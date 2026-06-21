@@ -506,6 +506,13 @@ export interface SSOConnection {
   /** The org_role JIT-provisioned users get: 'admin' | 'member' (never owner). */
   default_role: string
   enabled: boolean
+  /** "Require SSO" state. When true, a non-SSO (GitHub) login on one
+   *  of this connection's verified domains is rejected unless the principal is
+   *  break-glass. Separate axis from `enabled` ("allow" vs "require"). */
+  enforced: boolean
+  /** Whether the connection has passed a verify-before-enforce Test. The
+   *  enforce toggle is gated on this (plus `enabled` + a verified domain). */
+  tested: boolean
   created_at: string
   updated_at: string
 }
@@ -536,6 +543,16 @@ export interface SSODomain {
   txt_value: string
   status: SSODomainStatus
   verified_at?: string
+}
+
+/** One break-glass principal, from GET/POST /api/sso/break-glass — a
+ *  principal allowed to keep signing in via GitHub under SSO enforcement (the
+ *  recovery path). The owner is the default, seeded when enforcement is enabled. */
+export interface BreakGlassPrincipal {
+  user_id: string
+  display_name?: string
+  email?: string
+  created_at: string
 }
 
 /** GET /api/team/members row. Backs Variant B's searchable multi-select.

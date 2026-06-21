@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -105,13 +106,19 @@ func (h *ssoConnectionHandler) regMutex(orgID string) *sync.Mutex {
 // management fields. No secrets here — the connection carries none (the IdP
 // signing material lives in GoTrue).
 type ssoConnectionView struct {
-	ID          string    `json:"id"`
-	Kind        string    `json:"kind"`
-	ProviderID  string    `json:"provider_id"`
-	DefaultRole string    `json:"default_role"`
-	Enabled     bool      `json:"enabled"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	ProviderID  string `json:"provider_id"`
+	DefaultRole string `json:"default_role"`
+	Enabled     bool   `json:"enabled"`
+	// Enforced is the "Require SSO" state. Tested is whether the
+	// connection has passed a verify-before-enforce Test (last_tested_at set) —
+	// surfaced as a bool so the admin UI can gate the enforce toggle (enabled +
+	// tested + a verified domain) without exposing the raw timestamp's meaning.
+	Enforced  bool      `json:"enforced"`
+	Tested    bool      `json:"tested"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // ssoConnectionResponse is the shape all three endpoints return: the org's
@@ -137,6 +144,8 @@ func toSSOConnectionView(c *domain.SSOConnection) *ssoConnectionView {
 		ProviderID:  c.ProviderID,
 		DefaultRole: c.DefaultRole,
 		Enabled:     c.Enabled,
+		Enforced:    c.Enforced,
+		Tested:      c.LastTestedAt != nil,
 		CreatedAt:   c.CreatedAt,
 		UpdatedAt:   c.UpdatedAt,
 	}
@@ -438,6 +447,143 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		EntityID:   entityID,
 		ACSURL:     acsURL,
 	})
+}
+
+// handleSSOEnforcementUpdate flips the "Require SSO" switch on the
+// org's connection. Enforcing makes SSO mandatory — a non-SSO (GitHub) login
+// whose verified email is on one of the connection's verified domains is
+// rejected unless the principal is break-glass.
+//
+// Lockout safety is the whole design constraint: enforcing a broken connection
+// would brick the org, so turning enforcement ON is gated behind a
+// proven-working connection — (1) enabled, (2) at least one verified domain,
+// (3) a passed Test (last_tested_at set). All three are re-checked server-side
+// here (the UI disables the toggle, but the UI is never the trust boundary).
+// Turning it OFF has no gate — un-enforcing must always be possible (it's the
+// recovery action). Enabling also seeds the owner as break-glass (in the same
+// tx) so enforcement is never armed without a recovery principal.
+//
+// PATCH /api/sso/connection/enforcement  body: { "enforced": <bool> }
+func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.adminGate(w, r)
+	if !ok {
+		return
+	}
+
+	var body struct {
+		Enforced *bool `json:"enforced"`
+	}
+	if !decodeJSON(w, r, &body, "") {
+		return
+	}
+	if body.Enforced == nil {
+		// *bool so an omitted field is distinguishable from explicit false — a
+		// PATCH that names nothing must not silently un-enforce.
+		badRequest(w, "enforced is required")
+		return
+	}
+
+	entityID, acsURL, ok := h.spValuesOr500(w)
+	if !ok {
+		return
+	}
+
+	existing, err := h.currentConnection(r.Context(), orgID, userID)
+	if err != nil {
+		internalError(w, "sso", err)
+		return
+	}
+	if existing == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	var updated *domain.SSOConnection
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if *body.Enforced {
+			// Gate ON only behind a proven-working connection. Re-read state inside
+			// the tx so the checks can't race a concurrent disable/un-verify.
+			conn, e := tx.SSOConnections.GetByID(r.Context(), orgID, existing.ID)
+			if e != nil {
+				return e
+			}
+			if conn == nil {
+				return errEnforceNoConnection
+			}
+			if !conn.Enabled {
+				return errEnforceNotEnabled
+			}
+			if conn.LastTestedAt == nil {
+				return errEnforceNotTested
+			}
+			doms, e := tx.SSODomains.ListByOrg(r.Context(), orgID)
+			if e != nil {
+				return e
+			}
+			if !anyVerified(doms) {
+				return errEnforceNoVerifiedDomain
+			}
+			// Seed the owner as the default break-glass before arming enforcement,
+			// so the org can never enforce itself into a no-recovery state.
+			if e := tx.SSOBreakGlass.SeedOwnerIfEmpty(r.Context(), orgID); e != nil {
+				return e
+			}
+		}
+		if e := tx.SSOConnections.SetEnforced(r.Context(), orgID, existing.ID, *body.Enforced); e != nil {
+			return e
+		}
+		var e error
+		updated, e = tx.SSOConnections.GetByID(r.Context(), orgID, existing.ID)
+		return e
+	}); err != nil {
+		// The gating failures are 409s (the connection exists but isn't in a state
+		// that can be enforced) with an actionable message; everything else is a 500.
+		switch {
+		case errors.Is(err, errEnforceNotEnabled):
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "enable the connection before requiring SSO",
+			})
+		case errors.Is(err, errEnforceNotTested):
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "run a successful Test before requiring SSO",
+			})
+		case errors.Is(err, errEnforceNoVerifiedDomain):
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "verify a domain before requiring SSO",
+			})
+		case errors.Is(err, errEnforceNoConnection):
+			http.NotFound(w, r)
+		default:
+			internalError(w, "sso", err)
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ssoConnectionResponse{
+		Connection: toSSOConnectionView(updated),
+		EntityID:   entityID,
+		ACSURL:     acsURL,
+	})
+}
+
+// Sentinel errors for the enforcement gating, returned from inside the WithTx
+// closure and mapped to 409 (or 404) responses by handleSSOEnforcementUpdate.
+var (
+	errEnforceNoConnection     = errors.New("sso: no connection to enforce")
+	errEnforceNotEnabled       = errors.New("sso: connection not enabled")
+	errEnforceNotTested        = errors.New("sso: connection not tested")
+	errEnforceNoVerifiedDomain = errors.New("sso: no verified domain")
+)
+
+// anyVerified reports whether the domain list contains at least one verified
+// claim — the "a verified domain exists" half of the enforcement gate.
+func anyVerified(doms []domain.SSODomain) bool {
+	for _, d := range doms {
+		if d.VerifiedAt != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // gotrueAdminBaseURL returns the in-network GoTrue base URL for admin calls,

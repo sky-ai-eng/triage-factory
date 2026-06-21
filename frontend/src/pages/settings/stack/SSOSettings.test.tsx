@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { HttpError } from '../../../lib/apiClient'
-import type { SSOConnection, SSOConnectionResponse, SSODomain } from '../../../types'
+import type {
+  BreakGlassPrincipal,
+  SSOConnection,
+  SSOConnectionResponse,
+  SSODomain,
+} from '../../../types'
 
 // Mock the apiClient I/O but keep HttpError + httpErrorMessage real — the
 // verify path's 409 handling runs through httpErrorMessage to surface the
@@ -26,6 +31,8 @@ function makeConnection(over: Partial<SSOConnection> = {}): SSOConnection {
     provider_id: 'prov-uuid-123',
     default_role: 'member',
     enabled: true,
+    enforced: false,
+    tested: false,
     created_at: '2026-06-01T00:00:00Z',
     updated_at: '2026-06-01T00:00:00Z',
     ...over,
@@ -47,6 +54,7 @@ function makeDomain(over: Partial<SSODomain> = {}): SSODomain {
 // by the next GET — the same stateful-mock shape OrgPage.test uses.
 let connState: SSOConnectionResponse
 let domainList: SSODomain[]
+let breakGlass: BreakGlassPrincipal[]
 // When set, the verify endpoint throws it instead of stamping verified — drives
 // the two 409 states (DNS-not-found-yet / already-claimed).
 let verifyError: HttpError | null
@@ -78,6 +86,28 @@ function installApi() {
             connection: connState.connection ? { ...connState.connection, enabled } : null,
           }
           return connState
+        }
+      }
+
+      if (path === '/api/sso/connection/enforcement' && method === 'PATCH') {
+        const { enforced } = JSON.parse(opts!.body!) as { enforced: boolean }
+        connState = {
+          ...connState,
+          connection: connState.connection ? { ...connState.connection, enforced } : null,
+        }
+        return connState
+      }
+
+      // The break-glass section loads on mount whenever a connection exists.
+      if (path === '/api/sso/break-glass') {
+        if (method === 'GET') return breakGlass
+        if (method === 'POST') {
+          const { email } = JSON.parse(opts!.body!) as { email: string }
+          breakGlass = [
+            ...breakGlass,
+            { user_id: `u-${breakGlass.length + 1}`, email, created_at: '' },
+          ]
+          return breakGlass
         }
       }
 
@@ -114,6 +144,11 @@ function installApi() {
       domainList = domainList.filter((d) => d.id !== delMatch[1])
       return undefined as unknown as Response
     }
+    const bgDelMatch = path.match(/^\/api\/sso\/break-glass\/(.+)$/)
+    if (bgDelMatch && opts?.method === 'DELETE') {
+      breakGlass = breakGlass.filter((p) => p.user_id !== bgDelMatch[1])
+      return undefined as unknown as Response
+    }
     throw new Error(`unexpected apiFetch ${opts?.method} ${path}`)
   })
 }
@@ -124,6 +159,7 @@ beforeEach(() => {
   // Default: no connection yet (the cold-start register flow).
   connState = { connection: null, entity_id: SP.entity_id, acs_url: SP.acs_url }
   domainList = []
+  breakGlass = []
   verifyError = null
   window.confirm = vi.fn(() => true)
   // jsdom's window.open is a noisy no-op; stub it so the Test SSO popup launch is
@@ -322,5 +358,70 @@ describe('SSOSettings — domains', () => {
       }),
     )
     await waitFor(() => expect(screen.queryByText('example.com')).not.toBeInTheDocument())
+  })
+})
+
+describe('SSOSettings — require SSO (enforcement)', () => {
+  // Helper: connection that satisfies every gate (enabled + tested) plus a
+  // verified domain, so the enforce toggle is available.
+  function seedEnforceReady() {
+    connState = {
+      connection: makeConnection({ enabled: true, tested: true }),
+      entity_id: SP.entity_id,
+      acs_url: SP.acs_url,
+    }
+    domainList = [makeDomain({ status: 'verified', verified_at: '2026-06-02T00:00:00Z' })]
+  }
+
+  it('disables the toggle with an explanation until enabled + tested + a verified domain', async () => {
+    // Enabled but not tested, no verified domain → toggle disabled, reason shown.
+    connState = {
+      connection: makeConnection({ enabled: true, tested: false }),
+      entity_id: SP.entity_id,
+      acs_url: SP.acs_url,
+    }
+    domainList = [makeDomain()] // pending only
+    render(<SSOSettings />)
+
+    const toggle = await screen.findByRole('switch', { name: /require sso/i })
+    expect(toggle).toBeDisabled()
+    expect(screen.getByText(/run a successful test first/i)).toBeInTheDocument()
+  })
+
+  it('enables and PATCHes enforcement once the gates are met', async () => {
+    seedEnforceReady()
+    render(<SSOSettings />)
+
+    const toggle = await screen.findByRole('switch', { name: /require sso/i })
+    expect(toggle).not.toBeDisabled()
+    fireEvent.click(toggle)
+
+    await waitFor(() =>
+      expect(apiMocks.apiJSON).toHaveBeenCalledWith(
+        '/api/sso/connection/enforcement',
+        expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ enforced: true }) }),
+      ),
+    )
+    expect(await screen.findByText(/sso required/i)).toBeInTheDocument()
+  })
+
+  it('adds a break-glass principal by email', async () => {
+    seedEnforceReady()
+    render(<SSOSettings />)
+
+    const input = (await screen.findByLabelText(/break-glass principal email/i)) as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'recovery@corp.com' } })
+    fireEvent.click(screen.getByRole('button', { name: /^add$/i }))
+
+    await waitFor(() =>
+      expect(apiMocks.apiJSON).toHaveBeenCalledWith(
+        '/api/sso/break-glass',
+        expect.objectContaining({
+          method: 'POST',
+          body: expect.stringContaining('recovery@corp.com'),
+        }),
+      ),
+    )
+    expect(await screen.findByText('recovery@corp.com')).toBeInTheDocument()
   })
 })

@@ -27,7 +27,7 @@ import * as Switch from '@radix-ui/react-switch'
 import { apiFetch, apiJSON, httpErrorMessage } from '../../../lib/apiClient'
 import { toast } from '../../../components/Toast/toastStore'
 import { glassInputClass } from '../primitives'
-import type { SSOConnectionResponse, SSODomain } from '../../../types'
+import type { BreakGlassPrincipal, SSOConnectionResponse, SSODomain } from '../../../types'
 
 export default function SSOSettings() {
   const [loading, setLoading] = useState(true)
@@ -85,6 +85,7 @@ export default function SSOSettings() {
       <SPDetails resp={resp} />
       <ConnectionBlock resp={resp} setResp={setResp} />
       {resp.connection && <DomainsBlock domains={domains} setDomains={setDomains} />}
+      {resp.connection && <EnforcementBlock resp={resp} setResp={setResp} domains={domains} />}
     </div>
   )
 }
@@ -474,6 +475,229 @@ function DomainRow({
         </p>
       )}
     </li>
+  )
+}
+
+// ── Part 4: require SSO (enforcement) + break-glass ─────────────────────────
+function EnforcementBlock({
+  resp,
+  setResp,
+  domains,
+}: {
+  resp: SSOConnectionResponse
+  setResp: React.Dispatch<React.SetStateAction<SSOConnectionResponse | null>>
+  domains: SSODomain[]
+}) {
+  const connection = resp.connection
+  const [toggling, setToggling] = useState(false)
+
+  // The toggle is available only behind a proven-working connection — enabled,
+  // a passed Test, and at least one verified domain — so enforcing can never
+  // brick the org (the backend re-checks all three; this just mirrors it as a
+  // disabled-with-explanation control). connection is non-null (the parent only
+  // renders this block when one exists).
+  const hasVerifiedDomain = domains.some((d) => d.status === 'verified')
+  const enabled = connection?.enabled ?? false
+  const tested = connection?.tested ?? false
+  const enforced = connection?.enforced ?? false
+  const canEnforce = enabled && tested && hasVerifiedDomain
+
+  // The single reason the toggle is unavailable, surfaced inline. Order mirrors
+  // the operator's setup sequence (enable → test → verify a domain).
+  const blockReason = !enabled
+    ? 'Enable the connection first.'
+    : !tested
+      ? 'Run a successful Test first (under the connection above).'
+      : !hasVerifiedDomain
+        ? 'Verify at least one email domain first.'
+        : null
+
+  const toggle = async (next: boolean) => {
+    if (toggling || !connection) return
+    // Guard the ON direction in the UI too (the switch is disabled when it can't
+    // enforce, but a confirm on the irreversible-feeling action is worth it).
+    if (next) {
+      const ok = window.confirm(
+        'Require SSO for your verified domains? Members on those domains will no longer be able to sign in with GitHub — only via SSO. Break-glass principals (below) keep GitHub access so you can recover.',
+      )
+      if (!ok) return
+    }
+    setToggling(true)
+    try {
+      const updated = await apiJSON<SSOConnectionResponse>('/api/sso/connection/enforcement', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enforced: next }),
+      })
+      setResp(updated)
+      toast.success(next ? 'SSO is now required' : 'SSO is no longer required')
+    } catch (e) {
+      // The 409 gating messages ("enable the connection first", etc.) surface
+      // verbatim — a race where the connection changed under the admin.
+      toast.error(httpErrorMessage(e, 'Could not update SSO enforcement.'))
+    } finally {
+      setToggling(false)
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <BlockHeader
+        title="Require SSO"
+        hint="Make SSO mandatory for your verified domains. Members on those domains must sign in via SSO instead of GitHub. Off-domain users (e.g. invited externals) are unaffected."
+      />
+
+      <div className="flex items-center justify-between gap-4 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/40 px-4 py-3">
+        <div className="min-w-0">
+          <p className="text-[13px] font-medium text-text-primary">
+            {enforced ? 'SSO required' : 'SSO optional'}
+          </p>
+          {!canEnforce && !enforced && blockReason && (
+            <p className="mt-0.5 text-[12px] leading-relaxed text-text-tertiary">{blockReason}</p>
+          )}
+        </div>
+        <label className="flex shrink-0 cursor-pointer items-center gap-2 text-[12px] text-text-tertiary">
+          {enforced ? 'Required' : 'Optional'}
+          <Switch.Root
+            aria-label="Require SSO"
+            checked={enforced}
+            // Allow turning OFF always (recovery); only gate turning ON.
+            disabled={toggling || (!enforced && !canEnforce)}
+            onCheckedChange={(v) => void toggle(v)}
+            className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-accent data-[state=unchecked]:bg-black/10 disabled:opacity-50"
+          >
+            <Switch.Thumb className="block h-[14px] w-[14px] rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
+          </Switch.Root>
+        </label>
+      </div>
+
+      <BreakGlassManager enforced={enforced} />
+    </div>
+  )
+}
+
+// BreakGlassManager lists the principals who keep GitHub login under enforcement
+// and lets an admin add (by email) / remove them. The owner is the default,
+// seeded by the backend when enforcement is first enabled. Removing the last one
+// while SSO is required is refused server-side (the no-recovery guard) and shown
+// as an error toast.
+function BreakGlassManager({ enforced }: { enforced: boolean }) {
+  const [principals, setPrincipals] = useState<BreakGlassPrincipal[]>([])
+  const [loading, setLoading] = useState(true)
+  const [email, setEmail] = useState('')
+  const [adding, setAdding] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const list = await apiJSON<BreakGlassPrincipal[]>('/api/sso/break-glass')
+        if (!cancelled) setPrincipals(list)
+      } catch {
+        // Non-fatal: the section just shows empty. The toggle above still works.
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const add = async () => {
+    const e = email.trim()
+    if (e === '' || adding) return
+    setAdding(true)
+    try {
+      const list = await apiJSON<BreakGlassPrincipal[]>('/api/sso/break-glass', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: e }),
+      })
+      setPrincipals(list)
+      setEmail('')
+      toast.success('Break-glass principal added')
+    } catch (err) {
+      // 404 "no member of this organization has that verified email" surfaces verbatim.
+      toast.error(httpErrorMessage(err, 'Could not add the break-glass principal.'))
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  const remove = async (p: BreakGlassPrincipal) => {
+    const label = p.email || p.display_name || p.user_id
+    if (!window.confirm(`Remove ${label} as a break-glass principal?`)) return
+    try {
+      await apiFetch(`/api/sso/break-glass/${p.user_id}`, { method: 'DELETE' })
+      setPrincipals((ps) => ps.filter((x) => x.user_id !== p.user_id))
+      toast.success('Break-glass principal removed')
+    } catch (err) {
+      // 409 "can't remove the last break-glass principal while SSO is required …"
+      // surfaces verbatim.
+      toast.error(httpErrorMessage(err, 'Could not remove the break-glass principal.'))
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/20 px-4 py-3">
+      <div className="space-y-0.5">
+        <h4 className="text-[12px] font-medium text-text-primary">Break-glass access</h4>
+        <p className="text-[11px] leading-relaxed text-text-tertiary">
+          These principals can still sign in with GitHub under enforcement — the recovery path if
+          your identity provider breaks.{' '}
+          {enforced && 'You can’t remove the last one while SSO is required.'}
+        </p>
+      </div>
+
+      {!loading && principals.length > 0 && (
+        <ul className="space-y-1.5">
+          {principals.map((p) => (
+            <li
+              key={p.user_id}
+              className="flex items-center justify-between gap-3 rounded-xl bg-[var(--color-surface-overlay)]/40 px-3 py-2"
+            >
+              <span className="min-w-0 truncate text-[12px] text-text-secondary">
+                {p.email || p.display_name || p.user_id}
+              </span>
+              <button
+                type="button"
+                onClick={() => void remove(p)}
+                aria-label={`Remove ${p.email || p.user_id}`}
+                className="inline-flex shrink-0 items-center rounded-full p-1.5 text-text-tertiary transition-colors hover:text-dismiss"
+              >
+                <Trash2 size={13} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="flex items-center gap-2">
+        <input
+          type="email"
+          value={email}
+          aria-label="Break-glass principal email"
+          placeholder="person@company.com"
+          onChange={(e) => setEmail(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              void add()
+            }
+          }}
+          className={glassInputClass}
+        />
+        <button
+          type="button"
+          onClick={() => void add()}
+          disabled={email.trim() === '' || adding}
+          className="shrink-0 rounded-full border border-accent/20 px-4 py-2 text-[12px] font-medium text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+        >
+          {adding ? 'Adding…' : 'Add'}
+        </button>
+      </div>
+    </div>
   )
 }
 

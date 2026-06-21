@@ -117,6 +117,7 @@ func New(conn *sql.DB) db.Stores {
 		// both modes — local never mounts the SSO routes.
 		SSOConnections: newSSOConnectionStore(conn, conn),
 		SSODomains:     newSSODomainStore(conn, conn),
+		SSOBreakGlass:  newSSOBreakGlassStore(conn, conn),
 		Tx:             s,
 	}
 	return s.stores

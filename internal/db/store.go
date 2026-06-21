@@ -295,6 +295,12 @@ type Stores struct {
 	// linchpin. Multi-mode only; the SQLite impl is a stub.
 	SSODomains SSODomainStore
 
+	// SSOBreakGlass owns the sso_break_glass table — the principals exempt from
+	// SSO enforcement on their non-SSO identity. App pool for the
+	// admin-facing list/add/remove; admin pool for the login-time IsBreakGlass
+	// bypass check. Multi-mode only; the SQLite impl is a stub.
+	SSOBreakGlass SSOBreakGlassStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -343,6 +349,7 @@ type TxStores struct {
 	Invites          InvitesStore
 	SSOConnections   SSOConnectionStore
 	SSODomains       SSODomainStore
+	SSOBreakGlass    SSOBreakGlassStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

@@ -55,6 +55,12 @@ export default function Login() {
   const fallback = location.pathname !== '/login' ? location.pathname : '/'
   const returnTo = explicit ?? fallback
 
+  // ?error=sso_required is set by the OAuth callback when a GitHub
+  // login is rejected because the org requires SSO on that email's domain. The
+  // fix is to sign in via SSO — exactly what entering the work email here does
+  // (identifier-first routes the verified domain to SSO).
+  const ssoRequired = params.get('error') === 'sso_required'
+
   const startGitHub = () => {
     window.location.href = '/api/auth/oauth/github?return_to=' + encodeURIComponent(returnTo)
   }
@@ -104,6 +110,15 @@ export default function Login() {
         {auth.status === 'error' && auth.error && (
           <div className="rounded-xl bg-dismiss/[0.08] border border-dismiss/20 px-4 py-2.5 text-[13px] text-dismiss">
             Couldn&apos;t reach the server. Try again in a moment.
+          </div>
+        )}
+
+        {ssoRequired && (
+          <div
+            role="alert"
+            className="rounded-xl bg-accent/[0.08] border border-accent/20 px-4 py-2.5 text-[13px] text-text-secondary"
+          >
+            Your organization requires single sign-on. Enter your work email to continue via SSO.
           </div>
         )}
 

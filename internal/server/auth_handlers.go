@@ -399,6 +399,42 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SSO enforcement. A non-SSO (GitHub) login whose VERIFIED email
+	// is on an org's enforced verified domain is rejected — "your organization
+	// requires SSO" — unless the principal is a designated break-glass account
+	// (the recovery path so an org can un-enforce if the IdP breaks). Only the
+	// non-SSO path is gated: an SSO login is the very thing enforcement requires.
+	// Domain-scoped, so an invited external (@gmail.com) is off-domain and
+	// unaffected. Enforcement applies only when the connection is currently
+	// ENABLED — a disabled connection means SSO isn't actually available, so
+	// blocking GitHub too would lock the domain out (the toggle's gating keeps an
+	// org from arming this against a broken connection in the first place).
+	if !isSSO && claims.EmailVerified {
+		if dom, okDom := emailDomain(claims.Email); okDom {
+			route, rerr := s.allStores.SSODomains.GetVerifiedByDomain(r.Context(), dom)
+			if rerr != nil {
+				internalError(w, "sso", rerr)
+				return
+			}
+			if route != nil && route.Enabled && route.Enforced {
+				isBG, berr := s.allStores.SSOBreakGlass.IsBreakGlass(r.Context(), route.OrgID, userUUID.String())
+				if berr != nil {
+					internalError(w, "sso", berr)
+					return
+				}
+				if !isBG {
+					// Reject before minting a session. The identifier-first login page
+					// routes the same email to SSO, so bounce there with a marker it
+					// renders as "your organization requires SSO."
+					authLog.Info("sso enforcement: rejected non-sso login on enforced domain",
+						"user", userUUID, "org", route.OrgID, "domain", dom)
+					http.Redirect(w, r, "/login?error=sso_required", http.StatusFound)
+					return
+				}
+			}
+		}
+	}
+
 	// JIT provisioning (TFAC-426). The provider_id → org binding IS the
 	// cross-org isolation boundary: a user authenticated through provider X is
 	// provisioned into the org that registered X, and only that org's admin

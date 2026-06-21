@@ -763,6 +763,19 @@ func (s *Server) routes() {
 	s.api("GET /api/sso/connection", ssoc.handleSSOConnectionGet)
 	s.apiMutating("POST /api/sso/connection", ssoc.handleSSOConnectionCreate)
 	s.apiMutating("PATCH /api/sso/connection", ssoc.handleSSOConnectionUpdate)
+	// "Require SSO" enforcement toggle. Gated behind a proven-working
+	// connection (enabled + verified domain + passed Test) when turning ON;
+	// un-enforcing is always allowed (the recovery action). Enabling seeds the
+	// owner as break-glass so enforcement is never armed without a recovery path.
+	s.apiMutating("PATCH /api/sso/connection/enforcement", ssoc.handleSSOEnforcementUpdate)
+
+	// SSO break-glass management — the principals that retain non-SSO
+	// (GitHub) login under enforcement. Org-admin-gated (reuses ssoc.adminGate);
+	// the remove path refuses to drop the last principal while enforced.
+	ssobg := &ssoBreakGlassHandler{tx: s.tx, az: s.az, conn: ssoc}
+	s.api("GET /api/sso/break-glass", ssobg.handleBreakGlassList)
+	s.apiMutating("POST /api/sso/break-glass", ssobg.handleBreakGlassAdd)
+	s.apiMutating("DELETE /api/sso/break-glass/{user_id}", ssobg.handleBreakGlassRemove)
 	// Verify-before-enforce SSO test (TFAC-431) — an org admin round-trips a real
 	// sign-in through their not-yet-enabled connection to confirm the IdP is
 	// wired up. GET (the browser opens it in a popup); session-authed + admin-

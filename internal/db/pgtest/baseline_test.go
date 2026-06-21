@@ -1016,9 +1016,9 @@ func TestRLS_RevokedMembership(t *testing.T) {
 }
 
 // TestRLS_OrgAdminGate — non-admin members can read orgs/teams but
-// can't UPDATE the org row (rename, flip sso_enforced, etc.) or
-// CREATE/DELETE teams. Catches the original "any member could
-// mutate org-wide attributes" privilege escalation.
+// can't UPDATE the org row (rename, etc.) or CREATE/DELETE teams.
+// Catches the original "any member could mutate org-wide attributes"
+// privilege escalation.
 func TestRLS_OrgAdminGate(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -2065,22 +2065,6 @@ func TestRLS_TeamAdminNotOrgAdmin(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("carol rename attempt: %v", err)
-	}
-
-	// Carol CANNOT flip sso_enforced.
-	err = h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
-		res, err := tx.Exec(`UPDATE orgs SET sso_enforced = TRUE WHERE id = $1`, orgA)
-		if err != nil {
-			return err
-		}
-		n, _ := res.RowsAffected()
-		if n != 0 {
-			t.Errorf("team-admin-only carol flipped sso_enforced (%d rows) — two-axis broken", n)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("carol sso_enforced attempt: %v", err)
 	}
 
 	// Carol CANNOT write org_settings.

@@ -57,16 +57,12 @@ func (s *ssoConnectionStore) Create(ctx context.Context, p domain.CreateSSOConne
 }
 
 func (s *ssoConnectionStore) GetByID(ctx context.Context, orgID, id string) (*domain.SSOConnection, error) {
-	var c domain.SSOConnection
-	err := s.app.QueryRowContext(ctx, `
+	c, err := scanSSOConnection(s.app.QueryRowContext(ctx, `
 		SELECT id::text, org_id::text, kind, provider_id, default_role::text,
-		       enabled, created_at, updated_at
+		       enabled, enforced, last_tested_at, created_at, updated_at
 		FROM sso_connections
 		WHERE id = $1 AND org_id = $2
-	`, id, orgID).Scan(
-		&c.ID, &c.OrgID, &c.Kind, &c.ProviderID, &c.DefaultRole,
-		&c.Enabled, &c.CreatedAt, &c.UpdatedAt,
-	)
+	`, id, orgID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -79,7 +75,7 @@ func (s *ssoConnectionStore) GetByID(ctx context.Context, orgID, id string) (*do
 func (s *ssoConnectionStore) ListByOrg(ctx context.Context, orgID string) ([]domain.SSOConnection, error) {
 	rows, err := s.app.QueryContext(ctx, `
 		SELECT id::text, org_id::text, kind, provider_id, default_role::text,
-		       enabled, created_at, updated_at
+		       enabled, enforced, last_tested_at, created_at, updated_at
 		FROM sso_connections
 		WHERE org_id = $1
 		ORDER BY created_at DESC, id ASC
@@ -91,16 +87,33 @@ func (s *ssoConnectionStore) ListByOrg(ctx context.Context, orgID string) ([]dom
 
 	out := []domain.SSOConnection{}
 	for rows.Next() {
-		var c domain.SSOConnection
-		if err := rows.Scan(
-			&c.ID, &c.OrgID, &c.Kind, &c.ProviderID, &c.DefaultRole,
-			&c.Enabled, &c.CreatedAt, &c.UpdatedAt,
-		); err != nil {
+		c, err := scanSSOConnection(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan sso_connection: %w", err)
 		}
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// scanSSOConnection reads the full connection column list (shared by GetByID's
+// single-row read and ListByOrg's iteration) into a domain.SSOConnection,
+// unwrapping the nullable last_tested_at.
+func scanSSOConnection(sc rowScanner) (domain.SSOConnection, error) {
+	var (
+		c          domain.SSOConnection
+		lastTested sql.NullTime
+	)
+	if err := sc.Scan(
+		&c.ID, &c.OrgID, &c.Kind, &c.ProviderID, &c.DefaultRole,
+		&c.Enabled, &c.Enforced, &lastTested, &c.CreatedAt, &c.UpdatedAt,
+	); err != nil {
+		return domain.SSOConnection{}, err
+	}
+	if lastTested.Valid {
+		c.LastTestedAt = &lastTested.Time
+	}
+	return c, nil
 }
 
 func (s *ssoConnectionStore) Update(ctx context.Context, orgID, id string, p domain.UpdateSSOConnectionParams) error {
@@ -143,6 +156,29 @@ func (s *ssoConnectionStore) GetByProviderID(ctx context.Context, providerID str
 		return nil, fmt.Errorf("get sso_connection by provider_id: %w", err)
 	}
 	return &b, nil
+}
+
+func (s *ssoConnectionStore) SetEnforced(ctx context.Context, orgID, id string, enforced bool) error {
+	if _, err := s.app.ExecContext(ctx, `
+		UPDATE sso_connections SET enforced = $1
+		WHERE id = $2 AND org_id = $3
+	`, enforced, id, orgID); err != nil {
+		return fmt.Errorf("set sso_connection enforced: %w", err)
+	}
+	return nil
+}
+
+func (s *ssoConnectionStore) MarkTestedByProviderID(ctx context.Context, providerID string) error {
+	// Admin pool: the verify-before-enforce Test callback carries TF's signed
+	// state (the provider_id) but no membership claims, so this can't go through
+	// RLS — the provider_id is the lookup authorization, mirroring GetByProviderID.
+	if _, err := s.admin.ExecContext(ctx, `
+		UPDATE sso_connections SET last_tested_at = now()
+		WHERE provider_id = $1
+	`, providerID); err != nil {
+		return fmt.Errorf("mark sso_connection tested: %w", err)
+	}
+	return nil
 }
 
 // ssoDomainStore is the Postgres impl of db.SSODomainStore. Holds both
@@ -252,11 +288,11 @@ func (s *ssoDomainStore) GetVerifiedByDomain(ctx context.Context, domainName str
 	// to a connection in a different org.
 	var r domain.SSODomainRoute
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT d.connection_id::text, d.org_id::text, c.provider_id, c.enabled
+		SELECT d.connection_id::text, d.org_id::text, c.provider_id, c.enabled, c.enforced
 		FROM sso_domains d
 		JOIN sso_connections c ON c.id = d.connection_id AND c.org_id = d.org_id
 		WHERE lower(d.domain) = lower($1) AND d.verified_at IS NOT NULL
-	`, domainName).Scan(&r.ConnectionID, &r.OrgID, &r.ProviderID, &r.Enabled)
+	`, domainName).Scan(&r.ConnectionID, &r.OrgID, &r.ProviderID, &r.Enabled, &r.Enforced)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -266,9 +302,146 @@ func (s *ssoDomainStore) GetVerifiedByDomain(ctx context.Context, domainName str
 	return &r, nil
 }
 
+// ssoBreakGlassStore is the Postgres impl of db.SSOBreakGlassStore. Holds both
+// pools — see the SSOBreakGlassStore interface comment for the rationale.
+//
+//   - app: List, Add, Remove, Count, SeedOwnerIfEmpty. Request-handler
+//     reads/writes gated by the sso_break_glass_* RLS policies (org-admin).
+//   - admin: IsBreakGlass. The login-time enforcement bypass check resolves a
+//     principal mid-login with no membership claims for the target org.
+type ssoBreakGlassStore struct {
+	app   queryer
+	admin queryer
+}
+
+func newSSOBreakGlassStore(app, admin queryer) db.SSOBreakGlassStore {
+	return &ssoBreakGlassStore{app: app, admin: admin}
+}
+
+var _ db.SSOBreakGlassStore = (*ssoBreakGlassStore)(nil)
+
+func (s *ssoBreakGlassStore) List(ctx context.Context, orgID string) ([]domain.SSOBreakGlassPrincipal, error) {
+	// Admin pool: the email comes from user_identities, which is admin-pool-only
+	// by the principal-model design (RLS-enabled, no tf_app grant — the app pool
+	// can't read it). The handler has already gated org-admin, and this read is
+	// strictly scoped to bg.org_id = $1, so admin (BYPASSRLS) leaks nothing
+	// cross-org. Join the principal's display name; email is the most-recently-
+	// verified identity (COALESCE to '' when none). Newest designation first.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT bg.user_id::text,
+		       COALESCE(u.display_name, ''),
+		       COALESCE((
+		           SELECT i.email FROM user_identities i
+		            WHERE i.user_id = bg.user_id AND i.email IS NOT NULL
+		            ORDER BY i.email_verified DESC, i.updated_at DESC
+		            LIMIT 1
+		       ), ''),
+		       bg.created_at
+		FROM sso_break_glass bg
+		JOIN users u ON u.id = bg.user_id
+		WHERE bg.org_id = $1
+		ORDER BY bg.created_at DESC, bg.user_id ASC
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list sso_break_glass: %w", err)
+	}
+	defer rows.Close()
+
+	out := []domain.SSOBreakGlassPrincipal{}
+	for rows.Next() {
+		var p domain.SSOBreakGlassPrincipal
+		if err := rows.Scan(&p.UserID, &p.DisplayName, &p.Email, &p.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan sso_break_glass: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *ssoBreakGlassStore) Add(ctx context.Context, orgID, userID string) error {
+	if _, err := s.app.ExecContext(ctx, `
+		INSERT INTO sso_break_glass (org_id, user_id) VALUES ($1, $2)
+		ON CONFLICT (org_id, user_id) DO NOTHING
+	`, orgID, userID); err != nil {
+		return fmt.Errorf("add sso_break_glass: %w", err)
+	}
+	return nil
+}
+
+func (s *ssoBreakGlassStore) Remove(ctx context.Context, orgID, userID string) error {
+	if _, err := s.app.ExecContext(ctx, `
+		DELETE FROM sso_break_glass WHERE org_id = $1 AND user_id = $2
+	`, orgID, userID); err != nil {
+		return fmt.Errorf("remove sso_break_glass: %w", err)
+	}
+	return nil
+}
+
+func (s *ssoBreakGlassStore) Count(ctx context.Context, orgID string) (int, error) {
+	var n int
+	if err := s.app.QueryRowContext(ctx, `
+		SELECT count(*) FROM sso_break_glass WHERE org_id = $1
+	`, orgID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count sso_break_glass: %w", err)
+	}
+	return n, nil
+}
+
+func (s *ssoBreakGlassStore) SeedOwnerIfEmpty(ctx context.Context, orgID string) error {
+	// Insert the org owner only when the set is empty — the "default: the owner"
+	// behavior. The NOT EXISTS guard keeps it from re-adding an owner an admin
+	// deliberately removed (while another break-glass principal stands in).
+	if _, err := s.app.ExecContext(ctx, `
+		INSERT INTO sso_break_glass (org_id, user_id)
+		SELECT o.id, o.owner_user_id
+		FROM orgs o
+		WHERE o.id = $1
+		  AND NOT EXISTS (SELECT 1 FROM sso_break_glass bg WHERE bg.org_id = o.id)
+		ON CONFLICT (org_id, user_id) DO NOTHING
+	`, orgID); err != nil {
+		return fmt.Errorf("seed owner sso_break_glass: %w", err)
+	}
+	return nil
+}
+
+func (s *ssoBreakGlassStore) ResolveVerifiedEmailMember(ctx context.Context, orgID, email string) (string, error) {
+	// Admin pool: resolving an arbitrary email to its principal reads
+	// user_identities rows that don't belong to the caller (RLS would hide
+	// them). The org_memberships join confines the result to a member of orgID,
+	// so no principal outside the admin's org is ever returned.
+	var userID string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT om.user_id::text
+		FROM org_memberships om
+		WHERE om.org_id = $1
+		  AND om.user_id IN (
+		      SELECT i.user_id FROM user_identities i
+		      WHERE lower(i.email) = lower($2) AND i.email_verified
+		  )
+		LIMIT 1
+	`, orgID, email).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve verified-email member: %w", err)
+	}
+	return userID, nil
+}
+
+func (s *ssoBreakGlassStore) IsBreakGlass(ctx context.Context, orgID, userID string) (bool, error) {
+	var ok bool
+	if err := s.admin.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM sso_break_glass WHERE org_id = $1 AND user_id = $2)
+	`, orgID, userID).Scan(&ok); err != nil {
+		return false, fmt.Errorf("is sso_break_glass: %w", err)
+	}
+	return ok, nil
+}
+
 // rowScanner is the read shape shared by *sql.Row and *sql.Rows, so
-// scanSSODomain serves both the single-row GetByID and the iterating
-// ListByOrg without duplicating the column list.
+// scanSSODomain + scanSSOConnection serve both the single-row GetByID and the
+// iterating ListByOrg without duplicating the column list.
 type rowScanner interface {
 	Scan(dest ...any) error
 }

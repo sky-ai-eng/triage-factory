@@ -18,8 +18,17 @@ type SSOConnection struct {
 	ProviderID  string // GoTrue sso_providers.id (UUID), opaque to TF
 	DefaultRole string // org_role JIT grants: 'admin' | 'member' (never 'owner')
 	Enabled     bool
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// Enforced is the "Require SSO" switch: when true, a non-SSO
+	// (GitHub) login whose verified email is on one of this connection's
+	// verified domains is rejected unless the principal is break-glass.
+	// Separate axis from Enabled ("allow SSO" vs "require SSO").
+	Enforced bool
+	// LastTestedAt is stamped when a verify-before-enforce Test passes
+	// end-to-end. nil = the connection has never passed a Test. The
+	// enforcement toggle gates on this being non-nil.
+	LastTestedAt *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // CreateSSOConnectionParams is the input to SSOConnectionStore.Create.
@@ -90,4 +99,20 @@ type SSODomainRoute struct {
 	OrgID        string
 	ProviderID   string
 	Enabled      bool
+	// Enforced rides along so the login-path enforcement check can
+	// resolve, in one read, whether a non-SSO login on this verified domain
+	// must be rejected. Like Enabled, the store does not filter on it.
+	Enforced bool
+}
+
+// SSOBreakGlassPrincipal is one row of the sso_break_glass table — a principal
+// designated to retain non-SSO (GitHub) login under enforcement, the
+// recovery path if the IdP breaks. Email/DisplayName are joined from the
+// principal's identity for the admin view; the login-time check needs only
+// (OrgID, UserID) and goes through IsBreakGlass.
+type SSOBreakGlassPrincipal struct {
+	UserID      string
+	DisplayName string
+	Email       string
+	CreatedAt   time.Time
 }

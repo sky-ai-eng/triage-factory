@@ -46,6 +46,14 @@ func (s *ssoConnectionStore) GetByProviderID(context.Context, string) (*domain.S
 	return nil, db.ErrNotApplicableInLocal
 }
 
+func (s *ssoConnectionStore) SetEnforced(context.Context, string, string, bool) error {
+	return db.ErrNotApplicableInLocal
+}
+
+func (s *ssoConnectionStore) MarkTestedByProviderID(context.Context, string) error {
+	return db.ErrNotApplicableInLocal
+}
+
 type ssoDomainStore struct{ q queryer }
 
 func newSSODomainStore(q, _ queryer) db.SSODomainStore {
@@ -76,4 +84,44 @@ func (s *ssoDomainStore) Delete(context.Context, string, string) error {
 
 func (s *ssoDomainStore) GetVerifiedByDomain(context.Context, string) (*domain.SSODomainRoute, error) {
 	return nil, db.ErrNotApplicableInLocal
+}
+
+// ssoBreakGlassStore is the SQLite stub for the break-glass store.
+// SSO enforcement is multi-mode only; local mode (N=1) never enforces, so every
+// method returns ErrNotApplicableInLocal — no local caller reaches it (the
+// enforcement routes 404 in local).
+type ssoBreakGlassStore struct{ q queryer }
+
+func newSSOBreakGlassStore(q, _ queryer) db.SSOBreakGlassStore {
+	return &ssoBreakGlassStore{q: q}
+}
+
+var _ db.SSOBreakGlassStore = (*ssoBreakGlassStore)(nil)
+
+func (s *ssoBreakGlassStore) List(context.Context, string) ([]domain.SSOBreakGlassPrincipal, error) {
+	return nil, db.ErrNotApplicableInLocal
+}
+
+func (s *ssoBreakGlassStore) Add(context.Context, string, string) error {
+	return db.ErrNotApplicableInLocal
+}
+
+func (s *ssoBreakGlassStore) Remove(context.Context, string, string) error {
+	return db.ErrNotApplicableInLocal
+}
+
+func (s *ssoBreakGlassStore) Count(context.Context, string) (int, error) {
+	return 0, db.ErrNotApplicableInLocal
+}
+
+func (s *ssoBreakGlassStore) SeedOwnerIfEmpty(context.Context, string) error {
+	return db.ErrNotApplicableInLocal
+}
+
+func (s *ssoBreakGlassStore) IsBreakGlass(context.Context, string, string) (bool, error) {
+	return false, db.ErrNotApplicableInLocal
+}
+
+func (s *ssoBreakGlassStore) ResolveVerifiedEmailMember(context.Context, string, string) (string, error) {
+	return "", db.ErrNotApplicableInLocal
 }

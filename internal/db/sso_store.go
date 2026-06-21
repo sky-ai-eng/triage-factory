@@ -50,6 +50,75 @@ type SSOConnectionStore interface {
 	// the JIT isolation boundary. Returns (nil, nil) when the provider is
 	// bound to no org. Admin pool (the login actor has no membership yet).
 	GetByProviderID(ctx context.Context, providerID string) (*domain.SSOProviderBinding, error)
+
+	// SetEnforced flips the "Require SSO" switch on the org's
+	// connection. The handler validates the lockout-safety gating (enabled +
+	// verified domain + tested) and seeds the owner break-glass before calling
+	// this with enforced=true. A no-op (no error) when no row matches. App pool.
+	SetEnforced(ctx context.Context, orgID, id string, enforced bool) error
+
+	// MarkTestedByProviderID stamps last_tested_at = now() on the connection
+	// bound to providerID — called from the verify-before-enforce Test callback
+	// on a PASS. Keyed on provider_id and run on the ADMIN pool: the
+	// test callback is mid-flow with no org-membership claims (it carries only
+	// TF's signed state), the same posture as GetByProviderID. A no-op (no
+	// error) when no row matches.
+	MarkTestedByProviderID(ctx context.Context, providerID string) error
+}
+
+// SSOBreakGlassStore owns the sso_break_glass table — the principals that may
+// still authenticate via their non-SSO (GitHub) identity under SSO enforcement.
+// Postgres-only; the SQLite impl is a stub.
+//
+// # Pool split (Postgres)
+//
+//   - Add, Remove, Count, SeedOwnerIfEmpty run on the app pool, gated by the
+//     sso_break_glass_* RLS policies (org-admin in the current org).
+//   - List, IsBreakGlass, ResolveVerifiedEmailMember run on the admin pool
+//     (BYPASSRLS). List joins user_identities (admin-pool-only by the
+//     principal-model design) for the email; IsBreakGlass/ResolveVerifiedEmail
+//     are login/management reads of cross-principal data. All three are
+//     strictly org-scoped in SQL, and their callers are admin-gated (or the
+//     resolved org/principal is itself the login-time authorization).
+type SSOBreakGlassStore interface {
+	// List returns the org's break-glass principals (with display name + email
+	// joined for the admin view), newest first. Admin pool (the email join reads
+	// user_identities, which the app pool can't); the handler gates org-admin
+	// and the query is scoped to orgID.
+	List(ctx context.Context, orgID string) ([]domain.SSOBreakGlassPrincipal, error)
+
+	// Add designates userID as break-glass for orgID. Idempotent (ON CONFLICT
+	// DO NOTHING). The caller validates org membership first. App pool.
+	Add(ctx context.Context, orgID, userID string) error
+
+	// Remove revokes userID's break-glass designation. A no-op (no error) when
+	// no row matches. The handler enforces the "can't remove the last while
+	// enforced" guard before calling this. App pool.
+	Remove(ctx context.Context, orgID, userID string) error
+
+	// Count returns how many break-glass principals the org has — for the
+	// last-break-glass guard. App pool.
+	Count(ctx context.Context, orgID string) (int, error)
+
+	// SeedOwnerIfEmpty inserts the org owner as break-glass IFF the org has no
+	// break-glass rows yet — the "default: the owner" behavior, run in the same
+	// transaction as enabling enforcement so enforcement is never armed without
+	// a recovery principal. No-op when any row already exists. App pool.
+	SeedOwnerIfEmpty(ctx context.Context, orgID string) error
+
+	// IsBreakGlass reports whether userID is a break-glass principal for orgID.
+	// The login-time enforcement bypass check. Admin pool (the actor is
+	// mid-login with no membership claims for the target org).
+	IsBreakGlass(ctx context.Context, orgID, userID string) (bool, error)
+
+	// ResolveVerifiedEmailMember maps a verified email to the principal that
+	// holds it IFF that principal is a member of orgID — the lookup the
+	// add-break-glass handler uses to turn an admin-typed email into a user id.
+	// Returns ("", nil) when no member with that verified email exists. Admin
+	// pool: resolving an arbitrary email to a principal crosses the identity
+	// boundary (RLS scopes user_identities to the caller's own row), and the
+	// org-membership filter keeps it from leaking principals outside orgID.
+	ResolveVerifiedEmailMember(ctx context.Context, orgID, email string) (string, error)
 }
 
 // SSODomainStore owns the sso_domains table — the verified email domains

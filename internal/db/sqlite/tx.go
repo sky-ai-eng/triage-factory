@@ -87,6 +87,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Invites:          newInvitesStore(tx, tx),
 		SSOConnections:   newSSOConnectionStore(tx, tx),
 		SSODomains:       newSSODomainStore(tx, tx),
+		SSOBreakGlass:    newSSOBreakGlassStore(tx, tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

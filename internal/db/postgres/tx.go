@@ -240,5 +240,9 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// membership). Same shape Invites uses for its redeem-read half.
 		SSOConnections: newSSOConnectionStore(tx, s.admin),
 		SSODomains:     newSSODomainStore(tx, s.admin),
+		// SSOBreakGlass: app-side list/add/remove route through the tx; the
+		// admin half (IsBreakGlass) stays pinned to s.admin for the login-time
+		// claims-less check, same shape as Invites / SSOConnections.
+		SSOBreakGlass: newSSOBreakGlassStore(tx, s.admin),
 	}
 }

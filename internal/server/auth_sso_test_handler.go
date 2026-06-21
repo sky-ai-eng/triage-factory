@@ -193,6 +193,16 @@ func (s *Server) completeSAMLConnectionTest(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// Durably record the pass: last_tested_at is the "this connection has passed
+	// a Test" signal the enforcement toggle gates on. Keyed on the
+	// provider_id in TF's signed state and written on the admin pool (this
+	// callback carries no membership claims). Best-effort — a write failure
+	// shouldn't turn a genuine pass into a failure page for the admin, so log and
+	// still render pass; the admin can re-run the Test.
+	if err := s.allStores.SSOConnections.MarkTestedByProviderID(r.Context(), state.ProviderID); err != nil {
+		authLog.Warn("saml test: mark tested failed", "provider_id", state.ProviderID, "error", err)
+	}
+
 	res.Pass = true
 	s.renderSAMLTestResult(w, res)
 }

@@ -243,6 +243,7 @@ var orgScopedTables = []string{
 	"memberships",
 	"org_memberships",
 	"org_invites",
+	"sso_break_glass",
 	"sso_domains",
 	"sso_connections",
 	"teams",

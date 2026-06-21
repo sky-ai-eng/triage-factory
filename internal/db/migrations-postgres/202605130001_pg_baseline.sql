@@ -941,8 +941,6 @@ CREATE TABLE public.orgs (
     description text,
     billing_email text,
     owner_user_id uuid NOT NULL,
-    sso_provider_id uuid,
-    sso_enforced boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone
@@ -6742,6 +6740,19 @@ CREATE TABLE public.sso_connections (
     -- user_id sentinel, never granted via SSO.
     default_role public.org_role NOT NULL DEFAULT 'member',
     enabled      boolean NOT NULL DEFAULT true,
+    -- "Require SSO" switch. When true, a login via a NON-SSO
+    -- identity (GitHub) whose verified email is on one of this connection's
+    -- VERIFIED domains is rejected unless the principal is break-glass. A
+    -- separate axis from `enabled`: enabling makes SSO available, enforcing
+    -- makes it mandatory. Enforcing a broken connection would lock everyone
+    -- out, so the toggle is gated (handler-side) behind a proven-working
+    -- connection — enabled + a verified domain + a passed Test — and the
+    -- sso_break_glass set is the recovery path.
+    enforced     boolean NOT NULL DEFAULT false,
+    -- Stamped when a verify-before-enforce Test PASSES end-to-end:
+    -- the durable "this connection has passed a Test" signal the enforcement
+    -- toggle gates on. NULL = never passed.
+    last_tested_at timestamptz NULL,
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT sso_connections_kind_chk       CHECK (kind IN ('saml','oidc')),
@@ -6891,6 +6902,52 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.sso_connections TO tf_app;
 REVOKE ALL ON public.sso_domains FROM PUBLIC;
 REVOKE ALL ON public.sso_domains FROM anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.sso_domains TO tf_app;
+
+
+-- sso_break_glass: the principals that may still authenticate via
+-- their NON-SSO (GitHub) identity under SSO enforcement (sso_connections.
+-- enforced) — the recovery path if the IdP breaks, so they can un-enforce.
+-- Per (org, principal). The owner is the default, seeded when enforcement is
+-- first enabled; the handler refuses to remove the last row while the
+-- connection is enforced (the "can't enforce yourself into a no-recovery state"
+-- guard, same shape as can't-remove-the-last-owner). FK to orgs + users (not
+-- org_memberships) so a membership change never silently cascade-drops a
+-- break-glass row out from under that guard; the handler validates org
+-- membership at add time, and the login-time check is harmless for a non-member.
+CREATE TABLE public.sso_break_glass (
+    org_id     uuid NOT NULL REFERENCES public.orgs(id)  ON DELETE CASCADE,
+    user_id    uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (org_id, user_id)
+);
+
+-- Index the second PK column: the PK covers (org_id, user_id); this serves a
+-- by-principal read (e.g. "which orgs is this principal break-glass for") and
+-- the users-side ON DELETE CASCADE.
+CREATE INDEX sso_break_glass_user_idx ON public.sso_break_glass (user_id);
+
+ALTER TABLE public.sso_break_glass ENABLE ROW LEVEL SECURITY;
+
+-- Management surface is org-admin-gated in the current org, mirroring
+-- sso_connections / sso_domains. NOT expressible in RLS (deliberately absent):
+-- the login-time IsBreakGlass read, which resolves a principal mid-login with
+-- no membership claims for the target org — it runs on the admin pool
+-- (BYPASSRLS) with the resolved (org_id, principal) as the authorization, like
+-- sso_connections.GetByProviderID. The break-glass list's email join also runs
+-- on the admin pool (user_identities is admin-pool-only) but stays org-scoped
+-- in SQL behind the admin-gated handler.
+CREATE POLICY sso_break_glass_select ON public.sso_break_glass FOR SELECT
+  USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY sso_break_glass_insert ON public.sso_break_glass FOR INSERT
+  WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY sso_break_glass_delete ON public.sso_break_glass FOR DELETE
+  USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+REVOKE ALL ON public.sso_break_glass FROM PUBLIC;
+REVOKE ALL ON public.sso_break_glass FROM anon, authenticated, service_role;
+GRANT SELECT, INSERT, DELETE ON public.sso_break_glass TO tf_app;
 
 
 --
