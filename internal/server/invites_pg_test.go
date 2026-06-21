@@ -389,15 +389,21 @@ func TestInviteCreate_CrossOrgTargetTeam_400(t *testing.T) {
 
 // TestInviteCreate_ExistingMember_409: inviting an email that already maps to
 // a current member of THIS org via a *verified* identity is rejected (409) and
-// mints nothing — the invite-vs-existing-member guard (TFAC-437). seedUser
-// mints a verified <id>@test identity, so the owner's own address is the
-// ticket's repro (owner invites themselves → was 201, now 409).
+// mints nothing — the invite-vs-existing-member guard (TFAC-437). The owner
+// signs in with a verified-email claim (what a real GitHub login carries), so
+// their own address is the ticket's repro (owner invites themselves → was 201,
+// now 409). NB resolveOrCreatePrincipal rewrites email_verified from the login
+// claim, so signing in with the default (email_verified absent → false) would
+// downgrade the seeded identity and the guard wouldn't fire — hence the
+// explicit verified claim here.
 func TestInviteCreate_ExistingMember_409(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 	owner := r.seedUser()
 	orgID, _ := r.seedOrg(owner, "create-existing")
-	sid := r.signInAs(owner)
+	claims := validClaimsFor(owner)
+	claims["email_verified"] = true
+	sid := r.signInWithClaims(owner, claims)
 
 	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
 		map[string]string{"email": owner.String() + "@test", "role": "member"})
