@@ -12,7 +12,8 @@ import (
 
 // Pre-auth allowlist rate-limit tuning (TFAC-433). One shared per-IP
 // budget governs every pre-auth raw mount the limiter wraps (discovery,
-// oauth start/callback, logout, invite preview). The numbers target the
+// oauth start, logout, invite preview — the OAuth callback is excluded;
+// see routes()). The numbers target the
 // threat the ticket was filed for — systematic domain reconnaissance via
 // thousands of cheap POST /api/sso/discover probes — while staying well
 // above any real interactive use:

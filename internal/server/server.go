@@ -599,12 +599,15 @@ func (s *Server) routes() {
 	//        serving with no identity dependency.
 	//
 	// IP rate limiting (TFAC-433): the interactive pre-auth mounts —
-	// oauth start/callback, logout, invite preview, and SSO discovery
-	// (registered below) — are wrapped in s.preAuthRateLimit so an
-	// anonymous caller can't flood them (e.g. discovery domain
-	// enumeration). The cap is declared here at the allowlist, not
-	// sprinkled across handlers; it no-ops in local mode. Deliberately NOT
-	// wrapped: /api/health (platform liveness probes hit it often),
+	// oauth start, logout, invite preview, and SSO discovery (registered
+	// below) — are wrapped in s.preAuthRateLimit so an anonymous caller
+	// can't flood them (e.g. discovery domain enumeration). The cap is
+	// declared here at the allowlist, not sprinkled across handlers; it
+	// no-ops in local mode. Deliberately NOT wrapped: the OAuth callback
+	// (already bounded per-flow by its HMAC-signed PKCE state cookie +
+	// single-use IdP code, so an IP cap adds ~no protection — and a 429
+	// mid-OAuth on a shared NAT would break a top-level navigation for no
+	// gain), /api/health (platform liveness probes hit it often),
 	// /api/config (the AuthGate boot read), the GitHub webhook receiver
 	// (HMAC-verified, GitHub-paced), the /auth/v1/ GoTrue proxy (rate-
 	// limited upstream), and the SPA fallback (every static asset).
@@ -616,9 +619,9 @@ func (s *Server) routes() {
 	// Otherwise a malicious page could CSRF-spam logout from a victim's
 	// browser and drain that IP's shared pre-auth budget (starving its
 	// login/discovery) with requests that never pass CSRF anyway. The other
-	// four routes have no such gate, so the limiter is outermost there.
+	// wrapped routes have no such gate, so the limiter is outermost there.
 	s.mux.Handle("GET /api/auth/oauth/{provider}", s.preAuthRateLimit(http.HandlerFunc(s.handleOAuthStart)))
-	s.mux.Handle("GET /api/auth/callback", s.preAuthRateLimit(http.HandlerFunc(s.handleOAuthCallback)))
+	s.mux.HandleFunc("GET /api/auth/callback", s.handleOAuthCallback)
 	s.mux.Handle("POST /api/auth/logout", s.withCSRFOriginCheck(s.preAuthRateLimit(http.HandlerFunc(s.handleLogout))))
 	s.mux.HandleFunc("GET /api/config", s.handleConfig)
 	// Liveness probe — pre-auth so platform healthchecks (Fly checks,
