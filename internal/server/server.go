@@ -577,6 +577,10 @@ func (s *Server) routes() {
 	//   GET  /api/invites/preview          — invite-token preview; the
 	//        recipient hasn't authenticated yet, so this can't gate on a
 	//        session. Runs on the admin pool; the token is the bearer secret.
+	//   POST /api/sso/discover             — identifier-first login lookup;
+	//        the visitor is anonymous (pre-login), so it can't gate on a
+	//        session. No side effect, admin-pool read, privacy-safe reply
+	//        (registered with the SSO routes below; see TFAC-427).
 	//   /auth/v1/                        — GoTrue reverse proxy; auth
 	//        happens upstream, not in our middleware.
 	//   /                                — SPA fallback; static-file
@@ -730,6 +734,15 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/sso/domains", s.ssoDomains.handleDomainClaim)
 	s.apiMutating("POST /api/sso/domains/{id}/verify", s.ssoDomains.handleDomainVerify)
 	s.apiMutating("DELETE /api/sso/domains/{id}", s.ssoDomains.handleDomainDelete)
+
+	// Identifier-first SSO discovery (TFAC-427; multi-mode only — answers
+	// {sso:false} in local). Pre-auth: an anonymous visitor types their work
+	// email and TF routes the exact domain to its verified SSO connection or
+	// falls back to GitHub. No session, no side effect, admin-pool read, and a
+	// privacy-safe reply that never names an org — so it's a raw mount, NOT
+	// s.apiMutating (which would require a session and a CSRF origin it has
+	// none of pre-login). Listed in preAuthAllowlist.
+	s.mux.HandleFunc("POST /api/sso/discover", s.handleSSODiscover)
 
 	s.api("GET /api/queue", s.handleQueue)
 	s.api("GET /api/tasks", s.handleTasks)

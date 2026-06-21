@@ -1,20 +1,39 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
+import { apiJSON } from '../lib/apiClient'
 
 /**
- * Login screen. One option: "Sign in with GitHub". The button kicks
- * the browser to /api/auth/oauth/github with the current return_to so
- * we land back on the page the user originally wanted.
+ * Identifier-first login (TFAC-427). In a multi-org build an anonymous
+ * visitor's org is unknown, so we can't show an org-specific SSO button up
+ * front. Instead the visitor types their work email; we look up the exact
+ * domain via POST /api/sso/discover and either redirect into that org's SAML
+ * connection (start_url) or fall back to GitHub.
  *
- * If the user is already authed (e.g. someone bookmarked /login but
- * has a valid session), redirect them straight to /. AuthGate will
- * then route them into their active org.
+ * GitHub is ALWAYS present — it's the universal bootstrap-floor login. A fresh
+ * deployment has no SSO configured yet, so the first admin signs in via GitHub
+ * and sets SSO up for everyone else. Discovery never reveals org identity: it
+ * answers only "SSO available + where to start" or "not".
+ *
+ * If the user is already authed (e.g. someone bookmarked /login but has a valid
+ * session), redirect straight to /. AuthGate then routes them into their org.
  */
+
+interface DiscoverResponse {
+  sso: boolean
+  start_url?: string
+}
+
 export default function Login() {
   const auth = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
+
+  const [email, setEmail] = useState('')
+  const [checking, setChecking] = useState(false)
+  // noSSO is set after a submit whose domain didn't route — it surfaces the
+  // "continue with GitHub" hint without hiding the always-present button.
+  const [noSSO, setNoSSO] = useState(false)
 
   useEffect(() => {
     if (auth.status === 'authed') {
@@ -22,17 +41,45 @@ export default function Login() {
     }
   }, [auth.status, navigate])
 
-  // Return-to: prefer the ?return_to= query param (set by AuthGate
-  // when redirecting unauthenticated users away from a protected
-  // route), else the current pathname if it's not /login.
+  // Return-to: prefer the ?return_to= query param (set by AuthGate when
+  // redirecting unauthenticated users away from a protected route), else the
+  // current pathname if it's not /login.
   const params = new URLSearchParams(location.search)
   const explicit = params.get('return_to')
   const fallback = location.pathname !== '/login' ? location.pathname : '/'
   const returnTo = explicit ?? fallback
 
   const startGitHub = () => {
-    const target = '/api/auth/oauth/github?return_to=' + encodeURIComponent(returnTo)
-    window.location.href = target
+    window.location.href = '/api/auth/oauth/github?return_to=' + encodeURIComponent(returnTo)
+  }
+
+  const onSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const trimmed = email.trim()
+    if (!trimmed || checking) return
+
+    setChecking(true)
+    setNoSSO(false)
+    try {
+      const res = await apiJSON<DiscoverResponse>('/api/sso/discover', {
+        method: 'POST',
+        body: JSON.stringify({ email: trimmed, return_to: returnTo }),
+      })
+      if (res.sso && res.start_url) {
+        // Hand off to the SP-initiated SAML start endpoint (the same one the
+        // My Apps bookmark tile points at). The page navigates away.
+        window.location.href = res.start_url
+        return
+      }
+      // No SSO for this domain — keep the visitor on the GitHub path.
+      setNoSSO(true)
+    } catch {
+      // Discovery failed (network / 5xx). Don't block login: GitHub is always
+      // available, so degrade to the fallback rather than trapping the user.
+      setNoSSO(true)
+    } finally {
+      setChecking(false)
+    }
   }
 
   return (
@@ -42,7 +89,9 @@ export default function Login() {
           <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
             Triage Factory
           </h1>
-          <p className="text-[13px] text-text-tertiary leading-relaxed">Sign in to continue.</p>
+          <p className="text-[13px] text-text-tertiary leading-relaxed">
+            Enter your work email to continue.
+          </p>
         </div>
 
         {auth.status === 'error' && auth.error && (
@@ -50,6 +99,50 @@ export default function Login() {
             Couldn&apos;t reach the server. Try again in a moment.
           </div>
         )}
+
+        <form onSubmit={onSubmit} className="space-y-3">
+          <div className="space-y-1.5">
+            <label
+              htmlFor="login-email"
+              className="block text-[12px] font-medium text-text-secondary"
+            >
+              Work email
+            </label>
+            <input
+              id="login-email"
+              type="email"
+              autoComplete="email"
+              autoFocus
+              value={email}
+              onChange={(e) => {
+                setEmail(e.target.value)
+                if (noSSO) setNoSSO(false)
+              }}
+              placeholder="you@company.com"
+              className="w-full rounded-xl border border-border-subtle bg-white/60 px-3.5 py-2.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-accent focus:bg-white focus:outline-none"
+            />
+          </div>
+
+          {noSSO && (
+            <p role="status" className="text-[12px] text-text-tertiary leading-relaxed">
+              No single sign-on for that email. Continue with GitHub below.
+            </p>
+          )}
+
+          <button
+            type="submit"
+            disabled={checking || !email.trim()}
+            className="w-full flex items-center justify-center gap-2 bg-accent hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+          >
+            {checking ? 'Checking…' : 'Continue'}
+          </button>
+        </form>
+
+        <div className="flex items-center gap-3">
+          <div className="h-px flex-1 bg-border-subtle" />
+          <span className="text-[11px] uppercase tracking-wide text-text-tertiary">or</span>
+          <div className="h-px flex-1 bg-border-subtle" />
+        </div>
 
         <button
           type="button"

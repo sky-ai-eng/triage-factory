@@ -26,6 +26,7 @@ var preAuthAllowlist = []string{
 	"GET /api/health",                    // liveness probe for platform healthchecks (Fly, compose, k8s)
 	"POST /api/webhooks/github/{org_id}", // GitHub App webhook receiver; pre-auth, verified by HMAC signature in-handler
 	"GET /api/invites/preview",           // invite-token preview; recipient not yet authenticated, admin-pool, token is the bearer secret
+	"POST /api/sso/discover",             // identifier-first login lookup; visitor anonymous (pre-login), no side effect, admin-pool, privacy-safe reply
 	"/auth/v1/",                          // GoTrue reverse proxy; auth happens upstream
 	"/",                                  // SPA fallback; no identity dependency
 }
