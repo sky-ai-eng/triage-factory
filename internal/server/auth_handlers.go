@@ -741,11 +741,21 @@ var samlTestResultTmpl = template.Must(template.New("sso-test").Parse(`<!doctype
 // succeeded; pass/fail is content). The page loads no scripts and no external
 // resources, so a tight CSP locks it down as defense-in-depth behind the
 // template's auto-escaping of the IdP-derived fields.
+//
+// Header notes (mirrors github_app_register.go's self-contained pages):
+//   - The per-response CSP OVERRIDES the global one withSecurityHeaders set, so
+//     it must re-state frame-ancestors 'none' (clickjacking) itself — otherwise
+//     the override would silently drop it. (X-Frame-Options: DENY from the global
+//     middleware still applies; this is the standards-track twin.)
+//   - Cache-Control: no-store because the page embeds IdP-derived PII (the
+//     authenticated email) that must not be cached by the browser or any proxy.
+//
+// The global middleware still supplies X-Content-Type-Options / Referrer-Policy /
+// Permissions-Policy (this handler runs inside that wrap), so they aren't re-set.
 func (s *Server) renderSAMLTestResult(w http.ResponseWriter, res samlTestResult) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	if err := samlTestResultTmpl.Execute(w, res); err != nil {
 		// Status + headers are already committed, so we can't switch to a 500 —

@@ -204,8 +204,18 @@ function ConnectionBlock({
   // window keeps the admin's current session untouched (the test path mints none)
   // and the result visible alongside Settings. Works on a not-yet-enabled
   // connection — that's the point, confirming the IdP before flipping it on.
+  //
+  // noopener,noreferrer severs window.opener: the popup navigates to the external
+  // IdP (Entra), and without this that IdP-controlled page could reach back
+  // through window.opener to navigate this Settings tab (reverse tab-nabbing). We
+  // never call back to the opener (the result renders in the popup itself), so
+  // dropping the handle costs nothing.
   const runTest = () => {
-    window.open('/api/sso/connection/test', 'tf-sso-test', 'popup,width=480,height=620')
+    window.open(
+      '/api/sso/connection/test',
+      'tf-sso-test',
+      'popup,noopener,noreferrer,width=480,height=620',
+    )
   }
 
   return (

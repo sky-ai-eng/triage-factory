@@ -176,8 +176,16 @@ func TestSSOTestResultRendering(t *testing.T) {
 					t.Errorf("body unexpectedly contains %q", d)
 				}
 			}
-			if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") {
+			// The per-response CSP overrides the global one, so it must itself
+			// carry default-src 'none' AND frame-ancestors 'none' (clickjacking) —
+			// the override must not silently drop the latter.
+			csp := rec.Header().Get("Content-Security-Policy")
+			if !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "frame-ancestors 'none'") {
 				t.Errorf("CSP backstop missing or weakened: %q", csp)
+			}
+			// The page embeds IdP-derived PII (email), so it must not be cached.
+			if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+				t.Errorf("Cache-Control=%q, want no-store (page carries PII)", cc)
 			}
 		})
 	}

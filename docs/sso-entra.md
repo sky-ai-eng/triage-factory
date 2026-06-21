@@ -259,8 +259,15 @@ test a connection that is still disabled — that's the point):
 - Under the hood this is the normal SP-initiated flow with a test flag in TF's
   signed state. The callback completes the GoTrue code exchange and verifies the
   returned token — proving the assertion is valid and readable — then **stops
-  before any writes**: a test mints **no session, no membership, and no account**.
-  Your current admin session is untouched, so it's safe to run anytime.
+  before any writes on the Triage Factory side**: a test creates **no session, no
+  org membership, no user record, and no identity link**. Your current admin
+  session is untouched, so it's safe to run anytime.
+- One thing a test does leave behind: GoTrue (the auth service) records the
+  sign-in as a login identity (an `auth.users` row), the same as it would for any
+  assertion it processes. That's expected and inert — Triage Factory binds nothing
+  to it, and the test's tokens never leave the server — so it's a harmless orphan
+  that a later **real** sign-in by the same verified email simply adopts. There's
+  nothing to clean up.
 
 ```http
 GET /api/sso/connection/test      # org-admin only; opens in a popup

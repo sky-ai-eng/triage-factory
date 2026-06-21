@@ -217,10 +217,12 @@ describe('SSOSettings — SP details + connection', () => {
     expect(await screen.findByText(/connected · disabled/i)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /test sso/i }))
 
+    // noopener/noreferrer must be present — the popup navigates to the external
+    // IdP, so it must not retain a window.opener handle on this tab.
     expect(window.open).toHaveBeenCalledWith(
       '/api/sso/connection/test',
       'tf-sso-test',
-      expect.stringContaining('popup'),
+      expect.stringMatching(/(?=.*popup)(?=.*noopener)(?=.*noreferrer)/),
     )
   })
 
