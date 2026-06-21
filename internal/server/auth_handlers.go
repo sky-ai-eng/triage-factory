@@ -1033,13 +1033,14 @@ func (s *Server) gotrueExchangeFunc(cfg *authConfig) func(context.Context, strin
 func (s *Server) gotrueSSOFunc(cfg *authConfig) func(context.Context, string, string, string) (string, error) {
 	return func(ctx context.Context, providerID, redirectTo, codeChallenge string) (string, error) {
 		// JSON body (GoTrue's /sso decodes SingleSignOnParams from JSON).
-		// code_challenge_method is case-insensitive in GoTrue (lowercased
-		// before parse); send the canonical "s256".
+		// "S256" is RFC 7636's canonical value and matches the GitHub
+		// /authorize entrypoint above — keep the two PKCE paths identical
+		// rather than relying on GoTrue case-folding a lowercase variant.
 		payload, err := json.Marshal(map[string]string{
 			"provider_id":           providerID,
 			"redirect_to":           redirectTo,
 			"code_challenge":        codeChallenge,
-			"code_challenge_method": "s256",
+			"code_challenge_method": "S256",
 		})
 		if err != nil {
 			return "", err

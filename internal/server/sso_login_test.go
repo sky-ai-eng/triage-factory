@@ -537,8 +537,8 @@ func TestGoTrueSSO_PublicNoAuth_Forwards303(t *testing.T) {
 		gotBody["code_challenge"] != "challenge-abc" {
 		t.Errorf("body=%v", gotBody)
 	}
-	if gotBody["code_challenge_method"] != "s256" {
-		t.Errorf("code_challenge_method=%q, want s256", gotBody["code_challenge_method"])
+	if gotBody["code_challenge_method"] != "S256" {
+		t.Errorf("code_challenge_method=%q, want S256 (RFC 7636 canonical, matching /authorize)", gotBody["code_challenge_method"])
 	}
 }
 
