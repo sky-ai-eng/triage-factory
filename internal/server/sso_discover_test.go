@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -119,6 +120,27 @@ func TestHandleSSODiscover_LocalMode_FallsToGitHub(t *testing.T) {
 	}
 	if out.SSO || out.StartURL != "" {
 		t.Errorf("local-mode response = %+v, want {sso:false} (no IdP in N=1)", out)
+	}
+}
+
+// TestHandleSSODiscover_OversizeBody_Rejected locks in the pre-auth body cap:
+// an over-ssoDiscoverMaxBody payload is rejected (the MaxBytesReader read error
+// surfaces as decodeJSON's 400) rather than buffered into memory. No store
+// needed — the cap + decode short-circuit before any store access — so a
+// zero-value Server suffices.
+func TestHandleSSODiscover_OversizeBody_Rejected(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+
+	// A body comfortably over the cap: a giant email value an anonymous caller
+	// could otherwise stream unbounded.
+	huge := strings.Repeat("a", ssoDiscoverMaxBody+(1<<10))
+	req := httptest.NewRequest(http.MethodPost, "/api/sso/discover",
+		strings.NewReader(`{"email":"`+huge+`@corp.com"}`))
+	rec := httptest.NewRecorder()
+	(&Server{}).handleSSODiscover(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an over-cap body (body=%q)", rec.Code, rec.Body.String())
 	}
 }
 

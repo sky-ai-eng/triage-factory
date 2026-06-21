@@ -24,6 +24,12 @@ interface DiscoverResponse {
   start_url?: string
 }
 
+// Notice is the post-submit hint shown under the email field. 'no-sso' is a
+// definitive negative (discovery answered, this domain has no SSO); 'error' is
+// "couldn't check" (the request failed) — kept distinct so a transient
+// network/5xx never tells a user with SSO that they have none.
+type Notice = null | 'no-sso' | 'error'
+
 export default function Login() {
   const auth = useAuth()
   const location = useLocation()
@@ -31,9 +37,9 @@ export default function Login() {
 
   const [email, setEmail] = useState('')
   const [checking, setChecking] = useState(false)
-  // noSSO is set after a submit whose domain didn't route — it surfaces the
-  // "continue with GitHub" hint without hiding the always-present button.
-  const [noSSO, setNoSSO] = useState(false)
+  // notice surfaces a post-submit hint without hiding the always-present GitHub
+  // button — either "no SSO for this domain" or "couldn't check, try again".
+  const [notice, setNotice] = useState<Notice>(null)
 
   useEffect(() => {
     if (auth.status === 'authed') {
@@ -59,7 +65,7 @@ export default function Login() {
     if (!trimmed || checking) return
 
     setChecking(true)
-    setNoSSO(false)
+    setNotice(null)
     try {
       const res = await apiJSON<DiscoverResponse>('/api/sso/discover', {
         method: 'POST',
@@ -71,12 +77,13 @@ export default function Login() {
         window.location.href = res.start_url
         return
       }
-      // No SSO for this domain — keep the visitor on the GitHub path.
-      setNoSSO(true)
+      // Discovery answered: no SSO for this domain — keep the visitor on GitHub.
+      setNotice('no-sso')
     } catch {
-      // Discovery failed (network / 5xx). Don't block login: GitHub is always
-      // available, so degrade to the fallback rather than trapping the user.
-      setNoSSO(true)
+      // The request itself failed (network / 5xx) — we DON'T know whether SSO
+      // exists, so we must not claim "no SSO". Surface a retry hint; GitHub is
+      // always available so the user is never trapped.
+      setNotice('error')
     } finally {
       setChecking(false)
     }
@@ -116,16 +123,23 @@ export default function Login() {
               value={email}
               onChange={(e) => {
                 setEmail(e.target.value)
-                if (noSSO) setNoSSO(false)
+                if (notice) setNotice(null)
               }}
               placeholder="you@company.com"
               className="w-full rounded-xl border border-border-subtle bg-white/60 px-3.5 py-2.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-accent focus:bg-white focus:outline-none"
             />
           </div>
 
-          {noSSO && (
+          {notice === 'no-sso' && (
             <p role="status" className="text-[12px] text-text-tertiary leading-relaxed">
               No single sign-on for that email. Continue with GitHub below.
+            </p>
+          )}
+
+          {notice === 'error' && (
+            <p role="alert" className="text-[12px] text-dismiss leading-relaxed">
+              Couldn&apos;t check single sign-on right now. Try again, or continue with GitHub
+              below.
             </p>
           )}
 

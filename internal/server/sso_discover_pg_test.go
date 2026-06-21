@@ -21,9 +21,16 @@ import (
 
 // ssoDiscover POSTs an email to the discovery endpoint as an anonymous visitor
 // (no sid cookie — the whole point is that the caller is pre-login) and decodes
-// the reply. Returns the status, decoded body, and raw text (for assertions
-// about what the body does NOT contain).
-func ssoDiscover(r *authRig, body any) (int, ssoDiscoverResponse, string) {
+// the reply. Returns the decoded body + the raw text (for assertions about what
+// the body does NOT contain).
+//
+// It fails fast on a non-200 status or a body that isn't the expected JSON:
+// every discovery answer (sso:true and sso:false alike) is a 200, so a non-200
+// or undecodable body is always a regression — and if the helper swallowed it,
+// the zero-value ssoDiscoverResponse ({sso:false}) would let "false" assertions
+// pass silently. The one deliberate non-200 (a malformed BODY → 400) is tested
+// separately against the handler directly, not through this helper.
+func ssoDiscover(r *authRig, body any) (ssoDiscoverResponse, string) {
 	r.t.Helper()
 	var rdr *bytes.Reader
 	if body != nil {
@@ -38,9 +45,14 @@ func ssoDiscover(r *authRig, body any) (int, ssoDiscoverResponse, string) {
 	r.srv.mux.ServeHTTP(rec, req)
 	resp := rec.Result()
 	raw := readBody(resp)
+	if resp.StatusCode != http.StatusOK {
+		r.t.Fatalf("POST /api/sso/discover: status = %d; want 200 (body=%s)", resp.StatusCode, raw)
+	}
 	var out ssoDiscoverResponse
-	_ = json.Unmarshal([]byte(raw), &out)
-	return resp.StatusCode, out, raw
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		r.t.Fatalf("POST /api/sso/discover: decode %q: %v", raw, err)
+	}
+	return out, raw
 }
 
 // seedVerifiedSSODomain inserts an sso_connections row + a VERIFIED sso_domains
@@ -95,13 +107,10 @@ func TestSSODiscover_VerifiedDomain_RoutesToSSO(t *testing.T) {
 	orgID, _ := r.seedOrg(owner, "sso-disco")
 	providerID, _ := seedVerifiedSSODomain(t, r.h, orgID.String(), "corp.com", true)
 
-	status, body, raw := ssoDiscover(r, map[string]string{
+	body, raw := ssoDiscover(r, map[string]string{
 		"email":     "alice@corp.com",
 		"return_to": "/dashboard",
 	})
-	if status != http.StatusOK {
-		t.Fatalf("status = %d; want 200 (body=%s)", status, raw)
-	}
 	if !body.SSO {
 		t.Fatalf("sso = false; want true for a verified domain (body=%s)", raw)
 	}
@@ -125,7 +134,7 @@ func TestSSODiscover_VerifiedDomain_DrivesIntoSAMLStart(t *testing.T) {
 	orgID, _ := r.seedOrg(owner, "sso-disco-drive")
 	seedVerifiedSSODomain(t, r.h, orgID.String(), "corp.com", true)
 
-	_, body, raw := ssoDiscover(r, map[string]string{"email": "alice@corp.com", "return_to": "/dashboard"})
+	body, raw := ssoDiscover(r, map[string]string{"email": "alice@corp.com", "return_to": "/dashboard"})
 	if !body.SSO || body.StartURL == "" {
 		t.Fatalf("discovery did not route to SSO (body=%s)", raw)
 	}
@@ -155,10 +164,7 @@ func TestSSODiscover_UnknownDomain_FallsToGitHub(t *testing.T) {
 	orgID, _ := r.seedOrg(owner, "sso-disco-unknown")
 	seedVerifiedSSODomain(t, r.h, orgID.String(), "corp.com", true)
 
-	status, body, raw := ssoDiscover(r, map[string]string{"email": "bob@other-co.com"})
-	if status != http.StatusOK {
-		t.Fatalf("status = %d; want 200 (body=%s)", status, raw)
-	}
+	body, _ := ssoDiscover(r, map[string]string{"email": "bob@other-co.com"})
 	if body.SSO || body.StartURL != "" {
 		t.Errorf("response = %+v; want {sso:false} for an unknown domain", body)
 	}
@@ -173,7 +179,7 @@ func TestSSODiscover_PendingDomain_FallsToGitHub(t *testing.T) {
 	orgID, _ := r.seedOrg(owner, "sso-disco-pending")
 	seedPendingSSODomain(t, r.h, orgID.String(), "pending.com")
 
-	_, body, raw := ssoDiscover(r, map[string]string{"email": "x@pending.com"})
+	body, raw := ssoDiscover(r, map[string]string{"email": "x@pending.com"})
 	if body.SSO || body.StartURL != "" {
 		t.Errorf("response = %+v; want {sso:false} for a pending-only claim (body=%s)", body, raw)
 	}
@@ -190,7 +196,7 @@ func TestSSODiscover_DisabledConnection_FallsToGitHub(t *testing.T) {
 	orgID, _ := r.seedOrg(owner, "sso-disco-disabled")
 	seedVerifiedSSODomain(t, r.h, orgID.String(), "disabled.com", false) // enabled=false
 
-	_, body, raw := ssoDiscover(r, map[string]string{"email": "x@disabled.com"})
+	body, raw := ssoDiscover(r, map[string]string{"email": "x@disabled.com"})
 	if body.SSO || body.StartURL != "" {
 		t.Errorf("response = %+v; want {sso:false} for a disabled connection (body=%s)", body, raw)
 	}
@@ -209,16 +215,16 @@ func TestSSODiscover_ExactMatchOnly_NoSuffix(t *testing.T) {
 	seedVerifiedSSODomain(t, r.h, orgID.String(), "eng.example.com", true)
 
 	// Parent claim does not cover a subdomain address.
-	if _, body, raw := ssoDiscover(r, map[string]string{"email": "alice@eng.corp.com"}); body.SSO {
+	if body, raw := ssoDiscover(r, map[string]string{"email": "alice@eng.corp.com"}); body.SSO {
 		t.Errorf("alice@eng.corp.com routed on a bare corp.com claim — suffix match leaked (body=%s)", raw)
 	}
 	// Subdomain claim does not cover the parent address.
-	if _, body, raw := ssoDiscover(r, map[string]string{"email": "x@example.com"}); body.SSO {
+	if body, raw := ssoDiscover(r, map[string]string{"email": "x@example.com"}); body.SSO {
 		t.Errorf("x@example.com routed on an eng.example.com claim — parent match leaked (body=%s)", raw)
 	}
 	// Sanity: the exact domain DOES route, so the negatives above are real
 	// (the rows exist and route), not a seeding miss.
-	if _, body, _ := ssoDiscover(r, map[string]string{"email": "bob@corp.com"}); !body.SSO {
+	if body, _ := ssoDiscover(r, map[string]string{"email": "bob@corp.com"}); !body.SSO {
 		t.Error("bob@corp.com did not route to its exact verified domain")
 	}
 }
@@ -232,7 +238,7 @@ func TestSSODiscover_CaseInsensitive(t *testing.T) {
 	orgID, _ := r.seedOrg(owner, "sso-disco-case")
 	seedVerifiedSSODomain(t, r.h, orgID.String(), "corp.com", true)
 
-	_, body, raw := ssoDiscover(r, map[string]string{"email": "Alice@CORP.Com"})
+	body, raw := ssoDiscover(r, map[string]string{"email": "Alice@CORP.Com"})
 	if !body.SSO {
 		t.Errorf("mixed-case address did not route (body=%s)", raw)
 	}
@@ -250,7 +256,7 @@ func TestSSODiscover_Privacy_NoOrgIdentity(t *testing.T) {
 	orgID, _ := r.seedOrg(owner, slug)
 	providerID, connID := seedVerifiedSSODomain(t, r.h, orgID.String(), "corp.com", true)
 
-	_, body, raw := ssoDiscover(r, map[string]string{"email": "alice@corp.com"})
+	body, raw := ssoDiscover(r, map[string]string{"email": "alice@corp.com"})
 	if !body.SSO {
 		t.Fatalf("expected a match to assert the privacy shape against (body=%s)", raw)
 	}
@@ -293,10 +299,9 @@ func TestSSODiscover_MalformedEmail_FallsToGitHub(t *testing.T) {
 	seedVerifiedSSODomain(t, r.h, orgID.String(), "corp.com", true)
 
 	for _, email := range []string{"", "not-an-email", "@corp.com", "user@", "a@b@corp.com"} {
-		status, body, raw := ssoDiscover(r, map[string]string{"email": email})
-		if status != http.StatusOK {
-			t.Errorf("email %q: status = %d; want 200 (body=%s)", email, status, raw)
-		}
+		// ssoDiscover asserts the 200 (a malformed email is sso:false, NOT the
+		// 400 a malformed BODY gets); here we only check it didn't route.
+		body, _ := ssoDiscover(r, map[string]string{"email": email})
 		if body.SSO || body.StartURL != "" {
 			t.Errorf("email %q: response = %+v; want {sso:false}", email, body)
 		}
@@ -318,7 +323,7 @@ func TestSSODiscover_CrossOrgIsolation(t *testing.T) {
 	orgB, _ := r.seedOrg(ownerB, "sso-disco-b")
 	provB, _ := seedVerifiedSSODomain(t, r.h, orgB.String(), "b-corp.com", true)
 
-	_, bodyA, rawA := ssoDiscover(r, map[string]string{"email": "x@a-corp.com"})
+	bodyA, rawA := ssoDiscover(r, map[string]string{"email": "x@a-corp.com"})
 	if !bodyA.SSO || !strings.Contains(bodyA.StartURL, provA) {
 		t.Errorf("a-corp.com did not route to org A's provider %q (body=%s)", provA, rawA)
 	}

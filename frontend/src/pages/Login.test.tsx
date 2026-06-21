@@ -112,15 +112,19 @@ describe('Login (identifier-first, TFAC-427)', () => {
     expect(window.location.href).toContain(encodeURIComponent('/dashboard'))
   })
 
-  it('discovery failure → degrades to the GitHub fallback, never traps the user', async () => {
+  it('discovery failure → shows a retry hint (not a false "no SSO"), never traps the user', async () => {
     api.apiJSON.mockRejectedValue(new Error('network down'))
     renderAt()
 
     fireEvent.change(emailField(), { target: { value: 'x@corp.com' } })
     fireEvent.click(continueBtn())
 
-    expect(await screen.findByText(/no single sign-on for that email/i)).toBeInTheDocument()
+    // A transient failure must NOT claim the domain has no SSO — it shows the
+    // "couldn't check" copy instead, and GitHub stays available.
+    expect(await screen.findByText(/couldn.t check single sign-on/i)).toBeInTheDocument()
+    expect(screen.queryByText(/no single sign-on for that email/i)).not.toBeInTheDocument()
     expect(window.location.href).toBe('')
+    expect(githubBtn()).toBeInTheDocument()
   })
 
   it('already authed → bounces to /', () => {

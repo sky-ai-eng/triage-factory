@@ -40,6 +40,15 @@ type ssoDiscoverRequest struct {
 	ReturnTo string `json:"return_to"`
 }
 
+// ssoDiscoverMaxBody caps the discovery request body. The payload is only
+// {email, return_to} — an email is RFC-5321-bounded to 254 chars and return_to
+// is a short relative path — so 4 KiB is generous. The cap matters because this
+// endpoint is pre-auth: without it an unauthenticated caller could stream an
+// unbounded body to exhaust memory/CPU before any session check ever runs.
+// Mirrors the MaxBytesReader guard on the auth state-cookie body
+// (auth_handlers.go).
+const ssoDiscoverMaxBody = 4 << 10
+
 // ssoDiscoverResponse is the discovery reply — minimal by privacy design (see
 // the file doc). A match is {sso:true, start_url}; anything else is {sso:false}
 // (omitting start_url) and the login page continues with GitHub.
@@ -65,6 +74,12 @@ type ssoDiscoverResponse struct {
 //
 // POST /api/sso/discover  body: { "email": "user@corp.com", "return_to": "/path" }
 func (s *Server) handleSSODiscover(w http.ResponseWriter, r *http.Request) {
+	// Pre-auth endpoint: bound the body before decoding so an anonymous caller
+	// can't stream an unbounded payload to burn memory/CPU ahead of any auth
+	// check. {email, return_to} needs only a few KiB; an over-cap body surfaces
+	// as the decode error decodeJSON maps to 400.
+	r.Body = http.MaxBytesReader(w, r.Body, ssoDiscoverMaxBody)
+
 	var body ssoDiscoverRequest
 	if !decodeJSON(w, r, &body, "") {
 		return
