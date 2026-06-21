@@ -1,6 +1,7 @@
 package jwkinit
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -222,6 +223,7 @@ func TestRunGenerate_RotateReplacesKeypair(t *testing.T) {
 		t.Fatalf("first runGenerate: %v", err)
 	}
 	keys1 := envValue(t, path, "GOTRUE_JWT_KEYS")
+	secret1 := envValue(t, path, "GOTRUE_JWT_SECRET")
 
 	if err := runGenerate(path, true); err != nil {
 		t.Fatalf("rotate runGenerate: %v", err)
@@ -229,6 +231,10 @@ func TestRunGenerate_RotateReplacesKeypair(t *testing.T) {
 	keys2 := envValue(t, path, "GOTRUE_JWT_KEYS")
 	if keys2 == keys1 {
 		t.Fatal("--rotate did not change GOTRUE_JWT_KEYS")
+	}
+	// The HS256 fallback secret is regenerated alongside the keypair on rotate.
+	if got := envValue(t, path, "GOTRUE_JWT_SECRET"); got == secret1 {
+		t.Error("--rotate did not change GOTRUE_JWT_SECRET")
 	}
 	assertNoDuplicateKeys(t, path)
 
@@ -241,6 +247,55 @@ func TestRunGenerate_RotateReplacesKeypair(t *testing.T) {
 	if _, err := jwt.Parse(token2, func(*jwt.Token) (any, error) { return &oldPriv.PublicKey, nil }); err == nil {
 		t.Error("rotated token still verifies against the old key; want rotation")
 	}
+}
+
+// TestRunGenerate_StdoutReuseEmitsOnlyToken: with GOTRUE_JWT_KEYS in the process
+// env and no --write-env, the reuse path prints ONLY the service-role token —
+// not the keypair or secret it didn't generate.
+func TestRunGenerate_StdoutReuseEmitsOnlyToken(t *testing.T) {
+	keys, _, _, err := generateGoTrueKeys()
+	if err != nil {
+		t.Fatalf("generateGoTrueKeys: %v", err)
+	}
+	encoded, err := json.Marshal(keys)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	t.Setenv("GOTRUE_JWT_KEYS", string(encoded))
+
+	out := captureStdout(t, func() {
+		if err := runGenerate("", false); err != nil {
+			t.Fatalf("runGenerate: %v", err)
+		}
+	})
+	if !strings.Contains(out, "TF_GOTRUE_SERVICE_ROLE_TOKEN=") {
+		t.Errorf("stdout missing the token line:\n%s", out)
+	}
+	if strings.Contains(out, "GOTRUE_JWT_KEYS=") || strings.Contains(out, "GOTRUE_JWT_SECRET=") {
+		t.Errorf("reuse stdout should print only the token, got:\n%s", out)
+	}
+}
+
+// captureStdout redirects os.Stdout for the duration of fn and returns what it
+// wrote.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	return buf.String()
 }
 
 // TestUpsertEnvFile_CollapsesDuplicates: an .env with stale duplicate lines (the
@@ -260,6 +315,25 @@ func TestUpsertEnvFile_CollapsesDuplicates(t *testing.T) {
 	assertNoDuplicateKeys(t, path)
 	if envValue(t, path, "A") != "1" || envValue(t, path, "B") != "2" {
 		t.Error("unrelated lines not preserved")
+	}
+}
+
+// TestUpsertEnvFile_PreservesExportPrefix: a `export KEY=` line keeps its export
+// prefix when its value is replaced, so a sourced .env keeps exporting it.
+func TestUpsertEnvFile_PreservesExportPrefix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("export GOTRUE_JWT_KEYS=old\n"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := upsertEnvFile(path, []envVar{{"GOTRUE_JWT_KEYS", "new"}}); err != nil {
+		t.Fatalf("upsertEnvFile: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(b), "export GOTRUE_JWT_KEYS=new") {
+		t.Errorf("export prefix not preserved; got:\n%s", b)
 	}
 }
 

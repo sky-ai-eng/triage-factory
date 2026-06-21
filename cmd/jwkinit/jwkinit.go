@@ -410,11 +410,12 @@ func jwkToPrivateKey(jwk map[string]any) (*rsa.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The public exponent must fit in an int and be positive — guard before the
-	// narrowing conversion so a malformed/hand-edited "e" can't silently truncate
-	// into a wrong (or negative) exponent that slips past Validate. A real RSA e
-	// is small (commonly 65537), so anything that overflows MaxInt is bogus.
-	if !e.IsInt64() || e.Int64() < 2 || e.Int64() > int64(math.MaxInt) {
+	// The public exponent must fit in an int and be a valid RSA exponent (≥3) —
+	// guard before the narrowing conversion so a malformed/hand-edited "e" can't
+	// silently truncate into a wrong (or negative) exponent that slips past
+	// Validate. A real RSA e is small (commonly 65537), so anything that
+	// overflows MaxInt is bogus.
+	if !e.IsInt64() || e.Int64() < 3 || e.Int64() > int64(math.MaxInt) {
 		return nil, fmt.Errorf("JWK exponent %q is out of range for an RSA public exponent", e.String())
 	}
 	priv := &rsa.PrivateKey{
@@ -473,7 +474,14 @@ func upsertEnvFile(path string, vars []envVar) error {
 					continue // collapse a stale duplicate line
 				}
 				written[key] = true
-				out = append(out, key+"="+targets[key])
+				// Preserve a leading `export ` so an .env that's `source`d in a
+				// shell (not just consumed by compose's env_file) keeps exporting
+				// the rotated var.
+				prefix := ""
+				if strings.HasPrefix(strings.TrimSpace(line), "export ") {
+					prefix = "export "
+				}
+				out = append(out, prefix+key+"="+targets[key])
 				continue
 			}
 			out = append(out, line)
