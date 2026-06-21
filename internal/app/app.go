@@ -32,6 +32,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
+	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
@@ -63,6 +64,7 @@ type App struct {
 
 	// Subsystems.
 	scorer     *ai.Manager
+	profiler   *repoprofile.Manager
 	classifier *projectclassify.Runner
 	ingestor   *ingest.Ingestor
 	eventWake  chan struct{}
@@ -118,7 +120,7 @@ func New(ctx context.Context, cfg Config, static fs.FS) (*App, error) {
 func (a *App) Run(ctx context.Context) error {
 	a.runStartupTasks(ctx)
 	a.startWorkers(ctx)
-	a.startPolling(ctx)
+	a.startPolling()
 	return a.srv.ListenAndServeContext(ctx, a.cfg.Addr)
 }
 

@@ -68,7 +68,9 @@ Key invariants:
 `internal/eventbus` — `main.go` wires subscribers:
 
 - `ws-broadcast` forwards every event to the frontend via websocket.
-- `scorer` reacts to `system:poll:*` sentinels and kicks `ai.Runner.Trigger()`.
+- `scorer` reacts to `system:poll:*` sentinels and kicks the per-org `ai.Manager.Trigger(orgID)`.
+- `classifier` reacts to `system:poll:*` sentinels and kicks the project classifier (rotates through orgs internally).
+- `profiler` reacts to `system:poll:*` GitHub completions and kicks the per-org `repoprofile.Manager.Trigger(orgID)` — a TTL-gated repo-profiling pass. This is what profiles new / stale / newly-reachable (App-only) repos with no "github changed" plumbing, in both run modes. The explicit "Re-profile" button (and a tracked-repo-set change) calls `Trigger(orgID, force=true)` to bypass the TTL.
 - `router` (`internal/routing/router.go`) consumes `github:*` / `jira:*` events, records them, creates/bumps tasks per task_rules, and fires matching prompt_triggers (auto-delegation). Also owns inline close checks and `ReDeriveAfterScoring` (post-scoring trigger pass for deferred `min_autonomy_suitability` thresholds).
 - `poll-tracker` gates `/api/jira/stock` on first-poll-after-restart and surfaces one-shot "config took effect" toasts (announce-pending flag, flipped off after one completion).
 
@@ -84,7 +86,7 @@ Pollers publish events to the bus rather than invoking callbacks directly. This 
 
 ### AI scoring
 
-`internal/ai/runner.go` — a singleton runner with a trigger channel. `Trigger()` is idempotent during an active cycle. The `ProfileGate` forces the scorer to wait until repo profiling (`internal/repoprofile`) completes so the scorer has project context. Repo profiles have a 3-day TTL and regenerate on GitHub config change.
+`internal/ai/manager.go` + `internal/ai/runner.go` — a per-org `ai.Manager` owns lazy per-org `Runner`s, each with its own trigger channel and single-flight cycle gate, so a slow cycle on one tenant doesn't head-of-line-block scoring on others. `Manager.Trigger(orgID)` is idempotent during an active cycle (signals merge). Scoring does **not** block on repo profiling — there is no `ProfileGate`. Profiling (`internal/repoprofile`) is an independent `system:poll:` subscriber (a sibling per-org `repoprofile.Manager`, same shape as the scorer); the scorer uses whatever profile context exists and improves on the next cycle as profiles land (eventual consistency). Repo profiles have a 3-day TTL and regenerate per poll cycle (the `profiler` subscriber) or on an explicit re-profile (which forces past the TTL).
 
 ### HTTP server
 

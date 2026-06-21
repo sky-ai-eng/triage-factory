@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
+	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
@@ -66,6 +67,23 @@ func (a *App) buildAI() {
 	})
 	a.srv.SetScorerTrigger(a.scorer.Trigger)
 	aiLog.Info("scorer manager ready (per-org runners)", "model", "haiku")
+
+	// Repo-profiling manager: per-org Runners profiling configured repos off
+	// the system:poll: "profiler" subscriber (TTL-gated per cycle) and the
+	// explicit re-profile button (force). Sibling to the scorer — both react
+	// to poll sentinels independently; scoring does NOT gate on profiling.
+	a.profiler = repoprofile.NewManager(a.ghResolver, a.runSecrets, a.database, a.stores.Repos, a.stores.Orgs, a.wsHub)
+	// Chain bare-clone warming off profile-cycle completion: profiling
+	// populates repo_profiles.clone_url, which bootstrapBareClones reads.
+	// Local-only — the warm on-disk bare cache is an N=1 affordance; multi
+	// clones per-run inside the sandbox, so there's nothing to warm here.
+	if a.local() {
+		a.profiler.SetOnCycleComplete(func(orgID string) {
+			bootstrapBareClones(a.stores.Repos, a.stores.Secrets)
+		})
+	}
+	a.srv.SetProfilerTrigger(a.profiler.Trigger)
+	repoprofileLog.Info("repo-profiling manager ready (per-org runners)", "model", "haiku")
 
 	// Project classifier: per-poll, classify newly-discovered entities
 	// against existing projects via per-project Haiku quorum vote. Sticky —

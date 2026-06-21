@@ -33,6 +33,16 @@ func (a *App) registerSubscribers() {
 		Filter: []string{"system:poll:"},
 		Handle: func(evt domain.Event) { a.classifier.Trigger() },
 	})
+	// Kick the per-org repo profiler on GitHub poll-complete sentinels. The
+	// cycle is TTL-gated, so steady state is ~one staleness check per repo
+	// per cycle; it naturally profiles new / stale / newly-reachable
+	// (App-only) repos with no "github changed" plumbing. Filtered to
+	// source=="github" so a Jira-only cycle doesn't kick a no-op pass.
+	a.bus.Subscribe(eventbus.Subscriber{
+		Name:   "profiler",
+		Filter: []string{"system:poll:"},
+		Handle: a.handleProfilerPoll,
+	})
 	// Track Jira/GitHub poll completions: gate /api/jira/stock and surface
 	// the one-shot "config took effect" toast.
 	a.bus.Subscribe(eventbus.Subscriber{
@@ -99,6 +109,39 @@ func (a *App) handlePollCompleted(evt domain.Event) {
 			label, meta.Entities, pluralize(meta.Entities, "entity", "entities"),
 		))
 	}
+}
+
+// handleProfilerPoll kicks a TTL-gated repo-profiling cycle for the org
+// whose GitHub poll just completed. evt.OrgID scopes the per-org Runner; an
+// empty value is dropped by Manager.Trigger.
+func (a *App) handleProfilerPoll(evt domain.Event) {
+	orgID, ok := pollEventProfilesGitHub(evt)
+	if !ok {
+		return
+	}
+	a.profiler.Trigger(orgID, false)
+}
+
+// pollEventProfilesGitHub reports the org to profile for a poll-complete
+// event and whether a profiling pass should run. Only GitHub poll
+// completions qualify: a Jira completion can't change the tracked repo set,
+// so profiling on it would be a no-op staleness scan. Malformed metadata is
+// treated as "don't profile" — the poll-tracker subscriber already warns on
+// the same event, so this stays silent rather than double-logging.
+func pollEventProfilesGitHub(evt domain.Event) (string, bool) {
+	if evt.EventType != domain.EventSystemPollCompleted {
+		return "", false
+	}
+	var meta struct {
+		Source string `json:"source"`
+	}
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
+		return "", false
+	}
+	if meta.Source != "github" {
+		return "", false
+	}
+	return evt.OrgID, true
 }
 
 // pluralize picks the singular or plural form based on count, for toast

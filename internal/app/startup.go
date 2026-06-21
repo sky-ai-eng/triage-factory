@@ -78,11 +78,12 @@ func (a *App) startWorkers(ctx context.Context) {
 	go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
 }
 
-// startPolling kicks the first poll cycle (and, in local mode, wires the
-// process-global GitHub identity). The logic lives on the reloader since it
-// shares the local-mode profile→restart→score sequence with onGitHubChanged.
-func (a *App) startPolling(ctx context.Context) {
-	a.reloader.initialPoll(ctx)
+// startPolling kicks the first poll cycle. The logic lives on the reloader
+// alongside the credential-change callbacks it shares the poller manager
+// with. First-boot profiling and scoring are driven by the poll-complete
+// subscribers, not wired here.
+func (a *App) startPolling() {
+	a.reloader.initialPoll()
 }
 
 // cleanupWorktrees removes orphaned worktrees from crashed runs. Parked

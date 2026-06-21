@@ -135,11 +135,22 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Repo set changed → re-profile + restart pollers (the union the
-	// poller reads from repo_profiles was just reconciled).
+	// Repo set changed → re-due polling so the poller picks up the
+	// reconciled tracked set now (onGitHubChanged evicts the reachable-repo
+	// cache + PollSoon), and force a profiling pass so newly-tracked repos
+	// are profiled immediately rather than after one poll interval. This is
+	// also the path the "Re-profile" button takes (it re-PUTs the current
+	// selection), so the force is what makes that button bypass the TTL.
+	//
+	// This is GitHub-only and no longer touches the Jira poller: onGitHubChanged
+	// shed its old RestartAll (which used to bounce Jira too), so there's no
+	// Jira readiness to reset here — a repo-set change leaves Jira snapshots
+	// valid and /api/jira/stock ungated.
 	if s.onGitHubChanged != nil {
-		s.MarkJiraRestarted()
 		go s.onGitHubChanged(orgID)
+	}
+	if s.profilerTrigger != nil {
+		s.profilerTrigger(orgID, true)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "repos": len(repos)})
