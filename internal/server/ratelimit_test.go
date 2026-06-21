@@ -192,6 +192,27 @@ func TestPreAuthRateLimit_MultiMode429(t *testing.T) {
 	}
 }
 
+// TestIPRateLimiter_ZeroRateNoPanic guards the division in allow(): a
+// limiter configured with a non-positive refill rate must still honor its
+// burst and then refuse with a fixed back-off rather than dividing by zero.
+func TestIPRateLimiter_ZeroRateNoPanic(t *testing.T) {
+	clk := time.Now()
+	l := frozenLimiter(0.0, 2.0, time.Minute, &clk) // no refill, burst 2
+
+	for i := 0; i < 2; i++ {
+		if ok, _ := l.allow("1.2.3.4"); !ok {
+			t.Fatalf("request %d refused, want allowed within burst even at rate 0", i+1)
+		}
+	}
+	ok, wait := l.allow("1.2.3.4")
+	if ok {
+		t.Fatalf("3rd request allowed, want refused (burst spent, no refill)")
+	}
+	if wait <= 0 {
+		t.Fatalf("retry wait = %v, want a positive fixed back-off (no divide-by-zero)", wait)
+	}
+}
+
 // TestPreAuthRateLimit_LogoutCSRFRejectionCostsNoTokens locks in the wrap
 // ORDER for the logout mount: withCSRFOriginCheck (outer) runs before
 // preAuthRateLimit (inner), so a cross-origin POST the CSRF gate rejects

@@ -126,6 +126,14 @@ func (l *ipRateLimiter) allow(ip string) (bool, time.Duration) {
 	}
 
 	// Not enough for a whole token: hand back the wait until one accrues.
+	// Guard a non-positive rate (a misconfigured limiter with no refill) so
+	// the division can't panic — production passes preAuthRatePerSec=1, but
+	// keep allow() total for any caller. With no refill a spent bucket never
+	// recovers, so report a fixed back-off rather than +Inf. Placed here, not
+	// at the top, so a zero-rate limiter still honors its burst first.
+	if l.rate <= 0 {
+		return false, time.Second
+	}
 	wait := time.Duration((1 - b.tokens) / l.rate * float64(time.Second))
 	return false, wait
 }
