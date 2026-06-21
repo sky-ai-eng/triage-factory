@@ -946,9 +946,18 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
 
-	// Serialize concurrent first-logins sharing a verified email. A missing or
-	// unverified email skips the lock — those never link, so they can't race
-	// into a shared principal.
+	// Serialize concurrent logins for the SAME identity (browser double-submit /
+	// retry) so two requests can't both miss the lookup, both mint a principal,
+	// and collide on the user_identities PK (which would 500 the second). Taken
+	// on every login, keyed on auth_user_id (salt 1).
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 1))`, authUserID.String()); err != nil {
+		return uuid.Nil, fmt.Errorf("acquire identity lock: %w", err)
+	}
+	// Additionally serialize concurrent first-logins by DIFFERENT identities that
+	// share a verified email (salt 0), so they link to one principal rather than
+	// racing into two. A missing or unverified email skips this — those never
+	// link. Consistent lock order (identity then email) avoids deadlock.
 	if email != "" && claims.EmailVerified {
 		if _, err := tx.ExecContext(ctx,
 			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, email); err != nil {

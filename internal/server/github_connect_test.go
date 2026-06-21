@@ -582,9 +582,10 @@ func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
 	// alice's principal but must never touch the github identity row —
 	// preserving the connect_oauth binding captured above.
 	claims := &verify.Claims{
-		Subject:      samlID.String(),
-		Email:        "alice@corp.example",
-		UserMetadata: map[string]any{"full_name": "Alice Example"}, // no user_name
+		Subject:       samlID.String(),
+		Email:         "alice@corp.example",
+		EmailVerified: true,                                         // SAML assertion emails are verified by definition
+		UserMetadata:  map[string]any{"full_name": "Alice Example"}, // no user_name
 	}
 	got, err := resolveOrCreatePrincipal(context.Background(), rig.h.AdminDB, samlID, claims, true)
 	if err != nil {

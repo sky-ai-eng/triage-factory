@@ -335,7 +335,7 @@ func TestSSOLogin_NoMatchingConnection_FallsToOnboarding(t *testing.T) {
 	}
 	sid := r.sidFromResp(resp)
 
-	if got := r.membershipCount(user, uuid.Nil); got != 0 {
+	if got := r.membershipCount(r.principalOf(user), uuid.Nil); got != 0 {
 		t.Errorf("memberships=%d, want 0 (no accidental provisioning without a binding)", got)
 	}
 	me := r.me(sid)
@@ -360,7 +360,7 @@ func TestSSOLogin_DisabledConnection_NoProvisioning(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
 	}
-	if got := r.membershipCount(user, uuid.Nil); got != 0 {
+	if got := r.membershipCount(r.principalOf(user), uuid.Nil); got != 0 {
 		t.Errorf("memberships=%d, want 0 (a disabled connection must not JIT)", got)
 	}
 }
@@ -381,7 +381,7 @@ func TestSSOLogin_WritesNoGitHubIdentityRow(t *testing.T) {
 
 	var n int
 	if err := r.h.AdminDB.QueryRow(
-		`SELECT count(*) FROM user_github_identities WHERE user_id = $1`, user,
+		`SELECT count(*) FROM user_github_identities WHERE user_id = $1`, r.principalOf(user),
 	).Scan(&n); err != nil {
 		t.Fatalf("count github identities: %v", err)
 	}

@@ -6916,7 +6916,8 @@ CREATE TABLE public.user_identities (
     email text,
     email_verified boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_identities_provider_check CHECK ((provider = ANY (ARRAY['github'::text, 'saml'::text])))
 );
 
 ALTER TABLE ONLY public.user_identities
