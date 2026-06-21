@@ -35,14 +35,22 @@ func TestMeIdentities_MultiReturnsLinkedRows_MarksCurrent_NoLeak(t *testing.T) {
 	r := newAuthRig(t)
 
 	// Principal A: a GitHub identity (auth_user_id == A == principal, seeded by
-	// seedUser) plus a SAML identity linked to the SAME principal. Both carry
-	// A's email — the verified-email link case — so current-marking can only be
-	// right if it keys on auth_user_id, not email.
+	// seedUser) plus a SAML identity linked to the SAME principal (added below).
 	alice := r.seedUser()
 	aliceEmail := alice.String() + "@test"
 
+	// The SAML login is its OWN auth.users row — GoTrue never merges SSO logins
+	// (see sso_login_test.go's spike note); TF unifies the two at the
+	// user_identities layer, which is what this read surfaces. Two facts shape the
+	// seeding:
+	//   - auth.users.email is globally unique in the harness image, so the SAML
+	//     row needs its own auth-level email (the endpoint never reads it).
+	//   - the verified email that LINKED the two to one principal is the same on
+	//     both user_identities rows. That shared email is the point of the test:
+	//     a "current" marker keyed on email would light up BOTH rows, so only an
+	//     auth_user_id-keyed one (what the handler does) passes the checks below.
 	samlAuthID := uuid.NewString()
-	r.h.SeedAuthUser(t, samlAuthID, aliceEmail)
+	r.h.SeedAuthUser(t, samlAuthID, samlAuthID+"@test")
 	if _, err := r.h.AdminDB.Exec(`
 		INSERT INTO user_identities (auth_user_id, user_id, provider, email, email_verified)
 		VALUES ($1, $2, 'saml', $3, true)`, samlAuthID, alice, aliceEmail); err != nil {
@@ -69,7 +77,10 @@ func TestMeIdentities_MultiReturnsLinkedRows_MarksCurrent_NoLeak(t *testing.T) {
 	if got.StatusCode != http.StatusOK {
 		t.Fatalf("GET /api/me/identities status=%d, want 200", got.StatusCode)
 	}
-	bodyBytes, _ := io.ReadAll(got.Body)
+	bodyBytes, err := io.ReadAll(got.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
 	_ = got.Body.Close()
 	body := string(bodyBytes)
 
