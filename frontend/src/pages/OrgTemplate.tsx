@@ -1,7 +1,6 @@
 import { useState, useCallback } from 'react'
 import { Navigate } from 'react-router-dom'
 import { AnimatePresence } from 'motion/react'
-import { Layers } from 'lucide-react'
 import PromptDrawer from '../components/PromptDrawer'
 import BindingGraph from '../components/BindingGraph'
 import ForgivingBanner from '../components/ForgivingBanner'
@@ -14,14 +13,14 @@ import type { TriggerHandler, RuleHandler } from '../types'
 
 // OrgTemplate is the org-admin editor over the template new teams are seeded
 // from (SKY-381). It is the SAME binding-graph editor as /prompts, at template
-// scope — but deliberately, unmistakably NOT a team: no TeamSwitch, a distinct
-// header + a persistent forward-only banner + an accent frame on the canvas.
+// scope — but deliberately, unmistakably NOT a team: no TeamSwitch, a persistent
+// forward-only banner + an accent frame on the canvas.
 //
-// `embedded` is the /org Template-tab mode (TFAC-419): OrgPage already supplies
-// the page header + tab strip and a height-constrained flex parent, so the
-// component drops its own standalone title block (no double header) and fills
-// the parent via flex instead of its standalone `calc(100vh - …)` height.
-export default function OrgTemplate({ embedded = false }: { embedded?: boolean }) {
+// It only ever renders embedded in the /org Template tab (TFAC-419/436): OrgPage
+// supplies the page header + tab strip and a height-constrained flex parent, so
+// this component has no title block of its own (no double header) and fills the
+// parent via flex. The standalone route + top-bar pill are gone (TFAC-436).
+export default function OrgTemplate() {
   const orgHref = useOrgHref()
   const { available, ready, loading } = useTemplateScope()
 
@@ -91,32 +90,11 @@ export default function OrgTemplate({ embedded = false }: { embedded?: boolean }
   }
 
   return (
-    <div
-      className={`flex flex-col ${embedded ? 'min-h-0 flex-1' : ''}`}
-      style={embedded ? undefined : { height: 'calc(100vh - 120px)' }}
-    >
-      {/* Header. Standalone shows the distinct title block (never reads as a
-          live team's /prompts); embedded drops it — OrgPage's page header + tab
-          strip already title the surface — keeping just the New Prompt action,
-          right-aligned. */}
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/* OrgPage's page header + tab strip already title the surface, so this
+          embedded editor keeps just the New Prompt action, right-aligned. */}
       <div className="flex items-center justify-between mb-3 shrink-0">
-        {embedded ? (
-          <span />
-        ) : (
-          <div className="flex items-center gap-2.5">
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
-              <Layers size={15} />
-            </span>
-            <div>
-              <h1 className="text-[17px] font-semibold text-text-primary leading-tight">
-                Org Template — Defaults for New Teams
-              </h1>
-              <p className="text-[11px] text-text-tertiary leading-tight">
-                The prompts, rules, and triggers every new team starts with.
-              </p>
-            </div>
-          </div>
-        )}
+        <span />
         <button
           onClick={openNew}
           className="text-[13px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-2 rounded-full transition-colors"

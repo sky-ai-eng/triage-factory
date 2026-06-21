@@ -93,8 +93,9 @@ const TABS: { id: OrgTab; label: string }[] = [
 // shell. People is the shared roster + invite surface (TFAC-417/418); Settings
 // and Template host the relocated OrgSettings / OrgTemplate surfaces (TFAC-419)
 // — the org-scoped config moved off the global Settings page, and the template
-// new teams inherit moved off the standalone Org template route. The active tab
-// is URL-driven so the relocated surfaces stay deep-linkable.
+// new teams inherit is reached here (the standalone route + top-bar pill are
+// gone — TFAC-436). The active tab is URL-driven so the surfaces stay
+// deep-linkable.
 export default function OrgPage() {
   const orgId = useActiveOrgId()
 
@@ -113,15 +114,14 @@ export default function OrgPage() {
 // on orgId by the parent — so switching orgs remounts it from scratch and the
 // People tab's adapter always gets a concrete orgId. The active tab is
 // URL-driven (?tab=) so the relocated Settings/Template surfaces are
-// deep-linkable — the "Org template" nav entry points straight at ?tab=template
-// — and survive a refresh.
+// deep-linkable and survive a refresh.
 function OrgPageBody({ orgId }: { orgId: string }) {
   const { isAdmin } = useOrgRole()
-  // Gate Template on the SAME hook OrgTemplate uses to decide render-vs-redirect
-  // (and that Shell's "Org template" nav entry uses), not just isAdmin — so a
-  // visible Template tab can never click through to OrgTemplate's non-admin
-  // redirect. Today templateAvailable === isAdmin, but keeping the gate on one
-  // hook keeps the tab and the surface it opens from ever drifting apart.
+  // Gate Template on the SAME hook OrgTemplate uses to decide render-vs-redirect,
+  // not just isAdmin — so a visible Template tab can never click through to
+  // OrgTemplate's non-admin redirect. Today templateAvailable === isAdmin, but
+  // keeping the gate on one hook keeps the tab and the surface it opens from
+  // ever drifting apart.
   const { available: templateAvailable } = useTemplateScope()
   const [searchParams, setSearchParams] = useSearchParams()
   const tab = resolveTab(searchParams.get('tab'), isAdmin, templateAvailable)
@@ -181,7 +181,7 @@ function OrgPageBody({ orgId }: { orgId: string }) {
 
       {tab === 'people' && <OrgPeople orgId={orgId} canManage={isAdmin} />}
       {tab === 'settings' && <OrgSettings orgId={orgId} isLocal={false} />}
-      {tab === 'template' && <OrgTemplate embedded />}
+      {tab === 'template' && <OrgTemplate />}
     </div>
   )
 }

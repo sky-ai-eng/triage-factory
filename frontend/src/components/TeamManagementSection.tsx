@@ -15,9 +15,9 @@ import { toast } from './Toast/toastStore'
 // takes a name to create another.
 //
 // The defaults a new team inherits (prompts + handlers) are edited from the
-// dedicated "Org template" route — its own org-admin nav entry, not this
-// section (SKY-381 pinned a distinct surface so the template never reads as
-// just another team). See pages/OrgTemplate.tsx.
+// Org page's Template tab (TFAC-436), not this section (SKY-381 pinned a
+// distinct surface so the template never reads as just another team).
+// See pages/OrgTemplate.tsx.
 export default function TeamManagementSection() {
   const { teams, createTeam } = useTeams()
   const [name, setName] = useState('')

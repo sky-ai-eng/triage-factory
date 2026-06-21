@@ -1,8 +1,7 @@
-import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { Settings } from 'lucide-react'
 import { useOrgHref } from './hooks/useOrgHref'
 import { useOptionalAuth } from './contexts/AuthContext'
-import { useTemplateScope } from './hooks/useTemplateScope'
 import { useOrgRole } from './hooks/useOrgRole'
 import OrgPicker from './components/OrgPicker'
 import UserMenu from './components/UserMenu'
@@ -26,37 +25,16 @@ export default function Shell() {
   // local mode hides them.
   const auth = useOptionalAuth()
   const isMulti = auth !== null
-  // The org-template editor (SKY-381) is an org-admin surface; its nav entry
-  // renders only for owners/admins in multi mode (useTemplateScope is false in
-  // local mode). It deep-links to the /org Template tab (TFAC-419) — a distinct
-  // one-click entry, never the TeamSwitch.
-  const { available: templateAvailable } = useTemplateScope()
   // The /org surface is admin-gated in the nav (owner/admin of the active
   // org). Non-admins can still deep-link to it for a read-only roster + Leave,
   // but it doesn't earn a nav slot for them. False in local mode (no auth).
+  // The org template (low-frequency admin config) is reached via the Org pill →
+  // Template tab, not a standalone nav entry (TFAC-436).
   const { isAdmin: orgAdmin } = useOrgRole()
 
   // Full-bleed routes (the agent run station) drop the app nav + main padding so
   // the page owns the whole viewport — it's a focused, open-in-new-tab surface.
   const fullBleed = /\/runs\/[^/]+\/?$/.test(location.pathname)
-
-  // "Org" and "Org template" both resolve to the /org surface (Template is a tab,
-  // deep-linked via ?tab=template), so NavLink's pathname-only active match would
-  // light up both at once. Derive each entry's active state from the tab param so
-  // exactly one highlights — hence plain Links with a hand-rolled pill class. The
-  // standalone /org-template route still exists (direct links / bookmarks), so it
-  // counts as the Template pill's surface too — otherwise neither pill lights up
-  // there.
-  const onOrg = location.pathname === orgHref('/org')
-  const onOrgTemplate =
-    location.pathname === orgHref('/org-template') ||
-    (onOrg && new URLSearchParams(location.search).get('tab') === 'template')
-  const pill = (active: boolean) =>
-    `text-[13px] font-medium px-4 py-1.5 rounded-full transition-all duration-200 ${
-      active
-        ? 'bg-accent-soft text-accent'
-        : 'text-text-tertiary hover:text-text-secondary hover:bg-black/[0.03]'
-    }`
 
   return (
     <div className="min-h-screen bg-surface text-text-primary">
@@ -84,22 +62,18 @@ export default function Shell() {
               </NavLink>
             ))}
             {orgAdmin && (
-              <Link
+              <NavLink
                 to={orgHref('/org')}
-                aria-current={onOrg && !onOrgTemplate ? 'page' : undefined}
-                className={pill(onOrg && !onOrgTemplate)}
+                className={({ isActive }) =>
+                  `text-[13px] font-medium px-4 py-1.5 rounded-full transition-all duration-200 ${
+                    isActive
+                      ? 'bg-accent-soft text-accent'
+                      : 'text-text-tertiary hover:text-text-secondary hover:bg-black/[0.03]'
+                  }`
+                }
               >
                 Org
-              </Link>
-            )}
-            {templateAvailable && (
-              <Link
-                to={orgHref('/org?tab=template')}
-                aria-current={onOrgTemplate ? 'page' : undefined}
-                className={pill(onOrgTemplate)}
-              >
-                Org template
-              </Link>
+              </NavLink>
             )}
           </div>
           <NavLink

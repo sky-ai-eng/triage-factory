@@ -20,7 +20,6 @@ import PRDashboard from './pages/PRDashboard'
 import Brief from './pages/Brief'
 import Settings from './pages/Settings'
 import Prompts from './pages/Prompts'
-import OrgTemplate from './pages/OrgTemplate'
 import OrgPage from './pages/OrgPage'
 import Repos from './pages/Repos'
 import Factory from './pages/Factory'
@@ -237,10 +236,12 @@ function MultiRoutes() {
             <Route path="runs/:runID" element={<RunDetail />} />
             <Route path="prs" element={<PRDashboard />} />
             <Route path="prompts" element={<Prompts />} />
-            {/* Org-template editor (SKY-381) — multi-mode only; the page
-                itself redirects non-admins. No local-mode route (N=1 has no
-                template); LocalRoutes' catch-all sends /org-template → /. */}
-            <Route path="org-template" element={<OrgTemplate />} />
+            {/* Legacy org-template route (SKY-381) — the standalone editor and
+                its top-bar pill are gone (TFAC-436); the org template lives at
+                the /org Template tab. Redirect old bookmarks/links to the
+                canonical surface. Relative `..` pops to the /orgs/:org_id
+                parent, preserving the active org. */}
+            <Route path="org-template" element={<Navigate to="../org?tab=template" replace />} />
             <Route path="repos" element={<Repos />} />
             <Route path="projects" element={<Projects />} />
             <Route path="projects/:id" element={<ProjectDetail />} />
