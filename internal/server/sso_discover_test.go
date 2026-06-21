@@ -41,6 +41,8 @@ func TestEmailDomain(t *testing.T) {
 		{"trailing-dot-only domain", "user@.", "", false},
 		{"two ats", "a@b@corp.com", "", false},
 		{"interior whitespace in domain", "user@cor p.com", "", false},
+		// FQDN required: a bare single label is not a routable domain.
+		{"single label localhost", "user@localhost", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -140,7 +140,9 @@ func (s *Server) handleSSODiscover(w http.ResponseWriter, r *http.Request) {
 // dot (so "Alice@Corp.com." and "alice@corp.com" both resolve to "corp.com",
 // mirroring normalizeSSODomain's stored form), and returns the FULL domain
 // after the '@' — eng.corp.com, never the registrable corp.com — because the
-// match is exact. Returns ("", false) for anything that isn't a plain address.
+// match is exact. It requires an FQDN (at least one dot), so a bare label like
+// "localhost" is rejected. Returns ("", false) for anything that isn't a plain
+// address.
 func emailDomain(raw string) (string, bool) {
 	e := strings.TrimSpace(raw)
 	at := strings.IndexByte(e, '@')
@@ -161,6 +163,14 @@ func emailDomain(raw string) (string, bool) {
 	// "valid bare domain or false" contract (the store would simply not match
 	// such a value, but rejecting here keeps the call site's intent clear).
 	if strings.ContainsAny(domain, " \t\r\n") {
+		return "", false
+	}
+	// Require an FQDN, not a bare label: "user@localhost" yields no routable
+	// domain. Discovery's exact-match store lookup would miss a single label
+	// anyway, but tightening the contract here means any future reuse (e.g. a
+	// domain-claim UI borrowing this for validation feedback) can't read
+	// "localhost" as a valid domain.
+	if !strings.Contains(domain, ".") {
 		return "", false
 	}
 	return domain, true

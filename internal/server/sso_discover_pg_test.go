@@ -34,7 +34,10 @@ func ssoDiscover(r *authRig, body any) (ssoDiscoverResponse, string) {
 	r.t.Helper()
 	var rdr *bytes.Reader
 	if body != nil {
-		b, _ := json.Marshal(body)
+		b, err := json.Marshal(body)
+		if err != nil {
+			r.t.Fatalf("marshal discover body: %v", err)
+		}
 		rdr = bytes.NewReader(b)
 	} else {
 		rdr = bytes.NewReader(nil)
@@ -121,6 +124,31 @@ func TestSSODiscover_VerifiedDomain_RoutesToSSO(t *testing.T) {
 	// The start_url is the same SP-initiated endpoint handleSAMLStart serves.
 	if !strings.HasPrefix(body.StartURL, "/api/auth/oauth/saml?") {
 		t.Errorf("start_url = %q; want the /api/auth/oauth/saml start endpoint", body.StartURL)
+	}
+}
+
+// TestSSODiscover_HostileReturnTo_ClampedToRoot: a hostile return_to must not
+// survive into start_url — the handler runs it through normalizeReturnTo, which
+// clamps an absolute/off-site URL to "/". normalizeReturnTo is unit-tested in
+// its own right; this locks in that the discovery handler actually calls it, so
+// dropping that call in a refactor fails here rather than shipping an open
+// redirect through the SSO start link.
+func TestSSODiscover_HostileReturnTo_ClampedToRoot(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, _ := r.seedOrg(owner, "sso-disco-returnto")
+	seedVerifiedSSODomain(t, r.h, orgID.String(), "corp.com", true)
+
+	body, _ := ssoDiscover(r, map[string]string{
+		"email":     "alice@corp.com",
+		"return_to": "https://evil.com",
+	})
+	if !body.SSO {
+		t.Fatalf("expected an SSO match to exercise return_to normalization")
+	}
+	if strings.Contains(body.StartURL, "evil.com") {
+		t.Errorf("hostile return_to leaked into start_url: %s", body.StartURL)
 	}
 }
 
