@@ -387,6 +387,110 @@ func TestInviteCreate_CrossOrgTargetTeam_400(t *testing.T) {
 	}
 }
 
+// TestInviteCreate_ExistingMember_409: inviting an email that already maps to
+// a current member of THIS org via a *verified* identity is rejected (409) and
+// mints nothing — the invite-vs-existing-member guard (TFAC-437). seedUser
+// mints a verified <id>@test identity, so the owner's own address is the
+// ticket's repro (owner invites themselves → was 201, now 409).
+func TestInviteCreate_ExistingMember_409(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, _ := r.seedOrg(owner, "create-existing")
+	sid := r.signInAs(owner)
+
+	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+		map[string]string{"email": owner.String() + "@test", "role": "member"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d; want 409 (body=%s)", resp.StatusCode, readBody(resp))
+	}
+	var n int
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM org_invites WHERE org_id=$1`, orgID).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("invites created = %d; want 0 (existing member rejected before insert)", n)
+	}
+}
+
+// TestInviteCreate_CrossOrgExistingUser_Allowed: an existing TF user who is a
+// verified member of a DIFFERENT org may still be invited into this one —
+// accept grants them a fresh membership. The guard is same-org-only.
+func TestInviteCreate_CrossOrgExistingUser_Allowed(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, _ := r.seedOrg(owner, "create-crossorg")
+	sid := r.signInAs(owner)
+
+	// A user who is a verified member of some OTHER org, not this one.
+	other := r.seedUser()
+	r.seedOrg(other, "create-crossorg-other")
+
+	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+		map[string]string{"email": other.String() + "@test", "role": "member"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d; want 201 (cross-org existing user allowed); body=%s", resp.StatusCode, readBody(resp))
+	}
+	var n int
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM org_invites WHERE org_id=$1`, orgID).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("invites created = %d; want 1 (cross-org invite is legitimate)", n)
+	}
+}
+
+// TestInviteCreate_UnverifiedMember_Allowed: a member whose identity email is
+// UNVERIFIED is not a reliable dedup key — per the verified-only decision the
+// invite is allowed (201). Mirrors the principal-link rule: only a verified
+// email would auto-link on accept.
+func TestInviteCreate_UnverifiedMember_Allowed(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, teamID := r.seedOrg(owner, "create-unverified")
+	member := r.seedUser()
+	pgtest.AddOrgMember(t, r.h, member.String(), orgID.String(), teamID.String(), "member", "member")
+	// member already has a verified <id>@test identity; attach a SECOND,
+	// unverified identity carrying the address we'll invite, so the only match
+	// for that address is unverified.
+	unverifiedEmail := "unverified-" + member.String() + "@example.com"
+	seedExtraIdentity(t, r.h, member.String(), unverifiedEmail, false)
+	sid := r.signInAs(owner)
+
+	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+		map[string]string{"email": unverifiedEmail, "role": "member"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d; want 201 (unverified email not a dedup key); body=%s", resp.StatusCode, readBody(resp))
+	}
+	var n int
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM org_invites WHERE org_id=$1`, orgID).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("invites created = %d; want 1 (unverified member allowed)", n)
+	}
+}
+
+// seedExtraIdentity attaches an additional user_identities row to an existing
+// principal carrying email with the given verified flag. seedUser already
+// mints one verified <id>@test identity per user; auth_user_id is the table PK,
+// so a second identity gets its own auth.users row. Lets a test pin a specific
+// email/verified combination (e.g. an unverified address that must not count
+// as a dedup key).
+func seedExtraIdentity(t *testing.T, h *pgtest.Harness, userID, email string, verified bool) {
+	t.Helper()
+	authID := uuid.NewString()
+	h.SeedAuthUser(t, authID, email)
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO user_identities (auth_user_id, user_id, provider, email, email_verified)
+		VALUES ($1, $2, 'saml', $3, $4)
+	`, authID, userID, email, verified); err != nil {
+		t.Fatalf("seed extra identity: %v", err)
+	}
+}
+
 // TestInviteCreate_PendingDup_409: a second pending invite to the same
 // address is a 409.
 func TestInviteCreate_PendingDup_409(t *testing.T) {

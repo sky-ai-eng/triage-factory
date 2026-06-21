@@ -115,6 +115,40 @@ func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Requ
 		badRequest(w, "email is required")
 		return
 	}
+
+	// Reject inviting someone who is already a member of THIS org. The only
+	// create-time uniqueness guard otherwise is org_invites_active_uniq, which
+	// dedups invite-vs-invite, not invite-vs-existing-member — so without this
+	// an admin could mint a pending invite for a current member: a dead ghost
+	// row whose sole outcome on accept is the idempotent "you're already a
+	// member" short-circuit (:467-484). We match on a *verified* identity email,
+	// mirroring the principal-link rule: if it WOULD link on accept, block on
+	// create; an unverified identity email isn't a reliable dedup key. Scoped to
+	// THIS org only — inviting an existing TF user who belongs to another org is
+	// legitimate, and accept grants them a fresh membership. This is fail-fast
+	// UX, not a correctness gate: the accept-time member check (:467-484) stays
+	// as the TOCTOU backstop for an email JIT-provisioned between create and
+	// accept. Runs on the admin pool for the same reason as the target-team
+	// check below — user_identities is admin-pool-only.
+	var alreadyMember bool
+	if err := ih.admin.QueryRowContext(r.Context(),
+		`SELECT EXISTS (
+			SELECT 1 FROM public.org_memberships m
+			JOIN public.user_identities i ON i.user_id = m.user_id
+			WHERE m.org_id = $1 AND lower(i.email) = $2 AND i.email_verified
+		)`,
+		orgID, email,
+	).Scan(&alreadyMember); err != nil {
+		internalError(w, "invites", fmt.Errorf("check existing member: %w", err))
+		return
+	}
+	if alreadyMember {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "that person is already a member of this org",
+		})
+		return
+	}
+
 	// Role ceiling. We only accept admin|member; 'owner' is the founder
 	// sentinel on orgs.owner_user_id, never granted via invite (the schema
 	// CHECK enforces this too). The caller is already org-admin (owner OR
