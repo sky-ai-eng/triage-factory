@@ -483,6 +483,58 @@ export interface AcceptInviteMismatch {
   invited_email: string
 }
 
+/* ── SSO (multi-org SAML via GoTrue, epic TFAC-422) ──────────────────────────
+ *  Wire shapes for the per-org "Configure SSO" admin surface (TFAC-429), which
+ *  consumes the connection (TFAC-424) and domain (TFAC-428) endpoints. Multi-
+ *  mode only; admin-gated. GoTrue owns authN + the provider registry, TF owns
+ *  the org↔provider binding — `provider_id` is the bridge, and these carry no
+ *  IdP secrets (the signing material lives in GoTrue). */
+
+/** One registered IdP connection, from the `connection` field of
+ *  GET/POST/PATCH /api/sso/connection (null until one is registered). A freshly
+ *  registered connection is created enabled; disabling pauses SSO sign-in
+ *  without removing the binding. */
+export interface SSOConnection {
+  id: string
+  /** 'saml' | 'oidc' — today always 'saml'. */
+  kind: string
+  /** GoTrue sso_providers.id (UUID); opaque to TF, globally unique. */
+  provider_id: string
+  /** The org_role JIT-provisioned users get: 'admin' | 'member' (never owner). */
+  default_role: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+/** GET/POST/PATCH /api/sso/connection response. The SP values are always
+ *  present — even with no connection — because they're a pure function of the
+ *  deployment's public URL, so the operator can configure the IdP side first.
+ *  `entity_id` → the Entra "Identifier"; `acs_url` → the Entra "Reply URL". */
+export interface SSOConnectionResponse {
+  connection: SSOConnection | null
+  entity_id: string
+  acs_url: string
+}
+
+/** A claimed domain's lifecycle: inert (`pending`) until DNS-TXT verification
+ *  flips it to `verified`. Only a verified domain routes sign-in, and a verified
+ *  domain belongs to ≤1 org deployment-wide. */
+export type SSODomainStatus = 'pending' | 'verified'
+
+/** One claimed email domain, from GET/POST /api/sso/domains and the verify
+ *  endpoint. `txt_host`/`txt_value` are the exact DNS record to publish
+ *  (`<txt_host>  TXT  <txt_value>`) — public by design (it proves zone
+ *  control), so not a secret. `verified_at` rides along once stamped. */
+export interface SSODomain {
+  id: string
+  domain: string
+  txt_host: string
+  txt_value: string
+  status: SSODomainStatus
+  verified_at?: string
+}
+
 /** GET /api/team/members row. Backs Variant B's searchable multi-select.
  *  Local mode returns a single-entry array containing the synthetic
  *  LocalDefaultUserID; multi mode (post-SKY-251) returns the active

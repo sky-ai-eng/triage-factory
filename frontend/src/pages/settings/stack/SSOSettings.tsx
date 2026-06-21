@@ -1,0 +1,494 @@
+// SSOSettings — the per-org "Configure SSO" admin surface (TFAC-429), rendered
+// as the body of the "Single sign-on" section on the /org Settings tab. Multi-
+// mode only and admin-gated by its surface: the Settings tab only renders for
+// org admins, and OrgSettings gates this section on !isLocal (local mode is N=1
+// with no IdP, and every SSO endpoint 404s there). The backend additionally
+// 404s a non-admin, so this is never the trust boundary — just the UI.
+//
+// One screen, three parts, mirroring how an operator wires up Entra:
+//   1. SP details — the Entity ID + ACS URL (and, once connected, the Sign-on
+//      URL the My Apps tile points at) to paste into the IdP. Always shown:
+//      they're a pure function of the deployment URL, so the operator can set up
+//      the Entra side before registering here.
+//   2. Connection — paste the Entra App Federation Metadata URL to register
+//      (POST), then enable/disable (PATCH). GoTrue fetches the metadata
+//      server-side; TF stores only the org↔provider binding.
+//   3. Domains — claim an email domain (POST), publish the shown DNS-TXT record,
+//      Verify (POST {id}/verify) to flip Pending → Verified, or remove (DELETE).
+//      Only a verified domain routes sign-in. Gated on having a connection — the
+//      backend requires one before a domain can attach.
+//
+// Every endpoint resolves the org from the session's active org (no /api/orgs/
+// prefix), so the apiClient calls pass no `org` option.
+
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Check, Copy, Trash2 } from 'lucide-react'
+import * as Switch from '@radix-ui/react-switch'
+import { apiFetch, apiJSON, httpErrorMessage } from '../../../lib/apiClient'
+import { toast } from '../../../components/Toast/toastStore'
+import { glassInputClass } from '../primitives'
+import type { SSOConnectionResponse, SSODomain } from '../../../types'
+
+export default function SSOSettings() {
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [resp, setResp] = useState<SSOConnectionResponse | null>(null)
+  const [domains, setDomains] = useState<SSODomain[]>([])
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setLoadError(null)
+    try {
+      const conn = await apiJSON<SSOConnectionResponse>('/api/sso/connection')
+      // Domains attach to a connection, so skip the (always-empty) list fetch
+      // when none is registered yet.
+      const doms = conn.connection ? await apiJSON<SSODomain[]>('/api/sso/domains') : []
+      setResp(conn)
+      setDomains(doms)
+    } catch (e) {
+      setLoadError(httpErrorMessage(e, 'Could not load SSO settings.'))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  if (loading) {
+    return <p className="text-[13px] text-text-tertiary">Loading SSO settings…</p>
+  }
+  if (loadError || !resp) {
+    return (
+      <div className="text-[13px] text-text-secondary">
+        {loadError ?? 'Could not load SSO settings.'}{' '}
+        <button type="button" onClick={() => void load()} className="text-accent underline">
+          Retry
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-7">
+      <SPDetails resp={resp} />
+      <ConnectionBlock resp={resp} setResp={setResp} />
+      {resp.connection && <DomainsBlock domains={domains} setDomains={setDomains} />}
+    </div>
+  )
+}
+
+// ── Part 1: SP details to paste into the IdP ────────────────────────────────
+function SPDetails({ resp }: { resp: SSOConnectionResponse }) {
+  // The My Apps bookmark / Entra "Sign-on URL" is TF's SP-initiated start
+  // endpoint carrying the connection's provider_id — the same URL the
+  // identifier-first login path (TFAC-427) and the tile both target. Only
+  // buildable once a connection exists (it needs the provider_id). The
+  // provider_id-before-return_to order + %2F encoding mirror the backend's
+  // ssoStartURL so the displayed value matches what TF actually serves. The
+  // origin is taken from the backend-provided SP values (built from
+  // TF_PUBLIC_URL), not window.location, so it shares the exact public base the
+  // operator pastes for the Entity ID / ACS — even if the admin reached the UI
+  // via a different host.
+  const bookmarkURL = useMemo(() => {
+    if (!resp.connection) return ''
+    let origin: string
+    try {
+      origin = new URL(resp.entity_id).origin
+    } catch {
+      origin = window.location.origin
+    }
+    const q = new URLSearchParams()
+    q.set('provider_id', resp.connection.provider_id)
+    q.set('return_to', '/')
+    return `${origin}/api/auth/oauth/saml?${q.toString()}`
+  }, [resp.connection, resp.entity_id])
+
+  return (
+    <div className="space-y-3">
+      <BlockHeader
+        title="Service provider details"
+        hint="Paste these into your identity provider (e.g. Microsoft Entra) when you create the SAML enterprise app."
+      />
+      <CopyField label="Identifier (Entity ID)" value={resp.entity_id} />
+      <CopyField label="Reply URL (ACS)" value={resp.acs_url} />
+      {bookmarkURL && (
+        <CopyField
+          label="Sign-on URL"
+          value={bookmarkURL}
+          hint="In Entra, also set the Sign-on URL to this so the My Apps tile launches sign-in here (SP-initiated)."
+        />
+      )}
+    </div>
+  )
+}
+
+// ── Part 2: the IdP connection ──────────────────────────────────────────────
+function ConnectionBlock({
+  resp,
+  setResp,
+}: {
+  resp: SSOConnectionResponse
+  setResp: React.Dispatch<React.SetStateAction<SSOConnectionResponse | null>>
+}) {
+  const connection = resp.connection
+  const [metadataURL, setMetadataURL] = useState('')
+  const [connecting, setConnecting] = useState(false)
+  const [toggling, setToggling] = useState(false)
+
+  const connect = async () => {
+    const url = metadataURL.trim()
+    if (url === '' || connecting) return
+    setConnecting(true)
+    try {
+      const next = await apiJSON<SSOConnectionResponse>('/api/sso/connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ metadata_url: url }),
+      })
+      setResp(next)
+      setMetadataURL('')
+      toast.success('SSO connection registered')
+    } catch (e) {
+      // 409 "already registered", 503 "admin token not configured", and the
+      // https-only validation 400 all surface their server message verbatim.
+      toast.error(httpErrorMessage(e, 'Could not register the SSO connection.'))
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  const toggle = async (enabled: boolean) => {
+    if (toggling) return
+    setToggling(true)
+    try {
+      const next = await apiJSON<SSOConnectionResponse>('/api/sso/connection', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      })
+      setResp(next)
+      toast.success(enabled ? 'SSO enabled' : 'SSO disabled')
+    } catch (e) {
+      toast.error(httpErrorMessage(e, 'Could not update the SSO connection.'))
+    } finally {
+      setToggling(false)
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <BlockHeader
+        title="Identity provider connection"
+        hint={
+          connection
+            ? 'Your organization is connected. Disable to pause SSO sign-in without removing the connection.'
+            : 'Paste your Entra App Federation Metadata URL to register the connection.'
+        }
+      />
+
+      {connection ? (
+        <div className="flex items-center justify-between gap-4 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/40 px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-[13px] font-medium text-text-primary">
+              {connection.enabled ? 'Connected · enabled' : 'Connected · disabled'}
+            </p>
+            <p className="mt-0.5 truncate font-mono text-[11px] text-text-tertiary">
+              Provider {connection.provider_id}
+            </p>
+          </div>
+          <label className="flex shrink-0 cursor-pointer items-center gap-2 text-[12px] text-text-tertiary">
+            {connection.enabled ? 'Enabled' : 'Disabled'}
+            <Switch.Root
+              aria-label="Enable SSO"
+              checked={connection.enabled}
+              disabled={toggling}
+              onCheckedChange={(v) => void toggle(v)}
+              className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-accent data-[state=unchecked]:bg-black/10 disabled:opacity-50"
+            >
+              <Switch.Thumb className="block h-[14px] w-[14px] rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
+            </Switch.Root>
+          </label>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <input
+            type="url"
+            value={metadataURL}
+            aria-label="App Federation Metadata URL"
+            placeholder="https://login.microsoftonline.com/…/federationmetadata.xml"
+            onChange={(e) => setMetadataURL(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                void connect()
+              }
+            }}
+            className={`${glassInputClass} font-mono text-[12px]`}
+          />
+          <button
+            type="button"
+            onClick={() => void connect()}
+            disabled={metadataURL.trim() === '' || connecting}
+            className="shrink-0 rounded-full bg-accent px-5 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 disabled:opacity-40 disabled:shadow-none"
+          >
+            {connecting ? 'Connecting…' : 'Connect'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Part 3: domain claim + verification ─────────────────────────────────────
+function DomainsBlock({
+  domains,
+  setDomains,
+}: {
+  domains: SSODomain[]
+  setDomains: React.Dispatch<React.SetStateAction<SSODomain[]>>
+}) {
+  const [newDomain, setNewDomain] = useState('')
+  const [adding, setAdding] = useState(false)
+
+  const add = async () => {
+    const d = newDomain.trim()
+    if (d === '' || adding) return
+    setAdding(true)
+    try {
+      const created = await apiJSON<SSODomain>('/api/sso/domains', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: d }),
+      })
+      // POST is idempotent (a re-claim returns the existing row), so upsert by id
+      // rather than append — adding the same domain twice can't duplicate a row.
+      setDomains((ds) => [...ds.filter((x) => x.id !== created.id), created])
+      setNewDomain('')
+    } catch (e) {
+      // 400 "must be a bare domain like example.com" surfaces verbatim.
+      toast.error(httpErrorMessage(e, 'Could not add the domain.'))
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <BlockHeader
+        title="Verified domains"
+        hint="Claim each email domain your members sign in with, then prove control by publishing the DNS record shown. Only a verified domain routes sign-in to your organization."
+      />
+
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={newDomain}
+          aria-label="Domain to claim"
+          placeholder="example.com"
+          onChange={(e) => setNewDomain(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              void add()
+            }
+          }}
+          className={glassInputClass}
+        />
+        <button
+          type="button"
+          onClick={() => void add()}
+          disabled={newDomain.trim() === '' || adding}
+          className="shrink-0 rounded-full border border-accent/20 px-5 py-2.5 text-[13px] font-medium text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+        >
+          {adding ? 'Adding…' : 'Add domain'}
+        </button>
+      </div>
+
+      {domains.length > 0 && (
+        <ul className="space-y-2">
+          {domains.map((d) => (
+            <DomainRow key={d.id} domain={d} setDomains={setDomains} />
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function DomainRow({
+  domain,
+  setDomains,
+}: {
+  domain: SSODomain
+  setDomains: React.Dispatch<React.SetStateAction<SSODomain[]>>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const verified = domain.status === 'verified'
+
+  const verify = async () => {
+    if (busy) return
+    setBusy(true)
+    setMessage(null)
+    try {
+      const next = await apiJSON<SSODomain>(`/api/sso/domains/${domain.id}/verify`, {
+        method: 'POST',
+      })
+      setDomains((ds) => ds.map((x) => (x.id === next.id ? next : x)))
+      toast.success(`${next.domain} verified`)
+    } catch (e) {
+      // The two 409 states — "DNS record not found yet — propagation can take
+      // time, retry." and "this domain is already verified by another
+      // organization" — come back as friendly server messages. Surface them
+      // inline on the row (not a transient toast) so the operator can read the
+      // DNS record and the message side by side, then retry.
+      setMessage(httpErrorMessage(e, 'Could not verify the domain yet — try again shortly.'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async () => {
+    if (busy) return
+    if (
+      !window.confirm(
+        `Remove ${domain.domain}? Members on this domain will no longer be routed to SSO.`,
+      )
+    ) {
+      return
+    }
+    setBusy(true)
+    try {
+      await apiFetch(`/api/sso/domains/${domain.id}`, { method: 'DELETE' })
+      // On success the row unmounts, so don't clear `busy` afterwards.
+      setDomains((ds) => ds.filter((x) => x.id !== domain.id))
+      toast.success(`${domain.domain} removed`)
+    } catch (e) {
+      toast.error(httpErrorMessage(e, 'Could not remove the domain.'))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <li className="rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/40 px-4 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-[13px] font-medium text-text-primary">
+            {domain.domain}
+          </span>
+          <StatusBadge verified={verified} />
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {!verified && (
+            <button
+              type="button"
+              onClick={() => void verify()}
+              disabled={busy}
+              className="rounded-full border border-accent/20 px-3.5 py-1.5 text-[12px] font-medium text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+            >
+              {busy ? 'Verifying…' : 'Verify'}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void remove()}
+            disabled={busy}
+            aria-label={`Remove ${domain.domain}`}
+            className="inline-flex items-center rounded-full p-1.5 text-text-tertiary transition-colors hover:text-dismiss disabled:opacity-40"
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
+      </div>
+
+      {!verified && (
+        <div className="mt-3 space-y-2">
+          <p className="text-[11px] leading-relaxed text-text-tertiary">
+            Create this DNS record at your domain host, then click Verify:
+          </p>
+          <CopyField label="Host / name" value={domain.txt_host} />
+          <div className="flex items-center gap-2 text-[11px] text-text-tertiary">
+            <span className="font-medium uppercase tracking-wide">Type</span>
+            <span className="font-mono text-text-secondary">TXT</span>
+          </div>
+          <CopyField label="Value" value={domain.txt_value} />
+        </div>
+      )}
+
+      {message && (
+        <p role="status" className="mt-2 text-[12px] leading-relaxed text-text-secondary">
+          {message}
+        </p>
+      )}
+    </li>
+  )
+}
+
+// ── Shared leaf bits ────────────────────────────────────────────────────────
+
+function BlockHeader({ title, hint }: { title: string; hint: string }) {
+  return (
+    <div className="space-y-1">
+      <h3 className="text-[13px] font-medium text-text-primary">{title}</h3>
+      <p className="text-[12px] leading-relaxed text-text-tertiary">{hint}</p>
+    </div>
+  )
+}
+
+function StatusBadge({ verified }: { verified: boolean }) {
+  return verified ? (
+    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-claim/10 px-2 py-0.5 text-[11px] font-medium text-claim">
+      <Check size={11} aria-hidden /> Verified
+    </span>
+  ) : (
+    <span className="inline-flex shrink-0 items-center rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] font-medium text-text-tertiary">
+      Pending
+    </span>
+  )
+}
+
+// CopyField — a read-only value with a Copy button, matching the SP/callback
+// field pattern used across settings (AtlassianOAuthAppCard / GitHubAppImportForm).
+// The input carries an aria-label so the value is reachable by name; the button
+// labels itself "Copy {label}".
+function CopyField({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // Clipboard denied — the value is still selectable in the field.
+    }
+  }
+  return (
+    <div className="space-y-1.5">
+      <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+        {label}
+      </span>
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          readOnly
+          value={value}
+          aria-label={label}
+          onFocus={(e) => e.target.select()}
+          className={`${glassInputClass} font-mono text-[12px]`}
+        />
+        <button
+          type="button"
+          onClick={() => void copy()}
+          aria-label={`Copy ${label}`}
+          className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-border-glass)] px-3 py-2 text-[12px] font-medium text-text-secondary transition-colors hover:text-text-primary"
+        >
+          {copied ? <Check size={13} /> : <Copy size={13} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      {hint && <p className="text-[11px] leading-relaxed text-text-tertiary">{hint}</p>}
+    </div>
+  )
+}

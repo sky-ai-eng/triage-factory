@@ -51,6 +51,7 @@ import { connectAnthropic, CLAUDE_SOURCE_OPTIONS } from '../anthropicConnect'
 import { ClaudeProviderCards, AnthropicKeyField } from '../../setup/ClaudeStep'
 import { ChoiceCards } from '../../setup/parts'
 import GitHubAccessControl from './GitHubAccessControl'
+import SSOSettings from './SSOSettings'
 import SettingsSection from './SettingsSection'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
@@ -599,6 +600,17 @@ export default function OrgSettings({
       {!isLocal && (
         <SettingsSection title="Teams" summary="Add or review teams">
           <TeamManagementSection />
+        </SettingsSection>
+      )}
+
+      {/* Single sign-on (TFAC-429) — multi-mode only: SAML/SSO lives in the
+          GoTrue stack, so every /api/sso/* route 404s in local. An action
+          section (no Save footer) — SSOSettings owns its own register / enable /
+          domain-claim / verify controls. The surface is admin-gated (the /org
+          Settings tab only renders for org admins). */}
+      {!isLocal && (
+        <SettingsSection title="Single sign-on" summary="SAML via your identity provider">
+          <SSOSettings />
         </SettingsSection>
       )}
 
