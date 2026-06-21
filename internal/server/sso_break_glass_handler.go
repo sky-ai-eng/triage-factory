@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -57,20 +58,32 @@ func (h *ssoBreakGlassHandler) handleBreakGlassList(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
-	var principals []domain.SSOBreakGlassPrincipal
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		principals, e = tx.SSOBreakGlass.List(r.Context(), orgID)
-		return e
-	}); err != nil {
+	out, err := h.listViews(r.Context(), orgID, userID)
+	if err != nil {
 		internalError(w, "sso", err)
 		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// listViews returns the org's break-glass principals as wire views. Pulled out
+// so handleBreakGlassAdd can call it AFTER its write tx commits — List reads the
+// admin pool (a separate connection from the tx-bound app pool), so a List run
+// inside the add tx would not see the still-uncommitted Add.
+func (h *ssoBreakGlassHandler) listViews(ctx context.Context, orgID, userID string) ([]breakGlassView, error) {
+	var principals []domain.SSOBreakGlassPrincipal
+	if err := h.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var e error
+		principals, e = tx.SSOBreakGlass.List(ctx, orgID)
+		return e
+	}); err != nil {
+		return nil, err
 	}
 	out := make([]breakGlassView, 0, len(principals))
 	for _, p := range principals {
 		out = append(out, toBreakGlassView(p))
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out, nil
 }
 
 // handleBreakGlassAdd designates an org member (resolved by verified email) as a
@@ -97,10 +110,7 @@ func (h *ssoBreakGlassHandler) handleBreakGlassAdd(w http.ResponseWriter, r *htt
 		return
 	}
 
-	var (
-		resolved   string
-		principals []domain.SSOBreakGlassPrincipal
-	)
+	var resolved string
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		uid, e := tx.SSOBreakGlass.ResolveVerifiedEmailMember(r.Context(), orgID, email)
 		if e != nil {
@@ -112,11 +122,7 @@ func (h *ssoBreakGlassHandler) handleBreakGlassAdd(w http.ResponseWriter, r *htt
 			// 404 below; return early so we don't write a row.
 			return nil
 		}
-		if e := tx.SSOBreakGlass.Add(r.Context(), orgID, uid); e != nil {
-			return e
-		}
-		principals, e = tx.SSOBreakGlass.List(r.Context(), orgID)
-		return e
+		return tx.SSOBreakGlass.Add(r.Context(), orgID, uid)
 	}); err != nil {
 		internalError(w, "sso", err)
 		return
@@ -130,9 +136,12 @@ func (h *ssoBreakGlassHandler) handleBreakGlassAdd(w http.ResponseWriter, r *htt
 		})
 		return
 	}
-	out := make([]breakGlassView, 0, len(principals))
-	for _, p := range principals {
-		out = append(out, toBreakGlassView(p))
+	// List AFTER the add tx commits — List reads the admin pool, which wouldn't
+	// see the still-uncommitted insert from inside the closure above.
+	out, err := h.listViews(r.Context(), orgID, userID)
+	if err != nil {
+		internalError(w, "sso", err)
+		return
 	}
 	writeJSON(w, http.StatusOK, out)
 }

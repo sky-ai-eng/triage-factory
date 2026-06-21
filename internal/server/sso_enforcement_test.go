@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -46,15 +47,25 @@ func (r *authRig) seedVerifiedDomain(orgID uuid.UUID, providerID, dom string) {
 	}
 }
 
-// setConnectionEnforced flips enforced (and stamps last_tested_at so the row
-// looks like a real proven-working connection) on the provider's connection.
+// setConnectionEnforced flips the enforced flag on the provider's connection
+// (only that flag — see markConnectionTested for the tested signal).
 func (r *authRig) setConnectionEnforced(providerID string, enforced bool) {
 	r.t.Helper()
 	if _, err := r.h.AdminDB.Exec(`
-		UPDATE sso_connections SET enforced = $1, last_tested_at = now()
-		WHERE provider_id = $2
+		UPDATE sso_connections SET enforced = $1 WHERE provider_id = $2
 	`, enforced, providerID); err != nil {
 		r.t.Fatalf("set connection enforced=%v: %v", enforced, err)
+	}
+}
+
+// markConnectionTested stamps last_tested_at so the connection looks like one
+// that has passed a verify-before-enforce Test — the enforce toggle gates on it.
+func (r *authRig) markConnectionTested(providerID string) {
+	r.t.Helper()
+	if _, err := r.h.AdminDB.Exec(`
+		UPDATE sso_connections SET last_tested_at = now() WHERE provider_id = $1
+	`, providerID); err != nil {
+		r.t.Fatalf("mark connection tested: %v", err)
 	}
 }
 
@@ -310,7 +321,7 @@ func TestSSOEnforcement_ToggleGating(t *testing.T) {
 	}
 
 	// Tested but still no verified domain → 409.
-	r.setConnectionEnforced(providerID, false) // setConnectionEnforced stamps last_tested_at
+	r.markConnectionTested(providerID)
 	if resp := enforce(true); resp.StatusCode != http.StatusConflict {
 		t.Fatalf("no-domain enforce status=%d, want 409 (body=%s)", resp.StatusCode, readBody(resp))
 	}
@@ -338,7 +349,7 @@ func TestSSOEnforcement_ToggleRequiresEnabled(t *testing.T) {
 	providerID := uuid.NewString()
 	r.seedSSOConnection(orgA, providerID, "member", false) // disabled
 	r.seedVerifiedDomain(orgA, providerID, "corp.example")
-	r.setConnectionEnforced(providerID, false) // stamp tested
+	r.markConnectionTested(providerID)
 	sid := r.signInAs(owner)
 
 	resp := doInviteReq(r, http.MethodPatch, "/api/sso/connection/enforcement", sid,
@@ -409,6 +420,23 @@ func TestBreakGlass_AddByEmailAndRemove(t *testing.T) {
 		map[string]string{"email": member.String() + "@test"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("add status=%d, want 200 (body=%s)", resp.StatusCode, readBody(resp))
+	}
+	// The response body must reflect the just-added principal (it's read after the
+	// add commits, not from the still-uncommitted tx) — guards the stale-list bug.
+	var added []struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&added); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	foundInBody := false
+	for _, p := range added {
+		if p.UserID == member.String() {
+			foundInBody = true
+		}
+	}
+	if !foundInBody {
+		t.Errorf("add response body %+v omits the just-added member %s", added, member)
 	}
 	if n := breakGlassCount(t, r, orgA); n != 2 {
 		t.Fatalf("break-glass count=%d after add, want 2", n)

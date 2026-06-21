@@ -409,6 +409,12 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// ENABLED — a disabled connection means SSO isn't actually available, so
 	// blocking GitHub too would lock the domain out (the toggle's gating keeps an
 	// org from arming this against a broken connection in the first place).
+	//
+	// Note: this runs AFTER resolveOrCreatePrincipal, so a rejected first-time
+	// user still gets a principal + identity row — enforcement blocks SESSION
+	// creation, not principal creation. That's intentional and harmless: the row
+	// is the durable identity a later real SSO login links to by verified email;
+	// no session, membership, or JIT grant is written on the rejected path.
 	if !isSSO && claims.EmailVerified {
 		if dom, okDom := emailDomain(claims.Email); okDom {
 			route, rerr := s.allStores.SSODomains.GetVerifiedByDomain(r.Context(), dom)
