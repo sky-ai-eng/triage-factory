@@ -296,9 +296,10 @@ type Stores struct {
 	SSODomains SSODomainStore
 
 	// SSOBreakGlass owns the sso_break_glass table — the principals exempt from
-	// SSO enforcement on their non-SSO identity. App pool for the
-	// admin-facing list/add/remove; admin pool for the login-time IsBreakGlass
-	// bypass check. Multi-mode only; the SQLite impl is a stub.
+	// SSO enforcement on their non-SSO identity. App pool for the org-admin
+	// mutations (add/remove/seed); admin pool for the reads that join
+	// cross-principal identity data (list, login-time IsBreakGlass, email
+	// resolution). Multi-mode only; the SQLite impl is a stub.
 	SSOBreakGlass SSOBreakGlassStore
 
 	// Tx is the transaction runner — handlers that need atomic

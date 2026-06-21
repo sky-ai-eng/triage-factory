@@ -106,12 +106,8 @@ func (s *ssoBreakGlassStore) Add(context.Context, string, string) error {
 	return db.ErrNotApplicableInLocal
 }
 
-func (s *ssoBreakGlassStore) Remove(context.Context, string, string) error {
-	return db.ErrNotApplicableInLocal
-}
-
-func (s *ssoBreakGlassStore) Count(context.Context, string) (int, error) {
-	return 0, db.ErrNotApplicableInLocal
+func (s *ssoBreakGlassStore) RemoveGuarded(context.Context, string, string) (bool, error) {
+	return false, db.ErrNotApplicableInLocal
 }
 
 func (s *ssoBreakGlassStore) SeedOwnerIfEmpty(context.Context, string) error {

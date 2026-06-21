@@ -425,10 +425,17 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 				if !isBG {
 					// Reject before minting a session. The identifier-first login page
 					// routes the same email to SSO, so bounce there with a marker it
-					// renders as "your organization requires SSO."
+					// renders as "your organization requires SSO." Carry the original
+					// return_to through so the subsequent SSO login lands the user at the
+					// deep link they were headed to (it was normalized at start, so it's
+					// already open-redirect-safe).
 					authLog.Info("sso enforcement: rejected non-sso login on enforced domain",
 						"user", userUUID, "org", route.OrgID, "domain", dom)
-					http.Redirect(w, r, "/login?error=sso_required", http.StatusFound)
+					q := url.Values{"error": {"sso_required"}}
+					if state.ReturnTo != "" && state.ReturnTo != "/" {
+						q.Set("return_to", state.ReturnTo)
+					}
+					http.Redirect(w, r, "/login?"+q.Encode(), http.StatusFound)
 					return
 				}
 			}

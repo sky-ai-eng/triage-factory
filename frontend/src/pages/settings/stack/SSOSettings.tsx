@@ -587,6 +587,9 @@ function BreakGlassManager({ enforced }: { enforced: boolean }) {
   const [email, setEmail] = useState('')
   const [adding, setAdding] = useState(false)
 
+  // Refetch when `enforced` flips: enabling enforcement seeds the owner as the
+  // default break-glass principal server-side, so the list must reload to show
+  // it (otherwise it would misleadingly read empty right after enabling).
   useEffect(() => {
     let cancelled = false
     void (async () => {
@@ -602,7 +605,7 @@ function BreakGlassManager({ enforced }: { enforced: boolean }) {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [enforced])
 
   const add = async () => {
     const e = email.trim()

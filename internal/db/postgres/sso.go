@@ -305,10 +305,12 @@ func (s *ssoDomainStore) GetVerifiedByDomain(ctx context.Context, domainName str
 // ssoBreakGlassStore is the Postgres impl of db.SSOBreakGlassStore. Holds both
 // pools — see the SSOBreakGlassStore interface comment for the rationale.
 //
-//   - app: List, Add, Remove, Count, SeedOwnerIfEmpty. Request-handler
-//     reads/writes gated by the sso_break_glass_* RLS policies (org-admin).
-//   - admin: IsBreakGlass. The login-time enforcement bypass check resolves a
-//     principal mid-login with no membership claims for the target org.
+//   - app: Add, RemoveGuarded, SeedOwnerIfEmpty. Request-handler reads/writes
+//     gated by the sso_break_glass_* RLS policies (org-admin).
+//   - admin: List, IsBreakGlass, ResolveVerifiedEmailMember. List joins
+//     user_identities (admin-pool-only); IsBreakGlass is the login-time bypass
+//     check; ResolveVerifiedEmailMember reads cross-principal identities. All
+//     three are org-scoped in SQL behind an admin-gated/login-time caller.
 type ssoBreakGlassStore struct {
 	app   queryer
 	admin queryer
@@ -368,23 +370,33 @@ func (s *ssoBreakGlassStore) Add(ctx context.Context, orgID, userID string) erro
 	return nil
 }
 
-func (s *ssoBreakGlassStore) Remove(ctx context.Context, orgID, userID string) error {
-	if _, err := s.app.ExecContext(ctx, `
-		DELETE FROM sso_break_glass WHERE org_id = $1 AND user_id = $2
-	`, orgID, userID); err != nil {
-		return fmt.Errorf("remove sso_break_glass: %w", err)
-	}
-	return nil
-}
-
-func (s *ssoBreakGlassStore) Count(ctx context.Context, orgID string) (int, error) {
-	var n int
+func (s *ssoBreakGlassStore) RemoveGuarded(ctx context.Context, orgID, userID string) (blockedLast bool, err error) {
+	// One statement so the enforced-check, count, presence, and delete all read a
+	// SINGLE snapshot — the lockout-safety invariant ("never enforced with zero
+	// break-glass") can't be raced by a concurrent enforce-toggle or a sibling
+	// remove. The DELETE fires UNLESS the org has an enforced connection AND this
+	// would drop the last principal. A data-modifying CTE's changes aren't visible
+	// to the rest of the query, so the trailing EXISTS still sees the row's
+	// pre-delete state: blocked_last is true exactly when the row was present but
+	// the guard prevented its removal (present, enforced, last). A no-op remove of
+	// a non-member is blocked_last=false (idempotent), as is a delete that went
+	// through. App pool — every table here is RLS-gated to the org-admin caller.
 	if err := s.app.QueryRowContext(ctx, `
-		SELECT count(*) FROM sso_break_glass WHERE org_id = $1
-	`, orgID).Scan(&n); err != nil {
-		return 0, fmt.Errorf("count sso_break_glass: %w", err)
+		WITH del AS (
+			DELETE FROM sso_break_glass
+			WHERE org_id = $1 AND user_id = $2
+			  AND NOT (
+			      EXISTS (SELECT 1 FROM sso_connections WHERE org_id = $1 AND enforced)
+			      AND (SELECT count(*) FROM sso_break_glass WHERE org_id = $1) <= 1
+			  )
+			RETURNING 1
+		)
+		SELECT NOT EXISTS (SELECT 1 FROM del)
+		   AND EXISTS (SELECT 1 FROM sso_break_glass WHERE org_id = $1 AND user_id = $2)
+	`, orgID, userID).Scan(&blockedLast); err != nil {
+		return false, fmt.Errorf("remove sso_break_glass (guarded): %w", err)
 	}
-	return n, nil
+	return blockedLast, nil
 }
 
 func (s *ssoBreakGlassStore) SeedOwnerIfEmpty(ctx context.Context, orgID string) error {

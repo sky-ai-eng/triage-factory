@@ -72,7 +72,7 @@ type SSOConnectionStore interface {
 //
 // # Pool split (Postgres)
 //
-//   - Add, Remove, Count, SeedOwnerIfEmpty run on the app pool, gated by the
+//   - Add, RemoveGuarded, SeedOwnerIfEmpty run on the app pool, gated by the
 //     sso_break_glass_* RLS policies (org-admin in the current org).
 //   - List, IsBreakGlass, ResolveVerifiedEmailMember run on the admin pool
 //     (BYPASSRLS). List joins user_identities (admin-pool-only by the
@@ -91,14 +91,15 @@ type SSOBreakGlassStore interface {
 	// DO NOTHING). The caller validates org membership first. App pool.
 	Add(ctx context.Context, orgID, userID string) error
 
-	// Remove revokes userID's break-glass designation. A no-op (no error) when
-	// no row matches. The handler enforces the "can't remove the last while
-	// enforced" guard before calling this. App pool.
-	Remove(ctx context.Context, orgID, userID string) error
-
-	// Count returns how many break-glass principals the org has — for the
-	// last-break-glass guard. App pool.
-	Count(ctx context.Context, orgID string) (int, error)
+	// RemoveGuarded revokes userID's break-glass designation unless that would
+	// drop the LAST principal while the org has an enforced connection — the
+	// no-recovery guard. It folds the enforced-check, the count, the presence
+	// check, and the delete into one statement so the invariant holds against a
+	// concurrent enforce-toggle or sibling remove (single snapshot). Returns
+	// blockedLast=true (and deletes nothing) only when the row was present but the
+	// guard refused it; a removed row or a no-op (non-member) returns false. App
+	// pool.
+	RemoveGuarded(ctx context.Context, orgID, userID string) (blockedLast bool, err error)
 
 	// SeedOwnerIfEmpty inserts the org owner as break-glass IFF the org has no
 	// break-glass rows yet — the "default: the owner" behavior, run in the same

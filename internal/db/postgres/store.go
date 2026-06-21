@@ -301,9 +301,11 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// Same pool-split pattern as Invites.
 		SSOConnections: newSSOConnectionStore(app, admin),
 		SSODomains:     newSSODomainStore(app, admin),
-		// SSOBreakGlass needs both pools: app for the admin-facing list/add/
-		// remove (sso_break_glass_* RLS gates on org-admin), admin for the
-		// login-time IsBreakGlass bypass check, whose actor is mid-login.
+		// SSOBreakGlass needs both pools: app for the org-admin mutations
+		// (Add/RemoveGuarded/SeedOwnerIfEmpty, sso_break_glass_* RLS), admin for
+		// the reads that touch cross-principal data — List/ResolveVerifiedEmail
+		// join user_identities (admin-pool-only), and IsBreakGlass is the
+		// login-time bypass check whose actor is mid-login.
 		SSOBreakGlass: newSSOBreakGlassStore(app, admin),
 		Tx:            s,
 	}

@@ -154,34 +154,14 @@ func (h *ssoBreakGlassHandler) handleBreakGlassRemove(w http.ResponseWriter, r *
 		return
 	}
 
-	// Read the connection's enforced state on the admin gate's app pool so the
-	// guard below sees the same RLS-scoped view the rest of the surface does.
-	conn, err := h.conn.currentConnection(r.Context(), orgID, userID)
-	if err != nil {
-		internalError(w, "sso", err)
-		return
-	}
-
+	// RemoveGuarded folds the enforced-check, count, presence, and delete into one
+	// statement (one snapshot), so the "never enforced with zero break-glass"
+	// invariant can't be raced by a concurrent enforce-toggle or sibling remove.
 	var lastWhileEnforced bool
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		// The guard: while enforced, the set must never reach zero. Count inside
-		// the tx so a concurrent remove can't slip past the check. Only block when
-		// the target is actually present (count includes it) and it's the last one.
-		if conn != nil && conn.Enforced {
-			n, e := tx.SSOBreakGlass.Count(r.Context(), orgID)
-			if e != nil {
-				return e
-			}
-			present, e := tx.SSOBreakGlass.IsBreakGlass(r.Context(), orgID, target)
-			if e != nil {
-				return e
-			}
-			if present && n <= 1 {
-				lastWhileEnforced = true
-				return nil
-			}
-		}
-		return tx.SSOBreakGlass.Remove(r.Context(), orgID, target)
+		var e error
+		lastWhileEnforced, e = tx.SSOBreakGlass.RemoveGuarded(r.Context(), orgID, target)
+		return e
 	}); err != nil {
 		internalError(w, "sso", err)
 		return
