@@ -883,6 +883,118 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// handleMeIdentities returns the login identities linked to the signed-in
+// PRINCIPAL — one row per GoTrue login (a GitHub login + N SSO providers), all
+// resolving to the same public.users row via verified-email linking at login.
+// This is the first shared (non-system) read of public.user_identities, the
+// "Login methods" view on the account surface.
+//
+// Personal-identity read (axis (iii) of the multi-mode read-scoping rule in
+// CLAUDE.md): scoped on tf.current_user_id() through the session, never org-
+// scoped. The opaque bridge columns — auth_user_id and provider_subject — are
+// deliberately NOT exposed: they carry no user value and auth_user_id is an
+// internal GoTrue key. The identity backing the active session is flagged
+// `current` so the UI can mark "this is the login you're signed in with."
+//
+// Runs on s.db, the admin (BYPASSRLS) pool — same posture as handleMe.
+// user_identities is deny-by-default for tf_app (REVOKEd, no app-role policy:
+// resolution + linking only ever ran on the admin pool at login), so the
+// superuser pool does the read while `WHERE user_id = tf.current_user_id()`
+// does the principal scoping. tfdb.WithTx seeds request.jwt.claims so that
+// helper resolves to the principal even though RLS isn't enforcing here.
+//
+// Local mode has no GoTrue and no user_identities table, so it returns a single
+// synthetic row — keeping the wire contract uniform across modes (the component
+// needs no mode branch). It's a degenerate view: local mode is N=1 with no
+// login/link/verification concept.
+func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
+	claims := ClaimsFrom(r.Context())
+	if claims == nil {
+		writeUnauth(w)
+		return
+	}
+
+	// loginMethod is one linked identity. Wire shape mirrored in the frontend
+	// as LoginMethod (types.ts). No auth_user_id / provider_subject — see the
+	// handler doc.
+	type loginMethod struct {
+		Provider      string `json:"provider"`
+		Email         string `json:"email,omitempty"`
+		EmailVerified bool   `json:"email_verified"`
+		LinkedAt      string `json:"linked_at,omitempty"`
+		Current       bool   `json:"current"`
+	}
+	type response struct {
+		Methods []loginMethod `json:"methods"`
+	}
+
+	// Local-mode shim: one synthetic "local" row. Gated on authDeps==nil (not
+	// just the sentinel Subject) so a multi-mode caller whose principal UUID
+	// collides with the sentinel still falls through to the DB path — same
+	// rationale as handleMe.
+	if s.authDeps == nil && claims.Subject == runmode.LocalDefaultUserID {
+		writeJSON(w, http.StatusOK, response{Methods: []loginMethod{{
+			Provider: "local",
+			Current:  true,
+		}}})
+		return
+	}
+
+	// The login identity backing THIS session (JWT sub == auth_user_id),
+	// preserved by withSession before it remapped Subject to the principal.
+	// Empty would simply mark no row current; in multi mode it's always set.
+	currentIdentity := authIdentityIDFrom(r.Context())
+
+	var activeOrg string
+	if sess := SessionFrom(r.Context()); sess != nil && sess.ActiveOrgID.Valid {
+		activeOrg = sess.ActiveOrgID.UUID.String()
+	}
+
+	resp := response{Methods: []loginMethod{}}
+	err := tfdb.WithTx(r.Context(), s.db,
+		tfdb.Claims{Sub: claims.Subject, OrgID: activeOrg},
+		func(tx *sql.Tx) error {
+			// Oldest-first: the bootstrap GitHub (break-glass) identity leads,
+			// then SSO additions — the order that tells the linking story. The
+			// provider tiebreak keeps same-instant rows deterministic.
+			rows, err := tx.QueryContext(r.Context(), `
+				SELECT auth_user_id::text, provider, COALESCE(email, ''),
+				       email_verified, created_at
+				  FROM public.user_identities
+				 WHERE user_id = tf.current_user_id()
+				 ORDER BY created_at ASC, provider ASC
+			`)
+			if err != nil {
+				return fmt.Errorf("identities query: %w", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var authUserID, provider, email string
+				var verified bool
+				var createdAt time.Time
+				if err := rows.Scan(&authUserID, &provider, &email, &verified, &createdAt); err != nil {
+					return fmt.Errorf("identity scan: %w", err)
+				}
+				resp.Methods = append(resp.Methods, loginMethod{
+					Provider:      provider,
+					Email:         email,
+					EmailVerified: verified,
+					LinkedAt:      createdAt.UTC().Format(time.RFC3339),
+					Current:       authUserID == currentIdentity,
+				})
+			}
+			return rows.Err()
+		},
+	)
+	if err != nil {
+		authLog.Error("/api/me/identities failed", "user", claims.Subject, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // resolveOrCreatePrincipal maps a GoTrue login identity (authUserID = the JWT
 // sub) to its TF principal — the public.users row that memberships, ownership,
 // and the session all key on — and returns the principal id.

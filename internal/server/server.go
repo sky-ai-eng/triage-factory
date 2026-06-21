@@ -670,6 +670,10 @@ func (s *Server) routes() {
 	// sees a non-nil claims value; in multi mode the handler 401s when
 	// no claims are seeded.
 	s.api("GET /api/me", s.handleMe)
+	// Linked login identities for the signed-in principal — the read-only
+	// "Login methods" view. Personal read keyed on the session principal, no
+	// org scoping. Both modes (local returns a single synthetic row).
+	s.api("GET /api/me/identities", s.handleMeIdentities)
 	// Switch the session's active org.
 	s.apiMutating("POST /api/me/active-org", s.handleActiveOrgUpdate)
 	// Create a net-new org with default settings — the multi-mode

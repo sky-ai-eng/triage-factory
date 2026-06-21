@@ -161,6 +161,7 @@ type ctxKey int
 const (
 	ctxKeyClaims ctxKey = iota
 	ctxKeyOrgID
+	ctxKeyAuthIdentityID
 )
 
 // WithClaims returns ctx carrying the verified JWT claims. The session
@@ -190,6 +191,26 @@ func WithOrgID(ctx context.Context, orgID string) context.Context {
 // gate via RequireOrg so the SPA can prompt the user to pick/join one.
 func OrgIDFrom(ctx context.Context) string {
 	v, _ := ctx.Value(ctxKeyOrgID).(string)
+	return v
+}
+
+// WithAuthIdentityID returns ctx carrying the GoTrue login-identity id for the
+// request — the verified JWT sub, which equals public.user_identities.auth_user_id.
+// The session middleware sets this just before it remaps the claims Subject to
+// the PRINCIPAL, capturing which specific login the caller signed in with.
+func WithAuthIdentityID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, ctxKeyAuthIdentityID, id)
+}
+
+// AuthIdentityIDFrom returns the login-identity id backing this request, or ""
+// when absent (local mode has no GoTrue, and any path that didn't go through
+// the session middleware carries nothing). Distinct from ClaimsFrom().Subject,
+// which the middleware remaps to the principal: one principal holds N login
+// identities, so this is the only signal for "which identity is in use" — e.g.
+// to mark the current login in GET /api/me/identities, where two linked
+// identities commonly share an email and so can't be told apart by email alone.
+func AuthIdentityIDFrom(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeyAuthIdentityID).(string)
 	return v
 }
 

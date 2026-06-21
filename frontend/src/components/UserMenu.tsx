@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { LogOut, User as UserIcon } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import LoginMethods from './LoginMethods'
 
 /**
  * Avatar + popover in the topbar. Multi-mode only. Provides the
@@ -69,6 +70,9 @@ export default function UserMenu() {
               <div className="text-[11px] text-text-tertiary truncate">{auth.me.email}</div>
             )}
           </div>
+          {/* Linked login identities (the principal's GitHub + N SSO logins).
+              Fetches lazily — only mounts while the menu is open. */}
+          <LoginMethods />
           <button
             type="button"
             role="menuitem"

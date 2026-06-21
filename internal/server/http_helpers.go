@@ -50,3 +50,5 @@ func (s *Server) requireOrg(w http.ResponseWriter, r *http.Request) (string, boo
 func ClaimsFrom(ctx context.Context) *verify.Claims { return httpx.ClaimsFrom(ctx) }
 
 func OrgIDFrom(ctx context.Context) string { return httpx.OrgIDFrom(ctx) }
+
+func authIdentityIDFrom(ctx context.Context) string { return httpx.AuthIdentityIDFrom(ctx) }

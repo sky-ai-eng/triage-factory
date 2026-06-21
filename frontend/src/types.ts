@@ -382,6 +382,32 @@ export interface MeResponse {
   org_creation_enabled: boolean
 }
 
+/** One linked login identity for the signed-in principal, from
+ *  GET /api/me/identities. A principal holds N identities — a GitHub login
+ *  plus N SSO providers — that resolve to one account via verified-email
+ *  linking at login. The opaque GoTrue bridge ids (auth_user_id,
+ *  provider_subject) are never sent: no user value, internal keys. */
+export interface LoginMethod {
+  /** 'github' | 'saml' in multi mode; 'local' for the N=1 local stub. */
+  provider: string
+  /** The identity's email. Absent for the local stub (no email concept). */
+  email?: string
+  email_verified: boolean
+  /** RFC3339 timestamp the identity was first linked (its created_at).
+   *  Absent for the local stub. */
+  linked_at?: string
+  /** True for the identity backing the current browser session — the login
+   *  method you're signed in with right now. */
+  current: boolean
+}
+
+/** GET /api/me/identities — the "Login methods" view. Personal read scoped to
+ *  the session principal; works in both modes (local returns one synthetic
+ *  row). */
+export interface IdentitiesResponse {
+  methods: LoginMethod[]
+}
+
 /** GET /api/orgs/{org}/identity/github — the onboarding gate's status read.
  *  `connected` is the single bit the gate blocks on (a host-verified GitHub
  *  identity exists for the active org's host). An absent binding is

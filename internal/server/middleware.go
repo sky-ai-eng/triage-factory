@@ -170,9 +170,17 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 		// the PRINCIPAL. The session carries the principal (resolved at the OAuth
 		// callback), so key RLS + every handler on it. claims.Email stays the
 		// identity's email, for display.
+		//
+		// Stash the login-identity id (the JWT sub == user_identities.auth_user_id)
+		// before the remap, so a personal read like GET /api/me/identities can mark
+		// which of the principal's N linked identities backs THIS session — the
+		// remapped principal can't say which, and linked identities often share an
+		// email, so email is not a reliable discriminator.
+		authIdentityID := claims.Subject
 		claims.Subject = sess.UserID.String()
 
 		ctx := httpx.WithClaims(r.Context(), claims)
+		ctx = httpx.WithAuthIdentityID(ctx, authIdentityID)
 		ctx = context.WithValue(ctx, ctxKeySession, sess)
 		// SKY-313: surface the session's active org so OrgIDFrom() works
 		// uniformly in multi mode without per-handler plumbing. Sessions
