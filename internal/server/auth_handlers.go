@@ -1006,9 +1006,18 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 	`, principalID, displayName, avatarURL); err != nil {
 		return uuid.Nil, fmt.Errorf("refresh principal: %w", err)
 	}
+	// Refresh email + its verification from the claim, but only when the claim
+	// actually carries an email: a later login that omits it must NOT NULL out a
+	// known email or downgrade its verified flag (that would silently disable
+	// future linking). When an email IS present we take the provider's current
+	// truth for it — including a genuine un-verify — rather than forcing
+	// monotonicity, since a stale verified=true on a changed/unverified email
+	// would be the unsafe direction (it could let a later identity wrongly link).
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE public.user_identities
-		   SET email = NULLIF($2, ''), email_verified = $3, updated_at = now()
+		   SET email          = COALESCE(NULLIF($2, ''), email),
+		       email_verified = CASE WHEN NULLIF($2, '') IS NOT NULL THEN $3 ELSE email_verified END,
+		       updated_at     = now()
 		 WHERE auth_user_id = $1
 	`, authUserID, email, claims.EmailVerified); err != nil {
 		return uuid.Nil, fmt.Errorf("refresh identity: %w", err)

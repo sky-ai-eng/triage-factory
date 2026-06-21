@@ -274,7 +274,15 @@ func (r *authRig) signStateCookie(returnTo, csrf, codeVerifier string) string {
 // for assertion in logout tests.
 func (r *authRig) driveCallback(userID uuid.UUID) (resp *http.Response, accessToken string) {
 	r.t.Helper()
-	token := r.signKey.mintJWT(r.t, validClaimsFor(userID))
+	return r.driveCallbackClaims(validClaimsFor(userID))
+}
+
+// driveCallbackClaims drives the OAuth callback with arbitrary JWT claims, so a
+// test can vary email / email_verified and exercise principal resolution +
+// verified-email linking through the full verifier path.
+func (r *authRig) driveCallbackClaims(claims jwt.MapClaims) (resp *http.Response, accessToken string) {
+	r.t.Helper()
+	token := r.signKey.mintJWT(r.t, claims)
 	refresh := "refresh-" + uuid.NewString()
 
 	// Stub the exchange closure to return our minted tokens regardless

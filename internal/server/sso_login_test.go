@@ -582,3 +582,48 @@ func TestGoTrueSSO_Non303_Errors(t *testing.T) {
 		t.Fatal("expected an error for a non-303 /sso response, got nil")
 	}
 }
+
+// Verified-email linking: two DISTINCT GoTrue login identities carrying the same
+// verified email must resolve to ONE principal — what makes a GitHub-then-Entra
+// (same corp email) human a single account, not a duplicate. Drives the full
+// callback, so it also guards the verifier's email_verified extraction: if that
+// regressed to always-false, no link would happen and the identities would fork
+// into separate principals, failing here.
+func TestSSOLogin_VerifiedEmailLinksToOnePrincipal(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	const email = "shared@corp.example"
+	authA := r.seedAuthOnlyUser()
+	authB := r.seedAuthOnlyUser()
+
+	withVerifiedEmail := func(id uuid.UUID) jwt.MapClaims {
+		c := validClaimsFor(id)
+		c["email"] = email
+		c["email_verified"] = true
+		return c
+	}
+
+	if resp, _ := r.driveCallbackClaims(withVerifiedEmail(authA)); resp.StatusCode != http.StatusFound {
+		t.Fatalf("login A status=%d, want 302", resp.StatusCode)
+	}
+	if resp, _ := r.driveCallbackClaims(withVerifiedEmail(authB)); resp.StatusCode != http.StatusFound {
+		t.Fatalf("login B status=%d, want 302", resp.StatusCode)
+	}
+	if pA, pB := r.principalOf(authA), r.principalOf(authB); pA != pB {
+		t.Fatalf("identities with the same verified email resolved to principals %s and %s — want one", pA, pB)
+	}
+
+	// An UNVERIFIED matching email must NOT link — a separate principal (the safe
+	// default; we never merge a human on an unverified claim).
+	authC := r.seedAuthOnlyUser()
+	cC := validClaimsFor(authC)
+	cC["email"] = email
+	cC["email_verified"] = false
+	if resp, _ := r.driveCallbackClaims(cC); resp.StatusCode != http.StatusFound {
+		t.Fatalf("login C status=%d, want 302", resp.StatusCode)
+	}
+	if r.principalOf(authC) == r.principalOf(authA) {
+		t.Fatal("unverified matching email linked to the verified principal — must stay separate")
+	}
+}

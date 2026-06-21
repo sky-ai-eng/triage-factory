@@ -112,6 +112,15 @@ func extractClaims(mc jwt.MapClaims) (*Claims, error) {
 		out.UserMetadata = userMeta
 	}
 
+	// email_verified gates verified-email account linking. GoTrue emits it
+	// top-level for a confirmed email and mirrors it into user_metadata for the
+	// social/SAML providers; read either, defaulting to false (no link).
+	if ev, ok := mc["email_verified"].(bool); ok {
+		out.EmailVerified = ev
+	} else if out.UserMetadata != nil {
+		out.EmailVerified, _ = out.UserMetadata["email_verified"].(bool)
+	}
+
 	expAt, err := mc.GetExpirationTime()
 	if err != nil || expAt == nil {
 		return nil, fmt.Errorf("jwt missing valid exp: %w", err)
