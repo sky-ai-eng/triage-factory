@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -93,6 +94,13 @@ func (r *authRig) gotSidCookie(resp *http.Response) bool {
 	return false
 }
 
+// rejectedForSSO reports whether the callback bounced to the SSO-required login
+// page. Matched by prefix because the redirect also carries the original
+// return_to (e.g. /login?error=sso_required&return_to=%2Fdashboard).
+func rejectedForSSO(resp *http.Response) bool {
+	return strings.HasPrefix(resp.Header.Get("Location"), "/login?error=sso_required")
+}
+
 // ---------- login-path enforcement tests ----------
 
 // An enforced verified domain rejects a GitHub login whose verified email is on
@@ -114,8 +122,8 @@ func TestSSOEnforcement_RejectsGitHubOnEnforcedDomain(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status=%d, want 302 (reject → login)", resp.StatusCode)
 	}
-	if loc := resp.Header.Get("Location"); loc != "/login?error=sso_required" {
-		t.Errorf("Location=%q, want /login?error=sso_required", loc)
+	if !rejectedForSSO(resp) {
+		t.Errorf("Location=%q, want an /login?error=sso_required bounce", resp.Header.Get("Location"))
 	}
 	if r.gotSidCookie(resp) {
 		t.Error("a session was minted for an enforced non-SSO login — must be rejected")
@@ -141,7 +149,7 @@ func TestSSOEnforcement_BreakGlassGitHubAllowed(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status=%d, want 302", resp.StatusCode)
 	}
-	if loc := resp.Header.Get("Location"); loc == "/login?error=sso_required" {
+	if rejectedForSSO(resp) {
 		t.Error("break-glass principal was rejected — must retain GitHub access under enforcement")
 	}
 	if !r.gotSidCookie(resp) {
@@ -168,7 +176,7 @@ func TestSSOEnforcement_ExternalDomainUnaffected(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status=%d, want 302", resp.StatusCode)
 	}
-	if loc := resp.Header.Get("Location"); loc == "/login?error=sso_required" {
+	if rejectedForSSO(resp) {
 		t.Error("an off-domain login was rejected — enforcement must be domain-scoped")
 	}
 	if !r.gotSidCookie(resp) {
@@ -192,7 +200,7 @@ func TestSSOEnforcement_NotEnforcedAllowsGitHub(t *testing.T) {
 	user := r.seedAuthOnlyUser()
 	resp := r.driveGitHubLogin(user, "alice@corp.example")
 
-	if loc := resp.Header.Get("Location"); loc == "/login?error=sso_required" {
+	if rejectedForSSO(resp) {
 		t.Error("GitHub login rejected on a non-enforced domain")
 	}
 	if !r.gotSidCookie(resp) {
@@ -214,13 +222,13 @@ func TestSSOEnforcement_UnenforceRestoresGitHub(t *testing.T) {
 	r.setConnectionEnforced(providerID, true)
 
 	user := r.seedAuthOnlyUser()
-	if loc := r.driveGitHubLogin(user, "alice@corp.example").Header.Get("Location"); loc != "/login?error=sso_required" {
-		t.Fatalf("precondition: enforced login Location=%q, want rejection", loc)
+	if !rejectedForSSO(r.driveGitHubLogin(user, "alice@corp.example")) {
+		t.Fatalf("precondition: enforced login was not rejected")
 	}
 
 	r.setConnectionEnforced(providerID, false)
 	resp := r.driveGitHubLogin(user, "alice@corp.example")
-	if loc := resp.Header.Get("Location"); loc == "/login?error=sso_required" {
+	if rejectedForSSO(resp) {
 		t.Error("login still rejected after un-enforce")
 	}
 	if !r.gotSidCookie(resp) {
@@ -243,7 +251,7 @@ func TestSSOEnforcement_DisabledConnectionDoesNotEnforce(t *testing.T) {
 
 	user := r.seedAuthOnlyUser()
 	resp := r.driveGitHubLogin(user, "alice@corp.example")
-	if loc := resp.Header.Get("Location"); loc == "/login?error=sso_required" {
+	if rejectedForSSO(resp) {
 		t.Error("a disabled connection enforced login — fail-open expected when SSO is unavailable")
 	}
 	if !r.gotSidCookie(resp) {
@@ -269,7 +277,7 @@ func TestSSOEnforcement_UnverifiedEmailNotEnforced(t *testing.T) {
 	c["email"] = "alice@corp.example"
 	c["email_verified"] = false // unverified
 	resp, _ := r.driveCallbackClaims(c)
-	if loc := resp.Header.Get("Location"); loc == "/login?error=sso_required" {
+	if rejectedForSSO(resp) {
 		t.Error("an unverified on-domain login was enforced — only verified emails count")
 	}
 	if !r.gotSidCookie(resp) {
