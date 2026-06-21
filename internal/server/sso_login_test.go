@@ -71,12 +71,13 @@ func (r *authRig) seedAuthOnlyUser() uuid.UUID {
 // upsertUserFromClaims won't mint a github identity row from it.
 func validSAMLClaimsFor(userID uuid.UUID, jwtProviderID string) jwt.MapClaims {
 	return jwt.MapClaims{
-		"sub":   userID.String(),
-		"email": userID.String() + "@corp.example",
-		"iss":   testIssuer,
-		"aud":   testAudience,
-		"exp":   time.Now().Add(1 * time.Hour).Unix(),
-		"iat":   time.Now().Unix(),
+		"sub":            userID.String(),
+		"email":          userID.String() + "@corp.example",
+		"email_verified": true, // SAML assertion emails are verified by definition
+		"iss":            testIssuer,
+		"aud":            testAudience,
+		"exp":            time.Now().Add(1 * time.Hour).Unix(),
+		"iat":            time.Now().Unix(),
 		"app_metadata": map[string]any{
 			"provider":  "sso:" + jwtProviderID,
 			"providers": []any{"sso:" + jwtProviderID},
@@ -584,11 +585,13 @@ func TestGoTrueSSO_Non303_Errors(t *testing.T) {
 }
 
 // Verified-email linking: two DISTINCT GoTrue login identities carrying the same
-// verified email must resolve to ONE principal — what makes a GitHub-then-Entra
-// (same corp email) human a single account, not a duplicate. Drives the full
-// callback, so it also guards the verifier's email_verified extraction: if that
-// regressed to always-false, no link would happen and the identities would fork
-// into separate principals, failing here.
+// verified email must resolve to ONE principal. Drives the full callback, so it
+// also guards the verifier's email_verified extraction: if that regressed to
+// always-false, no link would happen and the identities would fork into separate
+// principals, failing here. Both legs are GitHub callbacks to isolate the
+// verifier + link logic; the real cross-provider GitHub→SAML round-trip (where
+// the second leg also skips the github-identity write) is
+// TestSSOLogin_SAMLEmailLinksExistingGitHubPrincipal.
 func TestSSOLogin_VerifiedEmailLinksToOnePrincipal(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -625,5 +628,45 @@ func TestSSOLogin_VerifiedEmailLinksToOnePrincipal(t *testing.T) {
 	}
 	if r.principalOf(authC) == r.principalOf(authA) {
 		t.Fatal("unverified matching email linked to the verified principal — must stay separate")
+	}
+}
+
+// The real cross-provider round-trip through the SAML HTTP path: a human logs in
+// via GitHub (minting a principal), then via Entra SAML with the same VERIFIED
+// email — the SAML callback must LINK to the existing GitHub principal (not mint
+// a second) and JIT that principal into the SSO org. Guards the SAML-specific
+// link path the github-on-both test above can't reach.
+func TestSSOLogin_SAMLEmailLinksExistingGitHubPrincipal(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+
+	// validSAMLClaimsFor uses <id>@corp.example as the verified email; reuse that
+	// exact address for the prior GitHub login so the SAML login links to it.
+	samlAuth := r.seedAuthOnlyUser()
+	sharedEmail := samlAuth.String() + "@corp.example"
+
+	githubAuth := r.seedAuthOnlyUser()
+	gh := validClaimsFor(githubAuth)
+	gh["email"] = sharedEmail
+	gh["email_verified"] = true
+	if resp, _ := r.driveCallbackClaims(gh); resp.StatusCode != http.StatusFound {
+		t.Fatalf("github login status=%d, want 302", resp.StatusCode)
+	}
+	principal := r.principalOf(githubAuth)
+
+	if resp := r.driveSAMLCallback(samlAuth, providerID, providerID); resp.StatusCode != http.StatusFound {
+		t.Fatalf("saml login status=%d, want 302", resp.StatusCode)
+	}
+	if got := r.principalOf(samlAuth); got != principal {
+		t.Fatalf("SAML login minted a new principal %s — want it linked to the existing GitHub principal %s", got, principal)
+	}
+	// The linked principal (not a fresh one) is what gets JIT'd into the SSO org.
+	if got := r.membershipCount(principal, orgA); got != 1 {
+		t.Errorf("linked principal memberships in the SSO org=%d, want 1", got)
 	}
 }
