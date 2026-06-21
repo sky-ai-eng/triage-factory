@@ -20,13 +20,12 @@ is **no env-driven / startup-bootstrap SSO**. This guide has two halves:
 > bootstrap-floor login: a fresh deployment has no SSO, so the first admin signs
 > in with GitHub and configures SSO for everyone else.
 
-> **What this page covers.** Enabling GoTrue SAML and registering an org's
-> connection (the provider + the TF-owned org↔role binding). The actual SSO
-> **login flow** (the SP-initiated start endpoint, JIT provisioning, account
-> merge) and **email-domain routing / verification** are follow-up tickets
-> (TFAC-426 / TFAC-427 / TFAC-428). Where this guide references the SAML
-> *start* URL, treat the exact path as finalized by that work; the expected
-> value is noted inline.
+> **What this page covers.** Enabling GoTrue SAML, registering an org's
+> connection (the provider + the org↔role binding), and the SP-initiated login
+> flow with just-in-time provisioning. **Email-domain routing** — so users can
+> sign in by typing their email instead of clicking the tile — is a follow-up
+> still in progress; until it lands, the My Apps tile (the Sign on URL below) is
+> the way in.
 
 ## How it fits together
 
@@ -66,8 +65,8 @@ protocol messages. It is an RSA key in DER form, base64-encoded:
 openssl genpkey -algorithm rsa -pkeyopt rsa_keygen_bits:2048 -outform DER | base64 -w0
 ```
 
-> **⚠️ RSA, not ES256.** The TFAC-423 spike confirmed GoTrue's SAML signing
-> requires an RSA key; an EC/ES256 key is rejected.
+> **⚠️ RSA, not ES256.** GoTrue's SAML signing requires an RSA key; an
+> EC/ES256 key is rejected.
 
 Add the output to `.env`:
 
@@ -144,8 +143,8 @@ are what you paste into Entra. Substitute your deployment's `TF_PUBLIC_URL`
 | **ACS** (Assertion Consumer Service) | `{TF_PUBLIC_URL}/auth/v1/sso/saml/acs` |
 
 Triage Factory also returns these to you directly — `GET /api/sso/connection`
-includes `entity_id` and `acs_url` in its response (and the "Configure SSO"
-admin screen, TFAC-429, surfaces them for copy-paste), so you never have to
+includes `entity_id` and `acs_url` in its response (and a forthcoming "Configure
+SSO" admin screen surfaces them for copy-paste), so you never have to
 hand-assemble them.
 
 ## 2.2 Create the Entra enterprise application
@@ -176,9 +175,9 @@ tile UX, safer flow.
 > the registration call returns (also shown by `GET /api/sso/connection`). The
 > start endpoint validates it against your org's connection and rejects an
 > unknown or disabled one, so TF only ever initiates a flow for a connection you
-> registered. (Once the identifier-first login UX lands in TFAC-427, users can
-> also reach this endpoint by typing their email on the login screen — the
-> bookmark tile is the zero-typing path.)
+> registered. (A forthcoming identifier-first login will also let users reach
+> this endpoint by typing their email on the login screen — the bookmark tile is
+> the zero-typing path.)
 
 Leave Relay State and Logout Url blank.
 
@@ -194,15 +193,15 @@ Entra only issues assertions for users assigned to the app. In the enterprise
 app → **Users and groups** → **Add user/group** → add your test user (and later,
 the group of everyone who should have access).
 
-A user's Entra email **must be a verified email** — account merge with an
-existing GitHub-OAuth login (TFAC-426) keys on verified-email match, and JIT
-provisioning relies on the email Entra returns.
+A user's Entra email **must be a real, verified email** — just-in-time
+provisioning uses the email Entra returns in the assertion to create the user's
+account.
 
 ## 2.5 Register the connection in Triage Factory
 
-Hand the metadata URL from step 2.3 to Triage Factory. When the "Configure SSO"
-admin screen lands (TFAC-429) this is a paste-and-save form; until then, an org
-admin POSTs it directly:
+Hand the metadata URL from step 2.3 to Triage Factory. A forthcoming "Configure
+SSO" admin screen will make this a paste-and-save form; until then, an org admin
+POSTs it directly:
 
 ```http
 POST /api/sso/connection
@@ -245,7 +244,7 @@ Only org admins can reach these endpoints (a non-admin gets a 404), and a
 connection is always bound to the caller's own org — so it can never be attached
 to an org you don't administer.
 
-## The login flow (TFAC-426, shipped)
+## The login flow
 
 Once the connection is registered, the SP-initiated login works end to end:
 
@@ -260,21 +259,22 @@ Once the connection is registered, the SP-initiated login works end to end:
 4. TF exchanges the `code` for a verified session and, for a **first-time** SSO
    user, **JIT-provisions** them as a `member` of the org that owns the
    `provider_id` — the cross-org isolation boundary. The user lands in the app;
-   no onboarding, no manual invite. Promote them later via the roster (TFAC-417).
+   no onboarding, no manual invite. Promote them later from the org's People
+   roster.
 
 A SAML login is always its own account — GoTrue does not link it to a GitHub
 login even at a matching email — and TF writes no GitHub identity row for it.
 
 ## What's next
 
-Still to come (separate tickets, not configured here):
+Still in progress (not configured here yet):
 
-- **Identifier-first login + the "Sign in with SSO" button** (TFAC-427) — so
-  users reach the start endpoint by typing their email, not just via the tile.
-- **Email-domain claim + DNS-TXT verification** — proves an org owns a domain
-  and routes that domain's logins to its connection, with verified-domain global
-  uniqueness as the cross-org isolation linchpin (TFAC-428).
-- **The "Configure SSO" admin UI** for the steps in Part 2 (TFAC-429).
+- **Identifier-first login + a "Sign in with SSO" button** — so users reach the
+  start endpoint by typing their email, not just via the tile.
+- **Email-domain claim + DNS-TXT verification** — proves your org owns a domain
+  and routes that domain's logins to your connection, with verified-domain global
+  uniqueness as the cross-org isolation guarantee.
+- **A "Configure SSO" admin UI** for the steps in Part 2.
 
 ## Troubleshooting
 
