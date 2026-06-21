@@ -980,7 +980,11 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 					Email:         email,
 					EmailVerified: verified,
 					LinkedAt:      createdAt.UTC().Format(time.RFC3339),
-					Current:       authUserID == currentIdentity,
+					// Fold-insensitive: authUserID is Postgres ::text (lowercase
+					// canonical), currentIdentity is the raw JWT sub. Both are
+					// lowercase in practice, but comparing case-insensitively keeps
+					// the mark from silently missing on any UUID-format drift.
+					Current: strings.EqualFold(authUserID, currentIdentity),
 				})
 			}
 			return rows.Err()
