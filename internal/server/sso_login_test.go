@@ -481,8 +481,17 @@ func TestSAMLStart_UnknownOrDisabledProvider_404(t *testing.T) {
 		t.Errorf("disabled provider status=%d, want 404", rec2.Code)
 	}
 
+	// A malformed (non-UUID) provider_id. provider_id is a `text` column treated
+	// as an opaque handle — GetByProviderID compares text = text with no ::uuid
+	// cast — so a garbage value matches no row → 404, NOT a DB cast error / 500.
+	rec3 := httptest.NewRecorder()
+	r.srv.mux.ServeHTTP(rec3, httptest.NewRequest("GET", "/api/auth/oauth/saml?provider_id=not-a-uuid", nil))
+	if rec3.Code != http.StatusNotFound {
+		t.Errorf("malformed provider status=%d, want 404 (opaque text key, no cast)", rec3.Code)
+	}
+
 	if called {
-		t.Error("GoTrue /sso was called for an unknown/disabled provider")
+		t.Error("GoTrue /sso was called for an unknown/disabled/malformed provider")
 	}
 }
 
