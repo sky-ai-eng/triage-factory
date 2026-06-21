@@ -413,6 +413,32 @@ func TestInviteCreate_ExistingMember_409(t *testing.T) {
 	}
 }
 
+// TestInviteCreate_ExistingNonOwnerMember_409: the guard is role-agnostic —
+// a plain (non-owner) member's verified email is rejected too, not just the
+// owner's. Belt-and-suspenders over the owner-targeted ExistingMember case.
+func TestInviteCreate_ExistingNonOwnerMember_409(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, teamID := r.seedOrg(owner, "create-nonowner-member")
+	member := r.seedUser() // verified <id>@test identity from seedUser
+	pgtest.AddOrgMember(t, r.h, member.String(), orgID.String(), teamID.String(), "member", "member")
+	sid := r.signInAs(owner)
+
+	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+		map[string]string{"email": member.String() + "@test", "role": "member"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d; want 409 (non-owner member); body=%s", resp.StatusCode, readBody(resp))
+	}
+	var n int
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM org_invites WHERE org_id=$1`, orgID).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("invites created = %d; want 0 (existing member rejected, role-agnostic)", n)
+	}
+}
+
 // TestInviteCreate_CrossOrgExistingUser_Allowed: an existing TF user who is a
 // verified member of a DIFFERENT org may still be invited into this one —
 // accept grants them a fresh membership. The guard is same-org-only.
