@@ -352,6 +352,48 @@ func TestSSOTest_ExchangeError_Fails(t *testing.T) {
 	}
 }
 
+// A successful exchange that hands back a token the verifier rejects (here a
+// wrong-issuer JWT — stands in for a rotated / mismatched signing key) → FAIL.
+// Guards the verify-after-exchange branch end-to-end, not just via the renderer,
+// and confirms the short-circuit still holds past the exchange (no writes).
+func TestSSOTest_TokenVerifyFails_Fails(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+
+	// Exchange succeeds but returns a JWT the live Verifier rejects: a valid
+	// signature over the wrong issuer. (A garbage string would also fail, but a
+	// well-formed-yet-untrusted token exercises the verifier's claim checks.)
+	user := r.seedAuthOnlyUser()
+	badClaims := validSAMLClaimsFor(user, providerID)
+	badClaims["iss"] = "https://wrong-issuer.example"
+	token := r.signKey.mintJWT(t, badClaims)
+	r.srv.authDeps.gotrueExchange = func(ctx context.Context, code, verifier string) (string, string, int64, error) {
+		return token, "refresh-" + uuid.NewString(), time.Now().Add(time.Hour).Unix(), nil
+	}
+	q := url.Values{}
+	q.Set("code", "fake-"+uuid.NewString())
+	resp := r.fireSAMLTestCallback(providerID, q)
+
+	body := readBody(resp)
+	if !strings.Contains(body, "SSO test failed") {
+		t.Errorf("body did not render a fail result:\n%s", body)
+	}
+	if !strings.Contains(body, "failed verification") {
+		t.Errorf("fail message did not mention verification:\n%s", body)
+	}
+	if r.hasSidCookie(resp) {
+		t.Error("a failed test set a sid cookie")
+	}
+	if got := r.identityLinkCount(user); got != 0 {
+		t.Errorf("user_identities rows=%d, want 0", got)
+	}
+}
+
 // GoTrue's ACS redirects back with ?error=&error_description= when it rejects the
 // assertion → FAIL surfacing the IdP's description.
 func TestSSOTest_ACSErrorParam_Fails(t *testing.T) {
