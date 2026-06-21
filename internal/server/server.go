@@ -208,6 +208,14 @@ type Server struct {
 	// when GitHub creds/installations rotate (SetOnGitHubChanged).
 	reachableRepoMu    sync.RWMutex
 	reachableRepoCache map[string]reachableRepoEntry // key: orgID\x00userID
+
+	// preAuthLimiter is the per-IP token-bucket cap on the pre-auth
+	// allowlist routes (TFAC-433). Those mounts run before any session
+	// exists, so they lack the implicit "needs a valid session" bound the
+	// s.api/apiMutating routes get for free; this blunts a single-source
+	// flood (e.g. SSO-discovery domain enumeration). Constructed in New so
+	// it's never nil; the wrapper no-ops in local mode. See ratelimit.go.
+	preAuthLimiter *ipRateLimiter
 }
 
 // reachableRepoEntry is one cached picker enumeration: the lowercased
@@ -447,6 +455,10 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 		mux:          http.NewServeMux(),
 		ws:           websocket.NewHub(),
 	}
+	// Per-IP rate limiter for the pre-auth allowlist (TFAC-433). Built here
+	// (not injected) so a Server is always usable without external wiring;
+	// the wrapper that consults it no-ops in local mode.
+	s.preAuthLimiter = newIPRateLimiter(preAuthRatePerSec, preAuthBurst, preAuthBucketTTL)
 	// GitHub credential resolver + its installation-token cache, built from
 	// the same stores. Constructed here (not injected) so a Server is always
 	// usable without external wiring — tests that call New directly get a
@@ -585,9 +597,20 @@ func (s *Server) routes() {
 	//        happens upstream, not in our middleware.
 	//   /                                — SPA fallback; static-file
 	//        serving with no identity dependency.
-	s.mux.HandleFunc("GET /api/auth/oauth/{provider}", s.handleOAuthStart)
-	s.mux.HandleFunc("GET /api/auth/callback", s.handleOAuthCallback)
-	s.mux.Handle("POST /api/auth/logout", s.withCSRFOriginCheck(http.HandlerFunc(s.handleLogout)))
+	//
+	// IP rate limiting (TFAC-433): the interactive pre-auth mounts —
+	// oauth start/callback, logout, invite preview, and SSO discovery
+	// (registered below) — are wrapped in s.preAuthRateLimit so an
+	// anonymous caller can't flood them (e.g. discovery domain
+	// enumeration). The cap is declared here at the allowlist, not
+	// sprinkled across handlers; it no-ops in local mode. Deliberately NOT
+	// wrapped: /api/health (platform liveness probes hit it often),
+	// /api/config (the AuthGate boot read), the GitHub webhook receiver
+	// (HMAC-verified, GitHub-paced), the /auth/v1/ GoTrue proxy (rate-
+	// limited upstream), and the SPA fallback (every static asset).
+	s.mux.Handle("GET /api/auth/oauth/{provider}", s.preAuthRateLimit(http.HandlerFunc(s.handleOAuthStart)))
+	s.mux.Handle("GET /api/auth/callback", s.preAuthRateLimit(http.HandlerFunc(s.handleOAuthCallback)))
+	s.mux.Handle("POST /api/auth/logout", s.preAuthRateLimit(s.withCSRFOriginCheck(http.HandlerFunc(s.handleLogout))))
 	s.mux.HandleFunc("GET /api/config", s.handleConfig)
 	// Liveness probe — pre-auth so platform healthchecks (Fly checks,
 	// compose healthcheck, k8s liveness) can hit it without a session.
@@ -697,8 +720,8 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/invites/accept", ih.handleInviteAccept)
 	// Pre-auth: the invitee previews the token before signing in. The handler
 	// runs on the admin pool and discloses only org name + role to the token
-	// holder. Listed in preAuthAllowlist.
-	s.mux.HandleFunc("GET /api/invites/preview", ih.handleInvitePreview)
+	// holder. Listed in preAuthAllowlist; IP-rate-limited (TFAC-433).
+	s.mux.Handle("GET /api/invites/preview", s.preAuthRateLimit(http.HandlerFunc(ih.handleInvitePreview)))
 
 	// Per-org SSO connection (TFAC-424, epic TFAC-422) — org-admin-gated,
 	// multi-mode only (each handler 404s in local). POST registers the org's
@@ -741,8 +764,9 @@ func (s *Server) routes() {
 	// falls back to GitHub. No session, no side effect, admin-pool read, and a
 	// privacy-safe reply that never names an org — so it's a raw mount, NOT
 	// s.apiMutating (which would require a session and a CSRF origin it has
-	// none of pre-login). Listed in preAuthAllowlist.
-	s.mux.HandleFunc("POST /api/sso/discover", s.handleSSODiscover)
+	// none of pre-login). Listed in preAuthAllowlist. IP-rate-limited
+	// (TFAC-433) — this is the surface domain-enumeration probing targets.
+	s.mux.Handle("POST /api/sso/discover", s.preAuthRateLimit(http.HandlerFunc(s.handleSSODiscover)))
 
 	s.api("GET /api/queue", s.handleQueue)
 	s.api("GET /api/tasks", s.handleTasks)
