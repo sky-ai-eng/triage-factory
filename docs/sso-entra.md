@@ -244,6 +244,32 @@ Only org admins can reach these endpoints (a non-admin gets a 404), and a
 connection is always bound to the caller's own org — so it can never be attached
 to an org you don't administer.
 
+## 2.6 Test the connection before enabling it
+
+The common SSO failures are Entra-side — the wrong Identifier/Reply URL pasted in,
+a certificate mismatch, the test user not assigned, or the assertion missing the
+email claim — and none of them show up in metadata validation. They only surface
+in a **live round-trip**, so verify one before you flip the connection on (you can
+test a connection that is still disabled — that's the point):
+
+- In the Configure-SSO admin screen, click **Test SSO**. It opens a real sign-in
+  in a new window and renders a **pass/fail** page with the authenticated email,
+  whether that email is verified, and whether its domain matches one of your
+  verified domains.
+- Under the hood this is the normal SP-initiated flow with a test flag in TF's
+  signed state. The callback completes the GoTrue code exchange and verifies the
+  returned token — proving the assertion is valid and readable — then **stops
+  before any writes**: a test mints **no session, no membership, and no account**.
+  Your current admin session is untouched, so it's safe to run anytime.
+
+```http
+GET /api/sso/connection/test      # org-admin only; opens in a popup
+```
+
+A failed test shows an actionable reason (e.g. *"the assertion carried no email
+claim — map the user's email/UPN to the email claim"*). Fix the Entra side, retest,
+and only then `PATCH { "enabled": true }`.
+
 ## The login flow
 
 Once the connection is registered, the SP-initiated login works end to end:

@@ -199,6 +199,15 @@ function ConnectionBlock({
     }
   }
 
+  // runTest opens the verify-before-enforce round-trip (TFAC-431) in a popup: a
+  // GET that 303s through the IdP and renders a pass/fail page server-side. A new
+  // window keeps the admin's current session untouched (the test path mints none)
+  // and the result visible alongside Settings. Works on a not-yet-enabled
+  // connection — that's the point, confirming the IdP before flipping it on.
+  const runTest = () => {
+    window.open('/api/sso/connection/test', 'tf-sso-test', 'popup,width=480,height=620')
+  }
+
   return (
     <div className="space-y-3">
       <BlockHeader
@@ -220,18 +229,28 @@ function ConnectionBlock({
               Provider {connection.provider_id}
             </p>
           </div>
-          <label className="flex shrink-0 cursor-pointer items-center gap-2 text-[12px] text-text-tertiary">
-            {connection.enabled ? 'Enabled' : 'Disabled'}
-            <Switch.Root
-              aria-label="Enable SSO"
-              checked={connection.enabled}
-              disabled={toggling}
-              onCheckedChange={(v) => void toggle(v)}
-              className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-accent data-[state=unchecked]:bg-black/10 disabled:opacity-50"
+          <div className="flex shrink-0 items-center gap-3">
+            <button
+              type="button"
+              onClick={runTest}
+              title="Open a real sign-in in a new window to confirm the connection works — without enabling it."
+              className="rounded-full border border-accent/20 px-3.5 py-1.5 text-[12px] font-medium text-accent transition-colors hover:border-accent/30 hover:text-accent/80"
             >
-              <Switch.Thumb className="block h-[14px] w-[14px] rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
-            </Switch.Root>
-          </label>
+              Test SSO
+            </button>
+            <label className="flex cursor-pointer items-center gap-2 text-[12px] text-text-tertiary">
+              {connection.enabled ? 'Enabled' : 'Disabled'}
+              <Switch.Root
+                aria-label="Enable SSO"
+                checked={connection.enabled}
+                disabled={toggling}
+                onCheckedChange={(v) => void toggle(v)}
+                className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-accent data-[state=unchecked]:bg-black/10 disabled:opacity-50"
+              >
+                <Switch.Thumb className="block h-[14px] w-[14px] rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
+              </Switch.Root>
+            </label>
+          </div>
         </div>
       ) : (
         <div className="flex items-center gap-2">

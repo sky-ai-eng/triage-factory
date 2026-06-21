@@ -126,6 +126,9 @@ beforeEach(() => {
   domainList = []
   verifyError = null
   window.confirm = vi.fn(() => true)
+  // jsdom's window.open is a noisy no-op; stub it so the Test SSO popup launch is
+  // assertable and doesn't log "Not implemented".
+  window.open = vi.fn()
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
     value: { writeText: vi.fn().mockResolvedValue(undefined) },
@@ -197,6 +200,28 @@ describe('SSOSettings — SP details + connection', () => {
     expect(screen.getByRole('switch', { name: /enable sso/i })).toBeChecked()
     // The domains surface opens once a connection exists.
     expect(screen.getByLabelText(/domain to claim/i)).toBeInTheDocument()
+  })
+
+  it('opens the verify-before-enforce test in a popup, even when disabled', async () => {
+    // The Test SSO button is offered on a not-yet-enabled connection — testing
+    // before enabling is the whole point — and launches the round-trip in a new
+    // window (a GET the server 303s through the IdP, untouched session).
+    connState = {
+      connection: makeConnection({ enabled: false }),
+      entity_id: SP.entity_id,
+      acs_url: SP.acs_url,
+    }
+    domainList = []
+    render(<SSOSettings />)
+
+    expect(await screen.findByText(/connected · disabled/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /test sso/i }))
+
+    expect(window.open).toHaveBeenCalledWith(
+      '/api/sso/connection/test',
+      'tf-sso-test',
+      expect.stringContaining('popup'),
+    )
   })
 
   it('toggles the connection disabled via PATCH', async () => {

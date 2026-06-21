@@ -80,6 +80,11 @@ type Server struct {
 	// injected DNS resolver for a fake — the verify path's only external
 	// dependency. Production wiring leaves it on the stdlib net.DefaultResolver.
 	ssoDomains *ssoDomainsHandler
+	// ssoConn is the per-org SSO connection handler, retained on the Server so
+	// the verify-before-enforce test-start (handleSAMLConnectionTestStart, in
+	// auth_handlers.go) can reuse its admin gate + active-org connection read
+	// rather than duplicating that authorization preamble.
+	ssoConn *ssoConnectionHandler
 	// ghResolver picks the right GitHub credential (org App installation
 	// token → PAT) per request, given the org + target account. The per-repo
 	// handler operations migrated off the old process-global PAT client —
@@ -754,9 +759,16 @@ func (s *Server) routes() {
 			return s.deployCfg.publicURL
 		},
 	}
+	s.ssoConn = ssoc
 	s.api("GET /api/sso/connection", ssoc.handleSSOConnectionGet)
 	s.apiMutating("POST /api/sso/connection", ssoc.handleSSOConnectionCreate)
 	s.apiMutating("PATCH /api/sso/connection", ssoc.handleSSOConnectionUpdate)
+	// Verify-before-enforce SSO test (TFAC-431) — an org admin round-trips a real
+	// sign-in through their not-yet-enabled connection to confirm the IdP is
+	// wired up. GET (the browser opens it in a popup); session-authed + admin-
+	// gated in-handler via the reused ssoConnectionHandler.adminGate. The
+	// matching no-write callback branch lives in handleOAuthCallback.
+	s.api("GET /api/sso/connection/test", s.handleSAMLConnectionTestStart)
 
 	// Per-org SSO domain claim + DNS-TXT verification (TFAC-428; multi-mode only
 	// — each handler 404s in local). All four routes gate on org-admin and write
