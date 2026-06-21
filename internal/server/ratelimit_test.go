@@ -192,6 +192,55 @@ func TestPreAuthRateLimit_MultiMode429(t *testing.T) {
 	}
 }
 
+// TestPreAuthRateLimit_LogoutCSRFRejectionCostsNoTokens locks in the wrap
+// ORDER for the logout mount: withCSRFOriginCheck (outer) runs before
+// preAuthRateLimit (inner), so a cross-origin POST the CSRF gate rejects
+// (403) never reaches the limiter and consumes no tokens. Without this
+// ordering a malicious page could CSRF-spam logout from a victim's browser
+// and drain that IP's shared pre-auth budget — starving its login /
+// discovery — with requests that never pass CSRF anyway.
+func TestPreAuthRateLimit_LogoutCSRFRejectionCostsNoTokens(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+
+	clk := time.Now()
+	s := &Server{preAuthLimiter: frozenLimiter(1.0, 3.0, time.Minute, &clk)}
+	s.SetDeployConfig("https://tf.test", [32]byte{})
+
+	// The exact composition the logout route mounts: CSRF outer, limiter inner.
+	h := s.withCSRFOriginCheck(s.preAuthRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+
+	post := func(origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+		req.Header.Set("X-Forwarded-For", "203.0.113.9")
+		req.Header.Set("Origin", origin)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// A flood of cross-origin POSTs — many more than the burst — all 403 at
+	// the CSRF gate and must NOT touch the limiter.
+	for i := 0; i < 25; i++ {
+		if rec := post("https://evil.example"); rec.Code != http.StatusForbidden {
+			t.Fatalf("cross-origin POST %d got %d, want 403", i+1, rec.Code)
+		}
+	}
+
+	// The full burst is therefore still available to the legitimate
+	// same-origin caller — proof the rejected spam consumed nothing.
+	for i := 0; i < 3; i++ {
+		if rec := post("https://tf.test"); rec.Code != http.StatusOK {
+			t.Fatalf("same-origin POST %d got %d, want 200 (budget drained by rejected CSRF spam?)", i+1, rec.Code)
+		}
+	}
+	// And the cap still bites once the legit burst is genuinely spent.
+	if rec := post("https://tf.test"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("post-burst same-origin POST got %d, want 429", rec.Code)
+	}
+}
+
 // TestPreAuthRateLimit_NilLimiterNoOp guards the defensive nil branch: a
 // Server without a limiter wired (no construction path does this today, but
 // the wrapper must not panic) passes requests through even in multi mode.

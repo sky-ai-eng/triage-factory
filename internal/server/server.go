@@ -608,9 +608,18 @@ func (s *Server) routes() {
 	// /api/config (the AuthGate boot read), the GitHub webhook receiver
 	// (HMAC-verified, GitHub-paced), the /auth/v1/ GoTrue proxy (rate-
 	// limited upstream), and the SPA fallback (every static asset).
+	//
+	// Wrap ORDER matters where a cheap rejection gate also applies: the
+	// limiter goes INSIDE such a gate so a request the gate rejects costs
+	// no tokens. Logout is the only case — withCSRFOriginCheck (outer) runs
+	// first, so a cross-origin POST 403s before the limiter is consulted.
+	// Otherwise a malicious page could CSRF-spam logout from a victim's
+	// browser and drain that IP's shared pre-auth budget (starving its
+	// login/discovery) with requests that never pass CSRF anyway. The other
+	// four routes have no such gate, so the limiter is outermost there.
 	s.mux.Handle("GET /api/auth/oauth/{provider}", s.preAuthRateLimit(http.HandlerFunc(s.handleOAuthStart)))
 	s.mux.Handle("GET /api/auth/callback", s.preAuthRateLimit(http.HandlerFunc(s.handleOAuthCallback)))
-	s.mux.Handle("POST /api/auth/logout", s.preAuthRateLimit(s.withCSRFOriginCheck(http.HandlerFunc(s.handleLogout))))
+	s.mux.Handle("POST /api/auth/logout", s.withCSRFOriginCheck(s.preAuthRateLimit(http.HandlerFunc(s.handleLogout))))
 	s.mux.HandleFunc("GET /api/config", s.handleConfig)
 	// Liveness probe — pre-auth so platform healthchecks (Fly checks,
 	// compose healthcheck, k8s liveness) can hit it without a session.
