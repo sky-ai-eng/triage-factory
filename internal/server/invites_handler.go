@@ -126,7 +126,7 @@ func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Requ
 	// create; an unverified identity email isn't a reliable dedup key. Scoped to
 	// THIS org only — inviting an existing TF user who belongs to another org is
 	// legitimate, and accept grants them a fresh membership. This is fail-fast
-	// UX, not a correctness gate: the accept-time member check (:467-484) stays
+	// UX, not a correctness gate: the accept-time member check in handleInviteAccept stays
 	// as the TOCTOU backstop for an email JIT-provisioned between create and
 	// accept. Runs on the admin pool for the same reason as the target-team
 	// check below — user_identities is admin-pool-only.
