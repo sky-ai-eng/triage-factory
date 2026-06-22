@@ -132,15 +132,17 @@ func (s *Spawner) terminateBlueprint(
 			blueprintLog.Warn("close task failed", "task", taskID, "error", closeErr)
 		}
 
-		// TFAC-300: mirror the terminal board move onto the Jira ticket —
-		// transition it into the Done bucket under the system/bot credential.
-		// Only here, in the completed branch: a failed/aborted/cancelled
-		// blueprint never reaches it, so a non-completion never moves the ticket
-		// to Done. mirrorJiraDoneForTask re-checks bot ownership, so a mid-run
-		// user takeover (claim flipped to the user) leaves the terminal Jira
-		// write to the user path. Close above does not clear the claim, so the
-		// ownership re-read still sees the bot.
-		s.mirrorJiraDoneForTask(bgCtx, orgID, taskID)
+		// TFAC-442: a clean completion means the agent opened its PR and the work is now
+		// awaiting human review + merge — "in progress" to a Jira watcher, NOT
+		// done. Re-assert the InProgress bucket (idempotent; usually a no-op
+		// since the dispatch-time mirror already moved the ticket) rather than
+		// transitioning to Done. PR-opened ≠ ticket-done: the ticket only reaches
+		// Done when its PR merges, via a separate entity-driven mirror.
+		// mirrorJiraInProgressForTask re-checks bot ownership, so a mid-run user
+		// takeover (claim flipped to the user) leaves the terminal Jira write to
+		// the user path. Close above does not clear the claim, so the ownership
+		// re-read still sees the bot.
+		s.mirrorJiraInProgressForTask(bgCtx, orgID, taskID)
 	}
 	// Aborted / failed / cancelled blueprints intentionally do NOT mark
 	// the task done — leave it in the queue so a human can inspect the
