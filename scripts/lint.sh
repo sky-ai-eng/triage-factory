@@ -96,6 +96,29 @@ else
   green "paths state-literal guard OK"
 fi
 
+# Open-core boundary: the dependency graph points inward, so core (internal/,
+# cmd/) must never import ee/. Only the composition root (package main, at the
+# repo root) wires ee in — ee.Install() + the ee/sso blank import — so it is the
+# sole allowed importer and lives outside these trees. We check Imports AND
+# Test/XTestImports: a core *test* reaching into ee (the old in-package
+# test-stub wiring) is exactly the regression this blocks. go vet ran above, so
+# the build is good and `go list` resolves cleanly.
+blue "ee import boundary guard"
+ee_pkg="github.com/sky-ai-eng/triage-factory/ee"
+ee_offenders=$(go list -f '{{$ip := .ImportPath}}{{range .Imports}}{{$ip}} {{.}}
+{{end}}{{range .TestImports}}{{$ip}} {{.}}
+{{end}}{{range .XTestImports}}{{$ip}} {{.}}
+{{end}}' ./internal/... ./cmd/... 2>/dev/null \
+  | awk -v ee="$ee_pkg" '$2 == ee || index($2, ee"/") == 1 {print $1" imports "$2}' \
+  | sort -u || true)
+if [[ -n "$ee_offenders" ]]; then
+  red "core (internal/, cmd/) must not import ee/ — the open-core boundary points inward; only package main may wire ee:"
+  echo "$ee_offenders"
+  fail=1
+else
+  green "ee import boundary guard OK"
+fi
+
 # --- Frontend ---------------------------------------------------------------
 blue "prettier"
 cd frontend
