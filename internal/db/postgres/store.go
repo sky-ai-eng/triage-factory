@@ -307,6 +307,7 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// join user_identities (admin-pool-only), and IsBreakGlass is the
 		// login-time bypass check whose actor is mid-login.
 		SSOBreakGlass: newSSOBreakGlassStore(app, admin),
+		Ext:           db.BuildStoreExtensions("postgres", app, admin),
 		Tx:            s,
 	}
 	return s.stores
@@ -385,5 +386,6 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		SSOConnections: newSSOConnectionStore(tx, tx),
 		SSODomains:     newSSODomainStore(tx, tx),
 		SSOBreakGlass:  newSSOBreakGlassStore(tx, tx),
+		Ext:            db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

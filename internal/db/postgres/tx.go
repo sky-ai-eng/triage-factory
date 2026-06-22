@@ -246,5 +246,9 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// ResolveVerifiedEmailMember, which read cross-principal data) stays
 		// pinned to s.admin, same shape as Invites / SSOConnections.
 		SSOBreakGlass: newSSOBreakGlassStore(tx, s.admin),
+		// Opaque extension bundles (Enterprise Edition stores) built from
+		// the same (app=tx, admin=s.admin) handles, so their pool split is
+		// identical to the SSO stores above.
+		Ext: db.BuildStoreExtensions("postgres", tx, s.admin),
 	}
 }

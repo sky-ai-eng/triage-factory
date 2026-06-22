@@ -118,6 +118,7 @@ func New(conn *sql.DB) db.Stores {
 		SSOConnections: newSSOConnectionStore(conn, conn),
 		SSODomains:     newSSODomainStore(conn, conn),
 		SSOBreakGlass:  newSSOBreakGlassStore(conn, conn),
+		Ext:            db.BuildStoreExtensions("sqlite", conn, conn),
 		Tx:             s,
 	}
 	return s.stores

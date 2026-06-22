@@ -88,6 +88,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		SSOConnections:   newSSOConnectionStore(tx, tx),
 		SSODomains:       newSSODomainStore(tx, tx),
 		SSOBreakGlass:    newSSOBreakGlassStore(tx, tx),
+		Ext:              db.BuildStoreExtensions("sqlite", tx, tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

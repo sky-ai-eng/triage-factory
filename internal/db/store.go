@@ -302,6 +302,15 @@ type Stores struct {
 	// resolution). Multi-mode only; the SQLite impl is a stub.
 	SSOBreakGlass SSOBreakGlassStore
 
+	// Ext carries opaque store bundles built by registered
+	// StoreExtension factories (see storeext.go) — the seam an
+	// out-of-core extension (the Enterprise Edition) uses to attach its
+	// own pool-split stores without core naming their types. Populated by
+	// the backend builders; read through Extension. Exported so the
+	// postgres/sqlite packages can set it in their struct literals; nil in
+	// a community build with no extension registered.
+	Ext map[string]any
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -351,7 +360,22 @@ type TxStores struct {
 	SSOConnections   SSOConnectionStore
 	SSODomains       SSODomainStore
 	SSOBreakGlass    SSOBreakGlassStore
+
+	// Ext carries opaque store bundles built by registered
+	// StoreExtension factories (see storeext.go), tx-bound to the same
+	// *sql.Tx as every other field here. Read through Extension; nil in a
+	// community build with no extension registered.
+	Ext map[string]any
 }
+
+// Extension returns the opaque store bundle registered under key (see
+// storeext.go), or nil when no extension registered it. The registering
+// package wraps this in a typed accessor that performs the assertion.
+func (s Stores) Extension(key string) any { return s.Ext[key] }
+
+// Extension returns the tx-bound opaque store bundle registered under
+// key, or nil when no extension registered it.
+func (t TxStores) Extension(key string) any { return t.Ext[key] }
 
 // TxRunner runs fn inside a single database transaction. Postgres
 // impl additionally calls
