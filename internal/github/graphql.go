@@ -80,21 +80,28 @@ fragment PRDiscoveryFields on PullRequest {
 `
 
 // prFullFragment includes everything in the discovery fragment plus
-// per-check-run CI data from the head commit's check suites. Used by
-// RefreshPRs for OPEN PRs only — these are the ones where CI state
-// changes drive events (github:pr:ci_failed, github:pr:ci_passed).
+// per-check-run CI data from the head commit. Used by RefreshPRs for
+// OPEN PRs only — these are the ones where CI state changes drive
+// events (github:pr:ci_failed, github:pr:ci_passed).
 //
-// Node budget per PR: ~1,060 (20 suites × 50 runs + overhead).
-// A RefreshPRs call for N open PRs costs roughly N × 1,060 nodes,
-// so ~470 open PRs fit in a single query before hitting the 500k
-// ceiling. If your tracked-open set grows past that, the fix is to
-// batch RefreshPRs calls, not to bump page caps.
+// CI is read from the head commit's statusCheckRollup.contexts — a FLAT
+// list of the actual check runs on the commit. We deliberately do NOT use
+// checkSuites(first:N){checkRuns(first:M)}: GitHub mints one check suite
+// per installed GitHub App on every commit, including apps that post no
+// check runs, so the suite connection is padded with empties. In orgs with
+// a normal app footprint that blows past any reasonable suite cap, wastes
+// the node budget on empty padding, and (since suites aren't relevance-
+// sorted) can push a real CI suite past the cap. The flat rollup sidesteps
+// all of that.
 //
-// Page caps (20 suites, 50 runs per suite) are load-bearing:
-// 100/100 pushes a 50-result query to ~507k nodes and hard-errors.
-// Do not bump without re-running the math. The hasNextPage watchdogs
-// in toSnapshot() log when we truncate, so real truncation becomes
-// visible in operator logs instead of being silent.
+// Node budget per PR: ~160 (100 contexts + overhead) — down ~10× from the
+// old ~1,060 (20 suites × 50 runs). A RefreshPRs call for N open PRs costs
+// roughly N × 160 nodes; with refreshBatchSize=20 that's ~3,200 nodes per
+// query, comfortably under the 500k ceiling. contexts is a union of CheckRun
+// and StatusContext; we inline only CheckRun fields (StatusContext is the
+// legacy commit-status API the old suite query never surfaced). The
+// hasNextPage watchdog in toSnapshot() logs if we ever truncate at the flat
+// 100 cap so real truncation stays visible instead of silent.
 const prFullFragment = `
 fragment PRFullFields on PullRequest {
 ` + prBaseFields + `
@@ -103,19 +110,19 @@ fragment PRFullFields on PullRequest {
 			commit {
 				oid
 				committedDate
-				checkSuites(first: 20) {
-					pageInfo { hasNextPage }
-					nodes {
-						workflowRun { databaseId }
-						checkRuns(first: 50) {
-							pageInfo { hasNextPage }
-							nodes {
+				statusCheckRollup {
+					contexts(first: 100) {
+						pageInfo { hasNextPage }
+						nodes {
+							__typename
+							... on CheckRun {
 								databaseId
 								name
 								status
 								conclusion
 								completedAt
 								detailsUrl
+								checkSuite { workflowRun { databaseId } }
 							}
 						}
 					}
@@ -419,50 +426,61 @@ type gqlCommits struct {
 }
 
 type gqlCommit struct {
-	OID           string         `json:"oid"`
-	CommittedDate string         `json:"committedDate"`
-	CheckSuites   gqlCheckSuites `json:"checkSuites"`
+	OID               string                `json:"oid"`
+	CommittedDate     string                `json:"committedDate"`
+	StatusCheckRollup *gqlStatusCheckRollup `json:"statusCheckRollup"`
 }
 
-type gqlCheckSuites struct {
-	PageInfo gqlPageInfo     `json:"pageInfo"`
-	Nodes    []gqlCheckSuite `json:"nodes"`
+// gqlStatusCheckRollup is the head commit's flattened CI state. contexts is a
+// flat list of the commit's actual check runs (and legacy status contexts) —
+// it is NOT padded with the empty per-installed-app check suites that the old
+// checkSuites query truncated on. nil when the commit has no rollup at all.
+type gqlStatusCheckRollup struct {
+	Contexts gqlRollupContexts `json:"contexts"`
 }
 
-type gqlCheckSuite struct {
+type gqlRollupContexts struct {
+	PageInfo gqlPageInfo        `json:"pageInfo"`
+	Nodes    []gqlRollupContext `json:"nodes"`
+}
+
+// gqlRollupContext is one node of statusCheckRollup.contexts. The connection
+// is a union of CheckRun and StatusContext; the fragment inlines only CheckRun
+// fields, so StatusContext nodes decode with Typename=="StatusContext" and
+// zero CheckRun fields. buildSnapshot filters on Typename to drop them —
+// preserving the old suite query's behavior of surfacing check runs only.
+type gqlRollupContext struct {
+	Typename    string            `json:"__typename"`
+	DatabaseID  int64             `json:"databaseId"`
+	Name        string            `json:"name"`
+	Status      string            `json:"status"`
+	Conclusion  string            `json:"conclusion"`
+	CompletedAt string            `json:"completedAt"`
+	DetailsURL  string            `json:"detailsUrl"`
+	CheckSuite  *gqlCheckSuiteRef `json:"checkSuite"`
+}
+
+// gqlCheckSuiteRef carries the owning suite's workflow-run linkage so we can
+// recover the GitHub Actions WorkflowRunID for Actions-backed check runs.
+type gqlCheckSuiteRef struct {
 	WorkflowRun *gqlWorkflowRun `json:"workflowRun"`
-	CheckRuns   gqlCheckRuns    `json:"checkRuns"`
 }
 
-// gqlWorkflowRun is non-nil only for check suites originating from GitHub
+// gqlWorkflowRun is non-nil only for check runs originating from GitHub
 // Actions workflows. Third-party CI systems (Supabase, Circle, etc.) produce
-// check suites with workflowRun == nil.
+// check runs whose suite has workflowRun == nil.
 type gqlWorkflowRun struct {
 	DatabaseID int64 `json:"databaseId"`
 }
 
-type gqlCheckRuns struct {
-	PageInfo gqlPageInfo   `json:"pageInfo"`
-	Nodes    []gqlCheckRun `json:"nodes"`
-}
-
 // gqlPageInfo is a minimal subset of GitHub's PageInfo used only to detect
 // when a connection was truncated at the first-N limit. We don't paginate
-// (matrix builds deep enough to blow through 20×50 check runs aren't a real
-// case today) but we log a warning if we hit the limit so we notice before
-// missing events becomes a silent failure mode. See the page-cap comment
-// inside prFragment for why the caps are what they are.
+// (a head commit with >100 check runs isn't a real case today) but we log a
+// warning if we hit the limit so we notice before missing events becomes a
+// silent failure mode. See the page-cap comment inside prFullFragment for
+// why the cap is what it is.
 type gqlPageInfo struct {
 	HasNextPage bool `json:"hasNextPage"`
-}
-
-type gqlCheckRun struct {
-	DatabaseID  int64  `json:"databaseId"`
-	Name        string `json:"name"`
-	Status      string `json:"status"`
-	Conclusion  string `json:"conclusion"`
-	CompletedAt string `json:"completedAt"`
-	DetailsURL  string `json:"detailsUrl"`
 }
 
 type gqlLabelNodes struct {
@@ -527,36 +545,43 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 			// nothing here" rather than "unknown prior state" (nil).
 			snap.CheckRuns = []domain.CheckRun{}
 
-			// Pagination truncation watchdog. Do not raise caps without
-			// re-running the node-budget math in prFullFragment's comment.
-			if commit.CheckSuites.PageInfo.HasNextPage {
-				githubLog.Warn("check suites truncated; some CI state may be missing from snapshot",
-					"repo", snap.Repo, "number", snap.Number, "cap", 20)
-			}
+			// statusCheckRollup is nil only when the commit has no CI rollup
+			// at all — treated identically to "polled, nothing here".
+			if commit.StatusCheckRollup != nil {
+				contexts := commit.StatusCheckRollup.Contexts
 
-			var raw []domain.CheckRun
-			for _, suite := range commit.CheckSuites.Nodes {
-				if suite.CheckRuns.PageInfo.HasNextPage {
-					githubLog.Warn("check runs within a suite truncated; some CI state may be missing from snapshot",
-						"repo", snap.Repo, "number", snap.Number, "cap", 50)
+				// Pagination truncation watchdog. Do not raise the cap without
+				// re-running the node-budget math in prFullFragment's comment.
+				if contexts.PageInfo.HasNextPage {
+					githubLog.Warn("check suites truncated; some CI state may be missing from snapshot",
+						"repo", snap.Repo, "number", snap.Number, "cap", 100)
 				}
-				var workflowRunID int64
-				if suite.WorkflowRun != nil {
-					workflowRunID = suite.WorkflowRun.DatabaseID
-				}
-				for _, cr := range suite.CheckRuns.Nodes {
+
+				var raw []domain.CheckRun
+				for _, ctx := range contexts.Nodes {
+					// contexts is a CheckRun|StatusContext union; the fragment
+					// inlines only CheckRun fields, so StatusContext nodes
+					// arrive empty. Drop anything that isn't a CheckRun to
+					// preserve the old suite query's check-runs-only behavior.
+					if ctx.Typename != "CheckRun" {
+						continue
+					}
+					var workflowRunID int64
+					if ctx.CheckSuite != nil && ctx.CheckSuite.WorkflowRun != nil {
+						workflowRunID = ctx.CheckSuite.WorkflowRun.DatabaseID
+					}
 					raw = append(raw, domain.CheckRun{
-						ID:            cr.DatabaseID,
-						Name:          cr.Name,
-						Status:        strings.ToLower(cr.Status),
-						Conclusion:    strings.ToLower(cr.Conclusion),
-						CompletedAt:   cr.CompletedAt,
-						DetailsURL:    cr.DetailsURL,
+						ID:            ctx.DatabaseID,
+						Name:          ctx.Name,
+						Status:        strings.ToLower(ctx.Status),
+						Conclusion:    strings.ToLower(ctx.Conclusion),
+						CompletedAt:   ctx.CompletedAt,
+						DetailsURL:    ctx.DetailsURL,
 						WorkflowRunID: workflowRunID,
 					})
 				}
+				snap.CheckRuns = domain.DedupCheckRunsByName(raw)
 			}
-			snap.CheckRuns = domain.DedupCheckRunsByName(raw)
 		}
 		// If !includeCheckRuns, snap.CheckRuns stays nil — "unknown prior
 		// state" — so the diff logic skips CI evaluation for this snapshot.
