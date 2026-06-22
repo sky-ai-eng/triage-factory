@@ -228,6 +228,20 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			DefaultBranch: defaultBranch,
 		}
 
+		// A repo with no docs is fully inspected by this fetch — there's
+		// nothing to send to the LLM, so stamp profiled_at now to gate it
+		// behind the TTL. Without this, a docs-less repo has profiled_at=nil
+		// forever and gets all four files re-fetched every poll cycle (the
+		// profiler now runs per-cycle, not just on config change). Repos WITH
+		// docs are stamped in the batch path below — and only on a successful
+		// run, so a transient batch failure still retries next cycle
+		// (error ≠ absence, the TFAC-331 invariant).
+		docs := buildDocText(readme, claudeMd, agentsMd)
+		if docs == "" {
+			now := time.Now()
+			prof.ProfiledAt = &now
+		}
+
 		// Persist docs flags immediately so the UI can show them before profiling completes
 		if err := p.repos.UpsertSystem(ctx, orgID, prof); err != nil {
 			repoprofileLog.Error("upsert docs flags failed", "repo", name, "error", err)
@@ -247,7 +261,6 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			})
 		}
 
-		docs := buildDocText(readme, claudeMd, agentsMd)
 		if docs == "" {
 			withoutDocs = append(withoutDocs, prof)
 		} else {
@@ -299,8 +312,13 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			prof := d.profile
 			if text := byRepo[prof.ID]; text != "" {
 				prof.ProfileText = text
-				prof.ProfiledAt = &now
 			}
+			// Stamp on every successful batch result, even when the model
+			// returned empty text: the batch completing IS a finished
+			// inspection, so gate it behind the TTL. (A FAILED batch took the
+			// fallback path above, which leaves profiled_at unset so the repo
+			// retries next cycle — error ≠ absence.)
+			prof.ProfiledAt = &now
 			if err := p.repos.UpsertSystem(ctx, orgID, prof); err != nil {
 				repoprofileLog.Error("upsert profile failed", "repo", prof.ID, "error", err)
 				continue

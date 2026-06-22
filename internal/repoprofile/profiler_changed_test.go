@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -127,6 +128,8 @@ type batchRepoStore struct {
 	names      []string
 	failUpsert func(call int) bool
 	calls      atomic.Int64
+	mu         sync.Mutex
+	last       map[string]domain.RepoProfile // last upsert per id (nil-safe via lazy init)
 }
 
 func (s *batchRepoStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
@@ -137,12 +140,56 @@ func (s *batchRepoStore) GetSystem(context.Context, string, string) (*domain.Rep
 	return nil, nil
 }
 
-func (s *batchRepoStore) UpsertSystem(context.Context, string, domain.RepoProfile) error {
+func (s *batchRepoStore) UpsertSystem(_ context.Context, _ string, p domain.RepoProfile) error {
 	n := int(s.calls.Add(1))
 	if s.failUpsert != nil && s.failUpsert(n) {
 		return errUpsertDown
 	}
+	s.mu.Lock()
+	if s.last == nil {
+		s.last = map[string]domain.RepoProfile{}
+	}
+	s.last[p.ID] = p
+	s.mu.Unlock()
 	return nil
+}
+
+// TestRunOrg_BatchFailLeavesProfiledAtUnset pins that a transient batch
+// (LLM) failure does NOT stamp profiled_at: the fallback upsert writes the
+// row so the UI sees the docs flags, but leaves profiled_at nil so the next
+// cycle retries the profiling — error ≠ absence (the TFAC-331 invariant).
+func TestRunOrg_BatchFailLeavesProfiledAtUnset(t *testing.T) {
+	readmeBody := `{"content":"` + base64.StdEncoding.EncodeToString([]byte("# readme")) + `","encoding":"base64"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/contents/README.md"):
+			_, _ = w.Write([]byte(readmeBody))
+		case strings.Contains(r.URL.Path, "/contents/"):
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			_, _ = w.Write([]byte(`{"default_branch":"main","clone_url":"https://x/own/withdocs.git"}`))
+		}
+	}))
+	defer srv.Close()
+
+	repos := &batchRepoStore{names: []string{"own/withdocs"}}
+	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil)
+	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
+		return nil, stubErr("simulated batch failure")
+	}
+	if _, err := p.RunOrg(context.Background(), "org-1", true); err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+
+	repos.mu.Lock()
+	defer repos.mu.Unlock()
+	got, ok := repos.last["own/withdocs"]
+	if !ok {
+		t.Fatal("fallback did not upsert the row; want a row written without profiled_at")
+	}
+	if got.ProfiledAt != nil {
+		t.Errorf("profiled_at = %v after a batch failure; want nil (retry next cycle)", got.ProfiledAt)
+	}
 }
 
 // changeRepoStore serves a fixed configured-name list and lets the test make

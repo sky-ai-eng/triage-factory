@@ -87,6 +87,12 @@ func TestProfiler_FetchErrorLeavesRowUntouched(t *testing.T) {
 	if nodocs.DefaultBranch != "main" {
 		t.Errorf("404 repo default_branch = %q; want %q (from repo meta)", nodocs.DefaultBranch, "main")
 	}
+	// A successfully-inspected docs-less repo is stamped profiled_at so the
+	// TTL gate skips it next cycle instead of re-fetching all four files on
+	// every poll (the profiler runs per-cycle now, not just on config change).
+	if nodocs.ProfiledAt == nil {
+		t.Error("404 repo profiled_at is nil; want stamped so the TTL gate skips it next cycle")
+	}
 }
 
 // --- test doubles (distinct from profiler_perorg_test.go's fakes) ---
