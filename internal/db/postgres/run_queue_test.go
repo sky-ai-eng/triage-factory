@@ -178,6 +178,15 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	if _, err := h.AdminDB.Exec(`UPDATE runs SET status = 'running' WHERE id = $1`, orphanID); err != nil {
 		t.Fatalf("set orphan running: %v", err)
 	}
+	// A queued orphan under the same terminal parent (never claimed) must also
+	// be cancelled — a queued step under a non-running parent is never claimable.
+	queuedOrphanID := uuid.New().String()
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+		ID: queuedOrphanID, TaskID: taskA, PromptID: promptA, Model: "m",
+		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brA, BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("EnqueueRun queued orphan: %v", err)
+	}
 	if _, err := h.AdminDB.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = false WHERE id = $1`, brA); err != nil {
 		t.Fatalf("set parent cancelled: %v", err)
 	}
@@ -196,11 +205,14 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	}
 
 	n, err := stores.RunQueue.ReconcileOrphanedRuns(ctx)
-	if err != nil || n != 1 {
-		t.Fatalf("ReconcileOrphanedRuns = (%d, %v), want (1, nil)", n, err)
+	if err != nil || n != 2 {
+		t.Fatalf("ReconcileOrphanedRuns = (%d, %v), want (2, nil)", n, err)
 	}
 	if st, completed := pgRunStatus(t, h, orphanID); st != "cancelled" || !completed {
 		t.Errorf("orphan = (%q, completed=%v), want (cancelled, true)", st, completed)
+	}
+	if st, completed := pgRunStatus(t, h, queuedOrphanID); st != "cancelled" || !completed {
+		t.Errorf("queued orphan = (%q, completed=%v), want (cancelled, true)", st, completed)
 	}
 	if st, _ := pgRunStatus(t, h, healthyID); st != "running" {
 		t.Errorf("healthy run status = %q, want running (must not touch a child under a running parent)", st)

@@ -151,6 +151,14 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 			}
 			return brID
 		},
+		SetBlueprintRunStatus: func(t *testing.T, blueprintRunID, status string) {
+			t.Helper()
+			// Raw UPDATE — must NOT cascade onto child runs (unlike
+			// BlueprintStore.MarkRunStatus), so the parked child stays parked.
+			if _, err := conn.Exec(`UPDATE blueprint_runs SET status = ? WHERE id = ?`, status, blueprintRunID); err != nil {
+				t.Fatalf("set blueprint_run status: %v", err)
+			}
+		},
 		SetRunMemory: func(t *testing.T, runID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()

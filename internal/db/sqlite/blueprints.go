@@ -934,7 +934,7 @@ func cancelOrphanedChildRuns(ctx context.Context, q queryer, blueprintRunID stri
 		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
 		    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
 		WHERE blueprint_run_id = ?
-		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable')
+		  AND status NOT IN (`+runTerminalStatusesSQL+`)
 	`, time.Now().UTC(), "Cancelled: owning blueprint run reached a terminal state", blueprintRunID)
 	return err
 }

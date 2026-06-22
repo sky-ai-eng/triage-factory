@@ -62,6 +62,13 @@ type AgentRunSeeder struct {
 	// multi-run-per-task subtests realistic.
 	BlueprintRun func(t *testing.T, taskID string) string
 
+	// SetBlueprintRunStatus raw-updates a blueprint_run's status, WITHOUT
+	// touching its child runs (a plain UPDATE, not BlueprintStore.MarkRunStatus,
+	// which now cascades a terminal flip onto children). Used to stage the
+	// "parked run under an already-terminal parent" precondition the
+	// worktree-preserve filter must exclude.
+	SetBlueprintRunStatus func(t *testing.T, blueprintRunID, status string)
+
 	// StampAgentClaim sets the task's claimed_by_agent_id directly.
 	// Used to set up task-claim preconditions for claim-flip
 	// assertions.
@@ -724,6 +731,18 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if err := store.SetWorktreePath(ctx, orgID, running, "/tmp/triagefactory-runs/running"); err != nil {
 			t.Fatalf("set worktree (running): %v", err)
 		}
+		// open WITH a worktree but under an already-terminal blueprint_run →
+		// excluded: a parked run under a terminal parent is not resumable, so its
+		// worktree must not be preserved (else the boot reconcile orphans the row
+		// and leaves its checked-out branch on disk).
+		orphanTaskID := seed.Task(t, seed.Entity(t, "parked-orphan"), domain.EventGitHubPROpened,
+			seed.Event(t, seed.Entity(t, "parked-orphan-ev"), domain.EventGitHubPROpened))
+		orphanBR := seed.BlueprintRun(t, orphanTaskID)
+		orphan := seedAgentRunUnderBlueprintForTest(t, store, orgID, orphanTaskID, orphanBR, "open")
+		if err := store.SetWorktreePath(ctx, orgID, orphan, "/tmp/triagefactory-runs/orphan"); err != nil {
+			t.Fatalf("set worktree (orphan): %v", err)
+		}
+		seed.SetBlueprintRunStatus(t, orphanBR, "cancelled")
 
 		paths, err := store.ListParkedWorktreePaths(ctx, orgID)
 		if err != nil {
@@ -741,6 +760,9 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 		if got["/tmp/triagefactory-runs/running"] {
 			t.Error("running worktree leaked — status filter failed")
+		}
+		if got["/tmp/triagefactory-runs/orphan"] {
+			t.Error("parked worktree under a terminal blueprint_run leaked — running-parent filter failed")
 		}
 		if len(got) != 2 {
 			t.Errorf("got %d parked paths, want 2 (%v)", len(got), paths)
@@ -1134,6 +1156,22 @@ func seedAgentRunForTaskTest(t *testing.T, store db.AgentRunStore, orgID, taskID
 		BlueprintRunID: seed.BlueprintRun(t, taskID),
 	}); err != nil {
 		t.Fatalf("Create %s: %v", status, err)
+	}
+	return id
+}
+
+// seedAgentRunUnderBlueprintForTest creates a run on an existing task under a
+// caller-supplied blueprint_run id, rather than minting a fresh parent. Used by
+// the worktree-preserve subtest, which needs the run and the blueprint_run it
+// then terminates to be the same pair.
+func seedAgentRunUnderBlueprintForTest(t *testing.T, store db.AgentRunStore, orgID, taskID, blueprintRunID, status string) string {
+	t.Helper()
+	id := uuid.New().String()
+	if err := store.Create(context.Background(), orgID, domain.AgentRun{
+		ID: id, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: status, Model: "m",
+		BlueprintRunID: blueprintRunID,
+	}); err != nil {
+		t.Fatalf("Create %s under blueprint_run: %v", status, err)
 	}
 	return id
 }

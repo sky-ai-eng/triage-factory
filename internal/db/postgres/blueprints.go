@@ -929,18 +929,23 @@ func markBlueprintRunStatus(ctx context.Context, q queryer, orgID, id string, st
 	if abortedAtStep != nil {
 		stepArg = *abortedAtStep
 	}
-	// Flip the blueprint_run terminal AND cancel any still-active child
-	// run in one transaction so a terminal parent can never be observed (or
-	// committed) alongside a live child. inTx composes with the caller's tx when
-	// markBlueprintRunStatus runs inside a SyntheticClaims tx (manual/app path)
-	// and opens a fresh one on the bare admin handle (event/system path) — either
-	// way the two writes are all-or-nothing. The admin pool bypasses RLS; the app
-	// pool passes runs_update for the team member who owns the blueprint, and
-	// RLS-filtered rows degrade to the boot reconcile backstop rather than
-	// erroring. Without this a cancel that raced the dispatcher's claim/setup
-	// window — or a parked open/pending_approval step the sequence-cancel path
-	// skips — would strand a child 'running', keeping the dispatcher on phantom
-	// work and pinning its feature branch in a worktree, requeuing forever.
+	// Flip the blueprint_run terminal AND cancel any still-active child run in
+	// one transaction, so the two writes commit together — a terminal parent is
+	// never committed alongside a live child. inTx composes with the caller's tx
+	// when markBlueprintRunStatus runs inside a SyntheticClaims tx (manual/app
+	// path) and opens a fresh one on the bare admin handle (event/system path).
+	//
+	// RLS scope: the admin pool bypasses RLS; on the app pool the child-cancel
+	// runs under the caller's claims, but a blueprint's child steps share its
+	// team, so runs_update admits them — the cancel covers every child the parent
+	// flip's actor owns. The narrow residual is a child the caller somehow can't
+	// see under RLS: it stays non-terminal (not an error — RLS filters the row,
+	// it doesn't fail), and the admin-pool boot reconcile is the backstop that
+	// heals it. Without this whole guard a cancel that raced the dispatcher's
+	// claim/setup window — or a parked open/pending_approval step the
+	// sequence-cancel path skips — would strand a child 'running', keeping the
+	// dispatcher on phantom work and pinning its feature branch in a worktree,
+	// requeuing forever.
 	var changed bool
 	err := inTx(ctx, q, func(tx queryer) error {
 		res, err := tx.ExecContext(ctx, `
@@ -983,7 +988,7 @@ func cancelOrphanedChildRuns(ctx context.Context, q queryer, orgID, blueprintRun
 		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
 		    result_summary = COALESCE(NULLIF(result_summary, ''), $3)
 		WHERE org_id = $1 AND blueprint_run_id = $2
-		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable')
+		  AND status NOT IN (`+runTerminalStatusesSQL+`)
 	`, orgID, blueprintRunID, "Cancelled: owning blueprint run reached a terminal state")
 	return err
 }

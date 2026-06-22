@@ -165,6 +165,16 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 		t.Fatalf("set br A cancelled: %v", err)
 	}
 
+	// A second orphan that never started: queued child under the same terminal
+	// parent (the parent went terminal before the step was claimed). Must also be
+	// cancelled — a queued step under a non-running parent is never claimable.
+	if err := stores.AgentRuns.Create(ctx, org, domain.AgentRun{
+		ID: "ra-child-queued", TaskID: taskA.ID, PromptID: "ra-p0", Status: "queued",
+		Model: "claude-sonnet-4-6", BlueprintRunID: brA, BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("create queued child A: %v", err)
+	}
+
 	// Healthy: running blueprint_run, child running — must be left alone.
 	taskB := seedEntityEventTask(t, conn, "recon-b")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rb-p0", Name: "p0", Body: "b", Source: "user"})
@@ -193,11 +203,14 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReconcileOrphanedRuns: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("reconciled count = %d, want 1 (only the orphan under the terminal parent)", n)
+	if n != 2 {
+		t.Errorf("reconciled count = %d, want 2 (running + queued orphans under the terminal parent)", n)
 	}
 	if got := childRunStatusDB(t, conn, "ra-child"); got != "cancelled" {
 		t.Errorf("orphan child status = %q, want cancelled", got)
+	}
+	if got := childRunStatusDB(t, conn, "ra-child-queued"); got != "cancelled" {
+		t.Errorf("queued orphan child status = %q, want cancelled", got)
 	}
 	if got := childRunStatusDB(t, conn, "rb-child"); got != "running" {
 		t.Errorf("healthy child status = %q, want running (must not touch children under a running parent)", got)
