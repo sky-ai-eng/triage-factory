@@ -33,7 +33,11 @@ type ExtensionAPI interface {
 	APIMutating(pattern string, h http.HandlerFunc)
 	// Raw mounts a handler with no session/CSRF wrap — for pre-auth routes
 	// that run before any session exists (their handler is responsible for
-	// its own authorization).
+	// its own authorization). NOTE: TestRoutesCoverage only parses routes() in
+	// server.go, so routes mounted here are invisible to it — use Raw ONLY for
+	// pre-auth / self-authorizing handlers; a session-gated route must go
+	// through API/APIMutating so the session+CSRF wrap (and the coverage guard)
+	// apply.
 	Raw(pattern string, h http.Handler)
 	// PreAuthRateLimit wraps a handler in the per-IP pre-auth token bucket
 	// (no-op in local mode), for anonymous-reachable routes.

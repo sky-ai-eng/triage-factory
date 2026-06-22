@@ -20,21 +20,21 @@ type Resolver interface {
 	LookupTXT(ctx context.Context, name string) ([]string, error)
 }
 
-var override atomic.Value // stores Resolver
+// override always holds a resolverHolder, never a bare Resolver interface:
+// atomic.Value panics both on a nil value and on two differently-typed values
+// over its lifetime, and the stored Resolver's dynamic type varies (or is nil
+// when cleared). Wrapping in a fixed struct type sidesteps both.
+var override atomic.Value // stores resolverHolder
+
+type resolverHolder struct{ r Resolver }
 
 // Set installs a test override resolver (or clears it with nil). Safe for
 // concurrent use; intended for tests only.
-func Set(r Resolver) {
-	if r == nil {
-		override.Store((Resolver)(nil))
-		return
-	}
-	override.Store(r)
-}
+func Set(r Resolver) { override.Store(resolverHolder{r: r}) }
 
 // Get returns the installed override, or nil when none is set (the production
 // case — callers fall back to their real resolver).
 func Get() Resolver {
-	r, _ := override.Load().(Resolver)
-	return r
+	h, _ := override.Load().(resolverHolder)
+	return h.r
 }

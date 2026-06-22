@@ -40,7 +40,10 @@ type Claims struct {
 	Issuer string `json:"iss,omitempty"`
 }
 
-// Has reports whether the license lists the given feature key.
+// Has reports whether the license lists the given feature key. Matching is
+// exact and case-sensitive: feature ids are stable lower-case wire identifiers
+// (see entitlements.Feature), so the issuing tool must emit them lower-case —
+// "SSO" would silently not match "sso".
 func (c Claims) Has(feature string) bool {
 	for _, f := range c.Features {
 		if f == feature {

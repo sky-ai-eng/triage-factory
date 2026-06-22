@@ -51,7 +51,10 @@ func Install() {
 		return
 	}
 	entitlements.Register(grant{claims})
-	fmt.Printf("Enterprise license: %s (features: %v) valid until %s\n",
+	// Startup diagnostic → stderr (like the failure paths above), so it doesn't
+	// land in the stdout log stream or leak the org/feature list into structured
+	// stdout logging.
+	fmt.Fprintf(os.Stderr, "Enterprise license: %s (features: %v) valid until %s\n",
 		claims.Org, claims.Features, claims.ExpiresAt().Format(time.DateOnly))
 }
 

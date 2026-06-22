@@ -38,6 +38,11 @@ type LoginExtension interface {
 	//   - JIT: an SSO login is provisioned into its provider's org, returned
 	//     as activeOrg so core defaults the new session there.
 	// done=true means the hook wrote the response and core must return.
+	//
+	// Response-writing contract (avoid a double write): EITHER write the
+	// response and return done=true, err=nil (the enforcement-reject path), OR
+	// return err!=nil and write NOTHING — core renders the 500 (the JIT-failure
+	// path). Never both. (activeOrg is only honored when done=false, err=nil.)
 	OnLoginResolved(w http.ResponseWriter, r *http.Request, in LoginResolved) (activeOrg uuid.NullUUID, done bool, err error)
 }
 
