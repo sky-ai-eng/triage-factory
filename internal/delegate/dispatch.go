@@ -97,6 +97,24 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	if n > 0 {
 		dispatchLog.Info("boot reconcile: re-queued in-flight runs stranded by a crash", "count", n)
 	}
+
+	// TFAC-441: mirror sweep for the opposite desync — child runs left
+	// non-terminal under an already-terminal blueprint_run. ResetProcessingRuns
+	// above only requeues under a *running* parent, so these orphans are
+	// invisible to it; left alone, a 'running' orphan keeps the dispatcher on
+	// phantom work and pins its feature branch in a worktree, requeuing any
+	// sibling fetch forever. Cancel them so the row stops looking live (the
+	// worktree.Cleanup sweep already reclaimed the on-disk dir for non-parked
+	// runs). The atomic cancel in MarkRunStatus prevents new desyncs; this heals
+	// rows broken before that landed.
+	c, err := s.runQueue.ReconcileOrphanedRuns(ctx)
+	if err != nil {
+		dispatchLog.Error("boot reconcile: cancel orphaned child runs failed", "error", err)
+		return
+	}
+	if c > 0 {
+		dispatchLog.Info("boot reconcile: cancelled child runs orphaned under a terminal blueprint_run", "count", c)
+	}
 }
 
 // drainRunQueue claims queued runs and hands each to a goroutine, bounded by

@@ -117,6 +117,34 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
 	return int(n), nil
 }
 
+func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) {
+	// TFAC-441 boot self-heal: cancel child runs left non-terminal under a
+	// blueprint_run that is already terminal. This is the mirror of
+	// ResetProcessingRuns (which requeues active runs under a *running* parent):
+	// a child alive under a terminal parent will never be claimed (ClaimNextRun
+	// gates on a running parent) nor reset, so without this it sits 'running'
+	// forever — the dispatcher treats it as live work and its worktree pins the
+	// feature branch, requeuing any sibling fetch into a forever-failing loop.
+	// Heals DBs broken before the atomic cancel in MarkRunStatus landed.
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'cancelled',
+		    completed_at = COALESCE(completed_at, ?),
+		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
+		    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
+		WHERE status NOT IN ('completed','failed','cancelled','task_unsolvable')
+		  AND blueprint_run_id IN (
+		      SELECT id FROM blueprint_runs
+		      WHERE status IN ('completed','aborted','failed','cancelled')
+		  )
+	`, time.Now().UTC(), "Cancelled: owning blueprint run reached a terminal state")
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // scanSqliteClaimedRun scans a claimed runs row into *domain.AgentRun.
 // (nil, nil) on sql.ErrNoRows so callers treat "nothing claimable" as a
 // non-error empty result.

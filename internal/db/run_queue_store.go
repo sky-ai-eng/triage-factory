@@ -68,4 +68,18 @@ type RunQueueStore interface {
 	// eventually fails out rather than crash-looping the boot. Cross-org system
 	// sweep; returns the count reset.
 	ResetProcessingRuns(ctx context.Context) (int, error)
+
+	// ReconcileOrphanedRuns is the boot self-heal mirror of ResetProcessingRuns
+	// (TFAC-441): every child run left non-terminal (queued/claimed/running/
+	// open/pending_approval/...) under a blueprint_run that is already terminal
+	// (completed/aborted/failed/cancelled) is flipped to 'cancelled' with a
+	// completed_at stamp. Such a child is unreachable by the dispatcher —
+	// ClaimNextRun only claims under a running parent, and ResetProcessingRuns
+	// only requeues under a running parent — so it would otherwise sit 'running'
+	// forever, keeping the dispatcher on phantom work and pinning its feature
+	// branch in a worktree (any sibling fetch then requeues forever). The atomic
+	// cancel in BlueprintStore.MarkRunStatus prevents the desync going forward;
+	// this heals rows already broken at boot. Cross-org system sweep; returns the
+	// count cancelled.
+	ReconcileOrphanedRuns(ctx context.Context) (int, error)
 }

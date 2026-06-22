@@ -19,6 +19,24 @@ const (
 	BlueprintRunStatusCancelled BlueprintRunStatus = "cancelled"
 )
 
+// Terminal reports whether the status is an end state (no further steps will
+// run). A terminal blueprint_run must hold zero non-terminal child runs — the
+// invariant the cancellation path and the boot reconcile enforce (TFAC-441): a
+// child left 'running' under a cancelled/completed parent strands the
+// dispatcher on phantom work and pins a worktree's branch, requeuing forever.
+// 'aborted' is terminal but message-resumable (ReopenRunForResume flips it back
+// to running); its retained child is 'completed', itself terminal, so the
+// invariant holds.
+func (s BlueprintRunStatus) Terminal() bool {
+	switch s {
+	case BlueprintRunStatusCompleted, BlueprintRunStatusAborted,
+		BlueprintRunStatusFailed, BlueprintRunStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
 // BlueprintTriggerType distinguishes how a blueprint run was initiated.
 type BlueprintTriggerType string
 

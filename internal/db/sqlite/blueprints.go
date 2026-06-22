@@ -891,7 +891,39 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	if err != nil {
 		return false, err
 	}
+	// TFAC-441: a terminal blueprint_run must leave no non-terminal child run
+	// behind. Cancel any still-active step run atomically with the parent's
+	// terminal flip so a cancel that raced the dispatcher's claim/setup window
+	// (or a parked open/pending_approval step the sequence-cancel path skips)
+	// can't strand a child 'running' — which keeps the dispatcher treating it as
+	// live work and pins its feature branch in a worktree, requeuing forever.
+	// Only on a real transition (n > 0) and a terminal target; a no-op flip or a
+	// non-terminal target leaves children alone. In the common terminate paths
+	// the triggering step is already terminal, so this is a guard that fires only
+	// on the race.
+	if n > 0 && status.Terminal() {
+		if err := cancelOrphanedChildRuns(ctx, s.q, id); err != nil {
+			return false, err
+		}
+	}
 	return n > 0, nil
+}
+
+// cancelOrphanedChildRuns marks every non-terminal child run of blueprintRunID
+// 'cancelled' (stamping completed_at). Shared by MarkRunStatus's atomic flip and
+// the boot reconcile; the terminal-status filter is the canonical run terminal
+// set used across the agentrun store.
+func cancelOrphanedChildRuns(ctx context.Context, q queryer, blueprintRunID string) error {
+	_, err := q.ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'cancelled',
+		    completed_at = COALESCE(completed_at, ?),
+		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
+		    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
+		WHERE blueprint_run_id = ?
+		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable')
+	`, time.Now().UTC(), "Cancelled: owning blueprint run reached a terminal state", blueprintRunID)
+	return err
 }
 
 func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id string) (bool, error) {

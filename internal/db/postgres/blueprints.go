@@ -942,7 +942,40 @@ func markBlueprintRunStatus(ctx context.Context, q queryer, orgID, id string, st
 	if err != nil {
 		return false, err
 	}
+	// TFAC-441: a terminal blueprint_run must leave no non-terminal child run
+	// behind. Cancel any still-active step run atomically with the parent's
+	// terminal flip (same pool/tx as the parent write) so a cancel that raced the
+	// dispatcher's claim/setup window — or a parked open/pending_approval step the
+	// sequence-cancel path skips — can't strand a child 'running', which keeps the
+	// dispatcher on phantom work and pins its feature branch in a worktree,
+	// requeuing forever. Only on a real transition to a terminal target. Runs on
+	// the same queryer: the admin pool (event blueprints) bypasses RLS; the app
+	// pool (manual blueprints) passes runs_update for the team member who owns the
+	// blueprint, and RLS-filtered rows degrade to the boot reconcile backstop
+	// rather than erroring.
+	if n > 0 && status.Terminal() {
+		if err := cancelOrphanedChildRuns(ctx, q, orgID, id); err != nil {
+			return false, err
+		}
+	}
 	return n > 0, nil
+}
+
+// cancelOrphanedChildRuns marks every non-terminal child run of blueprintRunID
+// 'cancelled' (stamping completed_at). Shared by markBlueprintRunStatus's atomic
+// flip and the boot reconcile; the terminal-status filter is the canonical run
+// terminal set used across the agentrun store.
+func cancelOrphanedChildRuns(ctx context.Context, q queryer, orgID, blueprintRunID string) error {
+	_, err := q.ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'cancelled',
+		    completed_at = COALESCE(completed_at, now()),
+		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
+		    result_summary = COALESCE(NULLIF(result_summary, ''), $3)
+		WHERE org_id = $1 AND blueprint_run_id = $2
+		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable')
+	`, orgID, blueprintRunID, "Cancelled: owning blueprint run reached a terminal state")
+	return err
 }
 
 func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id string) (bool, error) {

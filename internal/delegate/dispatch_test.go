@@ -104,6 +104,31 @@ func queuedStepRuns(t *testing.T, database *sql.DB, brID string) []int {
 	return out
 }
 
+// TestReconcileRunQueue_CancelsOrphanUnderTerminalBlueprint is the TFAC-441
+// boot-reconcile integration check: a child run left 'running' under an
+// already-terminal blueprint_run (the desync) must be cancelled by the boot
+// sweep, so the dispatcher stops treating it as live work and its feature
+// branch is no longer pinned in a worktree.
+func TestReconcileRunQueue_CancelsOrphanUnderTerminalBlueprint(t *testing.T) {
+	s, database, brID, _, run0 := reactorFixture(t, "recon-orphan", 1, "running", "")
+
+	// Force the desync directly, mimicking a DB broken before the atomic cancel
+	// in MarkRunStatus landed: terminal parent, child still running.
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = 0 WHERE id = ?`, brID); err != nil {
+		t.Fatalf("force blueprint cancelled: %v", err)
+	}
+
+	s.reconcileRunQueue(context.Background())
+
+	var status string
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id = ?`, run0).Scan(&status); err != nil {
+		t.Fatalf("read child status: %v", err)
+	}
+	if status != "cancelled" {
+		t.Errorf("orphan child status = %q, want cancelled after boot reconcile", status)
+	}
+}
+
 // TestReactor_AdvanceEnqueuesNextStep: a non-final step that completes with
 // 'continue' enqueues the next step and bumps current_step_index, leaving the
 // blueprint running.

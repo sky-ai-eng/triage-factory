@@ -129,6 +129,29 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
 	return int(n), nil
 }
 
+func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) {
+	// TFAC-441 boot self-heal — see RunQueueStore.ReconcileOrphanedRuns and the
+	// SQLite mirror. Admin pool (BYPASSRLS): a cross-org system sweep with no
+	// per-user identity, the same posture as ResetProcessingRuns.
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'cancelled',
+		    completed_at = COALESCE(completed_at, now()),
+		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
+		    result_summary = COALESCE(NULLIF(result_summary, ''), $1)
+		WHERE status NOT IN ('completed','failed','cancelled','task_unsolvable')
+		  AND blueprint_run_id IN (
+		      SELECT id FROM blueprint_runs
+		      WHERE status IN ('completed','aborted','failed','cancelled')
+		  )
+	`, "Cancelled: owning blueprint run reached a terminal state")
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 func scanPgClaimedRun(row *sql.Row) (*domain.AgentRun, error) {
 	var (
 		r       domain.AgentRun
