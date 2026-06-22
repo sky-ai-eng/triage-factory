@@ -424,11 +424,15 @@ func (c *Client) GetClaimState(ctx context.Context, issueKey string) *ClaimState
 	if issue.Fields.Assignee == nil {
 		state.Unassigned = true
 	} else {
-		if myself.AccountID != "" {
-			state.AssignedToSelf = issue.Fields.Assignee.AccountID == myself.AccountID
-		} else {
-			state.AssignedToSelf = issue.Fields.Assignee.Name == myself.Name
-		}
+		// Compare via the shared stable-id precedence (accountId → key → name)
+		// so "assigned to me" agrees with the identity the router and
+		// user_jira_identities key on. Both operands come from the same live
+		// instance here, but deriving them identically keeps this in lockstep
+		// with StableID() and the snapshot path — no field can be preferred on
+		// one side and not the other.
+		self := StableUserID(myself.AccountID, myself.Key, myself.Name)
+		assignee := StableUserID(issue.Fields.Assignee.AccountID, issue.Fields.Assignee.Key, issue.Fields.Assignee.Name)
+		state.AssignedToSelf = self != "" && self == assignee
 	}
 	return state
 }
@@ -858,8 +862,32 @@ func (c *Client) epicLinkField(ctx context.Context) (string, error) {
 // --- internal helpers ---
 
 type currentUserResponse struct {
-	Name      string `json:"name"`      // Jira Server/DC
+	Name      string `json:"name"`      // Jira Server/DC username
+	Key       string `json:"key"`       // Jira Server/DC internal user key
 	AccountID string `json:"accountId"` // Jira Cloud
+}
+
+// StableUserID returns the deployment-appropriate stable identifier for a Jira
+// user, with a single precedence shared by every surface that derives one:
+// accountId (Jira Cloud) → key (Jira Server/DC internal user key, e.g.
+// JIRAUSER12345) → name (the mutable username, often an email, last resort).
+//
+// This is the ONE source of truth for that precedence. auth.JiraUser.StableID()
+// (what writes user_jira_identities.account_id at bind time), the snapshot
+// derivation in internal/tracker (what writes events.assignee_account_id), and
+// the claim guard below all route through it, so the value the router joins on
+// (assignee-centric owner routing) can never drift from the identity it's
+// matched against. A name-only fallback while the stored identity holds the key
+// silently broke that join on Server/DC — events landed, no task was created.
+func StableUserID(accountID, key, name string) string {
+	switch {
+	case accountID != "":
+		return accountID
+	case key != "":
+		return key
+	default:
+		return name
+	}
 }
 
 // currentUser resolves and caches the authenticated user's identity

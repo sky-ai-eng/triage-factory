@@ -76,11 +76,11 @@ type JiraUser struct {
 // Jira user — accountId on Cloud, falling back to the legacy key on
 // Server / DC. This is the value persisted to user_jira_identities.account_id
 // (host-scoped, SKY-397) and the value predicate matchers compare against.
+// It routes through jira.StableUserID — the one source of truth for this
+// precedence — so the bound identity, the polled snapshot, and the claim
+// guard can never derive a different id for the same user.
 func (u JiraUser) StableID() string {
-	if u.AccountID != "" {
-		return u.AccountID
-	}
-	return u.Key
+	return jira.StableUserID(u.AccountID, u.Key, "")
 }
 
 // ValidateGitHub checks the PAT against the GitHub API and returns the user info.

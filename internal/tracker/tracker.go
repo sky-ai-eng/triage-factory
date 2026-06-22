@@ -927,26 +927,18 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string)
 	}
 	if issue.Fields.Assignee != nil {
 		snap.Assignee = issue.Fields.Assignee.DisplayName
-		// Derive the stable account id with the SAME precedence as
-		// auth.JiraUser.StableID() — accountId (Jira Cloud), then key
-		// (Jira Server/DC internal user key, e.g. JIRAUSER12345). This
-		// MUST match StableID() because the two are compared across stores:
-		// user_jira_identities.account_id is written from StableID() at bind
-		// time, and assignee-centric routing (internal/routing assigneeTeams)
-		// joins the event's assignee_account_id against it to resolve the
-		// owning team. Falling back to Name (the mutable username, often an
-		// email on DC) here while StableID() falls back to key silently broke
-		// that join on Server/DC — the event carried the username, the
-		// identity row held the key, so no task was ever created. Name is the
-		// last resort only when neither stable id is present.
-		switch {
-		case issue.Fields.Assignee.AccountID != "":
-			snap.AssigneeAccountID = issue.Fields.Assignee.AccountID
-		case issue.Fields.Assignee.Key != "":
-			snap.AssigneeAccountID = issue.Fields.Assignee.Key
-		default:
-			snap.AssigneeAccountID = issue.Fields.Assignee.Name
-		}
+		// Derive the stable account id through the shared precedence
+		// (accountId → key → name). This MUST agree with the identity stored
+		// in user_jira_identities (also via jira.StableUserID, through
+		// auth.JiraUser.StableID): assignee-centric routing joins this event's
+		// assignee_account_id against that row to resolve the owning team. A
+		// name-only fallback here while the identity held the Server/DC key
+		// silently broke the join — events landed, no task was created.
+		snap.AssigneeAccountID = jiraclient.StableUserID(
+			issue.Fields.Assignee.AccountID,
+			issue.Fields.Assignee.Key,
+			issue.Fields.Assignee.Name,
+		)
 	}
 	if issue.Fields.Priority != nil {
 		snap.Priority = issue.Fields.Priority.Name

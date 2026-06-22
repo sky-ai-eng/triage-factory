@@ -315,3 +315,28 @@ func TestCurrentUserFetchedOnceConcurrently(t *testing.T) {
 		t.Errorf("/myself fetched %d times, want exactly 1 (cached after first)", n)
 	}
 }
+
+// TestStableUserID locks the single precedence every Jira identity surface
+// shares: accountId (Cloud) → key (Server/DC internal user key) → name. The
+// key-over-name fallback is the regression guard — a snapshot that derived the
+// mutable username while the bound identity held the key silently broke
+// assignee-centric routing on Server/DC.
+func TestStableUserID(t *testing.T) {
+	cases := []struct {
+		desc                 string
+		accountID, key, name string
+		want                 string
+	}{
+		{"cloud prefers accountId", "557058:abc", "JIRAUSER10100", "aidan", "557058:abc"},
+		{"server/dc prefers key over name", "", "JIRAUSER10100", "aidan.allchin@corp.com", "JIRAUSER10100"},
+		{"name is the last resort", "", "", "aidan.allchin@corp.com", "aidan.allchin@corp.com"},
+		{"all empty stays empty", "", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			if got := StableUserID(tc.accountID, tc.key, tc.name); got != tc.want {
+				t.Errorf("StableUserID(%q,%q,%q) = %q, want %q", tc.accountID, tc.key, tc.name, got, tc.want)
+			}
+		})
+	}
+}
