@@ -19,10 +19,9 @@ import (
 // The endpoint is pre-login (no session), so these requests carry no sid; the
 // admin-pool GetVerifiedByDomain read is what the rig exercises end-to-end.
 
-// ssoDiscoverResponse / ssoStartURL moved to ee/sso with the handler. These
-// integration tests assert against the wire shape the ee endpoint emits and
-// depend on the package-server authRig harness, so they keep faithful local
-// copies rather than importing ee.
+// ssoDiscoverResponse / ssoStartURL mirror the wire shape the ee discover
+// endpoint emits; these black-box tests assert against the JSON and decode into
+// local copies rather than reaching for ee/sso's unexported view types.
 type ssoDiscoverResponse struct {
 	SSO      bool   `json:"sso"`
 	StartURL string `json:"start_url,omitempty"`

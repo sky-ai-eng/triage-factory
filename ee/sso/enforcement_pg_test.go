@@ -298,7 +298,7 @@ func TestSSOEnforcement_ToggleGating(t *testing.T) {
 	sid := r.signInAs(owner)
 
 	enforce := func(v bool) *http.Response {
-		return doInviteReq(r, http.MethodPatch, "/api/sso/connection/enforcement", sid,
+		return doReq(r, http.MethodPatch, "/api/sso/connection/enforcement", sid,
 			map[string]bool{"enforced": v})
 	}
 
@@ -339,7 +339,7 @@ func TestSSOEnforcement_ToggleRequiresEnabled(t *testing.T) {
 	r.markConnectionTested(providerID)
 	sid := r.signInAs(owner)
 
-	resp := doInviteReq(r, http.MethodPatch, "/api/sso/connection/enforcement", sid,
+	resp := doReq(r, http.MethodPatch, "/api/sso/connection/enforcement", sid,
 		map[string]bool{"enforced": true})
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("disabled-connection enforce status=%d, want 409 (body=%s)", resp.StatusCode, readBody(resp))
@@ -362,7 +362,7 @@ func TestBreakGlass_CantRemoveLastWhileEnforced(t *testing.T) {
 	sid := r.signInAs(owner)
 
 	// Removing the last one while enforced is refused.
-	resp := doInviteReq(r, http.MethodDelete, "/api/sso/break-glass/"+owner.String(), sid, nil)
+	resp := doReq(r, http.MethodDelete, "/api/sso/break-glass/"+owner.String(), sid, nil)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("remove-last-while-enforced status=%d, want 409 (body=%s)", resp.StatusCode, readBody(resp))
 	}
@@ -372,7 +372,7 @@ func TestBreakGlass_CantRemoveLastWhileEnforced(t *testing.T) {
 
 	// Un-enforce, then the same removal succeeds.
 	r.setConnectionEnforced(providerID, false)
-	resp2 := doInviteReq(r, http.MethodDelete, "/api/sso/break-glass/"+owner.String(), sid, nil)
+	resp2 := doReq(r, http.MethodDelete, "/api/sso/break-glass/"+owner.String(), sid, nil)
 	if resp2.StatusCode != http.StatusNoContent {
 		t.Fatalf("remove-after-unenforce status=%d, want 204 (body=%s)", resp2.StatusCode, readBody(resp2))
 	}
@@ -403,7 +403,7 @@ func TestBreakGlass_AddByEmailAndRemove(t *testing.T) {
 		t.Fatalf("seed member: %v", err)
 	}
 
-	resp := doInviteReq(r, http.MethodPost, "/api/sso/break-glass", sid,
+	resp := doReq(r, http.MethodPost, "/api/sso/break-glass", sid,
 		map[string]string{"email": member.String() + "@test"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("add status=%d, want 200 (body=%s)", resp.StatusCode, readBody(resp))
@@ -430,7 +430,7 @@ func TestBreakGlass_AddByEmailAndRemove(t *testing.T) {
 	}
 
 	// Now removing the added member is fine (owner is still break-glass).
-	resp2 := doInviteReq(r, http.MethodDelete, "/api/sso/break-glass/"+member.String(), sid, nil)
+	resp2 := doReq(r, http.MethodDelete, "/api/sso/break-glass/"+member.String(), sid, nil)
 	if resp2.StatusCode != http.StatusNoContent {
 		t.Fatalf("remove status=%d, want 204 (body=%s)", resp2.StatusCode, readBody(resp2))
 	}
@@ -448,7 +448,7 @@ func TestBreakGlass_AddUnknownEmail404(t *testing.T) {
 	r.seedSSOConnection(orgA, providerID, "member", true)
 	sid := r.signInAs(owner)
 
-	resp := doInviteReq(r, http.MethodPost, "/api/sso/break-glass", sid,
+	resp := doReq(r, http.MethodPost, "/api/sso/break-glass", sid,
 		map[string]string{"email": "nobody@elsewhere.example"})
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown-email add status=%d, want 404 (body=%s)", resp.StatusCode, readBody(resp))

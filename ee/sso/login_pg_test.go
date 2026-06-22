@@ -32,7 +32,7 @@ import (
 // (start → callback). The adversarial isolation test below proves TF ignores a
 // mismatched app_metadata provider in the JWT and keys only on its state.
 
-// ---------- SSO test helpers (extend the authRig in auth_handlers_test.go) ----------
+// ---------- SSO-login test helpers (build on the black-box rig in rig_test.go) ----------
 
 // seedSSOConnection inserts an sso_connections row binding providerID → orgID.
 // Mirrors what TFAC-424's handler writes after GoTrue registers the provider,

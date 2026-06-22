@@ -616,10 +616,9 @@ func (r *authRig) principalOf(authUserID uuid.UUID) uuid.UUID {
 
 // ---------- generic HTTP helpers ----------
 
-// doInviteReq fires a request with an optional sid cookie + a same-origin Origin
+// doReq fires a request with an optional sid cookie + a same-origin Origin
 // header (so mutating routes pass the CSRF check) and an optional JSON body.
-// (Name kept from the package-server harness for port fidelity.)
-func doInviteReq(r *authRig, method, path, sid string, body any) *http.Response {
+func doReq(r *authRig, method, path, sid string, body any) *http.Response {
 	r.t.Helper()
 	var rdr *strings.Reader
 	if body != nil {

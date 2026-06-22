@@ -17,9 +17,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// ssoDomainJSON / ssoTXTHost moved to ee/sso with the handler. These pgtest
-// integration tests depend on the package-server authRig harness, so they keep
-// faithful local copies of the wire shape the ee endpoint emits.
+// ssoDomainJSON / ssoTXTHost mirror the wire shape the ee domains endpoint
+// emits; these black-box tests decode into local copies rather than reaching
+// for ee/sso's unexported view types.
 type ssoDomainJSON struct {
 	ID         string     `json:"id"`
 	Domain     string     `json:"domain"`
@@ -67,7 +67,7 @@ func seedSSOConnForTest(t *testing.T, h *pgtest.Harness, orgID string) string {
 // the decoded body, and the raw text (for error messages).
 func ssoClaim(r *authRig, sid, domain string) (int, ssoDomainJSON, string) {
 	r.t.Helper()
-	resp := doInviteReq(r, http.MethodPost, "/api/sso/domains", sid, map[string]string{"domain": domain})
+	resp := doReq(r, http.MethodPost, "/api/sso/domains", sid, map[string]string{"domain": domain})
 	raw := readBody(resp)
 	var body ssoDomainJSON
 	_ = json.Unmarshal([]byte(raw), &body)
@@ -177,7 +177,7 @@ func TestSSODomainVerify_MatchAndMismatch(t *testing.T) {
 		ssoTXTHost("good.com"): {"some-other-record", good.TXTValue},
 	}})
 
-	vresp := doInviteReq(r, http.MethodPost, "/api/sso/domains/"+good.ID+"/verify", sid, nil)
+	vresp := doReq(r, http.MethodPost, "/api/sso/domains/"+good.ID+"/verify", sid, nil)
 	vraw := readBody(vresp)
 	if vresp.StatusCode != http.StatusOK {
 		t.Fatalf("verify good status = %d; want 200 (body=%s)", vresp.StatusCode, vraw)
@@ -196,7 +196,7 @@ func TestSSODomainVerify_MatchAndMismatch(t *testing.T) {
 	}
 
 	// missing.com → 409 retry, stays pending.
-	mresp := doInviteReq(r, http.MethodPost, "/api/sso/domains/"+missing.ID+"/verify", sid, nil)
+	mresp := doReq(r, http.MethodPost, "/api/sso/domains/"+missing.ID+"/verify", sid, nil)
 	mraw := readBody(mresp)
 	if mresp.StatusCode != http.StatusConflict {
 		t.Fatalf("verify missing status = %d; want 409 (body=%s)", mresp.StatusCode, mraw)
@@ -215,7 +215,7 @@ func TestSSODomainVerify_MatchAndMismatch(t *testing.T) {
 	// Re-verify good.com → idempotent 200 even with an empty resolver (the
 	// customer may have removed the TXT record by now).
 	dnsoverride.Set(&fakeTXTResolver{})
-	reresp := doInviteReq(r, http.MethodPost, "/api/sso/domains/"+good.ID+"/verify", sid, nil)
+	reresp := doReq(r, http.MethodPost, "/api/sso/domains/"+good.ID+"/verify", sid, nil)
 	if reresp.StatusCode != http.StatusOK {
 		t.Errorf("re-verify status = %d; want 200 idempotent (body=%s)", reresp.StatusCode, readBody(reresp))
 	}
@@ -237,7 +237,7 @@ func TestSSODomainVerify_ResolverError_RetryableConflict(t *testing.T) {
 	// Every lookup fails (resolver down), exercising the lookupErr != nil branch.
 	dnsoverride.Set(&fakeTXTResolver{err: errors.New("resolver unavailable")})
 
-	resp := doInviteReq(r, http.MethodPost, "/api/sso/domains/"+claim.ID+"/verify", sid, nil)
+	resp := doReq(r, http.MethodPost, "/api/sso/domains/"+claim.ID+"/verify", sid, nil)
 	raw := readBody(resp)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("verify status = %d; want 409 (resolver error); body=%s", resp.StatusCode, raw)
@@ -284,12 +284,12 @@ func TestSSODomainVerify_GlobalUniqueness_OpaqueConflict(t *testing.T) {
 		ssoTXTHost("shared.com"): {claimA.TXTValue, claimB.TXTValue},
 	}})
 
-	aResp := doInviteReq(r, http.MethodPost, "/api/sso/domains/"+claimA.ID+"/verify", sidA, nil)
+	aResp := doReq(r, http.MethodPost, "/api/sso/domains/"+claimA.ID+"/verify", sidA, nil)
 	if aResp.StatusCode != http.StatusOK {
 		t.Fatalf("orgA verify status = %d; want 200 (body=%s)", aResp.StatusCode, readBody(aResp))
 	}
 
-	bResp := doInviteReq(r, http.MethodPost, "/api/sso/domains/"+claimB.ID+"/verify", sidB, nil)
+	bResp := doReq(r, http.MethodPost, "/api/sso/domains/"+claimB.ID+"/verify", sidB, nil)
 	bRaw := readBody(bResp)
 	if bResp.StatusCode != http.StatusConflict {
 		t.Fatalf("orgB verify status = %d; want 409 (body=%s)", bResp.StatusCode, bRaw)
@@ -330,7 +330,7 @@ func TestSSODomainDelete_AndList(t *testing.T) {
 
 	_, claim, _ := ssoClaim(r, sid, "del.com")
 
-	lresp := doInviteReq(r, http.MethodGet, "/api/sso/domains", sid, nil)
+	lresp := doReq(r, http.MethodGet, "/api/sso/domains", sid, nil)
 	lraw := readBody(lresp)
 	if lresp.StatusCode != http.StatusOK {
 		t.Fatalf("list status = %d; want 200 (body=%s)", lresp.StatusCode, lraw)
@@ -343,7 +343,7 @@ func TestSSODomainDelete_AndList(t *testing.T) {
 		t.Fatalf("list = %+v; want one del.com entry", list)
 	}
 
-	dresp := doInviteReq(r, http.MethodDelete, "/api/sso/domains/"+claim.ID, sid, nil)
+	dresp := doReq(r, http.MethodDelete, "/api/sso/domains/"+claim.ID, sid, nil)
 	if dresp.StatusCode != http.StatusOK {
 		t.Fatalf("delete status = %d; want 200 (body=%s)", dresp.StatusCode, readBody(dresp))
 	}
@@ -355,7 +355,7 @@ func TestSSODomainDelete_AndList(t *testing.T) {
 		t.Errorf("rows after delete = %d; want 0", n)
 	}
 
-	d2 := doInviteReq(r, http.MethodDelete, "/api/sso/domains/"+claim.ID, sid, nil)
+	d2 := doReq(r, http.MethodDelete, "/api/sso/domains/"+claim.ID, sid, nil)
 	if d2.StatusCode != http.StatusNotFound {
 		t.Errorf("second delete status = %d; want 404 (already gone)", d2.StatusCode)
 	}
@@ -386,7 +386,7 @@ func TestSSODomainRoutes_NonAdmin404(t *testing.T) {
 		{http.MethodDelete, "/api/sso/domains/" + claim.ID, nil},
 	}
 	for _, tc := range cases {
-		resp := doInviteReq(r, tc.method, tc.path, sid, tc.body)
+		resp := doReq(r, tc.method, tc.path, sid, tc.body)
 		if resp.StatusCode != http.StatusNotFound {
 			t.Errorf("%s %s as member: status = %d; want 404 (non-disclosure); body=%s",
 				tc.method, tc.path, resp.StatusCode, readBody(resp))

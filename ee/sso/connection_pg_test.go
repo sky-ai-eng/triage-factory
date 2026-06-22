@@ -43,7 +43,7 @@ func TestSSOConnectionCreate_NoServiceToken_503(t *testing.T) {
 
 	t.Setenv(envServiceRoleToken, "") // override: token not configured
 
-	resp := doInviteReq(r, http.MethodPost, "/api/sso/connection", sid,
+	resp := doReq(r, http.MethodPost, "/api/sso/connection", sid,
 		map[string]string{"metadata_url": "https://idp/metadata.xml"})
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d; want 503 when service-role token unset (body=%s)", resp.StatusCode, readBody(resp))
@@ -63,7 +63,7 @@ func TestSSOConnectionCreate_HappyPath(t *testing.T) {
 	sid := r.signInAs(owner)
 
 	const metadataURL = "https://login.microsoftonline.com/tenant/federationmetadata.xml"
-	resp := doInviteReq(r, http.MethodPost, "/api/sso/connection", sid,
+	resp := doReq(r, http.MethodPost, "/api/sso/connection", sid,
 		map[string]string{"metadata_url": metadataURL})
 	raw := readBody(resp)
 	if resp.StatusCode != http.StatusCreated {
@@ -130,7 +130,7 @@ func TestSSOConnectionCreate_NonAdmin_404(t *testing.T) {
 	pgtest.AddOrgMember(t, r.h, member.String(), orgID.String(), teamID.String(), "member", "member")
 	sid := r.signInAs(member)
 
-	resp := doInviteReq(r, http.MethodPost, "/api/sso/connection", sid,
+	resp := doReq(r, http.MethodPost, "/api/sso/connection", sid,
 		map[string]string{"metadata_url": "https://idp/metadata.xml"})
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d; want 404 (non-admin); body=%s", resp.StatusCode, readBody(resp))
@@ -155,7 +155,7 @@ func TestSSOConnectionCreate_Idempotent(t *testing.T) {
 	orgID, _ := r.seedOrg(owner, "sso-idem")
 	sid := r.signInAs(owner)
 
-	first := doInviteReq(r, http.MethodPost, "/api/sso/connection", sid,
+	first := doReq(r, http.MethodPost, "/api/sso/connection", sid,
 		map[string]string{"metadata_url": "https://idp/metadata.xml"})
 	if first.StatusCode != http.StatusCreated {
 		t.Fatalf("first status = %d; want 201 (body=%s)", first.StatusCode, readBody(first))
@@ -165,7 +165,7 @@ func TestSSOConnectionCreate_Idempotent(t *testing.T) {
 
 	// A second call (even with a different metadata URL) is a no-op reuse:
 	// rotating the metadata is a deferred follow-up, so no 2nd provider.
-	second := doInviteReq(r, http.MethodPost, "/api/sso/connection", sid,
+	second := doReq(r, http.MethodPost, "/api/sso/connection", sid,
 		map[string]string{"metadata_url": "https://idp/metadata-changed.xml"})
 	raw := readBody(second)
 	if second.StatusCode != http.StatusOK {
@@ -199,13 +199,13 @@ func TestSSOConnectionUpdate_EnableDisable(t *testing.T) {
 	r.seedOrg(owner, "sso-toggle")
 	sid := r.signInAs(owner)
 
-	create := doInviteReq(r, http.MethodPost, "/api/sso/connection", sid,
+	create := doReq(r, http.MethodPost, "/api/sso/connection", sid,
 		map[string]string{"metadata_url": "https://idp/metadata.xml"})
 	if create.StatusCode != http.StatusCreated {
 		t.Fatalf("create status = %d (body=%s)", create.StatusCode, readBody(create))
 	}
 
-	dis := doInviteReq(r, http.MethodPatch, "/api/sso/connection", sid,
+	dis := doReq(r, http.MethodPatch, "/api/sso/connection", sid,
 		map[string]bool{"enabled": false})
 	raw := readBody(dis)
 	if dis.StatusCode != http.StatusOK {
@@ -220,7 +220,7 @@ func TestSSOConnectionUpdate_EnableDisable(t *testing.T) {
 		t.Errorf("disable changed default_role to %q; want member preserved", disBody.Connection.DefaultRole)
 	}
 
-	en := doInviteReq(r, http.MethodPatch, "/api/sso/connection", sid,
+	en := doReq(r, http.MethodPatch, "/api/sso/connection", sid,
 		map[string]bool{"enabled": true})
 	var enBody ssoConnectionResponse
 	_ = json.Unmarshal([]byte(readBody(en)), &enBody)
@@ -237,7 +237,7 @@ func TestSSOConnectionUpdate_NoConnection_404(t *testing.T) {
 	r.seedOrg(owner, "sso-patch-empty")
 	sid := r.signInAs(owner)
 
-	resp := doInviteReq(r, http.MethodPatch, "/api/sso/connection", sid,
+	resp := doReq(r, http.MethodPatch, "/api/sso/connection", sid,
 		map[string]bool{"enabled": false})
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d; want 404 (no connection)", resp.StatusCode)
@@ -256,7 +256,7 @@ func TestSSOConnectionGet_ReturnsSPValues(t *testing.T) {
 	wantACS := testPublicURL + "/auth/v1/sso/saml/acs"
 
 	// Before registration: SP values present, connection null.
-	pre := doInviteReq(r, http.MethodGet, "/api/sso/connection", sid, nil)
+	pre := doReq(r, http.MethodGet, "/api/sso/connection", sid, nil)
 	rawPre := readBody(pre)
 	if pre.StatusCode != http.StatusOK {
 		t.Fatalf("get(pre) status = %d (body=%s)", pre.StatusCode, rawPre)
@@ -276,9 +276,9 @@ func TestSSOConnectionGet_ReturnsSPValues(t *testing.T) {
 	}
 
 	// After registration: connection present, SP values unchanged.
-	doInviteReq(r, http.MethodPost, "/api/sso/connection", sid,
+	doReq(r, http.MethodPost, "/api/sso/connection", sid,
 		map[string]string{"metadata_url": "https://idp/metadata.xml"})
-	post := doInviteReq(r, http.MethodGet, "/api/sso/connection", sid, nil)
+	post := doReq(r, http.MethodGet, "/api/sso/connection", sid, nil)
 	var ab ssoConnectionResponse
 	_ = json.Unmarshal([]byte(readBody(post)), &ab)
 	if ab.Connection == nil {
@@ -303,7 +303,7 @@ func TestSSOConnectionGet_NoPublicURL_500(t *testing.T) {
 	r.seedOrg(owner, "sso-no-public-url")
 	sid := r.signInAs(owner)
 
-	resp := doInviteReq(r, http.MethodGet, "/api/sso/connection", sid, nil)
+	resp := doReq(r, http.MethodGet, "/api/sso/connection", sid, nil)
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status = %d; want 500 when public URL unconfigured (body=%s)", resp.StatusCode, readBody(resp))
 	}
@@ -325,7 +325,7 @@ func TestSSOConnectionCreate_NonHTTPSMetadata_400(t *testing.T) {
 		"ftp://idp/metadata.xml",
 		"not a url",
 	} {
-		resp := doInviteReq(r, http.MethodPost, "/api/sso/connection", sid,
+		resp := doReq(r, http.MethodPost, "/api/sso/connection", sid,
 			map[string]string{"metadata_url": bad})
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("metadata_url=%q: status = %d; want 400", bad, resp.StatusCode)
@@ -356,7 +356,7 @@ func TestSSOConnection_OrgIsolation(t *testing.T) {
 
 	// Org A registers a connection.
 	sidA := r.signInAs(ownerA)
-	if resp := doInviteReq(r, http.MethodPost, "/api/sso/connection", sidA,
+	if resp := doReq(r, http.MethodPost, "/api/sso/connection", sidA,
 		map[string]string{"metadata_url": "https://idp-a/metadata.xml"}); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("org A create status = %d (body=%s)", resp.StatusCode, readBody(resp))
 	}
@@ -364,7 +364,7 @@ func TestSSOConnection_OrgIsolation(t *testing.T) {
 	sidB := r.signInAs(ownerB)
 
 	// Org B's GET must not surface org A's connection (RLS-scoped read).
-	getB := doInviteReq(r, http.MethodGet, "/api/sso/connection", sidB, nil)
+	getB := doReq(r, http.MethodGet, "/api/sso/connection", sidB, nil)
 	if getB.StatusCode != http.StatusOK {
 		t.Fatalf("org B get status = %d (body=%s)", getB.StatusCode, readBody(getB))
 	}
@@ -375,7 +375,7 @@ func TestSSOConnection_OrgIsolation(t *testing.T) {
 	}
 
 	// Org B's PATCH finds no connection in its own org → 404; it cannot reach A.
-	if resp := doInviteReq(r, http.MethodPatch, "/api/sso/connection", sidB,
+	if resp := doReq(r, http.MethodPatch, "/api/sso/connection", sidB,
 		map[string]bool{"enabled": false}); resp.StatusCode != http.StatusNotFound {
 		t.Errorf("org B patch status = %d; want 404 (no connection in B)", resp.StatusCode)
 	}
