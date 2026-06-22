@@ -10,7 +10,8 @@
 // in server.handleSwipe).
 //
 // Two chokepoints drive it, and both move the ticket into the InProgress bucket
-// — nothing in this file writes Done:
+// — no board/task hook writes Done anymore (runJiraMirror still has a done mode,
+// but it is reserved for the forthcoming merge-driven Done mirror, not these):
 //   - recomputeTaskBoardColumn → mirrorJiraInProgress (board in_progress /
 //     in_review, which both collapse to InProgress — there is no in-review
 //     canonical, and a bot awaiting input is still "in progress" to a watcher).
