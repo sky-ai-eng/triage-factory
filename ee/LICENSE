@@ -1,60 +1,100 @@
-Triage Factory Enterprise Edition License (Draft)
+Triage Factory Enterprise Edition License
 
 Copyright (c) 2026 Aidan Allchin. All rights reserved.
 
-DRAFT NOTICE: This text is a plain-language placeholder pending review by
-counsel. It is intended to express the licensing model for the ee/ subtree;
-it is not yet a final legal instrument. Where this text and a signed
-commercial agreement conflict, the signed agreement governs.
+This license governs the contents of this "ee/" directory (the "Enterprise
+Edition"). The licensor is Aidan Allchin (the "Licensor"). By accessing,
+building, or using the Enterprise Edition, you ("you" or "Licensee") agree to
+these terms. Where this license and a signed commercial agreement between you
+and the Licensor conflict, the signed agreement governs.
 
 1. SCOPE
 
-This license governs only the contents of this "ee/" directory (the
-"Enterprise Edition"). The rest of the repository is licensed separately
-under the Business Source License 1.1 (see the repository-root LICENSE file).
-The Enterprise Edition is NOT covered by that BSL grant and does NOT convert
-to an open-source license on the BSL Change Date.
+This license governs only the Enterprise Edition. The rest of the repository
+is licensed separately under the Business Source License 1.1 (see the
+repository-root LICENSE file). The Enterprise Edition is NOT covered by that
+BSL grant and does NOT convert to an open-source license on the BSL Change
+Date or at any other time.
 
 2. SOURCE AVAILABILITY (READ AND AUDIT)
 
 The Enterprise Edition source is provided in this repository for
-transparency, evaluation, and security audit. You may read, review, and
-build it, and you may run it for non-production evaluation and testing.
-Making the source readable is deliberate: the isolation and security
+transparency, evaluation, and security audit. You may read, review, and build
+it, and you may run it solely for non-production evaluation and testing.
+Making the source readable is deliberate, so the isolation and security
 substrate stays auditable. Readability is not a grant of production use.
 
 3. PRODUCTION USE REQUIRES A SUBSCRIPTION
 
-Use of the Enterprise Edition in production, or for the internal business
+Any use of the Enterprise Edition in production, or for the internal business
 operations of any organization, requires a current paid commercial
-subscription or license from the Licensor (Aidan Allchin), including when
-you run it on your own hardware or self-hosted infrastructure. "Production
-use" means any use that is not solely for evaluation or testing.
+subscription or license from the Licensor, including when you run it on your
+own hardware or self-hosted infrastructure. "Production use" means any use
+that is not solely for evaluation or testing.
 
 4. RESTRICTIONS
 
-Except as expressly permitted by a signed commercial agreement, you may not:
+Except as expressly permitted by a separate written agreement with the
+Licensor, you may not:
   (a) use the Enterprise Edition in production without a current subscription;
-  (b) redistribute, resell, sublicense, or offer it to third parties as a
-      hosted or managed service;
-  (c) remove or circumvent license-key verification or feature gating;
-  (d) remove or alter this notice on copies of the Enterprise Edition.
+  (b) redistribute, resell, sublicense, rent, or otherwise make the
+      Enterprise Edition available to third parties, including as a hosted or
+      managed service;
+  (c) remove, disable, or circumvent license-key verification or feature
+      gating; or
+  (d) remove or alter this license or any copyright or proprietary notice on
+      copies of the Enterprise Edition.
 
-5. EVALUATION AND DESIGN-PARTNER LICENSES
+5. GRANTS OF PRODUCTION-USE RIGHTS
 
-The Licensor may issue time-limited evaluation or design-partner licenses
-that permit production use for a stated term at no charge. Such a license is
-granted by a signed agreement and/or a signed license token; absent one, the
-default of Section 3 applies.
+Production-use rights are granted only by the Licensor, through a separate
+written agreement and/or a signed license token — for example, a paid
+subscription, or a time-limited evaluation or design-partner license that
+permits production use for a stated term. Absent such a grant, Section 3
+applies. Any grant is limited to its stated scope and term.
 
-6. NO WARRANTY
+6. RESERVATION OF RIGHTS
 
-THE ENTERPRISE EDITION IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. THE
-LICENSOR SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY
-ARISING FROM OR IN CONNECTION WITH THE ENTERPRISE EDITION OR ITS USE.
+All rights not expressly granted in this license are reserved by the
+Licensor. No rights are granted to any Licensor trademark, service mark,
+trade name, or logo.
 
-7. CONTACT
+7. TERMINATION
+
+Your rights under this license terminate automatically if you breach it. On
+termination, you must immediately cease all production use of the Enterprise
+Edition and destroy all copies used in production. Sections 6 and 8 through
+10 survive termination.
+
+8. NO WARRANTY
+
+THE ENTERPRISE EDITION IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT
+WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION THE
+IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE,
+TITLE, AND NONINFRINGEMENT. THE LICENSOR DOES NOT WARRANT THAT THE ENTERPRISE
+EDITION WILL BE UNINTERRUPTED, ERROR-FREE, OR SECURE.
+
+9. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR WILL NOT BE LIABLE FOR
+ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR FOR
+ANY LOST PROFITS, REVENUE, DATA, OR GOODWILL, ARISING OUT OF OR RELATING TO
+THE ENTERPRISE EDITION OR THIS LICENSE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGES. THE LICENSOR'S TOTAL LIABILITY ARISING OUT OF OR RELATING TO
+THE ENTERPRISE EDITION OR THIS LICENSE WILL NOT EXCEED THE GREATER OF (A) THE
+AMOUNTS YOU PAID THE LICENSOR FOR THE ENTERPRISE EDITION IN THE TWELVE (12)
+MONTHS BEFORE THE EVENT GIVING RISE TO THE LIABILITY OR (B) ONE HUNDRED U.S.
+DOLLARS (US$100). THESE LIMITS APPLY REGARDLESS OF THE THEORY OF LIABILITY
+AND EVEN IF A REMEDY FAILS OF ITS ESSENTIAL PURPOSE.
+
+10. SEVERABILITY; ENTIRE AGREEMENT
+
+If any provision of this license is held unenforceable, it will be modified
+to the minimum extent necessary to make it enforceable, and the remaining
+provisions remain in full effect. Absent a signed commercial agreement, this
+license is the entire agreement between you and the Licensor regarding the
+Enterprise Edition.
+
+11. CONTACT
 
 For a commercial or evaluation license, contact the Licensor.
