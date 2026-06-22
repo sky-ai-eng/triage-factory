@@ -112,14 +112,10 @@ func New(conn *sql.DB) db.Stores {
 		// ErrNotApplicableInLocal. Wired so the bundle is complete in both
 		// modes — local never mounts the invite routes.
 		Invites: newInvitesStore(conn, conn),
-		// SSOConnections / SSODomains are multi-mode only; the SQLite stubs
-		// return ErrNotApplicableInLocal. Wired so the bundle is complete in
-		// both modes — local never mounts the SSO routes.
-		SSOConnections: newSSOConnectionStore(conn, conn),
-		SSODomains:     newSSODomainStore(conn, conn),
-		SSOBreakGlass:  newSSOBreakGlassStore(conn, conn),
-		Ext:            db.BuildStoreExtensions("sqlite", conn, conn),
-		Tx:             s,
+		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
+		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
+		Ext: db.BuildStoreExtensions("sqlite", conn, conn),
+		Tx:  s,
 	}
 	return s.stores
 }

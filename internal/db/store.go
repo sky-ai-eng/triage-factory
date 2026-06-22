@@ -278,29 +278,9 @@ type Stores struct {
 	// bootstrap tests can run without Postgres.
 	OrgTemplate OrgTemplateStore
 
-	// SSOConnections owns the sso_connections table — the TF-owned org↔IdP
-	// binding (TFAC-425). App pool for the admin-facing CRUD
-	// (sso_connections_* RLS gates on org-admin); admin pool for the
-	// login-time GetByProviderID JIT read, whose actor has no membership in
-	// the target org yet (the provider_id is the authorization). Multi-mode
-	// only; the SQLite impl is a stub returning ErrNotApplicableInLocal.
-	SSOConnections SSOConnectionStore
-
-	// SSODomains owns the sso_domains table — the verified email domains that
-	// route identifier-first SSO login (TFAC-425). App pool for the
-	// admin-facing claim/verify/CRUD (sso_domains_* RLS gates on org-admin);
-	// admin pool for the routing GetVerifiedByDomain read, whose actor is
-	// pre-login (the verified domain is the authorization). The
-	// verified-domain global-uniqueness index is the cross-org isolation
-	// linchpin. Multi-mode only; the SQLite impl is a stub.
-	SSODomains SSODomainStore
-
-	// SSOBreakGlass owns the sso_break_glass table — the principals exempt from
-	// SSO enforcement on their non-SSO identity. App pool for the org-admin
-	// mutations (add/remove/seed); admin pool for the reads that join
-	// cross-principal identity data (list, login-time IsBreakGlass, email
-	// resolution). Multi-mode only; the SQLite impl is a stub.
-	SSOBreakGlass SSOBreakGlassStore
+	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
+	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
+	// core holds no SSO symbols.
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go) — the seam an
@@ -357,9 +337,6 @@ type TxStores struct {
 	JiraApps         JiraAppsStore
 	OrgTemplate      OrgTemplateStore
 	Invites          InvitesStore
-	SSOConnections   SSOConnectionStore
-	SSODomains       SSODomainStore
-	SSOBreakGlass    SSOBreakGlassStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same

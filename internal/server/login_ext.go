@@ -87,3 +87,14 @@ func (s *Server) loginExtension() LoginExtension {
 	}
 	return s.loginExt
 }
+
+// toLoginState projects core's signed-state cookie onto the neutral
+// LoginState the hook sees — so the extension never names stateClaims.
+func toLoginState(st *stateClaims) LoginState {
+	return LoginState{
+		ReturnTo:     st.ReturnTo,
+		CodeVerifier: st.CodeVerifier,
+		ProviderID:   st.ProviderID,
+		Test:         st.Test,
+	}
+}

@@ -232,23 +232,11 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// IsOrgMemberSystem) inside WithTx route outside the tx — those are
 		// by-design claims-less (the redeem actor has no membership).
 		Invites: newInvitesStore(tx, s.admin),
-		// SSOConnections / SSODomains: app-side writes (CRUD, claim/verify)
-		// route through the tx so they compose with the surrounding claims
-		// tx; admin half stays pinned to s.admin so the login-time reads
-		// (GetByProviderID / GetVerifiedByDomain) inside WithTx route outside
-		// the tx — those are by-design claims-less (the login actor has no
-		// membership). Same shape Invites uses for its redeem-read half.
-		SSOConnections: newSSOConnectionStore(tx, s.admin),
-		SSODomains:     newSSODomainStore(tx, s.admin),
-		// SSOBreakGlass: the app-side mutations (Add/RemoveGuarded/
-		// SeedOwnerIfEmpty) route through the tx so they compose with the
-		// surrounding claims tx; the admin half (List/IsBreakGlass/
-		// ResolveVerifiedEmailMember, which read cross-principal data) stays
-		// pinned to s.admin, same shape as Invites / SSOConnections.
-		SSOBreakGlass: newSSOBreakGlassStore(tx, s.admin),
-		// Opaque extension bundles (Enterprise Edition stores) built from
-		// the same (app=tx, admin=s.admin) handles, so their pool split is
-		// identical to the SSO stores above.
+		// Opaque extension bundles (the Enterprise Edition SSO stores) built
+		// from the same (app=tx, admin=s.admin) handles, so their app/admin
+		// pool split is identical to core's own stores — the login-time reads
+		// (GetByProviderID / GetVerifiedByDomain) run on s.admin (claims-less),
+		// the CRUD on the claims tx.
 		Ext: db.BuildStoreExtensions("postgres", tx, s.admin),
 	}
 }

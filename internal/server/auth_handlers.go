@@ -187,9 +187,13 @@ func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 		q.Set("redirect_to", s.deployCfg.publicURL+"/api/auth/callback?state="+csrf)
 		target := s.deployCfg.publicURL + "/auth/v1/authorize?" + q.Encode()
 		http.Redirect(w, r, target, http.StatusFound)
-	case "saml":
-		s.handleSAMLStart(w, r, returnTo)
 	default:
+		// Non-"github" providers (e.g. "saml") are handled by the registered
+		// login extension (Enterprise Edition). Absent one — community build or
+		// unlicensed deployment — the provider is genuinely unsupported.
+		if s.loginExtension().StartSSO(w, r, provider, returnTo) {
+			return
+		}
 		http.Error(w, "unsupported provider", http.StatusNotFound)
 	}
 }
@@ -238,68 +242,6 @@ func (s *Server) issueOAuthStateCookie(w http.ResponseWriter, r *http.Request, r
 	return codeVerifier, csrf, true
 }
 
-// handleSAMLStart drives GoTrue's SP-initiated SAML flow. Given a TF-registered
-// provider_id, it server-side POSTs to GoTrue's public /sso endpoint and
-// forwards GoTrue's 303 Location (the signed SAML AuthnRequest redirect to the
-// IdP) to the browser. The Entra "My Apps" bookmark tile points here as a plain
-// GET link, and TFAC-427's identifier-first login UX redirects here after the
-// email→connection lookup; both share this one endpoint.
-//
-// The provider_id is validated against TF's own sso_connections binding (written
-// by TFAC-424) BEFORE initiating: an unknown or disabled provider 404s, so TF
-// never starts a SAML flow for a connection it doesn't own, and a raw GET with a
-// guessed provider_id can't coax TF into an open redirect to GoTrue/the IdP.
-//
-// PKCE composes with SP-initiated SAML (TFAC-423 spike): the same CSRF +
-// code_verifier + return_to state cookie the GitHub path uses carries through,
-// plus the provider_id — so the callback resolves the JIT org binding from TF's
-// OWN signed state, never from the GoTrue assertion.
-//
-// GET /api/auth/oauth/saml?provider_id=<gotrue-provider-uuid>&return_to=/path
-func (s *Server) handleSAMLStart(w http.ResponseWriter, r *http.Request, returnTo string) {
-	providerID := strings.TrimSpace(r.URL.Query().Get("provider_id"))
-	if providerID == "" {
-		http.Error(w, "missing provider_id", http.StatusBadRequest)
-		return
-	}
-
-	// Validate against TF's binding before initiating. Admin pool: the actor is
-	// pre-login with no membership (the provider_id is the lookup key, same
-	// posture as the callback's JIT read). Unknown/disabled → 404 (non-
-	// disclosure; don't reveal which provider_ids are registered or enabled).
-	binding, err := s.allStores.SSOConnections.GetByProviderID(r.Context(), providerID)
-	if err != nil {
-		authLog.Error("saml start: provider lookup failed", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if binding == nil || !binding.Enabled {
-		http.NotFound(w, r)
-		return
-	}
-
-	codeVerifier, csrf, ok := s.issueOAuthStateCookie(w, r, returnTo, providerID, false)
-	if !ok {
-		return
-	}
-
-	// redirect_to is TF's own callback (same one GitHub uses) carrying the CSRF;
-	// after the IdP posts the assertion to GoTrue's ACS, GoTrue redirects the
-	// browser here with ?code=<authcode> for the PKCE exchange.
-	redirectTo := s.deployCfg.publicURL + "/api/auth/callback?state=" + csrf
-	location, err := s.authDeps.gotrueSSO(r.Context(), providerID, redirectTo, pkceChallenge(codeVerifier))
-	if err != nil {
-		// GoTrue is in-network and on the request critical path; a failure here
-		// is an upstream/config fault, not a client error.
-		authLog.Warn("saml start: gotrue /sso failed", "error", err)
-		http.Error(w, "sso start failed", http.StatusBadGateway)
-		return
-	}
-	// Forward GoTrue's 303 target (the signed AuthnRequest URL at the IdP) to
-	// the browser. 303 so the browser GETs the IdP regardless of method.
-	http.Redirect(w, r, location, http.StatusSeeOther)
-}
-
 // handleOAuthCallback completes the PKCE dance: validates state,
 // exchanges the auth code via server-side POST to gotrue's /token,
 // verifies the returned JWT, upserts public.users, creates an
@@ -344,8 +286,12 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// principal, no JIT, no session), so a test mints nothing. Branch here, before
 	// authCode is even read, because the test path handles a GoTrue ?error= ACS
 	// rejection as a fail result rather than the plain 400 a real login returns.
-	if state.Test {
-		s.completeSAMLConnectionTest(w, r, state)
+	// Verify-before-enforce SSO test: when TF's signed state carries Test, the
+	// login extension completes the exchange/verify and renders a pass/fail
+	// page (no principal, no JIT, no session). No extension / not a test → false,
+	// and a normal login continues. Branch here, before authCode is read,
+	// because the test path handles a GoTrue ?error= ACS rejection itself.
+	if s.loginExtension().OnTestCallback(w, r, toLoginState(state)) {
 		return
 	}
 
@@ -399,98 +345,31 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SSO enforcement. A non-SSO (GitHub) login whose VERIFIED email
-	// is on an org's enforced verified domain is rejected — "your organization
-	// requires SSO" — unless the principal is a designated break-glass account
-	// (the recovery path so an org can un-enforce if the IdP breaks). Only the
-	// non-SSO path is gated: an SSO login is the very thing enforcement requires.
-	// Domain-scoped, so an invited external (@gmail.com) is off-domain and
-	// unaffected. Enforcement applies only when the connection is currently
-	// ENABLED — a disabled connection means SSO isn't actually available, so
-	// blocking GitHub too would lock the domain out (the toggle's gating keeps an
-	// org from arming this against a broken connection in the first place).
-	//
-	// Note: this runs AFTER resolveOrCreatePrincipal, so a rejected first-time
-	// user still gets a principal + identity row — enforcement blocks SESSION
-	// creation, not principal creation. That's intentional and harmless: the row
-	// is the durable identity a later real SSO login links to by verified email;
-	// no session, membership, or JIT grant is written on the rejected path.
-	if !isSSO && claims.EmailVerified {
-		if dom, okDom := emailDomain(claims.Email); okDom {
-			route, rerr := s.allStores.SSODomains.GetVerifiedByDomain(r.Context(), dom)
-			if rerr != nil {
-				internalError(w, "sso", rerr)
-				return
-			}
-			if route != nil && route.Enabled && route.Enforced {
-				isBG, berr := s.allStores.SSOBreakGlass.IsBreakGlass(r.Context(), route.OrgID, userUUID.String())
-				if berr != nil {
-					internalError(w, "sso", berr)
-					return
-				}
-				if !isBG {
-					// Reject before minting a session. The identifier-first login page
-					// routes the same email to SSO, so bounce there with a marker it
-					// renders as "your organization requires SSO." Carry the original
-					// return_to through so the subsequent SSO login lands the user at the
-					// deep link they were headed to (it was normalized at start, so it's
-					// already open-redirect-safe).
-					authLog.Info("sso enforcement: rejected non-sso login on enforced domain",
-						"user", userUUID, "org", route.OrgID, "domain", dom)
-					q := url.Values{"error": {"sso_required"}}
-					if state.ReturnTo != "" && state.ReturnTo != "/" {
-						q.Set("return_to", state.ReturnTo)
-					}
-					http.Redirect(w, r, "/login?"+q.Encode(), http.StatusFound)
-					return
-				}
-			}
-		}
+	// SSO enforcement + JIT provisioning. The login extension folds the two
+	// SSO forks that run after principal resolution but before the session is
+	// minted:
+	//   - enforcement: a non-SSO (GitHub) login whose VERIFIED email is on an
+	//     org's enforced verified domain is rejected (done=true → it wrote a
+	//     redirect), unless the principal is break-glass.
+	//   - JIT: an SSO login is provisioned into its provider's org, returned as
+	//     activeOrg so the session defaults there.
+	// No extension (community / unlicensed) → activeOrg invalid, done=false: a
+	// plain login with no enforcement or JIT. This runs AFTER
+	// resolveOrCreatePrincipal so a rejected first-time user still gets a
+	// durable principal + identity row; enforcement blocks only SESSION creation.
+	defaultOrg, done, err := s.loginExtension().OnLoginResolved(w, r, LoginResolved{
+		State:         toLoginState(state),
+		UserID:        userUUID,
+		Email:         claims.Email,
+		EmailVerified: claims.EmailVerified,
+		IsSSO:         isSSO,
+	})
+	if err != nil {
+		internalError(w, "sso", err)
+		return
 	}
-
-	// JIT provisioning (TFAC-426). The provider_id → org binding IS the
-	// cross-org isolation boundary: a user authenticated through provider X is
-	// provisioned into the org that registered X, and only that org's admin
-	// could have bound X (TFAC-424; provider_id is globally unique). So a
-	// connection can never JIT users into an org its admin doesn't control —
-	// and the binding is keyed on TF's signed state, not on anything the
-	// assertion carries. Resolve + grant on the ADMIN pool: the JIT actor has
-	// no membership in the target org yet, so RLS can't express the read
-	// (same rationale as invite-accept).
-	var defaultOrg uuid.NullUUID
-	if isSSO {
-		binding, lerr := s.allStores.SSOConnections.GetByProviderID(r.Context(), state.ProviderID)
-		if lerr != nil {
-			authLog.Error("jit: provider lookup failed", "user", userUUID, "error", lerr)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		// A disabled or vanished connection provisions nothing — an existing
-		// member still lands in their org via the earliest-membership fallback
-		// below; a net-new user falls through to onboarding.
-		if binding != nil && binding.Enabled {
-			orgUUID, perr := uuid.Parse(binding.OrgID)
-			if perr != nil {
-				authLog.Error("jit: bad org id in binding", "org", binding.OrgID, "error", perr)
-				http.Error(w, "internal error", http.StatusInternalServerError)
-				return
-			}
-			// teamID NULL → "org member, zero teams" (mirrors an org-only
-			// invite). Idempotent (ON CONFLICT DO NOTHING): a returning member's
-			// row already exists, so this GRANTS but never re-roles — an admin's
-			// later promotion via the roster is preserved across logins.
-			if gerr := grantOrgMembership(r.Context(), s.db, userUUID, orgUUID,
-				binding.DefaultRole, uuid.NullUUID{}, ""); gerr != nil {
-				authLog.Error("jit: grant membership failed", "user", userUUID, "org", orgUUID, "error", gerr)
-				http.Error(w, "internal error", http.StatusInternalServerError)
-				return
-			}
-			// The SSO org is THIS session's active org: the user arrived through
-			// its IdP, so route them into the app (not onboarding) there, even
-			// if they also belong to other orgs.
-			defaultOrg = uuid.NullUUID{UUID: orgUUID, Valid: true}
-			authLog.Info("jit provisioned sso login", "user", userUUID, "org", orgUUID, "role", binding.DefaultRole)
-		}
+	if done {
+		return
 	}
 
 	// Non-SSO login (or SSO with no active binding): default the session to the

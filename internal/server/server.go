@@ -75,16 +75,6 @@ type Server struct {
 	ws        *websocket.Hub
 	spawner   *delegate.Spawner
 	curator   *curator.Curator
-	// ssoDomains is the per-org SSO domain claim/verify handler, retained on
-	// the Server (rather than scoped to routes()) so tests can swap its
-	// injected DNS resolver for a fake — the verify path's only external
-	// dependency. Production wiring leaves it on the stdlib net.DefaultResolver.
-	ssoDomains *ssoDomainsHandler
-	// ssoConn is the per-org SSO connection handler, retained on the Server so
-	// the verify-before-enforce test-start (handleSAMLConnectionTestStart, in
-	// auth_handlers.go) can reuse its admin gate + active-org connection read
-	// rather than duplicating that authorization preamble.
-	ssoConn *ssoConnectionHandler
 	// ghResolver picks the right GitHub credential (org App installation
 	// token → PAT) per request, given the org + target account. The per-repo
 	// handler operations migrated off the old process-global PAT client —
@@ -750,70 +740,12 @@ func (s *Server) routes() {
 	// holder. Listed in preAuthAllowlist; IP-rate-limited (TFAC-433).
 	s.mux.Handle("GET /api/invites/preview", s.preAuthRateLimit(http.HandlerFunc(ih.handleInvitePreview)))
 
-	// Per-org SSO connection (TFAC-424, epic TFAC-422) — org-admin-gated,
-	// multi-mode only (each handler 404s in local). POST registers the org's
-	// IdP connection with GoTrue (minting a service_role token server-side)
-	// and writes the TF-owned sso_connections binding; GET returns it plus
-	// the SP Entity-ID/ACS values the operator pastes into Entra; PATCH
-	// enables/disables it. gotrueURL + publicURL are read lazily because
-	// authCfg/deployCfg land after routes() runs.
-	ssoc := &ssoConnectionHandler{
-		tx:        s.tx,
-		az:        s.az,
-		client:    ssoHTTPClient,
-		gotrueURL: s.gotrueAdminBaseURL,
-		publicURL: func() string {
-			if s.deployCfg == nil {
-				return ""
-			}
-			return s.deployCfg.publicURL
-		},
-	}
-	s.ssoConn = ssoc
-	s.api("GET /api/sso/connection", ssoc.handleSSOConnectionGet)
-	s.apiMutating("POST /api/sso/connection", ssoc.handleSSOConnectionCreate)
-	s.apiMutating("PATCH /api/sso/connection", ssoc.handleSSOConnectionUpdate)
-	// "Require SSO" enforcement toggle. Gated behind a proven-working
-	// connection (enabled + verified domain + passed Test) when turning ON;
-	// un-enforcing is always allowed (the recovery action). Enabling seeds the
-	// owner as break-glass so enforcement is never armed without a recovery path.
-	s.apiMutating("PATCH /api/sso/connection/enforcement", ssoc.handleSSOEnforcementUpdate)
-
-	// SSO break-glass management — the principals that retain non-SSO
-	// (GitHub) login under enforcement. Org-admin-gated (reuses ssoc.adminGate);
-	// the remove path refuses to drop the last principal while enforced.
-	ssobg := &ssoBreakGlassHandler{tx: s.tx, az: s.az, conn: ssoc}
-	s.api("GET /api/sso/break-glass", ssobg.handleBreakGlassList)
-	s.apiMutating("POST /api/sso/break-glass", ssobg.handleBreakGlassAdd)
-	s.apiMutating("DELETE /api/sso/break-glass/{user_id}", ssobg.handleBreakGlassRemove)
-	// Verify-before-enforce SSO test (TFAC-431) — an org admin round-trips a real
-	// sign-in through their not-yet-enabled connection to confirm the IdP is
-	// wired up. GET (the browser opens it in a popup); session-authed + admin-
-	// gated in-handler via the reused ssoConnectionHandler.adminGate. The
-	// matching no-write callback branch lives in handleOAuthCallback.
-	s.api("GET /api/sso/connection/test", s.handleSAMLConnectionTestStart)
-
-	// Per-org SSO domain claim + DNS-TXT verification (TFAC-428; multi-mode only
-	// — each handler 404s in local). All four routes gate on org-admin and write
-	// through the app pool (sso_domains_* RLS). Verify additionally does a
-	// live DNS TXT lookup via the stdlib resolver; only a verified domain
-	// routes logins, and the verify path enforces deployment-wide
-	// verified-domain uniqueness (the cross-org isolation linchpin).
-	s.ssoDomains = newSSODomainsHandler(s.tx, s.az)
-	s.api("GET /api/sso/domains", s.ssoDomains.handleDomainList)
-	s.apiMutating("POST /api/sso/domains", s.ssoDomains.handleDomainClaim)
-	s.apiMutating("POST /api/sso/domains/{id}/verify", s.ssoDomains.handleDomainVerify)
-	s.apiMutating("DELETE /api/sso/domains/{id}", s.ssoDomains.handleDomainDelete)
-
-	// Identifier-first SSO discovery (TFAC-427; multi-mode only — answers
-	// {sso:false} in local). Pre-auth: an anonymous visitor types their work
-	// email and TF routes the exact domain to its verified SSO connection or
-	// falls back to GitHub. No session, no side effect, admin-pool read, and a
-	// privacy-safe reply that never names an org — so it's a raw mount, NOT
-	// s.apiMutating (which would require a session and a CSRF origin it has
-	// none of pre-login). Listed in preAuthAllowlist. IP-rate-limited
-	// (TFAC-433) — this is the surface domain-enumeration probing targets.
-	s.mux.Handle("POST /api/sso/discover", s.preAuthRateLimit(http.HandlerFunc(s.handleSSODiscover)))
+	// SSO (connection / domains / break-glass admin surface, the verify-
+	// before-enforce test-start, and the identifier-first discovery probe) is
+	// an Enterprise Edition feature: ee/sso mounts these routes through the
+	// route-extension seam (installExtensions, gated on the `sso` entitlement)
+	// and registers the LoginExtension that drives SAML start + the callback's
+	// enforcement/JIT/test forks. Core holds no SSO symbols.
 
 	s.api("GET /api/queue", s.handleQueue)
 	s.api("GET /api/tasks", s.handleTasks)

@@ -11,6 +11,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/app"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 
+	// Enterprise Edition SSO: registers its store factories, route installer,
+	// and LoginExtension via init(). Gated at runtime on the `sso` entitlement.
+	_ "github.com/sky-ai-eng/triage-factory/ee/sso"
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
