@@ -244,7 +244,7 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 	host := ssoTXTHost(claim.Domain)
 	// Production uses h.resolver (net.DefaultResolver); tests inject a fake via
 	// the dnsoverride seam (the verify suite can't import ee directly).
-	var resolver txtResolver = h.resolver
+	resolver := h.resolver
 	if o := dnsoverride.Get(); o != nil {
 		resolver = o
 	}
