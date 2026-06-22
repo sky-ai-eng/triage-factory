@@ -65,7 +65,7 @@ Similarly, [docs/usage.md](docs/usage.md) details CLI flags, configuration refer
 
 ## License
 
-[Business Source License 1.1](LICENSE) — free for internal use, converts to Apache 2.0 on 2030-03-31. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution terms.
+The repository is [Business Source License 1.1](LICENSE) — free for internal use, converts to Apache 2.0 on 2030-03-31 — **except** the [`ee/`](ee/) subtree (Enterprise Edition), which is source-available under a separate [commercial license](ee/LICENSE) and does **not** convert. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution terms.
 
 ## Disclaimer
 

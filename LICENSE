@@ -9,7 +9,9 @@ Aidan Allchin
 
 Licensed Work:
 
-Triage Factory
+Triage Factory, excluding the "ee/" directory (the Enterprise Edition), which
+is licensed separately under the terms in ee/LICENSE and is not covered by this
+License or its Change License.
 
 Additional Use Grant:
 

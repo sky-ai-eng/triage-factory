@@ -3,10 +3,10 @@
 // package that package main imports for enterprise wiring. Core
 // (internal/*, cmd/*) never imports ee — dependencies point inward.
 //
-// As the SSO extraction lands, this package grows blank-import side
-// effects (ee/sso registering its store factories, route installers, and
-// login hooks into the core seams). Install() handles the licensing half:
-// verify the token, register the entitlements checker.
+// package main blank-imports ee/sso, whose init() side effects register the
+// SSO store factories, route installers, and login hooks into the core
+// seams. This package's Install() handles the licensing half: verify the
+// token, register the entitlements checker.
 package ee
 
 import (
