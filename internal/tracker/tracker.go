@@ -927,13 +927,24 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string)
 	}
 	if issue.Fields.Assignee != nil {
 		snap.Assignee = issue.Fields.Assignee.DisplayName
-		// Prefer AccountID (Jira Cloud). Fall back to Name (Jira
-		// Server/DC username key) so predicates and inline-close
-		// comparisons work on both deployment types. This mirrors
-		// auth.JiraUser.StableID() which prefers accountId over key.
-		if issue.Fields.Assignee.AccountID != "" {
+		// Derive the stable account id with the SAME precedence as
+		// auth.JiraUser.StableID() — accountId (Jira Cloud), then key
+		// (Jira Server/DC internal user key, e.g. JIRAUSER12345). This
+		// MUST match StableID() because the two are compared across stores:
+		// user_jira_identities.account_id is written from StableID() at bind
+		// time, and assignee-centric routing (internal/routing assigneeTeams)
+		// joins the event's assignee_account_id against it to resolve the
+		// owning team. Falling back to Name (the mutable username, often an
+		// email on DC) here while StableID() falls back to key silently broke
+		// that join on Server/DC — the event carried the username, the
+		// identity row held the key, so no task was ever created. Name is the
+		// last resort only when neither stable id is present.
+		switch {
+		case issue.Fields.Assignee.AccountID != "":
 			snap.AssigneeAccountID = issue.Fields.Assignee.AccountID
-		} else {
+		case issue.Fields.Assignee.Key != "":
+			snap.AssigneeAccountID = issue.Fields.Assignee.Key
+		default:
 			snap.AssigneeAccountID = issue.Fields.Assignee.Name
 		}
 	}

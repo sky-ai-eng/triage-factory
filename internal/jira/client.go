@@ -450,6 +450,7 @@ type Issue struct {
 		Assignee *struct {
 			DisplayName string `json:"displayName"`
 			AccountID   string `json:"accountId"`
+			Key         string `json:"key"`
 			Name        string `json:"name"`
 		} `json:"assignee,omitempty"`
 		Parent *struct {
