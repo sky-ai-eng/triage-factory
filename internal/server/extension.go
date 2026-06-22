@@ -1,9 +1,13 @@
 package server
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 
+	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
@@ -48,6 +52,33 @@ type ExtensionAPI interface {
 	PublicURL() string
 	// GotrueAdminBaseURL is the in-network GoTrue base URL for admin calls.
 	GotrueAdminBaseURL() string
+
+	// --- login seam (see login_ext.go) ---
+
+	// SetLoginExtension installs this server's SSO decision hook for the
+	// shared OAuth login path. Called by the extension during install.
+	SetLoginExtension(LoginExtension)
+	// AuthReady reports whether the multi-mode auth stack is wired (false in
+	// local mode / an unwired deploy); SSO routes 404 when it isn't.
+	AuthReady() bool
+	// IssueOAuthStateCookie mints the HMAC state cookie (CSRF + PKCE verifier,
+	// plus the optional SSO provider_id and the verify-before-enforce test
+	// flag) and returns the verifier + CSRF token. Writes a 500 and ok=false
+	// on a crypto/marshal failure.
+	IssueOAuthStateCookie(w http.ResponseWriter, r *http.Request, returnTo, providerID string, test bool) (codeVerifier, csrf string, ok bool)
+	// GotrueSSO POSTs GoTrue's public /sso and returns the IdP redirect Location.
+	GotrueSSO(ctx context.Context, providerID, redirectTo, codeChallenge string) (location string, err error)
+	// GotrueExchange completes the PKCE auth-code exchange, returning the tokens.
+	GotrueExchange(ctx context.Context, authCode, codeVerifier string) (accessToken, refreshToken string, err error)
+	// VerifyAccessToken verifies a GoTrue access token and returns its claims.
+	VerifyAccessToken(accessToken string) (*verify.Claims, error)
+	// PKCEChallenge derives the S256 code_challenge from a PKCE verifier.
+	PKCEChallenge(verifier string) string
+	// GrantOrgMembership grants (idempotently, admin pool) an org membership —
+	// the JIT-provisioning primitive for an SSO login.
+	GrantOrgMembership(ctx context.Context, userID, orgID uuid.UUID, role string) error
+	// EmailDomain extracts the lower-cased domain from an email address.
+	EmailDomain(email string) (domain string, ok bool)
 }
 
 // extensionInstaller is one registered extension: a name (diagnostics), a
@@ -109,3 +140,45 @@ func (a serverExtensionAPI) PublicURL() string {
 	}
 	return a.s.deployCfg.publicURL
 }
+
+// errAuthNotWired backs the auth-dependent ExtensionAPI methods when the
+// multi-mode auth stack isn't wired (local mode / pre-SetAuthDeps).
+// Extensions gate on AuthReady() first; this is a defensive backstop.
+var errAuthNotWired = errors.New("auth not wired")
+
+func (a serverExtensionAPI) SetLoginExtension(le LoginExtension) { a.s.loginExt = le }
+func (a serverExtensionAPI) AuthReady() bool                     { return a.s.authDeps != nil }
+
+func (a serverExtensionAPI) IssueOAuthStateCookie(w http.ResponseWriter, r *http.Request, returnTo, providerID string, test bool) (string, string, bool) {
+	return a.s.issueOAuthStateCookie(w, r, returnTo, providerID, test)
+}
+
+func (a serverExtensionAPI) GotrueSSO(ctx context.Context, providerID, redirectTo, codeChallenge string) (string, error) {
+	if a.s.authDeps == nil {
+		return "", errAuthNotWired
+	}
+	return a.s.authDeps.gotrueSSO(ctx, providerID, redirectTo, codeChallenge)
+}
+
+func (a serverExtensionAPI) GotrueExchange(ctx context.Context, authCode, codeVerifier string) (string, string, error) {
+	if a.s.authDeps == nil {
+		return "", "", errAuthNotWired
+	}
+	at, rt, _, err := a.s.authDeps.gotrueExchange(ctx, authCode, codeVerifier)
+	return at, rt, err
+}
+
+func (a serverExtensionAPI) VerifyAccessToken(accessToken string) (*verify.Claims, error) {
+	if a.s.authDeps == nil {
+		return nil, errAuthNotWired
+	}
+	return a.s.authDeps.verifier.Verify(accessToken)
+}
+
+func (a serverExtensionAPI) PKCEChallenge(verifier string) string { return pkceChallenge(verifier) }
+
+func (a serverExtensionAPI) GrantOrgMembership(ctx context.Context, userID, orgID uuid.UUID, role string) error {
+	return grantOrgMembership(ctx, a.s.db, userID, orgID, role, uuid.NullUUID{}, "")
+}
+
+func (a serverExtensionAPI) EmailDomain(email string) (string, bool) { return emailDomain(email) }

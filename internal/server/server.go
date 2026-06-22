@@ -163,6 +163,12 @@ type Server struct {
 	authCfg   *authConfig
 	authProxy http.Handler // /auth/v1/* → gotrue:9999/*
 
+	// loginExt is the SSO decision seam in the shared OAuth login path
+	// (see login_ext.go). nil until an extension calls SetLoginExtension
+	// during installExtensions; loginExtension() returns a no-op default
+	// when unset (SSO off). The Enterprise Edition registers the real one.
+	loginExt LoginExtension
+
 	// refreshGroup dedupes concurrent JWT refresh attempts per session.
 	// singleflight.Group is the standard "share-the-call-result-across-
 	// concurrent-callers" primitive: at most one gotrue refresh runs
