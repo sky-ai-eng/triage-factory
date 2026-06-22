@@ -1,12 +1,12 @@
-// Package dnsoverride is a tiny neutral seam for injecting a fake DNS-TXT
-// resolver into the SSO domain-verification path under test. It exists so a
-// test in package server (which cannot import ee/sso — that would cycle, since
-// ee/sso imports server) and the ee/sso verify handler can rendezvous on a
-// resolver override through a shared leaf package that imports neither.
+// Package dnsoverride is a tiny seam for injecting a fake DNS-TXT resolver into
+// the SSO domain-verification path under test. The verify suite drives ee/sso
+// black-box over HTTP, so it can't reach the handler's resolver field through
+// the request boundary — it rendezvous on a process-global override here, which
+// the verify handler consults before falling back to its real net.DefaultResolver.
 //
 // Production never sets an override: Get returns nil and the handler uses its
-// real net.DefaultResolver. This is a test seam, kept minimal and dependency-
-// free on purpose.
+// real resolver. This is a test seam, kept a dependency-free leaf so neither
+// ee/sso nor its tests pull anything extra in.
 package dnsoverride
 
 import (

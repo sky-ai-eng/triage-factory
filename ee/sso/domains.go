@@ -11,9 +11,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/ee/sso/dnsoverride"
 	ssostore "github.com/sky-ai-eng/triage-factory/ee/sso/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/dnsoverride"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"

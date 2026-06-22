@@ -12,8 +12,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/ee/sso/dnsoverride"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
-	"github.com/sky-ai-eng/triage-factory/internal/dnsoverride"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
