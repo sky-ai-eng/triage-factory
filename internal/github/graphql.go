@@ -143,7 +143,7 @@ fragment PRFullFields on PullRequest {
 	# happen between polls. last:20 covers the typical poll window
 	# comfortably; older timeline items fall through to the diff's
 	# updatedAt fallback. ~5 nodes per item × 20 = ~100 nodes per PR,
-	# additive to the existing ~1,060-node budget — a modest bump well
+	# additive to the existing ~160-node budget — a modest bump well
 	# within the 500k ceiling per the prFullFragment math above.
 	timelineItems(last: 20, itemTypes: [LABELED_EVENT, UNLABELED_EVENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT]) {
 		nodes {
@@ -228,7 +228,7 @@ func (c *Client) DiscoverPRs(searchQuery string, limit int) ([]DiscoveredPR, err
 // refreshBatchSize caps how many node IDs go into a single GraphQL
 // nodes(ids: [...]) call. GitHub's per-query runtime-cost limit can
 // reject large batches even when the static 500k-node budget is fine.
-// 20 IDs with the full fragment (~1,060 nodes each = ~21k nodes) is
+// 20 IDs with the full fragment (~160 nodes each = ~3,200 nodes) is
 // well within both limits while keeping the round-trip count reasonable.
 const refreshBatchSize = 20
 

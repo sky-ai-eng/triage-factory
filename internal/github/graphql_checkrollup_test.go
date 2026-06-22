@@ -138,6 +138,36 @@ func TestToSnapshot_NilRollup(t *testing.T) {
 	}
 }
 
+// TestToSnapshot_EmptyContexts covers the distinct-from-nil case: the rollup
+// object exists but no checks have reported yet (contexts.nodes == []). The
+// for-loop leaves raw nil, so DedupCheckRunsByName yields the non-nil empty
+// slice — same "polled, no CI" signal as a nil rollup, reached via a
+// different branch.
+func TestToSnapshot_EmptyContexts(t *testing.T) {
+	const body = `{
+	  "number": 10,
+	  "repository": {"nameWithOwner": "octo/repo"},
+	  "commits": {"nodes": [{"commit": {
+	    "oid": "ccc333",
+	    "committedDate": "2026-06-22T13:00:00Z",
+	    "statusCheckRollup": {"contexts": {"pageInfo": {"hasNextPage": false}, "nodes": []}}
+	  }}]}
+	}`
+
+	var pr gqlPR
+	if err := json.Unmarshal([]byte(body), &pr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	snap := pr.toSnapshot()
+	if snap.CheckRuns == nil {
+		t.Fatal("CheckRuns = nil; want non-nil empty on a non-nil rollup with no contexts")
+	}
+	if len(snap.CheckRuns) != 0 {
+		t.Errorf("CheckRuns = %+v; want empty", snap.CheckRuns)
+	}
+}
+
 // TestToDiscoverySnapshot_SkipsCI confirms the discovery path still leaves
 // CheckRuns nil ("unknown prior state") regardless of rollup contents, so a
 // freshly-discovered PR doesn't spuriously emit CI transitions on first poll.
