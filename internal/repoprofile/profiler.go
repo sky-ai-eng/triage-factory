@@ -33,6 +33,11 @@ type Profiler struct {
 	repos    db.RepoStore // profile reads + upserts go through the store
 	orgs     db.OrgsStore // iterate active orgs at the top of each profile run
 	ws       *websocket.Hub
+
+	// batchFn runs one Haiku profiling batch. Defaulted to profileBatch;
+	// overridable so tests can exercise the with-docs upsert / fallback paths
+	// without spawning a real agent subprocess.
+	batchFn func(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error)
 }
 
 // NewProfiler creates a Profiler with the given GitHub resolver, per-org
@@ -40,7 +45,7 @@ type Profiler struct {
 // resolver is consulted per (org, owner) inside the profiling loop so the
 // same code path serves both local (keychain PAT) and multi (App token).
 func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, database *sql.DB, repos db.RepoStore, orgs db.OrgsStore, ws *websocket.Hub) *Profiler {
-	return &Profiler{resolver: resolver, secrets: secrets, database: database, repos: repos, orgs: orgs, ws: ws}
+	return &Profiler{resolver: resolver, secrets: secrets, database: database, repos: repos, orgs: orgs, ws: ws, batchFn: profileBatch}
 }
 
 // repoWithDocs groups a repo profile with the documentation text to send to the LLM.
@@ -265,7 +270,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 		batch := withDocs[i:end]
 
-		results, err := profileBatch(ctx, orgID, batch, p.secrets)
+		results, err := p.batchFn(ctx, orgID, batch, p.secrets)
 		if err != nil {
 			repoprofileLog.Error("profile batch failed", "batch", i/profileBatchSize+1, "error", err)
 			repoNames := make([]string, len(batch))

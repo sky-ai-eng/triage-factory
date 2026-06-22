@@ -17,24 +17,24 @@ import (
 // split is that an org with a slow GitHub host (a sluggish GHES) can't
 // stall every other tenant's profiling.
 //
-// Runners are lazy-created on first Trigger(orgID). Profiling is driven by
-// the "profiler" subscriber off system:poll: sentinels (each carries
-// evt.OrgID) and by the explicit re-profile button (force=true), so the
-// Manager never enumerates the orgs table on its own. Local mode collapses
-// to one Runner under the runmode.LocalDefaultOrgID sentinel — functionally
-// identical to a single-runner build, just routed through the map.
+// Runners are lazy-created on first Trigger(orgID) and live for the process
+// lifetime — like ai.Manager, the runners map is not pruned when an org is
+// deleted or stops polling, so it grows with the number of distinct orgs
+// ever triggered. In multi mode with heavy org churn this is a slow,
+// bounded-by-org-count leak; it mirrors the scorer's accepted trade-off and
+// is cleaned up wholesale by Stop() at shutdown.
 type Manager struct {
-	profiler        *Profiler
-	onCycleComplete func(orgID string)
+	profiler *Profiler
 
 	// newRunnerFor builds the per-org Runner. Defaulted in NewManager to a
 	// Runner whose cycle is profiler.RunOrg; overridable so tests can drive
 	// the trigger/lazy-create/single-flight machinery with a fake cycle.
 	newRunnerFor func(orgID string, onComplete func(string)) *Runner
 
-	mu      sync.Mutex
-	runners map[string]*Runner
-	stopped bool
+	mu              sync.Mutex
+	onCycleComplete func(orgID string) // guarded by mu (write in SetOnCycleComplete, read in Trigger)
+	runners         map[string]*Runner
+	stopped         bool
 }
 
 // NewManager builds a profiling Manager with the same constructor deps as
@@ -57,9 +57,13 @@ func NewManager(resolver github.Resolver, secrets agentproc.SecretsReader, datab
 // profiling cycle for that org completes. It is the seam that chains
 // bootstrapBareClones (which reads the clone_url profiling populates) off
 // profile-cycle completion rather than off the credential callback. Set
-// once before any Trigger; nil is a no-op.
+// once before any Trigger; nil is a no-op. Takes mu so it's race-free
+// against a concurrent Trigger (which reads onCycleComplete under the same
+// lock), though in practice it's wired at boot before any trigger fires.
 func (m *Manager) SetOnCycleComplete(fn func(orgID string)) {
+	m.mu.Lock()
 	m.onCycleComplete = fn
+	m.mu.Unlock()
 }
 
 // Trigger signals the profiling runner for orgID. force bypasses the 3-day

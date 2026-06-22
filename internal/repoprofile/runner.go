@@ -23,8 +23,9 @@ type Runner struct {
 	orgID           string
 	onCycleComplete func(orgID string)
 
-	trigger chan struct{}
-	stop    chan struct{}
+	trigger  chan struct{}
+	stop     chan struct{}
+	stopOnce sync.Once
 
 	mu           sync.Mutex
 	running      bool
@@ -80,10 +81,18 @@ func (r *Runner) Start() {
 	}()
 }
 
-func (r *Runner) Stop() { close(r.stop) }
+// Stop cancels the runner's loop and any in-flight cycle. Idempotent — safe
+// to call independently of Manager.Stop (which may also reach it), since
+// closing an already-closed channel would otherwise panic.
+func (r *Runner) Stop() { r.stopOnce.Do(func() { close(r.stop) }) }
 
 func (r *Runner) run(ctx context.Context) {
 	r.mu.Lock()
+	// Defence-in-depth single-flight guard. The Start loop calls run()
+	// synchronously and the trigger channel is buffered to 1, so the loop
+	// can never re-enter run() concurrently — this is always false from the
+	// loop. It's kept (mirroring ai.Runner) so an accidental direct caller
+	// can't overlap two cycles.
 	if r.running {
 		r.mu.Unlock()
 		return
