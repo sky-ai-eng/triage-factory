@@ -79,6 +79,10 @@ type ExtensionAPI interface {
 	GrantOrgMembership(ctx context.Context, userID, orgID uuid.UUID, role string) error
 	// EmailDomain extracts the lower-cased domain from an email address.
 	EmailDomain(email string) (domain string, ok bool)
+	// NormalizeReturnTo applies the open-redirect guard to a return_to value
+	// (relative-path-only), so an extension building a redirect URL can't be
+	// coaxed into an off-site bounce.
+	NormalizeReturnTo(raw string) string
 }
 
 // extensionInstaller is one registered extension: a name (diagnostics), a
@@ -182,3 +186,4 @@ func (a serverExtensionAPI) GrantOrgMembership(ctx context.Context, userID, orgI
 }
 
 func (a serverExtensionAPI) EmailDomain(email string) (string, bool) { return emailDomain(email) }
+func (a serverExtensionAPI) NormalizeReturnTo(raw string) string     { return normalizeReturnTo(raw) }

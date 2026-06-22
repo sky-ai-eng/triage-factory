@@ -1,6 +1,8 @@
 package sso
 
 import (
+	"net/http"
+
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 
@@ -46,4 +48,13 @@ func install(api server.ExtensionAPI) {
 	api.APIMutating("POST /api/sso/domains", ssod.handleDomainClaim)
 	api.APIMutating("POST /api/sso/domains/{id}/verify", ssod.handleDomainVerify)
 	api.APIMutating("DELETE /api/sso/domains/{id}", ssod.handleDomainDelete)
+
+	// Login-path SSO: the verify-before-enforce test-start (session-authed,
+	// admin-gated) and the pre-auth identifier-first discovery probe, plus the
+	// LoginExtension that handles SAML start + the callback's enforcement/JIT/
+	// test forks inside core's shared OAuth login path.
+	le := &loginExt{api: api, conn: ssoc}
+	api.SetLoginExtension(le)
+	api.API("GET /api/sso/connection/test", le.handleTestStart)
+	api.Raw("POST /api/sso/discover", api.PreAuthRateLimit(http.HandlerFunc(le.handleDiscover)))
 }
