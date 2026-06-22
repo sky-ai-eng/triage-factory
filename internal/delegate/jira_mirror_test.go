@@ -44,6 +44,11 @@ type recordingJiraServer struct {
 	failAssign     bool
 
 	transitionPosted chan struct{}
+	// claimStateRead fires after the GetClaimState issue read is served — the
+	// observable point of a no-op mirror pass (one that reads state and then
+	// transitions nothing), so a test can join a detached mirror goroutine even
+	// when it makes no write.
+	claimStateRead chan struct{}
 }
 
 // idToStatus maps the transition ids the fake serves back to their target
@@ -60,6 +65,7 @@ func newRecordingJiraServer(t *testing.T, status, assignee string) *recordingJir
 		status:           status,
 		assignee:         assignee,
 		transitionPosted: make(chan struct{}, 8),
+		claimStateRead:   make(chan struct{}, 8),
 	}
 	r.srv = httptest.NewServer(http.HandlerFunc(r.handle))
 	t.Cleanup(r.srv.Close)
@@ -122,6 +128,10 @@ func (r *recordingJiraServer) handle(w http.ResponseWriter, req *http.Request) {
 			assigneeJSON = `{"name":"` + assignee + `"}`
 		}
 		_, _ = io.WriteString(w, `{"key":"SKY-1","fields":{"status":{"name":"`+status+`"},"assignee":`+assigneeJSON+`}}`)
+		select {
+		case r.claimStateRead <- struct{}{}:
+		default:
+		}
 	default:
 		w.WriteHeader(http.StatusOK)
 	}
@@ -168,6 +178,19 @@ func (r *recordingJiraServer) waitTransition(t *testing.T) {
 	case <-r.transitionPosted:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the mirror's Jira transition")
+	}
+}
+
+// waitClaimState blocks until the fake has served one GetClaimState issue read,
+// or fails on timeout — the deterministic join for a mirror pass that makes no
+// write (so waitTransition would never fire). After this returns the mirror
+// goroutine has read state and made its (no-op) decision.
+func (r *recordingJiraServer) waitClaimState(t *testing.T) {
+	t.Helper()
+	select {
+	case <-r.claimStateRead:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the mirror's Jira claim-state read")
 	}
 }
 
@@ -612,6 +635,11 @@ func TestTerminateBlueprint_CompletedJiraTask_AlreadyInProgress_NoDoneMove(t *te
 	if got := readTaskStatus(t, database, taskID); got != "done" {
 		t.Fatalf("task status = %q, want done", got)
 	}
+	// Join the detached mirror goroutine on its claim-state read (it makes no
+	// write, so there is no transition to wait on) before asserting — otherwise
+	// the assertion would win the race and pass even if a bug introduced an
+	// erroneous transition.
+	fake.waitClaimState(t)
 	// The mirror reads claim state but, finding the ticket already In Progress +
 	// assigned, makes no write — and crucially never advances it to Done.
 	if _, transitions := fake.snapshot(); len(transitions) != 0 {

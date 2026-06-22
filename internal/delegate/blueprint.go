@@ -545,7 +545,8 @@ func blueprintTerminalForResumedStep(stepRun *domain.AgentRun, isFinal bool) (do
 // aborted:
 //
 //   - finish → the work is done; terminate the blueprint completed, which
-//     closes the task and mirrors the Jira ticket to Done. The historical case.
+//     closes the task and re-asserts the Jira ticket as In Progress (the agent
+//     opened its PR — awaiting review + merge, not shipped). The common case.
 //   - abort  → the agent queued an artifact (a draft PR / review) and then
 //     deliberately stopped in the same turn ("opened a draft, decided the
 //     approach is wrong"). The approved artifact still landed, but an abort
