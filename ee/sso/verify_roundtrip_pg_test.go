@@ -12,7 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TFAC-431 — verify-before-enforce SSO test. An org admin round-trips a REAL
+// Verify-before-enforce SSO test. An org admin round-trips a REAL
 // sign-in through their own (possibly not-yet-enabled) connection to confirm the
 // IdP is wired up, and the callback short-circuits before any writes: no
 // session, no membership, no principal, no identity link.

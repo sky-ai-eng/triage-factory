@@ -14,16 +14,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TFAC-426 — SP-initiated SAML login + JIT provisioning + cross-org isolation.
+// SP-initiated SAML login + JIT provisioning + cross-org isolation.
 //
-// NOTE on account merge (ticket §4): the ticket said "GitHub-then-Entra, same
-// verified email → one auth.users". The TFAC-423 spike follow-up established
-// from GoTrue v2.189.0 source that this does NOT happen — SSO is excluded from
-// GoTrue's account linking (an `sso:` provider's linking domain is the provider
-// itself; the email-grouping path filters is_sso_user=false), so a SAML login
-// is ALWAYS its own auth.users. There is therefore no TF-side merge to test or
-// build; claims.Subject is the SAML user's own id. The relevant guard we DO
-// assert is that a SAML login writes no github identity row
+// NOTE on account merge: one might expect "GitHub-then-Entra, same verified
+// email → one auth.users". Investigation of GoTrue v2.189.0 source established
+// that this does NOT happen — SSO is excluded from GoTrue's account linking
+// (an `sso:` provider's linking domain is the provider itself; the
+// email-grouping path filters is_sso_user=false), so a SAML login is ALWAYS
+// its own auth.users. There is therefore no TF-side merge to test or build;
+// claims.Subject is the SAML user's own id. The relevant guard we DO assert is
+// that a SAML login writes no github identity row
 // (TestSSOLogin_WritesNoGitHubIdentityRow).
 //
 // The other consequence: TF never reads the GoTrue JWT to discover which SSO
@@ -35,7 +35,7 @@ import (
 // ---------- SSO-login test helpers (build on the black-box rig in rig_test.go) ----------
 
 // seedSSOConnection inserts an sso_connections row binding providerID → orgID.
-// Mirrors what TFAC-424's handler writes after GoTrue registers the provider,
+// Mirrors what the connection handler writes after GoTrue registers the provider,
 // without standing up GoTrue. role "" falls to the schema default ('member').
 func (r *authRig) seedSSOConnection(orgID uuid.UUID, providerID, role string, enabled bool) {
 	r.t.Helper()

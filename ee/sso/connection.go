@@ -1,11 +1,9 @@
 // Package sso is the Enterprise Edition SSO surface: the per-org SAML/OIDC
 // connection, domain-verification, and break-glass HTTP handlers, mounted
 // into the core server through the route-extension seam and gated on the
-// `sso` entitlement. It is a faithful move of the internal/server/sso_*
-// handlers — same routes, same authorization, same RLS posture — re-homed
-// so core holds zero SSO symbols. Store access goes through ee/sso/store's
-// typed view of core's opaque extension slot; HTTP helpers come from the
-// shared httpx package.
+// `sso` entitlement. Core holds zero SSO symbols: store access goes through
+// ee/sso/store's typed view of core's opaque extension slot, and HTTP helpers
+// come from the shared httpx package.
 //
 // Licensed under the Enterprise Edition License (see ee/LICENSE).
 package sso

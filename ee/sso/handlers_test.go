@@ -11,8 +11,7 @@ import (
 
 // TestSSOConnection_LocalMode404: every connection route 404s in local mode
 // (N=1, no IdP). adminGate checks runmode before touching any dependency, so
-// this is a pure unit test — no rig, no GoTrue, no store needed. Moved from
-// internal/server/sso_connection_handler_test.go with the handler.
+// this is a pure unit test — no rig, no GoTrue, no store needed.
 func TestSSOConnection_LocalMode404(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	h := &ssoConnectionHandler{}
@@ -39,8 +38,7 @@ func TestSSOConnection_LocalMode404(t *testing.T) {
 
 // TestSSOTestResultRendering executes the verify-before-enforce result template
 // for every outcome, escapes the IdP-derived fields, and ships the lock-down
-// CSP. Runs without a testcontainer. Moved from
-// internal/server/sso_test_round_trip_test.go with renderSAMLTestResult.
+// CSP. Runs without a testcontainer.
 func TestSSOTestResultRendering(t *testing.T) {
 	le := &loginExt{}
 	cases := []struct {

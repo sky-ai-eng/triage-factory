@@ -1,9 +1,8 @@
 // Package pg holds the Postgres implementations of the Enterprise Edition
 // SSO stores and registers them with core's store-extension registry for
-// the "postgres" dialect. It is a faithful move of internal/db/postgres/
-// sso.go: same SQL, same app/admin pool split, same RLS posture — only the
-// home package (ee/), the handle type (db.Execer), and the domain/
-// interface package (ssostore) changed.
+// the "postgres" dialect: same app/admin pool split and RLS posture as the
+// rest of the Postgres data layer, reading core's transaction handle as a
+// db.Execer and the domain/interface types from ssostore.
 //
 // Licensed under the Enterprise Edition License (see ee/LICENSE).
 package pg

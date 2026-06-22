@@ -17,9 +17,8 @@ import (
 // loginExt implements server.LoginExtension — the SSO forks of the shared
 // OAuth login path (SP-initiated SAML start, the verify-before-enforce test
 // round-trip, enforcement of a non-SSO login on an enforced domain, and JIT
-// provisioning of an SSO login). It is a faithful move of the SSO branches
-// of internal/server/auth_handlers.go + auth_sso_test_handler.go, reaching
-// core's OAuth primitives through the ExtensionAPI rather than *Server.
+// provisioning of an SSO login), reaching core's OAuth primitives through
+// the ExtensionAPI rather than *Server.
 type loginExt struct {
 	api  server.ExtensionAPI
 	conn *ssoConnectionHandler // adminGate + currentConnection for test-start

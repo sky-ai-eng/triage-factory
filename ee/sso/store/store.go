@@ -2,13 +2,11 @@
 // types, the store interfaces, and the typed accessors that retrieve the
 // SSO store bundle from core's opaque per-transaction extension slot.
 //
-// It is the ee/ counterpart to what used to live in internal/domain
-// (the SSO structs) and internal/db (the SSO store interfaces). Moving it
-// here is what lets core hold zero SSO symbols: core's db.TxStores /
-// db.Stores carry only an opaque Ext map; this package supplies the typed
-// view back. The backend implementations live in the pg/ and lite/
-// subpackages, which register their factories with core's store-extension
-// registry (see store/pg, store/lite).
+// Keeping the SSO types and interfaces here is what lets core hold zero SSO
+// symbols: core's db.TxStores / db.Stores carry only an opaque Ext map; this
+// package supplies the typed view back. The backend implementations live in
+// the pg/ and lite/ subpackages, which register their factories with core's
+// store-extension registry (see store/pg, store/lite).
 //
 // Licensed under the Enterprise Edition License (see ee/LICENSE), not the
 // repository-root BSL.
@@ -157,7 +155,7 @@ type SSOBreakGlassPrincipal struct {
 	CreatedAt   time.Time
 }
 
-// --- Store interfaces (moved from internal/db/sso_store.go) ---
+// --- Store interfaces ---
 
 // SSOConnectionStore owns the sso_connections table — the TF-owned org↔IdP
 // binding. Postgres-only; the SQLite impl is a stub returning

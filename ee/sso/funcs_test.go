@@ -96,8 +96,7 @@ func TestSAMLTestErrorReason(t *testing.T) {
 
 // TestHandleDiscover_LocalMode_FallsToGitHub: local mode answers {sso:false}
 // before ever touching the store, so a loginExt with no api wiring suffices
-// (the store is never reached — that's the proof). Moved from
-// internal/server/sso_discover_test.go (now testing ee's le.handleDiscover).
+// (the store is never reached — that's the proof).
 func TestHandleDiscover_LocalMode_FallsToGitHub(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 

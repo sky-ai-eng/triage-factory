@@ -37,7 +37,7 @@ startup (via a blank import from `package main`). Core asks
 - `ee/sso` — SSO/SAML/OIDC handlers, GoTrue SSO client, discovery,
   enforcement, break-glass, domains, the verify-before-enforce test flow.
 - `ee/sso/store` — the SQLite + Postgres `sso_*` store implementations and
-  domain types, formerly in `internal/db` and `internal/domain`.
+  domain types.
 - Frontend SSO surface is gated at render time on an entitlement flag served
   by `/api/me` (a single SPA bundle can't be split per-license, so the UI is
   present but inert without the feature).

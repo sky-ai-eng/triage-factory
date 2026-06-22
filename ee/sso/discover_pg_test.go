@@ -15,7 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TFAC-427 — identifier-first SSO login discovery (POST /api/sso/discover).
+// Identifier-first SSO login discovery (POST /api/sso/discover).
 // The endpoint is pre-login (no session), so these requests carry no sid; the
 // admin-pool GetVerifiedByDomain read is what the rig exercises end-to-end.
 
@@ -284,8 +284,8 @@ func TestSSODiscover_CaseInsensitive(t *testing.T) {
 
 // TestSSODiscover_Privacy_NoOrgIdentity: a match returns ONLY {sso, start_url}.
 // The response must never reveal org identity — no org id, org slug, or
-// connection id — only the opaque provider_id. This is the TFAC-422 trust-model
-// bar: mutually-distrusting orgs on one deployment.
+// connection id — only the opaque provider_id. This is the trust-model bar:
+// mutually-distrusting orgs on one deployment.
 func TestSSODiscover_Privacy_NoOrgIdentity(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)

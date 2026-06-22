@@ -20,11 +20,10 @@ func init() {
 }
 
 // install mounts the org-admin SSO surface (connection, break-glass,
-// domains) on the core server through the extension API — same routes,
-// withSession/CSRF discipline, and authorization as when these lived in
-// package server. The login-path SSO routes (discover, verify-test, SAML
-// start, callback enforcement/JIT) are wired separately through the login
-// hooks, not here.
+// domains) on the core server through the extension API, with the same
+// withSession/CSRF discipline and authorization as core's own routes. The
+// login-path SSO routes (discover, verify-test, SAML start, callback
+// enforcement/JIT) are wired separately through the login hooks, not here.
 func install(api server.ExtensionAPI) {
 	ssoc := &ssoConnectionHandler{
 		tx:        api.Tx(),

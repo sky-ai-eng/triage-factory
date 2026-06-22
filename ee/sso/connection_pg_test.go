@@ -344,7 +344,7 @@ func TestSSOConnectionCreate_NonHTTPSMetadata_400(t *testing.T) {
 }
 
 // TestSSOConnection_OrgIsolation: org B's admin can neither see nor modify org
-// A's connection. This is the cross-org isolation boundary TFAC-426's JIT trusts
+// A's connection. This is the cross-org isolation boundary SSO JIT trusts
 // (provider_id → exactly one org), enforced by RLS + requireOrg + the org-scoped
 // store reads — the non-admin 404 covers privilege, this covers tenancy.
 func TestSSOConnection_OrgIsolation(t *testing.T) {
