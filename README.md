@@ -18,35 +18,21 @@
   </a>
 </p>
 
-Triage Factory tracks everything that needs your attention across GitHub and Jira, scores it with AI, and routes it through an automation engine visualized as a factory floor. In Triage view, swipe to claim, dismiss, snooze, or delegate tasks to Claude. You decide exactly what gets automated, and you can take over any agent's run when needed. The things you delegate get done how you want them done using prompts you write or skills imported from Claude Code. PR reviews, Jira implementations, CI failures, and merge conflict resolution are all handled automatically in isolated worktrees, streaming results to a centralized dashboard in real time.
+Triage Factory watches everything that needs attention across your GitHub and Jira — open PRs, review requests, CI failures, merge conflicts, assigned tickets — scores and ranks it with AI, and lets you delegate the work to Claude Code agents that run in isolation and stream back to a live dashboard. You decide what gets automated, and you can take over any agent's run at any point.
 
-It's a single Go binary that runs on infrastructure you control. One developer runs it locally — SQLite, with credentials in the OS keychain (or an encrypted file when no keychain is reachable, like a container or headless server). A whole team runs the same binary self-hosted in multi-tenant mode, with Postgres and per-tenant isolation; local mode is just that same code path at N=1. Either way your data stays on infrastructure you control — the only things that leave it are API calls to GitHub, Jira, and Claude.
+It's a single Go binary that runs on infrastructure you control. One developer runs it locally — SQLite, credentials in the OS keychain. A whole organization runs the _same_ binary self-hosted in multi-tenant mode — Postgres, GoTrue auth, per-org isolation, and every agent run confined to its own kernel-level sandbox. There's no hosted service in the loop: your code and credentials stay on your infrastructure, and the only things that leave it are API calls to GitHub, Jira, and Claude. Local mode is just the same schema and the same code path at N=1.
 
-## What it does
+For a product tour and screenshots, see [triagefactory.com](https://www.triagefactory.com).
 
-**Factory** — A live factory-floor view of your automation pipeline. Event stations show where work is in flight, how much throughput each stage is handling, and which delegated runs need attention. Zoom in and out to see more detail and take control of individual stations and runs.
+## How it works
 
-**Triage queue** — A Tinder-style card stack of everything that needs you. AI scores and ranks items so the most urgent stuff surfaces first. Swipe left (dismiss), right (claim), up (delegate to agent), down (snooze).
+Work flows through an automation engine drawn as a factory floor. A durable **entity** (a PR, a Jira ticket) emits **events** as things happen to it — a review lands, CI fails, a label changes. Events that match your rules become **tasks**; a task you delegate becomes a **run** — one headless Claude Code execution inside an isolated git worktree. You map event types to prompts in a visual graph, so "review requested" routes to your review prompt and "Jira assigned" routes to your implementation prompt. Agents work autonomously and stream their activity back in real time; when a run finishes, you review and approve.
 
-**Board** — Three-column kanban (You / Agent / Done) with a collapsible, searchable queue sidebar. Drag tasks between columns. Drag from You to Agent to delegate something you already claimed. The Agent column is attention-weighted: tasks needing your review float to the top, running tasks sink to the bottom.
+## Local or self-hosted
 
-**Agent delegation** — When you delegate a task, Triage Factory spins up a headless Claude Code instance in an isolated git worktree. The agent works autonomously — reviewing PRs, implementing Jira tickets, resolving merge conflicts, or anything else you can dream up — and streams its activity back to the board in real time. On a self-hosted Linux server, each run is further confined in its own kernel-level sandbox (gVisor) with a per-run network namespace and a locked-down egress allowlist, so an agent can't reach another tenant's worktree or the host. When it's done, you review and approve.
+**Local (N=1)** — one developer, on your laptop. `brew install`, SQLite, credentials in the OS keychain. No DevOps.
 
-**Prompt routing** — A visual graph editor maps event types to delegation prompts. "Review requested" routes to your PR review prompt, "Jira assigned" routes to your implementation prompt. Drag event types onto prompt nodes to wire them up.
-
-<p align="center">
-  <img src="docs/imgs/prompts-page.png" alt="Prompt routing graph" width="90%" />
-</p>
-
-> Events are **per-action signals** — one event per check completion, one per review submission, one per push. Routing dedups those into one active card per `(entity_id, event_type, dedup_key)` so repeated churn bumps the same work item instead of spawning duplicates. For the current tracked event taxonomy, see [docs/tracked-events.md](docs/tracked-events.md).
-
-**PR dashboard** — Status donut, merge timeline, review balance, and 30-day totals. All your open, merged, and closed PRs in one place. Drag between "Ready for review" and "Drafts" to convert, all while keeping an eye on build status and merge conflicts.
-
-<p align="center">
-  <img src="docs/imgs/prs-page.png" alt="Pull Requests dashboard" width="90%" />
-</p>
-
-**Repo profiling** — AI-generated profiles of your configured repos (from README, CLAUDE.md, AGENTS.md) so the scorer and delegation agents understand context without you having to explain it.
+**Self-hosted (multi-tenant)** — your whole org on a Linux host you control: Postgres, GoTrue sign-in (SSO/SAML via the [Enterprise Edition](ee/)), RLS-isolated tenants, and gVisor-sandboxed agent runs with a locked-down egress allowlist. Same binary, same schema, deployed with Docker Compose. See [docs/self-host-setup.md](docs/self-host-setup.md).
 
 ## Install
 
@@ -59,13 +45,15 @@ brew install triagefactory
 triagefactory
 ```
 
-For direct downloads, building from source, prerequisites, and platform-specific notes, see [docs/INSTALLATION.md](docs/INSTALLATION.md).
+For direct downloads, building from source, and platform notes, see [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
-Similarly, [docs/usage.md](docs/usage.md) details CLI flags, configuration reference, polling details, and delegation/takeover workflows.
+## Documentation
 
-### Self-hosted for a team
-
-To run Triage Factory for a whole org in multi-tenant mode — Postgres, GoTrue auth, and kernel-sandboxed agent runs — see [docs/self-host-setup.md](docs/self-host-setup.md). It's the same binary and the same schema as local mode, deployed with Docker Compose on a Linux host you control. SSO/SAML for that deployment is available through the [Enterprise Edition](ee/).
+- [docs/INSTALLATION.md](docs/INSTALLATION.md) — install, build from source, prerequisites
+- [docs/usage.md](docs/usage.md) — CLI flags, configuration, polling, the delegation/takeover workflow
+- [docs/self-host-setup.md](docs/self-host-setup.md) — multi-tenant self-hosting
+- [docs/tracked-events.md](docs/tracked-events.md) — the GitHub/Jira event taxonomy
+- [CONTRIBUTING.md](CONTRIBUTING.md) — contribution terms
 
 ## License
 
