@@ -1,0 +1,60 @@
+Triage Factory Enterprise Edition License (Draft)
+
+Copyright (c) 2026 Aidan Allchin. All rights reserved.
+
+DRAFT NOTICE: This text is a plain-language placeholder pending review by
+counsel. It is intended to express the licensing model for the ee/ subtree;
+it is not yet a final legal instrument. Where this text and a signed
+commercial agreement conflict, the signed agreement governs.
+
+1. SCOPE
+
+This license governs only the contents of this "ee/" directory (the
+"Enterprise Edition"). The rest of the repository is licensed separately
+under the Business Source License 1.1 (see the repository-root LICENSE file).
+The Enterprise Edition is NOT covered by that BSL grant and does NOT convert
+to an open-source license on the BSL Change Date.
+
+2. SOURCE AVAILABILITY (READ AND AUDIT)
+
+The Enterprise Edition source is provided in this repository for
+transparency, evaluation, and security audit. You may read, review, and
+build it, and you may run it for non-production evaluation and testing.
+Making the source readable is deliberate: the isolation and security
+substrate stays auditable. Readability is not a grant of production use.
+
+3. PRODUCTION USE REQUIRES A SUBSCRIPTION
+
+Use of the Enterprise Edition in production, or for the internal business
+operations of any organization, requires a current paid commercial
+subscription or license from the Licensor (Aidan Allchin), including when
+you run it on your own hardware or self-hosted infrastructure. "Production
+use" means any use that is not solely for evaluation or testing.
+
+4. RESTRICTIONS
+
+Except as expressly permitted by a signed commercial agreement, you may not:
+  (a) use the Enterprise Edition in production without a current subscription;
+  (b) redistribute, resell, sublicense, or offer it to third parties as a
+      hosted or managed service;
+  (c) remove or circumvent license-key verification or feature gating;
+  (d) remove or alter this notice on copies of the Enterprise Edition.
+
+5. EVALUATION AND DESIGN-PARTNER LICENSES
+
+The Licensor may issue time-limited evaluation or design-partner licenses
+that permit production use for a stated term at no charge. Such a license is
+granted by a signed agreement and/or a signed license token; absent one, the
+default of Section 3 applies.
+
+6. NO WARRANTY
+
+THE ENTERPRISE EDITION IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. THE
+LICENSOR SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY
+ARISING FROM OR IN CONNECTION WITH THE ENTERPRISE EDITION OR ITS USE.
+
+7. CONTACT
+
+For a commercial or evaluation license, contact the Licensor.
