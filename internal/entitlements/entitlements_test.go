@@ -4,7 +4,10 @@ import "testing"
 
 func TestCommunityDefaultDeniesEverything(t *testing.T) {
 	Reset()
-	for _, f := range []Feature{FeatureSSO, FeatureSCIM, FeatureSandboxFleet, FeatureAuditExport} {
+	// The community checker denies every feature — the one real one and any
+	// hypothetical future identifier alike (using literals so the test doesn't
+	// depend on a constant existing yet).
+	for _, f := range []Feature{FeatureSSO, "scim", "sandbox_fleet", "any_future_feature"} {
 		if Active().Has(f) {
 			t.Fatalf("community build must not have %q", f)
 		}

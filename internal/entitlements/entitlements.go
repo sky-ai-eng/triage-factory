@@ -34,22 +34,10 @@ import "sync"
 type Feature string
 
 const (
-	// FeatureSSO gates SAML/OIDC single sign-on (the internal/server/sso_*
-	// handlers, GoTrue connection management, enforcement). Multi-mode only.
+	// FeatureSSO gates SAML/OIDC single sign-on — the ee/sso route + login
+	// extensions: GoTrue connection management, domain verification, and
+	// enforcement. Multi-mode only.
 	FeatureSSO Feature = "sso"
-
-	// FeatureSCIM gates SCIM 2.0 user/group provisioning. Multi-mode only.
-	FeatureSCIM Feature = "scim"
-
-	// FeatureSandboxFleet gates org-admin-defined sandbox profiles (the
-	// "customizable microVM" fleet) that teams choose from. The isolation
-	// MECHANISM (gVisor + credential proxies + egress allowlist) stays in
-	// core, free and auditable; this gates the fleet ADMINISTRATION surface.
-	FeatureSandboxFleet Feature = "sandbox_fleet"
-
-	// FeatureAuditExport gates audit-log export / retention beyond the
-	// in-product view.
-	FeatureAuditExport Feature = "audit_export"
 )
 
 // Checker answers whether a given enterprise feature is licensed for use
