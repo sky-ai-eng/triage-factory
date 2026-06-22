@@ -1101,6 +1101,13 @@ func (s *Server) routes() {
 	// secret before any side effect, so it's on the preAuthAllowlist.
 	s.mux.Handle("POST /api/webhooks/github/{org_id}", http.HandlerFunc(s.handleGitHubWebhook))
 
+	// Registered server extensions (Enterprise Edition, ee/) mount their
+	// routes here, each gated on its license feature. No-op in a community
+	// build / unlicensed deployment. Mounted before the SPA fallback; Go's
+	// ServeMux resolves by longest pattern, so specific /api/* extension
+	// routes take precedence over "/" regardless.
+	s.installExtensions()
+
 	// Frontend: serve embedded SPA, with fallback to index.html for client-side routing
 	s.mux.HandleFunc("/", s.handleFrontend)
 }
