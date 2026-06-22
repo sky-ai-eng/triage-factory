@@ -553,7 +553,7 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 				// Pagination truncation watchdog. Do not raise the cap without
 				// re-running the node-budget math in prFullFragment's comment.
 				if contexts.PageInfo.HasNextPage {
-					githubLog.Warn("check suites truncated; some CI state may be missing from snapshot",
+					githubLog.Warn("check rollup contexts truncated; some CI state may be missing from snapshot",
 						"repo", snap.Repo, "number", snap.Number, "cap", 100)
 				}
 
