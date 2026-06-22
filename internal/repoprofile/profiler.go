@@ -108,11 +108,12 @@ func (p *Profiler) RunOrg(ctx context.Context, orgID string, force bool) (bool, 
 // name. Cross-org repo dedup at the GitHub fetch layer (two orgs
 // both polling owner/repo doing two fetches) is a deferred concern
 // — local mode is N=1 so there's no immediate dedup pressure.
-// The returned bool reports whether this cycle wrote any profile row — i.e.
-// at least one repo passed the TTL + fetch gate and had its clone metadata
-// (re)persisted. A steady-state cycle where every repo is TTL-skipped
-// returns false, letting the caller skip the post-profile bare-clone
-// bootstrap (and its per-repo WS broadcasts) when nothing changed.
+// The returned bool reports whether this cycle *successfully persisted* any
+// profile row — at least one repo passed the TTL + fetch gate and had its
+// clone metadata written by an UpsertSystem that returned nil. A
+// steady-state cycle where every repo is TTL-skipped (or where every write
+// failed) returns false, letting the caller skip the post-profile bare-clone
+// bootstrap (and its per-repo WS broadcasts) when nothing landed on disk.
 func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, force bool) (bool, error) {
 	if len(repos) == 0 {
 		return false, nil
@@ -120,7 +121,10 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 
 	repoprofileLog.Info("profiling configured repos", "org", orgID, "repos", len(repos))
 
-	// touched flips true the first time a repo's row is upserted this cycle.
+	// touched flips true the first time a repo's row is *successfully*
+	// upserted this cycle (any of the three write sites below). A failed
+	// write leaves it false so the caller doesn't bootstrap bare clones for
+	// a clone_url that never landed.
 	touched := false
 
 	// Resolve the clone protocol once for the whole run rather than
@@ -222,8 +226,9 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		// Persist docs flags immediately so the UI can show them before profiling completes
 		if err := p.repos.UpsertSystem(ctx, orgID, prof); err != nil {
 			repoprofileLog.Error("upsert docs flags failed", "repo", name, "error", err)
+		} else {
+			touched = true
 		}
-		touched = true
 		if p.ws != nil {
 			p.ws.Broadcast(websocket.Event{
 				Type:  "repo_docs_updated",
@@ -272,6 +277,8 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			for _, d := range batch {
 				if uErr := p.repos.UpsertSystem(ctx, orgID, d.profile); uErr != nil {
 					repoprofileLog.Error("upsert fallback failed", "repo", d.profile.ID, "error", uErr)
+				} else {
+					touched = true
 				}
 			}
 			continue
@@ -293,6 +300,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 				repoprofileLog.Error("upsert profile failed", "repo", prof.ID, "error", err)
 				continue
 			}
+			touched = true
 			if prof.ProfileText != "" {
 				profiled++
 				if p.ws != nil {

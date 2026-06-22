@@ -17,8 +17,7 @@ import "github.com/sky-ai-eng/triage-factory/internal/logging"
 //	clone-status   worktree clone-result callback (local)
 //	kbwatcher      knowledge-base file watcher
 //	worktree       bare-clone bootstrap
-//	delegate       spawner readiness + App-registration read at boot
-//	repoprofile    local profile→restart→score sequence
+//	repoprofile    repo-profiling manager construction
 //	sandbox        orphan-sandbox reap at boot (multi mode)
 var (
 	aiLog          = logging.Component("ai")
@@ -32,7 +31,6 @@ var (
 	cloneStatusLog = logging.Component("clone-status")
 	kbwatcherLog   = logging.Component("kbwatcher")
 	worktreeLog    = logging.Component("worktree")
-	delegateLog    = logging.Component("delegate")
 	repoprofileLog = logging.Component("repoprofile")
 	sandboxLog     = logging.Component("sandbox")
 )

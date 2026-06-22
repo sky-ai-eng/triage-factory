@@ -129,7 +129,7 @@ type Server struct {
 	// Local mode always passes runmode.LocalDefaultOrgID; multi-mode
 	// handlers thread the request's orgID through so the callback
 	// can't fire one org's poller restart with another org's PAT.
-	onGitHubChanged func(orgID string) // GitHub creds/repos changed — full restart + re-profile
+	onGitHubChanged func(orgID string) // GitHub creds/access changed — evict the reachable-repo cache + re-due the org's GitHub poll (profiling is driven by the system:poll "profiler" subscriber, not here)
 	onJiraChanged   func(orgID string) // Jira config changed — restart Jira poller only
 	scorerTrigger   func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
 	// profilerTrigger kicks the per-org repo-profiling manager. force=true
@@ -1163,15 +1163,17 @@ func (s *Server) SetCurator(c *curator.Curator) {
 }
 
 // SetOnGitHubChanged registers a callback for GitHub config changes (creds, URL, repos).
-// This triggers a full restart: invalidate profiles → stop all pollers → re-profile → restart.
+// The callback re-dues the org's GitHub poll so the new credential/repo set
+// applies on the next wake; repo profiling is no longer triggered here — it's
+// driven by the system:poll "profiler" subscriber off that poll's completion.
 // The orgID is the tenant whose creds changed — closure re-resolves via SecretStore.
 //
 // The registered callback is wrapped so the reachable-repo enumeration cache
-// (SKY-409) is evicted for the org *before* the restart logic runs: a creds
+// (SKY-409) is evicted for the org *before* the re-due runs: a creds
 // rotation, App install, or repo-set change can move which repos the org can
 // reach, and a stale cached enumeration must never satisfy the next write.
 //
-// Handlers fire this callback in a goroutine (the restart is slow), so the
+// Handlers fire this callback in a goroutine, so the
 // eviction is asynchronous: a second write landing in the same instant as a
 // first could still read the pre-eviction cache. That race is benign — the
 // cache was just validated as correct, and the near-simultaneous second write
