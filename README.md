@@ -20,7 +20,7 @@
 
 Triage Factory watches everything that needs attention across your GitHub and Jira — open PRs, review requests, CI failures, merge conflicts, assigned tickets — scores and ranks it with AI, and lets you delegate the work to Claude Code agents that run in isolation and stream back to a live dashboard. You decide what gets automated, and you can take over any agent's run at any point.
 
-It's a single Go binary that runs on infrastructure you control. One developer runs it locally — SQLite, credentials in the OS keychain. A whole organization runs the _same_ binary self-hosted in multi-tenant mode — Postgres, GoTrue auth, per-org isolation, and every agent run confined to its own kernel-level sandbox. There's no hosted service in the loop: your code and credentials stay on your infrastructure, and the only things that leave it are API calls to GitHub, Jira, and Claude. Local mode is just the same schema and the same code path at N=1.
+It's a single Go binary that runs on infrastructure you control. One developer runs it locally — SQLite, credentials in the OS keychain (or an encrypted file when no keychain is reachable). A whole organization runs the _same_ binary self-hosted in multi-tenant mode — Postgres, GoTrue auth, per-org isolation, and, on Linux, per-run gVisor sandboxing. There's no hosted service in the loop: your code and credentials stay on your infrastructure, and the only things that leave it are API calls to GitHub, Jira, and Claude. Local mode is just the same schema and the same code path at N=1.
 
 For a product tour and screenshots, see [triagefactory.com](https://www.triagefactory.com).
 
@@ -30,9 +30,9 @@ Work flows through an automation engine drawn as a factory floor. A durable **en
 
 ## Local or self-hosted
 
-**Local (N=1)** — one developer, on your laptop. `brew install`, SQLite, credentials in the OS keychain. No DevOps.
+**Local (N=1)** — one developer, on your laptop. `brew install`, SQLite, credentials in the OS keychain (or an encrypted file when none is reachable, like a container or headless host). Agent runs execute in isolated git worktrees. No DevOps.
 
-**Self-hosted (multi-tenant)** — your whole org on a Linux host you control: Postgres, GoTrue sign-in (SSO/SAML via the [Enterprise Edition](ee/)), RLS-isolated tenants, and gVisor-sandboxed agent runs with a locked-down egress allowlist. Same binary, same schema, deployed with Docker Compose. See [docs/self-host-setup.md](docs/self-host-setup.md).
+**Self-hosted (multi-tenant)** — your whole org on a Linux host you control: Postgres, GoTrue sign-in (SSO/SAML via the [Enterprise Edition](ee/)), RLS-isolated tenants, and — on Linux — gVisor-sandboxed agent runs with a locked-down egress allowlist. Same binary, same schema, deployed with Docker Compose. See [docs/self-host-setup.md](docs/self-host-setup.md).
 
 ## Install
 
