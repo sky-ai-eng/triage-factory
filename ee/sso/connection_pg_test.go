@@ -1,29 +1,19 @@
-package server
+package sso_test
 
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// ssoTestServiceToken is the static service-role bearer the tests configure via
-// TF_GOTRUE_SERVICE_ROLE_TOKEN; the fake GoTrue checks TF forwards it verbatim.
-// Opaque here — TF treats the token as opaque and just presents it, so the
-// handler test only needs to prove forwarding. (jwk-init's own tests cover that
-// the real token is a valid RS256 service-role JWT with a matching kid.)
-const ssoTestServiceToken = "test-service-role-token-deadbeefdeadbeefdeadbeefdeadbeef"
-
-// ssoConnectionView / ssoConnectionResponse moved to ee/sso with the handler.
-// These pgtest integration tests depend on the package-server authRig harness,
-// so they keep faithful local copies of the wire shape the ee endpoint emits.
+// ssoConnectionView / ssoConnectionResponse mirror the wire shape the ee
+// endpoint emits; the tests decode into these local copies (the rig's fake
+// GoTrue + service-role-token plumbing live in rig_test.go).
 type ssoConnectionView struct {
 	ID          string    `json:"id"`
 	Kind        string    `json:"kind"`
@@ -40,81 +30,6 @@ type ssoConnectionResponse struct {
 	Connection *ssoConnectionView `json:"connection"`
 	EntityID   string             `json:"entity_id"`
 	ACSURL     string             `json:"acs_url"`
-}
-
-// envServiceRoleToken moved to ee/sso; the test asserts TF forwards this env's
-// token to GoTrue, so it keeps a local copy of the name.
-const envServiceRoleToken = "TF_GOTRUE_SERVICE_ROLE_TOKEN"
-
-// ssoFakeGoTrue is a minimal stand-in for GoTrue's admin SSO API. It checks the
-// bearer matches the configured service-role token, records the POST it
-// receives, and returns a fresh provider id (a UUID) on 201 — the shape
-// createSAMLProvider reads.
-type ssoFakeGoTrue struct {
-	srv       *httptest.Server
-	wantToken string
-
-	mu        sync.Mutex
-	postCount int
-	lastBody  map[string]any
-}
-
-func newSSOFakeGoTrue(t *testing.T, wantToken string) *ssoFakeGoTrue {
-	t.Helper()
-	f := &ssoFakeGoTrue{wantToken: wantToken}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/admin/sso/providers", func(w http.ResponseWriter, r *http.Request) {
-		// GoTrue authenticates the admin call by the service-role token; here we
-		// assert TF presented exactly the configured static token.
-		if r.Header.Get("Authorization") != "Bearer "+f.wantToken {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		f.mu.Lock()
-		f.postCount++
-		f.lastBody = body
-		f.mu.Unlock()
-		writeJSON(w, http.StatusCreated, map[string]any{"id": uuid.NewString()})
-	})
-	f.srv = httptest.NewServer(mux)
-	t.Cleanup(f.srv.Close)
-	return f
-}
-
-func (f *ssoFakeGoTrue) posts() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.postCount
-}
-
-func (f *ssoFakeGoTrue) lastPostBody() map[string]any {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.lastBody
-}
-
-// newSSORig builds a multi-mode auth rig wired to point GoTrue admin calls at a
-// fake, with the service-role token set in the env. Returns the rig + the fake
-// so tests can assert what TF sent to GoTrue.
-func newSSORig(t *testing.T) (*authRig, *ssoFakeGoTrue) {
-	t.Helper()
-	runmode.SetForTest(t, runmode.ModeMulti)
-	fake := newSSOFakeGoTrue(t, ssoTestServiceToken)
-	t.Setenv(envServiceRoleToken, ssoTestServiceToken)
-	r := newAuthRig(t)
-	// The rig wires SetAuthDeps with an unused GoTrue URL; repoint it at the
-	// fake. The handler reads it lazily via s.gotrueAdminBaseURL on each call.
-	r.srv.authCfg.gotrueURL = fake.srv.URL
-	return r, fake
 }
 
 // TestSSOConnectionCreate_NoServiceToken_503: with TF_GOTRUE_SERVICE_ROLE_TOKEN
@@ -337,8 +252,8 @@ func TestSSOConnectionGet_ReturnsSPValues(t *testing.T) {
 	r.seedOrg(owner, "sso-get")
 	sid := r.signInAs(owner)
 
-	wantEntity := r.srv.deployCfg.publicURL + "/auth/v1/sso/saml/metadata"
-	wantACS := r.srv.deployCfg.publicURL + "/auth/v1/sso/saml/acs"
+	wantEntity := testPublicURL + "/auth/v1/sso/saml/metadata"
+	wantACS := testPublicURL + "/auth/v1/sso/saml/acs"
 
 	// Before registration: SP values present, connection null.
 	pre := doInviteReq(r, http.MethodGet, "/api/sso/connection", sid, nil)
@@ -380,14 +295,13 @@ func TestSSOConnectionGet_ReturnsSPValues(t *testing.T) {
 // response. Uses GET (no CSRF) so a blanked publicURL doesn't trip the
 // same-origin check.
 func TestSSOConnectionGet_NoPublicURL_500(t *testing.T) {
-	r, _ := newSSORig(t)
+	// Build the deployment with no public URL configured, so PublicURL() returns
+	// "" and the handler must fail fast rather than emit relative SP paths. (GET
+	// only, so the blanked publicURL doesn't trip the same-origin CSRF check.)
+	r := newAuthRigWith(t, "")
 	owner := r.seedUser()
 	r.seedOrg(owner, "sso-no-public-url")
 	sid := r.signInAs(owner)
-
-	// Blank the public URL after sign-in (the rig wired it for the OAuth flow);
-	// publicURL() now returns "".
-	r.srv.deployCfg.publicURL = ""
 
 	resp := doInviteReq(r, http.MethodGet, "/api/sso/connection", sid, nil)
 	if resp.StatusCode != http.StatusInternalServerError {

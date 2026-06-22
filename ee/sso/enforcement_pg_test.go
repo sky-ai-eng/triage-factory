@@ -1,4 +1,4 @@
-package server
+package sso_test
 
 import (
 	"encoding/json"
@@ -90,19 +90,6 @@ func (r *authRig) driveGitHubLogin(authUserID uuid.UUID, email string) *http.Res
 	c["email_verified"] = true
 	resp, _ := r.driveCallbackClaims(c)
 	return resp
-}
-
-// gotSidCookie reports whether the response set a (non-empty) sid cookie — i.e.
-// a session was actually minted.
-func (r *authRig) gotSidCookie(resp *http.Response) bool {
-	r.t.Helper()
-	want := r.srv.sidCookieName()
-	for _, c := range resp.Cookies() {
-		if c.Name == want && c.Value != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // rejectedForSSO reports whether the callback bounced to the SSO-required login

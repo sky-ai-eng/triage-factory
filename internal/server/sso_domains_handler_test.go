@@ -31,4 +31,17 @@ func TestSSODomainRoutes_LocalAreNotFound(t *testing.T) {
 	}
 }
 
+// TestSSOTestStart_NoAuthStack_404: SSO is an ee feature gated on the `sso`
+// entitlement; a local-mode (community) server mounts no SSO routes, so the
+// verify-test-start route 404s — the "feature absent" contract observed at the
+// route boundary. (Lives in core: it asserts core's local-mode posture via the
+// package-server local test harness, with no ee extension registered.)
+func TestSSOTestStart_NoAuthStack_404(t *testing.T) {
+	s := newTestServer(t)
+	rec := doJSON(t, s, http.MethodGet, "/api/sso/connection/test", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status=%d, want 404 when SSO/auth stack is unavailable (local mode)", rec.Code)
+	}
+}
+
 // TestNormalizeSSODomain moved to ee/sso/funcs_test.go with the normalizer.

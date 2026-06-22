@@ -492,6 +492,13 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 	return s
 }
 
+// Handler returns the server's fully-wrapped HTTP handler — the same one
+// ListenAndServeContext binds — so callers can mount the app under a parent
+// mux, wrap it with additional middleware, or drive it over httptest without
+// opening a socket. The mux is populated by routes() during New, so the
+// handler is ready as soon as New returns.
+func (s *Server) Handler() http.Handler { return s.withSecurityHeaders(s.mux) }
+
 // ListenAndServe starts the HTTP server with no shutdown signal wired.
 // Kept for callers (and tests) that don't need graceful shutdown; it
 // delegates to ListenAndServeContext with a never-cancelled context.

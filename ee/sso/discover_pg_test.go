@@ -1,8 +1,7 @@
-package server
+package sso_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -61,9 +60,7 @@ func ssoDiscover(r *authRig, body any) (ssoDiscoverResponse, string) {
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/sso/discover", rdr)
 	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, req)
-	resp := rec.Result()
+	resp := r.serve(req)
 	raw := readBody(resp)
 	if resp.StatusCode != http.StatusOK {
 		r.t.Fatalf("POST /api/sso/discover: status = %d; want 200 (body=%s)", resp.StatusCode, raw)
@@ -184,18 +181,15 @@ func TestSSODiscover_VerifiedDomain_DrivesIntoSAMLStart(t *testing.T) {
 		t.Fatalf("discovery did not route to SSO (body=%s)", raw)
 	}
 
-	// Follow the start_url. GoTrue's /sso is stubbed to return the IdP redirect;
-	// a 303 proves the provider_id discovery emitted resolves to a real, enabled
+	// Follow the start_url. The fake GoTrue's /sso returns the IdP redirect; a 303
+	// proves the provider_id discovery emitted resolves to a real, enabled
 	// connection at the start endpoint.
-	r.srv.authDeps.gotrueSSO = func(_ context.Context, _, _, _ string) (string, error) {
-		return "https://login.microsoftonline.com/saml?SAMLRequest=abc", nil
+	r.fake.ssoLocation = "https://login.microsoftonline.com/saml?SAMLRequest=abc"
+	resp := r.serve(httptest.NewRequest("GET", body.StartURL, nil))
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("following start_url: status = %d; want 303 to the IdP (body=%s)", resp.StatusCode, readBody(resp))
 	}
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, httptest.NewRequest("GET", body.StartURL, nil))
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("following start_url: status = %d; want 303 to the IdP (body=%s)", rec.Code, rec.Body.String())
-	}
-	if loc := rec.Header().Get("Location"); loc != "https://login.microsoftonline.com/saml?SAMLRequest=abc" {
+	if loc := resp.Header.Get("Location"); loc != "https://login.microsoftonline.com/saml?SAMLRequest=abc" {
 		t.Errorf("Location = %q; want the IdP redirect", loc)
 	}
 }

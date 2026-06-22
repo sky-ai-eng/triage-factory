@@ -1,10 +1,10 @@
-package server
+package sso_test
 
 import (
-	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,17 +50,25 @@ func (r *authRig) seedSSOConnection(orgID uuid.UUID, providerID, role string, en
 	}
 }
 
-// seedAuthOnlyUser seeds an auth.users row WITHOUT a public.users row — a
-// genuine first-time login, where the callback's upsertUserFromClaims is what
-// creates public.users. (seedUser, by contrast, pre-creates both.)
-func (r *authRig) seedAuthOnlyUser() uuid.UUID {
+// setSSOConnectionEnabled flips the enabled flag — used to disable a connection
+// in the window between the SAML start (which mints the state cookie) and the
+// callback, so the callback's enable re-check can be exercised black-box.
+func (r *authRig) setSSOConnectionEnabled(providerID string, enabled bool) {
 	r.t.Helper()
-	var idStr string
-	if err := r.h.AdminDB.QueryRow(`SELECT gen_random_uuid()`).Scan(&idStr); err != nil {
-		r.t.Fatalf("gen uuid: %v", err)
+	if _, err := r.h.AdminDB.Exec(
+		`UPDATE sso_connections SET enabled = $1 WHERE provider_id = $2`, enabled, providerID); err != nil {
+		r.t.Fatalf("set connection enabled=%v: %v", enabled, err)
 	}
-	r.h.SeedAuthUser(r.t, idStr, idStr+"@corp.example")
-	return uuid.MustParse(idStr)
+}
+
+// deleteSSOConnection removes the connection — models a binding that vanished
+// between the SAML start and the callback.
+func (r *authRig) deleteSSOConnection(providerID string) {
+	r.t.Helper()
+	if _, err := r.h.AdminDB.Exec(
+		`DELETE FROM sso_connections WHERE provider_id = $1`, providerID); err != nil {
+		r.t.Fatalf("delete connection: %v", err)
+	}
 }
 
 // validSAMLClaimsFor returns JWT claims for a SAML login. jwtProviderID drives
@@ -89,92 +97,36 @@ func validSAMLClaimsFor(userID uuid.UUID, jwtProviderID string) jwt.MapClaims {
 	}
 }
 
-// driveSAMLCallback completes a SAML login at the callback handler. stateProviderID
-// is what TF's signed state carries (the value the JIT keys on); jwtProviderID is
-// what the minted JWT advertises in app_metadata (pass the same value for an
-// "honest" login). Returns the callback response (carrying the sid Set-Cookie).
+// startSAML drives the SP-initiated SAML start for providerID (the binding must
+// be enabled — that's the product gate), returning the cookies the server set
+// (the signed state cookie, carrying providerID) and the csrf to echo back. The
+// rig follows the server's own cookies, so it never hand-signs state.
+func (r *authRig) startSAML(providerID string) (cookies []*http.Cookie, csrf string) {
+	r.t.Helper()
+	return r.startLogin(ssoStartURL(providerID, "/dashboard"), true)
+}
+
+// completeSAMLLogin finishes a SAML login at the callback: stage the JWT the
+// exchange returns (with jwtProviderID in app_metadata) and replay the start's
+// cookies. Split from startSAML so a test can mutate connection state in the
+// window between start and callback.
+func (r *authRig) completeSAMLLogin(cookies []*http.Cookie, csrf string, userID uuid.UUID, jwtProviderID string) *http.Response {
+	r.t.Helper()
+	r.fake.stageToken(r.signKey.mintJWT(r.t, validSAMLClaimsFor(userID, jwtProviderID)))
+	return r.fireCallback(cookies, csrf, url.Values{"code": {"fake-" + uuid.NewString()}})
+}
+
+// driveSAMLCallback completes a full SAML login: SP-initiated start (state cookie
+// carries stateProviderID — the value the JIT keys on) then the callback (JWT
+// advertises jwtProviderID in app_metadata; pass the same value for an "honest"
+// login). Returns the callback response (carrying the sid Set-Cookie).
 func (r *authRig) driveSAMLCallback(userID uuid.UUID, stateProviderID, jwtProviderID string) *http.Response {
 	r.t.Helper()
-	token := r.signKey.mintJWT(r.t, validSAMLClaimsFor(userID, jwtProviderID))
-	refresh := "refresh-" + uuid.NewString()
-	r.srv.authDeps.gotrueExchange = func(ctx context.Context, code, verifier string) (string, string, int64, error) {
-		return token, refresh, time.Now().Add(time.Hour).Unix(), nil
-	}
-
-	csrf := "test-csrf-" + uuid.NewString()
-	state := stateClaims{
-		ReturnTo:     "/dashboard",
-		CSRF:         csrf,
-		CodeVerifier: "test-pkce-verifier",
-		ProviderID:   stateProviderID,
-		ExpiresAt:    time.Now().Add(10 * time.Minute).Unix(),
-	}
-	signed, err := state.sign(r.srv.deployCfg.hmacKey)
-	if err != nil {
-		r.t.Fatalf("sign state: %v", err)
-	}
-
-	req := httptest.NewRequest("GET", "/api/auth/callback?state="+csrf+"&code=fake-"+uuid.NewString(), nil)
-	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: signed})
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, req)
-	return rec.Result()
+	cookies, csrf := r.startSAML(stateProviderID)
+	return r.completeSAMLLogin(cookies, csrf, userID, jwtProviderID)
 }
 
-type meBody struct {
-	ID          string `json:"id"`
-	ActiveOrgID string `json:"active_org_id"`
-	Orgs        []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-		Role string `json:"role"`
-	} `json:"orgs"`
-}
-
-func (r *authRig) me(sid string) meBody {
-	r.t.Helper()
-	resp := r.requestWithSid("GET", "/api/me", sid)
-	if resp.StatusCode != http.StatusOK {
-		r.t.Fatalf("/api/me status=%d, want 200", resp.StatusCode)
-	}
-	var m meBody
-	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
-		r.t.Fatalf("decode /api/me: %v", err)
-	}
-	return m
-}
-
-// membershipCount returns how many org_memberships rows a user holds (optionally
-// scoped to one org when orgID != uuid.Nil).
-func (r *authRig) membershipCount(userID, orgID uuid.UUID) int {
-	r.t.Helper()
-	var n int
-	q := `SELECT count(*) FROM org_memberships WHERE user_id = $1`
-	args := []any{userID}
-	if orgID != uuid.Nil {
-		q += ` AND org_id = $2`
-		args = append(args, orgID)
-	}
-	if err := r.h.AdminDB.QueryRow(q, args...).Scan(&n); err != nil {
-		r.t.Fatalf("count memberships: %v", err)
-	}
-	return n
-}
-
-// principalOf resolves a GoTrue login identity (auth.users id) to its principal
-// (public.users id) via the user_identities link the callback writes. A genuine
-// first login mints a fresh principal, so memberships land on the principal, not
-// the auth identity — assertions must key on this.
-func (r *authRig) principalOf(authUserID uuid.UUID) uuid.UUID {
-	r.t.Helper()
-	var pid uuid.UUID
-	if err := r.h.AdminDB.QueryRow(
-		`SELECT user_id FROM user_identities WHERE auth_user_id = $1`, authUserID,
-	).Scan(&pid); err != nil {
-		r.t.Fatalf("resolve principal for identity %s: %v", authUserID, err)
-	}
-	return pid
-}
+// meBody, me, membershipCount, principalOf live on the rig in rig_test.go.
 
 // ---------- callback / JIT tests ----------
 
@@ -329,8 +281,17 @@ func TestSSOLogin_NoMatchingConnection_FallsToOnboarding(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 
+	// Start needs an enabled binding to mint the state; then the connection
+	// vanishes before the callback runs — exactly the modelled race.
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "vanish")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+
 	user := r.seedAuthOnlyUser()
-	resp := r.driveSAMLCallback(user, uuid.NewString(), uuid.NewString()) // no seedSSOConnection
+	cookies, csrf := r.startSAML(providerID)
+	r.deleteSSOConnection(providerID) // binding gone between start and callback
+	resp := r.completeSAMLLogin(cookies, csrf, user, providerID)
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
 	}
@@ -351,13 +312,17 @@ func TestSSOLogin_DisabledConnection_NoProvisioning(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 
+	// Enabled at start (so the state mints), disabled before the callback — the
+	// callback's enable re-check must then refuse to JIT.
 	providerID := uuid.NewString()
 	owner := r.seedUser()
 	orgA, _ := r.seedOrg(owner, "acme")
-	r.seedSSOConnection(orgA, providerID, "member", false) // disabled
+	r.seedSSOConnection(orgA, providerID, "member", true)
 
 	user := r.seedAuthOnlyUser()
-	resp := r.driveSAMLCallback(user, providerID, providerID)
+	cookies, csrf := r.startSAML(providerID)
+	r.setSSOConnectionEnabled(providerID, false) // disabled between start and callback
+	resp := r.completeSAMLLogin(cookies, csrf, user, providerID)
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
 	}
@@ -397,19 +362,19 @@ func TestSSOLogin_RawIdPInitiated_NoStateCookie_Rejected(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 
-	req := httptest.NewRequest("GET", "/api/auth/callback?state=x&code=y", nil)
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status=%d, want 400 (missing state cookie → reject)", rec.Code)
+	resp := r.serve(httptest.NewRequest("GET", "/api/auth/callback?state=x&code=y", nil))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status=%d, want 400 (missing state cookie → reject)", resp.StatusCode)
 	}
 }
 
 // ---------- start-endpoint tests ----------
 
-// GET /api/auth/oauth/saml?provider_id=… → 303 to the IdP, with TF's signed
-// state cookie carrying the provider_id + a PKCE verifier whose S256 challenge
-// is what TF posted to GoTrue.
+// GET /api/auth/oauth/saml?provider_id=… → 303 to the IdP GoTrue returned, after
+// TF posted GoTrue's /sso with the provider_id, a callback redirect_to, and an
+// S256 PKCE challenge. (The signed state cookie's internals are opaque to the
+// client by design; that the provider_id + PKCE verifier survive start→callback
+// is proven transitively by the JIT round-trip tests below.)
 func TestSAMLStart_RedirectsToIdP(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -419,73 +384,53 @@ func TestSAMLStart_RedirectsToIdP(t *testing.T) {
 	orgA, _ := r.seedOrg(owner, "acme")
 	r.seedSSOConnection(orgA, providerID, "member", true)
 
-	var gotProvider, gotRedirect, gotChallenge string
-	r.srv.authDeps.gotrueSSO = func(ctx context.Context, pid, redirectTo, challenge string) (string, error) {
-		gotProvider, gotRedirect, gotChallenge = pid, redirectTo, challenge
-		return "https://login.microsoftonline.com/saml?SAMLRequest=abc", nil
-	}
+	r.fake.ssoLocation = "https://login.microsoftonline.com/saml?SAMLRequest=abc"
+	resp := r.serve(httptest.NewRequest("GET",
+		"/api/auth/oauth/saml?provider_id="+providerID+"&return_to=/dashboard", nil))
 
-	req := httptest.NewRequest("GET", "/api/auth/oauth/saml?provider_id="+providerID+"&return_to=/dashboard", nil)
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("status=%d, want 303", rec.Code)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status=%d, want 303", resp.StatusCode)
 	}
-	if loc := rec.Header().Get("Location"); loc != "https://login.microsoftonline.com/saml?SAMLRequest=abc" {
+	if loc := resp.Header.Get("Location"); loc != "https://login.microsoftonline.com/saml?SAMLRequest=abc" {
 		t.Errorf("Location=%q, want the IdP redirect GoTrue returned", loc)
 	}
-	if gotProvider != providerID {
-		t.Errorf("provider_id posted to GoTrue=%q, want %q", gotProvider, providerID)
+
+	body := r.fake.lastSSO()
+	if body["provider_id"] != providerID {
+		t.Errorf("provider_id posted to GoTrue=%q, want %q", body["provider_id"], providerID)
 	}
-	wantRedirectPrefix := r.srv.deployCfg.publicURL + "/api/auth/callback?state="
-	if len(gotRedirect) < len(wantRedirectPrefix) || gotRedirect[:len(wantRedirectPrefix)] != wantRedirectPrefix {
-		t.Errorf("redirect_to=%q, want prefix %q", gotRedirect, wantRedirectPrefix)
+	wantPrefix := testPublicURL + "/api/auth/callback?state="
+	if !strings.HasPrefix(body["redirect_to"], wantPrefix) {
+		t.Errorf("redirect_to=%q, want prefix %q", body["redirect_to"], wantPrefix)
+	}
+	if body["code_challenge_method"] != "S256" {
+		t.Errorf("code_challenge_method=%q, want S256", body["code_challenge_method"])
+	}
+	if body["code_challenge"] == "" {
+		t.Error("no PKCE code_challenge posted to GoTrue")
 	}
 
-	var stateVal string
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == stateCookieName {
-			stateVal = c.Value
+	// The signed state cookie was set (its contents are opaque to the client).
+	var sawState bool
+	for _, c := range resp.Cookies() {
+		if c.Value != "" && c.Name != sidCookieName {
+			sawState = true
 		}
 	}
-	if stateVal == "" {
-		t.Fatal("no state cookie set")
-	}
-	sc, err := parseStateCookie(stateVal, r.srv.deployCfg.hmacKey)
-	if err != nil {
-		t.Fatalf("parse state cookie: %v", err)
-	}
-	if sc.ProviderID != providerID {
-		t.Errorf("state provider_id=%q, want %q", sc.ProviderID, providerID)
-	}
-	if sc.ReturnTo != "/dashboard" {
-		t.Errorf("state return_to=%q, want /dashboard", sc.ReturnTo)
-	}
-	if sc.CodeVerifier == "" {
-		t.Error("state carries no code_verifier")
-	}
-	if gotChallenge != pkceChallenge(sc.CodeVerifier) {
-		t.Errorf("challenge posted to GoTrue is not S256(verifier in state)")
+	if !sawState {
+		t.Error("no state cookie set on the SAML start")
 	}
 }
 
-// An unknown or disabled provider_id → 404, and TF never calls GoTrue.
+// An unknown, disabled, or malformed provider_id → 404, and TF never posts GoTrue.
 func TestSAMLStart_UnknownOrDisabledProvider_404(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 
-	called := false
-	r.srv.authDeps.gotrueSSO = func(ctx context.Context, _, _, _ string) (string, error) {
-		called = true
-		return "", nil
-	}
-
 	// Unknown provider_id (no row at all).
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/auth/oauth/saml?provider_id="+uuid.NewString(), nil))
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("unknown provider status=%d, want 404", rec.Code)
+	if resp := r.serve(httptest.NewRequest("GET",
+		"/api/auth/oauth/saml?provider_id="+uuid.NewString(), nil)); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown provider status=%d, want 404", resp.StatusCode)
 	}
 
 	// Disabled connection.
@@ -493,23 +438,20 @@ func TestSAMLStart_UnknownOrDisabledProvider_404(t *testing.T) {
 	owner := r.seedUser()
 	orgA, _ := r.seedOrg(owner, "acme")
 	r.seedSSOConnection(orgA, providerID, "member", false)
-	rec2 := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec2, httptest.NewRequest("GET", "/api/auth/oauth/saml?provider_id="+providerID, nil))
-	if rec2.Code != http.StatusNotFound {
-		t.Errorf("disabled provider status=%d, want 404", rec2.Code)
+	if resp := r.serve(httptest.NewRequest("GET",
+		"/api/auth/oauth/saml?provider_id="+providerID, nil)); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("disabled provider status=%d, want 404", resp.StatusCode)
 	}
 
-	// A malformed (non-UUID) provider_id. provider_id is a `text` column treated
-	// as an opaque handle — GetByProviderID compares text = text with no ::uuid
-	// cast — so a garbage value matches no row → 404, NOT a DB cast error / 500.
-	rec3 := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec3, httptest.NewRequest("GET", "/api/auth/oauth/saml?provider_id=not-a-uuid", nil))
-	if rec3.Code != http.StatusNotFound {
-		t.Errorf("malformed provider status=%d, want 404 (opaque text key, no cast)", rec3.Code)
+	// A malformed (non-UUID) provider_id is an opaque text key that matches no row
+	// → 404, NOT a DB cast error / 500.
+	if resp := r.serve(httptest.NewRequest("GET",
+		"/api/auth/oauth/saml?provider_id=not-a-uuid", nil)); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("malformed provider status=%d, want 404 (opaque text key, no cast)", resp.StatusCode)
 	}
 
-	if called {
-		t.Error("GoTrue /sso was called for an unknown/disabled/malformed provider")
+	if r.fake.ssoCalls() != 0 {
+		t.Errorf("GoTrue /sso calls=%d, want 0 (never called for unknown/disabled/malformed)", r.fake.ssoCalls())
 	}
 }
 
@@ -517,70 +459,8 @@ func TestSAMLStart_UnknownOrDisabledProvider_404(t *testing.T) {
 func TestSAMLStart_MissingProviderID_400(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/auth/oauth/saml", nil))
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status=%d, want 400", rec.Code)
-	}
-}
-
-// gotrueSSOFunc posts JSON to the PUBLIC /sso with NO Authorization header and
-// forwards the 303 Location without following it.
-func TestGoTrueSSO_PublicNoAuth_Forwards303(t *testing.T) {
-	var (
-		gotAuth, gotCT, gotPath string
-		gotBody                 map[string]string
-	)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		gotAuth = req.Header.Get("Authorization")
-		gotCT = req.Header.Get("Content-Type")
-		gotPath = req.URL.Path
-		_ = json.NewDecoder(req.Body).Decode(&gotBody)
-		w.Header().Set("Location", "https://idp.example/saml?SAMLRequest=zzz")
-		w.WriteHeader(http.StatusSeeOther)
-	}))
-	defer upstream.Close()
-
-	srv := &Server{}
-	cfg := &authConfig{gotrueURL: upstream.URL}
-	loc, err := srv.gotrueSSOFunc(cfg)(context.Background(), "prov-123", "https://tf/cb?state=x", "challenge-abc")
-	if err != nil {
-		t.Fatalf("gotrueSSO: %v", err)
-	}
-	if loc != "https://idp.example/saml?SAMLRequest=zzz" {
-		t.Errorf("location=%q", loc)
-	}
-	if gotAuth != "" {
-		t.Errorf("Authorization header sent to public /sso: %q (must be none)", gotAuth)
-	}
-	if gotCT != "application/json" {
-		t.Errorf("Content-Type=%q, want application/json", gotCT)
-	}
-	if gotPath != "/sso" {
-		t.Errorf("path=%q, want /sso", gotPath)
-	}
-	if gotBody["provider_id"] != "prov-123" ||
-		gotBody["redirect_to"] != "https://tf/cb?state=x" ||
-		gotBody["code_challenge"] != "challenge-abc" {
-		t.Errorf("body=%v", gotBody)
-	}
-	if gotBody["code_challenge_method"] != "S256" {
-		t.Errorf("code_challenge_method=%q, want S256 (RFC 7636 canonical, matching /authorize)", gotBody["code_challenge_method"])
-	}
-}
-
-// A non-303 response from GoTrue (e.g. a 400 for a bad provider) surfaces as an
-// error rather than a bogus empty redirect.
-func TestGoTrueSSO_Non303_Errors(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		http.Error(w, `{"error":"bad provider"}`, http.StatusBadRequest)
-	}))
-	defer upstream.Close()
-
-	srv := &Server{}
-	cfg := &authConfig{gotrueURL: upstream.URL}
-	if _, err := srv.gotrueSSOFunc(cfg)(context.Background(), "p", "r", "c"); err == nil {
-		t.Fatal("expected an error for a non-303 /sso response, got nil")
+	if resp := r.serve(httptest.NewRequest("GET", "/api/auth/oauth/saml", nil)); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status=%d, want 400", resp.StatusCode)
 	}
 }
 
