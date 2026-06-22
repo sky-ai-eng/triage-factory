@@ -4,11 +4,14 @@ Thanks for contributing.
 
 ## Before You Start
 
-By contributing to this repository, you agree that your contributions will be
-licensed and distributed under the repository's `LICENSE` terms.
+By contributing to this repository, you agree that your contributions may be
+distributed under either license in the repo — the root [Business Source
+License](LICENSE) or, for the [`ee/`](ee/) subtree, the commercial [Enterprise
+Edition license](ee/LICENSE) — as set out in the contributor license agreement
+in [`docs/CLA.md`](docs/CLA.md), which all contributions must be covered by.
 
-All contributions must also be covered by the project's contributor license
-agreement in [`docs/CLA.md`](docs/CLA.md).
+Small fixes to `ee/` (bugs, security, tests, docs) are welcome. For larger
+`ee/` features, please open an issue to discuss first.
 
 ## Contributor License Agreement
 
