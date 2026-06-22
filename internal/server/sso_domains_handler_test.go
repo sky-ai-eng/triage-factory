@@ -31,42 +31,4 @@ func TestSSODomainRoutes_LocalAreNotFound(t *testing.T) {
 	}
 }
 
-// TestNormalizeSSODomain covers the claim-time normalizer in isolation: lower
-// + trim + trailing-dot strip on the accepted side, and the paste-guard
-// rejections (empty, email, URL, whitespace, single label) on the other.
-func TestNormalizeSSODomain(t *testing.T) {
-	ok := []struct{ in, want string }{
-		{"corp.com", "corp.com"},
-		{"  Corp.Com  ", "corp.com"},
-		{"EXAMPLE.CO.UK", "example.co.uk"},
-		{"corp.com.", "corp.com"},  // single trailing FQDN dot stripped
-		{"corp.com..", "corp.com"}, // all trailing dots stripped (not just one)
-		{"eng.corp.com", "eng.corp.com"},
-	}
-	for _, tc := range ok {
-		got, valid := normalizeSSODomain(tc.in)
-		if !valid || got != tc.want {
-			t.Errorf("normalizeSSODomain(%q) = (%q, %v); want (%q, true)", tc.in, got, valid, tc.want)
-		}
-	}
-
-	bad := []string{
-		"",                 // empty
-		"   ",              // whitespace only
-		"localhost",        // single label, no dot
-		"user@corp.com",    // pasted email
-		"https://corp.com", // URL (scheme + slashes)
-		"corp.com/path",    // path
-		"corp .com",        // embedded space
-		"corp\tcom.com",    // embedded tab
-		".",                // dot(s) only → empty after strip
-		"..",               // dot(s) only → empty after strip
-		".corp.com",        // leading dot → empty first label
-		"corp..com",        // doubled internal dot → empty middle label
-	}
-	for _, in := range bad {
-		if got, valid := normalizeSSODomain(in); valid {
-			t.Errorf("normalizeSSODomain(%q) = (%q, true); want rejected", in, got)
-		}
-	}
-}
+// TestNormalizeSSODomain moved to ee/sso/funcs_test.go with the normalizer.
