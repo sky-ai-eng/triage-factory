@@ -655,12 +655,21 @@ func (s *agentRunStore) ListParkedWorktreePathsSystem(ctx context.Context, orgID
 	return listParkedWorktreePaths(ctx, s.admin, orgID)
 }
 
+// listParkedWorktreePaths returns the worktree dirs the startup sweep must keep
+// warm — parked (open/pending_approval) runs whose owning blueprint_run is still
+// 'running'. A parked run under an already-terminal blueprint_run is NOT
+// resumable (every resume path gates on cr.Status == running), so its worktree
+// must NOT be preserved: preserving it would leave a checked-out
+// branch on disk that the boot reconcile then orphans by cancelling the row,
+// reviving the "refusing to fetch into a branch checked out in a worktree" loop.
 func listParkedWorktreePaths(ctx context.Context, q queryer, orgID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT worktree_path FROM runs
-		WHERE org_id = $1
-		  AND status IN ('open', 'pending_approval')
-		  AND COALESCE(worktree_path, '') != ''
+		SELECT r.worktree_path FROM runs r
+		LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
+		WHERE r.org_id = $1
+		  AND r.status IN ('open', 'pending_approval')
+		  AND COALESCE(r.worktree_path, '') != ''
+		  AND (br.id IS NULL OR br.status = 'running')
 	`, orgID)
 	if err != nil {
 		return nil, err

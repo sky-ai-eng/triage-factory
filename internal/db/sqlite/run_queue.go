@@ -118,7 +118,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
 }
 
 func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) {
-	// TFAC-441 boot self-heal: cancel child runs left non-terminal under a
+	// Boot self-heal: cancel child runs left non-terminal under a
 	// blueprint_run that is already terminal. This is the mirror of
 	// ResetProcessingRuns (which requeues active runs under a *running* parent):
 	// a child alive under a terminal parent will never be claimed (ClaimNextRun

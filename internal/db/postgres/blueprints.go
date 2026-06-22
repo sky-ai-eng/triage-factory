@@ -929,42 +929,52 @@ func markBlueprintRunStatus(ctx context.Context, q queryer, orgID, id string, st
 	if abortedAtStep != nil {
 		stepArg = *abortedAtStep
 	}
-	res, err := q.ExecContext(ctx, `
-		UPDATE blueprint_runs
-		SET status = $1, abort_reason = $2, aborted_at_step = $3, completed_at = now()
-		WHERE org_id = $4 AND id = $5
-		  AND status IN ('running','pending_approval','open')
-	`, string(status), reasonArg, stepArg, orgID, id)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	// TFAC-441: a terminal blueprint_run must leave no non-terminal child run
-	// behind. Cancel any still-active step run atomically with the parent's
-	// terminal flip (same pool/tx as the parent write) so a cancel that raced the
-	// dispatcher's claim/setup window — or a parked open/pending_approval step the
-	// sequence-cancel path skips — can't strand a child 'running', which keeps the
-	// dispatcher on phantom work and pins its feature branch in a worktree,
-	// requeuing forever. Only on a real transition to a terminal target. Runs on
-	// the same queryer: the admin pool (event blueprints) bypasses RLS; the app
-	// pool (manual blueprints) passes runs_update for the team member who owns the
-	// blueprint, and RLS-filtered rows degrade to the boot reconcile backstop
-	// rather than erroring.
-	if n > 0 && status.Terminal() {
-		if err := cancelOrphanedChildRuns(ctx, q, orgID, id); err != nil {
-			return false, err
+	// Flip the blueprint_run terminal AND cancel any still-active child
+	// run in one transaction so a terminal parent can never be observed (or
+	// committed) alongside a live child. inTx composes with the caller's tx when
+	// markBlueprintRunStatus runs inside a SyntheticClaims tx (manual/app path)
+	// and opens a fresh one on the bare admin handle (event/system path) — either
+	// way the two writes are all-or-nothing. The admin pool bypasses RLS; the app
+	// pool passes runs_update for the team member who owns the blueprint, and
+	// RLS-filtered rows degrade to the boot reconcile backstop rather than
+	// erroring. Without this a cancel that raced the dispatcher's claim/setup
+	// window — or a parked open/pending_approval step the sequence-cancel path
+	// skips — would strand a child 'running', keeping the dispatcher on phantom
+	// work and pinning its feature branch in a worktree, requeuing forever.
+	var changed bool
+	err := inTx(ctx, q, func(tx queryer) error {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE blueprint_runs
+			SET status = $1, abort_reason = $2, aborted_at_step = $3, completed_at = now()
+			WHERE org_id = $4 AND id = $5
+			  AND status IN ('running','pending_approval','open')
+		`, string(status), reasonArg, stepArg, orgID, id)
+		if err != nil {
+			return err
 		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		changed = n > 0
+		// Only on a real transition to a terminal target.
+		if changed && status.Terminal() {
+			return cancelOrphanedChildRuns(ctx, tx, orgID, id)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
-	return n > 0, nil
+	return changed, nil
 }
 
 // cancelOrphanedChildRuns marks every non-terminal child run of blueprintRunID
-// 'cancelled' (stamping completed_at). Shared by markBlueprintRunStatus's atomic
-// flip and the boot reconcile; the terminal-status filter is the canonical run
-// terminal set used across the agentrun store.
+// 'cancelled' (stamping completed_at). Called by markBlueprintRunStatus's atomic
+// flip; RunQueueStore.ReconcileOrphanedRuns applies the same terminal-status
+// filter in its own boot sweep (it can't share this body — different store,
+// different scope). The filter is the canonical run terminal set used across the
+// agentrun store.
 func cancelOrphanedChildRuns(ctx context.Context, q queryer, orgID, blueprintRunID string) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE runs

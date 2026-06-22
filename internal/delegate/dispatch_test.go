@@ -104,7 +104,7 @@ func queuedStepRuns(t *testing.T, database *sql.DB, brID string) []int {
 	return out
 }
 
-// TestReconcileRunQueue_CancelsOrphanUnderTerminalBlueprint is the TFAC-441
+// TestReconcileRunQueue_CancelsOrphanUnderTerminalBlueprint is the
 // boot-reconcile integration check: a child run left 'running' under an
 // already-terminal blueprint_run (the desync) must be cancelled by the boot
 // sweep, so the dispatcher stops treating it as live work and its feature

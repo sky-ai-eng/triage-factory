@@ -20,7 +20,7 @@ func childRunStatusDB(t *testing.T, conn *sql.DB, id string) string {
 	return s
 }
 
-// TestMarkRunStatus_CancelsOrphanedChild_OnTerminal pins the TFAC-441 atomic
+// TestMarkRunStatus_CancelsOrphanedChild_OnTerminal pins the atomic
 // guarantee: flipping a blueprint_run to a terminal status must cancel any
 // still-active child run in the same call, so a cancel that raced the
 // dispatcher can't strand a child 'running' (which keeps the dispatcher on
@@ -126,7 +126,7 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 	}
 }
 
-// TestReconcileOrphanedRuns heals the exact desync from TFAC-441: a child run
+// TestReconcileOrphanedRuns heals the exact desync: a child run
 // left 'running' under an already-terminal blueprint_run. The boot sweep must
 // cancel it (and only it), leaving children under a still-running parent alone.
 func TestReconcileOrphanedRuns(t *testing.T) {

@@ -130,7 +130,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
 }
 
 func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) {
-	// TFAC-441 boot self-heal — see RunQueueStore.ReconcileOrphanedRuns and the
+	// Boot self-heal — see RunQueueStore.ReconcileOrphanedRuns and the
 	// SQLite mirror. Admin pool (BYPASSRLS): a cross-org system sweep with no
 	// per-user identity, the same posture as ResetProcessingRuns.
 	res, err := s.conn.ExecContext(ctx, `

@@ -153,6 +153,76 @@ func TestRunQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 	}
 }
 
+// TestRunQueueStore_Postgres_ReconcileOrphanedRuns heals the desync where a
+// child run is left non-terminal under an already-terminal blueprint_run: the
+// boot sweep cancels it (stamping completed_at) and only it, leaving a child
+// under a still-running parent untouched.
+func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+
+	// Orphan: terminal (cancelled) parent, child still running.
+	brA, taskA, promptA := seedPgRunQueueFixture(t, h, orgID, userID)
+	orphanID := uuid.New().String()
+	step0 := 0
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+		ID: orphanID, TaskID: taskA, PromptID: promptA, Model: "m",
+		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brA, BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("EnqueueRun orphan: %v", err)
+	}
+	if _, err := h.AdminDB.Exec(`UPDATE runs SET status = 'running' WHERE id = $1`, orphanID); err != nil {
+		t.Fatalf("set orphan running: %v", err)
+	}
+	if _, err := h.AdminDB.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = false WHERE id = $1`, brA); err != nil {
+		t.Fatalf("set parent cancelled: %v", err)
+	}
+
+	// Healthy: running parent, child running — must be left alone.
+	brB, taskB, promptB := seedPgRunQueueFixture(t, h, orgID, userID)
+	healthyID := uuid.New().String()
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+		ID: healthyID, TaskID: taskB, PromptID: promptB, Model: "m",
+		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brB, BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("EnqueueRun healthy: %v", err)
+	}
+	if _, err := h.AdminDB.Exec(`UPDATE runs SET status = 'running' WHERE id = $1`, healthyID); err != nil {
+		t.Fatalf("set healthy running: %v", err)
+	}
+
+	n, err := stores.RunQueue.ReconcileOrphanedRuns(ctx)
+	if err != nil || n != 1 {
+		t.Fatalf("ReconcileOrphanedRuns = (%d, %v), want (1, nil)", n, err)
+	}
+	if st, completed := pgRunStatus(t, h, orphanID); st != "cancelled" || !completed {
+		t.Errorf("orphan = (%q, completed=%v), want (cancelled, true)", st, completed)
+	}
+	if st, _ := pgRunStatus(t, h, healthyID); st != "running" {
+		t.Errorf("healthy run status = %q, want running (must not touch a child under a running parent)", st)
+	}
+
+	// Idempotent: a second sweep finds nothing.
+	if n2, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
+		t.Errorf("second ReconcileOrphanedRuns = (%d, %v), want (0, nil)", n2, err)
+	}
+}
+
+// pgRunStatus reads a run's status and whether completed_at is stamped.
+func pgRunStatus(t *testing.T, h *pgtest.Harness, runID string) (status string, completed bool) {
+	t.Helper()
+	var completedAt *string
+	if err := h.AdminDB.QueryRow(`SELECT status, completed_at::text FROM runs WHERE id = $1`, runID).
+		Scan(&status, &completedAt); err != nil {
+		t.Fatalf("read run %s: %v", runID, err)
+	}
+	return status, completedAt != nil
+}
+
 // seedPgRunQueueFixture mints a prompt + blueprint + a running blueprint_run on
 // a fresh task, returning (blueprintRunID, taskID, promptID) ready for enqueue.
 func seedPgRunQueueFixture(t *testing.T, h *pgtest.Harness, orgID, userID string) (brID, taskID, promptID string) {

@@ -98,7 +98,7 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 		dispatchLog.Info("boot reconcile: re-queued in-flight runs stranded by a crash", "count", n)
 	}
 
-	// TFAC-441: mirror sweep for the opposite desync — child runs left
+	// Mirror sweep for the opposite desync — child runs left
 	// non-terminal under an already-terminal blueprint_run. ResetProcessingRuns
 	// above only requeues under a *running* parent, so these orphans are
 	// invisible to it; left alone, a 'running' orphan keeps the dispatcher on

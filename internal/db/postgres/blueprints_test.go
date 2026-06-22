@@ -195,6 +195,50 @@ func TestBlueprintStore_Postgres_ReplaceAndListSteps(t *testing.T) {
 
 // TestBlueprintStore_Postgres_RunLifecycle exercises CreateRun → GetRun →
 // RunsForBlueprint (surfacing the step run's terminal runs.outcome) →
+// TestBlueprintStore_Postgres_MarkRunStatus_CancelsOrphanedChild pins the
+// atomic guarantee: flipping a blueprint_run to a terminal status cancels any
+// still-active child run in the same transaction (stamping completed_at), so a
+// terminal parent is never observed alongside a live child. Mirrors the SQLite
+// coverage to prevent Postgres/SQLite divergence.
+func TestBlueprintStore_Postgres_MarkRunStatus_CancelsOrphanedChild(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	blueprintID := "blueprint-oc-" + orgID[:8]
+	stepPromptID := "step-oc-" + orgID[:8]
+	seedPgBlueprint(t, h, orgID, userID, blueprintID)
+	seedPgPrompt(t, h, orgID, userID, stepPromptID)
+	taskID := seedPgTask(t, h, orgID, userID)
+
+	brID, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
+		WorktreePath: "/tmp/wt-oc",
+		StepPlan:     []domain.BlueprintPlanStep{{StepIndex: 0, PromptID: stepPromptID, PromptName: "S", PromptBody: "b", Source: "user"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	childID := seedPgRun(t, h, orgID, userID, taskID, stepPromptID, brID, 0)
+	if _, err := h.AdminDB.Exec(`UPDATE runs SET status = 'running' WHERE id = $1`, childID); err != nil {
+		t.Fatalf("set child running: %v", err)
+	}
+
+	changed, err := stores.Blueprints.MarkRunStatusSystem(ctx, orgID, brID, domain.BlueprintRunStatusCancelled, "user_cancelled", nil)
+	if err != nil {
+		t.Fatalf("MarkRunStatusSystem: %v", err)
+	}
+	if !changed {
+		t.Fatal("MarkRunStatusSystem reported no change")
+	}
+	if st, completed := pgRunStatus(t, h, childID); st != "cancelled" || !completed {
+		t.Errorf("child = (%q, completed=%v), want (cancelled, true) — a terminal parent must not strand a live child", st, completed)
+	}
+}
+
 // MarkRunStatus → GetRunForRun on a real Postgres tx. Covers the UUID/TEXT
 // column split (blueprint_runs.id UUID, blueprint_id TEXT).
 func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
