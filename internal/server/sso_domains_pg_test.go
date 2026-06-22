@@ -8,12 +8,28 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	"github.com/sky-ai-eng/triage-factory/internal/dnsoverride"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// ssoDomainJSON / ssoTXTHost moved to ee/sso with the handler. These pgtest
+// integration tests depend on the package-server authRig harness, so they keep
+// faithful local copies of the wire shape the ee endpoint emits.
+type ssoDomainJSON struct {
+	ID         string     `json:"id"`
+	Domain     string     `json:"domain"`
+	TXTHost    string     `json:"txt_host"`
+	TXTValue   string     `json:"txt_value"`
+	Status     string     `json:"status"`
+	VerifiedAt *time.Time `json:"verified_at,omitempty"`
+}
+
+func ssoTXTHost(domainName string) string { return "_triagefactory-verification." + domainName }
 
 // fakeTXTResolver is the injected DNS seam for the verify tests — the suite
 // never touches real DNS. records maps a TXT host to its published values; a
@@ -157,9 +173,9 @@ func TestSSODomainVerify_MatchAndMismatch(t *testing.T) {
 
 	// good.com's host carries an unrelated value alongside the real token, so
 	// the match must scan the whole TXT set. missing.com has no record.
-	r.srv.ssoDomains.resolver = &fakeTXTResolver{records: map[string][]string{
+	dnsoverride.Set(&fakeTXTResolver{records: map[string][]string{
 		ssoTXTHost("good.com"): {"some-other-record", good.TXTValue},
-	}}
+	}})
 
 	vresp := doInviteReq(r, http.MethodPost, "/api/sso/domains/"+good.ID+"/verify", sid, nil)
 	vraw := readBody(vresp)
@@ -198,7 +214,7 @@ func TestSSODomainVerify_MatchAndMismatch(t *testing.T) {
 
 	// Re-verify good.com → idempotent 200 even with an empty resolver (the
 	// customer may have removed the TXT record by now).
-	r.srv.ssoDomains.resolver = &fakeTXTResolver{}
+	dnsoverride.Set(&fakeTXTResolver{})
 	reresp := doInviteReq(r, http.MethodPost, "/api/sso/domains/"+good.ID+"/verify", sid, nil)
 	if reresp.StatusCode != http.StatusOK {
 		t.Errorf("re-verify status = %d; want 200 idempotent (body=%s)", reresp.StatusCode, readBody(reresp))
@@ -219,7 +235,7 @@ func TestSSODomainVerify_ResolverError_RetryableConflict(t *testing.T) {
 	_, claim, _ := ssoClaim(r, sid, "errdom.com")
 
 	// Every lookup fails (resolver down), exercising the lookupErr != nil branch.
-	r.srv.ssoDomains.resolver = &fakeTXTResolver{err: errors.New("resolver unavailable")}
+	dnsoverride.Set(&fakeTXTResolver{err: errors.New("resolver unavailable")})
 
 	resp := doInviteReq(r, http.MethodPost, "/api/sso/domains/"+claim.ID+"/verify", sid, nil)
 	raw := readBody(resp)
@@ -264,9 +280,9 @@ func TestSSODomainVerify_GlobalUniqueness_OpaqueConflict(t *testing.T) {
 
 	// The shared TXT host carries both orgs' tokens — each published its own,
 	// so each org's verify matches against its own claim's token.
-	r.srv.ssoDomains.resolver = &fakeTXTResolver{records: map[string][]string{
+	dnsoverride.Set(&fakeTXTResolver{records: map[string][]string{
 		ssoTXTHost("shared.com"): {claimA.TXTValue, claimB.TXTValue},
-	}}
+	}})
 
 	aResp := doInviteReq(r, http.MethodPost, "/api/sso/domains/"+claimA.ID+"/verify", sidA, nil)
 	if aResp.StatusCode != http.StatusOK {

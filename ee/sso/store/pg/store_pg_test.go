@@ -1,4 +1,4 @@
-package postgres_test
+package pg_test
 
 import (
 	"context"
@@ -7,10 +7,10 @@ import (
 
 	"github.com/google/uuid"
 
+	ssostore "github.com/sky-ai-eng/triage-factory/ee/sso/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // TestSSOConnectionStore_Postgres_CRUDRoundTrip: create reads back through
@@ -28,7 +28,7 @@ func TestSSOConnectionStore_Postgres_CRUDRoundTrip(t *testing.T) {
 	var connID string
 	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		connID, e = tx.SSOConnections.Create(ctx, domain.CreateSSOConnectionParams{
+		connID, e = ssostore.FromTx(tx).Connections.Create(ctx, ssostore.CreateSSOConnectionParams{
 			OrgID:      orgID,
 			ProviderID: providerID, // kind + default_role left empty → defaults
 		})
@@ -41,10 +41,10 @@ func TestSSOConnectionStore_Postgres_CRUDRoundTrip(t *testing.T) {
 	}
 
 	// GetByID reflects the schema defaults.
-	var got *domain.SSOConnection
+	var got *ssostore.SSOConnection
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		got, e = tx.SSOConnections.GetByID(ctx, orgID, connID)
+		got, e = ssostore.FromTx(tx).Connections.GetByID(ctx, orgID, connID)
 		return e
 	})
 	if got == nil {
@@ -59,10 +59,10 @@ func TestSSOConnectionStore_Postgres_CRUDRoundTrip(t *testing.T) {
 	}
 
 	// ListByOrg sees exactly the one row.
-	var list []domain.SSOConnection
+	var list []ssostore.SSOConnection
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		list, e = tx.SSOConnections.ListByOrg(ctx, orgID)
+		list, e = ssostore.FromTx(tx).Connections.ListByOrg(ctx, orgID)
 		return e
 	})
 	if len(list) != 1 || list[0].ID != connID {
@@ -72,13 +72,13 @@ func TestSSOConnectionStore_Postgres_CRUDRoundTrip(t *testing.T) {
 	// Update flips the mutable fields ('admin' is a legal default_role; only
 	// 'owner' is barred).
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.SSOConnections.Update(ctx, orgID, connID, domain.UpdateSSOConnectionParams{
+		return ssostore.FromTx(tx).Connections.Update(ctx, orgID, connID, ssostore.UpdateSSOConnectionParams{
 			DefaultRole: "admin",
 			Enabled:     false,
 		})
 	})
 	// The admin-pool GetByProviderID reflects the update.
-	b, err := stores.SSOConnections.GetByProviderID(ctx, providerID)
+	b, err := ssostore.FromStores(stores).Connections.GetByProviderID(ctx, providerID)
 	if err != nil {
 		t.Fatalf("GetByProviderID after update: %v", err)
 	}
@@ -89,11 +89,11 @@ func TestSSOConnectionStore_Postgres_CRUDRoundTrip(t *testing.T) {
 	// A disable-only Update (empty DefaultRole) must NOT downgrade the role —
 	// it leaves the stored 'admin' intact and just flips enabled back on.
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.SSOConnections.Update(ctx, orgID, connID, domain.UpdateSSOConnectionParams{
+		return ssostore.FromTx(tx).Connections.Update(ctx, orgID, connID, ssostore.UpdateSSOConnectionParams{
 			Enabled: true, // DefaultRole left empty → keep existing
 		})
 	})
-	b, err = stores.SSOConnections.GetByProviderID(ctx, providerID)
+	b, err = ssostore.FromStores(stores).Connections.GetByProviderID(ctx, providerID)
 	if err != nil {
 		t.Fatalf("GetByProviderID after role-preserving update: %v", err)
 	}
@@ -103,11 +103,11 @@ func TestSSOConnectionStore_Postgres_CRUDRoundTrip(t *testing.T) {
 
 	// Delete removes the row.
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.SSOConnections.Delete(ctx, orgID, connID)
+		return ssostore.FromTx(tx).Connections.Delete(ctx, orgID, connID)
 	})
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		got, e = tx.SSOConnections.GetByID(ctx, orgID, connID)
+		got, e = ssostore.FromTx(tx).Connections.GetByID(ctx, orgID, connID)
 		return e
 	})
 	if got != nil {
@@ -127,7 +127,7 @@ func TestSSOConnectionStore_Postgres_GetByProviderID(t *testing.T) {
 
 	_, providerID := mustSeedConn(t, h, orgID)
 
-	b, err := stores.SSOConnections.GetByProviderID(ctx, providerID)
+	b, err := ssostore.FromStores(stores).Connections.GetByProviderID(ctx, providerID)
 	if err != nil {
 		t.Fatalf("GetByProviderID: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestSSOConnectionStore_Postgres_GetByProviderID(t *testing.T) {
 		t.Error("freshly seeded connection should be enabled")
 	}
 
-	none, err := stores.SSOConnections.GetByProviderID(ctx, uuid.NewString())
+	none, err := ssostore.FromStores(stores).Connections.GetByProviderID(ctx, uuid.NewString())
 	if err != nil {
 		t.Fatalf("GetByProviderID(unknown): %v", err)
 	}
@@ -207,7 +207,7 @@ func TestSSODomainStore_Postgres_CRUDRoundTrip(t *testing.T) {
 	var domID string
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		domID, e = tx.SSODomains.Create(ctx, domain.CreateSSODomainParams{
+		domID, e = ssostore.FromTx(tx).Domains.Create(ctx, ssostore.CreateSSODomainParams{
 			ConnectionID: connID, OrgID: orgID, Domain: "Corp.com", Token: "dns-tok",
 		})
 		return e
@@ -216,10 +216,10 @@ func TestSSODomainStore_Postgres_CRUDRoundTrip(t *testing.T) {
 		t.Fatal("Create returned empty id")
 	}
 
-	var got *domain.SSODomain
+	var got *ssostore.SSODomain
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		got, e = tx.SSODomains.GetByID(ctx, orgID, domID)
+		got, e = ssostore.FromTx(tx).Domains.GetByID(ctx, orgID, domID)
 		return e
 	})
 	if got == nil {
@@ -234,11 +234,11 @@ func TestSSODomainStore_Postgres_CRUDRoundTrip(t *testing.T) {
 
 	// SetVerified stamps verified_at.
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.SSODomains.SetVerified(ctx, orgID, domID)
+		return ssostore.FromTx(tx).Domains.SetVerified(ctx, orgID, domID)
 	})
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		got, e = tx.SSODomains.GetByID(ctx, orgID, domID)
+		got, e = ssostore.FromTx(tx).Domains.GetByID(ctx, orgID, domID)
 		return e
 	})
 	if got == nil || got.VerifiedAt == nil {
@@ -247,11 +247,11 @@ func TestSSODomainStore_Postgres_CRUDRoundTrip(t *testing.T) {
 
 	// Delete removes the row.
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.SSODomains.Delete(ctx, orgID, domID)
+		return ssostore.FromTx(tx).Domains.Delete(ctx, orgID, domID)
 	})
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		got, e = tx.SSODomains.GetByID(ctx, orgID, domID)
+		got, e = ssostore.FromTx(tx).Domains.GetByID(ctx, orgID, domID)
 		return e
 	})
 	if got != nil {
@@ -279,20 +279,20 @@ func TestSSODomainStore_Postgres_VerifiedGlobalUnique(t *testing.T) {
 
 	// Org A verifies first → OK.
 	if err := stores.Tx.WithTx(ctx, orgA, userA, func(tx db.TxStores) error {
-		return tx.SSODomains.SetVerified(ctx, orgA, domA)
+		return ssostore.FromTx(tx).Domains.SetVerified(ctx, orgA, domA)
 	}); err != nil {
 		t.Fatalf("orgA SetVerified: %v", err)
 	}
 
 	// Org B verifies the same domain → global-unique violation.
 	if err := stores.Tx.WithTx(ctx, orgB, userB, func(tx db.TxStores) error {
-		return tx.SSODomains.SetVerified(ctx, orgB, domB)
+		return ssostore.FromTx(tx).Domains.SetVerified(ctx, orgB, domB)
 	}); err == nil {
 		t.Fatal("second org SetVerified succeeded; want verified-global-unique violation")
 	}
 
 	// Org A's verified claim is intact; org B's stayed pending (rolled back).
-	r, err := stores.SSODomains.GetVerifiedByDomain(ctx, "corp.com")
+	r, err := ssostore.FromStores(stores).Domains.GetVerifiedByDomain(ctx, "corp.com")
 	if err != nil {
 		t.Fatalf("GetVerifiedByDomain: %v", err)
 	}
@@ -349,14 +349,14 @@ func TestSSODomainStore_Postgres_GetVerifiedByDomain_ExactMatch(t *testing.T) {
 	// Verified corp.com; pending eng.corp.com (never routes).
 	verifiedID := createDomain(t, stores, ctx, orgID, userID, connID, "corp.com")
 	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.SSODomains.SetVerified(ctx, orgID, verifiedID)
+		return ssostore.FromTx(tx).Domains.SetVerified(ctx, orgID, verifiedID)
 	}); err != nil {
 		t.Fatalf("SetVerified: %v", err)
 	}
 	createDomain(t, stores, ctx, orgID, userID, connID, "eng.corp.com") // stays pending
 
 	// Exact verified match resolves to the connection + provider.
-	r, err := stores.SSODomains.GetVerifiedByDomain(ctx, "corp.com")
+	r, err := ssostore.FromStores(stores).Domains.GetVerifiedByDomain(ctx, "corp.com")
 	if err != nil {
 		t.Fatalf("GetVerifiedByDomain(corp.com): %v", err)
 	}
@@ -368,17 +368,17 @@ func TestSSODomainStore_Postgres_GetVerifiedByDomain_ExactMatch(t *testing.T) {
 	}
 
 	// Case-insensitive.
-	if up, err := stores.SSODomains.GetVerifiedByDomain(ctx, "CORP.COM"); err != nil || up == nil {
+	if up, err := ssostore.FromStores(stores).Domains.GetVerifiedByDomain(ctx, "CORP.COM"); err != nil || up == nil {
 		t.Errorf("GetVerifiedByDomain(CORP.COM) = (%+v, %v); want a hit (case-insensitive)", up, err)
 	}
 
 	// A pending row never routes — even on an exact match.
-	if p, err := stores.SSODomains.GetVerifiedByDomain(ctx, "eng.corp.com"); err != nil || p != nil {
+	if p, err := ssostore.FromStores(stores).Domains.GetVerifiedByDomain(ctx, "eng.corp.com"); err != nil || p != nil {
 		t.Errorf("GetVerifiedByDomain(eng.corp.com pending) = (%+v, %v); want (nil, nil)", p, err)
 	}
 
 	// No suffix / longest-match: a subdomain of a verified domain doesn't hit.
-	if sub, err := stores.SSODomains.GetVerifiedByDomain(ctx, "mail.corp.com"); err != nil || sub != nil {
+	if sub, err := ssostore.FromStores(stores).Domains.GetVerifiedByDomain(ctx, "mail.corp.com"); err != nil || sub != nil {
 		t.Errorf("GetVerifiedByDomain(mail.corp.com) = (%+v, %v); want (nil, nil) — no suffix match", sub, err)
 	}
 }
@@ -539,7 +539,7 @@ func createDomain(t *testing.T, stores db.Stores, ctx context.Context, orgID, us
 	var id string
 	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		id, e = tx.SSODomains.Create(ctx, domain.CreateSSODomainParams{
+		id, e = ssostore.FromTx(tx).Domains.Create(ctx, ssostore.CreateSSODomainParams{
 			ConnectionID: connID, OrgID: orgID, Domain: dom, Token: "tok-" + dom,
 		})
 		return e

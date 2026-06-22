@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -18,6 +19,22 @@ import (
 // TFAC-427 — identifier-first SSO login discovery (POST /api/sso/discover).
 // The endpoint is pre-login (no session), so these requests carry no sid; the
 // admin-pool GetVerifiedByDomain read is what the rig exercises end-to-end.
+
+// ssoDiscoverResponse / ssoStartURL moved to ee/sso with the handler. These
+// integration tests assert against the wire shape the ee endpoint emits and
+// depend on the package-server authRig harness, so they keep faithful local
+// copies rather than importing ee.
+type ssoDiscoverResponse struct {
+	SSO      bool   `json:"sso"`
+	StartURL string `json:"start_url,omitempty"`
+}
+
+func ssoStartURL(providerID, returnTo string) string {
+	q := url.Values{}
+	q.Set("provider_id", providerID)
+	q.Set("return_to", returnTo)
+	return "/api/auth/oauth/saml?" + q.Encode()
+}
 
 // ssoDiscover POSTs an email to the discovery endpoint as an anonymous visitor
 // (no sid cookie — the whole point is that the caller is pre-login) and decodes

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -19,6 +20,31 @@ import (
 // handler test only needs to prove forwarding. (jwk-init's own tests cover that
 // the real token is a valid RS256 service-role JWT with a matching kid.)
 const ssoTestServiceToken = "test-service-role-token-deadbeefdeadbeefdeadbeefdeadbeef"
+
+// ssoConnectionView / ssoConnectionResponse moved to ee/sso with the handler.
+// These pgtest integration tests depend on the package-server authRig harness,
+// so they keep faithful local copies of the wire shape the ee endpoint emits.
+type ssoConnectionView struct {
+	ID          string    `json:"id"`
+	Kind        string    `json:"kind"`
+	ProviderID  string    `json:"provider_id"`
+	DefaultRole string    `json:"default_role"`
+	Enabled     bool      `json:"enabled"`
+	Enforced    bool      `json:"enforced"`
+	Tested      bool      `json:"tested"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type ssoConnectionResponse struct {
+	Connection *ssoConnectionView `json:"connection"`
+	EntityID   string             `json:"entity_id"`
+	ACSURL     string             `json:"acs_url"`
+}
+
+// envServiceRoleToken moved to ee/sso; the test asserts TF forwards this env's
+// token to GoTrue, so it keeps a local copy of the name.
+const envServiceRoleToken = "TF_GOTRUE_SERVICE_ROLE_TOKEN"
 
 // ssoFakeGoTrue is a minimal stand-in for GoTrue's admin SSO API. It checks the
 // bearer matches the configured service-role token, records the POST it
@@ -459,33 +485,5 @@ func TestSSOConnection_OrgIsolation(t *testing.T) {
 	}
 }
 
-// TestSSOConnection_LocalMode404: every route 404s in local mode (N=1, no IdP).
-// adminGate checks runmode before touching any dependency, so this is a pure
-// unit test — no rig, no GoTrue, no store needed. (In production withSession
-// injects sentinel claims in local mode and the handler then 404s the same way;
-// the multi-mode auth rig can't represent local mode because it always wires
-// authDeps, so it's tested directly here instead.)
-func TestSSOConnection_LocalMode404(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	h := &ssoConnectionHandler{}
-
-	cases := []struct {
-		method string
-		fn     func(http.ResponseWriter, *http.Request)
-	}{
-		{http.MethodGet, h.handleSSOConnectionGet},
-		{http.MethodPost, h.handleSSOConnectionCreate},
-		{http.MethodPatch, h.handleSSOConnectionUpdate},
-	}
-	for _, tc := range cases {
-		t.Run(tc.method, func(t *testing.T) {
-			// Body is irrelevant — adminGate 404s before it's read.
-			req := httptest.NewRequest(tc.method, "/api/sso/connection", nil)
-			rec := httptest.NewRecorder()
-			tc.fn(rec, req)
-			if rec.Code != http.StatusNotFound {
-				t.Fatalf("%s status = %d; want 404 in local mode", tc.method, rec.Code)
-			}
-		})
-	}
-}
+// TestSSOConnection_LocalMode404 moved to ee/sso/handlers_test.go with the
+// connection handler.

@@ -13,6 +13,7 @@ import (
 
 	ssostore "github.com/sky-ai-eng/triage-factory/ee/sso/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/dnsoverride"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -241,7 +242,13 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 	lookupCtx, cancel := context.WithTimeout(r.Context(), dnsLookupTimeout)
 	defer cancel()
 	host := ssoTXTHost(claim.Domain)
-	values, lookupErr := h.resolver.LookupTXT(lookupCtx, host)
+	// Production uses h.resolver (net.DefaultResolver); tests inject a fake via
+	// the dnsoverride seam (the verify suite can't import ee directly).
+	var resolver txtResolver = h.resolver
+	if o := dnsoverride.Get(); o != nil {
+		resolver = o
+	}
+	values, lookupErr := resolver.LookupTXT(lookupCtx, host)
 	matched := false
 	if lookupErr == nil {
 		for _, v := range values {

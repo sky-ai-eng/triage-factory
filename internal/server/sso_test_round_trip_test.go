@@ -121,75 +121,8 @@ func (r *authRig) publicUserCount() int {
 	return n
 }
 
-// ---------- result rendering (no DB needed) ----------
-
-// renderSAMLTestResult executes the template for every outcome, escapes the
-// IdP-derived fields, and ships the lock-down CSP. Runs without a testcontainer.
-func TestSSOTestResultRendering(t *testing.T) {
-	s := &Server{}
-	cases := []struct {
-		name string
-		res  samlTestResult
-		want []string
-		deny []string
-	}{
-		{
-			name: "pass with domain match",
-			res:  samlTestResult{Pass: true, Email: "a@corp.com", EmailVerified: true, Domain: "corp.com", DomainMatch: true},
-			want: []string{"SSO test passed", "a@corp.com", "is verified for your organization"},
-			deny: []string{"SSO test failed"},
-		},
-		{
-			name: "pass without domain match",
-			res:  samlTestResult{Pass: true, Email: "a@corp.com", EmailVerified: true, Domain: "corp.com"},
-			want: []string{"SSO test passed", "is not a verified domain for your organization"},
-		},
-		{
-			name: "fail surfaces the reason",
-			res:  samlTestResult{Reason: "Sign-in completed, but the assertion carried no email claim."},
-			want: []string{"SSO test failed", "no email claim"},
-			deny: []string{"SSO test passed"},
-		},
-		{
-			// An assertion carrying markup must be escaped, not rendered live.
-			name: "escapes IdP-derived markup",
-			res:  samlTestResult{Pass: true, Email: "<script>alert(1)</script>@x.com", Domain: "x.com"},
-			want: []string{"&lt;script&gt;"},
-			deny: []string{"<script>alert(1)"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			s.renderSAMLTestResult(rec, tc.res)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("code=%d, want 200", rec.Code)
-			}
-			body := rec.Body.String()
-			for _, w := range tc.want {
-				if !strings.Contains(body, w) {
-					t.Errorf("body missing %q:\n%s", w, body)
-				}
-			}
-			for _, d := range tc.deny {
-				if strings.Contains(body, d) {
-					t.Errorf("body unexpectedly contains %q", d)
-				}
-			}
-			// The per-response CSP overrides the global one, so it must itself
-			// carry default-src 'none' AND frame-ancestors 'none' (clickjacking) —
-			// the override must not silently drop the latter.
-			csp := rec.Header().Get("Content-Security-Policy")
-			if !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "frame-ancestors 'none'") {
-				t.Errorf("CSP backstop missing or weakened: %q", csp)
-			}
-			// The page embeds IdP-derived PII (email), so it must not be cached.
-			if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
-				t.Errorf("Cache-Control=%q, want no-store (page carries PII)", cc)
-			}
-		})
-	}
-}
+// TestSSOTestResultRendering moved to ee/sso/handlers_test.go with
+// renderSAMLTestResult.
 
 // ---------- callback test-branch tests ----------
 
@@ -526,10 +459,13 @@ func TestSSOTestStart_NoConnection_404(t *testing.T) {
 // Local mode (and an unwired multi deploy) has no auth stack → 404 ("feature
 // absent"), exercised directly via the authDeps==nil guard.
 func TestSSOTestStart_NoAuthStack_404(t *testing.T) {
-	srv := &Server{} // authDeps nil → SSO doesn't exist here
-	rec := httptest.NewRecorder()
-	srv.handleSAMLConnectionTestStart(rec, httptest.NewRequest("GET", "/api/sso/connection/test", nil))
+	// SSO is an ee feature gated on the `sso` entitlement; a local-mode test
+	// server mounts no SSO routes, so the test-start route 404s — the same
+	// "feature absent" contract the old authDeps==nil guard enforced, observed
+	// at the route boundary. (The handler-level AuthReady guard moved to ee.)
+	s := newTestServer(t)
+	rec := doJSON(t, s, http.MethodGet, "/api/sso/connection/test", nil)
 	if rec.Code != http.StatusNotFound {
-		t.Errorf("status=%d, want 404 when the auth stack is unwired (local mode)", rec.Code)
+		t.Errorf("status=%d, want 404 when SSO/auth stack is unavailable (local mode)", rec.Code)
 	}
 }
