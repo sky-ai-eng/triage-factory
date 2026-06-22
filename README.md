@@ -20,7 +20,7 @@
 
 Triage Factory tracks everything that needs your attention across GitHub and Jira, scores it with AI, and routes it through an automation engine visualized as a factory floor. In Triage view, swipe to claim, dismiss, snooze, or delegate tasks to Claude. You decide exactly what gets automated, and you can take over any agent's run when needed. The things you delegate get done how you want them done using prompts you write or skills imported from Claude Code. PR reviews, Jira implementations, CI failures, and merge conflict resolution are all handled automatically in isolated worktrees, streaming results to a centralized dashboard in real time.
 
-It runs as a single Go binary on your machine. No hosted service, no team rollout, no DevOps. Credentials live in the OS keychain — or, when no keychain is reachable (a container, a headless server), an encrypted file on disk — and the only things that leave your machine are API calls to GitHub, Jira, and Claude.
+It's a single Go binary that runs on infrastructure you control. One developer runs it locally — SQLite, with credentials in the OS keychain (or an encrypted file when no keychain is reachable, like a container or headless server). A whole team runs the same binary self-hosted in multi-tenant mode, with Postgres and per-tenant isolation; local mode is just that same code path at N=1. Either way your data stays on infrastructure you control — the only things that leave it are API calls to GitHub, Jira, and Claude.
 
 ## What it does
 
@@ -30,7 +30,7 @@ It runs as a single Go binary on your machine. No hosted service, no team rollou
 
 **Board** — Three-column kanban (You / Agent / Done) with a collapsible, searchable queue sidebar. Drag tasks between columns. Drag from You to Agent to delegate something you already claimed. The Agent column is attention-weighted: tasks needing your review float to the top, running tasks sink to the bottom.
 
-**Agent delegation** — When you delegate a task, Triage Factory spins up a headless Claude Code instance in an isolated git worktree. The agent works autonomously — reviewing PRs, implementing Jira tickets, resolving merge conflicts, or anything else you can dream up — and streams its activity back to the board in real time. When it's done, you review and approve.
+**Agent delegation** — When you delegate a task, Triage Factory spins up a headless Claude Code instance in an isolated git worktree. The agent works autonomously — reviewing PRs, implementing Jira tickets, resolving merge conflicts, or anything else you can dream up — and streams its activity back to the board in real time. On a self-hosted Linux server, each run is further confined in its own kernel-level sandbox (gVisor) with a per-run network namespace and a locked-down egress allowlist, so an agent can't reach another tenant's worktree or the host. When it's done, you review and approve.
 
 **Prompt routing** — A visual graph editor maps event types to delegation prompts. "Review requested" routes to your PR review prompt, "Jira assigned" routes to your implementation prompt. Drag event types onto prompt nodes to wire them up.
 
@@ -62,6 +62,10 @@ triagefactory
 For direct downloads, building from source, prerequisites, and platform-specific notes, see [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
 Similarly, [docs/usage.md](docs/usage.md) details CLI flags, configuration reference, polling details, and delegation/takeover workflows.
+
+### Self-hosted for a team
+
+To run Triage Factory for a whole org in multi-tenant mode — Postgres, GoTrue auth, and kernel-sandboxed agent runs — see [docs/self-host-setup.md](docs/self-host-setup.md). It's the same binary and the same schema as local mode, deployed with Docker Compose on a Linux host you control. SSO/SAML for that deployment is available through the [Enterprise Edition](ee/).
 
 ## License
 
