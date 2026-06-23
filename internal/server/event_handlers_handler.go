@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
@@ -18,6 +19,29 @@ import (
 // routes() registers its methods through the api()/apiMutating() wrappers.
 type eventHandlersHandler struct {
 	tx db.TxRunner
+	az *authz.Checker
+}
+
+// gateHandlerWrite rejects a viewer before a write against an existing event
+// handler (TFAC-447), pre-loading the row to resolve its team. Returns false
+// (caller should return — a response was written) for a viewer (403) or a load
+// failure (500). A missing handler passes through (returns true) so the
+// handler's own nil-check renders the 404 — never reached for an absent row.
+// The same shape as gateBlueprintWrite.
+func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
+	var existing *domain.EventHandler
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "event_handlers", err)
+		return false
+	}
+	if existing == nil {
+		return true // let the handler's own nil-check render the 404
+	}
+	return eh.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID)
 }
 
 // /api/event-handlers — unified successor to /api/task-rules + /api/triggers
@@ -134,6 +158,13 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	canonical, err := events.ValidatePredicateJSON(req.EventType, req.ScopePredicateJSON)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Reject viewers before authoring a rule/trigger (TFAC-447): resolve the
+	// acting team read-only and gate, so a viewer gets a clean 403 rather than
+	// the event_handlers_insert RLS WITH CHECK surfacing as a 500.
+	if !gateActingTeamWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers") {
 		return
 	}
 
@@ -342,6 +373,11 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		notFound(w, "event handler")
 		return
 	}
+	// Viewers can't edit a rule/trigger (TFAC-447). Gate on the loaded row's
+	// team — no extra round-trip.
+	if !eh.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID) {
+		return
+	}
 
 	updated := *existing
 
@@ -451,6 +487,12 @@ func (eh *eventHandlersHandler) handleEventHandlerDelete(w http.ResponseWriter, 
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 
+	// Viewers can't delete a rule/trigger (TFAC-447). A missing handler passes
+	// through to the 404 below.
+	if !eh.gateHandlerWrite(w, r, orgID, userID, id) {
+		return
+	}
+
 	var existing *domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -485,6 +527,10 @@ func (eh *eventHandlersHandler) handleEventHandlerToggle(w http.ResponseWriter, 
 		Enabled bool `json:"enabled"`
 	}
 	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	// Viewers can't enable/disable a rule/trigger (TFAC-447).
+	if !eh.gateHandlerWrite(w, r, orgID, userID, id) {
 		return
 	}
 	var existing *domain.EventHandler
@@ -541,6 +587,11 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 	}
 	if req.BreakerThreshold == nil || req.MinAutonomySuitability == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "breaker_threshold and min_autonomy_suitability are required"})
+		return
+	}
+
+	// Viewers can't promote a rule to a trigger (TFAC-447).
+	if !eh.gateHandlerWrite(w, r, orgID, userID, id) {
 		return
 	}
 
@@ -675,6 +726,11 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 		return
 	}
 
+	// Viewers can't retarget a trigger (TFAC-447).
+	if !eh.gateHandlerWrite(w, r, orgID, userID, id) {
+		return
+	}
+
 	var (
 		existing   *domain.EventHandler
 		blueprint  *domain.Blueprint
@@ -773,6 +829,12 @@ func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter,
 	}
 	if len(ids) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "empty ID list"})
+		return
+	}
+	// Reorder rewrites sort_order across a team's handler list — a viewer can't
+	// (TFAC-447). The list is one team's handlers, so gating on the first id's
+	// team is representative; RLS is the backstop for a hand-crafted mixed list.
+	if !eh.gateHandlerWrite(w, r, orgID, userID, ids[0]) {
 		return
 	}
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {

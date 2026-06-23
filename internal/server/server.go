@@ -907,7 +907,7 @@ func (s *Server) routes() {
 	// Unified event_handlers endpoints (SKY-259). Replace the former
 	// /api/task-rules + /api/triggers split — kind is passed as ?kind=
 	// on list, in the body on create, derived on update.
-	eh := &eventHandlersHandler{tx: s.tx}
+	eh := &eventHandlersHandler{tx: s.tx, az: s.az}
 	s.api("GET /api/event-handlers", eh.handleEventHandlersList)
 	s.apiMutating("POST /api/event-handlers", eh.handleEventHandlerCreate)
 	s.apiMutating("PUT /api/event-handlers/reorder", eh.handleEventHandlerReorder)

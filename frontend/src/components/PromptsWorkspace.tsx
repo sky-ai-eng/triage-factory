@@ -185,6 +185,7 @@ export default function PromptsWorkspace({
       <TriggerConfigPanel
         open={editingTrigger !== null}
         trigger={editingTrigger}
+        readOnly={readOnly}
         onClose={() => setEditingTrigger(null)}
         onSaved={() => {
           setEditingTrigger(null)

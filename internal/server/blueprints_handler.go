@@ -54,28 +54,6 @@ func (bh *blueprintsHandler) gateBlueprintWrite(w http.ResponseWriter, r *http.R
 	return bh.az.RequireTeamWrite(w, r, orgID, userID, bp.TeamID)
 }
 
-// gateActingTeamWrite is the team-picker counterpart of gateBlueprintWrite, for
-// the create/duplicate paths that target an acting team (not an existing
-// blueprint). It resolves the acting team read-only — no last-acting stamp,
-// since a viewer is about to 403 — and gates the caller as a writer. Returns
-// false when a response was already written: a 400 for a bad team pick
-// (selection error), a 403 for a viewer, or a 500 on resolve failure.
-func (bh *blueprintsHandler) gateActingTeamWrite(w http.ResponseWriter, r *http.Request, orgID, userID, picked string) bool {
-	var actingTeam string
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		actingTeam, e = teamscope.ResolveActingNoStamp(r.Context(), tx.Teams, tx.Users, orgID, userID, picked)
-		return e
-	}); err != nil {
-		if teamscope.WriteIfSelectionError(w, err) {
-			return false
-		}
-		internalError(w, "blueprints", err)
-		return false
-	}
-	return bh.az.RequireTeamWrite(w, r, orgID, userID, actingTeam)
-}
-
 // --- Blueprint header CRUD -----------------------------------------------
 
 func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +146,7 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 	// Reject viewers before authoring a blueprint (TFAC-447): resolve the acting
 	// team read-only (no last-acting stamp — we may 403) and gate. The main tx
 	// re-resolves (and stamps) only for callers that pass.
-	if !bh.gateActingTeamWrite(w, r, orgID, userID, req.TeamID) {
+	if !gateActingTeamWrite(w, r, bh.tx, bh.az, orgID, userID, req.TeamID, "blueprints") {
 		return
 	}
 
@@ -989,7 +967,7 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 	}
 
 	// Viewers can't duplicate prompts into a new blueprint (TFAC-447).
-	if !bh.gateActingTeamWrite(w, r, orgID, userID, req.TeamID) {
+	if !gateActingTeamWrite(w, r, bh.tx, bh.az, orgID, userID, req.TeamID, "blueprints") {
 		return
 	}
 

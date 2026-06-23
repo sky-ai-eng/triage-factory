@@ -26,6 +26,7 @@ type viewerRig struct {
 	s      *Server
 	ph     *promptsHandler
 	bh     *blueprintsHandler
+	eh     *eventHandlersHandler
 	orgID  string
 	teamID string
 	admin  string
@@ -54,6 +55,7 @@ func newViewerRig(t *testing.T) *viewerRig {
 		s:      s,
 		ph:     &promptsHandler{db: h.AdminDB, tx: s.tx, az: s.az},
 		bh:     &blueprintsHandler{tx: s.tx, az: s.az, spawner: func() *delegate.Spawner { return nil }},
+		eh:     &eventHandlersHandler{tx: s.tx, az: s.az},
 		orgID:  orgID,
 		teamID: teamID,
 		admin:  founder,
@@ -198,6 +200,24 @@ func TestViewer_BlueprintCreate_Forbidden(t *testing.T) {
 	r.bh.handleBlueprintCreate(rec, r.req(http.MethodPost, "/api/blueprints", r.member, body))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("member POST blueprint: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestViewer_EventHandlerCreate_Forbidden: a viewer POSTing a task rule 403s at
+// the acting-team gate; a member creates (201). Covers the event-handler gates
+// added alongside the RLS swap.
+func TestViewer_EventHandlerCreate_Forbidden(t *testing.T) {
+	r := newViewerRig(t)
+	body := map[string]any{"kind": "rule", "event_type": "github:pr:opened", "name": "my-rule"}
+
+	rec := httptest.NewRecorder()
+	r.eh.handleEventHandlerCreate(rec, r.req(http.MethodPost, "/api/event-handlers", r.viewer, body))
+	assertViewOnly403(t, rec, "viewer POST event-handler")
+
+	rec = httptest.NewRecorder()
+	r.eh.handleEventHandlerCreate(rec, r.req(http.MethodPost, "/api/event-handlers", r.member, body))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("member POST event-handler: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
