@@ -1,0 +1,170 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, fireEvent } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import type { TeamSummary } from '../types'
+
+// Mutable mock state — each test seeds teams + the viewer's org role, then
+// renders. The child tab bodies are stubbed (their own slices test them); these
+// tests cover the shell: tab render/deep-link, the shared switcher's sticky
+// default, and the zero-team safe landing.
+const mockState = vi.hoisted(() => ({
+  teams: [] as TeamSummary[],
+  lastActingTeamId: '',
+  orgAdmin: false,
+}))
+
+vi.mock('../contexts/OrgContext', () => ({ useActiveOrgId: () => 'org-1' }))
+vi.mock('../hooks/useOrgRole', () => ({
+  useOrgRole: () => ({
+    role: mockState.orgAdmin ? 'admin' : 'member',
+    isAdmin: mockState.orgAdmin,
+    loading: false,
+  }),
+}))
+vi.mock('../hooks/useTeams', () => ({
+  useTeams: () => ({
+    teams: mockState.teams,
+    lastActingTeamId: mockState.lastActingTeamId,
+    multi: mockState.teams.length >= 2,
+    loading: false,
+    loaded: true,
+    error: null,
+    refresh: vi.fn(),
+    createTeam: vi.fn(),
+  }),
+}))
+// useOrgHref passthrough so ZeroTeamState's "Create a team" link has a target.
+vi.mock('../hooks/useOrgHref', () => ({ useOrgHref: () => (p: string) => p }))
+
+// Stub the tab bodies — expose the team they were handed + their canManage gate.
+vi.mock('../components/TeamMembersPanel', () => ({
+  default: ({ teamId, canManage }: { teamId: string; canManage: boolean }) => (
+    <div data-testid="members" data-team={teamId} data-manage={String(canManage)}>
+      members
+    </div>
+  ),
+}))
+vi.mock('./settings/stack/TeamSettings', () => ({
+  default: ({ teamId }: { teamId: string }) => (
+    <div data-testid="settings" data-team={teamId}>
+      settings
+    </div>
+  ),
+}))
+vi.mock('../components/PromptsWorkspace', () => ({
+  default: ({ teamId }: { teamId: string }) => (
+    <div data-testid="prompts" data-team={teamId}>
+      prompts
+    </div>
+  ),
+}))
+
+import TeamPage from './TeamPage'
+
+function team(id: string, name: string, role = 'member'): TeamSummary {
+  return { id, name, slug: name.toLowerCase().replace(/\s+/g, '-'), role }
+}
+
+function renderAt(path = '/team') {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <TeamPage />
+    </MemoryRouter>,
+  )
+}
+
+beforeEach(() => {
+  mockState.teams = [team('t-a', 'Team A'), team('t-b', 'Team B')]
+  mockState.lastActingTeamId = ''
+  mockState.orgAdmin = false
+  localStorage.clear()
+})
+
+describe('TeamPage — tab shell', () => {
+  it('defaults to the Members tab and shows the tab strip', () => {
+    renderAt()
+    expect(screen.getByTestId('members')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Members' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Prompts' })).toBeInTheDocument()
+  })
+
+  it('deep-links to the Prompts tab via ?tab=prompts', () => {
+    renderAt('/team?tab=prompts')
+    expect(screen.getByTestId('prompts')).toBeInTheDocument()
+    expect(screen.queryByTestId('members')).not.toBeInTheDocument()
+  })
+
+  it('switches tabs on click', () => {
+    renderAt()
+    fireEvent.click(screen.getByRole('button', { name: 'Prompts' }))
+    expect(screen.getByTestId('prompts')).toBeInTheDocument()
+  })
+
+  it('hides the Settings tab for non-managers and floors ?tab=settings to Members', () => {
+    renderAt('/team?tab=settings')
+    // member of the team, not an org admin → no Settings tab, no settings body
+    expect(screen.queryByRole('button', { name: 'Settings' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('settings')).not.toBeInTheDocument()
+    expect(screen.getByTestId('members')).toBeInTheDocument()
+  })
+
+  it('shows the Settings tab for a team admin', () => {
+    mockState.teams = [team('t-a', 'Team A', 'admin'), team('t-b', 'Team B')]
+    renderAt('/team?tab=settings')
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument()
+    expect(screen.getByTestId('settings')).toHaveAttribute('data-team', 't-a')
+  })
+})
+
+describe('TeamPage — shared switcher', () => {
+  it('seeds the active team from the sticky server default (last-acting team)', () => {
+    mockState.lastActingTeamId = 't-b'
+    renderAt()
+    expect(screen.getByTestId('members')).toHaveAttribute('data-team', 't-b')
+  })
+
+  it('persists the switcher selection and re-seeds from it on remount', () => {
+    const { unmount } = renderAt()
+    // Default (no sticky) is the first team.
+    expect(screen.getByTestId('members')).toHaveAttribute('data-team', 't-a')
+
+    // Open the switcher (its trigger shows the current team name) and pick B.
+    fireEvent.click(screen.getByRole('button', { name: /team a/i }))
+    fireEvent.click(screen.getByText('Team B'))
+    expect(screen.getByTestId('members')).toHaveAttribute('data-team', 't-b')
+    expect(localStorage.getItem('tf.activeTeam.team')).toBe('t-b')
+
+    // Remount — the sticky pick wins over the oldest-first default.
+    unmount()
+    renderAt()
+    expect(screen.getByTestId('members')).toHaveAttribute('data-team', 't-b')
+  })
+})
+
+describe('TeamPage — zero-team safe landing', () => {
+  it('renders the friendly empty state (no crash) when the user is on no team', () => {
+    mockState.teams = []
+    renderAt()
+    expect(screen.getByText(/not on a team yet/i)).toBeInTheDocument()
+    // No tabs, no tab bodies.
+    expect(screen.queryByTestId('members')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Members' })).not.toBeInTheDocument()
+  })
+
+  it('shows a "Create a team" CTA for org admins', () => {
+    mockState.teams = []
+    mockState.orgAdmin = true
+    renderAt()
+    const cta = screen.getByRole('link', { name: /create a team/i })
+    expect(cta).toBeInTheDocument()
+    expect(cta).toHaveAttribute('href', expect.stringContaining('/org'))
+  })
+
+  it('tells a non-admin to ask an org admin (no create CTA)', () => {
+    mockState.teams = []
+    mockState.orgAdmin = false
+    renderAt()
+    expect(screen.getByText(/ask an org admin/i)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /create a team/i })).not.toBeInTheDocument()
+  })
+})

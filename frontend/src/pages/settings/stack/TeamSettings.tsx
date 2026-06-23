@@ -1,7 +1,12 @@
-// The Team group of the Settings stack — rendered only when the viewer admins
-// >=1 team. A write-scope team selector (admin'd teams only, reusing TeamSwitch)
-// sits under the divider; switching teams reloads that team's config. Each
-// team-scope group is its own flush collapsible composing the wizard's
+// The team-scoped config sections — repos, GitHub teams, Jira projects, team
+// defaults/model/auto-delegate, and unattended prompts. Relocated from the
+// global Settings page into the /team page's Settings tab (TFAC-445): this
+// component now renders for ONE explicit team (the page-level switcher owns
+// team selection), so it no longer carries its own selector. The global
+// Settings page still mounts it in LOCAL mode (N=1, no /team route), passing
+// teamId 'default'.
+//
+// Each team-scope group is its own flush collapsible composing the wizard's
 // `bare`/glass primitives (the inline RepoPickerModal, bare GitHubTeamGroup /
 // JiraProjectRulesGroup, ModelTierSelector) — no carded field groups.
 //
@@ -36,8 +41,6 @@ import {
   type JiraProjectConfig,
   type TeamConfigForm,
 } from '../teamConfig'
-import type { TeamSummary } from '../../../types'
-import TeamSwitch from '../../../components/TeamSwitch'
 import SettingsSection from './SettingsSection'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
@@ -59,29 +62,24 @@ const sameGroups = (a: GitHubGroup[], b: GitHubGroup[]): boolean => {
   return ka.length === kb.length && ka.every((x, i) => x === kb[i])
 }
 
-// pickInitialTeam seeds the selector: the sticky default if it's an admin'd
-// team, else the first admin'd team.
-function pickInitialTeam(adminTeams: TeamSummary[], lastActingTeamId: string): string {
-  if (adminTeams.length === 0) return ''
-  if (lastActingTeamId && adminTeams.some((t) => t.id === lastActingTeamId)) return lastActingTeamId
-  return adminTeams[0].id
-}
-
 export default function TeamSettings({
   isLocal,
-  adminTeams,
-  lastActingTeamId,
+  teamId,
+  onDirtyChange,
 }: {
   isLocal: boolean
-  adminTeams: TeamSummary[]
-  lastActingTeamId: string
+  // The team these sections configure. The page-level switcher resolves it and
+  // remounts this component (key={teamId}) on a switch, so it's stable for the
+  // component's lifetime. Local mode ignores it (the endpoint alias is fixed).
+  teamId: string
+  // Reports the aggregate dirty state up so the page-level team switcher can
+  // confirm-before-discard on a switch (the switch happens outside this
+  // component now). Optional — the local Settings page doesn't switch teams.
+  onDirtyChange?: (dirty: boolean) => void
 }) {
-  const [selectedTeamId, setSelectedTeamId] = useState(() =>
-    pickInitialTeam(adminTeams, lastActingTeamId),
-  )
   // The endpoint alias: local addresses the sole team as "default"; multi uses
   // the selected team's real id.
-  const teamId = isLocal ? 'default' : selectedTeamId
+  const endpointTeamId = isLocal ? 'default' : teamId
 
   const [baseline, setBaseline] = useState<TeamConfigForm>(emptyTeamConfig)
   const [reposLoaded, setReposLoaded] = useState(false)
@@ -115,9 +113,9 @@ export default function TeamSettings({
     setLoading(true)
     setLoadError(null)
     Promise.all([
-      fetchTeamSettings(teamId),
-      fetchTeamRepos(teamId),
-      fetchTeamGitHubGroups(teamId),
+      fetchTeamSettings(endpointTeamId),
+      fetchTeamRepos(endpointTeamId),
+      fetchTeamGitHubGroups(endpointTeamId),
       fetch('/api/integrations/status')
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null),
@@ -158,28 +156,19 @@ export default function TeamSettings({
     return () => {
       cancelled = true
     }
-  }, [teamId])
+  }, [endpointTeamId])
 
   useEffect(() => {
     const cancel = load()
     return cancel
   }, [load])
 
-  // Re-seed the selection if the admin'd team set changes (e.g. a team created
-  // in the org section) and the held id is no longer admin'd.
-  useEffect(() => {
-    if (isLocal) return
-    if (selectedTeamId && adminTeams.some((t) => t.id === selectedTeamId)) return
-    const next = pickInitialTeam(adminTeams, lastActingTeamId)
-    if (next !== selectedTeamId) setSelectedTeamId(next)
-  }, [isLocal, adminTeams, lastActingTeamId, selectedTeamId])
-
   // ── Repos ──
   const reposDirty = reposLoaded && !sameRepos(repos, baseline.repos ?? [])
   const saveRepos = async (): Promise<boolean> => {
     setSavingRepos(true)
     try {
-      const res = await saveTeamRepos(teamId, repos)
+      const res = await saveTeamRepos(endpointTeamId, repos)
       if (!res.ok) {
         toast.error(res.error)
         return false
@@ -199,7 +188,7 @@ export default function TeamSettings({
   const saveGroups = async (): Promise<boolean> => {
     setSavingGroups(true)
     try {
-      const res = await saveTeamGitHubGroups(teamId, groups)
+      const res = await saveTeamGitHubGroups(endpointTeamId, groups)
       if (!res.ok) {
         toast.error(res.error)
         return false
@@ -219,7 +208,7 @@ export default function TeamSettings({
   const saveProjects = async (): Promise<boolean> => {
     setSavingProjects(true)
     try {
-      const res = await saveTeamSettings(teamId, { ...baseline, jira_projects: projects })
+      const res = await saveTeamSettings(endpointTeamId, { ...baseline, jira_projects: projects })
       if (!res.ok) {
         toast.error(res.error)
         return false
@@ -241,7 +230,7 @@ export default function TeamSettings({
   const saveDefaults = async (): Promise<boolean> => {
     setSavingDefaults(true)
     try {
-      const res = await saveTeamSettings(teamId, {
+      const res = await saveTeamSettings(endpointTeamId, {
         ...baseline,
         default_model: defaultModel,
         auto_delegate_enabled: autoDelegate,
@@ -283,7 +272,7 @@ export default function TeamSettings({
         Number.isFinite(absentGraceSeconds) && absentGraceSeconds >= 1
           ? absentGraceSeconds
           : baseline.permission_absent_grace_seconds
-      const res = await saveTeamSettings(teamId, {
+      const res = await saveTeamSettings(endpointTeamId, {
         ...baseline,
         permission_absent_autodeny_enabled: absentAutodeny,
         permission_absent_grace_seconds: grace,
@@ -305,16 +294,15 @@ export default function TeamSettings({
     }
   }
 
-  // Switching teams reloads the selected team's config behind the loading
-  // overlay, which would silently drop unsaved edits in any expanded section —
-  // the TeamSwitch fires outside SettingsSection's collapse guard. Confirm
-  // first when any section is dirty (mirrors the per-section discard guard).
+  // Surface the aggregate dirty state to the page-level switcher so it can
+  // confirm-before-discard on a team switch (the switch fires outside this
+  // component now). Reset to false on unmount so a stale "dirty" can't block a
+  // switch after the user navigates off the Settings tab.
   const anyDirty = reposDirty || groupsDirty || projectsDirty || defaultsDirty || promptsDirty
-  const switchTeam = (id: string) => {
-    if (id === selectedTeamId) return
-    if (anyDirty && !window.confirm('Discard unsaved changes and switch teams?')) return
-    setSelectedTeamId(id)
-  }
+  useEffect(() => {
+    onDirtyChange?.(anyDirty)
+  }, [anyDirty, onDirtyChange])
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange])
 
   if (loadError) {
     return (
@@ -329,215 +317,203 @@ export default function TeamSettings({
 
   const trackedProjects = projects.filter((p) => p.key.trim() !== '').length
 
+  if (loading) {
+    return <div className="px-1 py-3 text-[13px] text-text-tertiary">Loading team settings…</div>
+  }
+
   return (
-    <div>
-      {/* Selector — only renders for >=2 admin'd teams (solo/local hidden). */}
-      {!isLocal && adminTeams.length >= 2 && (
-        <div className="flex items-center justify-between pb-1 pl-1">
-          <span className="text-[11px] uppercase tracking-wide text-text-tertiary">
-            Configuring team
-          </span>
-          <TeamSwitch teams={adminTeams} value={selectedTeamId} onChange={switchTeam} />
-        </div>
-      )}
+    <div className="divide-y divide-border-subtle">
+      <SettingsSection
+        title="Repositories"
+        summary={`${(baseline.repos ?? []).length} tracked`}
+        dirty={reposDirty}
+        saving={savingRepos}
+        onSave={saveRepos}
+        onCancel={() => setRepos(baseline.repos ?? [])}
+      >
+        <p className="text-[13px] leading-relaxed text-text-tertiary">
+          Watched repos surface in this team&rsquo;s triage queue and anchor Jira-to-code matching
+          for delegation.
+        </p>
+        {reposLoaded ? (
+          <RepoPickerModal
+            inline
+            hideFooter
+            selected={repos}
+            onSelectionChange={setRepos}
+            onSave={() => {}}
+            onClose={() => {}}
+          />
+        ) : (
+          <p className="text-[12px] italic text-amber-600">
+            Couldn&rsquo;t load this team&rsquo;s repositories — they&rsquo;ll be left unchanged.
+            Reload to edit them.
+          </p>
+        )}
+      </SettingsSection>
 
-      {loading ? (
-        <div className="px-1 py-3 text-[13px] text-text-tertiary">Loading team settings…</div>
-      ) : (
-        <div className="divide-y divide-border-subtle">
-          <SettingsSection
-            title="Repositories"
-            summary={`${(baseline.repos ?? []).length} tracked`}
-            dirty={reposDirty}
-            saving={savingRepos}
-            onSave={saveRepos}
-            onCancel={() => setRepos(baseline.repos ?? [])}
-          >
-            <p className="text-[13px] leading-relaxed text-text-tertiary">
-              Watched repos surface in this team&rsquo;s triage queue and anchor Jira-to-code
-              matching for delegation.
+      <SettingsSection
+        title="GitHub teams"
+        summary={`${groupsBaseline.length} mapped`}
+        dirty={groupsDirty}
+        saving={savingGroups}
+        onSave={saveGroups}
+        onCancel={() => setGroups(groupsBaseline)}
+      >
+        <GitHubTeamGroup
+          // Key on teamId only — a team switch reseeds (also goes through
+          // the loading gate). A repos save bumps refreshSignal instead of
+          // the key, so candidates refetch against the new tracked-owner set
+          // WITHOUT remounting and clobbering unsaved mapping edits here.
+          key={endpointTeamId}
+          value={groups}
+          onChange={setGroups}
+          teamId={endpointTeamId}
+          canEdit
+          onLoaded={(seed) => {
+            setGroups(seed)
+            setGroupsBaseline(seed)
+          }}
+          refreshSignal={reposVersion}
+          bare
+        />
+      </SettingsSection>
+
+      <SettingsSection
+        title="Jira projects"
+        summary={`${trackedProjects} tracked`}
+        dirty={projectsDirty}
+        saving={savingProjects}
+        saveDisabled={projectsBlocked}
+        onSave={saveProjects}
+        onCancel={() => setProjects(baseline.jira_projects ?? [])}
+      >
+        <JiraProjectRulesGroup
+          value={projects}
+          onChange={setProjects}
+          connected={jiraConnected}
+          bare
+        />
+      </SettingsSection>
+
+      <SettingsSection
+        title="Team defaults"
+        summary={`Model: ${TIER_LABELS[baseline.default_model] ?? baseline.default_model}${
+          baseline.auto_delegate_enabled ? ' · auto-delegate on' : ''
+        }`}
+        dirty={defaultsDirty}
+        saving={savingDefaults}
+        onSave={saveDefaults}
+        onCancel={() => {
+          setDefaultModel(baseline.default_model)
+          setAutoDelegate(baseline.auto_delegate_enabled)
+        }}
+      >
+        {/* The actual /setup team-model body — same heading + tier ladder. */}
+        <TeamModelStep
+          orgId={null}
+          teamId={endpointTeamId}
+          isLocal={isLocal}
+          state={{
+            ...initialWizardState(),
+            team: { ...emptyTeamConfig(), default_model: defaultModel },
+          }}
+          patch={(p: Partial<StepContext['state']>) => {
+            if (p.team?.default_model !== undefined) setDefaultModel(p.team.default_model)
+          }}
+          advance={() => {}}
+        />
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-[13px] text-text-primary">Auto-delegation</p>
+            <p className="mt-0.5 text-[11px] text-text-tertiary">
+              Automatically delegate tasks when matching triggers fire
             </p>
-            {reposLoaded ? (
-              <RepoPickerModal
-                inline
-                hideFooter
-                selected={repos}
-                onSelectionChange={setRepos}
-                onSave={() => {}}
-                onClose={() => {}}
-              />
-            ) : (
-              <p className="text-[12px] italic text-amber-600">
-                Couldn&rsquo;t load this team&rsquo;s repositories — they&rsquo;ll be left
-                unchanged. Reload to edit them.
-              </p>
-            )}
-          </SettingsSection>
-
-          <SettingsSection
-            title="GitHub teams"
-            summary={`${groupsBaseline.length} mapped`}
-            dirty={groupsDirty}
-            saving={savingGroups}
-            onSave={saveGroups}
-            onCancel={() => setGroups(groupsBaseline)}
-          >
-            <GitHubTeamGroup
-              // Key on teamId only — a team switch reseeds (also goes through
-              // the loading gate). A repos save bumps refreshSignal instead of
-              // the key, so candidates refetch against the new tracked-owner set
-              // WITHOUT remounting and clobbering unsaved mapping edits here.
-              key={teamId}
-              value={groups}
-              onChange={setGroups}
-              teamId={teamId}
-              canEdit
-              onLoaded={(seed) => {
-                setGroups(seed)
-                setGroupsBaseline(seed)
-              }}
-              refreshSignal={reposVersion}
-              bare
-            />
-          </SettingsSection>
-
-          <SettingsSection
-            title="Jira projects"
-            summary={`${trackedProjects} tracked`}
-            dirty={projectsDirty}
-            saving={savingProjects}
-            saveDisabled={projectsBlocked}
-            onSave={saveProjects}
-            onCancel={() => setProjects(baseline.jira_projects ?? [])}
-          >
-            <JiraProjectRulesGroup
-              value={projects}
-              onChange={setProjects}
-              connected={jiraConnected}
-              bare
-            />
-          </SettingsSection>
-
-          <SettingsSection
-            title="Team defaults"
-            summary={`Model: ${TIER_LABELS[baseline.default_model] ?? baseline.default_model}${
-              baseline.auto_delegate_enabled ? ' · auto-delegate on' : ''
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoDelegate}
+            onClick={() => setAutoDelegate((v) => !v)}
+            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+              autoDelegate ? 'bg-accent' : 'bg-black/[0.08]'
             }`}
-            dirty={defaultsDirty}
-            saving={savingDefaults}
-            onSave={saveDefaults}
-            onCancel={() => {
-              setDefaultModel(baseline.default_model)
-              setAutoDelegate(baseline.auto_delegate_enabled)
-            }}
           >
-            {/* The actual /setup team-model body — same heading + tier ladder. */}
-            <TeamModelStep
-              orgId={null}
-              teamId={teamId}
-              isLocal={isLocal}
-              state={{
-                ...initialWizardState(),
-                team: { ...emptyTeamConfig(), default_model: defaultModel },
-              }}
-              patch={(p: Partial<StepContext['state']>) => {
-                if (p.team?.default_model !== undefined) setDefaultModel(p.team.default_model)
-              }}
-              advance={() => {}}
+            <span
+              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+                autoDelegate ? 'translate-x-4' : 'translate-x-0'
+              }`}
             />
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-[13px] text-text-primary">Auto-delegation</p>
-                <p className="mt-0.5 text-[11px] text-text-tertiary">
-                  Automatically delegate tasks when matching triggers fire
-                </p>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={autoDelegate}
-                onClick={() => setAutoDelegate((v) => !v)}
-                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                  autoDelegate ? 'bg-accent' : 'bg-black/[0.08]'
-                }`}
-              >
-                <span
-                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
-                    autoDelegate ? 'translate-x-4' : 'translate-x-0'
-                  }`}
-                />
-              </button>
-            </div>
-          </SettingsSection>
-
-          <SettingsSection
-            title="Unattended prompts"
-            summary={
-              absentAutodeny
-                ? `Fast-deny after ${baseline.permission_absent_grace_seconds}s when nobody's watching`
-                : 'Always wait the full timeout'
-            }
-            dirty={promptsDirty}
-            saving={savingPrompts}
-            saveDisabled={promptsBlocked}
-            onSave={savePrompts}
-            onCancel={() => {
-              setAbsentAutodeny(baseline.permission_absent_autodeny_enabled)
-              setAbsentGraceSeconds(baseline.permission_absent_grace_seconds)
-            }}
-          >
-            <p className="text-[13px] leading-relaxed text-text-tertiary">
-              When a delegated run needs permission for an off-allowlist tool and no one has the
-              board or that run open and focused, deny after a short grace instead of parking the
-              run for the full timeout. If someone opens or focuses the board (or the run) during
-              the grace, the prompt waits the full timeout so they can answer.
-            </p>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-[13px] text-text-primary">Fast-deny when unattended</p>
-                <p className="mt-0.5 text-[11px] text-text-tertiary">
-                  Off keeps the full-timeout behavior for every prompt
-                </p>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={absentAutodeny}
-                onClick={() => setAbsentAutodeny((v) => !v)}
-                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                  absentAutodeny ? 'bg-accent' : 'bg-black/[0.08]'
-                }`}
-              >
-                <span
-                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
-                    absentAutodeny ? 'translate-x-4' : 'translate-x-0'
-                  }`}
-                />
-              </button>
-            </div>
-            {absentAutodeny && (
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-[13px] text-text-primary">Grace window</p>
-                  <p className="mt-0.5 text-[11px] text-text-tertiary">
-                    How long to wait for someone to appear before denying
-                  </p>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <input
-                    type="number"
-                    min={1}
-                    value={Number.isFinite(absentGraceSeconds) ? absentGraceSeconds : ''}
-                    onChange={(e) => setAbsentGraceSeconds(parseInt(e.target.value, 10))}
-                    className="w-16 rounded-md border border-border-subtle bg-transparent px-2 py-1 text-right text-[13px] text-text-primary focus:border-accent focus:outline-none"
-                  />
-                  <span className="text-[12px] text-text-tertiary">seconds</span>
-                </div>
-              </div>
-            )}
-          </SettingsSection>
+          </button>
         </div>
-      )}
+      </SettingsSection>
+
+      <SettingsSection
+        title="Unattended prompts"
+        summary={
+          absentAutodeny
+            ? `Fast-deny after ${baseline.permission_absent_grace_seconds}s when nobody's watching`
+            : 'Always wait the full timeout'
+        }
+        dirty={promptsDirty}
+        saving={savingPrompts}
+        saveDisabled={promptsBlocked}
+        onSave={savePrompts}
+        onCancel={() => {
+          setAbsentAutodeny(baseline.permission_absent_autodeny_enabled)
+          setAbsentGraceSeconds(baseline.permission_absent_grace_seconds)
+        }}
+      >
+        <p className="text-[13px] leading-relaxed text-text-tertiary">
+          When a delegated run needs permission for an off-allowlist tool and no one has the board
+          or that run open and focused, deny after a short grace instead of parking the run for the
+          full timeout. If someone opens or focuses the board (or the run) during the grace, the
+          prompt waits the full timeout so they can answer.
+        </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-[13px] text-text-primary">Fast-deny when unattended</p>
+            <p className="mt-0.5 text-[11px] text-text-tertiary">
+              Off keeps the full-timeout behavior for every prompt
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={absentAutodeny}
+            onClick={() => setAbsentAutodeny((v) => !v)}
+            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+              absentAutodeny ? 'bg-accent' : 'bg-black/[0.08]'
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+                absentAutodeny ? 'translate-x-4' : 'translate-x-0'
+              }`}
+            />
+          </button>
+        </div>
+        {absentAutodeny && (
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[13px] text-text-primary">Grace window</p>
+              <p className="mt-0.5 text-[11px] text-text-tertiary">
+                How long to wait for someone to appear before denying
+              </p>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="number"
+                min={1}
+                value={Number.isFinite(absentGraceSeconds) ? absentGraceSeconds : ''}
+                onChange={(e) => setAbsentGraceSeconds(parseInt(e.target.value, 10))}
+                className="w-16 rounded-md border border-border-subtle bg-transparent px-2 py-1 text-right text-[13px] text-text-primary focus:border-accent focus:outline-none"
+              />
+              <span className="text-[12px] text-text-tertiary">seconds</span>
+            </div>
+          </div>
+        )}
+      </SettingsSection>
     </div>
   )
 }

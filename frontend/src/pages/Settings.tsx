@@ -10,20 +10,19 @@
 //             danger zone) + the org template to the dedicated /org page
 //             (TFAC-419); but /org has no local route, so N=1 keeps them here —
 //             Settings is local mode's only post-setup org-config surface.
-//   • Team  — rendered when the viewer admins ≥1 team; a selector (admin'd
-//             teams only) picks which one. Subsumes per-non-default-team config.
+//   • Team  — LOCAL MODE ONLY. Multi mode relocates the team-scoped sections
+//             (repos, GitHub teams, Jira projects, team defaults) to the /team
+//             page's Settings tab (TFAC-445); /team has no local route, so N=1
+//             keeps them here (admin of its sole team, addressed as "default").
 //   • User  — always (personal identity + device prefs).
-// The team gate mirrors the backend's role gates: an org admin does NOT inherit
-// team-admin, so a team they don't admin won't appear in their Team selector.
-// Local / N=1 is admin of everything, so its groups render with no selector and
-// no role probes.
+// Both relocated groups render here only in local mode — N=1 is admin of
+// everything, so its groups render with no selector and no role probes.
 
 import { GlassBackdrop } from './setup/glass'
 import { SectionDivider } from './setup/parts'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
-import { useTeams } from '../hooks/useTeams'
 import OrgSettings from './settings/stack/OrgSettings'
 import TeamSettings from './settings/stack/TeamSettings'
 import UserSettings from './settings/stack/UserSettings'
@@ -40,12 +39,6 @@ export default function Settings() {
   // active org and is null until it resolves.
   const ctxOrgId = useActiveOrgId()
   const orgId = isLocal ? LOCAL_DEFAULT_ORG_ID : ctxOrgId
-
-  const { teams, lastActingTeamId, loaded: teamsLoaded } = useTeams()
-  // The teams the viewer admins — gates the Team group + filters its selector.
-  // Local reports "admin" for its sole team, so this is non-empty there too.
-  const adminTeams = teams.filter((t) => t.role === 'admin')
-  const showTeam = adminTeams.length > 0
 
   // Multi mode whose active org hasn't resolved yet — hold rather than fetch
   // the wrong org's state.
@@ -66,27 +59,22 @@ export default function Settings() {
         </h1>
 
         <div className="space-y-8">
-          {/* Org group — local mode only. Multi mode relocates it to the /org
-              page; local has no /org route, so N=1 edits org config here (it's
-              always org admin, so isLocal alone gates it). */}
+          {/* Org + Team groups — local mode only. Multi mode relocates Org to
+              the /org page and Team to the /team page's Settings tab; neither
+              has a local route, so N=1 (always admin of its sole org + team)
+              edits both here. */}
           {isLocal && (
-            <section aria-labelledby="settings-section-org">
-              <SectionDivider id="settings-section-org" title="Organization" />
-              <OrgSettings orgId={orgId} isLocal={isLocal} />
-            </section>
-          )}
+            <>
+              <section aria-labelledby="settings-section-org">
+                <SectionDivider id="settings-section-org" title="Organization" />
+                <OrgSettings orgId={orgId} isLocal={isLocal} />
+              </section>
 
-          {/* Render the Team group once teams resolve and the viewer admins
-              one — keeps it from flashing in before the role set is known. */}
-          {teamsLoaded && showTeam && (
-            <section aria-labelledby="settings-section-team">
-              <SectionDivider id="settings-section-team" title="Team" />
-              <TeamSettings
-                isLocal={isLocal}
-                adminTeams={adminTeams}
-                lastActingTeamId={lastActingTeamId}
-              />
-            </section>
+              <section aria-labelledby="settings-section-team">
+                <SectionDivider id="settings-section-team" title="Team" />
+                <TeamSettings isLocal={isLocal} teamId="default" />
+              </section>
+            </>
           )}
 
           <section aria-labelledby="settings-section-user">

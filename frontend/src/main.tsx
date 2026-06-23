@@ -236,7 +236,11 @@ function MultiRoutes() {
             <Route path="board" element={<Board />} />
             <Route path="runs/:runID" element={<RunDetail />} />
             <Route path="prs" element={<PRDashboard />} />
-            <Route path="prompts" element={<Prompts />} />
+            {/* Prompts is the /team Prompts tab in multi mode (TFAC-445). The
+                top-level Prompts nav deep-links straight there; this redirect
+                keeps the standalone /prompts path (and old bookmarks) pointing
+                at the canonical surface. `..` pops to /orgs/:org_id. */}
+            <Route path="prompts" element={<Navigate to="../team?tab=prompts" replace />} />
             {/* Legacy org-template route (SKY-381) — the standalone editor and
                 its top-bar pill are gone (TFAC-436); the org template lives at
                 the /org Template tab. Redirect old bookmarks/links to the
@@ -251,8 +255,9 @@ function MultiRoutes() {
                 /orgs/:org_id parent. Non-admins reaching it directly get a
                 read-only roster (OrgPage gates management on org role). */}
             <Route path="org" element={<OrgPage />} />
-            {/* Temporary team-roster mount (TFAC-444) — superseded by the
-                /team page shell (TFAC-445). Multi-mode only. */}
+            {/* Team page shell (TFAC-445) — [Members · Settings · Prompts]
+                tabs + a shared team-switcher, plus the zero-team safe landing.
+                Multi-mode only. */}
             <Route path="team" element={<TeamPage />} />
             <Route path="settings" element={<Settings />} />
           </Route>

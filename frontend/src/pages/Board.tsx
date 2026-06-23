@@ -13,7 +13,9 @@ import { usePermissionQueues } from '../hooks/usePermissionQueues'
 import { isPermissionTerminalStatus } from '../lib/runStatus'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
+import { useOrgRole } from '../hooks/useOrgRole'
 import TeamScopeSelect from '../components/TeamScopeSelect'
+import ZeroTeamState from '../components/ZeroTeamState'
 import AgentCard from '../components/AgentCard'
 import TaskCard from '../components/TaskCard'
 import PromptPicker from '../components/PromptPicker'
@@ -196,7 +198,8 @@ export default function Board() {
   // into all five column fetches as team_id); `teams` backs the row
   // color-coding. Both render their UI only at ≥2 teams. teamFilterRef
   // keeps fetchTasks's identity stable while always reading the latest.
-  const { teams } = useTeams()
+  const { teams, loaded: teamsLoaded } = useTeams()
+  const { isAdmin: orgIsAdmin } = useOrgRole()
   const [teamFilter, setTeamFilter] = useTeamFilter('board')
   const teamFilterRef = useRef(teamFilter)
   useEffect(() => {
@@ -977,6 +980,19 @@ export default function Board() {
   )
 
   const activeTask = activeId ? allTasks.get(activeId) : null
+
+  // Zero-team safe landing (TFAC-445) — a multi-mode user on no team has no
+  // team-scoped tasks to show. Surface the friendly empty state instead of an
+  // empty board (local mode always has its default team, so this is multi-only
+  // in practice). Gated on teamsLoaded so it doesn't flash during cold load.
+  if (teamsLoaded && teams.length === 0) {
+    return (
+      <>
+        <GlassBackdrop />
+        <ZeroTeamState canCreate={orgIsAdmin} />
+      </>
+    )
+  }
 
   if (loading) {
     return (

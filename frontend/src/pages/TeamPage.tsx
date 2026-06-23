@@ -1,34 +1,53 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Users } from 'lucide-react'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
 import TeamMembersPanel from '../components/TeamMembersPanel'
+import TeamSettings from './settings/stack/TeamSettings'
+import PromptsWorkspace from '../components/PromptsWorkspace'
+import TeamSwitch from '../components/TeamSwitch'
+import ZeroTeamState from '../components/ZeroTeamState'
+import type { TeamSummary } from '../types'
 
-// TeamPage is a TEMPORARY mount for the team roster (TFAC-444): it lets the new
-// member CRUD + <TeamMembersPanel> be exercised end-to-end before the real
-// /team page shell lands (TFAC-445), which replaces this with the
-// [Members · Settings · Prompts] tabs + a shared team switcher. Multi-mode only
-// (mounted under /orgs/:org_id). It resolves the caller's sticky/default team
-// and offers a bare <select> to switch when they're on more than one.
+// TeamPage is the multi-mode team surface (TFAC-445): the
+// [Members · Settings · Prompts] shell with one shared team-switcher in the
+// header. Members hosts the shared roster (TFAC-444); Settings hosts the
+// team-scoped config relocated off the global Settings page; Prompts hosts the
+// binding-graph canvas (also reachable one-click via the top-level Prompts nav,
+// which deep-links to ?tab=prompts). Multi-mode only — mounted under
+// /orgs/:org_id; local N=1 keeps team config on the global Settings page.
+//
+// The first-class zero-team state (a user in the org but on no team — produced
+// today by team-less invites) renders a friendly empty landing here instead of
+// a crash or an empty dropdown.
+
+type TeamTab = 'members' | 'settings' | 'prompts'
+
+const TABS: { id: TeamTab; label: string }[] = [
+  { id: 'members', label: 'Members' },
+  { id: 'settings', label: 'Settings' },
+  { id: 'prompts', label: 'Prompts' },
+]
+
+// Device-local sticky team for the /team page (its own pageKey, independent of
+// the per-page read/write scopes). Persisted so the switcher's selection
+// survives reloads.
+const ACTIVE_TEAM_KEY = 'tf.activeTeam.team'
+
+function readStoredTeam(): string {
+  try {
+    return localStorage.getItem(ACTIVE_TEAM_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
 export default function TeamPage() {
   const orgId = useActiveOrgId()
   const { isAdmin: orgIsAdmin } = useOrgRole()
   const { teams, lastActingTeamId, loaded, loading, error } = useTeams()
-
-  // Default selection: the sticky last-acting team when it's still one of the
-  // caller's teams, else the org's default (teams[0], oldest-first).
-  const defaultTeamId = useMemo(() => {
-    if (teams.some((t) => t.id === lastActingTeamId)) return lastActingTeamId
-    return teams[0]?.id ?? ''
-  }, [teams, lastActingTeamId])
-
-  const [picked, setPicked] = useState('')
-  const teamId = picked && teams.some((t) => t.id === picked) ? picked : defaultTeamId
-  const team = teams.find((t) => t.id === teamId)
-  // canManage: a team admin OR an org admin — the same union the backend gate
-  // enforces. The roster re-checks server-side, so this is just the UI gate.
-  const canManage = !!team && (team.role === 'admin' || orgIsAdmin)
 
   if (!orgId || loading || !loaded) {
     return <p className="mx-auto max-w-3xl text-[13px] text-text-tertiary">Loading teams…</p>
@@ -36,19 +55,90 @@ export default function TeamPage() {
   if (error) {
     return <p className="mx-auto max-w-3xl text-[13px] text-dismiss">{error}</p>
   }
-  // Zero-team state — a user who's in the org but on no team. The full
-  // safe-landing treatment is the page-shell slice's; here we just say so.
-  if (!team) {
-    return (
-      <p className="mx-auto max-w-3xl text-[13px] text-text-tertiary">
-        You're not on any team yet.
-      </p>
-    )
+  // Zero-team safe landing — first-class, not an error. Reachable today via
+  // team-less org invites; the archive slice produces it too.
+  if (teams.length === 0) {
+    return <ZeroTeamState canCreate={orgIsAdmin} />
   }
 
   return (
-    <div className="mx-auto max-w-3xl">
-      <div className="mb-5 flex items-center justify-between gap-3">
+    <TeamPageBody
+      teams={teams}
+      lastActingTeamId={lastActingTeamId}
+      orgId={orgId}
+      orgIsAdmin={orgIsAdmin}
+    />
+  )
+}
+
+function TeamPageBody({
+  teams,
+  lastActingTeamId,
+  orgId,
+  orgIsAdmin,
+}: {
+  teams: TeamSummary[]
+  lastActingTeamId: string
+  orgId: string
+  orgIsAdmin: boolean
+}) {
+  const [picked, setPicked] = useState(() => readStoredTeam())
+  // Tracks whether the Settings tab has unsaved edits, so a team switch can
+  // confirm-before-discard (the switch fires from the page header, outside the
+  // tab body). Reset by TeamSettings on unmount.
+  const [settingsDirty, setSettingsDirty] = useState(false)
+
+  // Resolve the active team: a valid sticky pick → the server-side sticky
+  // default (last-acting team) → the org's default (teams[0], oldest-first).
+  // teams is non-empty here, so this always lands on a concrete team.
+  const teamId = useMemo(() => {
+    if (picked && teams.some((t) => t.id === picked)) return picked
+    if (lastActingTeamId && teams.some((t) => t.id === lastActingTeamId)) return lastActingTeamId
+    return teams[0].id
+  }, [picked, teams, lastActingTeamId])
+
+  const team = teams.find((t) => t.id === teamId)!
+  // canManage: a team admin OR an org admin — the union the backend gate
+  // enforces. Gates the Settings tab + the roster's management controls.
+  const canManage = team.role === 'admin' || orgIsAdmin
+
+  const switchTeam = useCallback(
+    (id: string) => {
+      if (id === teamId) return
+      if (settingsDirty && !window.confirm('Discard unsaved changes and switch teams?')) return
+      setPicked(id)
+      try {
+        localStorage.setItem(ACTIVE_TEAM_KEY, id)
+      } catch {
+        // localStorage unavailable — the selection still works this session.
+      }
+    },
+    [teamId, settingsDirty],
+  )
+
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tab = resolveTab(searchParams.get('tab'), canManage)
+  // Members owns the bare URL (drop the param); the others carry an explicit
+  // ?tab=. replace so flipping tabs doesn't pile up history entries.
+  const setTab = (t: TeamTab) =>
+    setSearchParams(t === 'members' ? {} : { tab: t }, { replace: true })
+
+  // Settings is gated to managers (team-admin or org-admin); members + prompts
+  // are visible to every team member (writes are gated server-side).
+  const tabs = canManage ? TABS : TABS.filter((t) => t.id !== 'settings')
+
+  const promptsTab = tab === 'prompts'
+
+  return (
+    // Prompts is a full binding-graph canvas: give it a viewport-tall flex
+    // column (nav + page padding ≈ 8rem) so the embedded editor fills the space
+    // below the header + tab strip. Members + Settings stay a narrow column.
+    <div
+      className={`mx-auto ${
+        promptsTab ? 'flex h-[calc(100vh-8rem)] max-w-6xl flex-col' : 'max-w-3xl'
+      }`}
+    >
+      <div className="mb-5 flex shrink-0 items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
             <Users size={15} />
@@ -57,27 +147,58 @@ export default function TeamPage() {
             <h1 className="text-[17px] font-semibold leading-tight text-text-primary">
               {team.name}
             </h1>
-            <p className="text-[11px] leading-tight text-text-tertiary">Team members</p>
+            <p className="text-[11px] leading-tight text-text-tertiary">
+              Members, settings, and prompts.
+            </p>
           </div>
         </div>
-        {teams.length > 1 && (
-          <select
-            value={teamId}
-            onChange={(e) => setPicked(e.target.value)}
-            aria-label="Switch team"
-            className="rounded-lg border border-border-glass bg-surface px-2.5 py-1.5 text-[12px] text-text-secondary focus:border-accent/40 focus:outline-none focus:ring-2 focus:ring-accent/30"
-          >
-            {teams.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-              </option>
-            ))}
-          </select>
-        )}
+        {/* Shared page-level switcher — renders for ≥2 teams. */}
+        <TeamSwitch teams={teams} value={teamId} onChange={switchTeam} />
       </div>
 
-      {/* key remounts the panel on a team switch — fresh roster + bot. */}
-      <TeamMembersPanel key={teamId} orgId={orgId} teamId={teamId} canManage={canManage} />
+      <div className="mb-5 flex shrink-0 gap-1 border-b border-border-subtle">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setTab(t.id)}
+            className={`-mb-px border-b-2 px-3 py-2 text-[13px] font-medium transition-colors ${
+              tab === t.id
+                ? 'border-accent text-accent'
+                : 'border-transparent text-text-tertiary hover:text-text-secondary'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* key remounts each tab body on a team switch — fresh roster/config/graph. */}
+      {tab === 'members' && (
+        <TeamMembersPanel key={teamId} orgId={orgId} teamId={teamId} canManage={canManage} />
+      )}
+      {tab === 'settings' && (
+        <TeamSettings
+          key={teamId}
+          isLocal={false}
+          teamId={teamId}
+          onDirtyChange={setSettingsDirty}
+        />
+      )}
+      {promptsTab && (
+        <div className="min-h-0 flex-1">
+          <PromptsWorkspace key={teamId} teamId={teamId} ready={teamId !== ''} />
+        </div>
+      )}
     </div>
   )
+}
+
+// resolveTab maps the ?tab= param to a concrete tab, flooring Settings to
+// Members for non-managers so a stale/hand-typed ?tab=settings can't surface a
+// tab the viewer can't use. Members is the default.
+function resolveTab(raw: string | null, canManage: boolean): TeamTab {
+  if (raw === 'settings' && canManage) return 'settings'
+  if (raw === 'prompts') return 'prompts'
+  return 'members'
 }
