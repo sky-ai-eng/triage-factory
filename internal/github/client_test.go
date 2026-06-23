@@ -1,8 +1,10 @@
 package github
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,12 +97,34 @@ func TestGraphQLURL(t *testing.T) {
 	}
 }
 
+// captureHandler is a minimal slog.Handler that records emitted entries so a
+// test can assert exactly what — and how often — a code path logged. It enables
+// every level and keeps records in order. Only used from non-parallel tests, so
+// it needs no locking.
+type captureHandler struct {
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
 // TestPostGraphQL_PartialError_ReturnsData pins the partial-error path: a 200
 // carrying both a usable `data` block and an `errors[]` entry (the FORBIDDEN
 // statusCheckRollup shape an App without statuses:read produces) returns the
 // data with no error, so the batch's other PRs survive one forbidden field
-// instead of the whole refresh aborting.
+// instead of the whole refresh aborting. It also asserts the degradation is
+// announced exactly once — a single WARN per response, not one per node.
 func TestPostGraphQL_PartialError_ReturnsData(t *testing.T) {
+	logs := &captureHandler{}
+	prev := githubLog
+	githubLog = slog.New(logs)
+	t.Cleanup(func() { githubLog = prev })
+
 	body := `{"data":{"nodes":[{"number":1}]},"errors":[{"type":"FORBIDDEN","path":["nodes",0,"commits","nodes",0,"commit","statusCheckRollup"],"message":"Resource not accessible by integration"}]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -114,6 +138,14 @@ func TestPostGraphQL_PartialError_ReturnsData(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"number":1`) {
 		t.Errorf("expected the usable data to pass through; got %s", string(data))
+	}
+
+	if len(logs.records) != 1 {
+		t.Fatalf("expected exactly one log record, got %d", len(logs.records))
+	}
+	const wantMsg = "GraphQL partial error; using partial data"
+	if got := logs.records[0]; got.Level != slog.LevelWarn || got.Message != wantMsg {
+		t.Errorf("log = %v %q; want WARN %q", got.Level, got.Message, wantMsg)
 	}
 }
 

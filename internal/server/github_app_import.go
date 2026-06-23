@@ -110,7 +110,7 @@ var importRequiredPermissions = []importRequiredPermission{
 	{name: "metadata", level: "read", hard: true},
 	{name: "checks", level: "read", feature: "CI check status events"},
 	{name: "actions", level: "read", feature: "workflow run events"},
-	{name: "statuses", level: "read", feature: "CI check status events"},
+	{name: "statuses", level: "read", feature: "open-PR CI status rollup"},
 	{name: "members", level: "read", feature: "GitHub team import and team-based review-request detection"},
 }
 
