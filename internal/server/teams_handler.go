@@ -226,7 +226,7 @@ func (th *teamsHandler) requireTeamAdminOrOrgAdmin(w http.ResponseWriter, r *htt
 		return false
 	}
 	if !isOrgAdmin {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "team admin role required"})
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "team admin or org admin role required"})
 		return false
 	}
 	return true
