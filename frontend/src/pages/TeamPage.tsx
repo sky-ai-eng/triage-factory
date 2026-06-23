@@ -120,8 +120,13 @@ function TeamPageBody({
   const tab = resolveTab(searchParams.get('tab'), canManage)
   // Members owns the bare URL (drop the param); the others carry an explicit
   // ?tab=. replace so flipping tabs doesn't pile up history entries.
-  const setTab = (t: TeamTab) =>
+  const setTab = (t: TeamTab) => {
+    if (t === tab) return
+    // Leaving the Settings tab unmounts <TeamSettings>, dropping any unsaved
+    // edits — confirm first when it's dirty (mirrors the team-switch guard).
+    if (tab === 'settings' && settingsDirty && !window.confirm('Discard unsaved changes?')) return
     setSearchParams(t === 'members' ? {} : { tab: t }, { replace: true })
+  }
 
   // Settings is gated to managers (team-admin or org-admin); members + prompts
   // are visible to every team member (writes are gated server-side).
@@ -156,11 +161,18 @@ function TeamPageBody({
         <TeamSwitch teams={teams} value={teamId} onChange={switchTeam} />
       </div>
 
-      <div className="mb-5 flex shrink-0 gap-1 border-b border-border-subtle">
+      <div
+        role="tablist"
+        aria-label="Team sections"
+        className="mb-5 flex shrink-0 gap-1 border-b border-border-subtle"
+      >
         {tabs.map((t) => (
           <button
             key={t.id}
             type="button"
+            role="tab"
+            aria-selected={tab === t.id}
+            aria-controls="team-tabpanel"
             onClick={() => setTab(t.id)}
             className={`-mb-px border-b-2 px-3 py-2 text-[13px] font-medium transition-colors ${
               tab === t.id
@@ -173,23 +185,27 @@ function TeamPageBody({
         ))}
       </div>
 
-      {/* key remounts each tab body on a team switch — fresh roster/config/graph. */}
-      {tab === 'members' && (
-        <TeamMembersPanel key={teamId} orgId={orgId} teamId={teamId} canManage={canManage} />
-      )}
-      {tab === 'settings' && (
-        <TeamSettings
-          key={teamId}
-          isLocal={false}
-          teamId={teamId}
-          onDirtyChange={setSettingsDirty}
-        />
-      )}
-      {promptsTab && (
-        <div className="min-h-0 flex-1">
-          <PromptsWorkspace key={teamId} teamId={teamId} ready={teamId !== ''} />
-        </div>
-      )}
+      {/* key remounts each tab body on a team switch — fresh roster/config/graph.
+          The min-h-0/flex-1 lets the Prompts canvas fill the column; the other
+          tabs are auto-height, so it's inert for them. */}
+      <div
+        id="team-tabpanel"
+        role="tabpanel"
+        className={promptsTab ? 'flex min-h-0 flex-1 flex-col' : undefined}
+      >
+        {tab === 'members' && (
+          <TeamMembersPanel key={teamId} orgId={orgId} teamId={teamId} canManage={canManage} />
+        )}
+        {tab === 'settings' && (
+          <TeamSettings
+            key={teamId}
+            isLocal={false}
+            teamId={teamId}
+            onDirtyChange={setSettingsDirty}
+          />
+        )}
+        {promptsTab && <PromptsWorkspace key={teamId} teamId={teamId} ready={teamId !== ''} />}
+      </div>
     </div>
   )
 }

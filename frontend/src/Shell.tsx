@@ -75,7 +75,11 @@ export default function Shell() {
             {/* Team — multi-mode only (the /team surface has no local route).
                 Defaults to the Members tab. */}
             {isMulti && (
-              <Link to={orgHref('/team')} className={pill(teamHomeActive)}>
+              <Link
+                to={orgHref('/team')}
+                aria-current={teamHomeActive ? 'page' : undefined}
+                className={pill(teamHomeActive)}
+              >
                 Team
               </Link>
             )}
@@ -83,7 +87,11 @@ export default function Shell() {
                 mode it deep-links straight to the /team Prompts tab; in local
                 mode it's the standalone /prompts page. */}
             {isMulti ? (
-              <Link to={orgHref('/team') + '?tab=prompts'} className={pill(promptsTabActive)}>
+              <Link
+                to={orgHref('/team') + '?tab=prompts'}
+                aria-current={promptsTabActive ? 'page' : undefined}
+                className={pill(promptsTabActive)}
+              >
                 Prompts
               </Link>
             ) : (

@@ -84,8 +84,8 @@ describe('TeamPage — tab shell', () => {
   it('defaults to the Members tab and shows the tab strip', () => {
     renderAt()
     expect(screen.getByTestId('members')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Members' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Prompts' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Members' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Prompts' })).toBeInTheDocument()
   })
 
   it('deep-links to the Prompts tab via ?tab=prompts', () => {
@@ -96,14 +96,14 @@ describe('TeamPage — tab shell', () => {
 
   it('switches tabs on click', () => {
     renderAt()
-    fireEvent.click(screen.getByRole('button', { name: 'Prompts' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Prompts' }))
     expect(screen.getByTestId('prompts')).toBeInTheDocument()
   })
 
   it('hides the Settings tab for non-managers and floors ?tab=settings to Members', () => {
     renderAt('/team?tab=settings')
     // member of the team, not an org admin → no Settings tab, no settings body
-    expect(screen.queryByRole('button', { name: 'Settings' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Settings' })).not.toBeInTheDocument()
     expect(screen.queryByTestId('settings')).not.toBeInTheDocument()
     expect(screen.getByTestId('members')).toBeInTheDocument()
   })
@@ -111,7 +111,7 @@ describe('TeamPage — tab shell', () => {
   it('shows the Settings tab for a team admin', () => {
     mockState.teams = [team('t-a', 'Team A', 'admin'), team('t-b', 'Team B')]
     renderAt('/team?tab=settings')
-    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Settings' })).toBeInTheDocument()
     expect(screen.getByTestId('settings')).toHaveAttribute('data-team', 't-a')
   })
 })
@@ -148,7 +148,7 @@ describe('TeamPage — zero-team safe landing', () => {
     expect(screen.getByText(/not on a team yet/i)).toBeInTheDocument()
     // No tabs, no tab bodies.
     expect(screen.queryByTestId('members')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Members' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Members' })).not.toBeInTheDocument()
   })
 
   it('shows a "Create a team" CTA for org admins', () => {
