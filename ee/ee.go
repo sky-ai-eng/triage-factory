@@ -10,7 +10,9 @@
 package ee
 
 import (
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -20,11 +22,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
-// publicKeyB64 is the base64 (std encoding) Ed25519 PUBLIC key license
-// tokens are verified against. Only the public half is baked in; the
-// private signing key never ships and lives with the licensor's
-// `triagefactory license issue` tooling. Empty in source — release builds
-// inject the real key via:
+// publicKeyB64 is the standard-base64 of the DER/SPKI (PKIX
+// SubjectPublicKeyInfo) encoding of the ECDSA P-256 PUBLIC key license
+// tokens are verified against — the conventional public-key encoding a
+// signing service emits, so the production key flows straight into ldflags
+// with no re-encoding. Only the public half is baked in; the private
+// signing key never ships and is held entirely by the licensor's issuing
+// service. Empty in source — release builds inject the real key via:
 //
 //	-ldflags "-X github.com/sky-ai-eng/triage-factory/ee.publicKeyB64=<b64>"
 var publicKeyB64 = ""
@@ -58,15 +62,28 @@ func Install() {
 		claims.Org, claims.Features, claims.ExpiresAt().Format(time.DateOnly))
 }
 
-func loadPublicKey() ed25519.PublicKey {
+// loadPublicKey parses the baked-in publicKeyB64 as an ECDSA P-256 public
+// key. The encoding is standard-base64 of the DER/SPKI (PKIX) form. Any
+// problem — empty key, bad base64, non-PKIX DER, wrong key type, or a curve
+// other than P-256 — yields nil, which Install treats as "no enterprise
+// key" (community default). Fail-closed: a malformed key never half-loads.
+func loadPublicKey() *ecdsa.PublicKey {
 	if publicKeyB64 == "" {
 		return nil
 	}
-	raw, err := base64.StdEncoding.DecodeString(publicKeyB64)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
+	der, err := base64.StdEncoding.DecodeString(publicKeyB64)
+	if err != nil {
 		return nil
 	}
-	return ed25519.PublicKey(raw)
+	pub, err := x509.ParsePKIXPublicKey(der)
+	if err != nil {
+		return nil
+	}
+	ec, ok := pub.(*ecdsa.PublicKey)
+	if !ok || ec.Curve != elliptic.P256() {
+		return nil
+	}
+	return ec
 }
 
 // grant adapts verified license claims to the entitlements.Checker the

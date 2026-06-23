@@ -1,26 +1,45 @@
 package license
 
 import (
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/json"
 	"testing"
 	"time"
 )
 
-func mustKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+func mustKey(t *testing.T) (*ecdsa.PublicKey, *ecdsa.PrivateKey) {
 	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(nil)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("genkey: %v", err)
 	}
-	return pub, priv
+	return &priv.PublicKey, priv
+}
+
+// signTest mints a token the way the out-of-band issuer does: ECDSA P-256
+// over the SHA-256 digest of the payload, ASN.1/DER signature. Test-only —
+// the shipping package never signs (production signing is key-custody-only),
+// so this lives here rather than in license.go.
+func signTest(t *testing.T, priv *ecdsa.PrivateKey, c Claims) string {
+	t.Helper()
+	payload, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	digest := sha256.Sum256(payload)
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	return b64.EncodeToString(payload) + "." + b64.EncodeToString(sig)
 }
 
 func TestSignVerifyRoundTrip(t *testing.T) {
 	pub, priv := mustKey(t)
-	tok, err := Sign(priv, Claims{Org: "acme", Features: []string{"sso", "scim"}, Expires: time.Now().Add(time.Hour).Unix()})
-	if err != nil {
-		t.Fatalf("sign: %v", err)
-	}
+	tok := signTest(t, priv, Claims{Org: "acme", Features: []string{"sso", "scim"}, Expires: time.Now().Add(time.Hour).Unix()})
 	got, err := NewVerifier(pub).Verify(tok)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
@@ -32,7 +51,7 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 
 func TestVerifyRejectsTampered(t *testing.T) {
 	pub, priv := mustKey(t)
-	tok, _ := Sign(priv, Claims{Org: "acme", Features: []string{"sso"}, Expires: time.Now().Add(time.Hour).Unix()})
+	tok := signTest(t, priv, Claims{Org: "acme", Features: []string{"sso"}, Expires: time.Now().Add(time.Hour).Unix()})
 	if _, err := NewVerifier(pub).Verify("A" + tok[1:]); err == nil {
 		t.Fatal("expected error on tampered token")
 	}
@@ -40,7 +59,7 @@ func TestVerifyRejectsTampered(t *testing.T) {
 
 func TestVerifyRejectsExpired(t *testing.T) {
 	pub, priv := mustKey(t)
-	tok, _ := Sign(priv, Claims{Org: "acme", Features: []string{"sso"}, Expires: time.Now().Add(-time.Hour).Unix()})
+	tok := signTest(t, priv, Claims{Org: "acme", Features: []string{"sso"}, Expires: time.Now().Add(-time.Hour).Unix()})
 	if _, err := NewVerifier(pub).Verify(tok); err != ErrExpired {
 		t.Fatalf("want ErrExpired, got %v", err)
 	}
@@ -49,7 +68,7 @@ func TestVerifyRejectsExpired(t *testing.T) {
 func TestVerifyWrongKey(t *testing.T) {
 	otherPub, _ := mustKey(t)
 	_, priv := mustKey(t)
-	tok, _ := Sign(priv, Claims{Org: "x", Features: []string{"sso"}, Expires: time.Now().Add(time.Hour).Unix()})
+	tok := signTest(t, priv, Claims{Org: "x", Features: []string{"sso"}, Expires: time.Now().Add(time.Hour).Unix()})
 	if _, err := NewVerifier(otherPub).Verify(tok); err != ErrSignature {
 		t.Fatalf("want ErrSignature, got %v", err)
 	}

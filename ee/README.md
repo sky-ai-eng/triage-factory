@@ -33,7 +33,7 @@ startup (via a blank import from `package main`). Core asks
 
 ## What lives here
 
-- `ee/license` — Ed25519 license-token verification.
+- `ee/license` — ECDSA P-256 license-token verification.
 - `ee/sso` — SSO/SAML/OIDC handlers, GoTrue SSO client, discovery,
   enforcement, break-glass, domains, the verify-before-enforce test flow.
 - `ee/sso/store` — the SQLite + Postgres `sso_*` store implementations and
@@ -44,10 +44,11 @@ startup (via a blank import from `package main`). Core asks
 
 ## Licensing a build
 
-Releases bake the Enterprise **public** key via
+Releases bake the Enterprise **public** key — a standard-base64 DER/SPKI
+ECDSA P-256 key — via
 `-ldflags "-X github.com/sky-ai-eng/triage-factory/ee.publicKeyB64=<b64>"`.
-The private signing key never ships; it lives with the licensor's
-`triagefactory license issue` tooling. At runtime, `TF_LICENSE=<token>`
-supplies a signed token; `ee.Install()` verifies it and registers the
-entitlements checker. No token, wrong key, or expired token → community
-default (every enterprise feature off).
+The private signing key never ships; production tokens are minted out-of-band
+by the licensor's issuing service. At runtime, `TF_LICENSE=<token>` supplies a
+signed token; `ee.Install()` verifies it offline against the baked public key
+and registers the entitlements checker. No token, wrong key, or expired token
+→ community default (every enterprise feature off).
