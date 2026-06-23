@@ -115,13 +115,23 @@ export default function TeamMembersPanel({ orgId, teamId, canManage }: TeamMembe
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), [])
 
-  const addAffordance = canManage ? (
-    <TeamMemberPicker orgId={orgId} teamId={teamId} onAdded={reload} />
-  ) : null
+  // MemberRoster/useMemberRoster require a referentially stable adapter, so
+  // memoize the composed pieces (not just `base`): a fresh object each render
+  // would violate that contract and break a future refactor that keys on
+  // adapter identity. addAffordance only changes when the picker's inputs do;
+  // extraRows only when the bot loads; the spread adapter changes only when one
+  // of those (or base) does.
+  const addAffordance = useMemo(
+    () => (canManage ? <TeamMemberPicker orgId={orgId} teamId={teamId} onAdded={reload} /> : null),
+    [canManage, orgId, teamId, reload],
+  )
 
-  const extraRows = bot ? <TeamBotRow bot={bot} /> : null
+  const extraRows = useMemo(() => (bot ? <TeamBotRow bot={bot} /> : null), [bot])
 
-  const adapter: MemberRosterAdapter = { ...base, addAffordance, extraRows }
+  const adapter = useMemo<MemberRosterAdapter>(
+    () => ({ ...base, addAffordance, extraRows }),
+    [base, addAffordance, extraRows],
+  )
 
   // key remounts on an add so the new member is fetched in (role-change/remove
   // refetch through the hook's own choreography and need no remount).
