@@ -178,7 +178,8 @@ export default function TriggerConfigPanel({
                   <Switch.Root
                     checked={enabled}
                     onCheckedChange={handleToggle}
-                    className="w-[34px] h-[18px] rounded-full bg-black/[0.08] data-[state=checked]:bg-accent transition-colors"
+                    disabled={readOnly}
+                    className="w-[34px] h-[18px] rounded-full bg-black/[0.08] data-[state=checked]:bg-accent transition-colors disabled:opacity-50"
                   >
                     <Switch.Thumb className="block w-[14px] h-[14px] bg-white rounded-full shadow-sm transition-transform translate-x-[2px] data-[state=checked]:translate-x-[18px]" />
                   </Switch.Root>
