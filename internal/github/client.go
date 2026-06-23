@@ -316,6 +316,12 @@ func (c *Client) PostGraphQL(body any) ([]byte, error) {
 				"errors", len(gqlResp.Errors), "type", e.Type, "path", e.Path, "message", e.Message)
 			return data, nil
 		}
+		// Surface the first error; note when more were dropped so a multi-error
+		// total failure isn't silently reduced to a single message.
+		if len(gqlResp.Errors) > 1 {
+			return nil, fmt.Errorf("GraphQL error (%s) at %v: %s (and %d more)",
+				e.Type, e.Path, e.Message, len(gqlResp.Errors)-1)
+		}
 		return nil, fmt.Errorf("GraphQL error (%s) at %v: %s", e.Type, e.Path, e.Message)
 	}
 
