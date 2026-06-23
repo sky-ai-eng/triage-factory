@@ -176,10 +176,16 @@ func (s *Server) handleTeamMembersMulti(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Bot scoped to the same default team, mirroring the delegate gate so the
-	// picker only offers a bot the delegate handlers would accept.
+	// picker only offers a bot the delegate handlers would accept. Skip the
+	// lookup entirely for a teamless org (the bootstrap-bug degraded state
+	// above): agentEnabledForTeam("") already resolves to disabled, so the
+	// guard just avoids a needless agent-lookup round-trip and makes the intent
+	// explicit.
 	var bot *teamBotRow
-	if agent, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, teamID); err == nil && enabled && agent != nil {
-		bot = &teamBotRow{AgentID: agent.ID, DisplayName: agent.DisplayName}
+	if teamID != "" {
+		if agent, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, teamID); err == nil && enabled && agent != nil {
+			bot = &teamBotRow{AgentID: agent.ID, DisplayName: agent.DisplayName}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, teamMembersResponse{Members: out, Bot: bot})

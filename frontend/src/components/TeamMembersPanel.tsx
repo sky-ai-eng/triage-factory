@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { Bot } from 'lucide-react'
 import { apiFetch, apiJSON } from '../lib/apiClient'
 import MemberRoster from './MemberRoster'
@@ -57,28 +57,9 @@ export default function TeamMembersPanel({ orgId, teamId, canManage }: TeamMembe
   const [reloadKey, setReloadKey] = useState(0)
   const [bot, setBot] = useState<TeamRosterBot | null>(null)
 
-  // The bot row is fetched alongside the roster but lives outside the member
-  // list, so we read it directly. Member mutations don't change the bot, so
-  // this only re-runs on a team switch.
-  useEffect(() => {
-    let alive = true
-    apiJSON<TeamRosterApiResponse>(`/api/teams/${teamId}/members`)
-      .then((d) => {
-        if (alive) setBot(d.bot)
-      })
-      .catch(() => {
-        if (alive) setBot(null)
-      })
-    return () => {
-      alive = false
-    }
-  }, [teamId])
-
   // Base adapter — referentially stable except when the team changes (the only
-  // thing the I/O closures depend on). addAffordance/extraRows are spread on
-  // top (a fresh object each render) so their per-render JSX identity can't
-  // trigger a refetch loop: useMemberRoster keys its load effect on
-  // fetchMembers, which stays stable here.
+  // thing the I/O closures depend on). The composed adapter is memoized below
+  // so the prop stays referentially stable per the MemberRoster contract.
   const base = useMemo<MemberRosterAdapter>(
     () => ({
       roles: TEAM_ROLES,
@@ -88,6 +69,12 @@ export default function TeamMembersPanel({ orgId, teamId, canManage }: TeamMembe
       roleLabels: TEAM_ROLE_LABELS,
       async fetchMembers(): Promise<RosterMember[]> {
         const data = await apiJSON<TeamRosterApiResponse>(`/api/teams/${teamId}/members`)
+        // The bot is a sibling field of the same roster payload, not a member —
+        // capture it here so the panel can render one row for it WITHOUT a
+        // second, identical GET. useMemberRoster owns the fetch lifecycle (mount
+        // + post-mutation reload), so this also keeps the bot row fresh. setBot
+        // is a stable setter, so it isn't a dependency of this memo.
+        setBot(data.bot)
         return data.members.map((m) => ({
           userId: m.user_id,
           displayName: m.display_name,
