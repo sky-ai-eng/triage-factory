@@ -923,7 +923,7 @@ func (s *Server) routes() {
 	s.apiMutating("PUT /api/prompts/{id}", ph.handlePromptPut)
 	s.apiMutating("DELETE /api/prompts/{id}", ph.handlePromptDelete)
 	s.api("GET /api/prompts/{id}/stats", ph.handlePromptStats)
-	bh := &blueprintsHandler{tx: s.tx, spawner: func() *delegate.Spawner { return s.spawner }}
+	bh := &blueprintsHandler{tx: s.tx, az: s.az, spawner: func() *delegate.Spawner { return s.spawner }}
 	s.api("GET /api/blueprints", bh.handleBlueprintsList)
 	s.apiMutating("POST /api/blueprints", bh.handleBlueprintCreate)
 	s.apiMutating("PUT /api/blueprints/{id}", bh.handleBlueprintUpdate)

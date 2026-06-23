@@ -162,6 +162,7 @@ export default function PromptsWorkspace({
         promptId={selectedId}
         isNew={isNew}
         lockedTeamId={teamId}
+        readOnly={readOnly}
         onClose={closeDrawer}
         onSaved={handleSaved}
         onDeleted={handleDeleted}

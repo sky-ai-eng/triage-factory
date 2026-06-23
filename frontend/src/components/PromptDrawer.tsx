@@ -19,6 +19,12 @@ interface Props {
   // no team picker, leaf-only (templates don't carry chain steps or run
   // stats). Mutually exclusive with lockedTeamId.
   templateScope?: boolean
+  // When true the drawer is a read-only viewer of an existing prompt (TFAC-447):
+  // inputs are disabled and the Save/Delete affordances are withheld, so a
+  // team viewer can inspect a prompt without being offered writes that 403
+  // server-side. Only meaningful in edit mode — viewers never reach the create
+  // flow (the "New Prompt" affordance is hidden upstream).
+  readOnly?: boolean
   onClose: () => void
   onSaved: () => void
   onDeleted?: () => void
@@ -134,6 +140,7 @@ export default function PromptDrawer({
   isNew,
   lockedTeamId,
   templateScope = false,
+  readOnly = false,
   onClose,
   onSaved,
   onDeleted,
@@ -446,8 +453,9 @@ export default function PromptDrawer({
                   type="text"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
+                  disabled={readOnly}
                   placeholder="e.g. Thorough Code Review"
-                  className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+                  className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors disabled:opacity-60"
                 />
               </div>
 
@@ -459,9 +467,10 @@ export default function PromptDrawer({
                 <textarea
                   value={body}
                   onChange={(e) => setBody(e.target.value)}
+                  disabled={readOnly}
                   placeholder="Describe what the agent should do..."
                   rows={16}
-                  className="w-full px-3 py-2.5 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary font-mono leading-relaxed placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors resize-y"
+                  className="w-full px-3 py-2.5 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary font-mono leading-relaxed placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors resize-y disabled:opacity-60"
                 />
               </div>
 
@@ -472,7 +481,8 @@ export default function PromptDrawer({
                 <select
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+                  disabled={readOnly}
+                  className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors disabled:opacity-60"
                 >
                   <option value="">Default{defaultModel ? ` (${defaultModel})` : ''}</option>
                   <option value="haiku">Haiku (fast, cheap)</option>
@@ -599,7 +609,7 @@ export default function PromptDrawer({
             {/* Footer */}
             <div className="px-6 py-4 border-t border-border-subtle flex items-center justify-between shrink-0">
               <div>
-                {!isNew && (
+                {!isNew && !readOnly && (
                   <button
                     onClick={handleDelete}
                     disabled={deleting}
@@ -623,19 +633,38 @@ export default function PromptDrawer({
 
               <div className="flex items-center gap-3">
                 {error && <span className="text-[12px] text-red-500">{error}</span>}
-                <button
-                  onClick={onClose}
-                  className="text-[12px] text-text-tertiary hover:text-text-secondary font-medium transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={save}
-                  disabled={saving || (isNew && !templateScope && !lockedTeamId && !teamsLoaded)}
-                  className="text-[12px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-1.5 rounded-full transition-colors disabled:opacity-50"
-                >
-                  {saving ? 'Saving...' : isNew ? 'Create' : 'Save'}
-                </button>
+                {readOnly ? (
+                  // View-only: no Save/Delete; the only action is to dismiss the
+                  // inspector. The label reads "Close" (not "Cancel") since there's
+                  // nothing to cancel.
+                  <>
+                    <span className="text-[11px] font-medium text-text-tertiary">View only</span>
+                    <button
+                      onClick={onClose}
+                      className="text-[12px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-1.5 rounded-full transition-colors"
+                    >
+                      Close
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={onClose}
+                      className="text-[12px] text-text-tertiary hover:text-text-secondary font-medium transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={save}
+                      disabled={
+                        saving || (isNew && !templateScope && !lockedTeamId && !teamsLoaded)
+                      }
+                      className="text-[12px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-1.5 rounded-full transition-colors disabled:opacity-50"
+                    >
+                      {saving ? 'Saving...' : isNew ? 'Create' : 'Save'}
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </motion.div>

@@ -242,6 +242,12 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 		internalError(w, "prompts", err)
 		return
 	}
+	// The existing != nil guard is semantically load-bearing, not just defensive:
+	// a nil preload (prompt missing, or not visible to this viewer under
+	// prompts_select) must fall through to the delete tx below, which re-Gets nil
+	// under the same RLS context and renders the 404 — so a viewer probing a
+	// prompt they can't see learns "not found", never "view-only". RequireTeamWrite
+	// needs a real team_id and must not be reached for an absent row.
 	if existing != nil && !ph.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID) {
 		return
 	}

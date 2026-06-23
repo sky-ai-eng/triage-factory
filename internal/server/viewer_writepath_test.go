@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -24,6 +25,7 @@ type viewerRig struct {
 	h      *pgtest.Harness
 	s      *Server
 	ph     *promptsHandler
+	bh     *blueprintsHandler
 	orgID  string
 	teamID string
 	admin  string
@@ -51,6 +53,7 @@ func newViewerRig(t *testing.T) *viewerRig {
 		h:      h,
 		s:      s,
 		ph:     &promptsHandler{db: h.AdminDB, tx: s.tx, az: s.az},
+		bh:     &blueprintsHandler{tx: s.tx, az: s.az, spawner: func() *delegate.Spawner { return nil }},
 		orgID:  orgID,
 		teamID: teamID,
 		admin:  founder,
@@ -155,6 +158,46 @@ func TestViewer_PromptEdit_Forbidden(t *testing.T) {
 	r.ph.handlePromptPut(rec, putReq)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("member PUT prompt: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestViewer_PromptCreate_Forbidden: a viewer POSTing a new prompt 403s at the
+// acting-team write gate (before the create tx); a member's POST creates (201).
+// Exercises the two-phase resolution the create path uses — ResolveActingNoStamp
+// for the gate, then ResolveActing (with stamp) in the main tx — which is a new
+// pattern worth its own integration coverage beyond the RLS layer.
+func TestViewer_PromptCreate_Forbidden(t *testing.T) {
+	r := newViewerRig(t)
+	// Sole-team callers omit team_id; the resolver falls back to their one team.
+	body := map[string]string{"name": "new-prompt", "body": "mission", "model": "sonnet"}
+
+	rec := httptest.NewRecorder()
+	r.ph.handlePromptCreate(rec, r.req(http.MethodPost, "/api/prompts", r.viewer, body))
+	assertViewOnly403(t, rec, "viewer POST prompt")
+
+	rec = httptest.NewRecorder()
+	r.ph.handlePromptCreate(rec, r.req(http.MethodPost, "/api/prompts", r.member, body))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("member POST prompt: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestViewer_BlueprintCreate_Forbidden: a viewer POSTing a blueprint 403s at the
+// acting-team gate; a member creates (201). Covers the blueprint handler gates
+// added alongside the RLS swap so a viewer gets a clean 403 rather than the
+// blueprints_insert RLS violation.
+func TestViewer_BlueprintCreate_Forbidden(t *testing.T) {
+	r := newViewerRig(t)
+	body := map[string]string{"name": "new-blueprint"}
+
+	rec := httptest.NewRecorder()
+	r.bh.handleBlueprintCreate(rec, r.req(http.MethodPost, "/api/blueprints", r.viewer, body))
+	assertViewOnly403(t, rec, "viewer POST blueprint")
+
+	rec = httptest.NewRecorder()
+	r.bh.handleBlueprintCreate(rec, r.req(http.MethodPost, "/api/blueprints", r.member, body))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("member POST blueprint: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
