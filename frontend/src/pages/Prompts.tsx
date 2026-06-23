@@ -16,7 +16,7 @@ export default function Prompts() {
   const activeTeam = useActiveTeam('prompts')
 
   return (
-    <div className="flex flex-col" style={{ height: 'calc(100vh - 120px)' }}>
+    <div className="flex h-[calc(100vh-8rem)] flex-col">
       <PromptsWorkspace
         teamId={activeTeam.teamId}
         ready={activeTeam.ready}

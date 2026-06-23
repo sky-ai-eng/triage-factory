@@ -58,6 +58,28 @@ vi.mock('../components/PromptsWorkspace', () => ({
     </div>
   ),
 }))
+// Stub the switcher as a plain <select> so the persistence test drives it
+// through a stable interface instead of coupling to TeamSwitch's dropdown DOM.
+vi.mock('../components/TeamSwitch', () => ({
+  default: ({
+    value,
+    onChange,
+    teams,
+  }: {
+    value: string
+    onChange: (id: string) => void
+    teams?: TeamSummary[]
+  }) =>
+    (teams?.length ?? 0) >= 2 ? (
+      <select data-testid="team-switch" value={value} onChange={(e) => onChange(e.target.value)}>
+        {teams!.map((t) => (
+          <option key={t.id} value={t.id}>
+            {t.name}
+          </option>
+        ))}
+      </select>
+    ) : null,
+}))
 
 import TeamPage from './TeamPage'
 
@@ -100,6 +122,19 @@ describe('TeamPage — tab shell', () => {
     expect(screen.getByTestId('prompts')).toBeInTheDocument()
   })
 
+  it('moves between tabs with Left/Right arrows', () => {
+    mockState.teams = [team('t-a', 'Team A', 'admin')]
+    renderAt()
+    // Members → Settings → Prompts via ArrowRight.
+    fireEvent.keyDown(screen.getByRole('tablist'), { key: 'ArrowRight' })
+    expect(screen.getByRole('tab', { name: 'Settings' })).toHaveAttribute('aria-selected', 'true')
+    fireEvent.keyDown(screen.getByRole('tablist'), { key: 'ArrowRight' })
+    expect(screen.getByTestId('prompts')).toBeInTheDocument()
+    // ArrowRight wraps back to Members.
+    fireEvent.keyDown(screen.getByRole('tablist'), { key: 'ArrowRight' })
+    expect(screen.getByTestId('members')).toBeInTheDocument()
+  })
+
   it('hides the Settings tab for non-managers and floors ?tab=settings to Members', () => {
     renderAt('/team?tab=settings')
     // member of the team, not an org admin → no Settings tab, no settings body
@@ -128,9 +163,8 @@ describe('TeamPage — shared switcher', () => {
     // Default (no sticky) is the first team.
     expect(screen.getByTestId('members')).toHaveAttribute('data-team', 't-a')
 
-    // Open the switcher (its trigger shows the current team name) and pick B.
-    fireEvent.click(screen.getByRole('button', { name: /team a/i }))
-    fireEvent.click(screen.getByText('Team B'))
+    // Pick Team B via the switcher (mocked as a <select> with a stable testid).
+    fireEvent.change(screen.getByTestId('team-switch'), { target: { value: 't-b' } })
     expect(screen.getByTestId('members')).toHaveAttribute('data-team', 't-b')
     expect(localStorage.getItem('tf.activeTeam.team')).toBe('t-b')
 

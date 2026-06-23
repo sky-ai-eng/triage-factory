@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState, type KeyboardEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Users } from 'lucide-react'
 import { useActiveOrgId } from '../contexts/OrgContext'
@@ -132,6 +132,18 @@ function TeamPageBody({
   // are visible to every team member (writes are gated server-side).
   const tabs = canManage ? TABS : TABS.filter((t) => t.id !== 'settings')
 
+  // Arrow-key navigation within the tablist (WAI-ARIA tabs pattern, automatic
+  // activation): Left/Right move the active tab and follow focus to it.
+  const onTabKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+    e.preventDefault()
+    const idx = tabs.findIndex((t) => t.id === tab)
+    const nextIdx = (idx + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+    setTab(tabs[nextIdx].id)
+    const btns = e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+    btns[nextIdx]?.focus()
+  }
+
   const promptsTab = tab === 'prompts'
 
   return (
@@ -164,15 +176,20 @@ function TeamPageBody({
       <div
         role="tablist"
         aria-label="Team sections"
+        onKeyDown={onTabKeyDown}
         className="mb-5 flex shrink-0 gap-1 border-b border-border-subtle"
       >
         {tabs.map((t) => (
           <button
             key={t.id}
+            id={`team-tab-${t.id}`}
             type="button"
             role="tab"
             aria-selected={tab === t.id}
             aria-controls="team-tabpanel"
+            // Roving tabindex: only the active tab is in the Tab order; the
+            // tablist's arrow-key handler moves focus among the rest.
+            tabIndex={tab === t.id ? 0 : -1}
             onClick={() => setTab(t.id)}
             className={`-mb-px border-b-2 px-3 py-2 text-[13px] font-medium transition-colors ${
               tab === t.id
@@ -191,6 +208,7 @@ function TeamPageBody({
       <div
         id="team-tabpanel"
         role="tabpanel"
+        aria-labelledby={`team-tab-${tab}`}
         className={promptsTab ? 'flex min-h-0 flex-1 flex-col' : undefined}
       >
         {tab === 'members' && (
