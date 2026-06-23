@@ -94,6 +94,11 @@ func (th *teamsHandler) handleTeamsList(w http.ResponseWriter, r *http.Request) 
 // "edit this field" affordance so it validates.
 const maxTeamNameLen = 100
 
+// maxTeamDescriptionLen caps the description blurb (in runes). The column is
+// unbounded TEXT, so this keeps a pasted document out of it — a blurb, not a
+// wiki. Generous enough for a sentence or two of "what this team owns."
+const maxTeamDescriptionLen = 500
+
 // teamDetailJSON is the PATCH /api/teams/{team_id} response — the updated
 // identity row plus its description (the field this endpoint manages). Role is
 // omitted: the caller already knows their relationship to the team (they had to
@@ -174,6 +179,10 @@ func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request)
 	}
 	if body.Description != nil {
 		desc := strings.TrimSpace(*body.Description)
+		if len([]rune(desc)) > maxTeamDescriptionLen {
+			badRequest(w, "description is too long")
+			return
+		}
 		descPtr = &desc
 	}
 	if namePtr == nil && descPtr == nil {

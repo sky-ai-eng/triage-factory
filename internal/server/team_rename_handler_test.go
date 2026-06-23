@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
@@ -172,6 +173,96 @@ func TestTeamRename_EmptyNameIs400(t *testing.T) {
 	}
 	if name, _, _ := r.nameSlugDescOf(t, r.teamID); name == "" {
 		t.Errorf("name cleared on rejected empty-name update, want original")
+	}
+}
+
+// TestTeamRename_DescriptionOnly: a body with no name leaves name + slug
+// untouched (the COALESCE(NULL, name) partial-PATCH path, all the way through
+// the widened RLS) while the description is written. The team admin is the
+// caller, so this also confirms the description-only write passes the policy.
+func TestTeamRename_DescriptionOnly(t *testing.T) {
+	r := newTeamRenameRig(t)
+
+	rec := httptest.NewRecorder()
+	r.th.handleTeamUpdate(rec, r.req(r.admin, r.teamID, map[string]string{"description": "owns the build"}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (description-only); body=%s", rec.Code, rec.Body.String())
+	}
+	name, slug, desc := r.nameSlugDescOf(t, r.teamID)
+	if name != "default" || slug != "default" {
+		// SeedOrgWithUser seeds the default team with name = slug = "default".
+		t.Errorf("name/slug = (%q, %q) after description-only update, want unchanged (default)", name, slug)
+	}
+	if desc != "owns the build" {
+		t.Errorf("description = %q, want %q", desc, "owns the build")
+	}
+}
+
+// TestTeamRename_EmptyBodyIs400: a body with neither field is rejected — there's
+// nothing to update, and an empty PATCH shouldn't silently bump updated_at.
+func TestTeamRename_EmptyBodyIs400(t *testing.T) {
+	r := newTeamRenameRig(t)
+
+	rec := httptest.NewRecorder()
+	r.th.handleTeamUpdate(rec, r.req(r.admin, r.teamID, map[string]struct{}{}))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (nothing to update); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestTeamRename_NameTooLongIs400: a name past the rune cap is rejected before
+// any write.
+func TestTeamRename_NameTooLongIs400(t *testing.T) {
+	r := newTeamRenameRig(t)
+
+	rec := httptest.NewRecorder()
+	r.th.handleTeamUpdate(rec, r.req(r.admin, r.teamID, map[string]string{
+		"name": strings.Repeat("a", maxTeamNameLen+1),
+	}))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (name too long); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestTeamRename_DescriptionTooLongIs400: a description past the rune cap is
+// rejected before any write.
+func TestTeamRename_DescriptionTooLongIs400(t *testing.T) {
+	r := newTeamRenameRig(t)
+
+	rec := httptest.NewRecorder()
+	r.th.handleTeamUpdate(rec, r.req(r.admin, r.teamID, map[string]string{
+		"description": strings.Repeat("a", maxTeamDescriptionLen+1),
+	}))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (description too long); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestTeamRename_SlugCollisionIs409: renaming to a name whose re-derived slug
+// collides with a sibling team in the org trips the UNIQUE (org_id, slug)
+// constraint, surfaced as a 409 (mirroring Create), not a 500.
+func TestTeamRename_SlugCollisionIs409(t *testing.T) {
+	r := newTeamRenameRig(t)
+	// A second team in the same org owning the slug "taken".
+	pgtest.MustExec(t, r.h.AdminDB,
+		`INSERT INTO teams (org_id, slug, name) VALUES ($1, 'taken', 'Taken')`, r.orgID)
+
+	rec := httptest.NewRecorder()
+	r.th.handleTeamUpdate(rec, r.req(r.admin, r.teamID, map[string]string{"name": "Taken"}))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (slug collision); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestTeamRename_NonUUIDTeamIs404: a malformed team_id in the path 404s before
+// any DB hit, so a bad path can't surface as a 500 from the uuid cast.
+func TestTeamRename_NonUUIDTeamIs404(t *testing.T) {
+	r := newTeamRenameRig(t)
+
+	rec := httptest.NewRecorder()
+	r.th.handleTeamUpdate(rec, r.req(r.admin, "not-a-uuid", map[string]string{"name": "X"}))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (non-UUID team_id); body=%s", rec.Code, rec.Body.String())
 	}
 }
 
