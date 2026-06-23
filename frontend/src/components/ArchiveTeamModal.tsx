@@ -137,7 +137,9 @@ export default function ArchiveTeamModal({
           <button
             type="button"
             onClick={submit}
-            disabled={submitting || loadError !== null}
+            // Stay disabled until the preview resolves so the user can't confirm
+            // before seeing the active-work counts (the warning the modal exists for).
+            disabled={submitting || loadError !== null || preview === null}
             className="rounded-xl bg-dismiss px-5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-dismiss/90 disabled:opacity-40"
           >
             {submitting ? 'Archiving…' : 'Archive team'}

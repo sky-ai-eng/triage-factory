@@ -706,7 +706,7 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	// rows. No-op when the curator runtime hasn't been wired (test
 	// harnesses, fresh-install before first message).
 	if s.curator != nil {
-		s.curator.CancelProject(orgID, id)
+		s.curator.CancelProject(orgID, id, "project deleted")
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {

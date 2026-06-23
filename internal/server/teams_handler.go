@@ -156,6 +156,11 @@ func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request)
 	if !th.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
+	// Block rename/description edits on an archived team — teams_update RLS gates
+	// on team-admin-or-org-admin, which carries no archived filter (TFAC-448).
+	if !th.az.VerifyTeamNotArchived(w, r, orgID, userID, teamID) {
+		return
+	}
 	if !th.requireTeamAdminOrOrgAdmin(w, r, orgID, userID, teamID) {
 		return
 	}

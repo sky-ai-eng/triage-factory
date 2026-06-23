@@ -159,6 +159,10 @@ type TeamsStore interface {
 	// touches current_user_id(). A request-path consumer would need a
 	// separate claims-scoped method with its own RLS story, and none is
 	// needed today. SQLite collapses to one connection.
+	//
+	// Archived teams (deleted_at IS NOT NULL) are excluded (TFAC-448): the
+	// router routes new tasks to the returned teams, and an archived team has
+	// been force-stopped + write-blocked, so it must not receive new work.
 	TeamIDsForUserInOrgSystem(ctx context.Context, orgID, userID string) ([]string, error)
 
 	// Create inserts a new team in the org and enrolls the creator as a
@@ -212,7 +216,7 @@ type TeamsStore interface {
 	GetSystem(ctx context.Context, orgID, teamID string) (*domain.Team, error)
 
 	// ListArchivedForOrgSystem returns the org's archived teams (deleted_at IS
-	// NOT NULL), oldest-first, with DeletedAt populated. Admin pool / org-scoped:
+	// NOT NULL), most-recently-archived first, with DeletedAt populated. Admin pool / org-scoped:
 	// the org-admin "Archived teams" restore surface enumerates them even for
 	// teams the admin never joined (the per-user membership join ListForUser uses
 	// would hide those). Empty slice when the org has no archived teams.

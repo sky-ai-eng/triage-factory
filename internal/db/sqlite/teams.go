@@ -147,11 +147,13 @@ func (s *teamsStore) TeamIDsForUserInOrgSystem(ctx context.Context, orgID, userI
 	// this takes an explicit userID and honors the membership rows, so
 	// the baseline's seeded local-user membership is what
 	// resolves the one synthetic user to its team in N=1.
+	// t.deleted_at IS NULL excludes archived teams (TFAC-448) — parity with the
+	// Postgres impl; the router must not route new tasks to an archived team.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT t.id
 		FROM memberships m
 		JOIN teams t ON t.id = m.team_id
-		WHERE t.org_id = ? AND m.user_id = ?
+		WHERE t.org_id = ? AND m.user_id = ? AND t.deleted_at IS NULL
 		ORDER BY t.id ASC
 	`, orgID, userID)
 	if err != nil {
@@ -296,7 +298,7 @@ func (s *teamsStore) ListArchivedForOrgSystem(ctx context.Context, orgID string)
 		SELECT id, org_id, slug, name, COALESCE(description, ''), created_at, deleted_at
 		FROM teams
 		WHERE org_id = ? AND deleted_at IS NOT NULL
-		ORDER BY created_at ASC, id ASC
+		ORDER BY deleted_at DESC, id ASC
 	`, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("list archived teams: %w", err)

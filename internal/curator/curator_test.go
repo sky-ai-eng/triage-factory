@@ -83,7 +83,7 @@ func TestCurator_CancelProject_FlipsQueuedRows(t *testing.T) {
 
 	c := New(sqlitestore.New(database), nil, "")
 	t.Cleanup(c.Shutdown)
-	c.CancelProject(runmode.LocalDefaultOrgID, projectID)
+	c.CancelProject(runmode.LocalDefaultOrgID, projectID, "project deleted")
 
 	for _, id := range []string{id1, id2} {
 		got, _ := db.GetCuratorRequest(database, id)
@@ -114,7 +114,7 @@ func TestCurator_CancelProject_KillsActiveSession(t *testing.T) {
 	if _, err := c.SendMessage(t.Context(), projectID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "hello"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	c.CancelProject(runmode.LocalDefaultOrgID, projectID)
+	c.CancelProject(runmode.LocalDefaultOrgID, projectID, "project deleted")
 
 	// Wait a moment for the goroutine to observe ctx.Done and exit.
 	// The contract is "tears down deterministically", not "instantly,"
@@ -164,7 +164,7 @@ func TestCurator_CrossProjectParallel(t *testing.T) {
 		t.Error("both projects should have an active session goroutine")
 	}
 
-	c.CancelProject(runmode.LocalDefaultOrgID, projectA)
+	c.CancelProject(runmode.LocalDefaultOrgID, projectA, "project deleted")
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {

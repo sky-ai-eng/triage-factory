@@ -199,7 +199,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 	// rows for every project the team owns.
 	if cur := th.curatorRuntime(); cur != nil {
 		for _, projectID := range projectIDs {
-			cur.CancelProject(orgID, projectID)
+			cur.CancelProject(orgID, projectID, "team archived")
 		}
 	}
 

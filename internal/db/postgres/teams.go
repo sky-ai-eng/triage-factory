@@ -213,7 +213,7 @@ func (s *teamsStore) ListArchivedForOrgSystem(ctx context.Context, orgID string)
 		       created_at, deleted_at
 		FROM teams
 		WHERE org_id = $1 AND deleted_at IS NOT NULL
-		ORDER BY created_at ASC, id ASC
+		ORDER BY deleted_at DESC, id ASC
 	`, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("list archived teams: %w", err)
@@ -243,11 +243,14 @@ func (s *teamsStore) TeamIDsForUserInOrgSystem(ctx context.Context, orgID, userI
 	// has since been deleted. Admin pool: the router resolves an
 	// arbitrary author/reviewer userID with no JWT claims, so this can't
 	// lean on current_user_id() the way ListForUser does.
+	// t.deleted_at IS NULL excludes archived teams (TFAC-448): the router resolves
+	// an author/reviewer's teams to route new tasks to, and an archived team must
+	// not receive new work (it's been force-stopped + write-blocked).
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT t.id::text
 		FROM memberships m
 		JOIN teams t ON t.id = m.team_id
-		WHERE t.org_id = $1 AND m.user_id = $2
+		WHERE t.org_id = $1 AND m.user_id = $2 AND t.deleted_at IS NULL
 		ORDER BY t.id ASC
 	`, orgID, userID)
 	if err != nil {

@@ -339,3 +339,43 @@ func containsTeam(teams []domain.Team, id string) bool {
 	}
 	return false
 }
+
+// TestTeamsStore_SQLite_TeamIDsForUserInOrgSystem_ExcludesArchived pins the
+// router-facing exclusion (TFAC-448): the team-resolution the event router uses
+// to route new tasks drops archived teams, so an archived team never receives
+// new work.
+func TestTeamsStore_SQLite_TeamIDsForUserInOrgSystem_ExcludesArchived(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	orgID, teamID := seedSQLiteTeam(t, conn)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	const userID = "user-tids"
+	if _, err := conn.Exec(`INSERT INTO users (id, display_name) VALUES (?, 'U')`, userID); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := conn.Exec(
+		`INSERT INTO memberships (user_id, team_id, role) VALUES (?, ?, 'member')`, userID, teamID,
+	); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+
+	ids, err := stores.Teams.TeamIDsForUserInOrgSystem(ctx, orgID, userID)
+	if err != nil {
+		t.Fatalf("TeamIDsForUserInOrgSystem: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != teamID {
+		t.Fatalf("before archive = %v; want [%s]", ids, teamID)
+	}
+
+	if err := stores.Teams.Archive(ctx, teamID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+	ids, err = stores.Teams.TeamIDsForUserInOrgSystem(ctx, orgID, userID)
+	if err != nil {
+		t.Fatalf("TeamIDsForUserInOrgSystem after archive: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("archived team still routed: %v; want []", ids)
+	}
+}

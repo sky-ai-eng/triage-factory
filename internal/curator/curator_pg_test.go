@@ -53,7 +53,7 @@ func TestCurator_Postgres_CancelProject_DrainsQueuedRowsUnderRLS(t *testing.T) {
 	// with no claims (RLS-rejected, rows stranded queued) and now goes
 	// through the admin-pool …System doors.
 	c := New(stores, nil, "")
-	c.CancelProject(orgA, projectA)
+	c.CancelProject(orgA, projectA, "project deleted")
 
 	if got := requestStatus(t, h, queuedA1); got != "cancelled" {
 		t.Errorf("queuedA1 status = %q, want cancelled", got)

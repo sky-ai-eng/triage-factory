@@ -269,20 +269,25 @@ func (c *Curator) InFlightProjectCount(projectIDs []string) int {
 	return n
 }
 
-// CancelProject is the project-delete hook: cancel any in-flight
-// request, drain queued requests to cancelled (so the deleted
-// project doesn't have ghost queued rows), and stop the goroutine
-// so nothing runs after the project row is gone.
+// CancelProject is the project-teardown hook: cancel any in-flight
+// request, drain queued requests to cancelled (so the project doesn't
+// have ghost queued rows), and stop the goroutine so nothing runs after
+// the teardown.
 //
-// Called BEFORE the projects DELETE so the FK cascade doesn't
-// race a still-running goroutine. The DB cascade (curator_requests
-// → curator_messages) takes care of the row removal once the
-// project row is dropped.
+// reason is recorded on the cancelled rows' error_msg and surfaced in
+// the cancellation broadcast — "project deleted" for the project-delete
+// path, "team archived" for the team-archive force-stop (TFAC-448) — so
+// the audit trail distinguishes the two.
+//
+// Called BEFORE the projects DELETE (delete path) so the FK cascade
+// doesn't race a still-running goroutine. The DB cascade (curator_requests
+// → curator_messages) takes care of row removal once the project row is
+// dropped.
 //
 // orgID is the project's owning tenant, threaded through to
 // broadcast events so the cancellation toast/update only reaches
 // connections authed against that org.
-func (c *Curator) CancelProject(orgID, projectID string) {
+func (c *Curator) CancelProject(orgID, projectID, reason string) {
 	c.mu.Lock()
 	session, ok := c.sessions[projectID]
 	if ok {
@@ -296,11 +301,11 @@ func (c *Curator) CancelProject(orgID, projectID string) {
 		// a chance to drain. Cancel them at the DB level so the
 		// FK cascade on project delete doesn't leave behind status
 		// confusion.
-		c.cancelQueuedRows(orgID, projectID, "project deleted")
+		c.cancelQueuedRows(orgID, projectID, reason)
 		return
 	}
-	session.shutdown("project deleted")
-	c.cancelQueuedRows(orgID, projectID, "project deleted")
+	session.shutdown(reason)
+	c.cancelQueuedRows(orgID, projectID, reason)
 }
 
 // Shutdown stops every per-project goroutine and rejects further

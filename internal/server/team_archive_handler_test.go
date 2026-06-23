@@ -213,3 +213,32 @@ func TestTeamArchive_BlocksTeamSettingsWrite(t *testing.T) {
 		t.Errorf("403 body missing archived:true marker; body=%s", wrec.Body.String())
 	}
 }
+
+// TestTeamArchive_BlocksMembershipWrite: once archived, a team's roster is
+// frozen — a member add is rejected with 403 + archived:true. The membership
+// handlers gate on user_is_team_admin (no user_can_write_team filter), so this
+// proves the explicit VerifyTeamNotArchived gate covers them (TFAC-448).
+func TestTeamArchive_BlocksMembershipWrite(t *testing.T) {
+	r := newTeamArchiveRig(t)
+
+	arc := httptest.NewRecorder()
+	r.th.handleTeamArchive(arc, r.req(http.MethodPost, "/api/teams/"+r.teamID+"/archive", r.owner, r.teamID))
+	if arc.Code != http.StatusOK {
+		t.Fatalf("archive = %d, want 200; body=%s", arc.Code, arc.Body.String())
+	}
+
+	tmh := &teamMembersHandler{tx: r.s.tx, az: r.s.az}
+	body := strings.NewReader(`{"user_id":"` + r.member + `","role":"member"}`)
+	mreq := httptest.NewRequest(http.MethodPost, "/api/teams/"+r.teamID+"/members", body)
+	mreq.Header.Set("Content-Type", "application/json")
+	mreq.SetPathValue("team_id", r.teamID)
+	ctx := httpx.WithClaims(mreq.Context(), &verify.Claims{Subject: r.owner})
+	ctx = httpx.WithOrgID(ctx, r.orgID)
+	mreq = mreq.WithContext(ctx)
+
+	mrec := httptest.NewRecorder()
+	tmh.handleTeamMemberAdd(mrec, mreq)
+	if mrec.Code != http.StatusForbidden {
+		t.Fatalf("member add on archived team = %d, want 403; body=%s", mrec.Code, mrec.Body.String())
+	}
+}

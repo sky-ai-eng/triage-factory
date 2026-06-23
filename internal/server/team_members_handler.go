@@ -148,6 +148,9 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+	if !h.az.VerifyTeamNotArchived(w, r, orgID, userID, teamID) {
+		return
+	}
 	if !h.requireTeamManager(w, r, orgID, userID, teamID) {
 		return
 	}
@@ -214,6 +217,9 @@ func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r
 	if !ok {
 		return
 	}
+	if !h.az.VerifyTeamNotArchived(w, r, orgID, userID, teamID) {
+		return
+	}
 	if !h.requireTeamManager(w, r, orgID, userID, teamID) {
 		return
 	}
@@ -256,6 +262,12 @@ func (h *teamMembersHandler) handleTeamMemberRemove(w http.ResponseWriter, r *ht
 	}
 	orgID, userID, teamID, ok := h.resolve(w, r)
 	if !ok {
+		return
+	}
+	// An archived team is frozen — block roster writes (including self-leave):
+	// the team is being torn down, and memberships_* RLS gates on
+	// user_is_team_admin, which carries no archived filter (TFAC-448).
+	if !h.az.VerifyTeamNotArchived(w, r, orgID, userID, teamID) {
 		return
 	}
 	target, ok := teamMemberTargetID(w, r)
