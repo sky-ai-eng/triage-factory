@@ -1,9 +1,11 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -84,6 +86,150 @@ func (th *teamsHandler) handleTeamsList(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	writeJSON(w, http.StatusOK, teamsResponse{Teams: out, LastActingTeamID: validLastActing})
+}
+
+// maxTeamNameLen caps a team name's length (in runes) on rename. A generous
+// bound that keeps a pasted blob out of the column without constraining any
+// real team name; Create doesn't enforce it today, but rename is the explicit
+// "edit this field" affordance so it validates.
+const maxTeamNameLen = 100
+
+// teamDetailJSON is the PATCH /api/teams/{team_id} response — the updated
+// identity row plus its description (the field this endpoint manages). Role is
+// omitted: the caller already knows their relationship to the team (they had to
+// be team-admin-or-org-admin to reach the write), and the list endpoint carries
+// role for the selectors.
+type teamDetailJSON struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Slug        string `json:"slug"`
+	Description string `json:"description"`
+}
+
+// handleTeamUpdate renames a team and/or rewrites its description. Multi-mode
+// only (local is N=1; 404 matches the create affordance's posture). Gated
+// team-admin-or-org-admin: a team admin can edit their own team (the widened
+// teams_update RLS), an org admin can edit any team in the org, and a plain
+// member gets a 403. A cross-org team_id 404s via VerifyTeamInOrg before the
+// role gate, so it can't leak the team's existence.
+//
+// Body is a partial PATCH: { "name"?: "<display name>", "description"?: "<blurb>" }.
+// A present name must be non-empty and within the length cap, and its slug is
+// re-derived (the same slugify Create uses) so name and slug stay in sync —
+// there's no separate slug field. At least one field must be present.
+//
+// PATCH /api/teams/{team_id}  body: { "name"?: "...", "description"?: "..." }
+func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request) {
+	if runmode.Current() == runmode.ModeLocal {
+		// Hosted-only: local mode has exactly one team by construction and
+		// hides the whole team-management surface.
+		http.NotFound(w, r)
+		return
+	}
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+
+	teamID := r.PathValue("team_id")
+	if _, err := uuid.Parse(teamID); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	// Cross-org 404 before the role gate — non-disclosure of teams in other
+	// orgs.
+	if !th.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
+		return
+	}
+	if !th.requireTeamAdminOrOrgAdmin(w, r, orgID, userID, teamID) {
+		return
+	}
+
+	var body struct {
+		Name        *string `json:"name"`
+		Description *string `json:"description"`
+	}
+	if !decodeJSON(w, r, &body, "") {
+		return
+	}
+
+	var namePtr, slugPtr, descPtr *string
+	if body.Name != nil {
+		name := strings.TrimSpace(*body.Name)
+		if name == "" {
+			badRequest(w, "name cannot be empty")
+			return
+		}
+		if len([]rune(name)) > maxTeamNameLen {
+			badRequest(w, "name is too long")
+			return
+		}
+		slug := slugify(name)
+		if slug == "" {
+			badRequest(w, "name must contain letters or numbers")
+			return
+		}
+		namePtr, slugPtr = &name, &slug
+	}
+	if body.Description != nil {
+		desc := strings.TrimSpace(*body.Description)
+		descPtr = &desc
+	}
+	if namePtr == nil && descPtr == nil {
+		badRequest(w, "nothing to update: provide name and/or description")
+		return
+	}
+
+	var updated domain.Team
+	err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		updated, e = tx.Teams.Update(r.Context(), teamID, namePtr, slugPtr, descPtr)
+		return e
+	})
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, teamDetailJSON{
+			ID: updated.ID, Name: updated.Name, Slug: updated.Slug, Description: updated.Description,
+		})
+	case errors.Is(err, db.ErrTeamNotFound):
+		// Raced past VerifyTeamInOrg (deleted between gate and write) — 404.
+		notFound(w, "team")
+	case strings.Contains(err.Error(), "UNIQUE constraint") || strings.Contains(err.Error(), "duplicate key"):
+		// Re-deriving slug from the new name collided with a sibling team —
+		// same 409 + generic message as Create.
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "a team with that name or slug already exists",
+		})
+	default:
+		internalError(w, "teams", err)
+	}
+}
+
+// requireTeamAdminOrOrgAdmin confirms the caller may rename the team: a team
+// admin (the widened teams_update RLS) OR an org admin. On not-allowed it writes
+// 403 and returns false — unlike the roster's non-disclosure 404, the caller is
+// already inside the org and the cross-org case 404'd at VerifyTeamInOrg, so a
+// plain member learns only that they lack the role, not whether the team exists.
+func (th *teamsHandler) requireTeamAdminOrOrgAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
+	isTeamAdmin, err := th.az.UserIsTeamAdmin(r.Context(), userID, orgID, teamID)
+	if err != nil {
+		internalError(w, "teams", err)
+		return false
+	}
+	if isTeamAdmin {
+		return true
+	}
+	isOrgAdmin, err := th.az.UserIsOrgAdmin(r.Context(), userID, orgID)
+	if err != nil {
+		internalError(w, "teams", err)
+		return false
+	}
+	if !isOrgAdmin {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "team admin role required"})
+		return false
+	}
+	return true
 }
 
 // handleTeamCreate is the org-admin "add team" affordance — the hosted-

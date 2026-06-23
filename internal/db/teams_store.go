@@ -24,6 +24,13 @@ var ErrTeamMemberNotFound = errors.New("db: team member not found")
 // ErrLastOwnerGuard for the org tier.
 var ErrLastTeamAdminGuard = errors.New("db: each team must retain at least one admin")
 
+// ErrTeamNotFound is returned by TeamsStore.Update when no team row matches
+// the id under the caller's RLS scope — a cross-org id (invisible to the app
+// pool) or a team deleted between the handler's VerifyTeamInOrg gate and the
+// write. The handler maps it to a 404. The handler's front gate makes this a
+// defensive backstop rather than the primary not-found path.
+var ErrTeamNotFound = errors.New("db: team not found")
+
 // ErrTeamMemberExists is returned by TeamsStore.AddMember when the user is
 // already on the team (the memberships PK (user_id, team_id) collides). The
 // member-picker only offers org members not already on the team, so this is
@@ -161,6 +168,18 @@ type TeamsStore interface {
 	// Callers must have already confirmed org-admin privilege; the RLS
 	// check is the backstop, not the primary gate.
 	Create(ctx context.Context, orgID, name, slug, creatorUserID string) (domain.Team, error)
+
+	// Update renames teamID and/or rewrites its description, returning the
+	// updated row. Each argument is optional (nil = leave that column
+	// untouched, the partial-PATCH contract) and applied via COALESCE; a
+	// non-nil empty-string description clears the blurb. The caller computes
+	// slug from the new name (slugify, the same derivation Create uses) and
+	// passes it alongside name so the two stay in sync — the body carries no
+	// slug of its own. Returns ErrTeamNotFound when no row matches under RLS,
+	// and surfaces the UNIQUE (org_id, slug) collision verbatim (the handler
+	// maps it to 409, mirroring Create). Postgres routes through the app pool:
+	// the teams_update RLS policy gates the write to team-admin-or-org-admin.
+	Update(ctx context.Context, teamID string, name, slug, description *string) (domain.Team, error)
 
 	// ListMembers returns every member of teamID with their team role and
 	// host-scoped identity readiness, ordered by display name then user id

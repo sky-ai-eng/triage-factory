@@ -703,6 +703,10 @@ func (s *Server) routes() {
 	th := &teamsHandler{tx: s.tx, az: s.az, allStores: s.allStores}
 	s.api("GET /api/teams", th.handleTeamsList)
 	s.apiMutating("POST /api/teams", th.handleTeamCreate)
+	// PATCH /api/teams/{team_id} renames a team / edits its description
+	// (hosted-only; 404 in local). Gated team-admin-or-org-admin; a plain
+	// member 403s, a cross-org team_id 404s (VerifyTeamInOrg).
+	s.apiMutating("PATCH /api/teams/{team_id}", th.handleTeamUpdate)
 
 	// Team roster (TFAC-444): list members + add + change role + remove/leave.
 	// Multi-mode only (each handler 404s in local; local keeps the synthetic

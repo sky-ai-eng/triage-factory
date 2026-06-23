@@ -13,11 +13,16 @@ import "time"
 // TeamSettings; this struct is the lightweight identity row the
 // selectors enumerate.
 type Team struct {
-	ID        string
-	OrgID     string
-	Slug      string
-	Name      string
-	CreatedAt time.Time
+	ID    string
+	OrgID string
+	Slug  string
+	Name  string
+	// Description is the team's optional free-text blurb (teams.description,
+	// nullable → empty string when unset). Only the lifecycle paths that
+	// manage it — TeamsStore.Update — populate this; the lightweight
+	// selector reads (ListForUser, Create) leave it empty.
+	Description string
+	CreatedAt   time.Time
 	// Role is the requesting user's membership role in this team
 	// ("admin" | "member" | "viewer"), populated by ListForUser so the
 	// settings surface can gate the Team section + its selector to teams

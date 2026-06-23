@@ -4521,7 +4521,7 @@ CREATE POLICY teams_select ON public.teams FOR SELECT USING (((org_id = tf.curre
 -- Name: teams teams_update; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY teams_update ON public.teams FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY teams_update ON public.teams FOR UPDATE USING (((org_id = tf.current_org_id()) AND (tf.user_is_team_admin(id) OR tf.user_is_org_admin(org_id)))) WITH CHECK (((org_id = tf.current_org_id()) AND (tf.user_is_team_admin(id) OR tf.user_is_org_admin(org_id))));
 
 
 --

@@ -188,6 +188,42 @@ func (s *teamsStore) Create(ctx context.Context, orgID, name, slug, creatorUserI
 	return t, nil
 }
 
+func (s *teamsStore) Update(ctx context.Context, teamID string, name, slug, description *string) (domain.Team, error) {
+	// COALESCE applies each arg only when non-nil (the partial-PATCH
+	// contract); an empty-string description clears the blurb. Mirrors the
+	// Postgres impl, but reads the row back with a follow-up SELECT rather
+	// than RETURNING to match the Create pattern in this file. A zero-row
+	// UPDATE means no such team → ErrTeamNotFound (a clean 404).
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE teams SET
+			name = COALESCE(?, name),
+			slug = COALESCE(?, slug),
+			description = COALESCE(?, description),
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, name, slug, description, teamID)
+	if err != nil {
+		// UNIQUE (org_id, slug) collision passes through verbatim — the
+		// handler maps "UNIQUE constraint" to a 409, the same as Create.
+		return domain.Team{}, fmt.Errorf("update team: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return domain.Team{}, fmt.Errorf("update team: rows affected: %w", err)
+	}
+	if n == 0 {
+		return domain.Team{}, db.ErrTeamNotFound
+	}
+	var t domain.Team
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT id, org_id, slug, name, COALESCE(description, ''), created_at
+		FROM teams WHERE id = ?
+	`, teamID).Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt); err != nil {
+		return domain.Team{}, fmt.Errorf("read updated team: %w", err)
+	}
+	return t, nil
+}
+
 func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain.TeamSettings) error {
 	projectsJSON, err := marshalJSONArray(u.JiraProjects)
 	if err != nil {

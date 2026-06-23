@@ -2,11 +2,16 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+func strptr(s string) *string { return &s }
 
 // TestTeamsStore_SQLite_GetDefaultForOrgSystem_ReturnsSentinelTeam
 // pins local-mode behavior: the seeded "default" team for the
@@ -80,5 +85,87 @@ func TestTeamsStore_SQLite_GetDefaultForOrgSystem_OldestWins(t *testing.T) {
 	}
 	if got != "team-older" {
 		t.Errorf("GetDefaultForOrgSystem = %q; want \"team-older\" (oldest by created_at)", got)
+	}
+}
+
+// seedSQLiteTeam inserts an org + a single team and returns the team id. The
+// Update tests below mutate that row and read it back.
+func seedSQLiteTeam(t *testing.T, conn *sql.DB) (orgID, teamID string) {
+	t.Helper()
+	orgID = "00000000-0000-0000-0000-000000000300"
+	teamID = "team-update-target"
+	if _, err := conn.Exec(
+		`INSERT INTO orgs (id, slug, name) VALUES ($1, $2, $3)`,
+		orgID, "rename-org", "Rename Org",
+	); err != nil {
+		t.Fatalf("seed org: %v", err)
+	}
+	if _, err := conn.Exec(
+		`INSERT INTO teams (id, org_id, slug, name) VALUES ($1, $2, $3, $4)`,
+		teamID, orgID, "platform", "Platform",
+	); err != nil {
+		t.Fatalf("seed team: %v", err)
+	}
+	return orgID, teamID
+}
+
+// TestTeamsStore_SQLite_Update_RenamesAndSetsDescription: a full rename — name,
+// slug, and description all supplied — round-trips through the returned row and
+// the persisted columns.
+func TestTeamsStore_SQLite_Update_RenamesAndSetsDescription(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	_, teamID := seedSQLiteTeam(t, conn)
+	stores := sqlitestore.New(conn)
+
+	got, err := stores.Teams.Update(context.Background(), teamID,
+		strptr("Platform Eng"), strptr("platform-eng"), strptr("Owns the build"))
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if got.Name != "Platform Eng" || got.Slug != "platform-eng" || got.Description != "Owns the build" {
+		t.Errorf("returned team = %+v; want name/slug/description updated", got)
+	}
+
+	var name, slug, desc string
+	if err := conn.QueryRow(
+		`SELECT name, slug, COALESCE(description, '') FROM teams WHERE id = ?`, teamID,
+	).Scan(&name, &slug, &desc); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if name != "Platform Eng" || slug != "platform-eng" || desc != "Owns the build" {
+		t.Errorf("persisted = (%q, %q, %q); want (Platform Eng, platform-eng, Owns the build)", name, slug, desc)
+	}
+}
+
+// TestTeamsStore_SQLite_Update_DescriptionOnly: a nil name leaves name + slug
+// untouched (the partial-PATCH contract) while the description is rewritten.
+func TestTeamsStore_SQLite_Update_DescriptionOnly(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	_, teamID := seedSQLiteTeam(t, conn)
+	stores := sqlitestore.New(conn)
+
+	got, err := stores.Teams.Update(context.Background(), teamID, nil, nil, strptr("just a blurb"))
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if got.Name != "Platform" || got.Slug != "platform" {
+		t.Errorf("name/slug changed on description-only update: %+v", got)
+	}
+	if got.Description != "just a blurb" {
+		t.Errorf("description = %q; want %q", got.Description, "just a blurb")
+	}
+}
+
+// TestTeamsStore_SQLite_Update_NotFound: a bogus team id matches no row and
+// surfaces db.ErrTeamNotFound (the handler maps it to a 404) rather than a
+// silent success.
+func TestTeamsStore_SQLite_Update_NotFound(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	seedSQLiteTeam(t, conn)
+	stores := sqlitestore.New(conn)
+
+	_, err := stores.Teams.Update(context.Background(), "no-such-team", strptr("X"), strptr("x"), nil)
+	if !errors.Is(err, db.ErrTeamNotFound) {
+		t.Fatalf("Update on missing team = %v; want ErrTeamNotFound", err)
 	}
 }

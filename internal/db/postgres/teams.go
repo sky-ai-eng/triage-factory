@@ -187,6 +187,36 @@ func (s *teamsStore) Create(ctx context.Context, orgID, name, slug, creatorUserI
 	return t, nil
 }
 
+func (s *teamsStore) Update(ctx context.Context, teamID string, name, slug, description *string) (domain.Team, error) {
+	// App pool: teams_update RLS gates the write to team-admin-or-org-admin
+	// (widened from org-admin-only). COALESCE applies each arg only when
+	// non-nil, so a description-only PATCH leaves name/slug untouched and an
+	// empty-string description clears the blurb (the empty string is non-NULL,
+	// so COALESCE takes it). RETURNING reads the post-update row back under the
+	// same statement; a zero-row result (id invisible to RLS, or deleted in a
+	// race past the handler gate) surfaces as ErrTeamNotFound for a clean 404.
+	var t domain.Team
+	err := s.app.QueryRowContext(ctx, `
+		UPDATE teams SET
+			name = COALESCE($2, name),
+			slug = COALESCE($3, slug),
+			description = COALESCE($4, description),
+			updated_at = now()
+		WHERE id = $1
+		RETURNING id::text, org_id::text, slug, name, COALESCE(description, ''), created_at
+	`, teamID, name, slug, description).
+		Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Team{}, db.ErrTeamNotFound
+	}
+	if err != nil {
+		// The UNIQUE (org_id, slug) collision passes through verbatim — the
+		// handler maps "duplicate key" to a 409, the same as Create.
+		return domain.Team{}, fmt.Errorf("update team: %w", err)
+	}
+	return t, nil
+}
+
 // scanTeams reads the ListForUser projection — identity columns plus the
 // caller's per-team role. It's the sole consumer of that 6-column shape;
 // the other team queries (Create, GetDefaultForOrg) scan their own rows.
