@@ -5,7 +5,9 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -116,10 +118,13 @@ func (th *teamsHandler) handleTeamArchivePreview(w http.ResponseWriter, r *http.
 }
 
 // handleTeamArchive soft-deletes the team and force-stops its in-flight work.
-// Order: stamp deleted_at first (so no new writes can start), then cancel the
-// active runs and curator sessions. The cascade runs on the admin pool
-// (spawner.Cancel with an empty userID, curator.CancelProject) so the now-archived
-// team's write RLS doesn't block the teardown. Returns the counts of work stopped.
+// Order: stamp deleted_at FIRST (so no further team-scoped writes can land —
+// new runs / curator turns are blocked), THEN enumerate and cancel the active
+// runs + curator sessions. Enumerating after the tombstone keeps the cascade
+// from missing work that started in the window between the read and the stamp.
+// The cascade runs on the admin pool (spawner.Cancel with an empty userID,
+// curator.CancelProject) so the now-archived team's write RLS doesn't block the
+// teardown. Returns the counts of work stopped.
 //
 // POST /api/teams/{team_id}/archive
 func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request) {
@@ -142,27 +147,9 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Enumerate the work to stop BEFORE flipping the tombstone — the curator
-	// in-flight count is a point-in-time read, and the run ids are stable
-	// (cancellation only moves them to terminal). Curator sessions are counted
-	// up front because CancelProject clears the in-flight marker.
-	runIDs, err := th.allStores.AgentRuns.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
-	if err != nil {
-		internalError(w, "teams", err)
-		return
-	}
-	projectIDs, err := th.teamProjectIDs(r, orgID, teamID)
-	if err != nil {
-		internalError(w, "teams", err)
-		return
-	}
-	var curatorSessions int
-	if cur := th.curator(); cur != nil {
-		curatorSessions = cur.InFlightProjectCount(projectIDs)
-	}
-
-	// Stamp deleted_at. teams_update RLS gates the write (org-admin via the front
-	// gate); a zero-row result means it was archived in a race past GetSystem.
+	// Stamp deleted_at FIRST so no new writes can start, then reap. teams_update
+	// RLS gates the write (org-admin via the front gate); a zero-row result means
+	// it was archived in a race past GetSystem.
 	if err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Teams.Archive(r.Context(), teamID)
 	}); err != nil {
@@ -174,12 +161,31 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Enumerate the work to stop now that the tombstone blocks new writes. The
+	// curator in-flight count is a point-in-time read taken before CancelProject
+	// clears the in-flight marker; the run ids are stable (cancellation only moves
+	// them to terminal).
+	runIDs, err := th.allStores.AgentRuns.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
+	if err != nil {
+		internalError(w, "teams", err)
+		return
+	}
+	projectIDs, err := th.teamProjectIDs(r, orgID, teamID)
+	if err != nil {
+		internalError(w, "teams", err)
+		return
+	}
+	var curatorSessions int
+	if cur := th.curatorRuntime(); cur != nil {
+		curatorSessions = cur.InFlightProjectCount(projectIDs)
+	}
+
 	// Force-stop the runs. spawner.Cancel("" userID) hard-kills a live process or
 	// marks a parked `open` run cancelled, all on the admin pool. A per-run error
 	// is a benign race (the run reached terminal on its own) — log and keep going
 	// so one stuck run can't strand the rest; count only the ones we stopped.
 	cancelledRuns := 0
-	if sp := th.spawner(); sp != nil {
+	if sp := th.spawnerRuntime(); sp != nil {
 		for _, runID := range runIDs {
 			if cErr := sp.Cancel(orgID, runID, ""); cErr != nil {
 				teamsLog.Warn("archive: run cancel failed", "team", teamID, "run", runID, "error", cErr)
@@ -191,7 +197,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 
 	// Force-stop the curator sessions: cancel the in-flight request + drain queued
 	// rows for every project the team owns.
-	if cur := th.curator(); cur != nil {
+	if cur := th.curatorRuntime(); cur != nil {
 		for _, projectID := range projectIDs {
 			cur.CancelProject(orgID, projectID)
 		}
@@ -311,10 +317,29 @@ func (th *teamsHandler) teamActiveWork(r *http.Request, orgID, teamID string) (r
 	if err != nil {
 		return 0, 0, err
 	}
-	if cur := th.curator(); cur != nil {
+	if cur := th.curatorRuntime(); cur != nil {
 		curatorSessions = cur.InFlightProjectCount(projectIDs)
 	}
 	return len(runIDs), curatorSessions, nil
+}
+
+// spawnerRuntime / curatorRuntime resolve the wired delegation spawner / curator
+// runtime, or nil. They guard the getter func ITSELF being nil (not just the
+// pointer it returns) so the archive cascade degrades to "nothing to cancel"
+// instead of panicking on a teamsHandler constructed without the getters wired
+// (early startup, a future refactor, or a test fixture that doesn't need them).
+func (th *teamsHandler) spawnerRuntime() *delegate.Spawner {
+	if th.spawner == nil {
+		return nil
+	}
+	return th.spawner()
+}
+
+func (th *teamsHandler) curatorRuntime() *curator.Curator {
+	if th.curator == nil {
+		return nil
+	}
+	return th.curator()
 }
 
 // teamProjectIDs returns the ids of every project owned by the team. Reads the
