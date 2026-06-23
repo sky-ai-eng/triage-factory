@@ -44,10 +44,11 @@ interface TeamRosterApiResponse {
 }
 
 const TEAM_ROLES = ['admin', 'member', 'viewer']
-// viewer is assignable now; its read-only enforcement is a later slice
-// (TFAC-447), so flag that in the role <select> — until then a viewer behaves
-// like a member.
-const TEAM_ROLE_LABELS: Record<string, string> = { viewer: 'viewer (read-only soon)' }
+// viewer is a read-only role: assignable here, and enforced end-to-end as of
+// TFAC-447 (team-scoped writes 403 server-side; mutation affordances hide on the
+// team surfaces). The label spells out the boundary so an admin picking it knows
+// what it grants.
+const TEAM_ROLE_LABELS: Record<string, string> = { viewer: 'viewer (read-only)' }
 
 export default function TeamMembersPanel({ orgId, teamId, canManage }: TeamMembersPanelProps) {
   // reloadKey remounts <MemberRoster> (re-running useMemberRoster's mount

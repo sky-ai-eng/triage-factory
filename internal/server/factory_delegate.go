@@ -65,6 +65,28 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject viewers before any task is synthesized (TFAC-447): delegation is
+	// agent work a viewer can't start. Resolve the acting team read-only (no
+	// last-acting stamp — we may be about to 403) and gate on it. Without this
+	// the tasks_insert RLS WITH CHECK would fail the FindOrCreate as a generic
+	// 500 instead of a clean role-named 403. A bad team pick still 400s via the
+	// selection-error mapping, same as the main path.
+	var actingTeam string
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		actingTeam, e = teamscope.ResolveActingNoStamp(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		return e
+	}); err != nil {
+		if teamscope.WriteIfSelectionError(w, err) {
+			return
+		}
+		internalError(w, "factory", err)
+		return
+	}
+	if !s.az.RequireTeamWrite(w, r, orgID, userID, actingTeam) {
+		return
+	}
+
 	// Entity must exist and be active. The factory snapshot's 60s
 	// soft-close grace window means a chip can ride the final
 	// animation hop after its entity already flipped to closed; if the

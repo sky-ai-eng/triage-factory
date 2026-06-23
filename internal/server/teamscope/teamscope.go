@@ -79,6 +79,17 @@ func ResolveActing(ctx context.Context, teams db.TeamsStore, users db.UsersStore
 	return resolved, nil
 }
 
+// ResolveActingNoStamp resolves the acting team without recording it as the
+// caller's last-written default. It's the read-only sibling of ResolveActing,
+// for callers that need to know the acting team *before* deciding whether the
+// write may proceed — notably the viewer-role write gate (TFAC-447), which must
+// resolve the team to check it but must not stamp a last-acting preference for a
+// write it's about to 403. Same resolution order and error contract as
+// ResolveActing (ErrRequired / ErrForbidden map to 400 via WriteIfSelectionError).
+func ResolveActingNoStamp(ctx context.Context, teams db.TeamsStore, users db.UsersStore, orgID, userID, picked string) (string, error) {
+	return resolveActingID(ctx, teams, users, orgID, userID, picked)
+}
+
 // resolveActingID is the pure resolution (no side effects), kept separate so
 // the contract is unit-testable without the last-used stamp.
 //

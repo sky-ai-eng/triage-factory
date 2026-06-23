@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
@@ -20,6 +21,7 @@ import (
 type promptsHandler struct {
 	db *sql.DB
 	tx db.TxRunner
+	az *authz.Checker
 }
 
 func (ph *promptsHandler) handleEventTypes(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +119,27 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 	}
 
 	userID := ClaimsFrom(r.Context()).Subject
+
+	// Resolve the acting team read-only and reject viewers up front (TFAC-447):
+	// a viewer can't author prompts. Gating here yields a clean 403 instead of
+	// the prompts_insert RLS WITH CHECK surfacing as a 500. The main tx below
+	// re-resolves (and stamps last-acting) only for callers that pass.
+	var actingTeam string
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		actingTeam, e = teamscope.ResolveActingNoStamp(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		return e
+	}); err != nil {
+		if teamscope.WriteIfSelectionError(w, err) {
+			return
+		}
+		internalError(w, "prompts", err)
+		return
+	}
+	if !ph.az.RequireTeamWrite(w, r, orgID, userID, actingTeam) {
+		return
+	}
+
 	var created *domain.Prompt
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
@@ -177,6 +200,11 @@ func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request
 		notFound(w, "prompt")
 		return
 	}
+	// A viewer of the prompt's team can read it but not rewrite it (TFAC-447).
+	// Gate after the 404 so a missing prompt still reads as not-found.
+	if !ph.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID) {
+		return
+	}
 
 	var updated *domain.Prompt
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -200,6 +228,23 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
+
+	// Pre-load to resolve the prompt's team for the viewer gate (TFAC-447): a
+	// viewer can read a prompt but not delete it. A missing prompt falls through
+	// to the 404 the mutation tx below already renders (RequireTeamWrite isn't
+	// reached). The extra read is cheap and human-paced (canvas delete gesture).
+	var existing *domain.Prompt
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		existing, e = tx.Prompts.Get(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "prompts", err)
+		return
+	}
+	if existing != nil && !ph.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID) {
+		return
+	}
 
 	var prompt *domain.Prompt
 	var status string

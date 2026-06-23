@@ -218,6 +218,11 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Snooze mutates the task (lifecycle axis) — a viewer can't (TFAC-447).
+	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
+		return
+	}
+
 	until, err := parseSnoozeUntil(req.Until)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid snooze duration: " + err.Error()})
@@ -305,6 +310,11 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 
+	// Undo reverses a swipe — a task mutation a viewer can't make (TFAC-447).
+	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
+		return
+	}
+
 	// GetTask up front does double duty: existence check for the
 	// 404 response AND loads the row needed for finalizeRequeue's
 	// Jira reversal context. Without the explicit nil check
@@ -357,6 +367,11 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
+
+	// Requeue moves a task back to the queue — a viewer can't (TFAC-447).
+	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
+		return
+	}
 
 	var task *domain.Task
 	var requeued bool
@@ -414,6 +429,11 @@ func (s *Server) handleTaskAdvance(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.To != "in_progress" && body.To != "in_review" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to must be one of: in_progress, in_review"})
+		return
+	}
+
+	// Advancing a task's status is a team-scoped write — viewers can't (TFAC-447).
+	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
 		return
 	}
 

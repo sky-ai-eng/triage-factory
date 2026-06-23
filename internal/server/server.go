@@ -900,7 +900,7 @@ func (s *Server) routes() {
 	s.api("GET /api/factory/snapshot", fh.handleFactorySnapshot)
 	s.apiMutating("POST /api/factory/delegate", s.handleFactoryDelegate)
 
-	ph := &promptsHandler{db: s.db, tx: s.tx}
+	ph := &promptsHandler{db: s.db, tx: s.tx, az: s.az}
 	s.api("GET /api/event-types", ph.handleEventTypes)
 	s.api("GET /api/event-schemas", handleEventSchemasList)
 	s.api("GET /api/event-schemas/{event_type}", handleEventSchemaGet)

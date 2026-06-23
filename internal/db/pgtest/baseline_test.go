@@ -51,6 +51,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"current_user_id", "current_org_id",
 		"user_has_org_access", "user_is_org_admin", "user_is_team_admin",
 		"user_owns_org", "user_is_org_admin_via_team",
+		"user_in_team", "user_can_write_team",
 	} {
 		var n int
 		if err := h.AdminDB.QueryRow(

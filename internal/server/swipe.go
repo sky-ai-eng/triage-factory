@@ -52,6 +52,16 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Viewers can't act on a team's tasks (TFAC-447). Every swipe action is a
+	// team-scoped write (claim/delegate stamp the responsibility axis;
+	// dismiss/snooze/complete the lifecycle axis), so gate the whole family with
+	// one clean 403 here rather than letting each per-action store UPDATE fall
+	// off the tasks_update RLS policy as a confusing 409/500. A task the viewer
+	// can't see at all still 404s downstream — RequireTaskWrite doesn't mask it.
+	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
+		return
+	}
+
 	// newStatus is the task status reported back to the client. jiraUserClient
 	// is set only by the claim path for Jira-backed tasks (SKY-463) and is
 	// consumed by the post-dispatch claim sync; nil otherwise.

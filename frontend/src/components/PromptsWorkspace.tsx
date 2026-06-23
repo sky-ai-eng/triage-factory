@@ -5,6 +5,8 @@ import BindingGraph from './BindingGraph'
 import ForgivingBanner from './ForgivingBanner'
 import TaskRuleEditor from './TaskRuleEditor'
 import TriggerConfigPanel from './TriggerConfigPanel'
+import ViewOnlyBadge from './ViewOnlyBadge'
+import { useTeamRole } from '../hooks/useTeamRole'
 import type { TriggerHandler, RuleHandler } from '../types'
 
 // PromptsWorkspace is the single-team prompt/auto-delegation editor: the
@@ -38,6 +40,15 @@ export default function PromptsWorkspace({
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [isNew, setIsNew] = useState(false)
   const [graphKey, setGraphKey] = useState(0)
+
+  // A viewer of this team gets a read-only graph: the create affordance is
+  // withheld and a quiet "view-only" chip stands in (TFAC-447). Prompt/trigger
+  // edits opened from the canvas still surface the backend's 403 if attempted —
+  // the server RLS is the hard guarantee; this just stops offering writes a
+  // viewer can't make. Solo/local reports "admin", so the editor stays fully
+  // interactive there.
+  const { isViewer } = useTeamRole()
+  const readOnly = isViewer(teamId)
 
   // Trigger config panel state.
   const [editingTrigger, setEditingTrigger] = useState<TriggerHandler | null>(null)
@@ -111,12 +122,16 @@ export default function PromptsWorkspace({
         <div className="flex min-w-0 items-center gap-2">{toolbarLeft}</div>
         <div className="flex items-center gap-2">
           {toolbarRight}
-          <button
-            onClick={openNew}
-            className="rounded-full bg-accent px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-accent/90"
-          >
-            New Prompt
-          </button>
+          {readOnly ? (
+            <ViewOnlyBadge />
+          ) : (
+            <button
+              onClick={openNew}
+              className="rounded-full bg-accent px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-accent/90"
+            >
+              New Prompt
+            </button>
+          )}
         </div>
       </div>
 

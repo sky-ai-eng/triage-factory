@@ -495,6 +495,33 @@ $$;
 
 
 --
+-- Name: user_can_write_team(uuid); Type: FUNCTION; Schema: tf; Owner: -
+--
+-- The write-path sibling of user_in_team (membership exists). A viewer is a
+-- read-only member, so the team-scoped *write* RLS policies gate on this —
+-- "membership exists AND the role can write" — while the *read* policies keep
+-- user_in_team (viewers read). Splitting the two is what makes the viewer role
+-- genuinely read-only end-to-end (TFAC-447); before this every write policy
+-- checked only membership, so a viewer wrote like a member. Same shape as
+-- user_in_team (SECURITY DEFINER STABLE, locked search_path) so it composes
+-- into the existing policy predicates without changing their RLS posture.
+
+-- +goose StatementBegin
+CREATE FUNCTION tf.user_can_write_team(target_team uuid) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM memberships
+    WHERE user_id = tf.current_user_id()
+      AND team_id = target_team
+      AND role IN ('admin', 'member')
+  );
+$$;
+-- +goose StatementEnd
+
+
+--
 -- Name: user_is_org_admin(uuid); Type: FUNCTION; Schema: tf; Owner: -
 --
 
@@ -3724,14 +3751,14 @@ ALTER TABLE public.event_handlers ENABLE ROW LEVEL SECURITY;
 -- Name: event_handlers event_handlers_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
+CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
 --
 -- Name: event_handlers event_handlers_insert; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_in_team(team_id)));
+CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 
 
 --
@@ -3747,7 +3774,7 @@ CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING ((
 -- Name: event_handlers event_handlers_update; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
+CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
 --
@@ -4119,14 +4146,14 @@ ALTER TABLE public.projects ENABLE ROW LEVEL SECURITY;
 -- Name: projects projects_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY projects_delete ON public.projects FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND tf.user_in_team(team_id)))));
+CREATE POLICY projects_delete ON public.projects FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND tf.user_can_write_team(team_id)))));
 
 
 --
 -- Name: projects projects_insert; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY projects_insert ON public.projects FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR ((team_id IS NOT NULL) AND tf.user_in_team(team_id))) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
+CREATE POLICY projects_insert ON public.projects FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR ((team_id IS NOT NULL) AND tf.user_can_write_team(team_id))) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
 
 
 --
@@ -4142,7 +4169,7 @@ CREATE POLICY projects_select ON public.projects FOR SELECT USING (((org_id = tf
 -- Name: projects projects_update; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY projects_update ON public.projects FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND tf.user_in_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND tf.user_in_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
+CREATE POLICY projects_update ON public.projects FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND tf.user_can_write_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND tf.user_can_write_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
 
 
 --
@@ -4155,14 +4182,14 @@ ALTER TABLE public.prompts ENABLE ROW LEVEL SECURITY;
 -- Name: prompts prompts_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY prompts_delete ON public.prompts FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
+CREATE POLICY prompts_delete ON public.prompts FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
 --
 -- Name: prompts prompts_insert; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY prompts_insert ON public.prompts FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_in_team(team_id)));
+CREATE POLICY prompts_insert ON public.prompts FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 
 
 --
@@ -4178,7 +4205,7 @@ CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.c
 -- Name: prompts prompts_update; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
+CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
 --
@@ -4272,14 +4299,14 @@ ALTER TABLE public.runs ENABLE ROW LEVEL SECURITY;
 -- Name: runs runs_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY runs_delete ON public.runs FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)))));
+CREATE POLICY runs_delete ON public.runs FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_can_write_team(team_id)))));
 
 
 --
 -- Name: runs runs_insert; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY runs_insert ON public.runs FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR tf.user_in_team(team_id)) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
+CREATE POLICY runs_insert ON public.runs FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR tf.user_can_write_team(team_id)) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
 
 
 --
@@ -4293,7 +4320,7 @@ CREATE POLICY runs_select ON public.runs FOR SELECT USING (((org_id = tf.current
 -- Name: runs runs_update; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY runs_update ON public.runs FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
+CREATE POLICY runs_update ON public.runs FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_can_write_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_can_write_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
 
 
 --
@@ -4392,14 +4419,14 @@ ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
 -- Name: tasks tasks_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY tasks_delete ON public.tasks FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_in_team(team_id)))))));
+CREATE POLICY tasks_delete ON public.tasks FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_can_write_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_can_write_team(team_id)))))));
 
 
 --
 -- Name: tasks tasks_insert; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY tasks_insert ON public.tasks FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR (team_id IS NOT NULL AND tf.user_in_team(team_id))) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
+CREATE POLICY tasks_insert ON public.tasks FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR (team_id IS NOT NULL AND tf.user_can_write_team(team_id))) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
 
 
 --
@@ -4413,7 +4440,7 @@ CREATE POLICY tasks_select ON public.tasks FOR SELECT USING (((org_id = tf.curre
 -- Name: tasks tasks_update; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY tasks_update ON public.tasks FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_in_team(team_id)))) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_in_team(team_id)))) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
+CREATE POLICY tasks_update ON public.tasks FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_can_write_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_can_write_team(team_id)))) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_can_write_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_can_write_team(team_id)))) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
 
 
 --
@@ -4426,14 +4453,14 @@ ALTER TABLE public.team_agents ENABLE ROW LEVEL SECURITY;
 -- Name: team_agents team_agents_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY team_agents_delete ON public.team_agents FOR DELETE USING ((tf.team_in_current_org(team_id) AND tf.user_in_team(team_id)));
+CREATE POLICY team_agents_delete ON public.team_agents FOR DELETE USING ((tf.team_in_current_org(team_id) AND tf.user_can_write_team(team_id)));
 
 
 --
 -- Name: team_agents team_agents_insert; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY team_agents_insert ON public.team_agents FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_in_team(team_id) AND (EXISTS ( SELECT 1
+CREATE POLICY team_agents_insert ON public.team_agents FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_can_write_team(team_id) AND (EXISTS ( SELECT 1
    FROM public.agents a
   WHERE ((a.id = team_agents.agent_id) AND (a.org_id = tf.current_org_id()))))));
 
@@ -4449,7 +4476,7 @@ CREATE POLICY team_agents_select ON public.team_agents FOR SELECT TO tf_app USIN
 -- Name: team_agents team_agents_update; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY team_agents_update ON public.team_agents FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_in_team(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_in_team(team_id) AND (EXISTS ( SELECT 1
+CREATE POLICY team_agents_update ON public.team_agents FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_can_write_team(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_can_write_team(team_id) AND (EXISTS ( SELECT 1
    FROM public.agents a
   WHERE ((a.id = team_agents.agent_id) AND (a.org_id = tf.current_org_id()))))));
 
@@ -4727,6 +4754,14 @@ GRANT ALL ON FUNCTION tf.user_has_org_access(target_org uuid) TO tf_app;
 
 REVOKE ALL ON FUNCTION tf.org_tracked_repos(p_org_id uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.org_tracked_repos(p_org_id uuid) TO tf_app;
+
+
+--
+-- Name: FUNCTION user_can_write_team(target_team uuid); Type: ACL; Schema: tf; Owner: -
+--
+
+REVOKE ALL ON FUNCTION tf.user_can_write_team(target_team uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION tf.user_can_write_team(target_team uuid) TO tf_app;
 
 
 --
@@ -5478,12 +5513,12 @@ CREATE POLICY blueprints_select ON public.blueprints FOR SELECT
                OR (EXISTS (SELECT 1 FROM public.memberships m
                            WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = blueprints.team_id)))))));
 CREATE POLICY blueprints_insert ON public.blueprints FOR INSERT
-  WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_in_team(team_id)));
+  WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 CREATE POLICY blueprints_update ON public.blueprints FOR UPDATE
-  USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)))
-  WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
+  USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)))
+  WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 CREATE POLICY blueprints_delete ON public.blueprints FOR DELETE
-  USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
+  USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 GRANT ALL ON TABLE public.blueprints TO postgres;
 GRANT ALL ON TABLE public.blueprints TO anon;

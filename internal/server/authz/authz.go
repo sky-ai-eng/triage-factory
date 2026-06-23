@@ -251,6 +251,114 @@ func (az *Checker) UserIsTeamAdmin(ctx context.Context, userID, orgID, teamID st
 	return ok, err
 }
 
+// viewOnlyMessage is the 403 body the team-write gates return. The viewer role
+// is read-only by design (TFAC-447), so a write attempt isn't an error to fix —
+// it's a role boundary. Keep the copy non-hostile and actionable: name the
+// boundary ("view-only access") so the frontend can surface it gracefully if a
+// stale/forced mutation slips past the affordance gating.
+const viewOnlyMessage = "view-only access: your role on this team is read-only"
+
+// UserCanWriteTeam reports whether the calling user may perform team-scoped
+// writes on the given team — a member with the 'admin' or 'member' role, i.e.
+// NOT a viewer. The write-path sibling of the membership-only check the read
+// gates use, delegating to the tf.user_can_write_team SQL helper that backs the
+// team-scoped write RLS policies (TFAC-447). Like the other raw probes it always
+// runs the tf.* helper via db.WithTx (no local-mode short-circuit), so callers
+// must gate local mode out before reaching it. The OrgID claim is required:
+// tf.user_can_write_team reads memberships under RLS, which gates on
+// tf.current_org_id().
+func (az *Checker) UserCanWriteTeam(ctx context.Context, userID, orgID, teamID string) (bool, error) {
+	var ok bool
+	err := db.WithTx(ctx, az.db, db.Claims{Sub: userID, OrgID: orgID},
+		func(tx *sql.Tx) error {
+			return tx.QueryRowContext(ctx,
+				`SELECT tf.user_can_write_team($1::uuid)`, teamID,
+			).Scan(&ok)
+		},
+	)
+	return ok, err
+}
+
+// RequireTeamWrite is the friendly front gate for a team-scoped write: it writes
+// a 403 "view-only access" and returns false when the caller is a viewer (or not
+// a member) of teamID. The team-scoped write RLS policies enforce this at the
+// row level regardless; this gate exists so a viewer reaching a write handler
+// gets a clean, role-named 403 instead of a generic RLS-blocked error (a
+// silently-zero-rows UPDATE or a WITH CHECK violation surfaced as a 500). Local
+// mode short-circuits to allowed — N=1 has a single implicit owner and no
+// viewers.
+func (az *Checker) RequireTeamWrite(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
+	if runmode.Current() == runmode.ModeLocal {
+		return true
+	}
+	canWrite, err := az.UserCanWriteTeam(r.Context(), userID, orgID, teamID)
+	if err != nil {
+		httpx.InternalError(w, "authz", fmt.Errorf("team-write check %s/%s/%s: %w", userID, orgID, teamID, err))
+		return false
+	}
+	if !canWrite {
+		httpx.WriteJSON(w, http.StatusForbidden, map[string]string{"error": viewOnlyMessage})
+		return false
+	}
+	return true
+}
+
+// RequireTaskWrite is the front gate for a write against an existing task whose
+// team isn't in the URL (the swipe / snooze / requeue / advance family). It
+// mirrors the team branches of the tasks_update write RLS policy: the caller may
+// write the task when they can write at least one of its teams (its own team_id
+// or any of its task_teams), own it as a private task, or are an org admin of an
+// org-visible task. A viewer of every team the task belongs to gets a 403
+// "view-only access".
+//
+// Crucially it does NOT mask a 404: when the task isn't visible to the caller at
+// all (no read access, or it doesn't exist) the gate returns true and lets the
+// handler's own not-found path render the 404 — so a viewer probing for a
+// task they can't see never learns whether it exists. Local mode short-circuits
+// to allowed.
+func (az *Checker) RequireTaskWrite(w http.ResponseWriter, r *http.Request, orgID, userID, taskID string) bool {
+	if runmode.Current() == runmode.ModeLocal {
+		return true
+	}
+	if _, err := uuid.Parse(taskID); err != nil {
+		// A malformed id is "not found" downstream, not a role failure — let
+		// the handler's own uuid/preload path render it (404 parity).
+		return true
+	}
+	var visible, canWrite bool
+	err := db.WithTx(r.Context(), az.db, db.Claims{Sub: userID, OrgID: orgID},
+		func(tx *sql.Tx) error {
+			return tx.QueryRowContext(r.Context(), `
+				SELECT
+				  EXISTS (SELECT 1 FROM tasks t WHERE t.id = $1::uuid AND t.org_id = $2::uuid) AS visible,
+				  EXISTS (
+				    SELECT 1 FROM tasks t
+				    WHERE t.id = $1::uuid AND t.org_id = $2::uuid AND (
+				      (t.visibility = 'private' AND t.creator_user_id = tf.current_user_id())
+				      OR (t.visibility = 'org' AND tf.user_is_org_admin(t.org_id))
+				      OR (t.visibility = 'team' AND (
+				           (t.team_id IS NOT NULL AND tf.user_can_write_team(t.team_id))
+				           OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tf.user_can_write_team(tt.team_id))
+				      ))
+				    )
+				  ) AS can_write`,
+				taskID, orgID,
+			).Scan(&visible, &canWrite)
+		},
+	)
+	if err != nil {
+		httpx.InternalError(w, "authz", fmt.Errorf("task-write check %s/%s/%s: %w", userID, orgID, taskID, err))
+		return false
+	}
+	// Not visible → let the handler 404 (don't disclose existence). Visible but
+	// not writable → the role boundary; 403.
+	if visible && !canWrite {
+		httpx.WriteJSON(w, http.StatusForbidden, map[string]string{"error": viewOnlyMessage})
+		return false
+	}
+	return true
+}
+
 // UserOwnsOrg returns true when the calling user is the founder/owner of the
 // given org — the holder of orgs.owner_user_id. Mirrors UserIsOrgAdmin but
 // delegates to tf.user_owns_org rather than tf.user_is_org_admin, because
