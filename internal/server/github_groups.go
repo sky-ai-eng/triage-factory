@@ -141,6 +141,11 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
+	// Block writes to an archived team (TFAC-448): team-settings family gates on
+	// user_is_team_admin, so the archived filter on user_can_write_team doesn't apply.
+	if !s.az.VerifyTeamNotArchived(w, r, orgID, userID, teamID) {
+		return
+	}
 	if !s.az.RequireTeamAdmin(w, r, orgID, userID, teamID) {
 		return
 	}

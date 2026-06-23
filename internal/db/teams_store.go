@@ -121,11 +121,14 @@ type TeamsStore interface {
 	// pool (team_settings_update RLS gates by team admin).
 	UpdateSettings(ctx context.Context, teamID string, updates domain.TeamSettings) error
 
-	// ListForUser returns the requesting user's teams in the org,
+	// ListForUser returns the requesting user's active teams in the org,
 	// ordered oldest-first (the same created_at tiebreak the default-
 	// team pick uses, so teams[0] is the org's default team). This is
 	// the data source for the multi-team selectors: the frontend
-	// renders a team control only when the count is ≥2.
+	// renders a team control only when the count is ≥2. Archived teams
+	// (deleted_at IS NOT NULL) are filtered out — the request-facing read
+	// filter that makes an archived team vanish from every selector (TFAC-448);
+	// the archive/restore lifecycle paths use the unfiltered ...System reads.
 	//
 	// Postgres joins memberships under the caller's claims — teams_select
 	// RLS alone returns *every* team in the org (it gates on org access,
@@ -180,6 +183,40 @@ type TeamsStore interface {
 	// maps it to 409, mirroring Create). Postgres routes through the app pool:
 	// the teams_update RLS policy gates the write to team-admin-or-org-admin.
 	Update(ctx context.Context, teamID string, name, slug, description *string) (domain.Team, error)
+
+	// Archive soft-deletes teamID by stamping deleted_at = now(), but only when
+	// the team is currently active (deleted_at IS NULL). Returns ErrTeamNotFound
+	// when no active row matches under RLS — already archived, or invisible /
+	// cross-org. The team's durable work (tasks, runs, memory) is never touched;
+	// archive only sets the tombstone, and the force-stop cascade runs in the
+	// handler. Postgres routes through the app pool: teams_update RLS gates the
+	// write to team-admin-or-org-admin, and the handler additionally restricts to
+	// org-admin (TFAC-448).
+	Archive(ctx context.Context, teamID string) error
+
+	// Restore clears teamID's deleted_at (back to NULL), but only when the team
+	// is currently archived (deleted_at IS NOT NULL). Returns ErrTeamNotFound when
+	// no archived row matches. Restore makes the team visible + writable again; it
+	// deliberately does NOT resurrect the runs / curator sessions that archive
+	// force-stopped — those stay terminal. App pool: teams_update RLS (org-admin
+	// via the handler gate).
+	Restore(ctx context.Context, teamID string) error
+
+	// GetSystem returns a single team by id WITHOUT the request-facing
+	// deleted_at read filter (so an archived team resolves), or nil when no row
+	// matches orgID/teamID. DeletedAt is populated. Admin pool: the archive /
+	// restore / preview paths read the team's lifecycle state from a handler
+	// whose caller is an org admin who may not be a member of the team, and the
+	// in-flight reaping has no team-membership claim to lean on. orgID stays in
+	// the WHERE clause as defense in depth.
+	GetSystem(ctx context.Context, orgID, teamID string) (*domain.Team, error)
+
+	// ListArchivedForOrgSystem returns the org's archived teams (deleted_at IS
+	// NOT NULL), oldest-first, with DeletedAt populated. Admin pool / org-scoped:
+	// the org-admin "Archived teams" restore surface enumerates them even for
+	// teams the admin never joined (the per-user membership join ListForUser uses
+	// would hide those). Empty slice when the org has no archived teams.
+	ListArchivedForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error)
 
 	// ListMembers returns every member of teamID with their team role and
 	// host-scoped identity readiness, ordered by display name then user id

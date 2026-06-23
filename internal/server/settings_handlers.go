@@ -197,6 +197,12 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
+	// Block writes to an archived team (TFAC-448). The team-settings family gates
+	// on user_is_team_admin, which doesn't carry the archived filter baked into
+	// user_can_write_team, so the explicit gate is required here.
+	if !s.az.VerifyTeamNotArchived(w, r, orgID, userID, teamID) {
+		return
+	}
 	if !s.az.RequireTeamAdmin(w, r, orgID, userID, teamID) {
 		return
 	}

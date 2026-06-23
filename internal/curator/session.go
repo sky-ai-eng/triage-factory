@@ -517,6 +517,17 @@ func (s *projectSession) revertPendingFor(item queueItem) {
 	}
 }
 
+// hasInFlight reports whether a curator request is currently running on this
+// session (a live subprocess). Used by Curator.InFlightProjectCount to count the
+// sessions a team archive will force-stop (TFAC-448). inFlightRequestID is set
+// before the message ctx is registered and cleared on the deferred teardown, so
+// it tracks exactly the window where cancelInFlight has something to kill.
+func (s *projectSession) hasInFlight() bool {
+	s.inFlightMu.Lock()
+	defer s.inFlightMu.Unlock()
+	return s.inFlightRequestID != ""
+}
+
 // cancelInFlight fires the active message's ctx if one exists.
 // Called from Curator.Cancel (user click) and Curator.CancelProject
 // (project delete). The goroutine observes msgCtx.Err() in its

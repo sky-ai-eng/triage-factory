@@ -505,6 +505,18 @@ $$;
 -- checked only membership, so a viewer wrote like a member. Same shape as
 -- user_in_team (SECURITY DEFINER STABLE, locked search_path) so it composes
 -- into the existing policy predicates without changing their RLS posture.
+--
+-- An archived team (teams.deleted_at IS NOT NULL) is write-blocked end-to-end
+-- (TFAC-448): the membership join to teams adds deleted_at IS NULL, so every
+-- team-scoped write policy keyed on user_can_write_team (tasks, runs, prompts,
+-- blueprints, event_handlers, projects, team_agents) — plus the
+-- RequireTeamWrite / RequireTaskWrite handler gates that call it — reject the
+-- write at the row level. This is the DB backstop that covers the task-scoped
+-- mutations (swipe / snooze / requeue / advance) whose team is derived from the
+-- task, not the URL. The team-settings family gates on user_is_team_admin
+-- instead, so those handlers add the explicit authz.VerifyTeamNotArchived gate.
+-- Archive itself stamps deleted_at via teams_update (org-admin) and reaps runs
+-- on the admin pool (BYPASSRLS), so neither path is blocked by this filter.
 
 -- +goose StatementBegin
 CREATE FUNCTION tf.user_can_write_team(target_team uuid) RETURNS boolean
@@ -512,10 +524,12 @@ CREATE FUNCTION tf.user_can_write_team(target_team uuid) RETURNS boolean
     SET search_path TO 'pg_catalog', 'public'
     AS $$
   SELECT EXISTS (
-    SELECT 1 FROM memberships
-    WHERE user_id = tf.current_user_id()
-      AND team_id = target_team
-      AND role IN ('admin', 'member')
+    SELECT 1 FROM memberships m
+    JOIN teams t ON t.id = m.team_id
+    WHERE m.user_id = tf.current_user_id()
+      AND m.team_id = target_team
+      AND m.role IN ('admin', 'member')
+      AND t.deleted_at IS NULL
   );
 $$;
 -- +goose StatementEnd
@@ -1547,7 +1561,15 @@ CREATE TABLE public.teams (
     description text,
     created_by_user_id uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- deleted_at soft-deletes a team (TFAC-448; mirrors orgs.deleted_at +
+    -- prompts.deleted_at). Archiving stamps now() here, force-stops the team's
+    -- in-flight work, and blocks further writes; restore flips it back to NULL.
+    -- Request-facing team reads filter deleted_at IS NULL (the team vanishes
+    -- from selectors); the ...System reads omit the filter so the archive /
+    -- restore / preview paths + in-flight reaping still resolve it. The team's
+    -- durable work (tasks, runs, memory) is never hard-deleted.
+    deleted_at timestamp with time zone
 );
 
 

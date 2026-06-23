@@ -647,6 +647,28 @@ func activeRunIDsForTask(ctx context.Context, q queryer, orgID, taskID string) (
 	return ids, rows.Err()
 }
 
+func (s *agentRunStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT id FROM runs
+		WHERE org_id = $1 AND team_id = $2
+		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
+		                     'pending_approval')
+	`, orgID, teamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *agentRunStore) ListParkedWorktreePaths(ctx context.Context, orgID string) ([]string, error) {
 	return listParkedWorktreePaths(ctx, s.q, orgID)
 }

@@ -98,6 +98,51 @@ func (az *Checker) VerifyTeamInOrg(w http.ResponseWriter, r *http.Request, orgID
 	return true
 }
 
+// archivedTeamMessage is the 403 body the archive write-block returns. An
+// archived team (TFAC-448) is intentionally read-only-and-vanished: the write
+// isn't an error to retry, it's a lifecycle boundary, so name it clearly so the
+// frontend can prompt "restore first" rather than surfacing a generic failure.
+const archivedTeamMessage = "team is archived: restore it before making changes"
+
+// VerifyTeamNotArchived blocks a team-scoped write when teamID is archived
+// (teams.deleted_at IS NOT NULL). It sits next to VerifyTeamInOrg on the
+// team-settings-family handlers, which gate on tf.user_is_team_admin and so
+// don't pick up the archived filter baked into tf.user_can_write_team (the DB
+// backstop covering the task / prompt / delegate write paths). Writes a 403
+// "team is archived" and returns false when archived; returns true otherwise.
+//
+// Local mode short-circuits to allowed — N=1 never archives its sole team. A
+// missing row is treated as not-archived (true): VerifyTeamInOrg is the
+// authority on existence and runs first, and a vanished team's write fails
+// downstream regardless. The read runs under the caller's claims; teams_select
+// RLS gates on org access (not deleted_at), so an archived team is still visible
+// to the probe.
+func (az *Checker) VerifyTeamNotArchived(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
+	if runmode.Current() == runmode.ModeLocal {
+		return true
+	}
+	var archived sql.NullBool
+	err := db.WithTx(r.Context(), az.db, db.Claims{Sub: userID, OrgID: orgID},
+		func(tx *sql.Tx) error {
+			return tx.QueryRowContext(r.Context(),
+				`SELECT deleted_at IS NOT NULL FROM teams WHERE id = $1::uuid`, teamID,
+			).Scan(&archived)
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true
+	}
+	if err != nil {
+		httpx.InternalError(w, "authz", fmt.Errorf("team-archived check %s/%s: %w", teamID, orgID, err))
+		return false
+	}
+	if archived.Valid && archived.Bool {
+		httpx.WriteJSON(w, http.StatusForbidden, map[string]any{"error": archivedTeamMessage, "archived": true})
+		return false
+	}
+	return true
+}
+
 // RequireTeamAdmin checks the user is an admin of the given team.
 // Returns 403 on non-admin.
 func (az *Checker) RequireTeamAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {

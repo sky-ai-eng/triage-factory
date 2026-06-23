@@ -20,7 +20,10 @@
 //     owner's mapping shows as an orphan).
 
 import { useCallback, useEffect, useState } from 'react'
+import { Archive } from 'lucide-react'
 import { toast } from '../../../components/Toast/toastStore'
+import ArchiveTeamModal from '../../../components/ArchiveTeamModal'
+import { useTeams } from '../../../hooks/useTeams'
 import RepoPickerModal from '../../../components/RepoPickerModal'
 import GitHubTeamGroup from '../GitHubTeamGroup'
 import JiraProjectRulesGroup from '../JiraProjectRulesGroup'
@@ -66,6 +69,8 @@ export default function TeamSettings({
   isLocal,
   teamId,
   onDirtyChange,
+  orgIsAdmin = false,
+  teamName = '',
 }: {
   isLocal: boolean
   // The team these sections configure. The page-level switcher resolves it and
@@ -76,7 +81,14 @@ export default function TeamSettings({
   // confirm-before-discard on a switch (the switch happens outside this
   // component now). Optional — the local Settings page doesn't switch teams.
   onDirtyChange?: (dirty: boolean) => void
+  // orgIsAdmin gates the org-admin-only "Archive team" danger zone (TFAC-448).
+  // Defaults to false so the local Settings page (and non-admins) never render
+  // it. teamName labels the confirm modal. Multi-mode only (isLocal hides it).
+  orgIsAdmin?: boolean
+  teamName?: string
 }) {
+  const { refresh: refreshTeams } = useTeams()
+  const [archiveOpen, setArchiveOpen] = useState(false)
   // The endpoint alias: local addresses the sole team as "default"; multi uses
   // the selected team's real id.
   const endpointTeamId = isLocal ? 'default' : teamId
@@ -514,6 +526,50 @@ export default function TeamSettings({
           </div>
         )}
       </SettingsSection>
+
+      {/* Danger zone: archive (org-admin, multi-mode only). Soft-deletes the
+          team, force-stops its in-flight delegations + curator sessions, and
+          blocks all writes — no "let it finish" branch (TFAC-448). */}
+      {!isLocal && orgIsAdmin && (
+        <div className="flex items-center justify-between gap-4 py-4">
+          <div>
+            <p className="flex items-center gap-1.5 text-[13px] font-medium text-text-primary">
+              <Archive size={13} className="text-dismiss" />
+              Archive team
+            </p>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-text-tertiary">
+              Stops all in-flight work for this team and hides it. Restorable by an org admin;
+              stopped runs do not resume.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setArchiveOpen(true)}
+            className="shrink-0 rounded-lg border border-dismiss/30 px-3 py-1.5 text-[13px] font-medium text-dismiss transition-colors hover:bg-dismiss/[0.06]"
+          >
+            Archive…
+          </button>
+        </div>
+      )}
+
+      {archiveOpen && (
+        <ArchiveTeamModal
+          teamId={teamId}
+          teamName={teamName || 'this team'}
+          onClose={() => setArchiveOpen(false)}
+          onDone={(runs, sessions) => {
+            setArchiveOpen(false)
+            toast.success(
+              `Team archived — stopped ${runs} ${runs === 1 ? 'delegation' : 'delegations'} and ${sessions} curator ${
+                sessions === 1 ? 'session' : 'sessions'
+              }.`,
+            )
+            // The team vanishes from /api/teams; refreshing drives the page to
+            // the next team (or the zero-team landing).
+            void refreshTeams()
+          }}
+        />
+      )}
     </div>
   )
 }

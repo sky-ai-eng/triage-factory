@@ -248,6 +248,22 @@ type AgentRunStore interface {
 	// this to enumerate runs to cancel from its background goroutine.
 	ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 
+	// ActiveIDsForTeamSystem returns the IDs of every active run owned by the
+	// team (runs.team_id = teamID), using the same active set as
+	// ActiveIDsForTask: status NOT IN ('completed','failed','cancelled',
+	// 'task_unsolvable','pending_approval'). This is the team-archive force-stop
+	// cascade's enumeration (TFAC-448), the team-scoped sibling of
+	// ActiveIDsForTaskSystem — each returned id is passed to
+	// spawner.Cancel(orgID, runID, ""), which hard-kills a live process or marks
+	// a parked `open` run cancelled. pending_approval is deliberately excluded:
+	// the agent process already exited with a prepared artifact (no live work to
+	// stop), spawner.Cancel can't flip it (MarkCancelledIfActive's filter omits
+	// it), and leaving it inert means a later restore can still surface the
+	// pending review. Admin pool / org-scoped: archive runs from an org-admin
+	// handler whose caller may not be a member of the team, so the team-visibility
+	// runs_select RLS would hide the rows on the app pool.
+	ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error)
+
 	// EntitiesWithOpenRuns returns the subset of entityIDs that have at
 	// least one run currently in the `open` state (a turn ended without a
 	// conclusion). Drives the factory snapshot's idle-run badge.

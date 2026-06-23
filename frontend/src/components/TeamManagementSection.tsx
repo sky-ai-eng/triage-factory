@@ -1,6 +1,7 @@
-import { useState } from 'react'
-import { Plus, Users } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { Plus, RotateCcw, Users } from 'lucide-react'
 import { useTeams } from '../hooks/useTeams'
+import { fetchArchivedTeams, restoreTeam, type ArchivedTeam } from '../lib/teamLifecycle'
 import { toast } from './Toast/toastStore'
 
 // TeamManagementSection is the org-admin "add team" affordance.
@@ -19,9 +20,44 @@ import { toast } from './Toast/toastStore'
 // distinct surface so the template never reads as just another team).
 // See pages/OrgTemplate.tsx.
 export default function TeamManagementSection() {
-  const { teams, createTeam } = useTeams()
+  const { teams, createTeam, refresh: refreshTeams } = useTeams()
   const [name, setName] = useState('')
   const [creating, setCreating] = useState(false)
+
+  // Archived-teams restore surface (TFAC-448): an org admin can list archived
+  // teams and restore them. Lazy — the list is only fetched when revealed.
+  const [showArchived, setShowArchived] = useState(false)
+  const [archived, setArchived] = useState<ArchivedTeam[] | null>(null)
+  const [archivedError, setArchivedError] = useState<string | null>(null)
+  const [restoringId, setRestoringId] = useState<string | null>(null)
+
+  const loadArchived = useCallback(async () => {
+    setArchivedError(null)
+    try {
+      setArchived(await fetchArchivedTeams())
+    } catch (err) {
+      setArchivedError(err instanceof Error ? err.message : 'Failed to load archived teams')
+    }
+  }, [])
+
+  useEffect(() => {
+    if (showArchived && archived === null) void loadArchived()
+  }, [showArchived, archived, loadArchived])
+
+  const restore = async (t: ArchivedTeam) => {
+    if (restoringId) return
+    setRestoringId(t.id)
+    try {
+      await restoreTeam(t.id)
+      toast.success(`Restored team "${t.name}"`)
+      setArchived((cur) => (cur ?? []).filter((x) => x.id !== t.id))
+      void refreshTeams()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to restore team')
+    } finally {
+      setRestoringId(null)
+    }
+  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -89,6 +125,56 @@ export default function TeamManagementSection() {
           {creating ? 'Adding…' : 'Add team'}
         </button>
       </form>
+
+      {/* Archived teams (TFAC-448): a reveal toggle + restore buttons. Archived
+          teams are hidden from the normal team list, so this is the org-admin
+          surface that brings them back. */}
+      <div className="mt-4 border-t border-border-subtle pt-3">
+        <button
+          type="button"
+          onClick={() => setShowArchived((v) => !v)}
+          className="text-[12px] font-medium text-text-tertiary transition-colors hover:text-text-secondary"
+        >
+          {showArchived ? 'Hide archived teams' : 'Show archived teams'}
+        </button>
+
+        {showArchived && (
+          <div className="mt-2">
+            {archivedError ? (
+              <p className="text-[12px] text-dismiss">
+                {archivedError}{' '}
+                <button type="button" onClick={() => void loadArchived()} className="underline">
+                  Retry
+                </button>
+              </p>
+            ) : archived === null ? (
+              <p className="text-[12px] text-text-tertiary">Loading archived teams…</p>
+            ) : archived.length === 0 ? (
+              <p className="text-[12px] text-text-tertiary">No archived teams.</p>
+            ) : (
+              <ul className="space-y-1">
+                {archived.map((t) => (
+                  <li
+                    key={t.id}
+                    className="flex items-center justify-between rounded-lg border border-border-subtle bg-white/40 px-3 py-1.5 text-[13px]"
+                  >
+                    <span className="text-text-secondary">{t.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => void restore(t)}
+                      disabled={restoringId === t.id}
+                      className="inline-flex items-center gap-1 text-[12px] font-medium text-accent hover:text-accent/80 disabled:opacity-40"
+                    >
+                      <RotateCcw size={12} />
+                      {restoringId === t.id ? 'Restoring…' : 'Restore'}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
     </section>
   )
 }

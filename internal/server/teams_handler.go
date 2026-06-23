@@ -6,7 +6,9 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
@@ -21,6 +23,13 @@ type teamsHandler struct {
 	tx        db.TxRunner
 	az        *authz.Checker
 	allStores db.Stores
+	// spawner / curator are read through getters so the archive force-stop
+	// cascade (TFAC-448) always sees the current delegation spawner + curator
+	// runtime, which are wired onto the server after construction (SetSpawner /
+	// SetCurator) and hot-swapped on credential change. Either may be nil before
+	// startup finishes; the archive handler guards.
+	spawner func() *delegate.Spawner
+	curator func() *curator.Curator
 }
 
 // teamJSON is the wire shape the multi-team selectors enumerate. Slug is

@@ -23,6 +23,13 @@ type Team struct {
 	// selector reads (ListForUser, Create) leave it empty.
 	Description string
 	CreatedAt   time.Time
+	// DeletedAt is the team's soft-delete timestamp (teams.deleted_at, TFAC-448):
+	// nil for an active team, non-nil when archived. Only the lifecycle paths
+	// that resolve a team without the request-facing deleted_at read filter —
+	// GetSystem, ListArchivedForOrgSystem — populate it; the request-facing
+	// selector reads (ListForUser) already filter archived teams out, so they
+	// leave it nil.
+	DeletedAt *time.Time
 	// Role is the requesting user's membership role in this team
 	// ("admin" | "member" | "viewer"), populated by ListForUser so the
 	// settings surface can gate the Team section + its selector to teams

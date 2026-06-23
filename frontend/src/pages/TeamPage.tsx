@@ -219,6 +219,8 @@ function TeamPageBody({
             key={teamId}
             isLocal={false}
             teamId={teamId}
+            teamName={team.name}
+            orgIsAdmin={orgIsAdmin}
             onDirtyChange={setSettingsDirty}
           />
         )}

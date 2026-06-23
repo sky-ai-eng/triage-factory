@@ -40,9 +40,12 @@ func (s *teamsStore) GetDefaultForOrgSystem(ctx context.Context, orgID string) (
 
 func getDefaultTeamForOrg(ctx context.Context, q queryer, orgID string) (string, error) {
 	var id string
+	// deleted_at IS NULL: an archived team is never the org's default (TFAC-448).
+	// Harmless at N=1 (local mode never archives its sole team), kept for parity
+	// with the Postgres impl.
 	err := q.QueryRowContext(ctx, `
 		SELECT id FROM teams
-		WHERE org_id = ?
+		WHERE org_id = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC, id ASC
 		LIMIT 1
 	`, orgID).Scan(&id)
@@ -114,10 +117,12 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string) ([]domain.Te
 	// constant 'admin': the sole local user owns every team (mirrors the
 	// local-mode short-circuit in requireTeamAdmin), so the settings
 	// surface's admin gate reads true for all of them.
+	// deleted_at IS NULL hides archived teams from the selectors (TFAC-448) —
+	// the request-facing read filter, mirrored from the Postgres impl.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id, org_id, slug, name, created_at, 'admin' AS role
 		FROM teams
-		WHERE org_id = ?
+		WHERE org_id = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC, id ASC
 	`, orgID)
 	if err != nil {
@@ -222,6 +227,96 @@ func (s *teamsStore) Update(ctx context.Context, teamID string, name, slug, desc
 		return domain.Team{}, fmt.Errorf("read updated team: %w", err)
 	}
 	return t, nil
+}
+
+func (s *teamsStore) Archive(ctx context.Context, teamID string) error {
+	return setTeamArchived(ctx, s.q, teamID, true)
+}
+
+func (s *teamsStore) Restore(ctx context.Context, teamID string) error {
+	return setTeamArchived(ctx, s.q, teamID, false)
+}
+
+// setTeamArchived flips teams.deleted_at, mirroring the Postgres impl: archive
+// stamps CURRENT_TIMESTAMP WHERE deleted_at IS NULL, restore clears it WHERE
+// deleted_at IS NOT NULL. The state-guarded WHERE makes a no-op flip affect zero
+// rows → ErrTeamNotFound (already archived / already active / missing).
+func setTeamArchived(ctx context.Context, q queryer, teamID string, archive bool) error {
+	var (
+		res sql.Result
+		err error
+	)
+	if archive {
+		res, err = q.ExecContext(ctx, `
+			UPDATE teams SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? AND deleted_at IS NULL
+		`, teamID)
+	} else {
+		res, err = q.ExecContext(ctx, `
+			UPDATE teams SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? AND deleted_at IS NOT NULL
+		`, teamID)
+	}
+	if err != nil {
+		return fmt.Errorf("set team archived=%v: %w", archive, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set team archived: rows affected: %w", err)
+	}
+	if n == 0 {
+		return db.ErrTeamNotFound
+	}
+	return nil
+}
+
+func (s *teamsStore) GetSystem(ctx context.Context, orgID, teamID string) (*domain.Team, error) {
+	var (
+		t       domain.Team
+		deleted sql.NullTime
+	)
+	err := s.q.QueryRowContext(ctx, `
+		SELECT id, org_id, slug, name, COALESCE(description, ''), created_at, deleted_at
+		FROM teams WHERE id = ? AND org_id = ?
+	`, teamID, orgID).Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt, &deleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get team system: %w", err)
+	}
+	if deleted.Valid {
+		t.DeletedAt = &deleted.Time
+	}
+	return &t, nil
+}
+
+func (s *teamsStore) ListArchivedForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id, org_id, slug, name, COALESCE(description, ''), created_at, deleted_at
+		FROM teams
+		WHERE org_id = ? AND deleted_at IS NOT NULL
+		ORDER BY created_at ASC, id ASC
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list archived teams: %w", err)
+	}
+	defer rows.Close()
+	out := []domain.Team{}
+	for rows.Next() {
+		var (
+			t       domain.Team
+			deleted sql.NullTime
+		)
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt, &deleted); err != nil {
+			return nil, fmt.Errorf("scan archived team: %w", err)
+		}
+		if deleted.Valid {
+			t.DeletedAt = &deleted.Time
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain.TeamSettings) error {

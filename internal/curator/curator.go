@@ -248,6 +248,27 @@ func (c *Curator) Cancel(projectID string) {
 	session.cancelInFlight()
 }
 
+// InFlightProjectCount returns how many of projectIDs have a curator request
+// currently running (a live subprocess). The team-archive preview + cascade
+// (TFAC-448) report it as the number of curator sessions the archive will
+// force-stop. Counts only running work, not idle sessions or queued-but-unstarted
+// rows — the "active work" the modal warns about. Safe to call with a nil/empty
+// slice (returns 0).
+func (c *Curator) InFlightProjectCount(projectIDs []string) int {
+	if len(projectIDs) == 0 {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, pid := range projectIDs {
+		if s, ok := c.sessions[pid]; ok && s.hasInFlight() {
+			n++
+		}
+	}
+	return n
+}
+
 // CancelProject is the project-delete hook: cancel any in-flight
 // request, drain queued requests to cancelled (so the deleted
 // project doesn't have ghost queued rows), and stop the goroutine

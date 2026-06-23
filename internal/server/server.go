@@ -700,13 +700,28 @@ func (s *Server) routes() {
 	// explicit-set endpoint — it's a recency signal, not a user preference).
 	// POST /api/teams is the org-admin "add team" affordance (hosted-only;
 	// 404 in local).
-	th := &teamsHandler{tx: s.tx, az: s.az, allStores: s.allStores}
+	th := &teamsHandler{
+		tx:        s.tx,
+		az:        s.az,
+		allStores: s.allStores,
+		spawner:   func() *delegate.Spawner { return s.spawner },
+		curator:   func() *curator.Curator { return s.curator },
+	}
 	s.api("GET /api/teams", th.handleTeamsList)
 	s.apiMutating("POST /api/teams", th.handleTeamCreate)
 	// PATCH /api/teams/{team_id} renames a team / edits its description
 	// (hosted-only; 404 in local). Gated team-admin-or-org-admin; a plain
 	// member 403s, a cross-org team_id 404s (VerifyTeamInOrg).
 	s.apiMutating("PATCH /api/teams/{team_id}", th.handleTeamUpdate)
+	// Team archive/restore lifecycle (TFAC-448), org-admin only, multi-mode.
+	// Archive soft-deletes + force-stops the team's in-flight delegations and
+	// curator sessions and blocks further writes; restore flips it back (dead
+	// runs stay dead). The preview + archived-list back the confirm modal and the
+	// org-admin restore surface.
+	s.api("GET /api/teams/archived", th.handleTeamArchivedList)
+	s.api("GET /api/teams/{team_id}/archive/preview", th.handleTeamArchivePreview)
+	s.apiMutating("POST /api/teams/{team_id}/archive", th.handleTeamArchive)
+	s.apiMutating("POST /api/teams/{team_id}/restore", th.handleTeamRestore)
 
 	// Team roster (TFAC-444): list members + add + change role + remove/leave.
 	// Multi-mode only (each handler 404s in local; local keeps the synthetic

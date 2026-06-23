@@ -1,6 +1,7 @@
 package sqlite_test
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -189,5 +191,51 @@ func TestAgentRunStore_SQLite_AssertLocalOrg(t *testing.T) {
 	store := sqlitestore.New(conn).AgentRuns
 	if _, err := store.HasActiveForTask(t.Context(), "some-other-org", uuid.New().String()); err == nil {
 		t.Error("HasActiveForTask accepted non-LocalDefaultOrgID without error")
+	}
+}
+
+// TestAgentRunStore_SQLite_ActiveIDsForTeamSystem pins the team-archive
+// force-stop enumeration (TFAC-448): runs on the team in the active set
+// (NOT completed/failed/cancelled/task_unsolvable/pending_approval) are
+// returned; terminal and pending_approval runs are excluded. SQLite hardcodes
+// runs.team_id to the local sentinel, so the cross-team negative case lives in
+// the Postgres tests; here we pin the status predicate + team scoping.
+func TestAgentRunStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
+	conn := newSQLiteForAgentRunTest(t)
+	seed := newSQLiteAgentRunSeeder(conn)
+	store := sqlitestore.New(conn).AgentRuns
+	ctx := context.Background()
+
+	ent := seed.Entity(t, "team-active")
+	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+	mk := func(status string) string {
+		id := uuid.New().String()
+		if err := store.Create(ctx, runmode.LocalDefaultOrgID, domain.AgentRun{
+			ID: id, TaskID: taskID, PromptID: "p_agentrun_test", Status: status, Model: "m",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
+		}); err != nil {
+			t.Fatalf("create %s run: %v", status, err)
+		}
+		return id
+	}
+
+	running := mk("running")
+	open := mk("open")
+	mk("completed")
+	mk("cancelled")
+	mk("pending_approval")
+
+	ids, err := store.ActiveIDsForTeamSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID)
+	if err != nil {
+		t.Fatalf("ActiveIDsForTeamSystem: %v", err)
+	}
+	got := map[string]bool{}
+	for _, id := range ids {
+		got[id] = true
+	}
+	if len(ids) != 2 || !got[running] || !got[open] {
+		t.Fatalf("ActiveIDsForTeamSystem = %v; want exactly the running + open runs (%s, %s)", ids, running, open)
 	}
 }

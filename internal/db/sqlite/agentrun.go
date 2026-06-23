@@ -478,6 +478,30 @@ func (s *agentRunStore) ActiveIDsForTaskSystem(ctx context.Context, orgID, taskI
 	return s.ActiveIDsForTask(ctx, orgID, taskID)
 }
 
+func (s *agentRunStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id FROM runs
+		WHERE team_id = ? AND status NOT IN ('completed', 'failed', 'cancelled',
+		                                     'task_unsolvable', 'pending_approval')
+	`, teamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *agentRunStore) GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
 	return s.Get(ctx, orgID, runID)
 }
