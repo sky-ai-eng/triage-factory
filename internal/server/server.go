@@ -704,6 +704,18 @@ func (s *Server) routes() {
 	s.api("GET /api/teams", th.handleTeamsList)
 	s.apiMutating("POST /api/teams", th.handleTeamCreate)
 
+	// Team roster (TFAC-444): list members + add + change role + remove/leave.
+	// Multi-mode only (each handler 404s in local; local keeps the synthetic
+	// single-member /api/team/members roster). GET is any org member;
+	// POST/PATCH/DELETE gate team-admin-or-org-admin (DELETE also allows a
+	// self-leave). VerifyTeamInOrg 404s a cross-org team_id; the last-admin
+	// guard is a DB trigger surfaced as a 409.
+	tmh := &teamMembersHandler{tx: s.tx, az: s.az}
+	s.api("GET /api/teams/{team_id}/members", tmh.handleTeamRosterList)
+	s.apiMutating("POST /api/teams/{team_id}/members", tmh.handleTeamMemberAdd)
+	s.apiMutating("PATCH /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRoleChange)
+	s.apiMutating("DELETE /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRemove)
+
 	// Org People roster: list members + change role + remove.
 	// Multi-mode only (each handler 404s in local). GET is any-member;
 	// PATCH/DELETE gate org-admin (DELETE also allows a self-leave). The

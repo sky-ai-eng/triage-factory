@@ -2,9 +2,33 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrTeamMemberNotFound is returned by TeamsStore.ChangeMemberRole /
+// RemoveMember when no membership row matches (team_id, user_id) — so a stale
+// or bogus user_id surfaces as a 404 rather than a silent no-op. The handlers
+// gate team-admin (or self) before calling, so a zero-row result past that
+// gate means the target simply isn't on the team. The team-tier twin of
+// ErrOrgMemberNotFound.
+var ErrTeamMemberNotFound = errors.New("db: team member not found")
+
+// ErrLastTeamAdminGuard is returned by TeamsStore.ChangeMemberRole /
+// RemoveMember when the write would leave the team with no 'admin' role. The
+// authority is the tf.guard_team_admins statement trigger (Postgres baseline),
+// which raises SQLSTATE 23514; the store translates that into this sentinel so
+// the handler can answer 409 without importing the pg driver. The invariant is
+// never re-implemented in Go — the DB is the single source of truth. Mirrors
+// ErrLastOwnerGuard for the org tier.
+var ErrLastTeamAdminGuard = errors.New("db: each team must retain at least one admin")
+
+// ErrTeamMemberExists is returned by TeamsStore.AddMember when the user is
+// already on the team (the memberships PK (user_id, team_id) collides). The
+// member-picker only offers org members not already on the team, so this is
+// the defensive backstop for a race; the handler maps it to a 409.
+var ErrTeamMemberExists = errors.New("db: user is already a member of this team")
 
 // TeamsStore owns the teams + team_settings tables — the membership
 // unit inside an org and its sibling settings row. Most resources
@@ -26,9 +50,20 @@ import (
 //     reads by team membership (via memberships) and writes by team
 //     admin; the request-handler caller has set the JWT claims via
 //     the TxRunner.
+//   - The roster methods (TFAC-444) split like
+//     OrgMembershipsStore: the membership read + the AddMember /
+//     ChangeMemberRole / RemoveMember mutations run on the app pool
+//     (memberships_select / _insert / _update / _delete RLS gate read
+//     by org access and writes by team-admin-or-org-admin), with the
+//     tf.guard_team_admins trigger the sole authority on the last-admin
+//     invariant; ListMembers' cross-member GitHub/Jira identity
+//     enrichment runs on the admin pool (the self-only identity RLS
+//     can't express it, scoped back to the team by a membership join).
 //
 // SQLite collapses the pool split to one connection; the `...System`
-// variants delegate to their non-System counterparts.
+// variants delegate to their non-System counterparts. The roster
+// methods are multi-mode only (the team-roster handlers 404 in local);
+// the SQLite impls are stubs returning ErrNotApplicableInLocal.
 type TeamsStore interface {
 	// GetDefaultForOrg returns the ID of the org's default team —
 	// defined as the oldest team row by created_at. Same shape as
@@ -126,4 +161,41 @@ type TeamsStore interface {
 	// Callers must have already confirmed org-admin privilege; the RLS
 	// check is the backstop, not the primary gate.
 	Create(ctx context.Context, orgID, name, slug, creatorUserID string) (domain.Team, error)
+
+	// ListMembers returns every member of teamID with their team role and
+	// host-scoped identity readiness, ordered by display name then user id
+	// for a stable roster — the team-tier sibling of
+	// OrgMembershipsStore.ListWithIdentity. githubBaseURL / jiraBaseURL are
+	// the org's configured hosts (raw, read from org_settings by the caller);
+	// the impl resolves them to the host identities are keyed under
+	// (EffectiveGitHubHost: an unset github_base_url resolves to github.com;
+	// NormalizeJiraHost: an unset jira_base_url matches nothing). A member's
+	// GitHubUsername / JiraAccountID is nil when they hold no binding on that
+	// host. The roster reads under the app pool (memberships_select RLS — any
+	// org member may read a team-in-org's roster); the identity enrichment
+	// reads under the admin pool (the self-only identity RLS can't express a
+	// cross-member read, scoped back to the team by a membership join).
+	ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string) ([]domain.TeamMember, error)
+
+	// AddMember enrolls userID on teamID with role ("admin" | "member" |
+	// "viewer"). App pool: memberships_insert RLS gates the write to team
+	// admins or org admins. Returns ErrTeamMemberExists when the user is
+	// already on the team (the PK collides). Callers validate role against the
+	// allowed set and confirm the target is an org member before calling.
+	AddMember(ctx context.Context, teamID, userID, role string) error
+
+	// ChangeMemberRole sets userID's team role on teamID. App pool:
+	// memberships_update RLS gates the write to team admins or org admins.
+	// Returns ErrLastTeamAdminGuard when the change would drop the team's last
+	// admin (the guard trigger fires), and ErrTeamMemberNotFound when no row
+	// matches. Callers validate role before calling so an invalid enum never
+	// reaches the column.
+	ChangeMemberRole(ctx context.Context, teamID, userID, role string) error
+
+	// RemoveMember deletes userID's membership on teamID. App pool:
+	// memberships_delete RLS permits the caller to remove themselves
+	// (self-leave, any role) or, as a team/org admin, anyone. Returns
+	// ErrLastTeamAdminGuard when removing the team's last admin (guard
+	// trigger), and ErrTeamMemberNotFound when no row matches.
+	RemoveMember(ctx context.Context, teamID, userID string) error
 }

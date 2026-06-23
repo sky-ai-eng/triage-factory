@@ -230,6 +230,27 @@ func (az *Checker) UserIsOrgAdmin(ctx context.Context, userID, orgID string) (bo
 	return ok, err
 }
 
+// UserIsTeamAdmin returns true when the calling user holds the 'admin' role in
+// the given team. The raw-probe sibling of RequireTeamAdmin (which writes a 403
+// front gate); endpoints that need to OR team-admin with another right — the
+// team roster's "team admin OR org admin" mutate gate — call this and compose
+// the decision themselves. The OrgID claim is required: tf.user_is_team_admin
+// reads memberships under RLS, which gates on tf.current_org_id(), so a
+// Sub-only claim would miscount. Like the other raw probes it always runs the
+// tf.* helper via db.WithTx (no local-mode short-circuit), so callers gate
+// local mode out before reaching it.
+func (az *Checker) UserIsTeamAdmin(ctx context.Context, userID, orgID, teamID string) (bool, error) {
+	var ok bool
+	err := db.WithTx(ctx, az.db, db.Claims{Sub: userID, OrgID: orgID},
+		func(tx *sql.Tx) error {
+			return tx.QueryRowContext(ctx,
+				`SELECT tf.user_is_team_admin($1::uuid)`, teamID,
+			).Scan(&ok)
+		},
+	)
+	return ok, err
+}
+
 // UserOwnsOrg returns true when the calling user is the founder/owner of the
 // given org — the holder of orgs.owner_user_id. Mirrors UserIsOrgAdmin but
 // delegates to tf.user_owns_org rather than tf.user_is_org_admin, because

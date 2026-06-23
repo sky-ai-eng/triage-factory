@@ -118,6 +118,7 @@ export default function MemberRoster({ adapter, canManage }: MemberRosterProps) 
                 key={m.userId}
                 member={m}
                 roles={adapter.roles}
+                roleLabels={adapter.roleLabels}
                 canManage={canManage}
                 isLastProtected={isLastProtected}
                 busy={busy}
@@ -149,6 +150,9 @@ export default function MemberRoster({ adapter, canManage }: MemberRosterProps) 
 interface MemberRowProps {
   member: import('../hooks/useMemberRoster').RosterMember
   roles: string[]
+  // roleLabels optionally maps a role value to the text shown in the <select>
+  // (the option's value stays the raw role). Undefined → render the raw role.
+  roleLabels?: Record<string, string>
   canManage: boolean
   isLastProtected: boolean
   // busy is true while ANY row's mutation is in flight — every row's
@@ -166,6 +170,7 @@ interface MemberRowProps {
 function MemberRow({
   member,
   roles,
+  roleLabels,
   canManage,
   isLastProtected,
   busy,
@@ -230,7 +235,7 @@ function MemberRow({
             primary vocab (defensive against legacy values). */}
         {(roles.includes(member.role) ? roles : [member.role, ...roles]).map((r) => (
           <option key={r} value={r}>
-            {r}
+            {roleLabels?.[r] ?? r}
           </option>
         ))}
       </select>

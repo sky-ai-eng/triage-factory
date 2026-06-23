@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -229,6 +230,173 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 	)
 	if err != nil {
 		return fmt.Errorf("upsert team_settings: %w", err)
+	}
+	return nil
+}
+
+func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string) ([]domain.TeamMember, error) {
+	// 1. Core roster on the app pool (RLS-gated). memberships_select lets any
+	//    org member read a team-in-org's roster; display_name is nullable, so
+	//    COALESCE renders the empty string (matching GetDisplayName's "").
+	rows, err := s.app.QueryContext(ctx, `
+		SELECT m.user_id::text, COALESCE(u.display_name, ''), m.role::text
+		FROM memberships m
+		JOIN users u ON u.id = m.user_id
+		WHERE m.team_id = $1
+		ORDER BY COALESCE(u.display_name, ''), m.user_id
+	`, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("list team members: %w", err)
+	}
+	defer rows.Close()
+	out := []domain.TeamMember{}
+	for rows.Next() {
+		var m domain.TeamMember
+		if err := rows.Scan(&m.UserID, &m.DisplayName, &m.Role); err != nil {
+			return nil, fmt.Errorf("scan team member: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate team members: %w", err)
+	}
+
+	// 2. Identity enrichment on the admin pool, scoped to this team's members
+	//    by a membership join — the team-tier twin of
+	//    OrgMembershipsStore.ListWithIdentity. The self-only identity-table
+	//    RLS can't show a peer's binding, but the roster's whole purpose is to
+	//    show every teammate's readiness; the membership join keeps the
+	//    admin-pool read scoped to exactly the members the RLS roster already
+	//    returned. Host resolution mirrors the org roster: an unset
+	//    github_base_url resolves to github.com (EffectiveGitHubHost), an unset
+	//    jira_base_url normalizes to "" and matches nothing.
+	ghMap, err := queryIdentityMap(ctx, s.admin, `
+		SELECT gh.user_id::text, gh.login
+		FROM user_github_identities gh
+		JOIN memberships m ON m.user_id = gh.user_id AND m.team_id = $1
+		WHERE gh.github_base_url = $2
+	`, teamID, db.EffectiveGitHubHost(githubBaseURL))
+	if err != nil {
+		return nil, fmt.Errorf("list team member github identities: %w", err)
+	}
+	jiraMap, err := queryIdentityMap(ctx, s.admin, `
+		SELECT j.user_id::text, j.account_id
+		FROM user_jira_identities j
+		JOIN memberships m ON m.user_id = j.user_id AND m.team_id = $1
+		WHERE j.jira_base_url = $2
+	`, teamID, db.NormalizeJiraHost(jiraBaseURL))
+	if err != nil {
+		return nil, fmt.Errorf("list team member jira identities: %w", err)
+	}
+
+	// 3. Merge. An absent (or empty) binding leaves the pointer nil — the
+	//    "Not connected" state.
+	for i := range out {
+		if login, ok := ghMap[out[i].UserID]; ok {
+			out[i].GitHubUsername = &login
+		}
+		if acct, ok := jiraMap[out[i].UserID]; ok {
+			out[i].JiraAccountID = &acct
+		}
+	}
+	return out, nil
+}
+
+// queryIdentityMap runs a (user_id, value) query on q and returns the
+// user_id → value map, dropping empty values so an "" binding reads as nil
+// ("not connected") rather than a present-but-blank handle. The team roster's
+// identity enrichment uses it; the org roster has its own method-bound twin.
+func queryIdentityMap(ctx context.Context, q queryer, query string, args ...any) (map[string]string, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[string]string{}
+	for rows.Next() {
+		var id, val string
+		if err := rows.Scan(&id, &val); err != nil {
+			return nil, err
+		}
+		if val != "" {
+			m[id] = val
+		}
+	}
+	return m, rows.Err()
+}
+
+func (s *teamsStore) AddMember(ctx context.Context, teamID, userID, role string) error {
+	// Cast the bound string to the enum explicitly — role is a
+	// public.membership_role column; the handler already rejected any value
+	// outside the enum, so this never trips a 22P02.
+	_, err := s.app.ExecContext(ctx, `
+		INSERT INTO memberships (user_id, team_id, role)
+		VALUES ($1, $2, $3::membership_role)
+	`, userID, teamID, role)
+	if err != nil {
+		return translateTeamMemberInsert(fmt.Errorf("insert membership: %w", err))
+	}
+	return nil
+}
+
+func (s *teamsStore) ChangeMemberRole(ctx context.Context, teamID, userID, role string) error {
+	res, err := s.app.ExecContext(ctx, `
+		UPDATE memberships SET role = $3::membership_role
+		WHERE team_id = $1 AND user_id = $2
+	`, teamID, userID, role)
+	if err != nil {
+		return translateTeamAdminGuard(fmt.Errorf("update membership role: %w", err))
+	}
+	return assertOneTeamMemberRow(res, "update membership role")
+}
+
+func (s *teamsStore) RemoveMember(ctx context.Context, teamID, userID string) error {
+	res, err := s.app.ExecContext(ctx, `
+		DELETE FROM memberships WHERE team_id = $1 AND user_id = $2
+	`, teamID, userID)
+	if err != nil {
+		return translateTeamAdminGuard(fmt.Errorf("delete membership: %w", err))
+	}
+	return assertOneTeamMemberRow(res, "delete membership")
+}
+
+// translateTeamAdminGuard maps the tf.guard_team_admins trigger's SQLSTATE
+// 23514 to db.ErrLastTeamAdminGuard so the handler answers 409 without
+// importing the pg driver. guard_team_admins is the only 23514 source on
+// memberships (the table carries no CHECK constraints; an invalid role enum
+// fails with 22P02, and callers validate role first), so the code→sentinel
+// mapping is unambiguous. Any other error passes through. The org tier's
+// translateOwnerGuard is its twin.
+func translateTeamAdminGuard(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23514" {
+		return errors.Join(db.ErrLastTeamAdminGuard, err)
+	}
+	return err
+}
+
+// translateTeamMemberInsert maps the memberships PK collision (unique_violation
+// 23505) to db.ErrTeamMemberExists for AddMember, so adding a user already on
+// the team is a clean 409 rather than a raw driver error.
+func translateTeamMemberInsert(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return errors.Join(db.ErrTeamMemberExists, err)
+	}
+	return err
+}
+
+// assertOneTeamMemberRow turns a zero-row UPDATE/DELETE result into
+// db.ErrTeamMemberNotFound. The handlers gate team-admin (or self) before
+// calling, so a row visible to the policy but absent means the target user
+// simply isn't on the team — a 404, not a silent success.
+func assertOneTeamMemberRow(res sql.Result, op string) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%s: rows affected: %w", op, err)
+	}
+	if n == 0 {
+		return db.ErrTeamMemberNotFound
 	}
 	return nil
 }

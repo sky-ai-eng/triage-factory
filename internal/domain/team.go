@@ -25,3 +25,21 @@ type Team struct {
 	// don't carry a per-user relationship.
 	Role string
 }
+
+// TeamMember is one row of the team roster (TFAC-444): a member's identity
+// facts plus their team-level role. The team-tier sibling of OrgMember,
+// structurally identical but distinct so the two membership tiers don't share
+// a type whose Role semantics differ (membership_role vs org_role).
+// GitHubUsername / JiraAccountID are nil when the member holds no host-scoped
+// binding for the org's GitHub / Jira host — the NULL-degrades-gracefully
+// contract the frontend renders as a "Not connected" readiness badge. Role is
+// the membership_role enum value: "admin" | "member" | "viewer". IsCurrentUser
+// is not carried here — the handler stamps it by comparing UserID to the
+// caller, since the store has no request identity.
+type TeamMember struct {
+	UserID         string
+	DisplayName    string
+	GitHubUsername *string
+	JiraAccountID  *string
+	Role           string
+}

@@ -218,3 +218,24 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 	}
 	return nil
 }
+
+// The roster methods are a multi-mode (Postgres) surface: the team-roster
+// handlers 404 in local, and local mode keeps the synthetic single-member
+// behavior in handleTeamMembers. These stubs exist only so the local store
+// bundle satisfies the interface; reaching them at N=1 is a runmode-gate
+// escape, and a clear error beats a misleading empty roster.
+func (s *teamsStore) ListMembers(_ context.Context, _, _, _ string) ([]domain.TeamMember, error) {
+	return nil, db.ErrNotApplicableInLocal
+}
+
+func (s *teamsStore) AddMember(_ context.Context, _, _, _ string) error {
+	return db.ErrNotApplicableInLocal
+}
+
+func (s *teamsStore) ChangeMemberRole(_ context.Context, _, _, _ string) error {
+	return db.ErrNotApplicableInLocal
+}
+
+func (s *teamsStore) RemoveMember(_ context.Context, _, _ string) error {
+	return db.ErrNotApplicableInLocal
+}

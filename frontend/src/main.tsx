@@ -21,6 +21,7 @@ import Brief from './pages/Brief'
 import Settings from './pages/Settings'
 import Prompts from './pages/Prompts'
 import OrgPage from './pages/OrgPage'
+import TeamPage from './pages/TeamPage'
 import Repos from './pages/Repos'
 import Factory from './pages/Factory'
 import Projects from './pages/Projects'
@@ -250,6 +251,9 @@ function MultiRoutes() {
                 /orgs/:org_id parent. Non-admins reaching it directly get a
                 read-only roster (OrgPage gates management on org role). */}
             <Route path="org" element={<OrgPage />} />
+            {/* Temporary team-roster mount (TFAC-444) — superseded by the
+                /team page shell (TFAC-445). Multi-mode only. */}
+            <Route path="team" element={<TeamPage />} />
             <Route path="settings" element={<Settings />} />
           </Route>
           <Route

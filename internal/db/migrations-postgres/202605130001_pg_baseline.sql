@@ -7000,5 +7000,49 @@ REVOKE ALL ON public.user_identities FROM PUBLIC;
 REVOKE ALL ON public.user_identities FROM anon, authenticated, service_role;
 
 
+--
+-- TFAC-444: guard_team_admins — each team must retain ≥1 admin.
+--
+-- The team-tier twin of guard_org_owners, fired by AFTER UPDATE/DELETE
+-- statement triggers on memberships: a write that would leave a team with no
+-- 'admin' role (demoting / removing / leaving the last admin) is rejected with
+-- SQLSTATE 23514, which TeamsStore surfaces as db.ErrLastTeamAdminGuard and the
+-- handler answers as a 409.
+--
+-- SECURITY DEFINER from the start (matching guard_org_owners' fixed form and
+-- every other tf.* helper): a global-invariant guard must evaluate the TRUE
+-- team state, not the mutating caller's RLS-filtered view. A team self-leave
+-- DELETEs the caller's own membership row, and although memberships_select
+-- still exposes peers via org access (a team-leave keeps org membership), the
+-- definer rights make the owner-count read independent of the caller's row
+-- visibility either way — the robust posture. search_path stays pinned, so the
+-- definer rights are safe.
+
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION tf.guard_team_admins() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM affected a
+    WHERE NOT EXISTS (
+      SELECT 1 FROM memberships
+       WHERE team_id = a.team_id AND role = 'admin'
+    )
+  ) THEN
+    RAISE EXCEPTION 'each team must retain at least one admin role'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+-- +goose StatementEnd
+
+CREATE TRIGGER memberships_keep_admin_on_delete AFTER DELETE ON public.memberships REFERENCING OLD TABLE AS affected FOR EACH STATEMENT EXECUTE FUNCTION tf.guard_team_admins();
+
+CREATE TRIGGER memberships_keep_admin_on_update AFTER UPDATE ON public.memberships REFERENCING OLD TABLE AS affected FOR EACH STATEMENT EXECUTE FUNCTION tf.guard_team_admins();
+
+
 -- +goose Down
 SELECT 'down not supported';

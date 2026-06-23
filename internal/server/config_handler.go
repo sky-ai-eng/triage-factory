@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -70,24 +71,24 @@ type teamMemberRow struct {
 }
 
 func (s *Server) handleTeamMembers(w http.ResponseWriter, r *http.Request) {
-	// Multi mode would query memberships for the session user's active
-	// team — gated behind the org-team roster work that hasn't landed
-	// yet. Refuse rather than return a synthetic local roster that would
-	// mislead the FE's "you" highlighting.
+	userID := ClaimsFrom(r.Context()).Subject
+	orgID := OrgIDFrom(r.Context())
+
+	// Multi mode: the caller's default team, sourced from the same
+	// Teams.ListMembers the team-roster endpoint (GET
+	// /api/teams/{team_id}/members) uses — one source of truth for the team
+	// roster (TFAC-444). This is the predicate-editor / assignee-picker view
+	// (roles dropped here; the picker only needs identity readiness + the bot),
+	// scoped to the org's default team until a per-call team selector lands
+	// (the page-shell slice). The roleful management view is the new endpoint.
 	if runmode.Current() != runmode.ModeLocal {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{
-			"error": "/api/team/members is not yet wired for multi mode",
-		})
+		s.handleTeamMembersMulti(w, r, orgID, userID)
 		return
 	}
 
-	userID := ClaimsFrom(r.Context()).Subject
-	// orgID via OrgIDFrom — the 501 gate above means this only runs
-	// in local mode today, where OrgIDFrom returns the local sentinel.
-	// Reading via the accessor (rather than referencing the sentinel
-	// directly) keeps this consistent with the rest of the handler
-	// surface for when the multi-mode path lands.
-	orgID := OrgIDFrom(r.Context())
+	// Local N=1: the synthetic single-member roster. There's exactly one
+	// (implicit) user, so we render their identity directly rather than
+	// querying memberships — the SQLite roster methods are multi-only stubs.
 	var username, displayName, jiraAccount string
 	_ = s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Identity is host-scoped (SKY-396): resolve the org's GitHub
@@ -130,4 +131,56 @@ func (s *Server) handleTeamMembers(w http.ResponseWriter, r *http.Request) {
 		},
 		Bot: bot,
 	})
+}
+
+// handleTeamMembersMulti serves the multi-mode /api/team/members: the caller's
+// default-team roster (identity readiness + the team bot), mapped to the
+// roleless picker shape. It reads through Teams.ListMembers — the same store
+// method the roleful GET /api/teams/{team_id}/members endpoint uses — so the
+// two team-roster reads can't diverge. The team is the org's default for now
+// (no per-call team param on this legacy picker route); the active-team
+// refinement belongs to the page-shell slice.
+func (s *Server) handleTeamMembersMulti(w http.ResponseWriter, r *http.Request, orgID, userID string) {
+	var (
+		members []domain.TeamMember
+		teamID  string
+	)
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		teamID, e = tx.Teams.GetDefaultForOrg(r.Context(), orgID)
+		if e != nil || teamID == "" {
+			// Teamless org is a bootstrap bug; degrade to an empty roster
+			// rather than erroring the predicate editor.
+			return e
+		}
+		orgSet, e := tx.Orgs.GetSettings(r.Context(), orgID)
+		if e != nil {
+			return e
+		}
+		members, e = tx.Teams.ListMembers(r.Context(), teamID, orgSet.GitHubBaseURL, orgSet.JiraBaseURL)
+		return e
+	}); err != nil {
+		internalError(w, "team-members", err)
+		return
+	}
+
+	out := make([]teamMemberRow, 0, len(members))
+	for _, m := range members {
+		out = append(out, teamMemberRow{
+			UserID:         m.UserID,
+			DisplayName:    m.DisplayName,
+			GitHubUsername: m.GitHubUsername,
+			JiraAccountID:  m.JiraAccountID,
+			IsCurrentUser:  m.UserID == userID,
+		})
+	}
+
+	// Bot scoped to the same default team, mirroring the delegate gate so the
+	// picker only offers a bot the delegate handlers would accept.
+	var bot *teamBotRow
+	if agent, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, teamID); err == nil && enabled && agent != nil {
+		bot = &teamBotRow{AgentID: agent.ID, DisplayName: agent.DisplayName}
+	}
+
+	writeJSON(w, http.StatusOK, teamMembersResponse{Members: out, Bot: bot})
 }

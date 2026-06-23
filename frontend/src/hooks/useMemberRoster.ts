@@ -32,6 +32,13 @@ export interface RosterMember {
 export interface MemberRosterAdapter {
   roles: string[]
   protectedRole: string
+  // roleLabels optionally overrides how a role value renders in the role
+  // <select>; the value sent to the backend stays the raw role. The team
+  // adapter uses it to flag that 'viewer' is assignable now but its read-only
+  // enforcement is a later slice (so a viewer behaves like a member until
+  // then). The org adapter leaves it undefined and the select shows the raw
+  // role.
+  roleLabels?: Record<string, string>
   fetchMembers(): Promise<RosterMember[]>
   changeRole(userId: string, role: string): Promise<void>
   remove(userId: string): Promise<void>
