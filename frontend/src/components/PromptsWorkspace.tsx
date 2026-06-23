@@ -47,7 +47,13 @@ export default function PromptsWorkspace({
   // the server RLS is the hard guarantee; this just stops offering writes a
   // viewer can't make. Solo/local reports "admin", so the editor stays fully
   // interactive there.
-  const { isViewer } = useTeamRole()
+  //
+  // rolesLoaded gates the toolbar's create/badge: until /api/teams resolves the
+  // role is unknown, so rendering neither (rather than the permissive "New
+  // Prompt" default) avoids flashing a write affordance at a viewer for the
+  // cold-load window before it flips to the badge. The drawers read `readOnly`
+  // directly — they only open on a canvas click, by which point roles are loaded.
+  const { isViewer, loaded: rolesLoaded } = useTeamRole()
   const readOnly = isViewer(teamId)
 
   // Trigger config panel state.
@@ -122,16 +128,18 @@ export default function PromptsWorkspace({
         <div className="flex min-w-0 items-center gap-2">{toolbarLeft}</div>
         <div className="flex items-center gap-2">
           {toolbarRight}
-          {readOnly ? (
-            <ViewOnlyBadge />
-          ) : (
-            <button
-              onClick={openNew}
-              className="rounded-full bg-accent px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-accent/90"
-            >
-              New Prompt
-            </button>
-          )}
+          {/* Until roles resolve, render neither — see rolesLoaded note above. */}
+          {rolesLoaded &&
+            (readOnly ? (
+              <ViewOnlyBadge />
+            ) : (
+              <button
+                onClick={openNew}
+                className="rounded-full bg-accent px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-accent/90"
+              >
+                New Prompt
+              </button>
+            ))}
         </div>
       </div>
 
