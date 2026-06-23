@@ -37,6 +37,7 @@ var importFullPerms = map[string]string{
 	"metadata":      "read",
 	"checks":        "read",
 	"actions":       "read",
+	"statuses":      "read",
 	"members":       "read",
 }
 
@@ -266,7 +267,7 @@ func TestGitHubAppImport_HardPermGap(t *testing.T) {
 	// issues only read (needs write) — a hard gap.
 	perms := map[string]string{
 		"issues": "read", "pull_requests": "write", "contents": "read", "metadata": "read",
-		"checks": "read", "actions": "read", "members": "read",
+		"checks": "read", "actions": "read", "statuses": "read", "members": "read",
 	}
 	stub := newImportStub(t, importStubCfg{appID: 5, slug: "b", clientID: "Iv1.x", permissions: perms})
 	setOrgGitHubBase(t, s, stub.URL)
@@ -310,7 +311,7 @@ func TestGitHubAppImport_SoftPermGap(t *testing.T) {
 	// members missing entirely — a soft gap (degrades team import).
 	perms := map[string]string{
 		"issues": "write", "pull_requests": "write", "contents": "read", "metadata": "read",
-		"checks": "read", "actions": "read",
+		"checks": "read", "actions": "read", "statuses": "read",
 	}
 	stub := newImportStub(t, importStubCfg{appID: 8, slug: "soft", clientID: "Iv1.x", permissions: perms})
 	setOrgGitHubBase(t, s, stub.URL)

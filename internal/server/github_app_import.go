@@ -99,8 +99,10 @@ type importRequiredPermission struct {
 //     metadata:read — core function (open PRs, comment, read code) breaks
 //     without them.
 //   - Soft (warn): checks:read / actions:read (CI check + workflow events),
-//     members:read (GitHub team import + team-based review-request detection) —
-//     specific features degrade, the rest works.
+//     statuses:read (the open-PR statusCheckRollup CI query — its contexts union
+//     touches the commit-statuses resource), members:read (GitHub team import +
+//     team-based review-request detection) — specific features degrade, the rest
+//     works.
 var importRequiredPermissions = []importRequiredPermission{
 	{name: "issues", level: "write", hard: true},
 	{name: "pull_requests", level: "write", hard: true},
@@ -108,6 +110,7 @@ var importRequiredPermissions = []importRequiredPermission{
 	{name: "metadata", level: "read", hard: true},
 	{name: "checks", level: "read", feature: "CI check status events"},
 	{name: "actions", level: "read", feature: "workflow run events"},
+	{name: "statuses", level: "read", feature: "CI check status events"},
 	{name: "members", level: "read", feature: "GitHub team import and team-based review-request detection"},
 }
 

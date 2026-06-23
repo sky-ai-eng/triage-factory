@@ -190,6 +190,16 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 			"metadata":      "read",
 			"checks":        "read",
 			"actions":       "read",
+			// statuses:read is required for the open-PR CI query to resolve.
+			// We read CI off the head commit's statusCheckRollup, whose
+			// contexts connection is a CheckRun | StatusContext union —
+			// resolving it touches the commit-statuses resource even though we
+			// inline only CheckRun fields, so checks:read alone 403s with
+			// "Resource not accessible by integration". We don't request the
+			// "status" webhook event: CI is read by polling and StatusContext
+			// nodes are filtered out, so only the read permission is needed,
+			// not status delivery.
+			"statuses": "read",
 			// members:read is required for GET /orgs/{org}/teams under an
 			// App installation token — without it the team-mapping import
 			// (settings/team/.../github-groups) and the poller's

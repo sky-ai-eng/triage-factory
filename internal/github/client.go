@@ -286,12 +286,37 @@ func (c *Client) PostGraphQL(body any) ([]byte, error) {
 		return nil, fmt.Errorf("GraphQL returned %d: %s", resp.StatusCode, string(data))
 	}
 
-	// Check for GraphQL-level errors
+	// GraphQL can return a 200 carrying BOTH a usable `data` block and an
+	// `errors[]` list — a per-field partial failure (e.g. a FORBIDDEN
+	// statusCheckRollup on a PR when the App lacks statuses:read). The old
+	// behavior treated any errors[] as a total failure and discarded the data,
+	// so one forbidden field on one node aborted the whole batch. Distinguish
+	// the two: present-and-non-null `data` ⇒ degrade to the partial result;
+	// absent/null `data` ⇒ a genuine failure (bad query, cost ceiling, auth).
 	var gqlResp struct {
-		Errors []struct{ Message string } `json:"errors"`
+		Data   json.RawMessage `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			// path is a mixed string/int array (field names and list indices),
+			// so it decodes into []any rather than a typed slice.
+			Path []any `json:"path"`
+		} `json:"errors"`
 	}
 	if json.Unmarshal(data, &gqlResp) == nil && len(gqlResp.Errors) > 0 {
-		return nil, fmt.Errorf("GraphQL error: %s", gqlResp.Errors[0].Message)
+		e := gqlResp.Errors[0]
+		// `data` present and not JSON null ⇒ the response is usable; callers
+		// already tolerate missing/null nodes (refreshPRsBatch skips null nodes,
+		// buildSnapshot treats a nil statusCheckRollup as "polled, no CI").
+		usableData := len(gqlResp.Data) > 0 && string(gqlResp.Data) != "null"
+		if usableData {
+			// One log line per response (= per batch), not per node, so even an
+			// all-forbidden batch logs once. Summarize via the first error.
+			githubLog.Warn("GraphQL partial error; using partial data",
+				"errors", len(gqlResp.Errors), "type", e.Type, "path", e.Path, "message", e.Message)
+			return data, nil
+		}
+		return nil, fmt.Errorf("GraphQL error (%s) at %v: %s", e.Type, e.Path, e.Message)
 	}
 
 	return data, nil
