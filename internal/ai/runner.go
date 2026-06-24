@@ -2,12 +2,12 @@ package ai
 
 import (
 	"context"
-	"database/sql"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
@@ -47,35 +47,44 @@ type RunnerCallbacks struct {
 // The 4 DB operations the runner does itself (UnscoredTasks, MarkScoring,
 // ResetScoringToPending, UpdateTaskScores) go through db.ScoreStore so
 // the same code path serves both SQLite (local) and Postgres (multi).
-// The runner still holds the raw *sql.DB because ScoreTasks (the
-// LLM-driven scorer in scorer.go) does its own multi-store reads
-// against the connection — that path migrates in a later D2 wave.
 type Runner struct {
-	database  *sql.DB
 	scores    db.ScoreStore
 	entities  db.EntityStore          // SKY-284: scorer bulk-loads entity descriptions for prompt context
 	orgID     string                  // scoring context org — runmode.LocalDefaultOrgID in local mode
 	secrets   agentproc.SecretsReader // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi). SKY-389.
 	recorder  *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
+	limiter   *syslimit.Limiter       // shared system-job sandbox cap (nil → unlimited); captured by scoreFn.
 	callbacks RunnerCallbacks
-	trigger   chan struct{}
-	stop      chan struct{}
-	mu        sync.Mutex
-	running   bool
+
+	// scoreFn scores one batch. The unit-test seam (replaces a direct
+	// scoreBatch call): defaulted in NewRunner to a closure over scoreBatch
+	// capturing recorder + limiter, overridable in tests. Mirrors the
+	// repo-profiler's batchFn.
+	scoreFn batchScoreFn
+
+	trigger  chan struct{}
+	stop     chan struct{}
+	stopOnce sync.Once
+	mu       sync.Mutex
+	running  bool
 }
 
-func NewRunner(database *sql.DB, scores db.ScoreStore, entities db.EntityStore, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, callbacks RunnerCallbacks) *Runner {
-	return &Runner{
-		database:  database,
+func NewRunner(scores db.ScoreStore, entities db.EntityStore, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, limiter *syslimit.Limiter, callbacks RunnerCallbacks) *Runner {
+	r := &Runner{
 		scores:    scores,
 		entities:  entities,
 		orgID:     orgID,
 		secrets:   secrets,
 		recorder:  recorder,
+		limiter:   limiter,
 		callbacks: callbacks,
 		trigger:   make(chan struct{}, 1),
 		stop:      make(chan struct{}),
 	}
+	r.scoreFn = func(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader) ([]TaskScore, error) {
+		return scoreBatch(ctx, tasks, orgID, secrets, recorder, limiter)
+	}
+	return r
 }
 
 // Trigger signals the runner to check for unscored tasks.
@@ -118,9 +127,11 @@ func (r *Runner) Start() {
 	}()
 }
 
-func (r *Runner) Stop() {
-	close(r.stop)
-}
+// Stop cancels the runner's loop and any in-flight cycle. Idempotent via
+// stopOnce — a second close(r.stop) would panic. The Manager is the sole
+// caller today, but guarding it makes a direct or repeat Stop safe and matches
+// the repo-profiler runner, so all three background runners behave alike.
+func (r *Runner) Stop() { r.stopOnce.Do(func() { close(r.stop) }) }
 
 func (r *Runner) run(ctx context.Context) {
 	r.mu.Lock()
@@ -165,7 +176,7 @@ func (r *Runner) run(ctx context.Context) {
 		r.callbacks.OnScoringStarted(r.orgID, taskIDs)
 	}
 
-	scores, skippedTasks, err := ScoreTasks(ctx, r.database, r.entities, r.orgID, tasks, r.secrets, r.recorder)
+	scores, skippedTasks, err := r.scoreTasks(ctx, tasks)
 	if err != nil {
 		aiLog.Error("scoring failed", "error", err)
 		r.reportError(err)

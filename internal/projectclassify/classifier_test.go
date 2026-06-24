@@ -9,13 +9,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
 // isolateHome redirects ~ to a fresh tempdir for the test. Required
-// for any test that runs Classify, because readProjectKB resolves
+// for any test that runs classify, because readProjectKB resolves
 // project IDs under ~/.triagefactory/projects/<id>/ — without
 // isolation, a developer machine with real project dirs could leak
 // real KB files into the test run, producing flaky truncation flags
@@ -37,15 +35,13 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-// stubStage1 swaps runStage1Haiku for the duration of a test, restoring
-// the real implementation when t.Cleanup fires. Scoring is keyed off
-// the project name embedded in the prompt so different projects can
-// return different scores.
-func stubStage1(t *testing.T, scoresByProjectName map[string]int) *callRecorder {
-	t.Helper()
+// stage1Stub returns a stage1Func that scores by the project name embedded in
+// the prompt, plus a recorder capturing each call (prompt + orgID). It mirrors
+// the previous stubStage1 but as a plain closure assigned to a Runner's
+// stage1Fn field rather than a package-level mutable var.
+func stage1Stub(scoresByProjectName map[string]int) (stage1Func, *callRecorder) {
 	rec := &callRecorder{}
-	orig := runStage1Haiku
-	runStage1Haiku = func(_ context.Context, orgID, prompt string, _ agentproc.SecretsReader, _ *systemllm.Recorder) (int, string, error) {
+	fn := func(_ context.Context, orgID, prompt string) (int, string, error) {
 		rec.record(prompt)
 		rec.mu.Lock()
 		rec.orgIDs = append(rec.orgIDs, orgID)
@@ -57,18 +53,15 @@ func stubStage1(t *testing.T, scoresByProjectName map[string]int) *callRecorder 
 		}
 		return 0, "no stage1 stub match", nil
 	}
-	t.Cleanup(func() { runStage1Haiku = orig })
-	return rec
+	return fn, rec
 }
 
-// stubStage2 swaps runStage2Haiku for the duration of a test. Stage 2
-// gets cwd as a second arg; the stub records both prompt and cwd so
-// tests can verify the agent ran in the expected project dir.
-func stubStage2(t *testing.T, scoresByProjectName map[string]int) *callRecorder {
-	t.Helper()
+// stage2Stub returns a stage2Func that scores by project name. Stage 2 gets a
+// cwd; the recorder captures it so a test can verify the agent ran in the
+// expected project dir.
+func stage2Stub(scoresByProjectName map[string]int) (stage2Func, *callRecorder) {
 	rec := &callRecorder{}
-	orig := runStage2Haiku
-	runStage2Haiku = func(_ context.Context, orgID, prompt, cwd string, _ agentproc.SecretsReader, _ *systemllm.Recorder) (int, string, error) {
+	fn := func(_ context.Context, orgID, prompt, cwd string) (int, string, error) {
 		rec.record(prompt)
 		rec.mu.Lock()
 		rec.cwds = append(rec.cwds, cwd)
@@ -81,8 +74,21 @@ func stubStage2(t *testing.T, scoresByProjectName map[string]int) *callRecorder 
 		}
 		return 0, "no stage2 stub match", nil
 	}
-	t.Cleanup(func() { runStage2Haiku = orig })
-	return rec
+	return fn, rec
+}
+
+// stubRunner builds a Runner for orgID with both stage funcs stubbed to score
+// by the project name embedded in the prompt. Either map may be nil. The
+// entity/project stores are nil — classify() takes projects as a param and
+// never reads the stores, so a stub-driven classify needs no DB. Returns the
+// runner plus the stage1 and stage2 call recorders.
+func stubRunner(orgID string, stage1, stage2 map[string]int) (*Runner, *callRecorder, *callRecorder) {
+	s1, rec1 := stage1Stub(stage1)
+	s2, rec2 := stage2Stub(stage2)
+	r := NewRunner(nil, nil, orgID, nil, nil, nil)
+	r.stage1Fn = s1
+	r.stage2Fn = s2
+	return r, rec1, rec2
 }
 
 type callRecorder struct {
@@ -114,23 +120,21 @@ func (c *callRecorder) orgIDList() []string {
 	return out
 }
 
-// TestClassify_OrgIDFlowsToHaiku pins the SKY-323 contract: the orgID
-// passed to Classify is threaded down through the per-project vote
-// fan-out into the Haiku invocation, so agentproc.Run resolves the
-// right tenant's credentials. A regression that dropped the orgID
-// somewhere in the chain (Classify → runVotes → voteStage1 →
-// runStage1Haiku) would silently bill the wrong org in multi-mode.
+// TestClassify_OrgIDFlowsToHaiku pins the SKY-323 contract: the Runner's org
+// is threaded down through the per-project vote fan-out into the stage call,
+// so agentproc.Run resolves the right tenant's credentials. A regression that
+// dropped the orgID somewhere in the chain (classify → runVotes → voteStage1 →
+// stage1Fn) would silently bill the wrong org in multi-mode.
 func TestClassify_OrgIDFlowsToHaiku(t *testing.T) {
 	isolateHome(t)
-	stage1 := stubStage1(t, map[string]int{"A": 80, "B": 20})
-	stubStage2(t, nil)
+	const orgID = "11111111-2222-3333-4444-555555555555"
+	r, stage1, _ := stubRunner(orgID, map[string]int{"A": 80, "B": 20}, nil)
 
 	projects := []domain.Project{
 		{ID: "p-a", Name: "A"},
 		{ID: "p-b", Name: "B"},
 	}
-	const orgID = "11111111-2222-3333-4444-555555555555"
-	Classify(context.Background(), orgID, nil, nil, projects, domain.Entity{Title: "X"})
+	r.classify(context.Background(), projects, domain.Entity{Title: "X"})
 
 	got := stage1.orgIDList()
 	if len(got) != 2 {
@@ -145,11 +149,10 @@ func TestClassify_OrgIDFlowsToHaiku(t *testing.T) {
 
 func TestClassify_WinnerAboveThreshold(t *testing.T) {
 	isolateHome(t)
-	stubStage1(t, map[string]int{
+	r, _, stage2 := stubRunner("test-org", map[string]int{
 		"Auth Migration": 85,
 		"Misc Work":      20,
-	})
-	stage2 := stubStage2(t, nil)
+	}, nil)
 
 	projects := []domain.Project{
 		{ID: "p-auth", Name: "Auth Migration", Description: "Replace session storage with JWT"},
@@ -161,7 +164,7 @@ func TestClassify_WinnerAboveThreshold(t *testing.T) {
 		Title: "Migrate session token validation",
 	}
 
-	winner, votes := Classify(context.Background(), "test-org", nil, nil, projects, entity)
+	winner, votes := r.classify(context.Background(), projects, entity)
 	if winner == nil {
 		t.Fatalf("expected winner, got nil; votes: %+v", votes)
 	}
@@ -175,11 +178,10 @@ func TestClassify_WinnerAboveThreshold(t *testing.T) {
 
 func TestClassify_AllBelowThreshold_ReturnsNil(t *testing.T) {
 	isolateHome(t)
-	stubStage1(t, map[string]int{
+	r, _, stage2 := stubRunner("test-org", map[string]int{
 		"Misc Work":     20,
 		"Other Project": 45,
-	})
-	stage2 := stubStage2(t, nil)
+	}, nil)
 
 	projects := []domain.Project{
 		{ID: "p1", Name: "Misc Work"},
@@ -187,7 +189,7 @@ func TestClassify_AllBelowThreshold_ReturnsNil(t *testing.T) {
 	}
 	entity := domain.Entity{ID: "e1", Title: "Random PR"}
 
-	winner, votes := Classify(context.Background(), "test-org", nil, nil, projects, entity)
+	winner, votes := r.classify(context.Background(), projects, entity)
 	if winner != nil {
 		t.Errorf("expected nil winner, got %s", *winner)
 	}
@@ -202,19 +204,18 @@ func TestClassify_AllBelowThreshold_ReturnsNil(t *testing.T) {
 
 func TestClassify_HighestAboveThresholdWins(t *testing.T) {
 	isolateHome(t)
-	stubStage1(t, map[string]int{
+	r, _, _ := stubRunner("test-org", map[string]int{
 		"P1": 65,
 		"P2": 90,
 		"P3": 70,
-	})
-	stubStage2(t, nil)
+	}, nil)
 
 	projects := []domain.Project{
 		{ID: "p1", Name: "P1"},
 		{ID: "p2", Name: "P2"},
 		{ID: "p3", Name: "P3"},
 	}
-	winner, _ := Classify(context.Background(), "test-org", nil, nil, projects, domain.Entity{Title: "X"})
+	winner, _ := r.classify(context.Background(), projects, domain.Entity{Title: "X"})
 	if winner == nil || *winner != "p2" {
 		got := "<nil>"
 		if winner != nil {
@@ -226,17 +227,16 @@ func TestClassify_HighestAboveThresholdWins(t *testing.T) {
 
 func TestClassify_TiesGoToFirstReturned(t *testing.T) {
 	isolateHome(t)
-	stubStage1(t, map[string]int{
+	r, _, _ := stubRunner("test-org", map[string]int{
 		"Alpha": 75,
 		"Beta":  75,
-	})
-	stubStage2(t, nil)
+	}, nil)
 
 	projects := []domain.Project{
 		{ID: "p-alpha", Name: "Alpha"},
 		{ID: "p-beta", Name: "Beta"},
 	}
-	winner, _ := Classify(context.Background(), "test-org", nil, nil, projects, domain.Entity{Title: "X"})
+	winner, _ := r.classify(context.Background(), projects, domain.Entity{Title: "X"})
 	if winner == nil {
 		t.Fatal("expected winner")
 	}
@@ -246,7 +246,8 @@ func TestClassify_TiesGoToFirstReturned(t *testing.T) {
 }
 
 func TestClassify_NoProjects_ReturnsNilNoVotes(t *testing.T) {
-	winner, votes := Classify(context.Background(), "test-org", nil, nil, nil, domain.Entity{Title: "X"})
+	r, _, _ := stubRunner("test-org", nil, nil)
+	winner, votes := r.classify(context.Background(), nil, domain.Entity{Title: "X"})
 	if winner != nil {
 		t.Errorf("expected nil winner")
 	}
@@ -257,21 +258,20 @@ func TestClassify_NoProjects_ReturnsNilNoVotes(t *testing.T) {
 
 func TestClassify_HaikuErrorTreatedAsNoVote(t *testing.T) {
 	isolateHome(t)
-	origS1 := runStage1Haiku
-	t.Cleanup(func() { runStage1Haiku = origS1 })
-	runStage1Haiku = func(_ context.Context, _ string, prompt string, _ agentproc.SecretsReader, _ *systemllm.Recorder) (int, string, error) {
+	r, _, _ := stubRunner("test-org", nil, nil)
+	// Override stage1 with a per-project failure: "Flaky" errors, others score 80.
+	r.stage1Fn = func(_ context.Context, _, prompt string) (int, string, error) {
 		if strings.Contains(prompt, "<project_name>\nFlaky\n</project_name>") {
 			return 0, "", errors.New("simulated CLI failure")
 		}
 		return 80, "ok", nil
 	}
-	stubStage2(t, nil)
 
 	projects := []domain.Project{
 		{ID: "p-flaky", Name: "Flaky"},
 		{ID: "p-good", Name: "Healthy"},
 	}
-	winner, votes := Classify(context.Background(), "test-org", nil, nil, projects, domain.Entity{Title: "X"})
+	winner, votes := r.classify(context.Background(), projects, domain.Entity{Title: "X"})
 	if winner == nil || *winner != "p-good" {
 		got := "<nil>"
 		if winner != nil {
@@ -304,17 +304,15 @@ func TestClassify_Stage2EscalatesOnBorderlineTruncated(t *testing.T) {
 	bigContent := strings.Repeat("x", kbInlineMaxBytes+1024)
 	writeFile(t, kbDir+"/big.md", bigContent)
 
-	stubStage1(t, map[string]int{
-		"Borderline": 50, // Borderline score → stage 2 candidate when truncated.
-	})
-	stage2Calls := stubStage2(t, map[string]int{
-		"Borderline": 80, // Stage 2 promotes the borderline project past threshold.
-	})
+	r, _, stage2Calls := stubRunner("test-org",
+		map[string]int{"Borderline": 50}, // Borderline score → stage 2 candidate when truncated.
+		map[string]int{"Borderline": 80}, // Stage 2 promotes the borderline project past threshold.
+	)
 
 	projects := []domain.Project{
 		{ID: projectID, Name: "Borderline", Description: "Big-KB project"},
 	}
-	winner, votes := Classify(context.Background(), "test-org", nil, nil, projects, domain.Entity{Title: "X"})
+	winner, votes := r.classify(context.Background(), projects, domain.Entity{Title: "X"})
 	if winner == nil || *winner != projectID {
 		got := "<nil>"
 		if winner != nil {
@@ -343,21 +341,17 @@ func TestClassify_Stage2EscalatesOnBorderlineTruncated(t *testing.T) {
 // can't help.
 func TestClassify_Stage2DoesNotFireWithoutTruncation(t *testing.T) {
 	isolateHome(t)
-	stubStage1(t, map[string]int{
-		"NotTruncated": 50, // Borderline score…
-	})
-	stage2 := stubStage2(t, map[string]int{
-		"NotTruncated": 80,
-	})
+	r, _, stage2 := stubRunner("test-org",
+		map[string]int{"NotTruncated": 50}, // Borderline score…
+		map[string]int{"NotTruncated": 80},
+	)
 
 	// readProjectKB returns truncated=false when the KB doesn't exist
-	// on disk, which is the default in unit tests with a temp HOME —
-	// but we don't even need to set HOME here because no KB dir means
-	// no truncation either way.
+	// on disk, which is the default in unit tests with a temp HOME.
 	projects := []domain.Project{
 		{ID: "p-nt", Name: "NotTruncated"},
 	}
-	winner, _ := Classify(context.Background(), "test-org", nil, nil, projects, domain.Entity{Title: "X"})
+	winner, _ := r.classify(context.Background(), projects, domain.Entity{Title: "X"})
 	if winner != nil {
 		t.Errorf("expected nil winner without escalation, got %s", *winner)
 	}

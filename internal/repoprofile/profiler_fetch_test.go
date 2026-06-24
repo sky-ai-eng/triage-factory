@@ -56,10 +56,10 @@ func TestProfiler_FetchErrorLeavesRowUntouched(t *testing.T) {
 	p := NewProfiler(
 		fixedResolver{client: github.NewClient(srv.URL, "tok")},
 		nil, // secrets unused: no with-docs repo reaches profileBatch
-		nil, // database unused in the fetch/classify path
 		repos,
 		oneOrgStore{},
 		nil, // recorder nil: a nil recorder makes Record a no-op
+		nil, // limiter nil: a nil limiter is an unlimited no-op
 		nil, // ws nil: the profiler guards every Broadcast on non-nil
 	)
 

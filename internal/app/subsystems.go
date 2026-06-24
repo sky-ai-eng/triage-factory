@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
+	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -30,11 +31,13 @@ func (a *App) buildInfra() {
 	a.srv.SetEventBus(a.bus)
 }
 
-// buildAI constructs the AI scoring manager and the project classifier.
-// Both resolve per-run LLM credentials through the run-credential seam
-// wired in buildRunCredentials. Neither starts background work here — the
-// classifier is started in startWorkers; the scorer reacts to its trigger
-// channel.
+// buildAI constructs the three background-LLM Managers — the scorer, the
+// repo-profiler, and the project classifier. All resolve per-run LLM
+// credentials through the run-credential seam wired in buildRunCredentials,
+// and all share one system-job concurrency limiter. None starts background
+// work here: each is a per-org Manager that lazy-starts a runner on the first
+// Trigger (driven by the system:poll: bus subscribers), never an explicit
+// Start in startWorkers.
 func (a *App) buildAI() {
 	// Shared across the three headless LLM jobs: each records its per-call
 	// cost + token breakdown into system_llm_runs (TFAC-451). One recorder
@@ -42,7 +45,20 @@ func (a *App) buildAI() {
 	// no-op, but the bundle always wires one.
 	llmRecorder := systemllm.NewRecorder(a.stores.SystemLLMRuns)
 
-	a.scorer = ai.NewManager(a.database, a.stores.Scores, a.stores.Entities, a.runSecrets, llmRecorder, ai.RunnerCallbacks{
+	// Shared system-job sandbox cap: one limiter injected into all
+	// three background Managers so their per-org runners can't fan out an
+	// unbounded number of gVisor sandboxes across tenants in multi-mode. It
+	// deliberately does NOT gate the curator, interactive sessions, or
+	// delegated runs (delegated has its own cap). Threaded the same way
+	// llmRecorder is.
+	//
+	// Applied in both modes (a real cap, not nil): in multi it bounds gVisor
+	// sandboxes; in local — where agentproc.Run is a direct subprocess with no
+	// sandbox — it's still a modest ceiling on concurrent background Haiku
+	// processes. nil (unlimited) is reserved for callers that opt out (tests).
+	sysLimiter := syslimit.New(syslimit.DefaultMaxConcurrentSystemRuns)
+
+	a.scorer = ai.NewManager(a.stores.Scores, a.stores.Entities, a.runSecrets, llmRecorder, sysLimiter, ai.RunnerCallbacks{
 		OnScoringStarted: func(orgID string, taskIDs []string) {
 			a.wsHub.Broadcast(websocket.Event{
 				Type:  "scoring_started",
@@ -79,7 +95,7 @@ func (a *App) buildAI() {
 	// the system:poll: "profiler" subscriber (TTL-gated per cycle) and the
 	// explicit re-profile button (force). Sibling to the scorer — both react
 	// to poll sentinels independently; scoring does NOT gate on profiling.
-	a.profiler = repoprofile.NewManager(a.ghResolver, a.runSecrets, a.database, a.stores.Repos, a.stores.Orgs, llmRecorder, a.wsHub)
+	a.profiler = repoprofile.NewManager(a.ghResolver, a.runSecrets, a.stores.Repos, a.stores.Orgs, llmRecorder, sysLimiter, a.wsHub)
 	// Chain bare-clone warming off profile-cycle completion: profiling
 	// populates repo_profiles.clone_url, which bootstrapBareClones reads.
 	// Local-only — the warm on-disk bare cache is an N=1 affordance; multi
@@ -92,11 +108,14 @@ func (a *App) buildAI() {
 	a.srv.SetProfilerTrigger(a.profiler.Trigger)
 	repoprofileLog.Info("repo-profiling manager ready (per-org runners)", "model", "haiku")
 
-	// Project classifier: per-poll, classify newly-discovered entities
-	// against existing projects via per-project Haiku quorum vote. Sticky —
-	// only fires on entities with classified_at IS NULL.
-	a.classifier = projectclassify.NewRunner(a.stores.Entities, a.stores.Projects, a.stores.Orgs, a.runSecrets, llmRecorder)
-	classifyLog.Info("project classifier ready", "model", "haiku")
+	// Project classifier: per-org Runners, classifying newly-
+	// discovered entities against existing projects via per-project Haiku
+	// quorum vote off the system:poll: subscriber. Sticky — only fires on
+	// entities with classified_at IS NULL. Sibling to the scorer/profiler:
+	// per-org isolation so a large org's backlog can't head-of-line-block
+	// another tenant's classification.
+	a.classifier = projectclassify.NewManager(a.stores.Entities, a.stores.Projects, a.runSecrets, llmRecorder, sysLimiter)
+	classifyLog.Info("project classifier manager ready (per-org runners)", "model", "haiku")
 }
 
 // buildExecution constructs the delegation spawner and the curator runtime,

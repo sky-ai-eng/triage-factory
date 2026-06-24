@@ -26,12 +26,13 @@ func (a *App) registerSubscribers() {
 		Filter: []string{"system:poll:"},
 		Handle: func(evt domain.Event) { a.scorer.Trigger(evt.OrgID) },
 	})
-	// Kick the project classifier on poll-complete sentinels; it rotates
-	// through orgs internally.
+	// Kick the per-org project classifier on poll-complete sentinels.
+	// evt.OrgID scopes the per-org Runner (like the scorer above); an empty
+	// value is dropped by Manager.Trigger.
 	a.bus.Subscribe(eventbus.Subscriber{
 		Name:   "classifier",
 		Filter: []string{"system:poll:"},
-		Handle: func(evt domain.Event) { a.classifier.Trigger() },
+		Handle: func(evt domain.Event) { a.classifier.Trigger(evt.OrgID) },
 	})
 	// Kick the per-org repo profiler on GitHub poll-complete sentinels. The
 	// cycle is TTL-gated, so steady state is ~one staleness check per repo

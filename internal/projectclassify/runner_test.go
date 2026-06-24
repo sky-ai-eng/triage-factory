@@ -2,16 +2,51 @@ package projectclassify
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
+
+	_ "modernc.org/sqlite"
 )
+
+// newTestDB opens an in-memory SQLite DB with the test schema bootstrapped.
+// Shared by the runner tests that exercise the real per-org cycle against the
+// store (the WaitFor tests use an in-memory fake instead).
+func newTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+	if err := db.BootstrapSchemaForTest(database); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
+	}
+	return database
+}
+
+// errStage2 is a stage2Func that fails loudly: the runner tests below never
+// reach Stage 2 (no borderline+truncated vote), so a call means a regression.
+func errStage2(context.Context, string, string, string) (int, string, error) {
+	return 0, "", errors.New("stage2 should not be reached")
+}
+
+// TestRunner_StopIdempotent pins that Stop is safe to call more than once
+// (guarded by stopOnce); a bare close(r.stop) would panic on the second call.
+func TestRunner_StopIdempotent(t *testing.T) {
+	r := NewRunner(nil, nil, runmode.LocalDefaultOrgID, nil, nil, nil)
+	r.Start()
+	r.Stop()
+	r.Stop() // must not panic
+}
 
 // TestRunner_AllErroredLeavesEntityForRetry guards against the bug
 // where a fully-failed classification cycle (e.g., claude CLI
@@ -31,14 +66,12 @@ func TestRunner_AllErroredLeavesEntityForRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil)
 	// Force every Stage 1 vote to error (simulates claude CLI down).
-	origS1 := runStage1Haiku
-	t.Cleanup(func() { runStage1Haiku = origS1 })
-	runStage1Haiku = func(_ context.Context, _ string, prompt string, _ agentproc.SecretsReader, _ *systemllm.Recorder) (int, string, error) {
+	r.stage1Fn = func(context.Context, string, string) (int, string, error) {
 		return 0, "", errors.New("simulated CLI down")
 	}
-
-	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs, nil, nil)
+	r.stage2Fn = errStage2
 	r.run(context.Background()) // synchronous one cycle
 
 	post, err := sqlitestore.New(database).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)
@@ -76,16 +109,14 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origS1 := runStage1Haiku
-	t.Cleanup(func() { runStage1Haiku = origS1 })
-	runStage1Haiku = func(_ context.Context, _ string, prompt string, _ agentproc.SecretsReader, _ *systemllm.Recorder) (int, string, error) {
+	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil)
+	r.stage1Fn = func(_ context.Context, _, prompt string) (int, string, error) {
 		if strings.Contains(prompt, "<project_name>\nFlaky\n</project_name>") {
 			return 0, "", errors.New("simulated CLI failure for Flaky")
 		}
 		return 30, "stub for Good", nil
 	}
-
-	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs, nil, nil)
+	r.stage2Fn = errStage2
 	r.run(context.Background())
 
 	post, err := sqlitestore.New(database).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)

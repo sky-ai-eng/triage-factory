@@ -1,11 +1,11 @@
 package ai
 
 import (
-	"database/sql"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
@@ -25,11 +25,11 @@ import (
 // runmode.LocalDefaultOrgID sentinel — behavior is functionally
 // identical to a single-runner build, just routed through the map.
 type Manager struct {
-	database  *sql.DB
 	scores    db.ScoreStore
 	entities  db.EntityStore
 	secrets   agentproc.SecretsReader // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi). SKY-389.
 	recorder  *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
+	limiter   *syslimit.Limiter       // shared system-job sandbox cap, injected into every per-org Runner.
 	callbacks RunnerCallbacks
 
 	mu      sync.Mutex
@@ -37,13 +37,13 @@ type Manager struct {
 	stopped bool
 }
 
-func NewManager(database *sql.DB, scores db.ScoreStore, entities db.EntityStore, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, callbacks RunnerCallbacks) *Manager {
+func NewManager(scores db.ScoreStore, entities db.EntityStore, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, limiter *syslimit.Limiter, callbacks RunnerCallbacks) *Manager {
 	return &Manager{
-		database:  database,
 		scores:    scores,
 		entities:  entities,
 		secrets:   secrets,
 		recorder:  recorder,
+		limiter:   limiter,
 		callbacks: callbacks,
 		runners:   make(map[string]*Runner),
 	}
@@ -70,7 +70,7 @@ func (m *Manager) Trigger(orgID string) {
 	}
 	r, ok := m.runners[orgID]
 	if !ok {
-		r = NewRunner(m.database, m.scores, m.entities, orgID, m.secrets, m.recorder, m.callbacks)
+		r = NewRunner(m.scores, m.entities, orgID, m.secrets, m.recorder, m.limiter, m.callbacks)
 		r.Start()
 		m.runners[orgID] = r
 	}

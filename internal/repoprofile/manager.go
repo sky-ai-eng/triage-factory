@@ -1,12 +1,12 @@
 package repoprofile
 
 import (
-	"database/sql"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -39,12 +39,12 @@ type Manager struct {
 }
 
 // NewManager builds a profiling Manager with the same constructor deps as
-// NewProfiler (resolver, secrets, DB handle, repo store, orgs store, WS
-// hub). The wrapped Profiler is shared across every per-org Runner — it is
-// stateless, reading credentials fresh per repo through the resolver, so a
-// config-change hot-swap is honored without rebuilding it.
-func NewManager(resolver github.Resolver, secrets agentproc.SecretsReader, database *sql.DB, repos db.RepoStore, orgs db.OrgsStore, recorder *systemllm.Recorder, ws *websocket.Hub) *Manager {
-	profiler := NewProfiler(resolver, secrets, database, repos, orgs, recorder, ws)
+// NewProfiler (resolver, secrets, repo store, orgs store, recorder, shared
+// system-job limiter, WS hub). The wrapped Profiler is shared across every
+// per-org Runner — it is stateless, reading credentials fresh per repo through
+// the resolver, so a config-change hot-swap is honored without rebuilding it.
+func NewManager(resolver github.Resolver, secrets agentproc.SecretsReader, repos db.RepoStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Manager {
+	profiler := NewProfiler(resolver, secrets, repos, orgs, recorder, limiter, ws)
 	return &Manager{
 		profiler: profiler,
 		runners:  make(map[string]*Runner),

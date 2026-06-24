@@ -44,15 +44,15 @@ func (a *App) runStartupTasks(ctx context.Context) {
 	}
 }
 
-// startWorkers starts the project classifier, the knowledge-base file
-// watcher, and the long-lived background workers. The workers take the app
-// context so they shut down cleanly on SIGINT/SIGTERM — previously these
-// used a never-cancelled background context ("the binary has no top-level
-// cancel today").
+// startWorkers starts the knowledge-base file watcher and the long-lived
+// background workers. The workers take the app context so they shut down
+// cleanly on SIGINT/SIGTERM — previously these used a never-cancelled
+// background context ("the binary has no top-level cancel today").
+//
+// The classifier is no longer Start()-ed here: it is now a per-org Manager
+// that lazy-starts a runner on first Trigger, matching the
+// scorer/profiler which are likewise never explicitly started.
 func (a *App) startWorkers(ctx context.Context) {
-	a.classifier.Start()
-	classifyLog.Info("project classifier started", "model", "haiku")
-
 	a.startKnowledgeWatcher()
 
 	// Drain sweeper: safety net for queues stuck on transient fire errors.

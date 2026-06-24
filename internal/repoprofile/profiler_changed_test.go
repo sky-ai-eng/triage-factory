@@ -34,7 +34,7 @@ func TestRunOrg_ChangedTracksUpsertSuccess(t *testing.T) {
 	defer srv.Close()
 
 	newProfiler := func(repos db.RepoStore) *Profiler {
-		return NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil)
+		return NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, repos, oneOrgStore{}, nil, nil, nil)
 	}
 
 	t.Run("successful upsert → changed=true", func(t *testing.T) {
@@ -106,7 +106,7 @@ func TestRunOrg_ChangedTracksBatchUpserts(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			repos := &batchRepoStore{names: []string{"own/withdocs"}, failUpsert: tc.failUpsert}
-			p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil)
+			p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, repos, oneOrgStore{}, nil, nil, nil)
 			p.batchFn = tc.batchFn
 			changed, err := p.RunOrg(context.Background(), "org-1", true)
 			if err != nil {
@@ -173,7 +173,7 @@ func TestRunOrg_BatchFailLeavesProfiledAtUnset(t *testing.T) {
 	defer srv.Close()
 
 	repos := &batchRepoStore{names: []string{"own/withdocs"}}
-	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil)
+	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, repos, oneOrgStore{}, nil, nil, nil)
 	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return nil, stubErr("simulated batch failure")
 	}

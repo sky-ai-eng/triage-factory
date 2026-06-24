@@ -65,7 +65,7 @@ type App struct {
 	// Subsystems.
 	scorer     *ai.Manager
 	profiler   *repoprofile.Manager
-	classifier *projectclassify.Runner
+	classifier *projectclassify.Manager
 	ingestor   *ingest.Ingestor
 	eventWake  chan struct{}
 	pollerMgr  *poller.Manager

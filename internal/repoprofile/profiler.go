@@ -2,7 +2,6 @@ package repoprofile
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -21,7 +21,6 @@ import (
 
 const (
 	profileBatchSize = 5
-	profilingModel   = "haiku"
 	maxDocChars      = 10000
 	reprofileTTL     = 3 * 24 * time.Hour // skip repos profiled within the last 3 days
 )
@@ -30,28 +29,30 @@ const (
 type Profiler struct {
 	resolver github.Resolver         // per-(org, owner) GitHub client source — App-installation token in multi, keychain PAT in local. SKY-389.
 	secrets  agentproc.SecretsReader // per-org LLM-credential reader for the profiling Haiku calls (nil in local → ambient subscription; system-door reader in multi). SKY-389.
-	database *sql.DB
-	repos    db.RepoStore        // profile reads + upserts go through the store
-	orgs     db.OrgsStore        // iterate active orgs at the top of each profile run
-	recorder *systemllm.Recorder // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
+	repos    db.RepoStore            // profile reads + upserts go through the store
+	orgs     db.OrgsStore            // iterate active orgs at the top of each profile run
+	recorder *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	ws       *websocket.Hub
 
-	// batchFn runs one Haiku profiling batch. Defaulted (in NewProfiler) to
-	// a closure over profileBatch that captures the recorder, so the field
-	// signature stays recorder-free and test overrides need no change.
-	// Overridable so tests can exercise the with-docs upsert / fallback
-	// paths without spawning a real agent subprocess.
+	// batchFn runs one Haiku profiling batch. Defaulted (in NewProfiler) to a
+	// closure over profileBatch that captures the recorder + system-job
+	// limiter, so the field signature stays free of both and test overrides
+	// need no change. Overridable so tests can exercise the with-docs upsert /
+	// fallback paths without spawning a real agent subprocess.
 	batchFn func(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error)
 }
 
 // NewProfiler creates a Profiler with the given GitHub resolver, per-org
-// secrets reader, DB handle, repo store, orgs store, and WS hub. The
-// resolver is consulted per (org, owner) inside the profiling loop so the
-// same code path serves both local (keychain PAT) and multi (App token).
-func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, database *sql.DB, repos db.RepoStore, orgs db.OrgsStore, recorder *systemllm.Recorder, ws *websocket.Hub) *Profiler {
-	p := &Profiler{resolver: resolver, secrets: secrets, database: database, repos: repos, orgs: orgs, recorder: recorder, ws: ws}
+// secrets reader, repo store, orgs store, recorder, shared system-job limiter,
+// and WS hub. The resolver is consulted per (org, owner) inside the profiling
+// loop so the same code path serves both local (keychain PAT) and multi (App
+// token). The limiter (nil → unlimited) bounds concurrent profiling sandboxes
+// against the other background jobs; it is captured by batchFn alongside the
+// recorder.
+func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, repos db.RepoStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Profiler {
+	p := &Profiler{resolver: resolver, secrets: secrets, repos: repos, orgs: orgs, recorder: recorder, ws: ws}
 	p.batchFn = func(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error) {
-		return profileBatch(ctx, orgID, batch, secrets, recorder)
+		return profileBatch(ctx, orgID, batch, secrets, recorder, limiter)
 	}
 	return p
 }
@@ -364,7 +365,7 @@ type repoProfileResult struct {
 	Profile string `json:"profile"`
 }
 
-func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader, recorder *systemllm.Recorder) ([]repoProfileResult, error) {
+func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, limiter *syslimit.Limiter) ([]repoProfileResult, error) {
 	inputs := make([]repoProfileInput, len(batch))
 	for i, d := range batch {
 		inputs[i] = repoProfileInput{
@@ -380,6 +381,15 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 
 	prompt := fmt.Sprintf(ai.RepoProfilePrompt, string(inputJSON))
 
+	// Bound concurrent background sandboxes across all orgs + jobs. A
+	// cancelled ctx returns the error into the existing batch-failure path
+	// (fallback upsert without AI summary, row left for retry). A nil limiter
+	// is an unlimited no-op (used by tests).
+	if err := limiter.Acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer limiter.Release()
+
 	// Run through the shared agent runtime. UsageSink accumulates the
 	// per-message token breakdown (no transcript persisted); we only parse
 	// the terminal Result.Result JSON array below, but the cost + tokens
@@ -387,7 +397,7 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 	startedAt := time.Now().UTC()
 	usage := &agentproc.UsageSink{}
 	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
-		Model:   profilingModel,
+		Model:   ai.SystemJobModel,
 		Message: prompt,
 		TraceID: "repoprofile-batch",
 		OrgID:   orgID,
@@ -398,7 +408,7 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 	recorder.Record(ctx, systemllm.Call{
 		OrgID:     orgID,
 		Job:       systemllm.JobRepoProfiler,
-		Model:     profilingModel,
+		Model:     ai.SystemJobModel,
 		StartedAt: startedAt,
 		Metadata:  map[string]any{"repo_count": len(batch)},
 	}, outcome, usage)

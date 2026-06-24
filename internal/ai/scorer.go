@@ -3,7 +3,6 @@ package ai
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -12,8 +11,8 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
@@ -88,23 +87,34 @@ type TaskScore struct {
 	Summary             string  `json:"summary"`
 }
 
-// scoringModel is always haiku — fast and cheap, plenty capable for
-// summarization and priority scoring. The user's model preference
-// is reserved for heavier features like delegation.
-const scoringModel = "haiku"
+// SystemJobModel is the model the three headless background jobs (scorer,
+// repo-profiler, project-classifier) run on: always haiku — fast and cheap,
+// plenty capable for summarization, priority scoring, and classification. The
+// user's model preference is reserved for heavier features like delegation.
+// Shared here (rather than re-declared per package) so the three surfaces
+// can't drift on Haiku version.
+const SystemJobModel = "haiku"
 
-// ScoreTasks runs the AI scoring pipeline on a set of tasks.
-// It batches into chunks of batchSize and runs them in parallel.
-// The returned skippedTasks is the exact count of task inputs that were
-// in failed batches — computed per-batch rather than inferred from
-// failedBatches * batchSize so the final partial batch doesn't inflate
-// the count, and so the number stays correct if batchSize changes.
-// Failures are non-fatal: the function still returns whatever scores
-// succeeded, and the caller surfaces skippedTasks as a warning toast.
-func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, orgID string, tasks []domain.Task, secrets agentproc.SecretsReader, recorder *systemllm.Recorder) (scores []TaskScore, skippedTasks int, err error) {
+// batchScoreFn scores one batch of task inputs. It is the scorer's unit-test
+// seam: the Runner holds one as a struct field (scoreFn), defaulted to a
+// closure over the real scoreBatch that captures the recorder + system-job
+// limiter, so tests can inject a stub without spawning an agent subprocess and
+// without a package-level mutable var. Mirrors the repo-profiler's batchFn.
+type batchScoreFn func(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader) ([]TaskScore, error)
+
+// scoreTasks runs the AI scoring pipeline on a set of tasks for the Runner's
+// org. It batches into chunks of batchSize and runs them in parallel via
+// r.scoreFn (the injectable batch seam). The returned skippedTasks is the
+// exact count of task inputs that were in failed batches — computed per-batch
+// rather than inferred from failedBatches * batchSize so the final partial
+// batch doesn't inflate the count, and so the number stays correct if
+// batchSize changes. Failures are non-fatal: the method still returns whatever
+// scores succeeded, and the caller surfaces skippedTasks as a warning toast.
+func (r *Runner) scoreTasks(ctx context.Context, tasks []domain.Task) (scores []TaskScore, skippedTasks int, err error) {
 	if len(tasks) == 0 {
 		return nil, 0, nil
 	}
+	orgID := r.orgID
 
 	// Batch-load descriptions from the dedicated entities.description column
 	// (not snapshot_json — description is bulk text, kept outside diff scope).
@@ -114,13 +124,13 @@ func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, 
 		entityIDs = append(entityIDs, t.EntityID)
 	}
 	descriptions := map[string]string{}
-	if entities != nil {
+	if r.entities != nil {
 		// The scorer is a singleton background goroutine triggered
 		// by event-bus sentinels — no JWT-claims context. Route the
 		// bulk description read through the admin pool variant
 		// (SKY-296) so Postgres multi-mode doesn't degrade every
 		// scored task to title-only context under RLS.
-		if descs, err := entities.DescriptionsSystem(ctx, orgID, entityIDs); err != nil {
+		if descs, err := r.entities.DescriptionsSystem(ctx, orgID, entityIDs); err != nil {
 			aiLog.Warn("load entity descriptions for scoring failed", "error", err)
 		} else {
 			descriptions = descs
@@ -168,7 +178,7 @@ func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, 
 		wg.Add(1)
 		go func(idx int, b []TaskInput) {
 			defer wg.Done()
-			scores, err := scoreBatch(ctx, b, orgID, secrets, recorder)
+			scores, err := r.scoreFn(ctx, b, orgID, r.secrets)
 			results[idx] = batchResult{scores, err}
 		}(i, batch)
 	}
@@ -180,25 +190,34 @@ func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, 
 	// if batchSize changes.
 	var allScores []TaskScore
 	skipped := 0
-	for i, r := range results {
-		if r.err != nil {
-			aiLog.Warn("scoring batch failed; tasks skipped", "batch", i+1, "batches", len(batches), "skipped", len(batches[i]), "error", r.err)
+	for i, res := range results {
+		if res.err != nil {
+			aiLog.Warn("scoring batch failed; tasks skipped", "batch", i+1, "batches", len(batches), "skipped", len(batches[i]), "error", res.err)
 			skipped += len(batches[i])
 			continue
 		}
-		allScores = append(allScores, r.scores...)
+		allScores = append(allScores, res.scores...)
 	}
 
 	return allScores, skipped, nil
 }
 
-func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder) ([]TaskScore, error) {
+func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, limiter *syslimit.Limiter) ([]TaskScore, error) {
 	tasksJSON, err := json.Marshal(tasks)
 	if err != nil {
 		return nil, fmt.Errorf("marshal tasks: %w", err)
 	}
 
 	prompt := fmt.Sprintf(batchPrioritizePrompt, string(tasksJSON))
+
+	// Bound concurrent background sandboxes across all orgs + jobs. A
+	// cancelled ctx here returns the error into the per-batch skip path above
+	// (the batch counts as skipped, its tasks reset to pending for retry). A
+	// nil limiter is an unlimited no-op (used by tests).
+	if err := limiter.Acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer limiter.Release()
 
 	// Run through the shared agent runtime. The terminal `result` event
 	// populates outcome.Result.Result with the agent's final response —
@@ -212,7 +231,7 @@ func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets ag
 	startedAt := time.Now().UTC()
 	usage := &agentproc.UsageSink{}
 	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
-		Model:   scoringModel,
+		Model:   SystemJobModel,
 		Message: prompt,
 		TraceID: "scorer-batch",
 		OrgID:   orgID,
@@ -224,7 +243,7 @@ func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets ag
 	recorder.Record(ctx, systemllm.Call{
 		OrgID:     orgID,
 		Job:       systemllm.JobScorer,
-		Model:     scoringModel,
+		Model:     SystemJobModel,
 		StartedAt: startedAt,
 		Metadata:  map[string]any{"batch_size": len(tasks)},
 	}, outcome, usage)

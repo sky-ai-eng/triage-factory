@@ -2,108 +2,116 @@ package projectclassify
 
 import (
 	"context"
-	"database/sql"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-
-	_ "modernc.org/sqlite"
 )
 
-func newTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	t.Cleanup(func() { database.Close() })
-	if err := db.BootstrapSchemaForTest(database); err != nil {
-		t.Fatalf("bootstrap schema: %v", err)
-	}
-	return database
+// waitEntities is an in-memory EntityStore for the WaitFor tests. WaitFor now
+// drives a *Manager, which lazy-starts a real per-org runner on Trigger — so a
+// real DB store would let that runner mutate (classify) the entity mid-test.
+// This fake instead drives the two reads deterministically:
+//   - ClassificationStatusSystem (WaitFor's probe): returns (classified,
+//     exists) under the mutex so a test can flip them mid-wait.
+//   - ListUnclassifiedSystem (the triggered runner's cycle entry): returns an
+//     empty list so the runner exits before touching projects / the LLM, and
+//     counts calls so a test can assert the Manager actually kicked a runner.
+type waitEntities struct {
+	db.EntityStore
+	mu         sync.Mutex
+	classified bool
+	exists     bool
+	listCalls  int
 }
+
+func (w *waitEntities) ClassificationStatusSystem(ctx context.Context, orgID, entityID string) (bool, bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.classified, w.exists, nil
+}
+
+func (w *waitEntities) ListUnclassifiedSystem(ctx context.Context, orgID string) ([]domain.Entity, error) {
+	w.mu.Lock()
+	w.listCalls++
+	w.mu.Unlock()
+	return nil, nil
+}
+
+func (w *waitEntities) setClassified(v bool) {
+	w.mu.Lock()
+	w.classified = v
+	w.mu.Unlock()
+}
+
+func (w *waitEntities) listCallCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.listCalls
+}
+
+// newWaitManager builds a Manager over the fake store. projects is nil — the
+// triggered runner exits on the empty unclassified list before any project
+// read. Callers defer m.Stop() to tear down the lazily-started runner.
+func newWaitManager(w *waitEntities) *Manager {
+	return NewManager(w, nil, nil, nil, nil)
+}
+
+const waitOrg = runmode.LocalDefaultOrgID
 
 // TestWaitFor_ReturnsImmediatelyWhenAlreadyClassified guards the
 // fast-path: an entity that's already been classified should not
 // trigger the runner or wait at all.
 func TestWaitFor_ReturnsImmediatelyWhenAlreadyClassified(t *testing.T) {
-	database := newTestDB(t)
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "T", "https://x/1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sqlitestore.New(database).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, entity.ID, nil, ""); err != nil {
-		t.Fatal(err)
-	}
+	w := &waitEntities{classified: true, exists: true}
+	m := newWaitManager(w)
+	defer m.Stop()
 
-	runner := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs, nil, nil)
 	start := time.Now()
-	WaitFor(context.Background(), runner, runmode.LocalDefaultOrgID, entity.ID, 5*time.Second)
+	WaitFor(context.Background(), m, waitOrg, "e1", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if elapsed > 100*time.Millisecond {
 		t.Errorf("WaitFor took %s — should have returned immediately for classified entity", elapsed)
 	}
+	if got := w.listCallCount(); got != 0 {
+		t.Errorf("classified entity triggered %d runner cycles; want 0 (no trigger on the fast path)", got)
+	}
 }
 
-// TestWaitFor_TriggersRunnerOnEntry verifies that WaitFor pings the
-// runner so it wakes up even if no post-poll trigger has fired for
-// this entity yet. Relies on the runner being started so the trigger
-// channel actually drains.
+// TestWaitFor_TriggersRunnerOnEntry verifies that WaitFor kicks the org's
+// classifier (via Manager.Trigger) so it wakes up even if no post-poll trigger
+// has fired for this entity yet. We observe the triggered runner's cycle
+// (ListUnclassifiedSystem) rather than the now-internal trigger channel.
 func TestWaitFor_TriggersRunnerOnEntry(t *testing.T) {
-	database := newTestDB(t)
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#2", "pr", "T", "https://x/2")
-	if err != nil {
-		t.Fatal(err)
-	}
+	w := &waitEntities{classified: false, exists: true}
+	m := newWaitManager(w)
+	defer m.Stop()
 
-	runner := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs, nil, nil)
-	// Don't Start the runner — we just want to observe that Trigger()
-	// got invoked. Inspect the trigger channel directly: a buffered
-	// chan with capacity 1 should have one signal queued after WaitFor.
-	// Cancellable ctx so the goroutine doesn't outlive the test —
-	// avoids a leaked WaitFor sleeping out its timeout in the
-	// background and logging into adjacent tests.
+	// Cancellable ctx so the WaitFor goroutine doesn't outlive the test.
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go WaitFor(ctx, runner, runmode.LocalDefaultOrgID, entity.ID, 200*time.Millisecond)
-	// Give the goroutine a moment to enter WaitFor and call Trigger.
-	time.Sleep(50 * time.Millisecond)
+	go WaitFor(ctx, m, waitOrg, "e2", 200*time.Millisecond)
 
-	select {
-	case <-runner.trigger:
-		// expected
-	default:
-		t.Errorf("runner.Trigger not invoked by WaitFor")
+	if !waitFor(time.Second, func() bool { return w.listCallCount() >= 1 }) {
+		t.Errorf("Manager.Trigger did not kick a runner cycle for the org")
 	}
 }
 
 // TestWaitFor_HonorsTimeout verifies WaitFor returns within the
 // configured budget when classification never completes.
 func TestWaitFor_HonorsTimeout(t *testing.T) {
-	database := newTestDB(t)
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#3", "pr", "T", "https://x/3")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	runner := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs, nil, nil)
-	// Drain any trigger so the test focuses on the timeout path.
-	go func() {
-		<-runner.trigger
-	}()
+	w := &waitEntities{classified: false, exists: true}
+	m := newWaitManager(w)
+	defer m.Stop()
 
 	start := time.Now()
-	WaitFor(context.Background(), runner, runmode.LocalDefaultOrgID, entity.ID, 250*time.Millisecond)
+	WaitFor(context.Background(), m, waitOrg, "e3", 250*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if elapsed < 200*time.Millisecond {
@@ -117,27 +125,18 @@ func TestWaitFor_HonorsTimeout(t *testing.T) {
 // TestWaitFor_WakesOnceClassificationLands verifies the polling loop
 // returns promptly once classified_at is set mid-wait.
 func TestWaitFor_WakesOnceClassificationLands(t *testing.T) {
-	database := newTestDB(t)
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#4", "pr", "T", "https://x/4")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	runner := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs, nil, nil)
-	go func() {
-		<-runner.trigger
-	}()
+	w := &waitEntities{classified: false, exists: true}
+	m := newWaitManager(w)
+	defer m.Stop()
 
 	// Mid-wait, mark the entity classified.
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		if err := sqlitestore.New(database).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, entity.ID, nil, ""); err != nil {
-			t.Errorf("AssignEntityProject in goroutine: %v", err)
-		}
+		w.setClassified(true)
 	}()
 
 	start := time.Now()
-	WaitFor(context.Background(), runner, runmode.LocalDefaultOrgID, entity.ID, 5*time.Second)
+	WaitFor(context.Background(), m, waitOrg, "e4", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if elapsed > 2*time.Second {
@@ -146,25 +145,24 @@ func TestWaitFor_WakesOnceClassificationLands(t *testing.T) {
 }
 
 // TestWaitFor_ReturnsEarlyOnMissingEntity guards against the bug where
-// classified() treated sql.ErrNoRows as "still unclassified" and the
+// the probe treated a missing row as "still unclassified" and the
 // caller stalled the full timeout for a deleted/non-existent row.
-//
-// Intentionally no drainer goroutine on runner.trigger — WaitFor
-// short-circuits BEFORE calling Trigger() for a missing entity, so a
-// drainer would block forever waiting for a signal that never comes.
 func TestWaitFor_ReturnsEarlyOnMissingEntity(t *testing.T) {
-	database := newTestDB(t)
-	runner := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs, nil, nil)
+	w := &waitEntities{exists: false}
+	m := newWaitManager(w)
+	defer m.Stop()
 
-	// UUID-shaped id so this mirrors the cross-backend convention
-	// (entity_conformance.go binds missing ids as UUIDs for the Postgres
-	// uuid column); the row simply doesn't exist.
+	// UUID-shaped id mirrors the cross-backend convention; the row simply
+	// doesn't exist.
 	start := time.Now()
-	WaitFor(context.Background(), runner, runmode.LocalDefaultOrgID, uuid.NewString(), 5*time.Second)
+	WaitFor(context.Background(), m, waitOrg, uuid.NewString(), 5*time.Second)
 	elapsed := time.Since(start)
 
 	if elapsed > 100*time.Millisecond {
 		t.Errorf("WaitFor took %s for a missing entity — should have returned immediately", elapsed)
+	}
+	if got := w.listCallCount(); got != 0 {
+		t.Errorf("missing entity triggered %d runner cycles; want 0 (short-circuit before Trigger)", got)
 	}
 }
 
@@ -172,16 +170,9 @@ func TestWaitFor_ReturnsEarlyOnMissingEntity(t *testing.T) {
 // when the caller's ctx is cancelled (run aborted, server shutting
 // down), WaitFor must break out instead of blocking the full timeout.
 func TestWaitFor_ReturnsOnContextCancel(t *testing.T) {
-	database := newTestDB(t)
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#5", "pr", "T", "https://x/5")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	runner := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs, nil, nil)
-	go func() {
-		<-runner.trigger
-	}()
+	w := &waitEntities{classified: false, exists: true}
+	m := newWaitManager(w)
+	defer m.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -190,7 +181,7 @@ func TestWaitFor_ReturnsOnContextCancel(t *testing.T) {
 	}()
 
 	start := time.Now()
-	WaitFor(ctx, runner, runmode.LocalDefaultOrgID, entity.ID, 5*time.Second)
+	WaitFor(ctx, m, waitOrg, "e5", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if elapsed > 1*time.Second {
@@ -201,38 +192,45 @@ func TestWaitFor_ReturnsOnContextCancel(t *testing.T) {
 // TestWaitFor_PreCancelledCtxReturnsWithoutTrigger guards the entry-time
 // cancellation guard: a WaitFor entered with an already-cancelled context
 // must return immediately AND must not kick the classifier — waking the
-// runner on a shutdown path is pointless work. Intentionally no drainer
-// goroutine on runner.trigger; we assert the channel is empty afterward.
+// runner on a shutdown path is pointless work.
 func TestWaitFor_PreCancelledCtxReturnsWithoutTrigger(t *testing.T) {
-	database := newTestDB(t)
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#6", "pr", "T", "https://x/6")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	runner := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs, nil, nil)
+	w := &waitEntities{classified: false, exists: true}
+	m := newWaitManager(w)
+	defer m.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancelled before entry
 
 	start := time.Now()
-	WaitFor(ctx, runner, runmode.LocalDefaultOrgID, entity.ID, 5*time.Second)
+	WaitFor(ctx, m, waitOrg, "e6", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if elapsed > 100*time.Millisecond {
 		t.Errorf("WaitFor took %s for a pre-cancelled ctx — should have returned immediately", elapsed)
 	}
-
-	// The entry guard returns before runner.Trigger(), so the buffered
-	// trigger channel must still be empty.
-	select {
-	case <-runner.trigger:
-		t.Errorf("WaitFor kicked the classifier on a pre-cancelled ctx — the entry guard should skip Trigger()")
-	default:
+	if got := w.listCallCount(); got != 0 {
+		t.Errorf("WaitFor kicked the classifier on a pre-cancelled ctx (%d cycles); the entry guard should skip Trigger", got)
 	}
 }
 
-// silence unused-import warning when domain is not directly used in
-// trivial paths above.
-var _ = domain.Entity{}
-var _ atomic.Int32
+// TestWaitFor_EmptyOrgReturnsEarly guards the empty-orgID path: classification
+// is org-scoped and Manager.Trigger drops an empty org, so WaitFor must return
+// immediately rather than poll the full timeout for a kick that can never fire.
+func TestWaitFor_EmptyOrgReturnsEarly(t *testing.T) {
+	w := &waitEntities{classified: false, exists: true}
+	m := newWaitManager(w)
+	defer m.Stop()
+
+	start := time.Now()
+	WaitFor(context.Background(), m, "", "e-empty", 5*time.Second)
+	elapsed := time.Since(start)
+
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("WaitFor took %s for an empty orgID — should return immediately (a kick can never fire)", elapsed)
+	}
+	if got := w.listCallCount(); got != 0 {
+		t.Errorf("empty orgID triggered %d runner cycles; want 0", got)
+	}
+}
+
+var _ db.EntityStore = (*waitEntities)(nil)
