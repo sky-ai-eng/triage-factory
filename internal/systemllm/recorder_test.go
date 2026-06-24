@@ -120,3 +120,38 @@ func TestRecorder_NilSafe(t *testing.T) {
 	NewRecorder(nil).Record(context.Background(), Call{Job: JobScorer},
 		&agentproc.Outcome{Result: &agentproc.Result{}}, &agentproc.UsageSink{})
 }
+
+// ctxCheckingStore mimics a real DB driver: it fails the insert if the ctx it
+// receives is already cancelled, and records the row otherwise.
+type ctxCheckingStore struct{ rows []domain.SystemLLMRun }
+
+func (s *ctxCheckingStore) Record(ctx context.Context, row domain.SystemLLMRun) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.rows = append(s.rows, row)
+	return nil
+}
+
+// TestRecorder_RecordsDespiteCancelledCtx is the regression test for the
+// shutdown/timeout drop: when a run completes just as its ctx is cancelled,
+// the accounting row must still land. Record detaches the insert from the
+// caller's ctx, so a store that rejects a cancelled ctx (every real DB
+// driver) still sees a live context and writes the row.
+func TestRecorder_RecordsDespiteCancelledCtx(t *testing.T) {
+	cs := &ctxCheckingStore{}
+	r := NewRecorder(cs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already dead before Record is called, as on shutdown
+
+	r.Record(ctx, Call{OrgID: "o", Job: JobScorer, Model: "haiku"},
+		&agentproc.Outcome{Result: &agentproc.Result{CostUSD: 0.01}}, &agentproc.UsageSink{InputTokens: 9})
+
+	if len(cs.rows) != 1 {
+		t.Fatalf("recorded %d rows, want 1 (insert must survive a cancelled caller ctx)", len(cs.rows))
+	}
+	if cs.rows[0].InputTokens != 9 {
+		t.Errorf("row not carried through: %+v", cs.rows[0])
+	}
+}

@@ -21,6 +21,11 @@ import (
 
 var log = logging.Component("systemllm")
 
+// recordTimeout bounds the detached accounting insert (see Record). Short
+// enough that a wedged DB can't stall server teardown, generous enough for a
+// local SQLite insert or an admin-pool Postgres round-trip.
+const recordTimeout = 5 * time.Second
+
 // Job discriminators for the system_llm_runs.job column.
 const (
 	JobScorer       = "scorer"
@@ -101,7 +106,16 @@ func (r *Recorder) Record(ctx context.Context, c Call, outcome *agentproc.Outcom
 		}
 	}
 
-	if err := r.store.Record(ctx, row); err != nil {
+	// Detach the insert from the caller's ctx. The run we're accounting for
+	// has already finished, so its ctx serves no purpose here — and when that
+	// ctx was cancelled (shutdown / per-run timeout) it's precisely the run
+	// that completed in the cancellation window whose row we'd otherwise drop,
+	// passing the dead ctx straight into a guaranteed-failing insert. Keep the
+	// ctx's values (WithoutCancel) and impose a fresh short deadline so a
+	// wedged DB still can't hang teardown.
+	insertCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	if err := r.store.Record(insertCtx, row); err != nil {
 		log.Warn("record system llm run failed", "job", c.Job, "org", c.OrgID, "model", c.Model, "error", err)
 	}
 }
