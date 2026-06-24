@@ -219,6 +219,14 @@ func (NoopSink) OnMessage(*domain.AgentMessage) error { return nil }
 // carries CostUSD/duration/turns; this sink fills the token gap so
 // system_llm_runs can record cache-rate breakdowns. See TFAC-451.
 //
+// Summing across messages assumes each AgentMessage carries its own turn's
+// token counts, NOT a cumulative running total — true for the Claude Agent
+// SDK stream, where every assistant message reports the usage of the API
+// call that produced it. A provider that instead emitted running totals on
+// the final message would be double-counted here; revisit this if a
+// multi-turn path (e.g. the classifier's Stage 2, MaxTurns 6) is ever
+// pointed at such a backend.
+//
 // Not concurrency-safe — construct one per Run call (Run drives the sink
 // from a single goroutine, same contract as every other Sink).
 type UsageSink struct {

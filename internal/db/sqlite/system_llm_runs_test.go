@@ -114,6 +114,33 @@ func TestSystemLLMRunStore_SQLite_EmptyMetadataIsNull(t *testing.T) {
 	}
 }
 
+// TestSystemLLMRunStore_SQLite_HonorsProvidedID pins that a caller-supplied
+// row.ID is preserved (parity with Postgres) rather than overwritten.
+func TestSystemLLMRunStore_SQLite_HonorsProvidedID(t *testing.T) {
+	conn := newSQLiteForSystemLLMTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	const id = "11111111-1111-1111-1111-111111111111"
+	if err := stores.SystemLLMRuns.Record(ctx, domain.SystemLLMRun{
+		ID:        id,
+		OrgID:     runmode.LocalDefaultOrgID,
+		Job:       "scorer",
+		Model:     "haiku",
+		StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	var got string
+	if err := conn.QueryRow(`SELECT id FROM system_llm_runs`).Scan(&got); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got != id {
+		t.Errorf("id = %q, want %q (caller-supplied id must be honored)", got, id)
+	}
+}
+
 func newSQLiteForSystemLLMTest(t *testing.T) *sql.DB {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")

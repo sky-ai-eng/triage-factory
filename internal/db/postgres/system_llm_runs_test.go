@@ -111,6 +111,38 @@ func TestSystemLLMRunStore_Postgres_EmptyMetadataIsNull(t *testing.T) {
 	}
 }
 
+// TestSystemLLMRunStore_Postgres_HonorsProvidedID pins that a caller-supplied
+// row.ID (a uuid) is preserved rather than replaced by gen_random_uuid() —
+// parity with the SQLite impl.
+func TestSystemLLMRunStore_Postgres_HonorsProvidedID(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID := seedPgSystemLLMOrg(t, h)
+	id := uuid.New().String()
+	if err := stores.SystemLLMRuns.Record(ctx, domain.SystemLLMRun{
+		ID:        id,
+		OrgID:     orgID,
+		Job:       "scorer",
+		Model:     "haiku",
+		StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	var got string
+	if err := h.AdminDB.QueryRow(
+		`SELECT id::text FROM system_llm_runs WHERE org_id = $1`, orgID,
+	).Scan(&got); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got != id {
+		t.Errorf("id = %q, want %q (caller-supplied id must be honored)", got, id)
+	}
+}
+
 func seedPgSystemLLMOrg(t *testing.T, h *pgtest.Harness) string {
 	t.Helper()
 	orgID := uuid.New().String()

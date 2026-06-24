@@ -18,10 +18,11 @@ import (
 // row.OrgID is required on every call; local mode passes
 // runmode.LocalDefaultOrgID. See TFAC-451.
 type SystemLLMRunStore interface {
-	// Record inserts one row. row.ID may be empty — the SQLite impl
-	// generates a uuid, Postgres defaults gen_random_uuid(). row.CompletedAt
-	// defaults to now when zero. Callers own the "never break the job on a
-	// recording failure" contract; this method just returns the insert
-	// error for the caller to log and swallow.
+	// Record inserts one row. row.ID may be empty — both impls then
+	// generate a uuid (SQLite app-side, Postgres via gen_random_uuid());
+	// a non-empty row.ID is honored on both (Postgres requires it parse as
+	// a uuid). row.CompletedAt defaults to now when zero. Callers own the
+	// "never break the job on a recording failure" contract; this method
+	// just returns the insert error for the caller to log and swallow.
 	Record(ctx context.Context, row domain.SystemLLMRun) error
 }

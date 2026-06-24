@@ -30,15 +30,17 @@ func (s *systemLLMRunStore) Record(ctx context.Context, row domain.SystemLLMRun)
 	if completedAt.IsZero() {
 		completedAt = time.Now().UTC()
 	}
-	// id defaults to gen_random_uuid() server-side; metadata_json '' → NULL.
+	// A caller-supplied row.ID is honored (parity with the SQLite impl); an
+	// empty row.ID falls back to gen_random_uuid() server-side. metadata_json
+	// '' → NULL.
 	_, err := s.admin.ExecContext(ctx, `
 		INSERT INTO system_llm_runs
-			(org_id, job, model, total_cost_usd,
+			(id, org_id, job, model, total_cost_usd,
 			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 			 duration_ms, num_turns, is_error, metadata_json, started_at, completed_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, $14)
+		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULLIF($13, ''), $14, $15)
 	`,
-		row.OrgID, row.Job, row.Model, row.TotalCostUSD,
+		row.ID, row.OrgID, row.Job, row.Model, row.TotalCostUSD,
 		row.InputTokens, row.OutputTokens, row.CacheReadTokens, row.CacheCreationTokens,
 		row.DurationMs, row.NumTurns, row.IsError, row.MetadataJSON,
 		row.StartedAt, completedAt,
