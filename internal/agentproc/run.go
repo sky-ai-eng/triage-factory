@@ -559,17 +559,18 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	// fixed in-sandbox path. core.hooksPath (set in the GIT_CONFIG_* env by
 	// startProxiesForSandbox) points here, so the hooks fire for every repo
 	// the agent touches. Mounted unconditionally (cheap, RO) so subdir
-	// clones in a repo-less Jira run are covered too. Ensured on the host
-	// at startup; a missing source is skipped rather than failing the run
-	// (core.hooksPath at a non-existent dir is a git no-op anyway).
-	if hooksDir := githooks.HostDir(); hooksDir != "" {
-		if _, statErr := os.Stat(hooksDir); statErr == nil {
-			extraMounts = append(extraMounts, sandbox.Mount{
-				Source:      hooksDir,
-				Destination: githooks.SandboxDir,
-				Options:     []string{"ro"},
-			})
-		}
+	// clones in a repo-less Jira run are covered too. The dir is ensured on
+	// the host at startup; the os.Stat guard is purely for paths where that
+	// didn't run (e.g. a unit test driving Run directly) — a missing source
+	// is skipped rather than failing the run, and core.hooksPath at a
+	// non-existent dir is a git no-op anyway.
+	hooksDir := githooks.HostDir()
+	if _, statErr := os.Stat(hooksDir); statErr == nil {
+		extraMounts = append(extraMounts, sandbox.Mount{
+			Source:      hooksDir,
+			Destination: githooks.SandboxDir,
+			Options:     []string{"ro"},
+		})
 	}
 
 	// Start the per-run agenthost daemon (when wired). The socket must exist

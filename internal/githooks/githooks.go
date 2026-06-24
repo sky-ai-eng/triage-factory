@@ -113,8 +113,20 @@ func DirectAgentEnv(env []string) []string {
 // gitConfigCount parses GIT_CONFIG_COUNT (the number of git's indexed
 // env-config entries) from env, or 0 when it is absent, malformed, or
 // negative. Scans last-to-first so a duplicated COUNT resolves the way
-// git and Go's exec env-dedup would (last value wins). Mirrors the
-// helper in internal/worktree.
+// git and Go's exec env-dedup would (last value wins).
+//
+// Intentionally a byte-for-byte copy of internal/worktree's unexported
+// gitConfigCount rather than a shared import. Reusing worktree's would
+// mean either exporting it from there (widening that package's API for a
+// 12-line helper) or githooks importing worktree — the wrong dependency
+// direction, since worktree is a heavy clone/fetch package and githooks
+// is a leaf. The only clean DRY fix is a new shared leaf package, which
+// isn't worth standing up for one trivial function that mirrors git's
+// fixed, documented GIT_CONFIG_COUNT format (so it won't drift) and is
+// independently unit-tested on both sides. If a third copy ever appears,
+// that's the rule-of-three trigger to extract — along with the
+// drop-and-re-emit layering this and worktree.gitConfigEnviron also
+// share, which is the more valuable thing to consolidate.
 func gitConfigCount(env []string) int {
 	for i := len(env) - 1; i >= 0; i-- {
 		v, ok := strings.CutPrefix(env[i], "GIT_CONFIG_COUNT=")
