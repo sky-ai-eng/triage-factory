@@ -278,6 +278,15 @@ type Stores struct {
 	// bootstrap tests can run without Postgres.
 	OrgTemplate OrgTemplateStore
 
+	// SystemLLMRuns owns the system_llm_runs table — per-call cost +
+	// token accounting for the headless LLM jobs (scorer, repo-profiler,
+	// project-classifier). Admin pool in Postgres: every writer is a
+	// boot-launched background goroutine with no JWT-claims context
+	// (system-written, org-scoped — same shape as PendingFirings). The
+	// org-scoped RLS policy gates the app-pool reads a future spend view
+	// will make. See TFAC-451.
+	SystemLLMRuns SystemLLMRunStore
+
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
 	// core holds no SSO symbols.
@@ -337,6 +346,7 @@ type TxStores struct {
 	JiraApps         JiraAppsStore
 	OrgTemplate      OrgTemplateStore
 	Invites          InvitesStore
+	SystemLLMRuns    SystemLLMRunStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same

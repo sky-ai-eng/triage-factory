@@ -59,6 +59,7 @@ func TestProfiler_FetchErrorLeavesRowUntouched(t *testing.T) {
 		nil, // database unused in the fetch/classify path
 		repos,
 		oneOrgStore{},
+		nil, // recorder nil: a nil recorder makes Record a no-op
 		nil, // ws nil: the profiler guards every Broadcast on non-nil
 	)
 

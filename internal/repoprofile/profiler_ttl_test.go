@@ -26,7 +26,7 @@ func TestRunOrg_TTLSkipsFreshUnlessForced(t *testing.T) {
 
 	t.Run("force=false skips a fresh repo", func(t *testing.T) {
 		res := &countingResolver{}
-		p := NewProfiler(res, nil, nil, repos, oneOrgStore{}, nil)
+		p := NewProfiler(res, nil, nil, repos, oneOrgStore{}, nil, nil)
 		changed, err := p.RunOrg(context.Background(), "org-1", false)
 		if err != nil {
 			t.Fatalf("RunOrg: %v", err)
@@ -44,7 +44,7 @@ func TestRunOrg_TTLSkipsFreshUnlessForced(t *testing.T) {
 
 	t.Run("force=true bypasses the TTL", func(t *testing.T) {
 		res := &countingResolver{}
-		p := NewProfiler(res, nil, nil, repos, oneOrgStore{}, nil)
+		p := NewProfiler(res, nil, nil, repos, oneOrgStore{}, nil, nil)
 		// force=true must reach client resolution (it skips the GetSystem TTL
 		// read entirely). The resolver errors, so the repo is then skipped
 		// before any fetch — enough to prove the TTL gate was bypassed.

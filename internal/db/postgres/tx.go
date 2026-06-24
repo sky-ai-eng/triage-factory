@@ -232,6 +232,11 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// IsOrgMemberSystem) inside WithTx route outside the tx — those are
 		// by-design claims-less (the redeem actor has no membership).
 		Invites: newInvitesStore(tx, s.admin),
+		// SystemLLMRuns stays pinned to s.admin (system-written, no
+		// JWT-claims writer) so an INSERT inside WithTx routes outside the
+		// tx and commits autonomously — the same admin-pool shape Events /
+		// TaskMemory use for their write-only halves.
+		SystemLLMRuns: newSystemLLMRunStore(s.admin),
 		// Opaque extension bundles (the Enterprise Edition SSO stores) built
 		// from the same (app=tx, admin=s.admin) handles, so their app/admin
 		// pool split is identical to core's own stores — the login-time reads

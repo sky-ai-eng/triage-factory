@@ -34,11 +34,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
 //go:embed prompts/classify_stage1.txt
@@ -115,12 +117,12 @@ type Vote struct {
 // tenant in multi-mode. secrets is the per-org LLM-credential reader
 // threaded alongside orgID (nil in local → ambient subscription;
 // system-door reader in multi). SKY-389.
-func Classify(ctx context.Context, orgID string, secrets agentproc.SecretsReader, projects []domain.Project, entity domain.Entity) (*string, []Vote) {
+func Classify(ctx context.Context, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, projects []domain.Project, entity domain.Entity) (*string, []Vote) {
 	if len(projects) == 0 {
 		return nil, nil
 	}
 
-	stage1 := runVotes(ctx, orgID, secrets, projects, entity, voteStage1)
+	stage1 := runVotes(ctx, orgID, secrets, recorder, projects, entity, voteStage1)
 
 	if winner := pickWinner(stage1); winner != nil {
 		return winner, stage1
@@ -147,7 +149,7 @@ func Classify(ctx context.Context, orgID string, secrets agentproc.SecretsReader
 	}
 
 	classifyLog.Info("escalating borderline+truncated projects to stage 2", "entity", entity.ID, "projects", len(escalated))
-	stage2 := runVotes(ctx, orgID, secrets, escalated, entity, voteStage2)
+	stage2 := runVotes(ctx, orgID, secrets, recorder, escalated, entity, voteStage2)
 
 	merged := mergeStages(stage1, stage2)
 	return pickWinner(merged), merged
@@ -156,7 +158,7 @@ func Classify(ctx context.Context, orgID string, secrets agentproc.SecretsReader
 // runVotes fans out one Haiku call per project using the provided
 // vote function (Stage 1 or Stage 2). Concurrency is capped at
 // maxConcurrentVotes.
-func runVotes(ctx context.Context, orgID string, secrets agentproc.SecretsReader, projects []domain.Project, entity domain.Entity, vote func(context.Context, string, agentproc.SecretsReader, domain.Project, domain.Entity) Vote) []Vote {
+func runVotes(ctx context.Context, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, projects []domain.Project, entity domain.Entity, vote func(context.Context, string, agentproc.SecretsReader, *systemllm.Recorder, domain.Project, domain.Entity) Vote) []Vote {
 	sem := make(chan struct{}, maxConcurrentVotes)
 	votes := make([]Vote, len(projects))
 	var wg sync.WaitGroup
@@ -166,7 +168,7 @@ func runVotes(ctx context.Context, orgID string, secrets agentproc.SecretsReader
 		go func(idx int, project domain.Project) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			votes[idx] = vote(ctx, orgID, secrets, project, entity)
+			votes[idx] = vote(ctx, orgID, secrets, recorder, project, entity)
 		}(i, p)
 	}
 	wg.Wait()
@@ -222,7 +224,7 @@ func pickWinner(votes []Vote) *string {
 // voteStage1 is the broad-pass single-shot Haiku call. KB inlined
 // up to kbInlineMaxBytes; flag KBTruncated when the cap was hit so
 // the orchestrator knows whether Stage 2 might help.
-func voteStage1(ctx context.Context, orgID string, secrets agentproc.SecretsReader, project domain.Project, entity domain.Entity) Vote {
+func voteStage1(ctx context.Context, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, project domain.Project, entity domain.Entity) Vote {
 	v := Vote{ProjectID: project.ID, Stage: 1}
 
 	kb, truncated, err := readProjectKB(orgID, project.ID)
@@ -244,7 +246,7 @@ func voteStage1(ctx context.Context, orgID string, secrets agentproc.SecretsRead
 		truncateDescription(entity.Description),
 	)
 
-	score, rationale, err := runStage1Haiku(ctx, orgID, prompt, secrets)
+	score, rationale, err := runStage1Haiku(ctx, orgID, prompt, secrets, recorder)
 	if err != nil {
 		v.Err = err
 		return v
@@ -257,7 +259,7 @@ func voteStage1(ctx context.Context, orgID string, secrets agentproc.SecretsRead
 // voteStage2 is the agent-mode call: Haiku in the project's working
 // directory, free to Read/Glob/Grep `./knowledge-base/` selectively.
 // Used only for borderline+truncated projects from Stage 1.
-func voteStage2(ctx context.Context, orgID string, secrets agentproc.SecretsReader, project domain.Project, entity domain.Entity) Vote {
+func voteStage2(ctx context.Context, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, project domain.Project, entity domain.Entity) Vote {
 	v := Vote{ProjectID: project.ID, Stage: 2}
 
 	kbRoot, err := curator.KnowledgeDir(orgID, project.ID)
@@ -281,7 +283,7 @@ func voteStage2(ctx context.Context, orgID string, secrets agentproc.SecretsRead
 		truncateDescription(entity.Description),
 	)
 
-	score, rationale, err := runStage2Haiku(ctx, orgID, prompt, kbRoot, secrets)
+	score, rationale, err := runStage2Haiku(ctx, orgID, prompt, kbRoot, secrets, recorder)
 	if err != nil {
 		v.Err = err
 		return v
@@ -370,14 +372,14 @@ func readProjectKB(orgID, projectID string) (string, bool, error) {
 // stub.
 var runStage1Haiku = realRunStage1Haiku
 
-func realRunStage1Haiku(ctx context.Context, orgID, prompt string, secrets agentproc.SecretsReader) (int, string, error) {
+func realRunStage1Haiku(ctx context.Context, orgID, prompt string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder) (int, string, error) {
 	return runHaiku(ctx, agentproc.RunOptions{
 		Model:   classifyModel,
 		Message: prompt,
 		TraceID: "classify-stage1",
 		OrgID:   orgID,
 		Secrets: secrets,
-	})
+	}, recorder, 1)
 }
 
 // runStage2Haiku runs in the project's KB directory so the model can
@@ -386,7 +388,7 @@ func realRunStage1Haiku(ctx context.Context, orgID, prompt string, secrets agent
 // can stub.
 var runStage2Haiku = realRunStage2Haiku
 
-func realRunStage2Haiku(ctx context.Context, orgID, prompt, cwd string, secrets agentproc.SecretsReader) (int, string, error) {
+func realRunStage2Haiku(ctx context.Context, orgID, prompt, cwd string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder) (int, string, error) {
 	return runHaiku(ctx, agentproc.RunOptions{
 		Cwd:      cwd,
 		Model:    classifyModel,
@@ -395,7 +397,7 @@ func realRunStage2Haiku(ctx context.Context, orgID, prompt, cwd string, secrets 
 		TraceID:  "classify-stage2",
 		OrgID:    orgID,
 		Secrets:  secrets,
-	})
+	}, recorder, 2)
 }
 
 // runHaiku drives one classification call through agentproc.Run with a
@@ -404,8 +406,22 @@ func realRunStage2Haiku(ctx context.Context, orgID, prompt, cwd string, secrets 
 // only in the RunOptions they pass. ctx propagates from the Runner's
 // stop channel so server shutdown SIGKILLs in-flight calls instead of
 // waiting for the model to time out.
-func runHaiku(ctx context.Context, opts agentproc.RunOptions) (int, string, error) {
-	outcome, err := agentproc.Run(ctx, opts, agentproc.NoopSink{})
+func runHaiku(ctx context.Context, opts agentproc.RunOptions, recorder *systemllm.Recorder, stage int) (int, string, error) {
+	// UsageSink accumulates the per-message token breakdown so the run's
+	// cost + tokens land in system_llm_runs; the terminal Result string is
+	// still parsed below. One row per Run call (the classifier fans out
+	// per-entity-per-project, so many rows per cycle — expected). Recording
+	// happens whenever an outcome was produced and never breaks classification.
+	startedAt := time.Now()
+	usage := &agentproc.UsageSink{}
+	outcome, err := agentproc.Run(ctx, opts, usage)
+	recorder.Record(ctx, systemllm.Call{
+		OrgID:     opts.OrgID,
+		Job:       systemllm.JobClassifier,
+		Model:     opts.Model,
+		StartedAt: startedAt,
+		Metadata:  map[string]any{"stage": stage},
+	}, outcome, usage)
 	if err != nil {
 		stderr := ""
 		if outcome != nil {

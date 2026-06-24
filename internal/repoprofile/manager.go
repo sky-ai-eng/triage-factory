@@ -7,6 +7,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -42,8 +43,8 @@ type Manager struct {
 // hub). The wrapped Profiler is shared across every per-org Runner — it is
 // stateless, reading credentials fresh per repo through the resolver, so a
 // config-change hot-swap is honored without rebuilding it.
-func NewManager(resolver github.Resolver, secrets agentproc.SecretsReader, database *sql.DB, repos db.RepoStore, orgs db.OrgsStore, ws *websocket.Hub) *Manager {
-	profiler := NewProfiler(resolver, secrets, database, repos, orgs, ws)
+func NewManager(resolver github.Resolver, secrets agentproc.SecretsReader, database *sql.DB, repos db.RepoStore, orgs db.OrgsStore, recorder *systemllm.Recorder, ws *websocket.Hub) *Manager {
+	profiler := NewProfiler(resolver, secrets, database, repos, orgs, recorder, ws)
 	return &Manager{
 		profiler: profiler,
 		runners:  make(map[string]*Runner),

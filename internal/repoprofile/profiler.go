@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -30,13 +31,16 @@ type Profiler struct {
 	resolver github.Resolver         // per-(org, owner) GitHub client source — App-installation token in multi, keychain PAT in local. SKY-389.
 	secrets  agentproc.SecretsReader // per-org LLM-credential reader for the profiling Haiku calls (nil in local → ambient subscription; system-door reader in multi). SKY-389.
 	database *sql.DB
-	repos    db.RepoStore // profile reads + upserts go through the store
-	orgs     db.OrgsStore // iterate active orgs at the top of each profile run
+	repos    db.RepoStore        // profile reads + upserts go through the store
+	orgs     db.OrgsStore        // iterate active orgs at the top of each profile run
+	recorder *systemllm.Recorder // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	ws       *websocket.Hub
 
-	// batchFn runs one Haiku profiling batch. Defaulted to profileBatch;
-	// overridable so tests can exercise the with-docs upsert / fallback paths
-	// without spawning a real agent subprocess.
+	// batchFn runs one Haiku profiling batch. Defaulted (in NewProfiler) to
+	// a closure over profileBatch that captures the recorder, so the field
+	// signature stays recorder-free and test overrides need no change.
+	// Overridable so tests can exercise the with-docs upsert / fallback
+	// paths without spawning a real agent subprocess.
 	batchFn func(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error)
 }
 
@@ -44,8 +48,12 @@ type Profiler struct {
 // secrets reader, DB handle, repo store, orgs store, and WS hub. The
 // resolver is consulted per (org, owner) inside the profiling loop so the
 // same code path serves both local (keychain PAT) and multi (App token).
-func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, database *sql.DB, repos db.RepoStore, orgs db.OrgsStore, ws *websocket.Hub) *Profiler {
-	return &Profiler{resolver: resolver, secrets: secrets, database: database, repos: repos, orgs: orgs, ws: ws, batchFn: profileBatch}
+func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, database *sql.DB, repos db.RepoStore, orgs db.OrgsStore, recorder *systemllm.Recorder, ws *websocket.Hub) *Profiler {
+	p := &Profiler{resolver: resolver, secrets: secrets, database: database, repos: repos, orgs: orgs, recorder: recorder, ws: ws}
+	p.batchFn = func(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error) {
+		return profileBatch(ctx, orgID, batch, secrets, recorder)
+	}
+	return p
 }
 
 // repoWithDocs groups a repo profile with the documentation text to send to the LLM.
@@ -356,7 +364,7 @@ type repoProfileResult struct {
 	Profile string `json:"profile"`
 }
 
-func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error) {
+func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader, recorder *systemllm.Recorder) ([]repoProfileResult, error) {
 	inputs := make([]repoProfileInput, len(batch))
 	for i, d := range batch {
 		inputs[i] = repoProfileInput{
@@ -372,17 +380,28 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 
 	prompt := fmt.Sprintf(ai.RepoProfilePrompt, string(inputJSON))
 
-	// Run through the shared agent runtime. NoopSink discards per-message
-	// stream events; we only care about the terminal Result.Result string,
-	// which carries the model's JSON array response (same string the old
-	// `claude --output-format json` envelope's `.result` field carried).
+	// Run through the shared agent runtime. UsageSink accumulates the
+	// per-message token breakdown (no transcript persisted); we only parse
+	// the terminal Result.Result JSON array below, but the cost + tokens
+	// land in system_llm_runs via the recorder.
+	startedAt := time.Now()
+	usage := &agentproc.UsageSink{}
 	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
 		Model:   profilingModel,
 		Message: prompt,
 		TraceID: "repoprofile-batch",
 		OrgID:   orgID,
 		Secrets: secrets,
-	}, agentproc.NoopSink{})
+	}, usage)
+	// One row per batch call whenever the subprocess produced an outcome
+	// (a failed-but-completed run still cost tokens). Never breaks profiling.
+	recorder.Record(ctx, systemllm.Call{
+		OrgID:     orgID,
+		Job:       systemllm.JobRepoProfiler,
+		Model:     profilingModel,
+		StartedAt: startedAt,
+		Metadata:  map[string]any{"repo_count": len(batch)},
+	}, outcome, usage)
 	if err != nil {
 		stderr := ""
 		if outcome != nil {

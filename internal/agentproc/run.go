@@ -210,6 +210,42 @@ type NoopSink struct{}
 func (NoopSink) OnSession(string) error               { return nil }
 func (NoopSink) OnMessage(*domain.AgentMessage) error { return nil }
 
+// UsageSink accumulates aggregate token usage across one Run. It's the
+// drop-in replacement for NoopSink at the one-shot system-job call sites
+// (scorer, repo-profiler, classifier) that want the token breakdown the
+// per-message usage already carries (stream.go populates InputTokens /
+// OutputTokens / CacheReadTokens / CacheCreationTokens on each assistant
+// message) without persisting a transcript. The terminal Result still
+// carries CostUSD/duration/turns; this sink fills the token gap so
+// system_llm_runs can record cache-rate breakdowns. See TFAC-451.
+//
+// Not concurrency-safe — construct one per Run call (Run drives the sink
+// from a single goroutine, same contract as every other Sink).
+type UsageSink struct {
+	InputTokens, OutputTokens, CacheReadTokens, CacheCreationTokens int
+}
+
+func (s *UsageSink) OnSession(string) error { return nil }
+
+func (s *UsageSink) OnMessage(m *domain.AgentMessage) error {
+	if m == nil {
+		return nil
+	}
+	if m.InputTokens != nil {
+		s.InputTokens += *m.InputTokens
+	}
+	if m.OutputTokens != nil {
+		s.OutputTokens += *m.OutputTokens
+	}
+	if m.CacheReadTokens != nil {
+		s.CacheReadTokens += *m.CacheReadTokens
+	}
+	if m.CacheCreationTokens != nil {
+		s.CacheCreationTokens += *m.CacheCreationTokens
+	}
+	return nil
+}
+
 // Sink is the storage-side adapter that turns parsed stream events
 // into rows + websocket pushes. Implementations are constructed per
 // invocation (they typically close over a runID or projectID) and are

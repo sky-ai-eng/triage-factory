@@ -6,6 +6,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
 // Runner manages the project-classification background loop. Mirrors
@@ -19,18 +20,20 @@ type Runner struct {
 	projects db.ProjectStore
 	orgs     db.OrgsStore            // enumerate active orgs per cycle
 	secrets  agentproc.SecretsReader // per-org LLM-credential reader threaded into Classify → Haiku (nil in local; system-door in multi). SKY-389.
+	recorder *systemllm.Recorder     // captures per-vote LLM cost + tokens into system_llm_runs (TFAC-451)
 	trigger  chan struct{}
 	stop     chan struct{}
 	mu       sync.Mutex
 	running  bool
 }
 
-func NewRunner(entities db.EntityStore, projects db.ProjectStore, orgs db.OrgsStore, secrets agentproc.SecretsReader) *Runner {
+func NewRunner(entities db.EntityStore, projects db.ProjectStore, orgs db.OrgsStore, secrets agentproc.SecretsReader, recorder *systemllm.Recorder) *Runner {
 	return &Runner{
 		entities: entities,
 		projects: projects,
 		orgs:     orgs,
 		secrets:  secrets,
+		recorder: recorder,
 		trigger:  make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 	}
@@ -135,7 +138,7 @@ func (r *Runner) runOrg(ctx context.Context, orgID string) {
 	assigned := 0
 	skipped := 0
 	for _, e := range entities {
-		winner, votes := Classify(ctx, orgID, r.secrets, projects, e)
+		winner, votes := Classify(ctx, orgID, r.secrets, r.recorder, projects, e)
 		// All votes errored — leave classified_at NULL so the entity
 		// resurfaces next cycle. Stamping it here would permanently
 		// freeze the entity at unassigned even if the underlying

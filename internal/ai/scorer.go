@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
 //go:embed prompts/batch-prioritize.txt
@@ -99,7 +101,7 @@ const scoringModel = "haiku"
 // the count, and so the number stays correct if batchSize changes.
 // Failures are non-fatal: the function still returns whatever scores
 // succeeded, and the caller surfaces skippedTasks as a warning toast.
-func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, orgID string, tasks []domain.Task, secrets agentproc.SecretsReader) (scores []TaskScore, skippedTasks int, err error) {
+func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, orgID string, tasks []domain.Task, secrets agentproc.SecretsReader, recorder *systemllm.Recorder) (scores []TaskScore, skippedTasks int, err error) {
 	if len(tasks) == 0 {
 		return nil, 0, nil
 	}
@@ -166,7 +168,7 @@ func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, 
 		wg.Add(1)
 		go func(idx int, b []TaskInput) {
 			defer wg.Done()
-			scores, err := scoreBatch(ctx, b, orgID, secrets)
+			scores, err := scoreBatch(ctx, b, orgID, secrets, recorder)
 			results[idx] = batchResult{scores, err}
 		}(i, batch)
 	}
@@ -190,7 +192,7 @@ func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, 
 	return allScores, skipped, nil
 }
 
-func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader) ([]TaskScore, error) {
+func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder) ([]TaskScore, error) {
 	tasksJSON, err := json.Marshal(tasks)
 	if err != nil {
 		return nil, fmt.Errorf("marshal tasks: %w", err)
@@ -202,17 +204,30 @@ func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets ag
 	// populates outcome.Result.Result with the agent's final response —
 	// same string the old `claude --output-format json` envelope's
 	// `.result` field carried, so the post-parse logic below is
-	// unchanged. NoopSink discards per-message stream events; this path
-	// doesn't persist a transcript. ctx propagates from the Runner's
-	// stop channel so server shutdown SIGKILLs in-flight scoring calls
-	// instead of waiting for the model to time out.
+	// unchanged. UsageSink accumulates the per-message token breakdown
+	// (no transcript persisted) so the run's cost + tokens land in
+	// system_llm_runs below. ctx propagates from the Runner's stop
+	// channel so server shutdown SIGKILLs in-flight scoring calls instead
+	// of waiting for the model to time out.
+	startedAt := time.Now()
+	usage := &agentproc.UsageSink{}
 	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
 		Model:   scoringModel,
 		Message: prompt,
 		TraceID: "scorer-batch",
 		OrgID:   orgID,
 		Secrets: secrets,
-	}, agentproc.NoopSink{})
+	}, usage)
+	// Record one row per batch call whenever the subprocess produced an
+	// outcome (covers a failed-but-completed run — it still cost tokens).
+	// A recording failure never breaks scoring; the recorder logs + swallows.
+	recorder.Record(ctx, systemllm.Call{
+		OrgID:     orgID,
+		Job:       systemllm.JobScorer,
+		Model:     scoringModel,
+		StartedAt: startedAt,
+		Metadata:  map[string]any{"batch_size": len(tasks)},
+	}, outcome, usage)
 	if err != nil {
 		stderr := ""
 		if outcome != nil {

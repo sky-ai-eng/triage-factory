@@ -731,6 +731,37 @@ CREATE TABLE public.curator_requests (
 
 
 --
+-- Name: system_llm_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+-- One row per agentproc.Run made by a headless system job (the scorer,
+-- repo-profiler, and project-classifier each run a Haiku call every poll
+-- cycle). Captures the cost + token breakdown the subprocess already
+-- computed so org spend reconciles with the Anthropic bill and a "system
+-- overhead" line exists alongside runs.total_cost_usd / curator_requests.cost_usd.
+-- Org-level, no team_id by design: scorer batches mix teams, and
+-- repo_profiles/entities carry no team. System-written (admin pool); the
+-- app pool only reads, gated by the org-scoped RLS policy below. See TFAC-451.
+CREATE TABLE public.system_llm_runs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id uuid NOT NULL,
+    job text NOT NULL,
+    model text NOT NULL,
+    total_cost_usd real DEFAULT 0 NOT NULL,
+    input_tokens integer DEFAULT 0 NOT NULL,
+    output_tokens integer DEFAULT 0 NOT NULL,
+    cache_read_tokens integer DEFAULT 0 NOT NULL,
+    cache_creation_tokens integer DEFAULT 0 NOT NULL,
+    duration_ms integer DEFAULT 0 NOT NULL,
+    num_turns integer DEFAULT 0 NOT NULL,
+    is_error boolean DEFAULT false NOT NULL,
+    metadata_json text,
+    started_at timestamp with time zone NOT NULL,
+    completed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: entities; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2060,6 +2091,14 @@ ALTER TABLE ONLY public.repo_profiles
 
 
 --
+-- Name: system_llm_runs system_llm_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.system_llm_runs
+    ADD CONSTRAINT system_llm_runs_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: run_artifacts run_artifacts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2421,6 +2460,20 @@ CREATE INDEX idx_pending_review_comments_review_id ON public.pending_review_comm
 --
 
 CREATE INDEX idx_repo_profiles_org_owner_repo ON public.repo_profiles USING btree (org_id, owner, repo);
+
+
+--
+-- Name: idx_system_llm_runs_org_started; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_system_llm_runs_org_started ON public.system_llm_runs USING btree (org_id, started_at DESC);
+
+
+--
+-- Name: idx_system_llm_runs_org_job_started; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_system_llm_runs_org_job_started ON public.system_llm_runs USING btree (org_id, job, started_at DESC);
 
 
 --
@@ -3242,6 +3295,14 @@ ALTER TABLE ONLY public.prompts
 
 ALTER TABLE ONLY public.repo_profiles
     ADD CONSTRAINT repo_profiles_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: system_llm_runs system_llm_runs_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.system_llm_runs
+    ADD CONSTRAINT system_llm_runs_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
 --
@@ -4244,6 +4305,23 @@ CREATE POLICY repo_profiles_all ON public.repo_profiles USING (((org_id = tf.cur
 
 
 --
+-- Name: system_llm_runs; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.system_llm_runs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: system_llm_runs system_llm_runs_all; Type: POLICY; Schema: public; Owner: -
+--
+
+-- Mirrors repo_profiles_all: org-scoped read/write under the app pool.
+-- The table is system-written via the admin pool (BYPASSRLS), so in
+-- practice only the org-scoped SELECT side is exercised by tf_app; the
+-- WITH CHECK is retained for symmetry with the rest of the schema.
+CREATE POLICY system_llm_runs_all ON public.system_llm_runs USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+
+--
 -- Name: run_artifacts; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -5143,6 +5221,17 @@ GRANT ALL ON TABLE public.repo_profiles TO anon;
 GRANT ALL ON TABLE public.repo_profiles TO authenticated;
 GRANT ALL ON TABLE public.repo_profiles TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.repo_profiles TO tf_app;
+
+
+--
+-- Name: TABLE system_llm_runs; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.system_llm_runs TO postgres;
+GRANT ALL ON TABLE public.system_llm_runs TO anon;
+GRANT ALL ON TABLE public.system_llm_runs TO authenticated;
+GRANT ALL ON TABLE public.system_llm_runs TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.system_llm_runs TO tf_app;
 
 
 --

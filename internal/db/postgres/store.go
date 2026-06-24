@@ -294,6 +294,12 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// IsOrgMemberSystem), whose actor is a token-bearing outsider with no
 		// membership. Same pool-split pattern as TeamsStore.
 		Invites: newInvitesStore(app, admin),
+		// SystemLLMRuns is admin-pool only: the writers (scorer,
+		// repo-profiler, project-classifier) are boot-launched system
+		// goroutines with no JWT-claims context, so an app-pool INSERT
+		// under system_llm_runs_all RLS would be rejected. Same admin-only
+		// shape as PendingFirings / EventQueue.
+		SystemLLMRuns: newSystemLLMRunStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),
@@ -368,10 +374,11 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		// Both pools collapse to tx (test door). BackfillInstallationsFromAPI's
 		// GetSystem would hit tf_app and be denied here — tests that exercise
 		// it use New(admin, app, key) directly, same as the SecretStore tests.
-		GitHubApps:  newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
-		JiraApps:    newJiraAppsStore(tx, tx),
-		OrgTemplate: newTxOrgTemplateStore(tx),
-		Invites:     newInvitesStore(tx, tx),
-		Ext:         db.BuildStoreExtensions("postgres", tx, tx),
+		GitHubApps:    newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
+		JiraApps:      newJiraAppsStore(tx, tx),
+		OrgTemplate:   newTxOrgTemplateStore(tx),
+		Invites:       newInvitesStore(tx, tx),
+		SystemLLMRuns: newSystemLLMRunStore(tx),
+		Ext:           db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

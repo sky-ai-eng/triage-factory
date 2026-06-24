@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -35,7 +36,13 @@ func (a *App) buildInfra() {
 // classifier is started in startWorkers; the scorer reacts to its trigger
 // channel.
 func (a *App) buildAI() {
-	a.scorer = ai.NewManager(a.database, a.stores.Scores, a.stores.Entities, a.runSecrets, ai.RunnerCallbacks{
+	// Shared across the three headless LLM jobs: each records its per-call
+	// cost + token breakdown into system_llm_runs (TFAC-451). One recorder
+	// over the single org-scoped store; a nil store would make Record a
+	// no-op, but the bundle always wires one.
+	llmRecorder := systemllm.NewRecorder(a.stores.SystemLLMRuns)
+
+	a.scorer = ai.NewManager(a.database, a.stores.Scores, a.stores.Entities, a.runSecrets, llmRecorder, ai.RunnerCallbacks{
 		OnScoringStarted: func(orgID string, taskIDs []string) {
 			a.wsHub.Broadcast(websocket.Event{
 				Type:  "scoring_started",
@@ -72,7 +79,7 @@ func (a *App) buildAI() {
 	// the system:poll: "profiler" subscriber (TTL-gated per cycle) and the
 	// explicit re-profile button (force). Sibling to the scorer — both react
 	// to poll sentinels independently; scoring does NOT gate on profiling.
-	a.profiler = repoprofile.NewManager(a.ghResolver, a.runSecrets, a.database, a.stores.Repos, a.stores.Orgs, a.wsHub)
+	a.profiler = repoprofile.NewManager(a.ghResolver, a.runSecrets, a.database, a.stores.Repos, a.stores.Orgs, llmRecorder, a.wsHub)
 	// Chain bare-clone warming off profile-cycle completion: profiling
 	// populates repo_profiles.clone_url, which bootstrapBareClones reads.
 	// Local-only — the warm on-disk bare cache is an N=1 affordance; multi
@@ -88,7 +95,7 @@ func (a *App) buildAI() {
 	// Project classifier: per-poll, classify newly-discovered entities
 	// against existing projects via per-project Haiku quorum vote. Sticky —
 	// only fires on entities with classified_at IS NULL.
-	a.classifier = projectclassify.NewRunner(a.stores.Entities, a.stores.Projects, a.stores.Orgs, a.runSecrets)
+	a.classifier = projectclassify.NewRunner(a.stores.Entities, a.stores.Projects, a.stores.Orgs, a.runSecrets, llmRecorder)
 	classifyLog.Info("project classifier ready", "model", "haiku")
 }
 

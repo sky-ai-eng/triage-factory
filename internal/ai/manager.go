@@ -6,6 +6,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
 // Manager owns per-org scoring Runners. Each org gets its own Runner —
@@ -28,6 +29,7 @@ type Manager struct {
 	scores    db.ScoreStore
 	entities  db.EntityStore
 	secrets   agentproc.SecretsReader // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi). SKY-389.
+	recorder  *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	callbacks RunnerCallbacks
 
 	mu      sync.Mutex
@@ -35,12 +37,13 @@ type Manager struct {
 	stopped bool
 }
 
-func NewManager(database *sql.DB, scores db.ScoreStore, entities db.EntityStore, secrets agentproc.SecretsReader, callbacks RunnerCallbacks) *Manager {
+func NewManager(database *sql.DB, scores db.ScoreStore, entities db.EntityStore, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, callbacks RunnerCallbacks) *Manager {
 	return &Manager{
 		database:  database,
 		scores:    scores,
 		entities:  entities,
 		secrets:   secrets,
+		recorder:  recorder,
 		callbacks: callbacks,
 		runners:   make(map[string]*Runner),
 	}
@@ -67,7 +70,7 @@ func (m *Manager) Trigger(orgID string) {
 	}
 	r, ok := m.runners[orgID]
 	if !ok {
-		r = NewRunner(m.database, m.scores, m.entities, orgID, m.secrets, m.callbacks)
+		r = NewRunner(m.database, m.scores, m.entities, orgID, m.secrets, m.recorder, m.callbacks)
 		r.Start()
 		m.runners[orgID] = r
 	}

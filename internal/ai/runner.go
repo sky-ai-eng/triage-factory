@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
 // RunnerCallbacks are optional hooks fired during the scoring lifecycle.
@@ -55,6 +56,7 @@ type Runner struct {
 	entities  db.EntityStore          // SKY-284: scorer bulk-loads entity descriptions for prompt context
 	orgID     string                  // scoring context org — runmode.LocalDefaultOrgID in local mode
 	secrets   agentproc.SecretsReader // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi). SKY-389.
+	recorder  *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	callbacks RunnerCallbacks
 	trigger   chan struct{}
 	stop      chan struct{}
@@ -62,13 +64,14 @@ type Runner struct {
 	running   bool
 }
 
-func NewRunner(database *sql.DB, scores db.ScoreStore, entities db.EntityStore, orgID string, secrets agentproc.SecretsReader, callbacks RunnerCallbacks) *Runner {
+func NewRunner(database *sql.DB, scores db.ScoreStore, entities db.EntityStore, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, callbacks RunnerCallbacks) *Runner {
 	return &Runner{
 		database:  database,
 		scores:    scores,
 		entities:  entities,
 		orgID:     orgID,
 		secrets:   secrets,
+		recorder:  recorder,
 		callbacks: callbacks,
 		trigger:   make(chan struct{}, 1),
 		stop:      make(chan struct{}),
@@ -162,7 +165,7 @@ func (r *Runner) run(ctx context.Context) {
 		r.callbacks.OnScoringStarted(r.orgID, taskIDs)
 	}
 
-	scores, skippedTasks, err := ScoreTasks(ctx, r.database, r.entities, r.orgID, tasks, r.secrets)
+	scores, skippedTasks, err := ScoreTasks(ctx, r.database, r.entities, r.orgID, tasks, r.secrets, r.recorder)
 	if err != nil {
 		aiLog.Error("scoring failed", "error", err)
 		r.reportError(err)

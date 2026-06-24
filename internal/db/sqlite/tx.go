@@ -85,6 +85,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		JiraApps:         newJiraAppsStore(tx),
 		OrgTemplate:      newOrgTemplateStore(tx),
 		Invites:          newInvitesStore(tx, tx),
+		SystemLLMRuns:    newSystemLLMRunStore(tx),
 		Ext:              db.BuildStoreExtensions("sqlite", tx, tx),
 	}
 	if err := fn(txStores); err != nil {

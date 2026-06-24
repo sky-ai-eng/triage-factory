@@ -112,6 +112,9 @@ func New(conn *sql.DB) db.Stores {
 		// ErrNotApplicableInLocal. Wired so the bundle is complete in both
 		// modes — local never mounts the invite routes.
 		Invites: newInvitesStore(conn, conn),
+		// SystemLLMRuns is admin-pool only in Postgres; SQLite collapses to
+		// the one connection (N=1, no RLS).
+		SystemLLMRuns: newSystemLLMRunStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

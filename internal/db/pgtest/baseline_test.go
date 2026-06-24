@@ -33,6 +33,9 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		// org_secrets replaces the Supabase Vault secret path (TFAC-402):
 		// app-encrypted ciphertext in a normal RLS table.
 		"org_secrets",
+		// system_llm_runs: per-call cost + token accounting for the headless
+		// system jobs (scorer/repo-profiler/classifier). TFAC-451.
+		"system_llm_runs",
 	}
 	for _, table := range expectedTables {
 		var n int
