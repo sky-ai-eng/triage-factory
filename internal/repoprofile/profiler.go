@@ -384,7 +384,7 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 	// per-message token breakdown (no transcript persisted); we only parse
 	// the terminal Result.Result JSON array below, but the cost + tokens
 	// land in system_llm_runs via the recorder.
-	startedAt := time.Now()
+	startedAt := time.Now().UTC()
 	usage := &agentproc.UsageSink{}
 	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
 		Model:   profilingModel,
