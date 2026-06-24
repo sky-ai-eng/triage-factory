@@ -15,7 +15,7 @@ import (
 // org-scoped RLS policy gates the app-pool reads a future spend view will
 // make. SQLite is N=1 and unscoped.
 //
-// orgID is required on every method; local mode passes
+// row.OrgID is required on every call; local mode passes
 // runmode.LocalDefaultOrgID. See TFAC-451.
 type SystemLLMRunStore interface {
 	// Record inserts one row. row.ID may be empty — the SQLite impl
