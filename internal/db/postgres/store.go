@@ -140,6 +140,11 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// pair makes that insert unreachable through tf_app — see
 		// the impl's Create comment.
 		AgentRuns: newAgentRunStore(app, admin),
+		// Artifacts wires app — writers (exec choke point, under
+		// synthetic claims) and readers (run-detail, C2) are all
+		// request-equivalent, and artifacts_* RLS scopes by team_id
+		// like runs. org_id stays in every clause as defense in depth.
+		Artifacts: newArtifactStore(app),
 		// Entities wires both pools (SKY-296): app for request-
 		// equivalent consumers (server panels, delegate context
 		// loaders) and admin for the `...System` variants the tracker
@@ -355,6 +360,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		// production) need the production WithTx wiring instead,
 		// which gets the real admin pool via Store.admin.
 		AgentRuns:        newAgentRunStore(tx, tx),
+		Artifacts:        newArtifactStore(tx),
 		Entities:         newEntityStore(tx, tx),
 		Repos:            newRepoStore(tx, tx),
 		Reviews:          newReviewStore(tx, tx),

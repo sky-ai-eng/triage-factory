@@ -25,7 +25,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
 		"team_github_groups", "team_github_repos",
 		"prompts", "projects", "events_catalog", "entities", "entity_links", "events",
-		"event_handlers", "tasks", "task_events", "runs", "run_artifacts",
+		"event_handlers", "tasks", "task_events", "runs", "artifacts",
 		"run_messages", "run_memory", "pending_firings", "run_worktrees", "pending_prs",
 		"swipe_events", "poller_state", "repo_profiles", "pending_reviews",
 		"pending_review_comments", "preferences", "system_prompt_versions",
@@ -1455,11 +1455,13 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 }
 
 // TestRLS_ChildTablesInheritParentVisibility — denormalized child
-// rows (task_events, run_artifacts, run_messages, run_memory,
-// run_worktrees, pending_prs, pending_firings) must NOT be visible
-// to org members who can't see the parent task/run. Earlier policies
-// gated only on org_id, leaking metadata across users in the same org.
-// EXISTS-on-parent inherits the parent table's RLS.
+// rows (task_events, run_messages, run_memory, run_worktrees,
+// pending_prs, pending_firings) must NOT be visible to org members
+// who can't see the parent task/run. Earlier policies gated only on
+// org_id, leaking metadata across users in the same org. EXISTS-on-parent
+// inherits the parent table's RLS. (artifacts is excluded: it scopes
+// directly on team_id like runs, not via EXISTS-on-run, so it has its
+// own team-visibility coverage in artifacts_test.go.)
 func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -1501,8 +1503,6 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	MustExec(t, h.AdminDB, `INSERT INTO task_events (org_id, task_id, event_id, kind)
 		SELECT $1, $2, e.id, 'closed' FROM events e WHERE e.entity_id = $3 LIMIT 1`,
 		orgA, taskID, entityA)
-	MustExec(t, h.AdminDB, `INSERT INTO run_artifacts (org_id, run_id, kind) VALUES ($1, $2, 'pr')`,
-		orgA, runID)
 	MustExec(t, h.AdminDB, `INSERT INTO run_messages (org_id, run_id, role, content) VALUES ($1, $2, 'assistant', 'hi')`,
 		orgA, runID)
 	MustExec(t, h.AdminDB, `INSERT INTO run_memory (org_id, run_id, entity_id, agent_content) VALUES ($1, $2, $3, 'note')`,
@@ -1514,7 +1514,7 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 
 	// Alice sees all her child rows.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		for _, table := range []string{"task_events", "run_artifacts", "run_messages", "run_memory", "run_worktrees", "pending_prs"} {
+		for _, table := range []string{"task_events", "run_messages", "run_memory", "run_worktrees", "pending_prs"} {
 			var n int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
 				return err
@@ -1533,7 +1533,7 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	// child rows — tasks_select and runs_select gate on creator, so
 	// the EXISTS-on-parent in each child policy returns false for him.
 	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		for _, table := range []string{"task_events", "run_artifacts", "run_messages", "run_memory", "run_worktrees", "pending_prs"} {
+		for _, table := range []string{"task_events", "run_messages", "run_memory", "run_worktrees", "pending_prs"} {
 			var n int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
 				return err

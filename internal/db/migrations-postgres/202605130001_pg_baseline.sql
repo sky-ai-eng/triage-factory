@@ -1250,19 +1250,34 @@ CREATE TABLE public.repo_profiles (
 
 
 --
--- Name: run_artifacts; Type: TABLE; Schema: public; Owner: -
+-- Name: artifacts; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.run_artifacts (
+-- artifacts (TFAC-455): the single durable, run-attributed, polymorphic
+-- record of everything a run produces in an external system (a pushed
+-- branch, a draft/open PR, a draft/submitted review, a Jira/Linear issue,
+-- a comment). One row per external object; provider + kind discriminate
+-- the shape. All capture writers UPSERT on (org_id, dedup_key) so the same
+-- logical object is one row. Replaces the never-written run_artifacts
+-- placeholder. team_id is denormalized from the run so reads scope by team
+-- exactly like runs; run_id is nullable (ON DELETE SET NULL) so a row
+-- survives a run purge for audit. state is per-kind lifecycle (domain
+-- consts, no CHECK — extensible).
+CREATE TABLE public.artifacts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
+    run_id uuid,
     org_id uuid NOT NULL,
-    run_id uuid NOT NULL,
+    team_id uuid NOT NULL,
+    provider text NOT NULL,
     kind text NOT NULL,
+    target text NOT NULL,
+    external_id text,
     url text,
-    title text,
-    metadata_json jsonb,
-    is_primary boolean DEFAULT false NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    state text NOT NULL,
+    dedup_key text NOT NULL,
+    details_json text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -2099,11 +2114,11 @@ ALTER TABLE ONLY public.system_llm_runs
 
 
 --
--- Name: run_artifacts run_artifacts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: artifacts artifacts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_artifacts
-    ADD CONSTRAINT run_artifacts_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.artifacts
+    ADD CONSTRAINT artifacts_pkey PRIMARY KEY (id);
 
 
 --
@@ -2477,24 +2492,24 @@ CREATE INDEX idx_system_llm_runs_org_job_started ON public.system_llm_runs USING
 
 
 --
--- Name: idx_run_artifacts_kind_created; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_artifacts_dedup; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_run_artifacts_kind_created ON public.run_artifacts USING btree (kind, created_at DESC);
-
-
---
--- Name: idx_run_artifacts_primary_per_run; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX idx_run_artifacts_primary_per_run ON public.run_artifacts USING btree (run_id) WHERE (is_primary = true);
+CREATE UNIQUE INDEX idx_artifacts_dedup ON public.artifacts USING btree (org_id, dedup_key);
 
 
 --
--- Name: idx_run_artifacts_run; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_artifacts_team_created; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_run_artifacts_run ON public.run_artifacts USING btree (run_id);
+CREATE INDEX idx_artifacts_team_created ON public.artifacts USING btree (team_id, created_at DESC);
+
+
+--
+-- Name: idx_artifacts_run; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_artifacts_run ON public.artifacts USING btree (run_id);
 
 
 --
@@ -3306,19 +3321,31 @@ ALTER TABLE ONLY public.system_llm_runs
 
 
 --
--- Name: run_artifacts run_artifacts_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: artifacts artifacts_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_artifacts
-    ADD CONSTRAINT run_artifacts_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.artifacts
+    ADD CONSTRAINT artifacts_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
 --
--- Name: run_artifacts run_artifacts_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: artifacts artifacts_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_artifacts
-    ADD CONSTRAINT run_artifacts_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
+-- Single-column ref to runs(id) with ON DELETE SET NULL: the artifact
+-- outlives a purged run for the audit ledger. A composite (run_id, org_id)
+-- ref like the other run children can't SET NULL here because org_id is
+-- NOT NULL — and the artifact's own org_id_fkey already pins the org.
+ALTER TABLE ONLY public.artifacts
+    ADD CONSTRAINT artifacts_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.runs(id) ON DELETE SET NULL;
+
+
+--
+-- Name: artifacts artifacts_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.artifacts
+    ADD CONSTRAINT artifacts_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
 
 
 --
@@ -4322,20 +4349,43 @@ CREATE POLICY system_llm_runs_all ON public.system_llm_runs USING (((org_id = tf
 
 
 --
--- Name: run_artifacts; Type: ROW SECURITY; Schema: public; Owner: -
+-- Name: artifacts; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
-ALTER TABLE public.run_artifacts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.artifacts ENABLE ROW LEVEL SECURITY;
+
+-- artifacts mirror the runs team-visibility branch: team-scoped read via
+-- team_id, the same write pool/scope runs use. artifacts carry no
+-- private/org visibility (no visibility / creator_user_id columns), so the
+-- policies are the team predicates from runs, swapped onto this table —
+-- user_in_team for SELECT, user_can_write_team for INSERT/UPDATE/DELETE.
 
 --
--- Name: run_artifacts run_artifacts_all; Type: POLICY; Schema: public; Owner: -
+-- Name: artifacts artifacts_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY run_artifacts_all ON public.run_artifacts USING ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = run_artifacts.run_id)))) WITH CHECK ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = run_artifacts.run_id))));
+CREATE POLICY artifacts_delete ON public.artifacts FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
+
+
+--
+-- Name: artifacts artifacts_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY artifacts_insert ON public.artifacts FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
+
+
+--
+-- Name: artifacts artifacts_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY artifacts_select ON public.artifacts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
+
+
+--
+-- Name: artifacts artifacts_update; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY artifacts_update ON public.artifacts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
 --
@@ -5235,14 +5285,14 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.system_llm_runs TO tf_app;
 
 
 --
--- Name: TABLE run_artifacts; Type: ACL; Schema: public; Owner: -
+-- Name: TABLE artifacts; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON TABLE public.run_artifacts TO postgres;
-GRANT ALL ON TABLE public.run_artifacts TO anon;
-GRANT ALL ON TABLE public.run_artifacts TO authenticated;
-GRANT ALL ON TABLE public.run_artifacts TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.run_artifacts TO tf_app;
+GRANT ALL ON TABLE public.artifacts TO postgres;
+GRANT ALL ON TABLE public.artifacts TO anon;
+GRANT ALL ON TABLE public.artifacts TO authenticated;
+GRANT ALL ON TABLE public.artifacts TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.artifacts TO tf_app;
 
 
 --

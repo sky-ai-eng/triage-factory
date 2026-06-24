@@ -139,7 +139,11 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// around RLS. The admin write commits autonomously from
 		// the outer tx — see Create's pool-routing comment for
 		// why that's the intended semantics.
-		AgentRuns:      newAgentRunStore(tx, s.admin),
+		AgentRuns: newAgentRunStore(tx, s.admin),
+		// Artifacts: app-pool store routes through the tx so writes
+		// compose with the surrounding claims tx (artifacts_* RLS scopes
+		// by team_id like runs).
+		Artifacts:      newArtifactStore(tx),
 		Entities:       newEntityStore(tx, tx),
 		Reviews:        newReviewStore(tx, s.admin),
 		PendingPRs:     newPendingPRStore(tx, s.admin),
