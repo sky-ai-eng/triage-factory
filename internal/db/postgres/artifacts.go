@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -89,8 +90,11 @@ func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, op
 	`
 	args := []any{orgID, teamID}
 	if opts.Limit > 0 {
-		query += ` LIMIT $3`
+		// Placeholder numbered from the current arg count, not hardcoded, so
+		// a future opt appended before this one (a Kind/State filter, say)
+		// can't silently shift LIMIT onto the wrong $N.
 		args = append(args, opts.Limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
 	}
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {

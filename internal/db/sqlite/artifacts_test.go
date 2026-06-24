@@ -217,6 +217,50 @@ func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_SQLite_ListByTeam_IncludesDetached pins the
+// audit-ledger invariant: an artifact whose run was purged (run_id NULL)
+// is still the team's and must come back from ListByTeam. Guards against a
+// future `AND run_id IS NOT NULL` creeping into the query. TFAC-455.
+func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runID := seedArtifactRun(t, conn)
+
+	art, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		Provider: "git", Kind: "branch", Target: "octo/repo",
+		State: domain.ArtifactStateBranchPushed, DedupKey: "git:branch:octo/repo:refs/heads/x",
+	})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Simulate a run purge: the FK is ON DELETE SET NULL, so deleting the
+	// run detaches the artifact rather than cascading it away.
+	if _, err := conn.Exec(`DELETE FROM runs WHERE id = ?`, runID); err != nil {
+		t.Fatalf("purge run: %v", err)
+	}
+	var nullRun sql.NullString
+	if err := conn.QueryRow(`SELECT run_id FROM artifacts WHERE id = ?`, art.ID).Scan(&nullRun); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if nullRun.Valid {
+		t.Fatalf("run_id should be NULL after run purge, got %q", nullRun.String)
+	}
+
+	rows, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
+	if err != nil {
+		t.Fatalf("ListByTeam: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != art.ID {
+		t.Errorf("ListByTeam dropped the detached artifact: %+v", rows)
+	}
+	if rows[0].RunID != "" {
+		t.Errorf("detached row RunID = %q, want empty", rows[0].RunID)
+	}
+}
+
 // TestArtifactStore_SQLite_DropsRunArtifacts pins that the forward
 // migration retired the dead run_artifacts table and created artifacts.
 func TestArtifactStore_SQLite_DropsRunArtifacts(t *testing.T) {

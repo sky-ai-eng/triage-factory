@@ -74,6 +74,13 @@ const (
 
 // Artifact state lifecycle values, grouped by kind. App-validated only —
 // there is no DB CHECK, so the set is extensible per the locked design.
+//
+// Some values intentionally alias across kinds (ArtifactStatePRPending and
+// ArtifactStateReviewPending are both "pending"), so state is only
+// meaningful read together with Kind — always branch on Artifact.Kind
+// first, never on the raw state string alone. The per-kind named consts
+// exist to nudge callers to the right one for their kind; the equal string
+// values mean a cross-kind mix-up won't surface as a type or string error.
 const (
 	// branch
 	ArtifactStateBranchPushed = "pushed"
@@ -93,7 +100,12 @@ const (
 	ArtifactStateReviewSubmitted = "submitted"
 	ArtifactStateReviewDismissed = "dismissed"
 
-	// issue (Jira / future Linear)
+	// issue (Jira / future Linear). These track the *last* action on the
+	// row, not the first: because the artifact is one deduped row, a
+	// 'created' issue that a later upsert touches again flips to 'updated',
+	// so "did this run create or only update the issue?" is NOT recoverable
+	// from state alone — a writer that needs that distinction must record it
+	// in details_json at create time.
 	ArtifactStateIssueCreated = "created"
 	ArtifactStateIssueUpdated = "updated"
 
@@ -105,6 +117,12 @@ const (
 // conflicts on: provider:kind:resource[:anchor]. The same logical artifact
 // maps to the same key regardless of which writer observed it, so a PR
 // seen via exec and again via reconciliation is one row.
+//
+// The key is ':'-delimited, so no segment may itself contain a ':' —
+// ("a:b", "") and ("a", "b") would otherwise collapse to the same
+// "...:a:b". Today's providers and GitHub/Jira identifiers (owner/repo,
+// refs/heads/x, SKY-123) carry no colons, so no current writer is at risk;
+// a future provider passing something URL-like must encode it first.
 //
 // resource and anchor are the caller's choice of *stable* dedup
 // coordinates — they need NOT equal the row's Artifact.Target /

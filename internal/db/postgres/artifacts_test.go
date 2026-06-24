@@ -218,6 +218,102 @@ func TestArtifactStore_Postgres_RLS_TeamScoped(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_Postgres_RLS_WritePath exercises the artifacts_insert
+// policy under tf_app (the read test bypasses it via AdminDB at setup): a
+// teamA member with write access can Upsert a teamA artifact, but a member
+// of a different team is rejected by the WITH CHECK
+// (user_can_write_team(team_id)). Without this the write policy could be
+// misconfigured and the read-only suite would still pass. TFAC-455.
+func TestArtifactStore_Postgres_RLS_WritePath(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	carol := pgtest.SeedUser(t, h, "carol")
+	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
+	pgtest.AddOrgMember(t, h, carol, orgA, teamB, "member", "member")
+	ctx := context.Background()
+
+	// run_id left empty (NULL) so this isolates artifacts_insert, not the
+	// runs FK/RLS interplay.
+	mkArtifact := func(key string) domain.Artifact {
+		return domain.Artifact{
+			OrgID: orgA, TeamID: teamA,
+			Provider: "github", Kind: "pull_request", Target: "octo/repo",
+			State: domain.ArtifactStatePROpen, DedupKey: key,
+		}
+	}
+
+	// Alice (teamA, founder → can write) succeeds through the app pool.
+	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.Upsert(ctx, orgA, mkArtifact("github:pull_request:octo/repo:refs/heads/a"))
+		return err
+	}); err != nil {
+		t.Fatalf("alice (teamA writer) Upsert under RLS: %v", err)
+	}
+	var landed int
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM artifacts WHERE team_id = $1`, teamA).Scan(&landed); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if landed != 1 {
+		t.Errorf("alice's artifact didn't land: count = %d, want 1", landed)
+	}
+
+	// Carol (teamB) writing a teamA-scoped artifact is rejected by the
+	// artifacts_insert WITH CHECK.
+	err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.Upsert(ctx, orgA, mkArtifact("github:pull_request:octo/repo:refs/heads/b"))
+		return e
+	})
+	pgtest.AssertRLSViolation(t, err)
+}
+
+// TestArtifactStore_Postgres_ListByTeam_IncludesDetached pins the
+// audit-ledger invariant: an artifact whose run was purged (run_id NULL)
+// is still the team's and must come back from ListByTeam. Guards against a
+// future `AND run_id IS NOT NULL` creeping into the query. TFAC-455.
+func TestArtifactStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
+	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	art, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+		RunID: runID, OrgID: orgID, TeamID: teamID,
+		Provider: "git", Kind: "branch", Target: "octo/repo",
+		State: domain.ArtifactStateBranchPushed, DedupKey: "git:branch:octo/repo:refs/heads/x",
+	})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Simulate a run purge: the FK is ON DELETE SET NULL, so deleting the
+	// run detaches the artifact rather than cascading it away.
+	if _, err := h.AdminDB.Exec(`DELETE FROM runs WHERE id = $1`, runID); err != nil {
+		t.Fatalf("purge run: %v", err)
+	}
+	var nullRun sql.NullString
+	if err := h.AdminDB.QueryRow(`SELECT run_id FROM artifacts WHERE id = $1`, art.ID).Scan(&nullRun); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if nullRun.Valid {
+		t.Fatalf("run_id should be NULL after run purge, got %q", nullRun.String)
+	}
+
+	rows, err := stores.Artifacts.ListByTeam(ctx, orgID, teamID, db.ArtifactListOpts{})
+	if err != nil {
+		t.Fatalf("ListByTeam: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != art.ID {
+		t.Errorf("ListByTeam dropped the detached artifact: %+v", rows)
+	}
+	if rows[0].RunID != "" {
+		t.Errorf("detached row RunID = %q, want empty", rows[0].RunID)
+	}
+}
+
 // seedPgArtifactRun mints a minimal run the artifacts.run_id FK can point
 // at. origin is non-'blueprint' so runs_origin_requires_parents doesn't
 // demand a parent chain; trigger_type='manual' needs a non-NULL creator.
