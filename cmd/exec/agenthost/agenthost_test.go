@@ -180,13 +180,17 @@ func TestIPCClient_MultiCall_PerCallDial(t *testing.T) {
 // TestServer_LookupRun_RoundTrip exercises the full
 // Server.Serve → IPCClient.LookupRun loop over a real (temporary)
 // unix socket. The probe RPC matches what the integration test +
-// the test stub send.
+// the test stub send. info carries a non-empty TeamID so the assertion
+// pins the multi-mode construction path (TFAC-458): the RunInfo the
+// spawner builds off the run row — TeamID included — survives the IPC
+// wire intact to the sandboxed agent, where the capture writers read it.
 func TestServer_LookupRun_RoundTrip(t *testing.T) {
 	stores, _ := newTestDB(t)
 	info := RunInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           "user-1",
 		RunID:            "run-1",
+		TeamID:           runmode.LocalDefaultTeamID,
 		IsEventTriggered: false,
 	}
 	sockPath := tempSocket(t)
@@ -210,6 +214,9 @@ func TestServer_LookupRun_RoundTrip(t *testing.T) {
 	}
 	if got != info {
 		t.Errorf("LookupRun mismatch: got %+v, want %+v", got, info)
+	}
+	if got.TeamID != info.TeamID {
+		t.Errorf("TeamID dropped over IPC: got %q, want %q", got.TeamID, info.TeamID)
 	}
 }
 

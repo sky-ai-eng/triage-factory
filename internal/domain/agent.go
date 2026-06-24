@@ -93,6 +93,16 @@ type AgentRun struct {
 	// migration introduced for prompts / task_rules / etc.
 	CreatorUserID string
 
+	// TeamID is the run's owning team — runs.team_id, NOT NULL (the
+	// LocalDefaultTeamID sentinel in local mode, the task-derived team in
+	// multi mode; EnqueueRun / Create denormalize it from the parent task
+	// at insert, so it carries the team without a task hop at read time).
+	// Surfaced onto RunInfo (TFAC-458) so the capture writers can stamp
+	// artifacts.team_id (NOT NULL, per TFAC-455 F1) directly off the run.
+	// Populated by the Get and ClaimNextRun scan paths; empty on rows
+	// hydrated by projections that don't select it.
+	TeamID string
+
 	BlueprintRunID     string `json:"blueprint_run_id,omitempty"`     // FK to blueprint_runs.id — populated for runs that are a step inside a multi-step blueprint
 	BlueprintStepIndex *int   `json:"blueprint_step_index,omitempty"` // 0-based step index within the blueprint; nil for non-blueprint-step runs
 

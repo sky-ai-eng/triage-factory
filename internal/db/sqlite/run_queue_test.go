@@ -69,6 +69,12 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	if got.BlueprintStepIndex == nil || *got.BlueprintStepIndex != 0 {
 		t.Fatalf("step index = %v, want 0", got.BlueprintStepIndex)
 	}
+	// team_id rides back on the claim (TFAC-458): the dispatcher stamps
+	// cfg.teamID = run.TeamID off the claimed row, which becomes the
+	// construction-path RunInfo.TeamID the capture writers attribute by.
+	if got.TeamID != runmode.LocalDefaultTeamID {
+		t.Fatalf("claimed team_id = %q, want %q", got.TeamID, runmode.LocalDefaultTeamID)
+	}
 
 	// Claimed → no longer queued, so a second claim finds nothing.
 	if got2, err := stores.RunQueue.ClaimNextRun(ctx); err != nil || got2 != nil {

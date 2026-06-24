@@ -31,10 +31,13 @@ var _ db.RunQueueStore = (*runQueueStore)(nil)
 // dormant statuses (open/pending_approval) to this set keep their own list.
 const runTerminalStatusesSQL = `'completed','failed','cancelled','task_unsolvable'`
 
-// runQueueClaimCols is the column list ClaimNextRun returns.
+// runQueueClaimCols is the column list ClaimNextRun returns. team_id is
+// surfaced (TFAC-458) so the construction-path RunInfo built off a claimed run
+// carries the owning team for the capture writers; it is NOT NULL on the row
+// (EnqueueRun derives it from the parent task).
 const runQueueClaimCols = `id::text, org_id::text, task_id::text, COALESCE(prompt_id, ''), status, COALESCE(model, ''),
 	COALESCE(worktree_path, ''), COALESCE(session_id, ''), trigger_type, COALESCE(trigger_id::text, ''),
-	COALESCE(creator_user_id::text, ''), COALESCE(blueprint_run_id::text, ''), blueprint_step_index, attempts`
+	COALESCE(creator_user_id::text, ''), team_id::text, COALESCE(blueprint_run_id::text, ''), blueprint_step_index, attempts`
 
 func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.AgentRun) error {
 	triggerType := run.TriggerType
@@ -166,7 +169,7 @@ func scanPgClaimedRun(row *sql.Row) (*domain.AgentRun, error) {
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model,
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
-		&r.CreatorUserID, &r.BlueprintRunID, &stepIdx, &r.Attempts)
+		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx, &r.Attempts)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

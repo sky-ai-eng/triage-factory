@@ -49,11 +49,11 @@ func (s *agentRunStore) Create(ctx context.Context, orgID string, run domain.Age
 		stepIdx = *run.BlueprintStepIndex
 	}
 	// team_id is the LocalDefaultTeamID sentinel — local mode has
-	// exactly one team. SKY-262's schema requires a non-NULL team_id
-	// for visibility='team' rows; pre-store callers passed the
-	// sentinel directly, and there is no TeamID field on domain
-	// AgentRun yet. Multi-mode requires a real team_id and will gain
-	// it when the spawner is wired through that path (D9 / SKY-253).
+	// exactly one team, so every run lands on it regardless of
+	// run.TeamID (which the read paths surface back out, TFAC-458).
+	// SKY-262's schema requires a non-NULL team_id for visibility='team'
+	// rows. Multi-mode derives the real team from the parent task in the
+	// Postgres Create / EnqueueRun, never here.
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility,
@@ -337,6 +337,7 @@ const sqliteRunColumns = `
 	r.result_summary, r.outcome, r.outcome_reason, r.session_id, r.actor_agent_id,
 	COALESCE(r.trigger_type, ''),
 	r.creator_user_id,
+	r.team_id,
 	r.executor_id,
 	r.blueprint_run_id, r.blueprint_step_index,
 	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
@@ -846,7 +847,7 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &executorID, &blueprintRunID, &blueprintStep,
+		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
@@ -865,7 +866,7 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &executorID, &blueprintRunID, &blueprintStep,
+		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err

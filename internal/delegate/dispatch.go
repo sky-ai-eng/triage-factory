@@ -264,6 +264,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 		return
 	}
 	cfg.orgID = orgID
+	cfg.teamID = run.TeamID
 	cfg.isBlueprintStep = true
 	cfg.blueprintRunID = br.ID
 	cfg.blueprintStep = stepIdx

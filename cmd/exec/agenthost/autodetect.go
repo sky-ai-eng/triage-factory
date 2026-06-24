@@ -75,6 +75,7 @@ func autoDetectLocal(ctx context.Context, stores db.Stores) (Client, error) {
 		OrgID:            ident.OrgID,
 		UserID:           ident.UserID,
 		RunID:            ident.RunID,
+		TeamID:           ident.TeamID,
 		IsEventTriggered: ident.IsEventTriggered,
 	}), nil
 }

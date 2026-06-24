@@ -363,13 +363,16 @@ func (s *projectSession) dispatch(item queueItem) {
 	// spawner (internal/delegate/run.go). The closure is only invoked in the
 	// sandbox branch (multi+linux); local/non-sandbox runs never call it.
 	// RunID is the curator request id (unique per turn → unique socket);
-	// identity is the requesting user's (org, user). IsEventTriggered is false
-	// — every curator turn is user-driven.
+	// identity is the requesting user's (org, user). TeamID is the curated
+	// project's owning team (this surface is project-scoped, not run-backed,
+	// so there is no runs.team_id to read — project.TeamID is the canonical
+	// team here). IsEventTriggered is false — every curator turn is user-driven.
 	startAgentHost := func() (sandbox.Mount, io.Closer, error) {
 		hd, mount, err := agenthost.Start(s.curator.stores, agenthost.RunInfo{
 			OrgID:            item.orgID,
 			UserID:           item.creatorUserID,
 			RunID:            requestID,
+			TeamID:           project.TeamID,
 			IsEventTriggered: false,
 		})
 		if err != nil {

@@ -327,16 +327,15 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 		// arm. The captured triggerType local (above) stays in scope
 		// for the goroutine's notifyDrainer defer — event-triggered
 		// runs still drive the per-entity firing queue on terminal.
-		resumeTeamID := ""
-		if taskCopy.TeamID != nil {
-			resumeTeamID = *taskCopy.TeamID
-		}
+		// run.TeamID (runs.team_id, NOT NULL) is the canonical owning team —
+		// no task hop, always populated — so it drives both the absent-auto-deny
+		// resolve and the resumed run's agenthost.RunInfo.TeamID (TFAC-458).
 		outcome, err := s.ResumeWithMessage(ctx, orgID, runID, sessionID, cwd, agentMessage, ResumeOptions{
 			Model:             model,
 			RepoEnv:           repoEnv,
 			ExtraAllowedTools: extraTools,
 			Namespace:         namespace,
-			TeamID:            resumeTeamID,
+			TeamID:            run.TeamID,
 		}, "manual", userID)
 		if ctx.Err() != nil {
 			// User cancelled mid-resume. ResumeWithMessage SIGKILLed
@@ -436,10 +435,12 @@ type ResumeOptions struct {
 	// capture it from the run (ResumeOpenRun → run.BlueprintRunID).
 	Namespace string
 
-	// TeamID is the run's owning team, used to resolve the presence-gated
+	// TeamID is the run's owning team. Resolves the presence-gated
 	// absent-auto-deny policy for the resumed run's permission prompts
-	// (TFAC-392). Empty falls back to the schema defaults. ResumeOpenRun
-	// captures it from the task (taskCopy.TeamID).
+	// (TFAC-392), and stamps the resumed run's agenthost.RunInfo.TeamID so
+	// the capture writers can attribute artifacts (TFAC-458). ResumeOpenRun
+	// captures it from the run row (run.TeamID, NOT NULL); empty falls back
+	// to the schema defaults for the absent-auto-deny resolve.
 	TeamID string
 }
 
@@ -545,6 +546,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 				OrgID:            orgID,
 				UserID:           creatorUserID,
 				RunID:            runID,
+				TeamID:           opts.TeamID,
 				IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 			}
 			hd, mount, err := agenthost.Start(stores, info)

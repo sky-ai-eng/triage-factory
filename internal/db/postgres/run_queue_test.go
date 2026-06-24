@@ -44,6 +44,16 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 	if got.ID != runID || got.Status != "running" || got.Attempts != 1 {
 		t.Fatalf("claimed = %+v", got)
 	}
+	// team_id rides back on the claim (TFAC-458) and matches the value
+	// EnqueueRun derived from the parent task — this is the construction-path
+	// RunInfo.TeamID source the capture writers attribute artifacts by.
+	var wantTeam string
+	if err := h.AdminDB.QueryRow(`SELECT team_id::text FROM tasks WHERE id = $1`, taskID).Scan(&wantTeam); err != nil {
+		t.Fatalf("read task team_id: %v", err)
+	}
+	if got.TeamID == "" || got.TeamID != wantTeam {
+		t.Fatalf("claimed team_id = %q, want %q (task-derived)", got.TeamID, wantTeam)
+	}
 
 	// Requeue → re-claimable, attempts retained.
 	if err := stores.RunQueue.RequeueRun(ctx, orgID, runID, "transient"); err != nil {

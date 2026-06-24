@@ -73,6 +73,12 @@ type RunIdentity struct {
 	// pending_pr.run_id, run_worktrees.run_id, etc.
 	RunID string
 
+	// TeamID is the run's owning team (runs.team_id, NOT NULL), read
+	// straight off the run row GetSystem already loads — no task hop.
+	// Carried onto the local-mode RunInfo (TFAC-458) so the capture
+	// writers can stamp artifacts.team_id (NOT NULL per TFAC-455 F1).
+	TeamID string
+
 	// IsEventTriggered is true when the run was spawned by an
 	// auto-delegation trigger rather than by a human action. The
 	// discriminator that picks synthetic-claims vs admin-pool
@@ -124,6 +130,7 @@ func ResolveRunIdentity(ctx context.Context, stores db.Stores, runID string) (Ru
 		OrgID:            orgID,
 		UserID:           run.CreatorUserID,
 		RunID:            runID,
+		TeamID:           run.TeamID,
 		IsEventTriggered: run.TriggerType == domain.TriggerTypeEvent,
 	}, nil
 }

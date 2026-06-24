@@ -33,10 +33,12 @@ var _ db.RunQueueStore = (*runQueueStore)(nil)
 const runTerminalStatusesSQL = `'completed','failed','cancelled','task_unsolvable'`
 
 // runQueueClaimCols is the column list ClaimNextRun returns, shared with the
-// scan helper. team_id/visibility are left at their row defaults on enqueue.
+// scan helper. visibility is left at its row default on enqueue; team_id is
+// surfaced (TFAC-458) so the construction-path RunInfo built off a claimed run
+// carries the owning team for the capture writers.
 const runQueueClaimCols = `id, org_id, task_id, COALESCE(prompt_id, ''), status, COALESCE(model, ''),
 	COALESCE(worktree_path, ''), COALESCE(session_id, ''), trigger_type, COALESCE(trigger_id, ''),
-	COALESCE(creator_user_id, ''), COALESCE(blueprint_run_id, ''), blueprint_step_index, attempts`
+	COALESCE(creator_user_id, ''), team_id, COALESCE(blueprint_run_id, ''), blueprint_step_index, attempts`
 
 func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.AgentRun) error {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -162,7 +164,7 @@ func scanSqliteClaimedRun(row *sql.Row) (*domain.AgentRun, error) {
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model,
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
-		&r.CreatorUserID, &r.BlueprintRunID, &stepIdx, &r.Attempts)
+		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx, &r.Attempts)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

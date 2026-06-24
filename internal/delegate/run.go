@@ -237,6 +237,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				OrgID:            orgID,
 				UserID:           creatorUserID,
 				RunID:            runID,
+				TeamID:           cfg.teamID,
 				IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 			}
 			hd, mount, err := agenthost.Start(stores, info)

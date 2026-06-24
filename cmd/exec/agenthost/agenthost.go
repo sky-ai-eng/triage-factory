@@ -61,10 +61,19 @@ const ProtocolVersion = 1
 // RunInfo is what LookupRun returns. Carries the routing-relevant
 // fields a subcommand needs to know about its own run — orgID for
 // every per-row read, userID for the synthetic-claims tx path, RunID
-// for the foreign-key columns on writes, and IsEventTriggered for any
+// for the foreign-key columns on writes, TeamID for the artifact
+// writers' NOT-NULL team_id stamp, and IsEventTriggered for any
 // caller that still wants to branch on routing shape (most don't,
 // since the routing decision is collapsed into the Client methods
 // below).
+//
+// TeamID is the run's owning team (runs.team_id, NOT NULL). The capture
+// writers (TFAC-459 Jira, TFAC-460 pre-push, GitHub-native rework) stamp
+// artifacts.team_id off it (NOT NULL per TFAC-455 F1), so it must be
+// populated on every construction path: the spawner reads it off the run
+// row (no task hop), and the local resolver carries it from
+// RunIdentity. Empty only on synthetic RunInfos that don't back a real
+// run (test seams).
 //
 // Mirrors runident.RunIdentity but lives in this package so the IPC
 // wire shape doesn't depend on runident's import graph (runident
@@ -73,6 +82,7 @@ type RunInfo struct {
 	OrgID            string `json:"org_id"`
 	UserID           string `json:"user_id"`
 	RunID            string `json:"run_id"`
+	TeamID           string `json:"team_id"`
 	IsEventTriggered bool   `json:"is_event_triggered"`
 }
 
