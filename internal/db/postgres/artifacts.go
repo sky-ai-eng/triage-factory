@@ -22,9 +22,9 @@ func newArtifactStore(q queryer) db.ArtifactStore { return &artifactStore{q: q} 
 var _ db.ArtifactStore = (*artifactStore)(nil)
 
 // pgArtifactColumns is the SELECT/RETURNING list scanned into a
-// domain.Artifact via scanArtifact. Nullable text columns are COALESCE'd
-// to ” so the scan targets are plain strings, the same shape pgRunColumns
-// uses.
+// domain.Artifact via scanArtifact. Nullable text columns are coalesced to
+// an empty string so the scan targets are plain strings, the same shape
+// pgRunColumns uses.
 const pgArtifactColumns = `
 	id, COALESCE(run_id::text, ''), org_id, team_id, provider, kind, target,
 	COALESCE(external_id, ''), COALESCE(url, ''), state, dedup_key,
@@ -32,11 +32,14 @@ const pgArtifactColumns = `
 `
 
 func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error) {
-	// ON CONFLICT(org_id, dedup_key) updates the mutable fields from the
-	// proposed row (EXCLUDED.*) and bumps updated_at; id/created_at on the
-	// existing row are preserved. A caller-supplied a.ID is honored on
-	// insert (parity with SQLite); an empty a.ID falls back to
-	// gen_random_uuid() server-side.
+	// ON CONFLICT(org_id, dedup_key) updates the documented mutable fields
+	// from the proposed row (EXCLUDED.*) and bumps updated_at; id/created_at
+	// on the existing row are preserved. provider/kind are deliberately NOT
+	// updated: they are encoded into dedup_key (the conflict target), so a
+	// conflicting row that disagreed on them would be keyed wrong — the
+	// insert side pins them, the update side leaves them. A caller-supplied
+	// a.ID is honored on insert (parity with SQLite); an empty a.ID falls
+	// back to gen_random_uuid() server-side.
 	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, run_id, org_id, team_id, provider, kind, target,
@@ -47,8 +50,6 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 		ON CONFLICT (org_id, dedup_key) DO UPDATE SET
 			run_id       = EXCLUDED.run_id,
 			team_id      = EXCLUDED.team_id,
-			provider     = EXCLUDED.provider,
-			kind         = EXCLUDED.kind,
 			target       = EXCLUDED.target,
 			external_id  = EXCLUDED.external_id,
 			url          = EXCLUDED.url,

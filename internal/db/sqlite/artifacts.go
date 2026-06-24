@@ -36,10 +36,14 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	if id == "" {
 		id = uuid.New().String()
 	}
-	// ON CONFLICT(org_id, dedup_key) updates the mutable fields from the
-	// proposed row (excluded.*) and bumps updated_at. id/created_at are
-	// preserved on the existing row — a conflicting insert keeps the
+	// ON CONFLICT(org_id, dedup_key) updates the documented mutable fields
+	// from the proposed row (excluded.*) and bumps updated_at. id/created_at
+	// are preserved on the existing row — a conflicting insert keeps the
 	// original identity, the same UPSERT contract the Postgres impl has.
+	// provider/kind are deliberately NOT updated: they are encoded into
+	// dedup_key (the conflict target), so the insert side pins them and the
+	// update side leaves them rather than risk a row whose discriminators
+	// disagree with its key.
 	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, run_id, org_id, team_id, provider, kind, target,
@@ -48,8 +52,6 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 		ON CONFLICT(org_id, dedup_key) DO UPDATE SET
 			run_id       = excluded.run_id,
 			team_id      = excluded.team_id,
-			provider     = excluded.provider,
-			kind         = excluded.kind,
 			target       = excluded.target,
 			external_id  = excluded.external_id,
 			url          = excluded.url,

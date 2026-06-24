@@ -102,27 +102,41 @@ const (
 )
 
 // ArtifactDedupKey builds the stable, provider-natural key Upsert
-// conflicts on: provider:kind:target[:externalID]. The same logical
-// artifact maps to the same key regardless of which writer observed it,
-// so a PR seen via exec and again via reconciliation is one row.
+// conflicts on: provider:kind:resource[:anchor]. The same logical artifact
+// maps to the same key regardless of which writer observed it, so a PR
+// seen via exec and again via reconciliation is one row.
+//
+// resource and anchor are the caller's choice of *stable* dedup
+// coordinates — they need NOT equal the row's Artifact.Target /
+// Artifact.ExternalID, which may evolve over the artifact's life. Pick
+// values that don't change across the transitions the artifact undergoes:
+//
+//   - resource: the stable resource key — 'owner/repo' for a branch or a
+//     branch-anchored PR, 'owner/repo#123' for a PR keyed on its number,
+//     'SKY-123' for a Jira issue.
+//   - anchor: an optional stable sub-discriminator appended when resource
+//     alone isn't unique — a branch ref for a branch, or for a PR whose
+//     number isn't known yet (see below). Empty when resource is already
+//     unique (e.g. jira:issue:SKY-123).
 //
 // Examples:
 //
-//	ArtifactDedupKey("github", "pull_request", "owner/repo#123", "")            => "github:pull_request:owner/repo#123"
-//	ArtifactDedupKey("git",    "branch",       "owner/repo", "refs/heads/x")    => "git:branch:owner/repo:refs/heads/x"
-//	ArtifactDedupKey("jira",   "issue",        "SKY-123", "")                   => "jira:issue:SKY-123"
+//	ArtifactDedupKey("github", "pull_request", "owner/repo#123", "")          => "github:pull_request:owner/repo#123"
+//	ArtifactDedupKey("git",    "branch",       "owner/repo", "refs/heads/x")  => "git:branch:owner/repo:refs/heads/x"
+//	ArtifactDedupKey("jira",   "issue",        "SKY-123", "")                 => "jira:issue:SKY-123"
 //
-// Pending→real PR: a 'pending' PR has no number yet, so writers key it on
-// the branch ref it will open from (e.g. ArtifactDedupKey("github",
-// "pull_request", "owner/repo", "refs/heads/x")). When the real PR is
-// created the writer keys on the same branch ref, so the row upserts in
-// place — state flips pending→open and external_id/url fill in. The key
-// must stay stable across that transition; keying the real PR on the
-// number instead would mint a second row.
-func ArtifactDedupKey(provider, kind, target, externalID string) string {
-	key := provider + ":" + kind + ":" + target
-	if externalID != "" {
-		key += ":" + externalID
+// Pending→real PR — why resource/anchor are NOT the struct fields: a
+// 'pending' PR has no number yet, so the writer keys it on the branch ref
+// it will open from: ArtifactDedupKey("github", "pull_request",
+// "owner/repo", "refs/heads/x"). When the real PR is created the writer
+// keys on the same repo+ref, so the row upserts in place — Artifact.Target
+// migrates owner/repo → owner/repo#123 and Artifact.ExternalID fills in,
+// but the dedup key stays put. Keying the real PR on its number instead
+// would mint a second row.
+func ArtifactDedupKey(provider, kind, resource, anchor string) string {
+	key := provider + ":" + kind + ":" + resource
+	if anchor != "" {
+		key += ":" + anchor
 	}
 	return key
 }
