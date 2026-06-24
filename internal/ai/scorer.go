@@ -209,7 +209,7 @@ func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets ag
 	// system_llm_runs below. ctx propagates from the Runner's stop
 	// channel so server shutdown SIGKILLs in-flight scoring calls instead
 	// of waiting for the model to time out.
-	startedAt := time.Now()
+	startedAt := time.Now().UTC()
 	usage := &agentproc.UsageSink{}
 	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
 		Model:   scoringModel,
