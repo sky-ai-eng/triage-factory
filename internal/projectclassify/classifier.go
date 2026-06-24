@@ -412,7 +412,7 @@ func runHaiku(ctx context.Context, opts agentproc.RunOptions, recorder *systemll
 	// still parsed below. One row per Run call (the classifier fans out
 	// per-entity-per-project, so many rows per cycle — expected). Recording
 	// happens whenever an outcome was produced and never breaks classification.
-	startedAt := time.Now()
+	startedAt := time.Now().UTC()
 	usage := &agentproc.UsageSink{}
 	outcome, err := agentproc.Run(ctx, opts, usage)
 	recorder.Record(ctx, systemllm.Call{
