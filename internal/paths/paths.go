@@ -250,6 +250,14 @@ func SDKDir() string {
 	return filepath.Join(ToolchainRoot(), "sdk")
 }
 
+// --- host-global but StateRoot-anchored (NOT ToolchainRoot) --------------
+//
+// Unlike the Class-2 resolvers above, the hooks dir is written by the
+// running binary at startup (not baked into the image), so it must live on
+// the writable state volume — hence StateRoot, not the image-baked
+// ToolchainRoot. It is still host-global (no org segment): the hooks are
+// generic and identical for every tenant.
+
 // HooksDir is the TF-controlled git hooks directory: <StateRoot>/hooks.
 // It hosts the hooks installed (process-scoped, via core.hooksPath) into
 // every git operation a delegated agent performs — in both run modes and

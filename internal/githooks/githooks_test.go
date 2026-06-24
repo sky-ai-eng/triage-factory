@@ -195,12 +195,15 @@ func setupHooks(t *testing.T, prePushBody string) (env []string, marker string) 
 
 	home := t.TempDir()
 	marker = filepath.Join(t.TempDir(), "marker")
-	// Hermetic base: strip every inherited GIT_* var (the test runner may
-	// export GIT_CONFIG_*, GIT_DIR, GIT_AUTHOR_*, ... which would otherwise
-	// leak into the agent git and make these tests non-hermetic / flaky),
-	// then add a clean HOME (no operator ~/.gitconfig), no system config, no
+	// Hermetic base: drop every inherited GIT_* var AND the keys we override
+	// below, so the agent git runs from a known-clean environment with no
+	// duplicate keys. Stripping the inherited HOME matters specifically: the
+	// runner exports its own HOME (e.g. /root), and leaving it in place would
+	// give two HOME entries — glibc getenv is first-wins, so git would read
+	// the operator's real ~/.gitconfig instead of the temp one, silently
+	// breaking hermeticity. Then add a clean HOME, no system config, no
 	// credential prompts, and the marker path for the hook.
-	base := append(withoutGitEnv(os.Environ()),
+	base := append(sanitizeEnv(os.Environ()),
 		"HOME="+home,
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_TERMINAL_PROMPT=0",
@@ -209,14 +212,21 @@ func setupHooks(t *testing.T, prePushBody string) (env []string, marker string) 
 	return DirectAgentEnv(base), marker
 }
 
-// withoutGitEnv returns env with every GIT_*-prefixed entry removed, so a
-// test's git runs from a known-clean environment regardless of what the
-// runner exported.
-func withoutGitEnv(env []string) []string {
+// sanitizeEnv returns env with every GIT_*-prefixed entry and the keys
+// setupHooks overrides (HOME, TF_HOOK_MARKER) removed, so the test agent
+// env has no duplicate keys and doesn't inherit the runner's git or home
+// configuration.
+func sanitizeEnv(env []string) []string {
+	drop := map[string]struct{}{"HOME": {}, "TF_HOOK_MARKER": {}}
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "GIT_") {
 			continue
+		}
+		if eq := strings.IndexByte(kv, '='); eq >= 0 {
+			if _, ok := drop[kv[:eq]]; ok {
+				continue
+			}
 		}
 		out = append(out, kv)
 	}
@@ -308,12 +318,16 @@ func assertSingleCount(t *testing.T, env []string) {
 	}
 }
 
+// envValue returns the first value for key in a KEY=VALUE slice. The test
+// envs never contain duplicate keys (DirectAgentEnv drops the inherited
+// GIT_CONFIG_COUNT and re-emits one; assertSingleCount guards that), so a
+// first-match scan is unambiguous — matching the same helper in
+// proxies_test.go.
 func envValue(env []string, key string) string {
 	prefix := key + "="
-	// Last-wins, matching getenv resolution of duplicate keys.
-	for i := len(env) - 1; i >= 0; i-- {
-		if strings.HasPrefix(env[i], prefix) {
-			return env[i][len(prefix):]
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return kv[len(prefix):]
 		}
 	}
 	return ""

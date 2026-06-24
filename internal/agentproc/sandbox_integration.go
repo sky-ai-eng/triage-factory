@@ -160,6 +160,18 @@ func buildSandboxEnv(extraEnv []string) []string {
 	// Floor: just enough for Node to find its binaries + cache dirs.
 	// Deliberately minimal; the sandbox's filesystem layout fills in
 	// most of what HOME would normally point at.
+	//
+	// INVARIANT: this base must never set GIT_CONFIG_COUNT (or any
+	// GIT_CONFIG_* entry). The sandboxed git's config is delivered as a
+	// single consolidated block by startProxiesForSandbox (core.hooksPath +
+	// the per-run proxy pairs), which owns GIT_CONFIG_COUNT outright and
+	// starts numbering at 0. A second GIT_CONFIG_COUNT here would collide
+	// with that block once sandbox.Wrap concatenates the two env slices, and
+	// which count git reads becomes platform-dependent (first-wins on glibc,
+	// last-wins elsewhere) — silently dropping either the hooks entry or the
+	// proxy routing. If a future feature needs sandbox git config, fold its
+	// pairs into that block, don't add them here. TestBuildSandboxEnv_NoGitConfig
+	// enforces this.
 	base := []string{
 		"PATH=/usr/local/bin:/usr/bin:/bin",
 		"HOME=/work",

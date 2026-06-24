@@ -2,8 +2,31 @@ package agentproc
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
+
+// TestBuildSandboxEnv_NoGitConfig enforces the invariant documented on
+// buildSandboxEnv: the base sandbox env must never carry a GIT_CONFIG_*
+// entry. The sandboxed git's config is delivered as one consolidated block
+// by startProxiesForSandbox (core.hooksPath + proxy pairs) that owns
+// GIT_CONFIG_COUNT and numbers from 0; a GIT_CONFIG_COUNT here would create
+// a second count once sandbox.Wrap concatenates the two slices, making which
+// one git reads platform-dependent. Asserted with both an empty extraEnv and
+// a representative one so a future contributor who reaches for buildSandboxEnv
+// to add a GIT_CONFIG_* var trips this immediately.
+func TestBuildSandboxEnv_NoGitConfig(t *testing.T) {
+	for _, extra := range [][]string{
+		nil,
+		{"TRIAGE_FACTORY_RUN_ID=r1", "TRIAGE_FACTORY_BLUEPRINT_RUN_ID=r1"},
+	} {
+		for _, kv := range buildSandboxEnv(extra) {
+			if strings.HasPrefix(kv, "GIT_CONFIG_") {
+				t.Errorf("buildSandboxEnv emitted %q; the base sandbox env must carry no GIT_CONFIG_* (see startProxiesForSandbox)", kv)
+			}
+		}
+	}
+}
 
 // TestAgentVisibleHelpers_LocalPassthrough exercises the un-sandboxed path
 // (tests run in local mode, so shouldSandbox() is false): both helpers must
