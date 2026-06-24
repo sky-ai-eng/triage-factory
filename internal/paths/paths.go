@@ -250,6 +250,21 @@ func SDKDir() string {
 	return filepath.Join(ToolchainRoot(), "sdk")
 }
 
+// HooksDir is the TF-controlled git hooks directory: <StateRoot>/hooks.
+// It hosts the hooks installed (process-scoped, via core.hooksPath) into
+// every git operation a delegated agent performs — in both run modes and
+// any cwd, including repos the agent clones into subdirs itself (F2,
+// TFAC-456). The hooks are generic and read run context from env
+// (TRIAGE_FACTORY_RUN_ID + the agenthost socket), so this is a single
+// fixed location, NOT regenerated per run — hence host-global and NOT
+// org-scoped (it hangs off StateRoot, never OrgRoot). In multi mode the
+// host process owns and writes this dir, then bind-mounts it read-only
+// into each sandbox; in local mode it lives under ~/.triagefactory and
+// the agent subprocess points at it directly.
+func HooksDir() string {
+	return filepath.Join(StateRoot(), "hooks")
+}
+
 // --- Class 3: local-only -------------------------------------------------
 
 // DBPath is the SQLite database path: <StateRoot>/triagefactory.db.

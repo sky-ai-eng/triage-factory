@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
 )
@@ -210,14 +211,26 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 
 	env := buildSandboxProxyEnv(cfg, llmURL, token)
 
+	// Assemble the single GIT_CONFIG_* block for the sandboxed git. It
+	// always carries core.hooksPath (F2, TFAC-456) so the TF hooks fire
+	// for every repo the agent touches — including subdir clones in a
+	// repo-less Jira run, which never reaches the git-proxy branch below.
+	// The proxy pairs layer on when a repo is in scope. Consolidating into
+	// one block keeps a single GIT_CONFIG_COUNT: the sandbox env merge
+	// (internal/sandbox) appends this slice verbatim and the base sandbox
+	// env carries no GIT_CONFIG, so there is exactly one count to read.
+	gitPairs := [][2]string{
+		{githooks.ConfigKey, githooks.SandboxDir},
+	}
+
 	// Git proxy: a second per-run proxy on its own port of hostVethIP
 	// that holds the GitHub credential host-side and injects Basic auth
 	// on outbound git-over-HTTPS. The sandbox git is pointed at it via
-	// GIT_CONFIG env entries (insteadOf + extraHeader) returned alongside
-	// the LLM env. Only wired for runs with a repo in scope; prompt-only
-	// runs pass git=nil and skip it.
+	// GIT_CONFIG env entries (insteadOf + extraHeader). Only wired for
+	// runs with a repo in scope; prompt-only runs pass git=nil and skip
+	// it (but still get core.hooksPath above).
 	if git != nil {
-		gitEnv, gitSrv, gerr := startGitProxyForSandbox(ctx, hostVethIP, git)
+		proxyPairs, gitSrv, gerr := startGitProxyForSandbox(ctx, hostVethIP, git)
 		if gerr != nil {
 			// The LLM proxy is already listening; tear it down so a git
 			// failure doesn't leak it, then return a clean nil bundle.
@@ -227,17 +240,21 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 			return nil, nil, gerr
 		}
 		bundle.git = gitSrv
-		env = append(env, gitEnv...)
+		gitPairs = append(gitPairs, proxyPairs...)
 	}
+
+	env = append(env, encodeGitConfigEnv(gitPairs)...)
 
 	return bundle, env, nil
 }
 
 // startGitProxyForSandbox mints the per-run git secret, starts the git
-// credential proxy on a free port of hostVethIP, and returns the
-// GIT_CONFIG env entries that route the sandbox git through it. Split
+// credential proxy on a free port of hostVethIP, and returns the git
+// config (key, value) pairs that route the sandbox git through it. Split
 // from startProxiesForSandbox so the LLM and git paths read independently
-// and the git failure path stays a single early return.
+// and the git failure path stays a single early return. The caller folds
+// the returned pairs into the single GIT_CONFIG_* block alongside
+// core.hooksPath.
 //
 // The eager TokenSource probe runs first: it surfaces a no-credentials
 // org as ErrNoSandboxGitCredentials at run start (a clear admin-facing
@@ -245,7 +262,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 // For an App-installation source the minted token is cached, so the
 // proxy's own lazy resolve on first request reuses it at no extra mint;
 // a PAT source pays one extra (cheap) secret-store read at run start.
-func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitProxyConfig) ([]string, *gitproxy.Server, error) {
+func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitProxyConfig) ([][2]string, *gitproxy.Server, error) {
 	if git.TokenSource == nil {
 		return nil, nil, errors.New("agentproc: GitProxyConfig.TokenSource is required")
 	}
@@ -282,8 +299,7 @@ func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitPro
 		return nil, nil, fmt.Errorf("agentproc: start git proxy on %s: %w", hostVethIP, err)
 	}
 
-	gitEnv := buildSandboxGitProxyEnv("http://"+addr, upstream, incoming)
-	return gitEnv, srv, nil
+	return sandboxGitProxyPairs("http://"+addr, upstream, incoming), srv, nil
 }
 
 // sandboxProxyConfig collects the parsed proxy-side configuration the
@@ -402,7 +418,7 @@ func buildSandboxProxyEnv(cfg sandboxProxyConfig, llmURL, incomingToken string) 
 // encoding needs a username, so we pin a stable sentinel.
 const gitProxyBasicUser = "x-run"
 
-// buildSandboxGitProxyEnv returns the GIT_CONFIG_* env entries that
+// sandboxGitProxyPairs returns the git config (key, value) pairs that
 // route the in-sandbox git through the per-run git proxy. Two settings,
 // both host-side (the agent never sees the real GitHub credential):
 //
@@ -415,17 +431,19 @@ const gitProxyBasicUser = "x-run"
 //     swapping in the real credential. Mirrors the base64("user:"+token)
 //     encoding internal/worktree uses for the host-side clone.
 //
-// Delivered via GIT_CONFIG_COUNT/KEY_n/VALUE_n rather than a .git/config
-// write because the bind-mounted worktree shares the bare clone's
-// config; the env form scopes the routing to this one sandboxed git
-// without touching shared on-disk state, and keeps the token out of
-// argv. proxyURL is "http://host:port" (no trailing slash); upstream is
-// the real git host base (no trailing slash).
+// The caller folds these into the single GIT_CONFIG_* block (with
+// core.hooksPath) via encodeGitConfigEnv. Delivered via env-config
+// rather than a .git/config write because the bind-mounted worktree
+// shares the bare clone's config; the env form scopes the routing to
+// this one sandboxed git without touching shared on-disk state, and
+// keeps the token out of argv. proxyURL is "http://host:port" (no
+// trailing slash); upstream is the real git host base (no trailing
+// slash).
 //
 // Property B: the only secret-shaped value is the per-run token, a
 // capability scoped to this run's own proxy — never the real GitHub
 // credential, which stays in the proxy on the host.
-func buildSandboxGitProxyEnv(proxyURL, upstream, incomingToken string) []string {
+func sandboxGitProxyPairs(proxyURL, upstream, incomingToken string) [][2]string {
 	// Trailing slash on both the rewritten base and the matched prefix
 	// so "<upstream>/owner/repo" maps cleanly to "<proxy>/owner/repo".
 	proxyBase := strings.TrimRight(proxyURL, "/") + "/"
@@ -434,14 +452,24 @@ func buildSandboxGitProxyEnv(proxyURL, upstream, incomingToken string) []string 
 	creds := gitProxyBasicUser + ":" + incomingToken
 	extraHeader := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
 
-	// One git config entry per pair. GIT_CONFIG_COUNT is derived from the
-	// pair count rather than hardcoded: git stops reading at the declared
-	// count, so a literal that drifted from the entries below would
-	// silently drop settings with no compile- or run-time error.
-	pairs := [][2]string{
+	return [][2]string{
 		{"url." + proxyBase + ".insteadOf", upstreamPrefix},
 		{"http." + proxyBase + ".extraHeader", extraHeader},
 	}
+}
+
+// encodeGitConfigEnv encodes git config (key, value) pairs into git's
+// indexed env-config form (GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n /
+// GIT_CONFIG_VALUE_n). GIT_CONFIG_COUNT is derived from the pair count
+// rather than hardcoded: git stops reading at the declared count, so a
+// literal that drifted from the entries would silently drop settings
+// with no compile- or run-time error.
+//
+// This is the one GIT_CONFIG_* block the sandbox env carries — the base
+// sandbox env sets none — so it owns GIT_CONFIG_COUNT outright and needs
+// no next-free-index bookkeeping (unlike the local direct-spawn path,
+// which layers over the inherited operator env).
+func encodeGitConfigEnv(pairs [][2]string) []string {
 	env := make([]string, 0, 1+2*len(pairs))
 	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(pairs)))
 	for i, kv := range pairs {

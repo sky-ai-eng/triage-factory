@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
 )
@@ -534,15 +536,47 @@ func TestRunProxies_ShutdownAggregatesErrors(t *testing.T) {
 
 // --- git proxy wiring (TFAC-302) -------------------------------------
 
+// gitConfigMap decodes git's indexed env-config form (GIT_CONFIG_COUNT +
+// GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n) in env into a key→value map.
+// Index-agnostic so a test can look up a config key by name regardless of
+// where it lands in the block — the consolidated sandbox block puts
+// core.hooksPath at index 0 and the proxy pairs after it.
+func gitConfigMap(t *testing.T, env []string) map[string]string {
+	t.Helper()
+	count, _ := strconv.Atoi(envValue(env, "GIT_CONFIG_COUNT"))
+	out := make(map[string]string, count)
+	for i := 0; i < count; i++ {
+		k := envValue(env, fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
+		v := envValue(env, fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
+		out[k] = v
+	}
+	return out
+}
+
+// gitConfigValueWithSuffix returns the value of the single git config key
+// ending in suffix (e.g. ".insteadOf", ".extraHeader"), failing if zero
+// or more than one match.
+func gitConfigValueWithSuffix(t *testing.T, env []string, suffix string) (key, value string) {
+	t.Helper()
+	var matches []string
+	cfg := gitConfigMap(t, env)
+	for k := range cfg {
+		if strings.HasSuffix(k, suffix) {
+			matches = append(matches, k)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("want exactly one git config key ending %q, got %v (env: %v)", suffix, matches, env)
+	}
+	return matches[0], cfg[matches[0]]
+}
+
 // gitProxyBaseFromEnv extracts the "http://host:port" proxy base the
 // git env entries route to, parsed out of the url.<base>.insteadOf key.
 func gitProxyBaseFromEnv(t *testing.T, env []string) string {
 	t.Helper()
-	v := envValue(env, "GIT_CONFIG_KEY_0")
-	if v == "" {
-		t.Fatalf("no GIT_CONFIG_KEY_0 (insteadOf) in env: %v", env)
-	}
-	v = strings.TrimSuffix(strings.TrimPrefix(v, "url."), ".insteadOf")
+	k, _ := gitConfigValueWithSuffix(t, env, ".insteadOf")
+	v := strings.TrimSuffix(strings.TrimPrefix(k, "url."), ".insteadOf")
 	return strings.TrimRight(v, "/")
 }
 
@@ -550,7 +584,7 @@ func gitProxyBaseFromEnv(t *testing.T, env []string) string {
 // http.<base>.extraHeader Basic credential the git env entries carry.
 func gitProxyTokenFromEnv(t *testing.T, env []string) string {
 	t.Helper()
-	hv := envValue(env, "GIT_CONFIG_VALUE_1")
+	_, hv := gitConfigValueWithSuffix(t, env, ".extraHeader")
 	b64 := strings.TrimPrefix(hv, "Authorization: Basic ")
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
@@ -563,28 +597,47 @@ func gitProxyTokenFromEnv(t *testing.T, env []string) string {
 	return tok
 }
 
-// TestBuildSandboxGitProxyEnv_Shape pins the exact GIT_CONFIG_* entries
-// that route the in-sandbox git through the proxy: an insteadOf rewrite
-// from the upstream host to the proxy base, and an extraHeader carrying
-// the per-run token (NOT the real credential) as the Basic password.
-func TestBuildSandboxGitProxyEnv_Shape(t *testing.T) {
-	env := buildSandboxGitProxyEnv("http://10.42.7.1:5123", "https://github.com", "per-run-secret")
+// TestSandboxGitProxyPairs_Shape pins the exact git config pairs that
+// route the in-sandbox git through the proxy: an insteadOf rewrite from
+// the upstream host to the proxy base, and an extraHeader carrying the
+// per-run token (NOT the real credential) as the Basic password. The
+// pairs are folded into the consolidated GIT_CONFIG_* block (with
+// core.hooksPath) by startProxiesForSandbox; here we assert the pairs
+// themselves.
+func TestSandboxGitProxyPairs_Shape(t *testing.T) {
+	pairs := sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "per-run-secret")
+	got := map[string]string{}
+	for _, p := range pairs {
+		got[p[0]] = p[1]
+	}
 
-	if got := envValue(env, "GIT_CONFIG_COUNT"); got != "2" {
-		t.Errorf("GIT_CONFIG_COUNT = %q, want 2", got)
+	if len(pairs) != 2 {
+		t.Errorf("len(pairs) = %d, want 2", len(pairs))
 	}
-	if got := envValue(env, "GIT_CONFIG_KEY_0"); got != "url.http://10.42.7.1:5123/.insteadOf" {
-		t.Errorf("GIT_CONFIG_KEY_0 = %q", got)
-	}
-	if got := envValue(env, "GIT_CONFIG_VALUE_0"); got != "https://github.com/" {
-		t.Errorf("GIT_CONFIG_VALUE_0 = %q, want https://github.com/ (insteadOf rewrites this prefix)", got)
-	}
-	if got := envValue(env, "GIT_CONFIG_KEY_1"); got != "http.http://10.42.7.1:5123/.extraHeader" {
-		t.Errorf("GIT_CONFIG_KEY_1 = %q", got)
+	if v := got["url.http://10.42.7.1:5123/.insteadOf"]; v != "https://github.com/" {
+		t.Errorf("insteadOf value = %q, want https://github.com/ (rewrites this prefix)", v)
 	}
 	wantHeader := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-run:per-run-secret"))
-	if got := envValue(env, "GIT_CONFIG_VALUE_1"); got != wantHeader {
-		t.Errorf("GIT_CONFIG_VALUE_1 = %q, want %q", got, wantHeader)
+	if v := got["http.http://10.42.7.1:5123/.extraHeader"]; v != wantHeader {
+		t.Errorf("extraHeader value = %q, want %q", v, wantHeader)
+	}
+}
+
+// TestEncodeGitConfigEnv_HooksAlwaysPresent pins that the consolidated
+// GIT_CONFIG_* block always carries core.hooksPath at index 0 (F2,
+// TFAC-456) and a single coherent GIT_CONFIG_COUNT covering it plus any
+// proxy pairs layered after it.
+func TestEncodeGitConfigEnv_HooksAlwaysPresent(t *testing.T) {
+	pairs := append([][2]string{{githooks.ConfigKey, githooks.SandboxDir}},
+		sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "tok")...)
+	env := encodeGitConfigEnv(pairs)
+
+	if got := envValue(env, "GIT_CONFIG_COUNT"); got != "3" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want 3 (hooks + 2 proxy pairs)", got)
+	}
+	cfg := gitConfigMap(t, env)
+	if cfg[githooks.ConfigKey] != githooks.SandboxDir {
+		t.Errorf("%s = %q, want %q", githooks.ConfigKey, cfg[githooks.ConfigKey], githooks.SandboxDir)
 	}
 }
 
@@ -609,11 +662,12 @@ func TestStartGitProxyForSandbox_RoutesAndAuthenticates(t *testing.T) {
 	src := func(ctx context.Context) (gitproxy.Token, error) {
 		return gitproxy.Token{Value: realToken, ExpiresAt: time.Now().Add(time.Hour)}, nil
 	}
-	env, srv, err := startGitProxyForSandbox(context.Background(), "127.0.0.1", &GitProxyConfig{TokenSource: src, Upstream: upstream.URL})
+	pairs, srv, err := startGitProxyForSandbox(context.Background(), "127.0.0.1", &GitProxyConfig{TokenSource: src, Upstream: upstream.URL})
 	if err != nil {
 		t.Fatalf("startGitProxyForSandbox: %v", err)
 	}
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	env := encodeGitConfigEnv(pairs)
 
 	base := gitProxyBaseFromEnv(t, env)
 	runToken := gitProxyTokenFromEnv(t, env)
@@ -657,9 +711,11 @@ func TestStartGitProxyForSandbox_RoutesAndAuthenticates(t *testing.T) {
 	}
 }
 
-// TestStartProxiesForSandbox_GitNilSkipsGitProxy pins that a run with
-// no git egress need (prompt-only) gets no git proxy and no GIT_CONFIG
-// entries — only the LLM proxy is wired.
+// TestStartProxiesForSandbox_GitNilSkipsGitProxy pins that a run with no
+// git egress need (prompt-only) gets no git proxy and no proxy GIT_CONFIG
+// entries — only the LLM proxy. core.hooksPath (F2) is still set: it is
+// proxy-independent, so a repo-less run that clones into a subdir is still
+// covered.
 func TestStartProxiesForSandbox_GitNilSkipsGitProxy(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer upstream.Close()
@@ -676,8 +732,18 @@ func TestStartProxiesForSandbox_GitNilSkipsGitProxy(t *testing.T) {
 	if bundle.git != nil {
 		t.Error("git proxy started despite nil GitProxy")
 	}
-	if got := envValue(env, "GIT_CONFIG_COUNT"); got != "" {
-		t.Errorf("GIT_CONFIG_COUNT = %q present despite nil GitProxy", got)
+	// Only the hooks entry — no proxy insteadOf/extraHeader pairs.
+	if got := envValue(env, "GIT_CONFIG_COUNT"); got != "1" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want 1 (core.hooksPath only, no proxy pairs)", got)
+	}
+	cfg := gitConfigMap(t, env)
+	if cfg[githooks.ConfigKey] != githooks.SandboxDir {
+		t.Errorf("%s = %q, want %q even with nil GitProxy", githooks.ConfigKey, cfg[githooks.ConfigKey], githooks.SandboxDir)
+	}
+	for k := range cfg {
+		if strings.HasSuffix(k, ".insteadOf") || strings.HasSuffix(k, ".extraHeader") {
+			t.Errorf("unexpected proxy git config %q present despite nil GitProxy", k)
+		}
 	}
 }
 

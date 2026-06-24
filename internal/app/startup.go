@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -22,6 +23,14 @@ import (
 // orphaned worktrees, and (local only) import skill files. All of this runs
 // before the background workers and the first poll.
 func (a *App) runStartupTasks(ctx context.Context) {
+	// Materialize the TF-controlled git hooks dir (F2, TFAC-456) before any
+	// run can spawn, in both modes, so core.hooksPath always resolves to a
+	// real directory. Best-effort: a failure here just means a run's git
+	// hooks no-op (core.hooksPath at a missing dir is harmless), so log and
+	// continue rather than block boot.
+	if err := githooks.Ensure(); err != nil {
+		serverLog.Warn("ensure git hooks dir failed; agent git hooks will no-op this boot", "error", err)
+	}
 	if a.local() {
 		a.wireCloneStatusCallback()
 		// Headless env-driven provisioning (TFAC-411): when TF_HEADLESS is set,
