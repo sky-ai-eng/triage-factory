@@ -76,28 +76,38 @@ func Ensure() error {
 	return nil
 }
 
-// DirectAgentEnv returns the GIT_CONFIG_* env entries that set
-// core.hooksPath=HostDir() for a non-sandboxed (local) agent subprocess.
+// DirectAgentEnv returns env extended with core.hooksPath=HostDir() as a
+// git env-config entry, for a non-sandboxed (local) agent subprocess. The
+// returned slice REPLACES the process env (it is env plus our entry), not
+// a fragment to append.
 //
-// The entries are layered over inheritedEnv — the environment the agent
-// will inherit (os.Environ()) — at the next free GIT_CONFIG index, so a
-// pre-existing operator GIT_CONFIG_* set (a custom CA, say) is preserved
-// and our hooks entry composes alongside it. The returned slice MUST be
-// appended AFTER inheritedEnv in the final process env: it re-emits
-// GIT_CONFIG_COUNT bumped by one, and last-value-wins env resolution is
-// what makes git read the bumped count rather than the inherited one.
+// The entry lands at the next free GIT_CONFIG index — one past the
+// inherited GIT_CONFIG_COUNT — so a pre-existing operator GIT_CONFIG_*
+// set (a custom CA, say) is preserved and our hooks entry composes
+// alongside it. Crucially, the inherited GIT_CONFIG_COUNT line is dropped
+// and re-emitted bumped, so git reads a single, correct count regardless
+// of how duplicate env keys resolve (getenv is first-wins on glibc,
+// last-wins elsewhere — depending on either is a portability bug). This
+// mirrors internal/worktree's gitConfigEnviron exactly.
 //
-// Git's env-config form (GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/_VALUE_n)
-// is used — not a `git config` write — so nothing touches on-disk config
-// (the operator's ~/.gitconfig stays untouched) and the install is
-// scoped to this one agent process.
-func DirectAgentEnv(inheritedEnv []string) []string {
-	idx := gitConfigCount(inheritedEnv)
-	return []string{
-		"GIT_CONFIG_KEY_" + strconv.Itoa(idx) + "=" + ConfigKey,
-		"GIT_CONFIG_VALUE_" + strconv.Itoa(idx) + "=" + HostDir(),
-		"GIT_CONFIG_COUNT=" + strconv.Itoa(idx+1),
+// Git's env-config form (GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/_VALUE_n) is
+// used — not a `git config` write — so nothing touches on-disk config
+// (the operator's ~/.gitconfig stays untouched) and the install is scoped
+// to this one agent process.
+func DirectAgentEnv(env []string) []string {
+	idx := gitConfigCount(env)
+	out := make([]string, 0, len(env)+3)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_CONFIG_COUNT=") {
+			continue // re-emitted below, bumped to include our entry
+		}
+		out = append(out, kv)
 	}
+	return append(out,
+		"GIT_CONFIG_KEY_"+strconv.Itoa(idx)+"="+ConfigKey,
+		"GIT_CONFIG_VALUE_"+strconv.Itoa(idx)+"="+HostDir(),
+		"GIT_CONFIG_COUNT="+strconv.Itoa(idx+1),
+	)
 }
 
 // gitConfigCount parses GIT_CONFIG_COUNT (the number of git's indexed

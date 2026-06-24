@@ -41,20 +41,24 @@ func TestEnsure_CreatesDirReadmeKeep(t *testing.T) {
 // TestDirectAgentEnv_IndexBookkeeping pins that the local hooks entry
 // lands at the next free GIT_CONFIG index — index 0 over a clean env, and
 // bumped past a pre-existing operator GIT_CONFIG_* set so it composes
-// rather than clobbering it.
+// rather than clobbering it. The inherited COUNT line is dropped and
+// re-emitted bumped, so the result carries exactly one GIT_CONFIG_COUNT
+// (no reliance on first-vs-last-wins duplicate-env resolution).
 func TestDirectAgentEnv_IndexBookkeeping(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	paths.SetForTest(t, "/s")
 	wantPath := filepath.Join("/s", "hooks")
 
-	// Clean env → index 0, count 1.
+	// Clean env → index 0, count 1. The non-git entry passes through.
 	clean := DirectAgentEnv([]string{"PATH=/usr/bin"})
+	assertEnv(t, clean, "PATH", "/usr/bin")
 	assertEnv(t, clean, "GIT_CONFIG_KEY_0", ConfigKey)
 	assertEnv(t, clean, "GIT_CONFIG_VALUE_0", wantPath)
 	assertEnv(t, clean, "GIT_CONFIG_COUNT", "1")
+	assertSingleCount(t, clean)
 
-	// Inherited count 2 → our entry at index 2, count bumped to 3, and the
-	// operator's existing indices left intact (we never re-emit them).
+	// Inherited count 2 → our entry at index 2, count bumped to 3, the
+	// operator's existing indices left intact, and exactly one COUNT line.
 	inherited := []string{
 		"GIT_CONFIG_COUNT=2",
 		"GIT_CONFIG_KEY_0=http.https://example.com/.extraHeader",
@@ -63,9 +67,12 @@ func TestDirectAgentEnv_IndexBookkeeping(t *testing.T) {
 		"GIT_CONFIG_VALUE_1=ssh -i /k",
 	}
 	layered := DirectAgentEnv(inherited)
+	assertEnv(t, layered, "GIT_CONFIG_KEY_0", "http.https://example.com/.extraHeader")
+	assertEnv(t, layered, "GIT_CONFIG_KEY_1", "core.sshCommand")
 	assertEnv(t, layered, "GIT_CONFIG_KEY_2", ConfigKey)
 	assertEnv(t, layered, "GIT_CONFIG_VALUE_2", wantPath)
 	assertEnv(t, layered, "GIT_CONFIG_COUNT", "3")
+	assertSingleCount(t, layered)
 }
 
 // TestLocalHookFires is the local-mode F2 acceptance test: a placeholder
@@ -188,15 +195,32 @@ func setupHooks(t *testing.T, prePushBody string) (env []string, marker string) 
 
 	home := t.TempDir()
 	marker = filepath.Join(t.TempDir(), "marker")
-	// Hermetic base: a clean HOME (no operator ~/.gitconfig), no system
-	// config, no credential prompts, and the marker path for the hook.
-	base := append(os.Environ(),
+	// Hermetic base: strip every inherited GIT_* var (the test runner may
+	// export GIT_CONFIG_*, GIT_DIR, GIT_AUTHOR_*, ... which would otherwise
+	// leak into the agent git and make these tests non-hermetic / flaky),
+	// then add a clean HOME (no operator ~/.gitconfig), no system config, no
+	// credential prompts, and the marker path for the hook.
+	base := append(withoutGitEnv(os.Environ()),
 		"HOME="+home,
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_TERMINAL_PROMPT=0",
 		"TF_HOOK_MARKER="+marker,
 	)
-	return append(base, DirectAgentEnv(base)...), marker
+	return DirectAgentEnv(base), marker
+}
+
+// withoutGitEnv returns env with every GIT_*-prefixed entry removed, so a
+// test's git runs from a known-clean environment regardless of what the
+// runner exported.
+func withoutGitEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // newRepoWithRemote builds a work repo with a single commit and a bare
@@ -265,6 +289,22 @@ func assertEnv(t *testing.T, env []string, key, want string) {
 	t.Helper()
 	if got := envValue(env, key); got != want {
 		t.Errorf("%s = %q, want %q", key, got, want)
+	}
+}
+
+// assertSingleCount fails if env carries more than one GIT_CONFIG_COUNT
+// line — the property that frees us from depending on first-vs-last-wins
+// duplicate-env resolution.
+func assertSingleCount(t *testing.T, env []string) {
+	t.Helper()
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_CONFIG_COUNT=") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("GIT_CONFIG_COUNT appears %d times, want exactly 1: %v", n, env)
 	}
 }
 

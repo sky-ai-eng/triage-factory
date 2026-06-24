@@ -9,8 +9,12 @@ agent performs: in both run modes (local + sandboxed multi), under any
 working directory, including repositories the agent clones into subdirs
 itself.
 
-Do not edit by hand. TF recreates this directory and its contents on
-startup.
+Do not add or edit files here by hand. On startup TF ensures the
+directory exists and rewrites the files it manages (this README, and the
+hooks themselves once they ship). It does **not** delete files it doesn't
+recognize, so a stray file you drop here will persist — but git only runs
+files named exactly after a hook (`pre-push`, ...), so an unrecognized
+file is inert rather than dangerous.
 
 ## Run-context convention
 

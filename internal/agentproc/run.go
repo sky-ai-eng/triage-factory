@@ -659,17 +659,16 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	}
 	cmd := exec.CommandContext(runCtx, "node", nodeArgs...)
 	cmd.Dir = opts.Cwd
-	env := mergeEnv(os.Environ(), opts.ExtraEnv, creds)
 	// Install the TF-controlled git hooks dir as process-scoped
 	// core.hooksPath for this agent (F2, TFAC-456). This is the local /
 	// non-sandbox path — the sandbox sets the same key via its GIT_CONFIG_*
 	// block (startProxiesForSandbox), so it deliberately lives here, off the
 	// sandbox branch, to avoid two GIT_CONFIG_COUNT sources colliding.
-	// Appended LAST and layered over the assembled env so a pre-existing
-	// operator GIT_CONFIG_* set is preserved (the operator's ~/.gitconfig is
-	// never touched — env-scoped only).
-	env = append(env, githooks.DirectAgentEnv(env)...)
-	cmd.Env = env
+	// DirectAgentEnv layers our entry over the assembled env at the next
+	// free index (dropping + re-emitting the inherited count), so a
+	// pre-existing operator GIT_CONFIG_* set is preserved and the operator's
+	// ~/.gitconfig is never touched — env-scoped only.
+	cmd.Env = githooks.DirectAgentEnv(mergeEnv(os.Environ(), opts.ExtraEnv, creds))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		// Process is non-nil here because the watcher only fires after
