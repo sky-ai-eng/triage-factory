@@ -54,7 +54,7 @@ func (c *Client) CreatePendingReview(owner, repo string, number int, commitSHA s
 		if strings.Contains(err.Error(), "422") && strings.Contains(strings.ToLower(err.Error()), "one pending review") {
 			return "", fmt.Errorf("a pending review already exists on this PR for the authenticated identity — fetch it with GetPendingReview instead of creating a new one")
 		}
-		return "", err
+		return "", liftValidationErr(err)
 	}
 
 	var raw map[string]any
