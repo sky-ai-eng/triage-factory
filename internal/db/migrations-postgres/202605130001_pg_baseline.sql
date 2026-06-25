@@ -1059,46 +1059,6 @@ ALTER SEQUENCE public.pending_firings_id_seq OWNED BY public.pending_firings.id;
 
 
 --
--- Name: pending_review_comments; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pending_review_comments (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    org_id uuid NOT NULL,
-    review_id uuid NOT NULL,
-    path text NOT NULL,
-    line integer NOT NULL,
-    start_line integer,
-    body text NOT NULL,
-    original_body text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    severity text DEFAULT ''::text NOT NULL
-);
-
-
---
--- Name: pending_reviews; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pending_reviews (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    org_id uuid NOT NULL,
-    pr_number integer NOT NULL,
-    owner text NOT NULL,
-    repo text NOT NULL,
-    commit_sha text NOT NULL,
-    diff_lines text,
-    run_id uuid,
-    review_body text,
-    review_event text,
-    original_review_body text,
-    original_review_event text,
-    diff_hunks text DEFAULT ''::text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
 -- Name: poller_state; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1942,30 +1902,6 @@ ALTER TABLE ONLY public.pending_firings
 
 
 --
--- Name: pending_review_comments pending_review_comments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pending_review_comments
-    ADD CONSTRAINT pending_review_comments_pkey PRIMARY KEY (id);
-
-
---
--- Name: pending_reviews pending_reviews_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pending_reviews
-    ADD CONSTRAINT pending_reviews_id_org_id_key UNIQUE (id, org_id);
-
-
---
--- Name: pending_reviews pending_reviews_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pending_reviews
-    ADD CONSTRAINT pending_reviews_pkey PRIMARY KEY (id);
-
-
---
 -- Name: poller_state poller_state_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2415,13 +2351,6 @@ CREATE UNIQUE INDEX idx_pending_firings_dedup ON public.pending_firings USING bt
 --
 
 CREATE INDEX idx_pending_firings_entity_pending ON public.pending_firings USING btree (entity_id, queued_at) WHERE (status = 'pending'::text);
-
-
---
--- Name: idx_pending_review_comments_review_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_pending_review_comments_review_id ON public.pending_review_comments USING btree (review_id);
 
 
 --
@@ -3106,38 +3035,6 @@ ALTER TABLE ONLY public.pending_firings
 
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
-
-
---
--- Name: pending_review_comments pending_review_comments_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pending_review_comments
-    ADD CONSTRAINT pending_review_comments_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-
---
--- Name: pending_review_comments pending_review_comments_review_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pending_review_comments
-    ADD CONSTRAINT pending_review_comments_review_id_org_id_fkey FOREIGN KEY (review_id, org_id) REFERENCES public.pending_reviews(id, org_id) ON DELETE CASCADE;
-
-
---
--- Name: pending_reviews pending_reviews_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pending_reviews
-    ADD CONSTRAINT pending_reviews_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-
---
--- Name: pending_reviews pending_reviews_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pending_reviews
-    ADD CONSTRAINT pending_reviews_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE SET NULL;
 
 
 --
@@ -4085,40 +3982,6 @@ CREATE POLICY pending_firings_all ON public.pending_firings USING ((EXISTS ( SEL
   WHERE (t.id = pending_firings.task_id)))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public.tasks t
   WHERE (t.id = pending_firings.task_id))));
-
-
---
--- Name: pending_review_comments; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.pending_review_comments ENABLE ROW LEVEL SECURITY;
-
---
--- Name: pending_review_comments pending_review_comments_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY pending_review_comments_all ON public.pending_review_comments USING ((EXISTS ( SELECT 1
-   FROM public.pending_reviews pr
-  WHERE (pr.id = pending_review_comments.review_id)))) WITH CHECK ((EXISTS ( SELECT 1
-   FROM public.pending_reviews pr
-  WHERE (pr.id = pending_review_comments.review_id))));
-
-
---
--- Name: pending_reviews; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.pending_reviews ENABLE ROW LEVEL SECURITY;
-
---
--- Name: pending_reviews pending_reviews_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY pending_reviews_all ON public.pending_reviews USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((run_id IS NULL) OR (EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = pending_reviews.run_id)))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((run_id IS NULL) OR (EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = pending_reviews.run_id))))));
 
 
 --
@@ -5093,28 +4956,6 @@ GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO anon;
 GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO authenticated;
 GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO service_role;
 GRANT SELECT,USAGE ON SEQUENCE public.pending_firings_id_seq TO tf_app;
-
-
---
--- Name: TABLE pending_review_comments; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.pending_review_comments TO postgres;
-GRANT ALL ON TABLE public.pending_review_comments TO anon;
-GRANT ALL ON TABLE public.pending_review_comments TO authenticated;
-GRANT ALL ON TABLE public.pending_review_comments TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.pending_review_comments TO tf_app;
-
-
---
--- Name: TABLE pending_reviews; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.pending_reviews TO postgres;
-GRANT ALL ON TABLE public.pending_reviews TO anon;
-GRANT ALL ON TABLE public.pending_reviews TO authenticated;
-GRANT ALL ON TABLE public.pending_reviews TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.pending_reviews TO tf_app;
 
 
 --

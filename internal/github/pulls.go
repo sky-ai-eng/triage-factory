@@ -21,6 +21,7 @@ import (
 // the head URL is only for fork-PR push tracking.
 type PRView struct {
 	Number       int               `json:"number"`
+	NodeID       string            `json:"node_id"`
 	Title        string            `json:"title"`
 	Body         string            `json:"body"`
 	State        string            `json:"state"`
@@ -86,6 +87,7 @@ func (c *Client) GetPRBasic(owner, repo string, number int) (*PRView, error) {
 func prViewFromRaw(raw map[string]any) *PRView {
 	pr := &PRView{
 		Number:       intVal(raw, "number"),
+		NodeID:       strVal(raw, "node_id"),
 		Title:        strVal(raw, "title"),
 		Body:         strVal(raw, "body"),
 		State:        strVal(raw, "state"),

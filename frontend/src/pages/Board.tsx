@@ -1143,7 +1143,7 @@ export default function Board() {
       />
 
       <ReviewOverlay
-        runID={approvalCtx?.kind === 'review' ? approvalCtx.runID : ''}
+        artifactId={approvalCtx?.kind === 'review' ? (approvalCtx.artifactId ?? '') : ''}
         open={approvalCtx?.kind === 'review'}
         onClose={() => {
           setApprovalCtx(null)

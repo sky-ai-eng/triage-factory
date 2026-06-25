@@ -186,6 +186,10 @@ func (s *Server) handleConn(conn net.Conn) {
 		if errors.Is(err, ErrPendingReviewCollision) {
 			resp.ErrCode = errCodePendingReviewCollision
 		}
+		// Same for the submit-review double-call guard.
+		if errors.Is(err, ErrReviewAlreadyFinalized) {
+			resp.ErrCode = errCodeReviewAlreadyFinalized
+		}
 	} else if result != nil {
 		body, mErr := json.Marshal(result)
 		if mErr != nil {
@@ -233,69 +237,12 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 	case methodLookupRun:
 		return lookupRunResult{Info: s.info}, nil
 
-	case methodGetPendingReview:
-		var a byIDArgs
+	case methodFinalizeReviewDraft:
+		var a finalizeReviewDraftArgs
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		r, err := client.GetPendingReview(ctx, a.ID)
-		if err != nil {
-			return nil, err
-		}
-		return pendingReviewResult{Review: r}, nil
-
-	case methodCreatePendingReview:
-		var a createPendingReviewArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		return emptyResult{}, client.CreatePendingReview(ctx, a.Review)
-
-	case methodDeletePendingReview:
-		var a byIDArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		return emptyResult{}, client.DeletePendingReview(ctx, a.ID)
-
-	case methodLockReviewSubmission:
-		var a lockReviewSubmissionArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		return emptyResult{}, client.LockReviewSubmission(ctx, a.ReviewID, a.Body, a.Event)
-
-	case methodAddPendingReviewComment:
-		var a addCommentArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		return emptyResult{}, client.AddPendingReviewComment(ctx, a.Comment)
-
-	case methodUpdatePendingReviewComment:
-		var a updateCommentArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		return emptyResult{}, client.UpdatePendingReviewComment(ctx, a.ID, a.Body)
-
-	case methodDeletePendingReviewComment:
-		var a byIDArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		return emptyResult{}, client.DeletePendingReviewComment(ctx, a.ID)
-
-	case methodListPendingReviewComments:
-		var a listCommentsArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		c, err := client.ListPendingReviewComments(ctx, a.ReviewID)
-		if err != nil {
-			return nil, err
-		}
-		return listCommentsResult{Comments: c}, nil
+		return emptyResult{}, client.FinalizeReviewDraft(ctx, a.ReviewID, a.Event, a.Body)
 
 	case methodGetAgentRun:
 		run, err := client.GetAgentRun(ctx)

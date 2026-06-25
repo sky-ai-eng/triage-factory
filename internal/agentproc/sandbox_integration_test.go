@@ -127,13 +127,11 @@ func TestTranslateEnvForSandbox(t *testing.T) {
 			env: []string{
 				"TRIAGE_FACTORY_RUN_ID=abc-123",
 				"TRIAGE_FACTORY_REPO=owner/repo",
-				"TRIAGE_FACTORY_REVIEW_PREVIEW=1",
 			},
 			cwd: "/data/worktrees/abc",
 			want: []string{
 				"TRIAGE_FACTORY_RUN_ID=abc-123",
 				"TRIAGE_FACTORY_REPO=owner/repo",
-				"TRIAGE_FACTORY_REVIEW_PREVIEW=1",
 			},
 		},
 		{

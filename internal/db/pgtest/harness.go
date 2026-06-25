@@ -258,7 +258,6 @@ var orgScopedTables = []string{
 	"org_secrets",
 	// TF data:
 	"curator_pending_context", "curator_messages", "curator_requests",
-	"pending_review_comments", "pending_reviews",
 	"swipe_events",
 	"run_worktrees",
 	"pending_firings",

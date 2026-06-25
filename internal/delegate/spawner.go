@@ -59,8 +59,7 @@ type Spawner struct {
 	tasks      db.TaskStore     // re-read tasks for run lifecycle handlers
 	agentRuns  db.AgentRunStore // run lifecycle + transcript
 	entities   db.EntityStore   // entity reads for project lookup + resume context
-	reviews    db.ReviewStore   // pending review cleanup on discard / cancel paths
-	artifacts  db.ArtifactStore // draft-PR artifact lookup on processCompletion park check
+	artifacts  db.ArtifactStore // review + draft-PR artifact lookup on processCompletion park check
 	events     db.EventStore    // admin-pool GetMetadataSystem for post-run prompt building
 	// taskMemory routes the post-completion UpsertAgentMemorySystem
 	// and the run-start GetMemoriesForEntitySystem through the dual-
@@ -220,7 +219,6 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		tasks:        stores.Tasks,
 		agentRuns:    stores.AgentRuns,
 		entities:     stores.Entities,
-		reviews:      stores.Reviews,
 		artifacts:    stores.Artifacts,
 		events:       stores.Events,
 		taskMemory:   stores.TaskMemory,

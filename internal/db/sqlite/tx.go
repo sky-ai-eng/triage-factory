@@ -67,7 +67,6 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		AgentRuns:        newAgentRunStore(tx),
 		Artifacts:        newArtifactStore(tx),
 		Entities:         newEntityStore(tx, tx),
-		Reviews:          newReviewStore(tx, tx),
 		Repos:            newRepoStore(tx, tx),
 		PendingFirings:   newPendingFiringsStore(tx),
 		Projects:         newProjectStore(tx, tx),

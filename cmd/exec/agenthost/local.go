@@ -83,64 +83,102 @@ func (c *LocalClient) withWrite(
 	return c.stores.Tx.SyntheticClaimsWithTx(ctx, c.info.OrgID, c.info.UserID, user)
 }
 
-// --- pending reviews ---
+// --- review draft finalization ---
 
-func (c *LocalClient) GetPendingReview(ctx context.Context, reviewID string) (*domain.PendingReview, error) {
-	return c.stores.Reviews.GetSystem(ctx, c.info.OrgID, reviewID)
+// FinalizeReviewDraft is the host side of `gh pr submit-review` under the
+// GitHub-native model: it does NOT submit to GitHub (approval does that). It
+// locates the run's pending review artifact, reads the live GitHub pending
+// review for the inline comments the agent added, stages the body + event, and
+// sets the ready sentinel (details_json.review_event) that parks the run for
+// human approval — snapshotting the agent's first draft into details.proposed so
+// the approve-time human-feedback diff has a baseline.
+//
+// reviewID is the review node id the agent passes through; it's validated
+// against the artifact's ExternalID so a stale id fails loudly rather than
+// finalizing the wrong review. The TFAC-358 anti-double-submit guard fires here:
+// a ready sentinel that's already set returns ErrReviewAlreadyFinalized.
+func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) error {
+	arts, err := c.listArtifactsByRun(ctx)
+	if err != nil {
+		return err
+	}
+	art := domain.FirstPendingReviewArtifact(arts)
+	if art == nil {
+		return fmt.Errorf("no pending review for this run — run `gh pr start-review` first")
+	}
+	if reviewID != "" && art.ExternalID != reviewID {
+		return fmt.Errorf("review %s does not match this run's pending review %s", reviewID, art.ExternalID)
+	}
+
+	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	if err != nil {
+		return fmt.Errorf("parse review artifact details: %w", err)
+	}
+	// Anti-double-submit (TFAC-358): the ready sentinel is already set, so the
+	// agent already finalized this review. Hard error so it stops looping.
+	if details.ReviewEvent != "" {
+		return ErrReviewAlreadyFinalized
+	}
+
+	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
+	if !ok {
+		return fmt.Errorf("review artifact has a malformed target %q", art.Target)
+	}
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return err
+	}
+	// Read the live pending review for the inline comments the agent staged on
+	// GitHub (each add-review-comment baked the severity badge into the body).
+	_, liveComments, err := client.GetPendingReview(owner, repo, number)
+	if err != nil {
+		return fmt.Errorf("read pending review from github: %w", err)
+	}
+
+	// A comment / request_changes review must carry something actionable: a body,
+	// inline comments, or both. An approve needs neither (the approval is the
+	// signal). Mirrors the old submit-review guard, now that the comments live on
+	// GitHub rather than a local table.
+	if body == "" && event != "APPROVE" && len(liveComments) == 0 {
+		return fmt.Errorf("a %s review needs --body/--body-file or at least one inline comment", strings.ToLower(event))
+	}
+
+	proposed := domain.ReviewArtifactProposed{Body: body, Event: event}
+	for _, cm := range liveComments {
+		proposed.Comments = append(proposed.Comments, domain.ReviewArtifactComment{
+			ID:        cm.ID,
+			Path:      cm.Path,
+			Line:      cm.Line,
+			StartLine: cm.StartLine,
+			Body:      cm.Body,
+		})
+	}
+	details.ReviewBody = body
+	details.ReviewEvent = event // the ready sentinel
+	details.Proposed = proposed
+
+	updated := *art
+	updated.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
+	if _, err := c.UpsertArtifact(ctx, updated); err != nil {
+		return fmt.Errorf("snapshot review draft into artifact: %w", err)
+	}
+	return nil
 }
 
-func (c *LocalClient) CreatePendingReview(ctx context.Context, r domain.PendingReview) error {
-	return c.withWrite(ctx,
-		func() error { return c.stores.Reviews.CreateSystem(ctx, c.info.OrgID, r) },
-		func(ts db.TxStores) error { return ts.Reviews.Create(ctx, c.info.OrgID, r) },
-	)
-}
-
-func (c *LocalClient) DeletePendingReview(ctx context.Context, reviewID string) error {
-	return c.withWrite(ctx,
-		func() error { return c.stores.Reviews.DeleteSystem(ctx, c.info.OrgID, reviewID) },
-		func(ts db.TxStores) error { return ts.Reviews.Delete(ctx, c.info.OrgID, reviewID) },
-	)
-}
-
-func (c *LocalClient) LockReviewSubmission(ctx context.Context, reviewID, body, event string) error {
-	return c.withWrite(ctx,
-		func() error {
-			return c.stores.Reviews.LockSubmissionSystem(ctx, c.info.OrgID, reviewID, body, event)
-		},
-		func(ts db.TxStores) error {
-			return ts.Reviews.LockSubmission(ctx, c.info.OrgID, reviewID, body, event)
-		},
-	)
-}
-
-func (c *LocalClient) AddPendingReviewComment(ctx context.Context, comment domain.PendingReviewComment) error {
-	return c.withWrite(ctx,
-		func() error { return c.stores.Reviews.AddCommentSystem(ctx, c.info.OrgID, comment) },
-		func(ts db.TxStores) error { return ts.Reviews.AddComment(ctx, c.info.OrgID, comment) },
-	)
-}
-
-func (c *LocalClient) UpdatePendingReviewComment(ctx context.Context, commentID, body string) error {
-	return c.withWrite(ctx,
-		func() error {
-			return c.stores.Reviews.UpdateCommentSystem(ctx, c.info.OrgID, commentID, body)
-		},
-		func(ts db.TxStores) error {
-			return ts.Reviews.UpdateComment(ctx, c.info.OrgID, commentID, body)
-		},
-	)
-}
-
-func (c *LocalClient) DeletePendingReviewComment(ctx context.Context, commentID string) error {
-	return c.withWrite(ctx,
-		func() error { return c.stores.Reviews.DeleteCommentSystem(ctx, c.info.OrgID, commentID) },
-		func(ts db.TxStores) error { return ts.Reviews.DeleteComment(ctx, c.info.OrgID, commentID) },
-	)
-}
-
-func (c *LocalClient) ListPendingReviewComments(ctx context.Context, reviewID string) ([]domain.PendingReviewComment, error) {
-	return c.stores.Reviews.ListCommentsSystem(ctx, c.info.OrgID, reviewID)
+// listArtifactsByRun reads the calling run's artifacts respecting the pool split:
+// event-triggered runs read admin-pool (no JWT claims); manual runs read under
+// the kicking-off user's synthetic claims. Mirrors withWrite for the read side.
+func (c *LocalClient) listArtifactsByRun(ctx context.Context) ([]domain.Artifact, error) {
+	if c.info.IsEventTriggered {
+		return c.stores.Artifacts.ListByRunSystem(ctx, c.info.OrgID, c.info.RunID)
+	}
+	var out []domain.Artifact
+	err := c.stores.Tx.SyntheticClaimsWithTx(ctx, c.info.OrgID, c.info.UserID, func(ts db.TxStores) error {
+		a, e := ts.Artifacts.ListByRun(ctx, c.info.OrgID, c.info.RunID)
+		out = a
+		return e
+	})
+	return out, err
 }
 
 // --- workspace ---
@@ -751,14 +789,44 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 	}
 	if existingID != "" {
 		if identity == ghclient.IdentityApp {
-			return existingID, nil // the bot's own review from a prior run — reuse it
+			// The bot's own review from a prior run — reuse it, and (re)record the
+			// artifact so it attributes to this run, the one now working the review.
+			c.recordGithubReview(ctx, client, owner, repo, number, existingID)
+			return existingID, nil
 		}
 		// Real-user PAT (or an identity we couldn't determine): the existing
 		// review might be a human's live work. Never hijack it.
 		return "", ErrPendingReviewCollision
 	}
 
-	return client.CreatePendingReview(owner, repo, number, commitSHA, comments)
+	reviewID, err := client.CreatePendingReview(owner, repo, number, commitSHA, comments)
+	if err != nil {
+		return "", err
+	}
+	c.recordGithubReview(ctx, client, owner, repo, number, reviewID)
+	return reviewID, nil
+}
+
+// recordGithubReview upserts the `review` artifact for a freshly created (or
+// reused) GitHub pending review, mirroring recordGithubPR. reviewID is the
+// review's GraphQL node id (stored as the artifact ExternalID — the handle
+// add-comment / submit / delete speak). The backing PR's own node id is fetched
+// best-effort for details_json context (reconciliation keys on it, TFAC-464); a
+// failure there degrades to an empty node id rather than dropping the artifact —
+// nothing in the approval flow reads it, and the review row is what matters.
+func (c *LocalClient) recordGithubReview(ctx context.Context, client *ghclient.Client, owner, repo string, number int, reviewID string) {
+	if c.stores.Artifacts == nil {
+		return
+	}
+	if reviewID == "" {
+		agenthostLog.Debug("github pending review recorded without a review id; skipping artifact", "run", c.info.RunID, "repo", owner+"/"+repo)
+		return
+	}
+	nodeID := ""
+	if pr, perr := client.GetPRBasic(owner, repo, number); perr == nil && pr != nil {
+		nodeID = pr.NodeID
+	}
+	c.upsertGithubArtifact(ctx, domain.NewReviewArtifact(owner+"/"+repo, number, nodeID, reviewID))
 }
 
 // GithubAddPendingReviewComment adds one inline comment to an existing pending

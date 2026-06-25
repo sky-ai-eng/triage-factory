@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
 // strPtr returns a pointer to a string literal so test fixtures can
@@ -216,40 +217,39 @@ func TestFormatHumanFeedback_CombinedAllChanged(t *testing.T) {
 	}
 }
 
-// TestBuildHumanFeedbackInput_ClassifiesComments pins the bridge
-// between the handler's DB types and the formatter's pure input.
-// In v1, the handler can only emit `unchanged` and `edited`
-// (see review_diff.go's note on why `removed`/`added` are deferred).
-// This test fixes that mapping so a regression that skipped the
-// `c.OriginalBody != ""` guard would be caught immediately —
-// otherwise pre-SKY-204 comments (OriginalBody empty) would all
-// classify as `edited` and produce noisy Was/Now diffs against an
-// empty original.
-func TestBuildHumanFeedbackInput_ClassifiesComments(t *testing.T) {
-	review := &domain.PendingReview{
-		ID:                  "rev",
-		ReviewBody:          "final body",
-		ReviewEvent:         "REQUEST_CHANGES",
-		OriginalReviewBody:  strPtr("draft body"),
-		OriginalReviewEvent: strPtr("APPROVE"),
-		RunID:               "run-123",
+// TestBuildReviewHumanFeedbackInput_ClassifiesComments pins the bridge between a
+// review artifact's proposed snapshot + the live final comments and the
+// formatter's pure input. Comments are joined by GitHub node id; severity badges
+// are stripped from both sides so the diff renders clean prose. With node ids the
+// classifier resolves all four statuses (the old local-table path could only emit
+// unchanged/edited).
+func TestBuildReviewHumanFeedbackInput_ClassifiesComments(t *testing.T) {
+	line := func(n int) *int { return &n }
+	details := domain.ReviewArtifactDetails{
+		ReviewBody:  "final body",
+		ReviewEvent: "REQUEST_CHANGES",
+		Proposed: domain.ReviewArtifactProposed{
+			Body:  "draft body",
+			Event: "APPROVE",
+			Comments: []domain.ReviewArtifactComment{
+				// Badge baked into the agent's draft — must be stripped for the diff.
+				{ID: "c1", Path: "x.go", Line: line(1), Body: domain.SeverityBadgeMarkdown(domain.SeverityMajor) + "agent draft"},
+				{ID: "c2", Path: "y.go", Line: line(2), Body: "still the same"},
+				{ID: "c3", Path: "z.go", Line: line(3), Body: "removed by human"},
+			},
+		},
 	}
-	comments := []domain.PendingReviewComment{
-		// Edited: body and original differ.
-		{ID: "c1", Path: "x.go", Line: 1, Body: "user edit", OriginalBody: strPtr("agent draft")},
-		// Unchanged: body matches original (even if user PATCHed it back).
-		{ID: "c2", Path: "y.go", Line: 2, Body: "still the same", OriginalBody: strPtr("still the same")},
-		// Legacy (no original captured at all): treat as unchanged
-		// so we don't emit a Was: "" / Now: "..." entry that's
-		// indistinguishable from a real edit.
-		{ID: "c3", Path: "z.go", Line: 3, Body: "legacy comment", OriginalBody: nil},
-		// Empty real snapshot: agent INSERT-ed with body="", user
-		// edited. Must classify as edited (NOT folded into the
-		// legacy-unchanged bucket).
-		{ID: "c4", Path: "w.go", Line: 4, Body: "human added text", OriginalBody: strPtr("")},
+	finalComments := []ghclient.PendingReviewComment{
+		// Edited: same id, body differs from the proposed snapshot.
+		{ID: "c1", Path: "x.go", Line: line(1), Body: domain.SeverityBadgeMarkdown(domain.SeverityMajor) + "user edit"},
+		// Unchanged.
+		{ID: "c2", Path: "y.go", Line: line(2), Body: "still the same"},
+		// c3 is absent → removed by the human.
+		// Added: present in final, not in the proposed draft.
+		{ID: "c4", Path: "w.go", Line: line(4), Body: "human added"},
 	}
 
-	got := buildHumanFeedbackInput(review, comments, "REQUEST_CHANGES")
+	got := buildReviewHumanFeedbackInput(details, finalComments)
 
 	if got.OriginalBody == nil || *got.OriginalBody != "draft body" || got.FinalBody != "final body" {
 		t.Errorf("body fields wrong: orig=%v final=%q", got.OriginalBody, got.FinalBody)
@@ -257,18 +257,22 @@ func TestBuildHumanFeedbackInput_ClassifiesComments(t *testing.T) {
 	if got.OriginalEvent == nil || *got.OriginalEvent != "APPROVE" || got.FinalEvent != "REQUEST_CHANGES" {
 		t.Errorf("event fields wrong: orig=%v final=%q", got.OriginalEvent, got.FinalEvent)
 	}
-	if len(got.Comments) != 4 {
-		t.Fatalf("len(Comments) = %d, want 4", len(got.Comments))
-	}
 	wantStatus := map[string]string{
 		"x.go": CommentDiffEdited,
 		"y.go": CommentDiffUnchanged,
-		"z.go": CommentDiffUnchanged,
-		"w.go": CommentDiffEdited,
+		"z.go": CommentDiffRemoved,
+		"w.go": CommentDiffAdded,
+	}
+	if len(got.Comments) != len(wantStatus) {
+		t.Fatalf("len(Comments) = %d, want %d", len(got.Comments), len(wantStatus))
 	}
 	for _, c := range got.Comments {
 		if want := wantStatus[c.Path]; c.Status != want {
 			t.Errorf("comment[%s]: status = %q, want %q", c.Path, c.Status, want)
+		}
+		// Severity badge must be stripped — the diff shows clean prose.
+		if strings.Contains(c.Original, "img.shields.io") || strings.Contains(c.Final, "img.shields.io") {
+			t.Errorf("comment[%s] still carries a severity badge: orig=%q final=%q", c.Path, c.Original, c.Final)
 		}
 	}
 }

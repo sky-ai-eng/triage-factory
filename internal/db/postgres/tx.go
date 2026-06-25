@@ -147,7 +147,6 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// autonomously, the same shape AgentRuns / RunWorktrees use.
 		Artifacts:      newArtifactStore(tx, s.admin),
 		Entities:       newEntityStore(tx, tx),
-		Reviews:        newReviewStore(tx, s.admin),
 		Repos:          newRepoStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
 		// Projects: ListSystem routes around RLS the same way

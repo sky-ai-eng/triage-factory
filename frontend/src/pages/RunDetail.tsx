@@ -213,7 +213,7 @@ export default function RunDetail() {
     <div className="relative h-screen p-3">
       <GlassBackdrop />
       <ReviewOverlay
-        runID={approval?.kind === 'review' ? approval.runID : ''}
+        artifactId={approval?.kind === 'review' ? (approval.artifactId ?? '') : ''}
         open={approval?.kind === 'review'}
         onClose={() => {
           setApproval(null)

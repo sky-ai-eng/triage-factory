@@ -132,6 +132,9 @@ func (c *IPCClient) callWithin(ctx context.Context, timeout time.Duration, metho
 		if resp.ErrCode == errCodePendingReviewCollision {
 			return ErrPendingReviewCollision
 		}
+		if resp.ErrCode == errCodeReviewAlreadyFinalized {
+			return ErrReviewAlreadyFinalized
+		}
 		// A non-zero HTTPStatus marks a host-routed GitHub API failure;
 		// rebuild the typed error so status-discriminating callers
 		// (IsHTTP406, the download-logs 404 fallback) behave identically to
@@ -164,46 +167,10 @@ func (c *IPCClient) LookupRun(ctx context.Context) (RunInfo, error) {
 	return res.Info, nil
 }
 
-func (c *IPCClient) GetPendingReview(ctx context.Context, reviewID string) (*domain.PendingReview, error) {
-	var res pendingReviewResult
-	if err := c.call(ctx, methodGetPendingReview, byIDArgs{ID: reviewID}, &res); err != nil {
-		return nil, err
-	}
-	return res.Review, nil
-}
-
-func (c *IPCClient) CreatePendingReview(ctx context.Context, r domain.PendingReview) error {
-	return c.call(ctx, methodCreatePendingReview, createPendingReviewArgs{Review: r}, nil)
-}
-
-func (c *IPCClient) DeletePendingReview(ctx context.Context, reviewID string) error {
-	return c.call(ctx, methodDeletePendingReview, byIDArgs{ID: reviewID}, nil)
-}
-
-func (c *IPCClient) LockReviewSubmission(ctx context.Context, reviewID, body, event string) error {
-	return c.call(ctx, methodLockReviewSubmission, lockReviewSubmissionArgs{
-		ReviewID: reviewID, Body: body, Event: event,
+func (c *IPCClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) error {
+	return c.call(ctx, methodFinalizeReviewDraft, finalizeReviewDraftArgs{
+		ReviewID: reviewID, Event: event, Body: body,
 	}, nil)
-}
-
-func (c *IPCClient) AddPendingReviewComment(ctx context.Context, comment domain.PendingReviewComment) error {
-	return c.call(ctx, methodAddPendingReviewComment, addCommentArgs{Comment: comment}, nil)
-}
-
-func (c *IPCClient) UpdatePendingReviewComment(ctx context.Context, commentID, body string) error {
-	return c.call(ctx, methodUpdatePendingReviewComment, updateCommentArgs{ID: commentID, Body: body}, nil)
-}
-
-func (c *IPCClient) DeletePendingReviewComment(ctx context.Context, commentID string) error {
-	return c.call(ctx, methodDeletePendingReviewComment, byIDArgs{ID: commentID}, nil)
-}
-
-func (c *IPCClient) ListPendingReviewComments(ctx context.Context, reviewID string) ([]domain.PendingReviewComment, error) {
-	var res listCommentsResult
-	if err := c.call(ctx, methodListPendingReviewComments, listCommentsArgs{ReviewID: reviewID}, &res); err != nil {
-		return nil, err
-	}
-	return res.Comments, nil
 }
 
 func (c *IPCClient) GetAgentRun(ctx context.Context) (*domain.AgentRun, error) {

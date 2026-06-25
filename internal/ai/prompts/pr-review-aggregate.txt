@@ -54,7 +54,7 @@ STEP 7 — Choose the event.
 STEP 8 — Submit once.
     {{BINARY_PATH}} exec gh pr submit-review "$REVIEW_ID" --event <approve|comment|request_changes> \
       --body-file {{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/summary.md
-This queues the review for human approval; the response is `{"status": "queued_for_human_approval", ...}`. That means success. Do NOT call `submit-review` again — a second call is a hard error. (If auto-merge is on, an approve is automatically downgraded to a comment-only review; that is expected.)
+This drafts the review and hands it off for human approval; the response is `{"status": "drafted_awaiting_approval", ...}`. That means success — your work on this review is complete. Do NOT call `submit-review` again — a second call is a hard error. (Nothing posts to GitHub until a human approves the draft; the inline comments you added live on a private pending review only you can see until then.)
 
 STEP 9 — Finish.
 Write your run memory file to `{{RUN_ROOT}}/_scratch/entity-memory/{{BLUEPRINT_RUN_ID}}/{{RUN_ID}}.md` — a couple of sentences: how many findings you posted, how many you skipped, and the event you submitted. Then return your completion JSON.

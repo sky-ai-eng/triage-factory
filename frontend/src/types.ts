@@ -105,9 +105,9 @@ export interface AgentRun {
   // PendingPROverlay (title/body editor + Open-PR button). Empty /
   // undefined for non-pending runs.
   pending_kind?: 'review' | 'pr'
-  // pending_artifact_id is the id of the gating draft-PR artifact, set
-  // alongside pending_kind === 'pr'. PendingPROverlay is addressed by it
-  // (the PR artifact id), not the run id.
+  // pending_artifact_id is the id of the gating artifact — the review artifact
+  // (pending_kind === 'review') or the draft-PR artifact (pending_kind === 'pr').
+  // Both overlays are addressed by it (the artifact id), not the run id.
   pending_artifact_id?: string
   blueprint_run_id?: string
   blueprint_step_index?: number | null

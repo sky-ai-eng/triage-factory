@@ -645,6 +645,9 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 		// prArtifact is the run's draft PR, if any. Captured in the tx and closed
 		// on GitHub AFTER it commits — a network call must not hold the tx open.
 		prArtifact *domain.Artifact
+		// reviewArtifact is the run's pending review, if any. Same pattern: marked
+		// dismissed in the tx, its GitHub pending review deleted after commit.
+		reviewArtifact *domain.Artifact
 	)
 	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var lookupErr error
@@ -658,7 +661,7 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 
 		// Detect what parked the run BEFORE the teardown, so the stop_reason and
 		// human_content name the right kind. A draft PR parks on its pull_request
-		// artifact; a review parks on the pending_reviews row. Without this, a
+		// artifact; a review parks on its review artifact. Without this, a
 		// discarded PR ends up tagged "review_discarded_by_user" — confusing in
 		// the UI and wrong for anything keyed on stop_reason.
 		kind := "review"
@@ -669,6 +672,11 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 		if pr := domain.FirstDraftPullRequest(arts); pr != nil {
 			kind = "pr"
 			prArtifact = pr
+		} else if rv := domain.FirstPendingReviewArtifact(arts); rv != nil {
+			// A pending review (started, maybe finalized) — abandoned whether or not
+			// it reached the ready sentinel, so key on FirstPendingReviewArtifact, not
+			// FirstReadyReview.
+			reviewArtifact = rv
 		}
 
 		// Write the discard outcome to run_memory.human_content
@@ -681,11 +689,16 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 			return fmt.Errorf("human_content write: %w", err)
 		}
 
-		// Tear down the pending review by run_id directly. The
-		// DELETE-by-run-id helper is transactional across
-		// comments + review and is a no-op when no review exists.
-		if err := tx.Reviews.DeleteByRunID(ctx, orgID, runID); err != nil {
-			return fmt.Errorf("reviews.DeleteByRunID: %w", err)
+		// Abandon a pending review by flipping its artifact to dismissed (the GitHub
+		// pending-review delete runs after the tx). The proposed snapshot is
+		// preserved for the audit ledger — abandonment retires the GitHub review
+		// object, not the record of what the agent drafted.
+		if reviewArtifact != nil {
+			dismissed := *reviewArtifact
+			dismissed.State = domain.ArtifactStateReviewDismissed
+			if _, err := tx.Artifacts.Upsert(ctx, orgID, dismissed); err != nil {
+				return fmt.Errorf("artifacts.Upsert(dismissed): %w", err)
+			}
 		}
 		// Abandon a draft PR by flipping its artifact to closed (the GitHub close
 		// runs after the tx). The pushed branch and the proposed snapshot are
@@ -725,6 +738,12 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 	if prArtifact != nil {
 		s.closeDraftPRBestEffort(ctx, orgID, prArtifact)
 	}
+	// Delete the GitHub pending review (best-effort, outside the tx). The artifact
+	// is already marked dismissed; a private pending review left on GitHub would
+	// otherwise linger and collide with the next start-review on the PR.
+	if reviewArtifact != nil {
+		s.deletePendingReviewBestEffort(ctx, orgID, reviewArtifact)
+	}
 
 	if !flippedToDone || runID == "" {
 		return
@@ -756,6 +775,27 @@ func (s *Server) closeDraftPRBestEffort(ctx context.Context, orgID string, art *
 	}
 	if err := gh.ClosePR(owner, repo, number); err != nil {
 		approvalDiscardLog.Warn("close draft PR on github failed (artifact already marked closed)", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+	}
+}
+
+// deletePendingReviewBestEffort deletes the abandoned GitHub pending review.
+// Best-effort, mirroring closeDraftPRBestEffort: every failure is logged, never
+// returned — the artifact is already marked dismissed and the run/task already
+// requeued, so a GitHub hiccup mustn't unwind that. owner/repo/number come from
+// the artifact target; ExternalID is the review node id.
+func (s *Server) deletePendingReviewBestEffort(ctx context.Context, orgID string, art *domain.Artifact) {
+	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
+	if !ok {
+		approvalDiscardLog.Warn("review artifact has a malformed target; skipping GitHub pending-review delete", "artifact", art.ID, "target", art.Target)
+		return
+	}
+	gh, err := s.ghResolver.ClientForRepo(ctx, orgID, owner, repo)
+	if err != nil {
+		approvalDiscardLog.Warn("resolve github client for pending-review delete failed", "artifact", art.ID, "owner", owner, "repo", repo, "error", err)
+		return
+	}
+	if err := gh.DeletePendingReview(owner, repo, number, art.ExternalID); err != nil {
+		approvalDiscardLog.Warn("delete pending review on github failed (artifact already marked dismissed)", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 	}
 }
 

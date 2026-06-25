@@ -72,3 +72,39 @@ func TestSeverityBadgeMarkdown(t *testing.T) {
 		t.Errorf("badge should end with a blank line so it sits above the body: %q", got)
 	}
 }
+
+func TestParseSeverityBadge_RoundTrip(t *testing.T) {
+	// ParseSeverityBadge is the exact inverse of SeverityBadgeMarkdown: badge a
+	// body, then parse it back, and we must recover both the level and the
+	// original clean body byte-for-byte.
+	for _, sev := range ValidSeverities {
+		body := "This is the finding.\nSecond line."
+		badged := SeverityBadgeMarkdown(sev) + body
+		gotSev, gotBody := ParseSeverityBadge(badged)
+		if gotSev != sev {
+			t.Errorf("ParseSeverityBadge severity = %q, want %q", gotSev, sev)
+		}
+		if gotBody != body {
+			t.Errorf("ParseSeverityBadge body = %q, want %q", gotBody, body)
+		}
+	}
+}
+
+func TestParseSeverityBadge_NoBadge(t *testing.T) {
+	// A body with no badge round-trips untouched (severity "", body verbatim) —
+	// a comment authored without --severity, or a human-written comment.
+	body := "plain body without a badge"
+	gotSev, gotBody := ParseSeverityBadge(body)
+	if gotSev != "" {
+		t.Errorf("ParseSeverityBadge severity = %q, want empty", gotSev)
+	}
+	if gotBody != body {
+		t.Errorf("ParseSeverityBadge body = %q, want %q", gotBody, body)
+	}
+}
+
+func TestParseSeverityBadge_EmptyBody(t *testing.T) {
+	if sev, body := ParseSeverityBadge(""); sev != "" || body != "" {
+		t.Errorf("ParseSeverityBadge(\"\") = (%q, %q), want empty", sev, body)
+	}
+}

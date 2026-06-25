@@ -17,8 +17,10 @@ interface Props {
   file: FileData
   comments: FileComment[]
   defaultCollapsed?: boolean
-  onUpdateComment: (id: string, body: string) => void
-  onDeleteComment: (id: string) => void
+  // Promise-returning (pessimistic) so the review overlay's per-comment edit/delete
+  // can surface GitHub errors; a void no-op is still accepted (the PR overlay).
+  onUpdateComment: (id: string, body: string) => void | Promise<void>
+  onDeleteComment: (id: string) => void | Promise<void>
 }
 
 export default function DiffFile({

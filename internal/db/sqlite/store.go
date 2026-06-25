@@ -49,7 +49,6 @@ func New(conn *sql.DB) db.Stores {
 		AgentRuns:      newAgentRunStore(conn),
 		Artifacts:      newArtifactStore(conn),
 		Entities:       newEntityStore(conn, conn),
-		Reviews:        newReviewStore(conn, conn),
 		Repos:          newRepoStore(conn, conn),
 		PendingFirings: newPendingFiringsStore(conn),
 		Projects:       newProjectStore(conn, conn),

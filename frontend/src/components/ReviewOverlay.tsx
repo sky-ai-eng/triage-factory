@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { parseDiff } from 'react-diff-view'
 import type { FileData } from 'react-diff-view'
@@ -6,18 +6,23 @@ import DiffFile from './DiffFile'
 import type { FileComment } from './DiffFile'
 import ReviewSummary from './ReviewSummary'
 
-interface PendingReview {
+// ReviewArtifact mirrors internal/server/reviews_artifact_handler.go's
+// reviewArtifactJSON. review_body / review_event are the STAGED values (applied
+// to GitHub only on approval); comments are the LIVE GitHub pending-review
+// comments, each with its severity parsed back out of the comment body (chip) and
+// the clean body shown. The review is a real GitHub pending review now, edited 1:1.
+interface ReviewArtifact {
   id: string
-  pr_number: number
+  run_id?: string
   owner: string
   repo: string
-  commit_sha: string
-  run_id: string
+  pr_number: number
+  review_id: string
   review_body: string
   review_event: string
+  state: string
   comments: {
     id: string
-    review_id: string
     path: string
     line: number
     start_line?: number
@@ -27,61 +32,77 @@ interface PendingReview {
 }
 
 interface Props {
-  runID: string
+  artifactId: string
   open: boolean
   onClose: () => void
 }
 
-export default function ReviewOverlay({ runID, open, onClose }: Props) {
-  const [review, setReview] = useState<PendingReview | null>(null)
+// ReviewOverlay is the modal opened from a parked review run's approval card. The
+// agent already created a GitHub pending review (private to the bot); this overlay
+// reads it 1:1, edits inline comments live, stages the summary body + verdict, and
+// on Submit approves — submitting the pending review to GitHub. Mirrors
+// PendingPROverlay's shape (artifactId-addressed, pessimistic sync, isolated diff
+// error) with review-specific affordances (inline comments + body/event editor).
+export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
+  const [review, setReview] = useState<ReviewArtifact | null>(null)
   const [files, setFiles] = useState<FileData[]>([])
   const [loading, setLoading] = useState(true)
+  // error is the blocking (full-screen) state: without the review there's nothing
+  // to edit or approve.
   const [error, setError] = useState<string | null>(null)
-  // truncationNote is the X-Diff-Truncated header from /diff, set when the PR
-  // diff was too large for GitHub to return verbatim and the backend
-  // reassembled it from per-file patches. Surfaced as a banner so the user
-  // knows the rendered diff is approximate.
+  // truncationNote: the X-Diff-Truncated header when the PR diff was reassembled
+  // from per-file patches (too large for GitHub to return verbatim).
   const [truncationNote, setTruncationNote] = useState<string | null>(null)
+  // diffError is isolated from `error`: the diff is secondary to the review, so a
+  // transient 406/502 on it must NOT hide the (already-loaded) editable review.
+  const [diffError, setDiffError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
-  // Extract the primitive id so useCallback deps below can reference a stable
-  // value (string | undefined) instead of review?.id, which is what the
-  // exhaustive-deps rule complains about.
-  const reviewId = review?.id
+  // submitError is the approve (submit-to-GitHub) failure, shown inline so the
+  // user can retry in place rather than close-and-reopen.
+  const [submitError, setSubmitError] = useState<string | null>(null)
 
-  // Fetch review data + diff
+  // Fetch the review artifact (blocking), then the diff (isolated).
   useEffect(() => {
-    if (!open || !runID) return
+    if (!open || !artifactId) return
     let cancelled = false
     setLoading(true)
     setError(null)
+    setSubmitError(null)
+    setReview(null)
+    setFiles([])
     setTruncationNote(null)
+    setDiffError(null)
     ;(async () => {
+      let data: ReviewArtifact
       try {
-        // Fetch review metadata + comments
-        const reviewRes = await fetch(`/api/agent/runs/${runID}/review`)
-        if (!reviewRes.ok) throw new Error('Failed to load review')
-        const reviewData: PendingReview = await reviewRes.json()
-        if (cancelled) return
-        setReview(reviewData)
+        const res = await fetch(`/api/artifacts/${artifactId}`)
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}))
+          throw new Error(e.error || `Failed to load review (${res.status})`)
+        }
+        data = await res.json()
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err))
+          setLoading(false)
+        }
+        return
+      }
+      if (cancelled) return
+      setReview(data)
 
-        // Fetch diff
-        const diffRes = await fetch(`/api/reviews/${reviewData.id}/diff`)
+      try {
+        const diffRes = await fetch(`/api/artifacts/${artifactId}/diff`)
         if (!diffRes.ok) {
-          // Backend returns JSON {"error": "..."} on failure. Surface it
-          // verbatim instead of a generic "Failed to load diff" so the user
-          // sees the actual reason. (The too-large case no longer reaches
-          // here — the backend reassembles per-file patches and flags it via
-          // X-Diff-Truncated below.)
-          const data = await diffRes.json().catch(() => ({}))
-          throw new Error(data.error || `Failed to load diff (${diffRes.status})`)
+          const e = await diffRes.json().catch(() => ({}))
+          throw new Error(e.error || `Failed to load diff (${diffRes.status})`)
         }
         const diffText = await diffRes.text()
         if (cancelled) return
-        const parsed = parseDiff(diffText)
-        setFiles(parsed)
+        setFiles(parseDiff(diffText))
         setTruncationNote(diffRes.headers.get('X-Diff-Truncated'))
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err))
+        if (!cancelled) setDiffError(err instanceof Error ? err.message : String(err))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -90,17 +111,22 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
     return () => {
       cancelled = true
     }
-  }, [open, runID])
+  }, [open, artifactId])
 
-  // Comment operations
+  // Pessimistic comment ops on the live GitHub pending review: await the request,
+  // throw on !ok so the child (ReviewComment) surfaces the error and stays in edit
+  // mode, and update local state only on success.
   const handleUpdateComment = useCallback(
     async (commentId: string, body: string) => {
-      if (!reviewId) return
-      await fetch(`/api/reviews/${reviewId}/comments/${commentId}`, {
+      const res = await fetch(`/api/artifacts/${artifactId}/comments/${commentId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ body }),
       })
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}))
+        throw new Error(e.error || `Save failed (${res.status})`)
+      }
       setReview((prev) =>
         prev
           ? {
@@ -110,71 +136,96 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
           : prev,
       )
     },
-    [reviewId],
+    [artifactId],
   )
 
   const handleDeleteComment = useCallback(
     async (commentId: string) => {
-      if (!reviewId) return
-      await fetch(`/api/reviews/${reviewId}/comments/${commentId}`, {
+      const res = await fetch(`/api/artifacts/${artifactId}/comments/${commentId}`, {
         method: 'DELETE',
       })
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}))
+        throw new Error(e.error || `Delete failed (${res.status})`)
+      }
       setReview((prev) =>
         prev ? { ...prev, comments: prev.comments.filter((c) => c.id !== commentId) } : prev,
       )
     },
-    [reviewId],
+    [artifactId],
   )
 
-  // Body + event updates — persist to DB
-  const handleUpdateBody = useCallback(
-    async (body: string) => {
-      if (!reviewId) return
-      setReview((prev) => (prev ? { ...prev, review_body: body } : prev))
-      await fetch(`/api/reviews/${reviewId}`, {
+  // Body + event stage into the artifact's details_json (no GitHub call — applied
+  // at approval). lastSavePromise lets the submit handler await the last edit.
+  const patchReview = useCallback(
+    async (patch: object) => {
+      const res = await fetch(`/api/artifacts/${artifactId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ review_body: body }),
+        body: JSON.stringify(patch),
       })
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}))
+        throw new Error(e.error || `Save failed (${res.status})`)
+      }
     },
-    [reviewId],
+    [artifactId],
+  )
+
+  const lastSavePromise = useRef<Promise<void> | null>(null)
+
+  const handleUpdateBody = useCallback(
+    async (body: string) => {
+      const p = patchReview({ review_body: body })
+      lastSavePromise.current = p
+      await p
+      setReview((prev) => (prev ? { ...prev, review_body: body } : prev))
+    },
+    [patchReview],
   )
 
   const handleUpdateEvent = useCallback(
     async (event: string) => {
-      if (!reviewId) return
+      const p = patchReview({ review_event: event })
+      lastSavePromise.current = p
+      await p
       setReview((prev) => (prev ? { ...prev, review_event: event } : prev))
-      await fetch(`/api/reviews/${reviewId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ review_event: event }),
-      })
     },
-    [reviewId],
+    [patchReview],
   )
 
-  // Submit to GitHub
   const handleSubmit = useCallback(async () => {
-    if (!reviewId) return
     setSubmitting(true)
+    setSubmitError(null)
     try {
-      const res = await fetch(`/api/reviews/${reviewId}/submit`, {
+      // Settle any in-flight body/event stage before approving so we don't submit
+      // before the last edit lands. A FAILED stage is dropped (its error already
+      // surfaced) — approve reads the staged details, which hold the last
+      // successful value.
+      if (lastSavePromise.current) {
+        try {
+          await lastSavePromise.current
+        } catch {
+          /* failed stage already surfaced to the user */
+        }
+      }
+      const res = await fetch(`/api/artifacts/${artifactId}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
       if (!res.ok) {
-        const data = await res.json()
-        throw new Error(data.error || 'Submit failed')
+        const e = await res.json().catch(() => ({}))
+        throw new Error(e.error || 'Submit failed')
       }
       onClose()
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setSubmitError(err instanceof Error ? err.message : String(err))
     } finally {
       setSubmitting(false)
     }
-  }, [reviewId, onClose])
+  }, [artifactId, onClose])
 
-  // Group comments by file path
+  // Group comments by file path for the diff renderer.
   const commentsByFile = (review?.comments ?? []).reduce<Record<string, FileComment[]>>(
     (acc, c) => {
       ;(acc[c.path] ??= []).push({
@@ -281,10 +332,27 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
                     submitting={submitting}
                   />
 
+                  {submitError && (
+                    <div className="rounded-xl border border-dismiss/30 bg-dismiss/[0.06] px-4 py-3 text-[12px] text-text-secondary">
+                      <span className="font-semibold text-text-primary">
+                        Couldn't submit review:
+                      </span>{' '}
+                      {submitError}. Your edits are saved on GitHub — you can retry Submit.
+                    </div>
+                  )}
+
                   {truncationNote && (
                     <div className="rounded-xl border border-snooze/30 bg-snooze/[0.06] px-4 py-3 text-[12px] text-text-secondary">
                       <span className="font-semibold text-text-primary">Diff truncated:</span>{' '}
                       {truncationNote}.
+                    </div>
+                  )}
+
+                  {diffError && (
+                    <div className="rounded-xl border border-dismiss/30 bg-dismiss/[0.06] px-4 py-3 text-[12px] text-text-secondary">
+                      <span className="font-semibold text-text-primary">Diff unavailable:</span>{' '}
+                      {diffError}. You can still edit and submit the review — the diff just couldn't
+                      be loaded right now.
                     </div>
                   )}
 
@@ -305,7 +373,7 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
                     })}
                   </div>
 
-                  {files.length === 0 && !truncationNote && (
+                  {files.length === 0 && !truncationNote && !diffError && (
                     <div className="text-center py-12">
                       <p className="text-[13px] text-text-tertiary">No diff available</p>
                     </div>

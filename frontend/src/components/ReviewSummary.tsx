@@ -8,8 +8,11 @@ interface Props {
   reviewEvent: string
   reviewBody: string
   commentCount: number
-  onUpdateBody: (body: string) => void
-  onUpdateEvent: (event: string) => void
+  // Pessimistic: these stage the body/event into the artifact and reject on
+  // failure, so the editor can surface the error and stay in edit mode rather
+  // than show a green "saved" over a write that didn't land.
+  onUpdateBody: (body: string) => Promise<void>
+  onUpdateEvent: (event: string) => Promise<void>
   onSubmit: () => void
   // onClose dismisses the review popup without backend side
   // effects. Was previously named onDiscard to match an old
@@ -104,14 +107,43 @@ export default function ReviewSummary({
   const [editingBody, setEditingBody] = useState(false)
   const [rawView, setRawView] = useState(false)
   const [draft, setDraft] = useState(reviewBody)
+  const [savingBody, setSavingBody] = useState(false)
+  const [bodyError, setBodyError] = useState<string | null>(null)
+  // pendingEvent disables the verdict buttons + flags which one is in flight so a
+  // rapid double-click can't fire two stages; eventError surfaces a failed stage.
+  const [pendingEvent, setPendingEvent] = useState<string | null>(null)
+  const [eventError, setEventError] = useState<string | null>(null)
 
-  const saveBody = () => {
-    onUpdateBody(draft)
-    setEditingBody(false)
+  const saveBody = async () => {
+    setSavingBody(true)
+    setBodyError(null)
+    try {
+      await onUpdateBody(draft)
+      setEditingBody(false)
+    } catch (err) {
+      // Stay in edit mode so the user can retry; the parent never moved its state.
+      setBodyError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSavingBody(false)
+    }
+  }
+
+  const selectEvent = async (event: string) => {
+    if (pendingEvent) return
+    setPendingEvent(event)
+    setEventError(null)
+    try {
+      await onUpdateEvent(event)
+    } catch (err) {
+      setEventError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setPendingEvent(null)
+    }
   }
 
   const cancelEdit = () => {
     setDraft(reviewBody)
+    setBodyError(null)
     setEditingBody(false)
   }
 
@@ -136,8 +168,9 @@ export default function ReviewSummary({
             {EVENT_OPTIONS.map((opt) => (
               <button
                 key={opt.value}
-                onClick={() => onUpdateEvent(opt.value)}
-                className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1.5 rounded-lg border transition-all duration-150 ${
+                onClick={() => selectEvent(opt.value)}
+                disabled={pendingEvent !== null}
+                className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1.5 rounded-lg border transition-all duration-150 disabled:opacity-60 ${
                   reviewEvent === opt.value
                     ? `${opt.color} ${opt.bg} border-current/20`
                     : 'text-text-tertiary border-transparent hover:bg-black/[0.03]'
@@ -149,6 +182,11 @@ export default function ReviewSummary({
             ))}
           </div>
         </div>
+        {eventError && (
+          <p className="mt-2 text-[11px] text-dismiss">
+            Couldn't change the verdict: {eventError}. Retry.
+          </p>
+        )}
       </div>
 
       {/* Review body */}
@@ -162,6 +200,11 @@ export default function ReviewSummary({
               placeholder="Review summary..."
               autoFocus
             />
+            {bodyError && (
+              <p className="text-[11px] text-dismiss">
+                Couldn't save: {bodyError}. Your edits are still here — retry Save.
+              </p>
+            )}
             <div className="flex items-center gap-2 justify-end">
               <button
                 onClick={cancelEdit}
@@ -171,9 +214,10 @@ export default function ReviewSummary({
               </button>
               <button
                 onClick={saveBody}
-                className="text-[11px] font-medium text-white bg-accent hover:bg-accent/90 px-3 py-1.5 rounded-lg transition-colors"
+                disabled={savingBody}
+                className="text-[11px] font-medium text-white bg-accent hover:bg-accent/90 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60"
               >
-                Save
+                {savingBody ? 'Saving…' : 'Save'}
               </button>
             </div>
           </div>

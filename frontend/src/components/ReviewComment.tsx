@@ -6,8 +6,12 @@ interface Props {
   line: number
   body: string
   severity?: string
-  onUpdate: (id: string, body: string) => void
-  onDelete: (id: string) => void
+  // Pessimistic: edit/delete the comment on the live GitHub pending review and
+  // reject on failure, so this component can surface the error and stay in edit
+  // mode instead of optimistically dropping/changing the comment. void return is
+  // accepted for callers with no inline-comment surface (the PR overlay's no-op).
+  onUpdate: (id: string, body: string) => void | Promise<void>
+  onDelete: (id: string) => void | Promise<void>
 }
 
 // Native chip styling per severity level — the diff UI renders this
@@ -46,16 +50,42 @@ export default function ReviewComment({
 }: Props) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(body)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-  const save = () => {
-    if (draft.trim() && draft !== body) {
-      onUpdate(id, draft)
+  const save = async () => {
+    if (!draft.trim() || draft === body) {
+      setEditing(false)
+      return
     }
-    setEditing(false)
+    setBusy(true)
+    setError(null)
+    try {
+      await onUpdate(id, draft)
+      setEditing(false)
+    } catch (err) {
+      // Stay in edit mode; the parent never moved its state on a rejected save.
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await onDelete(id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
   }
 
   const cancel = () => {
     setDraft(body)
+    setError(null)
     setEditing(false)
   }
 
@@ -117,15 +147,17 @@ export default function ReviewComment({
               <>
                 <button
                   onClick={() => setEditing(true)}
-                  className="text-[10px] text-text-tertiary hover:text-accent px-1.5 py-0.5 rounded transition-colors"
+                  disabled={busy}
+                  className="text-[10px] text-text-tertiary hover:text-accent px-1.5 py-0.5 rounded transition-colors disabled:opacity-50"
                 >
                   Edit
                 </button>
                 <button
-                  onClick={() => onDelete(id)}
-                  className="text-[10px] text-text-tertiary hover:text-dismiss px-1.5 py-0.5 rounded transition-colors"
+                  onClick={remove}
+                  disabled={busy}
+                  className="text-[10px] text-text-tertiary hover:text-dismiss px-1.5 py-0.5 rounded transition-colors disabled:opacity-50"
                 >
-                  Delete
+                  {busy ? 'Deleting…' : 'Delete'}
                 </button>
               </>
             )}
@@ -142,6 +174,11 @@ export default function ReviewComment({
                 className="w-full min-h-[80px] text-[12.5px] leading-relaxed text-text-primary bg-white/40 border border-border-subtle rounded-lg px-3 py-2 font-mono resize-y focus:outline-none focus:border-accent/30 focus:ring-1 focus:ring-accent/10"
                 autoFocus
               />
+              {error && (
+                <p className="text-[10.5px] text-dismiss">
+                  Couldn't save: {error}. Your edit is still here — retry.
+                </p>
+              )}
               <div className="flex items-center gap-2 justify-end">
                 <button
                   onClick={cancel}
@@ -151,15 +188,19 @@ export default function ReviewComment({
                 </button>
                 <button
                   onClick={save}
-                  className="text-[11px] font-medium text-white bg-accent hover:bg-accent/90 px-3 py-1 rounded-lg transition-colors"
+                  disabled={busy}
+                  className="text-[11px] font-medium text-white bg-accent hover:bg-accent/90 px-3 py-1 rounded-lg transition-colors disabled:opacity-60"
                 >
-                  Save
+                  {busy ? 'Saving…' : 'Save'}
                 </button>
               </div>
             </div>
           ) : (
-            <div className="text-[12.5px] leading-relaxed text-text-secondary">
+            <div className="space-y-1.5 text-[12.5px] leading-relaxed text-text-secondary">
               {renderBody(body)}
+              {error && (
+                <p className="text-[10.5px] text-dismiss">Couldn't delete: {error}. Retry.</p>
+              )}
             </div>
           )}
         </div>

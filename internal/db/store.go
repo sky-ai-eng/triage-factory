@@ -108,14 +108,6 @@ type Stores struct {
 	// delegate context loaders, the scorer, and the server panels.
 	Entities EntityStore
 
-	// Reviews owns pending_reviews + pending_review_comments — the
-	// agent-prepared GitHub review that sits in `pending_approval`
-	// until the user accepts / edits / discards. App pool in
-	// Postgres; consumers are the reviews handler, the spawner's
-	// discard cleanup, the swipe-dismiss path, and the
-	// cmd/exec/gh agent submit gate.
-	Reviews ReviewStore
-
 	// Repos owns repo_profiles — the user-configured GitHub repos
 	// plus their cached AI profile and clone-attempt state. App pool
 	// in Postgres; consumers are the repos handler, settings, the
@@ -329,7 +321,6 @@ type TxStores struct {
 	AgentRuns        AgentRunStore
 	Artifacts        ArtifactStore
 	Entities         EntityStore
-	Reviews          ReviewStore
 	Repos            RepoStore
 	PendingFirings   PendingFiringsStore
 	Projects         ProjectStore

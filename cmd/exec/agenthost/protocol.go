@@ -107,6 +107,12 @@ type response struct {
 // the typed sentinel instead of a bare string.
 const errCodePendingReviewCollision = "pending_review_collision"
 
+// errCodeReviewAlreadyFinalized is the same marker mechanism for
+// ErrReviewAlreadyFinalized — the submit-review double-call guard — so the
+// sandbox client rebuilds the typed sentinel and exec emits the same "your work
+// is done, stop calling submit-review" message on both paths.
+const errCodeReviewAlreadyFinalized = "review_already_finalized"
+
 // writeFrame serializes msg as a length-prefixed JSON frame on w.
 // JSON marshal failures are returned without writing anything — the
 // caller can still send a follow-up error frame.
@@ -169,39 +175,10 @@ type lookupRunResult struct {
 	Info RunInfo `json:"info"`
 }
 
-type byIDArgs struct {
-	ID string `json:"id"`
-}
-
-type pendingReviewResult struct {
-	Review *domain.PendingReview `json:"review,omitempty"`
-}
-
-type createPendingReviewArgs struct {
-	Review domain.PendingReview `json:"review"`
-}
-
-type lockReviewSubmissionArgs struct {
+type finalizeReviewDraftArgs struct {
 	ReviewID string `json:"review_id"`
-	Body     string `json:"body"`
 	Event    string `json:"event"`
-}
-
-type addCommentArgs struct {
-	Comment domain.PendingReviewComment `json:"comment"`
-}
-
-type updateCommentArgs struct {
-	ID   string `json:"id"`
-	Body string `json:"body"`
-}
-
-type listCommentsArgs struct {
-	ReviewID string `json:"review_id"`
-}
-
-type listCommentsResult struct {
-	Comments []domain.PendingReviewComment `json:"comments"`
+	Body     string `json:"body"`
 }
 
 type agentRunResult struct {
@@ -558,24 +535,17 @@ type emptyResult struct{}
 // methodCallNames are the wire-name constants. Used by both client
 // and server so a rename here is the only edit needed to propagate.
 const (
-	methodLookupRun                  = "LookupRun"
-	methodGetPendingReview           = "GetPendingReview"
-	methodCreatePendingReview        = "CreatePendingReview"
-	methodDeletePendingReview        = "DeletePendingReview"
-	methodLockReviewSubmission       = "LockReviewSubmission"
-	methodAddPendingReviewComment    = "AddPendingReviewComment"
-	methodUpdatePendingReviewComment = "UpdatePendingReviewComment"
-	methodDeletePendingReviewComment = "DeletePendingReviewComment"
-	methodListPendingReviewComments  = "ListPendingReviewComments"
-	methodGetAgentRun                = "GetAgentRun"
-	methodGetTask                    = "GetTask"
-	methodListRepos                  = "ListRepos"
-	methodGetRepo                    = "GetRepo"
-	methodGetRunWorktreeByRepo       = "GetRunWorktreeByRepo"
-	methodListRunWorktrees           = "ListRunWorktrees"
-	methodInsertRunWorktree          = "InsertRunWorktree"
-	methodDeleteRunWorktreeByRepo    = "DeleteRunWorktreeByRepo"
-	methodBuildAgentRunFooter        = "BuildAgentRunFooter"
+	methodLookupRun               = "LookupRun"
+	methodFinalizeReviewDraft     = "FinalizeReviewDraft"
+	methodGetAgentRun             = "GetAgentRun"
+	methodGetTask                 = "GetTask"
+	methodListRepos               = "ListRepos"
+	methodGetRepo                 = "GetRepo"
+	methodGetRunWorktreeByRepo    = "GetRunWorktreeByRepo"
+	methodListRunWorktrees        = "ListRunWorktrees"
+	methodInsertRunWorktree       = "InsertRunWorktree"
+	methodDeleteRunWorktreeByRepo = "DeleteRunWorktreeByRepo"
+	methodBuildAgentRunFooter     = "BuildAgentRunFooter"
 
 	methodUpsertArtifact = "UpsertArtifact"
 

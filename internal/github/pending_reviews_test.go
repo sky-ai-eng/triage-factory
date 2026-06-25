@@ -288,6 +288,75 @@ func TestDeletePendingReviewComment_EmptyID(t *testing.T) {
 	}
 }
 
+// TestDeletePendingReview pins the two-step delete: GraphQL resolves the review
+// node id to its numeric databaseId, then a REST DELETE keyed on that database id
+// (NOT the node id) drops the pending review. GraphQL has no delete-review
+// mutation, so REST is the only path and it needs the numeric id.
+func TestDeletePendingReview(t *testing.T) {
+	var (
+		gqlVars    map[string]any
+		deleteHit  bool
+		deletePath string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/graphql") {
+			var req struct {
+				Variables map[string]any `json:"variables"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			gqlVars = req.Variables
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{"node":{"databaseId":98765}}}`))
+			return
+		}
+		if r.Method == http.MethodDelete {
+			deleteHit = true
+			deletePath = r.URL.Path
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	if err := clientAgainst(srv.URL).DeletePendingReview("owner", "repo", 7, "PRR_node1"); err != nil {
+		t.Fatalf("DeletePendingReview: %v", err)
+	}
+	if gqlVars["id"] != "PRR_node1" {
+		t.Errorf("graphql node id var = %v, want PRR_node1", gqlVars["id"])
+	}
+	if !deleteHit {
+		t.Fatal("expected a REST DELETE call after resolving the database id")
+	}
+	if deletePath != "/repos/owner/repo/pulls/7/reviews/98765" {
+		t.Errorf("delete path = %q, want /repos/owner/repo/pulls/7/reviews/98765 (numeric database id)", deletePath)
+	}
+}
+
+func TestDeletePendingReview_EmptyID(t *testing.T) {
+	if err := clientAgainst("http://invalid.invalid").DeletePendingReview("o", "r", 1, ""); err == nil {
+		t.Fatal("expected error for empty review id")
+	}
+}
+
+// TestDeletePendingReview_NoDatabaseID guards the "already gone" case: a node
+// lookup that resolves nothing must error rather than issue a DELETE against
+// review id 0.
+func TestDeletePendingReview_NoDatabaseID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			t.Errorf("must not DELETE when no database id resolved; hit %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"node":{}}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	if err := clientAgainst(srv.URL).DeletePendingReview("o", "r", 1, "PRR_gone"); err == nil {
+		t.Fatal("expected error when the review node has no database id")
+	}
+}
+
 // TestSubmitExistingReview asserts the submit goes through
 // submitPullRequestReview with the review node id, event, and body — the
 // "approve the preview" step that flips a pending review public.

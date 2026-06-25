@@ -40,7 +40,7 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		if run == nil {
 			return nil
 		}
-		resp = runResponse(r.Context(), tx.Reviews, tx.Artifacts, orgID, run)
+		resp = runResponse(r.Context(), tx.Artifacts, orgID, run)
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -54,19 +54,19 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 }
 
 // runResponse projects an AgentRun into the wire shape the frontend
-// consumes, augmented with `pending_kind` (+ `pending_artifact_id` for the PR
-// case) so the Board page can pick the right approval card variant ("Review" or
-// "Open PR") when `status == "pending_approval"`. A run parks either on a
-// pending review (pending_reviews) or a draft PR (a pull_request artifact in
-// state=draft); the discriminator has to come from the server because the run
-// row itself doesn't know which kind queued it.
+// consumes, augmented with `pending_kind` + `pending_artifact_id` so the Board
+// page can pick the right approval card variant ("Review" or "Open PR") and
+// address the overlay by the gating artifact's id when `status ==
+// "pending_approval"`. A run parks either on a finalized pending review (a review
+// artifact whose ready sentinel is set) or a draft PR (a pull_request artifact in
+// state=draft); the discriminator has to come from the server because the run row
+// itself doesn't know which kind queued it.
 //
-// Cheap: at most two indexed lookups per call, both no-ops on the
-// common case (terminal completed/failed/cancelled with no pending
-// row). Both errors swallow + log — pending_kind is informational
-// for the UI; an erroring lookup shouldn't fail the whole status
-// fetch.
-func runResponse(ctx context.Context, reviews db.ReviewStore, artifacts db.ArtifactStore, orgID string, run *domain.AgentRun) map[string]any {
+// Cheap: one indexed by-run artifact read per call, a no-op on the common case
+// (terminal completed/failed/cancelled with no pending artifact). The error
+// swallows + logs — pending_kind is informational for the UI; an erroring lookup
+// shouldn't fail the whole status fetch.
+func runResponse(ctx context.Context, artifacts db.ArtifactStore, orgID string, run *domain.AgentRun) map[string]any {
 	out := map[string]any{
 		"ID":                   run.ID,
 		"TaskID":               run.TaskID,
@@ -88,14 +88,17 @@ func runResponse(ctx context.Context, reviews db.ReviewStore, artifacts db.Artif
 		"blueprint_run_id":     run.BlueprintRunID,
 		"blueprint_step_index": run.BlueprintStepIndex,
 	}
-	// pending_kind only relevant when the run is parked. A queued review opens
-	// ReviewOverlay; a draft PR opens the PR overlay, which is addressed by the
-	// gating artifact's id (pending_artifact_id), not the run id.
+	// pending_kind only relevant when the run is parked. Both overlays are
+	// addressed by the gating artifact's id (pending_artifact_id): a finalized
+	// review opens ReviewOverlay, a draft PR opens the PR overlay. A review that
+	// was started but never submitted has no ready sentinel and does NOT park, so
+	// FirstReadyReview (not a bare pending check) gates the review case.
 	if run.Status == "pending_approval" {
-		if review, err := reviews.ByRunID(ctx, orgID, run.ID); err == nil && review != nil {
-			out["pending_kind"] = "review"
-		} else if arts, err := artifacts.ListByRun(ctx, orgID, run.ID); err == nil {
-			if pr := domain.FirstDraftPullRequest(arts); pr != nil {
+		if arts, err := artifacts.ListByRun(ctx, orgID, run.ID); err == nil {
+			if rv := domain.FirstReadyReview(arts); rv != nil {
+				out["pending_kind"] = "review"
+				out["pending_artifact_id"] = rv.ID
+			} else if pr := domain.FirstDraftPullRequest(arts); pr != nil {
 				out["pending_kind"] = "pr"
 				out["pending_artifact_id"] = pr.ID
 			}
@@ -382,7 +385,7 @@ func (ag *agentHandler) handleAgentRuns(w http.ResponseWriter, r *http.Request) 
 		// flicker on first paint and only settle after the per-run fetch.
 		out = make([]map[string]any, len(runs))
 		for i := range runs {
-			out[i] = runResponse(r.Context(), tx.Reviews, tx.Artifacts, orgID, &runs[i])
+			out[i] = runResponse(r.Context(), tx.Artifacts, orgID, &runs[i])
 		}
 		return nil
 	}); err != nil {

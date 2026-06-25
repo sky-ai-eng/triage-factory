@@ -3,58 +3,48 @@ package server
 import (
 	"fmt"
 	"strings"
-
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // HumanFeedbackInput is the formatter's input. Pure data — the
 // handler does the DB work to assemble it, the formatter is a
 // no-side-effects function so it's fully covered by golden tests.
 type HumanFeedbackInput struct {
-	// OriginalBody is the agent's drafted review body (write-once
-	// snapshot from pending_reviews.original_review_body). nil means
-	// no snapshot exists — typically a legacy review row from before
-	// SKY-204 added the column. A non-nil pointer to "" is a real
-	// snapshot of an empty drafted body (common — agents that
-	// produce inline comments alone leave the top-level body
-	// empty). The formatter degrades only on nil; an empty real
-	// snapshot still drives a body diff if the human added text.
+	// OriginalBody is the agent's drafted review body (write-once snapshot
+	// from the review artifact's details.proposed.body, captured at
+	// submit-review). nil means no snapshot — buildReviewHumanFeedbackInput
+	// always supplies a non-nil pointer, so nil is reserved for legacy /
+	// degenerate callers. A non-nil pointer to "" is a real snapshot of an
+	// empty drafted body (common — agents that produce inline comments alone
+	// leave the top-level body empty). The formatter degrades only on nil; an
+	// empty real snapshot still drives a body diff if the human added text.
 	OriginalBody *string
 
 	FinalBody string
 
-	// OriginalEvent: same nil-vs-empty distinction as OriginalBody.
-	// In practice events shouldn't ever be a legitimately empty
-	// string (handleReviewSubmit rejects review_event=""), but the
-	// pointer encoding keeps the snapshot semantics symmetric and
-	// future-proof.
+	// OriginalEvent: same nil-vs-empty distinction as OriginalBody — the
+	// agent's drafted verdict (details.proposed.event). The pointer encoding
+	// keeps the snapshot semantics symmetric and future-proof.
 	OriginalEvent *string
 	FinalEvent    string
 
 	Comments []ReviewCommentDiffEntry
 }
 
-// ReviewCommentDiffEntry is the per-comment classification driving
-// the bullet list. The handler builds these by joining the agent's
-// drafted comments (read off pending_review_comments at the moment
-// of submit, before DeletePendingReview clears them) with the user's
-// final comment set, keyed by comment ID. Status is one of:
+// ReviewCommentDiffEntry is the per-comment classification driving the bullet
+// list. buildReviewHumanFeedbackInput builds these by joining the agent's drafted
+// comments (the review artifact's details.proposed.comments, snapshotted at
+// submit-review) with the human-edited final comments (read live from the GitHub
+// pending review at approval), keyed by GitHub comment node id. Status is one of:
 //
-//   - CommentDiffUnchanged: same id, body matches the original
-//     snapshot (or no snapshot exists — the legacy case is folded
-//     into unchanged so we don't emit a Was: "" / Now: "..." entry
-//     against a fabricated original).
+//   - CommentDiffUnchanged: same id, body matches the proposed snapshot.
 //   - CommentDiffEdited:    same id, body differs from the snapshot.
-//   - CommentDiffRemoved:   id was in the agent's draft, not in the
-//     final set (deferred — see review_diff.go's note in
-//     buildHumanFeedbackInput).
-//   - CommentDiffAdded:     id is in the final set with no original_body
-//     captured (deferred — same note).
+//   - CommentDiffRemoved:   id was in the agent's draft, not in the final set
+//     (the human deleted it via the overlay).
+//   - CommentDiffAdded:     id is in the final set, not the agent's draft
+//     (human-authored — out of scope today, handled for completeness).
 //
-// Original/Final are plain strings rather than pointers because the
-// handler classifies the legacy case as Unchanged and never reads
-// Original on the unchanged path; non-unchanged statuses always
-// have a real snapshot to render.
+// Original/Final are plain strings rather than pointers — node-id matching plus
+// the GitHub-native source means every status has a real snapshot to render.
 type ReviewCommentDiffEntry struct {
 	Path     string
 	Line     int
@@ -211,61 +201,6 @@ func writeCommentEntry(sb *strings.Builder, c ReviewCommentDiffEntry) {
 	case CommentDiffAdded:
 		fmt.Fprintf(sb, "- `%s:%d` — added by human (was not in agent's draft)\n", c.Path, c.Line)
 		fmt.Fprintf(sb, "  - Body: %s\n", inlineBody(c.Final))
-	}
-}
-
-// buildHumanFeedbackInput translates the handler's DB types into the
-// formatter's pure-data input. Called inline from handleReviewSubmit
-// while the originals are still loaded (DeletePendingReview below
-// removes them). The classification is intentionally limited to
-// `unchanged` and `edited`: detecting `removed` (human deleted an
-// agent-drafted comment) requires soft-delete on
-// pending_review_comments, which is a schema change beyond SKY-205's
-// scope; `added` (human inserted a fresh comment) requires a UI
-// flow that doesn't exist yet. Both statuses are still emitted by
-// the formatter — they just won't appear in v1's output.
-//
-// Comment classification: nil OriginalBody means a legacy row from
-// before AddPendingReviewComment captured the snapshot — fold to
-// `unchanged` so we don't render "Was: <empty>" against a
-// fabricated original. A non-nil pointer to "" is a real snapshot of
-// an empty agent-drafted comment, which still drives the
-// edited/unchanged comparison normally.
-//
-// finalEvent (the value GitHub actually accepted) overrides
-// review.ReviewEvent for the "what was submitted" half of the
-// verdict diff. They're usually the same, but ghClient.SubmitReview
-// returns the canonical event in case GitHub coerced the input
-// (e.g. legacy alias mapping).
-func buildHumanFeedbackInput(
-	review *domain.PendingReview,
-	comments []domain.PendingReviewComment,
-	finalEvent string,
-) HumanFeedbackInput {
-	entries := make([]ReviewCommentDiffEntry, 0, len(comments))
-	for _, c := range comments {
-		status := CommentDiffUnchanged
-		original := ""
-		if c.OriginalBody != nil {
-			original = *c.OriginalBody
-			if original != c.Body {
-				status = CommentDiffEdited
-			}
-		}
-		entries = append(entries, ReviewCommentDiffEntry{
-			Path:     c.Path,
-			Line:     c.Line,
-			Status:   status,
-			Original: original,
-			Final:    c.Body,
-		})
-	}
-	return HumanFeedbackInput{
-		OriginalBody:  review.OriginalReviewBody,
-		FinalBody:     review.ReviewBody,
-		OriginalEvent: review.OriginalReviewEvent,
-		FinalEvent:    finalEvent,
-		Comments:      entries,
 	}
 }
 

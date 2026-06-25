@@ -503,7 +503,6 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 
 	extraEnv := []string{
 		"TRIAGE_FACTORY_RUN_ID=" + runID,
-		"TRIAGE_FACTORY_REVIEW_PREVIEW=1",
 		// Mirror runAgent's TRIAGE_FACTORY_RUN_ROOT setting. The resume
 		// cwd IS the original run-root (runAgent passed runRoot as the
 		// agentproc Cwd; for GitHub PR runs the worktree IS the run-root,

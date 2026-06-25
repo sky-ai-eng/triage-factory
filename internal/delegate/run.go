@@ -204,7 +204,6 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	extraEnv := []string{
 		"TRIAGE_FACTORY_RUN_ID=" + runID,
-		"TRIAGE_FACTORY_REVIEW_PREVIEW=1",
 		"TRIAGE_FACTORY_RUN_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference an absolute _scratch/entity-memory path that resolves regardless of which worktree the agent has cd'd into.
 		// The memory namespace folder: blueprint_run_id for a blueprint step
 		// (its siblings' handoff), else the run's own id. Non-absolute, so it
@@ -471,39 +470,31 @@ func (s *Spawner) processCompletion(
 	bgCtx := context.Background()
 
 	// Does this completed run carry a queued external action awaiting human
-	// approval? Two sources park a completed run in pending_approval:
-	//   - pending_reviews: agent ran `pr submit-review` under
-	//     TRIAGE_FACTORY_REVIEW_PREVIEW=1, queued the review for approval.
+	// approval? Two artifact kinds park a completed run in pending_approval:
+	//   - a review artifact whose ready sentinel is set: agent ran `pr
+	//     submit-review`, which finalized the GitHub pending review for approval.
+	//     A start-review that never reached submit-review has a pending review
+	//     artifact with NO ready sentinel and must NOT park (fixes the spurious
+	//     start-but-not-submit park) — FirstReadyReview enforces that.
 	//   - a draft PR artifact: agent ran `pr create`, which opens a real draft
 	//     PR and records a pull_request artifact in state=draft.
 	// Detected once here — before the terminal write — so a blueprint step's
-	// outcome can be coerced (below) before it's persisted, and reused for
-	// the pending_approval flip after the write. Lookups use admin-pool System
-	// variants (no JWT claims in scope) and run on bgCtx so a racing cancel
-	// doesn't silently strand a queued action outside the approval queue.
+	// outcome can be coerced (below) before it's persisted, and reused for the
+	// pending_approval flip after the write. One admin-pool by-run read (no JWT
+	// claims in scope), on bgCtx so a racing cancel doesn't silently strand a
+	// queued action outside the approval queue.
 	hasPending := false
 	if status == "completed" {
-		// A lookup error leaves hasPending=false, which would let the run
-		// finish 'completed' while a queued review/PR strands outside the
-		// approval queue (and skips the blueprint-step coercion below) — log
-		// it so that failure mode is observable rather than silent.
-		pendingReview, rErr := s.reviews.ByRunIDSystem(bgCtx, orgID, runID)
-		if rErr != nil {
-			delegateLog.Warn("pending-review lookup for run failed; a queued review may strand outside the approval queue", "run", runID, "error", rErr)
+		// A lookup error leaves hasPending=false, which would let the run finish
+		// 'completed' while a queued review/PR strands outside the approval queue
+		// (and skips the blueprint-step coercion below) — log it so that failure
+		// mode is observable rather than silent.
+		arts, aErr := s.artifacts.ListByRunSystem(bgCtx, orgID, runID)
+		if aErr != nil {
+			delegateLog.Warn("artifact lookup for run failed; a queued review/PR may strand outside the approval queue", "run", runID, "error", aErr)
 		}
-		if pendingReview != nil {
+		if domain.FirstReadyReview(arts) != nil || domain.FirstDraftPullRequest(arts) != nil {
 			hasPending = true
-		} else {
-			// A run that opened a draft PR parks on its pull_request artifact in
-			// state=draft (the GitHub-native path replaced the pending_prs row).
-			// Admin-pool read: no JWT claims in this post-completion goroutine.
-			arts, aErr := s.artifacts.ListByRunSystem(bgCtx, orgID, runID)
-			if aErr != nil {
-				delegateLog.Warn("PR-artifact lookup for run failed; a queued PR may strand outside the approval queue", "run", runID, "error", aErr)
-			}
-			if domain.FirstDraftPullRequest(arts) != nil {
-				hasPending = true
-			}
 		}
 	}
 

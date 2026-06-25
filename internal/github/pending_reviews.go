@@ -352,3 +352,58 @@ func (c *Client) GetPendingReview(owner, repo string, number int) (string, []Pen
 	}
 	return "", nil, nil
 }
+
+// DeletePendingReview deletes a *pending* (unsubmitted) review on a PR,
+// addressed by the review's GraphQL node ID. This is the abandon half of the
+// preview flow (TFAC-463): a pending review is private to the bot, so "Return to
+// queue" must remove it from GitHub — otherwise it lingers as the bot's
+// one-per-PR pending review and collides with the next start-review on that PR.
+//
+// GitHub's GraphQL has no delete-review mutation (submitPullRequestReview and
+// dismissPullRequestReview both act on *submitted* reviews), so the only way to
+// drop a pending review is the REST endpoint
+// DELETE /repos/{o}/{r}/pulls/{n}/reviews/{review_id} — which keys on the
+// review's numeric database id, not the node id every other op here speaks. So
+// this first resolves the node id to its databaseId via GraphQL, then issues the
+// REST delete. owner/repo/number locate the PR for the REST path.
+func (c *Client) DeletePendingReview(owner, repo string, number int, reviewID string) error {
+	if reviewID == "" {
+		return fmt.Errorf("delete pending review: empty review id")
+	}
+	data, err := c.PostGraphQL(map[string]any{
+		"query": `query($id: ID!) {
+			node(id: $id) { ... on PullRequestReview { databaseId } }
+		}`,
+		"variables": map[string]any{"id": reviewID},
+	})
+	if err != nil {
+		return fmt.Errorf("delete pending review: resolve database id: %w", err)
+	}
+	var resp struct {
+		Data struct {
+			Node struct {
+				DatabaseID int64 `json:"databaseId"`
+			} `json:"node"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return fmt.Errorf("delete pending review: parse database id: %w", err)
+	}
+	// Surface a partial GraphQL error (200 + errors[]) before reading data, so a
+	// FORBIDDEN/NOT_FOUND on the node lookup isn't misread as "no database id".
+	if len(resp.Errors) > 0 {
+		e := resp.Errors[0]
+		return fmt.Errorf("delete pending review: GraphQL error (%s): %s", e.Type, e.Message)
+	}
+	if resp.Data.Node.DatabaseID == 0 {
+		return fmt.Errorf("delete pending review: review %s has no resolvable database id (already submitted or gone?)", reviewID)
+	}
+	if _, err := c.Delete(fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews/%d", owner, repo, number, resp.Data.Node.DatabaseID)); err != nil {
+		return fmt.Errorf("delete pending review: %w", err)
+	}
+	return nil
+}

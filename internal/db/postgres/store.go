@@ -157,16 +157,6 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// RLS, and org_id stays in every WHERE clause as defense
 		// in depth.
 		Entities: newEntityStore(app, admin),
-		// Reviews wires both pools: app for request-equivalent
-		// consumers (reviews handler, swipe-dismiss, agent submit-
-		// review via cmd/exec/gh), admin for ByRunIDSystem — the
-		// delegate spawner's processCompletion reads pending reviews
-		// from a goroutine that has detached from the request
-		// context. RLS policies pending_reviews_all +
-		// pending_review_comments_all gate the app side; admin
-		// bypasses RLS, and org_id stays in every WHERE clause as
-		// defense in depth.
-		Reviews: newReviewStore(app, admin),
 		// Repos wires both pools (SKY-296): app for request-
 		// equivalent consumers (repos/settings/projects handlers,
 		// curator) and admin for the `...System` variants the
@@ -358,7 +348,6 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Artifacts:        newArtifactStore(tx, tx),
 		Entities:         newEntityStore(tx, tx),
 		Repos:            newRepoStore(tx, tx),
-		Reviews:          newReviewStore(tx, tx),
 		PendingFirings:   newPendingFiringsStore(tx),
 		Projects:         newProjectStore(tx, tx),
 		Events:           newEventStore(tx, tx),

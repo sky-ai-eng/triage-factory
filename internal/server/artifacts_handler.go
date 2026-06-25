@@ -50,31 +50,37 @@ type prArtifactJSON struct {
 	State      string `json:"state"`
 }
 
-// resolvePR loads a pull_request artifact by id, validates its kind, parses its
-// owner/repo/number coordinates, and resolves a per-repo GitHub client. It
-// writes the appropriate error response and returns ok=false on any failure, so
-// callers can `if ... ; !ok { return }`.
-func (ah *artifactsHandler) resolvePR(w http.ResponseWriter, r *http.Request, orgID, userID, id string) (art *domain.Artifact, gh *ghclient.Client, owner, repo string, number int, ok bool) {
+// loadArtifact fetches an artifact by id and 404s if missing. It is the shared
+// first step of every artifact-id-addressed route; the caller then dispatches on
+// art.Kind (pull_request vs review). Returns ok=false (after writing the error
+// response) so callers can `if ...; !ok { return }`.
+func (ah *artifactsHandler) loadArtifact(w http.ResponseWriter, r *http.Request, orgID, userID, id string) (art *domain.Artifact, ok bool) {
 	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		art, e = tx.Artifacts.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
 		internalError(w, "artifacts", err)
-		return nil, nil, "", "", 0, false
+		return nil, false
 	}
-	if art == nil || art.Kind != domain.ArtifactKindPullRequest {
-		notFound(w, "pull request artifact")
-		return nil, nil, "", "", 0, false
+	if art == nil {
+		notFound(w, "artifact")
+		return nil, false
 	}
+	return art, true
+}
 
+// ghForArtifact parses an artifact's owner/repo/number coordinates (PR and review
+// artifacts both target owner/repo#<number>) and resolves a per-repo GitHub
+// client. Writes the error response and returns ok=false on any failure.
+func (ah *artifactsHandler) ghForArtifact(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Artifact) (gh *ghclient.Client, owner, repo string, number int, ok bool) {
 	o, rp, n, parseOK := domain.ParsePRTarget(art.Target)
 	if !parseOK {
-		// A pull_request artifact whose target isn't owner/repo#N can't be acted
-		// on (no PR to address). Treat as a server-side data error rather than
+		// A PR/review artifact whose target isn't owner/repo#N can't be acted on
+		// (no PR to address). Treat as a server-side data error rather than
 		// guessing — the create writer always stamps a well-formed target.
-		internalError(w, "artifacts", fmt.Errorf("malformed PR artifact target %q (artifact %s)", art.Target, art.ID))
-		return nil, nil, "", "", 0, false
+		internalError(w, "artifacts", fmt.Errorf("malformed artifact target %q (artifact %s)", art.Target, art.ID))
+		return nil, "", "", 0, false
 	}
 
 	// Resolve per-repo (org App installation token → PAT): App-only orgs (no PAT)
@@ -84,12 +90,12 @@ func (ah *artifactsHandler) resolvePR(w http.ResponseWriter, r *http.Request, or
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			artifactsLog.Warn("github not configured", "org", orgID, "owner", o, "repo", rp, "error", err)
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
-			return nil, nil, "", "", 0, false
+			return nil, "", "", 0, false
 		}
 		internalError(w, "artifacts", err)
-		return nil, nil, "", "", 0, false
+		return nil, "", "", 0, false
 	}
-	return art, client, o, rp, n, true
+	return client, o, rp, n, true
 }
 
 // handleArtifactGet returns the PR artifact augmented with the live PR title and
@@ -104,7 +110,21 @@ func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Req
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 
-	art, gh, owner, repo, number, ok := ah.resolvePR(w, r, orgID, userID, id)
+	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
+	if !ok {
+		return
+	}
+	switch art.Kind {
+	case domain.ArtifactKindReview:
+		ah.reviewGet(w, r, orgID, art)
+		return
+	case domain.ArtifactKindPullRequest:
+		// fall through to the PR path below
+	default:
+		notFound(w, "artifact")
+		return
+	}
+	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
 		return
 	}
@@ -148,6 +168,21 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 
+	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
+	if !ok {
+		return
+	}
+	switch art.Kind {
+	case domain.ArtifactKindReview:
+		ah.reviewUpdate(w, r, orgID, userID, art)
+		return
+	case domain.ArtifactKindPullRequest:
+		// fall through to the PR path below
+	default:
+		notFound(w, "artifact")
+		return
+	}
+
 	var req struct {
 		Title *string `json:"title"`
 		Body  *string `json:"body"`
@@ -156,7 +191,7 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 		return
 	}
 
-	art, gh, owner, repo, number, ok := ah.resolvePR(w, r, orgID, userID, id)
+	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
 		return
 	}
@@ -234,7 +269,18 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 
-	art, gh, owner, repo, number, ok := ah.resolvePR(w, r, orgID, userID, id)
+	// The diff is the backing PR's diff regardless of artifact kind — a review
+	// artifact targets the same owner/repo#<number> as a PR artifact, so the
+	// review overlay and the PR overlay share this endpoint (TFAC-462).
+	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
+	if !ok {
+		return
+	}
+	if art.Kind != domain.ArtifactKindPullRequest && art.Kind != domain.ArtifactKindReview {
+		notFound(w, "artifact")
+		return
+	}
+	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
 		return
 	}
@@ -300,7 +346,21 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 
-	art, gh, owner, repo, number, ok := ah.resolvePR(w, r, orgID, userID, id)
+	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
+	if !ok {
+		return
+	}
+	switch art.Kind {
+	case domain.ArtifactKindReview:
+		ah.reviewApprove(w, r, orgID, userID, art)
+		return
+	case domain.ArtifactKindPullRequest:
+		// fall through to the PR path below
+	default:
+		notFound(w, "artifact")
+		return
+	}
+	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
 		return
 	}
@@ -387,62 +447,75 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	}
 
 	// Step 3: run/task/blueprint bookkeeping — flip the run out of the approval
-	// queue, then either resume the blueprint (which closes the task) or close the
-	// standalone task. Ported from the old pending-PR submit handler.
-	var blueprintRun *domain.BlueprintRun
-	if art.RunID != "" {
-		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			if _, err := tx.AgentRuns.MarkCompletedIfPendingApproval(cleanupCtx, orgID, art.RunID); err != nil {
-				return fmt.Errorf("mark run completed: %w", err)
-			}
-			// Skip the blanket task-mark-done for blueprint steps;
-			// terminateBlueprint owns task closure so the blueprint_runs row
-			// finalizes first. A blueprint lookup error leaves the task open for
-			// human follow-up rather than racing terminateBlueprint.
-			cr, _, blueprintLookupErr := tx.Blueprints.GetRunForRun(cleanupCtx, orgID, art.RunID)
-			if blueprintLookupErr != nil {
-				artifactsLog.Warn("blueprint lookup failed, skipping task closure", "run", art.RunID, "error", blueprintLookupErr)
-				return nil
-			}
-			blueprintRun = cr
-			if cr != nil {
-				return nil
-			}
-			// Stand-alone run: resolve the run's task_id and flip the task to done.
-			run, runErr := tx.AgentRuns.Get(cleanupCtx, orgID, art.RunID)
-			if runErr != nil || run == nil {
-				artifactsLog.Warn("read run for task closure failed", "run", art.RunID, "error", runErr)
-				return nil
-			}
-			if err := tx.Tasks.Close(cleanupCtx, orgID, run.TaskID, "run_completed", ""); err != nil {
-				artifactsLog.Warn("failed to close task for run", "run", art.RunID, "error", err)
-			}
-			return nil
-		}); err != nil {
-			artifactsLog.Warn("post-approve run bookkeeping failed", "run", art.RunID, "error", err)
-		}
-
-		ah.ws.Broadcast(websocket.Event{
-			Type:  "agent_run_update",
-			OrgID: orgID,
-			RunID: art.RunID,
-			Data:  map[string]string{"status": "completed"},
-		})
-		spawner := ah.spawner()
-		if blueprintRun != nil && spawner != nil {
-			spawner.ResumeBlueprintAfterApproval(orgID, art.RunID, userID)
-		} else if spawner != nil {
-			// Standalone run: approval is its terminal, so drop the durable
-			// workspace snapshot taken when it parked in pending_approval.
-			spawner.DiscardWorkspaceSnapshot(orgID, art.RunID)
-		}
-	}
+	// queue, then either resume the blueprint or close the standalone task.
+	ah.finishApprovedRun(cleanupCtx, orgID, userID, art.RunID)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"number":   number,
 		"html_url": art.URL,
 		"state":    domain.ArtifactStatePROpen,
 	})
+}
+
+// finishApprovedRun runs the shared post-approval run/task/blueprint bookkeeping
+// for an approved artifact (PR ready / review submitted): flip the run out of
+// pending_approval, then either resume the blueprint (which closes the task via
+// terminateBlueprint) or close the standalone task, broadcast the completion, and
+// resume the blueprint or drop the parked workspace snapshot. A no-op for a
+// run-less artifact (standalone CLI). Detached + best-effort + each step logged:
+// the external action already landed, so a client disconnect mustn't strand the
+// run/task half-flipped. Ported from the old pending_reviews/pending_prs submit
+// handlers; shared by the PR and review approve paths so they can't drift.
+func (ah *artifactsHandler) finishApprovedRun(ctx context.Context, orgID, userID, runID string) {
+	if runID == "" {
+		return
+	}
+	var blueprintRun *domain.BlueprintRun
+	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		if _, err := tx.AgentRuns.MarkCompletedIfPendingApproval(ctx, orgID, runID); err != nil {
+			return fmt.Errorf("mark run completed: %w", err)
+		}
+		// Skip the blanket task-mark-done for blueprint steps; terminateBlueprint
+		// owns task closure so the blueprint_runs row finalizes first. A blueprint
+		// lookup error leaves the task open for human follow-up rather than racing
+		// terminateBlueprint.
+		cr, _, blueprintLookupErr := tx.Blueprints.GetRunForRun(ctx, orgID, runID)
+		if blueprintLookupErr != nil {
+			artifactsLog.Warn("blueprint lookup failed, skipping task closure", "run", runID, "error", blueprintLookupErr)
+			return nil
+		}
+		blueprintRun = cr
+		if cr != nil {
+			return nil
+		}
+		// Stand-alone run: resolve the run's task_id and flip the task to done.
+		run, runErr := tx.AgentRuns.Get(ctx, orgID, runID)
+		if runErr != nil || run == nil {
+			artifactsLog.Warn("read run for task closure failed", "run", runID, "error", runErr)
+			return nil
+		}
+		if err := tx.Tasks.Close(ctx, orgID, run.TaskID, "run_completed", ""); err != nil {
+			artifactsLog.Warn("failed to close task for run", "run", runID, "error", err)
+		}
+		return nil
+	}); err != nil {
+		artifactsLog.Warn("post-approve run bookkeeping failed", "run", runID, "error", err)
+	}
+
+	ah.ws.Broadcast(websocket.Event{
+		Type:  "agent_run_update",
+		OrgID: orgID,
+		RunID: runID,
+		Data:  map[string]string{"status": "completed"},
+	})
+	spawner := ah.spawner()
+	if blueprintRun != nil && spawner != nil {
+		spawner.ResumeBlueprintAfterApproval(orgID, runID, userID)
+	} else if spawner != nil {
+		// Standalone run: approval is its terminal, so drop the durable workspace
+		// snapshot taken when it parked in pending_approval.
+		spawner.DiscardWorkspaceSnapshot(orgID, runID)
+	}
 }
 
 // upsertPRDetails writes the artifact back with new details_json, inside a

@@ -115,6 +115,16 @@ var ErrProtocolVersion = errors.New("agenthost: protocol version mismatch")
 // the in-process path returns (errors.Is matches on both paths).
 var ErrPendingReviewCollision = errors.New("agenthost: a pending review already exists on this PR under a real-user PAT identity; refusing to modify it (use a GitHub App / service-account credential so the bot manages its own review)")
 
+// ErrReviewAlreadyFinalized is returned by FinalizeReviewDraft when the run's
+// review artifact already carries a ready sentinel (details_json.review_event is
+// set) — i.e. the agent already called submit-review once. exec (TFAC-358) turns
+// it into the "do not call submit-review again, your work on this review is
+// complete" message that stops agents looping on the approval hand-off. Like
+// ErrPendingReviewCollision it crosses the IPC boundary as a response-envelope
+// marker so the sandbox client reconstructs the same sentinel (errors.Is matches
+// on both the in-process and daemon paths).
+var ErrReviewAlreadyFinalized = errors.New("agenthost: this run's review has already been finalized for human approval; do not call submit-review again")
+
 // Client is the surface every cmd/exec/* subcommand consumes. Every
 // state-mutating operation that used to call stores.X.Y directly with
 // inline synthetic-claims / admin-pool routing lives here as a single
@@ -134,16 +144,16 @@ type Client interface {
 	// returns its cached value, the IPCClient does one round-trip.
 	LookupRun(ctx context.Context) (RunInfo, error)
 
-	// --- pending reviews (gh pr review-* + add-review-comment + submit-review) ---
-
-	GetPendingReview(ctx context.Context, reviewID string) (*domain.PendingReview, error)
-	CreatePendingReview(ctx context.Context, r domain.PendingReview) error
-	DeletePendingReview(ctx context.Context, reviewID string) error
-	LockReviewSubmission(ctx context.Context, reviewID, body, event string) error
-	AddPendingReviewComment(ctx context.Context, c domain.PendingReviewComment) error
-	UpdatePendingReviewComment(ctx context.Context, commentID, body string) error
-	DeletePendingReviewComment(ctx context.Context, commentID string) error
-	ListPendingReviewComments(ctx context.Context, reviewID string) ([]domain.PendingReviewComment, error)
+	// --- review draft finalization (gh pr submit-review) ---
+	//
+	// FinalizeReviewDraft snapshots the agent's finished review into its run's
+	// `review` artifact: it locates the run's pending review artifact, reads the
+	// live GitHub pending review for the inline comments, stages body + event,
+	// and sets the ready sentinel (details_json.review_event) that parks the run
+	// for human approval. No GitHub submit happens here — approval does that.
+	// Returns ErrReviewAlreadyFinalized when the ready sentinel is already set
+	// (the TFAC-358 anti-double-submit guard).
+	FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) error
 
 	// --- workspace (workspace add + list) ---
 

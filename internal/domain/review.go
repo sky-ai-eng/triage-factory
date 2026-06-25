@@ -78,59 +78,24 @@ func SeverityBadgeMarkdown(severity string) string {
 	)
 }
 
-// PendingReview is a locally-managed review that hasn't been submitted to GitHub yet.
-// DiffLines stores a JSON map of file -> line numbers that are valid comment targets.
-// When ReviewEvent is set, the review has been "submitted" locally but is awaiting
-// user approval before posting to GitHub.
+// ParseSeverityBadge is the exact inverse of SeverityBadgeMarkdown: given a
+// comment body that may carry a leading severity badge, it returns the parsed
+// severity level (one of the Severity* constants, or "" when no badge is
+// present) and the body with that badge prefix stripped.
 //
-// OriginalReviewBody / OriginalReviewEvent are write-once snapshots of the
-// agent's first draft, captured by SetPendingReviewSubmission's COALESCE
-// pattern. They survive any user edits via handleReviewUpdate and are read
-// by the human-verdict writer (SKY-205) to compose the post-run
-// `## Human feedback (post-run)` block.
-//
-// Pointer (rather than string + sentinel) so the formatter can tell apart
-// "no snapshot exists" (nil — legacy row mid-flight when the columns were
-// added) from "snapshot was a legitimate empty value" (non-nil pointer to
-// ""). The body case matters because review bodies are commonly empty —
-// agents that produced inline comments alone leave the top-level body
-// blank — and we don't want a human-added body to silently suppress the
-// diff just because the agent's draft was "".
-type PendingReview struct {
-	ID                  string
-	PRNumber            int
-	Owner               string
-	Repo                string
-	CommitSHA           string
-	DiffLines           string  // JSON: {"file.go": [1,2,3,...], ...}
-	DiffHunks           string  // JSON: {"file.go": [[start,end], ...], ...} — one [start,end] pair per hunk on the new side
-	RunID               string  // agent run that created this review (empty for standalone CLI)
-	ReviewBody          string  // deferred review body (set when awaiting approval)
-	ReviewEvent         string  // deferred review event: APPROVE, COMMENT, REQUEST_CHANGES
-	OriginalReviewBody  *string // agent's first draft body, write-once; nil = no snapshot
-	OriginalReviewEvent *string // agent's first draft event, write-once; nil = no snapshot
-}
-
-// PendingReviewComment is a comment attached to a local pending review.
-//
-// OriginalBody is the write-once snapshot of the agent's drafted comment
-// body, populated at INSERT in AddPendingReviewComment. UpdatePendingReviewComment
-// mutates Body but never OriginalBody, giving SKY-205's writer a stable
-// before/after pair for diff formatting. Pointer for the same reason as
-// PendingReview's originals: nil = legacy row predating the column;
-// non-nil pointer to "" = real snapshot of an empty drafted comment
-// (rare but possible).
-type PendingReviewComment struct {
-	ID           string
-	ReviewID     string
-	Path         string
-	Line         int
-	StartLine    *int
-	Body         string
-	OriginalBody *string
-	// Severity is one of the domain.Severity* constants, or "" when the
-	// author (agent or third-party skill) didn't tag the finding. Stored
-	// as data; rendered as a native chip in the diff UI and as a
-	// shields.io badge when posted to GitHub. Never embedded in Body.
-	Severity string
+// This is the read half of the GitHub-native severity round-trip (TFAC-463):
+// severity is no longer a stored column — it lives only baked into the GitHub
+// comment body — so the server parses it back out on read to render the native
+// chip and show the clean body. Kept adjacent to SeverityBadgeMarkdown, and
+// implemented by reconstructing each level's exact badge via that same
+// function, so the two can't drift: any change to the badge format updates both
+// directions at once.
+func ParseSeverityBadge(body string) (severity, stripped string) {
+	for _, sev := range ValidSeverities {
+		badge := SeverityBadgeMarkdown(sev)
+		if badge != "" && strings.HasPrefix(body, badge) {
+			return sev, body[len(badge):]
+		}
+	}
+	return "", body
 }

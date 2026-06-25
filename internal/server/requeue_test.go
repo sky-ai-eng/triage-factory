@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
+	"github.com/zalando/go-keyring"
 )
 
 // pendingApprovalFixture installs the full FK chain for a task whose
@@ -22,6 +23,12 @@ import (
 // memory, prepared a review, awaiting human submit.
 func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, reviewID string) {
 	t.Helper()
+	// The review-abandon path resolves a GitHub client (to delete the pending
+	// review), which is the first secret-backend resolution in some test orderings.
+	// Install the mock keychain so that resolution probes a mock (keychain backend)
+	// rather than memoizing keychainOK=false (file backend) — which would otherwise
+	// poison later seedApp-based tests that need TF_SECRET_ENCRYPTION_KEY.
+	keyring.MockInit()
 
 	const eventType = "github:pr:ci_check_passed"
 	// SKY-261 B+: pre-B+ this fixture used status='delegated' to mean
@@ -72,23 +79,29 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
 
-	// Pending review with one comment, populated via the same
-	// helpers production uses so the original_* columns get the
-	// real write-once snapshots.
-	if err := sqlitestore.New(database).Reviews.Create(context.Background(), runmode.LocalDefaultOrgID, domain.PendingReview{
-		ID: "rev_pa", PRNumber: 7, Owner: "owner", Repo: "repo", CommitSHA: "sha", DiffLines: "", RunID: "r_pa",
-	}); err != nil {
-		t.Fatalf("CreatePendingReview: %v", err)
+	// A finalized pending review parks the run: a review artifact in state=pending
+	// whose ready sentinel (details.review_event) is set, with the agent's draft
+	// snapshotted into details.proposed. Abandon flips it to dismissed (and
+	// best-effort deletes the GitHub pending review). Returns the artifact id.
+	line := 1
+	reviewArt := domain.NewReviewArtifact("owner/repo", 7, "PR_node_pa", "rev_pa")
+	reviewArt.RunID = "r_pa"
+	reviewArt.OrgID = runmode.LocalDefaultOrgID
+	reviewArt.TeamID = runmode.LocalDefaultTeamID
+	rd, _ := domain.ParseReviewArtifactDetails(reviewArt.DetailsJSON)
+	rd.ReviewBody = "agent draft body"
+	rd.ReviewEvent = "APPROVE"
+	rd.Proposed = domain.ReviewArtifactProposed{
+		Body:     "agent draft body",
+		Event:    "APPROVE",
+		Comments: []domain.ReviewArtifactComment{{ID: "c_pa", Path: "x.go", Line: &line, Body: "agent comment"}},
 	}
-	if err := sqlitestore.New(database).Reviews.AddComment(context.Background(), runmode.LocalDefaultOrgID, domain.PendingReviewComment{
-		ID: "c_pa", ReviewID: "rev_pa", Path: "x.go", Line: 1, Body: "agent comment",
-	}); err != nil {
-		t.Fatalf("AddPendingReviewComment: %v", err)
+	reviewArt.DetailsJSON = domain.MarshalReviewArtifactDetails(rd)
+	stored, err := sqlitestore.New(database).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, reviewArt)
+	if err != nil {
+		t.Fatalf("seed review artifact: %v", err)
 	}
-	if err := sqlitestore.New(database).Reviews.SetSubmission(context.Background(), runmode.LocalDefaultOrgID, "rev_pa", "agent draft body", "APPROVE"); err != nil {
-		t.Fatalf("SetPendingReviewSubmission: %v", err)
-	}
-	return "t_pa", "r_pa", "rev_pa"
+	return "t_pa", "r_pa", stored.ID
 }
 
 // assertPendingApprovalCleanedUp checks every post-condition the
@@ -134,22 +147,17 @@ func assertPendingApprovalCleanedUp(
 		t.Errorf("run.completed_at not populated")
 	}
 
-	var revCount, commentCount int
+	// The review artifact must be flipped to dismissed (its proposed snapshot is
+	// preserved for the audit ledger — abandonment retires the GitHub review, not
+	// the record). reviewID here is the artifact id.
+	var artState string
 	if err := database.QueryRow(
-		`SELECT COUNT(*) FROM pending_reviews WHERE id = ?`, reviewID,
-	).Scan(&revCount); err != nil {
-		t.Fatalf("scan pending_reviews count: %v", err)
+		`SELECT state FROM artifacts WHERE id = ?`, reviewID,
+	).Scan(&artState); err != nil {
+		t.Fatalf("scan review artifact state: %v", err)
 	}
-	if revCount != 0 {
-		t.Errorf("pending_reviews count = %d, want 0", revCount)
-	}
-	if err := database.QueryRow(
-		`SELECT COUNT(*) FROM pending_review_comments WHERE review_id = ?`, reviewID,
-	).Scan(&commentCount); err != nil {
-		t.Fatalf("scan pending_review_comments count: %v", err)
-	}
-	if commentCount != 0 {
-		t.Errorf("pending_review_comments count = %d, want 0", commentCount)
+	if artState != domain.ArtifactStateReviewDismissed {
+		t.Errorf("review artifact state = %q, want %q (dismissed on abandon)", artState, domain.ArtifactStateReviewDismissed)
 	}
 
 	var agentContent, humanContent sql.NullString
@@ -1257,49 +1265,43 @@ func TestCleanupPendingApprovalRun_Idempotent(t *testing.T) {
 	}
 }
 
-// TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry is
-// the regression for the ordering bug: if DeletePendingReviewByRunID
-// fails transiently, the cleanup must NOT flip the run off
-// status='pending_approval'. PendingApprovalRunIDForTask filters on
-// that status, so cancelling the run too eagerly would strand the
-// review with no path back to retry.
+// TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry is the regression
+// for the ordering bug: if a DB op inside the cleanup tx fails transiently, the
+// cleanup must NOT flip the run off status='pending_approval'.
+// PendingApprovalRunIDForTask filters on that status, so cancelling the run too
+// eagerly would strand the parked artifact with no path back to retry.
 //
-// We force a delete failure by temporarily renaming the
-// pending_review_comments table — the DELETE inside the
-// transactional helper sees a missing dependency and rolls back. After
-// restoring the table, a second cleanup call must find the run
-// still in pending_approval, succeed, and leave the expected
-// terminal state.
+// We force a failure by temporarily renaming the artifacts table — the cleanup's
+// kind-detecting ListByRun (and the dismiss upsert) reference it by name and the
+// whole tx rolls back. After restoring it, a second cleanup call must find the
+// run still in pending_approval, succeed, and leave the expected terminal state.
 func TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, _ := pendingApprovalFixture(t, s.db)
+	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
 
-	// Sabotage: rename the comments table so the DELETE inside
-	// DeletePendingReviewByRunID fails. SQLite's foreign-key
-	// validation isn't what trips here — the transactional helper's
-	// first DELETE references pending_review_comments by name and
-	// fails with "no such table".
-	if _, err := s.db.Exec(`ALTER TABLE pending_review_comments RENAME TO pending_review_comments_temp`); err != nil {
-		t.Fatalf("rename comments table: %v", err)
+	// Sabotage: rename the artifacts table so the cleanup's ListByRun fails with
+	// "no such table" and the tx rolls back before MarkDiscarded.
+	if _, err := s.db.Exec(`ALTER TABLE artifacts RENAME TO artifacts_temp`); err != nil {
+		t.Fatalf("rename artifacts table: %v", err)
 	}
 
 	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
-	// Run must still be pending_approval — the delete failed and
-	// MarkAgentRunDiscarded must have been skipped.
+	// Run must still be pending_approval — the lookup failed and MarkDiscarded
+	// must have been skipped.
 	var runStatus string
 	if err := s.db.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&runStatus); err != nil {
 		t.Fatalf("scan run after sabotaged cleanup: %v", err)
 	}
 	if runStatus != "pending_approval" {
-		t.Fatalf("run.status = %q after delete failure; want %q (cleanup must hold for retry)",
+		t.Fatalf("run.status = %q after failure; want %q (cleanup must hold for retry)",
 			runStatus, "pending_approval")
 	}
 
-	// Heal the table; the next cleanup call must rediscover the
-	// run via PendingApprovalRunIDForTask and complete the work.
-	if _, err := s.db.Exec(`ALTER TABLE pending_review_comments_temp RENAME TO pending_review_comments`); err != nil {
-		t.Fatalf("restore comments table: %v", err)
+	// Heal the table; the next cleanup call must rediscover the run via
+	// PendingApprovalRunIDForTask and complete the work.
+	if _, err := s.db.Exec(`ALTER TABLE artifacts_temp RENAME TO artifacts`); err != nil {
+		t.Fatalf("restore artifacts table: %v", err)
 	}
 
 	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
@@ -1310,12 +1312,12 @@ func TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry(t *testing.T) {
 	if runStatus != "cancelled" {
 		t.Errorf("run.status = %q after successful retry; want %q", runStatus, "cancelled")
 	}
-	var revCount int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pending_reviews WHERE run_id = ?`, runID).Scan(&revCount); err != nil {
-		t.Fatalf("scan pending_reviews after retry: %v", err)
+	var artState string
+	if err := s.db.QueryRow(`SELECT state FROM artifacts WHERE id = ?`, reviewID).Scan(&artState); err != nil {
+		t.Fatalf("scan review artifact after retry: %v", err)
 	}
-	if revCount != 0 {
-		t.Errorf("pending_reviews count = %d after retry; want 0 (review should be torn down)", revCount)
+	if artState != domain.ArtifactStateReviewDismissed {
+		t.Errorf("review artifact state = %q after retry; want %q (review should be dismissed)", artState, domain.ArtifactStateReviewDismissed)
 	}
 }
 

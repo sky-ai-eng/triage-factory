@@ -12,9 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
@@ -64,28 +62,6 @@ func agentMemoryFile() string {
 	return filepath.Join(root, "_scratch", "entity-memory", ns, runID+".md")
 }
 
-// getDiffShapes fetches the PR diff and returns both representations we
-// persist on a pending review: a flat per-file set of commentable lines
-// (used for legacy line-only validation) and a per-file list of hunk
-// ranges (used to validate that multi-line comments don't straddle two
-// hunks — GitHub rejects those with 422 at submit time). Tries the full
-// diff first; falls back to per-file patches if GitHub rejects it as
-// too large (HTTP 406).
-func getDiffShapes(client ghAPI, owner, repo string, number int) (map[string]map[int]bool, map[string][]ghclient.Hunk, error) {
-	diff, err := client.GetPRDiff(owner, repo, number, "")
-	if err != nil {
-		if ghclient.IsHTTP406(err) {
-			files, filesErr := client.GetPRFiles(owner, repo, number)
-			if filesErr != nil {
-				return nil, nil, filesErr
-			}
-			return ghclient.DiffLinesFromPatches(files), ghclient.DiffHunksFromPatches(files), nil
-		}
-		return nil, nil, err
-	}
-	return ghclient.DiffLines(diff), ghclient.DiffHunks(diff), nil
-}
-
 func handlePR(host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: triagefactory exec gh pr <action> [flags]")
@@ -112,8 +88,6 @@ func handlePR(host agenthost.Client, args []string) {
 		prThreadView(api, flags)
 	case "review-view":
 		prReviewView(api, flags)
-	case "review-delete":
-		prReviewDelete(host, flags)
 	case "review-dismiss":
 		prReviewDismiss(api, flags)
 	case "start-review":
@@ -121,9 +95,7 @@ func handlePR(host agenthost.Client, args []string) {
 	case "add-review-comment":
 		prAddReviewComment(host, flags)
 	case "submit-review":
-		prSubmitReview(api, host, flags)
-	case "comment-list-pending":
-		prListPending(host, flags)
+		prSubmitReview(host, flags)
 	case "add-comment":
 		prAddComment(api, flags)
 	case "comment-reply":
@@ -131,9 +103,9 @@ func handlePR(host agenthost.Client, args []string) {
 	case "comment-react":
 		prCommentReact(api, flags)
 	case "comment-update":
-		prCommentUpdate(api, host, flags)
+		prCommentUpdate(api, flags)
 	case "comment-delete":
-		prCommentDelete(api, host, flags)
+		prCommentDelete(api, flags)
 	default:
 		exitErr(fmt.Sprintf("unknown pr action: %s", action))
 	}
@@ -431,17 +403,6 @@ func prReviewView(client ghAPI, args []string) {
 	printJSON(detail)
 }
 
-func prReviewDelete(host agenthost.Client, args []string) {
-	if len(args) < 1 {
-		exitErr("usage: gh pr review-delete <review_id>")
-	}
-	reviewID := args[0]
-	_ = lookupRun(host) // validates identity is present; routing happens inside host
-	ctx := context.Background()
-	exitOnErr(host.DeletePendingReview(ctx, reviewID))
-	printJSON(map[string]any{"ok": true, "review_id": reviewID})
-}
-
 func prReviewDismiss(client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr review-dismiss <review_id> --pr <number> --body <reason>")
@@ -460,59 +421,46 @@ func prReviewDismiss(client ghAPI, args []string) {
 
 // --- Review lifecycle (local state) ---
 
+// prStartReview creates a real GitHub *pending* review (private to the bot until
+// submit) and prints its review id. The durable `review` artifact is recorded at
+// the host choke point (LocalClient.GithubCreatePendingReview), which also runs
+// the identity-aware collision check. No local staging: the review now lives on
+// GitHub, edited 1:1.
 func prStartReview(client ghAPI, host agenthost.Client, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
-	info := lookupRun(host)
-	// Fetch head SHA for the review
+	_ = lookupRun(host) // validates identity is present; routing happens inside host
+
+	// Fetch the head SHA so the pending review pins to the reviewed commit.
 	pr, err := client.GetPR(owner, repo, number, false)
 	exitOnErr(err)
 
-	// Fetch commentable lines + hunk ranges; falls back to per-file patches on HTTP 406.
-	diffLinesMap, diffHunksMap, err := getDiffShapes(client, owner, repo, number)
-	exitOnErr(err)
-
-	// Lines as JSON: {"file": [1,2,3,...], ...}
-	compactMap := make(map[string][]int)
-	for file, lines := range diffLinesMap {
-		for line := range lines {
-			compactMap[file] = append(compactMap[file], line)
+	// Create the pending review through the host (→ GithubCreatePendingReview):
+	// it folds in the collision check and records the artifact. Seed no inline
+	// comments — the agent adds them one at a time via add-review-comment.
+	reviewID, err := client.CreatePendingReview(owner, repo, number, pr.HeadSHA, nil)
+	if err != nil {
+		if errors.Is(err, agenthost.ErrPendingReviewCollision) {
+			exitErr(fmt.Sprintf(
+				"a pending review already exists for this identity on PR #%d. Use a GitHub App / service-account credential so the bot manages its own review — a real-user PAT's in-progress review must never be hijacked.",
+				number,
+			))
 		}
+		exitOnErr(err)
 	}
-	diffLinesJSON, _ := json.Marshal(compactMap)
-
-	// Hunks as JSON: {"file": [[start,end], ...], ...}
-	hunksMap := make(map[string][][2]int, len(diffHunksMap))
-	for file, hunks := range diffHunksMap {
-		pairs := make([][2]int, len(hunks))
-		for i, h := range hunks {
-			pairs[i] = [2]int{h.NewStart, h.NewEnd}
-		}
-		hunksMap[file] = pairs
-	}
-	diffHunksJSON, _ := json.Marshal(hunksMap)
-
-	reviewID := uuid.New().String()
-	row := domain.PendingReview{
-		ID:        reviewID,
-		PRNumber:  number,
-		Owner:     owner,
-		Repo:      repo,
-		CommitSHA: pr.HeadSHA,
-		DiffLines: string(diffLinesJSON),
-		DiffHunks: string(diffHunksJSON),
-		RunID:     info.RunID,
-	}
-	exitOnErr(host.CreatePendingReview(context.Background(), row))
 
 	printJSON(map[string]any{
 		"review_id":  reviewID,
 		"pr_number":  number,
 		"commit_sha": pr.HeadSHA,
-		"status":     "pending_local",
-		"files":      len(diffLinesMap),
+		"status":     "pending",
 	})
 }
 
+// prAddReviewComment bakes the severity badge into the comment body, then adds it
+// to the real GitHub pending review (→ GithubAddPendingReviewComment). Severity
+// lives only in the GitHub comment body now (no local column); the overlay parses
+// it back out for the chip. No local diff-shape pre-check — the live PR is the
+// source of truth, so GitHub's own out-of-diff line rejection surfaces instead.
 func prAddReviewComment(host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr add-review-comment <review_id> --file <path> --line <N> (--body <text> | --body-file <path>) [--start-line <N>] [--severity <blocker|major|minor|clean>]")
@@ -549,10 +497,10 @@ func prAddReviewComment(host agenthost.Client, args []string) {
 		exitErr("--file and --body (or --body-file) are required")
 	}
 
-	// --severity tags the finding's level; surfaced as a chip in the
-	// human approval UI and a shields.io badge on the posted comment.
-	// Optional and case-insensitive — third-party review skills that
-	// omit it just get an un-badged comment.
+	// --severity tags the finding's level; baked into the comment body as a
+	// shields.io badge (the overlay parses it back out to render a chip).
+	// Optional and case-insensitive — third-party review skills that omit it
+	// just get an un-badged comment.
 	severity, err := domain.NormalizeSeverity(flagVal(args, "--severity"))
 	if err != nil {
 		exitErr(err.Error())
@@ -564,94 +512,37 @@ func prAddReviewComment(host agenthost.Client, args []string) {
 		startLine = &v
 	}
 
+	owner, repo := ownerRepo(args)
 	_ = lookupRun(host)
-	ctx := context.Background()
 
-	// Verify review exists. Identity is enforced inside host;
-	// validation here just gates the agent's next-step messaging.
-	review, err := host.GetPendingReview(ctx, reviewID)
-	exitOnErr(err)
-	if review == nil {
-		exitErr(fmt.Sprintf("pending review %s not found", reviewID))
-	}
-
-	// Validate the comment's range against the captured diff. Prefer the
-	// hunk-aware check (start_line and line must be in the same hunk —
-	// GitHub rejects cross-hunk ranges with 422 at submit time); fall back
-	// to the legacy line-only check when diff_hunks is empty (pre-migration
-	// rows) or its JSON fails to parse (internal corruption — better to
-	// run the weaker check than silently accept the comment, since
-	// diff_hunks is something *we* wrote).
-	validated := false
-	if review.DiffHunks != "" {
-		var hunksJSON map[string][][2]int
-		if err := json.Unmarshal([]byte(review.DiffHunks), &hunksJSON); err == nil {
-			hunks := make(map[string][]ghclient.Hunk, len(hunksJSON))
-			for f, pairs := range hunksJSON {
-				hs := make([]ghclient.Hunk, len(pairs))
-				for i, p := range pairs {
-					hs[i] = ghclient.Hunk{NewStart: p[0], NewEnd: p[1]}
-				}
-				hunks[f] = hs
-			}
-			if msg := ghclient.ValidateCommentRange(hunks, file, line, startLine); msg != "" {
-				exitErr(msg)
-			}
-			validated = true
-		}
-	}
-	if !validated && review.DiffLines != "" {
-		var validLines map[string][]int
-		if json.Unmarshal([]byte(review.DiffLines), &validLines) == nil {
-			fileLines, fileExists := validLines[file]
-			if !fileExists {
-				exitErr(fmt.Sprintf("file '%s' is not in the diff. Valid files: %v", file, keys(validLines)))
-			}
-			lineSet := make(map[int]bool, len(fileLines))
-			for _, l := range fileLines {
-				lineSet[l] = true
-			}
-			if !lineSet[line] {
-				exitErr(fmt.Sprintf("line %d in '%s' is not part of the diff. Comment on lines that appear in the diff output.", line, file))
-			}
-			// Without hunk metadata we can't enforce same-hunk membership
-			// (the residual 422 case the SubmitReview backstop covers), but
-			// these two cheap checks always apply when --start-line is set
-			// and don't need hunk info — without them the legacy/corrupted
-			// path would skip start_line validation entirely.
-			if startLine != nil {
-				if *startLine > line {
-					exitErr(fmt.Sprintf("start_line %d must be ≤ line %d", *startLine, line))
-				}
-				if !lineSet[*startLine] {
-					exitErr(fmt.Sprintf("start_line %d in '%s' is not part of the diff. Comment on lines that appear in the diff output.", *startLine, file))
-				}
-			}
-		}
-	}
-
-	commentID := uuid.New().String()
-	comment := domain.PendingReviewComment{
-		ID:        commentID,
-		ReviewID:  reviewID,
+	// Bake the badge in, then add to the GitHub pending review. The add op keys
+	// off the review node id, but the host needs owner/repo to resolve the repo's
+	// credential — so build a repo-scoped adapter (the shared PR dispatch adapter
+	// is unscoped).
+	badgedBody := domain.SeverityBadgeMarkdown(severity) + body
+	client := newHostAPI(host, owner, repo)
+	commentID, err := client.AddPendingReviewComment(reviewID, ghclient.SubmitReviewComment{
 		Path:      file,
 		Line:      line,
 		StartLine: startLine,
-		Body:      body,
-		Severity:  severity,
-	}
-
-	exitOnErr(host.AddPendingReviewComment(ctx, comment))
+		Body:      badgedBody,
+	})
+	exitOnErr(err)
 
 	printJSON(map[string]any{
 		"comment_id": commentID,
 		"review_id":  reviewID,
 		"severity":   severity,
-		"status":     "pending_local",
+		"status":     "pending",
 	})
 }
 
-func prSubmitReview(client ghAPI, host agenthost.Client, args []string) {
+// prSubmitReview hands the finished review off for human approval — it does NOT
+// submit to GitHub (approval does that). The host snapshots the agent's draft
+// (body + event + the live inline comments) into the run's review artifact and
+// sets the ready sentinel that parks the run. The TFAC-358 anti-double-submit
+// guard fires host-side: a second call gets a hard error.
+func prSubmitReview(host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr submit-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)")
 	}
@@ -695,104 +586,29 @@ func prSubmitReview(client ghAPI, host agenthost.Client, args []string) {
 	}
 
 	_ = lookupRun(host)
-	ctx := context.Background()
 
-	// Load pending review.
-	review, err := host.GetPendingReview(ctx, reviewID)
+	// Snapshot the draft into the run's review artifact and set the ready
+	// sentinel. No GitHub submit — approval applies body + event atomically. The
+	// "meaningful review" check (body or inline comments for a non-approve) runs
+	// host-side, where the live comments are known.
+	err := host.FinalizeReviewDraft(context.Background(), reviewID, ghEvent, body)
+	if errors.Is(err, agenthost.ErrReviewAlreadyFinalized) {
+		exitErr(fmt.Sprintf(
+			"review %s has already been finalized for human approval. Do not call submit-review again — your work on this review is complete. Finish the run by writing %s and returning your completion JSON.",
+			reviewID, agentMemoryFile(),
+		))
+	}
 	exitOnErr(err)
-	if review == nil {
-		exitErr(fmt.Sprintf("pending review %s not found", reviewID))
-	}
-
-	// Load pending comments.
-	pendingComments, err := host.ListPendingReviewComments(ctx, reviewID)
-	exitOnErr(err)
-
-	// A comment / request_changes review must carry something actionable: a
-	// top-level body, inline comments, or both. An empty body with no comments
-	// is a meaningless review GitHub rejects — surface it as a clear CLI error
-	// instead of an opaque API failure later. An approve needs no body (the
-	// approval is the signal), and an empty body with inline comments is valid,
-	// so this only fires on the genuinely-empty case.
-	if body == "" && ghEvent != "APPROVE" && len(pendingComments) == 0 {
-		exitErr(fmt.Sprintf("a %s review needs --body/--body-file or at least one inline comment", event))
-	}
-
-	// Convert to GitHub format. Prepend the severity badge to the body
-	// here, at GitHub-post time — the stored body stays badge-free so
-	// edits don't fight the markdown and the local UI can render a
-	// native chip from the Severity field instead.
-	ghComments := make([]ghclient.SubmitReviewComment, len(pendingComments))
-	for i, c := range pendingComments {
-		ghComments[i] = ghclient.SubmitReviewComment{
-			Path:      c.Path,
-			Line:      c.Line,
-			StartLine: c.StartLine,
-			Body:      domain.SeverityBadgeMarkdown(c.Severity) + c.Body,
-		}
-	}
-
-	// In preview mode (TRIAGE_FACTORY_REVIEW_PREVIEW=1, the default
-	// for delegated runs), the agent's submit-review queues the
-	// review for human approval rather than posting to GitHub. The
-	// server injects header/footer with actual cost data at submit
-	// time. SKY-212: lock the row on first agent submit so a second
-	// submit-review call in the same run gets a hard error instead
-	// of silently overwriting — agents were looping after seeing
-	// the pending_approval response, mistaking it for "still pending,
-	// keep going."
-	if os.Getenv("TRIAGE_FACTORY_REVIEW_PREVIEW") == "1" {
-		err = host.LockReviewSubmission(ctx, reviewID, body, ghEvent)
-		if errors.Is(err, db.ErrPendingReviewAlreadySubmitted) {
-			exitErr(fmt.Sprintf(
-				"review %s has already been queued for human approval. Do not call submit-review again — your work on this review is complete. Finish the run by writing %s and returning your completion JSON.",
-				reviewID, agentMemoryFile(),
-			))
-		}
-		exitOnErr(err)
-
-		printJSON(map[string]any{
-			// queued_for_human_approval makes the contract explicit:
-			// the review has been handed off to the human approval
-			// queue and the agent's work on this PR is done. The old
-			// "pending_approval" wording mirrored the run-status
-			// vocabulary and was easy to misread as "still pending,
-			// more to do." next_step spells out the wrap-up so even
-			// agents that aren't reading the prompt closely get the
-			// signal directly from the tool result.
-			"status":          "queued_for_human_approval",
-			"review_id":       reviewID,
-			"event":           ghEvent,
-			"comments_queued": len(ghComments),
-			"next_step":       "Review is queued for human approval. Do not call submit-review again. Finish the run by writing " + agentMemoryFile() + " and returning your completion JSON.",
-		})
-		return
-	}
-
-	// Standalone (non-preview) mode: pre-apply the footer and submit
-	// directly to GitHub. The footer rendering happens through the
-	// agenthost surface so the sandbox path stays DB-free; LocalClient
-	// reads the run row in-process.
-	footer, err := host.BuildAgentRunFooter(ctx, "review")
-	exitOnErr(err)
-	body = body + footer
-
-	// Submit atomically to GitHub
-	ghReviewID, actualEvent, err := client.SubmitReview(
-		review.Owner, review.Repo, review.PRNumber,
-		review.CommitSHA, ghEvent, body, ghComments,
-	)
-	exitOnErr(err)
-
-	// Clean up local state.
-	if err := host.DeletePendingReview(ctx, reviewID); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to clean up local review state: %v\n", err)
-	}
 
 	printJSON(map[string]any{
-		"github_review_id": ghReviewID,
-		"event":            actualEvent,
-		"comments_posted":  len(ghComments),
+		// drafted_awaiting_approval makes the contract explicit: the review is
+		// handed off to the human approval queue and the agent's work on this PR
+		// is done. next_step spells out the wrap-up so even agents that aren't
+		// reading the prompt closely get the signal directly from the tool result.
+		"status":    "drafted_awaiting_approval",
+		"review_id": reviewID,
+		"event":     ghEvent,
+		"next_step": "Review is drafted and awaiting human approval. Do not call submit-review again. Finish the run by writing " + agentMemoryFile() + " and returning your completion JSON.",
 	})
 }
 
@@ -918,22 +734,6 @@ func prCreate(client ghAPI, args []string) {
 	})
 }
 
-func prListPending(host agenthost.Client, args []string) {
-	if len(args) < 1 {
-		exitErr("usage: gh pr comment-list-pending <review_id>")
-	}
-	reviewID := args[0]
-	// Read-only inventory — identity probe still happens via lookupRun
-	// so an invalid TRIAGE_FACTORY_RUN_ID still fails loudly.
-	_ = lookupRun(host)
-	comments, err := host.ListPendingReviewComments(context.Background(), reviewID)
-	exitOnErr(err)
-	if comments == nil {
-		comments = []domain.PendingReviewComment{}
-	}
-	printJSON(comments)
-}
-
 // --- Direct comments (hit GitHub API) ---
 
 func prAddComment(client ghAPI, args []string) {
@@ -978,66 +778,31 @@ func prCommentReact(client ghAPI, args []string) {
 	printJSON(map[string]any{"ok": true})
 }
 
-func prCommentUpdate(client ghAPI, host agenthost.Client, args []string) {
+// prCommentUpdate edits a real GitHub comment by its numeric id (an issue comment
+// or a submitted review comment). Pending-review comments are edited human-side
+// through the overlay (server-direct), never here — the agent flow is add-only.
+func prCommentUpdate(client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-update <comment_id> --body <text>")
 	}
-	commentID := args[0]
+	owner, repo := ownerRepo(args)
+	id := mustInt(args[0], "comment_id")
 	body := flagVal(args, "--body")
 	if body == "" {
 		exitErr("--body is required")
 	}
-
-	// Check if it's a local pending comment (UUID) vs remote (integer)
-	if isLocalID(commentID) {
-		_ = lookupRun(host)
-		exitOnErr(host.UpdatePendingReviewComment(context.Background(), commentID, body))
-		printJSON(map[string]any{"ok": true, "scope": "local"})
-	} else {
-		owner, repo := ownerRepo(args)
-		id := mustInt(commentID, "comment_id")
-		err := client.UpdateComment(owner, repo, id, body)
-		exitOnErr(err)
-		printJSON(map[string]any{"ok": true, "scope": "remote"})
-	}
+	exitOnErr(client.UpdateComment(owner, repo, id, body))
+	printJSON(map[string]any{"ok": true})
 }
 
-func prCommentDelete(client ghAPI, host agenthost.Client, args []string) {
+func prCommentDelete(client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-delete <comment_id>")
 	}
-	commentID := args[0]
-
-	if isLocalID(commentID) {
-		_ = lookupRun(host)
-		exitOnErr(host.DeletePendingReviewComment(context.Background(), commentID))
-		printJSON(map[string]any{"ok": true, "scope": "local"})
-	} else {
-		owner, repo := ownerRepo(args)
-		id := mustInt(commentID, "comment_id")
-		err := client.DeleteComment(owner, repo, id)
-		exitOnErr(err)
-		printJSON(map[string]any{"ok": true, "scope": "remote"})
-	}
-}
-
-// isLocalID returns true if the ID looks like a UUID (local pending comment)
-// vs an integer (GitHub remote comment).
-func keys[K comparable, V any](m map[K]V) []K {
-	result := make([]K, 0, len(m))
-	for k := range m {
-		result = append(result, k)
-	}
-	return result
-}
-
-func isLocalID(id string) bool {
-	if len(id) == 0 {
-		return false
-	}
-	// GitHub IDs are purely numeric, our local IDs are UUIDs (contain hyphens).
-	_, err := strconv.Atoi(id)
-	return err != nil
+	owner, repo := ownerRepo(args)
+	id := mustInt(args[0], "comment_id")
+	exitOnErr(client.DeleteComment(owner, repo, id))
+	printJSON(map[string]any{"ok": true})
 }
 
 // --- argument parsing helpers ---
