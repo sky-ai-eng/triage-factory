@@ -400,7 +400,10 @@ func (c *Client) DeletePendingReview(owner, repo string, number int, reviewID st
 		return fmt.Errorf("delete pending review: GraphQL error (%s): %s", e.Type, e.Message)
 	}
 	if resp.Data.Node.DatabaseID == 0 {
-		return fmt.Errorf("delete pending review: review %s has no resolvable database id (already submitted or gone?)", reviewID)
+		// A real review (pending or submitted) resolves to a non-zero databaseId, so
+		// a zero here means the node didn't resolve to a PullRequestReview at all —
+		// the review was deleted out-of-band, not merely submitted.
+		return fmt.Errorf("delete pending review: review %s not found or no longer a pull request review (already deleted)", reviewID)
 	}
 	if _, err := c.Delete(fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews/%d", owner, repo, number, resp.Data.Node.DatabaseID)); err != nil {
 		return fmt.Errorf("delete pending review: %w", err)

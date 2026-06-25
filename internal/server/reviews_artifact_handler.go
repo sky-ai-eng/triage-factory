@@ -86,6 +86,15 @@ func (ah *artifactsHandler) reviewGet(w http.ResponseWriter, r *http.Request, or
 // live-editable on GitHub (the event *is* the submit), so they stage here and
 // apply atomically at approval. No GitHub call.
 func (ah *artifactsHandler) reviewUpdate(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Artifact) {
+	// Only a still-pending review can be staged. A PATCH on a submitted/dismissed
+	// artifact would write body/event that can never be applied (approve guards
+	// state), so reject it as a conflict rather than return a misleading 200 on an
+	// artifact the user can no longer act on. Mirrors the reviewApprove guard.
+	if art.State != domain.ArtifactStateReviewPending {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending (state: " + art.State + ")"})
+		return
+	}
+
 	var req struct {
 		ReviewBody  *string `json:"review_body"`
 		ReviewEvent *string `json:"review_event"`

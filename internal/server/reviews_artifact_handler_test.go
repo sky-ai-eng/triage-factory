@@ -429,3 +429,26 @@ func TestReviewArtifactApprove_ReviewIDDrift_409(t *testing.T) {
 		t.Errorf("artifact state = %q after 409, want still pending", got)
 	}
 }
+
+// TestReviewArtifactUpdate_NonPending_409 pins that staging is rejected once the
+// review is no longer pending: a PATCH on a submitted/dismissed artifact returns
+// 409 and doesn't write body/event the user can't act on.
+func TestReviewArtifactUpdate_NonPending_409(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rnp", "acme", "api", 7, "PRR_1", "COMMENT")
+	// Flip to submitted out-of-band.
+	art := getArtifact(t, srv, artID)
+	art.State = domain.ArtifactStateReviewSubmitted
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+		t.Fatalf("flip submitted: %v", err)
+	}
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"review_body": "edit"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("PATCH on submitted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	// The staged body must be unchanged.
+	if d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON); d.ReviewBody != "## Review\nlgtm" {
+		t.Errorf("review_body = %q after rejected PATCH, want unchanged", d.ReviewBody)
+	}
+}

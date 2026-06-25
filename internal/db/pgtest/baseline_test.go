@@ -27,8 +27,8 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"prompts", "projects", "events_catalog", "entities", "entity_links", "events",
 		"event_handlers", "tasks", "task_events", "runs", "artifacts",
 		"run_messages", "run_memory", "pending_firings", "run_worktrees",
-		"swipe_events", "poller_state", "repo_profiles", "pending_reviews",
-		"pending_review_comments", "preferences", "system_prompt_versions",
+		"swipe_events", "poller_state", "repo_profiles",
+		"preferences", "system_prompt_versions",
 		"curator_requests", "curator_messages", "curator_pending_context",
 		// org_secrets replaces the Supabase Vault secret path (TFAC-402):
 		// app-encrypted ciphertext in a normal RLS table.
@@ -1733,98 +1733,6 @@ func TestUpdatedAtAutoBump(t *testing.T) {
 	}
 	if !after.After(before) {
 		t.Errorf("updated_at not bumped on UPDATE: before=%v after=%v", before, after)
-	}
-}
-
-// TestRLS_PendingReviewsInheritParentVisibility — pending_reviews
-// with a non-null run_id must inherit the run's creator-scope. Bob
-// can't read alice's draft review content via pending_reviews even
-// though they share an org.
-func TestRLS_PendingReviewsInheritParentVisibility(t *testing.T) {
-	h := Shared(t)
-	h.Reset(t)
-
-	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
-	bob := SeedUser(t, h, "bob")
-	AddOrgMember(t, h, bob, orgA, teamA, "member", "member")
-
-	// Alice creates a task + run + a pending review tied to that run.
-	// Forced visibility='private' on parents so the inheritance check is
-	// meaningful post-SKY-262 (default 'team' would let bob see them
-	// via team membership; this test pins child-inherits-private).
-	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
-	prompt := seedPrompt(t, h, orgA, alice, "p1")
-	var evtID string
-	if err := h.AdminDB.QueryRow(`
-		INSERT INTO events (org_id, entity_id, event_type) VALUES ($1, $2, 'github:pr:opened') RETURNING id
-	`, orgA, entityA).Scan(&evtID); err != nil {
-		t.Fatalf("seed event: %v", err)
-	}
-	var taskID, runID, reviewID string
-	if err := h.AdminDB.QueryRow(`
-		INSERT INTO tasks (org_id, creator_user_id, team_id, visibility, entity_id, event_type, primary_event_id)
-		VALUES ($1, $2, $3, 'private', $4, 'github:pr:opened', $5) RETURNING id
-	`, orgA, alice, teamA, entityA, evtID).Scan(&taskID); err != nil {
-		t.Fatalf("seed task: %v", err)
-	}
-	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
-	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id)
-		VALUES ($1, $2, $3, 'private', $4, $5, $6) RETURNING id
-	`, orgA, alice, teamA, taskID, prompt, bpRun).Scan(&runID); err != nil {
-		t.Fatalf("seed run: %v", err)
-	}
-	if err := h.AdminDB.QueryRow(`
-		INSERT INTO pending_reviews (org_id, pr_number, owner, repo, commit_sha, run_id, review_body)
-		VALUES ($1, 1, 'octo', 'repo', 'sha', $2, 'draft body') RETURNING id
-	`, orgA, runID).Scan(&reviewID); err != nil {
-		t.Fatalf("seed pending_review: %v", err)
-	}
-	MustExec(t, h.AdminDB, `
-		INSERT INTO pending_review_comments (org_id, review_id, path, line, body)
-		VALUES ($1, $2, 'main.go', 10, 'nit')
-	`, orgA, reviewID)
-
-	// Alice sees them.
-	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		var n int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM pending_reviews`).Scan(&n); err != nil {
-			return err
-		}
-		if n != 1 {
-			t.Errorf("alice saw %d reviews, want 1", n)
-		}
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM pending_review_comments`).Scan(&n); err != nil {
-			return err
-		}
-		if n != 1 {
-			t.Errorf("alice saw %d review comments, want 1", n)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("alice query: %v", err)
-	}
-
-	// Bob, same org, NOT the run creator — must see ZERO.
-	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		var n int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM pending_reviews`).Scan(&n); err != nil {
-			return err
-		}
-		if n != 0 {
-			t.Errorf("bob saw %d pending_reviews tied to alice's run, want 0 — review content leaked", n)
-		}
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM pending_review_comments`).Scan(&n); err != nil {
-			return err
-		}
-		if n != 0 {
-			t.Errorf("bob saw %d pending_review_comments, want 0", n)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("bob query: %v", err)
 	}
 }
 
