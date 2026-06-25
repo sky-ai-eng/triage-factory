@@ -135,6 +135,15 @@ type GitProxyConfig struct {
 	// defaultGitUpstream. Both the proxy's upstream and the insteadOf
 	// rewrite prefix derive from it.
 	Upstream string
+
+	// RecordPush, when non-nil, is forwarded to the git proxy as its
+	// receive-pack capture backstop: the proxy parses each branch push it
+	// transits and calls this with the pushed ref so the caller can record a
+	// branch artifact for a `git push --no-verify` that bypassed the pre-push
+	// hook. The delegate wires it to the same record path the hook uses; nil
+	// (a test fixture, or a caller that doesn't record) disables the backstop.
+	// See gitproxy.Config.RecordPush and TFAC-467.
+	RecordPush func(ctx context.Context, push gitproxy.PushedRef)
 }
 
 // startProxiesForSandbox starts the per-run LLM proxy, plus the git
@@ -290,6 +299,7 @@ func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitPro
 		Upstream:         upstream,
 		AllowNonLoopback: true,
 		IncomingToken:    incoming,
+		RecordPush:       git.RecordPush,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("agentproc: construct git proxy: %w", err)

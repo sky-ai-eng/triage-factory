@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -538,6 +539,34 @@ func (s *Spawner) gitProxyConfigFor(ctx context.Context, orgID, owner string) *a
 			}
 			return gitproxy.Token{Value: tok.Value, ExpiresAt: tok.ExpiresAt}, nil
 		},
+	}
+}
+
+// gitPushRecorder builds the git proxy's RecordPush callback for one run. The
+// proxy parses each non-delete ref out of a receive-pack body and hands it
+// here; we shape it into a branch artifact and upsert it through the same
+// host-side path the pre-push hook uses — agenthost.NewLocal → UpsertArtifact —
+// so the write routes to the right pool (admin for an event-triggered run,
+// the kicking-off user's synthetic claims for a manual one) exactly as the
+// hook's record-push does. Both writers build the artifact via
+// domain.NewBranchArtifact, so they share a dedup_key: a normal hook+push lands
+// one row, and this only adds rows the hook missed — a `git push --no-verify`,
+// which skips client hooks but not the network-layer proxy.
+//
+// Best-effort: a non-branch ref or a record failure is dropped (logged), never
+// surfaced. By the time this runs the push has already completed upstream, so
+// nothing it does can block, alter, or fail the push.
+func gitPushRecorder(stores db.Stores, info agenthost.RunInfo) func(context.Context, gitproxy.PushedRef) {
+	host := agenthost.NewLocal(stores, info)
+	return func(ctx context.Context, push gitproxy.PushedRef) {
+		art, ok := domain.NewBranchArtifact(push.Repo, push.Ref, push.NewSHA, push.Created)
+		if !ok {
+			return // not a branch ref (tag/other) or an unparseable repo path
+		}
+		if _, err := host.UpsertArtifact(ctx, art); err != nil {
+			delegateLog.Warn("git-proxy push backstop: record branch artifact failed",
+				"run", info.RunID, "repo", push.Repo, "ref", push.Ref, "error", err)
+		}
 	}
 }
 

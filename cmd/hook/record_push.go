@@ -2,11 +2,9 @@ package hook
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -14,21 +12,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
-
-// branchRefPrefix is the only ref namespace record-push records. A push
-// can carry tags (refs/tags/*) or other refs; those aren't branches, so a
-// `branch` artifact would mis-describe them. The hook forwards every
-// non-delete ref and lets this verb filter — keeping the hook generic.
-const branchRefPrefix = "refs/heads/"
-
-// branchDetails is the kind-specific payload stored in the artifact's
-// details_json. external_id pins the stable ref (the dedup anchor); the
-// per-push facts — which commit landed, and whether this push created the
-// branch — live here, so a re-push updates them in place on the one row.
-type branchDetails struct {
-	SHA string `json:"sha"`
-	New bool   `json:"new,omitempty"`
-}
 
 // runRecordPush upserts a `branch` artifact for one pushed ref. Invoked by
 // the pre-push hook, once per non-delete ref. Best-effort: a recording
@@ -57,13 +40,6 @@ func runRecordPush(host agenthost.Client, args []string) {
 		os.Exit(2)
 	}
 
-	// Only branch refs become branch artifacts; skip tags and other refs
-	// cleanly (the hook can't know the namespace policy). Not an error.
-	branch, ok := strings.CutPrefix(*ref, branchRefPrefix)
-	if !ok {
-		return
-	}
-
 	owner, repo, ok := parseRemoteOwnerRepo(*remote)
 	if !ok {
 		// Unparseable remote (a non-GitHub host, a GHES layout we don't
@@ -72,24 +48,15 @@ func runRecordPush(host agenthost.Client, args []string) {
 		fmt.Fprintf(os.Stderr, "hook record-push: could not parse owner/repo from remote %q; skipping\n", *remote)
 		return
 	}
-	target := owner + "/" + repo
 
-	details, err := json.Marshal(branchDetails{SHA: *sha, New: *isNew})
-	if err != nil {
-		// json.Marshal of this fixed shape can't realistically fail;
-		// degrade to empty details rather than dropping the artifact.
-		details = nil
-	}
-
-	artifact := domain.Artifact{
-		Provider:    domain.ArtifactProviderGit,
-		Kind:        domain.ArtifactKindBranch,
-		Target:      target,
-		ExternalID:  *ref,
-		URL:         branchWebURL(owner, repo, branch),
-		State:       domain.ArtifactStateBranchPushed,
-		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderGit, domain.ArtifactKindBranch, target, *ref),
-		DetailsJSON: string(details),
+	// Build through the shared constructor so the hook and the git-proxy
+	// receive-pack backstop (TFAC-467) land on the same deduped row. A
+	// non-branch ref (tag, etc.) returns ok=false — skip it cleanly, since
+	// the hook forwards every non-delete ref and can't know the namespace
+	// policy. Not an error.
+	artifact, ok := domain.NewBranchArtifact(owner+"/"+repo, *ref, *sha, *isNew)
+	if !ok {
+		return
 	}
 
 	// Bound the write so the hook can never block the push indefinitely.
@@ -103,25 +70,6 @@ func runRecordPush(host agenthost.Client, args []string) {
 		fmt.Fprintf(os.Stderr, "hook record-push: record branch %s: %v\n", *ref, err)
 		return // best-effort: never fail the push
 	}
-}
-
-// branchWebURL builds the GitHub web link for a branch. Always github.com
-// — the artifact URL is a human-facing link, and in sandbox mode the
-// remote URL is the per-run git proxy's address (not github.com), so
-// deriving the host from it would be wrong. GHES web hosts aren't modeled
-// (the product is GitHub-focused); a github.com link is the documented
-// default.
-//
-// Each branch path segment is URL-escaped: a branch name can legally
-// contain `#`, `%`, `?`, space, etc., which would otherwise break the link
-// (a `#` would start a fragment). `/` separators are preserved (a branch
-// like feature/x maps to .../tree/feature/x), so escaping is per-segment.
-func branchWebURL(owner, repo, branch string) string {
-	segs := strings.Split(branch, "/")
-	for i, s := range segs {
-		segs[i] = url.PathEscape(s)
-	}
-	return "https://github.com/" + owner + "/" + repo + "/tree/" + strings.Join(segs, "/")
 }
 
 // parseRemoteOwnerRepo extracts owner/repo from the remote URL git hands

@@ -539,16 +539,19 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// identity is unchanged across resumes — only the prompt and the
 	// SessionID differ.
 	stores, storesSet := s.getStores()
-	var startAgentHost func() (sandbox.Mount, io.Closer, error)
+	var (
+		info           agenthost.RunInfo
+		startAgentHost func() (sandbox.Mount, io.Closer, error)
+	)
 	if storesSet {
+		info = agenthost.RunInfo{
+			OrgID:            orgID,
+			UserID:           creatorUserID,
+			RunID:            runID,
+			TeamID:           opts.TeamID,
+			IsEventTriggered: triggerType == domain.TriggerTypeEvent,
+		}
 		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-			info := agenthost.RunInfo{
-				OrgID:            orgID,
-				UserID:           creatorUserID,
-				RunID:            runID,
-				TeamID:           opts.TeamID,
-				IsEventTriggered: triggerType == domain.TriggerTypeEvent,
-			}
 			hd, mount, err := agenthost.Start(stores, info)
 			if err != nil {
 				return sandbox.Mount{}, nil, err
@@ -563,6 +566,14 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// so gitProxyConfigFor returns nil and no git proxy is wired.
 	gitOwner, _, _ := strings.Cut(opts.RepoEnv, "/")
 
+	// Wire the proxy's receive-pack backstop to the same record path the
+	// pre-push hook uses (TFAC-467), matching the initial run. nil config
+	// (local mode / Jira-only / no stores) leaves the --no-verify gap accepted.
+	gitProxy := s.gitProxyConfigFor(ctx, orgID, gitOwner)
+	if gitProxy != nil && storesSet {
+		gitProxy.RecordPush = gitPushRecorder(stores, info)
+	}
+
 	baseOpts := agentproc.RunOptions{
 		Cwd:            cwd,
 		Model:          model,
@@ -574,7 +585,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		TraceID:        runID,
 		OrgID:          orgID,
 		Secrets:        s.getRunSecrets(),
-		GitProxy:       s.gitProxyConfigFor(ctx, orgID, gitOwner),
+		GitProxy:       gitProxy,
 		StartAgentHost: startAgentHost,
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)

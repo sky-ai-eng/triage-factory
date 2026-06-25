@@ -174,6 +174,41 @@ type Config struct {
 	// Empty disables the check (loopback/test usage, or single-tenant
 	// direct paths where the local hop is already trusted).
 	IncomingToken string
+
+	// RecordPush, when non-nil, makes the proxy a best-effort capture
+	// backstop for branch pushes. On each git-receive-pack POST it transits,
+	// the proxy tees the request body, parses the pkt-line ref-update commands
+	// (the block that precedes the packfile), and invokes RecordPush once per
+	// non-delete ref after the push completes — gated on a 2xx upstream
+	// response. The wiring maps each PushedRef to the same branch artifact the
+	// pre-push hook records, deduped on the same key, so a normal hook+push is
+	// not double-recorded: the proxy only adds rows the hook missed.
+	//
+	// The thing it catches is `git push --no-verify`, which skips client-side
+	// hooks (the pre-push hook among them) but cannot skip this network-layer
+	// proxy — every push transits it. So in multi mode this is the
+	// unbypassable backstop for branch-artifact capture; local mode has no
+	// proxy, so that --no-verify gap is accepted (nil here).
+	//
+	// Contract: the proxy never blocks, alters, or fails a push on account of
+	// this callback. It runs after the response is back to the client, under a
+	// bounded context, and any failure is the callback's to swallow. See
+	// TFAC-467.
+	RecordPush func(ctx context.Context, push PushedRef)
+}
+
+// PushedRef is one non-delete ref update the backstop parsed from a
+// git-receive-pack request body, handed to Config.RecordPush. Repo is the
+// "owner/repo" from the request path; Ref is the full remote ref
+// (refs/heads/...); NewSHA is the commit it now points to; Created is true when
+// the push created the ref (the remote held no prior value). It is pure data —
+// no domain dependency — so the proxy stays free of the artifact model; the
+// wiring layer maps it to a branch artifact.
+type PushedRef struct {
+	Repo    string
+	Ref     string
+	NewSHA  string
+	Created bool
 }
 
 // Server is a single per-run proxy instance with a cached installation
@@ -317,6 +352,17 @@ func (s *Server) Handler() http.Handler {
 		// here) keeps the token off the inbound request's header set,
 		// which means it never appears in a log of pr.In.Header.
 		r = r.WithContext(context.WithValue(r.Context(), tokenCtxKey{}, tok.Value))
+
+		// Receive-pack backstop (TFAC-467): when a push transits the proxy,
+		// tee its ref-update commands and record a branch artifact per
+		// non-delete ref — the network-layer mirror of the pre-push hook,
+		// which `git push --no-verify` skips but this cannot. Only engaged
+		// when RecordPush is wired (multi mode); everything else, including
+		// fetches and the ref advertisement, proxies untouched.
+		if s.cfg.RecordPush != nil && isReceivePackPush(r) {
+			s.serveReceivePack(w, r)
+			return
+		}
 		s.proxy.ServeHTTP(w, r)
 	})
 }

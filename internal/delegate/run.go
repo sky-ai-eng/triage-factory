@@ -230,22 +230,34 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// (orgID, userID) pair. Local-mode + non-sandbox calls never
 	// invoke this closure (agentproc gates on shouldSandbox).
 	stores, storesSet := s.getStores()
-	var startAgentHost func() (sandbox.Mount, io.Closer, error)
+	var (
+		info           agenthost.RunInfo
+		startAgentHost func() (sandbox.Mount, io.Closer, error)
+	)
 	if storesSet {
+		info = agenthost.RunInfo{
+			OrgID:            orgID,
+			UserID:           creatorUserID,
+			RunID:            runID,
+			TeamID:           cfg.teamID,
+			IsEventTriggered: triggerType == domain.TriggerTypeEvent,
+		}
 		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-			info := agenthost.RunInfo{
-				OrgID:            orgID,
-				UserID:           creatorUserID,
-				RunID:            runID,
-				TeamID:           cfg.teamID,
-				IsEventTriggered: triggerType == domain.TriggerTypeEvent,
-			}
 			hd, mount, err := agenthost.Start(stores, info)
 			if err != nil {
 				return sandbox.Mount{}, nil, err
 			}
 			return mount, hd, nil
 		}
+	}
+
+	// Git proxy (multi mode, repo in scope): wire its receive-pack backstop to
+	// the same record path the pre-push hook uses, so a `git push --no-verify`
+	// the hook can't see still records a branch artifact (TFAC-467). nil in
+	// local mode / no repo / no stores — no proxy, accepted gap.
+	gitProxy := s.gitProxyConfigFor(ctx, orgID, cfg.owner)
+	if gitProxy != nil && storesSet {
+		gitProxy.RecordPush = gitPushRecorder(stores, info)
 	}
 
 	// Crash re-claim: if the run already carries a session from a prior
@@ -274,7 +286,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		SystemPrompt:   cfg.appendSysPrompt,
 		OrgID:          orgID,
 		Secrets:        s.getRunSecrets(),
-		GitProxy:       s.gitProxyConfigFor(ctx, orgID, cfg.owner),
+		GitProxy:       gitProxy,
 		StartAgentHost: startAgentHost,
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)

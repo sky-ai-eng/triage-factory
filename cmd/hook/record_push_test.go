@@ -14,6 +14,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// pushDetails mirrors a branch artifact's details_json payload for assertions;
+// the producing type is unexported in internal/domain (NewBranchArtifact).
+type pushDetails struct {
+	SHA string `json:"sha"`
+	New bool   `json:"new"`
+}
+
 // newTestStores opens an in-memory SQLite, migrates it, and seeds one runs
 // row the artifacts FK (run_id) can point at. Returns the stores plus the
 // run id to wire into RunInfo.
@@ -87,7 +94,7 @@ func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 	if a.RunID != runID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
 		t.Errorf("identity not stamped: run=%q org=%q team=%q", a.RunID, a.OrgID, a.TeamID)
 	}
-	var d branchDetails
+	var d pushDetails
 	if err := json.Unmarshal([]byte(a.DetailsJSON), &d); err != nil {
 		t.Fatalf("details_json %q: %v", a.DetailsJSON, err)
 	}
@@ -113,7 +120,7 @@ func TestRecordPush_RepushUpsertsOneRow(t *testing.T) {
 	if len(arts) != 1 {
 		t.Fatalf("got %d artifacts, want 1 (re-push must upsert)", len(arts))
 	}
-	var d branchDetails
+	var d pushDetails
 	_ = json.Unmarshal([]byte(arts[0].DetailsJSON), &d)
 	if d.SHA != "bbb" || d.New {
 		t.Errorf("details after re-push = %+v, want sha=bbb new=false", d)
@@ -153,26 +160,6 @@ func TestRecordPush_SkipsNonBranchRef(t *testing.T) {
 	}
 	if len(arts) != 0 {
 		t.Fatalf("got %d artifacts, want 0 (tags are not branches)", len(arts))
-	}
-}
-
-func TestBranchWebURL_EscapesSegments(t *testing.T) {
-	cases := []struct {
-		branch string
-		want   string
-	}{
-		{"main", "https://github.com/octo/repo/tree/main"},
-		// `/` separators are preserved as path separators.
-		{"feature/x", "https://github.com/octo/repo/tree/feature/x"},
-		// `#`, space, and `%` are escaped so they don't break the link.
-		{"feature/#123", "https://github.com/octo/repo/tree/feature/%23123"},
-		{"wip/a b", "https://github.com/octo/repo/tree/wip/a%20b"},
-		{"odd/100%done", "https://github.com/octo/repo/tree/odd/100%25done"},
-	}
-	for _, c := range cases {
-		if got := branchWebURL("octo", "repo", c.branch); got != c.want {
-			t.Errorf("branchWebURL(octo, repo, %q) = %q, want %q", c.branch, got, c.want)
-		}
 	}
 }
 
