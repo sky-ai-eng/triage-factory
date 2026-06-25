@@ -367,6 +367,59 @@ func TestArtifactStore_Postgres_UpsertPreservesExternalIDAndURL(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_Postgres_UpsertPreservesTargetOnEmpty pins that an upsert
+// leaving target empty does NOT blank the resource key an earlier upsert
+// stored — a GitHub comment-update/delete knows only the comment id, not the
+// PR number, so it can't recompute owner/repo#N and must inherit it. A
+// non-empty target still migrates (the pending→real PR path).
+func TestArtifactStore_Postgres_UpsertPreservesTargetOnEmpty(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
+	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	key := domain.ArtifactDedupKey("github", "comment", "555", "")
+	if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+		RunID: runID, OrgID: orgID, TeamID: teamID,
+		Provider: "github", Kind: "comment", Target: "octo/repo#7",
+		ExternalID: "555", URL: "https://github.com/octo/repo/pull/7#issuecomment-555",
+		State: domain.ArtifactStateCommentPosted, DedupKey: key,
+	}); err != nil {
+		t.Fatalf("first Upsert: %v", err)
+	}
+
+	// A comment-delete that only carries the id (empty target/url).
+	out, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+		RunID: runID, OrgID: orgID, TeamID: teamID,
+		Provider: "github", Kind: "comment", ExternalID: "555",
+		State: domain.ArtifactStateCommentDeleted, DedupKey: key,
+	})
+	if err != nil {
+		t.Fatalf("second Upsert: %v", err)
+	}
+	if out.Target != "octo/repo#7" || out.URL != "https://github.com/octo/repo/pull/7#issuecomment-555" {
+		t.Errorf("empty upsert blanked stable coordinates: target=%q url=%q", out.Target, out.URL)
+	}
+	if out.State != domain.ArtifactStateCommentDeleted {
+		t.Errorf("state should follow the latest writer, got %q", out.State)
+	}
+
+	// A non-empty target still overwrites (migration path).
+	out, err = stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+		RunID: runID, OrgID: orgID, TeamID: teamID,
+		Provider: "github", Kind: "comment", Target: "octo/repo#8",
+		State: domain.ArtifactStateCommentPosted, DedupKey: key,
+	})
+	if err != nil {
+		t.Fatalf("third Upsert: %v", err)
+	}
+	if out.Target != "octo/repo#8" {
+		t.Errorf("non-empty target did not overwrite: %q", out.Target)
+	}
+}
+
 // TestArtifactStore_Postgres_UpsertSystem_BypassesRLS pins the admin-pool
 // write path the event-triggered exec choke point depends on (TFAC-459): a
 // run with no creator user has no JWT-claims context, so its artifact insert

@@ -226,6 +226,57 @@ func TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_SQLite_UpsertPreservesTargetOnEmpty pins that an upsert
+// leaving target empty does NOT blank the resource key an earlier upsert
+// stored — a GitHub comment-update/delete knows only the comment id, not the
+// PR number, so it can't recompute owner/repo#N and must inherit it. A
+// non-empty target still migrates (the pending→real PR path).
+func TestArtifactStore_SQLite_UpsertPreservesTargetOnEmpty(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runID := seedArtifactRun(t, conn)
+
+	key := domain.ArtifactDedupKey("github", "comment", "555", "")
+	if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		Provider: "github", Kind: "comment", Target: "octo/repo#7",
+		ExternalID: "555", URL: "https://github.com/octo/repo/pull/7#issuecomment-555",
+		State: domain.ArtifactStateCommentPosted, DedupKey: key,
+	}); err != nil {
+		t.Fatalf("first Upsert: %v", err)
+	}
+
+	// A comment-delete that only carries the id (empty target/url).
+	out, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		Provider: "github", Kind: "comment", ExternalID: "555",
+		State: domain.ArtifactStateCommentDeleted, DedupKey: key,
+	})
+	if err != nil {
+		t.Fatalf("second Upsert: %v", err)
+	}
+	if out.Target != "octo/repo#7" || out.URL != "https://github.com/octo/repo/pull/7#issuecomment-555" {
+		t.Errorf("empty upsert blanked stable coordinates: target=%q url=%q", out.Target, out.URL)
+	}
+	if out.State != domain.ArtifactStateCommentDeleted {
+		t.Errorf("state should follow the latest writer, got %q", out.State)
+	}
+
+	// A non-empty target still overwrites (migration path).
+	out, err = stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		Provider: "github", Kind: "comment", Target: "octo/repo#8",
+		State: domain.ArtifactStateCommentPosted, DedupKey: key,
+	})
+	if err != nil {
+		t.Fatalf("third Upsert: %v", err)
+	}
+	if out.Target != "octo/repo#8" {
+		t.Errorf("non-empty target did not overwrite: %q", out.Target)
+	}
+}
+
 // TestArtifactStore_SQLite_ListByRunAndTeam pins the two read paths and
 // their newest-first ordering + the team Limit. TFAC-455.
 func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {

@@ -566,19 +566,30 @@ func (c *Client) DismissReview(owner, repo string, number, reviewID int, message
 	return err
 }
 
-// AddComment adds a top-level issue comment to a PR.
+// AddComment adds a top-level issue comment to a PR and returns its id.
 func (c *Client) AddComment(owner, repo string, number int, body string) (int, error) {
+	id, _, err := c.AddCommentWithURL(owner, repo, number, body)
+	return id, err
+}
+
+// AddCommentWithURL is AddComment but also returns the new comment's html_url
+// — the canonical web link GitHub computes, correct for issues-vs-pulls and
+// for GHES without us having to assemble it. The host-side artifact recorder
+// (cmd/exec/agenthost) keys the comment artifact on the id and stamps this url;
+// the agent-facing AddComment drops it because the IPC surface doesn't carry a
+// comment url back to the sandbox.
+func (c *Client) AddCommentWithURL(owner, repo string, number int, body string) (int, string, error) {
 	data, err := c.Post(fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number), map[string]any{
 		"body": body,
 	})
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return intVal(raw, "id"), nil
+	return intVal(raw, "id"), strVal(raw, "html_url"), nil
 }
 
 // ReplyToComment replies to a review comment thread.

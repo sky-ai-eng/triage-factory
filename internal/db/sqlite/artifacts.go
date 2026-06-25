@@ -45,15 +45,19 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// update side leaves them rather than risk a row whose discriminators
 	// disagree with its key.
 	//
-	// external_id/url are COALESCE-preserved: they are the backing object's
-	// stable coordinates (PR number / issue key, html link) — once known they
-	// only ever fill in, never legitimately clear. Since the insert side
-	// NULLIFs empty strings to NULL, a plain excluded.* assignment would let a
-	// later upsert that can't supply them (a reconciliation pass, or a Jira
-	// mutation whose run can't compute the browse URL) blank a value an
-	// earlier writer already stored. COALESCE keeps the existing value when
-	// the incoming one is NULL. The other mutable fields are last-writer-wins
-	// by design (state tracks the latest action, target migrates).
+	// target/external_id/url are preserved-on-empty: they are the backing
+	// object's stable coordinates (resource key / PR number / issue key, html
+	// link) — once known they only ever fill in or migrate to a more specific
+	// value (pending PR owner/repo → owner/repo#123), never legitimately clear.
+	// A later upsert that can't supply them — a reconciliation pass, a Jira
+	// mutation whose run can't compute the browse URL, or a GitHub
+	// comment-update/delete that only knows the comment id, not its PR number —
+	// must not blank a value an earlier writer already stored. external_id/url
+	// are NULLIFed to NULL on insert, so COALESCE preserves them; target is NOT
+	// NULL, so NULLIF('','') folds an empty incoming target to NULL first. A
+	// non-empty incoming value still overwrites (the intentional-change /
+	// migration path). state/details_json stay last-writer-wins by design
+	// (state tracks the latest action).
 	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, run_id, org_id, team_id, provider, kind, target,
@@ -62,7 +66,7 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 		ON CONFLICT(org_id, dedup_key) DO UPDATE SET
 			run_id       = excluded.run_id,
 			team_id      = excluded.team_id,
-			target       = excluded.target,
+			target       = COALESCE(NULLIF(excluded.target, ''), artifacts.target),
 			external_id  = COALESCE(excluded.external_id, artifacts.external_id),
 			url          = COALESCE(excluded.url, artifacts.url),
 			state        = excluded.state,

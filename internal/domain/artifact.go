@@ -109,8 +109,11 @@ const (
 	ArtifactStateIssueCreated = "created"
 	ArtifactStateIssueUpdated = "updated"
 
-	// comment
-	ArtifactStateCommentPosted = "posted"
+	// comment: 'posted' once it lands on GitHub/Jira; 'deleted' when the agent
+	// later removes it (the row persists for the audit ledger, marked deleted —
+	// retiring a comment never drops its artifact).
+	ArtifactStateCommentPosted  = "posted"
+	ArtifactStateCommentDeleted = "deleted"
 )
 
 // ArtifactDedupKey builds the stable, provider-natural key Upsert

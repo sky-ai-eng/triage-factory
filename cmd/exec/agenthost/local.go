@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
@@ -734,7 +735,12 @@ func (c *LocalClient) GithubAddComment(ctx context.Context, owner, repo string, 
 	if err != nil {
 		return 0, err
 	}
-	return client.AddComment(owner, repo, number, body)
+	id, htmlURL, err := client.AddCommentWithURL(owner, repo, number, body)
+	if err != nil {
+		return 0, err
+	}
+	c.recordGithubComment(ctx, owner, repo, number, id, htmlURL)
+	return id, nil
 }
 
 func (c *LocalClient) GithubReplyToComment(ctx context.Context, owner, repo string, number, commentID int, body string) (int, error) {
@@ -758,7 +764,15 @@ func (c *LocalClient) GithubUpdateComment(ctx context.Context, owner, repo strin
 	if err != nil {
 		return err
 	}
-	return client.UpdateComment(owner, repo, commentID, body)
+	if err := client.UpdateComment(owner, repo, commentID, body); err != nil {
+		return err
+	}
+	// The comment is still posted, just edited — it stays in the posted state;
+	// the upsert bumps the existing row (re-attributing it to this run) and the
+	// store preserves the target/url an add-comment stamped, which this path
+	// can't recompute from the id alone.
+	c.recordGithubCommentState(ctx, commentID, domain.ArtifactStateCommentPosted)
+	return nil
 }
 
 func (c *LocalClient) GithubDeleteComment(ctx context.Context, owner, repo string, commentID int) error {
@@ -766,7 +780,13 @@ func (c *LocalClient) GithubDeleteComment(ctx context.Context, owner, repo strin
 	if err != nil {
 		return err
 	}
-	return client.DeleteComment(owner, repo, commentID)
+	if err := client.DeleteComment(owner, repo, commentID); err != nil {
+		return err
+	}
+	// Retire the artifact in place — the row persists for the audit ledger,
+	// flipped to the deleted state rather than dropped.
+	c.recordGithubCommentState(ctx, commentID, domain.ArtifactStateCommentDeleted)
+	return nil
 }
 
 func (c *LocalClient) GithubAPIGet(ctx context.Context, owner, repo, path string) ([]byte, error) {
@@ -783,4 +803,106 @@ func (c *LocalClient) GithubDownloadArtifact(ctx context.Context, owner, repo, p
 		return 0, err
 	}
 	return client.DownloadArtifact(ctx, path, dst, maxBytes)
+}
+
+// --- github artifact recording (TFAC-466) ---
+//
+// Record one durable `artifacts` row per successful *standalone* GitHub comment
+// the agent posts via `exec gh pr` — a top-level PR/issue comment, not a review
+// line-comment (those ride the review artifact, handled separately). Like the
+// Jira recording above this lives on the LocalClient, the single seam the multi
+// daemon dispatches every host-routed call through, so it covers both the
+// sandbox (daemon) and the local-mode CLI; and like it, recording is
+// best-effort and on-success-only — the comment already posted, so a store
+// failure is logged and swallowed, never able to fail the action.
+//
+// add → comment-update → comment-delete all key on github:comment:<id>, so the
+// three collapse onto one row: add stamps the full coordinates (target
+// owner/repo#N, the comment id, its html_url), update bumps it in place, delete
+// retires it to the deleted state. update/delete only know the comment id (not
+// its PR number), so they leave target/url empty and lean on the store
+// preserving them (see ArtifactStore.Upsert).
+
+// recordGithubComment upserts the `comment` artifact for a freshly posted
+// standalone comment, with every coordinate the add path knows: target
+// owner/repo#N, external_id + dedup key on the comment id, and the html_url
+// GitHub returned. A zero id (a 2xx whose body didn't parse) has no stable key
+// to dedup on, so recording is skipped with a debug breadcrumb — the comment
+// still posted.
+func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo string, number, commentID int, htmlURL string) {
+	if c.stores.Artifacts == nil {
+		return
+	}
+	if commentID <= 0 {
+		agenthostLog.Debug("github comment recorded without an id; skipping artifact",
+			"run", c.info.RunID, "repo", owner+"/"+repo, "pr", number)
+		return
+	}
+	c.upsertGithubArtifact(ctx, domain.Artifact{
+		Kind:       domain.ArtifactKindComment,
+		Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
+		ExternalID: strconv.Itoa(commentID),
+		URL:        htmlURL,
+		State:      domain.ArtifactStateCommentPosted,
+		DedupKey:   githubCommentDedupKey(commentID),
+	})
+}
+
+// recordGithubCommentState upserts the comment artifact for an edit (state
+// posted) or a delete (state deleted) keyed on the same comment id. These paths
+// carry only the id — not the PR number — so they leave target/url empty; the
+// store preserves whatever the add path stamped. If the comment was never
+// recorded (e.g. the agent edits a human's comment), the upsert mints a minimal
+// row keyed on the id, which still truthfully records that this run touched it.
+func (c *LocalClient) recordGithubCommentState(ctx context.Context, commentID int, state string) {
+	if c.stores.Artifacts == nil {
+		return
+	}
+	if commentID <= 0 {
+		agenthostLog.Debug("github comment state change without an id; skipping artifact",
+			"run", c.info.RunID, "state", state)
+		return
+	}
+	c.upsertGithubArtifact(ctx, domain.Artifact{
+		Kind:       domain.ArtifactKindComment,
+		ExternalID: strconv.Itoa(commentID),
+		State:      state,
+		DedupKey:   githubCommentDedupKey(commentID),
+	})
+}
+
+// githubCommentDedupKey is the stable key every comment action upserts on:
+// github:comment:<id>.
+func githubCommentDedupKey(commentID int) string {
+	return domain.ArtifactDedupKey(domain.ArtifactProviderGitHub, domain.ArtifactKindComment, strconv.Itoa(commentID), "")
+}
+
+// upsertGithubArtifact stamps the run attribution (run/org/team) + provider onto
+// a and writes it best-effort: a recording failure is logged and swallowed so
+// it never fails the agent's already-applied GitHub action. The write routes the
+// same way every other exec choke-point write does (withWrite) — admin pool for
+// event-triggered runs (no user), a synthetic-claims tx for manual ones.
+func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifact) {
+	if c.stores.Artifacts == nil {
+		return
+	}
+	a.RunID = c.info.RunID
+	a.OrgID = c.info.OrgID
+	a.TeamID = c.info.TeamID
+	a.Provider = domain.ArtifactProviderGitHub
+
+	err := c.withWrite(ctx,
+		func() error {
+			_, e := c.stores.Artifacts.UpsertSystem(ctx, c.info.OrgID, a)
+			return e
+		},
+		func(ts db.TxStores) error {
+			_, e := ts.Artifacts.Upsert(ctx, c.info.OrgID, a)
+			return e
+		},
+	)
+	if err != nil {
+		agenthostLog.Warn("github artifact recording failed (action already applied)",
+			"run", c.info.RunID, "kind", a.Kind, "target", a.Target, "error", err)
+	}
 }
