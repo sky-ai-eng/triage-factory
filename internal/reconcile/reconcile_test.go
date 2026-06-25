@@ -809,6 +809,44 @@ func (h *recLogger) records() []slog.Record {
 	return append([]slog.Record(nil), h.recs...)
 }
 
+// TestReconcile_WriteBackSurvivesCallerCancel pins the durability fix: if the
+// caller's ctx is cancelled (Tier-2 client disconnect / Tier-1 shutdown) once
+// the apply phase begins, the state transition AND its composed memory note both
+// still land. A terminal artifact drops out of both tiers' working sets, so a
+// note skipped here would never be re-written — the write-back must detach.
+func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
+	stores, seedRun, seedArt := reconcileTestStores(t)
+	const runID = "99999999-9999-9999-9999-999999999991"
+	seedRun("ent-9", runID, "narrative")
+	prArt := domain.NewPullRequestArtifact("octo/repo", 12, "PR_12", "x", "main", "u", "t", "b", false)
+	prArt.RunID = runID
+	seedArt(prArt)
+
+	stub := &stubGH{
+		prs:     map[string]string{"PR_12": prNodeJSON("PR_12", 12, "MERGED", false, true)},
+		prFinal: map[int][2]string{12: {"t", "b"}}, // shipped as drafted
+	}
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
+
+	arts, err := stores.Artifacts.ListByRunSystem(context.Background(), runmode.LocalDefaultOrgID, runID)
+	if err != nil {
+		t.Fatalf("ListByRunSystem: %v", err)
+	}
+	// The fetches don't observe ctx (fake resolver + http server), so reconcile
+	// reaches the apply phase, where the detached write-back ignores this cancel.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := rc.Reconcile(ctx, runmode.LocalDefaultOrgID, arts); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	assertState(t, stores, runmode.LocalDefaultOrgID, prArt.DedupKey, domain.ArtifactStatePRMerged)
+	mem, _ := stores.TaskMemory.GetRunMemory(context.Background(), runmode.LocalDefaultOrgID, runID)
+	if mem == nil || !strings.Contains(mem.Content, "was merged on GitHub") {
+		t.Errorf("memory note was dropped on a cancelled caller ctx — the write-back must detach; got: %v", mem)
+	}
+}
+
 // --- helpers ---
 
 // reconcileSet runs Tier-1 ReconcileOrg and returns its transitions (by

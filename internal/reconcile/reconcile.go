@@ -150,6 +150,17 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	// artifact set (recordRunOutcome) so a run that produced several artifacts —
 	// commonly a branch AND a PR — accumulates one outcome rather than each
 	// terminal write clobbering the last.
+	//
+	// The write-back runs on a detached ctx (the fetches above stayed
+	// cancellable). A terminal artifact drops out of BOTH tiers' non-terminal
+	// working sets the moment applyTransition commits it, so if a client
+	// disconnect (Tier-2) or shutdown (Tier-1) cancelled the state write's
+	// follow-up memory note, no later cycle would re-process it — the note would
+	// be lost, not self-corrected. Detaching keeps the state + memory writes
+	// atomic w.r.t. the caller's lifecycle, mirroring the approval handlers'
+	// post-action bookkeeping; the github http.Client's own 30s timeout still
+	// bounds each call.
+	writeCtx := context.WithoutCancel(ctx)
 	var transitioned []domain.Artifact
 	terminalRuns := map[string]bool{}
 	for _, a := range arts {
@@ -157,7 +168,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		if !ok || newState == a.State {
 			continue
 		}
-		updated, err := rc.applyTransition(ctx, orgID, a, newState)
+		updated, err := rc.applyTransition(writeCtx, orgID, a, newState)
 		if err != nil {
 			reconcileLog.Warn("apply artifact transition failed",
 				"org", orgID, "artifact", a.ID, "kind", a.Kind, "from", a.State, "to", newState, "error", err)
@@ -169,7 +180,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		}
 	}
 	for runID := range terminalRuns {
-		rc.recordRunOutcome(ctx, orgID, runID)
+		rc.recordRunOutcome(writeCtx, orgID, runID)
 	}
 	return transitioned, nil
 }
