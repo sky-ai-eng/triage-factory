@@ -321,6 +321,40 @@ func TestArtifactApprove_FooterIdempotent(t *testing.T) {
 	}
 }
 
+// TestArtifactApprove_NonDraft_409 pins the state guard: approving an artifact
+// that's no longer a draft (already open or closed) is a conflict and performs
+// no GitHub mutation — a stale double-click can't trigger a spurious footer
+// rewrite.
+func TestArtifactApprove_NonDraft_409(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	mutated := false
+	mux := newAppAPIMux()
+	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		mutated = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
+	})
+	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
+		mutated = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{}})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedDraftPRArtifactWithRun(t, srv, "appnd", "acme", "api", 42)
+	if _, err := srv.db.Exec(`UPDATE artifacts SET state=? WHERE id=?`, domain.ArtifactStatePROpen, artID); err != nil {
+		t.Fatalf("flip artifact to open: %v", err)
+	}
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("approve on non-draft = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if mutated {
+		t.Error("approve on a non-draft must not perform any GitHub mutation")
+	}
+}
+
 // seedDraftPRArtifactWithRun mints a pending_approval run chain (entity → … →
 // run) and a draft pull_request artifact hung off it, returning all three ids.
 func seedDraftPRArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo string, number int) (artifactID, runID, taskID string) {

@@ -52,9 +52,13 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   // truncated text alone would just yield fewer files — or zero — and the "No
   // diff available" fallback would mislead the user into thinking it's empty).
   const [truncationNote, setTruncationNote] = useState<string | null>(null)
+  // diffError is isolated from `error`: the diff is secondary to the summary, so
+  // a transient 406/502 on it must NOT hide the (already-loaded) editable PR.
+  // It renders as an inline banner while title/body editing + approve stay live.
+  const [diffError, setDiffError] = useState<string | null>(null)
 
-  // Fetch the PR artifact + diff. Reset stale state from any prior PR before the
-  // new fetch lands so the user doesn't see leftover values briefly.
+  // Fetch the PR artifact, then the diff. Reset stale state from any prior PR
+  // before the new fetch lands so the user doesn't see leftover values briefly.
   useEffect(() => {
     if (!open || !artifactId) return
     let cancelled = false
@@ -63,17 +67,31 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
     setPR(null)
     setFiles([])
     setTruncationNote(null)
+    setDiffError(null)
     ;(async () => {
+      // PR fetch — a failure here blocks: there's nothing to edit or approve
+      // without the PR, so it lands in `error` (the full-screen error state).
+      let prData: PRArtifact
       try {
         const prRes = await fetch(`/api/artifacts/${artifactId}`)
         if (!prRes.ok) {
           const data = await prRes.json().catch(() => ({}))
           throw new Error(data.error || `Failed to load PR (${prRes.status})`)
         }
-        const prData: PRArtifact = await prRes.json()
-        if (cancelled) return
-        setPR(prData)
+        prData = await prRes.json()
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err))
+          setLoading(false)
+        }
+        return
+      }
+      if (cancelled) return
+      setPR(prData)
 
+      // Diff fetch — isolated: its failure must not block editing/approving, so
+      // it lands in diffError (an inline banner), never the full-screen error.
+      try {
         const diffRes = await fetch(`/api/artifacts/${artifactId}/diff`)
         if (!diffRes.ok) {
           // Server returns JSON {"error": "..."} on failure. Surface that body
@@ -88,7 +106,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
         setFiles(parseDiff(diffText))
         setTruncationNote(diffRes.headers.get('X-Diff-Truncated'))
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err))
+        if (!cancelled) setDiffError(err instanceof Error ? err.message : String(err))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -147,15 +165,18 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   const handleSubmit = useCallback(async () => {
     setSubmitting(true)
     try {
-      // Wait for any in-flight save to land before approving. Otherwise the
-      // server would read the snapshot in its pre-edit state and footer/promote
-      // stale title/body. Errors during the wait are swallowed — we only care
-      // the PATCH completed; approve's own error handling kicks in if needed.
+      // Wait for any in-flight save to settle before approving, so we don't race
+      // a PATCH that's still writing to GitHub. A FAILED last save is
+      // intentionally swallowed rather than blocking approval: the user already
+      // saw its error banner in PendingPRSummary, and approve reads the live PR
+      // from GitHub — which holds the last *successfully* saved state — so the
+      // failed edit is simply dropped (the work proceeds with what actually
+      // landed on GitHub, never stale local state).
       if (lastSavePromise.current) {
         try {
           await lastSavePromise.current
         } catch {
-          /* noop */
+          /* failed save already surfaced to the user; drop it and approve live state */
         }
       }
       const res = await fetch(`/api/artifacts/${artifactId}/approve`, {
@@ -274,6 +295,14 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
                     </div>
                   )}
 
+                  {diffError && (
+                    <div className="rounded-xl border border-dismiss/30 bg-dismiss/[0.06] px-4 py-3 text-[12px] text-text-secondary">
+                      <span className="font-semibold text-text-primary">Diff unavailable:</span>{' '}
+                      {diffError}. You can still edit and open the PR — the diff just couldn't be
+                      loaded right now.
+                    </div>
+                  )}
+
                   {/* Diff files — same DiffFile component the review overlay uses;
                       commentsByFile is always empty for the PR overlay (no
                       inline-comment surface). */}
@@ -293,7 +322,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
                     })}
                   </div>
 
-                  {files.length === 0 && !truncationNote && (
+                  {files.length === 0 && !truncationNote && !diffError && (
                     <div className="text-center py-12">
                       <p className="text-[13px] text-text-tertiary">No diff available</p>
                     </div>

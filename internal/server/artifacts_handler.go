@@ -34,8 +34,8 @@ type artifactsHandler struct {
 }
 
 // prArtifactJSON is the wire shape the PR overlay consumes. Title/Body are the
-// live values pulled from GitHub (GetPR) so the editor renders the current PR,
-// not a stale snapshot; the rest are the artifact's stable coordinates.
+// live values pulled from GitHub (GetPRBasic) so the editor renders the current
+// PR, not a stale snapshot; the rest are the artifact's stable coordinates.
 type prArtifactJSON struct {
 	ID         string `json:"id"`
 	RunID      string `json:"run_id,omitempty"`
@@ -93,8 +93,8 @@ func (ah *artifactsHandler) resolvePR(w http.ResponseWriter, r *http.Request, or
 }
 
 // handleArtifactGet returns the PR artifact augmented with the live PR title and
-// body fetched from GitHub (1:1 display). On a GetPR failure it degrades to the
-// proposed/edited snapshot stored in details_json so the overlay still renders
+// body fetched from GitHub (1:1 display). On a live-fetch failure it degrades to
+// the proposed/edited snapshot stored in details_json so the overlay still renders
 // (a closed/merged PR or a transient GitHub blip shouldn't blank the editor).
 func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
@@ -112,7 +112,7 @@ func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Req
 	details, _ := domain.ParsePRArtifactDetails(art.DetailsJSON)
 	title := details.Snapshot.Title
 	body := details.Snapshot.Body
-	if pr, err := gh.GetPR(owner, repo, number, false); err != nil {
+	if pr, err := gh.GetPRBasic(owner, repo, number); err != nil {
 		artifactsLog.Warn("live PR fetch failed; falling back to snapshot",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 	} else {
@@ -170,7 +170,7 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	details, derr := domain.ParsePRArtifactDetails(art.DetailsJSON)
 	var title, body string
 	if req.Title == nil || req.Body == nil {
-		live, err := gh.GetPR(owner, repo, number, false)
+		live, err := gh.GetPRBasic(owner, repo, number)
 		if err != nil {
 			// We can't reconstruct the omitted field without the current PR state,
 			// and guessing from a stale snapshot risks clobbering. Fail loudly.
@@ -305,6 +305,17 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		return
 	}
 
+	// Approval only makes sense on a draft awaiting it. A stale/double "Open PR"
+	// click on an already-open or closed artifact would otherwise re-run the
+	// GitHub mutations — a spurious footer rewrite (new timestamp/cost) and a
+	// no-op MarkPRReady — so reject it as a conflict. The state transition is
+	// gated here rather than in resolvePR, which the read paths (GET/diff) share
+	// and must keep serving non-draft PRs.
+	if art.State != domain.ArtifactStatePRDraft {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this PR is no longer a draft awaiting approval (state: " + art.State + ")"})
+		return
+	}
+
 	// Parse the artifact details for the proposed (agent-draft) baseline the
 	// human-verdict memory diffs against. A parse failure is non-fatal: we still
 	// promote the PR from its LIVE content (below) and only skip the verdict diff.
@@ -317,7 +328,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// stale snapshot would revert a direct-on-GitHub edit, and a malformed one
 	// would yield empty title/body that UpdatePR would write over the PR. GetPR
 	// failure is fatal here — we can't safely promote what we can't read.
-	live, err := gh.GetPR(owner, repo, number, false)
+	live, err := gh.GetPRBasic(owner, repo, number)
 	if err != nil {
 		artifactsLog.Warn("approve GetPR failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't read the PR to promote it: " + err.Error()})
