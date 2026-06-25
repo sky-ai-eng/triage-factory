@@ -45,11 +45,18 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		if run == nil {
 			return nil
 		}
-		counts, e := tx.Artifacts.CountByRun(r.Context(), orgID, []string{run.ID})
-		if e != nil {
-			return e
+		// A parked run self-counts inside runResponse from the ListByRun it must
+		// run for pending_kind, so only a non-parked run needs a separate count
+		// query here. (The list path batches this across runs — handleAgentRuns.)
+		var artifactCount int
+		if run.Status != "pending_approval" {
+			counts, e := tx.Artifacts.CountByRun(r.Context(), orgID, []string{run.ID})
+			if e != nil {
+				return e
+			}
+			artifactCount = counts[run.ID]
 		}
-		resp = runResponse(r.Context(), tx.Artifacts, orgID, run, counts[run.ID])
+		resp = runResponse(r.Context(), tx.Artifacts, orgID, run, artifactCount)
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -143,8 +150,24 @@ type artifactJSON struct {
 	CreatedAt  time.Time       `json:"created_at"`
 }
 
-// toArtifactJSON projects a stored artifact onto the read-API wire shape.
+// toArtifactJSON projects a stored artifact onto the read-API wire shape,
+// emitting details_json as embedded JSON (or null when absent/corrupt).
 func toArtifactJSON(a domain.Artifact) artifactJSON {
+	var details json.RawMessage
+	switch {
+	case a.DetailsJSON == "":
+		// No details — leave nil, which marshals to null.
+	case json.Valid([]byte(a.DetailsJSON)):
+		details = json.RawMessage(a.DetailsJSON)
+	default:
+		// Corrupt payload: serve null rather than fail the whole response's
+		// marshal (json.Marshal validates a RawMessage). details_json is written
+		// by our own marshaled structs, so an invalid value is a real upstream
+		// bug worth a trace, not an expected empty — mirror the artifact handler's
+		// "details unparseable" warning so it isn't a silent drop.
+		artifactsLog.Warn("artifact details_json is not valid JSON; serving null",
+			"artifact", a.ID, "dedup_key", a.DedupKey)
+	}
 	return artifactJSON{
 		ID:         a.ID,
 		Kind:       a.Kind,
@@ -153,20 +176,9 @@ func toArtifactJSON(a domain.Artifact) artifactJSON {
 		Target:     a.Target,
 		ExternalID: a.ExternalID,
 		URL:        a.URL,
-		Details:    rawDetails(a.DetailsJSON),
+		Details:    details,
 		CreatedAt:  a.CreatedAt,
 	}
-}
-
-// rawDetails returns details_json as embeddable JSON, or nil (which marshals
-// to null) when it's empty or not valid JSON. The guard matters: json.Marshal
-// validates a json.RawMessage, so handing it a malformed payload would fail the
-// whole response — a corrupt details_json on one row must not 500 the list.
-func rawDetails(detailsJSON string) json.RawMessage {
-	if detailsJSON == "" || !json.Valid([]byte(detailsJSON)) {
-		return nil
-	}
-	return json.RawMessage(detailsJSON)
 }
 
 // handleAgentArtifacts returns every artifact a run produced — branch, PR,
@@ -219,13 +231,15 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 // artifact in state=draft); the discriminator has to come from the server
 // because the run row itself doesn't know which kind queued it.
 //
-// artifactCount is supplied by the caller (computed via Artifacts.CountByRun)
-// rather than derived here, so the run-list path can batch one count query for
-// every run instead of an N+1 of per-run reads. pending_kind still needs the
-// actual artifacts, so it keeps its own by-run read — a no-op on the common
-// terminal case, and bounded because parked runs are few. That read's error
-// swallows + logs: pending_kind is informational for the UI and an erroring
-// lookup shouldn't fail the whole status fetch.
+// artifactCount is supplied by the caller for the runs this function doesn't
+// otherwise read: the run-list path batches one count query for every run
+// instead of an N+1 of per-run reads (handleAgentRuns), and the single-run path
+// counts a non-parked run directly (handleAgentStatus). A PARKED run is the
+// exception — pending_kind already needs its full artifact list, so runResponse
+// reuses that one read for the count too (len(arts) == the CountByRun value)
+// rather than make the caller issue a second query. The pending_kind read's
+// error is best-effort: it logs and omits pending_kind (keeping the supplied
+// count) rather than failing the whole status fetch.
 func runResponse(ctx context.Context, artifacts db.ArtifactStore, orgID string, run *domain.AgentRun, artifactCount int) map[string]any {
 	out := map[string]any{
 		"ID":                   run.ID,
@@ -255,7 +269,12 @@ func runResponse(ctx context.Context, artifacts db.ArtifactStore, orgID string, 
 	// was started but never submitted has no ready sentinel and does NOT park, so
 	// FirstReadyReview (not a bare pending check) gates the review case.
 	if run.Status == "pending_approval" {
-		if arts, err := artifacts.ListByRun(ctx, orgID, run.ID); err == nil {
+		if arts, err := artifacts.ListByRun(ctx, orgID, run.ID); err != nil {
+			serverLog.Warn("pending_kind lookup failed; omitting it and keeping the supplied artifact_count", "run", run.ID, "error", err)
+		} else {
+			// Reuse the read we had to make anyway: a parked run's count is
+			// len(arts), so the caller skipped a separate count query for it.
+			out["artifact_count"] = len(arts)
 			if rv := domain.FirstReadyReview(arts); rv != nil {
 				out["pending_kind"] = "review"
 				out["pending_artifact_id"] = rv.ID
