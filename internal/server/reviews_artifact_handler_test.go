@@ -288,3 +288,144 @@ func TestReviewArtifactCommentUpdate_Pessimistic(t *testing.T) {
 		t.Fatalf("comment update = %d, want non-2xx on GitHub failure; body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestReviewArtifactCommentUpdate_WrongReview_404 pins the scoping guard: a
+// commentId that isn't part of THIS artifact's pending review is rejected (404)
+// and never reaches the GitHub update mutation, even though the mutation keys only
+// on the comment node id.
+func TestReviewArtifactCommentUpdate_WrongReview_404(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	badged := domain.SeverityBadgeMarkdown(domain.SeverityMajor) + "nit"
+	var updateCalled bool
+	mux := newAppAPIMux()
+	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if strings.Contains(req.Query, "updatePullRequestReviewComment") {
+			updateCalled = true
+			_, _ = w.Write([]byte(`{"data":{"updatePullRequestReviewComment":{"pullRequestReviewComment":{"id":"x"}}}}`))
+			return
+		}
+		// This review's only comment is PRRC_owned — not the one the request edits.
+		_, _ = w.Write([]byte(pendingReviewGraphQL("PRR_1", "PRRC_owned", badged)))
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rcw", "acme", "api", 7, "PRR_1", "COMMENT")
+	rec := doJSON(t, srv, http.MethodPut, "/api/artifacts/"+artID+"/comments/PRRC_elsewhere", map[string]any{"body": "x"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("update = %d, want 404 for a comment outside this review; body=%s", rec.Code, rec.Body.String())
+	}
+	if updateCalled {
+		t.Error("a wrong-review update (404) must not reach the GitHub update mutation")
+	}
+}
+
+// TestReviewArtifactCommentDelete pins delete on the live review (found → 200,
+// delete mutation keyed on the node id) and the wrong-review guard (404, no
+// delete) — the delete mutation keys only on the comment id, so the membership
+// check is what scopes it to this artifact's review.
+func TestReviewArtifactCommentDelete(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	badged := domain.SeverityBadgeMarkdown(domain.SeverityMajor) + "nit"
+	var deleted string
+	mux := newAppAPIMux()
+	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if strings.Contains(req.Query, "deletePullRequestReviewComment") {
+			deleted, _ = req.Variables["id"].(string)
+			_, _ = w.Write([]byte(`{"data":{"deletePullRequestReviewComment":{"pullRequestReviewComment":{"id":"PRRC_1"}}}}`))
+			return
+		}
+		_, _ = w.Write([]byte(pendingReviewGraphQL("PRR_1", "PRRC_1", badged)))
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rcd", "acme", "api", 7, "PRR_1", "COMMENT")
+
+	rec := doJSON(t, srv, http.MethodDelete, "/api/artifacts/"+artID+"/comments/PRRC_1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if deleted != "PRRC_1" {
+		t.Errorf("deleted node id = %q, want PRRC_1", deleted)
+	}
+
+	deleted = ""
+	rec = doJSON(t, srv, http.MethodDelete, "/api/artifacts/"+artID+"/comments/PRRC_elsewhere", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete = %d, want 404 for a comment outside this review; body=%s", rec.Code, rec.Body.String())
+	}
+	if deleted != "" {
+		t.Error("a wrong-review delete (404) must not reach the GitHub delete mutation")
+	}
+}
+
+// TestReviewArtifactUpdate_InvalidEvent_400 pins early validation of the staged
+// verdict: an invalid (or empty) review_event is rejected at PATCH time and the
+// stored sentinel is left unchanged (an empty event would otherwise un-park the run).
+func TestReviewArtifactUpdate_InvalidEvent_400(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rie", "acme", "api", 7, "PRR_1", "COMMENT")
+	for _, bad := range []string{"", "approve", "LGTM"} {
+		rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"review_event": bad})
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("PATCH review_event=%q = %d, want 400", bad, rec.Code)
+		}
+	}
+	d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON)
+	if d.ReviewEvent != "COMMENT" {
+		t.Errorf("review_event = %q after rejected PATCHes, want COMMENT (unchanged)", d.ReviewEvent)
+	}
+}
+
+// TestReviewArtifactApprove_ReviewIDDrift_409 pins the consistency guard: when the
+// live pending review on the PR isn't the one recorded on the artifact, approve
+// 409s before any submit rather than diffing the verdict against a different review.
+func TestReviewArtifactApprove_ReviewIDDrift_409(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var submitCalled bool
+	mux := newAppAPIMux()
+	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if strings.Contains(req.Query, "submitPullRequestReview") {
+			submitCalled = true
+			_, _ = w.Write([]byte(`{"data":{"submitPullRequestReview":{"pullRequestReview":{"id":"x"}}}}`))
+			return
+		}
+		// The live pending review id differs from the recorded PRR_1.
+		_, _ = w.Write([]byte(pendingReviewGraphQL("PRR_DIFFERENT", "PRRC_1", "nit")))
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rdrift", "acme", "api", 7, "PRR_1", "COMMENT")
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("approve = %d, want 409 on review-id drift; body=%s", rec.Code, rec.Body.String())
+	}
+	if submitCalled {
+		t.Error("a drift 409 must not submit anything to GitHub")
+	}
+	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStateReviewPending {
+		t.Errorf("artifact state = %q after 409, want still pending", got)
+	}
+}

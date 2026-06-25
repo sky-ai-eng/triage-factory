@@ -103,6 +103,13 @@ func (ah *artifactsHandler) reviewUpdate(w http.ResponseWriter, r *http.Request,
 		details.ReviewBody = *req.ReviewBody
 	}
 	if req.ReviewEvent != nil {
+		// Validate early (400) rather than deferring to approval-time GitHub
+		// rejection. review_event also doubles as the ready sentinel, so an empty
+		// or bogus value would silently un-park the run as well as fail the submit.
+		if !validReviewEvent(*req.ReviewEvent) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "review_event must be one of APPROVE, COMMENT, REQUEST_CHANGES"})
+			return
+		}
 		details.ReviewEvent = *req.ReviewEvent
 	}
 
@@ -153,10 +160,20 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// Capture the final (human-edited) inline comments for the verdict diff BEFORE
 	// submitting — once submitted the review leaves the PENDING state and
 	// GetPendingReview returns nothing. A read failure just drops the comment diff.
+	// If the live pending review's id doesn't match the one we recorded, the
+	// original was replaced out-of-band: submitting art.ExternalID would diff the
+	// verdict against a different review (or fail at GitHub), so 409 before any
+	// mutation and let the user restart the preview. (An empty id means no live
+	// pending review — the stale-submit failure surfaces from GitHub below.)
 	var finalComments []ghclient.PendingReviewComment
-	if _, comments, gerr := gh.GetPendingReview(owner, repo, number); gerr != nil {
+	if pendingID, comments, gerr := gh.GetPendingReview(owner, repo, number); gerr != nil {
 		artifactsLog.Warn("pre-approve pending-review re-read failed; verdict comment diff skipped",
 			"artifact", art.ID, "error", gerr)
+	} else if pendingID != "" && pendingID != art.ExternalID {
+		artifactsLog.Warn("live pending review id differs from the recorded one; refusing to approve",
+			"artifact", art.ID, "recorded", art.ExternalID, "live", pendingID)
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "the pending review on this PR no longer matches the one prepared here — return it to the queue and start a fresh review"})
+		return
 	} else {
 		finalComments = comments
 	}
@@ -241,17 +258,28 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 		return
 	}
 
-	// Recover the comment's current severity (baked into its GitHub body) so we can
-	// re-bake the badge onto the human's edited body. Best-effort: a read miss just
-	// leaves the comment un-badged after the edit.
-	severity := ""
-	if _, comments, err := gh.GetPendingReview(owner, repo, number); err == nil {
-		for _, c := range comments {
-			if c.ID == commentID {
-				severity, _ = domain.ParseSeverityBadge(c.Body)
-				break
-			}
+	// Read this artifact's pending review (scoped to its owner/repo/number) and
+	// require the comment to belong to it before editing. The GraphQL update keys
+	// solely on the comment node id, so without this a commentId from another
+	// pending review the credential can see would be editable through this
+	// artifact-scoped route. The same fetch recovers the comment's current severity
+	// (baked into its GitHub body) to re-bake the badge onto the human's edit.
+	_, comments, err := gh.GetPendingReview(owner, repo, number)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		return
+	}
+	severity, found := "", false
+	for _, c := range comments {
+		if c.ID == commentID {
+			severity, _ = domain.ParseSeverityBadge(c.Body)
+			found = true
+			break
 		}
+	}
+	if !found {
+		notFound(w, "review comment")
+		return
 	}
 	_, clean := domain.ParseSeverityBadge(req.Body)
 	if err := gh.UpdatePendingReviewComment(commentID, domain.SeverityBadgeMarkdown(severity)+clean); err != nil {
@@ -282,10 +310,28 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 		notFound(w, "review artifact")
 		return
 	}
-	// DeletePendingReviewComment keys solely off the comment node id; owner/repo
-	// resolve the per-repo credential.
-	gh, _, _, _, ok := ah.ghForArtifact(w, r, orgID, art)
+	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
+		return
+	}
+	// DeletePendingReviewComment keys solely off the comment node id, so require the
+	// comment to belong to THIS artifact's pending review first — otherwise a
+	// commentId from another pending review the credential can see would be
+	// deletable through this artifact-scoped route.
+	_, comments, err := gh.GetPendingReview(owner, repo, number)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		return
+	}
+	found := false
+	for _, c := range comments {
+		if c.ID == commentID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		notFound(w, "review comment")
 		return
 	}
 	if err := gh.DeletePendingReviewComment(commentID); err != nil {
@@ -374,4 +420,16 @@ func derefInt(p *int) int {
 		return 0
 	}
 	return *p
+}
+
+// validReviewEvent reports whether e is a GitHub PullRequestReviewEvent the
+// approve path can submit. Empty is intentionally invalid: review_event doubles
+// as the ready sentinel, so clearing it would un-park the run.
+func validReviewEvent(e string) bool {
+	switch e {
+	case "APPROVE", "COMMENT", "REQUEST_CHANGES":
+		return true
+	default:
+		return false
+	}
 }
