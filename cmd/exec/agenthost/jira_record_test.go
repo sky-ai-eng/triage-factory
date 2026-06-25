@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -204,7 +205,126 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 					t.Errorf("details_json %q did not carry the assignee", a.DetailsJSON)
 				}
 			})
+
+			t.Run("update", func(t *testing.T) {
+				jira := startFakeJira(t)
+				stores, info := newJiraRecordingStores(t, jira.URL, eventTriggered)
+				client := NewLocal(stores, info)
+
+				summary := "rewritten"
+				priority := "High"
+				if err := client.JiraUpdateIssue(context.Background(), "SKY-9", jiraclient.UpdateIssueFields{
+					Summary: &summary, Priority: &priority,
+				}); err != nil {
+					t.Fatalf("JiraUpdateIssue: %v", err)
+				}
+				arts := listRunArtifacts(t, stores, info.RunID)
+				if len(arts) != 1 {
+					t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
+				}
+				a := arts[0]
+				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
+					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != "jira:issue:SKY-9" {
+					t.Errorf("update artifact mismatch: %+v", a)
+				}
+				if !strings.Contains(a.DetailsJSON, `"summary"`) || !strings.Contains(a.DetailsJSON, `"priority"`) {
+					t.Errorf("details_json %q did not list the updated fields", a.DetailsJSON)
+				}
+			})
+
+			t.Run("set-parent", func(t *testing.T) {
+				jira := startFakeJira(t)
+				stores, info := newJiraRecordingStores(t, jira.URL, eventTriggered)
+				client := NewLocal(stores, info)
+
+				if err := client.JiraSetParent(context.Background(), "SKY-9", "SKY-1"); err != nil {
+					t.Fatalf("JiraSetParent: %v", err)
+				}
+				arts := listRunArtifacts(t, stores, info.RunID)
+				if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindIssue ||
+					arts[0].DedupKey != "jira:issue:SKY-9" || arts[0].State != domain.ArtifactStateIssueUpdated {
+					t.Fatalf("set-parent artifact mismatch: %+v", arts)
+				}
+				if !strings.Contains(arts[0].DetailsJSON, `"parent":"SKY-1"`) {
+					t.Errorf("details_json %q did not carry the parent", arts[0].DetailsJSON)
+				}
+			})
+
+			t.Run("set-priority", func(t *testing.T) {
+				jira := startFakeJira(t)
+				stores, info := newJiraRecordingStores(t, jira.URL, eventTriggered)
+				client := NewLocal(stores, info)
+
+				if err := client.JiraSetPriority(context.Background(), "SKY-9", "Low"); err != nil {
+					t.Fatalf("JiraSetPriority: %v", err)
+				}
+				arts := listRunArtifacts(t, stores, info.RunID)
+				if len(arts) != 1 || arts[0].DedupKey != "jira:issue:SKY-9" ||
+					arts[0].State != domain.ArtifactStateIssueUpdated {
+					t.Fatalf("set-priority artifact mismatch: %+v", arts)
+				}
+				if !strings.Contains(arts[0].DetailsJSON, `"priority":"Low"`) {
+					t.Errorf("details_json %q did not carry the priority", arts[0].DetailsJSON)
+				}
+			})
 		})
+	}
+}
+
+// TestLocalClient_JiraArtifactURLs_WhenSiteConfigured pins that with the org's
+// Jira site URL set, issue artifacts carry {site}/browse/<KEY> and comment
+// artifacts carry the focusedCommentId deep link.
+func TestLocalClient_JiraArtifactURLs_WhenSiteConfigured(t *testing.T) {
+	jira := startFakeJira(t)
+	stores, info := newJiraRecordingStores(t, jira.URL, true)
+	if err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID, domain.OrgSettings{
+		JiraBaseURL: "https://acme.atlassian.net",
+	}); err != nil {
+		t.Fatalf("set site URL: %v", err)
+	}
+	client := NewLocal(stores, info)
+	ctx := context.Background()
+
+	if err := client.JiraTransitionTo(ctx, "SKY-7", "Done"); err != nil {
+		t.Fatalf("JiraTransitionTo: %v", err)
+	}
+	if err := client.JiraAddComment(ctx, "SKY-7", "shipping it"); err != nil {
+		t.Fatalf("JiraAddComment: %v", err)
+	}
+
+	for _, a := range listRunArtifacts(t, stores, info.RunID) {
+		switch a.Kind {
+		case domain.ArtifactKindIssue:
+			if a.URL != "https://acme.atlassian.net/browse/SKY-7" {
+				t.Errorf("issue url = %q", a.URL)
+			}
+		case domain.ArtifactKindComment:
+			if a.URL != "https://acme.atlassian.net/browse/SKY-7?focusedCommentId=10042" {
+				t.Errorf("comment url = %q", a.URL)
+			}
+		}
+	}
+}
+
+// TestLocalClient_JiraComment_NoID_SkipsArtifact pins that when Jira's response
+// carries no comment id, the comment still posts (action succeeds) but no
+// artifact row is written — there's no stable key to dedup on.
+func TestLocalClient_JiraComment_NoID_SkipsArtifact(t *testing.T) {
+	jira := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Comment POST returns a body with no id field.
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(jira.Close)
+
+	stores, info := newJiraRecordingStores(t, jira.URL, true)
+	client := NewLocal(stores, info)
+
+	if err := client.JiraAddComment(context.Background(), "SKY-9", "no id back"); err != nil {
+		t.Fatalf("JiraAddComment must succeed even when the id is missing: %v", err)
+	}
+	if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+		t.Errorf("expected no artifact when comment id is empty, got %+v", arts)
 	}
 }
 

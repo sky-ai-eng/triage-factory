@@ -349,7 +349,11 @@ func (c *LocalClient) JiraUpdateIssue(ctx context.Context, key string, fields ji
 	if err != nil {
 		return err
 	}
-	return client.UpdateIssue(ctx, key, fields)
+	if err := client.UpdateIssue(ctx, key, fields); err != nil {
+		return err
+	}
+	c.recordJiraIssue(ctx, key, domain.ArtifactStateIssueUpdated, jiraDetailsJSON(map[string]any{"fields": updatedFieldNames(fields)}))
+	return nil
 }
 
 func (c *LocalClient) JiraSetParent(ctx context.Context, key, parentKey string) error {
@@ -357,7 +361,11 @@ func (c *LocalClient) JiraSetParent(ctx context.Context, key, parentKey string) 
 	if err != nil {
 		return err
 	}
-	return client.SetParent(ctx, key, parentKey)
+	if err := client.SetParent(ctx, key, parentKey); err != nil {
+		return err
+	}
+	c.recordJiraIssue(ctx, key, domain.ArtifactStateIssueUpdated, jiraDetailsJSON(map[string]any{"parent": parentKey}))
+	return nil
 }
 
 func (c *LocalClient) JiraGetChildIssues(ctx context.Context, key string) ([]jiraclient.Issue, error) {
@@ -389,7 +397,11 @@ func (c *LocalClient) JiraSetPriority(ctx context.Context, key, priority string)
 	if err != nil {
 		return err
 	}
-	return client.SetPriority(ctx, key, priority)
+	if err := client.SetPriority(ctx, key, priority); err != nil {
+		return err
+	}
+	c.recordJiraIssue(ctx, key, domain.ArtifactStateIssueUpdated, jiraDetailsJSON(map[string]any{"priority": priority}))
+	return nil
 }
 
 func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([]jiraclient.IssueType, error) {
@@ -412,14 +424,21 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([
 // dispatches every host-routed Jira call through NewLocal (server.go), so this
 // one seam covers both the sandbox (daemon) and the local-mode CLI, with the
 // full RunInfo + Stores in scope.
+//
+// Every mediated Jira *mutation* is captured: issue create, and the in-place
+// edits — transition, assign/unassign, update-fields, set-parent, set-priority
+// — plus comments. Pure reads (get / search / list-*) record nothing. This is
+// the full write surface of `exec jira`, so an agent can't mutate an issue
+// without leaving an audit trail.
 
-// recordJiraIssue upserts the single deduped `issue` artifact for KEY. All
-// issue mutations (create / transition / assign / unassign) collapse onto one
-// row keyed jira:issue:<KEY>; external_id and url are the issue's stable
-// coordinates, populated on every action so a later one can fill a URL an
-// earlier one couldn't compute (the store preserves them on empty either way —
-// see ArtifactStore.Upsert). state + details_json carry the most recent action
-// — by design the row tracks the last action, not the first (domain.Artifact).
+// recordJiraIssue upserts the single deduped `issue` artifact for KEY. Every
+// issue mutation (create / transition / assign / unassign / update / set-parent
+// / set-priority) collapses onto one row keyed jira:issue:<KEY>; external_id
+// and url are the issue's stable coordinates, populated on every action so a
+// later one can fill a URL an earlier one couldn't compute (the store preserves
+// them on empty either way — see ArtifactStore.Upsert). state + details_json
+// carry the most recent action — by design the row tracks the last action, not
+// the first (domain.Artifact).
 func (c *LocalClient) recordJiraIssue(ctx context.Context, key, state, detailsJSON string) {
 	if c.stores.Artifacts == nil || key == "" {
 		return
@@ -438,15 +457,23 @@ func (c *LocalClient) recordJiraIssue(ctx context.Context, key, state, detailsJS
 // recordJiraComment upserts a `comment` artifact keyed jira:comment:<id>. A
 // missing comment id (the POST landed but its body didn't parse) means there's
 // no stable key to dedup on, so recording is skipped — the comment still
-// posted; only its audit row is best-effort dropped.
+// posted; only its audit row is best-effort dropped. The skip is logged at
+// debug so a future Jira response-shape change surfaces as missing rows with a
+// breadcrumb, not silently.
 func (c *LocalClient) recordJiraComment(ctx context.Context, key, commentID, body string) {
-	if c.stores.Artifacts == nil || commentID == "" {
+	if c.stores.Artifacts == nil {
+		return
+	}
+	if commentID == "" {
+		agenthostLog.Debug("jira comment recorded without an id; skipping artifact",
+			"run", c.info.RunID, "issue", key)
 		return
 	}
 	c.upsertJiraArtifact(ctx, domain.Artifact{
 		Kind:        domain.ArtifactKindComment,
 		Target:      key,
 		ExternalID:  commentID,
+		URL:         c.jiraCommentURL(ctx, key, commentID),
 		State:       domain.ArtifactStateCommentPosted,
 		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindComment, commentID, ""),
 		DetailsJSON: jiraDetailsJSON(map[string]any{"body": jiraBodySnippet(body)}),
@@ -483,12 +510,13 @@ func (c *LocalClient) upsertJiraArtifact(ctx context.Context, a domain.Artifact)
 	}
 }
 
-// jiraBrowseURL builds the issue's human-facing {site}/browse/<KEY> link from
-// the org's configured Jira site URL — the same shape the poller stamps onto
-// entities. Best-effort: an unreadable or unset site URL yields an empty
-// string (url is an optional artifact field). Uses the admin-pool settings
-// read so it works without a JWT-claims context, like the rest of recording.
-func (c *LocalClient) jiraBrowseURL(ctx context.Context, key string) string {
+// jiraSiteBase returns the org's configured Jira site URL, trailing slash
+// trimmed, or "" if it's unreadable or unset. Best-effort and uses the
+// admin-pool settings read so it works without a JWT-claims context, like the
+// rest of recording. This is the human-facing site (e.g.
+// https://acme.atlassian.net), not the API gateway base the Jira client talks
+// to — the same source the poller stamps entity URLs from.
+func (c *LocalClient) jiraSiteBase(ctx context.Context) string {
 	if c.stores.Orgs == nil {
 		return ""
 	}
@@ -496,7 +524,28 @@ func (c *LocalClient) jiraBrowseURL(ctx context.Context, key string) string {
 	if err != nil || set.JiraBaseURL == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s/browse/%s", strings.TrimRight(set.JiraBaseURL, "/"), key)
+	return strings.TrimRight(set.JiraBaseURL, "/")
+}
+
+// jiraBrowseURL builds the issue's human-facing {site}/browse/<KEY> link, or ""
+// when the site URL is unavailable (url is an optional artifact field).
+func (c *LocalClient) jiraBrowseURL(ctx context.Context, key string) string {
+	base := c.jiraSiteBase(ctx)
+	if base == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/browse/%s", base, key)
+}
+
+// jiraCommentURL builds a deep link to the comment —
+// {site}/browse/<KEY>?focusedCommentId=<id> — which both Cloud and Server/DC
+// honor. Empty when the site URL is unavailable.
+func (c *LocalClient) jiraCommentURL(ctx context.Context, key, commentID string) string {
+	base := c.jiraSiteBase(ctx)
+	if base == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/browse/%s?focusedCommentId=%s", base, key, commentID)
 }
 
 // jiraDetailsJSON marshals a small kind-specific payload for an artifact's
@@ -512,6 +561,32 @@ func jiraDetailsJSON(m map[string]any) string {
 		return ""
 	}
 	return string(b)
+}
+
+// updatedFieldNames lists which issue fields an update touched, for the
+// artifact's details_json — the names only, never the (potentially large)
+// values. Order is stable so the recorded payload is deterministic.
+func updatedFieldNames(f jiraclient.UpdateIssueFields) []string {
+	names := []string{}
+	if f.Summary != nil {
+		names = append(names, "summary")
+	}
+	if f.Description != nil {
+		names = append(names, "description")
+	}
+	if f.Priority != nil {
+		names = append(names, "priority")
+	}
+	if f.IssueType != nil {
+		names = append(names, "issue_type")
+	}
+	if len(f.AddLabels) > 0 {
+		names = append(names, "add_labels")
+	}
+	if len(f.RemoveLabels) > 0 {
+		names = append(names, "remove_labels")
+	}
+	return names
 }
 
 // jiraBodySnippet trims a comment body to a short, stored-once reference for
