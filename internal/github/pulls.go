@@ -477,13 +477,15 @@ func (c *Client) SubmitReview(owner, repo string, number int, commitSHA, event, 
 // about it — git push must precede this call). base is the merge
 // target. draft=true creates a draft PR.
 //
-// Returns (number, htmlURL, err). On a 422, the GitHub validation
-// payload is parsed and the per-error "message" / "code"+"field" is
-// folded into the returned error so callers see "Validation Failed:
-// base 'develop' is not a valid branch" rather than the raw JSON
-// blob — the retry flow is much more useful when the actual reason
-// is visible.
-func (c *Client) CreatePR(owner, repo, head, base, title, body string, draft bool) (int, string, error) {
+// Returns (number, htmlURL, nodeID, err). nodeID is the PR's GraphQL global
+// node ID — the durable handle the GitHub-native artifact rework (TFAC-454)
+// keys a PR artifact on, distinct from the per-repo integer number; it composes
+// with the pending-review node-ID ops. On a 422, the GitHub validation payload
+// is parsed and the per-error "message" / "code"+"field" is folded into the
+// returned error so callers see "Validation Failed: base 'develop' is not a
+// valid branch" rather than the raw JSON blob — the retry flow is much more
+// useful when the actual reason is visible.
+func (c *Client) CreatePR(owner, repo, head, base, title, body string, draft bool) (int, string, string, error) {
 	payload := map[string]any{
 		"title": title,
 		"head":  head,
@@ -494,15 +496,15 @@ func (c *Client) CreatePR(owner, repo, head, base, title, body string, draft boo
 
 	data, err := c.Post(fmt.Sprintf("/repos/%s/%s/pulls", owner, repo), payload)
 	if err != nil {
-		return 0, "", liftValidationErr(err)
+		return 0, "", "", liftValidationErr(err)
 	}
 
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return 0, "", err
+		return 0, "", "", err
 	}
 
-	return intVal(raw, "number"), strVal(raw, "html_url"), nil
+	return intVal(raw, "number"), strVal(raw, "html_url"), strVal(raw, "node_id"), nil
 }
 
 // UpdatePR edits an open or draft PR's title and body via REST

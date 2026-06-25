@@ -310,7 +310,9 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 	if req.Draft != nil {
 		draft = *req.Draft
 	}
-	number, htmlURL, err := gh.CreatePR(pr.Owner, pr.Repo, pr.HeadBranch, pr.BaseBranch, pr.Title, finalBody, draft)
+	// node_id (4th return) is the PR's durable GraphQL handle; the artifact
+	// recording that consumes it lands with TFAC-462, so it's discarded here.
+	number, htmlURL, _, err := gh.CreatePR(pr.Owner, pr.Repo, pr.HeadBranch, pr.BaseBranch, pr.Title, finalBody, draft)
 	if err != nil {
 		// Release the guard so the user can retry. Pending row stays
 		// in place — they may want to edit title/body or push more

@@ -30,11 +30,13 @@ import (
 // configurable token, standing in for either credential tier — the App
 // installation token (tier 1) or the org PAT (tier 3) — without the App-mint
 // plumbing. errOnRepo, when set, is returned from ClientForRepo to exercise
-// the "not configured" mapping.
+// the "not configured" mapping. identity is what ClientForRepoWithIdentity
+// reports (App vs PAT), driving the start-review collision branch.
 type fakeGitHubResolver struct {
 	baseURL   string
 	token     string
 	errOnRepo error
+	identity  ghclient.Identity
 }
 
 func (f fakeGitHubResolver) ClientFor(_ context.Context, _, _ string) (*ghclient.Client, error) {
@@ -46,6 +48,16 @@ func (f fakeGitHubResolver) ClientForRepo(_ context.Context, _, _, _ string) (*g
 		return nil, f.errOnRepo
 	}
 	return ghclient.NewClient(f.baseURL, f.token), nil
+}
+
+// ClientForRepoWithIdentity satisfies ghclient.RepoIdentityResolver so the
+// collision check sees a controllable identity. It returns the configured
+// token tier alongside the same client ClientForRepo builds.
+func (f fakeGitHubResolver) ClientForRepoWithIdentity(_ context.Context, _, _, _ string) (*ghclient.Client, ghclient.Identity, error) {
+	if f.errOnRepo != nil {
+		return nil, ghclient.IdentityUnknown, f.errOnRepo
+	}
+	return ghclient.NewClient(f.baseURL, f.token), f.identity, nil
 }
 
 func (f fakeGitHubResolver) TokenFor(_ context.Context, _, _ string) (githubapp.Token, error) {
@@ -386,6 +398,209 @@ func TestGithub_NotConfigured_BothModes(t *testing.T) {
 		_, err := client.GithubAddComment(context.Background(), "o", "r", 1, "hi")
 		if err == nil || !strings.Contains(err.Error(), "not configured") {
 			t.Fatalf("err = %v, want the friendly guidance to cross the wire", err)
+		}
+	})
+}
+
+// --- TFAC-469: PR node_id + pending-review host methods ---
+
+// TestServer_GithubCreatePR_ReturnsNodeID pins node_id end-to-end: the REST
+// create response's node_id crosses the daemon→IPC boundary intact (the durable
+// PR handle the artifact rework keys on), alongside number and html_url.
+func TestServer_GithubCreatePR_ReturnsNodeID(t *testing.T) {
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"number":42,"html_url":"https://github.com/o/r/pull/42","node_id":"PR_node42"}`)
+	}))
+	defer gh.Close()
+
+	client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"}, ghInfo())
+
+	number, htmlURL, nodeID, err := client.GithubCreatePR(context.Background(), "o", "r", "feat", "main", "T", "B", false)
+	if err != nil {
+		t.Fatalf("GithubCreatePR: %v", err)
+	}
+	if number != 42 || htmlURL != "https://github.com/o/r/pull/42" || nodeID != "PR_node42" {
+		t.Fatalf("CreatePR = (%d, %q, %q), want (42, .../pull/42, PR_node42)", number, htmlURL, nodeID)
+	}
+}
+
+// TestServer_GithubGetPendingReview_RoundTrip pins the GraphQL read crossing
+// back to the sandbox: the review node id and its inline comments — including a
+// null line that must stay a nil *int, not collapse to 0 — survive the RPC.
+func TestServer_GithubGetPendingReview_RoundTrip(t *testing.T) {
+	resp := `{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[
+		{"id":"PRR_mine","viewerDidAuthor":true,"comments":{"nodes":[
+			{"id":"PRRC_1","path":"a.go","line":5,"startLine":null,"body":"one"},
+			{"id":"PRRC_2","path":"c.go","line":null,"startLine":null,"body":"outdated"}
+		]}}
+	]}}}}}`
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, resp)
+	}))
+	defer gh.Close()
+
+	client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"}, ghInfo())
+
+	id, comments, err := client.GithubGetPendingReview(context.Background(), "o", "r", 7)
+	if err != nil {
+		t.Fatalf("GithubGetPendingReview: %v", err)
+	}
+	if id != "PRR_mine" {
+		t.Errorf("reviewID = %q, want PRR_mine", id)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("comments = %+v, want 2", comments)
+	}
+	if comments[0].Line == nil || *comments[0].Line != 5 {
+		t.Errorf("comment[0].Line = %v, want 5", comments[0].Line)
+	}
+	if comments[1].Line != nil {
+		t.Errorf("comment[1].Line = %v, want nil (a null line must cross the wire as nil, not 0)", comments[1].Line)
+	}
+}
+
+// TestServer_GithubAddPendingReviewComment_RoundTrip pins the GraphQL mutation:
+// the new comment node id crosses back, and the daemon-resolved token reaches
+// GitHub (Property B — the sandbox holds no credential of its own).
+func TestServer_GithubAddPendingReviewComment_RoundTrip(t *testing.T) {
+	rec := &ghRecorder{}
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(r)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":{"addPullRequestReviewThread":{"thread":{"comments":{"nodes":[{"id":"PRRC_new"}]}}}}}`)
+	}))
+	defer gh.Close()
+
+	client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: gh.URL, token: "app-installation-token"}, ghInfo())
+
+	id, err := client.GithubAddPendingReviewComment(context.Background(), "o", "r", "PRR_1", "a.go", "nit", 5, nil)
+	if err != nil {
+		t.Fatalf("GithubAddPendingReviewComment: %v", err)
+	}
+	if id != "PRRC_new" {
+		t.Errorf("comment id = %q, want PRRC_new", id)
+	}
+	if got := rec.readAuth(); got != "Bearer app-installation-token" {
+		t.Errorf("GitHub saw Authorization %q, want the host-resolved token", got)
+	}
+}
+
+// pendingReviewBackend is a fake GitHub serving the two calls
+// GithubCreatePendingReview makes — the GetPendingReview GraphQL read (routed by
+// the /graphql path) and the REST pending-review create — so the collision
+// branch is observable. A non-empty existingReview makes the read report a
+// viewer-authored pending review; createNodeID is what a REST create returns;
+// createFired records whether the create path was taken (it must NOT be on
+// reuse / collision).
+type pendingReviewBackend struct {
+	mu             sync.Mutex
+	url            string
+	existingReview string
+	createNodeID   string
+	createFired    bool
+}
+
+func newPendingReviewBackend(t *testing.T, existingReview, createNodeID string) *pendingReviewBackend {
+	t.Helper()
+	b := &pendingReviewBackend{existingReview: existingReview, createNodeID: createNodeID}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/graphql") {
+			b.mu.Lock()
+			existing := b.existingReview
+			b.mu.Unlock()
+			if existing == "" {
+				_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[]}}}}}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"id":"`+existing+`","viewerDidAuthor":true,"comments":{"nodes":[]}}]}}}}}`)
+			return
+		}
+		// REST pending-review create.
+		b.mu.Lock()
+		b.createFired = true
+		b.mu.Unlock()
+		_, _ = io.WriteString(w, `{"id":1,"node_id":"`+b.createNodeID+`"}`)
+	}))
+	t.Cleanup(srv.Close)
+	b.url = srv.URL
+	return b
+}
+
+func (b *pendingReviewBackend) didCreate() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.createFired
+}
+
+// TestServer_GithubCreatePendingReview_CreatesWhenNone is the no-collision path:
+// GetPendingReview reports nothing, so the host creates a fresh pending review
+// and returns its node id over the RPC.
+func TestServer_GithubCreatePendingReview_CreatesWhenNone(t *testing.T) {
+	b := newPendingReviewBackend(t, "", "PRR_fresh")
+	client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: b.url, token: "org-pat", identity: ghclient.IdentityApp}, ghInfo())
+
+	id, err := client.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha123", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	if id != "PRR_fresh" {
+		t.Errorf("reviewID = %q, want PRR_fresh (a freshly created review)", id)
+	}
+	if !b.didCreate() {
+		t.Error("expected the REST create to fire when no pending review exists")
+	}
+}
+
+// TestGithub_CreatePendingReview_Collision is the load-bearing identity branch:
+// when a pending review already exists for the acting identity, an App /
+// service-account reuses it (the bot's own from a prior run) while a real-user
+// PAT refuses with ErrPendingReviewCollision (never hijack a human's review).
+// The PAT case runs over both the in-process and IPC paths to prove the typed
+// sentinel survives the wire; neither branch may fire the REST create.
+func TestGithub_CreatePendingReview_Collision(t *testing.T) {
+	t.Run("app identity reuses existing (ipc)", func(t *testing.T) {
+		b := newPendingReviewBackend(t, "PRR_existing", "PRR_should_not_create")
+		client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: b.url, token: "app-installation-token", identity: ghclient.IdentityApp}, ghInfo())
+
+		id, err := client.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil)
+		if err != nil {
+			t.Fatalf("GithubCreatePendingReview: %v", err)
+		}
+		if id != "PRR_existing" {
+			t.Errorf("reviewID = %q, want the reused PRR_existing", id)
+		}
+		if b.didCreate() {
+			t.Error("App-identity reuse must NOT create a second pending review")
+		}
+	})
+
+	t.Run("pat identity collides (local)", func(t *testing.T) {
+		b := newPendingReviewBackend(t, "PRR_existing", "PRR_should_not_create")
+		lc := NewLocal(emptyStores(), ghInfo())
+		lc.ghResolver = fakeGitHubResolver{baseURL: b.url, token: "org-pat", identity: ghclient.IdentityPAT}
+
+		_, err := lc.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil)
+		if !errors.Is(err, ErrPendingReviewCollision) {
+			t.Fatalf("err = %v, want ErrPendingReviewCollision", err)
+		}
+		if b.didCreate() {
+			t.Error("PAT-identity collision must NOT create a pending review (never hijack)")
+		}
+	})
+
+	t.Run("pat identity collides over ipc (typed error survives wire)", func(t *testing.T) {
+		b := newPendingReviewBackend(t, "PRR_existing", "PRR_should_not_create")
+		client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: b.url, token: "org-pat", identity: ghclient.IdentityPAT}, ghInfo())
+
+		_, err := client.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil)
+		if !errors.Is(err, ErrPendingReviewCollision) {
+			t.Fatalf("err = %v, want ErrPendingReviewCollision reconstructed over the wire", err)
+		}
+		if b.didCreate() {
+			t.Error("PAT-identity collision must NOT create a pending review")
 		}
 	})
 }

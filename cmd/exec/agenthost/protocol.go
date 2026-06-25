@@ -82,12 +82,25 @@ type request struct {
 // would erase it. Zero HTTPStatus means "not an HTTP error" (the common
 // case, including every Jira/DB method) and the client returns a plain
 // errors.New(Error).
+//
+// ErrCode is the second structured-error channel: a stable string tag for a
+// daemon-side sentinel error that the client must reconstruct as a typed value
+// (not just a message), where there's no HTTP status to key on. Today the only
+// value is errCodePendingReviewCollision, mapped back to
+// ErrPendingReviewCollision so the start-review collision stays errors.Is-able
+// across the wire. Empty means "no typed sentinel" — the common case.
 type response struct {
 	Result     json.RawMessage `json:"r,omitempty"`
 	Error      string          `json:"e,omitempty"`
 	HTTPStatus int             `json:"hs,omitempty"`
 	HTTPBody   string          `json:"hb,omitempty"`
+	ErrCode    string          `json:"ec,omitempty"`
 }
+
+// errCodePendingReviewCollision is the response.ErrCode marker the daemon sets
+// when dispatch returns ErrPendingReviewCollision, so the IPC client rebuilds
+// the typed sentinel instead of a bare string.
+const errCodePendingReviewCollision = "pending_review_collision"
 
 // writeFrame serializes msg as a length-prefixed JSON frame on w.
 // JSON marshal failures are returned without writing anything — the
@@ -450,6 +463,43 @@ type githubCreatePRArgs struct {
 type githubCreatePRResult struct {
 	Number  int    `json:"number"`
 	HTMLURL string `json:"html_url"`
+	NodeID  string `json:"node_id"`
+}
+
+// --- github-native pending reviews (TFAC-469) ---
+
+type githubCreatePendingReviewArgs struct {
+	githubRepoRef
+	Number    int                            `json:"number"`
+	CommitSHA string                         `json:"commit_sha"`
+	Comments  []ghclient.SubmitReviewComment `json:"comments"`
+}
+
+type githubReviewIDResult struct {
+	ReviewID string `json:"review_id"`
+}
+
+type githubAddPendingReviewCommentArgs struct {
+	githubRepoRef
+	ReviewID  string `json:"review_id"`
+	Path      string `json:"path"`
+	Body      string `json:"body"`
+	Line      int    `json:"line"`
+	StartLine *int   `json:"start_line,omitempty"`
+}
+
+type githubCommentIDStringResult struct {
+	CommentID string `json:"comment_id"`
+}
+
+type githubGetPendingReviewArgs struct {
+	githubRepoRef
+	Number int `json:"number"`
+}
+
+type githubGetPendingReviewResult struct {
+	ReviewID string                          `json:"review_id"`
+	Comments []ghclient.PendingReviewComment `json:"comments"`
 }
 
 type githubAddCommentArgs struct {
@@ -571,4 +621,8 @@ const (
 	methodGithubDeleteComment    = "GithubDeleteComment"
 	methodGithubAPIGet           = "GithubAPIGet"
 	methodGithubDownloadArtifact = "GithubDownloadArtifact"
+
+	methodGithubCreatePendingReview     = "GithubCreatePendingReview"
+	methodGithubAddPendingReviewComment = "GithubAddPendingReviewComment"
+	methodGithubGetPendingReview        = "GithubGetPendingReview"
 )

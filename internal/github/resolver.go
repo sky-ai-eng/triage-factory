@@ -19,6 +19,44 @@ import (
 // PAT. Handlers map it to a "GitHub not configured" response.
 var ErrNoGitHubCredentials = errors.New("github: no credentials resolved for org")
 
+// Identity classifies which credential tier a resolver call selected: a GitHub
+// App installation token (a bot / service-account identity acting as itself)
+// or a borrowed PAT (a real user's personal access token, lent to the org).
+//
+// The motivating consumer is the pending-review collision check (the agenthost
+// GitHub bridge, TFAC-469): an existing pending review on a PR is safe for the
+// bot to reuse only when the acting identity is the App (the review is the
+// bot's own from a prior run); under a borrowed PAT the review might be a
+// human's in-progress work, which must never be hijacked. The distinction is
+// knowable only host-side, where the token resolves — hence it rides out of the
+// resolver rather than being re-derived from the opaque bearer token (an App
+// installation token and a PAT are indistinguishable strings to the client).
+type Identity int
+
+const (
+	// IdentityUnknown is the zero value: no credential resolved, or the
+	// resolver doesn't report identity. Callers that branch on identity for a
+	// safety decision must treat it as the conservative case.
+	IdentityUnknown Identity = iota
+	// IdentityApp is a tier-1 GitHub App installation token — a service
+	// account / bot acting as itself.
+	IdentityApp
+	// IdentityPAT is a tier-3 PAT-borrow — a real user's personal access token.
+	IdentityPAT
+)
+
+// RepoIdentityResolver is the optional extension of Resolver, implemented by
+// the production resolver, that reports the Identity (App installation vs
+// borrowed PAT) of the credential ClientForRepo would resolve — in the same
+// pass that builds the client, so the App-coverage probe runs once. A caller
+// that must both make API calls AND branch on which credential is acting (the
+// agenthost pending-review collision check) type-asserts for this; a Resolver
+// that doesn't implement it leaves the caller to fall back to ClientForRepo and
+// IdentityUnknown.
+type RepoIdentityResolver interface {
+	ClientForRepoWithIdentity(ctx context.Context, orgID, owner, repo string) (*Client, Identity, error)
+}
+
 // Resolver produces an authenticated *Client for a given org + GitHub
 // target account, choosing the credential by tier:
 //
@@ -134,9 +172,20 @@ func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client
 }
 
 func (r *resolver) ClientForRepo(ctx context.Context, orgID, owner, repo string) (*Client, error) {
+	client, _, err := r.ClientForRepoWithIdentity(ctx, orgID, owner, repo)
+	return client, err
+}
+
+// ClientForRepoWithIdentity is ClientForRepo plus the Identity of the
+// credential it resolved (see RepoIdentityResolver). The tier decision IS the
+// identity — tier 1 (App installation covering the repo) → IdentityApp, tier 3
+// (PAT-borrow) → IdentityPAT — so reporting it costs nothing extra and the
+// caller gets a client and an identity that are guaranteed to describe the same
+// credential. ClientForRepo delegates here and discards the identity.
+func (r *resolver) ClientForRepoWithIdentity(ctx context.Context, orgID, owner, repo string) (*Client, Identity, error) {
 	base, err := r.githubBaseFor(ctx, orgID)
 	if err != nil {
-		return nil, err
+		return nil, IdentityUnknown, err
 	}
 
 	// Tier 1, repo-aware: the org's App installation for owner, but only when
@@ -150,18 +199,18 @@ func (r *resolver) ClientForRepo(ctx context.Context, orgID, owner, repo string)
 	// deliberately not cached — see repoCoverageCache.
 	if client, ok := r.tier1AppClient(ctx, orgID, owner, base); ok {
 		if r.coverage.covered(orgID, owner, repo) {
-			return client, nil // memoized: in the grant
+			return client, IdentityApp, nil // memoized: in the grant
 		}
 		reachable, conclusive := client.CheckRepoAccess(ctx, owner, repo)
 		if !conclusive {
 			// Indeterminate (5xx / transport error) — fail open with the minted
 			// App client (the same one owner-grain ClientFor would return) and
 			// don't cache, so a transient outage can't pin a wrong answer.
-			return client, nil
+			return client, IdentityApp, nil
 		}
 		if reachable {
 			r.coverage.markCovered(orgID, owner, repo)
-			return client, nil
+			return client, IdentityApp, nil
 		}
 		// Conclusively not covered: installed on this account but this repo
 		// isn't in the grant. Fall through to the PAT, which may still reach it.
@@ -176,13 +225,13 @@ func (r *resolver) ClientForRepo(ctx context.Context, orgID, owner, repo string)
 	// as ClientFor.
 	client, err := r.tier3PATClient(ctx, orgID, base)
 	if err != nil {
-		return nil, err
+		return nil, IdentityUnknown, err
 	}
 	if client != nil {
-		return client, nil
+		return client, IdentityPAT, nil
 	}
 
-	return nil, fmt.Errorf("%w: org=%s repo=%s/%s", ErrNoGitHubCredentials, orgID, owner, repo)
+	return nil, IdentityUnknown, fmt.Errorf("%w: org=%s repo=%s/%s", ErrNoGitHubCredentials, orgID, owner, repo)
 }
 
 // githubBaseFor resolves the org's user-facing GitHub base URL (github.com

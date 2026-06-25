@@ -181,6 +181,11 @@ func (s *Server) handleConn(conn net.Conn) {
 			resp.HTTPStatus = he.StatusCode
 			resp.HTTPBody = he.Body
 		}
+		// Tag the pending-review collision so the client rebuilds the typed
+		// sentinel (it has no HTTP status to key on — it's a host-side decision).
+		if errors.Is(err, ErrPendingReviewCollision) {
+			resp.ErrCode = errCodePendingReviewCollision
+		}
 	} else if result != nil {
 		body, mErr := json.Marshal(result)
 		if mErr != nil {
@@ -618,11 +623,44 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		number, htmlURL, err := client.GithubCreatePR(ctx, a.Owner, a.Repo, a.Head, a.Base, a.Title, a.Body, a.Draft)
+		number, htmlURL, nodeID, err := client.GithubCreatePR(ctx, a.Owner, a.Repo, a.Head, a.Base, a.Title, a.Body, a.Draft)
 		if err != nil {
 			return nil, err
 		}
-		return githubCreatePRResult{Number: number, HTMLURL: htmlURL}, nil
+		return githubCreatePRResult{Number: number, HTMLURL: htmlURL, NodeID: nodeID}, nil
+
+	case methodGithubCreatePendingReview:
+		var a githubCreatePendingReviewArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		reviewID, err := client.GithubCreatePendingReview(ctx, a.Owner, a.Repo, a.Number, a.CommitSHA, a.Comments)
+		if err != nil {
+			return nil, err
+		}
+		return githubReviewIDResult{ReviewID: reviewID}, nil
+
+	case methodGithubAddPendingReviewComment:
+		var a githubAddPendingReviewCommentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		commentID, err := client.GithubAddPendingReviewComment(ctx, a.Owner, a.Repo, a.ReviewID, a.Path, a.Body, a.Line, a.StartLine)
+		if err != nil {
+			return nil, err
+		}
+		return githubCommentIDStringResult{CommentID: commentID}, nil
+
+	case methodGithubGetPendingReview:
+		var a githubGetPendingReviewArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		reviewID, comments, err := client.GithubGetPendingReview(ctx, a.Owner, a.Repo, a.Number)
+		if err != nil {
+			return nil, err
+		}
+		return githubGetPendingReviewResult{ReviewID: reviewID, Comments: comments}, nil
 
 	case methodGithubAddComment:
 		var a githubAddCommentArgs

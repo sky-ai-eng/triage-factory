@@ -649,20 +649,45 @@ func (c *LocalClient) githubResolver() ghclient.Resolver {
 	return c.ghResolver
 }
 
-// githubClientForRepo resolves an authenticated client for owner/repo. A
-// missing credential maps to the same "not configured" guidance the gh
-// branch printed before this refactor; every other resolver error (a
-// transient vault/keychain outage) propagates so it isn't misreported as
+// mapGithubResolveErr maps a resolver error to the agent-facing form: a
+// missing credential becomes the same "not configured" guidance the gh branch
+// printed before this refactor; every other resolver error (a transient
+// vault/keychain outage) propagates verbatim so it isn't misreported as
 // "absent". Over IPC the message crosses as the response Error string.
+func mapGithubResolveErr(err error) error {
+	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+		return errors.New("GitHub not configured; run triagefactory and complete setup first")
+	}
+	return err
+}
+
+// githubClientForRepo resolves an authenticated client for owner/repo.
 func (c *LocalClient) githubClientForRepo(ctx context.Context, owner, repo string) (*ghclient.Client, error) {
 	client, err := c.githubResolver().ClientForRepo(ctx, c.info.OrgID, owner, repo)
-	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-		return nil, errors.New("GitHub not configured; run triagefactory and complete setup first")
-	}
 	if err != nil {
-		return nil, err
+		return nil, mapGithubResolveErr(err)
 	}
 	return client, nil
+}
+
+// githubClientAndIdentityForRepo resolves the client AND the acting credential's
+// identity (App/service-account vs real-user PAT) in one pass, for the
+// pending-review collision check. The identity is knowable only here, where the
+// token resolves. When the resolver implements ghclient.RepoIdentityResolver
+// (the production resolver does), the two come from a single resolution so they
+// describe the same credential; otherwise it falls back to ClientForRepo and
+// reports IdentityUnknown, which the collision check treats conservatively
+// (never reuses, so it can't hijack a review it can't prove is the bot's own).
+func (c *LocalClient) githubClientAndIdentityForRepo(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
+	if ir, ok := c.githubResolver().(ghclient.RepoIdentityResolver); ok {
+		client, identity, err := ir.ClientForRepoWithIdentity(ctx, c.info.OrgID, owner, repo)
+		if err != nil {
+			return nil, ghclient.IdentityUnknown, mapGithubResolveErr(err)
+		}
+		return client, identity, nil
+	}
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	return client, ghclient.IdentityUnknown, err
 }
 
 func (c *LocalClient) GithubGetPR(ctx context.Context, owner, repo string, number int, verbose bool) (*ghclient.PRView, error) {
@@ -721,12 +746,72 @@ func (c *LocalClient) GithubSubmitReview(ctx context.Context, owner, repo string
 	return client.SubmitReview(owner, repo, number, commitSHA, event, body, comments)
 }
 
-func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (int, string, error) {
+func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (int, string, string, error) {
 	client, err := c.githubClientForRepo(ctx, owner, repo)
 	if err != nil {
-		return 0, "", err
+		return 0, "", "", err
 	}
 	return client.CreatePR(owner, repo, head, base, title, body, draft)
+}
+
+// GithubCreatePendingReview resolves the client and acting identity, then folds
+// in the start-review collision check before creating. If a pending review
+// already exists for the acting identity on this PR: an App/service-account
+// identity reuses it (the review is the bot's own from a prior run) and returns
+// its id; a real-user-PAT (or unknown) identity returns ErrPendingReviewCollision
+// rather than risk modifying a human's in-progress review. Only when no pending
+// review exists does it create a fresh one, seeding it with commitSHA/comments.
+//
+// Reuse (return the existing id) is chosen over clear-and-recreate: it's
+// non-destructive and lets the caller keep appending to the bot's own review.
+func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error) {
+	client, identity, err := c.githubClientAndIdentityForRepo(ctx, owner, repo)
+	if err != nil {
+		return "", err
+	}
+
+	existingID, _, err := client.GetPendingReview(owner, repo, number)
+	if err != nil {
+		return "", err
+	}
+	if existingID != "" {
+		if identity == ghclient.IdentityApp {
+			return existingID, nil // the bot's own review from a prior run — reuse it
+		}
+		// Real-user PAT (or an identity we couldn't determine): the existing
+		// review might be a human's live work. Never hijack it.
+		return "", ErrPendingReviewCollision
+	}
+
+	return client.CreatePendingReview(owner, repo, number, commitSHA, comments)
+}
+
+// GithubAddPendingReviewComment adds one inline comment to an existing pending
+// review (addressed by its GraphQL node id). owner/repo resolve the per-repo
+// credential host-side; the github.Client op keys solely off the review node
+// id. line>0 with a non-nil startLine makes it a multi-line range.
+func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int) (string, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return "", err
+	}
+	return client.AddPendingReviewComment(reviewID, ghclient.SubmitReviewComment{
+		Path:      path,
+		Line:      line,
+		StartLine: startLine,
+		Body:      body,
+	})
+}
+
+// GithubGetPendingReview returns the acting identity's current pending review on
+// the PR (its node id plus inline comments), or ("", nil, nil) when there is
+// none. It backs both the start-review collision read and a plain editor sync.
+func (c *LocalClient) GithubGetPendingReview(ctx context.Context, owner, repo string, number int) (string, []ghclient.PendingReviewComment, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return "", nil, err
+	}
+	return client.GetPendingReview(owner, repo, number)
 }
 
 func (c *LocalClient) GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {

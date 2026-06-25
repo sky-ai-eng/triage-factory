@@ -28,12 +28,25 @@ type ghAPI interface {
 	GetReviewDetail(owner, repo string, number, reviewID int, verbose bool) (*ghclient.ReviewDetail, error)
 	DismissReview(owner, repo string, number, reviewID int, message string) error
 	SubmitReview(owner, repo string, number int, commitSHA, event, body string, comments []ghclient.SubmitReviewComment) (int, string, error)
-	CreatePR(owner, repo, head, base, title, body string, draft bool) (int, string, error)
+	CreatePR(owner, repo, head, base, title, body string, draft bool) (int, string, string, error)
 	AddComment(owner, repo string, number int, body string) (int, error)
 	ReplyToComment(owner, repo string, number, commentID int, body string) (int, error)
 	ReactToComment(owner, repo string, commentID int, emoji string) error
 	UpdateComment(owner, repo string, commentID int, body string) error
 	DeleteComment(owner, repo string, commentID int) error
+
+	// Pending-review surface (TFAC-469): the GitHub-native preview backing.
+	// Signatures mirror *github.Client exactly (so a real client still
+	// satisfies ghAPI); the host-backed adapter routes them through the
+	// agenthost daemon, where CreatePendingReview also runs the start-review
+	// collision check (the real client does a raw create — the check is a
+	// host-only concern keyed on the resolved credential identity).
+	// AddPendingReviewComment carries no owner/repo (it keys off the review
+	// node id), so the host adapter folds in the repo it was constructed with,
+	// like Get/DownloadArtifact below.
+	CreatePendingReview(owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error)
+	AddPendingReviewComment(reviewID string, comment ghclient.SubmitReviewComment) (string, error)
+	GetPendingReview(owner, repo string, number int) (string, []ghclient.PendingReviewComment, error)
 
 	// Get / DownloadArtifact are the raw transport the actions verbs lean on
 	// (workflow-run + job listings and log archives have no typed method).
@@ -89,8 +102,23 @@ func (a hostAPIClient) SubmitReview(owner, repo string, number int, commitSHA, e
 	return a.host.GithubSubmitReview(context.Background(), owner, repo, number, commitSHA, event, body, comments)
 }
 
-func (a hostAPIClient) CreatePR(owner, repo, head, base, title, body string, draft bool) (int, string, error) {
+func (a hostAPIClient) CreatePR(owner, repo, head, base, title, body string, draft bool) (int, string, string, error) {
 	return a.host.GithubCreatePR(context.Background(), owner, repo, head, base, title, body, draft)
+}
+
+func (a hostAPIClient) CreatePendingReview(owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error) {
+	return a.host.GithubCreatePendingReview(context.Background(), owner, repo, number, commitSHA, comments)
+}
+
+// AddPendingReviewComment carries no owner/repo (it keys off the review node
+// id), so — like Get/DownloadArtifact — the adapter folds in the owner/repo it
+// was constructed with for the host's per-repo credential resolution.
+func (a hostAPIClient) AddPendingReviewComment(reviewID string, comment ghclient.SubmitReviewComment) (string, error) {
+	return a.host.GithubAddPendingReviewComment(context.Background(), a.owner, a.repo, reviewID, comment.Path, comment.Body, comment.Line, comment.StartLine)
+}
+
+func (a hostAPIClient) GetPendingReview(owner, repo string, number int) (string, []ghclient.PendingReviewComment, error) {
+	return a.host.GithubGetPendingReview(context.Background(), owner, repo, number)
 }
 
 func (a hostAPIClient) AddComment(owner, repo string, number int, body string) (int, error) {

@@ -103,6 +103,18 @@ var ErrUnknownMethod = errors.New("agenthost: unknown method")
 // daemon's reply; mismatches abort the request with this error.
 var ErrProtocolVersion = errors.New("agenthost: protocol version mismatch")
 
+// ErrPendingReviewCollision is returned by GithubCreatePendingReview when a
+// pending review already exists on the PR for the acting identity AND that
+// identity is a real-user PAT (not a GitHub App / service account) — i.e. the
+// existing review might be a human's in-progress work the bot must not touch.
+// The App/service-account case reuses the existing review instead (it is the
+// bot's own from a prior run). exec (TFAC-463) turns this typed error into the
+// actionable "configure a GitHub App / service-account credential so the bot
+// manages its own review" message. It crosses the IPC boundary as a marker on
+// the response envelope so the sandbox client reconstructs the same sentinel
+// the in-process path returns (errors.Is matches on both paths).
+var ErrPendingReviewCollision = errors.New("agenthost: a pending review already exists on this PR under a real-user PAT identity; refusing to modify it (use a GitHub App / service-account credential so the bot manages its own review)")
+
 // Client is the surface every cmd/exec/* subcommand consumes. Every
 // state-mutating operation that used to call stores.X.Y directly with
 // inline synthetic-claims / admin-pool routing lives here as a single
@@ -222,12 +234,35 @@ type Client interface {
 	GithubGetReviewDetail(ctx context.Context, owner, repo string, number, reviewID int, verbose bool) (*ghclient.ReviewDetail, error)
 	GithubDismissReview(ctx context.Context, owner, repo string, number, reviewID int, message string) error
 	GithubSubmitReview(ctx context.Context, owner, repo string, number int, commitSHA, event, body string, comments []ghclient.SubmitReviewComment) (int, string, error)
-	GithubCreatePR(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (int, string, error)
+	GithubCreatePR(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (int, string, string, error)
 	GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error)
 	GithubReplyToComment(ctx context.Context, owner, repo string, number, commentID int, body string) (int, error)
 	GithubReactToComment(ctx context.Context, owner, repo string, commentID int, emoji string) error
 	GithubUpdateComment(ctx context.Context, owner, repo string, commentID int, body string) error
 	GithubDeleteComment(ctx context.Context, owner, repo string, commentID int) error
+
+	// --- github-native pending reviews (gh pr start-review / add-review-comment) ---
+	//
+	// The GitHub-native preview rework (TFAC-454 Sub-epic B) backs the review
+	// editor with a real GitHub *pending* review — private to the acting
+	// identity until submitted — instead of a local draft. These three bridge
+	// the agent-invoked subset of the TFAC-461 client methods; the server's
+	// live-edit/approve path calls github.Client directly and needs no bridge.
+	// owner/repo ride on every call so the host resolves the right per-repo
+	// credential tier; GithubCreatePR's node_id (above) and these node-ID-keyed
+	// ops compose into one preview.
+	//
+	// GithubCreatePendingReview folds in the start-review collision check, which
+	// must run host-side because it branches on the acting credential's identity
+	// (App/service-account vs real-user PAT) — knowable only where ClientForRepo
+	// resolves the token. It checks for an existing pending review first, then:
+	// an App/service-account identity reuses it (the review is the bot's own
+	// from a prior run), returning its id; a real-user-PAT identity returns
+	// ErrPendingReviewCollision rather than risk hijacking a human's in-progress
+	// review. exec stays simple — it gets a review id or the typed error.
+	GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (reviewID string, err error)
+	GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int) (commentID string, err error)
+	GithubGetPendingReview(ctx context.Context, owner, repo string, number int) (reviewID string, comments []ghclient.PendingReviewComment, err error)
 
 	// GithubAPIGet is the raw authenticated GET the actions verbs lean on
 	// (workflow-run + job listings have no typed ghclient method). Returns

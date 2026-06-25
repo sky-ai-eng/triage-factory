@@ -340,12 +340,12 @@ func TestCreatePR_HappyPath(t *testing.T) {
 		gotPath = r.URL.Path
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"number": 42, "html_url": "https://github.com/owner/repo/pull/42"}`))
+		_, _ = w.Write([]byte(`{"number": 42, "html_url": "https://github.com/owner/repo/pull/42", "node_id": "PR_node42"}`))
 	}))
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	number, url, err := c.CreatePR("owner", "repo", "feature/SKY-1", "main", "Add idempotency", "Body text", false)
+	number, url, nodeID, err := c.CreatePR("owner", "repo", "feature/SKY-1", "main", "Add idempotency", "Body text", false)
 	if err != nil {
 		t.Fatalf("CreatePR: %v", err)
 	}
@@ -354,6 +354,9 @@ func TestCreatePR_HappyPath(t *testing.T) {
 	}
 	if url != "https://github.com/owner/repo/pull/42" {
 		t.Errorf("url = %q, want canonical github.com path", url)
+	}
+	if nodeID != "PR_node42" {
+		t.Errorf("nodeID = %q, want PR_node42 (the durable GraphQL handle)", nodeID)
 	}
 	if gotMethod != "POST" {
 		t.Errorf("method = %q, want POST", gotMethod)
@@ -389,7 +392,7 @@ func TestCreatePR_DraftFlagPropagated(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	if _, _, err := c.CreatePR("o", "r", "h", "main", "T", "B", true); err != nil {
+	if _, _, _, err := c.CreatePR("o", "r", "h", "main", "T", "B", true); err != nil {
 		t.Fatalf("CreatePR: %v", err)
 	}
 	if draft, _ := gotBody["draft"].(bool); !draft {
@@ -410,7 +413,7 @@ func TestCreatePR_422_BaseMissing(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	_, _, err := c.CreatePR("o", "r", "h", "develop", "T", "B", false)
+	_, _, _, err := c.CreatePR("o", "r", "h", "develop", "T", "B", false)
 	if err == nil {
 		t.Fatal("expected error for 422, got nil")
 	}
@@ -434,7 +437,7 @@ func TestCreatePR_422_FieldErr(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	_, _, err := c.CreatePR("o", "r", "ghost-branch", "main", "T", "B", false)
+	_, _, _, err := c.CreatePR("o", "r", "ghost-branch", "main", "T", "B", false)
 	if err == nil {
 		t.Fatal("expected error for 422, got nil")
 	}

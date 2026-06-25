@@ -998,7 +998,9 @@ func prCreate(client ghAPI, host agenthost.Client, args []string) {
 	footer, err := host.BuildAgentRunFooter(context.Background(), "PR")
 	exitOnErr(err)
 	body = body + footer
-	number, htmlURL, err := client.CreatePR(owner, repo, head, base, title, body, draft)
+	// node_id (3rd return) is the PR's durable GraphQL handle; the standalone
+	// path doesn't record artifacts yet (that wiring is TFAC-462), so discard it.
+	number, htmlURL, _, err := client.CreatePR(owner, repo, head, base, title, body, draft)
 	exitOnErr(err)
 
 	printJSON(map[string]any{

@@ -126,6 +126,12 @@ func (c *IPCClient) callWithin(ctx context.Context, timeout time.Duration, metho
 	}
 
 	if resp.Error != "" {
+		// A tagged sentinel (no HTTP status to key on) rebuilds as the typed
+		// value so errors.Is matches identically to the in-process path —
+		// today only the start-review pending-review collision.
+		if resp.ErrCode == errCodePendingReviewCollision {
+			return ErrPendingReviewCollision
+		}
 		// A non-zero HTTPStatus marks a host-routed GitHub API failure;
 		// rebuild the typed error so status-discriminating callers
 		// (IsHTTP406, the download-logs 404 fallback) behave identically to
@@ -458,12 +464,36 @@ func (c *IPCClient) GithubSubmitReview(ctx context.Context, owner, repo string, 
 	return res.ReviewID, res.Event, nil
 }
 
-func (c *IPCClient) GithubCreatePR(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (int, string, error) {
+func (c *IPCClient) GithubCreatePR(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (int, string, string, error) {
 	var res githubCreatePRResult
 	if err := c.call(ctx, methodGithubCreatePR, githubCreatePRArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Head: head, Base: base, Title: title, Body: body, Draft: draft}, &res); err != nil {
-		return 0, "", err
+		return 0, "", "", err
 	}
-	return res.Number, res.HTMLURL, nil
+	return res.Number, res.HTMLURL, res.NodeID, nil
+}
+
+func (c *IPCClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error) {
+	var res githubReviewIDResult
+	if err := c.call(ctx, methodGithubCreatePendingReview, githubCreatePendingReviewArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, CommitSHA: commitSHA, Comments: comments}, &res); err != nil {
+		return "", err
+	}
+	return res.ReviewID, nil
+}
+
+func (c *IPCClient) GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int) (string, error) {
+	var res githubCommentIDStringResult
+	if err := c.call(ctx, methodGithubAddPendingReviewComment, githubAddPendingReviewCommentArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, ReviewID: reviewID, Path: path, Body: body, Line: line, StartLine: startLine}, &res); err != nil {
+		return "", err
+	}
+	return res.CommentID, nil
+}
+
+func (c *IPCClient) GithubGetPendingReview(ctx context.Context, owner, repo string, number int) (string, []ghclient.PendingReviewComment, error) {
+	var res githubGetPendingReviewResult
+	if err := c.call(ctx, methodGithubGetPendingReview, githubGetPendingReviewArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number}, &res); err != nil {
+		return "", nil, err
+	}
+	return res.ReviewID, res.Comments, nil
 }
 
 func (c *IPCClient) GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {

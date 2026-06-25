@@ -399,6 +399,94 @@ func TestResolver_ClientForRepo_NoApp_PAT(t *testing.T) {
 	}
 }
 
+// ClientForRepoWithIdentity reports the tier it resolved as an Identity, so the
+// agenthost pending-review collision check can branch on App-vs-PAT without
+// re-deriving it from the opaque bearer token. The identity must track the same
+// tier decision ClientForRepo makes: App covers the repo → IdentityApp; App
+// doesn't cover (or no App) → the PAT fallback → IdentityPAT; nothing resolves
+// → IdentityUnknown alongside the error.
+func TestResolver_ClientForRepoWithIdentity_ReportsTier(t *testing.T) {
+	t.Run("app covers repo → IdentityApp", func(t *testing.T) {
+		gh := newGHTestServer(t)
+		gh.installRepos = []string{"acme/widget"}
+		r := NewResolver(
+			&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+			&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+			&fakeOrgs{base: gh.srv.URL},
+			&fakeAgents{},
+			nil,
+		)
+		client, identity, err := r.(RepoIdentityResolver).ClientForRepoWithIdentity(context.Background(), "org-1", "acme", "widget")
+		if err != nil {
+			t.Fatalf("ClientForRepoWithIdentity: %v", err)
+		}
+		if identity != IdentityApp {
+			t.Errorf("identity = %v, want IdentityApp (tier 1)", identity)
+		}
+		if _, err := client.Get("/probe"); err != nil {
+			t.Fatalf("probe: %v", err)
+		}
+		if gh.lastProbe != "Bearer ghs_minted" {
+			t.Errorf("client carried %q, want the minted App token alongside IdentityApp", gh.lastProbe)
+		}
+	})
+
+	t.Run("app does not cover repo → IdentityPAT", func(t *testing.T) {
+		gh := newGHTestServer(t)
+		gh.installRepos = []string{"acme/widget"} // "acme/other" not granted
+		r := NewResolver(
+			&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+			&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+			&fakeOrgs{base: gh.srv.URL},
+			&fakeAgents{},
+			nil,
+		)
+		_, identity, err := r.(RepoIdentityResolver).ClientForRepoWithIdentity(context.Background(), "org-1", "acme", "other")
+		if err != nil {
+			t.Fatalf("ClientForRepoWithIdentity: %v", err)
+		}
+		if identity != IdentityPAT {
+			t.Errorf("identity = %v, want IdentityPAT (App didn't cover → PAT fallback)", identity)
+		}
+	})
+
+	t.Run("no app → IdentityPAT", func(t *testing.T) {
+		gh := newGHTestServer(t)
+		r := NewResolver(
+			&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
+			&fakeApps{app: nil},
+			&fakeOrgs{base: gh.srv.URL},
+			&fakeAgents{},
+			nil,
+		)
+		_, identity, err := r.(RepoIdentityResolver).ClientForRepoWithIdentity(context.Background(), "org-1", "acme", "widget")
+		if err != nil {
+			t.Fatalf("ClientForRepoWithIdentity: %v", err)
+		}
+		if identity != IdentityPAT {
+			t.Errorf("identity = %v, want IdentityPAT", identity)
+		}
+	})
+
+	t.Run("no credentials → IdentityUnknown + error", func(t *testing.T) {
+		gh := newGHTestServer(t)
+		r := NewResolver(
+			&fakeSecrets{vals: map[string]string{}}, // no PAT, no App
+			&fakeApps{app: nil},
+			&fakeOrgs{base: gh.srv.URL},
+			&fakeAgents{},
+			nil,
+		)
+		_, identity, err := r.(RepoIdentityResolver).ClientForRepoWithIdentity(context.Background(), "org-1", "acme", "widget")
+		if !errors.Is(err, ErrNoGitHubCredentials) {
+			t.Fatalf("err = %v, want ErrNoGitHubCredentials", err)
+		}
+		if identity != IdentityUnknown {
+			t.Errorf("identity = %v, want IdentityUnknown when nothing resolves", identity)
+		}
+	})
+}
+
 // TokenFor must hand back the same App installation token ClientFor would
 // authenticate with (tier 1), and share the mint cache so the host-side clone
 // and the API client don't each mint a separate token.
