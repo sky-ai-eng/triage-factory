@@ -36,7 +36,7 @@ import (
 //     runAgent terminal.
 type runConfig struct {
 	orgID     string  // tenant scope for every store call inside this run's goroutine — set once in Delegate from opts.OrgID, then read everywhere via cfg.orgID instead of being threaded positionally
-	teamID    string  // the run's owning team (runs.team_id, NOT NULL), stamped alongside orgID from the claimed run row; read at construction to populate agenthost.RunInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Empty on the pre-agent cancel/error runConfig literals that never reach runAgent.
+	teamID    string  // the run's owning team (runs.team_id, NOT NULL), stamped alongside orgID from the claimed run row; read at construction to populate agenthost.RunInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Also stamped on the run-bearing terminal literals (dispatchClaimedRun / handleStepSetupError); empty only on the CancelBlueprint / paused-cleanup paths that have a task but no claimed run in scope.
 	scope     string  // what the agent is scoped to (repo, PR, issue)
 	toolsRef  string  // tool documentation to inject
 	wtPath    string  // initial cwd: GitHub PR worktree, or Jira run-root

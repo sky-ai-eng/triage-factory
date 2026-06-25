@@ -95,13 +95,14 @@ func decideBlueprintStep(outcome string, isFinal bool) (decision blueprintStepOu
 // requesting user's ID) write under synthetic claims; event-triggered
 // blueprints write through the admin pool.
 //
-// The cfg here is the worktree-cleanup config only — these terminal call
-// sites build it with just orgID + the worktree fields, and it never reaches
-// runAgent, so run-identity fields like cfg.teamID are intentionally unset on
-// this path (see runConfig.teamID). It is NOT a run-identity source: any
-// future run-attributed work on the terminal path (e.g. recording a failed
-// run's artifacts, TFAC-454) must thread the team/identity explicitly — the
-// claimed run row carrying runs.team_id is in scope at every call site.
+// The cfg here is a cleanup-scoped config (worktree fields + orgID), not the
+// full run-execution config. The run-bearing callers (dispatchClaimedRun /
+// handleStepSetupError) stamp cfg.teamID off the claimed run, but the
+// CancelBlueprint / paused-cleanup callers have only a task (no claimed run)
+// and leave it empty — so cfg.teamID is NOT reliably set here. Any future
+// run-attributed work on the terminal path (e.g. recording a failed run's
+// artifacts, TFAC-454) must thread the team/identity explicitly rather than
+// trust cfg.
 func (s *Spawner) terminateBlueprint(
 	orgID, blueprintRunID, taskID, triggerType, creatorUserID string,
 	startTime time.Time,

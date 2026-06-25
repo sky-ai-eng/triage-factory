@@ -200,7 +200,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 			return
 		}
 		s.terminateBlueprint(orgID, br.ID, run.TaskID, run.TriggerType, run.CreatorUserID, startTime,
-			runConfig{orgID: orgID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("load task: %v", err), run.BlueprintStepIndex, true)
+			runConfig{orgID: orgID, teamID: run.TeamID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("load task: %v", err), run.BlueprintStepIndex, true)
 		return
 	}
 
@@ -215,7 +215,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 		}
 		s.broadcastRunUpdate(orgID, run.ID, "cancelled")
 		if br.Status == domain.BlueprintRunStatusRunning {
-			cfg := runConfig{orgID: orgID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != "" && task.EntitySource == "github"}
+			cfg := runConfig{orgID: orgID, teamID: run.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != "" && task.EntitySource == "github"}
 			s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime, cfg,
 				domain.BlueprintRunStatusCancelled, "cancelled", run.BlueprintStepIndex, false)
 		}
@@ -229,7 +229,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	plan := br.StepPlan
 	if len(plan) == 0 {
 		s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime,
-			runConfig{orgID: orgID}, domain.BlueprintRunStatusFailed, "blueprint run has empty step plan", run.BlueprintStepIndex, true)
+			runConfig{orgID: orgID, teamID: run.TeamID}, domain.BlueprintRunStatusFailed, "blueprint run has empty step plan", run.BlueprintStepIndex, true)
 		return
 	}
 	stepIdx := 0
@@ -238,7 +238,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	}
 	if stepIdx < 0 || stepIdx >= len(plan) {
 		s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime,
-			runConfig{orgID: orgID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("step index %d out of range", stepIdx), run.BlueprintStepIndex, true)
+			runConfig{orgID: orgID, teamID: run.TeamID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("step index %d out of range", stepIdx), run.BlueprintStepIndex, true)
 		return
 	}
 	planStep := plan[stepIdx]
@@ -584,7 +584,7 @@ func (s *Spawner) handleStepSetupError(orgID string, br *domain.BlueprintRun, ru
 	if run.Attempts >= maxRunAttempts {
 		dispatchLog.Error("workspace setup failed after attempts; failing blueprint", "run", run.ID, "attempts", run.Attempts, "error", setupErr)
 		s.terminateBlueprint(orgID, br.ID, run.TaskID, run.TriggerType, run.CreatorUserID, time.Now(),
-			runConfig{orgID: orgID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
+			runConfig{orgID: orgID, teamID: run.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
 			domain.BlueprintRunStatusFailed, "workspace setup: "+setupErr.Error(), run.BlueprintStepIndex, false)
 		return
 	}
