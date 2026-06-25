@@ -207,6 +207,26 @@ func TestAddPendingReviewComment_EmptyReviewID(t *testing.T) {
 	}
 }
 
+// TestAddPendingReviewComment_Guards pins the fail-fast preconditions for the
+// required line-thread fields, so a missing path/body/line yields a pointed
+// error before any network call rather than a vague GraphQL rejection.
+func TestAddPendingReviewComment_Guards(t *testing.T) {
+	c := clientAgainst("http://invalid.invalid")
+	cases := map[string]SubmitReviewComment{
+		"empty path": {Path: "", Line: 1, Body: "x"},
+		"empty body": {Path: "a.go", Line: 1, Body: ""},
+		"zero line":  {Path: "a.go", Line: 0, Body: "x"},
+		"neg line":   {Path: "a.go", Line: -3, Body: "x"},
+	}
+	for name, cm := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := c.AddPendingReviewComment("PRR_1", cm); err == nil {
+				t.Fatalf("expected error for %s", name)
+			}
+		})
+	}
+}
+
 // TestAddPendingReviewComment_NoCommentReturned treats a thread payload with no
 // comment node as an error — the caller needs the comment id for later edits.
 func TestAddPendingReviewComment_NoCommentReturned(t *testing.T) {
@@ -303,6 +323,25 @@ func TestSubmitExistingReview_Guards(t *testing.T) {
 	}
 }
 
+// TestSubmitExistingReview_EmptyBodyPassedThrough pins that an empty body (the
+// documented "optional body" case — submit with no top-level message) is sent
+// as "" rather than dropped, since the mutation's $body is a nullable String.
+func TestSubmitExistingReview_EmptyBodyPassedThrough(t *testing.T) {
+	resp := `{"data":{"submitPullRequestReview":{"pullRequestReview":{"id":"PRR_1","state":"COMMENTED"}}}}`
+	c, rec := graphqlCapturing(t, resp)
+
+	if err := c.SubmitExistingReview("o", "r", "PRR_1", "COMMENT", ""); err != nil {
+		t.Fatalf("SubmitExistingReview: %v", err)
+	}
+	body, ok := rec.variables["body"]
+	if !ok {
+		t.Fatal("body variable should be present (sent as empty string), not omitted")
+	}
+	if body != "" {
+		t.Errorf("body var = %v, want empty string", body)
+	}
+}
+
 // TestGetPendingReview_Found returns the viewer's pending review id and its
 // inline comments, mapping line/startLine and the per-comment node ids the sync
 // needs for edit/delete. The third comment pins the nullable-anchor contract: a
@@ -378,5 +417,22 @@ func TestGetPendingReview_GraphQLError(t *testing.T) {
 	c, _ := graphqlCapturing(t, body)
 	if _, _, err := c.GetPendingReview("o", "r", 1); err == nil {
 		t.Fatal("expected error to propagate from GraphQL errors[]")
+	}
+}
+
+// TestGetPendingReview_PartialError covers the subtler shape PostGraphQL passes
+// through: usable (non-null) data alongside errors[] — here a FORBIDDEN scoped
+// to the reviews field, leaving empty nodes under a non-null pullRequest. The
+// error must propagate, NOT read as "no pending review", so B·3's collision
+// check can't create a duplicate on top of an access failure.
+func TestGetPendingReview_PartialError(t *testing.T) {
+	body := `{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[]}}}},"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by integration"}]}`
+	c, _ := graphqlCapturing(t, body)
+	id, comments, err := c.GetPendingReview("o", "r", 1)
+	if err == nil {
+		t.Fatalf("expected error to propagate from a partial GraphQL error; got id=%q comments=%+v", id, comments)
+	}
+	if !strings.Contains(err.Error(), "FORBIDDEN") {
+		t.Errorf("error should surface the GraphQL error type; got %q", err.Error())
 	}
 }

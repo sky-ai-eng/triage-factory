@@ -56,6 +56,11 @@ func (c *Client) CreatePendingReview(owner, repo string, number int, commitSHA s
 
 	data, err := c.Post(fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, number), payload)
 	if err != nil {
+		// Match GitHub's current duplicate-pending wording ("User can only have
+		// one pending review per pull request") to point the caller at the
+		// recovery path. This is a message-text dependency: if GitHub rewrites the
+		// 422, the friendly hint stops firing and the raw (lifted) 422 surfaces
+		// instead — still an error, never a silent success, so it degrades safely.
 		if strings.Contains(err.Error(), "422") && strings.Contains(strings.ToLower(err.Error()), "one pending review") {
 			return "", fmt.Errorf("a pending review already exists on this PR for the authenticated identity — fetch it with GetPendingReview instead of creating a new one")
 		}
@@ -88,6 +93,18 @@ func (c *Client) CreatePendingReview(owner, repo string, number int, commitSHA s
 func (c *Client) AddPendingReviewComment(reviewID string, comment SubmitReviewComment) (string, error) {
 	if reviewID == "" {
 		return "", fmt.Errorf("add pending review comment: empty review id")
+	}
+	// path/body/line are all required for a LINE-anchored thread; fail fast with
+	// a pointed message rather than letting GraphQL reject the mutation with a
+	// vaguer one (matching the reviewID guard above).
+	if comment.Path == "" {
+		return "", fmt.Errorf("add pending review comment: empty path")
+	}
+	if comment.Body == "" {
+		return "", fmt.Errorf("add pending review comment: empty body")
+	}
+	if comment.Line <= 0 {
+		return "", fmt.Errorf("add pending review comment: line must be positive, got %d", comment.Line)
 	}
 
 	decls := "$reviewId: ID!, $path: String!, $body: String!, $line: Int!"
@@ -229,13 +246,23 @@ func (c *Client) SubmitExistingReview(owner, repo, reviewID, event, body string)
 // GetPendingReview fetches the authenticated identity's current PENDING review
 // on a PR, if any, via GraphQL. A pending review is private to its author, so
 // filtering reviews by the PENDING state already scopes results to the viewer;
-// the viewerDidAuthor guard is belt-and-suspenders.
+// the viewerDidAuthor guard is belt-and-suspenders. GitHub allows at most one
+// pending review per identity per PR, so the result is effectively single — the
+// reviews(first: 50) request plus the loop is only defensive against an
+// unexpected non-author PENDING node, not an expectation of many.
 //
 // Returns ("", nil, nil) when there is no pending review — absence is a normal
-// result, not an error (B·3's collision check creates one in that case).
+// result, not an error (B·3's collision check creates one in that case). A
+// GraphQL error propagates instead of masquerading as "no review" — including
+// the 200 *partial* shape (usable data plus errors[]) that PostGraphQL passes
+// through, e.g. a FORBIDDEN on the reviews field — so the collision check never
+// creates a duplicate on top of an access failure.
+//
 // Otherwise returns the review's GraphQL node ID and its inline comments (each
 // carrying its own node ID for incremental edit/delete). Comments are capped at
-// 100, matching the other review-fetch paths.
+// 100: this is a correctness boundary for B·3's 1:1 sync, not just a perf cap —
+// a pending review with >100 inline comments would omit the oldest, which the
+// sync must NOT read as deletions (paginate, or bound the editor, when B·3 lands).
 func (c *Client) GetPendingReview(owner, repo string, number int) (string, []PendingReviewComment, error) {
 	query := `query($owner: String!, $repo: String!, $number: Int!) {
 		repository(owner: $owner, name: $repo) {
@@ -294,11 +321,16 @@ func (c *Client) GetPendingReview(owner, repo string, number int) (string, []Pen
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return "", nil, fmt.Errorf("parse pending review response: %w", err)
 	}
+	// Surface a partial GraphQL error before interpreting the data. PostGraphQL
+	// returns a 200 partial response (usable data + errors[]) without erroring,
+	// so a FORBIDDEN scoped to the reviews field arrives here as empty nodes
+	// alongside errors[] — checked first so it can't be silently read as "no
+	// pending review". (Total failures with null data already returned above.)
+	if len(resp.Errors) > 0 {
+		e := resp.Errors[0]
+		return "", nil, fmt.Errorf("get pending review: GraphQL error (%s): %s", e.Type, e.Message)
+	}
 	if resp.Data.Repository == nil || resp.Data.Repository.PullRequest == nil {
-		if len(resp.Errors) > 0 {
-			e := resp.Errors[0]
-			return "", nil, fmt.Errorf("get pending review: GraphQL error (%s): %s", e.Type, e.Message)
-		}
 		return "", nil, nil
 	}
 
