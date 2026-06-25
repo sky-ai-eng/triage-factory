@@ -130,9 +130,18 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	}
 	// Read the live pending review for the inline comments the agent staged on
 	// GitHub (each add-review-comment baked the severity badge into the body).
-	_, liveComments, err := client.GetPendingReview(owner, repo, number)
+	liveID, liveComments, err := client.GetPendingReview(owner, repo, number)
 	if err != nil {
 		return fmt.Errorf("read pending review from github: %w", err)
+	}
+	// Guard against the recorded review drifting from the live one: if the bot's
+	// pending review was deleted and recreated out-of-band between start-review and
+	// now, GetPendingReview returns a different review's comments — which would be
+	// snapshotted into details.Proposed as if they were the agent's. Bail rather
+	// than record a draft built from someone else's review. (This is the only place
+	// art.ExternalID isn't validated against the live state.)
+	if liveID != "" && liveID != art.ExternalID {
+		return fmt.Errorf("the pending review on GitHub (%s) no longer matches this run's recorded review (%s); it was replaced out-of-band — start a fresh review", liveID, art.ExternalID)
 	}
 
 	// A comment / request_changes review must carry something actionable: a body,

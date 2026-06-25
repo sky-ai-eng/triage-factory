@@ -131,3 +131,38 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 		t.Errorf("second submit-review = %v, want ErrReviewAlreadyFinalized", err)
 	}
 }
+
+// TestLocalClient_FinalizeReviewDraft_ReviewIDDrift pins the drift guard: when the
+// live pending review on the PR isn't the one recorded on the artifact (replaced
+// out-of-band), finalize errors and does NOT snapshot the foreign comments or set
+// the ready sentinel.
+func TestLocalClient_FinalizeReviewDraft_ReviewIDDrift(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/graphql") {
+			// The live pending review id differs from the recorded PRR_1.
+			_, _ = io.WriteString(w, pendingReviewGQL("PRR_OTHER", "PRRC_foreign", "someone else's nit"))
+			return
+		}
+		t.Errorf("unexpected GitHub REST call during drift finalize: %s %s", r.Method, r.URL.Path)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(srv.Close)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	seed := domain.NewReviewArtifact("octo/repo", 7, "PR_node7", "PRR_1")
+	if _, err := client.UpsertArtifact(context.Background(), seed); err != nil {
+		t.Fatalf("seed review artifact: %v", err)
+	}
+
+	err := client.FinalizeReviewDraft(context.Background(), "PRR_1", "COMMENT", "## body")
+	if err == nil || !strings.Contains(err.Error(), "replaced out-of-band") {
+		t.Fatalf("FinalizeReviewDraft = %v, want a drift error", err)
+	}
+	// Not finalized: ready sentinel still empty, no foreign comments snapshotted.
+	arts := listRunArtifacts(t, stores, info.RunID)
+	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if d.ReviewEvent != "" || len(d.Proposed.Comments) != 0 {
+		t.Errorf("artifact finalized despite drift: %+v", d)
+	}
+}

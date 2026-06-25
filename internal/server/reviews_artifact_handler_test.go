@@ -452,3 +452,47 @@ func TestReviewArtifactUpdate_NonPending_409(t *testing.T) {
 		t.Errorf("review_body = %q after rejected PATCH, want unchanged", d.ReviewBody)
 	}
 }
+
+// TestReviewArtifactCommentOps_ReviewIDDrift_409 pins that an edit/delete on a
+// pending review whose live id no longer matches the artifact's recorded id (the
+// review was replaced out-of-band) is rejected with 409 before any GitHub
+// mutation — even when the target comment is present in the live (wrong) review.
+func TestReviewArtifactCommentOps_ReviewIDDrift_409(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	badged := domain.SeverityBadgeMarkdown(domain.SeverityMajor) + "nit"
+	var mutated bool
+	mux := newAppAPIMux()
+	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if strings.Contains(req.Query, "updatePullRequestReviewComment") || strings.Contains(req.Query, "deletePullRequestReviewComment") {
+			mutated = true
+			_, _ = w.Write([]byte(`{"data":{}}`))
+			return
+		}
+		// The live pending review id (PRR_LIVE) differs from the recorded PRR_1,
+		// but it does contain PRRC_1 — the id check must fire before the membership
+		// check.
+		_, _ = w.Write([]byte(pendingReviewGraphQL("PRR_LIVE", "PRRC_1", badged)))
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rcdrift", "acme", "api", 7, "PRR_1", "COMMENT")
+
+	rec := doJSON(t, srv, http.MethodPut, "/api/artifacts/"+artID+"/comments/PRRC_1", map[string]any{"body": "x"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("update on drifted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, srv, http.MethodDelete, "/api/artifacts/"+artID+"/comments/PRRC_1", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("delete on drifted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if mutated {
+		t.Error("a drift 409 must not reach the GitHub update/delete mutation")
+	}
+}

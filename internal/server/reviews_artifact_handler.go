@@ -273,9 +273,17 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 	// pending review the credential can see would be editable through this
 	// artifact-scoped route. The same fetch recovers the comment's current severity
 	// (baked into its GitHub body) to re-bake the badge onto the human's edit.
-	_, comments, err := gh.GetPendingReview(owner, repo, number)
+	pendingID, comments, err := gh.GetPendingReview(owner, repo, number)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		return
+	}
+	// If the live pending review isn't the one the artifact records, it was
+	// replaced out-of-band — the comment-membership check below would pass against
+	// the wrong review. 409 so the edit can't land on a review this artifact no
+	// longer represents.
+	if pendingID != "" && pendingID != art.ExternalID {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "the pending review on this PR no longer matches the one prepared here — return it to the queue and start a fresh review"})
 		return
 	}
 	severity, found := "", false
@@ -327,9 +335,15 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 	// comment to belong to THIS artifact's pending review first — otherwise a
 	// commentId from another pending review the credential can see would be
 	// deletable through this artifact-scoped route.
-	_, comments, err := gh.GetPendingReview(owner, repo, number)
+	pendingID, comments, err := gh.GetPendingReview(owner, repo, number)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		return
+	}
+	// A live pending review that isn't the recorded one was replaced out-of-band;
+	// 409 rather than delete against a review this artifact no longer represents.
+	if pendingID != "" && pendingID != art.ExternalID {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "the pending review on this PR no longer matches the one prepared here — return it to the queue and start a fresh review"})
 		return
 	}
 	found := false

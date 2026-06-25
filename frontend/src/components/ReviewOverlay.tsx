@@ -172,12 +172,16 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     [artifactId],
   )
 
-  const lastSavePromise = useRef<Promise<void> | null>(null)
+  // Track every in-flight body/event stage (not just the most recent), so submit
+  // waits for all of them to settle — a body PATCH still writing when a later
+  // event PATCH resolves must not let approve race ahead of the body edit.
+  const inFlightSaves = useRef<Set<Promise<void>>>(new Set())
 
   const handleUpdateBody = useCallback(
     async (body: string) => {
       const p = patchReview({ review_body: body })
-      lastSavePromise.current = p
+      inFlightSaves.current.add(p)
+      void p.finally(() => inFlightSaves.current.delete(p))
       await p
       setReview((prev) => (prev ? { ...prev, review_body: body } : prev))
     },
@@ -187,7 +191,8 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   const handleUpdateEvent = useCallback(
     async (event: string) => {
       const p = patchReview({ review_event: event })
-      lastSavePromise.current = p
+      inFlightSaves.current.add(p)
+      void p.finally(() => inFlightSaves.current.delete(p))
       await p
       setReview((prev) => (prev ? { ...prev, review_event: event } : prev))
     },
@@ -198,16 +203,12 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     setSubmitting(true)
     setSubmitError(null)
     try {
-      // Settle any in-flight body/event stage before approving so we don't submit
-      // before the last edit lands. A FAILED stage is dropped (its error already
-      // surfaced) — approve reads the staged details, which hold the last
-      // successful value.
-      if (lastSavePromise.current) {
-        try {
-          await lastSavePromise.current
-        } catch {
-          /* failed stage already surfaced to the user */
-        }
+      // Settle EVERY in-flight body/event stage before approving so we don't submit
+      // before the last edit lands. allSettled never rejects — a failed stage is
+      // dropped (its error already surfaced) and approve reads the staged details,
+      // which hold the last successful values.
+      if (inFlightSaves.current.size > 0) {
+        await Promise.allSettled([...inFlightSaves.current])
       }
       const res = await fetch(`/api/artifacts/${artifactId}/approve`, {
         method: 'POST',
