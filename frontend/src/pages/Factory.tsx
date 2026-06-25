@@ -184,7 +184,12 @@ export default function Factory() {
   // event payload — the next snapshot carries the same information
   // in a form that's coherent with everything else on the floor.
   useWebSocket((evt) => {
-    if (evt.type === 'event' || evt.type === 'tasks_updated' || evt.type === 'agent_run_update') {
+    if (
+      evt.type === 'event' ||
+      evt.type === 'tasks_updated' ||
+      evt.type === 'agent_run_update' ||
+      evt.type === 'artifact_updated'
+    ) {
       const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
       refetch?.()
     }

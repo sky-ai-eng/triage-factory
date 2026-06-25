@@ -79,6 +79,34 @@ func TestBranchesExist_QualifiesRefAndAliases(t *testing.T) {
 	}
 }
 
+// TestBranchesExist_ErroredRefIsUnknown pins that a ref which is null because of
+// a per-field GraphQL error (a 200 partial: repository resolves, but errors[]
+// names the ref's alias) is treated as UNKNOWN (omitted), NOT "gone" — so a
+// FORBIDDEN/transient failure can never be read as a branch deletion. A sibling
+// ref with no error still resolves normally.
+func TestBranchesExist_ErroredRefIsUnknown(t *testing.T) {
+	body := `{
+		"data": {"r0": {"ref": null}, "r1": {"ref": {"id": "REF_alive"}}},
+		"errors": [{"type": "FORBIDDEN", "message": "no access", "path": ["r0", "ref"]}]
+	}`
+	c := clientAgainst(graphqlServing(t, body))
+
+	refs := []BranchRef{
+		{Owner: "octo", Repo: "locked", Branch: "secret"}, // r0: ref null + error
+		{Owner: "octo", Repo: "repo", Branch: "alive"},    // r1: exists
+	}
+	got, err := c.BranchesExist(refs)
+	if err != nil {
+		t.Fatalf("BranchesExist: %v", err)
+	}
+	if _, present := got[refs[0]]; present {
+		t.Errorf("a ref null due to a per-field error must be omitted (unknown), but it was recorded as %v", got[refs[0]])
+	}
+	if v, present := got[refs[1]]; !present || !v {
+		t.Errorf("the un-errored ref: got (exists=%v, present=%v), want (true, true)", v, present)
+	}
+}
+
 // TestBranchesExist_Empty pins that no input is a no-op (nil map, nil error) —
 // the reconciler calls it unconditionally per owner.
 func TestBranchesExist_Empty(t *testing.T) {

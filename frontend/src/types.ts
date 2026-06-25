@@ -767,6 +767,13 @@ export interface FactorySnapshot {
 
 export type WSEvent =
   | { type: 'agent_run_update'; run_id: string; data: { status: string } }
+  // Artifact reconciliation (TFAC-464): an artifact a run produced changed
+  // state on GitHub (PR merged/closed, branch deleted, review submitted). The
+  // run's own status is unchanged — consumers refetch the run to pick up its
+  // artifact-derived surface (pending kind / approval card). Distinct from
+  // agent_run_update precisely so it never feeds the Board's optimistic
+  // run.Status write.
+  | { type: 'artifact_updated'; run_id: string; data: { artifact_id: string; state: string } }
   | { type: 'agent_message'; run_id: string; data: AgentMessage }
   | {
       // P3 steering: a run surfaced a tool-permission prompt (canUseTool),

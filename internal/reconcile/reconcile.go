@@ -212,19 +212,22 @@ func (rc *Reconciler) recordRunOutcome(ctx context.Context, orgID, runID string)
 	}
 }
 
-// broadcast pushes the transition to the frontend as an agent_run_update on the
-// owning run — the run view already refetches the run (and its artifact-derived
-// pending surface) on that event, so no new event type or FE handler is needed.
-// Skipped for a detached artifact (no run to address) or when the hub is unset.
+// broadcast pushes the transition to the frontend as a dedicated artifact_updated
+// event on the owning run. It deliberately does NOT reuse agent_run_update: that
+// event's consumers (the Board) optimistically write run.Status = data.status, so
+// a payload carrying no real status would blank the card until a refetch. The
+// run's own status is unchanged here — only its artifact-derived surface (pending
+// kind / approval card) is — so the FE handlers refetch the run on this event
+// without touching status. Skipped for a detached artifact (no run) or unset hub.
 func (rc *Reconciler) broadcast(orgID string, a domain.Artifact) {
 	if rc.ws == nil || a.RunID == "" {
 		return
 	}
 	rc.ws.Broadcast(websocket.Event{
-		Type:  "agent_run_update",
+		Type:  "artifact_updated",
 		OrgID: orgID,
 		RunID: a.RunID,
-		Data:  map[string]any{"artifact_id": a.ID, "artifact_state": a.State},
+		Data:  map[string]any{"artifact_id": a.ID, "state": a.State},
 	})
 }
 

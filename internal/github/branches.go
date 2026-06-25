@@ -93,16 +93,36 @@ func (c *Client) branchesExistBatch(refs []BranchRef, out map[BranchRef]bool) er
 				ID string `json:"id"`
 			} `json:"ref"`
 		} `json:"data"`
+		Errors gqlErrors `json:"errors"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return fmt.Errorf("parse branch existence response: %w", err)
 	}
+
+	// PostGraphQL passes a 200 partial (usable data + errors[]) through. An
+	// errors[] entry scoped to one alias — a FORBIDDEN / timeout on its
+	// repository or ref — leaves that alias's ref null for a reason that is NOT
+	// "the branch is gone". Collect the aliases named in errors[].path[0] and
+	// treat them as UNKNOWN (omit), so a per-field failure is never read as a
+	// deletion. path is [alias, "ref", ...]; path[0] is the r<i> alias.
+	errored := map[string]bool{}
+	for _, e := range resp.Errors {
+		if len(e.Path) > 0 {
+			if alias, ok := e.Path[0].(string); ok {
+				errored[alias] = true
+			}
+		}
+	}
+
 	for i, r := range refs {
-		repo, ok := resp.Data[fmt.Sprintf("r%d", i)]
+		alias := fmt.Sprintf("r%d", i)
+		if errored[alias] {
+			continue // a per-field error on this ref — unknown, never "deleted"
+		}
+		repo, ok := resp.Data[alias]
 		if !ok || repo == nil {
-			// Repository didn't resolve — gone/renamed/inaccessible, or a
-			// per-field error. Leave it unknown so the caller never marks the
-			// branch deleted on a non-answer.
+			// Repository didn't resolve — gone/renamed/inaccessible. Leave it
+			// unknown so the caller never marks the branch deleted on a non-answer.
 			continue
 		}
 		out[r] = repo.Ref != nil

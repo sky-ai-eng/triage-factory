@@ -151,7 +151,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // merged/closed on GitHub, a branch deleted, a review submitted) reflect
   // without waiting for the background per-org cycle. The backend bounds the
   // work to this run's non-terminal artifacts — a cheap no-op once they're all
-  // terminal — and broadcasts any transition as agent_run_update, which the
+  // terminal — and broadcasts any transition as artifact_updated, which the
   // websocket handler below turns into a run refetch. On a dropped frame the
   // {updated} count drives a defensive refetch so the view can't go stale.
   useEffect(() => {
@@ -204,6 +204,18 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           if (isPermissionTerminalStatus(event.data.status)) {
             dropRun(runID)
           }
+          fetch(`/api/agent/runs/${runID}`)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((data: AgentRun | null) => {
+              if (data) setRun(data)
+            })
+            .catch(() => {})
+        }
+        if (event.type === 'artifact_updated' && event.run_id === runID) {
+          // Reconciler (TFAC-464): an artifact this run produced changed state
+          // on GitHub. Refetch the run so its artifact-derived surface (pending
+          // kind / approval overlay) updates. The run's own status is unchanged,
+          // so no permission-queue drop here.
           fetch(`/api/agent/runs/${runID}`)
             .then((r) => (r.ok ? r.json() : null))
             .then((data: AgentRun | null) => {

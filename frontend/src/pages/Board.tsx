@@ -538,6 +538,28 @@ export default function Board() {
                 .catch(() => {})
             }
           }
+        } else if (event.type === 'artifact_updated') {
+          // Reconciler (TFAC-464): an artifact this run produced changed state
+          // on GitHub. The run's own status is unchanged — only its
+          // artifact-derived surface (pending kind / approval card) — so refetch
+          // the run, with NO optimistic Status write (unlike agent_run_update).
+          fetch(`/api/agent/runs/${event.run_id}`)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((fullRun: AgentRun | null) => {
+              if (!fullRun) return
+              setAgentRuns((p) => {
+                const existing = p[fullRun.TaskID]
+                if (
+                  existing &&
+                  existing.ID !== fullRun.ID &&
+                  existing.StartedAt >= fullRun.StartedAt
+                ) {
+                  return p
+                }
+                return { ...p, [fullRun.TaskID]: fullRun }
+              })
+            })
+            .catch(() => {})
         } else if (event.type === 'agent_message') {
           // Live run-log append. AgentCard renders from agentMessages
           // keyed by run.ID; without this, new agent output only
