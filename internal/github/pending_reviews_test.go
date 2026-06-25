@@ -304,13 +304,16 @@ func TestSubmitExistingReview_Guards(t *testing.T) {
 }
 
 // TestGetPendingReview_Found returns the viewer's pending review id and its
-// inline comments, mapping line/startLine (incl. a null startLine → nil) and
-// the per-comment node ids the sync needs for edit/delete.
+// inline comments, mapping line/startLine and the per-comment node ids the sync
+// needs for edit/delete. The third comment pins the nullable-anchor contract: a
+// null line maps to a nil Line pointer (an outdated/unpositioned comment),
+// distinct from a real line and never silently collapsed to 0.
 func TestGetPendingReview_Found(t *testing.T) {
 	resp := `{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[
 		{"id":"PRR_mine","viewerDidAuthor":true,"comments":{"nodes":[
 			{"id":"PRRC_1","path":"a.go","line":5,"startLine":null,"body":"one"},
-			{"id":"PRRC_2","path":"b.go","line":20,"startLine":15,"body":"two"}
+			{"id":"PRRC_2","path":"b.go","line":20,"startLine":15,"body":"two"},
+			{"id":"PRRC_3","path":"c.go","line":null,"startLine":null,"body":"outdated"}
 		]}}
 	]}}}}}`
 	c, rec := graphqlCapturing(t, resp)
@@ -325,10 +328,10 @@ func TestGetPendingReview_Found(t *testing.T) {
 	if rec.variables["number"] != float64(7) {
 		t.Errorf("number var = %v, want 7", rec.variables["number"])
 	}
-	if len(comments) != 2 {
-		t.Fatalf("comments = %+v, want 2", comments)
+	if len(comments) != 3 {
+		t.Fatalf("comments = %+v, want 3", comments)
 	}
-	if comments[0].ID != "PRRC_1" || comments[0].Path != "a.go" || comments[0].Line != 5 {
+	if comments[0].ID != "PRRC_1" || comments[0].Path != "a.go" || comments[0].Line == nil || *comments[0].Line != 5 {
 		t.Errorf("comment[0] = %+v, want id PRRC_1 path a.go line 5", comments[0])
 	}
 	if comments[0].StartLine != nil {
@@ -336,6 +339,11 @@ func TestGetPendingReview_Found(t *testing.T) {
 	}
 	if comments[1].StartLine == nil || *comments[1].StartLine != 15 {
 		t.Errorf("comment[1].StartLine = %v, want 15", comments[1].StartLine)
+	}
+	// Null line → nil pointer, not 0: the outdated/unpositioned case stays
+	// distinguishable from a comment that really anchors at line 0.
+	if comments[2].Line != nil {
+		t.Errorf("comment[2].Line = %v, want nil for a null (unpositioned) line", *comments[2].Line)
 	}
 }
 

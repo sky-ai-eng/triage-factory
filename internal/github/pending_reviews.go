@@ -12,13 +12,18 @@ import (
 // pending review on GitHub: the node ID (for in-place update/delete), the
 // anchor (Path + Line, plus StartLine for a multi-line range), and the Body.
 //
+// Line and StartLine are pointers because GitHub returns them null for a
+// comment with no anchor on the current diff (an outdated/unpositioned
+// comment). nil therefore means "no current-diff line" — distinct from a real
+// line, and not silently collapsed to 0, so a consumer can tell the two apart.
+//
 // Distinct from ReviewDetailComment (REST, int ID, used for already-submitted
 // reviews): every pending-review comment mutation goes through GraphQL, which
 // addresses comments by node ID, not the REST integer id.
 type PendingReviewComment struct {
 	ID        string `json:"id"`
 	Path      string `json:"path"`
-	Line      int    `json:"line"`
+	Line      *int   `json:"line,omitempty"`
 	StartLine *int   `json:"start_line,omitempty"`
 	Body      string `json:"body"`
 }
@@ -303,16 +308,13 @@ func (c *Client) GetPendingReview(owner, repo string, number int) (string, []Pen
 		}
 		comments := make([]PendingReviewComment, 0, len(rv.Comments.Nodes))
 		for _, cm := range rv.Comments.Nodes {
-			prc := PendingReviewComment{
+			comments = append(comments, PendingReviewComment{
 				ID:        cm.ID,
 				Path:      cm.Path,
 				Body:      cm.Body,
+				Line:      cm.Line,
 				StartLine: cm.StartLine,
-			}
-			if cm.Line != nil {
-				prc.Line = *cm.Line
-			}
-			comments = append(comments, prc)
+			})
 		}
 		return rv.ID, comments, nil
 	}
