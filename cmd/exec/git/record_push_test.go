@@ -156,6 +156,26 @@ func TestRecordPush_SkipsNonBranchRef(t *testing.T) {
 	}
 }
 
+func TestBranchWebURL_EscapesSegments(t *testing.T) {
+	cases := []struct {
+		branch string
+		want   string
+	}{
+		{"main", "https://github.com/octo/repo/tree/main"},
+		// `/` separators are preserved as path separators.
+		{"feature/x", "https://github.com/octo/repo/tree/feature/x"},
+		// `#`, space, and `%` are escaped so they don't break the link.
+		{"feature/#123", "https://github.com/octo/repo/tree/feature/%23123"},
+		{"wip/a b", "https://github.com/octo/repo/tree/wip/a%20b"},
+		{"odd/100%done", "https://github.com/octo/repo/tree/odd/100%25done"},
+	}
+	for _, c := range cases {
+		if got := branchWebURL("octo", "repo", c.branch); got != c.want {
+			t.Errorf("branchWebURL(octo, repo, %q) = %q, want %q", c.branch, got, c.want)
+		}
+	}
+}
+
 func TestParseRemoteOwnerRepo(t *testing.T) {
 	cases := []struct {
 		remote string
@@ -171,9 +191,14 @@ func TestParseRemoteOwnerRepo(t *testing.T) {
 		// Sandbox git-proxy rewrites the remote to its veth address; the
 		// owner/repo path still parses cleanly.
 		{"http://10.42.0.1:38573/octo/repo", "octo", "repo", true},
+		{"http://127.0.0.1:9000/octo/repo", "octo", "repo", true},
 		// Unparseable / unsupported shapes -> best-effort skip.
 		{"", "", "", false},
 		{"https://github.com/octo", "", "", false},
+		// Non-GitHub public hosts are rejected even when the path is exactly
+		// owner/repo — the github.com web URL would be wrong for them.
+		{"https://gitlab.com/group/repo.git", "", "", false},
+		{"git@gitlab.com:group/repo.git", "", "", false},
 		{"https://gitlab.com/group/subgroup/repo.git", "", "", false},
 	}
 	for _, c := range cases {

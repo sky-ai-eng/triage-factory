@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 
@@ -44,8 +46,13 @@ func runRecordPush(host agenthost.Client, args []string) {
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2) // flag already printed the error
 	}
-	if *remote == "" || *ref == "" {
-		fmt.Fprintln(os.Stderr, "git record-push: --remote and --ref are required")
+	if *remote == "" || *ref == "" || *sha == "" {
+		// --sha is required, not just --remote/--ref: the commit SHA is part
+		// of the durable "what landed" record (it's the branch's pushed head
+		// in details_json), so an empty one would store a meaningless
+		// artifact. The hook always supplies it for a real push; an empty
+		// value means a malformed invocation.
+		fmt.Fprintln(os.Stderr, "git record-push: --remote, --ref, and --sha are required")
 		os.Exit(2)
 	}
 
@@ -96,15 +103,33 @@ func runRecordPush(host agenthost.Client, args []string) {
 // deriving the host from it would be wrong. GHES web hosts aren't modeled
 // (the product is GitHub-focused); a github.com link is the documented
 // default.
+//
+// Each branch path segment is URL-escaped: a branch name can legally
+// contain `#`, `%`, `?`, space, etc., which would otherwise break the link
+// (a `#` would start a fragment). `/` separators are preserved (a branch
+// like feature/x maps to .../tree/feature/x), so escaping is per-segment.
 func branchWebURL(owner, repo, branch string) string {
-	return "https://github.com/" + owner + "/" + repo + "/tree/" + branch
+	segs := strings.Split(branch, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return "https://github.com/" + owner + "/" + repo + "/tree/" + strings.Join(segs, "/")
 }
 
 // parseRemoteOwnerRepo extracts owner/repo from the remote URL git hands
 // the pre-push hook. Handles the SCP-style and URL-style forms git emits,
 // including the rewritten http://<proxy>/owner/repo form the sandbox git
 // proxy produces. Returns ok=false for anything it can't resolve to
-// exactly owner/repo (the caller treats that as best-effort skip).
+// exactly owner/repo on a recognized host (the caller treats that as a
+// best-effort skip).
+//
+// Host gating: the artifact URL is hardcoded to github.com, so a non-GitHub
+// remote (gitlab.com/group/repo) must NOT be recorded — it would mint a
+// wrong github.com link for someone else's repo. Accepted hosts are
+// github.com itself and any loopback/private IP (the sandbox git proxy's
+// veth address, where the real upstream was github.com). A GHES/other public
+// host is skipped rather than mis-recorded — correct-web-host GHES support is
+// explicitly out of scope (see branchWebURL).
 //
 // A deliberately small, self-contained parser rather than importing
 // cmd/exec/gh's unexported equivalent: gh is a heavy subcommand package
@@ -117,21 +142,54 @@ func parseRemoteOwnerRepo(remote string) (owner, repo string, ok bool) {
 		return "", "", false
 	}
 
-	// SCP-style: [user@]host:owner/repo(.git)
+	var host, path string
 	if !strings.Contains(remote, "://") {
-		if colon := strings.LastIndex(remote, ":"); colon >= 0 {
-			return splitOwnerRepoPath(remote[colon+1:])
+		// SCP-style: [user@]host:owner/repo(.git)
+		colon := strings.LastIndex(remote, ":")
+		if colon < 0 {
+			return "", "", false
 		}
-		return "", "", false
+		host, path = stripUserInfo(remote[:colon]), remote[colon+1:]
+	} else {
+		// URL-style: scheme://[user@]host[:port]/owner/repo(.git)
+		rest := remote[strings.Index(remote, "://")+len("://"):]
+		slash := strings.Index(rest, "/")
+		if slash < 0 {
+			return "", "", false
+		}
+		host, path = stripUserInfo(rest[:slash]), rest[slash+1:]
 	}
 
-	// URL-style: scheme://[user@]host[:port]/owner/repo(.git)
-	rest := remote[strings.Index(remote, "://")+len("://"):]
-	slash := strings.Index(rest, "/")
-	if slash < 0 {
+	if !isGitHubOrProxyHost(host) {
 		return "", "", false
 	}
-	return splitOwnerRepoPath(rest[slash+1:])
+	return splitOwnerRepoPath(path)
+}
+
+// stripUserInfo drops a leading "user@" from a host authority.
+func stripUserInfo(host string) string {
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		return host[at+1:]
+	}
+	return host
+}
+
+// isGitHubOrProxyHost reports whether host (a possibly host:port authority)
+// is one record-push trusts to be github.com: literally github.com, or a
+// loopback/private IP — the sandbox git proxy's veth address, which fronts
+// a github.com upstream. Any other public host (gitlab.com, a GHES domain)
+// is rejected so its pushes aren't mis-recorded under a github.com URL.
+func isGitHubOrProxyHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "github.com" || host == "www.github.com" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate()
+	}
+	return false
 }
 
 // splitOwnerRepoPath takes the path portion after the host and resolves it
