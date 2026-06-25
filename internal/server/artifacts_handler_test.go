@@ -100,14 +100,17 @@ func TestArtifactUpdate_GitHubFailure_Pessimistic(t *testing.T) {
 func TestArtifactApprove(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	var patched, marked bool
+	var marked bool
+	var patchBody map[string]any
 	mux := newAppAPIMux()
 	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		patched = true
+		_ = json.NewDecoder(r.Body).Decode(&patchBody)
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
 	})
+	// approve reads the LIVE PR for the content to promote, so GET must serve the
+	// current title/body (matching the proposed snapshot here → "as drafted").
 	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "node_id": "PR_node"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "node_id": "PR_node", "title": "Proposed title", "body": "Proposed body"})
 	})
 	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
 		marked = true
@@ -122,8 +125,12 @@ func TestArtifactApprove(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if !patched || !marked {
-		t.Errorf("approve must UpdatePR (got %v) and MarkPRReady (got %v)", patched, marked)
+	if patchBody == nil || !marked {
+		t.Errorf("approve must UpdatePR (got %v) and MarkPRReady (got %v)", patchBody, marked)
+	}
+	// The promoted body is the live content with the agentmeta footer appended.
+	if got, _ := patchBody["body"].(string); !strings.HasPrefix(got, "Proposed body") || !strings.Contains(got, "Triage Factory") {
+		t.Errorf("UpdatePR body = %q, want live body + footer", got)
 	}
 	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePROpen {
 		t.Errorf("artifact state = %q, want open", got)
@@ -172,6 +179,145 @@ func TestArtifactAbandon_ClosesDraftPR(t *testing.T) {
 	}
 	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePRClosed {
 		t.Errorf("artifact state = %q, want closed", got)
+	}
+}
+
+// TestArtifactUpdate_SingleField_UsesLiveBaseline pins the lost-update fix: a
+// PATCH that touches only the title fills the untouched body from the PR's CURRENT
+// live value, not a stale cached snapshot — so a body edited directly on GitHub
+// isn't silently reverted.
+func TestArtifactUpdate_SingleField_UsesLiveBaseline(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var patchBody map[string]any
+	mux := newAppAPIMux()
+	// The live body diverged from the snapshot (seeded as "Body.") via a direct
+	// GitHub edit.
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "title": "Live title", "body": "Body edited on GitHub"})
+	})
+	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&patchBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID := seedDraftPRArtifact(t, srv, "acme", "api")
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"title": "New title"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if patchBody["title"] != "New title" {
+		t.Errorf("UpdatePR title = %v, want New title", patchBody["title"])
+	}
+	if patchBody["body"] != "Body edited on GitHub" {
+		t.Errorf("UpdatePR body = %v, want the live body (no lost update); the stale snapshot was %q", patchBody["body"], "Body.")
+	}
+}
+
+// TestArtifactUpdate_PartialEdit_GetPRFailure_502 pins that when the live
+// baseline read fails on a single-field PATCH, the handler fails rather than
+// clobbering the untouched field from a stale snapshot.
+func TestArtifactUpdate_PartialEdit_GetPRFailure_502(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	patched := false
+	mux := newAppAPIMux()
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+	})
+	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		patched = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID := seedDraftPRArtifact(t, srv, "acme", "api")
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"title": "New title"})
+	if rec.Code < 400 {
+		t.Fatalf("patch = %d, want non-2xx when the live baseline read fails", rec.Code)
+	}
+	if patched {
+		t.Error("UpdatePR must not run when the baseline read failed — it would clobber the untouched field")
+	}
+}
+
+// TestArtifactApprove_MalformedDetails_PromotesFromLive pins the data-loss fix:
+// even when details_json is unparseable, approve promotes the PR from its LIVE
+// content — never empty title/body that would wipe the PR.
+func TestArtifactApprove_MalformedDetails_PromotesFromLive(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var patchBody map[string]any
+	mux := newAppAPIMux()
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "node_id": "PR_node", "title": "Live title", "body": "Live body"})
+	})
+	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&patchBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
+	})
+	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"markPullRequestReadyForReview": map[string]any{"pullRequest": map[string]any{"isDraft": false}}}})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedDraftPRArtifactWithRun(t, srv, "appmal", "acme", "api", 42)
+	if _, err := srv.db.Exec(`UPDATE artifacts SET details_json='{not valid json' WHERE id=?`, artID); err != nil {
+		t.Fatalf("corrupt details: %v", err)
+	}
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if title, _ := patchBody["title"].(string); title != "Live title" {
+		t.Errorf("UpdatePR title = %q, want live title (never empty from malformed details)", title)
+	}
+	if got, _ := patchBody["body"].(string); !strings.HasPrefix(got, "Live body") {
+		t.Errorf("UpdatePR body = %q, want live body (+footer), never empty", got)
+	}
+}
+
+// TestArtifactApprove_FooterIdempotent pins that approving a PR whose live body
+// already carries a footer (a prior partially-failed approve) strips it before
+// re-appending, so exactly one footer survives.
+func TestArtifactApprove_FooterIdempotent(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var patchBody map[string]any
+	liveBody := "Real body\n\n---\n*This PR was partially generated by AI using [Triage Factory](https://github.com/sky-ai-eng/triage-factory).*\n\nTime: 1s | Cost: $0.001"
+	mux := newAppAPIMux()
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "node_id": "PR_node", "title": "T", "body": liveBody})
+	})
+	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&patchBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
+	})
+	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"markPullRequestReadyForReview": map[string]any{"pullRequest": map[string]any{"isDraft": false}}}})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedDraftPRArtifactWithRun(t, srv, "appftr", "acme", "api", 42)
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := patchBody["body"].(string)
+	if n := strings.Count(got, "partially generated by AI using [Triage Factory]"); n != 1 {
+		t.Errorf("footer appears %d times, want exactly 1 (idempotent); body=%q", n, got)
+	}
+	if !strings.HasPrefix(got, "Real body") {
+		t.Errorf("stripped body lost its real content: %q", got)
 	}
 }
 

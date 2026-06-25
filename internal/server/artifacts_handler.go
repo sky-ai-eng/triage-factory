@@ -161,13 +161,26 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Whole-field replace: UpdatePR sends both title and body, so a PATCH that
-	// touches only one field fills the other from the current snapshot (TF's
-	// record, kept current by every prior edit). The snapshot is the baseline,
-	// matching the old pending_prs row-as-baseline semantics.
-	details, _ := domain.ParsePRArtifactDetails(art.DetailsJSON)
-	title := details.Snapshot.Title
-	body := details.Snapshot.Body
+	// Whole-field replace: UpdatePR rewrites both title and body, so a PATCH that
+	// touches only one field must fill the other with the PR's CURRENT live value,
+	// not a cached snapshot. Using the snapshot would silently revert a field the
+	// human (or anyone) edited directly on GitHub since we last cached it — a lost
+	// update. We only need the live read when a field is omitted; if the client
+	// sent both, skip the round-trip.
+	details, derr := domain.ParsePRArtifactDetails(art.DetailsJSON)
+	var title, body string
+	if req.Title == nil || req.Body == nil {
+		live, err := gh.GetPR(owner, repo, number, false)
+		if err != nil {
+			// We can't reconstruct the omitted field without the current PR state,
+			// and guessing from a stale snapshot risks clobbering. Fail loudly.
+			artifactsLog.Warn("GetPR for partial-edit baseline failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't read the current PR to apply a partial edit: " + err.Error()})
+			return
+		}
+		title = live.Title
+		body = live.Body
+	}
 	if req.Title != nil {
 		title = *req.Title
 	}
@@ -195,9 +208,15 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	// Refresh the artifact's mutable snapshot to the new title/body; proposed
 	// stays frozen. Best-effort-but-reported: the GitHub edit already landed, so
 	// a snapshot-write failure isn't fatal to the user's edit, but we log it.
-	details.Snapshot = domain.PRArtifactSnapshot{Title: title, Body: body}
-	if err := ah.upsertPRDetails(r.Context(), orgID, userID, art, details); err != nil {
-		artifactsLog.Warn("refresh PR artifact snapshot failed (GitHub edit applied)", "artifact", art.ID, "error", err)
+	// Skip when details didn't parse — re-marshaling a zero-value details would
+	// blank the proposed (agent draft) baseline the approve diff needs.
+	if derr != nil {
+		artifactsLog.Warn("PR artifact details unparseable; skipping snapshot refresh after edit", "artifact", art.ID, "error", derr)
+	} else {
+		details.Snapshot = domain.PRArtifactSnapshot{Title: title, Body: body}
+		if err := ah.upsertPRDetails(r.Context(), orgID, userID, art, details); err != nil {
+			artifactsLog.Warn("refresh PR artifact snapshot failed (GitHub edit applied)", "artifact", art.ID, "error", err)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -266,11 +285,13 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 // same post-approval flow the old pending_prs submit handler ran, minus the
 // CreatePR (the PR already exists).
 //
-// The two GitHub mutations come first and are pessimistic (non-2xx on failure):
-// the footer base is the proposed/edited snapshot WITHOUT a footer, so a retry
-// after a partial failure re-appends exactly one footer (idempotent). Everything
-// after the GitHub success is detached best-effort bookkeeping — the PR is
-// already ready, so a client disconnect must not strand the run/task half-flipped.
+// The content promoted is read LIVE from GitHub (never the cached snapshot), so a
+// stale or malformed snapshot can neither revert a direct GitHub edit nor write an
+// empty body that wipes the PR. The footer is appended idempotently (existing one
+// stripped first), so a retry after a partial failure leaves exactly one. The two
+// GitHub mutations come first and are pessimistic (non-2xx on failure); everything
+// after is detached best-effort bookkeeping — the PR is already ready, so a client
+// disconnect must not strand the run/task half-flipped.
 func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -284,13 +305,30 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		return
 	}
 
-	details, _ := domain.ParsePRArtifactDetails(art.DetailsJSON)
-	finalTitle := details.Snapshot.Title
-	finalBody := details.Snapshot.Body
+	// Parse the artifact details for the proposed (agent-draft) baseline the
+	// human-verdict memory diffs against. A parse failure is non-fatal: we still
+	// promote the PR from its LIVE content (below) and only skip the verdict diff.
+	details, derr := domain.ParsePRArtifactDetails(art.DetailsJSON)
+	if derr != nil {
+		artifactsLog.Warn("PR artifact details unparseable; promoting from live PR and skipping the verdict diff", "artifact", art.ID, "error", derr)
+	}
 
-	// Build the final body with footer from the pre-footer snapshot, so a retry
-	// after a partial GitHub failure can't double-append.
-	footeredBody := finalBody + agentmeta.Build(ah.agentRuns, orgID, art.RunID, "PR")
+	// Source the promoted content from the LIVE PR, never the cached snapshot: a
+	// stale snapshot would revert a direct-on-GitHub edit, and a malformed one
+	// would yield empty title/body that UpdatePR would write over the PR. GetPR
+	// failure is fatal here — we can't safely promote what we can't read.
+	live, err := gh.GetPR(owner, repo, number, false)
+	if err != nil {
+		artifactsLog.Warn("approve GetPR failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't read the PR to promote it: " + err.Error()})
+		return
+	}
+	finalTitle := live.Title
+	finalBody := live.Body
+
+	// Append the footer idempotently: strip any footer a prior (partially failed)
+	// approve already added before re-appending, so a retry can't stack footers.
+	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.agentRuns, orgID, art.RunID, "PR")
 	if err := gh.UpdatePR(owner, repo, number, finalTitle, footeredBody); err != nil {
 		artifactsLog.Warn("approve UpdatePR (footer) failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
@@ -304,15 +342,20 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 
 	// Post-success bookkeeping runs detached from r.Context(): the PR is already
 	// ready on GitHub, so a client disconnect mustn't leave the run/task in a
-	// half-cleaned state. Each step is best-effort + logged (ported from the old
-	// handlePendingPRSubmit cleanup), and each gets its own tx so one failure
-	// doesn't roll back the others.
+	// half-cleaned state. Each step is best-effort + logged, and each gets its own
+	// tx so one failure doesn't roll back the others.
 	cleanupCtx := context.WithoutCancel(r.Context())
 
-	// Step 1: flip the artifact to open. proposed + snapshot are preserved
-	// (details unchanged); only state moves.
+	// Step 1: flip the artifact to open and refresh its snapshot to the promoted
+	// (pre-footer) content. proposed stays frozen. When details didn't parse we
+	// still flip the state but leave the (malformed) details rather than blanking
+	// them.
 	openArt := *art
 	openArt.State = domain.ArtifactStatePROpen
+	if derr == nil {
+		details.Snapshot = domain.PRArtifactSnapshot{Title: finalTitle, Body: finalBody}
+		openArt.DetailsJSON = domain.MarshalPRArtifactDetails(details)
+	}
 	if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 		_, e := tx.Artifacts.Upsert(cleanupCtx, orgID, openArt)
 		return e
@@ -320,9 +363,10 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		artifactsLog.Warn("flip PR artifact to open failed", "artifact", art.ID, "error", err)
 	}
 
-	// Step 2: human verdict capture. Mirrors the submit-time human-verdict block
-	// so the next retry of this ticket sees what the human changed vs the agent's draft.
-	if art.RunID != "" {
+	// Step 2: human verdict capture — only when we recovered the agent's proposed
+	// draft (details parsed); without it there's no honest baseline to diff the
+	// human's final against, so we skip rather than fabricate a "was empty" diff.
+	if art.RunID != "" && derr == nil {
 		humanContent := formatPRHumanFeedback(details.Proposed.Title, details.Proposed.Body, finalTitle, finalBody)
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, art.RunID, humanContent)
