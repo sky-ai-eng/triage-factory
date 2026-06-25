@@ -55,10 +55,12 @@ func receivePackRepoPath(p string) string {
 
 // serveReceivePack proxies a push while teeing its body, then records a branch
 // artifact for each non-delete ref it pushed. The recording runs only after
-// ServeHTTP returns — i.e. after the response is fully back to the client — so
-// it cannot block, alter, or fail the push. It is gated on a 2xx upstream
-// status so a push the upstream refused (401/403/5xx — nothing landed) is not
-// recorded.
+// ServeHTTP returns — the upstream response is fully written to the client by
+// then — so it can neither block, alter, nor fail the push or its response. The
+// handler goroutine does stay alive until recording finishes, so a graceful
+// Shutdown waits for it (bounded by recordPushTimeout); the integration test
+// relies on exactly that to synchronize. It is gated on a 2xx upstream status
+// so a push the upstream refused (401/403/5xx — nothing landed) is not recorded.
 func (s *Server) serveReceivePack(w http.ResponseWriter, r *http.Request) {
 	tee := &receivePackCapture{rc: r.Body, max: maxReceivePackCapture}
 	r.Body = tee
@@ -142,7 +144,13 @@ type statusRecorder struct {
 }
 
 func (w *statusRecorder) WriteHeader(code int) {
-	if w.status == 0 {
+	// Capture the first FINAL status only. A backend 1xx interim response —
+	// chiefly 100 Continue, which a git client elicits with Expect:
+	// 100-continue and httputil.ReverseProxy forwards by calling WriteHeader
+	// with the 1xx code on this very writer — must not latch the 2xx gate; the
+	// real 2xx/4xx/5xx arrives in a later call. Every code is still passed
+	// through so the informational response reaches the client unchanged.
+	if w.status == 0 && code >= 200 {
 		w.status = code
 	}
 	w.ResponseWriter.WriteHeader(code)

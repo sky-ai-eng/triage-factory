@@ -3,6 +3,7 @@ package gitproxy
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
@@ -171,4 +172,37 @@ func TestDispatchPushes_StopsWhenContextDone(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("RecordPush called %d times, want 1 (loop must stop once ctx is done)", calls)
 	}
+}
+
+// TestStatusRecorder_CapturesFirstFinalStatus pins that the 2xx gate keys off
+// the upstream's first FINAL status, not a 1xx interim one. ReverseProxy
+// forwards a backend 100 Continue (which git elicits via Expect: 100-continue)
+// by calling WriteHeader(100) on this writer; latching that would wrongly drop
+// the record on a successful push.
+func TestStatusRecorder_CapturesFirstFinalStatus(t *testing.T) {
+	t.Run("1xx interim does not latch the gate", func(t *testing.T) {
+		sr := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+		sr.WriteHeader(http.StatusContinue) // 100 — forwarded interim, must be ignored
+		sr.WriteHeader(http.StatusOK)       // 200 — the real final status
+		if sr.status != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (a 1xx interim response must not latch the 2xx gate)", sr.status)
+		}
+	})
+	t.Run("first final status wins", func(t *testing.T) {
+		sr := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+		sr.WriteHeader(http.StatusForbidden)
+		sr.WriteHeader(http.StatusInternalServerError)
+		if sr.status != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 (first final status wins)", sr.status)
+		}
+	})
+	t.Run("implicit 200 via Write", func(t *testing.T) {
+		sr := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+		if _, err := sr.Write([]byte("ok")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if sr.status != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (a bare Write implies 200)", sr.status)
+		}
+	})
 }
