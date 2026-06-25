@@ -91,6 +91,36 @@ func TestHandleAgentArtifacts(t *testing.T) {
 	}
 }
 
+// TestHandleAgentArtifacts_CorruptDetails pins that a row with malformed
+// details_json degrades to `details: null` with a 200 (the json.Valid guard),
+// never a 500 from a failed response marshal.
+func TestHandleAgentArtifacts_CorruptDetails(t *testing.T) {
+	s := newTestServer(t)
+	runID := seedSteerRun(t, s.db, "corrupt", "completed")
+	art := seedRunArtifact(t, s, runID, domain.Artifact{
+		Provider: "github", Kind: "comment", Target: "octo/repo#1",
+		State: domain.ArtifactStateCommentPosted, DedupKey: "corrupt1",
+	})
+	if _, err := s.db.Exec(`UPDATE artifacts SET details_json='{not valid json' WHERE id=?`, art.ID); err != nil {
+		t.Fatalf("corrupt details: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/runs/"+runID+"/artifacts", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET = %d, want 200 (corrupt details must not 500); body=%s", rec.Code, rec.Body.String())
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	if len(got) != 1 {
+		t.Fatalf("returned %d artifacts, want 1", len(got))
+	}
+	if v, present := got[0]["details"]; !present || v != nil {
+		t.Errorf("corrupt details = %v (present=%v), want null", v, present)
+	}
+}
+
 // TestHandleAgentArtifacts_Empty pins that a run with no artifacts returns an
 // empty JSON array (200 []), never null — the board card can render a 0 count
 // without special-casing.
@@ -141,6 +171,37 @@ func TestRunResponse_ArtifactCount(t *testing.T) {
 	}
 	if m["artifact_count"] != float64(2) {
 		t.Errorf("artifact_count = %v, want 2", m["artifact_count"])
+	}
+}
+
+// TestRunResponse_ArtifactCount_Parked pins that a parked run reports the right
+// artifact_count even though handleAgentStatus skips the count query for it —
+// runResponse derives it from the ListByRun it runs for pending_kind. pending_kind
+// rides along (a draft PR → "pr").
+func TestRunResponse_ArtifactCount_Parked(t *testing.T) {
+	s := newTestServer(t)
+	runID := seedSteerRun(t, s.db, "park", "pending_approval")
+	seedRunArtifact(t, s, runID, domain.NewPullRequestArtifact(
+		"octo/repo", 7, "PR_node", "feature/x", "main",
+		"https://github.com/octo/repo/pull/7", "T", "B", true))
+	seedRunArtifact(t, s, runID, domain.Artifact{
+		Provider: "github", Kind: "comment", Target: "octo/repo#7",
+		State: domain.ArtifactStateCommentPosted, DedupKey: "pk1",
+	})
+
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/runs/"+runID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET run = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var m map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if m["artifact_count"] != float64(2) {
+		t.Errorf("artifact_count = %v, want 2 (self-counted on the parked path)", m["artifact_count"])
+	}
+	if m["pending_kind"] != "pr" {
+		t.Errorf("pending_kind = %v, want pr", m["pending_kind"])
 	}
 }
 
