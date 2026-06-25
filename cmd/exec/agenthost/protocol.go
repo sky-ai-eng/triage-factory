@@ -257,6 +257,16 @@ type buildAgentRunFooterResult struct {
 	Footer string `json:"footer"`
 }
 
+// --- artifacts (capture writers) ---
+
+type upsertArtifactArgs struct {
+	Artifact domain.Artifact `json:"artifact"`
+}
+
+type upsertArtifactResult struct {
+	Artifact domain.Artifact `json:"artifact"`
+}
+
 // --- jira (exec jira ticket ...) ---
 //
 // Args/result envelopes for the host-routed Jira surface. The daemon
@@ -528,6 +538,8 @@ const (
 	methodInsertRunWorktree          = "InsertRunWorktree"
 	methodDeleteRunWorktreeByRepo    = "DeleteRunWorktreeByRepo"
 	methodBuildAgentRunFooter        = "BuildAgentRunFooter"
+
+	methodUpsertArtifact = "UpsertArtifact"
 
 	methodJiraGetIssue       = "JiraGetIssue"
 	methodJiraTransitionTo   = "JiraTransitionTo"

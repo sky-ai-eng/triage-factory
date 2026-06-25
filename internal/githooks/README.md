@@ -26,6 +26,11 @@ process in both modes:
   through the `triagefactory exec ...` choke point, which resolves this
   into the `(org, user, run)` identity (local mode) or hands it to the
   agenthost daemon (sandbox mode).
+- `TRIAGE_FACTORY_BIN` — the absolute path to the `triagefactory` binary
+  the hook invokes. The hooks are generic scripts with no compiled-in
+  path, and in local mode the binary lives wherever the operator ran it
+  from (not necessarily on `PATH`), so the spawner exports this in both
+  modes. Hooks read it with a `PATH` fallback (`${TRIAGE_FACTORY_BIN:-triagefactory}`).
 - The **agenthost socket** — present at `/run/tf.sock` inside the sandbox
   (multi). In local mode there is no socket; `triagefactory exec`
   auto-detects its absence and routes writes through a `LocalClient`
@@ -42,5 +47,10 @@ process in both modes:
   `prepare-commit-msg`, ...). A hooks dir with no file matching the hook
   git is firing is simply a no-op.
 
-No hooks ship yet — this is the install mechanism only (F2, TFAC-456).
-The first hook (`pre-push`, branch-artifact capture) lands with A·3.
+## Shipped hooks
+
+- `pre-push` (A·3, TFAC-456→TFAC-460) — records each pushed branch as a
+  durable `branch` artifact via `triagefactory exec git record-push`. git
+  feeds it the pushed refs on stdin; it skips deletes, marks new branches,
+  and always exits `0`. Rewritten by `Ensure` on every startup so an
+  upgraded binary refreshes a stale on-disk copy.

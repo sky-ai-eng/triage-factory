@@ -396,6 +396,17 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return buildAgentRunFooterResult{Footer: footer}, nil
 
+	case methodUpsertArtifact:
+		var a upsertArtifactArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		stored, err := client.UpsertArtifact(ctx, a.Artifact)
+		if err != nil {
+			return nil, err
+		}
+		return upsertArtifactResult{Artifact: stored}, nil
+
 	// --- jira: build ForSystem host-side, make the REST call, return the
 	// result / error. The per-request LocalClient reads the credential
 	// from this daemon's (host-side, Vault-backed) stores, so nothing

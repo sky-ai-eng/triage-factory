@@ -238,6 +238,29 @@ func (c *LocalClient) BuildAgentRunFooter(_ context.Context, kind string) (strin
 	return agentmeta.Build(c.stores.AgentRuns, c.info.OrgID, c.info.RunID, kind), nil
 }
 
+// --- artifacts ---
+
+// UpsertArtifact stamps the run identity (run_id, org_id, team_id) onto the
+// caller's polymorphic artifact and upserts it. Event-triggered runs route
+// admin-pool (no JWT claims to bind); manual runs wrap the app-pool write in
+// the kicking-off user's synthetic claims — the same branch the pending-PR
+// writer uses. Returns the stored row. See TFAC-460.
+func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
+	a.OrgID = c.info.OrgID
+	a.TeamID = c.info.TeamID
+	a.RunID = c.info.RunID
+	if c.info.IsEventTriggered {
+		return c.stores.Artifacts.UpsertSystem(ctx, c.info.OrgID, a)
+	}
+	var out domain.Artifact
+	err := c.stores.Tx.SyntheticClaimsWithTx(ctx, c.info.OrgID, c.info.UserID, func(ts db.TxStores) error {
+		stored, uerr := ts.Artifacts.Upsert(ctx, c.info.OrgID, a)
+		out = stored
+		return uerr
+	})
+	return out, err
+}
+
 // --- jira ---
 //
 // jiraSystemClient builds the org's bot-attributed Jira client via the

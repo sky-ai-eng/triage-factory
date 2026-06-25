@@ -1,0 +1,48 @@
+#!/bin/sh
+# Triage Factory pre-push hook (A·3, TFAC-460).
+#
+# Records each pushed branch as a durable `branch` artifact — the one
+# external action the exec CLIs don't mediate, so a branch pushed with raw
+# `git` (and maybe never opened as a PR) would otherwise be invisible to TF.
+#
+# git invokes this hook with:
+#   $1 = remote name (e.g. "origin")
+#   $2 = remote URL  (the location being pushed to)
+# and feeds the refs being pushed on stdin, one per line:
+#   <local ref> SP <local sha> SP <remote ref> SP <remote sha> LF
+# A delete has an all-zero <local sha>; a new branch has an all-zero
+# <remote sha>.
+#
+# Best-effort, non-blocking by contract: every recording call is guarded and
+# the hook always exits 0, so a record failure never aborts the agent's push.
+# The binary is resolved from $TRIAGE_FACTORY_BIN (set by the spawner in both
+# run modes), falling back to PATH.
+
+remote_url="$2"
+bin="${TRIAGE_FACTORY_BIN:-triagefactory}"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+	# Skip deletes: an all-zero (or empty) local sha means nothing was
+	# pushed, so there is no branch to record.
+	case "$local_sha" in
+		*[!0]*) ;;     # has a non-zero digit -> a real push
+		*) continue ;; # all zeros / empty -> a delete
+	esac
+
+	# new=true when the remote had no prior sha for this ref (all zeros).
+	case "$remote_sha" in
+		*[!0]*) is_new=false ;;
+		*) is_new=true ;;
+	esac
+
+	# --new uses the =value form: Go's flag package reads a bare boolean
+	# flag as true and would treat a following "false" token as a stray
+	# positional, so the space form must not be used here.
+	"$bin" exec git record-push \
+		--remote "$remote_url" \
+		--ref "$remote_ref" \
+		--sha "$local_sha" \
+		--new="$is_new" >/dev/null 2>&1 || true
+done
+
+exit 0

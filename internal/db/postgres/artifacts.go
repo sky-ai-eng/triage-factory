@@ -16,9 +16,14 @@ import (
 // reads/writes by team_id exactly like runs. org_id stays in every
 // WHERE/INSERT clause as defense in depth. Mirrors the runs store
 // (agentrun.go) for $N placeholders + scan conventions. See TFAC-455.
-type artifactStore struct{ q queryer }
+type artifactStore struct {
+	q     queryer
+	admin queryer
+}
 
-func newArtifactStore(q queryer) db.ArtifactStore { return &artifactStore{q: q} }
+func newArtifactStore(q, admin queryer) db.ArtifactStore {
+	return &artifactStore{q: q, admin: admin}
+}
 
 var _ db.ArtifactStore = (*artifactStore)(nil)
 
@@ -32,7 +37,21 @@ const pgArtifactColumns = `
 	COALESCE(details_json, ''), created_at, updated_at
 `
 
+// Upsert writes on the app pool (RLS-active); the manual capture path wraps
+// it in synthetic claims. See UpsertSystem for the event-triggered sibling.
 func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error) {
+	return upsertArtifact(ctx, s.q, orgID, a)
+}
+
+// UpsertSystem writes on the admin pool (BYPASSRLS), for capture writers
+// running under an event-triggered run with no JWT claims to bind. The row's
+// team_id still scopes it; only the RLS claim requirement is sidestepped.
+// Mirrors PendingPRStore.CreateSystem. See TFAC-460.
+func (s *artifactStore) UpsertSystem(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error) {
+	return upsertArtifact(ctx, s.admin, orgID, a)
+}
+
+func upsertArtifact(ctx context.Context, q queryer, orgID string, a domain.Artifact) (domain.Artifact, error) {
 	// ON CONFLICT(org_id, dedup_key) updates the documented mutable fields
 	// from the proposed row (EXCLUDED.*) and bumps updated_at; id/created_at
 	// on the existing row are preserved. provider/kind are deliberately NOT
@@ -41,7 +60,7 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// insert side pins them, the update side leaves them. A caller-supplied
 	// a.ID is honored on insert (parity with SQLite); an empty a.ID falls
 	// back to gen_random_uuid() server-side.
-	row := s.q.QueryRowContext(ctx, `
+	row := q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, run_id, org_id, team_id, provider, kind, target,
 			 external_id, url, state, dedup_key, details_json, updated_at)

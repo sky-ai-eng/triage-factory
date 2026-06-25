@@ -268,6 +268,48 @@ func TestArtifactStore_Postgres_RLS_WritePath(t *testing.T) {
 	pgtest.AssertRLSViolation(t, err)
 }
 
+// TestArtifactStore_Postgres_UpsertSystem_BypassesRLS pins the
+// event-triggered capture path (TFAC-460): a run with no user identity
+// (auto-delegation) writes through UpsertSystem on the admin pool, which
+// must land a team-scoped artifact WITHOUT any JWT claims — exactly where
+// the app-pool Upsert is rejected for lack of a current org/user.
+func TestArtifactStore_Postgres_UpsertSystem_BypassesRLS(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgA, _, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	ctx := context.Background()
+
+	// Dual-pool store: Upsert → AppDB (RLS-active), UpsertSystem → AdminDB
+	// (BYPASSRLS), the production wiring.
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	art := domain.Artifact{
+		OrgID: orgA, TeamID: teamA,
+		Provider: "git", Kind: "branch", Target: "octo/repo",
+		State: domain.ArtifactStateBranchPushed, DedupKey: "git:branch:octo/repo:refs/heads/x",
+	}
+
+	// The app-pool Upsert with no claims set is rejected — there is no
+	// current org/user for the artifacts_insert WITH CHECK to satisfy. This
+	// is the condition an event-triggered run is in.
+	if _, err := stores.Artifacts.Upsert(ctx, orgA, art); err == nil {
+		t.Fatal("app-pool Upsert with no claims unexpectedly succeeded")
+	}
+
+	// UpsertSystem on the admin pool lands the row regardless.
+	if _, err := stores.Artifacts.UpsertSystem(ctx, orgA, art); err != nil {
+		t.Fatalf("UpsertSystem under no claims: %v", err)
+	}
+	var landed int
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM artifacts WHERE team_id = $1 AND dedup_key = $2`, teamA, art.DedupKey).Scan(&landed); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if landed != 1 {
+		t.Errorf("UpsertSystem artifact didn't land: count = %d, want 1", landed)
+	}
+}
+
 // TestArtifactStore_Postgres_ListByTeam_IncludesDetached pins the
 // audit-ledger invariant: an artifact whose run was purged (run_id NULL)
 // is still the team's and must come back from ListByTeam. Guards against a

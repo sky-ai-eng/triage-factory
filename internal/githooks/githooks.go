@@ -43,8 +43,24 @@ const SandboxDir = "/run/tf-hooks"
 // ConfigKey is the git config key that points git at a hooks directory.
 const ConfigKey = "core.hooksPath"
 
+// BinEnvVar names the env entry carrying the absolute path to the
+// triagefactory binary the hooks invoke. The hooks are generic shell
+// scripts with no compiled-in path, and in local mode the binary is
+// wherever the operator ran it from (not necessarily on PATH), so the
+// spawner exports this in the agent process env in both run modes; the
+// hooks read it with a PATH fallback. Part of the F2 run-context
+// convention, alongside TRIAGE_FACTORY_RUN_ID and the agenthost socket.
+const BinEnvVar = "TRIAGE_FACTORY_BIN"
+
 //go:embed README.md
 var readmeContent []byte
+
+// prePushHook is the embedded pre-push hook (A·3, TFAC-460) Ensure writes
+// into the hooks dir. It records each pushed branch as a durable artifact
+// via `triagefactory exec git record-push`. Best-effort: it always exits 0.
+//
+//go:embed pre-push
+var prePushHook []byte
 
 // HostDir returns the host-side TF-controlled hooks directory. In local
 // mode this is what the agent's core.hooksPath points at directly; in
@@ -53,15 +69,15 @@ func HostDir() string {
 	return paths.HooksDir()
 }
 
-// Ensure creates the host hooks directory and (re)writes its README and
-// .keep marker. Idempotent: safe to call on every startup. Called before
-// any run can spawn so core.hooksPath always resolves to a real
-// directory.
+// Ensure creates the host hooks directory and (re)writes its README,
+// .keep marker, and managed hooks. Idempotent: safe to call on every
+// startup. Called before any run can spawn so core.hooksPath always
+// resolves to a real directory with the current hook set.
 //
-// No hooks are written here — F2 ships the directory + convention only.
-// The README documents the contract for the hooks A·3 (and later A2)
-// add; the .keep keeps the directory present in an otherwise-empty
-// install.
+// The pre-push hook (A·3, TFAC-460) is rewritten every call so an upgraded
+// binary refreshes a stale on-disk copy — the hooks dir lives under the
+// state root and persists across upgrades. It is written 0755 because git
+// skips non-executable hooks.
 func Ensure() error {
 	dir := HostDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -72,6 +88,9 @@ func Ensure() error {
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".keep"), nil, 0o644); err != nil {
 		return fmt.Errorf("githooks: write hooks .keep: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pre-push"), prePushHook, 0o755); err != nil {
+		return fmt.Errorf("githooks: write pre-push hook: %w", err)
 	}
 	return nil
 }

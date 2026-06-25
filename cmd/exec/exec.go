@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/gh"
+	gitexec "github.com/sky-ai-eng/triage-factory/cmd/exec/git"
 	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/workspace"
@@ -124,6 +125,19 @@ func Handle(args []string) {
 		defer func() { _ = host.Close() }()
 		workspace.Handle(host, cmdArgs)
 
+	case "git":
+		// No credentials needed — git record-push only upserts an artifact
+		// through the agenthost client (DB in local mode, IPC in sandbox).
+		// Invoked by the pre-push hook; resolves the run via the same
+		// socket/env path as every other exec verb.
+		if isHelp(cmdArgs) {
+			gitexec.Handle(nil, cmdArgs)
+			return
+		}
+		host := buildAgentHost()
+		defer func() { _ = host.Close() }()
+		gitexec.Handle(host, cmdArgs)
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown exec command: %s\nRun 'triagefactory exec --help' for usage.\n", cmd)
 		os.Exit(1)
@@ -140,5 +154,5 @@ func isHelp(args []string) bool {
 }
 
 func printHelp() {
-	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText)
+	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText, gitexec.HelpText)
 }

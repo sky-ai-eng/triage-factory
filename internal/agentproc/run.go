@@ -517,6 +517,11 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	// Translate any host-path env values (e.g. TRIAGE_FACTORY_RUN_ROOT) to
 	// /work-relative paths before the sandbox sees them.
 	sbExtraEnv := translateEnvForSandbox(opts.ExtraEnv, workCwd)
+	// The pre-push hook (A·3, TFAC-460) invokes the binary via this env
+	// entry; in the sandbox it's the fixed bind-mount path, which is also on
+	// PATH but set explicitly so the hook never depends on PATH contents. A
+	// literal sandbox path, so it goes in after translateEnvForSandbox.
+	sbExtraEnv = append(sbExtraEnv, githooks.BinEnvVar+"="+sandboxTFBinary)
 	sbEnv := buildSandboxEnv(sbExtraEnv)
 
 	// Translate AddDirs (host paths under workCwd) into their /work-relative
@@ -669,7 +674,16 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// free index (dropping + re-emitting the inherited count), so a
 	// pre-existing operator GIT_CONFIG_* set is preserved and the operator's
 	// ~/.gitconfig is never touched — env-scoped only.
-	cmd.Env = githooks.DirectAgentEnv(mergeEnv(os.Environ(), opts.ExtraEnv, creds))
+	//
+	// hookEnv carries the binary path the pre-push hook (A·3, TFAC-460)
+	// invokes — os.Executable() here, since in local mode the binary is
+	// wherever the operator ran it from, not necessarily on PATH. An
+	// os.Executable() error is non-fatal: the hook falls back to PATH.
+	hookEnv := opts.ExtraEnv
+	if selfBin, exeErr := os.Executable(); exeErr == nil {
+		hookEnv = append(append([]string(nil), opts.ExtraEnv...), githooks.BinEnvVar+"="+selfBin)
+	}
+	cmd.Env = githooks.DirectAgentEnv(mergeEnv(os.Environ(), hookEnv, creds))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		// Process is non-nil here because the watcher only fires after

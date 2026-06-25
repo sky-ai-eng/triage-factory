@@ -69,6 +69,13 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	return out, nil
 }
 
+// UpsertSystem is identical to Upsert in SQLite: local mode is N=1 with no
+// RLS, so there is no admin/app pool split to honor. It exists to satisfy
+// the db.ArtifactStore interface the Postgres impl needs (TFAC-460).
+func (s *artifactStore) UpsertSystem(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error) {
+	return s.Upsert(ctx, orgID, a)
+}
+
 func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

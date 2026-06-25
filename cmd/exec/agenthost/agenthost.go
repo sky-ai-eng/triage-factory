@@ -163,6 +163,18 @@ type Client interface {
 	// reads its own AgentRunStore for the lookup.
 	BuildAgentRunFooter(ctx context.Context, kind string) (string, error)
 
+	// --- artifacts (capture writers: pre-push hook, ...) ---
+	//
+	// UpsertArtifact records one durable run artifact (a pushed branch, a
+	// Jira write, a GitHub action) at the host-side choke point. The
+	// caller supplies the polymorphic fields (Provider/Kind/Target/State/
+	// DedupKey/...); the client stamps run_id/org_id/team_id off the run
+	// identity, so the agent never has to know them. Routed admin-pool for
+	// event-triggered runs and synthetic-claims for manual runs, exactly
+	// like the pending-PR writer. Returns the stored row; best-effort
+	// callers (the pre-push hook) ignore it. See TFAC-460.
+	UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error)
+
 	// --- jira (exec jira ticket ...) ---
 	//
 	// These route the agent's in-sandbox `exec jira` calls host-side:

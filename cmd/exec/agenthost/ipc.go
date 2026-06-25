@@ -284,6 +284,19 @@ func (c *IPCClient) BuildAgentRunFooter(ctx context.Context, kind string) (strin
 	return res.Footer, nil
 }
 
+// --- artifacts ---
+
+// UpsertArtifact ships the polymorphic artifact to the daemon, which stamps
+// the run identity and upserts it host-side (admin- or app-pool per the run's
+// trigger shape). Returns the stored row. See TFAC-460.
+func (c *IPCClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
+	var res upsertArtifactResult
+	if err := c.call(ctx, methodUpsertArtifact, upsertArtifactArgs{Artifact: a}, &res); err != nil {
+		return domain.Artifact{}, err
+	}
+	return res.Artifact, nil
+}
+
 // --- jira ---
 //
 // Each method is a thin RPC: serialize args, ship one frame to the

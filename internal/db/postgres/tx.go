@@ -142,8 +142,9 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		AgentRuns: newAgentRunStore(tx, s.admin),
 		// Artifacts: app-pool store routes through the tx so writes
 		// compose with the surrounding claims tx (artifacts_* RLS scopes
-		// by team_id like runs).
-		Artifacts:      newArtifactStore(tx),
+		// by team_id like runs). UpsertSystem still targets the real admin
+		// pool (BYPASSRLS), mirroring PendingPRs/AgentRuns below.
+		Artifacts:      newArtifactStore(tx, s.admin),
 		Entities:       newEntityStore(tx, tx),
 		Reviews:        newReviewStore(tx, s.admin),
 		PendingPRs:     newPendingPRStore(tx, s.admin),
