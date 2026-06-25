@@ -373,6 +373,58 @@ func TestArtifactStore_SQLite_CountByRun(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_SQLite_ListByRuns pins the batched multi-run read the
+// run-list path uses for pending_kind (TFAC-465): artifacts for the given runs
+// come back in one slice, each carrying its RunID for grouping; a run with no
+// artifacts contributes nothing and an empty runIDs is a no-op.
+func TestArtifactStore_SQLite_ListByRuns(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runA := seedArtifactRun(t, conn)
+	runB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	runC := seedArtifactRunWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
+
+	seed := func(runID, key string) {
+		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+			RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			Provider: "github", Kind: "comment", Target: "octo/repo",
+			State: domain.ArtifactStateCommentPosted, DedupKey: key,
+		}); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	seed(runA, "a1")
+	seed(runA, "a2")
+	seed(runB, "b1")
+
+	arts, err := stores.Artifacts.ListByRuns(ctx, runmode.LocalDefaultOrgID, []string{runA, runB, runC})
+	if err != nil {
+		t.Fatalf("ListByRuns: %v", err)
+	}
+	byRun := map[string]int{}
+	for _, a := range arts {
+		if a.RunID == "" {
+			t.Errorf("artifact %s came back without its RunID (can't group)", a.ID)
+		}
+		byRun[a.RunID]++
+	}
+	if byRun[runA] != 2 || byRun[runB] != 1 {
+		t.Errorf("grouped counts = %v, want runA=2 runB=1", byRun)
+	}
+	if byRun[runC] != 0 {
+		t.Errorf("runC (no artifacts) contributed %d rows, want 0", byRun[runC])
+	}
+
+	empty, err := stores.Artifacts.ListByRuns(ctx, runmode.LocalDefaultOrgID, nil)
+	if err != nil {
+		t.Fatalf("ListByRuns(nil): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("ListByRuns(nil) = %v, want empty", empty)
+	}
+}
+
 // TestArtifactStore_SQLite_ListByTeam_IncludesDetached pins the
 // audit-ledger invariant: an artifact whose run was purged (run_id NULL)
 // is still the team's and must come back from ListByTeam. Guards against a

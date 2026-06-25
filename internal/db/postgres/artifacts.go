@@ -202,6 +202,27 @@ func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []s
 	return counts, rows.Err()
 }
 
+func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Artifact, error) {
+	if len(runIDs) == 0 {
+		return nil, nil
+	}
+	// App pool (RLS-active): the caller is the run-list handler under request
+	// claims, so rows are team-scoped exactly like ListByRun. run_id is a uuid
+	// column, so the slice goes through pgUUIDArray (a Postgres array literal),
+	// not a raw []string bind — see CountByRun. A NULL run_id never matches ANY,
+	// so detached artifacts are excluded.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+pgArtifactColumns+`
+		FROM artifacts
+		WHERE org_id = $1 AND run_id = ANY($2)
+		ORDER BY created_at DESC, id DESC
+	`, orgID, pgUUIDArray(runIDs))
+	if err != nil {
+		return nil, err
+	}
+	return scanArtifactRows(rows)
+}
+
 func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {
 	query := `
 		SELECT ` + pgArtifactColumns + `

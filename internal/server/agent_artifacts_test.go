@@ -204,6 +204,37 @@ func TestRunResponse_ArtifactCount_Parked(t *testing.T) {
 	}
 }
 
+// TestRunResponse_PendingKind_List pins that pending_kind / pending_artifact_id
+// propagate through the run-LIST endpoint for a parked run — the batched
+// ListByRuns path, distinct from the single-run path covered by
+// TestRunResponse_ArtifactCount_Parked. Guards the list endpoint against a
+// silent pending_kind regression.
+func TestRunResponse_PendingKind_List(t *testing.T) {
+	s := newTestServer(t)
+	runID := seedSteerRun(t, s.db, "pklist", "pending_approval")
+	pr := seedRunArtifact(t, s, runID, domain.NewPullRequestArtifact(
+		"octo/repo", 9, "PR_node", "feature/x", "main",
+		"https://github.com/octo/repo/pull/9", "T", "B", true))
+
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/runs?task_id=t_pklist", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET runs = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var runs []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &runs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("listed %d runs, want 1", len(runs))
+	}
+	if got := runs[0]["pending_kind"]; got != "pr" {
+		t.Errorf("pending_kind = %v, want pr", got)
+	}
+	if got := runs[0]["pending_artifact_id"]; got != pr.ID {
+		t.Errorf("pending_artifact_id = %v, want %s", got, pr.ID)
+	}
+}
+
 // TestRunResponse_ArtifactCount_List pins that the batched count flows through
 // the run-list path (GET /api/agent/runs?task_id=...): two runs on one task get
 // their own correct counts from the single CountByRun batch.

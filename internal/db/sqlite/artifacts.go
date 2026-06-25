@@ -191,6 +191,34 @@ func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []s
 	return counts, rows.Err()
 }
 
+func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Artifact, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if len(runIDs) == 0 {
+		return nil, nil
+	}
+	// Expand to a ?-placeholder IN list (SQLite has no array bind). A NULL
+	// run_id never matches IN, so detached artifacts are excluded for free.
+	placeholders := make([]string, len(runIDs))
+	args := make([]any, 0, len(runIDs)+1)
+	args = append(args, orgID)
+	for i, id := range runIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+artifactColumns+`
+		FROM artifacts
+		WHERE org_id = ? AND run_id IN (`+strings.Join(placeholders, ", ")+`)
+		ORDER BY created_at DESC, id DESC
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanArtifactRows(rows)
+}
+
 func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

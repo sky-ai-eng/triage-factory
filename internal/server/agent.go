@@ -49,7 +49,18 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		if e != nil {
 			return e
 		}
-		resp = runResponse(r.Context(), tx.Artifacts, orgID, run, counts[run.ID])
+		// pending_kind is best-effort and parked-only: read the run's artifacts to
+		// derive the overlay discriminator, but a failure just omits it (logged) —
+		// it must not fail the status fetch or touch the authoritative count above.
+		var pending pendingApproval
+		if run.Status == "pending_approval" {
+			if arts, lerr := tx.Artifacts.ListByRun(r.Context(), orgID, run.ID); lerr != nil {
+				serverLog.Warn("pending_kind lookup failed; omitting it (artifact_count unaffected)", "run", run.ID, "error", lerr)
+			} else {
+				pending = pendingApprovalFor(run, arts)
+			}
+		}
+		resp = runResponse(run, counts[run.ID], pending)
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -193,8 +204,11 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		run, e = tx.AgentRuns.Get(r.Context(), orgID, runID)
-		if e != nil || run == nil {
+		if e != nil {
 			return e
+		}
+		if run == nil {
+			return nil
 		}
 		arts, e = tx.Artifacts.ListByRun(r.Context(), orgID, runID)
 		return e
@@ -214,29 +228,51 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, out)
 }
 
-// runResponse projects an AgentRun into the wire shape the frontend
-// consumes, augmented with `artifact_count` (so the Board card can show how
-// many artifacts a run produced without a per-card fetch) and, when the run is
-// parked, `pending_kind` + `pending_artifact_id` so the page can pick the right
-// approval card variant ("Review" or "Open PR") and address the overlay by the
-// gating artifact's id. A run parks either on a finalized pending review (a
-// review artifact whose ready sentinel is set) or a draft PR (a pull_request
-// artifact in state=draft); the discriminator has to come from the server
-// because the run row itself doesn't know which kind queued it.
+// pendingApproval carries the parked-run overlay discriminator for runResponse:
+// which approval card to show ("review" | "pr") and the gating artifact's id.
+// The zero value means "not parked / no gating artifact", so runResponse omits
+// pending_kind. Built by pendingApprovalFor from a run's artifacts.
+type pendingApproval struct {
+	kind       string // "review" | "pr"
+	artifactID string
+}
+
+// pendingApprovalFor derives the overlay discriminator for a parked run from its
+// artifacts. A run parks either on a finalized pending review (a review artifact
+// whose ready sentinel is set — FirstReadyReview, not a bare pending check) or a
+// draft PR; the discriminator has to come from the server because the run row
+// itself doesn't know which kind queued it. Returns the zero value for a
+// non-parked run or one with no gating artifact yet.
+func pendingApprovalFor(run *domain.AgentRun, arts []domain.Artifact) pendingApproval {
+	if run.Status != "pending_approval" {
+		return pendingApproval{}
+	}
+	if rv := domain.FirstReadyReview(arts); rv != nil {
+		return pendingApproval{kind: "review", artifactID: rv.ID}
+	}
+	if pr := domain.FirstDraftPullRequest(arts); pr != nil {
+		return pendingApproval{kind: "pr", artifactID: pr.ID}
+	}
+	return pendingApproval{}
+}
+
+// runResponse projects an AgentRun into the wire shape the frontend consumes,
+// augmented with `artifact_count` (so the Board card can show how many artifacts
+// a run produced without a per-card fetch) and, when the run is parked,
+// `pending_kind` + `pending_artifact_id` so the page can pick the right approval
+// card variant ("Review" or "Open PR") and address the overlay by the gating
+// artifact's id.
 //
-// artifactCount is supplied by the caller (Artifacts.CountByRun) for every run —
-// the single-run path counts the one run, the run-list path batches all runs in
-// one query (N+1 avoidance, handleAgentRuns). It is the authoritative source for
-// artifact_count and is deliberately INDEPENDENT of the pending_kind read below:
-// the two were once shared (parked runs self-counted from the pending_kind list)
-// until that coupling meant a transient list-read failure reported artifact_count
-// 0 for a run that had artifacts.
-//
-// pending_kind is a separate, best-effort concern: only a parked run needs it,
-// and only it requires the full artifact list. If that read fails it logs and
-// omits pending_kind WITHOUT touching artifact_count, so a transient blip costs
-// the UI its overlay discriminator (informational) but never the count.
-func runResponse(ctx context.Context, artifacts db.ArtifactStore, orgID string, run *domain.AgentRun, artifactCount int) map[string]any {
+// Pure projection — it does no I/O. The caller supplies both inputs, which is
+// what lets the run-list path batch its reads instead of issuing them per run:
+//   - artifactCount from Artifacts.CountByRun (the single-run path counts one
+//     run; the list path batches every run in one query — N+1 avoidance).
+//   - pending from pendingApprovalFor over the run's artifacts, which the caller
+//     reads best-effort (the single-run path via ListByRun, the list path via one
+//     ListByRuns over just the parked runs). Keeping artifact_count and the
+//     pending read separate is deliberate: a transient pending read can't report
+//     the count as 0.
+func runResponse(run *domain.AgentRun, artifactCount int, pending pendingApproval) map[string]any {
 	out := map[string]any{
 		"ID":                   run.ID,
 		"TaskID":               run.TaskID,
@@ -259,23 +295,11 @@ func runResponse(ctx context.Context, artifacts db.ArtifactStore, orgID string, 
 		"blueprint_step_index": run.BlueprintStepIndex,
 		"artifact_count":       artifactCount,
 	}
-	// pending_kind only relevant when the run is parked. Both overlays are
-	// addressed by the gating artifact's id (pending_artifact_id): a finalized
-	// review opens ReviewOverlay, a draft PR opens the PR overlay. A review that
-	// was started but never submitted has no ready sentinel and does NOT park, so
-	// FirstReadyReview (not a bare pending check) gates the review case.
-	if run.Status == "pending_approval" {
-		if arts, err := artifacts.ListByRun(ctx, orgID, run.ID); err != nil {
-			serverLog.Warn("pending_kind lookup failed; omitting it (artifact_count unaffected)", "run", run.ID, "error", err)
-		} else {
-			if rv := domain.FirstReadyReview(arts); rv != nil {
-				out["pending_kind"] = "review"
-				out["pending_artifact_id"] = rv.ID
-			} else if pr := domain.FirstDraftPullRequest(arts); pr != nil {
-				out["pending_kind"] = "pr"
-				out["pending_artifact_id"] = pr.ID
-			}
-		}
+	// Both overlays are addressed by the gating artifact's id (pending_artifact_id):
+	// a finalized review opens ReviewOverlay, a draft PR opens the PR overlay.
+	if pending.kind != "" {
+		out["pending_kind"] = pending.kind
+		out["pending_artifact_id"] = pending.artifactID
 	}
 	return out
 }
@@ -551,27 +575,45 @@ func (ag *agentHandler) handleAgentRuns(w http.ResponseWriter, r *http.Request) 
 		if runs == nil {
 			runs = []domain.AgentRun{}
 		}
-		// Batch the per-run artifact_count into one query — the list path is
-		// N+1-sensitive (Board's useWebSocket re-fetches it on every status
-		// transition), so a per-run count read would scale with the task's run
-		// history. CountByRun returns a runID→count map; a run with no
-		// artifacts is simply absent (→ 0).
+		// Both artifact reads are batched so the list stays O(1) in queries
+		// regardless of how many runs — or parked runs — a task has. Board's
+		// useWebSocket re-fetches this on every status transition, so a per-run
+		// read (count or list) would scale with the task's run history.
+		//
+		//   - artifact_count for every run: one CountByRun (runID→count; a run
+		//     with no artifacts is absent → 0).
+		//   - pending_kind for the parked runs: one ListByRuns over just those run
+		//     ids, grouped per run. pending_kind needs the actual artifacts, but
+		//     only a parked run has a gating one, so non-parked runs cost nothing.
+		//     Without the discriminator on the list response the Open-PR vs Review
+		//     button choice would flicker on first paint until the per-run fetch.
 		runIDs := make([]string, len(runs))
+		var parkedIDs []string
 		for i := range runs {
 			runIDs[i] = runs[i].ID
+			if runs[i].Status == "pending_approval" {
+				parkedIDs = append(parkedIDs, runs[i].ID)
+			}
 		}
 		counts, e := tx.Artifacts.CountByRun(r.Context(), orgID, runIDs)
 		if e != nil {
 			return e
 		}
-		// Project each run through runResponse so pending_kind rides
-		// alongside on the list endpoint too. Board's useWebSocket calls
-		// this on every status transition; without the discriminator on
-		// the list response the Open-PR vs Review button choice would
-		// flicker on first paint and only settle after the per-run fetch.
+		// Best-effort, like the single-run path: a failure here drops pending_kind
+		// for the parked runs (logged) but leaves counts and the rest intact.
+		artsByRun := map[string][]domain.Artifact{}
+		if len(parkedIDs) > 0 {
+			if arts, lerr := tx.Artifacts.ListByRuns(r.Context(), orgID, parkedIDs); lerr != nil {
+				serverLog.Warn("pending_kind batch lookup failed; omitting pending_kind (artifact_count unaffected)", "task", taskID, "error", lerr)
+			} else {
+				for _, a := range arts {
+					artsByRun[a.RunID] = append(artsByRun[a.RunID], a)
+				}
+			}
+		}
 		out = make([]map[string]any, len(runs))
 		for i := range runs {
-			out[i] = runResponse(r.Context(), tx.Artifacts, orgID, &runs[i], counts[runs[i].ID])
+			out[i] = runResponse(&runs[i], counts[runs[i].ID], pendingApprovalFor(&runs[i], artsByRun[runs[i].ID]))
 		}
 		return nil
 	}); err != nil {

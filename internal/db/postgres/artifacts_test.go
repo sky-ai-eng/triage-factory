@@ -652,6 +652,61 @@ func TestArtifactStore_Postgres_CountByRun_TeamScoped(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_Postgres_ListByRuns pins the batched multi-run read on the
+// admin pool (TFAC-465): artifacts for the given runs come back in one slice,
+// each carrying its RunID for grouping; a run with no artifacts contributes
+// nothing and an empty runIDs is a no-op. Doubles as proof the []string→ANY
+// uuid[] bind works for the list variant.
+func TestArtifactStore_Postgres_ListByRuns(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
+	runA := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	runB := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	runC := seedPgArtifactRun(t, h, orgID, teamID, userID) // no artifacts
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	seed := func(runID, key string) {
+		if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+			RunID: runID, OrgID: orgID, TeamID: teamID,
+			Provider: "github", Kind: "comment", Target: "octo/repo",
+			State: domain.ArtifactStateCommentPosted, DedupKey: key,
+		}); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	seed(runA, "a1")
+	seed(runA, "a2")
+	seed(runB, "b1")
+
+	arts, err := stores.Artifacts.ListByRuns(ctx, orgID, []string{runA, runB, runC})
+	if err != nil {
+		t.Fatalf("ListByRuns: %v", err)
+	}
+	byRun := map[string]int{}
+	for _, a := range arts {
+		if a.RunID == "" {
+			t.Errorf("artifact %s came back without its RunID", a.ID)
+		}
+		byRun[a.RunID]++
+	}
+	if byRun[runA] != 2 || byRun[runB] != 1 {
+		t.Errorf("grouped counts = %v, want runA=2 runB=1", byRun)
+	}
+	if _, ok := byRun[runC]; ok {
+		t.Errorf("runC (no artifacts) contributed %d rows, want 0", byRun[runC])
+	}
+
+	empty, err := stores.Artifacts.ListByRuns(ctx, orgID, nil)
+	if err != nil {
+		t.Fatalf("ListByRuns(nil): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("ListByRuns(nil) = %v, want empty", empty)
+	}
+}
+
 // seedPgArtifactRun mints a minimal run the artifacts.run_id FK can point
 // at. origin is non-'blueprint' so runs_origin_requires_parents doesn't
 // demand a parent chain; trigger_type='manual' needs a non-NULL creator.

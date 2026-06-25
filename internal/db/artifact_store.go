@@ -87,6 +87,20 @@ type ArtifactStore interface {
 	// run_id NULL) never match and are correctly excluded.
 	CountByRun(ctx context.Context, orgID string, runIDs []string) (map[string]int, error)
 
+	// ListByRuns returns the artifacts for every given run as one flat slice,
+	// each ordered newest-first (created_at DESC, id DESC) so a run's rows
+	// match ListByRun's order once grouped. It lets a caller projecting many
+	// runs fetch their artifacts in a single query instead of an N+1 of
+	// per-run ListByRun calls — the run-list response uses it to resolve
+	// pending_kind for the parked runs in a task's run list
+	// (internal/server/agent.go). Each artifact carries its RunID, so the
+	// caller groups by it; an empty runIDs returns nil without touching the DB.
+	//
+	// Mirrors ListByRun's pool/RLS conventions: app pool in Postgres
+	// (RLS-active, team-scoped), the one connection in SQLite. orgID stays
+	// bound as defense in depth. Detached artifacts (run_id NULL) never match.
+	ListByRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Artifact, error)
+
 	// ListByTeam returns the team's artifacts, newest first (the
 	// team_created index order). Backs team-level C2 (TFAC-449) through the
 	// shared A·6 API. Detached rows (run purged → run_id NULL) are still
