@@ -320,6 +320,59 @@ func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_SQLite_CountByRun pins the batched per-run count the run
+// list path uses for artifact_count (TFAC-465): counts keyed by run id, a run
+// with no artifacts absent from the map (not 0-valued), unknown ids absent, and
+// an empty runIDs a no-op returning an empty map.
+func TestArtifactStore_SQLite_CountByRun(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runA := seedArtifactRun(t, conn)
+	runB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	runC := seedArtifactRunWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
+
+	seed := func(runID, key string) {
+		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+			RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			Provider: "github", Kind: "comment", Target: "octo/repo",
+			State: domain.ArtifactStateCommentPosted, DedupKey: key,
+		}); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	seed(runA, "a1")
+	seed(runA, "a2")
+	seed(runA, "a3")
+	seed(runB, "b1")
+
+	counts, err := stores.Artifacts.CountByRun(ctx, runmode.LocalDefaultOrgID, []string{runA, runB, runC, "nonexistent"})
+	if err != nil {
+		t.Fatalf("CountByRun: %v", err)
+	}
+	if counts[runA] != 3 {
+		t.Errorf("runA count = %d, want 3", counts[runA])
+	}
+	if counts[runB] != 1 {
+		t.Errorf("runB count = %d, want 1", counts[runB])
+	}
+	if _, ok := counts[runC]; ok {
+		t.Errorf("runC (no artifacts) should be absent from the map, got %d", counts[runC])
+	}
+	if _, ok := counts["nonexistent"]; ok {
+		t.Error("unknown run id should be absent from the map")
+	}
+
+	// Empty runIDs is a no-op — empty, non-nil map, no query.
+	empty, err := stores.Artifacts.CountByRun(ctx, runmode.LocalDefaultOrgID, nil)
+	if err != nil {
+		t.Fatalf("CountByRun(nil): %v", err)
+	}
+	if empty == nil || len(empty) != 0 {
+		t.Errorf("CountByRun(nil) = %v, want empty non-nil map", empty)
+	}
+}
+
 // TestArtifactStore_SQLite_ListByTeam_IncludesDetached pins the
 // audit-ledger invariant: an artifact whose run was purged (run_id NULL)
 // is still the team's and must come back from ListByTeam. Guards against a
@@ -472,11 +525,17 @@ func newSQLiteForArtifactTest(t *testing.T) *sql.DB {
 // org/team/creator columns default to the local sentinels.
 func seedArtifactRun(t *testing.T, conn *sql.DB) string {
 	t.Helper()
-	const id = "99999999-9999-9999-9999-999999999999"
+	return seedArtifactRunWithID(t, conn, "99999999-9999-9999-9999-999999999999")
+}
+
+// seedArtifactRunWithID is seedArtifactRun parameterized on the run id, for
+// tests that need more than one run (CountByRun batches across runs).
+func seedArtifactRunWithID(t *testing.T, conn *sql.DB, id string) string {
+	t.Helper()
 	if _, err := conn.Exec(
 		`INSERT INTO runs (id, origin, status) VALUES (?, 'interactive', 'running')`, id,
 	); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed run %s: %v", id, err)
 	}
 	return id
 }

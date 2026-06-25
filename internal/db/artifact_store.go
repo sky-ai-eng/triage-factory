@@ -72,6 +72,21 @@ type ArtifactStore interface {
 	// no RLS).
 	ListByRunSystem(ctx context.Context, orgID, runID string) ([]domain.Artifact, error)
 
+	// CountByRun returns the number of artifacts each given run produced,
+	// keyed by run id. Runs with zero artifacts (or absent from the table)
+	// have no entry — the caller treats a missing key as 0. It batches the
+	// run-list path's per-card count into one query so listing a task's runs
+	// stays O(1) in artifact reads rather than N+1 (the run response's
+	// artifact_count, internal/server/agent.go). An empty runIDs returns an
+	// empty map without touching the DB.
+	//
+	// Mirrors ListByRun's pool/RLS conventions: app pool in Postgres
+	// (RLS-active, so the count is team-scoped exactly like the rows it
+	// counts — a non-member counts zero), the one connection in SQLite.
+	// orgID stays bound as defense in depth. Detached artifacts (run purged →
+	// run_id NULL) never match and are correctly excluded.
+	CountByRun(ctx context.Context, orgID string, runIDs []string) (map[string]int, error)
+
 	// ListByTeam returns the team's artifacts, newest first (the
 	// team_created index order). Backs team-level C2 (TFAC-449) through the
 	// shared A·6 API. Detached rows (run purged → run_id NULL) are still

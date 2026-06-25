@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -150,6 +151,44 @@ func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]d
 // check (no JWT-claims context) needs an admin-pool path.
 func (s *artifactStore) ListByRunSystem(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
 	return s.ListByRun(ctx, orgID, runID)
+}
+
+func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []string) (map[string]int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int, len(runIDs))
+	if len(runIDs) == 0 {
+		return counts, nil
+	}
+	// Expand to a ?-placeholder IN list (SQLite has no array bind). A NULL
+	// run_id never matches IN, so detached artifacts are excluded for free.
+	placeholders := make([]string, len(runIDs))
+	args := make([]any, 0, len(runIDs)+1)
+	args = append(args, orgID)
+	for i, id := range runIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT run_id, COUNT(*)
+		FROM artifacts
+		WHERE org_id = ? AND run_id IN (`+strings.Join(placeholders, ", ")+`)
+		GROUP BY run_id
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID string
+		var n int
+		if err := rows.Scan(&runID, &n); err != nil {
+			return nil, err
+		}
+		counts[runID] = n
+	}
+	return counts, rows.Err()
 }
 
 func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {

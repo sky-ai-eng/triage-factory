@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -43,7 +45,11 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		if run == nil {
 			return nil
 		}
-		resp = runResponse(r.Context(), tx.Artifacts, orgID, run)
+		counts, e := tx.Artifacts.CountByRun(r.Context(), orgID, []string{run.ID})
+		if e != nil {
+			return e
+		}
+		resp = runResponse(r.Context(), tx.Artifacts, orgID, run, counts[run.ID])
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -118,20 +124,109 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{"updated": len(updated)})
 }
 
+// artifactJSON is the wire shape of one run artifact for
+// GET /api/agent/runs/{runID}/artifacts — the run's artifacts as the board /
+// run-detail UI (TFAC-470) consumes them, across every kind (branch /
+// pull_request / review / issue / comment). details is the PARSED details_json
+// (the kind-specific payload as a JSON object, or null when absent/unparseable)
+// so the client gets structured data, not a string to re-parse. The mutable
+// dedup_key / org_id / team_id internals stay off the wire.
+type artifactJSON struct {
+	ID         string          `json:"id"`
+	Kind       string          `json:"kind"`
+	Provider   string          `json:"provider"`
+	State      string          `json:"state"`
+	Target     string          `json:"target"`
+	ExternalID string          `json:"external_id"`
+	URL        string          `json:"url"`
+	Details    json.RawMessage `json:"details"`
+	CreatedAt  time.Time       `json:"created_at"`
+}
+
+// toArtifactJSON projects a stored artifact onto the read-API wire shape.
+func toArtifactJSON(a domain.Artifact) artifactJSON {
+	return artifactJSON{
+		ID:         a.ID,
+		Kind:       a.Kind,
+		Provider:   a.Provider,
+		State:      a.State,
+		Target:     a.Target,
+		ExternalID: a.ExternalID,
+		URL:        a.URL,
+		Details:    rawDetails(a.DetailsJSON),
+		CreatedAt:  a.CreatedAt,
+	}
+}
+
+// rawDetails returns details_json as embeddable JSON, or nil (which marshals
+// to null) when it's empty or not valid JSON. The guard matters: json.Marshal
+// validates a json.RawMessage, so handing it a malformed payload would fail the
+// whole response — a corrupt details_json on one row must not 500 the list.
+func rawDetails(detailsJSON string) json.RawMessage {
+	if detailsJSON == "" || !json.Valid([]byte(detailsJSON)) {
+		return nil
+	}
+	return json.RawMessage(detailsJSON)
+}
+
+// handleAgentArtifacts returns every artifact a run produced — branch, PR,
+// review, issue, comment — newest first (A·6, TFAC-465). It reuses
+// Artifacts.ListByRun and reads the run first under request claims, so a run
+// the caller's team can't see is a 404 (RLS scopes both reads), never a leak;
+// a member of the owning team gets the list. Backs the run-detail surface
+// (TFAC-470); team-level aggregation is TFAC-449 C2, not here.
+func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	runID := r.PathValue("runID")
+
+	var run *domain.AgentRun
+	var arts []domain.Artifact
+	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		run, e = tx.AgentRuns.Get(r.Context(), orgID, runID)
+		if e != nil || run == nil {
+			return e
+		}
+		arts, e = tx.Artifacts.ListByRun(r.Context(), orgID, runID)
+		return e
+	}); err != nil {
+		internalError(w, "agent", err)
+		return
+	}
+	if run == nil {
+		notFound(w, "run")
+		return
+	}
+
+	out := make([]artifactJSON, len(arts))
+	for i, a := range arts {
+		out[i] = toArtifactJSON(a)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // runResponse projects an AgentRun into the wire shape the frontend
-// consumes, augmented with `pending_kind` + `pending_artifact_id` so the Board
-// page can pick the right approval card variant ("Review" or "Open PR") and
-// address the overlay by the gating artifact's id when `status ==
-// "pending_approval"`. A run parks either on a finalized pending review (a review
-// artifact whose ready sentinel is set) or a draft PR (a pull_request artifact in
-// state=draft); the discriminator has to come from the server because the run row
-// itself doesn't know which kind queued it.
+// consumes, augmented with `artifact_count` (so the Board card can show how
+// many artifacts a run produced without a per-card fetch) and, when the run is
+// parked, `pending_kind` + `pending_artifact_id` so the page can pick the right
+// approval card variant ("Review" or "Open PR") and address the overlay by the
+// gating artifact's id. A run parks either on a finalized pending review (a
+// review artifact whose ready sentinel is set) or a draft PR (a pull_request
+// artifact in state=draft); the discriminator has to come from the server
+// because the run row itself doesn't know which kind queued it.
 //
-// Cheap: one indexed by-run artifact read per call, a no-op on the common case
-// (terminal completed/failed/cancelled with no pending artifact). The error
-// swallows + logs — pending_kind is informational for the UI; an erroring lookup
-// shouldn't fail the whole status fetch.
-func runResponse(ctx context.Context, artifacts db.ArtifactStore, orgID string, run *domain.AgentRun) map[string]any {
+// artifactCount is supplied by the caller (computed via Artifacts.CountByRun)
+// rather than derived here, so the run-list path can batch one count query for
+// every run instead of an N+1 of per-run reads. pending_kind still needs the
+// actual artifacts, so it keeps its own by-run read — a no-op on the common
+// terminal case, and bounded because parked runs are few. That read's error
+// swallows + logs: pending_kind is informational for the UI and an erroring
+// lookup shouldn't fail the whole status fetch.
+func runResponse(ctx context.Context, artifacts db.ArtifactStore, orgID string, run *domain.AgentRun, artifactCount int) map[string]any {
 	out := map[string]any{
 		"ID":                   run.ID,
 		"TaskID":               run.TaskID,
@@ -152,6 +247,7 @@ func runResponse(ctx context.Context, artifacts db.ArtifactStore, orgID string, 
 		"TriggerID":            run.TriggerID,
 		"blueprint_run_id":     run.BlueprintRunID,
 		"blueprint_step_index": run.BlueprintStepIndex,
+		"artifact_count":       artifactCount,
 	}
 	// pending_kind only relevant when the run is parked. Both overlays are
 	// addressed by the gating artifact's id (pending_artifact_id): a finalized
@@ -443,6 +539,19 @@ func (ag *agentHandler) handleAgentRuns(w http.ResponseWriter, r *http.Request) 
 		if runs == nil {
 			runs = []domain.AgentRun{}
 		}
+		// Batch the per-run artifact_count into one query — the list path is
+		// N+1-sensitive (Board's useWebSocket re-fetches it on every status
+		// transition), so a per-run count read would scale with the task's run
+		// history. CountByRun returns a runID→count map; a run with no
+		// artifacts is simply absent (→ 0).
+		runIDs := make([]string, len(runs))
+		for i := range runs {
+			runIDs[i] = runs[i].ID
+		}
+		counts, e := tx.Artifacts.CountByRun(r.Context(), orgID, runIDs)
+		if e != nil {
+			return e
+		}
 		// Project each run through runResponse so pending_kind rides
 		// alongside on the list endpoint too. Board's useWebSocket calls
 		// this on every status transition; without the discriminator on
@@ -450,7 +559,7 @@ func (ag *agentHandler) handleAgentRuns(w http.ResponseWriter, r *http.Request) 
 		// flicker on first paint and only settle after the per-run fetch.
 		out = make([]map[string]any, len(runs))
 		for i := range runs {
-			out[i] = runResponse(r.Context(), tx.Artifacts, orgID, &runs[i])
+			out[i] = runResponse(r.Context(), tx.Artifacts, orgID, &runs[i], counts[runs[i].ID])
 		}
 		return nil
 	}); err != nil {
