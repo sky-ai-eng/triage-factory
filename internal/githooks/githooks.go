@@ -57,7 +57,7 @@ var readmeContent []byte
 
 // prePushHook is the embedded pre-push hook (A·3, TFAC-460) Ensure writes
 // into the hooks dir. It records each pushed branch as a durable artifact
-// via `triagefactory exec git record-push`. Best-effort: it always exits 0.
+// via `triagefactory hook record-push`. Best-effort: it always exits 0.
 //
 //go:embed pre-push
 var prePushHook []byte

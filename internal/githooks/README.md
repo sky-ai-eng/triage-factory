@@ -23,9 +23,10 @@ context from the environment TF guarantees is present in the agent
 process in both modes:
 
 - `TRIAGE_FACTORY_RUN_ID` — the run the git op belongs to. A hook records
-  through the `triagefactory exec ...` choke point, which resolves this
-  into the `(org, user, run)` identity (local mode) or hands it to the
-  agenthost daemon (sandbox mode).
+  through the `triagefactory hook ...` callback (an internal namespace,
+  kept off `exec` so the agent can't invoke it), which resolves this into
+  the `(org, user, run)` identity (local mode) or hands it to the agenthost
+  daemon (sandbox mode).
 - `TRIAGE_FACTORY_BIN` — the absolute path to the `triagefactory` binary
   the hook invokes. The hooks are generic scripts with no compiled-in
   path, and in local mode the binary lives wherever the operator ran it
@@ -50,7 +51,7 @@ process in both modes:
 ## Shipped hooks
 
 - `pre-push` (A·3, TFAC-456→TFAC-460) — records each pushed branch as a
-  durable `branch` artifact via `triagefactory exec git record-push`. git
+  durable `branch` artifact via `triagefactory hook record-push`. git
   feeds it the pushed refs on stdin; it skips deletes, marks new branches,
   and always exits `0`. Rewritten by `Ensure` on every startup so an
   upgraded binary refreshes a stale on-disk copy.

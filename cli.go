@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
+	"github.com/sky-ai-eng/triage-factory/cmd/hook"
 	"github.com/sky-ai-eng/triage-factory/cmd/install"
 	"github.com/sky-ai-eng/triage-factory/cmd/jwkinit"
 	"github.com/sky-ai-eng/triage-factory/cmd/migrate"
@@ -26,6 +27,14 @@ func dispatchCLI(args []string) (handled bool, err error) {
 	switch args[0] {
 	case "exec":
 		exec.Handle(args[1:])
+	case "hook":
+		// Internal git-hook callbacks (e.g. `hook record-push`), fired by
+		// the TF-controlled git hooks. Deliberately a separate namespace
+		// from `exec`: the agent's Bash allowlist is `exec *`, so keeping
+		// these off `exec` makes them un-invokable by the agent while the
+		// hook (a git subprocess, not an agent tool call) can still reach
+		// them. Undocumented in --help for the same reason.
+		hook.Handle(args[1:])
 	case "status":
 		exec.HandleStatus(args[1:])
 	case "install":

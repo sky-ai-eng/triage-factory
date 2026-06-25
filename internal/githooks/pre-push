@@ -35,10 +35,12 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 		*) is_new=true ;;
 	esac
 
-	# --new uses the =value form: Go's flag package reads a bare boolean
-	# flag as true and would treat a following "false" token as a stray
-	# positional, so the space form must not be used here.
-	"$bin" exec git record-push \
+	# `hook record-push` is an internal callback namespace, deliberately not
+	# under `exec` (which the agent can invoke). --new uses the =value form:
+	# Go's flag package reads a bare boolean flag as true and would treat a
+	# following "false" token as a stray positional, so the space form must
+	# not be used here.
+	"$bin" hook record-push \
 		--remote "$remote_url" \
 		--ref "$remote_ref" \
 		--sha "$local_sha" \

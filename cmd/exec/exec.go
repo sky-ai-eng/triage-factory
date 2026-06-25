@@ -10,7 +10,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/gh"
-	gitexec "github.com/sky-ai-eng/triage-factory/cmd/exec/git"
 	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/workspace"
@@ -125,19 +124,6 @@ func Handle(args []string) {
 		defer func() { _ = host.Close() }()
 		workspace.Handle(host, cmdArgs)
 
-	case "git":
-		// No credentials needed — git record-push only upserts an artifact
-		// through the agenthost client (DB in local mode, IPC in sandbox).
-		// Invoked by the pre-push hook; resolves the run via the same
-		// socket/env path as every other exec verb.
-		if isHelp(cmdArgs) {
-			gitexec.Handle(nil, cmdArgs)
-			return
-		}
-		host := buildAgentHost()
-		defer func() { _ = host.Close() }()
-		gitexec.Handle(host, cmdArgs)
-
 	default:
 		fmt.Fprintf(os.Stderr, "unknown exec command: %s\nRun 'triagefactory exec --help' for usage.\n", cmd)
 		os.Exit(1)
@@ -154,13 +140,10 @@ func isHelp(args []string) bool {
 }
 
 func printHelp() {
-	// gitexec.HelpText is intentionally omitted here. `git record-push` is
-	// internal plumbing the pre-push hook invokes automatically — never a
-	// caller-of-intent action. A delegated agent that gets stuck reaches for
-	// `exec --help`, and since the agent's Bash allowlist is `exec *` it
-	// could then call record-push directly and fabricate/duplicate a branch
-	// artifact. Keeping it out of this aggregate menu (it's still documented
-	// under `exec git --help` for human operators debugging the hook) keeps
-	// the agent-facing surface to real agent actions.
+	// Only agent-facing verbs are listed. The pre-push hook's branch-capture
+	// callback is deliberately NOT an exec subcommand — it lives under the
+	// internal `triagefactory hook` namespace (see cmd/hook), off the agent's
+	// `Bash(<bin> exec *)` allowlist, so a stuck agent scanning this help can
+	// neither see nor invoke it.
 	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText)
 }

@@ -183,7 +183,7 @@ func TestPrePushHook_RecordsNewAndUpdate(t *testing.T) {
 	// First push creates main on the remote → --new=true.
 	mustGit(t, env, work, "push", "-u", "origin", "main")
 	got := readMarker(t, recLog)
-	for _, want := range []string{"exec git record-push", "--ref refs/heads/main", "--new=true"} {
+	for _, want := range []string{"hook record-push", "--ref refs/heads/main", "--new=true"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("new-branch push: recorder log %q missing %q", got, want)
 		}

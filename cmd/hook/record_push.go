@@ -1,4 +1,4 @@
-package git
+package hook
 
 import (
 	"context"
@@ -32,11 +32,11 @@ type branchDetails struct {
 
 // runRecordPush upserts a `branch` artifact for one pushed ref. Invoked by
 // the pre-push hook, once per non-delete ref. Best-effort: a recording
-// failure is reported on stderr and exits 0 so the hook (which also
-// guards with `|| true`) never blocks the push. Only a malformed
-// invocation (a bug in the hook) exits non-zero, to surface the bug.
+// failure is reported on stderr and returns so the hook (which also guards
+// with `|| true`) never blocks the push. Only a malformed invocation (a bug
+// in the hook) exits non-zero, to surface the bug.
 func runRecordPush(host agenthost.Client, args []string) {
-	fs := flag.NewFlagSet("git record-push", flag.ContinueOnError)
+	fs := flag.NewFlagSet("hook record-push", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var (
 		remote = fs.String("remote", "", "remote URL being pushed to (git's $2)")
@@ -53,7 +53,7 @@ func runRecordPush(host agenthost.Client, args []string) {
 		// in details_json), so an empty one would store a meaningless
 		// artifact. The hook always supplies it for a real push; an empty
 		// value means a malformed invocation.
-		fmt.Fprintln(os.Stderr, "git record-push: --remote, --ref, and --sha are required")
+		fmt.Fprintln(os.Stderr, "hook record-push: --remote, --ref, and --sha are required")
 		os.Exit(2)
 	}
 
@@ -68,8 +68,8 @@ func runRecordPush(host agenthost.Client, args []string) {
 	if !ok {
 		// Unparseable remote (a non-GitHub host, a GHES layout we don't
 		// model). Best-effort: nothing to anchor the artifact to, so warn
-		// and exit 0 rather than failing the push.
-		fmt.Fprintf(os.Stderr, "git record-push: could not parse owner/repo from remote %q; skipping\n", *remote)
+		// and return rather than failing the push.
+		fmt.Fprintf(os.Stderr, "hook record-push: could not parse owner/repo from remote %q; skipping\n", *remote)
 		return
 	}
 	target := owner + "/" + repo
@@ -100,7 +100,7 @@ func runRecordPush(host agenthost.Client, args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if _, err := host.UpsertArtifact(ctx, artifact); err != nil {
-		fmt.Fprintf(os.Stderr, "git record-push: record branch %s: %v\n", *ref, err)
+		fmt.Fprintf(os.Stderr, "hook record-push: record branch %s: %v\n", *ref, err)
 		return // best-effort: never fail the push
 	}
 }
