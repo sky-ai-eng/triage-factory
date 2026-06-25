@@ -69,6 +69,15 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	return out, nil
 }
 
+// UpsertSystem is identical to Upsert in SQLite: local mode is single-tenant
+// (N=1) with no RLS, so there is no admin/app pool split — both run on the one
+// connection. The method exists for parity with the Postgres store, where the
+// exec choke point's event-triggered writers (no JWT-claims context) need an
+// admin-pool path. See TFAC-459.
+func (s *artifactStore) UpsertSystem(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error) {
+	return s.Upsert(ctx, orgID, a)
+}
+
 func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

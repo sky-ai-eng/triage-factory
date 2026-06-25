@@ -25,7 +25,24 @@ type ArtifactStore interface {
 	// via reconciliation lands on one row. Returns the stored row with id
 	// and timestamps populated. a.ID may be empty (both impls generate a
 	// uuid); a non-empty a.ID is honored on insert and ignored on update.
+	//
+	// Runs on the app pool in Postgres (RLS-active), so the caller must be
+	// inside a claims-set tx (request handler or SyntheticClaimsWithTx). A
+	// caller with an authoritative team identity but no JWT-claims context —
+	// an event-triggered run's exec choke point, which has no user (runs by
+	// schema CHECK carry no creator) — must use UpsertSystem instead.
 	Upsert(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error)
+
+	// UpsertSystem is the admin-pool (BYPASSRLS) variant of Upsert for
+	// system-service writers that hold a real (org_id, team_id) identity but
+	// no JWT-claims context — chiefly the exec choke point on an
+	// event-triggered run (TFAC-459), whose insert is unreachable through
+	// tf_app because the artifacts_insert RLS policy demands a team-writing
+	// user and the run has none. Mirrors the `...System` admin halves on
+	// AgentRuns / RunWorktrees / Reviews. org_id stays bound as defense in
+	// depth; team_id on the row is authoritative (it comes from the run).
+	// Identical to Upsert in SQLite (single-tenant, no RLS).
+	UpsertSystem(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error)
 
 	// ListByRun returns every artifact produced by one run, newest first.
 	// Backs the run-detail surface (A·6).

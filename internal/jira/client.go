@@ -657,10 +657,24 @@ func extractFieldID(field string) string {
 	return strings.TrimPrefix(field, "customfield_")
 }
 
-// AddComment posts a comment on an issue.
-func (c *Client) AddComment(ctx context.Context, issueKey, body string) error {
+// AddComment posts a comment on an issue and returns the new comment's id.
+// The id is best-effort: if the POST succeeds (2xx) but the response body
+// can't be parsed, the comment still landed, so we return an empty id with no
+// error rather than failing an action that already took effect. Callers that
+// only care about success can ignore the id.
+func (c *Client) AddComment(ctx context.Context, issueKey, body string) (string, error) {
 	url := c.apiURL("issue/%s/comment", issueKey)
-	return c.post(ctx, url, map[string]string{"body": body})
+	respBody, err := c.postJSON(ctx, url, map[string]string{"body": body})
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", nil
+	}
+	return result.ID, nil
 }
 
 // GetTransitions returns the available workflow transitions for an issue.

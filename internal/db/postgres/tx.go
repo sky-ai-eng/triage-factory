@@ -140,10 +140,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// the outer tx — see Create's pool-routing comment for
 		// why that's the intended semantics.
 		AgentRuns: newAgentRunStore(tx, s.admin),
-		// Artifacts: app-pool store routes through the tx so writes
+		// Artifacts: app-side write routes through the tx so writes
 		// compose with the surrounding claims tx (artifacts_* RLS scopes
-		// by team_id like runs).
-		Artifacts:      newArtifactStore(tx),
+		// by team_id like runs); admin half stays pinned to s.admin so
+		// UpsertSystem inside WithTx routes outside the tx and commits
+		// autonomously, the same shape AgentRuns / RunWorktrees use.
+		Artifacts:      newArtifactStore(tx, s.admin),
 		Entities:       newEntityStore(tx, tx),
 		Reviews:        newReviewStore(tx, s.admin),
 		PendingPRs:     newPendingPRStore(tx, s.admin),

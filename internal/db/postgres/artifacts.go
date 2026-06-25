@@ -9,16 +9,29 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// artifactStore is the Postgres impl of db.ArtifactStore. Wired against
-// the app pool in postgres.New — every consumer is request-equivalent
-// (the exec choke point writes under synthetic claims; run-detail / C2
-// read under the request user), and the artifacts_* RLS policies scope
-// reads/writes by team_id exactly like runs. org_id stays in every
-// WHERE/INSERT clause as defense in depth. Mirrors the runs store
+// artifactStore is the Postgres impl of db.ArtifactStore. The artifacts_*
+// RLS policies scope reads/writes by team_id exactly like runs; org_id stays
+// in every WHERE/INSERT clause as defense in depth. Mirrors the runs store
 // (agentrun.go) for $N placeholders + scan conventions. See TFAC-455.
-type artifactStore struct{ q queryer }
+//
+// Holds two pools, the same split AgentRuns / RunWorktrees use:
+//
+//   - q: app pool (tf_app, RLS-active). Manual-run exec writes (under
+//     synthetic claims) and run-detail / C2 reads route here.
+//
+//   - admin: admin pool (BYPASSRLS). UpsertSystem routes here for the exec
+//     choke point on an event-triggered run, whose insert is unreachable
+//     through tf_app — the run carries no creator user, so the
+//     artifacts_insert policy's team-write check can never pass. See
+//     TFAC-459.
+type artifactStore struct {
+	q     queryer
+	admin queryer
+}
 
-func newArtifactStore(q queryer) db.ArtifactStore { return &artifactStore{q: q} }
+func newArtifactStore(q, admin queryer) db.ArtifactStore {
+	return &artifactStore{q: q, admin: admin}
+}
 
 var _ db.ArtifactStore = (*artifactStore)(nil)
 
@@ -33,6 +46,17 @@ const pgArtifactColumns = `
 `
 
 func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error) {
+	return s.upsert(ctx, s.q, orgID, a)
+}
+
+// UpsertSystem runs the same UPSERT on the admin pool (BYPASSRLS) for
+// event-triggered exec writers that have no JWT-claims context. See the type
+// doc and TFAC-459.
+func (s *artifactStore) UpsertSystem(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error) {
+	return s.upsert(ctx, s.admin, orgID, a)
+}
+
+func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a domain.Artifact) (domain.Artifact, error) {
 	// ON CONFLICT(org_id, dedup_key) updates the documented mutable fields
 	// from the proposed row (EXCLUDED.*) and bumps updated_at; id/created_at
 	// on the existing row are preserved. provider/kind are deliberately NOT
@@ -41,7 +65,7 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// insert side pins them, the update side leaves them. A caller-supplied
 	// a.ID is honored on insert (parity with SQLite); an empty a.ID falls
 	// back to gen_random_uuid() server-side.
-	row := s.q.QueryRowContext(ctx, `
+	row := q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, run_id, org_id, team_id, provider, kind, target,
 			 external_id, url, state, dedup_key, details_json, updated_at)
