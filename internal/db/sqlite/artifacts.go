@@ -44,6 +44,16 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// dedup_key (the conflict target), so the insert side pins them and the
 	// update side leaves them rather than risk a row whose discriminators
 	// disagree with its key.
+	//
+	// external_id/url are COALESCE-preserved: they are the backing object's
+	// stable coordinates (PR number / issue key, html link) — once known they
+	// only ever fill in, never legitimately clear. Since the insert side
+	// NULLIFs empty strings to NULL, a plain excluded.* assignment would let a
+	// later upsert that can't supply them (a reconciliation pass, or a Jira
+	// mutation whose run can't compute the browse URL) blank a value an
+	// earlier writer already stored. COALESCE keeps the existing value when
+	// the incoming one is NULL. The other mutable fields are last-writer-wins
+	// by design (state tracks the latest action, target migrates).
 	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, run_id, org_id, team_id, provider, kind, target,
@@ -53,8 +63,8 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 			run_id       = excluded.run_id,
 			team_id      = excluded.team_id,
 			target       = excluded.target,
-			external_id  = excluded.external_id,
-			url          = excluded.url,
+			external_id  = COALESCE(excluded.external_id, artifacts.external_id),
+			url          = COALESCE(excluded.url, artifacts.url),
 			state        = excluded.state,
 			details_json = excluded.details_json,
 			updated_at   = CURRENT_TIMESTAMP
@@ -69,9 +79,11 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	return out, nil
 }
 
-// UpsertSystem is identical to Upsert in SQLite: local mode is N=1 with no
-// RLS, so there is no admin/app pool split to honor. It exists to satisfy
-// the db.ArtifactStore interface the Postgres impl needs (TFAC-460).
+// UpsertSystem is identical to Upsert in SQLite: local mode is single-tenant
+// (N=1) with no RLS, so there is no admin/app pool split — both run on the one
+// connection. The method exists for parity with the Postgres store, where the
+// exec choke point's event-triggered writers (no JWT-claims context) need an
+// admin-pool path. See TFAC-459.
 func (s *artifactStore) UpsertSystem(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error) {
 	return s.Upsert(ctx, orgID, a)
 }
