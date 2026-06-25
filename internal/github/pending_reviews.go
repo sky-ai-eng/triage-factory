@@ -313,10 +313,7 @@ func (c *Client) GetPendingReview(owner, repo string, number int) (string, []Pen
 				} `json:"pullRequest"`
 			} `json:"repository"`
 		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-		} `json:"errors"`
+		Errors gqlErrors `json:"errors"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return "", nil, fmt.Errorf("parse pending review response: %w", err)
@@ -326,9 +323,8 @@ func (c *Client) GetPendingReview(owner, repo string, number int) (string, []Pen
 	// so a FORBIDDEN scoped to the reviews field arrives here as empty nodes
 	// alongside errors[] — checked first so it can't be silently read as "no
 	// pending review". (Total failures with null data already returned above.)
-	if len(resp.Errors) > 0 {
-		e := resp.Errors[0]
-		return "", nil, fmt.Errorf("get pending review: GraphQL error (%s): %s", e.Type, e.Message)
+	if err := resp.Errors.first("get pending review"); err != nil {
+		return "", nil, err
 	}
 	if resp.Data.Repository == nil || resp.Data.Repository.PullRequest == nil {
 		return "", nil, nil
@@ -408,17 +404,13 @@ func (c *Client) GetReview(reviewNodeID string) (*SubmittedReview, error) {
 				} `json:"comments"`
 			} `json:"node"`
 		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-		} `json:"errors"`
+		Errors gqlErrors `json:"errors"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, fmt.Errorf("parse review response: %w", err)
 	}
-	if len(resp.Errors) > 0 {
-		e := resp.Errors[0]
-		return nil, fmt.Errorf("get review: GraphQL error (%s): %s", e.Type, e.Message)
+	if err := resp.Errors.first("get review"); err != nil {
+		return nil, err
 	}
 	// node==null (unresolved) or a non-review node (the inline fragment matched
 	// nothing, leaving State empty) → no review to describe.
@@ -466,19 +458,15 @@ func (c *Client) DeletePendingReview(owner, repo string, number int, reviewID st
 				DatabaseID int64 `json:"databaseId"`
 			} `json:"node"`
 		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-		} `json:"errors"`
+		Errors gqlErrors `json:"errors"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return fmt.Errorf("delete pending review: parse database id: %w", err)
 	}
 	// Surface a partial GraphQL error (200 + errors[]) before reading data, so a
 	// FORBIDDEN/NOT_FOUND on the node lookup isn't misread as "no database id".
-	if len(resp.Errors) > 0 {
-		e := resp.Errors[0]
-		return fmt.Errorf("delete pending review: GraphQL error (%s): %s", e.Type, e.Message)
+	if err := resp.Errors.first("delete pending review"); err != nil {
+		return err
 	}
 	if resp.Data.Node.DatabaseID == 0 {
 		// A real review (pending or submitted) resolves to a non-zero databaseId, so

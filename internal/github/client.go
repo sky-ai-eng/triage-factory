@@ -259,6 +259,32 @@ func graphqlURL(baseURL string) string {
 	return strings.TrimSuffix(baseURL, "/v3") + "/graphql"
 }
 
+// gqlError is one entry in a GraphQL response's errors[] array. Path is a mixed
+// string/int array (field names + list indices); only the PostGraphQL
+// partial-error path reads it, the per-method re-checks use Type + Message.
+type gqlError struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Path    []any  `json:"path"`
+}
+
+// gqlErrors is a GraphQL response's errors[] array. It lets a method embed
+// `Errors gqlErrors` in its response struct and surface a partial error in one
+// line, rather than re-declaring the struct + the len-check at every call site.
+type gqlErrors []gqlError
+
+// first returns a formatted error for the first entry, or nil when empty. PostGraphQL
+// passes a 200 partial response (usable data + errors[]) through without erroring,
+// so a method that finds an errors[] scoped to its own field calls this to surface
+// it rather than misreading the empty data as a real "not found". context prefixes
+// the message (e.g. "get review").
+func (e gqlErrors) first(context string) error {
+	if len(e) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s: GraphQL error (%s): %s", context, e[0].Type, e[0].Message)
+}
+
 // PostGraphQL sends a GraphQL query to GitHub's GraphQL API.
 func (c *Client) PostGraphQL(body any) ([]byte, error) {
 	url := graphqlURL(c.baseURL)
@@ -295,13 +321,7 @@ func (c *Client) PostGraphQL(body any) ([]byte, error) {
 	// absent/null `data` ⇒ a genuine failure (bad query, cost ceiling, auth).
 	var gqlResp struct {
 		Data   json.RawMessage `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			// path is a mixed string/int array (field names and list indices),
-			// so it decodes into []any rather than a typed slice.
-			Path []any `json:"path"`
-		} `json:"errors"`
+		Errors gqlErrors       `json:"errors"`
 	}
 	if json.Unmarshal(data, &gqlResp) == nil && len(gqlResp.Errors) > 0 {
 		e := gqlResp.Errors[0]
