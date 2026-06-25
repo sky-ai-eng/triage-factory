@@ -764,14 +764,19 @@ func (c *LocalClient) GithubUpdateComment(ctx context.Context, owner, repo strin
 	if err != nil {
 		return err
 	}
-	if err := client.UpdateComment(owner, repo, commentID, body); err != nil {
+	isIssueComment, err := client.UpdateCommentScoped(owner, repo, commentID, body)
+	if err != nil {
 		return err
 	}
-	// The comment is still posted, just edited — it stays in the posted state;
-	// the upsert bumps the existing row (re-attributing it to this run) and the
-	// store preserves the target/url an add-comment stamped, which this path
-	// can't recompute from the id alone.
-	c.recordGithubCommentState(ctx, commentID, domain.ArtifactStateCommentPosted)
+	// Standalone comments only. A review line-comment — the pulls/comments
+	// fallback inside UpdateCommentScoped — rides the review artifact, not a
+	// comment artifact, so it records nothing here. The edit keeps the comment
+	// posted; the upsert bumps the existing row (re-attributing it to this run),
+	// and the store preserves the target/url an add-comment stamped, which this
+	// id-only path can't recompute.
+	if isIssueComment {
+		c.recordGithubCommentState(ctx, commentID, domain.ArtifactStateCommentPosted)
+	}
 	return nil
 }
 
@@ -780,12 +785,17 @@ func (c *LocalClient) GithubDeleteComment(ctx context.Context, owner, repo strin
 	if err != nil {
 		return err
 	}
-	if err := client.DeleteComment(owner, repo, commentID); err != nil {
+	isIssueComment, err := client.DeleteCommentScoped(owner, repo, commentID)
+	if err != nil {
 		return err
 	}
-	// Retire the artifact in place — the row persists for the audit ledger,
-	// flipped to the deleted state rather than dropped.
-	c.recordGithubCommentState(ctx, commentID, domain.ArtifactStateCommentDeleted)
+	// Standalone comments only — a review line-comment (the pulls/comments
+	// fallback) rides the review artifact. Retire the artifact in place: the row
+	// persists for the audit ledger, flipped to the deleted state rather than
+	// dropped.
+	if isIssueComment {
+		c.recordGithubCommentState(ctx, commentID, domain.ArtifactStateCommentDeleted)
+	}
 	return nil
 }
 
@@ -849,11 +859,13 @@ func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo strin
 }
 
 // recordGithubCommentState upserts the comment artifact for an edit (state
-// posted) or a delete (state deleted) keyed on the same comment id. These paths
-// carry only the id — not the PR number — so they leave target/url empty; the
-// store preserves whatever the add path stamped. If the comment was never
-// recorded (e.g. the agent edits a human's comment), the upsert mints a minimal
-// row keyed on the id, which still truthfully records that this run touched it.
+// posted) or a delete (state deleted) keyed on the same comment id. The caller
+// only reaches here for a standalone (top-level issue) comment — review
+// line-comments are filtered out upstream. These paths carry only the id — not
+// the PR number — so they leave target/url empty; the store preserves whatever
+// the add path stamped. If the comment was never recorded (e.g. the agent edits
+// a human's top-level comment), the upsert mints a minimal row keyed on the id,
+// which still truthfully records that this run touched it.
 func (c *LocalClient) recordGithubCommentState(ctx context.Context, commentID int, state string) {
 	if c.stores.Artifacts == nil {
 		return

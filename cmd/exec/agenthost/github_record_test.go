@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -163,6 +164,47 @@ func TestLocalClient_GithubCommentLifecycle_DedupsAndRetires(t *testing.T) {
 	// The id-only update/delete paths must inherit, not blank, the add's coordinates.
 	if a.Target != "octo/repo#1" || a.URL != "https://github.com/octo/repo/pull/1#issuecomment-777" || a.ExternalID != "777" {
 		t.Errorf("retire blanked the add's stable coordinates: %+v", a)
+	}
+}
+
+// TestLocalClient_GithubCommentUpdateDelete_ReviewComment_NotRecorded pins the
+// scope boundary: comment-update / comment-delete fall back to the
+// pulls/comments (review line-comment) endpoint when the id isn't a top-level
+// issue comment. Those ride the review artifact, so even though the action
+// succeeds via the fallback, no comment artifact is written.
+func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_NotRecorded(t *testing.T) {
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// The issues-comments endpoint 404s (id is not a top-level comment);
+		// the client then falls back to the pulls (review) endpoint, which
+		// handles it.
+		if strings.Contains(r.URL.Path, "/issues/comments/") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"message":"Not Found"}`)
+			return
+		}
+		switch r.Method {
+		case http.MethodPatch:
+			_, _ = io.WriteString(w, `{"id":999}`)
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	t.Cleanup(gh.Close)
+
+	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
+	ctx := context.Background()
+
+	if err := client.GithubUpdateComment(ctx, "octo", "repo", 999, "edit a review comment"); err != nil {
+		t.Fatalf("update via the review fallback must still succeed: %v", err)
+	}
+	if err := client.GithubDeleteComment(ctx, "octo", "repo", 999); err != nil {
+		t.Fatalf("delete via the review fallback must still succeed: %v", err)
+	}
+	if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+		t.Errorf("a review line-comment update/delete must record no comment artifact, got %+v", arts)
 	}
 }
 
