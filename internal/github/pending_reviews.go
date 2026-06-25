@@ -281,6 +281,10 @@ func (c *Client) GetPendingReview(owner, repo string, number int) (string, []Pen
 				} `json:"pullRequest"`
 			} `json:"repository"`
 		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"errors"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return "", nil, fmt.Errorf("parse pending review response: %w", err)
