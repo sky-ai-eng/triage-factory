@@ -188,6 +188,115 @@ func TestReceivePackBackstop_LargePackForwardedIntact(t *testing.T) {
 	}
 }
 
+// TestReceivePackBackstop_InterimResponseStillRecords drives a real push through
+// the proxy against an upstream that sends a 1xx interim response (103 Early
+// Hints) before its final 200. httputil.ReverseProxy forwards that 1xx by
+// calling WriteHeader(103) on the wrapped statusRecorder (verified on Go 1.26),
+// so without the recorder's "first FINAL status" guard the 103 would latch the
+// gate and the branch would be silently dropped on a successful push. This is
+// the full-path companion to the statusRecorder unit test.
+func TestReceivePackBackstop_InterimResponseStillRecords(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusEarlyHints) // 103 interim — forwarded before the final status
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("0000"))
+	}))
+	defer upstream.Close()
+
+	var mu sync.Mutex
+	var pushes []gitproxy.PushedRef
+	srv, err := gitproxy.New(gitproxy.Config{
+		TokenSource: func(context.Context) (gitproxy.Token, error) { return gitproxy.Token{Value: "ghs"}, nil },
+		Upstream:    upstream.URL,
+		RecordPush: func(_ context.Context, p gitproxy.PushedRef) {
+			mu.Lock()
+			pushes = append(pushes, p)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("gitproxy.New: %v", err)
+	}
+	addr, err := srv.Start("")
+	if err != nil {
+		t.Fatalf("Server.Start: %v", err)
+	}
+
+	body := pkt(zeroOID+" aaaa refs/heads/main\n") + "0000" + "PACKDATA"
+	req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/octo/repo/git-receive-pack", strings.NewReader(body))
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("client status = %d, want 200", resp.StatusCode)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := []gitproxy.PushedRef{{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "aaaa", Created: true}}
+	if !equalPushes(pushes, want) {
+		t.Errorf("recorded pushes = %+v, want %+v (a 1xx interim must not drop the record)", pushes, want)
+	}
+}
+
+// TestReceivePackBackstop_NilRecordPushDisablesBackstop proves a proxy with no
+// RecordPush wired (local mode / no stores) leaves the push completely
+// untouched — the Handler guard skips serveReceivePack, so the body still
+// reaches the upstream and nothing is recorded.
+func TestReceivePackBackstop_NilRecordPushDisablesBackstop(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("0000"))
+	}))
+	defer upstream.Close()
+
+	srv, err := gitproxy.New(gitproxy.Config{
+		TokenSource: func(context.Context) (gitproxy.Token, error) { return gitproxy.Token{Value: "ghs"}, nil },
+		Upstream:    upstream.URL,
+		// RecordPush deliberately nil.
+	})
+	if err != nil {
+		t.Fatalf("gitproxy.New: %v", err)
+	}
+	addr, err := srv.Start("")
+	if err != nil {
+		t.Fatalf("Server.Start: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+
+	body := pkt(zeroOID+" aaaa refs/heads/main\n") + "0000" + "PACKDATA"
+	req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/octo/repo/git-receive-pack", strings.NewReader(body))
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("client status = %d, want 200", resp.StatusCode)
+	}
+	if string(gotBody) != body {
+		t.Errorf("upstream body = %q, want the push forwarded untouched %q", gotBody, body)
+	}
+}
+
 func equalPushes(a, b []gitproxy.PushedRef) bool {
 	if len(a) != len(b) {
 		return false
