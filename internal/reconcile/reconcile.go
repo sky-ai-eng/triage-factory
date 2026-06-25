@@ -423,8 +423,17 @@ func formatTitleBodyDelta(draftTitle, draftBody, finalTitle, finalBody string) s
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// writeBlockquote prefixes each line of text with "> " for a markdown blockquote.
+// writeBlockquote prefixes each line of text with "> " for a markdown
+// blockquote. CRLF-normalizes (GitHub web/Windows clients deliver "\r\n") and
+// trims trailing newlines first, so an empty or trailing-newline body doesn't
+// emit a stray "> " line; an empty body writes nothing.
 func writeBlockquote(b *strings.Builder, text string) {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "")
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return
+	}
 	for _, line := range strings.Split(text, "\n") {
 		b.WriteString("> ")
 		b.WriteString(line)
@@ -483,7 +492,7 @@ func formatFinalReview(final github.SubmittedReview) string {
 	}
 	for _, c := range final.Comments {
 		_, clean := domain.ParseSeverityBadge(c.Body)
-		fmt.Fprintf(&b, "\n- `%s:%d` — %s", c.Path, derefLine(c.Line), inlineComment(clean))
+		fmt.Fprintf(&b, "\n- %s — %s", commentLoc(c.Path, derefLine(c.Line)), inlineComment(clean))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -548,9 +557,9 @@ func diffReviewComments(proposed []domain.ReviewArtifactComment, final []github.
 		f, ok := fm[id]
 		switch {
 		case !ok:
-			out = append(out, fmt.Sprintf("- `%s:%d` — dropped before submit (you wrote: %s)", p.path, p.line, inlineComment(p.body)))
+			out = append(out, fmt.Sprintf("- %s — dropped before submit (you wrote: %s)", commentLoc(p.path, p.line), inlineComment(p.body)))
 		case p.body != f.body:
-			out = append(out, fmt.Sprintf("- `%s:%d` — edited before submit. Final: %s (you wrote: %s)", p.path, p.line, inlineComment(f.body), inlineComment(p.body)))
+			out = append(out, fmt.Sprintf("- %s — edited before submit. Final: %s (you wrote: %s)", commentLoc(p.path, p.line), inlineComment(f.body), inlineComment(p.body)))
 		}
 	}
 	for _, id := range fOrder {
@@ -558,9 +567,19 @@ func diffReviewComments(proposed []domain.ReviewArtifactComment, final []github.
 			continue
 		}
 		f := fm[id]
-		out = append(out, fmt.Sprintf("- `%s:%d` — added before submit: %s", f.path, f.line, inlineComment(f.body)))
+		out = append(out, fmt.Sprintf("- %s — added before submit: %s", commentLoc(f.path, f.line), inlineComment(f.body)))
 	}
 	return out
+}
+
+// commentLoc renders an inline comment's location. A line of 0 — GitHub returns
+// a null line for a comment no longer anchored on the current diff — reads as
+// "(outdated)" rather than a meaningless ":0".
+func commentLoc(path string, line int) string {
+	if line <= 0 {
+		return fmt.Sprintf("`%s` (outdated)", path)
+	}
+	return fmt.Sprintf("`%s:%d`", path, line)
 }
 
 // reviewVerdict maps a GitHub review state to friendly prose.

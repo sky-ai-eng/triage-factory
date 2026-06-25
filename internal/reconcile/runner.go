@@ -82,6 +82,12 @@ func (r *Runner) run(ctx context.Context) {
 	}()
 
 	if err := r.reconciler.ReconcileOrg(ctx, r.orgID); err != nil {
+		if ctx.Err() != nil {
+			// Shutting down: Stop() cancelled ctx and it propagated out through a
+			// DB call as context.Canceled — not a real failure. Mirrors the
+			// profiler runner's guard.
+			return
+		}
 		reconcileLog.Error("reconcile cycle failed", "org", r.orgID, "error", err)
 	}
 }

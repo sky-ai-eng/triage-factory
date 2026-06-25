@@ -355,9 +355,13 @@ func (c *Client) GetPendingReview(owner, repo string, number int) (string, []Pen
 // ids (not the REST integer ids GetReviewDetail returns) so a proposed-vs-final
 // diff can join on the same key the pending-review editor used. TFAC-464.
 type SubmittedReview struct {
-	State    string                 // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
-	Body     string                 //
-	Comments []PendingReviewComment // node-id-keyed, RIGHT-side inline comments
+	State string // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
+	Body  string //
+	// Comments are the node-id-keyed RIGHT-side inline comments, capped at the
+	// first 100 (same correctness boundary as GetPendingReview — a review with
+	// >100 comments truncates here, and GetReview logs a warning so the
+	// proposed-vs-final diff silently omitting the tail stays visible).
+	Comments []PendingReviewComment
 }
 
 // GetReview fetches a review by its GraphQL node id in ANY state (submitted or
@@ -379,6 +383,7 @@ func (c *Client) GetReview(reviewNodeID string) (*SubmittedReview, error) {
 				state
 				body
 				comments(first: 100) {
+					pageInfo { hasNextPage }
 					nodes { id path line startLine body }
 				}
 			}
@@ -394,6 +399,9 @@ func (c *Client) GetReview(reviewNodeID string) (*SubmittedReview, error) {
 				State    string `json:"state"`
 				Body     string `json:"body"`
 				Comments struct {
+					PageInfo struct {
+						HasNextPage bool `json:"hasNextPage"`
+					} `json:"pageInfo"`
 					Nodes []struct {
 						ID        string `json:"id"`
 						Path      string `json:"path"`
@@ -416,6 +424,14 @@ func (c *Client) GetReview(reviewNodeID string) (*SubmittedReview, error) {
 	// nothing, leaving State empty) → no review to describe.
 	if resp.Data.Node == nil || resp.Data.Node.State == "" {
 		return nil, nil
+	}
+	// Comment-count truncation watchdog, mirroring GetPendingReview: a review
+	// with >100 inline comments returns only the first 100, so the
+	// proposed-vs-final diff would silently omit the tail. Log it rather than let
+	// truncation read as deletions.
+	if resp.Data.Node.Comments.PageInfo.HasNextPage {
+		githubLog.Warn("review comments truncated at 100; the proposed-vs-final diff may omit comments past the cap",
+			"review", reviewNodeID)
 	}
 	out := &SubmittedReview{State: resp.Data.Node.State, Body: resp.Data.Node.Body}
 	for _, cm := range resp.Data.Node.Comments.Nodes {

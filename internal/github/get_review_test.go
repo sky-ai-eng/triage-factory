@@ -1,6 +1,10 @@
 package github
 
-import "testing"
+import (
+	"log/slog"
+	"strings"
+	"testing"
+)
 
 // TestGetReview pins the node(id:) fetch: a submitted/dismissed review's state,
 // body, and inline comments (with their GraphQL node ids, the join key the
@@ -47,5 +51,36 @@ func TestGetReview_AbsentIsNotAnError(t *testing.T) {
 func TestGetReview_EmptyID(t *testing.T) {
 	if _, err := clientAgainst("http://unused.invalid").GetReview(""); err == nil {
 		t.Error("empty review id should error")
+	}
+}
+
+// TestGetReview_TruncationWarns pins the comment-cap watchdog: a review with
+// >100 inline comments (hasNextPage) logs a warning so the silently-truncated
+// diff stays visible, while still returning the page it got.
+func TestGetReview_TruncationWarns(t *testing.T) {
+	logs := &captureHandler{}
+	prev := githubLog
+	githubLog = slog.New(logs)
+	t.Cleanup(func() { githubLog = prev })
+
+	body := `{"data":{"node":{
+		"state":"COMMENTED","body":"",
+		"comments":{"pageInfo":{"hasNextPage":true},"nodes":[{"id":"C1","path":"a.go","line":1,"body":"x"}]}
+	}}}`
+	rv, err := clientAgainst(graphqlServing(t, body)).GetReview("PRR_big")
+	if err != nil || rv == nil {
+		t.Fatalf("GetReview: rv=%v err=%v", rv, err)
+	}
+	if len(rv.Comments) != 1 {
+		t.Errorf("returned comments dropped: got %d, want the page intact", len(rv.Comments))
+	}
+	warned := false
+	for _, r := range logs.recorded() {
+		if strings.Contains(r.Message, "review comments truncated") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Error("expected a truncation warning when hasNextPage is true")
 	}
 }

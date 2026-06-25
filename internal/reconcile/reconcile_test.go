@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -231,13 +233,46 @@ func TestFormatReviewDelta(t *testing.T) {
 		t.Errorf("dropped-comment delta = %q", dropped)
 	}
 
-	// No draft (Proposed empty) → record the final content instead of a diff.
+	// No draft (Proposed empty) → record the final content instead of a diff. The
+	// comment has no current-diff anchor (nil line) → "(outdated)", not ":0".
 	noDraft := formatReviewDelta(domain.ReviewArtifactProposed{}, github.SubmittedReview{
 		State:    "APPROVED",
-		Comments: []github.PendingReviewComment{{ID: "X", Path: "a.go", Line: &line5, Body: "looks good"}},
+		Comments: []github.PendingReviewComment{{ID: "X", Path: "a.go", Line: nil, Body: "looks good"}},
 	})
-	if !strings.Contains(noDraft, "Verdict: approved") || !strings.Contains(noDraft, "`a.go:5` — looks good") {
+	if !strings.Contains(noDraft, "Verdict: approved") || !strings.Contains(noDraft, "`a.go` (outdated) — looks good") {
 		t.Errorf("no-draft final-review record = %q", noDraft)
+	}
+}
+
+func TestCommentLoc(t *testing.T) {
+	if got := commentLoc("a.go", 5); got != "`a.go:5`" {
+		t.Errorf("anchored = %q, want `a.go:5`", got)
+	}
+	// A line of 0 (GitHub's null line for an unanchored/outdated comment) reads
+	// as "(outdated)", not a meaningless ":0".
+	if got := commentLoc("a.go", 0); got != "`a.go` (outdated)" {
+		t.Errorf("outdated = %q, want `a.go` (outdated)", got)
+	}
+}
+
+func TestWriteBlockquote(t *testing.T) {
+	var b strings.Builder
+	// Empty body writes nothing (no stray "> " line).
+	writeBlockquote(&b, "")
+	if b.String() != "" {
+		t.Errorf("empty = %q, want \"\"", b.String())
+	}
+	// Trailing newline doesn't emit a trailing "> " line.
+	b.Reset()
+	writeBlockquote(&b, "line1\nline2\n")
+	if got := b.String(); got != "> line1\n> line2\n" {
+		t.Errorf("trailing newline = %q", got)
+	}
+	// CRLF normalizes (no stray \r at line ends).
+	b.Reset()
+	writeBlockquote(&b, "a\r\nb")
+	if got := b.String(); got != "> a\n> b\n" {
+		t.Errorf("CRLF = %q", got)
 	}
 }
 
@@ -723,6 +758,55 @@ func TestReconcile_OutcomeSupersedesVerdict(t *testing.T) {
 			t.Errorf("outcome missing %q; got:\n%s", want, mem.Content)
 		}
 	}
+}
+
+// TestRunner_SuppressesCancelErrorOnShutdown pins that a cycle in flight when
+// Stop() cancels the context does NOT log an error: the cancel propagates out
+// through a DB call as context.Canceled, and the runner's ctx.Err() guard treats
+// it as a graceful shutdown, not a failure.
+func TestRunner_SuppressesCancelErrorOnShutdown(t *testing.T) {
+	logs := &recLogger{}
+	prev := reconcileLog
+	reconcileLog = slog.New(logs)
+	t.Cleanup(func() { reconcileLog = prev })
+
+	stores, _, _ := reconcileTestStores(t)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Artifacts, stores.TaskMemory, nil)
+	r := NewRunner(rc, runmode.LocalDefaultOrgID)
+
+	// An already-cancelled ctx makes the cycle's first DB call (ListNonTerminalBySystem)
+	// return context.Canceled — the in-flight-at-shutdown shape.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.run(ctx)
+
+	for _, rec := range logs.records() {
+		if rec.Level >= slog.LevelError {
+			t.Errorf("graceful shutdown logged at %s: %q", rec.Level, rec.Message)
+		}
+	}
+}
+
+// recLogger is a minimal slog.Handler capturing records so a test can assert on
+// log levels.
+type recLogger struct {
+	mu   sync.Mutex
+	recs []slog.Record
+}
+
+func (h *recLogger) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recLogger) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.recs = append(h.recs, r.Clone())
+	return nil
+}
+func (h *recLogger) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recLogger) WithGroup(string) slog.Handler      { return h }
+func (h *recLogger) records() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.recs...)
 }
 
 // --- helpers ---
