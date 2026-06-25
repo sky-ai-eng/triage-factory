@@ -444,6 +444,59 @@ func TestCreatePR_422_FieldErr(t *testing.T) {
 	}
 }
 
+// TestUpdatePR_HappyPath asserts UpdatePR issues a PATCH to the PR endpoint
+// with title and body sent verbatim (a whole-field replace). This is the edit
+// path the B·2 PR rework drives when an approved preview's title/body change.
+func TestUpdatePR_HappyPath(t *testing.T) {
+	var (
+		gotMethod, gotPath string
+		gotBody            map[string]any
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"number": 42}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := clientAgainst(srv.URL)
+	if err := c.UpdatePR("owner", "repo", 42, "New title", "New body"); err != nil {
+		t.Fatalf("UpdatePR: %v", err)
+	}
+	if gotMethod != "PATCH" {
+		t.Errorf("method = %q, want PATCH", gotMethod)
+	}
+	if gotPath != "/repos/owner/repo/pulls/42" {
+		t.Errorf("path = %q, want /repos/owner/repo/pulls/42", gotPath)
+	}
+	if got, _ := gotBody["title"].(string); got != "New title" {
+		t.Errorf("body[title] = %q, want %q", got, "New title")
+	}
+	if got, _ := gotBody["body"].(string); got != "New body" {
+		t.Errorf("body[body] = %q, want %q", got, "New body")
+	}
+}
+
+// TestUpdatePR_422 confirms a validation failure is lifted to a readable
+// message (same liftValidationErr path as CreatePR) rather than the raw JSON.
+func TestUpdatePR_422(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"Validation Failed","errors":[{"message":"title cannot be blank"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	err := clientAgainst(srv.URL).UpdatePR("o", "r", 1, "", "body")
+	if err == nil {
+		t.Fatal("expected error for 422, got nil")
+	}
+	if !strings.Contains(err.Error(), "title cannot be blank") {
+		t.Errorf("expected lifted validation message, got %q", err.Error())
+	}
+}
+
 // TestFilterDiffByFile_ExactMatch verifies the file filter matches the new-side
 // path exactly and never via substring, so a request for "foo.go" can't
 // accidentally capture a different file whose path merely contains it.

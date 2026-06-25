@@ -379,6 +379,29 @@ type SubmitReviewComment struct {
 	Body      string `json:"body"`
 }
 
+// reviewCommentsPayload converts typed review comments into the REST request
+// shape shared by the atomic SubmitReview and the pending-review
+// CreatePendingReview. Returns nil for an empty slice so callers can omit the
+// "comments" key entirely (GitHub rejects an empty array on some paths).
+func reviewCommentsPayload(comments []SubmitReviewComment) []map[string]any {
+	if len(comments) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, len(comments))
+	for i, c := range comments {
+		m := map[string]any{
+			"path": c.Path,
+			"line": c.Line,
+			"body": c.Body,
+		}
+		if c.StartLine != nil {
+			m["start_line"] = *c.StartLine
+		}
+		out[i] = m
+	}
+	return out
+}
+
 // SubmitReview creates and submits a review atomically with all comments in one API call.
 // Event is "APPROVE", "REQUEST_CHANGES", or "COMMENT".
 // If auto_merge is enabled on the PR and event is "APPROVE", it's downgraded to "COMMENT".
@@ -398,19 +421,7 @@ func (c *Client) SubmitReview(owner, repo string, number int, commitSHA, event, 
 		"body":      body,
 	}
 
-	if len(comments) > 0 {
-		ghComments := make([]map[string]any, len(comments))
-		for i, c := range comments {
-			m := map[string]any{
-				"path": c.Path,
-				"line": c.Line,
-				"body": c.Body,
-			}
-			if c.StartLine != nil {
-				m["start_line"] = *c.StartLine
-			}
-			ghComments[i] = m
-		}
+	if ghComments := reviewCommentsPayload(comments); ghComments != nil {
 		payload["comments"] = ghComments
 	}
 
@@ -492,6 +503,24 @@ func (c *Client) CreatePR(owner, repo, head, base, title, body string, draft boo
 	}
 
 	return intVal(raw, "number"), strVal(raw, "html_url"), nil
+}
+
+// UpdatePR edits an open or draft PR's title and body via REST
+// (PATCH /repos/{o}/{r}/pulls/{n}). Both fields are sent verbatim, so the
+// caller passes the full desired title and body — this is a whole-field
+// replace, not a partial patch. 422 validation failures are lifted to a
+// readable message via the same liftValidationErr CreatePR uses, so a blank
+// title or other rejection surfaces the actionable reason rather than the raw
+// JSON envelope.
+//
+// API layer only (TFAC-461); the PR-path rework that calls it lands in B·2.
+func (c *Client) UpdatePR(owner, repo string, number int, title, body string) error {
+	payload := map[string]any{
+		"title": title,
+		"body":  body,
+	}
+	_, err := c.Patch(fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number), payload)
+	return liftValidationErr(err)
 }
 
 // liftValidationErr extracts a useful message from a GitHub error
