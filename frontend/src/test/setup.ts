@@ -10,6 +10,18 @@ import '@testing-library/jest-dom/vitest'
 import { afterEach } from 'vitest'
 import { cleanup } from '@testing-library/react'
 
+// jsdom ships no ResizeObserver; Radix primitives (Popover arrow sizing, etc.)
+// touch it on mount. A no-op stub is enough for the tests, which assert on
+// text/roles rather than measured geometry.
+if (!('ResizeObserver' in globalThis)) {
+  class ResizeObserverStub {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver
+}
+
 afterEach(() => {
   cleanup()
 })

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
+import * as Popover from '@radix-ui/react-popover'
 import type { AgentMessage, AgentRun, Task } from '../types'
 import { useOrgHref } from '../hooks/useOrgHref'
+import ArtifactList from './ArtifactList'
 import RequestedReviewerBadge from './RequestedReviewerBadge'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
@@ -28,6 +30,10 @@ interface Props {
   onResolvePermission?: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
   onRequeue?: () => void
   onReview?: () => void
+  // Open a PR/review artifact's approval overlay by id, from the footer's
+  // artifacts popover (TFAC-470). Distinct from onReview, which fires the parked
+  // run's single gating overlay; this addresses any artifact in the full set.
+  onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
   // SKY-330: caller-supplied assignee picker, rendered in the header cluster.
   assigneeSlot?: React.ReactNode
 }
@@ -47,6 +53,7 @@ export default function AgentCard({
   onResolvePermission,
   onRequeue,
   onReview,
+  onOpenArtifact,
   assigneeSlot,
 }: Props) {
   const orgHref = useOrgHref()
@@ -215,6 +222,7 @@ export default function AgentCard({
             {run.TotalCostUSD != null && run.TotalCostUSD > 0 && (
               <span>${run.TotalCostUSD.toFixed(3)}</span>
             )}
+            <ArtifactsAffordance run={run} onOpenArtifact={onOpenArtifact} />
           </div>
 
           <div className="flex items-center gap-3">
@@ -245,6 +253,56 @@ export default function AgentCard({
 // readouts (assignee | elapsed | expand | cancel).
 function HeaderDivider() {
   return <span aria-hidden className="h-3 w-px shrink-0 bg-text-tertiary/20" />
+}
+
+// ArtifactsAffordance is the footer's "N artifacts →" button — the full set a
+// run produced (the count comes free with the run, TFAC-465). Hidden at 0.
+// Clicking opens a lightweight popover that lazy-fetches the list (ArtifactList
+// only mounts when the popover does); PR/review rows reuse the board's approval
+// overlays via onOpenArtifact, the rest link out.
+function ArtifactsAffordance({
+  run,
+  onOpenArtifact,
+}: {
+  run: AgentRun
+  onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const count = run.artifact_count ?? 0
+  if (count <= 0) return null
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          className="font-mono text-[11px] tabular-nums tracking-wide text-accent transition-colors hover:text-accent/70"
+          aria-label={`Show ${count} artifact${count === 1 ? '' : 's'}`}
+        >
+          {count} artifact{count === 1 ? '' : 's'} →
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          side="top"
+          align="start"
+          sideOffset={6}
+          className="z-[100] max-h-[360px] w-[320px] overflow-y-auto rounded-xl border border-border-glass bg-surface-raised/95 p-2.5 shadow-lg shadow-black/[0.08] backdrop-blur-2xl animate-in fade-in-0 zoom-in-95"
+        >
+          <div className="mb-1.5 px-1 font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-text-tertiary/70">
+            Artifacts
+          </div>
+          <ArtifactList
+            runId={run.ID}
+            onOpenApproval={(kind, id) => {
+              setOpen(false)
+              onOpenArtifact?.(kind, id)
+            }}
+          />
+          <Popover.Arrow className="fill-surface-raised" />
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  )
 }
 
 // The feed fades in at its top edge so older lines dissolve as new ones arrive.

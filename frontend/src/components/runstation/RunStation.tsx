@@ -25,6 +25,9 @@ export interface StationActions {
   onCancel?: () => void
   onRequeue?: () => void
   onReview?: () => void
+  /** Open an artifact's approval overlay (PR / review) by artifact id, from the
+   *  telemetry rail's Artifacts list. */
+  onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
   /** Steer the run with a free-form message (live process or `open` resume). */
   onMessage?: (text: string) => void
   /** Pause the current turn (run → open), leaving the process warm. */
@@ -127,7 +130,13 @@ export default function RunStation({
           <ScreenTranscript messages={messages} run={run} />
           <VentHeat heat={heat} light={st.light} live={st.live} />
         </div>
-        <TelemetryRail run={run} messages={messages} state={st} now={now} />
+        <TelemetryRail
+          run={run}
+          messages={messages}
+          state={st}
+          now={now}
+          onOpenArtifact={actions.onOpenArtifact}
+        />
       </div>
 
       <IntakeDock

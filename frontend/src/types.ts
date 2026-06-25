@@ -109,8 +109,31 @@ export interface AgentRun {
   // (pending_kind === 'review') or the draft-PR artifact (pending_kind === 'pr').
   // Both overlays are addressed by it (the artifact id), not the run id.
   pending_artifact_id?: string
+  // artifact_count is the number of artifacts this run produced (TFAC-465's
+  // runResponse projection — branch / PR / review / issue / comment, the
+  // primary gating one included). The Board card shows it as a footer
+  // affordance without a per-card fetch; 0 / undefined hides the affordance.
+  artifact_count?: number
   blueprint_run_id?: string
   blueprint_step_index?: number | null
+}
+
+// Artifact mirrors the GET /api/agent/runs/{id}/artifacts wire shape
+// (internal/server/agent.go artifactJSON, TFAC-465). One row per real external
+// object a run produced. `kind` is the discriminator (branch / pull_request /
+// review / issue / comment); `state` is meaningful only read with `kind` (see
+// internal/domain/artifact.go — 'pending' aliases across kinds). `details` is
+// the parsed kind-specific payload (or null when absent/unparseable).
+export interface Artifact {
+  id: string
+  kind: 'branch' | 'pull_request' | 'review' | 'issue' | 'comment' | string
+  provider: string
+  state: string
+  target: string
+  external_id: string
+  url: string
+  details: unknown
+  created_at: string
 }
 
 export interface AgentMessage {

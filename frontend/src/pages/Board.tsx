@@ -1275,6 +1275,7 @@ function ColumnContents({
                 const kind: 'review' | 'pr' = run.pending_kind === 'pr' ? 'pr' : 'review'
                 onReview(run.ID, kind, run.pending_artifact_id)
               }}
+              onOpenArtifact={(kind, artifactId) => onReview(run.ID, kind, artifactId)}
               assigneeSlot={picker}
             />
           )
@@ -1377,6 +1378,7 @@ function SortableAgentCard({
   onResolvePermission,
   onRequeue,
   onReview,
+  onOpenArtifact,
   assigneeSlot,
 }: {
   task: Task
@@ -1387,6 +1389,7 @@ function SortableAgentCard({
   onResolvePermission: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
   onRequeue?: () => void
   onReview?: () => void
+  onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
   assigneeSlot?: React.ReactNode
 }) {
   // SKY-330: bot-managed cards in in_progress / in_review are
@@ -1428,6 +1431,7 @@ function SortableAgentCard({
         onResolvePermission={onResolvePermission}
         onRequeue={onRequeue}
         onReview={onReview}
+        onOpenArtifact={onOpenArtifact}
         assigneeSlot={assigneeSlot}
       />
     </div>

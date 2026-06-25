@@ -164,6 +164,17 @@ export default function RunDetail() {
     })
   }, [run])
 
+  // Open any PR/review artifact's overlay from the rail's Artifacts list (the
+  // parked attention row uses handleReview for the gating one; this handles the
+  // full set, addressed by the row's own artifact id).
+  const handleOpenArtifact = useCallback(
+    (kind: 'review' | 'pr', artifactId: string) => {
+      if (!run) return
+      setApproval({ runID: run.ID, kind, artifactId })
+    },
+    [run],
+  )
+
   // Keyboard: Esc → back.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -203,6 +214,7 @@ export default function RunDetail() {
     onCancel: handleCancel,
     onRequeue: handleRequeue,
     onReview: handleReview,
+    onOpenArtifact: handleOpenArtifact,
     onMessage: handleMessage,
     onInterrupt: handleInterrupt,
     interruptPending,
