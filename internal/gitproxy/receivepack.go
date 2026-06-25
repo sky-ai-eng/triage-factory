@@ -73,9 +73,9 @@ func (s *Server) serveReceivePack(w http.ResponseWriter, r *http.Request) {
 }
 
 // recordReceivePack parses the captured command block and invokes RecordPush
-// once per non-delete ref. The bounded context mirrors the pre-push hook's cap.
-// RecordPush is guaranteed non-nil here (Handler only routes pushes through
-// serveReceivePack when it is set).
+// once per non-delete ref, under a context whose deadline mirrors the pre-push
+// hook's cap. RecordPush is guaranteed non-nil here (Handler only routes pushes
+// through serveReceivePack when it is set).
 func (s *Server) recordReceivePack(repoPath string, body []byte) {
 	cmds := parseReceivePackCommands(body)
 	if len(cmds) == 0 {
@@ -83,7 +83,19 @@ func (s *Server) recordReceivePack(repoPath string, body []byte) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), recordPushTimeout)
 	defer cancel()
+	s.dispatchPushes(ctx, repoPath, cmds)
+}
+
+// dispatchPushes invokes RecordPush once per ref, stopping as soon as ctx is
+// done. Without the early-out, a multi-ref push whose first upsert exhausts the
+// bounded window would have every remaining call observe ctx.Err() and fail — a
+// burst of guaranteed-failing work and logs. Stopping instead records fewer
+// refs for that (pathological) push, which is the best-effort contract.
+func (s *Server) dispatchPushes(ctx context.Context, repoPath string, cmds []refUpdate) {
 	for _, c := range cmds {
+		if ctx.Err() != nil {
+			break
+		}
 		s.cfg.RecordPush(ctx, PushedRef{
 			Repo:    repoPath,
 			Ref:     c.ref,

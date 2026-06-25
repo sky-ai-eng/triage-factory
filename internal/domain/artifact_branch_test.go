@@ -62,6 +62,7 @@ func TestNewBranchArtifact_Rejects(t *testing.T) {
 		{"single-segment repo", "octo", "refs/heads/main"},
 		{"nested repo path", "scm/octo/repo", "refs/heads/main"},
 		{"empty repo segment", "octo/", "refs/heads/main"},
+		{"trailing slash", "octo/repo/", "refs/heads/main"},
 		{"empty repo path", "", "refs/heads/main"},
 	}
 	for _, c := range cases {

@@ -1,6 +1,7 @@
 package gitproxy
 
 import (
+	"context"
 	"fmt"
 	"net/http/httptest"
 	"reflect"
@@ -143,5 +144,31 @@ func TestParseRefUpdate_TrailingAndCaps(t *testing.T) {
 	}
 	if _, ok := parseRefUpdate([]byte(strings.Repeat(" ", 3))); ok {
 		t.Error("parseRefUpdate accepted a blank line")
+	}
+}
+
+// TestDispatchPushes_StopsWhenContextDone proves the per-ref loop bails out the
+// moment its bounded context is done, rather than calling RecordPush for every
+// remaining ref (each of which would observe ctx.Err() and fail). Here the
+// first callback cancels the context — standing in for an upsert that exhausts
+// the window — so only that first ref is dispatched.
+func TestDispatchPushes_StopsWhenContextDone(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls int
+	s := &Server{cfg: Config{RecordPush: func(context.Context, PushedRef) {
+		calls++
+		cancel()
+	}}}
+
+	s.dispatchPushes(ctx, "octo/repo", []refUpdate{
+		{ref: "refs/heads/a", newSHA: "1"},
+		{ref: "refs/heads/b", newSHA: "2"},
+		{ref: "refs/heads/c", newSHA: "3"},
+	})
+
+	if calls != 1 {
+		t.Fatalf("RecordPush called %d times, want 1 (loop must stop once ctx is done)", calls)
 	}
 }

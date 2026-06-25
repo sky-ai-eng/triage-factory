@@ -41,7 +41,6 @@ func NewBranchArtifact(repoPath, ref, sha string, created bool) (Artifact, bool)
 	if !ok {
 		return Artifact{}, false
 	}
-	repoPath = strings.TrimSuffix(repoPath, "/")
 	if !validOwnerRepo(repoPath) {
 		return Artifact{}, false
 	}
