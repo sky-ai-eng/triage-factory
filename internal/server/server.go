@@ -808,6 +808,9 @@ func (s *Server) routes() {
 	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
 	s.api("GET /api/agent/runs/{runID}", ag.handleAgentStatus)
 	s.api("GET /api/agent/runs/{runID}/messages", ag.handleAgentMessages)
+	// Run-scoped artifact read (A·6, TFAC-465): the run's artifacts across
+	// every kind, team-scoped via the run. Backs the run-detail surface (TFAC-470).
+	s.api("GET /api/agent/runs/{runID}/artifacts", ag.handleAgentArtifacts)
 	s.apiMutating("POST /api/agent/runs/{runID}/cancel", ag.handleAgentCancel)
 	s.apiMutating("POST /api/agent/runs/{runID}/message", ag.handleAgentMessage)
 	s.apiMutating("POST /api/agent/runs/{runID}/interrupt", ag.handleAgentInterrupt)

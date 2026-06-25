@@ -94,6 +94,23 @@ func TestCrossOrgHTTP_AgentRunGet(t *testing.T) {
 	}
 }
 
+// TestCrossOrgHTTP_AgentArtifacts covers the run-scoped artifact read
+// (TFAC-465): alice sees her run's artifacts endpoint (200), bob sees it as
+// absent (404). The run read is the RLS-scoped authorization gate, so a
+// non-member never learns the run exists, let alone reads its artifacts.
+func TestCrossOrgHTTP_AgentArtifacts(t *testing.T) {
+	r := newAuthRig(t)
+	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
+	runA := seedRunInOrg(t, r, orgA, alice, "run-arts")
+
+	if got := r.requestWithSid("GET", "/api/agent/runs/"+runA+"/artifacts", sidA).StatusCode; got != http.StatusOK {
+		t.Errorf("alice GET /api/agent/runs/%s/artifacts = %d, want 200", runA, got)
+	}
+	if got := r.requestWithSid("GET", "/api/agent/runs/"+runA+"/artifacts", sidB).StatusCode; got != http.StatusNotFound {
+		t.Errorf("bob GET /api/agent/runs/%s/artifacts = %d, want 404 (cross-org leak)", runA, got)
+	}
+}
+
 // TestCrossOrgHTTP_TaskSwipe covers the mutating path: bob's swipe
 // gesture against alice's task should appear as "task not found" to
 // bob, not as a 200 with a state change applied, and not as a 500. The

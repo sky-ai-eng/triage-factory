@@ -547,6 +547,111 @@ func TestArtifactStore_Postgres_ListNonTerminalBySystem(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_Postgres_CountByRun pins the batched per-run count
+// (TFAC-465) on the admin pool: counts keyed by run id across a multi-run
+// batch, a run with no artifacts absent from the map, and an empty runIDs a
+// no-op. Doubles as the proof that the []string→ANY($2) bind and GROUP BY work
+// against the uuid run_id column.
+func TestArtifactStore_Postgres_CountByRun(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
+	runA := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	runB := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	runC := seedPgArtifactRun(t, h, orgID, teamID, userID) // no artifacts
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	seed := func(runID, key string) {
+		if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+			RunID: runID, OrgID: orgID, TeamID: teamID,
+			Provider: "github", Kind: "comment", Target: "octo/repo",
+			State: domain.ArtifactStateCommentPosted, DedupKey: key,
+		}); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	seed(runA, "a1")
+	seed(runA, "a2")
+	seed(runB, "b1")
+
+	counts, err := stores.Artifacts.CountByRun(ctx, orgID, []string{runA, runB, runC})
+	if err != nil {
+		t.Fatalf("CountByRun: %v", err)
+	}
+	if counts[runA] != 2 {
+		t.Errorf("runA count = %d, want 2", counts[runA])
+	}
+	if counts[runB] != 1 {
+		t.Errorf("runB count = %d, want 1", counts[runB])
+	}
+	if _, ok := counts[runC]; ok {
+		t.Errorf("runC (no artifacts) should be absent, got %d", counts[runC])
+	}
+
+	empty, err := stores.Artifacts.CountByRun(ctx, orgID, nil)
+	if err != nil {
+		t.Fatalf("CountByRun(nil): %v", err)
+	}
+	if empty == nil || len(empty) != 0 {
+		t.Errorf("CountByRun(nil) = %v, want empty non-nil map", empty)
+	}
+}
+
+// TestArtifactStore_Postgres_CountByRun_TeamScoped pins that CountByRun runs on
+// the RLS-active app pool: a same-org member of a different team counts zero for
+// a run whose artifacts belong to another team — the per-card count can't leak
+// across the tenancy boundary. Mirrors the ListByTeam RLS test. TFAC-465.
+func TestArtifactStore_Postgres_CountByRun_TeamScoped(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	carol := pgtest.SeedUser(t, h, "carol")
+	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
+	pgtest.AddOrgMember(t, h, carol, orgA, teamB, "member", "member")
+	runID := seedPgArtifactRun(t, h, orgA, teamA, alice)
+
+	// Two teamA-scoped artifacts on the run (admin insert bypasses RLS for setup).
+	for _, key := range []string{"github:comment:octo/repo:1", "github:comment:octo/repo:2"} {
+		if _, err := h.AdminDB.Exec(`
+			INSERT INTO artifacts (org_id, run_id, team_id, provider, kind, target, state, dedup_key)
+			VALUES ($1, $2, $3, 'github', 'comment', 'octo/repo', 'posted', $4)
+		`, orgA, runID, teamA, key); err != nil {
+			t.Fatalf("seed artifact: %v", err)
+		}
+	}
+	ctx := context.Background()
+
+	// Alice (teamA) counts both.
+	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		counts, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.CountByRun(ctx, orgA, []string{runID})
+		if err != nil {
+			return err
+		}
+		if counts[runID] != 2 {
+			t.Errorf("alice counted %d, want 2", counts[runID])
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("alice path: %v", err)
+	}
+
+	// Carol (teamB, same org, different team) counts zero — artifacts_select
+	// gates on user_in_team(team_id), so the rows are invisible to her.
+	if err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		counts, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.CountByRun(ctx, orgA, []string{runID})
+		if err != nil {
+			return err
+		}
+		if _, ok := counts[runID]; ok {
+			t.Errorf("carol (different team) counted %d — RLS leaked across teams", counts[runID])
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("carol path: %v", err)
+	}
+}
+
 // seedPgArtifactRun mints a minimal run the artifacts.run_id FK can point
 // at. origin is non-'blueprint' so runs_origin_requires_parents doesn't
 // demand a parent chain; trigger_type='manual' needs a non-NULL creator.

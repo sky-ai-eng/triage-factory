@@ -170,6 +170,38 @@ func (s *artifactStore) ListByRunSystem(ctx context.Context, orgID, runID string
 	return scanArtifactRows(rows)
 }
 
+func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []string) (map[string]int, error) {
+	counts := make(map[string]int, len(runIDs))
+	if len(runIDs) == 0 {
+		return counts, nil
+	}
+	// App pool (RLS-active): both callers are HTTP handlers under request
+	// claims, so the count is team-scoped exactly like ListByRun. run_id is a
+	// uuid column, so the slice goes through pgUUIDArray (a Postgres array
+	// literal) rather than a raw []string bind — a []string encodes as text[]
+	// and `run_id = ANY(text[])` errors with "operator does not exist: uuid =
+	// text". A NULL run_id never matches ANY, so detached artifacts are excluded.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT run_id::text, COUNT(*)
+		FROM artifacts
+		WHERE org_id = $1 AND run_id = ANY($2)
+		GROUP BY run_id
+	`, orgID, pgUUIDArray(runIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID string
+		var n int
+		if err := rows.Scan(&runID, &n); err != nil {
+			return nil, err
+		}
+		counts[runID] = n
+	}
+	return counts, rows.Err()
+}
+
 func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {
 	query := `
 		SELECT ` + pgArtifactColumns + `
