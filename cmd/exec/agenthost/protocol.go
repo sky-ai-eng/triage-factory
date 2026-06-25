@@ -89,6 +89,11 @@ type request struct {
 // value is errCodePendingReviewCollision, mapped back to
 // ErrPendingReviewCollision so the start-review collision stays errors.Is-able
 // across the wire. Empty means "no typed sentinel" — the common case.
+//
+// ErrCode is only meaningful alongside a non-empty Error: the client inspects it
+// inside the `Error != ""` branch (an error response always sets Error first,
+// then any marker). A daemon that ever sets ErrCode without Error would have the
+// client miss the reconstruction — so the two are set together in server.go.
 type response struct {
 	Result     json.RawMessage `json:"r,omitempty"`
 	Error      string          `json:"e,omitempty"`

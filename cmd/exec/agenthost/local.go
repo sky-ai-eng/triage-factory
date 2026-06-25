@@ -764,6 +764,14 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 //
 // Reuse (return the existing id) is chosen over clear-and-recreate: it's
 // non-destructive and lets the caller keep appending to the bot's own review.
+//
+// The GetPendingReview→CreatePendingReview window is not locked across runs: the
+// daemon serializes one run's RPCs over its socket, but two delegated runs on
+// the same PR have separate sockets and no shared lock, so both could observe
+// "none" and both attempt a create. GitHub backstops this — it allows at most
+// one pending review per identity per PR, so the loser's create fails with
+// CreatePendingReview's mapped "one pending review" 422, never a duplicate (and
+// never a hijack). The window is benign: worst case is a rare, safe error.
 func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error) {
 	client, identity, err := c.githubClientAndIdentityForRepo(ctx, owner, repo)
 	if err != nil {

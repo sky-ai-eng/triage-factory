@@ -57,6 +57,13 @@ type ghAPI interface {
 	DownloadArtifact(ctx context.Context, path string, dst io.Writer, maxBytes int64) (int64, error)
 }
 
+// errUnscopedReviewAdapter is returned by AddPendingReviewComment when the
+// adapter has no repo to fold in. It's a programming-error guard (a caller built
+// the shared unscoped adapter for a path that keys off the review node id), so
+// it's a sentinel for a robust errors.Is check rather than a brittle message
+// match — the message itself still carries the actionable fix.
+var errUnscopedReviewAdapter = errors.New("hostAPIClient.AddPendingReviewComment needs a repo-scoped adapter: construct newHostAPI(host, owner, repo) (this op keys off the review node id and has no owner/repo to forward for credential resolution)")
+
 // hostAPIClient adapts an agenthost.Client to the ghAPI surface. The PR
 // methods carry owner/repo explicitly and forward them; the raw Get /
 // DownloadArtifact paths have no owner/repo in their signature, so the
@@ -121,7 +128,7 @@ func (a hostAPIClient) CreatePendingReview(owner, repo string, number int, commi
 // that's missed.
 func (a hostAPIClient) AddPendingReviewComment(reviewID string, comment ghclient.SubmitReviewComment) (string, error) {
 	if a.owner == "" || a.repo == "" {
-		return "", errors.New("hostAPIClient.AddPendingReviewComment needs a repo-scoped adapter: construct newHostAPI(host, owner, repo) (this op keys off the review node id and has no owner/repo to forward for credential resolution)")
+		return "", errUnscopedReviewAdapter
 	}
 	return a.host.GithubAddPendingReviewComment(context.Background(), a.owner, a.repo, reviewID, comment.Path, comment.Body, comment.Line, comment.StartLine)
 }

@@ -68,6 +68,31 @@ func (f fakeGitHubResolver) BaseURLFor(_ context.Context, _ string) (string, err
 	panic("BaseURLFor is not used by the host-routed gh surface")
 }
 
+// baseOnlyResolver implements ghclient.Resolver WITHOUT the optional
+// RepoIdentityResolver capability, so githubClientAndIdentityForRepo's type
+// assertion fails and it falls back to IdentityUnknown — the conservative
+// branch the production resolver (which always reports an identity) never hits.
+type baseOnlyResolver struct {
+	baseURL string
+	token   string
+}
+
+func (r baseOnlyResolver) ClientFor(_ context.Context, _, _ string) (*ghclient.Client, error) {
+	panic("ClientFor is not used by the host-routed gh surface")
+}
+
+func (r baseOnlyResolver) ClientForRepo(_ context.Context, _, _, _ string) (*ghclient.Client, error) {
+	return ghclient.NewClient(r.baseURL, r.token), nil
+}
+
+func (r baseOnlyResolver) TokenFor(_ context.Context, _, _ string) (githubapp.Token, error) {
+	panic("TokenFor is not used by the host-routed gh surface")
+}
+
+func (r baseOnlyResolver) BaseURLFor(_ context.Context, _ string) (string, error) {
+	panic("BaseURLFor is not used by the host-routed gh surface")
+}
+
 // ghRecorder captures what the fake GitHub backend saw. Mutex-guarded so the
 // handler goroutine and the test goroutine don't race under -race.
 type ghRecorder struct {
@@ -521,8 +546,9 @@ func newPendingReviewBackend(t *testing.T, existingReview, createNodeID string) 
 		// REST pending-review create.
 		b.mu.Lock()
 		b.createFired = true
+		nodeID := b.createNodeID
 		b.mu.Unlock()
-		_, _ = io.WriteString(w, `{"id":1,"node_id":"`+b.createNodeID+`"}`)
+		_, _ = io.WriteString(w, `{"id":1,"node_id":"`+nodeID+`"}`)
 	}))
 	t.Cleanup(srv.Close)
 	b.url = srv.URL
@@ -601,6 +627,24 @@ func TestGithub_CreatePendingReview_Collision(t *testing.T) {
 		}
 		if b.didCreate() {
 			t.Error("PAT-identity collision must NOT create a pending review")
+		}
+	})
+
+	// A resolver lacking the RepoIdentityResolver capability yields
+	// IdentityUnknown, which must be treated as "can't prove it's the bot's own"
+	// → collide, never silently reuse. The production resolver always reports an
+	// identity, so this fallback branch is otherwise test-dead.
+	t.Run("unknown identity collides (resolver without capability)", func(t *testing.T) {
+		b := newPendingReviewBackend(t, "PRR_existing", "PRR_should_not_create")
+		lc := NewLocal(emptyStores(), ghInfo())
+		lc.ghResolver = baseOnlyResolver{baseURL: b.url, token: "org-pat"}
+
+		_, err := lc.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil)
+		if !errors.Is(err, ErrPendingReviewCollision) {
+			t.Fatalf("err = %v, want ErrPendingReviewCollision (unknown identity must not reuse)", err)
+		}
+		if b.didCreate() {
+			t.Error("unknown-identity collision must NOT create a pending review")
 		}
 	})
 }

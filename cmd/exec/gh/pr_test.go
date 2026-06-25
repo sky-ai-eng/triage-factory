@@ -2,6 +2,7 @@ package gh
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -679,10 +680,7 @@ func TestStripClaudeCodeCitation(t *testing.T) {
 func TestHostAPIClient_AddPendingReviewComment_RequiresRepoScope(t *testing.T) {
 	api := newHostAPI(nil, "", "") // mirrors handlePR's shared unscoped adapter
 	_, err := api.AddPendingReviewComment("PRR_1", ghclient.SubmitReviewComment{Path: "a.go", Line: 1, Body: "x"})
-	if err == nil {
-		t.Fatal("expected an error for an unscoped adapter, got nil")
-	}
-	if !strings.Contains(err.Error(), "newHostAPI(host, owner, repo)") {
-		t.Errorf("error %q should point at the repo-scoped construction", err.Error())
+	if !errors.Is(err, errUnscopedReviewAdapter) {
+		t.Fatalf("err = %v, want errUnscopedReviewAdapter for an unscoped adapter", err)
 	}
 }
