@@ -56,6 +56,12 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   // a transient 406/502 on it must NOT hide the (already-loaded) editable PR.
   // It renders as an inline banner while title/body editing + approve stay live.
   const [diffError, setDiffError] = useState<string | null>(null)
+  // submitError is the "Open PR" (approve) failure, shown as an inline banner
+  // rather than the full-screen error state: a partial failure (UpdatePR landed
+  // but MarkPRReady failed) is safely retryable in place — the artifact stays
+  // draft and approve re-strips/re-appends the footer — so we keep the editor
+  // visible instead of forcing a close-and-reopen.
+  const [submitError, setSubmitError] = useState<string | null>(null)
 
   // Fetch the PR artifact, then the diff. Reset stale state from any prior PR
   // before the new fetch lands so the user doesn't see leftover values briefly.
@@ -64,6 +70,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
     let cancelled = false
     setLoading(true)
     setError(null)
+    setSubmitError(null)
     setPR(null)
     setFiles([])
     setTruncationNote(null)
@@ -164,6 +171,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
 
   const handleSubmit = useCallback(async () => {
     setSubmitting(true)
+    setSubmitError(null)
     try {
       // Wait for any in-flight save to settle before approving, so we don't race
       // a PATCH that's still writing to GitHub. A FAILED last save is
@@ -189,7 +197,9 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
       }
       onClose()
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      // Inline (not full-screen): keep the editor visible so the user can retry
+      // "Open PR" in place — a partial failure is safely re-runnable.
+      setSubmitError(err instanceof Error ? err.message : String(err))
     } finally {
       setSubmitting(false)
     }
@@ -286,6 +296,13 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
                     onClose={onClose}
                     submitting={submitting}
                   />
+
+                  {submitError && (
+                    <div className="rounded-xl border border-dismiss/30 bg-dismiss/[0.06] px-4 py-3 text-[12px] text-text-secondary">
+                      <span className="font-semibold text-text-primary">Couldn't open PR:</span>{' '}
+                      {submitError}. Your edits are saved on GitHub — you can retry Open PR.
+                    </div>
+                  )}
 
                   {truncationNote && (
                     <div className="rounded-xl border border-snooze/30 bg-snooze/[0.06] px-4 py-3 text-[12px] text-text-secondary">

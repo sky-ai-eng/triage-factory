@@ -103,6 +103,13 @@ func Build(agentRuns db.AgentRunStore, orgID, runID, kind string) string {
 // cutting at the first footer removes all of them, so a fresh append leaves
 // exactly one. The marker requires both the separator and the disclaimer text,
 // so ordinary "---" rules in user content aren't mistaken for a footer.
+//
+// Assumption: a body that contains footerDisclaimerMarker verbatim above a
+// "\n\n---\n" separator (e.g. an agent quoting a footer inside its own
+// description) would have the content above that point stripped. The practical
+// risk is negligible — nobody writes this exact phrase intentionally in a PR
+// body — so we accept it rather than carry a more elaborate (and equally
+// heuristic) footer fingerprint.
 func StripFooter(body string) string {
 	marker := strings.Index(body, footerDisclaimerMarker)
 	if marker < 0 {
