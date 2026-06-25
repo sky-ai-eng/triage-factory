@@ -65,6 +65,16 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 	// insert side pins them, the update side leaves them. A caller-supplied
 	// a.ID is honored on insert (parity with SQLite); an empty a.ID falls
 	// back to gen_random_uuid() server-side.
+	//
+	// external_id/url are COALESCE-preserved: they are the backing object's
+	// stable coordinates (PR number / issue key, html link) — once known they
+	// only ever fill in, never legitimately clear. Since the insert side
+	// NULLIFs empty strings to NULL, a plain EXCLUDED.* assignment would let a
+	// later upsert that can't supply them (a reconciliation pass, or a Jira
+	// mutation whose run can't compute the browse URL) blank a value an
+	// earlier writer already stored. COALESCE keeps the existing value when
+	// the incoming one is NULL. The other mutable fields are last-writer-wins
+	// by design (state tracks the latest action, target migrates).
 	row := q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, run_id, org_id, team_id, provider, kind, target,
@@ -76,8 +86,8 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 			run_id       = EXCLUDED.run_id,
 			team_id      = EXCLUDED.team_id,
 			target       = EXCLUDED.target,
-			external_id  = EXCLUDED.external_id,
-			url          = EXCLUDED.url,
+			external_id  = COALESCE(EXCLUDED.external_id, artifacts.external_id),
+			url          = COALESCE(EXCLUDED.url, artifacts.url),
 			state        = EXCLUDED.state,
 			details_json = EXCLUDED.details_json,
 			updated_at   = now()

@@ -416,9 +416,10 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([
 // recordJiraIssue upserts the single deduped `issue` artifact for KEY. All
 // issue mutations (create / transition / assign / unassign) collapse onto one
 // row keyed jira:issue:<KEY>; external_id and url are the issue's stable
-// coordinates and are always populated so a later transition/assign upsert
-// doesn't blank them. state + details_json carry the most recent action — by
-// design the row tracks the last action, not the first (see domain.Artifact).
+// coordinates, populated on every action so a later one can fill a URL an
+// earlier one couldn't compute (the store preserves them on empty either way —
+// see ArtifactStore.Upsert). state + details_json carry the most recent action
+// — by design the row tracks the last action, not the first (domain.Artifact).
 func (c *LocalClient) recordJiraIssue(ctx context.Context, key, state, detailsJSON string) {
 	if c.stores.Artifacts == nil || key == "" {
 		return

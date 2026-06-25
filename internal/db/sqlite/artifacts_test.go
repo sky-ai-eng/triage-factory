@@ -174,6 +174,58 @@ func TestArtifactStore_SQLite_PendingToReal(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL pins that an
+// upsert leaving external_id/url empty does NOT blank values an earlier upsert
+// stored — they only ever fill in (PR number / issue key, html link). A
+// reconciliation pass, or a Jira mutation whose run can't compute the browse
+// URL, must not erase them. State/target still follow the latest writer.
+func TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runID := seedArtifactRun(t, conn)
+
+	key := domain.ArtifactDedupKey("jira", "issue", "SKY-1", "")
+	if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		Provider: "jira", Kind: "issue", Target: "SKY-1",
+		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1",
+		State: domain.ArtifactStateIssueCreated, DedupKey: key,
+	}); err != nil {
+		t.Fatalf("first Upsert: %v", err)
+	}
+
+	// A later mutation that can't supply external_id/url (both empty).
+	out, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		Provider: "jira", Kind: "issue", Target: "SKY-1",
+		State: domain.ArtifactStateIssueUpdated, DedupKey: key,
+	})
+	if err != nil {
+		t.Fatalf("second Upsert: %v", err)
+	}
+	if out.ExternalID != "SKY-1" || out.URL != "https://jira.example.com/browse/SKY-1" {
+		t.Errorf("external_id/url were blanked by an empty upsert: ext=%q url=%q", out.ExternalID, out.URL)
+	}
+	if out.State != domain.ArtifactStateIssueUpdated {
+		t.Errorf("state should still follow the latest writer, got %q", out.State)
+	}
+
+	// A non-empty value still overwrites (intentional change path).
+	out, err = stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		Provider: "jira", Kind: "issue", Target: "SKY-1",
+		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1?focusedId=9",
+		State: domain.ArtifactStateIssueUpdated, DedupKey: key,
+	})
+	if err != nil {
+		t.Fatalf("third Upsert: %v", err)
+	}
+	if out.URL != "https://jira.example.com/browse/SKY-1?focusedId=9" {
+		t.Errorf("non-empty url did not overwrite: %q", out.URL)
+	}
+}
+
 // TestArtifactStore_SQLite_ListByRunAndTeam pins the two read paths and
 // their newest-first ordering + the team Limit. TFAC-455.
 func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {

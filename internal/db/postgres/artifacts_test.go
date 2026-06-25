@@ -314,6 +314,59 @@ func TestArtifactStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_Postgres_UpsertPreservesExternalIDAndURL pins that an
+// upsert leaving external_id/url empty does NOT blank values an earlier upsert
+// stored. They are the backing object's stable coordinates and only fill in;
+// a reconciliation pass or a URL-less mutation must not erase them. State
+// still follows the latest writer.
+func TestArtifactStore_Postgres_UpsertPreservesExternalIDAndURL(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
+	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	key := domain.ArtifactDedupKey("jira", "issue", "SKY-1", "")
+	if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+		RunID: runID, OrgID: orgID, TeamID: teamID,
+		Provider: "jira", Kind: "issue", Target: "SKY-1",
+		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1",
+		State: domain.ArtifactStateIssueCreated, DedupKey: key,
+	}); err != nil {
+		t.Fatalf("first Upsert: %v", err)
+	}
+
+	out, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+		RunID: runID, OrgID: orgID, TeamID: teamID,
+		Provider: "jira", Kind: "issue", Target: "SKY-1",
+		State: domain.ArtifactStateIssueUpdated, DedupKey: key,
+	})
+	if err != nil {
+		t.Fatalf("second Upsert: %v", err)
+	}
+	if out.ExternalID != "SKY-1" || out.URL != "https://jira.example.com/browse/SKY-1" {
+		t.Errorf("external_id/url were blanked by an empty upsert: ext=%q url=%q", out.ExternalID, out.URL)
+	}
+	if out.State != domain.ArtifactStateIssueUpdated {
+		t.Errorf("state should follow the latest writer, got %q", out.State)
+	}
+
+	// A non-empty value still overwrites.
+	out, err = stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+		RunID: runID, OrgID: orgID, TeamID: teamID,
+		Provider: "jira", Kind: "issue", Target: "SKY-1",
+		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1?focusedId=9",
+		State: domain.ArtifactStateIssueUpdated, DedupKey: key,
+	})
+	if err != nil {
+		t.Fatalf("third Upsert: %v", err)
+	}
+	if out.URL != "https://jira.example.com/browse/SKY-1?focusedId=9" {
+		t.Errorf("non-empty url did not overwrite: %q", out.URL)
+	}
+}
+
 // TestArtifactStore_Postgres_UpsertSystem_BypassesRLS pins the admin-pool
 // write path the event-triggered exec choke point depends on (TFAC-459): a
 // run with no creator user has no JWT-claims context, so its artifact insert
