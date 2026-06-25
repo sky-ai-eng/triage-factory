@@ -175,9 +175,8 @@ func TestRunResponse_ArtifactCount(t *testing.T) {
 }
 
 // TestRunResponse_ArtifactCount_Parked pins that a parked run reports the right
-// artifact_count even though handleAgentStatus skips the count query for it —
-// runResponse derives it from the ListByRun it runs for pending_kind. pending_kind
-// rides along (a draft PR → "pr").
+// artifact_count (from CountByRun, independent of the best-effort pending_kind
+// list read) and that pending_kind rides along (a draft PR → "pr").
 func TestRunResponse_ArtifactCount_Parked(t *testing.T) {
 	s := newTestServer(t)
 	runID := seedSteerRun(t, s.db, "park", "pending_approval")

@@ -45,18 +45,11 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		if run == nil {
 			return nil
 		}
-		// A parked run self-counts inside runResponse from the ListByRun it must
-		// run for pending_kind, so only a non-parked run needs a separate count
-		// query here. (The list path batches this across runs — handleAgentRuns.)
-		var artifactCount int
-		if run.Status != "pending_approval" {
-			counts, e := tx.Artifacts.CountByRun(r.Context(), orgID, []string{run.ID})
-			if e != nil {
-				return e
-			}
-			artifactCount = counts[run.ID]
+		counts, e := tx.Artifacts.CountByRun(r.Context(), orgID, []string{run.ID})
+		if e != nil {
+			return e
 		}
-		resp = runResponse(r.Context(), tx.Artifacts, orgID, run, artifactCount)
+		resp = runResponse(r.Context(), tx.Artifacts, orgID, run, counts[run.ID])
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -231,15 +224,18 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 // artifact in state=draft); the discriminator has to come from the server
 // because the run row itself doesn't know which kind queued it.
 //
-// artifactCount is supplied by the caller for the runs this function doesn't
-// otherwise read: the run-list path batches one count query for every run
-// instead of an N+1 of per-run reads (handleAgentRuns), and the single-run path
-// counts a non-parked run directly (handleAgentStatus). A PARKED run is the
-// exception — pending_kind already needs its full artifact list, so runResponse
-// reuses that one read for the count too (len(arts) == the CountByRun value)
-// rather than make the caller issue a second query. The pending_kind read's
-// error is best-effort: it logs and omits pending_kind (keeping the supplied
-// count) rather than failing the whole status fetch.
+// artifactCount is supplied by the caller (Artifacts.CountByRun) for every run —
+// the single-run path counts the one run, the run-list path batches all runs in
+// one query (N+1 avoidance, handleAgentRuns). It is the authoritative source for
+// artifact_count and is deliberately INDEPENDENT of the pending_kind read below:
+// the two were once shared (parked runs self-counted from the pending_kind list)
+// until that coupling meant a transient list-read failure reported artifact_count
+// 0 for a run that had artifacts.
+//
+// pending_kind is a separate, best-effort concern: only a parked run needs it,
+// and only it requires the full artifact list. If that read fails it logs and
+// omits pending_kind WITHOUT touching artifact_count, so a transient blip costs
+// the UI its overlay discriminator (informational) but never the count.
 func runResponse(ctx context.Context, artifacts db.ArtifactStore, orgID string, run *domain.AgentRun, artifactCount int) map[string]any {
 	out := map[string]any{
 		"ID":                   run.ID,
@@ -270,11 +266,8 @@ func runResponse(ctx context.Context, artifacts db.ArtifactStore, orgID string, 
 	// FirstReadyReview (not a bare pending check) gates the review case.
 	if run.Status == "pending_approval" {
 		if arts, err := artifacts.ListByRun(ctx, orgID, run.ID); err != nil {
-			serverLog.Warn("pending_kind lookup failed; omitting it and keeping the supplied artifact_count", "run", run.ID, "error", err)
+			serverLog.Warn("pending_kind lookup failed; omitting it (artifact_count unaffected)", "run", run.ID, "error", err)
 		} else {
-			// Reuse the read we had to make anyway: a parked run's count is
-			// len(arts), so the caller skipped a separate count query for it.
-			out["artifact_count"] = len(arts)
 			if rv := domain.FirstReadyReview(arts); rv != nil {
 				out["pending_kind"] = "review"
 				out["pending_artifact_id"] = rv.ID
