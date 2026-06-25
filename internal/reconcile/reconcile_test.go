@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -118,49 +119,70 @@ func TestIsTerminalState(t *testing.T) {
 	}
 }
 
-func TestOutcomeNote(t *testing.T) {
-	pr := domain.Artifact{Kind: domain.ArtifactKindPullRequest, Target: "octo/repo#1"}
-	rv := domain.Artifact{Kind: domain.ArtifactKindReview, Target: "octo/repo#2"}
-	br := domain.Artifact{Kind: domain.ArtifactKindBranch, Target: "octo/repo", ExternalID: "refs/heads/feat"}
+func TestFormatTitleBodyDelta(t *testing.T) {
+	// Unchanged → empty (the caller renders "shipped as you drafted them").
+	if got := formatTitleBodyDelta("T", "B", "T", "B"); got != "" {
+		t.Errorf("unchanged delta = %q, want empty", got)
+	}
+	// Title only.
+	got := formatTitleBodyDelta("draft title", "B", "shipped title", "B")
+	if !strings.Contains(got, "Title") || !strings.Contains(got, "shipped title") || !strings.Contains(got, "draft title") {
+		t.Errorf("title delta = %q, want both shipped + drafted titles", got)
+	}
+	if strings.Contains(got, "Description") {
+		t.Errorf("unchanged body should not appear: %q", got)
+	}
+	// Body only → the shipped body is quoted.
+	got = formatTitleBodyDelta("T", "old body", "T", "new body line1\nline2")
+	if !strings.Contains(got, "Description") || !strings.Contains(got, "> new body line1") || !strings.Contains(got, "> line2") {
+		t.Errorf("body delta = %q, want the final body blockquoted", got)
+	}
+}
+
+func TestDescribeArtifactOutcome_Dispositions(t *testing.T) {
+	// The non-merged terminal kinds render disposition text without touching the
+	// resolver, so a zero-value Reconciler is enough.
+	rc := &Reconciler{}
 	cases := []struct {
-		art   domain.Artifact
-		state string
-		want  string
+		art  domain.Artifact
+		want string
 	}{
-		{pr, domain.ArtifactStatePRMerged, "merged"},
-		{pr, domain.ArtifactStatePRClosed, "closed without merging"},
-		{rv, domain.ArtifactStateReviewSubmitted, "submitted"},
-		{rv, domain.ArtifactStateReviewDismissed, "dismissed"},
-		{br, domain.ArtifactStateBranchDeleted, "deleted"},
-		{pr, domain.ArtifactStatePROpen, ""}, // non-terminal → no note
+		{domain.Artifact{Kind: domain.ArtifactKindPullRequest, Target: "octo/repo#1", State: domain.ArtifactStatePRClosed}, "closed without merging"},
+		{domain.Artifact{Kind: domain.ArtifactKindReview, Target: "octo/repo#2", State: domain.ArtifactStateReviewSubmitted}, "submitted"},
+		{domain.Artifact{Kind: domain.ArtifactKindReview, Target: "octo/repo#3", State: domain.ArtifactStateReviewDismissed}, "dismissed"},
+		{domain.Artifact{Kind: domain.ArtifactKindBranch, Target: "octo/repo", ExternalID: "refs/heads/feat", State: domain.ArtifactStateBranchDeleted}, "deleted"},
+		// Non-terminal → no block.
+		{domain.Artifact{Kind: domain.ArtifactKindPullRequest, Target: "octo/repo#4", State: domain.ArtifactStatePROpen}, ""},
 	}
 	for _, c := range cases {
-		got := outcomeNote(c.art, c.state)
+		got := rc.describeArtifactOutcome(context.Background(), "org", c.art)
 		if c.want == "" {
 			if got != "" {
-				t.Errorf("outcomeNote(%s) = %q, want empty", c.state, got)
+				t.Errorf("describeArtifactOutcome(%s) = %q, want empty", c.art.State, got)
 			}
 			continue
 		}
 		if !strings.Contains(got, c.want) {
-			t.Errorf("outcomeNote(%s) = %q, want to contain %q", c.state, got, c.want)
+			t.Errorf("describeArtifactOutcome(%s) = %q, want to contain %q", c.art.State, got, c.want)
 		}
 	}
-	// Branch note names the branch (not the ref) and the repo.
-	if got := outcomeNote(br, domain.ArtifactStateBranchDeleted); !strings.Contains(got, "`feat`") || !strings.Contains(got, "`octo/repo`") {
-		t.Errorf("branch note = %q, want to name `feat` in `octo/repo`", got)
+	// Branch block names the branch (not the ref) and the repo.
+	br := domain.Artifact{Kind: domain.ArtifactKindBranch, Target: "octo/repo", ExternalID: "refs/heads/feat", State: domain.ArtifactStateBranchDeleted}
+	if got := rc.describeArtifactOutcome(context.Background(), "org", br); !strings.Contains(got, "`feat`") || !strings.Contains(got, "`octo/repo`") {
+		t.Errorf("branch block = %q, want to name `feat` in `octo/repo`", got)
 	}
 }
 
 // --- integration: Reconcile end-to-end against a stub GitHub + real SQLite ---
 
-// stubGH is a canned GitHub GraphQL endpoint for RefreshPRs (nodes query) and
-// BranchesExist (aliased repository query). It records which PR node ids and
-// branch refs were queried so a test can assert terminal artifacts are never
-// fetched.
+// stubGH is a canned GitHub endpoint for RefreshPRs (GraphQL nodes query),
+// BranchesExist (GraphQL aliased repository query), and GetPRBasic (REST
+// GET /pulls/{n}). It records which PR node ids and branch refs were queried so
+// a test can assert terminal artifacts are never fetched.
 type stubGH struct {
-	prs      map[string]string // PR node id → JSON node body
+	prs      map[string]string // PR node id → JSON node body (RefreshPRs)
 	branches map[string]bool   // "owner/repo/branch" → exists; absent key = unknown
+	prFinal  map[int][2]string // PR number → {title, body} for GetPRBasic; absent → 404
 	prCalls  map[string]bool   // PR node ids actually requested
 	refCalls map[string]bool   // branch refs actually requested ("owner/repo/branch")
 }
@@ -170,12 +192,32 @@ func newStubClient(t *testing.T, s *stubGH) *github.Client {
 	s.prCalls = map[string]bool{}
 	s.refCalls = map[string]bool{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		// GetPRBasic is a REST GET to /repos/{o}/{r}/pulls/{n}; GraphQL is always
+		// POST. Route on method.
+		if r.Method == http.MethodGet {
+			seg := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			number, _ := strconv.Atoi(seg[len(seg)-1])
+			tb, ok := s.prFinal[number]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+				return
+			}
+			body, _ := json.Marshal(map[string]any{
+				"number": number, "node_id": fmt.Sprintf("PR_%d", number),
+				"title": tb[0], "body": tb[1], "merged": true, "state": "closed",
+			})
+			_, _ = w.Write(body)
+			return
+		}
+
 		var req struct {
 			Query     string         `json:"query"`
 			Variables map[string]any `json:"variables"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		w.Header().Set("Content-Type", "application/json")
 
 		switch {
 		case strings.Contains(req.Query, "nodes(ids:"):
@@ -284,8 +326,10 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, runID, content
 
 // TestReconcile_TransitionsAndFinalMemory is the headline end-to-end: a draft PR
 // that merged, a pending review that was submitted, and a pushed branch that was
-// deleted all reflect their new state; each terminal transition appends a final
-// memory note; and a terminal artifact already in the set is never re-queried.
+// deleted all reflect their new state; the run's post-run memory is ONE composed
+// note covering all three (proving multi-artifact runs accumulate, not clobber),
+// with the merged PR diffed against the agent's draft; and a terminal artifact
+// already in the set is never re-queried.
 func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 	stores, seedRun, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
@@ -314,6 +358,8 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 			"PR_2": prNodeJSON("PR_2", 2, "OPEN", false, false, [2]string{"REV_2", "APPROVED"}),
 		},
 		branches: map[string]bool{"octo/repo/feature": false}, // gone
+		// PR_1 shipped with an edited title vs the agent's draft ("t"/"b").
+		prFinal: map[int][2]string{1: {"shipped title", "b"}},
 	}
 	res := &fakeResolver{client: newStubClient(t, stub)}
 	rc := NewReconciler(res, stores.Artifacts, stores.TaskMemory, nil)
@@ -332,8 +378,9 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 		t.Error("terminal merged PR (PR_9) was re-queried; it should be excluded from the non-terminal set")
 	}
 
-	// Final memory captured for each terminal transition, appended after the
-	// agent narrative (not trampling it).
+	// ONE composed note covering all three artifacts, after the agent narrative
+	// (which is untouched). Overwrite, not append — but composed over the run's
+	// whole set, so nothing is clobbered.
 	mem, err := stores.TaskMemory.GetRunMemory(ctx, runmode.LocalDefaultOrgID, runID)
 	if err != nil || mem == nil {
 		t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
@@ -343,8 +390,12 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 	}
 	for _, want := range []string{"was merged on GitHub", "was submitted on GitHub", "was deleted on GitHub"} {
 		if !strings.Contains(mem.Content, want) {
-			t.Errorf("final memory missing %q; got:\n%s", want, mem.Content)
+			t.Errorf("composed outcome missing %q; got:\n%s", want, mem.Content)
 		}
+	}
+	// The merged PR carries the title delta vs the agent's draft.
+	if !strings.Contains(mem.Content, "shipped title") {
+		t.Errorf("merged-PR title delta missing; got:\n%s", mem.Content)
 	}
 }
 
@@ -373,6 +424,12 @@ func TestReconcile_PRClosedAndReviewDismissed(t *testing.T) {
 	}
 	assertState(t, stores, runmode.LocalDefaultOrgID, prArt.DedupKey, domain.ArtifactStatePRClosed)
 	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewDismissed)
+
+	// One composed note covers both dispositions.
+	mem, _ := stores.TaskMemory.GetRunMemory(ctx, runmode.LocalDefaultOrgID, runID)
+	if mem == nil || !strings.Contains(mem.Content, "closed without merging") || !strings.Contains(mem.Content, "dismissed") {
+		t.Errorf("composed note missing a disposition; got: %v", mem)
+	}
 }
 
 // TestReconcile_NoOpWhenUnchanged pins that an open PR still open, a pending
@@ -414,8 +471,8 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 	assertState(t, stores, runmode.LocalDefaultOrgID, branchArt.DedupKey, domain.ArtifactStateBranchPushed)
 
 	mem, _ := stores.TaskMemory.GetRunMemory(ctx, runmode.LocalDefaultOrgID, runID)
-	if mem != nil && strings.Contains(mem.Content, "Outcome:") {
-		t.Errorf("no terminal transition, but a final-memory note was written: %q", mem.Content)
+	if mem != nil && strings.Contains(mem.Content, "Post-run outcome") {
+		t.Errorf("no terminal transition, but a post-run outcome note was written: %q", mem.Content)
 	}
 }
 
@@ -481,6 +538,52 @@ func TestReconcile_SingleRunScope(t *testing.T) {
 	assertState(t, stores, runmode.LocalDefaultOrgID, prB.DedupKey, domain.ArtifactStatePROpen)
 	if stub.prCalls["PR_8"] {
 		t.Error("run B's PR_8 was queried during a run-A-scoped reconcile")
+	}
+}
+
+// TestReconcile_OutcomeSupersedesVerdict pins the overwrite semantics: a run
+// approved through TF carries a human verdict in human_content; when its PR
+// later merges on GitHub, the reconciler's post-run outcome OVERWRITES that
+// verdict (the final state is the authoritative divergence account), while the
+// agent's own narrative is untouched.
+func TestReconcile_OutcomeSupersedesVerdict(t *testing.T) {
+	stores, seedRun, seedArt := reconcileTestStores(t)
+	ctx := context.Background()
+	const runID = "77777777-7777-7777-7777-777777777777"
+	seedRun("ent-7", runID, "agent narrative")
+	// Approval-time verdict already recorded.
+	if err := stores.TaskMemory.UpdateRunMemoryHumanContent(ctx, runmode.LocalDefaultOrgID, runID, "Human approved with a tweaked body."); err != nil {
+		t.Fatalf("seed verdict: %v", err)
+	}
+
+	prArt := domain.NewPullRequestArtifact("octo/repo", 10, "PR_10", "x", "main", "u", "draft title", "draft body", false)
+	prArt.RunID = runID
+	seedArt(prArt)
+
+	stub := &stubGH{
+		prs:     map[string]string{"PR_10": prNodeJSON("PR_10", 10, "MERGED", false, true)},
+		prFinal: map[int][2]string{10: {"shipped title", "shipped body"}},
+	}
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
+	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("ReconcileOrg: %v", err)
+	}
+
+	mem, err := stores.TaskMemory.GetRunMemory(ctx, runmode.LocalDefaultOrgID, runID)
+	if err != nil || mem == nil {
+		t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+	}
+	if strings.Contains(mem.Content, "Human approved with a tweaked body.") {
+		t.Errorf("the approval verdict should have been superseded by the post-run outcome; got:\n%s", mem.Content)
+	}
+	if !strings.HasPrefix(mem.Content, "agent narrative") {
+		t.Errorf("agent narrative was trampled: %q", mem.Content)
+	}
+	// The outcome carries the real shipped-vs-drafted delta.
+	for _, want := range []string{"was merged on GitHub", "shipped title", "shipped body"} {
+		if !strings.Contains(mem.Content, want) {
+			t.Errorf("outcome missing %q; got:\n%s", want, mem.Content)
+		}
 	}
 }
 

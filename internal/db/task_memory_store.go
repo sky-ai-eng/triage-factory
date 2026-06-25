@@ -89,26 +89,22 @@ type TaskMemoryStore interface {
 	// handler, swipe-discard cleanup) runs under request claims.
 	UpdateRunMemoryHumanContent(ctx context.Context, orgID, runID, content string) error
 
-	// AppendRunMemoryOutcomeSystem appends a terminal-outcome note to a
-	// run's human_content (the post-run slot), separated from any existing
-	// content by a blank line. It is the reconciler's "final memory" capture
-	// (TFAC-464 β): when an artifact reaches a terminal state OUTSIDE the TF
-	// approval flow — a PR merged/closed on GitHub, a review submitted/
-	// dismissed, a branch deleted — the run that produced it gets an honest
-	// record of how it ended, so the next agent working the same entity sees
-	// the outcome in its materialized memory.
+	// UpdateRunMemoryHumanContentSystem is the admin-pool (BYPASSRLS) variant
+	// of UpdateRunMemoryHumanContent for the artifact reconciler (TFAC-464 β),
+	// which has no JWT-claims context. It overwrites human_content with the
+	// run's post-run outcome — how the run's artifacts resolved on GitHub
+	// (merged/closed/deleted/submitted) vs. what the agent drafted — so the
+	// next agent on the entity reads the final state.
 	//
-	// Append, not overwrite: a human verdict may already sit in human_content
-	// (the run was approved through TF, then the PR later merged on GitHub),
-	// and that verdict must survive. A missing run_memory row is a logged
-	// no-op, matching UpdateRunMemoryHumanContent — the external transition
-	// already landed, so a missed note must not error the cycle.
-	//
-	// Admin pool (BYPASSRLS) — the reconciler is a background system job with
-	// no JWT-claims context (Tier 1), and the Tier-2 refresh reuses the same
-	// reconcile path. org_id stays bound as defense in depth. SQLite collapses
-	// onto the one connection.
-	AppendRunMemoryOutcomeSystem(ctx context.Context, orgID, runID, outcome string) error
+	// Overwrite, not append: human_content is the single "how reality diverged
+	// from your draft" slot, and the terminal outcome is its most authoritative
+	// version, superseding any approval-time account. The reconciler composes
+	// the note over the run's WHOLE artifact set each time one resolves, so a
+	// branch-then-PR run accumulates correctly without an append and a repeated
+	// cycle is idempotent. Same empty→NULL + missing-row-logged-not-fatal
+	// contract as the app-pool variant. org_id stays bound as defense in depth;
+	// SQLite collapses onto the one connection.
+	UpdateRunMemoryHumanContentSystem(ctx context.Context, orgID, runID, content string) error
 
 	// GetMemoriesForEntity returns all memories across all runs on
 	// this entity (and linked entities via entity_links), oldest

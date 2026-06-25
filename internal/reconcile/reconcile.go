@@ -37,8 +37,8 @@ type clientResolver interface {
 // shared between Tier 1 (the background Manager/Runner) and Tier 2 (the
 // run-scoped refresh endpoint): both call Reconcile with a set of non-terminal
 // artifacts. Writes route through the admin pool (UpsertSystem /
-// AppendRunMemoryOutcomeSystem) — the reconciler has no JWT-claims context in
-// either tier.
+// UpdateRunMemoryHumanContentSystem) — the reconciler has no JWT-claims context
+// in either tier.
 type Reconciler struct {
 	resolver  clientResolver
 	artifacts db.ArtifactStore
@@ -144,8 +144,14 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		}
 	}
 
-	// Pass 3 — apply transitions.
+	// Pass 3 — apply each transition, then recompute run-memory once per run
+	// that had a TERMINAL transition this cycle. The memory recompute is
+	// deferred out of the per-artifact loop and composed over the run's whole
+	// artifact set (recordRunOutcome) so a run that produced several artifacts —
+	// commonly a branch AND a PR — accumulates one outcome rather than each
+	// terminal write clobbering the last.
 	var transitioned []domain.Artifact
+	terminalRuns := map[string]bool{}
 	for _, a := range arts {
 		newState, ok := nextState(a, snapshots, branchExists)
 		if !ok || newState == a.State {
@@ -158,14 +164,20 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 			continue
 		}
 		transitioned = append(transitioned, updated)
+		if a.RunID != "" && isTerminalState(a.Kind, newState) {
+			terminalRuns[a.RunID] = true
+		}
+	}
+	for runID := range terminalRuns {
+		rc.recordRunOutcome(ctx, orgID, runID)
 	}
 	return transitioned, nil
 }
 
-// applyTransition writes the new state (admin pool), captures the final-outcome
-// memory on a terminal transition, and broadcasts the change. The memory + WS
-// steps are best-effort: the external state already moved, so a failed note or
-// a dropped broadcast must not undo the recorded transition.
+// applyTransition writes the new state (admin pool) and broadcasts the change.
+// Memory capture is deferred to recordRunOutcome (a per-run recompute) so a run
+// with several artifacts gets one composed outcome, not one clobbering write per
+// artifact. Best-effort WS: a dropped broadcast must not undo the transition.
 func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domain.Artifact, newState string) (domain.Artifact, error) {
 	next := a
 	next.State = newState
@@ -173,20 +185,31 @@ func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domai
 	if err != nil {
 		return domain.Artifact{}, err
 	}
-
-	if a.RunID != "" && isTerminalState(a.Kind, newState) {
-		if note := outcomeNote(a, newState); note != "" {
-			if merr := rc.memory.AppendRunMemoryOutcomeSystem(ctx, orgID, a.RunID, note); merr != nil {
-				reconcileLog.Warn("append outcome memory failed",
-					"org", orgID, "run", a.RunID, "artifact", a.ID, "error", merr)
-			}
-		}
-	}
-
 	rc.broadcast(orgID, updated)
 	reconcileLog.Info("artifact reconciled",
 		"org", orgID, "artifact", a.ID, "kind", a.Kind, "from", a.State, "to", newState)
 	return updated, nil
+}
+
+// recordRunOutcome recomputes a run's post-run memory note over its WHOLE
+// artifact set and OVERWRITES human_content with it. Called once per run that
+// had a terminal transition this cycle, after the artifact writes commit (so it
+// reads the fresh terminal states). Composing over the full set — not just this
+// cycle's transitions — is what lets a branch-then-PR run accumulate without an
+// append: every resolution recomputes the complete picture, which is also why a
+// repeated or concurrent cycle is idempotent (same set → same note). The
+// overwrite supersedes any approval-time verdict by design; the terminal state
+// is the authoritative account of how reality diverged from the agent's draft.
+// Best-effort — the external state already moved, so a failed note must not
+// undo the transition.
+func (rc *Reconciler) recordRunOutcome(ctx context.Context, orgID, runID string) {
+	note := rc.composeRunOutcome(ctx, orgID, runID)
+	if note == "" {
+		return
+	}
+	if err := rc.memory.UpdateRunMemoryHumanContentSystem(ctx, orgID, runID, note); err != nil {
+		reconcileLog.Warn("record run outcome memory failed", "org", orgID, "run", runID, "error", err)
+	}
 }
 
 // broadcast pushes the transition to the frontend as an agent_run_update on the
@@ -301,23 +324,109 @@ func isTerminalState(kind, state string) bool {
 	return false
 }
 
-// outcomeNote builds the markdown line appended to the producing run's memory on
-// a terminal transition (TFAC-464 β), so the next agent on the entity sees how
-// the artifact ended. Empty for a non-terminal transition (no note warranted).
-func outcomeNote(a domain.Artifact, newState string) string {
+// runOutcomeHeader prefaces the composed post-run memory note — the framing the
+// next agent reads the per-artifact outcome blocks under.
+const runOutcomeHeader = "**Post-run outcome** — how your work resolved on GitHub versus what you drafted:\n\n"
+
+// composeRunOutcome builds the run's post-run memory note from every TERMINAL
+// artifact it produced. It reads the run's whole artifact set (admin pool — the
+// reconciler has no claims), so the note is the complete picture regardless of
+// which cycle each artifact resolved in. Returns "" when nothing is terminal yet
+// (still in flight — no outcome to report), which recordRunOutcome treats as
+// "don't touch the row."
+func (rc *Reconciler) composeRunOutcome(ctx context.Context, orgID, runID string) string {
+	arts, err := rc.artifacts.ListByRunSystem(ctx, orgID, runID)
+	if err != nil {
+		reconcileLog.Warn("list run artifacts for outcome note failed", "org", orgID, "run", runID, "error", err)
+		return ""
+	}
+	var blocks []string
+	for _, a := range arts {
+		if block := rc.describeArtifactOutcome(ctx, orgID, a); block != "" {
+			blocks = append(blocks, block)
+		}
+	}
+	if len(blocks) == 0 {
+		return ""
+	}
+	return runOutcomeHeader + strings.Join(blocks, "\n\n")
+}
+
+// describeArtifactOutcome renders one terminal artifact's outcome block, or ""
+// when the artifact isn't terminal (still in flight — nothing final to report).
+// A merged PR is diffed against the agent's authored draft (Proposed) so the
+// note carries how the shipped title/description differs; every other terminal
+// kind renders its disposition.
+func (rc *Reconciler) describeArtifactOutcome(ctx context.Context, orgID string, a domain.Artifact) string {
 	switch {
-	case a.Kind == domain.ArtifactKindPullRequest && newState == domain.ArtifactStatePRMerged:
-		return fmt.Sprintf("**Outcome:** `%s` was merged on GitHub.", a.Target)
-	case a.Kind == domain.ArtifactKindPullRequest && newState == domain.ArtifactStatePRClosed:
-		return fmt.Sprintf("**Outcome:** `%s` was closed without merging on GitHub.", a.Target)
-	case a.Kind == domain.ArtifactKindReview && newState == domain.ArtifactStateReviewSubmitted:
-		return fmt.Sprintf("**Outcome:** The review on `%s` was submitted on GitHub.", a.Target)
-	case a.Kind == domain.ArtifactKindReview && newState == domain.ArtifactStateReviewDismissed:
-		return fmt.Sprintf("**Outcome:** The review on `%s` was dismissed on GitHub.", a.Target)
-	case a.Kind == domain.ArtifactKindBranch && newState == domain.ArtifactStateBranchDeleted:
-		return fmt.Sprintf("**Outcome:** Branch `%s` in `%s` was deleted on GitHub.", branchName(a.ExternalID), a.Target)
+	case a.Kind == domain.ArtifactKindPullRequest && a.State == domain.ArtifactStatePRMerged:
+		return rc.describeMergedPR(ctx, orgID, a)
+	case a.Kind == domain.ArtifactKindPullRequest && a.State == domain.ArtifactStatePRClosed:
+		return fmt.Sprintf("`%s` was closed without merging on GitHub.", a.Target)
+	case a.Kind == domain.ArtifactKindReview && a.State == domain.ArtifactStateReviewSubmitted:
+		return fmt.Sprintf("Your review on `%s` was submitted on GitHub.", a.Target)
+	case a.Kind == domain.ArtifactKindReview && a.State == domain.ArtifactStateReviewDismissed:
+		return fmt.Sprintf("Your review on `%s` was dismissed on GitHub.", a.Target)
+	case a.Kind == domain.ArtifactKindBranch && a.State == domain.ArtifactStateBranchDeleted:
+		return fmt.Sprintf("Branch `%s` in `%s` was deleted on GitHub.", branchName(a.ExternalID), a.Target)
 	}
 	return ""
+}
+
+// describeMergedPR reports a merged PR and diffs the SHIPPED title/body (read
+// live via GetPRBasic) against the agent's authored draft (Proposed), so the
+// note tells the next agent how the merged result differs from what it wrote.
+// A fetch/parse failure degrades to the bare disposition rather than dropping
+// the line.
+//
+// This captures the title/description divergence — the cheap delta that
+// subsumes the approval-time verdict (same fields, more final). The deeper code
+// divergence — commits that landed on top of the agent's — is a follow-up that
+// needs a base..head diff against the authored head SHA.
+func (rc *Reconciler) describeMergedPR(ctx context.Context, orgID string, a domain.Artifact) string {
+	base := fmt.Sprintf("`%s` was merged on GitHub.", a.Target)
+	owner, repo, number, ok := domain.ParsePRTarget(a.Target)
+	if !ok {
+		return base
+	}
+	client, err := rc.resolver.ClientFor(ctx, orgID, owner)
+	if err != nil {
+		return base
+	}
+	pr, err := client.GetPRBasic(owner, repo, number)
+	if err != nil || pr == nil {
+		return base
+	}
+	d, _ := domain.ParsePRArtifactDetails(a.DetailsJSON)
+	delta := formatTitleBodyDelta(d.Proposed.Title, d.Proposed.Body, pr.Title, pr.Body)
+	if delta == "" {
+		return base + " Its title and description shipped as you drafted them."
+	}
+	return base + "\n" + delta
+}
+
+// formatTitleBodyDelta renders how a PR's shipped title/body differs from the
+// agent's draft, or "" when both are unchanged. Only changed fields appear; the
+// shipped body is quoted in full (it's the current truth the next agent acts on).
+func formatTitleBodyDelta(draftTitle, draftBody, finalTitle, finalBody string) string {
+	var b strings.Builder
+	if draftTitle != finalTitle {
+		fmt.Fprintf(&b, "- **Title** shipped as %q (you drafted %q).\n", finalTitle, draftTitle)
+	}
+	if draftBody != finalBody {
+		b.WriteString("- **Description** was edited before it shipped. Final:\n\n")
+		writeBlockquote(&b, finalBody)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// writeBlockquote prefixes each line of text with "> " for a markdown blockquote.
+func writeBlockquote(b *strings.Builder, text string) {
+	for _, line := range strings.Split(text, "\n") {
+		b.WriteString("> ")
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
 }
 
 // --- coordinate helpers ---

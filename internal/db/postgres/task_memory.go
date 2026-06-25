@@ -21,11 +21,6 @@ const humanFeedbackHeader = "## Human feedback (post-run)\n\n"
 // a memory row are populated.
 const humanFeedbackSeparator = "\n\n---\n" + humanFeedbackHeader
 
-// outcomeSeparator divides an appended reconciler outcome note (TFAC-464 β)
-// from any content already in human_content — a blank line. Mirrors the
-// SQLite impl's value so both dialects append identically.
-const outcomeSeparator = "\n\n"
-
 // taskMemoryStore is the Postgres impl of db.TaskMemoryStore. SQL is
 // written fresh against D3's schema: $N placeholders, explicit org_id
 // bind (the column is NOT NULL with no default), and org_id in every
@@ -92,45 +87,26 @@ func upsertAgentMemory(ctx context.Context, q queryer, orgID, runID, entityID, b
 	return err
 }
 
-func (s *taskMemoryStore) AppendRunMemoryOutcomeSystem(ctx context.Context, orgID, runID, outcome string) error {
-	if strings.TrimSpace(outcome) == "" {
-		return nil
-	}
-	// Admin pool (BYPASSRLS): the reconciler has no JWT-claims context. The
-	// CASE concatenates in one statement so a concurrent verdict write can't
-	// be lost to a read-modify-write race — a blank line separates the note
-	// from any existing content; an empty/NULL column takes the note alone.
-	res, err := s.admin.ExecContext(ctx, `
-		UPDATE run_memory
-		SET human_content = CASE
-			WHEN COALESCE(human_content, '') = '' THEN $1
-			ELSE human_content || $2 || $1
-		END
-		WHERE org_id = $3 AND run_id = $4
-	`, outcome, outcomeSeparator, orgID, runID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		var exists int
-		switch err := s.admin.QueryRowContext(ctx, `SELECT 1 FROM run_memory WHERE org_id = $1 AND run_id = $2 LIMIT 1`, orgID, runID).Scan(&exists); err {
-		case nil:
-			// Row exists; UPDATE was a no-op (same note appended twice).
-		case sql.ErrNoRows:
-			memoryLog.Warn("no run_memory row; outcome note not recorded", "run_id", runID)
-		default:
-			memoryLog.Warn("verify run_memory row after outcome append failed", "run_id", runID, "error", err)
-		}
-	}
-	return nil
+func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID, runID, content string) error {
+	return updateRunMemoryHumanContent(ctx, s.q, orgID, runID, content)
 }
 
-func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID, runID, content string) error {
+// UpdateRunMemoryHumanContentSystem overwrites human_content on the admin pool
+// (BYPASSRLS) for the artifact reconciler, which has no JWT-claims context. Same
+// body as the app-pool variant, different pool. See the interface doc + TFAC-464.
+func (s *taskMemoryStore) UpdateRunMemoryHumanContentSystem(ctx context.Context, orgID, runID, content string) error {
+	return updateRunMemoryHumanContent(ctx, s.admin, orgID, runID, content)
+}
+
+// updateRunMemoryHumanContent is the shared body for the app- and admin-pool
+// variants: a plain overwrite of human_content (empty/whitespace → NULL),
+// logged-not-fatal on a missing row.
+func updateRunMemoryHumanContent(ctx context.Context, q queryer, orgID, runID, content string) error {
 	var humanContent any
 	if strings.TrimSpace(content) != "" {
 		humanContent = content
 	}
-	res, err := s.q.ExecContext(ctx,
+	res, err := q.ExecContext(ctx,
 		`UPDATE run_memory SET human_content = $1 WHERE org_id = $2 AND run_id = $3`,
 		humanContent, orgID, runID,
 	)
@@ -144,7 +120,7 @@ func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID
 		// precisely, so this is mostly defensive; the symmetry is
 		// what matters.
 		var exists int
-		err := s.q.QueryRowContext(ctx,
+		err := q.QueryRowContext(ctx,
 			`SELECT 1 FROM run_memory WHERE org_id = $1 AND run_id = $2 LIMIT 1`,
 			orgID, runID,
 		).Scan(&exists)
