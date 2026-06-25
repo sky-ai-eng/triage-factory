@@ -364,9 +364,9 @@ func (rc *Reconciler) describeArtifactOutcome(ctx context.Context, orgID string,
 	case a.Kind == domain.ArtifactKindPullRequest && a.State == domain.ArtifactStatePRClosed:
 		return fmt.Sprintf("`%s` was closed without merging on GitHub.", a.Target)
 	case a.Kind == domain.ArtifactKindReview && a.State == domain.ArtifactStateReviewSubmitted:
-		return fmt.Sprintf("Your review on `%s` was submitted on GitHub.", a.Target)
+		return rc.describeResolvedReview(ctx, orgID, a, "submitted")
 	case a.Kind == domain.ArtifactKindReview && a.State == domain.ArtifactStateReviewDismissed:
-		return fmt.Sprintf("Your review on `%s` was dismissed on GitHub.", a.Target)
+		return rc.describeResolvedReview(ctx, orgID, a, "dismissed")
 	case a.Kind == domain.ArtifactKindBranch && a.State == domain.ArtifactStateBranchDeleted:
 		return fmt.Sprintf("Branch `%s` in `%s` was deleted on GitHub.", branchName(a.ExternalID), a.Target)
 	}
@@ -427,6 +427,181 @@ func writeBlockquote(b *strings.Builder, text string) {
 		b.WriteString(line)
 		b.WriteByte('\n')
 	}
+}
+
+// describeResolvedReview reports a review that resolved on GitHub (submitted or
+// dismissed) and diffs what landed against the agent's authored draft (the
+// artifact's Proposed snapshot), fetching the final review by its node id. A
+// fetch/parse failure degrades to the bare disposition rather than dropping the
+// line. The framing is the reconciler's ("resolved on GitHub"), distinct from
+// the approval path's human-action framing — a different actor resolved it.
+func (rc *Reconciler) describeResolvedReview(ctx context.Context, orgID string, a domain.Artifact, disposition string) string {
+	base := fmt.Sprintf("Your review on `%s` was %s on GitHub.", a.Target, disposition)
+	owner, _, _, ok := domain.ParsePRTarget(a.Target)
+	if !ok || a.ExternalID == "" {
+		return base
+	}
+	client, err := rc.resolver.ClientFor(ctx, orgID, owner)
+	if err != nil {
+		return base
+	}
+	final, err := client.GetReview(a.ExternalID)
+	if err != nil || final == nil {
+		return base
+	}
+	d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
+	if body := formatReviewDelta(d.Proposed, *final); body != "" {
+		return base + "\n" + body
+	}
+	return base
+}
+
+// formatReviewDelta renders how a resolved review differs from the agent's
+// drafted review. With no agent draft to diff against (the review was submitted
+// before TF finalized it, so Proposed is empty) it records the final review
+// content instead, so the next agent still sees what was reviewed. Returns ""
+// only when there's a draft and nothing changed — the bare disposition suffices.
+func formatReviewDelta(proposed domain.ReviewArtifactProposed, final github.SubmittedReview) string {
+	hasDraft := len(proposed.Comments) > 0 || strings.TrimSpace(proposed.Body) != "" || proposed.Event != ""
+	if !hasDraft {
+		return formatFinalReview(final)
+	}
+	return formatReviewDiff(proposed, final)
+}
+
+// formatFinalReview records a resolved review's content verbatim — used when
+// there's no agent draft to diff against.
+func formatFinalReview(final github.SubmittedReview) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Verdict: %s.", reviewVerdict(final.State))
+	if body := strings.TrimSpace(final.Body); body != "" {
+		b.WriteString("\n\n")
+		writeBlockquote(&b, body)
+	}
+	for _, c := range final.Comments {
+		_, clean := domain.ParseSeverityBadge(c.Body)
+		fmt.Fprintf(&b, "\n- `%s:%d` — %s", c.Path, derefLine(c.Line), inlineComment(clean))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// formatReviewDiff renders the difference between the agent's drafted review and
+// what landed: a changed verdict, an edited body, and per-comment edits/drops/
+// adds (joined by GraphQL node id, severity badges stripped so the diff is
+// prose). Returns "" when nothing changed.
+func formatReviewDiff(proposed domain.ReviewArtifactProposed, final github.SubmittedReview) string {
+	var b strings.Builder
+
+	if proposed.Event != "" && !verdictMatches(proposed.Event, final.State) {
+		fmt.Fprintf(&b, "Verdict shipped as %s (you drafted %s).\n", reviewVerdict(final.State), strings.ToLower(proposed.Event))
+	}
+	if strings.TrimSpace(proposed.Body) != strings.TrimSpace(final.Body) {
+		b.WriteString("Body was edited before it shipped. Final:\n\n")
+		writeBlockquote(&b, final.Body)
+		b.WriteByte('\n')
+	}
+	for _, line := range diffReviewComments(proposed.Comments, final.Comments) {
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// diffReviewComments classifies the agent's drafted comments against the final
+// set by GraphQL node id — the same join the approval-time editor uses — into
+// dropped / edited / added bullet lines. Unchanged comments are omitted.
+func diffReviewComments(proposed []domain.ReviewArtifactComment, final []github.PendingReviewComment) []string {
+	type cmt struct {
+		path, body string
+		line       int
+	}
+	pm, pOrder := map[string]cmt{}, []string{}
+	for _, p := range proposed {
+		if p.ID == "" {
+			continue
+		}
+		_, clean := domain.ParseSeverityBadge(p.Body)
+		if _, seen := pm[p.ID]; !seen {
+			pOrder = append(pOrder, p.ID)
+		}
+		pm[p.ID] = cmt{p.Path, clean, derefLine(p.Line)}
+	}
+	fm := map[string]cmt{}
+	var fOrder []string
+	for _, f := range final {
+		if f.ID == "" {
+			continue
+		}
+		_, clean := domain.ParseSeverityBadge(f.Body)
+		if _, seen := fm[f.ID]; !seen {
+			fOrder = append(fOrder, f.ID)
+		}
+		fm[f.ID] = cmt{f.Path, clean, derefLine(f.Line)}
+	}
+
+	var out []string
+	for _, id := range pOrder {
+		p := pm[id]
+		f, ok := fm[id]
+		switch {
+		case !ok:
+			out = append(out, fmt.Sprintf("- `%s:%d` — dropped before submit (you wrote: %s)", p.path, p.line, inlineComment(p.body)))
+		case p.body != f.body:
+			out = append(out, fmt.Sprintf("- `%s:%d` — edited before submit. Final: %s (you wrote: %s)", p.path, p.line, inlineComment(f.body), inlineComment(p.body)))
+		}
+	}
+	for _, id := range fOrder {
+		if _, drafted := pm[id]; drafted {
+			continue
+		}
+		f := fm[id]
+		out = append(out, fmt.Sprintf("- `%s:%d` — added before submit: %s", f.path, f.line, inlineComment(f.body)))
+	}
+	return out
+}
+
+// reviewVerdict maps a GitHub review state to friendly prose.
+func reviewVerdict(state string) string {
+	switch strings.ToUpper(state) {
+	case "APPROVED":
+		return "approved"
+	case "CHANGES_REQUESTED":
+		return "changes requested"
+	case "COMMENTED":
+		return "comment"
+	case "DISMISSED":
+		return "dismissed"
+	default:
+		return strings.ToLower(state)
+	}
+}
+
+// verdictMatches reports whether the agent's drafted review event (APPROVE /
+// REQUEST_CHANGES / COMMENT) equals the final GitHub review state (which uses a
+// past-tense vocabulary), normalizing across the two.
+func verdictMatches(draftEvent, finalState string) bool {
+	norm := map[string]string{"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED", "COMMENT": "COMMENTED"}
+	want, ok := norm[strings.ToUpper(draftEvent)]
+	if !ok {
+		want = strings.ToUpper(draftEvent)
+	}
+	return want == strings.ToUpper(finalState)
+}
+
+// inlineComment collapses a comment body to a single trimmed line for prose use.
+func inlineComment(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.TrimSpace(s)
+}
+
+// derefLine returns the pointed-to line, or 0 for a comment with no anchor on
+// the current diff (GitHub returns null line for an outdated comment).
+func derefLine(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // --- coordinate helpers ---

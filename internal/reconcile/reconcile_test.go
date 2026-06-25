@@ -173,6 +173,74 @@ func TestDescribeArtifactOutcome_Dispositions(t *testing.T) {
 	}
 }
 
+func TestVerdictMatches(t *testing.T) {
+	// Draft event vocab (APPROVE) normalizes to GitHub state vocab (APPROVED).
+	for _, c := range []struct {
+		event, state string
+		want         bool
+	}{
+		{"APPROVE", "APPROVED", true},
+		{"REQUEST_CHANGES", "CHANGES_REQUESTED", true},
+		{"COMMENT", "COMMENTED", true},
+		{"APPROVE", "CHANGES_REQUESTED", false},
+	} {
+		if got := verdictMatches(c.event, c.state); got != c.want {
+			t.Errorf("verdictMatches(%q,%q) = %v, want %v", c.event, c.state, got, c.want)
+		}
+	}
+}
+
+func TestFormatReviewDelta(t *testing.T) {
+	line5, line7 := 5, 7
+
+	// With a draft: verdict change, body edit, a per-comment edit, and an add.
+	proposed := domain.ReviewArtifactProposed{
+		Body:  "draft summary",
+		Event: "COMMENT",
+		Comments: []domain.ReviewArtifactComment{
+			{ID: "PRRC_1", Path: "a.go", Line: &line5, Body: "draft comment"},
+		},
+	}
+	final := github.SubmittedReview{
+		State: "CHANGES_REQUESTED",
+		Body:  "final summary",
+		Comments: []github.PendingReviewComment{
+			{ID: "PRRC_1", Path: "a.go", Line: &line5, Body: "final comment"},
+			{ID: "PRRC_2", Path: "b.go", Line: &line7, Body: "new thing"},
+		},
+	}
+	got := formatReviewDelta(proposed, final)
+	for _, want := range []string{
+		"Verdict shipped as changes requested",
+		"Body was edited",
+		"`a.go:5` — edited before submit",
+		"final comment",
+		"`b.go:7` — added before submit",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("review delta missing %q; got:\n%s", want, got)
+		}
+	}
+
+	// A dropped comment.
+	dropped := formatReviewDelta(
+		domain.ReviewArtifactProposed{Event: "COMMENT", Comments: []domain.ReviewArtifactComment{{ID: "PRRC_9", Path: "c.go", Line: &line5, Body: "gone"}}},
+		github.SubmittedReview{State: "COMMENTED"},
+	)
+	if !strings.Contains(dropped, "`c.go:5` — dropped before submit") {
+		t.Errorf("dropped-comment delta = %q", dropped)
+	}
+
+	// No draft (Proposed empty) → record the final content instead of a diff.
+	noDraft := formatReviewDelta(domain.ReviewArtifactProposed{}, github.SubmittedReview{
+		State:    "APPROVED",
+		Comments: []github.PendingReviewComment{{ID: "X", Path: "a.go", Line: &line5, Body: "looks good"}},
+	})
+	if !strings.Contains(noDraft, "Verdict: approved") || !strings.Contains(noDraft, "`a.go:5` — looks good") {
+		t.Errorf("no-draft final-review record = %q", noDraft)
+	}
+}
+
 // --- integration: Reconcile end-to-end against a stub GitHub + real SQLite ---
 
 // stubGH is a canned GitHub endpoint for RefreshPRs (GraphQL nodes query),
@@ -183,6 +251,7 @@ type stubGH struct {
 	prs      map[string]string // PR node id → JSON node body (RefreshPRs)
 	branches map[string]bool   // "owner/repo/branch" → exists; absent key = unknown
 	prFinal  map[int][2]string // PR number → {title, body} for GetPRBasic; absent → 404
+	reviews  map[string]string // review node id → PullRequestReview JSON body (GetReview); absent → node null
 	prCalls  map[string]bool   // PR node ids actually requested
 	refCalls map[string]bool   // branch refs actually requested ("owner/repo/branch")
 }
@@ -255,6 +324,15 @@ func newStubClient(t *testing.T, s *stubGH) *github.Client {
 				}
 			}
 			fmt.Fprintf(w, `{"data":{%s}}`, strings.Join(fields, ","))
+
+		case strings.Contains(req.Query, "PullRequestReview"):
+			// GetReview(node(id:)). Return the canned review body, or node:null.
+			id, _ := req.Variables["id"].(string)
+			if body, ok := s.reviews[id]; ok {
+				fmt.Fprintf(w, `{"data":{"node":%s}}`, body)
+			} else {
+				_, _ = w.Write([]byte(`{"data":{"node":null}}`))
+			}
 
 		default:
 			_, _ = w.Write([]byte(`{"data":{}}`))
@@ -429,6 +507,66 @@ func TestReconcile_PRClosedAndReviewDismissed(t *testing.T) {
 	mem, _ := stores.TaskMemory.GetRunMemory(ctx, runmode.LocalDefaultOrgID, runID)
 	if mem == nil || !strings.Contains(mem.Content, "closed without merging") || !strings.Contains(mem.Content, "dismissed") {
 		t.Errorf("composed note missing a disposition; got: %v", mem)
+	}
+}
+
+// TestReconcile_ReviewContentDiff pins that an externally-submitted review's note
+// carries the diff between the agent's drafted review (Proposed) and what landed
+// — the content signal, not just the disposition. The review is fetched by its
+// node id (GetReview), so a submitted review's body/comments are recovered.
+func TestReconcile_ReviewContentDiff(t *testing.T) {
+	stores, seedRun, seedArt := reconcileTestStores(t)
+	ctx := context.Background()
+	const runID = "88888888-8888-8888-8888-888888888888"
+	seedRun("ent-8", runID, "narrative")
+
+	// Review artifact with a finalized draft (Proposed) — a comment the human
+	// then edits, and a body/verdict that shift before submit.
+	reviewArt := domain.NewReviewArtifact("octo/repo", 11, "PR_11", "REV_11")
+	d, _ := domain.ParseReviewArtifactDetails(reviewArt.DetailsJSON)
+	line := 5
+	d.Proposed = domain.ReviewArtifactProposed{
+		Body:  "draft summary",
+		Event: "COMMENT",
+		Comments: []domain.ReviewArtifactComment{
+			{ID: "PRRC_1", Path: "a.go", Line: &line, Body: "draft comment"},
+		},
+	}
+	reviewArt.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
+	reviewArt.RunID = runID
+	seedArt(reviewArt)
+
+	stub := &stubGH{
+		// The PR snapshot surfaces REV_11 as a landed (non-pending) review, so
+		// the artifact transitions pending → submitted.
+		prs: map[string]string{"PR_11": prNodeJSON("PR_11", 11, "OPEN", false, false, [2]string{"REV_11", "CHANGES_REQUESTED"})},
+		// GetReview(REV_11) returns the final content: the comment edited, plus
+		// a body/verdict shift.
+		reviews: map[string]string{"REV_11": `{
+			"state":"CHANGES_REQUESTED","body":"final summary",
+			"comments":{"nodes":[{"id":"PRRC_1","path":"a.go","line":5,"startLine":null,"body":"final comment"}]}
+		}`},
+	}
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
+	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("ReconcileOrg: %v", err)
+	}
+	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewSubmitted)
+
+	mem, err := stores.TaskMemory.GetRunMemory(ctx, runmode.LocalDefaultOrgID, runID)
+	if err != nil || mem == nil {
+		t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+	}
+	for _, want := range []string{
+		"was submitted on GitHub",
+		"Verdict shipped as changes requested",
+		"Body was edited",
+		"`a.go:5` — edited before submit",
+		"final comment",
+	} {
+		if !strings.Contains(mem.Content, want) {
+			t.Errorf("review note missing %q; got:\n%s", want, mem.Content)
+		}
 	}
 }
 
