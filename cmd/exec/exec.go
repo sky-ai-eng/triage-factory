@@ -154,5 +154,13 @@ func isHelp(args []string) bool {
 }
 
 func printHelp() {
-	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText, gitexec.HelpText)
+	// gitexec.HelpText is intentionally omitted here. `git record-push` is
+	// internal plumbing the pre-push hook invokes automatically — never a
+	// caller-of-intent action. A delegated agent that gets stuck reaches for
+	// `exec --help`, and since the agent's Bash allowlist is `exec *` it
+	// could then call record-push directly and fabricate/duplicate a branch
+	// artifact. Keeping it out of this aggregate menu (it's still documented
+	// under `exec git --help` for human operators debugging the hook) keeps
+	// the agent-facing surface to real agent actions.
+	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText)
 }
