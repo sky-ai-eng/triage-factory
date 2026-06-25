@@ -309,12 +309,14 @@ func setupHooks(t *testing.T, prePushBody string) (env []string, marker string) 
 	return DirectAgentEnv(base), marker
 }
 
-// sanitizeEnv returns env with every GIT_*-prefixed entry and the keys
-// setupHooks overrides (HOME, TF_HOOK_MARKER) removed, so the test agent
-// env has no duplicate keys and doesn't inherit the runner's git or home
-// configuration.
+// sanitizeEnv returns env with every GIT_*-prefixed entry and the keys the
+// setup helpers override (HOME, TF_HOOK_MARKER, TRIAGE_FACTORY_BIN, REC_LOG)
+// removed, so the test agent env has no duplicate keys and doesn't inherit
+// the runner's git/home config or a stray TRIAGE_FACTORY_BIN from the
+// developer/CI shell — which, being first-wins under glibc getenv, would
+// otherwise shadow the test recorder.
 func sanitizeEnv(env []string) []string {
-	drop := map[string]struct{}{"HOME": {}, "TF_HOOK_MARKER": {}}
+	drop := map[string]struct{}{"HOME": {}, "TF_HOOK_MARKER": {}, BinEnvVar: {}, "REC_LOG": {}}
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "GIT_") {

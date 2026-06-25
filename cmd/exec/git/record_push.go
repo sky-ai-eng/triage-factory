@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -91,7 +92,14 @@ func runRecordPush(host agenthost.Client, args []string) {
 		DetailsJSON: string(details),
 	}
 
-	if _, err := host.UpsertArtifact(context.Background(), artifact); err != nil {
+	// Bound the write so the hook can never block the push indefinitely.
+	// The IPC path already has its own 30s call timeout; this also caps the
+	// local SQLite path, where a wedged write (WAL lock, full disk) would
+	// otherwise hold git open with no backstop. On timeout the upsert errors,
+	// we report and return — best-effort, the push still proceeds.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := host.UpsertArtifact(ctx, artifact); err != nil {
 		fmt.Fprintf(os.Stderr, "git record-push: record branch %s: %v\n", *ref, err)
 		return // best-effort: never fail the push
 	}
@@ -183,7 +191,7 @@ func isGitHubOrProxyHost(host string) bool {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	if host == "github.com" || host == "www.github.com" {
+	if host == "github.com" {
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {

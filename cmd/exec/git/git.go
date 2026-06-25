@@ -23,7 +23,7 @@ import (
 // HelpText is the help block for `git` commands, surfaced both from
 // `git --help` and the top-level `exec --help`.
 const HelpText = `Git Commands:
-  git record-push --remote <url> --ref <remote-ref> --sha <local-sha> --new <bool>
+  git record-push --remote <url> --ref <remote-ref> --sha <local-sha> --new=<bool>
       Record a pushed branch as a durable artifact. Invoked by the TF
       pre-push hook for each ref a 'git push' carries; not meant to be
       called by hand. Best-effort — failures are reported on stderr but
