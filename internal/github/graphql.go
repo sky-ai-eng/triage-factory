@@ -39,6 +39,7 @@ const prBaseFields = `
 	}
 	latestReviews(first: 20) {
 		nodes {
+			id
 			author { login }
 			state
 			submittedAt
@@ -405,6 +406,7 @@ type gqlReviewer struct {
 
 type gqlRevNodes struct {
 	Nodes []struct {
+		ID          string    `json:"id"`
 		Author      gqlAuthor `json:"author"`
 		State       string    `json:"state"`
 		SubmittedAt string    `json:"submittedAt"`
@@ -615,10 +617,15 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 		}
 	}
 
-	// Latest reviews per reviewer
+	// Latest reviews per reviewer. ID is the review's GraphQL node id —
+	// carried so the artifact reconciler (TFAC-464) can match a pending
+	// review artifact (keyed on that id) to its now-submitted/dismissed state
+	// here, rather than matching by author (which can't distinguish a fresh
+	// pending review from a prior submitted one by the same identity).
 	for _, rev := range pr.LatestReviews.Nodes {
 		if rev.Author.Login != "" {
 			snap.Reviews = append(snap.Reviews, domain.ReviewState{
+				ID:          rev.ID,
 				Author:      rev.Author.Login,
 				State:       rev.State,
 				SubmittedAt: rev.SubmittedAt,

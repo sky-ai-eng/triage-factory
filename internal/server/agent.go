@@ -10,16 +10,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // agentHandler serves the agent-run endpoints (status / messages / cancel /
-// message / interrupt / permissions / runs). spawner is read through a
-// getter so the handler always sees the current delegation spawner.
+// message / interrupt / permissions / runs / artifact refresh). spawner and
+// reconciler are read through getters so the handler always sees the current
+// instance, (re)wired onto the server after construction.
 type agentHandler struct {
-	tx      db.TxRunner
-	ws      *websocket.Hub
-	spawner func() *delegate.Spawner
+	tx         db.TxRunner
+	ws         *websocket.Hub
+	spawner    func() *delegate.Spawner
+	reconciler func() *reconcile.Reconciler
 }
 
 func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
@@ -51,6 +54,68 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleArtifactRefresh is the Tier-2, run-scoped half of artifact
+// reconciliation (TFAC-464): the run view polls it (~5s while open) to pull a
+// run's non-terminal artifacts fresh against GitHub without waiting for the
+// background per-org cycle. It runs the SAME reconcile path as Tier 1, bounded
+// to this one run's artifacts, and pushes any transition over the WS hub.
+//
+// Authorization rides the request-claims read: AgentRuns.Get + Artifacts.ListByRun
+// are RLS-scoped, so a user can only refresh a run their team can see. The GitHub
+// calls and the artifact/memory writes happen OUTSIDE that read tx (no network
+// I/O under a held transaction) — the reconciler writes via its admin-pool path.
+func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	runID := r.PathValue("runID")
+
+	rc := ag.reconciler()
+	if rc == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "reconciler not ready"})
+		return
+	}
+
+	// Read the run + its reconcilable non-terminal artifacts under request
+	// claims (authorization + RLS scoping). Filter to the same working set the
+	// org-wide Tier-1 query selects so the two tiers reconcile identically.
+	var run *domain.AgentRun
+	var arts []domain.Artifact
+	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		run, e = tx.AgentRuns.Get(r.Context(), orgID, runID)
+		if e != nil || run == nil {
+			return e
+		}
+		all, e := tx.Artifacts.ListByRun(r.Context(), orgID, runID)
+		if e != nil {
+			return e
+		}
+		for _, a := range all {
+			if domain.IsReconcilableNonTerminal(a.Kind, a.State) {
+				arts = append(arts, a)
+			}
+		}
+		return nil
+	}); err != nil {
+		internalError(w, "agent", err)
+		return
+	}
+	if run == nil {
+		notFound(w, "run")
+		return
+	}
+
+	updated, err := rc.Reconcile(r.Context(), orgID, arts)
+	if err != nil {
+		internalError(w, "agent", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"updated": len(updated)})
 }
 
 // runResponse projects an AgentRun into the wire shape the frontend

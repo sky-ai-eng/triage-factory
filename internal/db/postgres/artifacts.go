@@ -45,6 +45,21 @@ const pgArtifactColumns = `
 	COALESCE(details_json, ''), created_at, updated_at
 `
 
+// pgArtifactNonTerminalPredicate is the SQL WHERE fragment selecting the
+// reconciler's working set — non-terminal artifacts backed by a fetchable
+// GitHub object (TFAC-464). Built from the domain consts (no bind params, all
+// literals) so it can't drift from domain.IsReconcilableNonTerminal. The state
+// strings carry no quotes, so the concatenation is injection-safe.
+var pgArtifactNonTerminalPredicate = fmt.Sprintf(`(
+		   (kind = '%s' AND state IN ('%s', '%s'))
+		OR (kind = '%s' AND state = '%s')
+		OR (kind = '%s' AND state = '%s')
+	)`,
+	domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen,
+	domain.ArtifactKindReview, domain.ArtifactStateReviewPending,
+	domain.ArtifactKindBranch, domain.ArtifactStateBranchPushed,
+)
+
 func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error) {
 	return s.upsert(ctx, s.q, orgID, a)
 }
@@ -171,6 +186,25 @@ func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, op
 		query += fmt.Sprintf(" LIMIT $%d", len(args))
 	}
 	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanArtifactRows(rows)
+}
+
+// ListNonTerminalBySystem runs on the admin pool (BYPASSRLS), org-scoped — the
+// reconciler is a background system job with no JWT-claims context and must see
+// every team's non-terminal artifacts to keep them fresh against GitHub. Same
+// org-wide admin shape the scorer's UnscoredTasks and the classifier's
+// ListUnclassifiedSystem use. org_id stays in the WHERE clause as defense in
+// depth. TFAC-464.
+func (s *artifactStore) ListNonTerminalBySystem(ctx context.Context, orgID string) ([]domain.Artifact, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+pgArtifactColumns+`
+		FROM artifacts
+		WHERE org_id = $1 AND `+pgArtifactNonTerminalPredicate+`
+		ORDER BY created_at DESC, id DESC
+	`, orgID)
 	if err != nil {
 		return nil, err
 	}

@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -469,6 +470,80 @@ func TestArtifactStore_Postgres_UpsertSystem_BypassesRLS(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("UpsertSystem did not land the row: count = %d, want 1", count)
+	}
+}
+
+// TestArtifactStore_Postgres_ListNonTerminalBySystem pins the reconciler's
+// org-wide admin read (TFAC-464): on the admin pool it returns EXACTLY the
+// reconcilable non-terminal rows for the org (PR draft|open, review pending,
+// branch pushed — domain.IsReconcilableNonTerminal), excludes terminal /
+// unreconcilable states, and never crosses org boundaries.
+func TestArtifactStore_Postgres_ListNonTerminalBySystem(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, _, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	orgB, _, teamB := pgtest.SeedOrgWithUser(t, h, "bob")
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	seeds := []struct{ kind, state string }{
+		{domain.ArtifactKindPullRequest, domain.ArtifactStatePRPending},
+		{domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft},
+		{domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen},
+		{domain.ArtifactKindPullRequest, domain.ArtifactStatePRMerged},
+		{domain.ArtifactKindPullRequest, domain.ArtifactStatePRClosed},
+		{domain.ArtifactKindReview, domain.ArtifactStateReviewPending},
+		{domain.ArtifactKindReview, domain.ArtifactStateReviewSubmitted},
+		{domain.ArtifactKindReview, domain.ArtifactStateReviewDismissed},
+		{domain.ArtifactKindBranch, domain.ArtifactStateBranchPushed},
+		{domain.ArtifactKindBranch, domain.ArtifactStateBranchDeleted},
+		{domain.ArtifactKindComment, domain.ArtifactStateCommentPosted},
+		{domain.ArtifactKindIssue, domain.ArtifactStateIssueCreated},
+	}
+	want := map[string]bool{}
+	for i, s := range seeds {
+		key := fmt.Sprintf("a%d", i)
+		if _, err := stores.Artifacts.UpsertSystem(ctx, orgA, domain.Artifact{
+			OrgID: orgA, TeamID: teamA, Provider: "github", Kind: s.kind, Target: "octo/repo", State: s.state, DedupKey: key,
+		}); err != nil {
+			t.Fatalf("seed %s/%s: %v", s.kind, s.state, err)
+		}
+		if domain.IsReconcilableNonTerminal(s.kind, s.state) {
+			want[key] = true
+		}
+	}
+	// Org B owns a non-terminal artifact that must never surface in org A's list.
+	if _, err := stores.Artifacts.UpsertSystem(ctx, orgB, domain.Artifact{
+		OrgID: orgB, TeamID: teamB, Provider: "github", Kind: domain.ArtifactKindPullRequest,
+		Target: "octo/repo", State: domain.ArtifactStatePROpen, DedupKey: "b0",
+	}); err != nil {
+		t.Fatalf("seed org B: %v", err)
+	}
+
+	got, err := stores.Artifacts.ListNonTerminalBySystem(ctx, orgA)
+	if err != nil {
+		t.Fatalf("ListNonTerminalBySystem: %v", err)
+	}
+	gotKeys := map[string]bool{}
+	for _, a := range got {
+		if a.OrgID != orgA {
+			t.Errorf("cross-org leak: row %q belongs to org %q, not %q", a.DedupKey, a.OrgID, orgA)
+		}
+		gotKeys[a.DedupKey] = true
+	}
+	if len(gotKeys) != len(want) {
+		t.Errorf("returned %d rows, want %d: got=%v want=%v", len(gotKeys), len(want), gotKeys, want)
+	}
+	for k := range want {
+		if !gotKeys[k] {
+			t.Errorf("dropped reconcilable row %q", k)
+		}
+	}
+	for k := range gotKeys {
+		if !want[k] {
+			t.Errorf("returned terminal/unreconcilable row %q (SQL predicate disagrees with domain.IsReconcilableNonTerminal)", k)
+		}
 	}
 }
 

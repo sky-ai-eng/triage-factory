@@ -77,6 +77,21 @@ type ArtifactStore interface {
 	// shared A·6 API. Detached rows (run purged → run_id NULL) are still
 	// the team's and are included.
 	ListByTeam(ctx context.Context, orgID, teamID string, opts ArtifactListOpts) ([]domain.Artifact, error)
+
+	// ListNonTerminalBySystem returns every artifact for the org whose
+	// (kind, state) is still reconcilable — PR draft|open, review pending,
+	// branch pushed (domain.IsReconcilableNonTerminal). It is the artifact
+	// reconciler's per-cycle working set (TFAC-464), org-wide and bounded:
+	// terminal artifacts (merged/closed/submitted/dismissed/deleted) drop
+	// out, so the set shrinks as work resolves.
+	//
+	// Admin-pool / org-wide in Postgres — the same BYPASSRLS, org-scoped
+	// shape the scorer's UnscoredTasks and the classifier's
+	// ListUnclassifiedSystem use: the reconciler is a background system job
+	// with no JWT-claims context, and it must see every team's non-terminal
+	// artifacts to keep them fresh. org_id stays bound as defense in depth.
+	// Identical to a plain org read in SQLite (single-tenant, no RLS).
+	ListNonTerminalBySystem(ctx context.Context, orgID string) ([]domain.Artifact, error)
 }
 
 // ArtifactListOpts carries the optional filters/paging for

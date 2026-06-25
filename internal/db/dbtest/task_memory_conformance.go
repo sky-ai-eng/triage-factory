@@ -196,6 +196,77 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		}
 	})
 
+	t.Run("AppendRunMemoryOutcomeSystem_sets_then_appends_preserving_verdict", func(t *testing.T) {
+		// The reconciler's final-memory capture (TFAC-464 β). On a row whose
+		// human_content is empty it sets the note; on a row that already
+		// carries a human verdict (the run was approved through TF, then the
+		// PR later merged on GitHub) it APPENDS — the verdict must survive,
+		// separated by a blank line.
+		s, orgID, seed := mk(t)
+		runID, entityID := seed.Run(t, "outcome-append")
+		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent narrative"); err != nil {
+			t.Fatalf("UpsertAgentMemory: %v", err)
+		}
+
+		// Empty human_content → the note becomes the whole post-run section.
+		if err := s.AppendRunMemoryOutcomeSystem(ctx, orgID, runID, "**Outcome:** PR merged on GitHub."); err != nil {
+			t.Fatalf("AppendRunMemoryOutcomeSystem (set): %v", err)
+		}
+		mem, err := s.GetRunMemory(ctx, orgID, runID)
+		if err != nil || mem == nil {
+			t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+		}
+		if !strings.Contains(mem.Content, "## Human feedback (post-run)") || !strings.HasSuffix(mem.Content, "PR merged on GitHub.") {
+			t.Fatalf("set did not materialize under the post-run heading: %q", mem.Content)
+		}
+
+		// Now simulate a prior human verdict and append a second note: both
+		// survive, in order, blank-line separated.
+		if err := s.UpdateRunMemoryHumanContent(ctx, orgID, runID, "Human approved as drafted."); err != nil {
+			t.Fatalf("seed verdict: %v", err)
+		}
+		if err := s.AppendRunMemoryOutcomeSystem(ctx, orgID, runID, "**Outcome:** PR merged on GitHub."); err != nil {
+			t.Fatalf("AppendRunMemoryOutcomeSystem (append): %v", err)
+		}
+		mem, err = s.GetRunMemory(ctx, orgID, runID)
+		if err != nil || mem == nil {
+			t.Fatalf("GetRunMemory after append: mem=%v err=%v", mem, err)
+		}
+		if !strings.Contains(mem.Content, "Human approved as drafted.") {
+			t.Errorf("append trampled the human verdict: %q", mem.Content)
+		}
+		if !strings.Contains(mem.Content, "Human approved as drafted.\n\n**Outcome:** PR merged on GitHub.") {
+			t.Errorf("append did not blank-line-separate the note after the verdict: %q", mem.Content)
+		}
+	})
+
+	t.Run("AppendRunMemoryOutcomeSystem_empty_is_noop", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		runID, entityID := seed.Run(t, "outcome-empty")
+		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent narrative"); err != nil {
+			t.Fatalf("UpsertAgentMemory: %v", err)
+		}
+		if err := s.AppendRunMemoryOutcomeSystem(ctx, orgID, runID, "   \n  "); err != nil {
+			t.Fatalf("AppendRunMemoryOutcomeSystem: %v", err)
+		}
+		mem, err := s.GetRunMemory(ctx, orgID, runID)
+		if err != nil || mem == nil {
+			t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+		}
+		if mem.Content != "agent narrative" {
+			t.Errorf("whitespace-only outcome should be a no-op; Content = %q", mem.Content)
+		}
+	})
+
+	t.Run("AppendRunMemoryOutcomeSystem_missing_row_logged_not_fatal", func(t *testing.T) {
+		// The external transition already landed on GitHub; a missing
+		// run_memory row (purged / detached run) must not error the cycle.
+		s, orgID, _ := mk(t)
+		if err := s.AppendRunMemoryOutcomeSystem(ctx, orgID, "00000000-0000-0000-0000-0000000000fe", "**Outcome:** anything"); err != nil {
+			t.Errorf("expected nil error on missing row (logged warning); got %v", err)
+		}
+	})
+
 	t.Run("GetMemoriesForEntity_orders_by_created_at_ASC", func(t *testing.T) {
 		// Materializer reads in oldest-first order so the next agent
 		// reading prior memories sees them chronologically. Insert two

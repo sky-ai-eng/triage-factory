@@ -146,6 +146,40 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
     }
   }, [runID, refetchTick, dropRun])
 
+  // Tier-2 artifact reconciliation (TFAC-464): while the run view is open, poll
+  // the run-scoped refresh endpoint so externally-changed artifacts (a PR
+  // merged/closed on GitHub, a branch deleted, a review submitted) reflect
+  // without waiting for the background per-org cycle. The backend bounds the
+  // work to this run's non-terminal artifacts — a cheap no-op once they're all
+  // terminal — and broadcasts any transition as agent_run_update, which the
+  // websocket handler below turns into a run refetch. On a dropped frame the
+  // {updated} count drives a defensive refetch so the view can't go stale.
+  useEffect(() => {
+    if (!runID) return
+    let cancelled = false
+    const poll = () => {
+      fetch(`/api/agent/runs/${runID}/artifacts/refresh`, { method: 'POST' })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data: { updated?: number } | null) => {
+          if (cancelled || !data?.updated) return
+          // A transition landed — pull the run row fresh in case the websocket
+          // broadcast was missed (the WS handler does the same on its event).
+          fetch(`/api/agent/runs/${runID}`)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((run: AgentRun | null) => {
+              if (!cancelled && run) setRun(run)
+            })
+            .catch(() => {})
+        })
+        .catch(() => {})
+    }
+    const id = setInterval(poll, 5000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [runID])
+
   // Live updates. agent_message appends; agent_run_update refetches the
   // run row so status/duration/cost flip without a full reload. Permission
   // prompts route into the shared queue (ingest on request, forget on a

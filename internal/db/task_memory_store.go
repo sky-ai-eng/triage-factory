@@ -89,6 +89,27 @@ type TaskMemoryStore interface {
 	// handler, swipe-discard cleanup) runs under request claims.
 	UpdateRunMemoryHumanContent(ctx context.Context, orgID, runID, content string) error
 
+	// AppendRunMemoryOutcomeSystem appends a terminal-outcome note to a
+	// run's human_content (the post-run slot), separated from any existing
+	// content by a blank line. It is the reconciler's "final memory" capture
+	// (TFAC-464 β): when an artifact reaches a terminal state OUTSIDE the TF
+	// approval flow — a PR merged/closed on GitHub, a review submitted/
+	// dismissed, a branch deleted — the run that produced it gets an honest
+	// record of how it ended, so the next agent working the same entity sees
+	// the outcome in its materialized memory.
+	//
+	// Append, not overwrite: a human verdict may already sit in human_content
+	// (the run was approved through TF, then the PR later merged on GitHub),
+	// and that verdict must survive. A missing run_memory row is a logged
+	// no-op, matching UpdateRunMemoryHumanContent — the external transition
+	// already landed, so a missed note must not error the cycle.
+	//
+	// Admin pool (BYPASSRLS) — the reconciler is a background system job with
+	// no JWT-claims context (Tier 1), and the Tier-2 refresh reuses the same
+	// reconcile path. org_id stays bound as defense in depth. SQLite collapses
+	// onto the one connection.
+	AppendRunMemoryOutcomeSystem(ctx context.Context, orgID, runID, outcome string) error
+
 	// GetMemoriesForEntity returns all memories across all runs on
 	// this entity (and linked entities via entity_links), oldest
 	// first. The returned TaskMemory.Content is materialized from

@@ -32,6 +32,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
+	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -66,6 +67,7 @@ type App struct {
 	scorer     *ai.Manager
 	profiler   *repoprofile.Manager
 	classifier *projectclassify.Manager
+	reconciler *reconcile.Manager
 	ingestor   *ingest.Ingestor
 	eventWake  chan struct{}
 	pollerMgr  *poller.Manager

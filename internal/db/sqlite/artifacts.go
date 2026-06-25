@@ -3,11 +3,28 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
+
+// artifactNonTerminalPredicate is the SQL WHERE fragment selecting the
+// reconciler's working set — non-terminal artifacts backed by a fetchable
+// GitHub object (TFAC-464). Built from the domain consts (no bind params, all
+// literals) so it can't drift from domain.IsReconcilableNonTerminal, which
+// TestArtifactStore_SQLite_ListNonTerminal pins it equal to. The state strings
+// carry no quotes, so the concatenation is injection-safe.
+var artifactNonTerminalPredicate = fmt.Sprintf(`(
+		   (kind = '%s' AND state IN ('%s', '%s'))
+		OR (kind = '%s' AND state = '%s')
+		OR (kind = '%s' AND state = '%s')
+	)`,
+	domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen,
+	domain.ArtifactKindReview, domain.ArtifactStateReviewPending,
+	domain.ArtifactKindBranch, domain.ArtifactStateBranchPushed,
 )
 
 // artifactStore is the SQLite impl of db.ArtifactStore. SQLite is
@@ -151,6 +168,27 @@ func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, op
 		args = append(args, opts.Limit)
 	}
 	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanArtifactRows(rows)
+}
+
+// ListNonTerminalBySystem is identical to a plain org read in SQLite: local
+// mode is single-tenant (N=1) with no RLS, so there is no admin/app pool
+// split. The method exists for parity with the Postgres store, where the
+// reconciler (a background system job with no JWT-claims context) needs the
+// admin pool to see every team's non-terminal artifacts. TFAC-464.
+func (s *artifactStore) ListNonTerminalBySystem(ctx context.Context, orgID string) ([]domain.Artifact, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+artifactColumns+`
+		FROM artifacts
+		WHERE org_id = ? AND `+artifactNonTerminalPredicate+`
+		ORDER BY created_at DESC, id DESC
+	`, orgID)
 	if err != nil {
 		return nil, err
 	}

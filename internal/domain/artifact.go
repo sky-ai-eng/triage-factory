@@ -82,8 +82,12 @@ const (
 // exist to nudge callers to the right one for their kind; the equal string
 // values mean a cross-kind mix-up won't surface as a type or string error.
 const (
-	// branch
-	ArtifactStateBranchPushed = "pushed"
+	// branch: 'pushed' once the ref lands on the remote; 'deleted' is the
+	// terminal state the reconciler stamps when the ref is gone from GitHub
+	// (TFAC-464). The row persists as the historical record — it just drops
+	// out of the non-terminal set, i.e. becomes "untracked".
+	ArtifactStateBranchPushed  = "pushed"
+	ArtifactStateBranchDeleted = "deleted"
 
 	// pull_request: 'pending' is intent-only (not yet on GitHub — the
 	// branch-anchored PR before approval); the rest mirror GitHub's PR
@@ -160,4 +164,30 @@ func ArtifactDedupKey(provider, kind, resource, anchor string) string {
 		key += ":" + anchor
 	}
 	return key
+}
+
+// reconcilableNonTerminal lists, per Kind, the states the reconciler
+// (TFAC-464) treats as non-terminal AND backed by a fetchable GitHub object —
+// the exact set Artifacts.ListNonTerminalBySystem returns and the Tier-2
+// run-scoped refresh filters to. It is the single source of truth both the
+// store's SQL predicate and IsReconcilableNonTerminal derive from.
+//
+// PR 'pending' is deliberately excluded: a pending PR is intent-only (no
+// number, no node id), so there is no backing object to refresh — it can't be
+// reconciled until a create writer turns it real. Terminal states (PR
+// merged/closed, review submitted/dismissed, branch deleted, every comment /
+// issue state) are absent, so a terminal artifact is never re-queried.
+var reconcilableNonTerminal = map[string]map[string]bool{
+	ArtifactKindPullRequest: {ArtifactStatePRDraft: true, ArtifactStatePROpen: true},
+	ArtifactKindReview:      {ArtifactStateReviewPending: true},
+	ArtifactKindBranch:      {ArtifactStateBranchPushed: true},
+}
+
+// IsReconcilableNonTerminal reports whether an artifact of (kind, state) is
+// in the reconciler's working set: non-terminal AND backed by a fetchable
+// GitHub object. The Tier-2 run-scoped refresh filters a run's artifacts
+// through this so it reconciles exactly what the org-wide Tier-1 query would;
+// TestReconcilableNonTerminal pins it equal to the store's SQL predicate.
+func IsReconcilableNonTerminal(kind, state string) bool {
+	return reconcilableNonTerminal[kind][state]
 }

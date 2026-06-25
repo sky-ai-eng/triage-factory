@@ -24,6 +24,12 @@ const humanFeedbackHeader = "## Human feedback (post-run)\n\n"
 // stray HR ahead of the only block of content).
 const humanFeedbackSeparator = "\n\n---\n" + humanFeedbackHeader
 
+// outcomeSeparator divides an appended reconciler outcome note (TFAC-464 β)
+// from any content already in human_content — a blank line, so the note reads
+// as its own paragraph under the post-run heading. Shared with the Postgres
+// impl's value so both dialects append identically.
+const outcomeSeparator = "\n\n"
+
 // taskMemoryStore — SQLite impl. The constructor accepts two queryers
 // for signature parity with the Postgres impl; SQLite has one
 // connection so both collapse to the same queryer. The `...System`
@@ -94,6 +100,45 @@ func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID
 			memoryLog.Warn("no run_memory row; human_content not recorded", "run_id", runID)
 		default:
 			memoryLog.Warn("verify run_memory row after no-op human_content update failed", "run_id", runID, "error", err)
+		}
+	}
+	return nil
+}
+
+func (s *taskMemoryStore) AppendRunMemoryOutcomeSystem(ctx context.Context, orgID, runID, outcome string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(outcome) == "" {
+		return nil
+	}
+	// Concatenate in one statement so a concurrent verdict write can't be
+	// lost to a read-modify-write race: a blank line separates the appended
+	// note from any existing content; an empty/NULL column takes the note
+	// alone (no leading separator). outcomeSeparator is "\n\n".
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE run_memory
+		SET human_content = CASE
+			WHEN COALESCE(human_content, '') = '' THEN ?
+			ELSE human_content || ? || ?
+		END
+		WHERE run_id = ?
+	`, outcome, outcomeSeparator, outcome, runID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// SQLite reports 0 both for a no-op UPDATE and a missing row; verify
+		// before claiming the row is missing (parity with
+		// UpdateRunMemoryHumanContent).
+		var exists int
+		switch err := s.q.QueryRowContext(ctx, `SELECT 1 FROM run_memory WHERE run_id = ? LIMIT 1`, runID).Scan(&exists); err {
+		case nil, sql.ErrNoRows:
+			if err == sql.ErrNoRows {
+				memoryLog.Warn("no run_memory row; outcome note not recorded", "run_id", runID)
+			}
+		default:
+			memoryLog.Warn("verify run_memory row after outcome append failed", "run_id", runID, "error", err)
 		}
 	}
 	return nil

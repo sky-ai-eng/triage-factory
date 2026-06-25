@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
+	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -116,6 +117,17 @@ func (a *App) buildAI() {
 	// another tenant's classification.
 	a.classifier = projectclassify.NewManager(a.stores.Entities, a.stores.Projects, a.runSecrets, llmRecorder, sysLimiter)
 	classifyLog.Info("project classifier manager ready (per-org runners)", "model", "haiku")
+
+	// Artifact reconciler: per-org Runners mirroring artifacts against live
+	// GitHub state off the system:poll: GitHub sentinel (TFAC-464), a sibling
+	// to the scorer/profiler/classifier — same per-org isolation so a slow
+	// reconcile on one tenant can't head-of-line-block another. The shared
+	// Reconciler is also handed to the server for the Tier-2 run-scoped refresh
+	// endpoint, so foreground and background reconciliation run one code path.
+	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores.Artifacts, a.stores.TaskMemory, a.wsHub)
+	a.reconciler = reconcile.NewManager(reconciler)
+	a.srv.SetReconciler(reconciler)
+	reconcileLog.Info("artifact reconciler ready (per-org runners)")
 }
 
 // buildExecution constructs the delegation spawner and the curator runtime,

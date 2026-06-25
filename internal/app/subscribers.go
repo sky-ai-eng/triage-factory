@@ -44,6 +44,16 @@ func (a *App) registerSubscribers() {
 		Filter: []string{"system:poll:"},
 		Handle: a.handleProfilerPoll,
 	})
+	// Kick the per-org artifact reconciler on GitHub poll-complete sentinels.
+	// Mirrors the profiler: gated to source=="github" (a Jira cycle can't
+	// change a PR/branch's GitHub state), per-org via evt.OrgID. This is the
+	// webhook-independent baseline that keeps `artifacts` fresh in both modes
+	// (TFAC-464).
+	a.bus.Subscribe(eventbus.Subscriber{
+		Name:   "reconciler",
+		Filter: []string{"system:poll:"},
+		Handle: a.handleReconcilerPoll,
+	})
 	// Track Jira/GitHub poll completions: gate /api/jira/stock and surface
 	// the one-shot "config took effect" toast.
 	a.bus.Subscribe(eventbus.Subscriber{
@@ -51,6 +61,19 @@ func (a *App) registerSubscribers() {
 		Filter: []string{"system:poll:"},
 		Handle: a.handlePollCompleted,
 	})
+}
+
+// handleReconcilerPoll kicks the per-org artifact reconciler for the org whose
+// GitHub poll just completed. Reuses pollEventProfilesGitHub's gate: only GitHub
+// completions qualify (a Jira cycle can't move a PR/branch's GitHub state), and
+// an empty / malformed event is a silent no-op. evt.OrgID scopes the per-org
+// Runner; an empty value is dropped by Manager.Trigger.
+func (a *App) handleReconcilerPoll(evt domain.Event) {
+	orgID, ok := pollEventProfilesGitHub(evt)
+	if !ok {
+		return
+	}
+	a.reconciler.Trigger(orgID)
 }
 
 // broadcastEvent forwards a bus event to the websocket hub, scoped to the

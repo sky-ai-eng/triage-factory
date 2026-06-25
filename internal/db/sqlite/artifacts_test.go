@@ -387,6 +387,70 @@ func TestArtifactStore_SQLite_DropsRunArtifacts(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_SQLite_ListNonTerminal pins the reconciler's working set
+// (TFAC-464): seed one artifact in every state across kinds, then assert
+// ListNonTerminalBySystem returns EXACTLY the rows domain.IsReconcilableNonTerminal
+// marks — PR draft|open, review pending, branch pushed — and nothing terminal
+// (merged/closed/submitted/dismissed/deleted) or unreconcilable (PR pending,
+// comment, issue). Doubles as the SQL-predicate ⇔ domain-predicate drift guard.
+func TestArtifactStore_SQLite_ListNonTerminal(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runID := seedArtifactRun(t, conn)
+
+	// (kind, state) across the whole lifecycle space.
+	seeds := []struct{ kind, state string }{
+		{domain.ArtifactKindPullRequest, domain.ArtifactStatePRPending}, // unreconcilable: no node id yet
+		{domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft},
+		{domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen},
+		{domain.ArtifactKindPullRequest, domain.ArtifactStatePRMerged},
+		{domain.ArtifactKindPullRequest, domain.ArtifactStatePRClosed},
+		{domain.ArtifactKindReview, domain.ArtifactStateReviewPending},
+		{domain.ArtifactKindReview, domain.ArtifactStateReviewSubmitted},
+		{domain.ArtifactKindReview, domain.ArtifactStateReviewDismissed},
+		{domain.ArtifactKindBranch, domain.ArtifactStateBranchPushed},
+		{domain.ArtifactKindBranch, domain.ArtifactStateBranchDeleted},
+		{domain.ArtifactKindComment, domain.ArtifactStateCommentPosted},
+		{domain.ArtifactKindIssue, domain.ArtifactStateIssueCreated},
+	}
+	want := map[string]bool{}
+	for i, s := range seeds {
+		key := "k" + string(rune('a'+i)) // unique dedup_key per seed
+		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+			RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			Provider: "github", Kind: s.kind, Target: "octo/repo", State: s.state, DedupKey: key,
+		}); err != nil {
+			t.Fatalf("seed %s/%s: %v", s.kind, s.state, err)
+		}
+		if domain.IsReconcilableNonTerminal(s.kind, s.state) {
+			want[key] = true
+		}
+	}
+
+	got, err := stores.Artifacts.ListNonTerminalBySystem(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("ListNonTerminalBySystem: %v", err)
+	}
+	gotKeys := map[string]bool{}
+	for _, a := range got {
+		gotKeys[a.DedupKey] = true
+	}
+	if len(gotKeys) != len(want) {
+		t.Errorf("returned %d rows, want %d: got=%v want=%v", len(gotKeys), len(want), gotKeys, want)
+	}
+	for k := range want {
+		if !gotKeys[k] {
+			t.Errorf("ListNonTerminalBySystem dropped reconcilable row %q", k)
+		}
+	}
+	for k := range gotKeys {
+		if !want[k] {
+			t.Errorf("ListNonTerminalBySystem returned terminal/unreconcilable row %q (SQL predicate disagrees with domain.IsReconcilableNonTerminal)", k)
+		}
+	}
+}
+
 func newSQLiteForArtifactTest(t *testing.T) *sql.DB {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")

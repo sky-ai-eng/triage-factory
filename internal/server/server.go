@@ -22,6 +22,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -75,6 +76,11 @@ type Server struct {
 	ws        *websocket.Hub
 	spawner   *delegate.Spawner
 	curator   *curator.Curator
+	// reconciler backs the Tier-2 run-scoped artifact refresh endpoint
+	// (TFAC-464) — the same Reconciler the background Tier-1 Manager runs.
+	// Wired via SetReconciler after construction; nil until then, so the
+	// endpoint 503s rather than panicking if a request races startup.
+	reconciler *reconcile.Reconciler
 	// ghResolver picks the right GitHub credential (org App installation
 	// token → PAT) per request, given the org + target account. The per-repo
 	// handler operations migrated off the old process-global PAT client —
@@ -799,13 +805,16 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/tasks/{id}/requeue", s.handleRequeue)
 	s.apiMutating("POST /api/tasks/{id}/advance", s.handleTaskAdvance)
 
-	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }}
+	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
 	s.api("GET /api/agent/runs/{runID}", ag.handleAgentStatus)
 	s.api("GET /api/agent/runs/{runID}/messages", ag.handleAgentMessages)
 	s.apiMutating("POST /api/agent/runs/{runID}/cancel", ag.handleAgentCancel)
 	s.apiMutating("POST /api/agent/runs/{runID}/message", ag.handleAgentMessage)
 	s.apiMutating("POST /api/agent/runs/{runID}/interrupt", ag.handleAgentInterrupt)
 	s.apiMutating("POST /api/agent/runs/{runID}/permissions/{requestID}", ag.handleAgentPermission)
+	// Tier-2 run-scoped artifact reconcile (TFAC-464): the run view polls this
+	// while open to refresh that run's non-terminal artifacts against GitHub.
+	s.apiMutating("POST /api/agent/runs/{runID}/artifacts/refresh", ag.handleArtifactRefresh)
 	s.api("GET /api/agent/runs", ag.handleAgentRuns)
 
 	// Projects (SKY-215). Pure CRUD over the projects table; the
@@ -1189,6 +1198,14 @@ func (s *Server) SetScorerTrigger(fn func(orgID string)) {
 // rather than waiting for the next poll cycle's TTL-gated pass.
 func (s *Server) SetProfilerTrigger(fn func(orgID string, force bool)) {
 	s.profilerTrigger = fn
+}
+
+// SetReconciler registers the shared artifact Reconciler that backs the Tier-2
+// run-scoped refresh endpoint (TFAC-464). The same instance the background
+// Tier-1 Manager runs, so a foreground refresh and a background cycle apply the
+// identical reconcile path. Nil until wired — the endpoint 503s until then.
+func (s *Server) SetReconciler(rc *reconcile.Reconciler) {
+	s.reconciler = rc
 }
 
 // SetDashboardBackfiller registers the per-user dashboard-history backfill
