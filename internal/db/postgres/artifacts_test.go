@@ -707,6 +707,63 @@ func TestArtifactStore_Postgres_ListByRuns(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_Postgres_ListByRuns_TeamScoped pins that ListByRuns runs on
+// the RLS-active app pool — symmetric to CountByRun_TeamScoped, the
+// defense-in-depth scoping guarantee at the store layer. A same-org member of a
+// different team sees no artifacts for a run whose artifacts belong to another
+// team, even passing the run id directly. ListByRuns feeds the pending_kind /
+// pending_artifact_id overlay discriminator, so a leak here would mis-surface
+// another team's approval card. TFAC-465.
+func TestArtifactStore_Postgres_ListByRuns_TeamScoped(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	carol := pgtest.SeedUser(t, h, "carol")
+	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
+	pgtest.AddOrgMember(t, h, carol, orgA, teamB, "member", "member")
+	runID := seedPgArtifactRun(t, h, orgA, teamA, alice)
+
+	// Two teamA-scoped artifacts on the run (admin insert bypasses RLS for setup).
+	for _, key := range []string{"github:comment:octo/repo:1", "github:comment:octo/repo:2"} {
+		if _, err := h.AdminDB.Exec(`
+			INSERT INTO artifacts (org_id, run_id, team_id, provider, kind, target, state, dedup_key)
+			VALUES ($1, $2, $3, 'github', 'comment', 'octo/repo', 'posted', $4)
+		`, orgA, runID, teamA, key); err != nil {
+			t.Fatalf("seed artifact: %v", err)
+		}
+	}
+	ctx := context.Background()
+
+	// Alice (teamA) sees both.
+	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		arts, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByRuns(ctx, orgA, []string{runID})
+		if err != nil {
+			return err
+		}
+		if len(arts) != 2 {
+			t.Errorf("alice saw %d artifacts, want 2", len(arts))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("alice path: %v", err)
+	}
+
+	// Carol (teamB, same org, different team) sees zero — artifacts_select gates
+	// on user_in_team(team_id), so the rows are invisible to her.
+	if err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		arts, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByRuns(ctx, orgA, []string{runID})
+		if err != nil {
+			return err
+		}
+		if len(arts) != 0 {
+			t.Errorf("carol (different team) saw %d artifacts — RLS leaked across teams", len(arts))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("carol path: %v", err)
+	}
+}
+
 // seedPgArtifactRun mints a minimal run the artifacts.run_id FK can point
 // at. origin is non-'blueprint' so runs_origin_requires_parents doesn't
 // demand a parent chain; trigger_type='manual' needs a non-NULL creator.
