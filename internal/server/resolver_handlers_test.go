@@ -100,20 +100,23 @@ func seedSubmittableReview(t *testing.T, s *Server, owner, repo string, number i
 	return id
 }
 
-func seedPendingPR(t *testing.T, s *Server, owner, repo string) string {
+func seedDraftPRArtifact(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
-	// pending_prs.run_id is NOT NULL REFERENCES runs(id), so mint a full
-	// entity→event→prompt→task→blueprint_run→run chain and hang the pending PR
-	// off it. The owner/repo the resolver keys on live on the pending_prs row
-	// and are independent of the entity's source.
+	// artifacts.run_id REFERENCES runs(id), so mint a full
+	// entity→event→prompt→task→blueprint_run→run chain and hang the draft PR
+	// artifact off it. The owner/repo the resolver keys on are encoded in the
+	// artifact's target (owner/repo#number), independent of the entity's source.
 	runID := seedSteerRun(t, s.db, "ppr-"+uuid.New().String()[:8], "pending_approval")
-	id := uuid.New().String()
-	if err := sqlitestore.New(s.db).PendingPRs.Create(context.Background(), runmode.LocalDefaultOrgID, domain.PendingPR{
-		ID: id, RunID: runID, Owner: owner, Repo: repo, HeadBranch: "feature/x", BaseBranch: "main", Title: "Add thing", Body: "Body.",
-	}); err != nil {
-		t.Fatalf("seed pending pr: %v", err)
+	a := domain.NewPullRequestArtifact(owner+"/"+repo, 42, "PR_node", "feature/x", "main",
+		"https://example.test/"+owner+"/"+repo+"/pull/42", "Add thing", "Body.", true)
+	a.RunID = runID
+	a.OrgID = runmode.LocalDefaultOrgID
+	a.TeamID = runmode.LocalDefaultTeamID
+	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
+	if err != nil {
+		t.Fatalf("seed draft PR artifact: %v", err)
 	}
-	return id
+	return stored.ID
 }
 
 // --- review diff ---
@@ -241,66 +244,56 @@ func TestReviewSubmit_NoCredentials_503(t *testing.T) {
 	assertLogged(t, logs, "github not configured")
 }
 
-// --- pending-PR submit ---
+// --- PR artifact read (resolver tier coverage for the GitHub-native PR path) ---
 
-func TestPendingPRSubmit_AppOnlyOrg_Success(t *testing.T) {
+func TestArtifactGet_AppOnlyOrg_Success(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	var gotAuth string
 	mux := newAppAPIMux()
-	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "html_url": "https://example.test/acme/api/pull/42"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "title": "Live title", "body": "Live body"})
 	})
 	stub := httptest.NewServer(mux)
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	prID := seedPendingPR(t, srv, "acme", "api")
-	rec := doJSON(t, srv, http.MethodPost, "/api/pending-prs/"+prID+"/submit", map[string]any{})
+	artID := seedDraftPRArtifact(t, srv, "acme", "api")
+	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("submit = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var out map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	// Title/body come from the live PR (GetPR), not the artifact snapshot.
+	if out["title"] != "Live title" || out["body"] != "Live body" {
+		t.Errorf("title/body = %v/%v, want live values", out["title"], out["body"])
+	}
 	if out["number"] != float64(42) {
 		t.Errorf("number = %v, want 42", out["number"])
 	}
-	if out["html_url"] != "https://example.test/acme/api/pull/42" {
-		t.Errorf("html_url = %v", out["html_url"])
-	}
-	// Published through the App installation token, not a PAT (App bot identity).
+	// The live read reached GitHub through the App installation token (App bot
+	// identity), not a PAT.
 	if gotAuth != "Bearer ghs_111" {
-		t.Errorf("PR opened with auth %q, want App installation token Bearer ghs_111", gotAuth)
+		t.Errorf("PR read with auth %q, want App installation token Bearer ghs_111", gotAuth)
 	}
 }
 
-func TestPendingPRSubmit_NoCredentials_503(t *testing.T) {
+func TestArtifactGet_NoCredentials_503(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	logs := captureLog(t)
 
-	prID := seedPendingPR(t, srv, "acme", "api")
-	rec := doJSON(t, srv, http.MethodPost, "/api/pending-prs/"+prID+"/submit", map[string]any{})
+	artID := seedDraftPRArtifact(t, srv, "acme", "api")
+	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
 	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("submit = %d, want 503; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("get = %d, want 503; body=%s", rec.Code, rec.Body.String())
 	}
 	assertErrorBody(t, rec.Body.Bytes(), "GitHub credentials not configured")
 	assertLogged(t, logs, "github not configured")
-
-	// The resolve happens BEFORE the concurrent-submit guard, so a no-creds
-	// failure must leave the row un-guarded (not stuck "in flight"). A retry
-	// once creds exist must not 409.
-	pr, err := sqlitestore.New(srv.db).PendingPRs.Get(context.Background(), runmode.LocalDefaultOrgID, prID)
-	if err != nil {
-		t.Fatalf("re-read pending pr: %v", err)
-	}
-	if pr.SubmittedAt != nil {
-		t.Errorf("submit guard set after a no-credentials failure; row would be stuck in flight")
-	}
 }
 
 // --- repo branches ---

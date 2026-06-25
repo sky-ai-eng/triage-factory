@@ -345,7 +345,7 @@ func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 }
 
 // TestLocalClient_RoutingByTriggerType_Manual pins the per-write
-// routing: a manual run's CreatePendingPR wraps in synthetic-claims
+// routing: a manual run's UpsertArtifact wraps in synthetic-claims
 // (so RLS sees the kicking-off user), an event-triggered run's
 // goes through the admin-pool ...System variant. We can't observe
 // the pool directly in SQLite (one connection) but we can confirm
@@ -361,34 +361,25 @@ func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 	info := RunInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           runmode.LocalDefaultUserID,
+		TeamID:           runmode.LocalDefaultTeamID,
 		RunID:            "run-1",
 		IsEventTriggered: false,
 	}
 	client := NewLocal(stores, info)
 
-	row := domain.PendingPR{
-		ID:         "pr-1",
-		RunID:      "run-1",
-		Owner:      "octocat",
-		Repo:       "hello",
-		HeadBranch: "feature/x",
-		HeadSHA:    "abc123",
-		BaseBranch: "main",
-		Title:      "feat: x",
-		Body:       "body",
+	// UpsertArtifact routes through the same withWrite branch the retired
+	// pending-PR writer used: a synthetic-claims tx for a manual run.
+	if _, err := client.UpsertArtifact(context.Background(), domain.Artifact{
+		Kind:     domain.ArtifactKindPullRequest,
+		Target:   "octocat/hello#1",
+		State:    domain.ArtifactStatePRDraft,
+		DedupKey: "github:pull_request:octocat/hello#1",
+	}); err != nil {
+		t.Fatalf("UpsertArtifact (manual): %v", err)
 	}
-	if err := client.CreateAndLockPendingPR(context.Background(), row); err != nil {
-		t.Fatalf("CreateAndLockPendingPR (manual): %v", err)
-	}
-	got, err := client.GetPendingPRByRunID(context.Background())
-	if err != nil {
-		t.Fatalf("GetPendingPRByRunID: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected PR row, got nil")
-	}
-	if got.ID != "pr-1" || !got.Locked {
-		t.Errorf("unexpected row: %+v", got)
+	got := listRunArtifacts(t, stores, "run-1")
+	if len(got) != 1 || got[0].Target != "octocat/hello#1" {
+		t.Errorf("unexpected artifacts: %+v", got)
 	}
 }
 
@@ -400,31 +391,26 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 	info := RunInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           "",
+		TeamID:           runmode.LocalDefaultTeamID,
 		RunID:            "run-2",
 		IsEventTriggered: true,
 	}
 	client := NewLocal(stores, info)
 
-	row := domain.PendingPR{
-		ID:         "pr-2",
-		RunID:      "run-2",
-		Owner:      "octocat",
-		Repo:       "hello",
-		HeadBranch: "feature/y",
-		HeadSHA:    "def456",
-		BaseBranch: "main",
-		Title:      "fix: y",
-		Body:       "body",
+	// Event-triggered runs have no user, so UpsertArtifact must route through
+	// the admin-pool ...System variant (the case Postgres RLS would reject under
+	// tf_app). SQLite collapses both, but the same shape runs against Postgres.
+	if _, err := client.UpsertArtifact(context.Background(), domain.Artifact{
+		Kind:     domain.ArtifactKindPullRequest,
+		Target:   "octocat/hello#2",
+		State:    domain.ArtifactStatePRDraft,
+		DedupKey: "github:pull_request:octocat/hello#2",
+	}); err != nil {
+		t.Fatalf("UpsertArtifact (event): %v", err)
 	}
-	if err := client.CreateAndLockPendingPR(context.Background(), row); err != nil {
-		t.Fatalf("CreateAndLockPendingPR (event): %v", err)
-	}
-	got, err := client.GetPendingPRByRunID(context.Background())
-	if err != nil {
-		t.Fatalf("GetPendingPRByRunID: %v", err)
-	}
-	if got == nil || got.ID != "pr-2" || !got.Locked {
-		t.Errorf("unexpected row: %+v", got)
+	got := listRunArtifacts(t, stores, "run-2")
+	if len(got) != 1 || got[0].Target != "octocat/hello#2" {
+		t.Errorf("unexpected artifacts: %+v", got)
 	}
 }
 

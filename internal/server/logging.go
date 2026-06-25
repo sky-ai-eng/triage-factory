@@ -8,6 +8,7 @@ import "github.com/sky-ai-eng/triage-factory/internal/logging"
 // canonical auth and jira packages that own those component names.
 var (
 	approvalDiscardLog = logging.Component("approval-discard")
+	artifactsLog       = logging.Component("artifacts")
 	authLog            = logging.Component("auth/server")
 	backfillLog        = logging.Component("backfill")
 	dashboardLog       = logging.Component("dashboard")
@@ -29,7 +30,6 @@ var (
 	membershipLog      = logging.Component("membership")
 	orgTemplateLog     = logging.Component("org_template")
 	orgsLog            = logging.Component("orgs")
-	pendingPrsLog      = logging.Component("pending-prs")
 	projectsLog        = logging.Component("projects")
 	reposLog           = logging.Component("repos")
 	reviewsLog         = logging.Component("reviews")

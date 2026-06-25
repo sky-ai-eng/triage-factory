@@ -145,12 +145,6 @@ type Client interface {
 	DeletePendingReviewComment(ctx context.Context, commentID string) error
 	ListPendingReviewComments(ctx context.Context, reviewID string) ([]domain.PendingReviewComment, error)
 
-	// --- pending PRs (gh pr create) ---
-
-	GetPendingPRByRunID(ctx context.Context) (*domain.PendingPR, error)
-	CreateAndLockPendingPR(ctx context.Context, row domain.PendingPR) error
-	LockPendingPR(ctx context.Context, id, title, body string) error
-
 	// --- workspace (workspace add + list) ---
 
 	GetAgentRun(ctx context.Context) (*domain.AgentRun, error)

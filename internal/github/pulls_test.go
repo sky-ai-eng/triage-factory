@@ -500,6 +500,37 @@ func TestUpdatePR_422(t *testing.T) {
 	}
 }
 
+// TestClosePR_HappyPath asserts ClosePR issues a PATCH to the PR endpoint with
+// state=closed — the abandon path's "close the draft, keep the branch" action.
+func TestClosePR_HappyPath(t *testing.T) {
+	var (
+		gotMethod, gotPath string
+		gotBody            map[string]any
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"number": 42, "state": "closed"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := clientAgainst(srv.URL)
+	if err := c.ClosePR("owner", "repo", 42); err != nil {
+		t.Fatalf("ClosePR: %v", err)
+	}
+	if gotMethod != "PATCH" {
+		t.Errorf("method = %q, want PATCH", gotMethod)
+	}
+	if gotPath != "/repos/owner/repo/pulls/42" {
+		t.Errorf("path = %q, want /repos/owner/repo/pulls/42", gotPath)
+	}
+	if got, _ := gotBody["state"].(string); got != "closed" {
+		t.Errorf("body[state] = %q, want %q", got, "closed")
+	}
+}
+
 // TestFilterDiffByFile_ExactMatch verifies the file filter matches the new-side
 // path exactly and never via substring, so a request for "foo.go" can't
 // accidentally capture a different file whose path merely contains it.

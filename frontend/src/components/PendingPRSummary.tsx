@@ -4,47 +4,43 @@ import Markdown from 'react-markdown'
 interface Props {
   owner: string
   repo: string
+  number: number
   headBranch: string
   baseBranch: string
-  headSHA: string
+  url: string
   title: string
   body: string
-  draft: boolean
   // onUpdateTitle/Body return promises so the Save click handler
   // can await the PATCH before clearing edit-mode state. That
   // serialization is what prevents a click-Save-then-click-Open-PR
-  // race from submitting the row in its pre-edit state.
+  // race from approving the PR in its pre-edit state.
   onUpdateTitle: (title: string) => Promise<void>
   onUpdateBody: (body: string) => Promise<void>
-  onUpdateDraft: (draft: boolean) => void
   onSubmit: () => void
   onClose: () => void
   submitting: boolean
 }
 
-// PendingPRSummary is the title/body editor + Open-PR button for the
-// pending-PR overlay. Mirrors ReviewSummary's shape (header, body
-// editor with Markdown preview, footer action cluster) but with PR-
-// specific affordances:
-//   - title editable as a single-line input (reviews don't have a
-//     title field)
-//   - draft checkbox alongside the submit button (reviews don't have
-//     a draft state)
-//   - branch arrow header instead of #PR-number (the PR doesn't
-//     exist yet)
+// PendingPRSummary is the title/body editor + Open-PR button for the draft-PR
+// overlay. Mirrors ReviewSummary's shape (header, body editor with Markdown
+// preview, footer action cluster) but with PR-specific affordances:
+//   - title editable as a single-line input (reviews don't have a title field)
+//   - a #PR-number header linking to the real (draft) PR on GitHub
 //   - explicit-Save UX matching ReviewSummary (no autosave)
+//
+// There's no draft toggle: the PR is created as a draft and stays one until
+// "Open PR" (approve) promotes it to ready-for-review.
 export default function PendingPRSummary({
   owner,
   repo,
+  number,
   headBranch,
   baseBranch,
-  headSHA,
+  url,
   title,
   body,
-  draft,
   onUpdateTitle,
   onUpdateBody,
-  onUpdateDraft,
   onSubmit,
   onClose,
   submitting,
@@ -113,15 +109,18 @@ export default function PendingPRSummary({
       <div className="px-5 pt-5 pb-4">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <h2 className="text-[15px] font-semibold text-text-primary tracking-tight">
-              Pending PR
-            </h2>
+            <h2 className="text-[15px] font-semibold text-text-primary tracking-tight">Draft PR</h2>
             <p className="text-[12px] text-text-tertiary mt-0.5 font-mono truncate">
               {owner}/{repo} &middot; {headBranch} &rarr; {baseBranch}
             </p>
-            <p className="text-[10.5px] text-text-tertiary/70 mt-0.5 font-mono">
-              queued at {headSHA.slice(0, 7)}
-            </p>
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[10.5px] text-text-tertiary/70 hover:text-accent mt-0.5 font-mono inline-block transition-colors"
+            >
+              #{number} on GitHub &rarr;
+            </a>
           </div>
         </div>
       </div>
@@ -252,17 +251,7 @@ export default function PendingPRSummary({
       </div>
 
       {/* Footer actions */}
-      <div className="px-5 py-3 border-t border-border-subtle flex items-center justify-between">
-        <label className="flex items-center gap-2 text-[12px] text-text-secondary cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={draft}
-            onChange={(e) => onUpdateDraft(e.target.checked)}
-            className="w-3.5 h-3.5 rounded border-border-subtle text-accent focus:ring-accent/30"
-          />
-          Open as draft
-        </label>
-
+      <div className="px-5 py-3 border-t border-border-subtle flex items-center justify-end">
         <div className="flex items-center gap-2">
           <button
             onClick={onClose}

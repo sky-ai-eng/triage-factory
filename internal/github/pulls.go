@@ -525,6 +525,22 @@ func (c *Client) UpdatePR(owner, repo string, number int, title, body string) er
 	return liftValidationErr(err)
 }
 
+// ClosePR closes an open or draft PR without merging it via REST
+// (PATCH /repos/{o}/{r}/pulls/{n} with state=closed). The head branch is
+// untouched — closing a PR never deletes the ref — which is exactly the
+// contract the artifact-abandon path needs: the draft PR is retired but the
+// pushed branch stays, so the work is recoverable. 422 validation failures are
+// lifted to a readable message via the same liftValidationErr CreatePR/UpdatePR
+// use.
+//
+// Used by the GitHub-native PR path's abandon flow — "Return to queue" on a run
+// that opened a draft PR closes that PR and flips its artifact to state=closed.
+func (c *Client) ClosePR(owner, repo string, number int) error {
+	payload := map[string]any{"state": "closed"}
+	_, err := c.Patch(fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number), payload)
+	return liftValidationErr(err)
+}
+
 // liftValidationErr extracts a useful message from a GitHub error
 // returned by client.do. The original error string has the shape
 // "POST /path returned NNN: {raw JSON body}"; for 422s the body

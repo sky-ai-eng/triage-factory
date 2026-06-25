@@ -16,7 +16,7 @@ import (
 // task_id/prompt_id) to be set when origin='blueprint' (the default). Returns
 // the blueprint_run id to drop into the run insert's blueprint_run_id column.
 //
-// Shared across the package-sqlite CRUD test files (factory, pending_prs,
+// Shared across the package-sqlite CRUD test files (factory,
 // prompts, run_worktrees, task_memory) whose `runs` fixtures are not the
 // system under test — they just need a valid FK target.
 func seedBlueprintRunForRun(t *testing.T, conn *sql.DB, taskID string) string {

@@ -143,45 +143,6 @@ func (c *LocalClient) ListPendingReviewComments(ctx context.Context, reviewID st
 	return c.stores.Reviews.ListCommentsSystem(ctx, c.info.OrgID, reviewID)
 }
 
-// --- pending PRs ---
-
-func (c *LocalClient) GetPendingPRByRunID(ctx context.Context) (*domain.PendingPR, error) {
-	return c.stores.PendingPRs.ByRunIDSystem(ctx, c.info.OrgID, c.info.RunID)
-}
-
-// CreateAndLockPendingPR collapses the old Create + Lock pair into a
-// single agenthost call. The manual path runs both inside one
-// synthetic-claims tx (atomic — a crash between Create and Lock used
-// to strand an unlocked row, see the TODO removed in this refactor).
-// The event-triggered path still does them as two admin-pool calls
-// because there's no shared tx surface across the admin pool's
-// statements; the second-layer Lock is still load-bearing for the
-// rare insert-but-no-lock race two concurrent `pr create` invocations
-// can produce.
-func (c *LocalClient) CreateAndLockPendingPR(ctx context.Context, row domain.PendingPR) error {
-	return c.withWrite(ctx,
-		func() error {
-			if err := c.stores.PendingPRs.CreateSystem(ctx, c.info.OrgID, row); err != nil {
-				return err
-			}
-			return c.stores.PendingPRs.LockSystem(ctx, c.info.OrgID, row.ID, row.Title, row.Body)
-		},
-		func(ts db.TxStores) error {
-			if err := ts.PendingPRs.Create(ctx, c.info.OrgID, row); err != nil {
-				return err
-			}
-			return ts.PendingPRs.Lock(ctx, c.info.OrgID, row.ID, row.Title, row.Body)
-		},
-	)
-}
-
-func (c *LocalClient) LockPendingPR(ctx context.Context, id, title, body string) error {
-	return c.withWrite(ctx,
-		func() error { return c.stores.PendingPRs.LockSystem(ctx, c.info.OrgID, id, title, body) },
-		func(ts db.TxStores) error { return ts.PendingPRs.Lock(ctx, c.info.OrgID, id, title, body) },
-	)
-}
-
 // --- workspace ---
 
 func (c *LocalClient) GetAgentRun(ctx context.Context) (*domain.AgentRun, error) {
@@ -752,7 +713,12 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 	if err != nil {
 		return 0, "", "", err
 	}
-	return client.CreatePR(owner, repo, head, base, title, body, draft)
+	number, htmlURL, nodeID, err := client.CreatePR(owner, repo, head, base, title, body, draft)
+	if err != nil {
+		return 0, "", "", err
+	}
+	c.recordGithubPR(ctx, owner, repo, head, base, title, body, number, nodeID, htmlURL, draft)
+	return number, htmlURL, nodeID, nil
 }
 
 // GithubCreatePendingReview resolves the client and acting identity, then folds
@@ -974,6 +940,41 @@ func (c *LocalClient) recordGithubCommentState(ctx context.Context, commentID in
 		State:      state,
 		DedupKey:   githubCommentDedupKey(commentID),
 	})
+}
+
+// --- github PR artifact recording ---
+//
+// Record the durable `pull_request` artifact when the agent opens a draft PR via
+// `exec gh pr create`. Like the comment/Jira recording above this lives on the
+// LocalClient — the single seam the multi daemon dispatches every host-routed
+// GitHub call through (server.go's dispatch builds NewLocal) — so it covers both
+// the sandbox (daemon) and the local-mode CLI. Best-effort and on-success-only:
+// the PR is already open on GitHub by the time we get here, so a store failure is
+// logged and swallowed, never able to fail the action. The artifact dedup key
+// (github:pull_request:owner/repo#<number>) is the new idempotency guard that
+// replaces the retired pending_prs one-per-run lock.
+
+// recordGithubPR upserts the `pull_request` artifact for a freshly opened PR. The
+// proposed snapshot {title, body} is the agent's draft exactly as sent to GitHub
+// (no footer — that lands at human approval); node_id / head_branch / base ride
+// details_json for reconciliation and the server's edit/approve handlers. A zero
+// number (a 2xx whose body didn't parse) has no stable key to
+// dedup on, so recording is skipped with a debug breadcrumb — the PR still
+// opened. The `draft` flag selects the artifact's initial state (draft vs open);
+// the new PR path always creates drafts, but recording the param keeps the row
+// honest if a standalone caller ever opens a non-draft.
+func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, base, title, body string, number int, nodeID, htmlURL string, draft bool) {
+	if c.stores.Artifacts == nil {
+		return
+	}
+	if number <= 0 {
+		agenthostLog.Debug("github PR recorded without a number; skipping artifact",
+			"run", c.info.RunID, "repo", owner+"/"+repo)
+		return
+	}
+	c.upsertGithubArtifact(ctx, domain.NewPullRequestArtifact(
+		owner+"/"+repo, number, nodeID, head, base, htmlURL, title, body, draft,
+	))
 }
 
 // githubCommentDedupKey is the stable key every comment action upserts on:

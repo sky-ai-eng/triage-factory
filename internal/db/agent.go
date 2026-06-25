@@ -170,7 +170,7 @@ type AgentRunStore interface {
 
 	// MarkCompletedIfPendingApproval is the inverse transition: flips
 	// a 'pending_approval' run back to 'completed' iff the row is
-	// currently 'pending_approval'. The reviews / pending_prs handlers
+	// currently 'pending_approval'. The reviews / artifact-PR handlers
 	// call this after the user submits the artifact (review posted or
 	// PR opened) so the run row leaves the approval queue. The guard
 	// prevents racing terminal writes (cancel, discard) from

@@ -12,6 +12,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+// seedDraftPRArtifact records a draft pull_request artifact for runID, so the
+// run looks (to processCompletion's park check) like it queued a PR for human
+// approval — the GitHub-native successor to seeding a pending_prs row.
+func seedDraftPRArtifact(t *testing.T, s *Spawner, runID string) {
+	t.Helper()
+	a := domain.NewPullRequestArtifact("o/r", 1, "node", "h", "main",
+		"https://github.com/o/r/pull/1", "queued PR", "", true)
+	a.RunID = runID
+	a.OrgID = runmode.LocalDefaultOrgID
+	a.TeamID = runmode.LocalDefaultTeamID
+	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
+		t.Fatalf("seed draft PR artifact: %v", err)
+	}
+}
+
 // --- decideBlueprintStep: the advancement decision matrix ------------------
 
 // TestDecideBlueprintStep pins the position-gated mapping from a completed
@@ -83,13 +98,8 @@ func TestDecideBlueprintStep(t *testing.T) {
 func TestProcessCompletion_BlueprintStepExternalActionCoercesToFinish(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "bp-coerce")
 	makeRunBlueprintStep(t, database, runID, taskID)
-	// Queue a PR for human approval so the run has a pending external action.
-	if err := s.pendingPRs.CreateSystem(context.Background(), runmode.LocalDefaultOrgID, domain.PendingPR{
-		ID: "pp-" + runID, RunID: runID, Owner: "o", Repo: "r",
-		HeadBranch: "h", HeadSHA: "sha", BaseBranch: "main", Title: "queued PR",
-	}); err != nil {
-		t.Fatalf("seed pending PR: %v", err)
-	}
+	// Queue a draft PR for human approval so the run has a pending external action.
+	seedDraftPRArtifact(t, s, runID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
@@ -184,15 +194,10 @@ func TestResumeBlueprintAfterApproval_AbortFinalizesBlueprintTaskOpen(t *testing
 	makeRunBlueprintStep(t, database, runID, taskID)
 	blueprintRunID := "bpr-" + runID
 
-	// Queue a PR for approval, then conclude the same turn with abort: the step
-	// lands pending_approval with outcome=abort (no continue→finish coercion —
-	// abort is the exception the run.go coercion exempts).
-	if err := s.pendingPRs.CreateSystem(context.Background(), runmode.LocalDefaultOrgID, domain.PendingPR{
-		ID: "pp-" + runID, RunID: runID, Owner: "o", Repo: "r",
-		HeadBranch: "h", HeadSHA: "sha", BaseBranch: "main", Title: "queued PR",
-	}); err != nil {
-		t.Fatalf("seed pending PR: %v", err)
-	}
+	// Queue a draft PR for approval, then conclude the same turn with abort: the
+	// step lands pending_approval with outcome=abort (no continue→finish coercion
+	// — abort is the exception the run.go coercion exempts).
+	seedDraftPRArtifact(t, s, runID)
 	task := loadTask(t, s, taskID)
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, blueprintRunID, task,
 		res(`{"outcome":"abort","summary":"opened a draft PR","reason":"approach is wrong; needs a human"}`),

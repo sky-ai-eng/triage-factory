@@ -297,27 +297,6 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return listCommentsResult{Comments: c}, nil
 
-	case methodGetPendingPRByRunID:
-		pr, err := client.GetPendingPRByRunID(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return pendingPRResult{PR: pr}, nil
-
-	case methodCreateAndLockPendingPR:
-		var a createAndLockPendingPRArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		return emptyResult{}, client.CreateAndLockPendingPR(ctx, a.Row)
-
-	case methodLockPendingPR:
-		var a lockPendingPRArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		return emptyResult{}, client.LockPendingPR(ctx, a.ID, a.Title, a.Body)
-
 	case methodGetAgentRun:
 		run, err := client.GetAgentRun(ctx)
 		if err != nil {

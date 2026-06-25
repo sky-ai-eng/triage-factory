@@ -35,7 +35,11 @@ export default function RunDetail() {
   const [chainSteps, setChainSteps] = useState<AgentRun[] | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [interruptPending, setInterruptPending] = useState(false)
-  const [approval, setApproval] = useState<{ runID: string; kind: 'review' | 'pr' } | null>(null)
+  const [approval, setApproval] = useState<{
+    runID: string
+    kind: 'review' | 'pr'
+    artifactId?: string
+  } | null>(null)
 
   // Presence (TFAC-392): this run's detail page is an answer-capable surface for
   // ITS run's permission prompts. Report run:<id> while mounted (re-firing if the
@@ -153,7 +157,11 @@ export default function RunDetail() {
 
   const handleReview = useCallback(() => {
     if (!run) return
-    setApproval({ runID: run.ID, kind: run.pending_kind === 'pr' ? 'pr' : 'review' })
+    setApproval({
+      runID: run.ID,
+      kind: run.pending_kind === 'pr' ? 'pr' : 'review',
+      artifactId: run.pending_artifact_id,
+    })
   }, [run])
 
   // Keyboard: Esc → back.
@@ -213,7 +221,7 @@ export default function RunDetail() {
         }}
       />
       <PendingPROverlay
-        runID={approval?.kind === 'pr' ? approval.runID : ''}
+        artifactId={approval?.kind === 'pr' ? (approval.artifactId ?? '') : ''}
         open={approval?.kind === 'pr'}
         onClose={() => {
           setApproval(null)

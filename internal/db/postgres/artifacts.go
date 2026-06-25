@@ -106,8 +106,44 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 	return out, nil
 }
 
+func (s *artifactStore) Get(ctx context.Context, orgID, id string) (*domain.Artifact, error) {
+	// App pool (RLS-active): every caller is an HTTP handler under request
+	// claims. RLS scopes the row to the caller's team exactly like runs; org_id
+	// stays bound as defense in depth.
+	row := s.q.QueryRowContext(ctx, `
+		SELECT `+pgArtifactColumns+`
+		FROM artifacts
+		WHERE org_id = $1 AND id = $2
+	`, orgID, id)
+	var a domain.Artifact
+	if err := scanArtifact(row, &a); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &a, nil
+}
+
 func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
 	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+pgArtifactColumns+`
+		FROM artifacts
+		WHERE org_id = $1 AND run_id = $2
+		ORDER BY created_at DESC, id DESC
+	`, orgID, runID)
+	if err != nil {
+		return nil, err
+	}
+	return scanArtifactRows(rows)
+}
+
+// ListByRunSystem runs ListByRun's query on the admin pool (BYPASSRLS) for the
+// spawner's park check, which reads a completed run's artifacts from a goroutine
+// with no JWT-claims context. org_id stays in the WHERE clause as defense in
+// depth.
+func (s *artifactStore) ListByRunSystem(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
+	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`
 		FROM artifacts
 		WHERE org_id = $1 AND run_id = $2

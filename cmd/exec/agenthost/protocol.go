@@ -204,20 +204,6 @@ type listCommentsResult struct {
 	Comments []domain.PendingReviewComment `json:"comments"`
 }
 
-type pendingPRResult struct {
-	PR *domain.PendingPR `json:"pr,omitempty"`
-}
-
-type createAndLockPendingPRArgs struct {
-	Row domain.PendingPR `json:"row"`
-}
-
-type lockPendingPRArgs struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Body  string `json:"body"`
-}
-
 type agentRunResult struct {
 	Run *domain.AgentRun `json:"run,omitempty"`
 }
@@ -561,8 +547,8 @@ type githubDownloadArtifactResult struct {
 }
 
 // emptyArgs is the args type for methods that take no parameters
-// (LookupRun, GetPendingPRByRunID, GetAgentRun, ListRunWorktrees,
-// ListRepos). Using an empty struct rather than json.RawMessage(nil)
+// (LookupRun, GetAgentRun, ListRunWorktrees, ListRepos). Using an empty
+// struct rather than json.RawMessage(nil)
 // lets the daemon-side dispatch use the same json.Unmarshal call shape
 // for every method without a nil-check.
 type emptyArgs struct{}
@@ -581,9 +567,6 @@ const (
 	methodUpdatePendingReviewComment = "UpdatePendingReviewComment"
 	methodDeletePendingReviewComment = "DeletePendingReviewComment"
 	methodListPendingReviewComments  = "ListPendingReviewComments"
-	methodGetPendingPRByRunID        = "GetPendingPRByRunID"
-	methodCreateAndLockPendingPR     = "CreateAndLockPendingPR"
-	methodLockPendingPR              = "LockPendingPR"
 	methodGetAgentRun                = "GetAgentRun"
 	methodGetTask                    = "GetTask"
 	methodListRepos                  = "ListRepos"

@@ -85,7 +85,7 @@ type TaskMemoryStore interface {
 	// response after GitHub already accepted the review would be
 	// worse than the missed memory write.
 	//
-	// App pool only — every caller (reviews handler, pending_prs
+	// App pool only — every caller (reviews handler, artifact-PR approve
 	// handler, swipe-discard cleanup) runs under request claims.
 	UpdateRunMemoryHumanContent(ctx context.Context, orgID, runID, content string) error
 

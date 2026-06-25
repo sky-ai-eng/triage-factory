@@ -148,7 +148,6 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		Artifacts:      newArtifactStore(tx, s.admin),
 		Entities:       newEntityStore(tx, tx),
 		Reviews:        newReviewStore(tx, s.admin),
-		PendingPRs:     newPendingPRStore(tx, s.admin),
 		Repos:          newRepoStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
 		// Projects: ListSystem routes around RLS the same way

@@ -642,6 +642,9 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 	var (
 		runID         string
 		flippedToDone bool
+		// prArtifact is the run's draft PR, if any. Captured in the tx and closed
+		// on GitHub AFTER it commits — a network call must not hold the tx open.
+		prArtifact *domain.Artifact
 	)
 	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var lookupErr error
@@ -653,17 +656,19 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 			return nil
 		}
 
-		// Detect which side-table held the row BEFORE deleting, so
-		// the stop_reason and human_content can name the right
-		// kind. Without this, a discarded PR ends up tagged
-		// "review_discarded_by_user" — confusing in the UI and
-		// breaks any downstream logic keyed on stop_reason that
-		// needs to tell the two apart.
+		// Detect what parked the run BEFORE the teardown, so the stop_reason and
+		// human_content name the right kind. A draft PR parks on its pull_request
+		// artifact; a review parks on the pending_reviews row. Without this, a
+		// discarded PR ends up tagged "review_discarded_by_user" — confusing in
+		// the UI and wrong for anything keyed on stop_reason.
 		kind := "review"
-		if pr, prErr := tx.PendingPRs.ByRunID(ctx, orgID, runID); prErr != nil {
-			return fmt.Errorf("pendingPRs.ByRunID: %w", prErr)
-		} else if pr != nil {
+		arts, artErr := tx.Artifacts.ListByRun(ctx, orgID, runID)
+		if artErr != nil {
+			return fmt.Errorf("artifacts.ListByRun: %w", artErr)
+		}
+		if pr := domain.FirstDraftPullRequest(arts); pr != nil {
 			kind = "pr"
+			prArtifact = pr
 		}
 
 		// Write the discard outcome to run_memory.human_content
@@ -682,13 +687,15 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 		if err := tx.Reviews.DeleteByRunID(ctx, orgID, runID); err != nil {
 			return fmt.Errorf("reviews.DeleteByRunID: %w", err)
 		}
-		// Same idempotent no-op when no pending_prs row exists.
-		// A run can have at most one pending entry across the two
-		// tables (the spawner flips on either), but
-		// cleanupPendingApprovalRun runs against the run id without
-		// first determining which kind — so we attempt both deletes.
-		if err := tx.PendingPRs.DeleteByRunID(ctx, orgID, runID); err != nil {
-			return fmt.Errorf("pendingPRs.DeleteByRunID: %w", err)
+		// Abandon a draft PR by flipping its artifact to closed (the GitHub close
+		// runs after the tx). The pushed branch and the proposed snapshot are
+		// preserved — abandonment retires the PR object, not the work.
+		if prArtifact != nil {
+			closed := *prArtifact
+			closed.State = domain.ArtifactStatePRClosed
+			if _, err := tx.Artifacts.Upsert(ctx, orgID, closed); err != nil {
+				return fmt.Errorf("artifacts.Upsert(closed): %w", err)
+			}
 		}
 
 		stopReason := "review_discarded_by_user"
@@ -711,6 +718,14 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 		approvalDiscardLog.Error("task cleanup failed, run held in pending_approval for retry", "task", taskID, "error", err)
 		return
 	}
+
+	// Close the draft PR on GitHub (best-effort, outside the tx). The artifact is
+	// already marked closed; a GitHub failure leaves the PR open for reconciliation
+	// to retire later and must never fail the requeue. The branch stays regardless.
+	if prArtifact != nil {
+		s.closeDraftPRBestEffort(ctx, orgID, prArtifact)
+	}
+
 	if !flippedToDone || runID == "" {
 		return
 	}
@@ -721,6 +736,27 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 		RunID: runID,
 		Data:  map[string]string{"status": "cancelled"},
 	})
+}
+
+// closeDraftPRBestEffort closes the abandoned draft PR on GitHub. Best-effort:
+// every failure is logged, never returned — the artifact is already marked
+// closed and the run/task already requeued, so a GitHub hiccup mustn't unwind
+// that. owner/repo/number come from the artifact's target; the per-repo client
+// resolves App-installation-token → PAT like every other PR mutation.
+func (s *Server) closeDraftPRBestEffort(ctx context.Context, orgID string, art *domain.Artifact) {
+	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
+	if !ok {
+		approvalDiscardLog.Warn("draft PR artifact has a malformed target; skipping GitHub close", "artifact", art.ID, "target", art.Target)
+		return
+	}
+	gh, err := s.ghResolver.ClientForRepo(ctx, orgID, owner, repo)
+	if err != nil {
+		approvalDiscardLog.Warn("resolve github client for draft PR close failed", "artifact", art.ID, "owner", owner, "repo", repo, "error", err)
+		return
+	}
+	if err := gh.ClosePR(owner, repo, number); err != nil {
+		approvalDiscardLog.Warn("close draft PR on github failed (artifact already marked closed)", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+	}
 }
 
 // buildDiscardHumanContent renders the post-run human verdict

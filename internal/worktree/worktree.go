@@ -275,11 +275,10 @@ func repoDir(owner, repo string) (string, error) {
 	return paths.BareCacheDir(runmode.LocalDefaultOrgID, owner, repo), nil
 }
 
-// RepoDir is the exported variant for callers outside the worktree
-// package — specifically internal/server's livePRDiff path, which
-// runs `git -C <bareDir> diff` against the bare clone for the
-// pending-PR live diff. Wrapper rather than renaming repoDir to
-// keep the existing internal call sites untouched.
+// RepoDir is the exported variant of repoDir for callers outside the worktree
+// package that need the bare clone's path to run git against it directly (e.g.
+// the workspace-snapshot tests). Wrapper rather than renaming repoDir to keep
+// the existing internal call sites untouched.
 func RepoDir(owner, repo string) (string, error) {
 	return repoDir(owner, repo)
 }

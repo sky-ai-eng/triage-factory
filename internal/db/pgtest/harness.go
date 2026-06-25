@@ -260,7 +260,7 @@ var orgScopedTables = []string{
 	"curator_pending_context", "curator_messages", "curator_requests",
 	"pending_review_comments", "pending_reviews",
 	"swipe_events",
-	"pending_prs", "run_worktrees",
+	"run_worktrees",
 	"pending_firings",
 	"artifacts",
 	"run_memory", "run_messages", "runs",

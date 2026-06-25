@@ -285,6 +285,7 @@ export default function Board() {
   const [approvalCtx, setApprovalCtx] = useState<{
     runID: string
     kind: 'review' | 'pr'
+    artifactId?: string
   } | null>(null)
 
   // Pads /api/blueprint-runs/{id} into a length-N array with synthetic
@@ -1100,7 +1101,9 @@ export default function Board() {
                     onPickerClaim={handlePickerClaim}
                     onPickerUnclaim={handlePickerUnclaim}
                     onPickerDelegate={handlePickerDelegate}
-                    onReview={(runID, kind) => setApprovalCtx({ runID, kind })}
+                    onReview={(runID, kind, artifactId) =>
+                      setApprovalCtx({ runID, kind, artifactId })
+                    }
                     onRetry={(task) => {
                       pendingDelegateTask.current = task
                       setShowPromptPicker(true)
@@ -1148,7 +1151,7 @@ export default function Board() {
         }}
       />
       <PendingPROverlay
-        runID={approvalCtx?.kind === 'pr' ? approvalCtx.runID : ''}
+        artifactId={approvalCtx?.kind === 'pr' ? (approvalCtx.artifactId ?? '') : ''}
         open={approvalCtx?.kind === 'pr'}
         onClose={() => {
           setApprovalCtx(null)
@@ -1203,7 +1206,7 @@ function ColumnContents({
   onPickerClaim: (task: Task) => Promise<void>
   onPickerUnclaim: (task: Task) => Promise<void>
   onPickerDelegate: (task: Task) => void
-  onReview: (runID: string, kind: 'review' | 'pr') => void
+  onReview: (runID: string, kind: 'review' | 'pr', artifactId?: string) => void
   onRetry: (task: Task) => void
 }) {
   if (tasks.length === 0) {
@@ -1248,7 +1251,7 @@ function ColumnContents({
               onRequeue={() => onRequeue(task.id)}
               onReview={() => {
                 const kind: 'review' | 'pr' = run.pending_kind === 'pr' ? 'pr' : 'review'
-                onReview(run.ID, kind)
+                onReview(run.ID, kind, run.pending_artifact_id)
               }}
               assigneeSlot={picker}
             />

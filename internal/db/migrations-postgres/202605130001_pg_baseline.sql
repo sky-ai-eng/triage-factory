@@ -1059,30 +1059,6 @@ ALTER SEQUENCE public.pending_firings_id_seq OWNED BY public.pending_firings.id;
 
 
 --
--- Name: pending_prs; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pending_prs (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    org_id uuid NOT NULL,
-    run_id uuid NOT NULL,
-    owner text NOT NULL,
-    repo text NOT NULL,
-    head_branch text NOT NULL,
-    head_sha text NOT NULL,
-    base_branch text NOT NULL,
-    title text NOT NULL,
-    body text,
-    original_title text,
-    original_body text,
-    locked boolean DEFAULT false NOT NULL,
-    draft boolean DEFAULT false NOT NULL,
-    submitted_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
 -- Name: pending_review_comments; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1966,21 +1942,6 @@ ALTER TABLE ONLY public.pending_firings
 
 
 --
--- Name: pending_prs pending_prs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pending_prs
-    ADD CONSTRAINT pending_prs_pkey PRIMARY KEY (id);
-
-
--- NOTE: the pending_prs_run_id_key UNIQUE (run_id) constraint was dropped at
--- this baseline — one run may open PRs across several repos, so one-PR-
--- per-run is no longer a DB invariant (validated app-side where it still
--- holds). The non-unique idx_pending_prs_run index keeps the by-run lookup
--- fast. pending_reviews.run_id is likewise non-unique (symmetric for the
--- two-PRs-reviewed-in-one-run case).
-
---
 -- Name: pending_review_comments pending_review_comments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2454,13 +2415,6 @@ CREATE UNIQUE INDEX idx_pending_firings_dedup ON public.pending_firings USING bt
 --
 
 CREATE INDEX idx_pending_firings_entity_pending ON public.pending_firings USING btree (entity_id, queued_at) WHERE (status = 'pending'::text);
-
-
---
--- Name: idx_pending_prs_run; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_pending_prs_run ON public.pending_prs USING btree (run_id);
 
 
 --
@@ -3152,22 +3106,6 @@ ALTER TABLE ONLY public.pending_firings
 
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
-
-
---
--- Name: pending_prs pending_prs_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pending_prs
-    ADD CONSTRAINT pending_prs_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-
---
--- Name: pending_prs pending_prs_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pending_prs
-    ADD CONSTRAINT pending_prs_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -4147,23 +4085,6 @@ CREATE POLICY pending_firings_all ON public.pending_firings USING ((EXISTS ( SEL
   WHERE (t.id = pending_firings.task_id)))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public.tasks t
   WHERE (t.id = pending_firings.task_id))));
-
-
---
--- Name: pending_prs; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.pending_prs ENABLE ROW LEVEL SECURITY;
-
---
--- Name: pending_prs pending_prs_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY pending_prs_all ON public.pending_prs USING ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = pending_prs.run_id)))) WITH CHECK ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = pending_prs.run_id))));
 
 
 --
@@ -5172,17 +5093,6 @@ GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO anon;
 GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO authenticated;
 GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO service_role;
 GRANT SELECT,USAGE ON SEQUENCE public.pending_firings_id_seq TO tf_app;
-
-
---
--- Name: TABLE pending_prs; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.pending_prs TO postgres;
-GRANT ALL ON TABLE public.pending_prs TO anon;
-GRANT ALL ON TABLE public.pending_prs TO authenticated;
-GRANT ALL ON TABLE public.pending_prs TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.pending_prs TO tf_app;
 
 
 --

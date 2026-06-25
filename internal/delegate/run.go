@@ -471,16 +471,16 @@ func (s *Spawner) processCompletion(
 	bgCtx := context.Background()
 
 	// Does this completed run carry a queued external action awaiting human
-	// approval? Two side-tables park a completed run in pending_approval:
+	// approval? Two sources park a completed run in pending_approval:
 	//   - pending_reviews: agent ran `pr submit-review` under
 	//     TRIAGE_FACTORY_REVIEW_PREVIEW=1, queued the review for approval.
-	//   - pending_prs: agent ran `pr create` under the same flag.
+	//   - a draft PR artifact: agent ran `pr create`, which opens a real draft
+	//     PR and records a pull_request artifact in state=draft.
 	// Detected once here — before the terminal write — so a blueprint step's
 	// outcome can be coerced (below) before it's persisted, and reused for
-	// the pending_approval flip after the write. Side-table lookups use
-	// admin-pool System variants (no JWT claims in scope) and run on bgCtx so
-	// a racing cancel doesn't silently strand a queued review outside the
-	// approval queue.
+	// the pending_approval flip after the write. Lookups use admin-pool System
+	// variants (no JWT claims in scope) and run on bgCtx so a racing cancel
+	// doesn't silently strand a queued action outside the approval queue.
 	hasPending := false
 	if status == "completed" {
 		// A lookup error leaves hasPending=false, which would let the run
@@ -494,11 +494,14 @@ func (s *Spawner) processCompletion(
 		if pendingReview != nil {
 			hasPending = true
 		} else {
-			pendingPR, pErr := s.pendingPRs.ByRunIDSystem(bgCtx, orgID, runID)
-			if pErr != nil {
-				delegateLog.Warn("pending-PR lookup for run failed; a queued PR may strand outside the approval queue", "run", runID, "error", pErr)
+			// A run that opened a draft PR parks on its pull_request artifact in
+			// state=draft (the GitHub-native path replaced the pending_prs row).
+			// Admin-pool read: no JWT claims in this post-completion goroutine.
+			arts, aErr := s.artifacts.ListByRunSystem(bgCtx, orgID, runID)
+			if aErr != nil {
+				delegateLog.Warn("PR-artifact lookup for run failed; a queued PR may strand outside the approval queue", "run", runID, "error", aErr)
 			}
-			if pendingPR != nil {
+			if domain.FirstDraftPullRequest(arts) != nil {
 				hasPending = true
 			}
 		}

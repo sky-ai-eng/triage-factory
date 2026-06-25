@@ -153,7 +153,7 @@ func DedupPreserveOrder(ids []string) []string {
 // Audiences:
 //
 //   - HTTP handlers (server/blueprints_handler.go, server/prompts_handler.go,
-//     server/pending_prs_handler.go, server/reviews_handler.go) — read-mostly.
+//     server/artifacts_handler.go, server/reviews_handler.go) — read-mostly.
 //   - Delegate spawner (delegate/blueprint.go, delegate/run.go) — every method.
 //
 // # Postgres / RLS shape

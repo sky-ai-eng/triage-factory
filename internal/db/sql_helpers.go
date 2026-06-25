@@ -4,7 +4,7 @@ import "database/sql"
 
 // Tiny SQL-binding helpers used by the package-`db` raw-function files
 // that haven't been migrated to per-resource stores yet (curator,
-// pending_prs, projects, repos, ...). When those move behind their
+// projects, repos, ...). When those move behind their
 // own AgentStore/etc. interfaces this file goes away — the per-
 // backend impl files own their own copies of these helpers there.
 //

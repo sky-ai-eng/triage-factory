@@ -101,7 +101,7 @@ func handlePR(host agenthost.Client, args []string) {
 
 	switch action {
 	case "create":
-		prCreate(api, host, flags)
+		prCreate(api, flags)
 	case "view":
 		prView(api, flags)
 	case "diff":
@@ -796,27 +796,24 @@ func prSubmitReview(client ghAPI, host agenthost.Client, args []string) {
 	})
 }
 
-// prCreate queues (preview mode) or directly opens (standalone mode)
-// a pull request. Caller is responsible for having pushed the head
-// branch upstream first; this is the contract documented in the
-// agent prompts and enforced by GitHub's API at submit time anyway.
+// prCreate opens a real GitHub draft PR immediately and prints
+// {status:"created", url, number, draft:true}. The caller is responsible for
+// having pushed the head branch upstream first; that's the contract documented
+// in the agent prompts, and the ls-remote preflight below enforces it early.
 //
-// Preview mode (TRIAGE_FACTORY_REVIEW_PREVIEW=1, the delegated-run
-// default): create a pending_prs row + lock it via CreateAndLockPendingPR.
-// Output status=queued_for_human_approval. The server's submit handler
-// reads the row at user-approval time, opens the PR for real, and
-// applies the agentmeta footer.
-//
-// Standalone mode (env unset, e.g. a human running this directly
-// from a checkout): pre-apply the footer and POST to GitHub
-// immediately. Same shape as prSubmitReview's standalone branch.
-func prCreate(client ghAPI, host agenthost.Client, args []string) {
+// The PR is always created as a draft — repo-visible, but not "ready for
+// review" — and stays a draft until a human approves it in the UI (which marks
+// it ready for review and appends the agentmeta footer). No footer is applied
+// here: the proposed body is what the agent drafted. The durable pull_request
+// artifact is recorded at the host choke point (LocalClient.GithubCreatePR),
+// deduped on the PR number — which is also the idempotency guard against a
+// repeated `pr create`, replacing the retired pending_prs one-per-run lock.
+func prCreate(client ghAPI, args []string) {
 	title := flagVal(args, "--title")
 	body := flagVal(args, "--body")
 	bodyFile := flagVal(args, "--body-file")
 	base := flagVal(args, "--base")
 	head := flagVal(args, "--head")
-	draft := hasFlag(args, "--draft")
 
 	if title == "" {
 		exitErr("usage: gh pr create --title <T> (--body <B> | --body-file <path>) --base <branch> [--head <branch>] [--draft] [--repo owner/repo]\n--title is required")
@@ -907,106 +904,17 @@ func prCreate(client ghAPI, host agenthost.Client, args []string) {
 		}
 	}
 
-	if os.Getenv("TRIAGE_FACTORY_REVIEW_PREVIEW") == "1" {
-		info := lookupRun(host)
-		ctx := context.Background()
-
-		// Capture the head sha at queue time so the UI can flag drift if
-		// the agent pushes a fixup mid-approval. Best-effort: if
-		// rev-parse fails (cwd doesn't have HEAD, weird state), we
-		// surface the error rather than queueing a row with no sha
-		// because the head_sha column is NOT NULL.
-		headSHAOut, err := exec.Command("git", "rev-parse", "HEAD").Output()
-		if err != nil {
-			exitErr("could not capture head sha via git rev-parse HEAD; the worktree appears to be in a bad state. err: " + err.Error())
-		}
-		headSHA := strings.TrimSpace(string(headSHAOut))
-		if headSHA == "" {
-			exitErr("git rev-parse HEAD returned empty; refusing to queue a pending PR with no head sha")
-		}
-
-		// SKY-212-style anti-retry. The store's app-layer one-per-run
-		// guard (PendingPRs.Create returns ErrPendingPRAlreadyQueued; the
-		// DB UNIQUE(run_id) was dropped at this baseline for future
-		// multi-repo PRs) blocks a second insert, but checking up front
-		// gives the agent a clear "already queued" message rather than
-		// relying on the create error, matching what submit-review does
-		// for reviews.
-		existing, lookupErr := host.GetPendingPRByRunID(ctx)
-		if lookupErr != nil {
-			exitErr("lookup existing pending PR for run: " + lookupErr.Error())
-		}
-		if existing != nil {
-			exitErr(fmt.Sprintf(
-				"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing %s and returning your completion JSON.",
-				info.RunID, agentMemoryFile(),
-			))
-		}
-
-		id := uuid.NewString()
-		row := domain.PendingPR{
-			ID: id, RunID: info.RunID,
-			Owner: owner, Repo: repo,
-			HeadBranch: head, HeadSHA: headSHA, BaseBranch: base,
-			Title: title, Body: body,
-			Draft: draft,
-		}
-		err = host.CreateAndLockPendingPR(ctx, row)
-		if err != nil {
-			// The pre-check above is racy: two concurrent `pr create`
-			// invocations on different DB connections can both pass
-			// it before either has inserted. The store's app-layer
-			// one-per-run guard (INSERT ... WHERE NOT EXISTS) then
-			// returns ErrPendingPRAlreadyQueued to the loser instead
-			// of inserting a duplicate — treat that as the same
-			// SKY-212 retry case the pre-check normally catches and
-			// surface the clean "already queued" message. Also
-			// catches the ErrPendingPRAlreadyQueued from the inner
-			// Lock call when the manual-branch tx hit the lock race.
-			if errors.Is(err, db.ErrPendingPRAlreadyQueued) {
-				exitErr(fmt.Sprintf(
-					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing %s and returning your completion JSON.",
-					info.RunID, agentMemoryFile(),
-				))
-			}
-			if existing, lookupErr := host.GetPendingPRByRunID(ctx); lookupErr == nil && existing != nil {
-				exitErr(fmt.Sprintf(
-					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing %s and returning your completion JSON.",
-					info.RunID, agentMemoryFile(),
-				))
-			}
-			exitErr("failed to insert pending PR: " + err.Error())
-		}
-
-		printJSON(map[string]any{
-			"status":    "queued_for_human_approval",
-			"id":        id,
-			"owner":     owner,
-			"repo":      repo,
-			"head":      head,
-			"base":      base,
-			"head_sha":  headSHA,
-			"draft":     draft,
-			"next_step": "PR is queued for human approval. Do not call pr create again. Finish the run by writing " + agentMemoryFile() + " and returning your completion JSON.",
-		})
-		return
-	}
-
-	// Standalone mode: open the PR immediately, with footer pre-applied.
-	// Footer rendering routes through the agenthost surface so the
-	// sandboxed-binary path stays DB-free.
-	footer, err := host.BuildAgentRunFooter(context.Background(), "PR")
-	exitOnErr(err)
-	body = body + footer
-	// node_id (3rd return) is the PR's durable GraphQL handle; the standalone
-	// path doesn't record artifacts yet (that wiring is TFAC-462), so discard it.
-	number, htmlURL, _, err := client.CreatePR(owner, repo, head, base, title, body, draft)
+	// Always open a real draft PR. node_id (3rd return) is recorded onto the
+	// pull_request artifact at the host choke point (LocalClient.GithubCreatePR),
+	// so it's discarded here.
+	number, htmlURL, _, err := client.CreatePR(owner, repo, head, base, title, body, true)
 	exitOnErr(err)
 
 	printJSON(map[string]any{
-		"status":   "submitted",
-		"number":   number,
-		"html_url": htmlURL,
+		"status": "created",
+		"number": number,
+		"url":    htmlURL,
+		"draft":  true,
 	})
 }
 

@@ -116,14 +116,6 @@ type Stores struct {
 	// cmd/exec/gh agent submit gate.
 	Reviews ReviewStore
 
-	// PendingPRs owns the pending_prs table — the agent-drafted PR
-	// that sits in `pending_approval` until the user accepts / edits
-	// / discards / submits. App pool in Postgres; consumers are the
-	// pending_prs handler, the cmd/exec/gh agent pr-create tool, the
-	// spawner's terminal-flip + cleanup paths, and tasks.go's drag-
-	// back-to-queue cleanup. Leaf table — no child rows hang off it.
-	PendingPRs PendingPRStore
-
 	// Repos owns repo_profiles — the user-configured GitHub repos
 	// plus their cached AI profile and clone-attempt state. App pool
 	// in Postgres; consumers are the repos handler, settings, the
@@ -338,7 +330,6 @@ type TxStores struct {
 	Artifacts        ArtifactStore
 	Entities         EntityStore
 	Reviews          ReviewStore
-	PendingPRs       PendingPRStore
 	Repos            RepoStore
 	PendingFirings   PendingFiringsStore
 	Projects         ProjectStore

@@ -904,12 +904,11 @@ func (s *Server) routes() {
 	s.apiMutating("DELETE /api/reviews/{id}/comments/{commentId}", rh.handleReviewCommentDelete)
 	s.api("GET /api/agent/runs/{runID}/review", rh.handleRunReview)
 
-	pp := &pendingPRsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
-	s.api("GET /api/pending-prs/{id}", pp.handlePendingPRGet)
-	s.apiMutating("PATCH /api/pending-prs/{id}", pp.handlePendingPRUpdate)
-	s.api("GET /api/pending-prs/{id}/diff", pp.handlePendingPRDiff)
-	s.apiMutating("POST /api/pending-prs/{id}/submit", pp.handlePendingPRSubmit)
-	s.api("GET /api/agent/runs/{runID}/pending-pr", pp.handleRunPendingPR)
+	ah := &artifactsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
+	s.api("GET /api/artifacts/{id}", ah.handleArtifactGet)
+	s.apiMutating("PATCH /api/artifacts/{id}", ah.handleArtifactUpdate)
+	s.api("GET /api/artifacts/{id}/diff", ah.handleArtifactDiff)
+	s.apiMutating("POST /api/artifacts/{id}/approve", ah.handleArtifactApprove)
 
 	fh := &factoryHandler{tx: s.tx}
 	s.api("GET /api/factory/snapshot", fh.handleFactorySnapshot)

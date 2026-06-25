@@ -101,10 +101,14 @@ export interface AgentRun {
   // pending_kind is set by the server's runResponse projection when
   // status == 'pending_approval'. The discriminator tells the Board
   // which approval card variant to render: a queued review opens
-  // ReviewOverlay (with inline-comment editing); a queued PR opens
+  // ReviewOverlay (with inline-comment editing); a draft PR opens
   // PendingPROverlay (title/body editor + Open-PR button). Empty /
   // undefined for non-pending runs.
   pending_kind?: 'review' | 'pr'
+  // pending_artifact_id is the id of the gating draft-PR artifact, set
+  // alongside pending_kind === 'pr'. PendingPROverlay is addressed by it
+  // (the PR artifact id), not the run id.
+  pending_artifact_id?: string
   blueprint_run_id?: string
   blueprint_step_index?: number | null
 }

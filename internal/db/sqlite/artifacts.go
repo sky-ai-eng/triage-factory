@@ -92,6 +92,25 @@ func (s *artifactStore) UpsertSystem(ctx context.Context, orgID string, a domain
 	return s.Upsert(ctx, orgID, a)
 }
 
+func (s *artifactStore) Get(ctx context.Context, orgID, id string) (*domain.Artifact, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	row := s.q.QueryRowContext(ctx, `
+		SELECT `+artifactColumns+`
+		FROM artifacts
+		WHERE org_id = ? AND id = ?
+	`, orgID, id)
+	var a domain.Artifact
+	if err := scanArtifact(row, &a); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &a, nil
+}
+
 func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -106,6 +125,14 @@ func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]d
 		return nil, err
 	}
 	return scanArtifactRows(rows)
+}
+
+// ListByRunSystem is identical to ListByRun in SQLite: local mode is
+// single-tenant (N=1) with no RLS, so there is no admin/app pool split. The
+// method exists for parity with the Postgres store, where the spawner's park
+// check (no JWT-claims context) needs an admin-pool path.
+func (s *artifactStore) ListByRunSystem(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
+	return s.ListByRun(ctx, orgID, runID)
 }
 
 func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {

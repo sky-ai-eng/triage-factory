@@ -52,9 +52,25 @@ type ArtifactStore interface {
 	// Identical to Upsert in SQLite (single-tenant, no RLS).
 	UpsertSystem(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error)
 
+	// Get returns a single artifact by id, or nil when none matches. Runs on
+	// the app pool in Postgres (RLS-active), so the caller must be inside a
+	// claims-set tx — every consumer is an HTTP handler under request claims
+	// (the artifact-id-addressed PR endpoints: GET / PATCH / diff / approve).
+	// org_id stays bound as defense in depth alongside RLS.
+	Get(ctx context.Context, orgID, id string) (*domain.Artifact, error)
+
 	// ListByRun returns every artifact produced by one run, newest first.
 	// Backs the run-detail surface (A·6).
 	ListByRun(ctx context.Context, orgID, runID string) ([]domain.Artifact, error)
+
+	// ListByRunSystem is the admin-pool (BYPASSRLS) variant of ListByRun for
+	// system-service readers that hold a real (org_id) identity but no
+	// JWT-claims context — chiefly the delegate spawner's post-completion park
+	// check, which reads a run's artifacts from a goroutine detached from any
+	// request to decide whether to park in pending_approval. Mirrors
+	// reviews.ByRunIDSystem. Identical to ListByRun in SQLite (single-tenant,
+	// no RLS).
+	ListByRunSystem(ctx context.Context, orgID, runID string) ([]domain.Artifact, error)
 
 	// ListByTeam returns the team's artifacts, newest first (the
 	// team_created index order). Backs team-level C2 (TFAC-449) through the

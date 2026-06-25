@@ -55,13 +55,13 @@ type Spawner struct {
 	prompts    db.PromptStore
 	agents     db.AgentStore // resolves actor for run.actor_agent_id stamping
 	blueprints db.BlueprintStore
-	runQueue   db.RunQueueStore  // the run queue the dispatcher drains: enqueue a step, claim it, run it, react
-	tasks      db.TaskStore      // re-read tasks for run lifecycle handlers
-	agentRuns  db.AgentRunStore  // run lifecycle + transcript
-	entities   db.EntityStore    // entity reads for project lookup + resume context
-	reviews    db.ReviewStore    // pending review cleanup on discard / cancel paths
-	pendingPRs db.PendingPRStore // pending PR lookup on processCompletion / cleanup paths
-	events     db.EventStore     // admin-pool GetMetadataSystem for post-run prompt building
+	runQueue   db.RunQueueStore // the run queue the dispatcher drains: enqueue a step, claim it, run it, react
+	tasks      db.TaskStore     // re-read tasks for run lifecycle handlers
+	agentRuns  db.AgentRunStore // run lifecycle + transcript
+	entities   db.EntityStore   // entity reads for project lookup + resume context
+	reviews    db.ReviewStore   // pending review cleanup on discard / cancel paths
+	artifacts  db.ArtifactStore // draft-PR artifact lookup on processCompletion park check
+	events     db.EventStore    // admin-pool GetMetadataSystem for post-run prompt building
 	// taskMemory routes the post-completion UpsertAgentMemorySystem
 	// and the run-start GetMemoriesForEntitySystem through the dual-
 	// pool store. Both fire inside the runAgent goroutine, which has
@@ -221,7 +221,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		agentRuns:    stores.AgentRuns,
 		entities:     stores.Entities,
 		reviews:      stores.Reviews,
-		pendingPRs:   stores.PendingPRs,
+		artifacts:    stores.Artifacts,
 		events:       stores.Events,
 		taskMemory:   stores.TaskMemory,
 		runWorktrees: stores.RunWorktrees,

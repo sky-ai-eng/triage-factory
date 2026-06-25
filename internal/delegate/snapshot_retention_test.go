@@ -24,12 +24,7 @@ func TestProcessCompletion_PendingApprovalWritesSnapshot(t *testing.T) {
 	wireBlobStore(t, s)
 	bpr := blueprintRunIDForRun(t, database, runID)
 
-	if err := s.pendingPRs.CreateSystem(context.Background(), runmode.LocalDefaultOrgID, domain.PendingPR{
-		ID: "pp-" + runID, RunID: runID, Owner: "o", Repo: "r",
-		HeadBranch: "h", HeadSHA: "sha", BaseBranch: "main", Title: "queued PR",
-	}); err != nil {
-		t.Fatalf("seed pending PR: %v", err)
-	}
+	seedDraftPRArtifact(t, s, runID)
 
 	task := loadTask(t, s, taskID)
 	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,

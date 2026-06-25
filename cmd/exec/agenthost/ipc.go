@@ -206,22 +206,6 @@ func (c *IPCClient) ListPendingReviewComments(ctx context.Context, reviewID stri
 	return res.Comments, nil
 }
 
-func (c *IPCClient) GetPendingPRByRunID(ctx context.Context) (*domain.PendingPR, error) {
-	var res pendingPRResult
-	if err := c.call(ctx, methodGetPendingPRByRunID, emptyArgs{}, &res); err != nil {
-		return nil, err
-	}
-	return res.PR, nil
-}
-
-func (c *IPCClient) CreateAndLockPendingPR(ctx context.Context, row domain.PendingPR) error {
-	return c.call(ctx, methodCreateAndLockPendingPR, createAndLockPendingPRArgs{Row: row}, nil)
-}
-
-func (c *IPCClient) LockPendingPR(ctx context.Context, id, title, body string) error {
-	return c.call(ctx, methodLockPendingPR, lockPendingPRArgs{ID: id, Title: title, Body: body}, nil)
-}
-
 func (c *IPCClient) GetAgentRun(ctx context.Context) (*domain.AgentRun, error) {
 	var res agentRunResult
 	if err := c.call(ctx, methodGetAgentRun, emptyArgs{}, &res); err != nil {
