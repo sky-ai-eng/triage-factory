@@ -310,7 +310,7 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 	if req.Draft != nil {
 		draft = *req.Draft
 	}
-	// node_id (4th return) is the PR's durable GraphQL handle; the artifact
+	// node_id (3rd return) is the PR's durable GraphQL handle; the artifact
 	// recording that consumes it lands with TFAC-462, so it's discarded here.
 	number, htmlURL, _, err := gh.CreatePR(pr.Owner, pr.Repo, pr.HeadBranch, pr.BaseBranch, pr.Title, finalBody, draft)
 	if err != nil {

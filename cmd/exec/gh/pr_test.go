@@ -668,3 +668,21 @@ func TestStripClaudeCodeCitation(t *testing.T) {
 		})
 	}
 }
+
+// TestHostAPIClient_AddPendingReviewComment_RequiresRepoScope locks the fold-in
+// guard: AddPendingReviewComment has no owner/repo to forward (it keys off the
+// review node id), so on the unscoped adapter the PR dispatch builds
+// (newHostAPI(host, "", "")) it must fail with an actionable "build a
+// repo-scoped adapter" error rather than asking the host to resolve credentials
+// for an empty repo. The guard returns before touching host, so a nil host is
+// never dereferenced.
+func TestHostAPIClient_AddPendingReviewComment_RequiresRepoScope(t *testing.T) {
+	api := newHostAPI(nil, "", "") // mirrors handlePR's shared unscoped adapter
+	_, err := api.AddPendingReviewComment("PRR_1", ghclient.SubmitReviewComment{Path: "a.go", Line: 1, Body: "x"})
+	if err == nil {
+		t.Fatal("expected an error for an unscoped adapter, got nil")
+	}
+	if !strings.Contains(err.Error(), "newHostAPI(host, owner, repo)") {
+		t.Errorf("error %q should point at the repo-scoped construction", err.Error())
+	}
+}

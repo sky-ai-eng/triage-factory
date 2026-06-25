@@ -2,6 +2,7 @@ package gh
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -111,9 +112,17 @@ func (a hostAPIClient) CreatePendingReview(owner, repo string, number int, commi
 }
 
 // AddPendingReviewComment carries no owner/repo (it keys off the review node
-// id), so — like Get/DownloadArtifact — the adapter folds in the owner/repo it
-// was constructed with for the host's per-repo credential resolution.
+// id, matching *github.Client), so — like Get/DownloadArtifact — the adapter
+// folds in the owner/repo it was constructed with for the host's per-repo
+// credential resolution. The shared PR-dispatch adapter is built unscoped
+// (newHostAPI(host, "", "")), so a caller of this op must reconstruct a
+// repo-scoped adapter (as the actions dispatch does); the guard turns the
+// otherwise-confusing "GitHub not configured for /" into an actionable error if
+// that's missed.
 func (a hostAPIClient) AddPendingReviewComment(reviewID string, comment ghclient.SubmitReviewComment) (string, error) {
+	if a.owner == "" || a.repo == "" {
+		return "", errors.New("hostAPIClient.AddPendingReviewComment needs a repo-scoped adapter: construct newHostAPI(host, owner, repo) (this op keys off the review node id and has no owner/repo to forward for credential resolution)")
+	}
 	return a.host.GithubAddPendingReviewComment(context.Background(), a.owner, a.repo, reviewID, comment.Path, comment.Body, comment.Line, comment.StartLine)
 }
 
