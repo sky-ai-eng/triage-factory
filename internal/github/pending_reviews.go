@@ -286,6 +286,10 @@ func (c *Client) GetPendingReview(owner, repo string, number int) (string, []Pen
 		return "", nil, fmt.Errorf("parse pending review response: %w", err)
 	}
 	if resp.Data.Repository == nil || resp.Data.Repository.PullRequest == nil {
+		if len(resp.Errors) > 0 {
+			e := resp.Errors[0]
+			return "", nil, fmt.Errorf("get pending review: GraphQL error (%s): %s", e.Type, e.Message)
+		}
 		return "", nil, nil
 	}
 
