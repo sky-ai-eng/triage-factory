@@ -735,24 +735,11 @@ function Channel({ value, onChange }: { value: RangeKey; onChange: (r: RangeKey)
 }
 
 // ConsoleFrame wraps the bands in the wireframe-industrial framing: rust corner
-// registration ticks (the board's L-bracket DNA, at page scale) over a faint
-// blueprint grid field that fades out toward the bottom.
+// registration ticks (the board's L-bracket DNA, at page scale).
 function ConsoleFrame({ children }: { children: React.ReactNode }) {
   const tick = 'pointer-events-none absolute h-3 w-3 border-accent/40'
   return (
     <div className="relative">
-      <div
-        aria-hidden
-        className="pointer-events-none absolute -inset-x-4 -top-2 bottom-0"
-        style={{
-          backgroundImage:
-            'linear-gradient(var(--color-border-subtle) 1px, transparent 1px), linear-gradient(90deg, var(--color-border-subtle) 1px, transparent 1px)',
-          backgroundSize: '34px 34px',
-          opacity: 0.5,
-          maskImage: 'linear-gradient(to bottom, #000 0, #000 60%, transparent 100%)',
-          WebkitMaskImage: 'linear-gradient(to bottom, #000 0, #000 60%, transparent 100%)',
-        }}
-      />
       <span aria-hidden className={`${tick} -left-3 -top-3 border-l-[1.5px] border-t-[1.5px]`} />
       <span aria-hidden className={`${tick} -right-3 -top-3 border-r-[1.5px] border-t-[1.5px]`} />
       <span aria-hidden className={`${tick} -bottom-3 -left-3 border-b-[1.5px] border-l-[1.5px]`} />
