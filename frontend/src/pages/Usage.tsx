@@ -73,45 +73,63 @@ function withWindow(path: string, since: string): string {
 
 // --- fetch hook ---
 
+// Spend settles sporadically — a run / curator turn / system job finishing every
+// few seconds-to-minutes — so the page POLLS rather than streams; a websocket
+// spend feed would be mostly idle chatter for a once-in-a-while update. 15s feels
+// live for a cost view without hammering the aggregation reads (the /org rollup
+// is a cross-RLS scan). It's the single knob: polling much faster is the point a
+// short-TTL server-side cache would start to earn its keep, but at this cadence
+// the per-org/-month volumes are modest enough to read straight through (matching
+// the backend's deliberate "materialize nothing" stance).
+const POLL_INTERVAL_MS = 15_000
+
 interface UsageFetch<T> {
   data: T | null
+  /** True ONLY on the cold load (no data yet) — drives the skeleton. A refetch
+   *  (window switch, team switch, poll) keeps the last data on screen instead of
+   *  flashing back to a skeleton. */
   loading: boolean
   error: string | null
 }
 
-// useUsageFetch loads one usage endpoint, re-running when the url (window/team)
-// changes or reloadToken is bumped (the page's Refresh). A null url means "don't
-// fetch" (e.g. the team section before a team resolves) and clears to an idle,
-// non-loading state. The actual setState calls live in the `load` callback (not
-// the effect body) — mirrors PRDashboard's fetchAll pattern and keeps the
+// useUsageFetch loads one usage endpoint and keeps it fresh: it refetches when
+// the url (window / team) changes, polls every POLL_INTERVAL_MS while the tab is
+// visible, and refetches immediately when the tab regains focus. Crucially it
+// HOLDS the previous response while a new one is in flight (never clears `data`
+// mid-fetch), so switching the range/team or a background poll updates the
+// numbers in place rather than flashing the whole section. A null url means
+// "don't fetch" (the team section before a team resolves). setState lives in the
+// `load` callback (not the effect body) — mirrors PRDashboard and keeps the
 // set-state-in-effect lint rule happy.
-function useUsageFetch<T>(url: string | null, reloadToken = 0): UsageFetch<T> {
+function useUsageFetch<T>(url: string | null): UsageFetch<T> {
   const [data, setData] = useState<T | null>(null)
-  const [loading, setLoading] = useState<boolean>(url !== null)
+  const [fetching, setFetching] = useState<boolean>(url !== null)
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(
     async (signal: { cancelled: boolean }) => {
       if (!url) {
         setData(null)
-        setLoading(false)
+        setFetching(false)
         setError(null)
         return
       }
-      setLoading(true)
-      setError(null)
+      setFetching(true)
+      // Deliberately do NOT clear data/error here — the last good data stays on
+      // screen until the new response lands, so a refetch never flashes.
       try {
         const res = await fetch(url)
         if (!res.ok) throw new Error(await readError(res, 'Failed to load usage'))
         const body = (await res.json()) as T
         if (!signal.cancelled) {
           setData(body)
-          setLoading(false)
+          setError(null)
+          setFetching(false)
         }
       } catch (err) {
         if (!signal.cancelled) {
           setError(err instanceof Error ? err.message : String(err))
-          setLoading(false)
+          setFetching(false)
         }
       }
     },
@@ -120,13 +138,24 @@ function useUsageFetch<T>(url: string | null, reloadToken = 0): UsageFetch<T> {
 
   useEffect(() => {
     const signal = { cancelled: false }
-    void load(signal)
+    void load(signal) // immediate on mount + whenever the url (window/team) changes
+    // Poll only while visible — a backgrounded tab shouldn't churn the DB — and
+    // refetch the instant it regains focus so it's never stale on return.
+    const poll = () => {
+      if (document.visibilityState === 'visible') void load(signal)
+    }
+    const interval = setInterval(poll, POLL_INTERVAL_MS)
+    document.addEventListener('visibilitychange', poll)
     return () => {
       signal.cancelled = true
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', poll)
     }
-  }, [load, reloadToken])
+  }, [load])
 
-  return { data, loading, error }
+  // loading = cold load only (no data yet). Once we have data, a refetch keeps it
+  // visible, so callers render the data, not a skeleton.
+  return { data, loading: data === null && fetching, error }
 }
 
 // --- formatting + category mapping ---
@@ -170,9 +199,20 @@ function categoryColor(category: string): string {
   return CATEGORY_COLOR[category] ?? 'var(--color-snooze)'
 }
 
+// tokenTitle is the donut-legend hover detail. The parenthetical parts must sum
+// to the stated total, so the breakdown lists every component that goes into it
+// (input + output + the two cache classes, folded into one "cached" figure),
+// omitting any that are zero. Listing only in/out while the total also counted
+// cache tokens made the number disagree with its own breakdown.
 function tokenTitle(b: UsageCategoryBucket): string {
-  const total = b.input_tokens + b.output_tokens + b.cache_read_tokens + b.cache_creation_tokens
-  return `${total.toLocaleString()} tokens (${b.input_tokens.toLocaleString()} in / ${b.output_tokens.toLocaleString()} out)`
+  const cached = b.cache_read_tokens + b.cache_creation_tokens
+  const total = b.input_tokens + b.output_tokens + cached
+  const parts: string[] = []
+  if (b.input_tokens) parts.push(`${b.input_tokens.toLocaleString()} in`)
+  if (b.output_tokens) parts.push(`${b.output_tokens.toLocaleString()} out`)
+  if (cached) parts.push(`${cached.toLocaleString()} cached`)
+  const breakdown = parts.length ? ` (${parts.join(' · ')})` : ''
+  return `${total.toLocaleString()} tokens${breakdown}`
 }
 
 // --- bar-list adapters: each labeled breakdown → a common {key,label,value} ---
@@ -469,33 +509,31 @@ function SectionShell({
   )
 }
 
-// SectionBody picks the right state — error / loading skeleton / zero state /
-// content — so every section handles an empty window the same way (a zero state,
-// never a crash). `empty` is keyed off the total: total === 0 means no settled
-// spend in the window.
+// SectionBody picks the right state. The skeleton (and the full error card) show
+// ONLY before the first successful load — once we have data, it stays on screen
+// across refetches (window/team switch, poll) so the section updates in place
+// instead of flashing. `empty` is keyed off the total: total === 0 means no
+// settled spend in the window → a zero state, never a crash.
 function SectionBody({
-  loading,
+  hasData,
   error,
   empty,
   children,
 }: {
-  loading: boolean
+  hasData: boolean
   error: string | null
   empty: boolean
   children: React.ReactNode
 }) {
-  if (error) return <ErrorState msg={error} />
-  if (loading) return <SkeletonGrid />
-  if (empty) return <ZeroState />
-  return <>{children}</>
+  if (!hasData) return error ? <ErrorState msg={error} /> : <SkeletonGrid />
+  return empty ? <ZeroState /> : <>{children}</>
 }
 
 // --- sections ---
 
-function PersonalSection({ since, reload }: { since: string; reload: number }) {
+function PersonalSection({ since }: { since: string }) {
   const { data, loading, error } = useUsageFetch<UsageMeResponse>(
     withWindow('/api/usage/me', since),
-    reload,
   )
   const total = data?.total_cost_usd ?? 0
 
@@ -505,7 +543,7 @@ function PersonalSection({ since, reload }: { since: string; reload: number }) {
       subtitle="Your delegated runs and curator turns."
       right={<TotalPill value={total} loading={loading} />}
     >
-      <SectionBody loading={loading} error={error} empty={total === 0}>
+      <SectionBody hasData={data !== null} error={error} empty={total === 0}>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <Card title="By category">
             <CategoryDonut data={data?.by_category ?? []} />
@@ -522,15 +560,7 @@ function PersonalSection({ since, reload }: { since: string; reload: number }) {
   )
 }
 
-function TeamSection({
-  adminTeams,
-  since,
-  reload,
-}: {
-  adminTeams: TeamSummary[]
-  since: string
-  reload: number
-}) {
+function TeamSection({ adminTeams, since }: { adminTeams: TeamSummary[]; since: string }) {
   // The picked team, validated against the teams we currently admin every
   // render — if the held id is no longer one of them (org switch, a late
   // /api/teams load that changed the set), fall back to the first. Deriving the
@@ -541,10 +571,14 @@ function TeamSection({
 
   const { data, loading, error } = useUsageFetch<UsageTeamResponse>(
     teamId ? withWindow(`/api/usage/teams/${teamId}`, since) : null,
-    reload,
   )
   const total = data?.total_cost_usd ?? 0
-  const teamName = data?.team_name || adminTeams.find((t) => t.id === teamId)?.name || 'your team'
+  // Name from the locally-known selection FIRST, not the response: while a switch
+  // is in flight we still hold the previous team's data, so data.team_name would
+  // momentarily label the section with the wrong (old) team. teamId always
+  // reflects the current selection, so its local name is correct immediately; the
+  // response name is only a fallback if the local lookup somehow misses.
+  const teamName = adminTeams.find((t) => t.id === teamId)?.name || data?.team_name || 'your team'
 
   return (
     <SectionShell
@@ -559,7 +593,7 @@ function TeamSection({
         </div>
       }
     >
-      <SectionBody loading={loading} error={error} empty={total === 0}>
+      <SectionBody hasData={data !== null} error={error} empty={total === 0}>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           <Card title="By member">
             <CostBars data={userBars(data?.by_user)} emptyLabel="No member spend" />
@@ -582,10 +616,9 @@ function TeamSection({
   )
 }
 
-function OrgSection({ since, reload }: { since: string; reload: number }) {
+function OrgSection({ since }: { since: string }) {
   const { data, loading, error } = useUsageFetch<UsageOrgResponse>(
     withWindow('/api/usage/org', since),
-    reload,
   )
   const total = data?.total_cost_usd ?? 0
 
@@ -595,7 +628,7 @@ function OrgSection({ since, reload }: { since: string; reload: number }) {
       subtitle="Every team, plus curator and system overhead across the org."
       right={<TotalPill value={total} loading={loading} />}
     >
-      <SectionBody loading={loading} error={error} empty={total === 0}>
+      <SectionBody hasData={data !== null} error={error} empty={total === 0}>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           <Card title="By team">
             <CostBars data={teamBars(data?.by_team)} emptyLabel="No team spend" />
@@ -642,6 +675,21 @@ function RangePicker({ value, onChange }: { value: RangeKey; onChange: (r: Range
   )
 }
 
+// LiveDot is the passive replacement for a manual refresh button: the page polls
+// and refetches on focus, so this just signals "this is live" with a gentle
+// pulse — no click, nothing to remember to press.
+function LiveDot() {
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 text-[11px] text-text-tertiary"
+      title={`Updates automatically (~${Math.round(POLL_INTERVAL_MS / 1000)}s)`}
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-claim animate-pulse" />
+      Live
+    </span>
+  )
+}
+
 export default function Usage() {
   // The org rollup gates on org-admin; the team section on the teams the viewer
   // admins (filtered from useTeams, NOT the org rollup — drilling into a non-
@@ -660,7 +708,6 @@ export default function Usage() {
   const adminTeams = teams.filter((t) => t.role === 'admin')
 
   const [range, setRange] = useState<RangeKey>('month')
-  const [reload, setReload] = useState(0)
   const since = sinceParam(range)
 
   return (
@@ -673,22 +720,14 @@ export default function Usage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <LiveDot />
           <RangePicker value={range} onChange={setRange} />
-          <button
-            type="button"
-            onClick={() => setReload((n) => n + 1)}
-            className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors"
-          >
-            Refresh
-          </button>
         </div>
       </div>
 
-      <PersonalSection since={since} reload={reload} />
-      {adminTeams.length > 0 && (
-        <TeamSection adminTeams={adminTeams} since={since} reload={reload} />
-      )}
-      {showOrg && <OrgSection since={since} reload={reload} />}
+      <PersonalSection since={since} />
+      {adminTeams.length > 0 && <TeamSection adminTeams={adminTeams} since={since} />}
+      {showOrg && <OrgSection since={since} />}
     </div>
   )
 }

@@ -69,6 +69,24 @@ const ME_EMPTY: UsageMeResponse = {
   by_day: [],
 }
 
+// A category with non-zero cache tokens, to assert the donut tooltip's total
+// (in + out + cache) agrees with its parenthetical breakdown.
+const ME_TOKENS: UsageMeResponse = {
+  total_cost_usd: 8,
+  by_category: [
+    {
+      category: 'manual',
+      cost: 8,
+      input_tokens: 100,
+      output_tokens: 50,
+      cache_read_tokens: 30,
+      cache_creation_tokens: 20,
+    },
+  ],
+  by_model: [{ model: 'claude-opus-4-8', cost: 8 }],
+  by_day: [{ date: '2026-06-01', cost: 8 }],
+}
+
 const TEAM: UsageTeamResponse = {
   team_id: 't1',
   team_name: 'Platform',
@@ -272,5 +290,46 @@ describe('Usage page', () => {
     expect(await screen.findByText('Org-level')).toBeInTheDocument()
     expect((await screen.findAllByText('System')).length).toBeGreaterThan(0)
     expect(await screen.findByText('$100.00')).toBeInTheDocument()
+  })
+
+  it('auto-updates: shows a live indicator and no refresh button', async () => {
+    roleMock.isAdmin = false
+    teamsMock.teams = []
+    stubUsageFetch({ '/api/usage/me': ME })
+
+    render(<Usage />)
+
+    await screen.findByText('$12.50')
+    expect(screen.getByText('Live')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /refresh/i })).not.toBeInTheDocument()
+  })
+
+  it('team subtitle uses the selected team name, not the (possibly stale) response', async () => {
+    // Holding the previous response while a switch is in flight means the
+    // response team_name can lag the selection — so the label must come from the
+    // locally-known team. Here the response name differs to prove which wins.
+    roleMock.isAdmin = false
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/teams/t1': { ...TEAM, team_name: 'STALE-NAME' },
+    })
+
+    render(<Usage />)
+
+    expect(await screen.findByText(/Spend across Platform/)).toBeInTheDocument()
+    expect(screen.queryByText(/STALE-NAME/)).not.toBeInTheDocument()
+  })
+
+  it('category tooltip total matches its in/out/cache breakdown', async () => {
+    roleMock.isAdmin = false
+    teamsMock.teams = []
+    stubUsageFetch({ '/api/usage/me': ME_TOKENS })
+
+    render(<Usage />)
+
+    // 100 in + 50 out + (30 read + 20 creation = 50 cached) = 200 — and the
+    // breakdown parts sum to that stated total.
+    expect(await screen.findByTitle('200 tokens (100 in · 50 out · 50 cached)')).toBeInTheDocument()
   })
 })
