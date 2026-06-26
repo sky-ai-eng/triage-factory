@@ -51,13 +51,19 @@ type RunSpendFixture struct {
 }
 
 // CuratorSpendFixture stages one curator_requests row. Status "" defaults to
-// "completed" in the seeder.
+// "completed" in the seeder. TeamID selects which project the curator turn is
+// attributed to (TFAC-476): "" → a null-team (org/private) project, so the
+// snapshotted team_id is NULL; non-empty → the fixture's team-scoped project, so
+// the snapshot carries that team. The per-backend seeder owns mapping this to a
+// project and snapshotting team_id from it via (SELECT team_id FROM projects …),
+// exactly as production does — proving project team → row team → view.
 type CuratorSpendFixture struct {
 	CreatorUserID string
 	Cost          float64
 	Tokens        SpendTokens
 	Status        string
 	CreatedAt     time.Time
+	TeamID        string
 }
 
 // SystemSpendFixture stages one system_llm_runs row.
@@ -113,9 +119,15 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			ActorAgentID: fx.AgentID, Model: "claude-haiku-4-5", Cost: spendCostPtr(0.25),
 			Tokens: SpendTokens{10, 20, 30, 40}, Status: "completed", StartedAt: t2,
 		})
+		// Curator on a TEAM-visible project → team_id snapshotted from the project.
 		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{
-			CreatorUserID: fx.UserID, Cost: 0.75,
+			CreatorUserID: fx.UserID, Cost: 0.75, TeamID: fx.TeamID,
 			Tokens: SpendTokens{11, 22, 33, 44}, Status: "completed", CreatedAt: t3,
+		})
+		// Curator on a null-team (org/private) project → team_id NULL (TFAC-476).
+		orgCuratorID := fx.Seeder.Curator(t, CuratorSpendFixture{
+			CreatorUserID: fx.UserID, Cost: 0.10,
+			Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t3,
 		})
 		systemID := fx.Seeder.System(t, SystemSpendFixture{
 			Job: "scorer", Model: "claude-haiku-4-5", Cost: 0.05,
@@ -127,8 +139,8 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			t.Fatalf("ListSpend: %v", err)
 		}
 		byID := indexSpend(t, rows)
-		if len(rows) != 4 {
-			t.Fatalf("ListSpend returned %d rows, want 4 (one per seeded source row)", len(rows))
+		if len(rows) != 5 {
+			t.Fatalf("ListSpend returned %d rows, want 5 (one per seeded source row)", len(rows))
 		}
 
 		// Manual run → category 'manual', full passthrough.
@@ -155,11 +167,12 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertPtrEq(t, "event.team_id", er.TeamID, fx.TeamID)
 		assertCost(t, "event.cost", er.TotalCostUSD, 0.25)
 
-		// Curator → category 'curator'; org-level (no team), no model, no agent.
+		// Curator on a team project → category 'curator'; team_id snapshotted from
+		// the project (TFAC-476); no model, no agent.
 		cr := byID[curatorID]
 		assertEq(t, "curator.source", cr.Source, domain.SpendSourceCurator)
 		assertEq(t, "curator.category", cr.Category, domain.SpendCategoryCurator)
-		assertNilStr(t, "curator.team_id", cr.TeamID)
+		assertPtrEq(t, "curator.team_id", cr.TeamID, fx.TeamID)
 		assertNilStr(t, "curator.subtype", cr.Subtype)
 		assertNilStr(t, "curator.model", cr.Model)
 		assertNilStr(t, "curator.actor_agent_id", cr.ActorAgentID)
@@ -169,6 +182,13 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		if !cr.OccurredAt.Truncate(time.Second).Equal(t3) {
 			t.Errorf("curator.occurred_at = %s, want %s (curator_requests.created_at)", cr.OccurredAt, t3)
 		}
+
+		// Curator on a null-team (org/private) project → team_id NULL: still
+		// creator-visible, just absent from team dashboards (TFAC-476).
+		ocr := byID[orgCuratorID]
+		assertEq(t, "org-curator.category", ocr.Category, domain.SpendCategoryCurator)
+		assertNilStr(t, "org-curator.team_id", ocr.TeamID)
+		assertPtrEq(t, "org-curator.creator_user_id", ocr.CreatorUserID, fx.UserID)
 
 		// System → category 'system_overhead'; job carried as subtype; no team,
 		// no creator, no agent; model present.
@@ -317,14 +337,18 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertCost(t, "system.win.autonomous", win[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
 	})
 
-	// TeamID filter narrows to one team's runs. Curator + system carry a NULL
-	// team_id, so a non-nil TeamID excludes them — the team dashboard sees its
-	// own runs, not org-level overhead.
+	// TeamID filter narrows to one team's spend — two-sided: it INCLUDES
+	// team-scoped runs AND team-attributed curator (its project carries the team,
+	// TFAC-476), and EXCLUDES null-team curator + system (NULL team_id) so the team
+	// dashboard sees its own work, not org-level overhead or another project's.
 	t.Run("ListSpend_TeamFilter", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()
 
 		runID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
+		// Team-attributed curator (project carries fx.TeamID) → included.
+		teamCuratorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.5, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
+		// Null-team curator (org/private project) + system → NULL team_id, excluded.
 		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.5, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
 		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
 
@@ -333,8 +357,12 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		if err != nil {
 			t.Fatalf("ListSpend team filter: %v", err)
 		}
-		if len(got) != 1 || got[0].SourceID != runID {
-			t.Fatalf("TeamID filter = %d rows, want exactly the run %s (curator/system have NULL team_id)", len(got), runID)
+		gotIDs := map[string]bool{}
+		for _, r := range got {
+			gotIDs[r.SourceID] = true
+		}
+		if len(got) != 2 || !gotIDs[runID] || !gotIDs[teamCuratorID] {
+			t.Fatalf("TeamID filter = %d rows %v, want exactly the run %s + team-attributed curator %s (null-team curator/system excluded)", len(got), gotIDs, runID, teamCuratorID)
 		}
 
 		other := "00000000-0000-0000-0000-0000000009ff"

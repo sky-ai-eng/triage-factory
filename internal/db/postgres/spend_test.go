@@ -28,7 +28,7 @@ func TestSpendStore_Postgres(t *testing.T) {
 	dbtest.RunSpendStoreConformance(t, func(t *testing.T) dbtest.SpendStoreFixture {
 		t.Helper()
 		h.Reset(t)
-		orgID, userID, teamID, agentID, projectID := seedPgSpendOrg(t, h)
+		orgID, userID, teamID, agentID, projectID, nullTeamProjectID := seedPgSpendOrg(t, h)
 		// admin-on-both: bypass RLS for SQL-shape coverage (the FK + NOT NULL
 		// + CHECK constraints still apply, so it's the same SQL the app pool
 		// runs). RLS is exercised separately in TestSpendStore_Postgres_RLS_*.
@@ -39,7 +39,7 @@ func TestSpendStore_Postgres(t *testing.T) {
 			TeamID:  teamID,
 			UserID:  userID,
 			AgentID: agentID,
-			Seeder:  newPgSpendSeeder(h.AdminDB, orgID, projectID),
+			Seeder:  newPgSpendSeeder(h.AdminDB, orgID, projectID, nullTeamProjectID),
 		}
 	})
 }
@@ -71,15 +71,22 @@ func TestSpendStore_Postgres_RLS_ViewSecurityInvoker(t *testing.T) {
 	pgtest.AddOrgMember(t, h, bob, orgA, teamB, "member", "member")
 	orgB, carol, _ := pgtest.SeedOrgWithUser(t, h, "carol")
 
-	// orgA fixtures: an agent + a project the curator rows FK into.
+	// orgA fixtures: an agent + a team project the runs/curator rows FK into, plus
+	// a null-team org project. The RLS curator fixtures below use the default
+	// (null-team) project — curator visibility is creator-scoped regardless of
+	// team_id, so the snapshot value (NULL here) doesn't affect these assertions.
 	agentA := uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB, `INSERT INTO agents (id, org_id) VALUES ($1, $2)`, agentA, orgA)
 	projectA := uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB,
 		`INSERT INTO projects (id, org_id, creator_user_id, team_id, name, visibility) VALUES ($1, $2, $3, $4, 'spend-rls', 'team')`,
 		projectA, orgA, alice, teamA)
+	projectAOrg := uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO projects (id, org_id, creator_user_id, team_id, name, visibility) VALUES ($1, $2, $3, NULL, 'spend-rls-org', 'org')`,
+		projectAOrg, orgA, alice)
 
-	seeder := newPgSpendSeeder(h.AdminDB, orgA, projectA)
+	seeder := newPgSpendSeeder(h.AdminDB, orgA, projectA, projectAOrg)
 	runA := seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
 	runB := seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
 	curatorAlice := seeder.Curator(t, dbtest.CuratorSpendFixture{CreatorUserID: alice, Cost: 0.3, Tokens: dbtest.SpendTokens{Input: 3, Output: 3, CacheRead: 3, CacheCreation: 3}, Status: "completed", CreatedAt: spendTestTime})
@@ -140,7 +147,10 @@ func TestSpendStore_Postgres_SpendByCategorySystem_BypassesRLS(t *testing.T) {
 		`INSERT INTO projects (id, org_id, creator_user_id, team_id, name, visibility) VALUES ($1, $2, $3, $4, 'spend-sys', 'team')`,
 		projectA, orgA, alice, teamA)
 
-	seeder := newPgSpendSeeder(h.AdminDB, orgA, projectA)
+	// Runs only (team_id set directly on each run), so the seeder's curator
+	// project args (team-attributed / null-team, TFAC-476) are never exercised —
+	// pass projectA for both.
+	seeder := newPgSpendSeeder(h.AdminDB, orgA, projectA, projectA)
 	seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
 	seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
 
@@ -212,7 +222,7 @@ var spendTestTime = time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
 // seedPgSpendOrg bootstraps an org + user + default team + agent + project for
 // the conformance fixture, all via the admin pool. Returns the ids the seeder
 // and the suite thread through the three source tables.
-func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, agentID, projectID string) {
+func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, agentID, projectID, nullTeamProjectID string) {
 	t.Helper()
 	orgID, userID, teamID = pgtest.SeedOrgWithUser(t, h, "spend-"+uuid.NewString()[:8])
 	agentID = uuid.New().String()
@@ -221,6 +231,12 @@ func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, age
 	pgtest.MustExec(t, h.AdminDB,
 		`INSERT INTO projects (id, org_id, creator_user_id, team_id, name, visibility) VALUES ($1, $2, $3, $4, 'spend-test', 'team')`,
 		projectID, orgID, userID, teamID)
+	// A null-team, org-visibility project for the curator null-team case (TFAC-476):
+	// team_id NULL is valid for visibility <> 'team'.
+	nullTeamProjectID = uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO projects (id, org_id, creator_user_id, team_id, name, visibility) VALUES ($1, $2, $3, NULL, 'spend-test-org', 'org')`,
+		nullTeamProjectID, orgID, userID)
 	return
 }
 
@@ -228,7 +244,7 @@ func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, age
 // pool. origin='manual' satisfies runs_origin_requires_parents without a
 // blueprint graph; empty CreatorUserID/ActorAgentID and a nil Cost map to SQL
 // NULL (uuid columns reject empty strings; the in-flight run carries NULL cost).
-func newPgSpendSeeder(conn *sql.DB, orgID, projectID string) dbtest.SpendSeeder {
+func newPgSpendSeeder(conn *sql.DB, orgID, teamProjectID, nullTeamProjectID string) dbtest.SpendSeeder {
 	return dbtest.SpendSeeder{
 		Run: func(t *testing.T, f dbtest.RunSpendFixture) string {
 			t.Helper()
@@ -254,13 +270,21 @@ func newPgSpendSeeder(conn *sql.DB, orgID, projectID string) dbtest.SpendSeeder 
 			if status == "" {
 				status = "completed"
 			}
+			// Non-empty TeamID → the team-scoped project (snapshot carries its team);
+			// empty → the null-team project (snapshot is NULL). team_id is captured
+			// via the same (SELECT team_id FROM projects WHERE id = ...) subquery
+			// production uses, so this proves project team → row team → view (TFAC-476).
+			projID := nullTeamProjectID
+			if f.TeamID != "" {
+				projID = teamProjectID
+			}
 			if _, err := conn.Exec(`
 				INSERT INTO curator_requests
-					(id, org_id, creator_user_id, project_id, status, user_input, cost_usd,
+					(id, org_id, creator_user_id, project_id, team_id, status, user_input, cost_usd,
 					 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-				VALUES ($1, $2, $3, $4, $5, 'spend-test', $6, $7, $8, $9, $10, $11)
+				VALUES ($1, $2, $3, $4, (SELECT team_id FROM projects WHERE id = $4), $5, 'spend-test', $6, $7, $8, $9, $10, $11)
 			`,
-				id, orgID, f.CreatorUserID, projectID, status, f.Cost,
+				id, orgID, f.CreatorUserID, projID, status, f.Cost,
 				f.Tokens.Input, f.Tokens.Output, f.Tokens.CacheRead, f.Tokens.CacheCreation, f.CreatedAt,
 			); err != nil {
 				t.Fatalf("seed curator_request: %v", err)

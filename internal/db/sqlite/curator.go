@@ -40,10 +40,15 @@ func (s *curatorStore) CreateRequest(ctx context.Context, orgID, projectID, crea
 		return "", err
 	}
 	id := uuid.New().String()
+	// team_id is snapshotted from the project at creation (point-in-time, like
+	// runs.team_id) so curator spend rolls into the project's team; the llm_spend
+	// view reads the column directly. Any future curator INSERT MUST keep this
+	// (SELECT team_id FROM projects WHERE id = ?) subquery — projectID is bound
+	// twice for the correlated lookup (TFAC-476).
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO curator_requests (id, project_id, status, user_input, created_at, creator_user_id)
-		VALUES (?, ?, 'queued', ?, ?, ?)
-	`, id, projectID, userInput, time.Now().UTC(), creatorUserID)
+		INSERT INTO curator_requests (id, project_id, team_id, status, user_input, created_at, creator_user_id)
+		VALUES (?, ?, (SELECT team_id FROM projects WHERE id = ?), 'queued', ?, ?, ?)
+	`, id, projectID, projectID, userInput, time.Now().UTC(), creatorUserID)
 	if err != nil {
 		return "", err
 	}

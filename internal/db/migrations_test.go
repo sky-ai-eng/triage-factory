@@ -321,3 +321,88 @@ func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
 		t.Errorf("backfilled tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
 	}
 }
+
+// TestMigrate_CuratorTeamIDBackfillAndView pins the TFAC-476 SQLite migration:
+// curator_requests gains a nullable team_id, existing rows backfill from their
+// project's team (team project → that team; null-team org/private project →
+// NULL), and the recreated llm_spend view surfaces team_id on the curator arm.
+// Together these are the migration's acceptance: applies on an existing DB,
+// backfills, and the view reads the project's team for team-visible projects and
+// NULL otherwise.
+func TestMigrate_CuratorTeamIDBackfillAndView(t *testing.T) {
+	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+
+	goose.SetBaseFS(migrationsSQLiteFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("set dialect: %v", err)
+	}
+
+	// Migrate up to the migration *before* the curator team_id one, so
+	// curator_requests does not yet have team_id and llm_spend's curator arm
+	// still hardcodes NULL.
+	const priorVersion = 202606260005
+	if err := goose.UpTo(database, "migrations-sqlite", priorVersion); err != nil {
+		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
+	}
+
+	const teamID = "00000000-0000-0000-0000-000000000010"
+	// A team-visible project (carries a team) and a null-team org-visible project.
+	// org_id / creator_user_id fall to their NOT NULL DEFAULT sentinels.
+	if _, err := database.Exec(`
+		INSERT INTO projects (id, name, team_id, visibility) VALUES
+			('pteam', 'team-proj', ?,    'team'),
+			('porg',  'org-proj',  NULL, 'org')
+	`, teamID); err != nil {
+		t.Fatalf("seed projects: %v", err)
+	}
+	// Two curator requests that predate the migration (no team_id column yet).
+	if _, err := database.Exec(`
+		INSERT INTO curator_requests (id, project_id, status, user_input) VALUES
+			('ct', 'pteam', 'done', 'hi'),
+			('co', 'porg',  'done', 'hi')
+	`); err != nil {
+		t.Fatalf("seed curator_requests: %v", err)
+	}
+
+	// Apply the rest (the team_id migration: ALTER + backfill + view recreate).
+	if err := goose.Up(database, "migrations-sqlite"); err != nil {
+		t.Fatalf("goose Up: %v", err)
+	}
+
+	// Column backfilled from each row's project team.
+	assertCuratorTeamID(t, database,
+		`SELECT team_id FROM curator_requests WHERE id = 'ct'`, teamID)
+	assertCuratorTeamID(t, database,
+		`SELECT team_id FROM curator_requests WHERE id = 'co'`, "")
+
+	// View surfaces the same team_id on the curator arm.
+	assertCuratorTeamID(t, database,
+		`SELECT team_id FROM llm_spend WHERE source = 'curator' AND source_id = 'ct'`, teamID)
+	assertCuratorTeamID(t, database,
+		`SELECT team_id FROM llm_spend WHERE source = 'curator' AND source_id = 'co'`, "")
+}
+
+// assertCuratorTeamID runs a single-row team_id query and checks it against want
+// ("" means SQL NULL is expected).
+func assertCuratorTeamID(t *testing.T, database *sql.DB, query, want string) {
+	t.Helper()
+	var got sql.NullString
+	if err := database.QueryRow(query).Scan(&got); err != nil {
+		t.Fatalf("query %q: %v", query, err)
+	}
+	if want == "" {
+		if got.Valid {
+			t.Errorf("%q = %q, want NULL", query, got.String)
+		}
+		return
+	}
+	if !got.Valid || got.String != want {
+		t.Errorf("%q = %v (valid=%t), want %q", query, got.String, got.Valid, want)
+	}
+}

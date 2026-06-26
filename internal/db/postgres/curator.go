@@ -41,10 +41,15 @@ var _ db.CuratorStore = (*curatorStore)(nil)
 
 func (s *curatorStore) CreateRequest(ctx context.Context, orgID, projectID, creatorUserID, userInput string) (string, error) {
 	var id string
+	// team_id is snapshotted from the project at creation (point-in-time, like
+	// runs.team_id) so curator spend rolls into the project's team; the
+	// security_invoker llm_spend view reads the column directly. Any future
+	// curator INSERT MUST keep this (SELECT team_id FROM projects WHERE id = ...)
+	// subquery (TFAC-476). $2 (project_id) is reused for the correlated lookup.
 	err := s.q.QueryRowContext(ctx, `
 		INSERT INTO curator_requests
-			(org_id, project_id, creator_user_id, status, user_input)
-		VALUES ($1, $2, $3, 'queued', $4)
+			(org_id, project_id, team_id, creator_user_id, status, user_input)
+		VALUES ($1, $2, (SELECT team_id FROM projects WHERE id = $2), $3, 'queued', $4)
 		RETURNING id::text
 	`, orgID, projectID, creatorUserID, userInput).Scan(&id)
 	if err != nil {
