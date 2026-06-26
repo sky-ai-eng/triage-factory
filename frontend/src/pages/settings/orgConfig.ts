@@ -107,16 +107,22 @@ export async function fetchOrgSettings(): Promise<OrgSettingsData | null> {
   return res.ok ? ((await res.json()) as OrgSettingsData) : null
 }
 
-// dailyCapToNumber converts the daily-cap text input to the wire number.
-// Blank → 0 ("no cap"). A non-negative number passes through. A negative or
-// unparseable value passes through as-is (negative) / NaN→0 so the backend's
-// own `>= 0` validation is the single source of truth: a real negative gets a
-// 400 the user sees, rather than being silently coerced to "no cap".
-function dailyCapToNumber(raw: string): number {
+// dailyCapToWire converts the daily-cap text input to the wire value for
+// max_daily_cost_usd. The field is an <input type="number">, so in practice it
+// only yields an empty string or a valid numeric string:
+//   - blank        → 0 (an explicit "no cap" clear)
+//   - valid number → passed straight through, fractions and all. A negative is
+//     left intact so the backend's `>= 0` check rejects it with a 400 the user
+//     sees (the input's min="0" is just the client-side first line of defense).
+//   - unparseable  → undefined, which JSON.stringify drops, so the field is
+//     omitted and a previously-stored cap is left UNTOUCHED rather than silently
+//     cleared to 0. Effectively unreachable from a number input; the guard just
+//     makes the "never stomp the cap on garbage" property explicit.
+function dailyCapToWire(raw: string): number | undefined {
   const trimmed = raw.trim()
   if (trimmed === '') return 0
   const n = Number(trimmed)
-  return Number.isFinite(n) ? n : 0
+  return Number.isFinite(n) ? n : undefined
 }
 
 // saveOrgConfig persists the org-level field group via POST
@@ -139,7 +145,7 @@ export async function saveOrgConfig(
       jira_pat: form.jira_pat || undefined,
       jira_poll_interval: form.jira_poll_interval,
       max_llm_model_tier: form.max_llm_model_tier,
-      max_daily_cost_usd: dailyCapToNumber(form.max_daily_cost_usd),
+      max_daily_cost_usd: dailyCapToWire(form.max_daily_cost_usd),
     }),
   })
   if (!res.ok) {

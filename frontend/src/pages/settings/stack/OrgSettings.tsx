@@ -563,7 +563,7 @@ export default function OrgSettings({
               <input
                 type="number"
                 min="0"
-                step="1"
+                step="0.01"
                 inputMode="decimal"
                 placeholder="No cap"
                 value={draft.org.max_daily_cost_usd}
