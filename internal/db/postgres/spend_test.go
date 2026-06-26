@@ -159,7 +159,7 @@ func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, age
 // newPgSpendSeeder owns the raw INSERT shape for each source table on the admin
 // pool. origin='manual' satisfies runs_origin_requires_parents without a
 // blueprint graph; empty CreatorUserID/ActorAgentID and a nil Cost map to SQL
-// NULL (the uuid columns reject ”; the in-flight run carries NULL cost).
+// NULL (uuid columns reject empty strings; the in-flight run carries NULL cost).
 func newPgSpendSeeder(conn *sql.DB, orgID, projectID string) dbtest.SpendSeeder {
 	return dbtest.SpendSeeder{
 		Run: func(t *testing.T, f dbtest.RunSpendFixture) string {
