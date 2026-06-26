@@ -16,12 +16,14 @@
 -- total. EVERY terminal write does this roll-up, not just normal completion:
 -- the streaming sink writes per-message tokens as the turn runs, so a run or
 -- request that ends by cancel or infra-failure has real token rows that must
--- be reflected rather than stranded at 0. So the SUM lives in Complete /
--- CompleteRequest AND in MarkFailedIfActive / MarkCancelledIfActive /
--- MarkRequestCancelledIfActive. (MarkDiscarded is the lone exception — it only
--- acts on pending_approval rows, already rolled up at completion.) Net: these
--- columns are trustworthy for every terminal state, so the TFAC-472 spend view
--- reads them natively without joining the message tables.
+-- be reflected rather than stranded at 0. So the SUM lives in every terminal
+-- write: normal completion (Complete / CompleteRequest), cancel + infra-fail
+-- (MarkCancelledIfActive / MarkFailedIfActive / MarkRequestCancelledIfActive),
+-- and the boot-time orphan sweeps (ReconcileOrphanedRuns /
+-- CancelOrphanedNonTerminalRequests). MarkDiscarded is the lone exception — it
+-- only acts on pending_approval rows, already rolled up at completion. Net:
+-- these columns are trustworthy for every terminal state, so the TFAC-472 spend
+-- view reads them natively without joining the message tables.
 ALTER TABLE runs ADD COLUMN input_tokens          INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE runs ADD COLUMN output_tokens         INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE runs ADD COLUMN cache_read_tokens     INTEGER NOT NULL DEFAULT 0;

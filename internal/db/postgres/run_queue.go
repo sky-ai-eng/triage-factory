@@ -143,12 +143,23 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 	// Boot self-heal — see RunQueueStore.ReconcileOrphanedRuns and the
 	// SQLite mirror. Admin pool (BYPASSRLS): a cross-org system sweep with no
 	// per-user identity, the same posture as ResetProcessingRuns.
+	//
+	// Roll up the token cache here too (correlated SUM per row) — a 'running'
+	// child stranded under a terminal blueprint may have streamed run_messages,
+	// so this terminal write must reflect them rather than leave the columns at
+	// 0. Same every-terminal-write invariant as the cancel paths; correlates on
+	// the unique run_id, so no org scoping is needed on this cross-tenant sweep
+	// (TFAC-473).
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE runs
 		SET status = 'cancelled',
 		    completed_at = COALESCE(completed_at, now()),
 		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
-		    result_summary = COALESCE(NULLIF(result_summary, ''), $1)
+		    result_summary = COALESCE(NULLIF(result_summary, ''), $1),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = runs.id),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = runs.id),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = runs.id),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE run_id = runs.id)
 		WHERE status NOT IN (`+runTerminalStatusesSQL+`)
 		  AND blueprint_run_id IN (
 		      SELECT id FROM blueprint_runs

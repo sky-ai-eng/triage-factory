@@ -591,6 +591,18 @@ func TestCuratorStore_SQLite_CancelOrphanedNonTerminalRequests(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("MarkRequestRunning: %v", err)
 	}
+	// The running request streamed a token-bearing message before the "crash";
+	// the boot sweep must roll it up onto the cancelled row (TFAC-473).
+	ip := func(n int) *int { return &n }
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
+		_, err := ts.Curator.InsertMessage(ctx, runmode.LocalDefaultOrgID, &domain.CuratorMessage{
+			RequestID: runningID, Role: "assistant", Subtype: "text", Content: "partial",
+			InputTokens: ip(100), OutputTokens: ip(20), CacheReadTokens: ip(1000), CacheCreationTokens: ip(7),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
 
 	queuedID := create("queued")
 
@@ -632,6 +644,20 @@ func TestCuratorStore_SQLite_CancelOrphanedNonTerminalRequests(t *testing.T) {
 	}
 	if got := getStatus(doneID); got != "done" {
 		t.Errorf("done row status = %q, want done (untouched)", got)
+	}
+	// The running orphan's token cache rolled up from curator_messages in the
+	// same sweep; the queued orphan had no messages, so it stays 0 (TFAC-473).
+	{
+		var in, out, cr, cc int
+		if err := conn.QueryRow(`
+			SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+			FROM curator_requests WHERE id = ?
+		`, runningID).Scan(&in, &out, &cr, &cc); err != nil {
+			t.Fatalf("read running tokens: %v", err)
+		}
+		if in != 100 || out != 20 || cr != 1000 || cc != 7 {
+			t.Errorf("running orphan token cols = (%d,%d,%d,%d), want (100,20,1000,7) — boot sweep did not roll up curator_messages", in, out, cr, cc)
+		}
 	}
 }
 

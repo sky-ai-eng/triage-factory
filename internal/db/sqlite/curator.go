@@ -394,11 +394,20 @@ func (s *curatorStore) DeletePendingContextForSession(ctx context.Context, orgID
 }
 
 func (s *curatorStore) CancelOrphanedNonTerminalRequests(ctx context.Context) (int, error) {
+	// Roll up the token cache here too (correlated SUM per row) — a 'running'
+	// request stranded by a crash may have streamed curator_messages, so the
+	// boot sweep must reflect them rather than leave the columns at 0. Same
+	// every-terminal-write invariant as the cancel paths; 'queued' rows simply
+	// have no messages and sum to 0 (TFAC-473).
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE curator_requests
 		SET status = 'cancelled',
 		    error_msg = COALESCE(error_msg, 'process restarted'),
-		    finished_at = COALESCE(finished_at, ?)
+		    finished_at = COALESCE(finished_at, ?),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = curator_requests.id),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = curator_requests.id),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = curator_requests.id),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = curator_requests.id)
 		WHERE status IN ('queued', 'running')
 	`, time.Now().UTC())
 	if err != nil {

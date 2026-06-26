@@ -135,12 +135,21 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 	// forever — the dispatcher treats it as live work and its worktree pins the
 	// feature branch, requeuing any sibling fetch into a forever-failing loop.
 	// Heals DBs broken before the atomic cancel in MarkRunStatus landed.
+	//
+	// Roll up the token cache here too (correlated SUM per row) — a 'running'
+	// child stranded under a terminal blueprint may have streamed run_messages,
+	// so this terminal write must reflect them rather than leave the columns at
+	// 0. Same every-terminal-write invariant as the cancel paths (TFAC-473).
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE runs
 		SET status = 'cancelled',
 		    completed_at = COALESCE(completed_at, ?),
 		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
-		    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
+		    result_summary = COALESCE(NULLIF(result_summary, ''), ?),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = runs.id),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = runs.id),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = runs.id),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE run_id = runs.id)
 		WHERE status NOT IN (`+runTerminalStatusesSQL+`)
 		  AND blueprint_run_id IN (
 		      SELECT id FROM blueprint_runs
