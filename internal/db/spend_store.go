@@ -30,8 +30,13 @@ type SpendStore interface {
 	ListSpend(ctx context.Context, orgID string, opts domain.SpendFilter) ([]domain.SpendRow, error)
 
 	// SpendByCategory aggregates cost + the four token totals per category for
-	// orgID over [since, now), one bucket per category present. This is the
-	// dashboard's headline query and the cheap "org spend today" the safety cap
-	// will key on.
-	SpendByCategory(ctx context.Context, orgID string, since time.Time) ([]domain.SpendBucket, error)
+	// orgID over the window [since, until), one bucket per category present.
+	// Both bounds are optional, matching SpendFilter: a zero since imposes no
+	// lower bound (all-time), a zero until no upper bound (up to now). So
+	// SpendByCategory(…, since, time.Time{}) is the open "spend since X" the
+	// dashboard headline + safety cap key on, and a non-zero until gives the
+	// closed billing-period window (e.g. all of March) that reconciles against
+	// the Anthropic bill. This is the cheap aggregate; ListSpend is the
+	// row-level drill-down.
+	SpendByCategory(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error)
 }

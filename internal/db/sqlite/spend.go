@@ -84,9 +84,24 @@ func (s *spendStore) ListSpend(ctx context.Context, orgID string, opts domain.Sp
 	return out, rows.Err()
 }
 
-func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since time.Time) ([]domain.SpendBucket, error) {
+func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
+	}
+	// Both bounds optional (see SpendFilter): drop the clause on a zero time.
+	// datetime() normalizes both sides, same as ListSpend. SQLite REAL is always
+	// 8-byte, so SUM accumulates in double precision natively — no cast needed
+	// (the Postgres twin casts the addends to float8 to match this).
+	var where strings.Builder
+	where.WriteString(`WHERE org_id = ?`)
+	args := []any{orgID}
+	if !since.IsZero() {
+		where.WriteString(` AND datetime(occurred_at) >= datetime(?)`)
+		args = append(args, since)
+	}
+	if !until.IsZero() {
+		where.WriteString(` AND datetime(occurred_at) < datetime(?)`)
+		args = append(args, until)
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT category,
@@ -95,11 +110,10 @@ func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since ti
 		       SUM(output_tokens)         AS output_tokens,
 		       SUM(cache_read_tokens)     AS cache_read_tokens,
 		       SUM(cache_creation_tokens) AS cache_creation_tokens
-		FROM llm_spend
-		WHERE org_id = ? AND datetime(occurred_at) >= datetime(?)
+		FROM llm_spend `+where.String()+`
 		GROUP BY category
 		ORDER BY category
-	`, orgID, since)
+	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("spend by category: %w", err)
 	}

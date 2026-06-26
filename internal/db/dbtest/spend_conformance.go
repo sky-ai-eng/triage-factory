@@ -98,7 +98,6 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 	t2 := time.Date(2026, 6, 20, 11, 0, 0, 0, time.UTC)
 	t3 := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	t4 := time.Date(2026, 6, 20, 13, 0, 0, 0, time.UTC)
-	epoch := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	t.Run("OneRowPerSource_Derivations", func(t *testing.T) {
 		fx := factory(t)
@@ -254,14 +253,9 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.70, Tokens: SpendTokens{7, 7, 7, 7}, Status: "completed", CreatedAt: t3})
 		fx.Seeder.System(t, SystemSpendFixture{Job: "classifier", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t4})
 
-		buckets, err := fx.Store.SpendByCategory(ctx, fx.OrgID, epoch)
-		if err != nil {
-			t.Fatalf("SpendByCategory: %v", err)
-		}
-		byCat := map[string]domain.SpendBucket{}
-		for _, b := range buckets {
-			byCat[b.Category] = b
-		}
+		// All-time (zero since + zero until → both bounds dropped).
+		allBuckets, err := fx.Store.SpendByCategory(ctx, fx.OrgID, time.Time{}, time.Time{})
+		byCat := spendByCat(t, allBuckets, err)
 		assertCost(t, "manual.sum", byCat[domain.SpendCategoryManual].TotalCostUSD, 3.00)
 		assertEq(t, "manual.input", byCat[domain.SpendCategoryManual].InputTokens, 300)
 		assertEq(t, "manual.output", byCat[domain.SpendCategoryManual].OutputTokens, 30)
@@ -271,6 +265,18 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertEq(t, "curator.input", byCat[domain.SpendCategoryCurator].InputTokens, 10)
 		assertCost(t, "system.sum", byCat[domain.SpendCategorySystemOverhead].TotalCostUSD, 0.05)
 		assertEq(t, "system.cache_creation", byCat[domain.SpendCategorySystemOverhead].CacheCreationTokens, 1)
+
+		// Closed window [t2, t4) — the billing-period shape. Excludes the t1
+		// manual run (since lower bound) and the t4 system row (until upper
+		// bound, exclusive); keeps the t2 runs + t3 curator turns.
+		winBuckets, err := fx.Store.SpendByCategory(ctx, fx.OrgID, t2, t4)
+		win := spendByCat(t, winBuckets, err)
+		assertCost(t, "win.manual", win[domain.SpendCategoryManual].TotalCostUSD, 2.00) // only the t2 run, not t1
+		assertCost(t, "win.autonomous", win[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
+		assertCost(t, "win.curator", win[domain.SpendCategoryCurator].TotalCostUSD, 1.00)
+		if _, ok := win[domain.SpendCategorySystemOverhead]; ok {
+			t.Errorf("window [t2,t4) included a system_overhead bucket; the t4 row should be excluded by the exclusive until bound")
+		}
 	})
 
 	// TeamID filter narrows to one team's runs. Curator + system carry a NULL
@@ -369,6 +375,19 @@ func indexSpend(t *testing.T, rows []domain.SpendRow) map[string]domain.SpendRow
 	m := make(map[string]domain.SpendRow, len(rows))
 	for _, r := range rows {
 		m[r.SourceID] = r
+	}
+	return m
+}
+
+// spendByCat fails on error and indexes SpendByCategory buckets by category.
+func spendByCat(t *testing.T, buckets []domain.SpendBucket, err error) map[string]domain.SpendBucket {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("SpendByCategory: %v", err)
+	}
+	m := make(map[string]domain.SpendBucket, len(buckets))
+	for _, b := range buckets {
+		m[b.Category] = b
 	}
 	return m
 }

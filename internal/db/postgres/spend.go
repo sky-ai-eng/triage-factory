@@ -82,19 +82,39 @@ func (s *spendStore) ListSpend(ctx context.Context, orgID string, opts domain.Sp
 	return out, rows.Err()
 }
 
-func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since time.Time) ([]domain.SpendBucket, error) {
+func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
+	// Both bounds optional (see SpendFilter): drop the clause on a zero time.
+	var where strings.Builder
+	where.WriteString(`WHERE org_id = $1`)
+	args := []any{orgID}
+	next := func(v any) string {
+		args = append(args, v)
+		return "$" + strconv.Itoa(len(args))
+	}
+	if !since.IsZero() {
+		where.WriteString(` AND occurred_at >= ` + next(since))
+	}
+	if !until.IsZero() {
+		where.WriteString(` AND occurred_at < ` + next(until))
+	}
+	// SUM(total_cost_usd::double precision), not SUM(total_cost_usd): in PG,
+	// total_cost_usd is `real` (float4) and SUM(real) both accumulates AND
+	// returns real, so casting each addend to double precision first makes the
+	// accumulation happen in float8 — matching SQLite (whose REAL is always
+	// 8-byte) and minimizing rounding drift when many rows are summed for bill
+	// reconciliation. (Casting the SUM *result* instead would widen an
+	// already-float4-rounded value and buy nothing.)
 	rows, err := s.app.QueryContext(ctx, `
 		SELECT category,
-		       SUM(total_cost_usd)::double precision AS cost,
+		       SUM(total_cost_usd::double precision) AS cost,
 		       SUM(input_tokens)          AS input_tokens,
 		       SUM(output_tokens)         AS output_tokens,
 		       SUM(cache_read_tokens)     AS cache_read_tokens,
 		       SUM(cache_creation_tokens) AS cache_creation_tokens
-		FROM llm_spend
-		WHERE org_id = $1 AND occurred_at >= $2
+		FROM llm_spend `+where.String()+`
 		GROUP BY category
 		ORDER BY category
-	`, orgID, since)
+	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("spend by category: %w", err)
 	}
