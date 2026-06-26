@@ -1413,6 +1413,104 @@ CREATE TABLE public.runs (
 
 
 --
+-- Name: llm_spend; Type: VIEW; Schema: public; Owner: -
+--
+
+-- Unified spend view (TFAC-472): one row-per-spend shape UNION-ing the three
+-- source tables — delegated runs, curator turns, and headless system jobs —
+-- onto a single category axis so the team dashboard + safety cap read from one
+-- place and org totals reconcile with the Anthropic bill. Read-side only: no
+-- normalized table, no write-path change, no backfill — the view IS the
+-- abstraction boundary (materialize later only if it's ever measured too slow).
+-- Placed here because it depends on all three source tables, of which runs is
+-- the last created.
+--
+-- category derivation: runs split on trigger_type (manual → per-user, anything
+-- else → autonomous; the runs_creator_matches_trigger_type CHECK guarantees
+-- 'manual'/'event'); curator is 'curator'; system jobs are 'system_overhead'
+-- with the job (scorer/repo_profiler/classifier) carried as subtype.
+--
+-- team_id: runs are team-scoped; system-overhead has no team (org-level) and
+-- curator is org-level in v1 (a projects join could team-attribute curator
+-- later — out of scope). So the dashboard sees runs by team; system + curator
+-- surface at org scope. actor_agent_id is the org agent that executed the run
+-- (audit passthrough) — only runs are agent-executed, so NULL for curator
+-- (user-driven) + system (background).
+--
+-- Tokens are read NATIVELY from all three tables — every token column is
+-- INTEGER NOT NULL DEFAULT 0 (runs + curator via TFAC-473, system via
+-- TFAC-451) — so the view does NO COALESCE on tokens; only runs.total_cost_usd
+-- (nullable until a terminal write) is wrapped in COALESCE(…,0). The view
+-- reflects *settled* spend: in-flight rows show 0 cost + 0 tokens until a
+-- terminal write, consistently across cost and tokens. Every terminal write
+-- (completion, cancel, infra-failure, and the boot-time orphan sweeps) rolls
+-- the breakdown up from the per-message tables, so a cancelled/failed run or
+-- curator turn still carries its real token spend.
+--
+-- security_invoker = true is LOAD-BEARING and mandatory (PG 15+): without it a
+-- view evaluates base-table RLS as the view *owner*, bypassing the invoker's
+-- row scoping → a cross-team / cross-org spend leak. With it, the base tables'
+-- existing RLS (runs/curator_requests org+team, system_llm_runs org) applies
+-- under the querying app-pool identity, exactly as if selecting the tables
+-- directly. Deliberately NO separate RLS policy on the view, and NOT
+-- security_definer.
+CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
+ SELECT 'run'::text AS source,
+    runs.id AS source_id,
+    runs.org_id,
+    runs.team_id,
+        CASE runs.trigger_type
+            WHEN 'manual'::text THEN 'manual'::text
+            ELSE 'autonomous'::text
+        END AS category,
+    NULL::text AS subtype,
+    runs.creator_user_id,
+    runs.actor_agent_id,
+    runs.model,
+    COALESCE(runs.total_cost_usd, (0)::real) AS total_cost_usd,
+    runs.input_tokens,
+    runs.output_tokens,
+    runs.cache_read_tokens,
+    runs.cache_creation_tokens,
+    runs.started_at AS occurred_at
+   FROM public.runs
+UNION ALL
+ SELECT 'curator'::text AS source,
+    curator_requests.id AS source_id,
+    curator_requests.org_id,
+    NULL::uuid AS team_id,
+    'curator'::text AS category,
+    NULL::text AS subtype,
+    curator_requests.creator_user_id,
+    NULL::uuid AS actor_agent_id,
+    NULL::text AS model,
+    curator_requests.cost_usd AS total_cost_usd,
+    curator_requests.input_tokens,
+    curator_requests.output_tokens,
+    curator_requests.cache_read_tokens,
+    curator_requests.cache_creation_tokens,
+    curator_requests.created_at AS occurred_at
+   FROM public.curator_requests
+UNION ALL
+ SELECT 'system'::text AS source,
+    system_llm_runs.id AS source_id,
+    system_llm_runs.org_id,
+    NULL::uuid AS team_id,
+    'system_overhead'::text AS category,
+    system_llm_runs.job AS subtype,
+    NULL::uuid AS creator_user_id,
+    NULL::uuid AS actor_agent_id,
+    system_llm_runs.model,
+    system_llm_runs.total_cost_usd,
+    system_llm_runs.input_tokens,
+    system_llm_runs.output_tokens,
+    system_llm_runs.cache_read_tokens,
+    system_llm_runs.cache_creation_tokens,
+    system_llm_runs.started_at AS occurred_at
+   FROM public.system_llm_runs;
+
+
+--
 -- Name: sessions; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5211,6 +5309,20 @@ GRANT ALL ON TABLE public.runs TO anon;
 GRANT ALL ON TABLE public.runs TO authenticated;
 GRANT ALL ON TABLE public.runs TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.runs TO tf_app;
+
+
+--
+-- Name: TABLE llm_spend; Type: ACL; Schema: public; Owner: -
+--
+
+-- Read-only view (TFAC-472): tf_app gets SELECT only. security_invoker='true'
+-- means the base tables' RLS still applies under tf_app, so no view-level policy
+-- is needed (and would be wrong — see the CREATE VIEW comment).
+GRANT ALL ON TABLE public.llm_spend TO postgres;
+GRANT ALL ON TABLE public.llm_spend TO anon;
+GRANT ALL ON TABLE public.llm_spend TO authenticated;
+GRANT ALL ON TABLE public.llm_spend TO service_role;
+GRANT SELECT ON TABLE public.llm_spend TO tf_app;
 
 
 --

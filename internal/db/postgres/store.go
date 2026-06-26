@@ -296,6 +296,11 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// audit view's read) by org. Unlike SystemLLMRuns, it is not
 		// system-written. See TFAC-471.
 		AccessChangeLog: newAccessChangeLogStore(app),
+		// Spend is APP-pool: the llm_spend view is security_invoker, so reading
+		// it under tf_app applies the base tables' RLS as the querying user —
+		// team-scoped runs + org-scoped system/curator. Admin pool would bypass
+		// that and leak cross-team spend. Read-only; owns no table. See TFAC-472.
+		Spend: newSpendStore(app),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),
@@ -375,6 +380,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Invites:         newInvitesStore(tx, tx),
 		SystemLLMRuns:   newSystemLLMRunStore(tx),
 		AccessChangeLog: newAccessChangeLogStore(tx),
+		Spend:           newSpendStore(tx),
 		Ext:             db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

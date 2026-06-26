@@ -1,0 +1,188 @@
+package sqlite_test
+
+import (
+	"database/sql"
+	"testing"
+
+	"github.com/google/uuid"
+	_ "modernc.org/sqlite"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// TestSpendStore_SQLite runs the shared SpendStore conformance suite against the
+// SQLite impl. Each subtest opens a fresh in-memory DB (which includes the
+// llm_spend view from migration 202606260004 via the cached schema bundle) so
+// the assertions also prove the view applies on the shipped baseline and
+// returns rows. SQLite is N=1 / no RLS, so the store reads directly.
+func TestSpendStore_SQLite(t *testing.T) {
+	dbtest.RunSpendStoreConformance(t, func(t *testing.T) dbtest.SpendStoreFixture {
+		t.Helper()
+		conn := openSQLiteSpendConn(t)
+		stores := sqlitestore.New(conn)
+
+		// One org agent (UNIQUE per org) for the actor_agent_id passthrough,
+		// and one project so curator_requests' NOT NULL project_id FK is
+		// satisfied. The local tenant sentinels (org/team/user) already exist
+		// via BootstrapSchemaForTest → SeedLocalTenantRows.
+		agentID := uuid.New().String()
+		if _, err := conn.Exec(
+			`INSERT INTO agents (id, org_id) VALUES (?, ?)`, agentID, runmode.LocalDefaultOrgID,
+		); err != nil {
+			t.Fatalf("seed agent: %v", err)
+		}
+		projectID := uuid.New().String()
+		if _, err := conn.Exec(
+			`INSERT INTO projects (id, name, team_id, org_id, creator_user_id) VALUES (?, 'spend-test', ?, ?, ?)`,
+			projectID, runmode.LocalDefaultTeamID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
+		); err != nil {
+			t.Fatalf("seed project: %v", err)
+		}
+
+		return dbtest.SpendStoreFixture{
+			Store:   stores.Spend,
+			OrgID:   runmode.LocalDefaultOrgID,
+			TeamID:  runmode.LocalDefaultTeamID,
+			UserID:  runmode.LocalDefaultUserID,
+			AgentID: agentID,
+			Seeder:  newSQLiteSpendSeeder(conn, projectID),
+		}
+	})
+}
+
+// openSQLiteSpendConn mirrors openSQLiteForTest but adds _time_format=sqlite —
+// the same DSN production's db.OpenAt uses — so a bound time.Time and a stored
+// started_at/created_at serialize to a datetime()-parseable form. The view's
+// ListSpend/SpendByCategory time filters wrap both sides in datetime(); without
+// the production time format the wrapper would see modernc's default
+// time.String() serialization (unparseable) and silently drop every row.
+func openSQLiteSpendConn(t *testing.T) *sql.DB {
+	t.Helper()
+	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)&_time_format=sqlite")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
+	if err := db.BootstrapSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
+	}
+	return conn
+}
+
+// newSQLiteSpendSeeder owns the raw INSERT shape for each source table. origin
+// is 'manual' so the runs_origin_requires_parents CHECK (which only constrains
+// origin='blueprint') is satisfied without a blueprint/task/prompt graph. Empty
+// CreatorUserID / ActorAgentID and a nil Cost serialize to SQL NULL.
+func newSQLiteSpendSeeder(conn *sql.DB, projectID string) dbtest.SpendSeeder {
+	return dbtest.SpendSeeder{
+		Run: func(t *testing.T, f dbtest.RunSpendFixture) string {
+			t.Helper()
+			id := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO runs
+					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, model, status,
+					 total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)
+				VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`,
+				id, runmode.LocalDefaultOrgID, f.TeamID, nullStr(f.CreatorUserID), f.TriggerType,
+				nullStr(f.ActorAgentID), f.Model, f.Status,
+				costArg(f.Cost), f.Tokens.Input, f.Tokens.Output, f.Tokens.CacheRead, f.Tokens.CacheCreation, f.StartedAt,
+			); err != nil {
+				t.Fatalf("seed run: %v", err)
+			}
+			return id
+		},
+		Curator: func(t *testing.T, f dbtest.CuratorSpendFixture) string {
+			t.Helper()
+			id := uuid.New().String()
+			status := f.Status
+			if status == "" {
+				status = "completed"
+			}
+			if _, err := conn.Exec(`
+				INSERT INTO curator_requests
+					(id, org_id, creator_user_id, project_id, status, user_input, cost_usd,
+					 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
+				VALUES (?, ?, ?, ?, ?, 'spend-test', ?, ?, ?, ?, ?, ?)
+			`,
+				id, runmode.LocalDefaultOrgID, f.CreatorUserID, projectID, status, f.Cost,
+				f.Tokens.Input, f.Tokens.Output, f.Tokens.CacheRead, f.Tokens.CacheCreation, f.CreatedAt,
+			); err != nil {
+				t.Fatalf("seed curator_request: %v", err)
+			}
+			return id
+		},
+		System: func(t *testing.T, f dbtest.SystemSpendFixture) string {
+			t.Helper()
+			id := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO system_llm_runs
+					(id, org_id, job, model, total_cost_usd,
+					 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`,
+				id, runmode.LocalDefaultOrgID, f.Job, f.Model, f.Cost,
+				f.Tokens.Input, f.Tokens.Output, f.Tokens.CacheRead, f.Tokens.CacheCreation, f.StartedAt,
+			); err != nil {
+				t.Fatalf("seed system_llm_run: %v", err)
+			}
+			return id
+		},
+	}
+}
+
+// nullStr returns nil for an empty string so the column lands as SQL NULL.
+func nullStr(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// costArg returns nil for a nil cost (the in-flight shape → NULL total_cost_usd).
+func costArg(c *float64) any {
+	if c == nil {
+		return nil
+	}
+	return *c
+}
+
+// TestSpendView_SQLite_MigrationApplies pins that the view migration applies on
+// the shipped baseline chain via a real goose Migrate (not the cached test
+// bundle) and that the view is queryable. Empty DB → empty view, no error.
+func TestSpendView_SQLite_MigrationApplies(t *testing.T) {
+	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
+
+	if err := db.Migrate(conn, "sqlite3"); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var isView int
+	if err := conn.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'llm_spend'`,
+	).Scan(&isView); err != nil {
+		t.Fatalf("probe sqlite_master: %v", err)
+	}
+	if isView != 1 {
+		t.Fatalf("llm_spend view missing after Migrate (found %d)", isView)
+	}
+
+	var n int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM llm_spend`).Scan(&n); err != nil {
+		t.Fatalf("select from llm_spend: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("fresh llm_spend has %d rows, want 0", n)
+	}
+}

@@ -289,6 +289,15 @@ type Stores struct {
 	// and unscoped. See TFAC-471.
 	AccessChangeLog AccessChangeLogStore
 
+	// Spend is the read-only aggregation over the llm_spend view — the unified
+	// shape that UNION-ALLs runs + curator_requests + system_llm_runs onto the
+	// category axis (TFAC-472). App pool in Postgres: the view is
+	// security_invoker, so the base tables' RLS scopes the read under the
+	// querying user (a team member sees their team's runs, not another team's;
+	// system/curator at org scope). Owns no table; the spine the dashboards +
+	// safety cap (TFAC-449) read from.
+	Spend SpendStore
+
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
 	// core holds no SSO symbols.
@@ -349,6 +358,7 @@ type TxStores struct {
 	Invites          InvitesStore
 	SystemLLMRuns    SystemLLMRunStore
 	AccessChangeLog  AccessChangeLogStore
+	Spend            SpendStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same
