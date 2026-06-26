@@ -73,17 +73,22 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 	var coLogin string
 	if manual && creatorUserID != "" {
 		if stores, set := s.getStores(); set {
-			host, _ := s.ghResolver.BaseURLFor(ctx, orgID)
-			login, err := stores.Users.GetGitHubLoginSystem(ctx, creatorUserID, host)
-			if err != nil {
-				// Non-fatal: the run proceeds, the human just doesn't get co-author
-				// credit (ResolveCommitIdentity omits the trailer on an empty login).
-				// Debug-logged so an operator can diagnose a missing trailer without
-				// it surfacing as a run error.
+			// The login is host-scoped (user_github_identities is keyed by host), so
+			// a failed base-URL resolve must SKIP the lookup, not pass host="": on a
+			// GHE org an empty host would query the wrong (default) host and silently
+			// miss — or mis-resolve — the human's identity. Both failures are
+			// non-fatal (the run proceeds without a trailer) and debug-logged so an
+			// operator can diagnose a missing/wrong trailer without it surfacing as a
+			// run error.
+			if host, herr := s.ghResolver.BaseURLFor(ctx, orgID); herr != nil {
+				delegateLog.Debug("resolve org github base for co-author lookup failed; manual run will omit the trailer",
+					"org", orgID, "error", herr)
+			} else if login, err := stores.Users.GetGitHubLoginSystem(ctx, creatorUserID, host); err != nil {
 				delegateLog.Debug("resolve co-author github login failed; manual run will omit the trailer",
 					"creator", creatorUserID, "error", err)
+			} else {
+				coLogin = login
 			}
-			coLogin = login
 		}
 	}
 	id, _ := githooks.ResolveCommitIdentity(orgLogin, manual, coLogin)
