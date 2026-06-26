@@ -58,12 +58,20 @@ func TestCuratorStore_SQLite_FullTurn(t *testing.T) {
 		t.Errorf("second MarkRequestRunning err = %v, want sql.ErrNoRows", err)
 	}
 
+	// One token-bearing message — the streaming sink writes these rows
+	// before the terminal completion write, and CompleteRequest rolls them
+	// up onto curator_requests (TFAC-473).
+	ip := func(n int) *int { return &n }
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
 		_, err := ts.Curator.InsertMessage(ctx, runmode.LocalDefaultOrgID, &domain.CuratorMessage{
-			RequestID: requestID,
-			Role:      "assistant",
-			Subtype:   "text",
-			Content:   "ack",
+			RequestID:           requestID,
+			Role:                "assistant",
+			Subtype:             "text",
+			Content:             "ack",
+			InputTokens:         ip(11),
+			OutputTokens:        ip(22),
+			CacheReadTokens:     ip(33),
+			CacheCreationTokens: ip(44),
 		})
 		return err
 	}); err != nil {
@@ -120,6 +128,15 @@ func TestCuratorStore_SQLite_FullTurn(t *testing.T) {
 	}
 	if seen.CreatorUserID != runmode.LocalDefaultUserID {
 		t.Errorf("CreatorUserID = %q, want %q", seen.CreatorUserID, runmode.LocalDefaultUserID)
+	}
+	// Token breakdown rolled up from curator_messages by the first (winning)
+	// CompleteRequest and read back via the store's scan path; the second
+	// (no-op, already-terminal) call leaves it intact — the status filter
+	// blocks the re-roll-up entirely. TFAC-473.
+	if seen.InputTokens != 11 || seen.OutputTokens != 22 ||
+		seen.CacheReadTokens != 33 || seen.CacheCreationTokens != 44 {
+		t.Errorf("token breakdown = (%d,%d,%d,%d), want (11,22,33,44) — SUM over curator_messages, lost or clobbered",
+			seen.InputTokens, seen.OutputTokens, seen.CacheReadTokens, seen.CacheCreationTokens)
 	}
 }
 

@@ -147,6 +147,31 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 		t.Errorf("projects.curator_session_id = %q, want sess-capstone (session capture under claims)", sid)
 	}
 
+	// --- TFAC-473: per-message tokens rolled up onto the request ---
+	// The dispatch's requestSink persisted the streamed message (with its
+	// token usage) to curator_messages, and CompleteRequest SET the request's
+	// token columns from the curator_messages SUM. Read back under alice's
+	// claims (exercises the PG token read-scan too).
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgA, alice, func(ts db.TxStores) error {
+		r, err := ts.Curator.GetRequest(ctx, orgA, reqID)
+		if err != nil {
+			return err
+		}
+		if r == nil {
+			t.Fatal("alice cannot read her own completed request")
+			return nil
+		}
+		if r.InputTokens != capstoneInputTokens || r.OutputTokens != capstoneOutputTokens ||
+			r.CacheReadTokens != capstoneCacheReadTokens || r.CacheCreationTokens != capstoneCacheCreationTokens {
+			t.Errorf("curator_requests tokens = (%d,%d,%d,%d), want (%d,%d,%d,%d) — curator_messages SUM not rolled up",
+				r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens,
+				capstoneInputTokens, capstoneOutputTokens, capstoneCacheReadTokens, capstoneCacheCreationTokens)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("alice read tokens: %v", err)
+	}
+
 	// --- no cross-tenant leakage: bob (orgB) cannot read alice's request ---
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgB, bob, func(ts db.TxStores) error {
 		r, err := ts.Curator.GetRequest(ctx, orgA, reqID)
@@ -417,6 +442,17 @@ func TestCurator_Postgres_Multimode_SimulatedRestartSweepsOrphans(t *testing.T) 
 
 // --- stub agent -----------------------------------------------------------
 
+// Token usage the driveSink stub streams on its one assistant message, so
+// tests can assert the curator_messages → curator_requests roll-up (TFAC-473).
+const (
+	capstoneInputTokens         = 111
+	capstoneOutputTokens        = 22
+	capstoneCacheReadTokens     = 3333
+	capstoneCacheCreationTokens = 44
+)
+
+func intPtr(n int) *int { return &n }
+
 // stubAgent stands in for agentproc.Run via the Curator.runAgent seam. It
 // captures each turn's RunOptions, optionally replays the sink writes, and
 // optionally parks the dispatch (inFlight signal + release gate) so tests
@@ -439,9 +475,18 @@ func (s *stubAgent) run(ctx context.Context, opts agentproc.RunOptions, sink age
 	if s.driveSink {
 		// The real per-turn RLS-attributed write set: session-id capture
 		// onto the project + one streamed message row, both wrapped in
-		// SyntheticClaimsWithTx by the curator sink.
+		// SyntheticClaimsWithTx by the curator sink. The message carries a
+		// token usage block that the requestSink persists onto
+		// curator_messages; CompleteRequest then rolls those rows up onto
+		// curator_requests — TFAC-473.
 		_ = sink.OnSession("sess-capstone")
-		_ = sink.OnMessage(&domain.AgentMessage{Role: "assistant", Subtype: "text", Content: "capstone ack"})
+		_ = sink.OnMessage(&domain.AgentMessage{
+			Role: "assistant", Subtype: "text", Content: "capstone ack",
+			InputTokens:         intPtr(capstoneInputTokens),
+			OutputTokens:        intPtr(capstoneOutputTokens),
+			CacheReadTokens:     intPtr(capstoneCacheReadTokens),
+			CacheCreationTokens: intPtr(capstoneCacheCreationTokens),
+		})
 	}
 	if s.inFlight != nil {
 		s.inFlight <- struct{}{}

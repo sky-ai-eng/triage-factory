@@ -57,6 +57,7 @@ func (s *curatorStore) GetRequest(ctx context.Context, orgID, id string) (*domai
 	row := s.q.QueryRowContext(ctx, `
 		SELECT id::text, project_id::text, status, user_input, error_msg,
 		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		       started_at, finished_at, created_at, creator_user_id::text
 		FROM curator_requests
 		WHERE org_id = $1 AND id = $2
@@ -99,9 +100,20 @@ func completeCuratorRequest(ctx context.Context, q queryer, orgID, id, status, e
 	if errMsg != "" {
 		errBind = errMsg
 	}
+	// Token columns are SET from the absolute curator_messages SUM (the
+	// streaming sink wrote every message row before this terminal write) —
+	// the same roll-up runs uses over run_messages. The subqueries reuse
+	// the org/id binds ($6/$7); org_id scopes curator_messages for
+	// defense-in-depth (and so the admin-pool BYPASSRLS path stays
+	// tenant-correct). TFAC-473.
 	res, err := q.ExecContext(ctx, `
 		UPDATE curator_requests
-		SET status = $1, error_msg = $2, cost_usd = $3, duration_ms = $4, num_turns = $5, finished_at = now()
+		SET status = $1, error_msg = $2, cost_usd = $3, duration_ms = $4, num_turns = $5,
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE org_id = $6 AND request_id = $7),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE org_id = $6 AND request_id = $7),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE org_id = $6 AND request_id = $7),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE org_id = $6 AND request_id = $7),
+		    finished_at = now()
 		WHERE org_id = $6 AND id = $7 AND status NOT IN ('done', 'cancelled', 'failed')
 	`, status, errBind, costUSD, durationMs, numTurns, orgID, id)
 	if err != nil {
@@ -147,6 +159,7 @@ func (s *curatorStore) QueuedRequestsForProjectSystem(ctx context.Context, orgID
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT id::text, project_id::text, status, user_input, error_msg,
 		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		       started_at, finished_at, created_at, creator_user_id::text
 		FROM curator_requests
 		WHERE org_id = $1 AND project_id = $2 AND status = 'queued'
@@ -435,6 +448,7 @@ func scanPgCuratorRequest(row interface {
 	err := row.Scan(
 		&req.ID, &req.ProjectID, &req.Status, &req.UserInput, &errMsg,
 		&req.CostUSD, &req.DurationMs, &req.NumTurns,
+		&req.InputTokens, &req.OutputTokens, &req.CacheReadTokens, &req.CacheCreationTokens,
 		&startedAt, &finishedAt, &req.CreatedAt, &userID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

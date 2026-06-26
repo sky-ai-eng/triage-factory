@@ -65,6 +65,13 @@ func MarkCuratorRequestRunning(database *sql.DB, id string) error {
 // done | cancelled | failed. Caller passes 0 for any field that
 // wasn't observed (e.g., a failure with no result event).
 //
+// The four token columns are SET from the curator_messages SUM in the
+// same UPDATE — the streaming sink writes every per-message row before
+// this terminal write, so the SUM is the turn's full token total.
+// Mirrors the runs roll-up over run_messages; recovers historical
+// curator spend for free since the per-message data is already on disk
+// (TFAC-473).
+//
 // Returns true if the flip happened. The status filter is the
 // single source of truth for "terminal state is final": the
 // goroutine that actually ran agentproc and the cancel handler
@@ -79,9 +86,15 @@ func MarkCuratorRequestRunning(database *sql.DB, id string) error {
 func CompleteCuratorRequest(database *sql.DB, id, status, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error) {
 	res, err := database.Exec(`
 		UPDATE curator_requests
-		SET status = ?, error_msg = ?, cost_usd = ?, duration_ms = ?, num_turns = ?, finished_at = ?
+		SET status = ?, error_msg = ?, cost_usd = ?, duration_ms = ?, num_turns = ?,
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = ?),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = ?),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = ?),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = ?),
+		    finished_at = ?
 		WHERE id = ? AND status NOT IN ('done', 'cancelled', 'failed')
-	`, status, nullIfEmpty(errMsg), costUSD, durationMs, numTurns, time.Now().UTC(), id)
+	`, status, nullIfEmpty(errMsg), costUSD, durationMs, numTurns,
+		id, id, id, id, time.Now().UTC(), id)
 	if err != nil {
 		return false, err
 	}
@@ -114,6 +127,7 @@ func GetCuratorRequest(database *sql.DB, id string) (*domain.CuratorRequest, err
 	row := database.QueryRow(`
 		SELECT id, project_id, status, user_input, error_msg,
 		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		       started_at, finished_at, created_at
 		FROM curator_requests WHERE id = ?
 	`, id)
@@ -128,6 +142,7 @@ func ListCuratorRequestsByProject(database *sql.DB, projectID string) ([]domain.
 	rows, err := database.Query(`
 		SELECT id, project_id, status, user_input, error_msg,
 		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		       started_at, finished_at, created_at
 		FROM curator_requests
 		WHERE project_id = ?
@@ -163,6 +178,7 @@ func InFlightCuratorRequestForProject(database *sql.DB, projectID string) (*doma
 	row := database.QueryRow(`
 		SELECT id, project_id, status, user_input, error_msg,
 		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		       started_at, finished_at, created_at
 		FROM curator_requests
 		WHERE project_id = ? AND status IN ('queued', 'running')
@@ -185,6 +201,7 @@ func QueuedCuratorRequestsForProject(database *sql.DB, projectID string) ([]doma
 	rows, err := database.Query(`
 		SELECT id, project_id, status, user_input, error_msg,
 		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		       started_at, finished_at, created_at
 		FROM curator_requests
 		WHERE project_id = ? AND status = 'queued'
@@ -490,6 +507,7 @@ func scanCuratorRequest(row rowScanner) (*domain.CuratorRequest, error) {
 	err := row.Scan(
 		&req.ID, &req.ProjectID, &req.Status, &req.UserInput, &errMsg,
 		&req.CostUSD, &req.DurationMs, &req.NumTurns,
+		&req.InputTokens, &req.OutputTokens, &req.CacheReadTokens, &req.CacheCreationTokens,
 		&startedAt, &finishedAt, &req.CreatedAt,
 	)
 	if err == sql.ErrNoRows {

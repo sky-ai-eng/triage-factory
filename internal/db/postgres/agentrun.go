@@ -196,6 +196,13 @@ func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status
 }
 
 func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error {
+	// Token columns are SET to the absolute SUM over run_messages (the
+	// streaming sink wrote every session's rows before this terminal
+	// write), NOT accumulated like total_cost_usd — the SUM is already the
+	// full total, so re-running Complete on a resume re-sets the same
+	// correct value rather than doubling. The subqueries reuse the org/run
+	// binds ($10/$11); org_id scopes run_messages for defense-in-depth
+	// (and so the admin-pool BYPASSRLS path stays tenant-correct). TFAC-473.
 	_, err := q.ExecContext(ctx, `
 		UPDATE runs
 		SET status = $1,
@@ -206,7 +213,11 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 		    stop_reason = $6,
 		    result_summary = $7,
 		    outcome = NULLIF($8, ''),
-		    outcome_reason = NULLIF($9, '')
+		    outcome_reason = NULLIF($9, ''),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE org_id = $10 AND run_id = $11),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE org_id = $10 AND run_id = $11),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE org_id = $10 AND run_id = $11),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE org_id = $10 AND run_id = $11)
 		WHERE org_id = $10 AND id = $11
 	`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, orgID, runID)
 	return err
@@ -506,6 +517,7 @@ const pgRunColumns = `
 	r.team_id::text,
 	COALESCE(r.executor_id, ''),
 	r.blueprint_run_id, r.blueprint_step_index,
+	r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens,
 	(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing
 `
 
@@ -938,6 +950,7 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
+		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
@@ -956,6 +969,7 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
+		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing,
 	); err != nil {
 		return err

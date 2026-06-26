@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -172,5 +173,151 @@ func TestMigrationStatus_BricksPreV1110(t *testing.T) {
 	}
 	if buf.Len() != 0 {
 		t.Errorf("expected no output on brick path, got: %q", buf.String())
+	}
+}
+
+// TestMigrate_RunCuratorTokenColumnsPresent pins that the TFAC-473 token
+// columns land on both runs and curator_requests after a full fresh
+// migration. A SELECT of the four columns errors if any is missing, so the
+// LIMIT 0 probe is a column-existence assertion without needing rows.
+func TestMigrate_RunCuratorTokenColumnsPresent(t *testing.T) {
+	database := openMigrationsTestDB(t)
+	if err := Migrate(database, "sqlite3"); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	for _, table := range []string{"runs", "curator_requests"} {
+		if _, err := database.Exec(
+			`SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM ` + table + ` LIMIT 0`,
+		); err != nil {
+			t.Errorf("%s missing a token column after migrate: %v", table, err)
+		}
+	}
+}
+
+// TestMigrate_BackfillsRunTokensFromRunMessages pins the TFAC-473 SQLite
+// backfill: a run that completed BEFORE the migration (its per-message
+// tokens already in run_messages, but no denormalized total) gets its four
+// token columns populated from the run_messages SUM when the migration
+// runs. Driven through goose directly so we can land the pre-migration
+// fixture between the prior migration and the new one.
+func TestMigrate_BackfillsRunTokensFromRunMessages(t *testing.T) {
+	// Foreign keys off (plain :memory:) so the fixture needs no entity /
+	// task / prompt / blueprint scaffolding — the backfill is pure SQL over
+	// runs ⋈ run_messages and doesn't care about FK targets. The CHECK
+	// constraints still apply, so the run carries origin='blueprint' parents.
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+
+	goose.SetBaseFS(migrationsSQLiteFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("set dialect: %v", err)
+	}
+
+	// Migrate up to the migration *before* the token-breakdown one, so the
+	// runs table does not yet have the token columns.
+	const priorVersion = 202606250002
+	if err := goose.UpTo(database, "migrations-sqlite", priorVersion); err != nil {
+		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
+	}
+
+	// A completed run with two token-bearing run_messages rows — history
+	// that predates the backfill.
+	if _, err := database.Exec(`
+		INSERT INTO runs (id, task_id, prompt_id, blueprint_run_id, status)
+		VALUES ('r1', 't1', 'p1', 'b1', 'completed')
+	`); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO run_messages (run_id, role, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+		VALUES ('r1', 'assistant', 100, 20, 1000, 7),
+		       ('r1', 'assistant',  50,  5,  500, 3)
+	`); err != nil {
+		t.Fatalf("seed run_messages: %v", err)
+	}
+
+	// Apply the rest (the token-breakdown migration + backfill).
+	if err := goose.Up(database, "migrations-sqlite"); err != nil {
+		t.Fatalf("goose Up: %v", err)
+	}
+
+	var in, out, cr, cc int
+	if err := database.QueryRow(`
+		SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+		FROM runs WHERE id = 'r1'
+	`).Scan(&in, &out, &cr, &cc); err != nil {
+		t.Fatalf("read backfilled tokens: %v", err)
+	}
+	if in != 150 || out != 25 || cr != 1500 || cc != 10 {
+		t.Errorf("backfilled tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
+	}
+}
+
+// TestMigrate_BackfillsCuratorTokensFromMessages pins the TFAC-473 SQLite
+// backfill for the curator side: a request that completed BEFORE the
+// migration (its per-message tokens already in curator_messages) gets its
+// four token columns populated from the curator_messages SUM when the
+// migration runs. Symmetric with the runs backfill — the per-message data
+// was on disk all along, so historical curator spend is recovered, not just
+// going-forward.
+func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
+	// Foreign keys off (plain :memory:) so the fixture needs no projects
+	// scaffolding — the backfill is pure SQL over
+	// curator_requests ⋈ curator_messages and doesn't care about FK targets.
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+
+	goose.SetBaseFS(migrationsSQLiteFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("set dialect: %v", err)
+	}
+
+	// Migrate up to the migration *before* the token-breakdown one, so
+	// curator_requests does not yet have the token columns.
+	const priorVersion = 202606250002
+	if err := goose.UpTo(database, "migrations-sqlite", priorVersion); err != nil {
+		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
+	}
+
+	// A completed request with two token-bearing curator_messages rows —
+	// history that predates the backfill.
+	if _, err := database.Exec(`
+		INSERT INTO curator_requests (id, project_id, status, user_input)
+		VALUES ('cr1', 'proj1', 'done', 'hi')
+	`); err != nil {
+		t.Fatalf("seed curator_request: %v", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO curator_messages (request_id, role, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+		VALUES ('cr1', 'assistant', 100, 20, 1000, 7),
+		       ('cr1', 'assistant',  50,  5,  500, 3)
+	`); err != nil {
+		t.Fatalf("seed curator_messages: %v", err)
+	}
+
+	// Apply the rest (the token-breakdown migration + backfill).
+	if err := goose.Up(database, "migrations-sqlite"); err != nil {
+		t.Fatalf("goose Up: %v", err)
+	}
+
+	var in, out, cr, cc int
+	if err := database.QueryRow(`
+		SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+		FROM curator_requests WHERE id = 'cr1'
+	`).Scan(&in, &out, &cr, &cc); err != nil {
+		t.Fatalf("read backfilled tokens: %v", err)
+	}
+	if in != 150 || out != 25 || cr != 1500 || cc != 10 {
+		t.Errorf("backfilled tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
 	}
 }

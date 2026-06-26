@@ -57,6 +57,7 @@ func (s *curatorStore) GetRequest(ctx context.Context, orgID, id string) (*domai
 	row := s.q.QueryRowContext(ctx, `
 		SELECT id, project_id, status, user_input, error_msg,
 		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		       started_at, finished_at, created_at, creator_user_id
 		FROM curator_requests WHERE id = ?
 	`, id)
@@ -89,11 +90,20 @@ func (s *curatorStore) CompleteRequest(ctx context.Context, orgID, id, status, e
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
+	// Token columns are SET from the absolute curator_messages SUM (the
+	// streaming sink wrote every message row before this terminal write) —
+	// the same roll-up runs uses over run_messages. TFAC-473.
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE curator_requests
-		SET status = ?, error_msg = ?, cost_usd = ?, duration_ms = ?, num_turns = ?, finished_at = ?
+		SET status = ?, error_msg = ?, cost_usd = ?, duration_ms = ?, num_turns = ?,
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = ?),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = ?),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = ?),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = ?),
+		    finished_at = ?
 		WHERE id = ? AND status NOT IN ('done', 'cancelled', 'failed')
-	`, status, nullIfEmpty(errMsg), costUSD, durationMs, numTurns, time.Now().UTC(), id)
+	`, status, nullIfEmpty(errMsg), costUSD, durationMs, numTurns,
+		id, id, id, id, time.Now().UTC(), id)
 	if err != nil {
 		return false, err
 	}
@@ -139,6 +149,7 @@ func (s *curatorStore) QueuedRequestsForProjectSystem(ctx context.Context, orgID
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id, project_id, status, user_input, error_msg,
 		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		       started_at, finished_at, created_at, creator_user_id
 		FROM curator_requests
 		WHERE project_id = ? AND status = 'queued'
@@ -426,6 +437,7 @@ func scanCuratorRequestWithUser(row interface {
 	err := row.Scan(
 		&req.ID, &req.ProjectID, &req.Status, &req.UserInput, &errMsg,
 		&req.CostUSD, &req.DurationMs, &req.NumTurns,
+		&req.InputTokens, &req.OutputTokens, &req.CacheReadTokens, &req.CacheCreationTokens,
 		&startedAt, &finishedAt, &req.CreatedAt, &userID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

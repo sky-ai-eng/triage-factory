@@ -115,6 +115,11 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
+	// Token columns are SET to the absolute SUM over run_messages (the
+	// streaming sink wrote every session's messages before this terminal
+	// write), NOT accumulated like total_cost_usd — the SUM is already the
+	// full total, so re-running Complete on a resume re-sets the same
+	// correct value rather than doubling. TFAC-473.
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE runs
 		SET status = ?,
@@ -125,10 +130,14 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 		    stop_reason = ?,
 		    result_summary = ?,
 		    outcome = ?,
-		    outcome_reason = ?
+		    outcome_reason = ?,
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = ?),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = ?),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = ?),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE run_id = ?)
 		WHERE id = ?
 	`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary,
-		nullIfEmpty(outcome), nullIfEmpty(outcomeReason), runID)
+		nullIfEmpty(outcome), nullIfEmpty(outcomeReason), runID, runID, runID, runID, runID)
 	return err
 }
 
@@ -340,6 +349,7 @@ const sqliteRunColumns = `
 	r.team_id,
 	r.executor_id,
 	r.blueprint_run_id, r.blueprint_step_index,
+	r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens,
 	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
 `
 
@@ -848,6 +858,7 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
+		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
@@ -867,6 +878,7 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
+		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing,
 	); err != nil {
 		return err

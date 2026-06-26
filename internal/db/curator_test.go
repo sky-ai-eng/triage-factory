@@ -229,6 +229,50 @@ func TestCompleteCuratorRequest_DoesNotClobberCancelled(t *testing.T) {
 	}
 }
 
+// TestCompleteCuratorRequest_RollsUpTokensFromMessages pins the TFAC-473
+// roll-up: CompleteCuratorRequest SETs the four token columns to the
+// absolute SUM over curator_messages (the same shape runs uses over
+// run_messages), so a completed request carries the turn's full token
+// breakdown without the caller threading any counts.
+func TestCompleteCuratorRequest_RollsUpTokensFromMessages(t *testing.T) {
+	database := newTestDB(t)
+	projectID := seedProjectForCurator(t, database)
+
+	id, _ := CreateCuratorRequest(database, projectID, "x")
+	if err := MarkCuratorRequestRunning(database, id); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	// Two token-bearing assistant rows — written by the streaming sink
+	// before the terminal completion write in production.
+	for _, m := range []*domain.CuratorMessage{
+		{RequestID: id, Role: "assistant", Subtype: "text", Content: "a",
+			InputTokens: intPtr(100), OutputTokens: intPtr(20), CacheReadTokens: intPtr(1000), CacheCreationTokens: intPtr(7)},
+		{RequestID: id, Role: "assistant", Subtype: "text", Content: "b",
+			InputTokens: intPtr(50), OutputTokens: intPtr(5), CacheReadTokens: intPtr(500), CacheCreationTokens: intPtr(3)},
+	} {
+		if _, err := InsertCuratorMessage(database, m); err != nil {
+			t.Fatalf("insert msg: %v", err)
+		}
+	}
+
+	if flipped, err := CompleteCuratorRequest(database, id, "done", "", 0.1, 1000, 2); err != nil || !flipped {
+		t.Fatalf("complete: flipped=%v err=%v", flipped, err)
+	}
+
+	// The legacy package-level reader doesn't project the token columns
+	// (the CuratorStore read path does), so assert them directly.
+	var in, out, cr, cc int
+	if err := database.QueryRow(`
+		SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+		FROM curator_requests WHERE id = ?
+	`, id).Scan(&in, &out, &cr, &cc); err != nil {
+		t.Fatalf("read tokens: %v", err)
+	}
+	if in != 150 || out != 25 || cr != 1500 || cc != 10 {
+		t.Errorf("token cols = (%d,%d,%d,%d), want (150,25,1500,10) — SUM over curator_messages", in, out, cr, cc)
+	}
+}
+
 func TestProjectDelete_CascadesCuratorRows(t *testing.T) {
 	// FK ON DELETE CASCADE drives the cleanup contract: removing the
 	// project takes its requests + messages with it. Without this,

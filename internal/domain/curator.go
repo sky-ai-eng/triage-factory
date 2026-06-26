@@ -18,14 +18,22 @@ type CuratorRequest struct {
 	// CreatorUserID is the requesting user (curator_requests.creator_user_id).
 	// The per-project goroutine reads this when dequeuing a row so each turn's
 	// writes attribute to the user that sent the message — see SKY-298.
-	CreatorUserID string     `json:"creator_user_id,omitempty"`
-	ErrorMsg      string     `json:"error_msg,omitempty"`
-	CostUSD       float64    `json:"cost_usd"`
-	DurationMs    int        `json:"duration_ms"`
-	NumTurns      int        `json:"num_turns"`
-	StartedAt     *time.Time `json:"started_at,omitempty"`
-	FinishedAt    *time.Time `json:"finished_at,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
+	CreatorUserID string  `json:"creator_user_id,omitempty"`
+	ErrorMsg      string  `json:"error_msg,omitempty"`
+	CostUSD       float64 `json:"cost_usd"`
+	DurationMs    int     `json:"duration_ms"`
+	NumTurns      int     `json:"num_turns"`
+	// Token breakdown captured at completion via agentproc.UsageSink
+	// (TFAC-473) and aggregated onto the request — mirrors
+	// system_llm_runs so the unified spend view (TFAC-472) reads tokens
+	// natively for curator turns. INTEGER NOT NULL DEFAULT 0.
+	InputTokens         int        `json:"input_tokens"`
+	OutputTokens        int        `json:"output_tokens"`
+	CacheReadTokens     int        `json:"cache_read_tokens"`
+	CacheCreationTokens int        `json:"cache_creation_tokens"`
+	StartedAt           *time.Time `json:"started_at,omitempty"`
+	FinishedAt          *time.Time `json:"finished_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
 }
 
 // IsTerminal reports whether the request has reached a final status.
