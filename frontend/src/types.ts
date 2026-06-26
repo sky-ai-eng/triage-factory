@@ -118,15 +118,22 @@ export interface AgentRun {
   blueprint_step_index?: number | null
 }
 
+// ArtifactKind is the closed set of artifact discriminators the backend emits
+// (internal/domain/artifact.go). Kept a strict union — not widened with
+// `| string`, which would collapse the whole type to `string` and erase the
+// narrowing. A server value outside this set is handled defensively at the
+// render layer (a fallback icon/label), it just isn't part of the documented
+// contract.
+export type ArtifactKind = 'branch' | 'pull_request' | 'review' | 'issue' | 'comment'
+
 // Artifact mirrors the GET /api/agent/runs/{id}/artifacts wire shape
 // (internal/server/agent.go artifactJSON, TFAC-465). One row per real external
-// object a run produced. `kind` is the discriminator (branch / pull_request /
-// review / issue / comment); `state` is meaningful only read with `kind` (see
+// object a run produced. `state` is meaningful only read with `kind` (see
 // internal/domain/artifact.go — 'pending' aliases across kinds). `details` is
 // the parsed kind-specific payload (or null when absent/unparseable).
 export interface Artifact {
   id: string
-  kind: 'branch' | 'pull_request' | 'review' | 'issue' | 'comment' | string
+  kind: ArtifactKind
   provider: string
   state: string
   target: string

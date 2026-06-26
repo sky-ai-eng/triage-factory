@@ -8,7 +8,8 @@ import {
   type LucideIcon,
   Eye,
 } from 'lucide-react'
-import type { Artifact } from '../types'
+import type { Artifact, ArtifactKind } from '../types'
+import { readError } from '../lib/api'
 import { TONE_TEXT, TONE_VAR, type Tone } from './board/cardStyle'
 
 // ArtifactList — the shared surface for everything a run produced (TFAC-470).
@@ -41,8 +42,10 @@ export default function ArtifactList({ runId, onOpenApproval }: Props) {
       try {
         const res = await fetch(`/api/agent/runs/${runId}/artifacts`)
         if (!res.ok) {
-          const data = await res.json().catch(() => ({}))
-          throw new Error(data.error || `Failed to load artifacts (${res.status})`)
+          // readError keeps the context ("Couldn't load artifacts: …") and
+          // degrades through the server's JSON `error`, a non-JSON text body,
+          // then the bare status code — never a context-less raw message.
+          throw new Error(await readError(res, "Couldn't load artifacts"))
         }
         const data = (await res.json()) as Artifact[]
         if (!cancelled) setArtifacts(data ?? [])
@@ -84,7 +87,10 @@ function ArtifactRow({
   artifact: Artifact
   onOpenApproval?: (kind: 'review' | 'pr', artifactId: string) => void
 }) {
-  const meta = KIND_META[artifact.kind] ?? FALLBACK_META
+  // KIND_META is exhaustive over ArtifactKind; the fallback only catches a
+  // server value outside the modeled union (forward-compat), so the cast lets
+  // an unmodeled string fall through to it rather than typecheck as covered.
+  const meta = KIND_META[artifact.kind as ArtifactKind] ?? FALLBACK_META
   const Icon = meta.icon
   const overlayKind =
     artifact.kind === 'pull_request' ? 'pr' : artifact.kind === 'review' ? 'review' : null
@@ -187,7 +193,7 @@ interface KindMeta {
   text: string
 }
 
-const KIND_META: Record<string, KindMeta> = {
+const KIND_META: Record<ArtifactKind, KindMeta> = {
   branch: { icon: GitBranch, label: 'branch', text: 'text-text-tertiary' },
   pull_request: { icon: GitPullRequest, label: 'pull request', text: 'text-delegate' },
   review: { icon: Eye, label: 'review', text: 'text-snooze' },

@@ -108,16 +108,50 @@ describe('ArtifactList', () => {
     expect(await screen.findByText(/No artifacts yet/)).toBeInTheDocument()
   })
 
-  it('surfaces a load error', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue({
-        ok: false,
-        status: 500,
-        json: () => Promise.resolve({ error: 'boom' }),
-      }),
-    )
+  it('surfaces a load error with context, preferring the server JSON error', async () => {
+    failingFetch({ status: 500, jsonBody: { error: 'boom' } })
     render(<ArtifactList runId="r1" />)
-    await waitFor(() => expect(screen.getByText('boom')).toBeInTheDocument())
+    // Context is preserved ("Couldn't load artifacts: …"), not a bare "boom".
+    await waitFor(() =>
+      expect(screen.getByText(/Couldn't load artifacts: boom/)).toBeInTheDocument(),
+    )
+  })
+
+  it('falls back to a non-JSON error body', async () => {
+    failingFetch({ status: 502, textBody: '<html>Bad Gateway</html>' })
+    render(<ArtifactList runId="r1" />)
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Couldn't load artifacts: <html>Bad Gateway<\/html>/),
+      ).toBeInTheDocument(),
+    )
   })
 })
+
+// failingFetch stubs fetch with a non-ok Response shaped enough for readError:
+// a clone().json() path (the server's JSON `error`) and a text() fallback for
+// non-JSON bodies.
+function failingFetch({
+  status = 500,
+  jsonBody,
+  textBody = '',
+}: {
+  status?: number
+  jsonBody?: unknown
+  textBody?: string
+}) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: false,
+      status,
+      text: () => Promise.resolve(textBody),
+      clone: () => ({
+        json: () =>
+          jsonBody !== undefined
+            ? Promise.resolve(jsonBody)
+            : Promise.reject(new Error('not json')),
+      }),
+    }),
+  )
+}
