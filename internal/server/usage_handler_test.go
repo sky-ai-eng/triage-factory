@@ -273,6 +273,11 @@ func TestUsageEndpoints_Local(t *testing.T) {
 		if resp.ByTeam[0].TeamName == "" {
 			t.Errorf("/org by_team team_name empty; GetSystem name resolution failed: %+v", resp.ByTeam)
 		}
+		// by_user (org-wide): the local user's manual run (1.00) + both curator
+		// turns (0.50 + 0.10) = 1.60; the autonomous run + system carry no creator.
+		if len(resp.ByUser) != 1 || resp.ByUser[0].UserID != runmode.LocalDefaultUserID || !floatEq(resp.ByUser[0].Cost, 1.60) {
+			t.Errorf("/org by_user = %+v, want the local user at 1.60", resp.ByUser)
+		}
 		// org_level: the NULL-team rows — curator 0.10 + system_overhead 0.05.
 		ol := map[string]float64{}
 		for _, b := range resp.OrgLevel {

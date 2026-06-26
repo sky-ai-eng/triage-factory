@@ -12,7 +12,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 )
 
@@ -104,6 +103,7 @@ type usageTeamResponse struct {
 type usageOrgResponse struct {
 	TotalCostUSD float64               `json:"total_cost_usd"`
 	ByTeam       []usageTeamBucket     `json:"by_team"`
+	ByUser       []usageUserBucket     `json:"by_user"`
 	OrgLevel     []usageOrgLevelBucket `json:"org_level"`
 	ByCategory   []usageCategoryBucket `json:"by_category"`
 	ByModel      []usageModelBucket    `json:"by_model"`
@@ -150,11 +150,19 @@ func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUsageTeam returns one team's full breakdown. Gate: team admin OR org
-// admin (an org admin may not be a team member, so the read is a System /
-// admin-pool ListSpendSystem — the role gate authorizes the cross-RLS path).
-// by_user groups manual+curator rows by creator; by_rule groups autonomous rows
-// by the firing trigger; system rows (NULL team) never appear (the TeamID
+// handleUsageTeam returns one team's full breakdown. Gate: TEAM ADMIN — the
+// team's own members. Per-rule (per-blueprint) detail is operational, so it
+// stays with the team; org admins get the cross-team rollup from /api/usage/org
+// instead, never another team's per-rule view.
+//
+// Because the caller is a team member, every name resolves under their own RLS:
+// by_rule reads the team's event_handlers / blueprints through the app pool
+// (team-scoped RLS permits a member), and by_user reads org-scoped display
+// names. The spend READ still uses ListSpendSystem: curator_requests RLS is
+// creator-scoped, so a single admin's app-pool read would miss peers' curator
+// turns — the team-admin gate authorizes the System read that captures the whole
+// team. by_user groups manual+curator rows by creator; by_rule groups autonomous
+// rows by the firing trigger; system rows (NULL team) never appear (the TeamID
 // filter excludes them).
 //
 // GET /api/usage/teams/{team_id}?since=&until=
@@ -170,12 +178,14 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// Confirm the team is in the caller's org before the role gate so a
-	// cross-org id 404s cleanly rather than returning an empty 200.
+	// Confirm the team is in the caller's org first so a cross-org id 404s
+	// cleanly (non-disclosure) rather than falling through to the 403.
 	if !h.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
-	if !h.requireTeamOrOrgAdmin(w, r, orgID, userID, teamID) {
+	// Team admins only — an org admin who isn't on the team gets the org rollup,
+	// not this per-team detail. Writes a 403; short-circuits to allowed in local.
+	if !h.az.RequireTeamAdmin(w, r, orgID, userID, teamID) {
 		return
 	}
 	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
@@ -229,9 +239,13 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 
 // handleUsageOrg returns the org rollup across every team + curator + system
 // job. Gate: org admin (a cross-team read — the authorized intent, not a
-// workaround). by_team groups the team-attributed rows (and drives the FE
-// team dropdown); org_level is the NULL-team rows (curator on non-team
-// projects + system_overhead) by category.
+// workaround). This is the governance lens: by_team groups the team-attributed
+// rows (and drives the FE team dropdown), by_user groups the human creators
+// org-wide, by_category splits automated / delegated / curator / system, and
+// org_level is the NULL-team rows (curator on non-team projects + system_
+// overhead) by category. Deliberately NO by_rule — per-rule detail stays with
+// the owning team (/api/usage/teams), so the org view never reaches into another
+// team's event_handlers.
 //
 // GET /api/usage/org?since=&until=
 func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
@@ -251,6 +265,7 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	var (
 		rows      []domain.SpendRow
 		teamNames map[string]string
+		userNames map[string]string
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -260,7 +275,12 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return e
 		}
-		teamNames, e = resolveSpendTeamNames(r.Context(), tx, orgID, rows)
+		if teamNames, e = resolveSpendTeamNames(r.Context(), tx, orgID, rows); e != nil {
+			return e
+		}
+		// Org-wide creators are co-org-members, so display names resolve under the
+		// org admin's claims (users_select is org-scoped) — no System read needed.
+		userNames, e = resolveSpendUserNames(r.Context(), tx, rows)
 		return e
 	}); err != nil {
 		internalError(w, "usage", err)
@@ -270,6 +290,7 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, usageOrgResponse{
 		TotalCostUSD: sumSpendCost(rows),
 		ByTeam:       spendByTeam(rows, teamNames),
+		ByUser:       spendByUser(rows, userNames),
 		OrgLevel:     spendOrgLevel(rows),
 		ByCategory:   spendByCategory(rows),
 		ByModel:      spendByModel(rows),
@@ -294,34 +315,6 @@ func (h *usageHandler) resolveCaller(w http.ResponseWriter, r *http.Request) (or
 		return "", "", false
 	}
 	return orgID, claims.Subject, true
-}
-
-// requireTeamOrOrgAdmin gates the team usage read on team admin OR org admin,
-// writing a 403 when neither. Composes the two raw probes (rather than
-// RequireTeamAdmin, which would write its own 403 even for an org admin who
-// isn't on the team). Local mode is the degenerate single implicit admin.
-func (h *usageHandler) requireTeamOrOrgAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
-	if runmode.Current() == runmode.ModeLocal {
-		return true
-	}
-	isTeamAdmin, err := h.az.UserIsTeamAdmin(r.Context(), userID, orgID, teamID)
-	if err != nil {
-		internalError(w, "usage", err)
-		return false
-	}
-	if isTeamAdmin {
-		return true
-	}
-	isOrgAdmin, err := h.az.UserIsOrgAdmin(r.Context(), userID, orgID)
-	if err != nil {
-		internalError(w, "usage", err)
-		return false
-	}
-	if !isOrgAdmin {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "team admin or org admin role required"})
-		return false
-	}
-	return true
 }
 
 // --- window parsing ---
@@ -565,12 +558,14 @@ func resolveSpendUserNames(ctx context.Context, tx db.TxStores, rows []domain.Sp
 	return names, nil
 }
 
-// resolveSpendRuleNames maps each distinct firing trigger (autonomous rows) to
-// a human-readable rule name via the ADMIN pool (GetSystem) — an org admin may
-// not be on the team that owns the trigger, so an app-pool read would be
-// RLS-blocked. A trigger event_handler always carries a NULL name (the
-// trigger_shape CHECK forces it), so the meaningful label is the blueprint it
-// fires; we fall back to that, then to "" (the FE shows the id).
+// resolveSpendRuleNames maps each distinct firing trigger (autonomous rows) to a
+// human-readable rule name. It uses the plain app-pool Get (RLS-scoped), NOT
+// GetSystem: this only runs for /api/usage/teams, whose caller is a team member
+// (team-admin gate), and event_handlers / blueprints RLS lets a member read
+// their own team's rows. No cross-team read happens — the org rollup never
+// resolves another team's per-rule names. A trigger event_handler always carries
+// a NULL name (the trigger_shape CHECK forces it), so the meaningful label is the
+// blueprint it fires; we fall back to that, then to "" (the FE shows the id).
 func resolveSpendRuleNames(ctx context.Context, tx db.TxStores, orgID string, rows []domain.SpendRow) (map[string]string, error) {
 	names := map[string]string{}
 	for _, r := range rows {
@@ -581,7 +576,7 @@ func resolveSpendRuleNames(ctx context.Context, tx db.TxStores, orgID string, ro
 		if _, done := names[tid]; done {
 			continue
 		}
-		eh, err := tx.EventHandlers.GetSystem(ctx, orgID, tid)
+		eh, err := tx.EventHandlers.Get(ctx, orgID, tid)
 		if err != nil {
 			return nil, err
 		}
@@ -589,7 +584,7 @@ func resolveSpendRuleNames(ctx context.Context, tx db.TxStores, orgID string, ro
 		if eh != nil {
 			name = eh.Name // non-empty only for rules; triggers carry NULL.
 			if name == "" && eh.BlueprintID != "" {
-				bp, err := tx.Blueprints.GetSystem(ctx, orgID, eh.BlueprintID)
+				bp, err := tx.Blueprints.Get(ctx, orgID, eh.BlueprintID)
 				if err != nil {
 					return nil, err
 				}

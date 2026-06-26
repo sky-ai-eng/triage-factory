@@ -161,25 +161,10 @@ func TestUsageHandler_GatesAndScope_Postgres(t *testing.T) {
 		if !floatEq(resp.TotalCostUSD, 1.75) {
 			t.Errorf("/teams total = %v, want 1.75 (teamA manual + autonomous + curator)", resp.TotalCostUSD)
 		}
-	})
-
-	t.Run("team_org_admin_not_member_200_crossRLS", func(t *testing.T) {
-		// The org admin is on teamB, NOT teamA. An app-pool read would see no
-		// teamA rows; the role gate + System read are the authorized cross-RLS path.
-		rec := httptest.NewRecorder()
-		r.uh.handleUsageTeam(rec, r.req(r.orgAdmin, r.teamA))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("/teams/{teamA} as org admin (not on teamA) = %d, want 200; body=%s", rec.Code, rec.Body.String())
-		}
-		var resp usageTeamResponse
-		mustDecode(t, rec, &resp)
-		if !floatEq(resp.TotalCostUSD, 1.75) {
-			t.Errorf("/teams total (org admin) = %v, want 1.75 — System read should cross RLS", resp.TotalCostUSD)
-		}
-		// by_rule resolves the blueprint name via the admin-pool GetSystem chain,
-		// which an org admin not on teamA could not reach through app-pool RLS.
+		// by_rule resolves the blueprint name under the team admin's OWN claims —
+		// a member can read their team's event_handlers/blueprints (no System read).
 		if len(resp.ByRule) != 1 || resp.ByRule[0].RuleName != r.blueprint {
-			t.Errorf("/teams by_rule = %+v, want one rule %q (blueprint-name fallback via GetSystem)", resp.ByRule, r.blueprint)
+			t.Errorf("/teams by_rule = %+v, want one rule %q (resolved under member claims)", resp.ByRule, r.blueprint)
 		}
 		// by_user surfaces the member who created the teamA spend.
 		var sawMember bool
@@ -190,6 +175,16 @@ func TestUsageHandler_GatesAndScope_Postgres(t *testing.T) {
 		}
 		if !sawMember {
 			t.Errorf("/teams by_user = %+v, want the member %s present", resp.ByUser, r.member)
+		}
+	})
+
+	t.Run("team_org_admin_not_member_403", func(t *testing.T) {
+		// /teams is team-admin-only: an org admin who isn't on teamA is NOT given
+		// that team's per-rule detail — they use the org rollup instead.
+		rec := httptest.NewRecorder()
+		r.uh.handleUsageTeam(rec, r.req(r.orgAdmin, r.teamA))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("/teams/{teamA} as org admin (not on teamA) = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 
@@ -228,6 +223,14 @@ func TestUsageHandler_GatesAndScope_Postgres(t *testing.T) {
 		}
 		if !floatEq(byTeam[r.teamA], 1.75) || !floatEq(byTeam[r.teamB], 2.00) {
 			t.Errorf("/org by_team = %+v, want teamA 1.75 + teamB 2.00", resp.ByTeam)
+		}
+		// by_user (org-wide, manual+curator by creator): member 1.00+0.50, orgAdmin 2.00.
+		byUser := map[string]float64{}
+		for _, u := range resp.ByUser {
+			byUser[u.UserID] = u.Cost
+		}
+		if !floatEq(byUser[r.member], 1.50) || !floatEq(byUser[r.orgAdmin], 2.00) {
+			t.Errorf("/org by_user = %+v, want member 1.50 + orgAdmin 2.00", resp.ByUser)
 		}
 		// org_level: the NULL-team system row.
 		var sysCost float64
