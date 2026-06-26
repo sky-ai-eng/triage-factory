@@ -189,7 +189,17 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 	}
 
 	err = h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Teams.AddMember(r.Context(), teamID, target, role)
+		if err := tx.Teams.AddMember(r.Context(), teamID, target, role); err != nil {
+			return err
+		}
+		// TFAC-471: audit the team add in the same tx (rolls back with it).
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID:  userID,
+			Action:       domain.AccessActionTeamMemberAdded,
+			TargetUserID: target,
+			TeamID:       teamID,
+			DetailJSON:   accessDetailNewRole(role),
+		})
 	})
 	switch {
 	case err == nil:
@@ -241,7 +251,17 @@ func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r
 	}
 
 	err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Teams.ChangeMemberRole(r.Context(), teamID, target, role)
+		if err := tx.Teams.ChangeMemberRole(r.Context(), teamID, target, role); err != nil {
+			return err
+		}
+		// TFAC-471: audit the team role change in the same tx (rolls back with it).
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID:  userID,
+			Action:       domain.AccessActionTeamRoleChanged,
+			TargetUserID: target,
+			TeamID:       teamID,
+			DetailJSON:   accessDetailNewRole(role),
+		})
 	})
 	if !writeTeamMemberMutationResult(w, err) {
 		return
@@ -282,7 +302,16 @@ func (h *teamMembersHandler) handleTeamMemberRemove(w http.ResponseWriter, r *ht
 	}
 
 	err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Teams.RemoveMember(r.Context(), teamID, target)
+		if err := tx.Teams.RemoveMember(r.Context(), teamID, target); err != nil {
+			return err
+		}
+		// TFAC-471: audit the team removal in the same tx (rolls back with it).
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID:  userID,
+			Action:       domain.AccessActionTeamMemberRemoved,
+			TargetUserID: target,
+			TeamID:       teamID,
+		})
 	})
 	if !writeTeamMemberMutationResult(w, err) {
 		return

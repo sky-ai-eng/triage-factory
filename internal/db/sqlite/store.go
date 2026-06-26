@@ -114,6 +114,9 @@ func New(conn *sql.DB) db.Stores {
 		// SystemLLMRuns is admin-pool only in Postgres; SQLite collapses to
 		// the one connection (N=1, no RLS).
 		SystemLLMRuns: newSystemLLMRunStore(conn),
+		// AccessChangeLog is app-pool in Postgres; SQLite collapses to the one
+		// connection (N=1, no RLS). See TFAC-471.
+		AccessChangeLog: newAccessChangeLogStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

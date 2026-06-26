@@ -196,6 +196,13 @@ func (s *Server) provisionOrg(ctx context.Context, userID uuid.UUID, name, slugB
 	// team, through the shared primitive invite-accept (and later JIT/SCIM)
 	// also use. The org + team were just created in this tx, so the
 	// ON CONFLICT DO NOTHING inside never trips here — behaviour unchanged.
+	//
+	// TFAC-471: the founder self-grant is deliberately NOT written to
+	// access_change_log. The first owner is self-evident — orgs.owner_user_id
+	// and this org_memberships row already record it durably, and there is no
+	// third-party actor whose action needs auditing (the founder grants
+	// themselves). The audit log captures governance changes *after* the org
+	// exists (role changes, revokes, transfers, later grants via invite).
 	if err := grantOrgMembership(ctx, tx, userID, orgID, "owner",
 		uuid.NullUUID{UUID: teamID, Valid: true}, "admin"); err != nil {
 		return uuid.Nil, uuid.Nil, "", err

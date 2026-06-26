@@ -290,6 +290,12 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// under system_llm_runs_all RLS would be rejected. Same admin-only
 		// shape as PendingFirings / EventQueue.
 		SystemLLMRuns: newSystemLLMRunStore(admin),
+		// AccessChangeLog is APP-pool: every Record composes inside the
+		// claims-bearing WithTx that runs the audited governance action, so
+		// the access_change_log_all RLS policy gates the write (and the future
+		// audit view's read) by org. Unlike SystemLLMRuns, it is not
+		// system-written. See TFAC-471.
+		AccessChangeLog: newAccessChangeLogStore(app),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),
@@ -363,11 +369,12 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		// Both pools collapse to tx (test door). BackfillInstallationsFromAPI's
 		// GetSystem would hit tf_app and be denied here — tests that exercise
 		// it use New(admin, app, key) directly, same as the SecretStore tests.
-		GitHubApps:    newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
-		JiraApps:      newJiraAppsStore(tx, tx),
-		OrgTemplate:   newTxOrgTemplateStore(tx),
-		Invites:       newInvitesStore(tx, tx),
-		SystemLLMRuns: newSystemLLMRunStore(tx),
-		Ext:           db.BuildStoreExtensions("postgres", tx, tx),
+		GitHubApps:      newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
+		JiraApps:        newJiraAppsStore(tx, tx),
+		OrgTemplate:     newTxOrgTemplateStore(tx),
+		Invites:         newInvitesStore(tx, tx),
+		SystemLLMRuns:   newSystemLLMRunStore(tx),
+		AccessChangeLog: newAccessChangeLogStore(tx),
+		Ext:             db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

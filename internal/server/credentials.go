@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -159,6 +160,18 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		}
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
+		}
+		// TFAC-471: audit the org GitHub PAT bind/rotate in the same tx. The
+		// setup wizard requires a GitHub PAT (guarded above), so this seam is
+		// the github_pat write-point; the host carries the configured base URL.
+		if req.GitHubPAT != "" {
+			if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+				ActorUserID: userID,
+				Action:      domain.AccessActionCredentialSet,
+				DetailJSON:  accessDetailCredential(domain.CredentialKindGitHubPAT, req.GitHubURL),
+			}); err != nil {
+				return fmt.Errorf("audit credential set: %w", err)
+			}
 		}
 		return nil
 	}); err != nil {

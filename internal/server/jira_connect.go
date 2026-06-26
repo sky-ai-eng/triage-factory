@@ -372,6 +372,17 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 		if err := tx.Users.UpsertJiraIdentity(r.Context(), userID, host, jiraUser.StableID(), jiraUser.DisplayName, source); err != nil {
 			return fmt.Errorf("persist jira identity: %w", err)
 		}
+		// TFAC-471: audit the per-user Jira credential bind/rotate in the same
+		// tx; actor is the user binding their own access, host carries the org's
+		// Jira host. No target_user_id — that column is for membership/role
+		// actions; the per-user credential's subject is the actor.
+		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialSet,
+			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraUser, host),
+		}); err != nil {
+			return fmt.Errorf("audit credential set: %w", err)
+		}
 		return nil
 	}); err != nil {
 		internalError(w, "jira-identity", err)

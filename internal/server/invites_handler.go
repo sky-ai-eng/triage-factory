@@ -544,6 +544,26 @@ func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Requ
 		internalError(w, "invites", err)
 		return
 	}
+	// TFAC-471: audit the membership grant in the SAME admin-pool tx as the
+	// grant. The actor is the invitee themselves (they redeemed the link); the
+	// invite id rides in detail_json. team_id is set when the invite also
+	// placed them on a team. This is the raw-execer path because the grant runs
+	// on the admin pool (the invitee has no RLS standing to insert their own
+	// membership), so it can't route through the app-pool AccessChangeLogStore.
+	teamIDStr := ""
+	if teamID.Valid {
+		teamIDStr = teamID.UUID.String()
+	}
+	if err := recordAccessChangeTx(r.Context(), tx, orgUUID.String(), domain.AccessChange{
+		ActorUserID:  inviteeID.String(),
+		Action:       domain.AccessActionOrgMemberGranted,
+		TargetUserID: inviteeID.String(),
+		TeamID:       teamIDStr,
+		DetailJSON:   accessDetailInvite(invite.ID),
+	}); err != nil {
+		internalError(w, "invites", fmt.Errorf("audit member granted: %w", err))
+		return
+	}
 	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE public.org_invites
 		   SET accepted_at = now(), accepted_by = $2

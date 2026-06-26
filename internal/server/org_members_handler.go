@@ -137,7 +137,17 @@ func (h *orgMembersHandler) handleOrgMemberRoleChange(w http.ResponseWriter, r *
 	}
 
 	err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.OrgMemberships.UpdateRole(r.Context(), orgID, targetID, role)
+		if err := tx.OrgMemberships.UpdateRole(r.Context(), orgID, targetID, role); err != nil {
+			return err
+		}
+		// TFAC-471: record the role change in the same tx — a log-write failure
+		// rolls the role change back, so the audit can't diverge from reality.
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID:  userID,
+			Action:       domain.AccessActionOrgRoleChanged,
+			TargetUserID: targetID,
+			DetailJSON:   accessDetailNewRole(role),
+		})
 	})
 	if !writeOrgMemberMutationResult(w, "org-members", err) {
 		return
@@ -180,7 +190,15 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 	}
 
 	err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.OrgMemberships.Remove(r.Context(), orgID, targetID)
+		if err := tx.OrgMemberships.Remove(r.Context(), orgID, targetID); err != nil {
+			return err
+		}
+		// TFAC-471: audit the revoke in the same tx (rolls back with it).
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID:  userID,
+			Action:       domain.AccessActionOrgMemberRevoked,
+			TargetUserID: targetID,
+		})
 	})
 	if !writeOrgMemberMutationResult(w, "org-members", err) {
 		return
@@ -279,7 +297,16 @@ func (h *orgMembersHandler) handleOrgOwnershipTransfer(w http.ResponseWriter, r 
 	// Run as the owner: guard_org_owner_transfer reads tf.current_user_id(),
 	// so the owner's claims must be in context (the app pool, not admin).
 	err = h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.OrgMemberships.TransferOwnership(r.Context(), orgID, userID, newOwner)
+		if err := tx.OrgMemberships.TransferOwnership(r.Context(), orgID, userID, newOwner); err != nil {
+			return err
+		}
+		// TFAC-471: audit the transfer in the same tx. actor = the former owner
+		// who initiated it; target = the member who became owner.
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID:  userID,
+			Action:       domain.AccessActionOrgOwnershipTransferred,
+			TargetUserID: newOwner,
+		})
 	})
 	switch {
 	case err == nil:

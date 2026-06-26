@@ -241,6 +241,11 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// tx and commits autonomously — the same admin-pool shape Events /
 		// TaskMemory use for their write-only halves.
 		SystemLLMRuns: newSystemLLMRunStore(s.admin),
+		// AccessChangeLog is tx-bound (app-pool): the Record calls the
+		// governance handlers make compose with their surrounding claims tx, so
+		// the audit row commits or rolls back atomically with the action.
+		// access_change_log_all RLS gates the in-tx write by org. See TFAC-471.
+		AccessChangeLog: newAccessChangeLogStore(tx),
 		// Opaque extension bundles (the Enterprise Edition SSO stores) built
 		// from the same (app=tx, admin=s.admin) handles, so their app/admin
 		// pool split is identical to core's own stores — the login-time reads

@@ -280,6 +280,15 @@ type Stores struct {
 	// will make. See TFAC-451.
 	SystemLLMRuns SystemLLMRunStore
 
+	// AccessChangeLog owns the access_change_log table — the small, low-volume
+	// audit log of governance actions with no external entity (org/team
+	// membership & role grants/changes/revokes, credential bind/rotate). App
+	// pool in Postgres: every Record composes inside the claims-bearing WithTx
+	// that runs the audited action, gated by an org-scoped RLS policy; the
+	// future org-admin audit view reads through the same pool. SQLite is N=1
+	// and unscoped. See TFAC-471.
+	AccessChangeLog AccessChangeLogStore
+
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
 	// core holds no SSO symbols.
@@ -339,6 +348,7 @@ type TxStores struct {
 	OrgTemplate      OrgTemplateStore
 	Invites          InvitesStore
 	SystemLLMRuns    SystemLLMRunStore
+	AccessChangeLog  AccessChangeLogStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same
