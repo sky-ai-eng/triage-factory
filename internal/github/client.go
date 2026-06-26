@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// HTTPError is returned by GetRaw when the server responds with a non-2xx
-// status. Callers can use errors.As to inspect the status code.
+// HTTPError is returned for any transport-level non-2xx GitHub response.
+// Callers can use errors.As to inspect the status code.
 type HTTPError struct {
 	StatusCode int
 	Body       string
@@ -39,6 +39,11 @@ func IsHTTP406(err error) bool {
 	return errors.As(err, &he) && he.StatusCode == 406
 }
 
+// acceptJSON is the default Accept header for the GitHub v3 JSON API. Every
+// request builder sends it unless the caller overrides it (GetRaw's diff/patch
+// media types) or the endpoint doesn't take one (PostGraphQL).
+const acceptJSON = "application/vnd.github.v3+json"
+
 // downloadTimeout is the cap for streaming artifact downloads (log archives
 // and similar large blobs). Deliberately way longer than the 30s shared-client
 // timeout on c.http — a 400 MB log archive on a slow link can take several
@@ -62,62 +67,65 @@ func NewClient(baseURL, pat string) *Client {
 	}
 }
 
-// Get performs an authenticated GET request and returns the response body.
-func (c *Client) Get(path string) ([]byte, error) {
-	return c.do("GET", path, nil)
+// NewClientWithHTTPClient is NewClient backed by a caller-supplied *http.Client
+// rather than the default 30s one. It exists for callers that must control the
+// Transport — a custom proxy/TLS stack in an enterprise deployment, or, in
+// tests, a RoundTripper that injects faults or observes request cancellation.
+// A nil hc falls back to NewClient's default. ctx threading is orthogonal: the
+// supplied client still has every request built with http.NewRequestWithContext.
+func NewClientWithHTTPClient(baseURL, pat string, hc *http.Client) *Client {
+	c := NewClient(baseURL, pat)
+	if hc != nil {
+		c.http = hc
+	}
+	return c
 }
 
-// UserID resolves the numeric user-account id for a GitHub login (e.g. a bot
-// account "<slug>[bot]") via GET /users/{login}. It is the bot *user* id — the
-// account behind the App — not the App id, and it's the value the numeric-id
-// noreply commit email is built from so App-bot commits link on github.com
-// (TFAC-474).
-//
-// /users/{login} is a public endpoint that works unauthenticated, which is what
-// the App-registration path relies on (it has only the org's GitHub base URL,
-// no installation token yet). The login is url.PathEscape'd because a bot login
-// carries "[bot]" brackets that would otherwise be mangled in the path. The
-// call routes through c.baseURL like every other request, so it targets
-// github.com or the org's GHES host without hardcoding api.github.com.
-//
-// ctx cancels the request (the call goes through getCtx rather than the
-// ctx-free do() family). Returns (0, error) on a non-2xx (notably 404 when the
-// freshly-created bot account hasn't propagated yet) or a malformed/idless body,
-// so the caller can fall back to the plain "<slug>[bot]@users.noreply.github.com"
-// form. On a non-2xx the error wraps a *HTTPError, so a caller can status-
-// discriminate via errors.As (e.g. 404 vs 429) rather than only checking err != nil.
-func (c *Client) UserID(ctx context.Context, login string) (int64, error) {
-	data, err := c.getCtx(ctx, "/users/"+url.PathEscape(login))
-	if err != nil {
-		return 0, fmt.Errorf("get user %q: %w", login, err)
+// newRequest builds an authenticated *http.Request under ctx and is the shared
+// construction prefix for the whole client: request() (the do-family core),
+// GetConditional, DownloadArtifact, and PostGraphQL all build through it, so
+// auth + header handling lives in exactly one place. It marshals a JSON body
+// when present, applies setAuth (empty token ⇒ no Authorization header — see
+// setAuth), sets Accept when non-empty (GraphQL passes ""), and sets
+// Content-Type only when there's a body. fullURL is the absolute URL — callers
+// pass c.baseURL+path, or the GraphQL endpoint.
+func (c *Client) newRequest(ctx context.Context, method, fullURL string, body any, accept string) (*http.Request, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("marshal body: %w", err)
+		}
+		bodyReader = bytes.NewReader(b)
 	}
-	var u struct {
-		ID int64 `json:"id"`
-	}
-	if err := json.Unmarshal(data, &u); err != nil {
-		return 0, fmt.Errorf("parse user %q: %w", login, err)
-	}
-	if u.ID == 0 {
-		return 0, fmt.Errorf("user %q: response carried no id", login)
-	}
-	return u.ID, nil
-}
 
-// getCtx performs a context-aware authenticated GET (or unauthenticated, when
-// the token is empty — see setAuth) and returns the response body. It differs
-// from the do() family in two ways UserID needs and the broader API doesn't
-// (yet) provide: it honors ctx for cancellation, and it returns a typed
-// *HTTPError on a non-2xx so callers can status-discriminate via errors.As —
-// matching GetConditional / GetRaw / DownloadArtifact, which already do. It's
-// kept as its own seam rather than changing do()'s shared error type across
-// every Get/Post/… caller in this PR.
-func (c *Client) getCtx(ctx context.Context, path string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+path, nil)
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
 	if err != nil {
 		return nil, err
 	}
 	c.setAuth(req)
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return req, nil
+}
+
+// request is the single ctx-aware request core behind the do() family
+// (Get/Post/Put/Patch/Delete) and GetRaw. It builds through newRequest, honors
+// ctx for cancellation (request-scoped cancellation, handler deadlines,
+// poller/shutdown abort — additive to the 30s client timeout), reads the full
+// body, and returns a typed *HTTPError on any non-2xx so every caller can
+// status-discriminate via errors.As. The error string is the verbatim
+// "%s %s returned %d: %s" the pre-unification do() formatted, so string-matching
+// callers are unaffected and errors.As callers only gain accuracy.
+func (c *Client) request(ctx context.Context, method, path string, body any, accept string) ([]byte, error) {
+	req, err := c.newRequest(ctx, method, c.baseURL+path, body, accept)
+	if err != nil {
+		return nil, err
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -133,10 +141,52 @@ func (c *Client) getCtx(ctx context.Context, path string) ([]byte, error) {
 		return nil, &HTTPError{
 			StatusCode: resp.StatusCode,
 			Body:       string(data),
-			msg:        fmt.Sprintf("GET %s returned %d: %s", path, resp.StatusCode, string(data)),
+			msg:        fmt.Sprintf("%s %s returned %d: %s", method, path, resp.StatusCode, string(data)),
 		}
 	}
 	return data, nil
+}
+
+// Get performs a context-aware authenticated GET request and returns the
+// response body. ctx cancels the request; a non-2xx returns a *HTTPError.
+func (c *Client) Get(ctx context.Context, path string) ([]byte, error) {
+	return c.request(ctx, "GET", path, nil, acceptJSON)
+}
+
+// UserID resolves the numeric user-account id for a GitHub login (e.g. a bot
+// account "<slug>[bot]") via GET /users/{login}. It is the bot *user* id — the
+// account behind the App — not the App id, and it's the value the numeric-id
+// noreply commit email is built from so App-bot commits link on github.com
+// (TFAC-474).
+//
+// /users/{login} is a public endpoint that works unauthenticated, which is what
+// the App-registration path relies on (it has only the org's GitHub base URL,
+// no installation token yet). The login is url.PathEscape'd because a bot login
+// carries "[bot]" brackets that would otherwise be mangled in the path. The
+// call routes through c.baseURL like every other request, so it targets
+// github.com or the org's GHES host without hardcoding api.github.com.
+//
+// ctx cancels the request. Returns (0, error) on a non-2xx (notably 404 when
+// the freshly-created bot account hasn't propagated yet) or a malformed/idless
+// body, so the caller can fall back to the plain
+// "<slug>[bot]@users.noreply.github.com" form. On a non-2xx the error wraps a
+// *HTTPError, so a caller can status-discriminate via errors.As (e.g. 404 vs
+// 429) rather than only checking err != nil.
+func (c *Client) UserID(ctx context.Context, login string) (int64, error) {
+	data, err := c.Get(ctx, "/users/"+url.PathEscape(login))
+	if err != nil {
+		return 0, fmt.Errorf("get user %q: %w", login, err)
+	}
+	var u struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(data, &u); err != nil {
+		return 0, fmt.Errorf("parse user %q: %w", login, err)
+	}
+	if u.ID == 0 {
+		return 0, fmt.Errorf("user %q: response carried no id", login)
+	}
+	return u.ID, nil
 }
 
 // GetConditional performs an authenticated GET that sends an If-None-Match
@@ -151,15 +201,13 @@ func (c *Client) getCtx(ctx context.Context, path string) ([]byte, error) {
 //   - other non-2xx → (nil, "", false, *HTTPError).
 //
 // Kept separate from Get so existing callers don't have to thread ETags they
-// don't use.
-func (c *Client) GetConditional(path, etag string) (body []byte, newEtag string, notModified bool, err error) {
-	url := c.baseURL + path
-	req, err := http.NewRequest("GET", url, nil)
+// don't use; it shares the newRequest build prefix but keeps the 304
+// short-circuit and ETag return that the unified core doesn't model.
+func (c *Client) GetConditional(ctx context.Context, path, etag string) (body []byte, newEtag string, notModified bool, err error) {
+	req, err := c.newRequest(ctx, "GET", c.baseURL+path, nil, acceptJSON)
 	if err != nil {
 		return nil, "", false, err
 	}
-	c.setAuth(req)
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
@@ -190,24 +238,24 @@ func (c *Client) GetConditional(path, etag string) (body []byte, newEtag string,
 	return data, resp.Header.Get("ETag"), false, nil
 }
 
-// Post performs an authenticated POST request with a JSON body.
-func (c *Client) Post(path string, body any) ([]byte, error) {
-	return c.do("POST", path, body)
+// Post performs a context-aware authenticated POST request with a JSON body.
+func (c *Client) Post(ctx context.Context, path string, body any) ([]byte, error) {
+	return c.request(ctx, "POST", path, body, acceptJSON)
 }
 
-// Put performs an authenticated PUT request with a JSON body.
-func (c *Client) Put(path string, body any) ([]byte, error) {
-	return c.do("PUT", path, body)
+// Put performs a context-aware authenticated PUT request with a JSON body.
+func (c *Client) Put(ctx context.Context, path string, body any) ([]byte, error) {
+	return c.request(ctx, "PUT", path, body, acceptJSON)
 }
 
-// Patch performs an authenticated PATCH request with a JSON body.
-func (c *Client) Patch(path string, body any) ([]byte, error) {
-	return c.do("PATCH", path, body)
+// Patch performs a context-aware authenticated PATCH request with a JSON body.
+func (c *Client) Patch(ctx context.Context, path string, body any) ([]byte, error) {
+	return c.request(ctx, "PATCH", path, body, acceptJSON)
 }
 
-// Delete performs an authenticated DELETE request.
-func (c *Client) Delete(path string) ([]byte, error) {
-	return c.do("DELETE", path, nil)
+// Delete performs a context-aware authenticated DELETE request.
+func (c *Client) Delete(ctx context.Context, path string) ([]byte, error) {
+	return c.request(ctx, "DELETE", path, nil, acceptJSON)
 }
 
 // DownloadArtifact performs an authenticated streaming GET against a GitHub
@@ -236,16 +284,13 @@ func (c *Client) Delete(path string) ([]byte, error) {
 // is the right behavior here — the signed S3 URL would reject our Bearer
 // token anyway.
 //
-// Returns the number of bytes written to dst.
+// ctx cancels the (potentially long) download; it's additive to the 15-minute
+// clone timeout. Returns the number of bytes written to dst.
 func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Writer, maxBytes int64) (int64, error) {
-	url := c.baseURL + path
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := c.newRequest(ctx, "GET", c.baseURL+path, nil, acceptJSON)
 	if err != nil {
 		return 0, err
 	}
-	c.setAuth(req)
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	// Shallow copy so the long-download timeout doesn't bleed into other
 	// API calls that share the same client. Inherits Transport/Jar/CheckRedirect.
@@ -291,35 +336,12 @@ func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Write
 	return n, nil
 }
 
-// GetRaw performs an authenticated GET with a custom Accept header and returns raw bytes.
-func (c *Client) GetRaw(path, accept string) ([]byte, error) {
-	url := c.baseURL + path
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	c.setAuth(req)
-	req.Header.Set("Accept", accept)
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		body := string(data)
-		return nil, &HTTPError{
-			StatusCode: resp.StatusCode,
-			Body:       body,
-			msg:        fmt.Sprintf("GET %s returned %d: %s", path, resp.StatusCode, body),
-		}
-	}
-	return data, nil
+// GetRaw performs a context-aware authenticated GET with a custom Accept
+// header and returns raw bytes. It is a thin layer over the unified core —
+// the only thing distinct about it is the caller-supplied Accept (diff/patch
+// media types); a non-2xx returns a *HTTPError like every other path.
+func (c *Client) GetRaw(ctx context.Context, path, accept string) ([]byte, error) {
+	return c.request(ctx, "GET", path, nil, accept)
 }
 
 // graphqlURL derives the GraphQL endpoint from the REST API base URL.
@@ -358,21 +380,16 @@ func (e gqlErrors) first(context string) error {
 	return fmt.Errorf("%s: GraphQL error (%s): %s", context, e[0].Type, e[0].Message)
 }
 
-// PostGraphQL sends a GraphQL query to GitHub's GraphQL API.
-func (c *Client) PostGraphQL(body any) ([]byte, error) {
-	url := graphqlURL(c.baseURL)
-
-	b, err := json.Marshal(body)
+// PostGraphQL sends a GraphQL query to GitHub's GraphQL API. ctx cancels the
+// request. Only a transport-level (>= 400) non-2xx returns a *HTTPError; the
+// load-bearing 200-carrying-errors[] partial-vs-total-failure path below is
+// preserved exactly — a usable `data` block degrades to the partial result,
+// an absent/null `data` is a genuine failure.
+func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
+	req, err := c.newRequest(ctx, "POST", graphqlURL(c.baseURL), body, "")
 	if err != nil {
 		return nil, err
 	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-	c.setAuth(req)
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -382,7 +399,11 @@ func (c *Client) PostGraphQL(body any) ([]byte, error) {
 
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("GraphQL returned %d: %s", resp.StatusCode, string(data))
+		return nil, &HTTPError{
+			StatusCode: resp.StatusCode,
+			Body:       string(data),
+			msg:        fmt.Sprintf("GraphQL returned %d: %s", resp.StatusCode, string(data)),
+		}
 	}
 
 	// GraphQL can return a 200 carrying BOTH a usable `data` block and an
@@ -422,9 +443,10 @@ func (c *Client) PostGraphQL(body any) ([]byte, error) {
 }
 
 // setAuth applies the bearer Authorization header for an authenticated client,
-// and is the single place every request builder (do, GetConditional, GetRaw,
-// DownloadArtifact, PostGraphQL) sets it — so "empty token ⇒ unauthenticated"
-// holds uniformly across the whole client, not just one method.
+// and is the single place every request builder (newRequest, and through it
+// request, GetConditional, GetRaw, DownloadArtifact, PostGraphQL) sets it — so
+// "empty token ⇒ unauthenticated" holds uniformly across the whole client, not
+// just one method.
 //
 // An empty token means an unauthenticated client. The App-registration path
 // builds one to read the public GET /users/{login} (UserID) before any
@@ -439,42 +461,4 @@ func (c *Client) setAuth(req *http.Request) {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+c.pat)
-}
-
-func (c *Client) do(method, path string, body any) ([]byte, error) {
-	url := c.baseURL + path
-
-	var bodyReader io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("marshal body: %w", err)
-		}
-		bodyReader = bytes.NewReader(b)
-	}
-
-	req, err := http.NewRequest(method, url, bodyReader)
-	if err != nil {
-		return nil, err
-	}
-	c.setAuth(req)
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("%s %s returned %d: %s", method, path, resp.StatusCode, string(data))
-	}
-	return data, nil
 }

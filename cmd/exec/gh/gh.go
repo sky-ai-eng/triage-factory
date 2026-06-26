@@ -1,6 +1,7 @@
 package gh
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -78,7 +79,7 @@ Repo Resolution (all gh commands):
 // App-installation-or-PAT credential and makes the request; in local mode the
 // in-process LocalClient builds the same client directly on the user's
 // machine. host is nil on the help route, which returns before any call.
-func Handle(host agenthost.Client, args []string) {
+func Handle(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		printHelp()
 		return
@@ -89,9 +90,9 @@ func Handle(host agenthost.Client, args []string) {
 
 	switch resource {
 	case "pr":
-		handlePR(host, cmdArgs)
+		handlePR(ctx, host, cmdArgs)
 	case "actions":
-		handleActions(host, cmdArgs)
+		handleActions(ctx, host, cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown gh resource: %s\n", resource)
 		os.Exit(1)

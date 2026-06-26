@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -26,7 +27,7 @@ func TestBranchesExist_ThreeWayResult(t *testing.T) {
 		{Owner: "octo", Repo: "repo", Branch: "gone"},
 		{Owner: "octo", Repo: "ghost", Branch: "whatever"},
 	}
-	got, err := c.BranchesExist(refs)
+	got, err := c.BranchesExist(context.Background(), refs)
 	if err != nil {
 		t.Fatalf("BranchesExist: %v", err)
 	}
@@ -59,7 +60,7 @@ func TestBranchesExist_QualifiesRefAndAliases(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	if _, err := c.BranchesExist([]BranchRef{
+	if _, err := c.BranchesExist(context.Background(), []BranchRef{
 		{Owner: "octo", Repo: "repo", Branch: "feature/x"},
 		{Owner: "octo", Repo: "repo", Branch: `weird"name`},
 	}); err != nil {
@@ -95,7 +96,7 @@ func TestBranchesExist_ErroredRefIsUnknown(t *testing.T) {
 		{Owner: "octo", Repo: "locked", Branch: "secret"}, // r0: ref null + error
 		{Owner: "octo", Repo: "repo", Branch: "alive"},    // r1: exists
 	}
-	got, err := c.BranchesExist(refs)
+	got, err := c.BranchesExist(context.Background(), refs)
 	if err != nil {
 		t.Fatalf("BranchesExist: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestBranchesExist_ErroredRefIsUnknown(t *testing.T) {
 // the reconciler calls it unconditionally per owner.
 func TestBranchesExist_Empty(t *testing.T) {
 	c := clientAgainst("http://unused.invalid")
-	got, err := c.BranchesExist(nil)
+	got, err := c.BranchesExist(context.Background(), nil)
 	if err != nil || got != nil {
 		t.Errorf("BranchesExist(nil) = (%v, %v), want (nil, nil)", got, err)
 	}

@@ -457,7 +457,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			m.reportError("github", orgID, cerr)
 			continue
 		}
-		grant, gerr := client.ListInstallationRepos()
+		grant, gerr := client.ListInstallationRepos(ctx)
 		if gerr != nil {
 			githubLog.Error("list installation repos failed", "org", orgID, "account", inst.AccountLogin, "error", gerr)
 			m.reportError("github", orgID, gerr)
@@ -470,7 +470,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
-		if _, rerr := m.trackerForOrg(orgID).RefreshGitHub(client, "", scoped, resolver); rerr != nil {
+		if _, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, "", scoped, resolver); rerr != nil {
 			githubLog.Error("tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
 			m.reportError("github", orgID, rerr)
 		}
@@ -533,7 +533,7 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID string, repos
 			}
 			continue
 		}
-		teams, err := client.ListOrgTeams(owner)
+		teams, err := client.ListOrgTeams(ctx, owner)
 		if err != nil {
 			githubGroupsLog.Warn("list teams for owner failed; skipping reconcile", "org", orgID, "owner", owner, "error", err)
 			continue
@@ -592,7 +592,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 			githubLog.Error("read github identity failed", "org", orgID, "error", err)
 			return
 		}
-		if teams, terr := client.ListMyTeams(); terr != nil {
+		if teams, terr := client.ListMyTeams(ctx); terr != nil {
 			githubLog.Warn("list teams failed; team-based review requests will be missed this cycle", "org", orgID, "error", terr)
 		} else {
 			userTeams = teams
@@ -600,7 +600,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	}
 
 	resolver := m.reviewerResolver(ctx, orgID, username, userTeams)
-	if _, err := m.trackerForOrg(orgID).RefreshGitHub(client, username, repos, resolver); err != nil {
+	if _, err := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, username, repos, resolver); err != nil {
 		githubLog.Error("tracker error", "org", orgID, "error", err)
 		m.reportError("github", orgID, err)
 	}

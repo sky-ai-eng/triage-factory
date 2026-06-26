@@ -51,7 +51,7 @@ const (
 // handleActions dispatches gh actions subcommands. The GitHub adapter is
 // built inside each action once owner/repo resolve, since the raw transport
 // (Get / DownloadArtifact) needs them for the host's credential resolution.
-func handleActions(host agenthost.Client, args []string) {
+func handleActions(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: triagefactory exec gh actions <action> [flags]")
 	}
@@ -61,9 +61,9 @@ func handleActions(host agenthost.Client, args []string) {
 
 	switch action {
 	case "download-logs":
-		actionsDownloadLogs(host, flags)
+		actionsDownloadLogs(ctx, host, flags)
 	case "list-runs":
-		actionsListRuns(host, flags)
+		actionsListRuns(ctx, host, flags)
 	default:
 		exitErr(fmt.Sprintf("unknown actions action: %s", action))
 	}
@@ -114,7 +114,7 @@ type listRun struct {
 // Exactly one of --pr / --sha is required. --pr takes a PR number and
 // resolves the head SHA before calling the Actions list endpoint; --sha
 // hits the endpoint directly.
-func actionsListRuns(host agenthost.Client, args []string) {
+func actionsListRuns(ctx context.Context, host agenthost.Client, args []string) {
 	prStr := flagVal(args, "--pr")
 	sha := flagVal(args, "--sha")
 
@@ -138,7 +138,7 @@ func actionsListRuns(host agenthost.Client, args []string) {
 		// retries, and error shapes. The extra calls are a few hundred
 		// milliseconds on a PR with normal activity — acceptable for a
 		// discovery command agents run at most once per task.
-		pr, err := client.GetPR(owner, repo, prNum, false)
+		pr, err := client.GetPR(ctx, owner, repo, prNum, false)
 		if err != nil {
 			exitErr(fmt.Sprintf("fetch PR #%d: %v", prNum, err))
 		}
@@ -148,7 +148,7 @@ func actionsListRuns(host agenthost.Client, args []string) {
 		sha = pr.HeadSHA
 	}
 
-	runs, err := fetchRunsForSHA(client, owner, repo, sha)
+	runs, err := fetchRunsForSHA(ctx, client, owner, repo, sha)
 	if err != nil {
 		exitErr(err.Error())
 	}
@@ -172,7 +172,7 @@ func actionsListRuns(host agenthost.Client, args []string) {
 // fetchRunsForSHA queries GET /repos/{o}/{r}/actions/runs?head_sha=<sha>
 // and flattens the response to the subset of fields the agent needs.
 // Runs come back newest-first per GitHub's default ordering.
-func fetchRunsForSHA(client ghAPI, owner, repo, sha string) ([]listRun, error) {
+func fetchRunsForSHA(ctx context.Context, client ghAPI, owner, repo, sha string) ([]listRun, error) {
 	q := url.Values{
 		"head_sha":              []string{sha},
 		"per_page":              []string{strconv.Itoa(maxListedRuns)},
@@ -180,7 +180,7 @@ func fetchRunsForSHA(client ghAPI, owner, repo, sha string) ([]listRun, error) {
 	}
 	apiPath := fmt.Sprintf("/repos/%s/%s/actions/runs?%s", owner, repo, q.Encode())
 
-	data, err := client.Get(apiPath)
+	data, err := client.Get(ctx, apiPath)
 	if err != nil {
 		return nil, fmt.Errorf("list workflow runs: %w", err)
 	}
@@ -288,7 +288,7 @@ type jobInfo struct {
 // on error — exitErr calls os.Exit, which skips defers, so inlining the
 // logic here would leak the temp zip (and leave a half-extracted destDir)
 // on every failure path.
-func actionsDownloadLogs(host agenthost.Client, args []string) {
+func actionsDownloadLogs(ctx context.Context, host agenthost.Client, args []string) {
 	// Validate the positional arg first. If the user forgot <run_id>
 	// entirely, we want the usage message, not a confusing "could not
 	// resolve repo" error that happens to surface because they're
@@ -327,7 +327,7 @@ func actionsDownloadLogs(host agenthost.Client, args []string) {
 	// Always fetch the job list up front. Cheap (single JSON GET) and the
 	// response shape is consistent in either path — agents don't need to
 	// branch on whether Jobs[] is present.
-	jobs, err := fetchJobsForRun(client, owner, repo, runID)
+	jobs, err := fetchJobsForRun(ctx, client, owner, repo, runID)
 	if err != nil {
 		exitErr(err.Error())
 	}
@@ -336,7 +336,7 @@ func actionsDownloadLogs(host agenthost.Client, args []string) {
 	// Try the run-level archive first. This is the happy path for any
 	// completed run and produces the same response shape we've always
 	// emitted (Entries listing + extracted files on disk).
-	bytesDownloaded, err := downloadAndExtractLogs(client, owner, repo, runID, destDir)
+	bytesDownloaded, err := downloadAndExtractLogs(ctx, client, owner, repo, runID, destDir)
 	if err == nil {
 		entries, listErr := topLevelEntries(destDir)
 		if listErr != nil {
@@ -367,7 +367,7 @@ func actionsDownloadLogs(host agenthost.Client, args []string) {
 		exitErr(err.Error())
 	}
 
-	bytesDownloaded, jobs, err = downloadPerJobLogsToDir(client, owner, repo, destDir, jobs)
+	bytesDownloaded, jobs, err = downloadPerJobLogsToDir(ctx, client, owner, repo, destDir, jobs)
 	if err != nil {
 		exitErr(err.Error())
 	}
@@ -394,9 +394,9 @@ func actionsDownloadLogs(host agenthost.Client, args []string) {
 // already extreme; if we ever see truncation we log a warning to stderr
 // rather than silently dropping data, but real pagination is deferred
 // until something actually hits the cap.
-func fetchJobsForRun(client ghAPI, owner, repo string, runID int64) ([]jobInfo, error) {
+func fetchJobsForRun(ctx context.Context, client ghAPI, owner, repo string, runID int64) ([]jobInfo, error) {
 	apiPath := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?per_page=100", owner, repo, runID)
-	data, err := client.Get(apiPath)
+	data, err := client.Get(ctx, apiPath)
 	if err != nil {
 		return nil, fmt.Errorf("list jobs for run %d: %w", runID, err)
 	}
@@ -499,7 +499,7 @@ func sanitizeJobNameForFile(name string) string {
 // up front, and on any failure (mid-download or partial extract) it's
 // removed so a retry sees a clean slate. Queued and in_progress jobs are
 // skipped (their LogPath stays empty as a stub).
-func downloadPerJobLogsToDir(client ghAPI, owner, repo, destDir string, jobs []jobInfo) (int64, []jobInfo, error) {
+func downloadPerJobLogsToDir(ctx context.Context, client ghAPI, owner, repo, destDir string, jobs []jobInfo) (int64, []jobInfo, error) {
 	if err := os.RemoveAll(destDir); err != nil {
 		return 0, nil, fmt.Errorf("clear stale destination directory: %w", err)
 	}
@@ -517,7 +517,6 @@ func downloadPerJobLogsToDir(client ghAPI, owner, repo, destDir string, jobs []j
 	copy(out, jobs)
 
 	var totalBytes int64
-	ctx := context.Background()
 	for i, j := range out {
 		if j.Status != "completed" {
 			// Stub for queued / in_progress jobs. Empty LogPath signals
@@ -561,7 +560,7 @@ func downloadPerJobLogsToDir(client ghAPI, owner, repo, destDir string, jobs []j
 //     valid state to the next retry.
 //
 // Returns the number of bytes downloaded on success.
-func downloadAndExtractLogs(client ghAPI, owner, repo string, runID int64, destDir string) (int64, error) {
+func downloadAndExtractLogs(ctx context.Context, client ghAPI, owner, repo string, runID int64, destDir string) (int64, error) {
 	// Clobber any previous extraction for the same run_id. The command owns
 	// this directory completely (<cwd>/_scratch/ci-logs/<run_id>), so a
 	// re-run should produce a clean state — otherwise stale entries from an
@@ -601,9 +600,9 @@ func downloadAndExtractLogs(client ghAPI, owner, repo string, runID int64, destD
 	// per-request timeout via the shallow-copied http.Client it runs
 	// against. Setting another WithTimeout here would just duplicate
 	// the same magic number (and let the two drift in a future edit).
-	// Using context.Background keeps the door open for signal-driven
-	// cancellation without committing to a specific wall-clock ceiling.
-	ctx := context.Background()
+	// ctx is the caller's (rooted at the gh CLI dispatch), so a
+	// signal-driven cancellation can abort the download without
+	// committing to a specific wall-clock ceiling.
 
 	apiPath := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/logs", owner, repo, runID)
 	bytesDownloaded, err := client.DownloadArtifact(ctx, apiPath, tmpFile, maxArchiveBytes)

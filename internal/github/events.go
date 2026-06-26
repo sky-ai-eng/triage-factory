@@ -22,12 +22,12 @@ type UserRepo struct {
 
 // ListUserRepos returns all repositories the authenticated user has access to,
 // sorted by most recently pushed. Paginates until all repos are fetched.
-func (c *Client) ListUserRepos() ([]UserRepo, error) {
+func (c *Client) ListUserRepos(ctx context.Context) ([]UserRepo, error) {
 	var all []UserRepo
 
 	for page := 1; ; page++ {
 		path := fmt.Sprintf("/user/repos?sort=pushed&direction=desc&per_page=100&page=%d", page)
-		data, err := c.Get(path)
+		data, err := c.Get(ctx, path)
 		if err != nil {
 			return nil, fmt.Errorf("fetch repos page %d: %w", page, err)
 		}
@@ -52,12 +52,12 @@ func (c *Client) ListUserRepos() ([]UserRepo, error) {
 // installation access token…"), so only call it on an App-issued client. The
 // poller uses the result to map each configured repo onto the installation
 // whose token can reach it. Paginates until all repos are fetched.
-func (c *Client) ListInstallationRepos() ([]UserRepo, error) {
+func (c *Client) ListInstallationRepos(ctx context.Context) ([]UserRepo, error) {
 	var all []UserRepo
 
 	for page := 1; ; page++ {
 		path := fmt.Sprintf("/installation/repositories?per_page=100&page=%d", page)
-		data, err := c.Get(path)
+		data, err := c.Get(ctx, path)
 		if err != nil {
 			return nil, fmt.Errorf("fetch installation repositories page %d: %w", page, err)
 		}
@@ -138,8 +138,8 @@ type RepoMeta struct {
 }
 
 // GetRepoMeta fetches the default branch and clone URL for a repository.
-func (c *Client) GetRepoMeta(owner, repo string) (*RepoMeta, error) {
-	data, err := c.Get(fmt.Sprintf("/repos/%s/%s", owner, repo))
+func (c *Client) GetRepoMeta(ctx context.Context, owner, repo string) (*RepoMeta, error) {
+	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s", owner, repo))
 	if err != nil {
 		return nil, err
 	}
@@ -158,14 +158,14 @@ type Branch struct {
 // ListBranches returns branches for a repo, optionally filtered by prefix.
 // The GitHub REST branches endpoint doesn't support server-side search,
 // so we fetch up to 100 branches and filter client-side.
-func (c *Client) ListBranches(owner, repo, query string, limit int) ([]Branch, error) {
+func (c *Client) ListBranches(ctx context.Context, owner, repo, query string, limit int) ([]Branch, error) {
 	if limit <= 0 {
 		limit = 30
 	}
 	// Fetch more than we need to allow for filtering
 	fetchSize := 100
 	path := fmt.Sprintf("/repos/%s/%s/branches?per_page=%d", owner, repo, fetchSize)
-	data, err := c.Get(path)
+	data, err := c.Get(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -200,8 +200,8 @@ type fileContent struct {
 
 // GetFileContent fetches and decodes a file from a repo's default branch.
 // Returns an empty string without error if the file does not exist (404).
-func (c *Client) GetFileContent(owner, repo, path string) (string, error) {
-	data, err := c.Get(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, path))
+func (c *Client) GetFileContent(ctx context.Context, owner, repo, path string) (string, error) {
+	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, path))
 	if err != nil {
 		if strings.Contains(err.Error(), "returned 404") {
 			return "", nil

@@ -1,6 +1,7 @@
 package gh
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -108,7 +109,7 @@ func TestPersistPRDiff_WritesFullDiffAndManifest(t *testing.T) {
 
 	cwd := t.TempDir()
 	client := ghclient.NewClient(srv.URL, "test-token")
-	m, err := persistPRDiff(client, cwd, "owner", "repo", 42)
+	m, err := persistPRDiff(context.Background(), client, cwd, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("persistPRDiff: %v", err)
 	}
@@ -155,7 +156,7 @@ func TestPersistPRDiff_406Reassembles(t *testing.T) {
 
 	cwd := t.TempDir()
 	client := ghclient.NewClient(srv.URL, "test-token")
-	m, err := persistPRDiff(client, cwd, "owner", "repo", 42)
+	m, err := persistPRDiff(context.Background(), client, cwd, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("persistPRDiff: %v", err)
 	}
@@ -191,7 +192,7 @@ func TestPersistPRDiff_BinaryAndRename(t *testing.T) {
 
 	cwd := t.TempDir()
 	client := ghclient.NewClient(srv.URL, "test-token")
-	m, err := persistPRDiff(client, cwd, "owner", "repo", 42)
+	m, err := persistPRDiff(context.Background(), client, cwd, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("persistPRDiff: %v", err)
 	}
@@ -227,7 +228,7 @@ func TestPersistPRDiff_MissingHeadSHATolerated(t *testing.T) {
 	})
 	cwd := t.TempDir()
 	client := ghclient.NewClient(srv.URL, "test-token")
-	m, err := persistPRDiff(client, cwd, "owner", "repo", 42)
+	m, err := persistPRDiff(context.Background(), client, cwd, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("persistPRDiff with empty head SHA: %v", err)
 	}
@@ -252,7 +253,7 @@ func TestPersistPRDiff_ReDiff(t *testing.T) {
 		diffBody:  "diff --git a/foo.go b/foo.go\n@@ -1 +1,2 @@\n a\n+b\n",
 		filesBody: files,
 	})
-	m1, err := persistPRDiff(ghclient.NewClient(srv1.URL, "test-token"), cwd, "owner", "repo", 42)
+	m1, err := persistPRDiff(context.Background(), ghclient.NewClient(srv1.URL, "test-token"), cwd, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("first persistPRDiff: %v", err)
 	}
@@ -268,7 +269,7 @@ func TestPersistPRDiff_ReDiff(t *testing.T) {
 		diffBody:  "diff --git a/foo.go b/foo.go\n@@ -1 +1,2 @@\n a\n+c\n",
 		filesBody: files,
 	})
-	m2, err := persistPRDiff(ghclient.NewClient(srv2.URL, "test-token"), cwd, "owner", "repo", 42)
+	m2, err := persistPRDiff(context.Background(), ghclient.NewClient(srv2.URL, "test-token"), cwd, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("re-diff: %v", err)
 	}
@@ -304,7 +305,7 @@ func TestPersistPRDiff_RejectsSymlinkedScratch(t *testing.T) {
 		filesBody: jsonPRFiles(t, []map[string]any{{"filename": "foo.go", "status": "modified", "patch": "@@ -1 +1,2 @@\n a\n+b"}}),
 	})
 	client := ghclient.NewClient(srv.URL, "test-token")
-	_, err := persistPRDiff(client, cwd, "owner", "repo", 42)
+	_, err := persistPRDiff(context.Background(), client, cwd, "owner", "repo", 42)
 	if err == nil {
 		t.Fatal("expected symlink rejection, got nil")
 	}
@@ -443,7 +444,7 @@ func TestStripClaudeCodeCitation(t *testing.T) {
 // never dereferenced.
 func TestHostAPIClient_AddPendingReviewComment_RequiresRepoScope(t *testing.T) {
 	api := newHostAPI(nil, "", "") // mirrors handlePR's shared unscoped adapter
-	_, err := api.AddPendingReviewComment("PRR_1", ghclient.SubmitReviewComment{Path: "a.go", Line: 1, Body: "x"})
+	_, err := api.AddPendingReviewComment(context.Background(), "PRR_1", ghclient.SubmitReviewComment{Path: "a.go", Line: 1, Body: "x"})
 	if !errors.Is(err, errUnscopedReviewAdapter) {
 		t.Fatalf("err = %v, want errUnscopedReviewAdapter for an unscoped adapter", err)
 	}

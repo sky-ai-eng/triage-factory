@@ -238,7 +238,7 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string
 			continue
 		}
 		credsMissing = false
-		teams, err := client.ListOrgTeamsDetailed(owner)
+		teams, err := client.ListOrgTeamsDetailed(ctx, owner)
 		if err != nil {
 			// The owner may be a user account (no teams) or one the org
 			// credential can't read. Skip — candidates only.

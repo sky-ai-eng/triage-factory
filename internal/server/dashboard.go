@@ -189,7 +189,7 @@ func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *ht
 		internalError(w, "dashboard", err)
 		return
 	}
-	status, err := client.GetPRStatus(parts[0], parts[1], number)
+	status, err := client.GetPRStatus(r.Context(), parts[0], parts[1], number)
 	if err != nil {
 		internalError(w, "dashboard", err)
 		return
@@ -249,9 +249,9 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	}
 
 	if body.Draft {
-		err = client.ConvertPRToDraft(parts[0], parts[1], number)
+		err = client.ConvertPRToDraft(r.Context(), parts[0], parts[1], number)
 	} else {
-		err = client.MarkPRReady(parts[0], parts[1], number)
+		err = client.MarkPRReady(r.Context(), parts[0], parts[1], number)
 	}
 	if err != nil {
 		internalError(w, "dashboard", err)

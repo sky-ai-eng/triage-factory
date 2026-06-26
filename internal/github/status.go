@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -36,11 +37,11 @@ type ChecksStatus struct {
 }
 
 // GetPRStatus fetches the live status for a PR: mergeability, reviews, checks.
-func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) {
+func (c *Client) GetPRStatus(ctx context.Context, owner, repo string, number int) (*PRStatus, error) {
 	status := &PRStatus{}
 
 	// 1. PR mergeability (from the PR endpoint)
-	prData, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
+	prData, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +60,7 @@ func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) 
 	}
 
 	// 2. Reviews — deduplicate to latest per author
-	reviewsData, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=100", owner, repo, number))
+	reviewsData, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=100", owner, repo, number))
 	if err == nil {
 		var rawReviews []map[string]any
 		if json.Unmarshal(reviewsData, &rawReviews) == nil {
@@ -107,7 +108,7 @@ func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) 
 		headSHA, _ = head["sha"].(string)
 	}
 	if headSHA != "" {
-		checksData, err := c.Get(fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=100", owner, repo, headSHA))
+		checksData, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=100", owner, repo, headSHA))
 		if err == nil {
 			var resp restCheckRunsResponse
 			if json.Unmarshal(checksData, &resp) == nil {
@@ -194,9 +195,9 @@ func parseWorkflowRunIDFromURL(url string) int64 {
 }
 
 // MarkPRReady marks a draft PR as ready for review. Requires GraphQL.
-func (c *Client) MarkPRReady(owner, repo string, number int) error {
+func (c *Client) MarkPRReady(ctx context.Context, owner, repo string, number int) error {
 	// Get node_id
-	data, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
+	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
 	if err != nil {
 		return err
 	}
@@ -215,14 +216,14 @@ func (c *Client) MarkPRReady(owner, repo string, number int) error {
 			"id": nodeID,
 		},
 	}
-	_, err = c.PostGraphQL(mutation)
+	_, err = c.PostGraphQL(ctx, mutation)
 	return err
 }
 
 // ConvertPRToDraft converts a PR back to draft. Requires GraphQL.
-func (c *Client) ConvertPRToDraft(owner, repo string, number int) error {
+func (c *Client) ConvertPRToDraft(ctx context.Context, owner, repo string, number int) error {
 	// First get the node_id for the PR
-	data, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
+	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
 	if err != nil {
 		return err
 	}
@@ -242,13 +243,13 @@ func (c *Client) ConvertPRToDraft(owner, repo string, number int) error {
 			"id": nodeID,
 		},
 	}
-	_, err = c.PostGraphQL(mutation)
+	_, err = c.PostGraphQL(ctx, mutation)
 	return err
 }
 
 // SearchUserPRs returns open PRs authored by the given username.
-func (c *Client) SearchUserPRs(username string) ([]PRSummary, error) {
-	data, err := c.Get(fmt.Sprintf("/search/issues?q=author:%s+type:pr+state:open&per_page=50&sort=updated", username))
+func (c *Client) SearchUserPRs(ctx context.Context, username string) ([]PRSummary, error) {
+	data, err := c.Get(ctx, fmt.Sprintf("/search/issues?q=author:%s+type:pr+state:open&per_page=50&sort=updated", username))
 	if err != nil {
 		return nil, err
 	}

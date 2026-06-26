@@ -88,13 +88,18 @@ func Handle(args []string) {
 		// LocalClient), so the DB opened at the top of Handle is consulted on
 		// the gh path only by the local-mode LocalClient; the sandbox IPC path
 		// ignores it.
+		// context.Background() is the deliberate root: exec is a short-lived
+		// per-tool-call CLI process with no parent ctx to inherit. It threads
+		// through gh.Handle into every GitHub API call so the surface is
+		// ctx-aware (a future signal-rooted ctx slots in here without touching
+		// the call sites).
 		if isHelp(cmdArgs) {
-			gh.Handle(nil, cmdArgs)
+			gh.Handle(context.Background(), nil, cmdArgs)
 			return
 		}
 		host := buildAgentHost()
 		defer func() { _ = host.Close() }()
-		gh.Handle(host, cmdArgs)
+		gh.Handle(context.Background(), host, cmdArgs)
 
 	case "jira":
 		// Jira API calls route through the agenthost client. In the sandbox

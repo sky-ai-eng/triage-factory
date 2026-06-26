@@ -154,7 +154,7 @@ func TestResolver_Tier3_PATWhenNoApp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}
-	if _, err := client.Get("/probe"); err != nil {
+	if _, err := client.Get(context.Background(), "/probe"); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	if gh.lastProbe != "Bearer ghp_test" {
@@ -179,7 +179,7 @@ func TestResolver_Tier1_AppInstallationToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}
-	if _, err := client.Get("/probe"); err != nil {
+	if _, err := client.Get(context.Background(), "/probe"); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	if gh.lastProbe != "Bearer ghs_minted" {
@@ -215,7 +215,7 @@ func TestResolver_ClientForRepo_AppCoversRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientForRepo: %v", err)
 	}
-	if _, err := client.Get("/probe"); err != nil {
+	if _, err := client.Get(context.Background(), "/probe"); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	if gh.lastProbe != "Bearer ghs_minted" {
@@ -242,7 +242,7 @@ func TestResolver_ClientForRepo_AppDoesNotCoverRepo_FallsBackToPAT(t *testing.T)
 	if err != nil {
 		t.Fatalf("ClientForRepo: %v", err)
 	}
-	if _, err := client.Get("/probe"); err != nil {
+	if _, err := client.Get(context.Background(), "/probe"); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	if gh.lastProbe != "Bearer ghp_test" {
@@ -269,7 +269,7 @@ func TestResolver_ClientForRepo_CoverageProbeIndeterminate_FailsOpen(t *testing.
 	if err != nil {
 		t.Fatalf("ClientForRepo: %v", err)
 	}
-	if _, err := client.Get("/probe"); err != nil {
+	if _, err := client.Get(context.Background(), "/probe"); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	if gh.lastProbe != "Bearer ghs_minted" {
@@ -388,7 +388,7 @@ func TestResolver_ClientForRepo_NoApp_PAT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientForRepo: %v", err)
 	}
-	if _, err := client.Get("/probe"); err != nil {
+	if _, err := client.Get(context.Background(), "/probe"); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	if gh.lastProbe != "Bearer ghp_test" {
@@ -423,7 +423,7 @@ func TestResolver_ClientForRepoWithIdentity_ReportsTier(t *testing.T) {
 		if identity != IdentityApp {
 			t.Errorf("identity = %v, want IdentityApp (tier 1)", identity)
 		}
-		if _, err := client.Get("/probe"); err != nil {
+		if _, err := client.Get(context.Background(), "/probe"); err != nil {
 			t.Fatalf("probe: %v", err)
 		}
 		if gh.lastProbe != "Bearer ghs_minted" {
@@ -611,7 +611,7 @@ func TestResolver_EmptyTargetMultiInstall_FallsToPAT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}
-	if _, err := client.Get("/probe"); err != nil {
+	if _, err := client.Get(context.Background(), "/probe"); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	if gh.lastProbe != "Bearer ghp_test" {
@@ -716,7 +716,7 @@ func TestResolver_BaseURLFallbackToSecret(t *testing.T) {
 	}
 	// If the base wrongly defaulted to github.com, this request would never
 	// reach the test server and lastProbe would stay empty.
-	if _, err := client.Get("/probe"); err != nil {
+	if _, err := client.Get(context.Background(), "/probe"); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	if gh.lastProbe != "Bearer ghp_test" {
@@ -739,7 +739,7 @@ func TestResolver_AppMintFails_FallsToPAT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}
-	if _, err := client.Get("/probe"); err != nil {
+	if _, err := client.Get(context.Background(), "/probe"); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	if gh.lastProbe != "Bearer ghp_test" {

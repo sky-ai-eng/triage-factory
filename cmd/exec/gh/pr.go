@@ -62,7 +62,7 @@ func agentMemoryFile() string {
 	return filepath.Join(root, "_scratch", "entity-memory", ns, runID+".md")
 }
 
-func handlePR(host agenthost.Client, args []string) {
+func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: triagefactory exec gh pr <action> [flags]")
 	}
@@ -77,44 +77,44 @@ func handlePR(host agenthost.Client, args []string) {
 
 	switch action {
 	case "create":
-		prCreate(api, flags)
+		prCreate(ctx, api, flags)
 	case "view":
-		prView(api, flags)
+		prView(ctx, api, flags)
 	case "diff":
-		prDiff(api, flags)
+		prDiff(ctx, api, flags)
 	case "files":
-		prFiles(api, flags)
+		prFiles(ctx, api, flags)
 	case "thread-view":
-		prThreadView(api, flags)
+		prThreadView(ctx, api, flags)
 	case "review-view":
-		prReviewView(api, flags)
+		prReviewView(ctx, api, flags)
 	case "review-dismiss":
-		prReviewDismiss(api, flags)
+		prReviewDismiss(ctx, api, flags)
 	case "start-review":
-		prStartReview(api, host, flags)
+		prStartReview(ctx, api, host, flags)
 	case "add-review-comment":
-		prAddReviewComment(host, flags)
+		prAddReviewComment(ctx, host, flags)
 	case "submit-review":
-		prSubmitReview(host, flags)
+		prSubmitReview(ctx, host, flags)
 	case "add-comment":
-		prAddComment(api, flags)
+		prAddComment(ctx, api, flags)
 	case "comment-reply":
-		prCommentReply(api, flags)
+		prCommentReply(ctx, api, flags)
 	case "comment-react":
-		prCommentReact(api, flags)
+		prCommentReact(ctx, api, flags)
 	case "comment-update":
-		prCommentUpdate(api, flags)
+		prCommentUpdate(ctx, api, flags)
 	case "comment-delete":
-		prCommentDelete(api, flags)
+		prCommentDelete(ctx, api, flags)
 	default:
 		exitErr(fmt.Sprintf("unknown pr action: %s", action))
 	}
 }
 
-func prView(client ghAPI, args []string) {
+func prView(ctx context.Context, client ghAPI, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	verbose := hasFlag(args, "-v") || hasFlag(args, "--verbose")
-	pr, err := client.GetPR(owner, repo, number, verbose)
+	pr, err := client.GetPR(ctx, owner, repo, number, verbose)
 	exitOnErr(err)
 	printJSON(pr)
 }
@@ -172,18 +172,18 @@ const (
 // fallback: GitHub refuses the diff media type, so we reassemble from
 // per-file patches — the whole diff for --stdout, or just the requested
 // file for --file — instead of erroring.
-func prDiff(client ghAPI, args []string) {
+func prDiff(ctx context.Context, client ghAPI, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	file := flagVal(args, "--file")
 	stdout := hasFlag(args, "--stdout")
 
 	if file != "" || stdout {
-		diff, err := client.GetPRDiff(owner, repo, number, file)
+		diff, err := client.GetPRDiff(ctx, owner, repo, number, file)
 		if err != nil {
 			if !ghclient.IsHTTP406(err) {
 				exitOnErr(err)
 			}
-			files, ferr := client.GetPRFiles(owner, repo, number)
+			files, ferr := client.GetPRFiles(ctx, owner, repo, number)
 			exitOnErr(ferr)
 			if file != "" {
 				diff = ghclient.SingleFileDiff(files, file)
@@ -202,7 +202,7 @@ func prDiff(client ghAPI, args []string) {
 	if err != nil {
 		exitErr(fmt.Sprintf("resolve cwd: %v", err))
 	}
-	manifest, err := persistPRDiff(client, cwd, owner, repo, number)
+	manifest, err := persistPRDiff(ctx, client, cwd, owner, repo, number)
 	exitOnErr(err)
 	printJSON(manifest)
 }
@@ -214,25 +214,25 @@ func prDiff(client ghAPI, args []string) {
 // locate an earlier capture without first looking up the head SHA. Each
 // `pr diff` overwrites the capture in place; the manifest records head_sha so
 // a reader that cares about freshness can compare it to the live head.
-func persistPRDiff(client ghAPI, cwd, owner, repo string, number int) (diffManifest, error) {
+func persistPRDiff(ctx context.Context, client ghAPI, cwd, owner, repo string, number int) (diffManifest, error) {
 	// Three separate REST calls follow (GetPR → GetPRFiles → GetPRDiff): the
 	// API has no transactional snapshot, so a force-push mid-sequence could
 	// leave manifest.head_sha (from GetPR) describing a different commit than
 	// full.diff. We accept that race — head_sha is recorded precisely so a
 	// reader can detect the drift — rather than adding fragile re-fetch loops.
-	pr, err := client.GetPR(owner, repo, number, false)
+	pr, err := client.GetPR(ctx, owner, repo, number, false)
 	if err != nil {
 		return diffManifest{}, fmt.Errorf("fetch PR #%d: %w", number, err)
 	}
 
 	// GetPRFiles is needed for the per-file manifest rows and doubles as the
 	// reassembly source if the full diff is too large (HTTP 406).
-	files, err := client.GetPRFiles(owner, repo, number)
+	files, err := client.GetPRFiles(ctx, owner, repo, number)
 	if err != nil {
 		return diffManifest{}, fmt.Errorf("list PR files: %w", err)
 	}
 
-	fullDiff, truncated, err := fetchFullDiff(client, owner, repo, number, files)
+	fullDiff, truncated, err := fetchFullDiff(ctx, client, owner, repo, number, files)
 	if err != nil {
 		return diffManifest{}, err
 	}
@@ -307,8 +307,8 @@ func persistPRDiff(client ghAPI, cwd, owner, repo string, number int) (diffManif
 // HTTP 406 ("diff too large") GitHub refuses it, so we reconstruct an
 // approximate unified diff from the already-fetched per-file patches and flag
 // the result truncated. Any other error propagates.
-func fetchFullDiff(client ghAPI, owner, repo string, number int, files []ghclient.PRFile) (string, bool, error) {
-	diff, err := client.GetPRDiff(owner, repo, number, "")
+func fetchFullDiff(ctx context.Context, client ghAPI, owner, repo string, number int, files []ghclient.PRFile) (string, bool, error) {
+	diff, err := client.GetPRDiff(ctx, owner, repo, number, "")
 	if err == nil {
 		return diff, false, nil
 	}
@@ -355,14 +355,14 @@ func buildPRFilesResult(files []ghclient.PRFile) prFilesResult {
 	return result
 }
 
-func prFiles(client ghAPI, args []string) {
+func prFiles(ctx context.Context, client ghAPI, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
-	files, err := client.GetPRFiles(owner, repo, number)
+	files, err := client.GetPRFiles(ctx, owner, repo, number)
 	exitOnErr(err)
 	printJSON(buildPRFilesResult(files))
 }
 
-func prThreadView(client ghAPI, args []string) {
+func prThreadView(ctx context.Context, client ghAPI, args []string) {
 	if len(args) < 2 {
 		exitErr("usage: gh pr thread-view <pr_number> <comment_id> [--page N]")
 	}
@@ -372,12 +372,12 @@ func prThreadView(client ghAPI, args []string) {
 	if v := flagVal(args, "--page"); v != "" {
 		page = mustInt(v, "page")
 	}
-	thread, err := client.GetCommentThread(owner, repo, commentID, page)
+	thread, err := client.GetCommentThread(ctx, owner, repo, commentID, page)
 	exitOnErr(err)
 	printJSON(thread)
 }
 
-func prReviewView(client ghAPI, args []string) {
+func prReviewView(ctx context.Context, client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr review-view <review_id> --pr <pr_number> [-v]")
 	}
@@ -398,12 +398,12 @@ func prReviewView(client ghAPI, args []string) {
 	owner, repo := ownerRepo(args)
 	prNumber := mustInt(prFlag, "pr_number")
 	verbose := hasFlag(args, "-v") || hasFlag(args, "--verbose")
-	detail, err := client.GetReviewDetail(owner, repo, prNumber, reviewID, verbose)
+	detail, err := client.GetReviewDetail(ctx, owner, repo, prNumber, reviewID, verbose)
 	exitOnErr(err)
 	printJSON(detail)
 }
 
-func prReviewDismiss(client ghAPI, args []string) {
+func prReviewDismiss(ctx context.Context, client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr review-dismiss <review_id> --pr <number> --body <reason>")
 	}
@@ -414,7 +414,7 @@ func prReviewDismiss(client ghAPI, args []string) {
 	if body == "" {
 		body = "Dismissed"
 	}
-	err := client.DismissReview(owner, repo, prNumber, reviewID, body)
+	err := client.DismissReview(ctx, owner, repo, prNumber, reviewID, body)
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "review_id": reviewID, "status": "dismissed"})
 }
@@ -426,18 +426,18 @@ func prReviewDismiss(client ghAPI, args []string) {
 // the host choke point (LocalClient.GithubCreatePendingReview), which also runs
 // the identity-aware collision check. No local staging: the review now lives on
 // GitHub, edited 1:1.
-func prStartReview(client ghAPI, host agenthost.Client, args []string) {
+func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	_ = lookupRun(host) // validates identity is present; routing happens inside host
 
 	// Fetch the head SHA so the pending review pins to the reviewed commit.
-	pr, err := client.GetPR(owner, repo, number, false)
+	pr, err := client.GetPR(ctx, owner, repo, number, false)
 	exitOnErr(err)
 
 	// Create the pending review through the host (→ GithubCreatePendingReview):
 	// it folds in the collision check and records the artifact. Seed no inline
 	// comments — the agent adds them one at a time via add-review-comment.
-	reviewID, err := client.CreatePendingReview(owner, repo, number, pr.HeadSHA, nil)
+	reviewID, err := client.CreatePendingReview(ctx, owner, repo, number, pr.HeadSHA, nil)
 	if err != nil {
 		if errors.Is(err, agenthost.ErrPendingReviewCollision) {
 			exitErr(fmt.Sprintf(
@@ -461,7 +461,7 @@ func prStartReview(client ghAPI, host agenthost.Client, args []string) {
 // lives only in the GitHub comment body now (no local column); the overlay parses
 // it back out for the chip. No local diff-shape pre-check — the live PR is the
 // source of truth, so GitHub's own out-of-diff line rejection surfaces instead.
-func prAddReviewComment(host agenthost.Client, args []string) {
+func prAddReviewComment(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr add-review-comment <review_id> --file <path> --line <N> (--body <text> | --body-file <path>) [--start-line <N>] [--severity <blocker|major|minor|clean>]")
 	}
@@ -521,7 +521,7 @@ func prAddReviewComment(host agenthost.Client, args []string) {
 	// is unscoped).
 	badgedBody := domain.SeverityBadgeMarkdown(severity) + body
 	client := newHostAPI(host, owner, repo)
-	commentID, err := client.AddPendingReviewComment(reviewID, ghclient.SubmitReviewComment{
+	commentID, err := client.AddPendingReviewComment(ctx, reviewID, ghclient.SubmitReviewComment{
 		Path:      file,
 		Line:      line,
 		StartLine: startLine,
@@ -542,7 +542,7 @@ func prAddReviewComment(host agenthost.Client, args []string) {
 // (body + event + the live inline comments) into the run's review artifact and
 // sets the ready sentinel that parks the run. The TFAC-358 anti-double-submit
 // guard fires host-side: a second call gets a hard error.
-func prSubmitReview(host agenthost.Client, args []string) {
+func prSubmitReview(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr submit-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)")
 	}
@@ -591,7 +591,7 @@ func prSubmitReview(host agenthost.Client, args []string) {
 	// sentinel. No GitHub submit — approval applies body + event atomically. The
 	// "meaningful review" check (body or inline comments for a non-approve) runs
 	// host-side, where the live comments are known.
-	err := host.FinalizeReviewDraft(context.Background(), reviewID, ghEvent, body)
+	err := host.FinalizeReviewDraft(ctx, reviewID, ghEvent, body)
 	if errors.Is(err, agenthost.ErrReviewAlreadyFinalized) {
 		exitErr(fmt.Sprintf(
 			"review %s has already been finalized for human approval. Do not call submit-review again — your work on this review is complete. Finish the run by writing %s and returning your completion JSON.",
@@ -624,7 +624,7 @@ func prSubmitReview(host agenthost.Client, args []string) {
 // artifact is recorded at the host choke point (LocalClient.GithubCreatePR),
 // deduped on the PR number — which is also the idempotency guard against a
 // repeated `pr create`, replacing the retired pending_prs one-per-run lock.
-func prCreate(client ghAPI, args []string) {
+func prCreate(ctx context.Context, client ghAPI, args []string) {
 	title := flagVal(args, "--title")
 	body := flagVal(args, "--body")
 	bodyFile := flagVal(args, "--body-file")
@@ -723,7 +723,7 @@ func prCreate(client ghAPI, args []string) {
 	// Always open a real draft PR. node_id (3rd return) is recorded onto the
 	// pull_request artifact at the host choke point (LocalClient.GithubCreatePR),
 	// so it's discarded here.
-	number, htmlURL, _, err := client.CreatePR(owner, repo, head, base, title, body, true)
+	number, htmlURL, _, err := client.CreatePR(ctx, owner, repo, head, base, title, body, true)
 	exitOnErr(err)
 
 	printJSON(map[string]any{
@@ -736,18 +736,18 @@ func prCreate(client ghAPI, args []string) {
 
 // --- Direct comments (hit GitHub API) ---
 
-func prAddComment(client ghAPI, args []string) {
+func prAddComment(ctx context.Context, client ghAPI, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	body := flagVal(args, "--body")
 	if body == "" {
 		exitErr("--body is required")
 	}
-	commentID, err := client.AddComment(owner, repo, number, body)
+	commentID, err := client.AddComment(ctx, owner, repo, number, body)
 	exitOnErr(err)
 	printJSON(map[string]any{"comment_id": commentID})
 }
 
-func prCommentReply(client ghAPI, args []string) {
+func prCommentReply(ctx context.Context, client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-reply <comment_id> --body <text> --pr <number>")
 	}
@@ -758,12 +758,12 @@ func prCommentReply(client ghAPI, args []string) {
 	if body == "" {
 		exitErr("--body is required")
 	}
-	replyID, err := client.ReplyToComment(owner, repo, prNumber, commentID, body)
+	replyID, err := client.ReplyToComment(ctx, owner, repo, prNumber, commentID, body)
 	exitOnErr(err)
 	printJSON(map[string]any{"reply_id": replyID})
 }
 
-func prCommentReact(client ghAPI, args []string) {
+func prCommentReact(ctx context.Context, client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-react <comment_id> --emoji <emoji>")
 	}
@@ -773,7 +773,7 @@ func prCommentReact(client ghAPI, args []string) {
 	if emoji == "" {
 		exitErr("--emoji is required (+1, -1, laugh, confused, heart, hooray, rocket, eyes)")
 	}
-	err := client.ReactToComment(owner, repo, commentID, emoji)
+	err := client.ReactToComment(ctx, owner, repo, commentID, emoji)
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true})
 }
@@ -781,7 +781,7 @@ func prCommentReact(client ghAPI, args []string) {
 // prCommentUpdate edits a real GitHub comment by its numeric id (an issue comment
 // or a submitted review comment). Pending-review comments are edited human-side
 // through the overlay (server-direct), never here — the agent flow is add-only.
-func prCommentUpdate(client ghAPI, args []string) {
+func prCommentUpdate(ctx context.Context, client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-update <comment_id> --body <text>")
 	}
@@ -791,17 +791,17 @@ func prCommentUpdate(client ghAPI, args []string) {
 	if body == "" {
 		exitErr("--body is required")
 	}
-	exitOnErr(client.UpdateComment(owner, repo, id, body))
+	exitOnErr(client.UpdateComment(ctx, owner, repo, id, body))
 	printJSON(map[string]any{"ok": true})
 }
 
-func prCommentDelete(client ghAPI, args []string) {
+func prCommentDelete(ctx context.Context, client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-delete <comment_id>")
 	}
 	owner, repo := ownerRepo(args)
 	id := mustInt(args[0], "comment_id")
-	exitOnErr(client.DeleteComment(owner, repo, id))
+	exitOnErr(client.DeleteComment(ctx, owner, repo, id))
 	printJSON(map[string]any{"ok": true})
 }
 

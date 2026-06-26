@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -32,7 +33,7 @@ func TestGetConditional_NotModified(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := testClient(srv.URL)
-	body, etag, notModified, err := c.GetConditional("/x", `"abc123"`)
+	body, etag, notModified, err := c.GetConditional(context.Background(), "/x", `"abc123"`)
 	if err != nil {
 		t.Fatalf("GetConditional: %v", err)
 	}
@@ -57,7 +58,7 @@ func TestGetConditional_OK(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := testClient(srv.URL)
-	body, etag, notModified, err := c.GetConditional("/x", "")
+	body, etag, notModified, err := c.GetConditional(context.Background(), "/x", "")
 	if err != nil {
 		t.Fatalf("GetConditional: %v", err)
 	}
@@ -84,7 +85,7 @@ func TestListOpenPRs_NotModified(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := testClient(srv.URL)
-	prs, etag, notModified, err := c.ListOpenPRs("octo", "repo", `"prev"`)
+	prs, etag, notModified, err := c.ListOpenPRs(context.Background(), "octo", "repo", `"prev"`)
 	if err != nil {
 		t.Fatalf("ListOpenPRs: %v", err)
 	}
@@ -129,7 +130,7 @@ func TestListOpenPRs_OK(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := testClient(srv.URL)
-	prs, etag, notModified, err := c.ListOpenPRs("octo", "repo", "")
+	prs, etag, notModified, err := c.ListOpenPRs(context.Background(), "octo", "repo", "")
 	if err != nil {
 		t.Fatalf("ListOpenPRs: %v", err)
 	}
@@ -197,7 +198,7 @@ func TestListInstallationRepos_Parses(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := testClient(srv.URL)
-	repos, err := c.ListInstallationRepos()
+	repos, err := c.ListInstallationRepos(context.Background())
 	if err != nil {
 		t.Fatalf("ListInstallationRepos: %v", err)
 	}

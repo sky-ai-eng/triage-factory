@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -56,7 +57,7 @@ func TestCreatePendingReview_OmitsEventField(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	start := 10
-	reviewID, err := clientAgainst(srv.URL).CreatePendingReview("owner", "repo", 7, "abc123", []SubmitReviewComment{
+	reviewID, err := clientAgainst(srv.URL).CreatePendingReview(context.Background(), "owner", "repo", 7, "abc123", []SubmitReviewComment{
 		{Path: "main.go", Line: 12, Body: "nit"},
 		{Path: "main.go", Line: 20, StartLine: &start, Body: "range"},
 	})
@@ -97,7 +98,7 @@ func TestCreatePendingReview_OmitsEmptyCommitAndComments(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	if _, err := clientAgainst(srv.URL).CreatePendingReview("o", "r", 1, "", nil); err != nil {
+	if _, err := clientAgainst(srv.URL).CreatePendingReview(context.Background(), "o", "r", 1, "", nil); err != nil {
 		t.Fatalf("CreatePendingReview: %v", err)
 	}
 	if _, ok := gotBody["commit_id"]; ok {
@@ -118,7 +119,7 @@ func TestCreatePendingReview_DuplicateError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := clientAgainst(srv.URL).CreatePendingReview("o", "r", 1, "", nil)
+	_, err := clientAgainst(srv.URL).CreatePendingReview(context.Background(), "o", "r", 1, "", nil)
 	if err == nil {
 		t.Fatal("expected error for duplicate pending review, got nil")
 	}
@@ -137,7 +138,7 @@ func TestCreatePendingReview_MissingNodeID(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	if _, err := clientAgainst(srv.URL).CreatePendingReview("o", "r", 1, "", nil); err == nil {
+	if _, err := clientAgainst(srv.URL).CreatePendingReview(context.Background(), "o", "r", 1, "", nil); err == nil {
 		t.Fatal("expected error when response has no node_id")
 	}
 }
@@ -150,7 +151,7 @@ func TestAddPendingReviewComment_SingleLine(t *testing.T) {
 	resp := `{"data":{"addPullRequestReviewThread":{"thread":{"comments":{"nodes":[{"id":"PRRC_new"}]}}}}}`
 	c, rec := graphqlCapturing(t, resp)
 
-	id, err := c.AddPendingReviewComment("PRR_1", SubmitReviewComment{Path: "a.go", Line: 5, Body: "hi"})
+	id, err := c.AddPendingReviewComment(context.Background(), "PRR_1", SubmitReviewComment{Path: "a.go", Line: 5, Body: "hi"})
 	if err != nil {
 		t.Fatalf("AddPendingReviewComment: %v", err)
 	}
@@ -184,7 +185,7 @@ func TestAddPendingReviewComment_MultiLine(t *testing.T) {
 	c, rec := graphqlCapturing(t, resp)
 
 	start := 3
-	id, err := c.AddPendingReviewComment("PRR_1", SubmitReviewComment{Path: "a.go", Line: 8, StartLine: &start, Body: "range"})
+	id, err := c.AddPendingReviewComment(context.Background(), "PRR_1", SubmitReviewComment{Path: "a.go", Line: 8, StartLine: &start, Body: "range"})
 	if err != nil {
 		t.Fatalf("AddPendingReviewComment: %v", err)
 	}
@@ -202,7 +203,7 @@ func TestAddPendingReviewComment_MultiLine(t *testing.T) {
 // TestAddPendingReviewComment_EmptyReviewID guards the empty-id precondition —
 // it must fail fast, before any network call.
 func TestAddPendingReviewComment_EmptyReviewID(t *testing.T) {
-	if _, err := clientAgainst("http://invalid.invalid").AddPendingReviewComment("", SubmitReviewComment{Path: "a.go", Line: 1, Body: "x"}); err == nil {
+	if _, err := clientAgainst("http://invalid.invalid").AddPendingReviewComment(context.Background(), "", SubmitReviewComment{Path: "a.go", Line: 1, Body: "x"}); err == nil {
 		t.Fatal("expected error for empty review id")
 	}
 }
@@ -220,7 +221,7 @@ func TestAddPendingReviewComment_Guards(t *testing.T) {
 	}
 	for name, cm := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := c.AddPendingReviewComment("PRR_1", cm); err == nil {
+			if _, err := c.AddPendingReviewComment(context.Background(), "PRR_1", cm); err == nil {
 				t.Fatalf("expected error for %s", name)
 			}
 		})
@@ -232,7 +233,7 @@ func TestAddPendingReviewComment_Guards(t *testing.T) {
 func TestAddPendingReviewComment_NoCommentReturned(t *testing.T) {
 	resp := `{"data":{"addPullRequestReviewThread":{"thread":{"comments":{"nodes":[]}}}}}`
 	c, _ := graphqlCapturing(t, resp)
-	if _, err := c.AddPendingReviewComment("PRR_1", SubmitReviewComment{Path: "a.go", Line: 1, Body: "x"}); err == nil {
+	if _, err := c.AddPendingReviewComment(context.Background(), "PRR_1", SubmitReviewComment{Path: "a.go", Line: 1, Body: "x"}); err == nil {
 		t.Fatal("expected error when no comment id is returned")
 	}
 }
@@ -244,7 +245,7 @@ func TestUpdatePendingReviewComment(t *testing.T) {
 	resp := `{"data":{"updatePullRequestReviewComment":{"pullRequestReviewComment":{"id":"PRRC_1"}}}}`
 	c, rec := graphqlCapturing(t, resp)
 
-	if err := c.UpdatePendingReviewComment("PRRC_1", "edited"); err != nil {
+	if err := c.UpdatePendingReviewComment(context.Background(), "PRRC_1", "edited"); err != nil {
 		t.Fatalf("UpdatePendingReviewComment: %v", err)
 	}
 	if rec.variables["id"] != "PRRC_1" {
@@ -259,7 +260,7 @@ func TestUpdatePendingReviewComment(t *testing.T) {
 }
 
 func TestUpdatePendingReviewComment_EmptyID(t *testing.T) {
-	if err := clientAgainst("http://invalid.invalid").UpdatePendingReviewComment("", "x"); err == nil {
+	if err := clientAgainst("http://invalid.invalid").UpdatePendingReviewComment(context.Background(), "", "x"); err == nil {
 		t.Fatal("expected error for empty comment id")
 	}
 }
@@ -271,7 +272,7 @@ func TestDeletePendingReviewComment(t *testing.T) {
 	resp := `{"data":{"deletePullRequestReviewComment":{"pullRequestReviewComment":{"id":"PRRC_1"}}}}`
 	c, rec := graphqlCapturing(t, resp)
 
-	if err := c.DeletePendingReviewComment("PRRC_1"); err != nil {
+	if err := c.DeletePendingReviewComment(context.Background(), "PRRC_1"); err != nil {
 		t.Fatalf("DeletePendingReviewComment: %v", err)
 	}
 	if rec.variables["id"] != "PRRC_1" {
@@ -283,7 +284,7 @@ func TestDeletePendingReviewComment(t *testing.T) {
 }
 
 func TestDeletePendingReviewComment_EmptyID(t *testing.T) {
-	if err := clientAgainst("http://invalid.invalid").DeletePendingReviewComment(""); err == nil {
+	if err := clientAgainst("http://invalid.invalid").DeletePendingReviewComment(context.Background(), ""); err == nil {
 		t.Fatal("expected error for empty comment id")
 	}
 }
@@ -319,7 +320,7 @@ func TestDeletePendingReview(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	if err := clientAgainst(srv.URL).DeletePendingReview("owner", "repo", 7, "PRR_node1"); err != nil {
+	if err := clientAgainst(srv.URL).DeletePendingReview(context.Background(), "owner", "repo", 7, "PRR_node1"); err != nil {
 		t.Fatalf("DeletePendingReview: %v", err)
 	}
 	if gqlVars["id"] != "PRR_node1" {
@@ -334,7 +335,7 @@ func TestDeletePendingReview(t *testing.T) {
 }
 
 func TestDeletePendingReview_EmptyID(t *testing.T) {
-	if err := clientAgainst("http://invalid.invalid").DeletePendingReview("o", "r", 1, ""); err == nil {
+	if err := clientAgainst("http://invalid.invalid").DeletePendingReview(context.Background(), "o", "r", 1, ""); err == nil {
 		t.Fatal("expected error for empty review id")
 	}
 }
@@ -352,7 +353,7 @@ func TestDeletePendingReview_NoDatabaseID(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	if err := clientAgainst(srv.URL).DeletePendingReview("o", "r", 1, "PRR_gone"); err == nil {
+	if err := clientAgainst(srv.URL).DeletePendingReview(context.Background(), "o", "r", 1, "PRR_gone"); err == nil {
 		t.Fatal("expected error when the review node has no database id")
 	}
 }
@@ -364,7 +365,7 @@ func TestSubmitExistingReview(t *testing.T) {
 	resp := `{"data":{"submitPullRequestReview":{"pullRequestReview":{"id":"PRR_1","state":"APPROVED"}}}}`
 	c, rec := graphqlCapturing(t, resp)
 
-	if err := c.SubmitExistingReview("o", "r", "PRR_1", "APPROVE", "lgtm"); err != nil {
+	if err := c.SubmitExistingReview(context.Background(), "o", "r", "PRR_1", "APPROVE", "lgtm"); err != nil {
 		t.Fatalf("SubmitExistingReview: %v", err)
 	}
 	if rec.variables["reviewId"] != "PRR_1" {
@@ -384,10 +385,10 @@ func TestSubmitExistingReview(t *testing.T) {
 // TestSubmitExistingReview_Guards covers the fail-fast preconditions.
 func TestSubmitExistingReview_Guards(t *testing.T) {
 	c := clientAgainst("http://invalid.invalid")
-	if err := c.SubmitExistingReview("o", "r", "", "APPROVE", ""); err == nil {
+	if err := c.SubmitExistingReview(context.Background(), "o", "r", "", "APPROVE", ""); err == nil {
 		t.Error("expected error for empty review id")
 	}
-	if err := c.SubmitExistingReview("o", "r", "PRR_1", "", ""); err == nil {
+	if err := c.SubmitExistingReview(context.Background(), "o", "r", "PRR_1", "", ""); err == nil {
 		t.Error("expected error for empty event")
 	}
 }
@@ -399,7 +400,7 @@ func TestSubmitExistingReview_EmptyBodyPassedThrough(t *testing.T) {
 	resp := `{"data":{"submitPullRequestReview":{"pullRequestReview":{"id":"PRR_1","state":"COMMENTED"}}}}`
 	c, rec := graphqlCapturing(t, resp)
 
-	if err := c.SubmitExistingReview("o", "r", "PRR_1", "COMMENT", ""); err != nil {
+	if err := c.SubmitExistingReview(context.Background(), "o", "r", "PRR_1", "COMMENT", ""); err != nil {
 		t.Fatalf("SubmitExistingReview: %v", err)
 	}
 	body, ok := rec.variables["body"]
@@ -426,7 +427,7 @@ func TestGetPendingReview_Found(t *testing.T) {
 	]}}}}}`
 	c, rec := graphqlCapturing(t, resp)
 
-	id, comments, err := c.GetPendingReview("owner", "repo", 7)
+	id, comments, err := c.GetPendingReview(context.Background(), "owner", "repo", 7)
 	if err != nil {
 		t.Fatalf("GetPendingReview: %v", err)
 	}
@@ -468,7 +469,7 @@ func TestGetPendingReview_None(t *testing.T) {
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
 			c, _ := graphqlCapturing(t, body)
-			id, comments, err := c.GetPendingReview("o", "r", 1)
+			id, comments, err := c.GetPendingReview(context.Background(), "o", "r", 1)
 			if err != nil {
 				t.Fatalf("GetPendingReview: %v", err)
 			}
@@ -484,7 +485,7 @@ func TestGetPendingReview_None(t *testing.T) {
 func TestGetPendingReview_GraphQLError(t *testing.T) {
 	body := `{"data":null,"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a Repository"}]}`
 	c, _ := graphqlCapturing(t, body)
-	if _, _, err := c.GetPendingReview("o", "r", 1); err == nil {
+	if _, _, err := c.GetPendingReview(context.Background(), "o", "r", 1); err == nil {
 		t.Fatal("expected error to propagate from GraphQL errors[]")
 	}
 }
@@ -497,7 +498,7 @@ func TestGetPendingReview_GraphQLError(t *testing.T) {
 func TestGetPendingReview_PartialError(t *testing.T) {
 	body := `{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[]}}}},"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by integration"}]}`
 	c, _ := graphqlCapturing(t, body)
-	id, comments, err := c.GetPendingReview("o", "r", 1)
+	id, comments, err := c.GetPendingReview(context.Background(), "o", "r", 1)
 	if err == nil {
 		t.Fatalf("expected error to propagate from a partial GraphQL error; got id=%q comments=%+v", id, comments)
 	}

@@ -368,7 +368,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 	}
 
 	s.updateStatus(orgID, runID, "fetching")
-	pr, err := ghClient.GetPR(owner, repo, prNumber, false)
+	pr, err := ghClient.GetPR(ctx, owner, repo, prNumber, false)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to fetch PR: %w", err)
 	}

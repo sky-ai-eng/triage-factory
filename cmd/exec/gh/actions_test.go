@@ -3,6 +3,7 @@ package gh
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -452,7 +453,7 @@ func TestDownloadAndExtractLogs_HappyPath(t *testing.T) {
 	destDir := filepath.Join(t.TempDir(), "_scratch", "ci-logs", "123")
 
 	before := countCILogTempFiles(t)
-	n, err := downloadAndExtractLogs(client, "owner", "repo", 123, destDir)
+	n, err := downloadAndExtractLogs(context.Background(), client, "owner", "repo", 123, destDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -488,7 +489,7 @@ func TestDownloadAndExtractLogs_FailureCleansUp(t *testing.T) {
 	destDir := filepath.Join(t.TempDir(), "_scratch", "ci-logs", "123")
 
 	before := countCILogTempFiles(t)
-	_, err := downloadAndExtractLogs(client, "owner", "repo", 123, destDir)
+	_, err := downloadAndExtractLogs(context.Background(), client, "owner", "repo", 123, destDir)
 	if err == nil {
 		t.Fatal("expected error on 404, got nil")
 	}
@@ -535,7 +536,7 @@ func TestDownloadAndExtractLogs_ClobberStaleRunDir(t *testing.T) {
 	mustWrite(t, filepath.Join(destDir, "removed-job", "old-step.txt"), "stale from previous run\n")
 	mustWrite(t, filepath.Join(destDir, "0_old-summary.txt"), "stale summary\n")
 
-	if _, err := downloadAndExtractLogs(client, "owner", "repo", 123, destDir); err != nil {
+	if _, err := downloadAndExtractLogs(context.Background(), client, "owner", "repo", 123, destDir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -574,7 +575,7 @@ func TestDownloadAndExtractLogs_ExtractFailureCleansUp(t *testing.T) {
 	destDir := filepath.Join(t.TempDir(), "_scratch", "ci-logs", "123")
 
 	before := countCILogTempFiles(t)
-	_, err := downloadAndExtractLogs(client, "owner", "repo", 123, destDir)
+	_, err := downloadAndExtractLogs(context.Background(), client, "owner", "repo", 123, destDir)
 	if err == nil {
 		t.Fatal("expected extraction failure on invalid zip, got nil")
 	}
@@ -619,7 +620,7 @@ func TestFetchRunsForSHA_ShapesResponse(t *testing.T) {
 
 	client := github.NewClient(srv.URL, "test-token")
 
-	runs, err := fetchRunsForSHA(client, "owner", "repo", "abc123")
+	runs, err := fetchRunsForSHA(context.Background(), client, "owner", "repo", "abc123")
 	if err != nil {
 		t.Fatalf("fetchRunsForSHA: %v", err)
 	}
@@ -642,7 +643,7 @@ func TestFetchRunsForSHA_EmptyResponse(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := github.NewClient(srv.URL, "test-token")
-	runs, err := fetchRunsForSHA(client, "owner", "repo", "deadbeef")
+	runs, err := fetchRunsForSHA(context.Background(), client, "owner", "repo", "deadbeef")
 	if err != nil {
 		t.Fatalf("fetchRunsForSHA: %v", err)
 	}
@@ -658,7 +659,7 @@ func TestFetchRunsForSHA_HTTPError(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := github.NewClient(srv.URL, "test-token")
-	_, err := fetchRunsForSHA(client, "owner", "repo", "abc123")
+	_, err := fetchRunsForSHA(context.Background(), client, "owner", "repo", "abc123")
 	if err == nil {
 		t.Fatal("expected error on 404, got nil")
 	}
@@ -715,7 +716,7 @@ func TestFetchJobsForRun_ShapesResponse(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := github.NewClient(srv.URL, "test-token")
-	jobs, err := fetchJobsForRun(client, "owner", "repo", 42)
+	jobs, err := fetchJobsForRun(context.Background(), client, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("fetchJobsForRun: %v", err)
 	}
@@ -829,7 +830,7 @@ func TestDownloadPerJobLogsToDir_HappyPath(t *testing.T) {
 		{ID: 1004, Name: "Deploy", Status: "queued"},
 	}
 
-	bytes, updated, err := downloadPerJobLogsToDir(client, "owner", "repo", destDir, jobs)
+	bytes, updated, err := downloadPerJobLogsToDir(context.Background(), client, "owner", "repo", destDir, jobs)
 	if err != nil {
 		t.Fatalf("downloadPerJobLogsToDir: %v", err)
 	}
@@ -876,7 +877,7 @@ func TestDownloadPerJobLogsToDir_FailureCleansUp(t *testing.T) {
 	destDir := filepath.Join(t.TempDir(), "_scratch", "ci-logs", "42")
 
 	jobs := []jobInfo{{ID: 7777, Name: "Lint", Status: "completed"}}
-	_, _, err := downloadPerJobLogsToDir(client, "owner", "repo", destDir, jobs)
+	_, _, err := downloadPerJobLogsToDir(context.Background(), client, "owner", "repo", destDir, jobs)
 	if err == nil {
 		t.Fatal("expected error from 500 response, got nil")
 	}
@@ -906,7 +907,7 @@ func TestDownloadPerJobLogsToDir_AllStubs(t *testing.T) {
 		{ID: 1, Name: "Lint", Status: "queued"},
 		{ID: 2, Name: "Build", Status: "in_progress"},
 	}
-	bytes, updated, err := downloadPerJobLogsToDir(client, "owner", "repo", destDir, jobs)
+	bytes, updated, err := downloadPerJobLogsToDir(context.Background(), client, "owner", "repo", destDir, jobs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

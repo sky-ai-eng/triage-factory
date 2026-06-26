@@ -130,7 +130,7 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	}
 	// Read the live pending review for the inline comments the agent staged on
 	// GitHub (each add-review-comment baked the severity badge into the body).
-	liveID, liveComments, err := client.GetPendingReview(owner, repo, number)
+	liveID, liveComments, err := client.GetPendingReview(ctx, owner, repo, number)
 	if err != nil {
 		return fmt.Errorf("read pending review from github: %w", err)
 	}
@@ -704,7 +704,7 @@ func (c *LocalClient) GithubGetPR(ctx context.Context, owner, repo string, numbe
 	if err != nil {
 		return nil, err
 	}
-	return client.GetPR(owner, repo, number, verbose)
+	return client.GetPR(ctx, owner, repo, number, verbose)
 }
 
 func (c *LocalClient) GithubGetPRDiff(ctx context.Context, owner, repo string, number int, file string) (string, error) {
@@ -712,7 +712,7 @@ func (c *LocalClient) GithubGetPRDiff(ctx context.Context, owner, repo string, n
 	if err != nil {
 		return "", err
 	}
-	return client.GetPRDiff(owner, repo, number, file)
+	return client.GetPRDiff(ctx, owner, repo, number, file)
 }
 
 func (c *LocalClient) GithubGetPRFiles(ctx context.Context, owner, repo string, number int) ([]ghclient.PRFile, error) {
@@ -720,7 +720,7 @@ func (c *LocalClient) GithubGetPRFiles(ctx context.Context, owner, repo string, 
 	if err != nil {
 		return nil, err
 	}
-	return client.GetPRFiles(owner, repo, number)
+	return client.GetPRFiles(ctx, owner, repo, number)
 }
 
 func (c *LocalClient) GithubGetCommentThread(ctx context.Context, owner, repo string, commentID, page int) (*ghclient.CommentThread, error) {
@@ -728,7 +728,7 @@ func (c *LocalClient) GithubGetCommentThread(ctx context.Context, owner, repo st
 	if err != nil {
 		return nil, err
 	}
-	return client.GetCommentThread(owner, repo, commentID, page)
+	return client.GetCommentThread(ctx, owner, repo, commentID, page)
 }
 
 func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo string, number, reviewID int, verbose bool) (*ghclient.ReviewDetail, error) {
@@ -736,7 +736,7 @@ func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo str
 	if err != nil {
 		return nil, err
 	}
-	return client.GetReviewDetail(owner, repo, number, reviewID, verbose)
+	return client.GetReviewDetail(ctx, owner, repo, number, reviewID, verbose)
 }
 
 func (c *LocalClient) GithubDismissReview(ctx context.Context, owner, repo string, number, reviewID int, message string) error {
@@ -744,7 +744,7 @@ func (c *LocalClient) GithubDismissReview(ctx context.Context, owner, repo strin
 	if err != nil {
 		return err
 	}
-	return client.DismissReview(owner, repo, number, reviewID, message)
+	return client.DismissReview(ctx, owner, repo, number, reviewID, message)
 }
 
 func (c *LocalClient) GithubSubmitReview(ctx context.Context, owner, repo string, number int, commitSHA, event, body string, comments []ghclient.SubmitReviewComment) (int, string, error) {
@@ -752,7 +752,7 @@ func (c *LocalClient) GithubSubmitReview(ctx context.Context, owner, repo string
 	if err != nil {
 		return 0, "", err
 	}
-	return client.SubmitReview(owner, repo, number, commitSHA, event, body, comments)
+	return client.SubmitReview(ctx, owner, repo, number, commitSHA, event, body, comments)
 }
 
 func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (int, string, string, error) {
@@ -760,7 +760,7 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 	if err != nil {
 		return 0, "", "", err
 	}
-	number, htmlURL, nodeID, err := client.CreatePR(owner, repo, head, base, title, body, draft)
+	number, htmlURL, nodeID, err := client.CreatePR(ctx, owner, repo, head, base, title, body, draft)
 	if err != nil {
 		return 0, "", "", err
 	}
@@ -792,7 +792,7 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 		return "", err
 	}
 
-	existingID, _, err := client.GetPendingReview(owner, repo, number)
+	existingID, _, err := client.GetPendingReview(ctx, owner, repo, number)
 	if err != nil {
 		return "", err
 	}
@@ -808,7 +808,7 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 		return "", ErrPendingReviewCollision
 	}
 
-	reviewID, err := client.CreatePendingReview(owner, repo, number, commitSHA, comments)
+	reviewID, err := client.CreatePendingReview(ctx, owner, repo, number, commitSHA, comments)
 	if err != nil {
 		return "", err
 	}
@@ -832,7 +832,7 @@ func (c *LocalClient) recordGithubReview(ctx context.Context, client *ghclient.C
 		return
 	}
 	nodeID := ""
-	if pr, perr := client.GetPRBasic(owner, repo, number); perr == nil && pr != nil {
+	if pr, perr := client.GetPRBasic(ctx, owner, repo, number); perr == nil && pr != nil {
 		nodeID = pr.NodeID
 	}
 	c.upsertGithubArtifact(ctx, domain.NewReviewArtifact(owner+"/"+repo, number, nodeID, reviewID))
@@ -847,7 +847,7 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 	if err != nil {
 		return "", err
 	}
-	return client.AddPendingReviewComment(reviewID, ghclient.SubmitReviewComment{
+	return client.AddPendingReviewComment(ctx, reviewID, ghclient.SubmitReviewComment{
 		Path:      path,
 		Line:      line,
 		StartLine: startLine,
@@ -863,7 +863,7 @@ func (c *LocalClient) GithubGetPendingReview(ctx context.Context, owner, repo st
 	if err != nil {
 		return "", nil, err
 	}
-	return client.GetPendingReview(owner, repo, number)
+	return client.GetPendingReview(ctx, owner, repo, number)
 }
 
 func (c *LocalClient) GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {
@@ -871,7 +871,7 @@ func (c *LocalClient) GithubAddComment(ctx context.Context, owner, repo string, 
 	if err != nil {
 		return 0, err
 	}
-	id, htmlURL, err := client.AddCommentWithURL(owner, repo, number, body)
+	id, htmlURL, err := client.AddCommentWithURL(ctx, owner, repo, number, body)
 	if err != nil {
 		return 0, err
 	}
@@ -884,7 +884,7 @@ func (c *LocalClient) GithubReplyToComment(ctx context.Context, owner, repo stri
 	if err != nil {
 		return 0, err
 	}
-	return client.ReplyToComment(owner, repo, number, commentID, body)
+	return client.ReplyToComment(ctx, owner, repo, number, commentID, body)
 }
 
 func (c *LocalClient) GithubReactToComment(ctx context.Context, owner, repo string, commentID int, emoji string) error {
@@ -892,7 +892,7 @@ func (c *LocalClient) GithubReactToComment(ctx context.Context, owner, repo stri
 	if err != nil {
 		return err
 	}
-	return client.ReactToComment(owner, repo, commentID, emoji)
+	return client.ReactToComment(ctx, owner, repo, commentID, emoji)
 }
 
 func (c *LocalClient) GithubUpdateComment(ctx context.Context, owner, repo string, commentID int, body string) error {
@@ -900,7 +900,7 @@ func (c *LocalClient) GithubUpdateComment(ctx context.Context, owner, repo strin
 	if err != nil {
 		return err
 	}
-	isIssueComment, err := client.UpdateCommentScoped(owner, repo, commentID, body)
+	isIssueComment, err := client.UpdateCommentScoped(ctx, owner, repo, commentID, body)
 	if err != nil {
 		return err
 	}
@@ -921,7 +921,7 @@ func (c *LocalClient) GithubDeleteComment(ctx context.Context, owner, repo strin
 	if err != nil {
 		return err
 	}
-	isIssueComment, err := client.DeleteCommentScoped(owner, repo, commentID)
+	isIssueComment, err := client.DeleteCommentScoped(ctx, owner, repo, commentID)
 	if err != nil {
 		return err
 	}
@@ -940,7 +940,7 @@ func (c *LocalClient) GithubAPIGet(ctx context.Context, owner, repo, path string
 	if err != nil {
 		return nil, err
 	}
-	return client.Get(path)
+	return client.Get(ctx, path)
 }
 
 func (c *LocalClient) GithubDownloadArtifact(ctx context.Context, owner, repo, path string, dst io.Writer, maxBytes int64) (int64, error) {

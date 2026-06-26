@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -69,8 +70,8 @@ type PRTopComment struct {
 // callers that need the PR's own fields and not its discussion (e.g. the artifact
 // PR handlers that read/promote title + body on every overlay load, edit, and
 // approve).
-func (c *Client) GetPRBasic(owner, repo string, number int) (*PRView, error) {
-	data, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
+func (c *Client) GetPRBasic(ctx context.Context, owner, repo string, number int) (*PRView, error) {
+	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
 	if err != nil {
 		return nil, err
 	}
@@ -126,9 +127,9 @@ func prViewFromRaw(raw map[string]any) *PRView {
 // list calls on top of the PR object). In compact mode (verbose=false),
 // review/comment bodies are truncated to first line. Callers that only need the
 // PR's own fields should use GetPRBasic.
-func (c *Client) GetPR(owner, repo string, number int, verbose bool) (*PRView, error) {
+func (c *Client) GetPR(ctx context.Context, owner, repo string, number int, verbose bool) (*PRView, error) {
 	// Fetch PR
-	data, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
+	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
 	if err != nil {
 		return nil, err
 	}
@@ -141,13 +142,13 @@ func (c *Client) GetPR(owner, repo string, number int, verbose bool) (*PRView, e
 	pr := prViewFromRaw(raw)
 
 	// Fetch reviews
-	reviewsData, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=100", owner, repo, number))
+	reviewsData, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=100", owner, repo, number))
 	if err == nil {
 		var rawReviews []map[string]any
 		if json.Unmarshal(reviewsData, &rawReviews) == nil {
 			// Count comments per review
 			commentCounts := make(map[int]int)
-			reviewCommentsData, rcErr := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d/comments?per_page=100", owner, repo, number))
+			reviewCommentsData, rcErr := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/comments?per_page=100", owner, repo, number))
 			if rcErr == nil {
 				var rawRC []map[string]any
 				if json.Unmarshal(reviewCommentsData, &rawRC) == nil {
@@ -183,7 +184,7 @@ func (c *Client) GetPR(owner, repo string, number int, verbose bool) (*PRView, e
 	}
 
 	// Fetch issue comments (top-level)
-	commentsData, err := c.Get(fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100", owner, repo, number))
+	commentsData, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100", owner, repo, number))
 	if err == nil {
 		var rawComments []map[string]any
 		if json.Unmarshal(commentsData, &rawComments) == nil {
@@ -232,10 +233,10 @@ const MaxPRFiles = 1000
 
 // GetPRFiles lists files changed in a PR, including per-file patch content.
 // Paginates up to MaxPRFiles total results.
-func (c *Client) GetPRFiles(owner, repo string, number int) ([]PRFile, error) {
+func (c *Client) GetPRFiles(ctx context.Context, owner, repo string, number int) ([]PRFile, error) {
 	var files []PRFile
 	for page := 1; ; page++ {
-		data, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100&page=%d", owner, repo, number, page))
+		data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100&page=%d", owner, repo, number, page))
 		if err != nil {
 			return nil, err
 		}
@@ -264,8 +265,8 @@ func (c *Client) GetPRFiles(owner, repo string, number int) ([]PRFile, error) {
 }
 
 // GetPRDiff fetches the raw diff for a PR, optionally filtered to a single file.
-func (c *Client) GetPRDiff(owner, repo string, number int, file string) (string, error) {
-	diff, err := c.GetRaw(fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number), "application/vnd.github.v3.diff")
+func (c *Client) GetPRDiff(ctx context.Context, owner, repo string, number int, file string) (string, error) {
+	diff, err := c.GetRaw(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number), "application/vnd.github.v3.diff")
 	if err != nil {
 		return "", err
 	}
@@ -299,9 +300,9 @@ type ThreadReply struct {
 // GetCommentThread fetches a comment and its replies. For issue comments,
 // there are no threaded replies in the REST API, so we return just the comment.
 // For review comments, we fetch the thread.
-func (c *Client) GetCommentThread(owner, repo string, commentID, page int) (*CommentThread, error) {
+func (c *Client) GetCommentThread(ctx context.Context, owner, repo string, commentID, page int) (*CommentThread, error) {
 	// Try as issue comment first
-	data, err := c.Get(fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID))
+	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID))
 	if err == nil {
 		var raw map[string]any
 		if json.Unmarshal(data, &raw) == nil {
@@ -344,9 +345,9 @@ type ReviewDetailComment struct {
 
 // GetReviewDetail fetches a review and all its inline comments.
 // In compact mode, comment bodies are truncated to first line.
-func (c *Client) GetReviewDetail(owner, repo string, number, reviewID int, verbose bool) (*ReviewDetail, error) {
+func (c *Client) GetReviewDetail(ctx context.Context, owner, repo string, number, reviewID int, verbose bool) (*ReviewDetail, error) {
 	// Fetch the review itself
-	data, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews/%d", owner, repo, number, reviewID))
+	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews/%d", owner, repo, number, reviewID))
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +370,7 @@ func (c *Client) GetReviewDetail(owner, repo string, number, reviewID int, verbo
 	}
 
 	// Fetch comments for this review
-	commentsData, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews/%d/comments?per_page=100", owner, repo, number, reviewID))
+	commentsData, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews/%d/comments?per_page=100", owner, repo, number, reviewID))
 	if err == nil {
 		var rawComments []map[string]any
 		if json.Unmarshal(commentsData, &rawComments) == nil {
@@ -435,10 +436,10 @@ func reviewCommentsPayload(comments []SubmitReviewComment) []map[string]any {
 // SubmitReview creates and submits a review atomically with all comments in one API call.
 // Event is "APPROVE", "REQUEST_CHANGES", or "COMMENT".
 // If auto_merge is enabled on the PR and event is "APPROVE", it's downgraded to "COMMENT".
-func (c *Client) SubmitReview(owner, repo string, number int, commitSHA, event, body string, comments []SubmitReviewComment) (int, string, error) {
+func (c *Client) SubmitReview(ctx context.Context, owner, repo string, number int, commitSHA, event, body string, comments []SubmitReviewComment) (int, string, error) {
 	// Check auto_merge guardrail
 	if event == "APPROVE" {
-		pr, err := c.GetPR(owner, repo, number, false)
+		pr, err := c.GetPR(ctx, owner, repo, number, false)
 		if err == nil && pr.AutoMerge {
 			event = "COMMENT"
 			body = "[Auto-merge is enabled — downgraded from APPROVE to COMMENT]\n\n" + body
@@ -455,7 +456,7 @@ func (c *Client) SubmitReview(owner, repo string, number int, commitSHA, event, 
 		payload["comments"] = ghComments
 	}
 
-	data, err := c.Post(fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, number), payload)
+	data, err := c.Post(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, number), payload)
 	if err != nil {
 		errStr := err.Error()
 		if strings.Contains(errStr, "422") && event == "REQUEST_CHANGES" {
@@ -515,7 +516,7 @@ func (c *Client) SubmitReview(owner, repo string, number int, commitSHA, event, 
 // returned error so callers see "Validation Failed: base 'develop' is not a
 // valid branch" rather than the raw JSON blob — the retry flow is much more
 // useful when the actual reason is visible.
-func (c *Client) CreatePR(owner, repo, head, base, title, body string, draft bool) (int, string, string, error) {
+func (c *Client) CreatePR(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (int, string, string, error) {
 	payload := map[string]any{
 		"title": title,
 		"head":  head,
@@ -524,7 +525,7 @@ func (c *Client) CreatePR(owner, repo, head, base, title, body string, draft boo
 		"draft": draft,
 	}
 
-	data, err := c.Post(fmt.Sprintf("/repos/%s/%s/pulls", owner, repo), payload)
+	data, err := c.Post(ctx, fmt.Sprintf("/repos/%s/%s/pulls", owner, repo), payload)
 	if err != nil {
 		return 0, "", "", liftValidationErr(err)
 	}
@@ -546,12 +547,12 @@ func (c *Client) CreatePR(owner, repo, head, base, title, body string, draft boo
 // JSON envelope.
 //
 // API layer only (TFAC-461); the PR-path rework that calls it lands in B·2.
-func (c *Client) UpdatePR(owner, repo string, number int, title, body string) error {
+func (c *Client) UpdatePR(ctx context.Context, owner, repo string, number int, title, body string) error {
 	payload := map[string]any{
 		"title": title,
 		"body":  body,
 	}
-	_, err := c.Patch(fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number), payload)
+	_, err := c.Patch(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number), payload)
 	return liftValidationErr(err)
 }
 
@@ -565,9 +566,9 @@ func (c *Client) UpdatePR(owner, repo string, number int, title, body string) er
 //
 // Used by the GitHub-native PR path's abandon flow — "Return to queue" on a run
 // that opened a draft PR closes that PR and flips its artifact to state=closed.
-func (c *Client) ClosePR(owner, repo string, number int) error {
+func (c *Client) ClosePR(ctx context.Context, owner, repo string, number int) error {
 	payload := map[string]any{"state": "closed"}
-	_, err := c.Patch(fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number), payload)
+	_, err := c.Patch(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number), payload)
 	return liftValidationErr(err)
 }
 
@@ -633,8 +634,8 @@ func liftValidationErr(err error) error {
 
 // DismissReview dismisses a submitted review (removes approval/change-request status).
 // Only works on APPROVED or CHANGES_REQUESTED reviews — COMMENTED reviews cannot be dismissed.
-func (c *Client) DismissReview(owner, repo string, number, reviewID int, message string) error {
-	_, err := c.Put(fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews/%d/dismissals", owner, repo, number, reviewID), map[string]any{
+func (c *Client) DismissReview(ctx context.Context, owner, repo string, number, reviewID int, message string) error {
+	_, err := c.Put(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews/%d/dismissals", owner, repo, number, reviewID), map[string]any{
 		"message": message,
 	})
 	if err != nil && strings.Contains(err.Error(), "422") {
@@ -644,8 +645,8 @@ func (c *Client) DismissReview(owner, repo string, number, reviewID int, message
 }
 
 // AddComment adds a top-level issue comment to a PR and returns its id.
-func (c *Client) AddComment(owner, repo string, number int, body string) (int, error) {
-	id, _, err := c.AddCommentWithURL(owner, repo, number, body)
+func (c *Client) AddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {
+	id, _, err := c.AddCommentWithURL(ctx, owner, repo, number, body)
 	return id, err
 }
 
@@ -655,8 +656,8 @@ func (c *Client) AddComment(owner, repo string, number int, body string) (int, e
 // (cmd/exec/agenthost) keys the comment artifact on the id and stamps this url;
 // the agent-facing AddComment drops it because the IPC surface doesn't carry a
 // comment url back to the sandbox.
-func (c *Client) AddCommentWithURL(owner, repo string, number int, body string) (int, string, error) {
-	data, err := c.Post(fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number), map[string]any{
+func (c *Client) AddCommentWithURL(ctx context.Context, owner, repo string, number int, body string) (int, string, error) {
+	data, err := c.Post(ctx, fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number), map[string]any{
 		"body": body,
 	})
 	if err != nil {
@@ -670,8 +671,8 @@ func (c *Client) AddCommentWithURL(owner, repo string, number int, body string) 
 }
 
 // ReplyToComment replies to a review comment thread.
-func (c *Client) ReplyToComment(owner, repo string, number, commentID int, body string) (int, error) {
-	data, err := c.Post(fmt.Sprintf("/repos/%s/%s/pulls/%d/comments/%d/replies", owner, repo, number, commentID), map[string]any{
+func (c *Client) ReplyToComment(ctx context.Context, owner, repo string, number, commentID int, body string) (int, error) {
+	data, err := c.Post(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/comments/%d/replies", owner, repo, number, commentID), map[string]any{
 		"body": body,
 	})
 	if err != nil {
@@ -685,21 +686,21 @@ func (c *Client) ReplyToComment(owner, repo string, number, commentID int, body 
 }
 
 // ReactToComment adds a reaction to a comment. Tries issue comments first, then review comments.
-func (c *Client) ReactToComment(owner, repo string, commentID int, emoji string) error {
+func (c *Client) ReactToComment(ctx context.Context, owner, repo string, commentID int, emoji string) error {
 	body := map[string]any{"content": emoji}
 	// Try issue comment
-	_, err := c.Post(fmt.Sprintf("/repos/%s/%s/issues/comments/%d/reactions", owner, repo, commentID), body)
+	_, err := c.Post(ctx, fmt.Sprintf("/repos/%s/%s/issues/comments/%d/reactions", owner, repo, commentID), body)
 	if err == nil {
 		return nil
 	}
 	// Try review comment
-	_, err = c.Post(fmt.Sprintf("/repos/%s/%s/pulls/comments/%d/reactions", owner, repo, commentID), body)
+	_, err = c.Post(ctx, fmt.Sprintf("/repos/%s/%s/pulls/comments/%d/reactions", owner, repo, commentID), body)
 	return err
 }
 
 // UpdateComment updates a comment body. Tries issue comments first, then review comments.
-func (c *Client) UpdateComment(owner, repo string, commentID int, body string) error {
-	_, err := c.UpdateCommentScoped(owner, repo, commentID, body)
+func (c *Client) UpdateComment(ctx context.Context, owner, repo string, commentID int, body string) error {
+	_, err := c.UpdateCommentScoped(ctx, owner, repo, commentID, body)
 	return err
 }
 
@@ -709,18 +710,18 @@ func (c *Client) UpdateComment(owner, repo string, commentID int, body string) e
 // keys off this so it records only standalone comments — review line-comments
 // ride the review artifact, not a comment artifact (TFAC-466). isIssueComment is
 // meaningful only when err is nil.
-func (c *Client) UpdateCommentScoped(owner, repo string, commentID int, body string) (isIssueComment bool, err error) {
+func (c *Client) UpdateCommentScoped(ctx context.Context, owner, repo string, commentID int, body string) (isIssueComment bool, err error) {
 	payload := map[string]any{"body": body}
-	if _, err = c.Patch(fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID), payload); err == nil {
+	if _, err = c.Patch(ctx, fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID), payload); err == nil {
 		return true, nil
 	}
-	_, err = c.Patch(fmt.Sprintf("/repos/%s/%s/pulls/comments/%d", owner, repo, commentID), payload)
+	_, err = c.Patch(ctx, fmt.Sprintf("/repos/%s/%s/pulls/comments/%d", owner, repo, commentID), payload)
 	return false, err
 }
 
 // DeleteComment deletes a comment. Tries issue comments first, then review comments.
-func (c *Client) DeleteComment(owner, repo string, commentID int) error {
-	_, err := c.DeleteCommentScoped(owner, repo, commentID)
+func (c *Client) DeleteComment(ctx context.Context, owner, repo string, commentID int) error {
+	_, err := c.DeleteCommentScoped(ctx, owner, repo, commentID)
 	return err
 }
 
@@ -729,11 +730,11 @@ func (c *Client) DeleteComment(owner, repo string, commentID int) error {
 // reached via the pulls/comments fallback). Same contract as UpdateCommentScoped
 // — only standalone comments are recorded as artifacts. isIssueComment is
 // meaningful only when err is nil.
-func (c *Client) DeleteCommentScoped(owner, repo string, commentID int) (isIssueComment bool, err error) {
-	if _, err = c.Delete(fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID)); err == nil {
+func (c *Client) DeleteCommentScoped(ctx context.Context, owner, repo string, commentID int) (isIssueComment bool, err error) {
+	if _, err = c.Delete(ctx, fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID)); err == nil {
 		return true, nil
 	}
-	_, err = c.Delete(fmt.Sprintf("/repos/%s/%s/pulls/comments/%d", owner, repo, commentID))
+	_, err = c.Delete(ctx, fmt.Sprintf("/repos/%s/%s/pulls/comments/%d", owner, repo, commentID))
 	return false, err
 }
 
@@ -797,9 +798,9 @@ type restPR struct {
 // and on a 200 any further pages are listed unconditionally. >100 open PRs
 // therefore re-list fully on each change; the Phase-2 refresh remains the
 // correctness backstop for state changes on already-tracked entities.
-func (c *Client) ListOpenPRs(owner, repo, etag string) ([]DiscoveredPR, string, bool, error) {
+func (c *Client) ListOpenPRs(ctx context.Context, owner, repo, etag string) ([]DiscoveredPR, string, bool, error) {
 	first := fmt.Sprintf("/repos/%s/%s/pulls?state=open&per_page=100&page=1", owner, repo)
-	body, newEtag, notModified, err := c.GetConditional(first, etag)
+	body, newEtag, notModified, err := c.GetConditional(ctx, first, etag)
 	if err != nil {
 		return nil, "", false, err
 	}
@@ -816,7 +817,7 @@ func (c *Client) ListOpenPRs(owner, repo, etag string) ([]DiscoveredPR, string, 
 
 	// Single-page fast path: fewer than a full page means no more pages.
 	for page := 2; len(out) > 0 && len(out)%100 == 0; page++ {
-		data, perr := c.Get(fmt.Sprintf("/repos/%s/%s/pulls?state=open&per_page=100&page=%d", owner, repo, page))
+		data, perr := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls?state=open&per_page=100&page=%d", owner, repo, page))
 		if perr != nil {
 			return nil, "", false, perr
 		}
@@ -895,9 +896,9 @@ func (pr restPR) toDiscoverySnapshot(owner, repo string) domain.PRSnapshot {
 }
 
 // SearchReviewRequested searches for open PRs requesting the user's review.
-func (c *Client) SearchReviewRequested(username string) ([]map[string]any, error) {
+func (c *Client) SearchReviewRequested(ctx context.Context, username string) ([]map[string]any, error) {
 	q := url.QueryEscape(fmt.Sprintf("review-requested:%s type:pr state:open", username))
-	data, err := c.Get(fmt.Sprintf("/search/issues?q=%s&per_page=50", q))
+	data, err := c.Get(ctx, fmt.Sprintf("/search/issues?q=%s&per_page=50", q))
 	if err != nil {
 		return nil, err
 	}

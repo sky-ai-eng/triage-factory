@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -29,25 +30,25 @@ type TimePoint struct {
 }
 
 // GetDashboardStats fetches PR statistics for the user over the last 30 days.
-func (c *Client) GetDashboardStats(username string) (*DashboardStats, error) {
+func (c *Client) GetDashboardStats(ctx context.Context, username string) (*DashboardStats, error) {
 	stats := &DashboardStats{}
 	since := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
 
 	// 1. Merged PRs (last 30 days)
-	mergedItems, err := c.searchIssues(fmt.Sprintf("author:%s type:pr is:merged merged:>%s", username, since))
+	mergedItems, err := c.searchIssues(ctx, fmt.Sprintf("author:%s type:pr is:merged merged:>%s", username, since))
 	if err == nil {
 		stats.Merged = len(mergedItems)
 		stats.MergedOverTime = bucketByWeek(mergedItems, "closed_at")
 	}
 
 	// 2. Closed (not merged) PRs
-	closedItems, err := c.searchIssues(fmt.Sprintf("author:%s type:pr is:closed is:unmerged closed:>%s", username, since))
+	closedItems, err := c.searchIssues(ctx, fmt.Sprintf("author:%s type:pr is:closed is:unmerged closed:>%s", username, since))
 	if err == nil {
 		stats.Closed = len(closedItems)
 	}
 
 	// 3. Open PRs (awaiting + draft)
-	openItems, err := c.searchIssues(fmt.Sprintf("author:%s type:pr state:open", username))
+	openItems, err := c.searchIssues(ctx, fmt.Sprintf("author:%s type:pr state:open", username))
 	if err == nil {
 		for _, item := range openItems {
 			if boolVal(item, "draft") {
@@ -59,7 +60,7 @@ func (c *Client) GetDashboardStats(username string) (*DashboardStats, error) {
 	}
 
 	// 4. Reviews given by user (last 30 days)
-	reviewedItems, err := c.searchIssues(fmt.Sprintf("reviewed-by:%s type:pr -author:%s updated:>%s", username, username, since))
+	reviewedItems, err := c.searchIssues(ctx, fmt.Sprintf("reviewed-by:%s type:pr -author:%s updated:>%s", username, username, since))
 	if err == nil {
 		stats.ReviewsGiven = len(reviewedItems)
 	}
@@ -70,8 +71,8 @@ func (c *Client) GetDashboardStats(username string) (*DashboardStats, error) {
 	return stats, nil
 }
 
-func (c *Client) searchIssues(query string) ([]map[string]any, error) {
-	data, err := c.Get(fmt.Sprintf("/search/issues?q=%s&per_page=100&sort=updated", url.QueryEscape(query)))
+func (c *Client) searchIssues(ctx context.Context, query string) ([]map[string]any, error) {
+	data, err := c.Get(ctx, fmt.Sprintf("/search/issues?q=%s&per_page=100&sort=updated", url.QueryEscape(query)))
 	if err != nil {
 		return nil, err
 	}

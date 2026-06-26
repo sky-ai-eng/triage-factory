@@ -123,7 +123,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		if ids := sortedKeys(prNodeIDsByOwner[owner]); len(ids) > 0 {
 			// includeCheckRuns=false: reconciliation needs PR lifecycle + reviews,
 			// not CI — the lighter discovery fragment still carries both.
-			snaps, err := client.RefreshPRs(ids, false)
+			snaps, err := client.RefreshPRs(ctx, ids, false)
 			if err != nil {
 				reconcileLog.Warn("refresh PRs failed", "org", orgID, "owner", owner, "count", len(ids), "error", err)
 			} else {
@@ -133,7 +133,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 			}
 		}
 		if refs := branchRefsByOwner[owner]; len(refs) > 0 {
-			ex, err := client.BranchesExist(refs)
+			ex, err := client.BranchesExist(ctx, refs)
 			if err != nil {
 				reconcileLog.Warn("branch existence check failed", "org", orgID, "owner", owner, "count", len(refs), "error", err)
 			} else {
@@ -407,7 +407,7 @@ func (rc *Reconciler) describeMergedPR(ctx context.Context, orgID string, a doma
 	if err != nil {
 		return base
 	}
-	pr, err := client.GetPRBasic(owner, repo, number)
+	pr, err := client.GetPRBasic(ctx, owner, repo, number)
 	if err != nil || pr == nil {
 		return base
 	}
@@ -468,7 +468,7 @@ func (rc *Reconciler) describeResolvedReview(ctx context.Context, orgID string, 
 	if err != nil {
 		return base
 	}
-	final, err := client.GetReview(a.ExternalID)
+	final, err := client.GetReview(ctx, a.ExternalID)
 	if err != nil || final == nil {
 		return base
 	}

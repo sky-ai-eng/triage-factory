@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -45,7 +46,7 @@ type PendingReviewComment struct {
 // SubmitExistingReview, GetPendingReview). GitHub allows only one pending
 // review per identity per PR; a duplicate create surfaces a clear error so
 // B·3's collision check can fall back to GetPendingReview.
-func (c *Client) CreatePendingReview(owner, repo string, number int, commitSHA string, comments []SubmitReviewComment) (string, error) {
+func (c *Client) CreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []SubmitReviewComment) (string, error) {
 	payload := map[string]any{}
 	if commitSHA != "" {
 		payload["commit_id"] = commitSHA
@@ -54,7 +55,7 @@ func (c *Client) CreatePendingReview(owner, repo string, number int, commitSHA s
 		payload["comments"] = ghComments
 	}
 
-	data, err := c.Post(fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, number), payload)
+	data, err := c.Post(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, number), payload)
 	if err != nil {
 		// Match GitHub's current duplicate-pending wording ("User can only have
 		// one pending review per pull request") to point the caller at the
@@ -90,7 +91,7 @@ func (c *Client) CreatePendingReview(owner, repo string, number int, commitSHA s
 // non-nil comment.StartLine makes it a multi-line range (start..line on the
 // same side). Returns the new comment's GraphQL node ID, for a later
 // UpdatePendingReviewComment / DeletePendingReviewComment.
-func (c *Client) AddPendingReviewComment(reviewID string, comment SubmitReviewComment) (string, error) {
+func (c *Client) AddPendingReviewComment(ctx context.Context, reviewID string, comment SubmitReviewComment) (string, error) {
 	if reviewID == "" {
 		return "", fmt.Errorf("add pending review comment: empty review id")
 	}
@@ -134,7 +135,7 @@ func (c *Client) AddPendingReviewComment(reviewID string, comment SubmitReviewCo
 		}
 	}`, decls, strings.Join(inputs, ", "))
 
-	data, err := c.PostGraphQL(map[string]any{"query": query, "variables": vars})
+	data, err := c.PostGraphQL(ctx, map[string]any{"query": query, "variables": vars})
 	if err != nil {
 		return "", err
 	}
@@ -166,7 +167,7 @@ func (c *Client) AddPendingReviewComment(reviewID string, comment SubmitReviewCo
 // addressed by its GraphQL node ID (GraphQL updatePullRequestReviewComment).
 // Used by the editor⇄pending-review sync to push a body change without
 // recreating the thread.
-func (c *Client) UpdatePendingReviewComment(commentID, body string) error {
+func (c *Client) UpdatePendingReviewComment(ctx context.Context, commentID, body string) error {
 	if commentID == "" {
 		return fmt.Errorf("update pending review comment: empty comment id")
 	}
@@ -178,7 +179,7 @@ func (c *Client) UpdatePendingReviewComment(commentID, body string) error {
 		}`,
 		"variables": map[string]any{"id": commentID, "body": body},
 	}
-	_, err := c.PostGraphQL(mutation)
+	_, err := c.PostGraphQL(ctx, mutation)
 	return err
 }
 
@@ -188,7 +189,7 @@ func (c *Client) UpdatePendingReviewComment(commentID, body string) error {
 //
 // Note the input field is `id` here, unlike updatePullRequestReviewComment's
 // `pullRequestReviewCommentId` — GitHub's schema is asymmetric between the two.
-func (c *Client) DeletePendingReviewComment(commentID string) error {
+func (c *Client) DeletePendingReviewComment(ctx context.Context, commentID string) error {
 	if commentID == "" {
 		return fmt.Errorf("delete pending review comment: empty comment id")
 	}
@@ -200,7 +201,7 @@ func (c *Client) DeletePendingReviewComment(commentID string) error {
 		}`,
 		"variables": map[string]any{"id": commentID},
 	}
-	_, err := c.PostGraphQL(mutation)
+	_, err := c.PostGraphQL(ctx, mutation)
 	return err
 }
 
@@ -220,7 +221,7 @@ func (c *Client) DeletePendingReviewComment(commentID string) error {
 // owner and repo are accepted for symmetry with the other review entry points
 // (and a possible future REST fallback); the GraphQL mutation keys solely off
 // the review node ID, which is globally unique.
-func (c *Client) SubmitExistingReview(owner, repo, reviewID, event, body string) error {
+func (c *Client) SubmitExistingReview(ctx context.Context, owner, repo, reviewID, event, body string) error {
 	if reviewID == "" {
 		return fmt.Errorf("submit existing review: empty review id")
 	}
@@ -239,7 +240,7 @@ func (c *Client) SubmitExistingReview(owner, repo, reviewID, event, body string)
 			"body":     body,
 		},
 	}
-	_, err := c.PostGraphQL(mutation)
+	_, err := c.PostGraphQL(ctx, mutation)
 	return err
 }
 
@@ -263,7 +264,7 @@ func (c *Client) SubmitExistingReview(owner, repo, reviewID, event, body string)
 // 100: this is a correctness boundary for B·3's 1:1 sync, not just a perf cap —
 // a pending review with >100 inline comments would omit the oldest, which the
 // sync must NOT read as deletions (paginate, or bound the editor, when B·3 lands).
-func (c *Client) GetPendingReview(owner, repo string, number int) (string, []PendingReviewComment, error) {
+func (c *Client) GetPendingReview(ctx context.Context, owner, repo string, number int) (string, []PendingReviewComment, error) {
 	query := `query($owner: String!, $repo: String!, $number: Int!) {
 		repository(owner: $owner, name: $repo) {
 			pullRequest(number: $number) {
@@ -279,7 +280,7 @@ func (c *Client) GetPendingReview(owner, repo string, number int) (string, []Pen
 			}
 		}
 	}`
-	data, err := c.PostGraphQL(map[string]any{
+	data, err := c.PostGraphQL(ctx, map[string]any{
 		"query": query,
 		"variables": map[string]any{
 			"owner":  owner,
@@ -373,7 +374,7 @@ type SubmittedReview struct {
 // Returns (nil, nil) when the id doesn't resolve to a review (deleted, or a node
 // of another type) — absence is a normal result the caller degrades on, not an
 // error. A GraphQL error (including a 200 partial) propagates.
-func (c *Client) GetReview(reviewNodeID string) (*SubmittedReview, error) {
+func (c *Client) GetReview(ctx context.Context, reviewNodeID string) (*SubmittedReview, error) {
 	if reviewNodeID == "" {
 		return nil, fmt.Errorf("get review: empty review id")
 	}
@@ -389,7 +390,7 @@ func (c *Client) GetReview(reviewNodeID string) (*SubmittedReview, error) {
 			}
 		}
 	}`
-	data, err := c.PostGraphQL(map[string]any{"query": query, "variables": map[string]any{"id": reviewNodeID}})
+	data, err := c.PostGraphQL(ctx, map[string]any{"query": query, "variables": map[string]any{"id": reviewNodeID}})
 	if err != nil {
 		return nil, err
 	}
@@ -455,11 +456,11 @@ func (c *Client) GetReview(reviewNodeID string) (*SubmittedReview, error) {
 // review's numeric database id, not the node id every other op here speaks. So
 // this first resolves the node id to its databaseId via GraphQL, then issues the
 // REST delete. owner/repo/number locate the PR for the REST path.
-func (c *Client) DeletePendingReview(owner, repo string, number int, reviewID string) error {
+func (c *Client) DeletePendingReview(ctx context.Context, owner, repo string, number int, reviewID string) error {
 	if reviewID == "" {
 		return fmt.Errorf("delete pending review: empty review id")
 	}
-	data, err := c.PostGraphQL(map[string]any{
+	data, err := c.PostGraphQL(ctx, map[string]any{
 		"query": `query($id: ID!) {
 			node(id: $id) { ... on PullRequestReview { databaseId } }
 		}`,
@@ -490,7 +491,7 @@ func (c *Client) DeletePendingReview(owner, repo string, number int, reviewID st
 		// the review was deleted out-of-band, not merely submitted.
 		return fmt.Errorf("delete pending review: review %s not found or no longer a pull request review (already deleted)", reviewID)
 	}
-	if _, err := c.Delete(fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews/%d", owner, repo, number, resp.Data.Node.DatabaseID)); err != nil {
+	if _, err := c.Delete(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews/%d", owner, repo, number, resp.Data.Node.DatabaseID)); err != nil {
 		return fmt.Errorf("delete pending review: %w", err)
 	}
 	return nil

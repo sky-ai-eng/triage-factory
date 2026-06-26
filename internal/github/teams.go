@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -61,11 +62,11 @@ const teamsPageCap = 20
 //
 // Paginates through the REST endpoint's 100-per-page cap. Stops at
 // teamsPageCap as a defensive ceiling.
-func (c *Client) ListMyTeams() ([]string, error) {
+func (c *Client) ListMyTeams(ctx context.Context) ([]string, error) {
 	var out []string
 	for page := 1; page <= teamsPageCap; page++ {
 		path := fmt.Sprintf("/user/teams?per_page=%d&page=%d", teamsPerPage, page)
-		data, err := c.Get(path)
+		data, err := c.Get(ctx, path)
 		if err != nil {
 			return nil, fmt.Errorf("list teams page %d: %w", page, err)
 		}
@@ -104,11 +105,11 @@ func (c *Client) ListMyTeams() ([]string, error) {
 // for the org-teams + membership reconstruction it uses instead.
 //
 // Requires the read:org scope, same as ListMyTeams.
-func (c *Client) ListMyTeamsDetailed() ([]UserTeam, error) {
+func (c *Client) ListMyTeamsDetailed(ctx context.Context) ([]UserTeam, error) {
 	var out []UserTeam
 	for page := 1; page <= teamsPageCap; page++ {
 		path := fmt.Sprintf("/user/teams?per_page=%d&page=%d", teamsPerPage, page)
-		data, err := c.Get(path)
+		data, err := c.Get(ctx, path)
 		if err != nil {
 			return nil, fmt.Errorf("list teams page %d: %w", page, err)
 		}
@@ -155,7 +156,7 @@ func (c *Client) ListMyTeamsDetailed() ([]UserTeam, error) {
 // Requires the token to have org-members read for the org. A permission or
 // not-found failure surfaces as an error so the caller can skip the org
 // rather than assert it has no teams.
-func (c *Client) ListUserTeamsInOrg(orgLogin, userLogin string) ([]UserTeam, error) {
+func (c *Client) ListUserTeamsInOrg(ctx context.Context, orgLogin, userLogin string) ([]UserTeam, error) {
 	const query = `
 		query($org: String!, $login: String!, $cursor: String) {
 			organization(login: $org) {
@@ -173,7 +174,7 @@ func (c *Client) ListUserTeamsInOrg(orgLogin, userLogin string) ([]UserTeam, err
 	var out []UserTeam
 	var cursor *string
 	for page := 1; page <= teamsPageCap; page++ {
-		data, err := c.PostGraphQL(map[string]any{
+		data, err := c.PostGraphQL(ctx, map[string]any{
 			"query": query,
 			"variables": map[string]any{
 				"org":    orgLogin,
@@ -254,7 +255,7 @@ func (c *Client) ListUserTeamsInOrg(orgLogin, userLogin string) ([]UserTeam, err
 // than mistaking it for "this org has no teams, delete everything."
 //
 // Requires read:org / Members:read for the org, same as ListOrgTeams.
-func (c *Client) ListOrgTeamsDetailed(orgLogin string) ([]UserTeam, error) {
+func (c *Client) ListOrgTeamsDetailed(ctx context.Context, orgLogin string) ([]UserTeam, error) {
 	const query = `
 		query($org: String!, $cursor: String) {
 			organization(login: $org) {
@@ -272,7 +273,7 @@ func (c *Client) ListOrgTeamsDetailed(orgLogin string) ([]UserTeam, error) {
 	var out []UserTeam
 	var cursor *string
 	for page := 1; page <= teamsPageCap; page++ {
-		data, err := c.PostGraphQL(map[string]any{
+		data, err := c.PostGraphQL(ctx, map[string]any{
 			"query": query,
 			"variables": map[string]any{
 				"org":    orgLogin,
@@ -347,11 +348,11 @@ func (c *Client) ListOrgTeamsDetailed(orgLogin string) ([]UserTeam, error) {
 // they can't see (and crucially NOT prune its mappings on a fetch
 // failure). Paginates the REST endpoint's 100-per-page cap, bounded by
 // teamsPageCap.
-func (c *Client) ListOrgTeams(org string) ([]OrgTeam, error) {
+func (c *Client) ListOrgTeams(ctx context.Context, org string) ([]OrgTeam, error) {
 	var out []OrgTeam
 	for page := 1; page <= teamsPageCap; page++ {
 		path := fmt.Sprintf("/orgs/%s/teams?per_page=%d&page=%d", url.PathEscape(org), teamsPerPage, page)
-		data, err := c.Get(path)
+		data, err := c.Get(ctx, path)
 		if err != nil {
 			return nil, fmt.Errorf("list org %s teams page %d: %w", org, page, err)
 		}

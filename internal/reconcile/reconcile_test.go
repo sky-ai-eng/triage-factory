@@ -1,10 +1,12 @@
 package reconcile
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -291,7 +293,7 @@ type stubGH struct {
 	refCalls map[string]bool   // branch refs actually requested ("owner/repo/branch")
 }
 
-func newStubClient(t *testing.T, s *stubGH) *github.Client {
+func newStubServer(t *testing.T, s *stubGH) *httptest.Server {
 	t.Helper()
 	s.prCalls = map[string]bool{}
 	s.refCalls = map[string]bool{}
@@ -374,7 +376,37 @@ func newStubClient(t *testing.T, s *stubGH) *github.Client {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return github.NewClient(srv.URL, "test-token")
+	return srv
+}
+
+func newStubClient(t *testing.T, s *stubGH) *github.Client {
+	t.Helper()
+	return github.NewClient(newStubServer(t, s).URL, "test-token")
+}
+
+// cancelAfterFetchRT cancels a caller context the moment the GraphQL fetch (the
+// only POST reconcile issues) has completed and its body is safely buffered in
+// memory — so the fetch itself succeeds on the live ctx, but everything
+// downstream observes a cancelled caller ctx. It's the deterministic way to
+// prove reconcile's write-back detaches (context.WithoutCancel): a server-side
+// cancel would race the client's own response read. The GetPRBasic in the
+// write-back is a GET on the detached writeCtx and passes through untouched.
+type cancelAfterFetchRT struct {
+	base   http.RoundTripper
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (rt *cancelAfterFetchRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := rt.base.RoundTrip(req)
+	if err != nil || req.Method != http.MethodPost {
+		return resp, err
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	rt.once.Do(rt.cancel) // fetch done + buffered → safe to cancel the caller ctx
+	return resp, nil
 }
 
 // prNodeJSON builds one PR node body for the RefreshPRs response. reviews are
@@ -826,18 +858,27 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 		prs:     map[string]string{"PR_12": prNodeJSON("PR_12", 12, "MERGED", false, true)},
 		prFinal: map[int][2]string{12: {"t", "b"}}, // shipped as drafted
 	}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
+	// The fetch (GraphQL POST) now observes ctx (TFAC-475 made it cancellable),
+	// so it must succeed BEFORE the cancel: cancelAfterFetchRT lets the fetch
+	// complete on the live ctx, buffers its body, then cancels the caller ctx —
+	// reconcile then enters the apply phase with ctx already cancelled, where the
+	// write-back (state + memory) runs on context.WithoutCancel(ctx) and must
+	// still land. A server-side cancel would race the client's own response read.
+	srv := newStubServer(t, stub)
+	ctx, cancel := context.WithCancel(context.Background())
+	client := github.NewClientWithHTTPClient(srv.URL, "test-token",
+		&http.Client{Transport: &cancelAfterFetchRT{base: http.DefaultTransport, cancel: cancel}})
+	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.TaskMemory, nil)
 
 	arts, err := stores.Artifacts.ListByRunSystem(context.Background(), runmode.LocalDefaultOrgID, runID)
 	if err != nil {
 		t.Fatalf("ListByRunSystem: %v", err)
 	}
-	// The fetches don't observe ctx (fake resolver + http server), so reconcile
-	// reaches the apply phase, where the detached write-back ignores this cancel.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	if _, err := rc.Reconcile(ctx, runmode.LocalDefaultOrgID, arts); err != nil {
 		t.Fatalf("Reconcile: %v", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("fetch RoundTripper never fired — the cancel-after-fetch guard didn't exercise the detached write-back")
 	}
 
 	assertState(t, stores, runmode.LocalDefaultOrgID, prArt.DedupKey, domain.ArtifactStatePRMerged)

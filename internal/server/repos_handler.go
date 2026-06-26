@@ -119,7 +119,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 
 		client := ghclient.NewClient(baseURL, creds.GitHubPAT)
 		var err error
-		repos, err = client.ListUserRepos()
+		repos, err = client.ListUserRepos(r.Context())
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch repos: " + err.Error()})
 			return
@@ -184,7 +184,7 @@ func (s *Server) installationReposUnion(ctx context.Context, orgID string, insts
 		}
 		resolvedAny = true
 
-		repos, err := client.ListInstallationRepos()
+		repos, err := client.ListInstallationRepos(ctx)
 		if err != nil {
 			reposLog.Warn("list installation repos failed, skipping installation", "org", orgID, "account", inst.AccountLogin, "error", err)
 			lastListErr = err
@@ -354,7 +354,7 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := r.URL.Query().Get("q")
-	branches, err := client.ListBranches(owner, repo, query, 30)
+	branches, err := client.ListBranches(r.Context(), owner, repo, query, 30)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch branches: " + err.Error()})
 		return

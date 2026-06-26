@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
@@ -18,7 +19,7 @@ func TestGetReview(t *testing.T) {
 			{"id":"PRRC_2","path":"b.go","line":20,"startLine":null,"body":"bug"}
 		]}
 	}}}`
-	rv, err := clientAgainst(graphqlServing(t, body)).GetReview("PRR_1")
+	rv, err := clientAgainst(graphqlServing(t, body)).GetReview(context.Background(), "PRR_1")
 	if err != nil {
 		t.Fatalf("GetReview: %v", err)
 	}
@@ -40,7 +41,7 @@ func TestGetReview(t *testing.T) {
 // on, not an error.
 func TestGetReview_AbsentIsNotAnError(t *testing.T) {
 	for _, body := range []string{`{"data":{"node":null}}`, `{"data":{"node":{}}}`} {
-		rv, err := clientAgainst(graphqlServing(t, body)).GetReview("X")
+		rv, err := clientAgainst(graphqlServing(t, body)).GetReview(context.Background(), "X")
 		if err != nil || rv != nil {
 			t.Errorf("body %s: got (%+v, %v), want (nil, nil)", body, rv, err)
 		}
@@ -49,7 +50,7 @@ func TestGetReview_AbsentIsNotAnError(t *testing.T) {
 
 // TestGetReview_EmptyID guards the input.
 func TestGetReview_EmptyID(t *testing.T) {
-	if _, err := clientAgainst("http://unused.invalid").GetReview(""); err == nil {
+	if _, err := clientAgainst("http://unused.invalid").GetReview(context.Background(), ""); err == nil {
 		t.Error("empty review id should error")
 	}
 }
@@ -67,7 +68,7 @@ func TestGetReview_TruncationWarns(t *testing.T) {
 		"state":"COMMENTED","body":"",
 		"comments":{"pageInfo":{"hasNextPage":true},"nodes":[{"id":"C1","path":"a.go","line":1,"body":"x"}]}
 	}}}`
-	rv, err := clientAgainst(graphqlServing(t, body)).GetReview("PRR_big")
+	rv, err := clientAgainst(graphqlServing(t, body)).GetReview(context.Background(), "PRR_big")
 	if err != nil || rv == nil {
 		t.Fatalf("GetReview: rv=%v err=%v", rv, err)
 	}

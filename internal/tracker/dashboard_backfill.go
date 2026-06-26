@@ -80,7 +80,7 @@ func (t *Tracker) BackfillDashboardHistory(ctx context.Context, client *ghclient
 		if err := ctx.Err(); err != nil {
 			return seeded, err
 		}
-		prs, err := client.DiscoverPRs(q, 50)
+		prs, err := client.DiscoverPRs(ctx, q, 50)
 		if err != nil {
 			failed++
 			if firstErr == nil {

@@ -132,7 +132,7 @@ func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Req
 	details, _ := domain.ParsePRArtifactDetails(art.DetailsJSON)
 	title := details.Snapshot.Title
 	body := details.Snapshot.Body
-	if pr, err := gh.GetPRBasic(owner, repo, number); err != nil {
+	if pr, err := gh.GetPRBasic(r.Context(), owner, repo, number); err != nil {
 		artifactsLog.Warn("live PR fetch failed; falling back to snapshot",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 	} else {
@@ -205,7 +205,7 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	details, derr := domain.ParsePRArtifactDetails(art.DetailsJSON)
 	var title, body string
 	if req.Title == nil || req.Body == nil {
-		live, err := gh.GetPRBasic(owner, repo, number)
+		live, err := gh.GetPRBasic(r.Context(), owner, repo, number)
 		if err != nil {
 			// We can't reconstruct the omitted field without the current PR state,
 			// and guessing from a stale snapshot risks clobbering. Fail loudly.
@@ -234,7 +234,7 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	// Live edit FIRST (pessimistic): if GitHub rejects it, surface the error and
 	// don't move the snapshot. liftValidationErr inside UpdatePR turns a 422 into
 	// a readable reason.
-	if err := gh.UpdatePR(owner, repo, number, title, body); err != nil {
+	if err := gh.UpdatePR(r.Context(), owner, repo, number, title, body); err != nil {
 		artifactsLog.Warn("UpdatePR failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
 		return
@@ -286,7 +286,7 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 	}
 
 	file := r.URL.Query().Get("file")
-	diff, err := gh.GetPRDiff(owner, repo, number, file)
+	diff, err := gh.GetPRDiff(r.Context(), owner, repo, number, file)
 	truncationNote := ""
 	if err != nil {
 		if !ghclient.IsHTTP406(err) {
@@ -295,7 +295,7 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
 			return
 		}
-		files, filesErr := gh.GetPRFiles(owner, repo, number)
+		files, filesErr := gh.GetPRFiles(r.Context(), owner, repo, number)
 		if filesErr != nil {
 			artifactsLog.Error("PR diff fallback failed",
 				"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", filesErr)
@@ -388,7 +388,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// stale snapshot would revert a direct-on-GitHub edit, and a malformed one
 	// would yield empty title/body that UpdatePR would write over the PR. GetPR
 	// failure is fatal here — we can't safely promote what we can't read.
-	live, err := gh.GetPRBasic(owner, repo, number)
+	live, err := gh.GetPRBasic(r.Context(), owner, repo, number)
 	if err != nil {
 		artifactsLog.Warn("approve GetPR failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't read the PR to promote it: " + err.Error()})
@@ -400,12 +400,12 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// Append the footer idempotently: strip any footer a prior (partially failed)
 	// approve already added before re-appending, so a retry can't stack footers.
 	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.agentRuns, orgID, art.RunID, "PR")
-	if err := gh.UpdatePR(owner, repo, number, finalTitle, footeredBody); err != nil {
+	if err := gh.UpdatePR(r.Context(), owner, repo, number, finalTitle, footeredBody); err != nil {
 		artifactsLog.Warn("approve UpdatePR (footer) failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
 		return
 	}
-	if err := gh.MarkPRReady(owner, repo, number); err != nil {
+	if err := gh.MarkPRReady(r.Context(), owner, repo, number); err != nil {
 		artifactsLog.Warn("MarkPRReady failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
 		return

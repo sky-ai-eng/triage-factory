@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -42,7 +43,7 @@ const branchRefBatchSize = 50
 // callers. A genuine whole-query failure (auth, cost ceiling, malformed)
 // propagates; per-field nulls degrade to the partial result PostGraphQL passes
 // through.
-func (c *Client) BranchesExist(refs []BranchRef) (map[BranchRef]bool, error) {
+func (c *Client) BranchesExist(ctx context.Context, refs []BranchRef) (map[BranchRef]bool, error) {
 	if len(refs) == 0 {
 		return nil, nil
 	}
@@ -52,7 +53,7 @@ func (c *Client) BranchesExist(refs []BranchRef) (map[BranchRef]bool, error) {
 		if end > len(refs) {
 			end = len(refs)
 		}
-		if err := c.branchesExistBatch(refs[i:end], out); err != nil {
+		if err := c.branchesExistBatch(ctx, refs[i:end], out); err != nil {
 			return nil, err
 		}
 	}
@@ -61,7 +62,7 @@ func (c *Client) BranchesExist(refs []BranchRef) (map[BranchRef]bool, error) {
 
 // branchesExistBatch is the single-call implementation for one batch. It writes
 // confident answers into out; unknown (repository-null) aliases are left absent.
-func (c *Client) branchesExistBatch(refs []BranchRef, out map[BranchRef]bool) error {
+func (c *Client) branchesExistBatch(ctx context.Context, refs []BranchRef, out map[BranchRef]bool) error {
 	var decls, fields strings.Builder
 	vars := make(map[string]any, len(refs)*3)
 	for i, r := range refs {
@@ -79,7 +80,7 @@ func (c *Client) branchesExistBatch(refs []BranchRef, out map[BranchRef]bool) er
 	}
 	query := fmt.Sprintf("query(%s) {\n%s}", decls.String(), fields.String())
 
-	data, err := c.PostGraphQL(map[string]any{"query": query, "variables": vars})
+	data, err := c.PostGraphQL(ctx, map[string]any{"query": query, "variables": vars})
 	if err != nil {
 		return fmt.Errorf("branch existence check: %w", err)
 	}

@@ -232,7 +232,7 @@ func (p projectBundleGitHubProbe) CloneURLForRepo(ctx context.Context, owner, re
 	if err != nil {
 		return "", err
 	}
-	meta, err := client.GetRepoMeta(owner, repo)
+	meta, err := client.GetRepoMeta(ctx, owner, repo)
 	if err != nil {
 		return "", err
 	}

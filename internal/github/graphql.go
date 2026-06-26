@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -180,7 +181,7 @@ type DiscoveredPR struct {
 
 // DiscoverPRs runs a GitHub search query via GraphQL and returns discovered PRs.
 // The query should be a GitHub search string like "is:pr is:open review-requested:user".
-func (c *Client) DiscoverPRs(searchQuery string, limit int) ([]DiscoveredPR, error) {
+func (c *Client) DiscoverPRs(ctx context.Context, searchQuery string, limit int) ([]DiscoveredPR, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -194,7 +195,7 @@ func (c *Client) DiscoverPRs(searchQuery string, limit int) ([]DiscoveredPR, err
 		%s
 	`, prDiscoveryFragment)
 
-	data, err := c.PostGraphQL(map[string]any{
+	data, err := c.PostGraphQL(ctx, map[string]any{
 		"query":     query,
 		"variables": map[string]any{"q": searchQuery, "limit": limit},
 	})
@@ -245,7 +246,7 @@ const refreshBatchSize = 20
 //     CI state changes drive events.
 //   - false → prDiscoveryFragment, CheckRuns == nil. Use for terminal
 //     (merged/closed) PRs where CI status is irrelevant.
-func (c *Client) RefreshPRs(nodeIDs []string, includeCheckRuns bool) (map[string]domain.PRSnapshot, error) {
+func (c *Client) RefreshPRs(ctx context.Context, nodeIDs []string, includeCheckRuns bool) (map[string]domain.PRSnapshot, error) {
 	if len(nodeIDs) == 0 {
 		return nil, nil
 	}
@@ -256,7 +257,7 @@ func (c *Client) RefreshPRs(nodeIDs []string, includeCheckRuns bool) (map[string
 		if end > len(nodeIDs) {
 			end = len(nodeIDs)
 		}
-		batch, err := c.refreshPRsBatch(nodeIDs[i:end], includeCheckRuns)
+		batch, err := c.refreshPRsBatch(ctx, nodeIDs[i:end], includeCheckRuns)
 		if err != nil {
 			return nil, err
 		}
@@ -268,7 +269,7 @@ func (c *Client) RefreshPRs(nodeIDs []string, includeCheckRuns bool) (map[string
 }
 
 // refreshPRsBatch is the single-call implementation for one batch of IDs.
-func (c *Client) refreshPRsBatch(nodeIDs []string, includeCheckRuns bool) (map[string]domain.PRSnapshot, error) {
+func (c *Client) refreshPRsBatch(ctx context.Context, nodeIDs []string, includeCheckRuns bool) (map[string]domain.PRSnapshot, error) {
 	fragment := prDiscoveryFragment
 	fragmentSpread := "PRDiscoveryFields"
 	if includeCheckRuns {
@@ -283,7 +284,7 @@ func (c *Client) refreshPRsBatch(nodeIDs []string, includeCheckRuns bool) (map[s
 		%s
 	`, fragmentSpread, fragment)
 
-	data, err := c.PostGraphQL(map[string]any{
+	data, err := c.PostGraphQL(ctx, map[string]any{
 		"query":     query,
 		"variables": map[string]any{"ids": nodeIDs},
 	})

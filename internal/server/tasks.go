@@ -773,7 +773,7 @@ func (s *Server) closeDraftPRBestEffort(ctx context.Context, orgID string, art *
 		approvalDiscardLog.Warn("resolve github client for draft PR close failed", "artifact", art.ID, "owner", owner, "repo", repo, "error", err)
 		return
 	}
-	if err := gh.ClosePR(owner, repo, number); err != nil {
+	if err := gh.ClosePR(ctx, owner, repo, number); err != nil {
 		approvalDiscardLog.Warn("close draft PR on github failed (artifact already marked closed)", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 	}
 }
@@ -794,7 +794,7 @@ func (s *Server) deletePendingReviewBestEffort(ctx context.Context, orgID string
 		approvalDiscardLog.Warn("resolve github client for pending-review delete failed", "artifact", art.ID, "owner", owner, "repo", repo, "error", err)
 		return
 	}
-	if err := gh.DeletePendingReview(owner, repo, number, art.ExternalID); err != nil {
+	if err := gh.DeletePendingReview(ctx, owner, repo, number, art.ExternalID); err != nil {
 		approvalDiscardLog.Warn("delete pending review on github failed (artifact already marked dismissed)", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 	}
 }

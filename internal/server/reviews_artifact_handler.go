@@ -62,7 +62,7 @@ func (ah *artifactsHandler) reviewGet(w http.ResponseWriter, r *http.Request, or
 		State:       art.State,
 		Comments:    []reviewArtifactCommentJSON{},
 	}
-	if _, comments, err := gh.GetPendingReview(owner, repo, number); err != nil {
+	if _, comments, err := gh.GetPendingReview(r.Context(), owner, repo, number); err != nil {
 		artifactsLog.Warn("live pending-review fetch failed; serving staged body/event with no comments",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 	} else {
@@ -175,7 +175,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// mutation and let the user restart the preview. (An empty id means no live
 	// pending review — the stale-submit failure surfaces from GitHub below.)
 	var finalComments []ghclient.PendingReviewComment
-	if pendingID, comments, gerr := gh.GetPendingReview(owner, repo, number); gerr != nil {
+	if pendingID, comments, gerr := gh.GetPendingReview(r.Context(), owner, repo, number); gerr != nil {
 		artifactsLog.Warn("pre-approve pending-review re-read failed; verdict comment diff skipped",
 			"artifact", art.ID, "error", gerr)
 	} else if pendingID != "" && pendingID != art.ExternalID {
@@ -189,7 +189,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 
 	// Submit the pending review to GitHub with the staged body + event + footer.
 	body := details.ReviewBody + agentmeta.Build(ah.agentRuns, orgID, art.RunID, "review")
-	if err := gh.SubmitExistingReview(owner, repo, art.ExternalID, details.ReviewEvent, body); err != nil {
+	if err := gh.SubmitExistingReview(r.Context(), owner, repo, art.ExternalID, details.ReviewEvent, body); err != nil {
 		artifactsLog.Warn("SubmitExistingReview failed",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "review", art.ExternalID, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
@@ -273,7 +273,7 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 	// pending review the credential can see would be editable through this
 	// artifact-scoped route. The same fetch recovers the comment's current severity
 	// (baked into its GitHub body) to re-bake the badge onto the human's edit.
-	pendingID, comments, err := gh.GetPendingReview(owner, repo, number)
+	pendingID, comments, err := gh.GetPendingReview(r.Context(), owner, repo, number)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
 		return
@@ -299,7 +299,7 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 		return
 	}
 	_, clean := domain.ParseSeverityBadge(req.Body)
-	if err := gh.UpdatePendingReviewComment(commentID, domain.SeverityBadgeMarkdown(severity)+clean); err != nil {
+	if err := gh.UpdatePendingReviewComment(r.Context(), commentID, domain.SeverityBadgeMarkdown(severity)+clean); err != nil {
 		artifactsLog.Warn("UpdatePendingReviewComment failed", "artifact", art.ID, "comment", commentID, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
 		return
@@ -335,7 +335,7 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 	// comment to belong to THIS artifact's pending review first — otherwise a
 	// commentId from another pending review the credential can see would be
 	// deletable through this artifact-scoped route.
-	pendingID, comments, err := gh.GetPendingReview(owner, repo, number)
+	pendingID, comments, err := gh.GetPendingReview(r.Context(), owner, repo, number)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
 		return
@@ -357,7 +357,7 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 		notFound(w, "review comment")
 		return
 	}
-	if err := gh.DeletePendingReviewComment(commentID); err != nil {
+	if err := gh.DeletePendingReviewComment(r.Context(), commentID); err != nil {
 		artifactsLog.Warn("DeletePendingReviewComment failed", "artifact", art.ID, "comment", commentID, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
 		return

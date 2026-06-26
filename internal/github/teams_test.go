@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -50,7 +51,7 @@ func TestListMyTeamsDetailed_PaginationAndFields(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	teams, err := NewClient(ts.URL, "pat").ListMyTeamsDetailed()
+	teams, err := NewClient(ts.URL, "pat").ListMyTeamsDetailed(context.Background())
 	if err != nil {
 		t.Fatalf("ListMyTeamsDetailed: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestListMyTeamsDetailed_SkipsMalformed(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	teams, err := NewClient(ts.URL, "pat").ListMyTeamsDetailed()
+	teams, err := NewClient(ts.URL, "pat").ListMyTeamsDetailed(context.Background())
 	if err != nil {
 		t.Fatalf("ListMyTeamsDetailed: %v", err)
 	}
@@ -123,7 +124,7 @@ func TestListUserTeamsInOrg_FiltersAndCounts(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	teams, err := NewClient(ts.URL, "pat").ListUserTeamsInOrg("acme", "octocat")
+	teams, err := NewClient(ts.URL, "pat").ListUserTeamsInOrg(context.Background(), "acme", "octocat")
 	if err != nil {
 		t.Fatalf("ListUserTeamsInOrg: %v", err)
 	}
@@ -151,7 +152,7 @@ func TestListUserTeamsInOrg_NullOrgIsEmpty(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	teams, err := NewClient(ts.URL, "pat").ListUserTeamsInOrg("some-user", "octocat")
+	teams, err := NewClient(ts.URL, "pat").ListUserTeamsInOrg(context.Background(), "some-user", "octocat")
 	if err != nil {
 		t.Fatalf("null organization should not error: %v", err)
 	}
@@ -180,7 +181,7 @@ func TestListUserTeamsInOrg_Paginates(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	teams, err := NewClient(ts.URL, "pat").ListUserTeamsInOrg("acme", "octocat")
+	teams, err := NewClient(ts.URL, "pat").ListUserTeamsInOrg(context.Background(), "acme", "octocat")
 	if err != nil {
 		t.Fatalf("ListUserTeamsInOrg: %v", err)
 	}

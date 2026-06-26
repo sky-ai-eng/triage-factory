@@ -76,7 +76,7 @@ func (s *Server) userTeamsLocal(ctx context.Context, orgID, userID string) ([]gh
 	if baseURL == "" {
 		baseURL = creds.GitHubURL
 	}
-	return ghclient.NewClient(baseURL, creds.GitHubPAT).ListMyTeamsDetailed()
+	return ghclient.NewClient(baseURL, creds.GitHubPAT).ListMyTeamsDetailed(ctx)
 }
 
 // userTeamsMulti reconstructs the caller's teams in multi mode. The
@@ -130,7 +130,7 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 			}
 			continue
 		}
-		teams, err := client.ListUserTeamsInOrg(owner, login)
+		teams, err := client.ListUserTeamsInOrg(ctx, owner, login)
 		if err != nil {
 			// The owner may be a user account, or one we lack org-members
 			// read on — skip, candidates only.

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestHTTPError_Error(t *testing.T) {
@@ -160,14 +161,17 @@ func TestClient_EmptyToken_UnauthenticatedAcrossMethods(t *testing.T) {
 		name string
 		call func() error
 	}{
-		{"do/Get", func() error { _, err := c.Get("/x"); return err }},
-		{"GetConditional", func() error { _, _, _, err := c.GetConditional("/x", ""); return err }},
-		{"GetRaw", func() error { _, err := c.GetRaw("/x", "application/json"); return err }},
+		{"do/Get", func() error { _, err := c.Get(context.Background(), "/x"); return err }},
+		{"GetConditional", func() error { _, _, _, err := c.GetConditional(context.Background(), "/x", ""); return err }},
+		{"GetRaw", func() error { _, err := c.GetRaw(context.Background(), "/x", "application/json"); return err }},
 		{"DownloadArtifact", func() error {
 			_, err := c.DownloadArtifact(context.Background(), "/x", &strings.Builder{}, 1<<20)
 			return err
 		}},
-		{"PostGraphQL", func() error { _, err := c.PostGraphQL(map[string]any{"query": "{__typename}"}); return err }},
+		{"PostGraphQL", func() error {
+			_, err := c.PostGraphQL(context.Background(), map[string]any{"query": "{__typename}"})
+			return err
+		}},
 	}
 	for _, ck := range checks {
 		gotAuth = "sentinel"
@@ -264,7 +268,7 @@ func TestPostGraphQL_PartialError_ReturnsData(t *testing.T) {
 	t.Cleanup(func() { githubLog = prev })
 
 	body := `{"data":{"nodes":[{"number":1}]},"errors":[{"type":"FORBIDDEN","path":["nodes",0,"commits","nodes",0,"commit","statusCheckRollup"],"message":"Resource not accessible by integration"}]}`
-	data, err := clientAgainst(graphqlServing(t, body)).PostGraphQL(map[string]any{"query": "{ __typename }"})
+	data, err := clientAgainst(graphqlServing(t, body)).PostGraphQL(context.Background(), map[string]any{"query": "{ __typename }"})
 	if err != nil {
 		t.Fatalf("PostGraphQL with partial data should not error, got %v", err)
 	}
@@ -311,7 +315,7 @@ func TestPostGraphQL_TotalError_Errors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := clientAgainst(graphqlServing(t, tt.body)).PostGraphQL(map[string]any{"query": "{ __typename }"})
+			_, err := clientAgainst(graphqlServing(t, tt.body)).PostGraphQL(context.Background(), map[string]any{"query": "{ __typename }"})
 			if err == nil {
 				t.Fatalf("expected an error for %s, got nil", tt.name)
 			}
@@ -321,5 +325,136 @@ func TestPostGraphQL_TotalError_Errors(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRequestCore_Table exercises the unified ctx-aware request core (TFAC-475):
+// a 2xx returns the body; any non-2xx returns a *HTTPError carrying the exact
+// status, body, and rendered message; and the Accept header defaults to the v3
+// JSON media type but is overridable via GetRaw. Empty-token (no Authorization)
+// is pinned separately by TestClient_EmptyToken_UnauthenticatedAcrossMethods.
+func TestRequestCore_Table(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		accept     string // "" → Get (default Accept); else GetRaw with this Accept
+		wantErr    bool
+		wantStatus int
+	}{
+		{name: "2xx returns body", status: 200, body: `{"ok":true}`},
+		{name: "404 returns typed error", status: 404, body: `{"message":"nope"}`, wantErr: true, wantStatus: 404},
+		{name: "500 returns typed error", status: 500, body: "boom", wantErr: true, wantStatus: 500},
+		{name: "GetRaw honors custom Accept", status: 200, body: "diff", accept: "application/vnd.github.v3.diff"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotAccept string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAccept = r.Header.Get("Accept")
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+			c := clientAgainst(srv.URL)
+
+			var (
+				data       []byte
+				err        error
+				wantAccept = "application/vnd.github.v3+json"
+			)
+			if tt.accept != "" {
+				data, err = c.GetRaw(context.Background(), "/x", tt.accept)
+				wantAccept = tt.accept
+			} else {
+				data, err = c.Get(context.Background(), "/x")
+			}
+
+			if gotAccept != wantAccept {
+				t.Errorf("Accept header = %q, want %q", gotAccept, wantAccept)
+			}
+			if tt.wantErr {
+				var he *HTTPError
+				if !errors.As(err, &he) {
+					t.Fatalf("want *HTTPError, got %T: %v", err, err)
+				}
+				if he.StatusCode != tt.wantStatus {
+					t.Errorf("StatusCode = %d, want %d", he.StatusCode, tt.wantStatus)
+				}
+				if he.Body != tt.body {
+					t.Errorf("Body = %q, want %q", he.Body, tt.body)
+				}
+				if want := fmt.Sprintf("GET /x returned %d: %s", tt.status, tt.body); he.Error() != want {
+					t.Errorf("Error() = %q, want %q", he.Error(), want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if string(data) != tt.body {
+				t.Errorf("body = %q, want %q", string(data), tt.body)
+			}
+		})
+	}
+}
+
+// TestRequestCore_ContextCancellation proves the core actually honors ctx: the
+// server holds the response open until the request's context fires, and a
+// mid-flight cancel makes the call return promptly with a context error rather
+// than hanging to the 30s client timeout. This is the whole point of the
+// ticket — before unification the do() family ignored ctx entirely.
+func TestRequestCore_ContextCancellation(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done() // hold open until the client cancels
+	}))
+	defer srv.Close()
+	c := clientAgainst(srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := c.Get(ctx, "/slow")
+		errc <- err
+	}()
+
+	<-started
+	cancel()
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Get did not return after ctx cancellation — the request is not ctx-aware")
+	}
+}
+
+// TestDo_PostSurfacesHTTPError pins the error-typing half of the unification: a
+// do-family call (Post) now returns a status-discriminable *HTTPError, where it
+// used to return a plain fmt.Errorf. The rendered message is byte-identical to
+// the old "%s %s returned %d: %s", so string-matching callers are unaffected
+// and errors.As callers only gain accuracy.
+func TestDo_PostSurfacesHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"validation failed"}`))
+	}))
+	defer srv.Close()
+	c := clientAgainst(srv.URL)
+
+	_, err := c.Post(context.Background(), "/repos/o/r/pulls", map[string]any{"title": "x"})
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		t.Fatalf("Post must now surface a *HTTPError (do-family folded onto the typed core); got %T: %v", err, err)
+	}
+	if he.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("StatusCode = %d, want 422", he.StatusCode)
+	}
+	if want := `POST /repos/o/r/pulls returned 422: {"message":"validation failed"}`; he.Error() != want {
+		t.Errorf("Error() = %q, want %q", he.Error(), want)
 	}
 }

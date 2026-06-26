@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -66,7 +67,7 @@ func TestGetPR_ForkPR_ParsesHeadAndBaseCloneURLs(t *testing.T) {
 	srv := httptest.NewServer(servePRFixture(t, prJSON))
 	t.Cleanup(srv.Close)
 
-	pr, err := clientAgainst(srv.URL).GetPR("upstream-owner", "upstream-repo", 42, false)
+	pr, err := clientAgainst(srv.URL).GetPR(context.Background(), "upstream-owner", "upstream-repo", 42, false)
 	if err != nil {
 		t.Fatalf("GetPR: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestGetPR_OwnRepoPR_HeadAndBaseEqual(t *testing.T) {
 	srv := httptest.NewServer(servePRFixture(t, prJSON))
 	t.Cleanup(srv.Close)
 
-	pr, err := clientAgainst(srv.URL).GetPR("me", "myrepo", 7, false)
+	pr, err := clientAgainst(srv.URL).GetPR(context.Background(), "me", "myrepo", 7, false)
 	if err != nil {
 		t.Fatalf("GetPR: %v", err)
 	}
@@ -165,7 +166,7 @@ func TestGetPR_DeletedFork_BaseStillPopulated(t *testing.T) {
 	srv := httptest.NewServer(servePRFixture(t, prJSON))
 	t.Cleanup(srv.Close)
 
-	pr, err := clientAgainst(srv.URL).GetPR("me", "myrepo", 99, false)
+	pr, err := clientAgainst(srv.URL).GetPR(context.Background(), "me", "myrepo", 99, false)
 	if err != nil {
 		t.Fatalf("GetPR: %v", err)
 	}
@@ -211,7 +212,7 @@ func TestGetPRFiles_SinglePage(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	got, err := c.GetPRFiles("owner", "repo", 1)
+	got, err := c.GetPRFiles(context.Background(), "owner", "repo", 1)
 	if err != nil {
 		t.Fatalf("GetPRFiles: %v", err)
 	}
@@ -254,7 +255,7 @@ func TestGetPRFiles_MultiPage(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	got, err := c.GetPRFiles("owner", "repo", 1)
+	got, err := c.GetPRFiles(context.Background(), "owner", "repo", 1)
 	if err != nil {
 		t.Fatalf("GetPRFiles multi-page: %v", err)
 	}
@@ -280,7 +281,7 @@ func TestGetPRFiles_CapAt1000(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	got, err := c.GetPRFiles("owner", "repo", 1)
+	got, err := c.GetPRFiles(context.Background(), "owner", "repo", 1)
 	if err != nil {
 		t.Fatalf("GetPRFiles cap: %v", err)
 	}
@@ -299,7 +300,7 @@ func TestGetPRFiles_ErrorPropagates(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	_, err := c.GetPRFiles("owner", "repo", 1)
+	_, err := c.GetPRFiles(context.Background(), "owner", "repo", 1)
 	if err == nil {
 		t.Fatal("expected error on 404, got nil")
 	}
@@ -321,7 +322,7 @@ func TestGetPRFiles_SecondPageError(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	_, err := c.GetPRFiles("owner", "repo", 1)
+	_, err := c.GetPRFiles(context.Background(), "owner", "repo", 1)
 	if err == nil {
 		t.Fatal("expected error when second page fails, got nil")
 	}
@@ -345,7 +346,7 @@ func TestCreatePR_HappyPath(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	number, url, nodeID, err := c.CreatePR("owner", "repo", "feature/SKY-1", "main", "Add idempotency", "Body text", false)
+	number, url, nodeID, err := c.CreatePR(context.Background(), "owner", "repo", "feature/SKY-1", "main", "Add idempotency", "Body text", false)
 	if err != nil {
 		t.Fatalf("CreatePR: %v", err)
 	}
@@ -392,7 +393,7 @@ func TestCreatePR_DraftFlagPropagated(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	if _, _, _, err := c.CreatePR("o", "r", "h", "main", "T", "B", true); err != nil {
+	if _, _, _, err := c.CreatePR(context.Background(), "o", "r", "h", "main", "T", "B", true); err != nil {
 		t.Fatalf("CreatePR: %v", err)
 	}
 	if draft, _ := gotBody["draft"].(bool); !draft {
@@ -413,7 +414,7 @@ func TestCreatePR_422_BaseMissing(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	_, _, _, err := c.CreatePR("o", "r", "h", "develop", "T", "B", false)
+	_, _, _, err := c.CreatePR(context.Background(), "o", "r", "h", "develop", "T", "B", false)
 	if err == nil {
 		t.Fatal("expected error for 422, got nil")
 	}
@@ -437,7 +438,7 @@ func TestCreatePR_422_FieldErr(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	_, _, _, err := c.CreatePR("o", "r", "ghost-branch", "main", "T", "B", false)
+	_, _, _, err := c.CreatePR(context.Background(), "o", "r", "ghost-branch", "main", "T", "B", false)
 	if err == nil {
 		t.Fatal("expected error for 422, got nil")
 	}
@@ -465,7 +466,7 @@ func TestUpdatePR_HappyPath(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	if err := c.UpdatePR("owner", "repo", 42, "New title", "New body"); err != nil {
+	if err := c.UpdatePR(context.Background(), "owner", "repo", 42, "New title", "New body"); err != nil {
 		t.Fatalf("UpdatePR: %v", err)
 	}
 	if gotMethod != "PATCH" {
@@ -491,7 +492,7 @@ func TestUpdatePR_422(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := clientAgainst(srv.URL).UpdatePR("o", "r", 1, "", "body")
+	err := clientAgainst(srv.URL).UpdatePR(context.Background(), "o", "r", 1, "", "body")
 	if err == nil {
 		t.Fatal("expected error for 422, got nil")
 	}
@@ -517,7 +518,7 @@ func TestClosePR_HappyPath(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := clientAgainst(srv.URL)
-	if err := c.ClosePR("owner", "repo", 42); err != nil {
+	if err := c.ClosePR(context.Background(), "owner", "repo", 42); err != nil {
 		t.Fatalf("ClosePR: %v", err)
 	}
 	if gotMethod != "PATCH" {

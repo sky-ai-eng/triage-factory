@@ -198,10 +198,10 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		// (internal/github/events.go). GetRepoMeta likewise errors on any
 		// non-2xx. Collect all four outcomes so we can tell "the repo
 		// genuinely lacks this file" from "we couldn't reach GitHub."
-		readme, readmeErr := client.GetFileContent(owner, repo, "README.md")
-		claudeMd, claudeErr := client.GetFileContent(owner, repo, "CLAUDE.md")
-		agentsMd, agentsErr := client.GetFileContent(owner, repo, "AGENTS.md")
-		meta, metaErr := client.GetRepoMeta(owner, repo)
+		readme, readmeErr := client.GetFileContent(ctx, owner, repo, "README.md")
+		claudeMd, claudeErr := client.GetFileContent(ctx, owner, repo, "CLAUDE.md")
+		agentsMd, agentsErr := client.GetFileContent(ctx, owner, repo, "AGENTS.md")
+		meta, metaErr := client.GetRepoMeta(ctx, owner, repo)
 
 		// TFAC-331 root cause 2: error ≠ absence. If ANY fetch failed, skip
 		// the repo entirely — no upsert, no broadcast, no docs

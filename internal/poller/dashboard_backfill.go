@@ -130,7 +130,7 @@ func (m *Manager) runDashboardBackfill(ctx context.Context, orgID, login string,
 			log.Printf("[dashboard-backfill] org %s: resolve client for installation %s: %v", orgID, inst.AccountLogin, cerr)
 			continue
 		}
-		grant, gerr := client.ListInstallationRepos()
+		grant, gerr := client.ListInstallationRepos(ctx)
 		if gerr != nil {
 			log.Printf("[dashboard-backfill] org %s: list installation repos for %s: %v", orgID, inst.AccountLogin, gerr)
 			continue

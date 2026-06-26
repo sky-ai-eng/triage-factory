@@ -97,14 +97,24 @@ func (t *Tracker) publish(evt domain.Event) {
 // orgID (set at construction). In multi mode the poller's per-org
 // loop constructs one Tracker per active org per cycle; in local
 // mode there's one Tracker for the single synthetic tenant.
-func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos []string, resolver ReviewerResolver) (int, error) {
+//
+// ctx is the poll cycle's context (rooted in the poller's runGitHubCycle);
+// it scopes the GitHub API calls this cycle makes — open-PR listing,
+// discovery, and batch refresh — so a shutdown or restart can abort an
+// in-flight cycle mid-fetch (TFAC-475). The entity/task-store writes below
+// deliberately keep context.Background(): seeding/closing/reactivating an
+// entity is durable bookkeeping that must complete even if the cycle is
+// cancelled (a half-seeded create→snapshot pair would not be re-seeded, since
+// the next cycle's FindOrCreate returns created=false). Threading cancellation
+// into those persistence calls is a separate concern, out of scope here.
+func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, username string, repos []string, resolver ReviewerResolver) (int, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
 	// quietRepos is the set of "owner/repo" whose open-PR listing returned
 	// 304 (unchanged) this cycle; their tracked entities can keep their
 	// stored snapshot through the Phase-2 gate without a refresh.
-	discovered, quietRepos, err := t.discoverGitHub(client, username, repos)
+	discovered, quietRepos, err := t.discoverGitHub(ctx, client, username, repos)
 	if err != nil {
 		trackerLog.Error("github discovery error", "error", err)
 	}
@@ -298,7 +308,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		for i, item := range openItems {
 			nodeIDs[i] = item.nodeID
 		}
-		open, err := client.RefreshPRs(nodeIDs, true)
+		open, err := client.RefreshPRs(ctx, nodeIDs, true)
 		if err != nil {
 			return 0, fmt.Errorf("refresh open PRs: %w", err)
 		}
@@ -311,7 +321,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		for i, item := range terminalItems {
 			nodeIDs[i] = item.nodeID
 		}
-		terminal, err := client.RefreshPRs(nodeIDs, false)
+		terminal, err := client.RefreshPRs(ctx, nodeIDs, false)
 		if err != nil {
 			return 0, fmt.Errorf("refresh terminal PRs: %w", err)
 		}
@@ -380,12 +390,10 @@ const maxSearchQueryLen = 256
 // GraphQL search to seed recent-history entities the dashboard reads. That
 // backfill is inherently user-perspective and stays local/PAT-only;
 // multi-mode dashboard history is out of scope.
-func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, map[string]bool, error) {
+func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, map[string]bool, error) {
 	seen := map[string]bool{}
 	var all []ghclient.DiscoveredPR
 	quiet := map[string]bool{}
-
-	ctx := context.Background()
 
 	// Phase 1a: per-repo conditional open-PR enumeration. Sequential — the
 	// per-repo sweep is paced to respect GitHub's secondary (concurrency /
@@ -406,7 +414,7 @@ func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos
 			}
 		}
 
-		prs, newEtag, notModified, err := client.ListOpenPRs(owner, name, etag)
+		prs, newEtag, notModified, err := client.ListOpenPRs(ctx, owner, name, etag)
 		if err != nil {
 			// 403/404 means the token can't reach this configured repo (a
 			// PAT user without access, or an App not installed on it) — skip
@@ -444,7 +452,7 @@ func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos
 	// both search for exactly the same history.
 	if username != "" {
 		for _, q := range dashboardBackfillQueries(username, repos) {
-			prs, err := client.DiscoverPRs(q, 50)
+			prs, err := client.DiscoverPRs(ctx, q, 50)
 			if err != nil {
 				trackerLog.Error("dashboard backfill query failed", "error", err, "query", q)
 				continue
