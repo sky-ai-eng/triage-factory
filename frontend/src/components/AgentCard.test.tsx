@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import AgentCard from './AgentCard'
 import type { AgentRun, Task } from '../types'
@@ -79,6 +79,43 @@ describe('AgentCard artifacts affordance', () => {
     // Popover lazy-fetches and renders the list.
     expect(await screen.findByText('org/repo#18')).toBeInTheDocument()
     expect(globalThis.fetch).toHaveBeenCalledWith('/api/agent/runs/r1/artifacts')
+  })
+
+  it('forwards a PR row to onOpenArtifact and closes the popover', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            {
+              id: 'pr1',
+              kind: 'pull_request',
+              provider: 'github',
+              state: 'draft',
+              target: 'org/repo#18',
+              external_id: '18',
+              url: 'https://gh/pr',
+              details: null,
+              created_at: '2026-06-25T00:00:00Z',
+            },
+          ]),
+      }),
+    )
+    const onOpenArtifact = renderCard({ artifact_count: 1 })
+
+    const trigger = screen.getByRole('button', { name: /1 artifact\b/ })
+    fireEvent.click(trigger)
+    expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.click(await screen.findByRole('button', { name: /Open pull request/ }))
+
+    // The adapter delegates to onOpenArtifact (overlay opens)…
+    expect(onOpenArtifact).toHaveBeenCalledWith('pr', 'pr1')
+    // …and closes the popover. (Asserted via the trigger's aria-expanded rather
+    // than the content unmounting: under jsdom Radix's Presence keeps the
+    // content node alive waiting on the never-firing exit animation, but the
+    // controlled open state — and thus the trigger — flips immediately.)
+    await waitFor(() => expect(trigger).toHaveAttribute('aria-expanded', 'false'))
   })
 
   it('uses the singular noun for a single artifact', () => {

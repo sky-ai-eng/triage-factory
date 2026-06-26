@@ -92,9 +92,8 @@ function ArtifactRow({
   // an unmodeled string fall through to it rather than typecheck as covered.
   const meta = KIND_META[artifact.kind as ArtifactKind] ?? FALLBACK_META
   const Icon = meta.icon
-  const overlayKind =
+  const overlayKind: 'review' | 'pr' | null =
     artifact.kind === 'pull_request' ? 'pr' : artifact.kind === 'review' ? 'review' : null
-  const opensOverlay = overlayKind != null && !!onOpenApproval
 
   const body = (
     <>
@@ -109,12 +108,14 @@ function ArtifactRow({
   const rowClass =
     'flex w-full items-center gap-2 rounded-[4px] border border-border-subtle bg-black/[0.015] px-2 py-1.5 text-left transition-colors hover:bg-black/[0.04]'
 
-  if (opensOverlay) {
+  // Inline (not a precomputed boolean) so TypeScript narrows both to non-null
+  // inside the branch — no `!` assertions on the click handler.
+  if (overlayKind != null && onOpenApproval != null) {
     return (
       <li className="flex items-center gap-1">
         <button
           type="button"
-          onClick={() => onOpenApproval!(overlayKind!, artifact.id)}
+          onClick={() => onOpenApproval(overlayKind, artifact.id)}
           className={rowClass}
           aria-label={`Open ${meta.label}: ${artifact.target}`}
           title={`Open ${meta.label}`}
@@ -207,18 +208,20 @@ const FALLBACK_META: KindMeta = {
   text: 'text-text-tertiary',
 }
 
-// stateTone maps an artifact state to the card tone vocabulary. Terminal-good
-// outcomes (merged / submitted / posted / created) read green; in-flight /
-// awaiting-you states (draft / pending) read amber; retired states (closed /
-// deleted / dismissed) read as the dismiss tone; the rest stay neutral. The
-// distinct values are unambiguous across kinds, so the tone keys off state
-// alone — the kind icon already carries the type.
+// stateTone maps an artifact state to the card tone vocabulary. Landed-good
+// outcomes read green — merged / submitted / posted / created, plus 'open' (an
+// agent-filed PR/issue now live on GitHub/Jira, a done-and-waiting success).
+// In-flight / awaiting-you states (draft / pending) read amber; retired states
+// (closed / deleted / dismissed) read as the dismiss tone; the rest stay
+// neutral. The distinct values are unambiguous across kinds, so the tone keys
+// off state alone — the kind icon already carries the type.
 function stateTone(state: string): Tone {
   switch (state) {
     case 'merged':
     case 'submitted':
     case 'posted':
     case 'created':
+    case 'open':
       return 'good'
     case 'draft':
     case 'pending':
@@ -228,7 +231,7 @@ function stateTone(state: string): Tone {
     case 'dismissed':
       return 'problem'
     default:
-      // open / pushed / updated and any unknown state.
+      // pushed / updated and any unknown state.
       return 'neutral'
   }
 }

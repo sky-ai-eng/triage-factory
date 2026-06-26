@@ -67,11 +67,15 @@ export function TelemetryRail({ run, messages, state, now, onOpenArtifact }: Pro
       </Section>
 
       {/* Artifacts — everything the run produced (branch / PR / review / issue /
-          comment), always shown so the full set is one glance away; PR/review
-          rows open their approval overlays, the rest link out (TFAC-470). */}
-      <Section label="Artifacts">
-        <ArtifactList runId={run.ID} onOpenApproval={onOpenArtifact} />
-      </Section>
+          comment); PR/review rows open their approval overlays, the rest link
+          out (TFAC-470). Gated on artifact_count (free on the run) so a run
+          that produced nothing skips both the section and its fetch — matching
+          the board card's affordance, which hides at 0. */}
+      {(run.artifact_count ?? 0) > 0 && (
+        <Section label="Artifacts">
+          <ArtifactList runId={run.ID} onOpenApproval={onOpenArtifact} />
+        </Section>
+      )}
 
       {run.Status === 'completed' && run.ResultSummary && (
         <Section label="Summary" last>
