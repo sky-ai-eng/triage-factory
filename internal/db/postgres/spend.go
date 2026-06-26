@@ -15,18 +15,26 @@ import (
 // spendStore is the Postgres impl of db.SpendStore — a read-only aggregation
 // over the public.llm_spend view (TFAC-472).
 //
-// # Pool: app, RLS-active
+// # Pools: app (RLS-active) + admin (BYPASSRLS)
 //
-// Wired against the app pool in postgres.New. The view is defined
-// WITH (security_invoker = true), so SELECTing it under tf_app evaluates the
-// base tables' RLS (runs/curator_requests org+team, system_llm_runs org) as the
-// querying user — a team member sees their team's runs but not a sibling team's,
-// with system/curator rows visible at org scope. Wiring this to admin would
-// bypass that and leak cross-team spend. org_id stays in every WHERE as defense
-// in depth alongside RLS.
-type spendStore struct{ app queryer }
+//   - app: ListSpend + SpendByCategory. The view is defined
+//     WITH (security_invoker = true), so SELECTing it under tf_app evaluates the
+//     base tables' RLS (runs/curator_requests org+team, system_llm_runs org) as
+//     the querying user — a team member sees their team's runs but not a sibling
+//     team's, with system/curator rows visible at org scope.
+//   - admin: SpendByCategorySystem. The org-wide aggregate a claims-less system
+//     caller needs — the TFAC-477 safety cap reads it from a Spawner.Delegate
+//     goroutine with no tf.current_org_id(), where an app-pool read would see
+//     nothing. Mirrors the app/admin split on artifactStore (ListByRun /
+//     ListByRunSystem).
+//
+// org_id stays in every WHERE as defense in depth alongside RLS on both pools.
+type spendStore struct {
+	app   queryer
+	admin queryer
+}
 
-func newSpendStore(app queryer) db.SpendStore { return &spendStore{app: app} }
+func newSpendStore(app, admin queryer) db.SpendStore { return &spendStore{app: app, admin: admin} }
 
 var _ db.SpendStore = (*spendStore)(nil)
 
@@ -83,6 +91,20 @@ func (s *spendStore) ListSpend(ctx context.Context, orgID string, opts domain.Sp
 }
 
 func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
+	return spendByCategory(ctx, s.app, orgID, since, until)
+}
+
+// SpendByCategorySystem runs SpendByCategory's aggregate on the admin pool
+// (BYPASSRLS) so a claims-less system caller (the TFAC-477 safety cap, in a
+// Spawner.Delegate goroutine) sees org-wide spend across every team. org_id
+// stays in the WHERE as defense in depth. Mirrors ListByRunSystem.
+func (s *spendStore) SpendByCategorySystem(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
+	return spendByCategory(ctx, s.admin, orgID, since, until)
+}
+
+// spendByCategory is the shared aggregate the app- and admin-pool variants both
+// run; q selects which pool (and thus whether RLS applies).
+func spendByCategory(ctx context.Context, q queryer, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
 	// Both bounds optional (see SpendFilter): drop the clause on a zero time.
 	var where strings.Builder
 	where.WriteString(`WHERE org_id = $1`)
@@ -104,7 +126,7 @@ func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since, u
 	// 8-byte) and minimizing rounding drift when many rows are summed for bill
 	// reconciliation. (Casting the SUM *result* instead would widen an
 	// already-float4-rounded value and buy nothing.)
-	rows, err := s.app.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT category,
 		       SUM(total_cost_usd::double precision) AS cost,
 		       SUM(input_tokens)          AS input_tokens,

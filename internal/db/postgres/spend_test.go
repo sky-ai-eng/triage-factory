@@ -114,6 +114,74 @@ func TestSpendStore_Postgres_RLS_ViewSecurityInvoker(t *testing.T) {
 	})
 }
 
+// TestSpendStore_Postgres_SpendByCategorySystem_BypassesRLS pins the
+// load-bearing TFAC-477 fix: SpendByCategorySystem reads the ADMIN pool, so it
+// sums spend org-wide across every team, whereas the app-pool SpendByCategory
+// (under a team member's claims) only sees that member's own team. The safety
+// cap MUST use the System variant — Spawner.Delegate is claims-less, so an
+// app-pool read there would see nothing and the cap would never trip.
+//
+// orgA has teamA (alice) + teamB (bob), each with one manual run. The org-wide
+// System aggregate must equal the sum of both ($1 + $2 = $3); the app-pool read
+// under alice must see only teamA's $1.
+func TestSpendStore_Postgres_SpendByCategorySystem_BypassesRLS(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "spend-sys")
+	teamB := pgtest.SeedTeam(t, h, orgA, "teamB")
+	bob := pgtest.SeedUser(t, h, "spend-sys-bob")
+	pgtest.AddOrgMember(t, h, bob, orgA, teamB, "member", "member")
+
+	agentA := uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB, `INSERT INTO agents (id, org_id) VALUES ($1, $2)`, agentA, orgA)
+	projectA := uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO projects (id, org_id, creator_user_id, team_id, name, visibility) VALUES ($1, $2, $3, $4, 'spend-sys', 'team')`,
+		projectA, orgA, alice, teamA)
+
+	seeder := newPgSpendSeeder(h.AdminDB, orgA, projectA)
+	seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
+	seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
+
+	// Admin-pool System read: org-wide, sees both teams → manual = $3.
+	adminStore := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	sysBuckets, err := adminStore.Spend.SpendByCategorySystem(context.Background(), orgA, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("SpendByCategorySystem: %v", err)
+	}
+	if got := manualBucketCost(sysBuckets); got != 3.0 {
+		t.Errorf("SpendByCategorySystem manual sum = %v, want 3.0 (teamA $1 + teamB $2, org-wide)", got)
+	}
+
+	// App-pool read under alice (teamA member): RLS scopes to teamA → manual = $1.
+	var appManual float64
+	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		b, e := pgstore.NewForTx(tx, pgtest.SecretKey).Spend.SpendByCategory(context.Background(), orgA, time.Time{}, time.Time{})
+		if e != nil {
+			return e
+		}
+		appManual = manualBucketCost(b)
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser SpendByCategory: %v", err)
+	}
+	if appManual != 1.0 {
+		t.Errorf("app-pool SpendByCategory under alice = %v, want 1.0 (teamA only; teamB excluded by RLS)", appManual)
+	}
+}
+
+// manualBucketCost returns the 'manual' category bucket's total cost, or 0 if
+// absent.
+func manualBucketCost(buckets []domain.SpendBucket) float64 {
+	for _, b := range buckets {
+		if b.Category == domain.SpendCategoryManual {
+			return b.TotalCostUSD
+		}
+	}
+	return 0
+}
+
 // TestSpendView_Postgres_IsSecurityInvoker is the regression guard for the
 // load-bearing storage option: if a future schema edit drops
 // security_invoker=true (or flips the view to security_definer), base-table RLS

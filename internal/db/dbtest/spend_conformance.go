@@ -279,6 +279,44 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		}
 	})
 
+	// SpendByCategorySystem is the admin-pool org-wide aggregate the TFAC-477
+	// safety cap reads. Under the conformance fixture (admin-on-both for PG, the
+	// single conn for SQLite) it returns the same totals as SpendByCategory; the
+	// RLS divergence between the two is proven separately in the per-backend
+	// Postgres test. Here we pin that the System variant exists, sums every
+	// category org-wide, and honors the window bounds identically.
+	t.Run("SpendByCategorySystem_SumsOrgWide", func(t *testing.T) {
+		fx := factory(t)
+		ctx := context.Background()
+
+		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{10, 1, 0, 0}, Status: "completed", StartedAt: t1})
+		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.50), Tokens: SpendTokens{5, 5, 5, 5}, Status: "completed", StartedAt: t2})
+		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.30, Tokens: SpendTokens{3, 3, 3, 3}, Status: "completed", CreatedAt: t3})
+		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t4})
+
+		allBuckets, err := fx.Store.SpendByCategorySystem(ctx, fx.OrgID, time.Time{}, time.Time{})
+		byCat := spendByCat(t, allBuckets, err)
+		assertCost(t, "system.manual.sum", byCat[domain.SpendCategoryManual].TotalCostUSD, 1.00)
+		assertCost(t, "system.autonomous.sum", byCat[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
+		assertCost(t, "system.curator.sum", byCat[domain.SpendCategoryCurator].TotalCostUSD, 0.30)
+		assertCost(t, "system.overhead.sum", byCat[domain.SpendCategorySystemOverhead].TotalCostUSD, 0.05)
+
+		// Total across all categories — the figure the daily-cost cap sums.
+		var total float64
+		for _, b := range allBuckets {
+			total += b.TotalCostUSD
+		}
+		assertCost(t, "system.grand_total", total, 1.85)
+
+		// Window bound honored: since t2 drops the t1 manual run.
+		winBuckets, err := fx.Store.SpendByCategorySystem(ctx, fx.OrgID, t2, time.Time{})
+		win := spendByCat(t, winBuckets, err)
+		if _, ok := win[domain.SpendCategoryManual]; ok {
+			t.Errorf("SpendByCategorySystem(since=t2) included the t1 manual run; lower bound not applied")
+		}
+		assertCost(t, "system.win.autonomous", win[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
+	})
+
 	// TeamID filter narrows to one team's runs. Curator + system carry a NULL
 	// team_id, so a non-nil TeamID excludes them — the team dashboard sees its
 	// own runs, not org-level overhead.

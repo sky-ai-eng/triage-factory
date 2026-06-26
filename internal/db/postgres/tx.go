@@ -246,10 +246,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// the audit row commits or rolls back atomically with the action.
 		// access_change_log_all RLS gates the in-tx write by org. See TFAC-471.
 		AccessChangeLog: newAccessChangeLogStore(tx),
-		// Spend is tx-bound (app-pool): a read composed inside WithTx runs under
-		// the surrounding claims, so the security_invoker view's base-table RLS
-		// scopes it to the requesting user. Read-only. See TFAC-472.
-		Spend: newSpendStore(tx),
+		// Spend: app half is the claims-set tx (ListSpend / SpendByCategory run
+		// under the surrounding claims, so the security_invoker view's base-table
+		// RLS scopes them to the requesting user); admin half stays pinned to
+		// s.admin so SpendByCategorySystem routes outside the tx and reads org-wide
+		// (the TFAC-477 cap is claims-less by design). Read-only. See TFAC-472.
+		Spend: newSpendStore(tx, s.admin),
 		// Opaque extension bundles (the Enterprise Edition SSO stores) built
 		// from the same (app=tx, admin=s.admin) handles, so their app/admin
 		// pool split is identical to core's own stores — the login-time reads

@@ -84,6 +84,13 @@ func (s *spendStore) ListSpend(ctx context.Context, orgID string, opts domain.Sp
 	return out, rows.Err()
 }
 
+// SpendByCategorySystem mirrors the Postgres admin-pool variant the TFAC-477
+// safety cap reads. SQLite is N=1 / no RLS, so the org-wide aggregate is
+// identical to SpendByCategory — delegate straight through.
+func (s *spendStore) SpendByCategorySystem(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
+	return s.SpendByCategory(ctx, orgID, since, until)
+}
+
 func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

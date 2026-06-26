@@ -143,6 +143,15 @@ type DelegateOpts struct {
 func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) {
 	orgID := opts.OrgID
 
+	// TFAC-477 runaway-spend fuse: if the org has hit its daily LLM spend cap,
+	// refuse the spawn before any blueprint resolution or DB write — so no
+	// blueprint_run is minted and the choke point holds for manual + autonomous
+	// alike. Fails open on a read error (see checkDailyCostCap). context.Background
+	// — Delegate is claims-less, and the cap reads through the admin pool.
+	if err := s.checkDailyCostCap(context.Background(), orgID); err != nil {
+		return "", err
+	}
+
 	// Resolve this run's GitHub client + default model per (org, owner, team).
 	// Both modes go through the same seam (SKY-389): the resolver mints an
 	// App-installation token in multi or borrows the keychain PAT in local;

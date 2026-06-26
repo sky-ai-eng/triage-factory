@@ -71,11 +71,17 @@ type Spawner struct {
 	// CLI; the defer iterates and removes them). Goroutine-internal
 	// callers, all routed through the admin-pool System variants.
 	runWorktrees db.RunWorktreeStore
-	// orgs reads per-org settings (GitHub clone protocol) from
-	// org_settings during run setup. Post-internal/config deletion;
-	// every per-org read goes through OrgsStore.GetSettingsSystem
+	// orgs reads per-org settings (GitHub clone protocol, the TFAC-477 daily
+	// spend cap) from org_settings during run setup. Post-internal/config
+	// deletion; every per-org read goes through OrgsStore.GetSettingsSystem
 	// (no JWT claims context on the run goroutine).
 	orgs db.OrgsStore
+	// spend reads the org's settled LLM spend for the TFAC-477 daily-cost-cap
+	// admission check at Delegate entry. Read via SpendByCategorySystem — the
+	// admin-pool variant — because Delegate runs under context.Background()
+	// with no JWT claims, so an app-pool/RLS read would see nothing and the cap
+	// would never trip. Read-only; a plain store ref like s.orgs.
+	spend db.SpendStore
 	// jiraRules reads the team's per-project Jira status rules under the
 	// admin pool (ListForTeamSystem) for the TFAC-300 board→Jira mirror's
 	// system-context rule lookup. Populated from the Stores bundle in
@@ -224,6 +230,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		taskMemory:   stores.TaskMemory,
 		runWorktrees: stores.RunWorktrees,
 		orgs:         stores.Orgs,
+		spend:        stores.Spend,
 		jiraRules:    stores.JiraStatusRules,
 		teams:        stores.Teams,
 		tx:           stores.Tx,

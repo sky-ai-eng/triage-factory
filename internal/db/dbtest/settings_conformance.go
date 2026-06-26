@@ -63,6 +63,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			AnthropicAPIKeyRef:    "vault://orgs/A/anthropic",
 			BedrockCredentialsRef: "vault://orgs/A/bedrock",
 			MaxLLMModelTier:       "sonnet",
+			MaxDailyCostUSD:       12.50,
 		}
 		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
@@ -119,7 +120,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	t.Run("OrgSettings_NullableFields_RoundTripEmpty", func(t *testing.T) {
 		// AnthropicAPIKeyRef / BedrockCredentialsRef / MaxLLMModelTier /
 		// GitHubBaseURL / JiraBaseURL: empty input writes NULL, scans
-		// back as "". Pins the "" ↔ NULL contract.
+		// back as "". MaxDailyCostUSD: 0 input writes NULL, scans back as 0
+		// (TFAC-477's "no cap" round-trip). Pins the ""/0 ↔ NULL contract.
 		stores, ids := factory(t)
 		in := domain.OrgSettings{
 			GitHubPollInterval:  5 * time.Minute,
@@ -135,8 +137,43 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if got.GitHubBaseURL != "" || got.JiraBaseURL != "" ||
 			got.AnthropicAPIKeyRef != "" || got.BedrockCredentialsRef != "" ||
-			got.MaxLLMModelTier != "" {
+			got.MaxLLMModelTier != "" || got.MaxDailyCostUSD != 0 {
 			t.Errorf("nullable empties did not round-trip: %+v", got)
+		}
+	})
+
+	t.Run("OrgSettings_DailyCostCap_SetThenClear", func(t *testing.T) {
+		// TFAC-477: a positive daily cap round-trips, and writing 0 clears it
+		// back to "no cap" (0 ↔ NULL). The set/clear cycle on the same row
+		// proves the column isn't write-once.
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+		set := base
+		set.MaxDailyCostUSD = 25
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
+			t.Fatalf("UpdateSettings (set cap): %v", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem after set: %v", err)
+		}
+		if got.MaxDailyCostUSD != 25 {
+			t.Errorf("after set, MaxDailyCostUSD = %v; want 25", got.MaxDailyCostUSD)
+		}
+		// Clear: 0 writes NULL, reads back 0.
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+			t.Fatalf("UpdateSettings (clear cap): %v", err)
+		}
+		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem after clear: %v", err)
+		}
+		if got.MaxDailyCostUSD != 0 {
+			t.Errorf("after clear, MaxDailyCostUSD = %v; want 0 (no cap)", got.MaxDailyCostUSD)
 		}
 	})
 
@@ -148,6 +185,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			GitHubCloneProtocol: "ssh",
 			JiraPollInterval:    5 * time.Minute,
 			MaxLLMModelTier:     "haiku",
+			MaxDailyCostUSD:     5,
 		}
 		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, first); err != nil {
 			t.Fatalf("first UpdateSettings: %v", err)
@@ -155,6 +193,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		second := first
 		second.GitHubBaseURL = "https://second.example.com"
 		second.MaxLLMModelTier = "opus"
+		second.MaxDailyCostUSD = 10
 		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, second); err != nil {
 			t.Fatalf("second UpdateSettings: %v", err)
 		}

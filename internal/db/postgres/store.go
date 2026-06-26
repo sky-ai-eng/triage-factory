@@ -296,11 +296,13 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// audit view's read) by org. Unlike SystemLLMRuns, it is not
 		// system-written. See TFAC-471.
 		AccessChangeLog: newAccessChangeLogStore(app),
-		// Spend is APP-pool: the llm_spend view is security_invoker, so reading
-		// it under tf_app applies the base tables' RLS as the querying user —
-		// team-scoped runs + org-scoped system/curator. Admin pool would bypass
-		// that and leak cross-team spend. Read-only; owns no table. See TFAC-472.
-		Spend: newSpendStore(app),
+		// Spend holds both pools: app for ListSpend + SpendByCategory (the
+		// llm_spend view is security_invoker, so reading it under tf_app applies
+		// the base tables' RLS — team-scoped runs + org-scoped system/curator),
+		// admin for SpendByCategorySystem (the org-wide aggregate the TFAC-477
+		// safety cap reads from a claims-less Spawner.Delegate goroutine). Read-
+		// only; owns no table. See TFAC-472 / TFAC-477.
+		Spend: newSpendStore(app, admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),
@@ -380,7 +382,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Invites:         newInvitesStore(tx, tx),
 		SystemLLMRuns:   newSystemLLMRunStore(tx),
 		AccessChangeLog: newAccessChangeLogStore(tx),
-		Spend:           newSpendStore(tx),
+		Spend:           newSpendStore(tx, tx),
 		Ext:             db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

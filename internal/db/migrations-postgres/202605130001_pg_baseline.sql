@@ -1038,6 +1038,14 @@ CREATE TABLE public.org_settings (
     -- future families be added with zero DDL; a richer provider/model split stays
     -- additive (new columns). Column not renamed; app layer unchanged.
     max_llm_model_tier text,
+    -- Org-wide daily LLM spend cap (TFAC-477). NULL = no cap; the app layer also
+    -- treats 0 as "no cap". When the org's spend for the current UTC calendar day
+    -- (summed across every category — autonomous + manual + curator + system
+    -- overhead) is at or above this value, the delegation choke point
+    -- (Spawner.Delegate) refuses all new agent runs, a runaway-spend fuse. Mirrors
+    -- the nullable max_llm_model_tier shape above; in-flight runs are unaffected
+    -- and the read fails open on error so a transient failure can't wedge delegation.
+    max_daily_cost_usd double precision,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT org_settings_github_clone_protocol_check CHECK ((github_clone_protocol = ANY (ARRAY['https'::text, 'ssh'::text])))
 );

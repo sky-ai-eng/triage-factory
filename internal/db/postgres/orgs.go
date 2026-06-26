@@ -101,6 +101,7 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		ghURL, jiraURL, anthRef, bedRef, maxTier sql.NullString
 		ghSecs, jiraSecs                         float64
 		cloneProto                               string
+		maxDailyCost                             sql.NullFloat64
 	)
 	// EXTRACT(EPOCH FROM interval) returns numeric in PG13+; the
 	// ::double precision cast pins the row-out type so pgx can scan
@@ -113,12 +114,14 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		       github_clone_protocol,
 		       jira_base_url,
 		       EXTRACT(EPOCH FROM jira_poll_interval)::double precision,
-		       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier
+		       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
+		       max_daily_cost_usd
 		FROM org_settings WHERE org_id = $1
 	`, orgID).Scan(
 		&ghURL, &ghSecs, &cloneProto,
 		&jiraURL, &jiraSecs,
 		&anthRef, &bedRef, &maxTier,
+		&maxDailyCost,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Provisioning seeds org_settings rows at org-create time
@@ -140,6 +143,7 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		AnthropicAPIKeyRef:    anthRef.String,
 		BedrockCredentialsRef: bedRef.String,
 		MaxLLMModelTier:       maxTier.String,
+		MaxDailyCostUSD:       maxDailyCost.Float64, // NULL → 0 (no cap)
 	}, nil
 }
 
@@ -156,11 +160,13 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 			org_id, github_base_url, github_poll_interval, github_clone_protocol,
 			jira_base_url, jira_poll_interval,
 			anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
+			max_daily_cost_usd,
 			updated_at
 		) VALUES (
 			$1, $2, make_interval(secs => $3), $4,
 			$5, make_interval(secs => $6),
 			$7, $8, $9,
+			$10,
 			now()
 		)
 		ON CONFLICT (org_id) DO UPDATE SET
@@ -172,6 +178,7 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 			anthropic_api_key_ref = EXCLUDED.anthropic_api_key_ref,
 			bedrock_credentials_ref = EXCLUDED.bedrock_credentials_ref,
 			max_llm_model_tier = EXCLUDED.max_llm_model_tier,
+			max_daily_cost_usd = EXCLUDED.max_daily_cost_usd,
 			updated_at = now()
 	`,
 		orgID,
@@ -183,6 +190,7 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 		nullString(u.AnthropicAPIKeyRef),
 		nullString(u.BedrockCredentialsRef),
 		nullString(u.MaxLLMModelTier),
+		nullFloat(u.MaxDailyCostUSD),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert org_settings: %w", err)

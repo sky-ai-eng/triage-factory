@@ -824,3 +824,71 @@ func TestOrgSettingsPost_CapBelowTeamDefault_Warns(t *testing.T) {
 		t.Errorf("expected cap-downgrade warning, got warning=%q", resp["warning"])
 	}
 }
+
+// --- TFAC-477 daily spend cap ----------------------------------------------
+
+// orgDailyCap reads the org settings GET and returns max_daily_cost_usd.
+func orgDailyCap(t *testing.T, s *Server) float64 {
+	t.Helper()
+	rec := doJSON(t, s, "GET", "/api/settings/org", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/settings/org: %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		MaxDailyCostUSD float64 `json:"max_daily_cost_usd"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode org settings: %v", err)
+	}
+	return resp.MaxDailyCostUSD
+}
+
+// TestOrgSettingsPost_DailyCostCap_RoundTrip pins the GET/POST wire round-trip:
+// POSTing a positive cap reflects it on the next GET, and POSTing 0 clears it
+// back to "no cap".
+func TestOrgSettingsPost_DailyCostCap_RoundTrip(t *testing.T) {
+	s := newTestServer(t)
+
+	if got := orgDailyCap(t, s); got != 0 {
+		t.Fatalf("fresh org daily cap = %v, want 0 (no cap by default)", got)
+	}
+
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_daily_cost_usd": 25.5})
+	if got := orgDailyCap(t, s); got != 25.5 {
+		t.Errorf("after POST 25.5, GET max_daily_cost_usd = %v, want 25.5", got)
+	}
+
+	// 0 clears the cap.
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_daily_cost_usd": 0})
+	if got := orgDailyCap(t, s); got != 0 {
+		t.Errorf("after POST 0, GET max_daily_cost_usd = %v, want 0 (cleared)", got)
+	}
+}
+
+// TestOrgSettingsPost_DailyCostCap_OmittedFieldUntouched pins the pointer-nil
+// semantics: a save that omits max_daily_cost_usd must leave a previously-set
+// cap intact (an unrelated org save can't stomp the cap).
+func TestOrgSettingsPost_DailyCostCap_OmittedFieldUntouched(t *testing.T) {
+	s := newTestServer(t)
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_daily_cost_usd": 40})
+
+	// A save touching only the model tier omits the cap → it must survive.
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_llm_model_tier": "sonnet"})
+	if got := orgDailyCap(t, s); got != 40 {
+		t.Errorf("omitting max_daily_cost_usd cleared the cap: got %v, want 40 preserved", got)
+	}
+}
+
+// TestOrgSettingsPost_DailyCostCap_NegativeRejected pins the >= 0 validation.
+func TestOrgSettingsPost_DailyCostCap_NegativeRejected(t *testing.T) {
+	s := newTestServer(t)
+	rec := doJSON(t, s, "POST", "/api/settings/org", map[string]any{"max_daily_cost_usd": -1})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("negative cap should 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp["error"], "max_daily_cost_usd must be >= 0") {
+		t.Errorf("expected >= 0 validation message, got: %q", resp["error"])
+	}
+}

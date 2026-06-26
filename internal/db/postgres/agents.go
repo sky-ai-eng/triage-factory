@@ -196,6 +196,17 @@ func nullString(s string) any {
 	return s
 }
 
+// nullFloat returns nil when f is 0 so the column ends up SQL NULL — the
+// numeric analog of nullString. Used for nullable cost/limit columns whose
+// Go zero value (0) means "unset" (e.g. org_settings.max_daily_cost_usd, where
+// 0 / NULL both mean "no cap").
+func nullFloat(f float64) any {
+	if f == 0 {
+		return nil
+	}
+	return f
+}
+
 // nullUUID returns nil for empty / non-UUID input, otherwise the string
 // for direct pgx UUID binding. Distinguished from nullString because
 // passing an empty string into a UUID column would 22P02-error.

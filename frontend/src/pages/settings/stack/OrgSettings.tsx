@@ -42,6 +42,7 @@ import { OrgModelStep } from '../../setup/ModelStep'
 import { initialWizardState, loadOrg, loadGitHubAppInstall } from '../../setup/steps'
 import type { StepContext, WizardState } from '../../setup/types'
 import PollerTimingGroup from '../PollerTimingGroup'
+import { inputClass } from '../primitives'
 import JiraAccessGroup from '../JiraAccessGroup'
 import AtlassianOAuthAppCard from '../AtlassianOAuthAppCard'
 import TeamManagementSection from '../../../components/TeamManagementSection'
@@ -207,6 +208,11 @@ export default function OrgSettings({
   const capSummary = baseline.org.max_llm_model_tier
     ? `Capped at ${TIER_LABELS[baseline.org.max_llm_model_tier] ?? baseline.org.max_llm_model_tier}`
     : 'No cap'
+  const dailyCapValue = Number(baseline.org.max_daily_cost_usd)
+  const dailyCapSummary =
+    baseline.org.max_daily_cost_usd.trim() !== '' && dailyCapValue > 0
+      ? `Cap at $${dailyCapValue.toLocaleString()} / day`
+      : 'No cap'
 
   // ── Claude credentials ── Captured via the validated connectAnthropic
   // endpoint (never the bulk org POST). Local shows the system-vs-BYOK source
@@ -515,6 +521,60 @@ export default function OrgSettings({
         onCancel={() => revertOrg(['max_llm_model_tier'])}
       >
         <OrgModelStep {...ctx} />
+      </SettingsSection>
+
+      {/* ── Daily spend cap (TFAC-477) ── A runaway-spend fuse: when the org's
+          LLM spend for the current UTC day reaches this ceiling, every new agent
+          run (manual + autonomous) is refused at the delegation choke point.
+          In-flight runs are unaffected. Empty / 0 = no cap. */}
+      <SettingsSection
+        title="Daily spend cap"
+        summary={dailyCapSummary}
+        dirty={draft.org.max_daily_cost_usd !== baseline.org.max_daily_cost_usd}
+        saving={isSaving('daily-cap')}
+        onSave={() =>
+          commitOrgSlice(
+            'daily-cap',
+            { max_daily_cost_usd: draft.org.max_daily_cost_usd },
+            'Daily spend cap',
+          )
+        }
+        onCancel={() => revertOrg(['max_daily_cost_usd'])}
+      >
+        <div className="space-y-5">
+          <div className="space-y-1.5">
+            <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+              Cap the org&rsquo;s daily LLM spend
+            </h2>
+            <p className="text-[13px] leading-relaxed text-text-tertiary">
+              A safety fuse against runaway spend (most often a misconfigured autonomous trigger).
+              When today&rsquo;s total LLM spend — measured on the UTC calendar day, across every
+              category — reaches this amount, new agent runs, manual and autonomous alike, are
+              blocked until tomorrow or until you raise the cap. In-flight runs keep going. Leave
+              blank for no cap.
+            </p>
+          </div>
+          <label className="block max-w-[220px]">
+            <span className="mb-1.5 block text-[11px] text-text-tertiary">Daily limit (USD)</span>
+            <div className="relative">
+              <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[13px] text-text-tertiary">
+                $
+              </span>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                inputMode="decimal"
+                placeholder="No cap"
+                value={draft.org.max_daily_cost_usd}
+                onChange={(e) =>
+                  patch({ org: { ...draft.org, max_daily_cost_usd: e.target.value } })
+                }
+                className={`${inputClass} pl-7`}
+              />
+            </div>
+          </label>
+        </div>
       </SettingsSection>
 
       {/* ── Claude credentials ── Save drives the validated connectAnthropic

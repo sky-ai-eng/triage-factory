@@ -91,16 +91,19 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		ghURL, jiraURL, anthRef, bedRef, maxTier sql.NullString
 		ghInterval, jiraInterval                 string
 		cloneProto                               string
+		maxDailyCost                             sql.NullFloat64
 	)
 	err := q.QueryRowContext(ctx, `
 		SELECT github_base_url, github_poll_interval, github_clone_protocol,
 		       jira_base_url, jira_poll_interval,
-		       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier
+		       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
+		       max_daily_cost_usd
 		FROM org_settings WHERE org_id = ?
 	`, orgID).Scan(
 		&ghURL, &ghInterval, &cloneProto,
 		&jiraURL, &jiraInterval,
 		&anthRef, &bedRef, &maxTier,
+		&maxDailyCost,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Provisioning is meant to seed an org_settings row at org-
@@ -132,6 +135,7 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		AnthropicAPIKeyRef:    anthRef.String,
 		BedrockCredentialsRef: bedRef.String,
 		MaxLLMModelTier:       maxTier.String,
+		MaxDailyCostUSD:       maxDailyCost.Float64, // NULL → 0 (no cap)
 	}, nil
 }
 
@@ -145,8 +149,9 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 			org_id, github_base_url, github_poll_interval, github_clone_protocol,
 			jira_base_url, jira_poll_interval,
 			anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
+			max_daily_cost_usd,
 			updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(org_id) DO UPDATE SET
 			github_base_url = excluded.github_base_url,
 			github_poll_interval = excluded.github_poll_interval,
@@ -156,6 +161,7 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 			anthropic_api_key_ref = excluded.anthropic_api_key_ref,
 			bedrock_credentials_ref = excluded.bedrock_credentials_ref,
 			max_llm_model_tier = excluded.max_llm_model_tier,
+			max_daily_cost_usd = excluded.max_daily_cost_usd,
 			updated_at = CURRENT_TIMESTAMP
 	`,
 		orgID,
@@ -167,6 +173,7 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 		nullStringValue(u.AnthropicAPIKeyRef),
 		nullStringValue(u.BedrockCredentialsRef),
 		nullStringValue(u.MaxLLMModelTier),
+		nullFloatValue(u.MaxDailyCostUSD),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert org_settings: %w", err)
@@ -183,6 +190,17 @@ func nullStringValue(s string) any {
 		return nil
 	}
 	return s
+}
+
+// nullFloatValue returns nil when f is 0 so the column lands SQL NULL — the
+// numeric analog of nullStringValue (mirrors the Postgres impl's nullFloat).
+// Used for nullable cost columns whose Go zero value means "unset"
+// (org_settings.max_daily_cost_usd: 0 / NULL both mean "no cap").
+func nullFloatValue(f float64) any {
+	if f == 0 {
+		return nil
+	}
+	return f
 }
 
 // marshalJSONArray is shared by the team_settings + jira rules upserts:

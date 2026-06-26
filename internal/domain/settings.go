@@ -23,6 +23,9 @@ const DefaultModel = "sonnet"
 //     Empty string round-trips "" ↔ NULL: "not configured yet" (base
 //     URLs), "use deployment default" (vault refs), or "no cap" (max
 //     tier). Callers never need to distinguish "" from NULL.
+//   - MaxDailyCostUSD is a nullable numeric column (TFAC-477). 0
+//     round-trips 0 ↔ NULL — "no cap". Callers never need to
+//     distinguish 0 from NULL.
 //
 // GitHubCloneProtocol is "ssh" or "https" only — enforced by a CHECK
 // on both backends. An empty string from a caller is treated as
@@ -39,6 +42,12 @@ type OrgSettings struct {
 	AnthropicAPIKeyRef    string
 	BedrockCredentialsRef string
 	MaxLLMModelTier       string // app-validated, NOT DB-constrained; known values "haiku" | "sonnet" | "opus" | "" (no cap) — not an exhaustive set
+
+	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477). 0 = no
+	// cap (round-trips 0 ↔ NULL). When today's org spend (UTC calendar day,
+	// summed across every category) is >= this value, the delegation choke
+	// point refuses all new agent runs. A runaway-spend fuse.
+	MaxDailyCostUSD float64
 }
 
 // DefaultOrgSettings returns the NOT NULL DEFAULT values from the

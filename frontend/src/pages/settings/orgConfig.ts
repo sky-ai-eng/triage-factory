@@ -27,6 +27,11 @@ export interface OrgConfigForm {
   jira_api_token: string
   jira_poll_interval: string
   max_llm_model_tier: string
+  // Org-wide daily LLM spend cap (TFAC-477), held as the raw text input. Empty =
+  // "no cap"; a numeric string is the per-day USD ceiling. Stored as a string
+  // (not a number) so the input can be cleared to "" cleanly and partial typing
+  // works; saveOrgConfig converts it to the wire number.
+  max_daily_cost_usd: string
   // The org's Anthropic API key (BYOK). Blank on load — it's a secret that never
   // leaves the vault, like jira_pat. It is captured ONLY via the validated
   // connectAnthropic endpoint and is deliberately NOT sent by saveOrgConfig, so
@@ -49,6 +54,8 @@ export interface OrgSettingsData {
   // specifically, so a Cloud org reports true despite having no PAT.
   has_jira_credential: boolean
   max_llm_model_tier?: string
+  // Org-wide daily spend cap in USD (TFAC-477); 0 = no cap. Always present.
+  max_daily_cost_usd: number
   has_anthropic_api_key: boolean
   has_bedrock_credentials: boolean
   member_count: number
@@ -65,6 +72,7 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
   jira_api_token: '',
   jira_poll_interval: '5m0s',
   max_llm_model_tier: '',
+  max_daily_cost_usd: '',
   anthropic_api_key: '',
 })
 
@@ -84,6 +92,9 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
     jira_api_token: '',
     jira_poll_interval: org.jira_poll_interval,
     max_llm_model_tier: org.max_llm_model_tier || '',
+    // 0 (no cap) renders as an empty input ("No cap"); any positive cap seeds
+    // the numeric string the input edits.
+    max_daily_cost_usd: org.max_daily_cost_usd ? String(org.max_daily_cost_usd) : '',
     // Secret — never returned by the GET (presence rides has_anthropic_api_key),
     // so it stays blank and a save without a re-typed key leaves the vault key
     // untouched.
@@ -94,6 +105,18 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
 export async function fetchOrgSettings(): Promise<OrgSettingsData | null> {
   const res = await fetch('/api/settings/org')
   return res.ok ? ((await res.json()) as OrgSettingsData) : null
+}
+
+// dailyCapToNumber converts the daily-cap text input to the wire number.
+// Blank → 0 ("no cap"). A non-negative number passes through. A negative or
+// unparseable value passes through as-is (negative) / NaN→0 so the backend's
+// own `>= 0` validation is the single source of truth: a real negative gets a
+// 400 the user sees, rather than being silently coerced to "no cap".
+function dailyCapToNumber(raw: string): number {
+  const trimmed = raw.trim()
+  if (trimmed === '') return 0
+  const n = Number(trimmed)
+  return Number.isFinite(n) ? n : 0
 }
 
 // saveOrgConfig persists the org-level field group via POST
@@ -116,6 +139,7 @@ export async function saveOrgConfig(
       jira_pat: form.jira_pat || undefined,
       jira_poll_interval: form.jira_poll_interval,
       max_llm_model_tier: form.max_llm_model_tier,
+      max_daily_cost_usd: dailyCapToNumber(form.max_daily_cost_usd),
     }),
   })
   if (!res.ok) {

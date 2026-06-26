@@ -347,10 +347,14 @@ type orgSettingsResponse struct {
 	// stored for the org's auth-method marker — a Data Center PAT or a Cloud
 	// email + API token — rather than the presence of a specific key, so a
 	// Cloud org (which has no PAT) still reports true.
-	HasJiraCredential  bool   `json:"has_jira_credential"`
-	MaxLLMModelTier    string `json:"max_llm_model_tier,omitempty"`
-	HasAnthropicAPIKey bool   `json:"has_anthropic_api_key"`
-	HasBedrockCreds    bool   `json:"has_bedrock_credentials"`
+	HasJiraCredential bool   `json:"has_jira_credential"`
+	MaxLLMModelTier   string `json:"max_llm_model_tier,omitempty"`
+	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477); 0 = no
+	// cap. Always emitted (not omitempty) so the Settings form can render the
+	// numeric input's current value, including an explicit "0 / no cap".
+	MaxDailyCostUSD    float64 `json:"max_daily_cost_usd"`
+	HasAnthropicAPIKey bool    `json:"has_anthropic_api_key"`
+	HasBedrockCreds    bool    `json:"has_bedrock_credentials"`
 	// MemberCount is the number of members in this org. Feeds the
 	// frontend's N=1 collapse alongside the team member count. A property
 	// of the org, so it rides the org-scope response rather than /api/me.
@@ -410,6 +414,7 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		JiraPollInterval:    orgSet.JiraPollInterval.String(),
 		HasJiraCredential:   hasJiraCred,
 		MaxLLMModelTier:     orgSet.MaxLLMModelTier,
+		MaxDailyCostUSD:     orgSet.MaxDailyCostUSD,
 		HasAnthropicAPIKey:  orgSet.AnthropicAPIKeyRef != "",
 		HasBedrockCreds:     orgSet.BedrockCredentialsRef != "",
 		MemberCount:         memberCount,
@@ -425,6 +430,10 @@ type orgSettingsUpdate struct {
 	JiraPAT             *string `json:"jira_pat"`
 	JiraPollInterval    string  `json:"jira_poll_interval,omitempty"`
 	MaxLLMModelTier     *string `json:"max_llm_model_tier"`
+	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477). Pointer so
+	// nil = don't touch (an unrelated save leaves it alone) and a present value
+	// (including 0, which clears the cap) is applied. Validated >= 0.
+	MaxDailyCostUSD *float64 `json:"max_daily_cost_usd"`
 	// NOTE: the Anthropic API key is deliberately NOT a field here. It is
 	// writable only through the validated POST /api/anthropic/connect endpoint
 	// (which clears it on an empty key), so the bulk settings form can never be
@@ -527,6 +536,17 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		orgSet.MaxLLMModelTier = tier
+	}
+
+	// Daily spend cap (TFAC-477): nil = don't touch, 0 = clear the cap, >0 = set.
+	// Reject a negative cap — it would either block every run (if the trip is
+	// >=) or be silently inert, neither a meaningful input.
+	if req.MaxDailyCostUSD != nil {
+		if *req.MaxDailyCostUSD < 0 {
+			badRequest(w, "max_daily_cost_usd must be >= 0")
+			return
+		}
+		orgSet.MaxDailyCostUSD = *req.MaxDailyCostUSD
 	}
 
 	// GitHub PAT (PAT_1, the org bot credential): nil = don't touch, "" =

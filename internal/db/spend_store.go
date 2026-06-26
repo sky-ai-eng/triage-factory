@@ -37,6 +37,17 @@ type SpendStore interface {
 	// dashboard headline + safety cap key on, and a non-zero until gives the
 	// closed billing-period window (e.g. all of March) that reconciles against
 	// the Anthropic bill. This is the cheap aggregate; ListSpend is the
-	// row-level drill-down.
+	// row-level drill-down. APP pool in Postgres (RLS-active) — team-scoped.
 	SpendByCategory(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error)
+
+	// SpendByCategorySystem is SpendByCategory on the ADMIN pool (BYPASSRLS) in
+	// Postgres — the org-wide aggregate a claims-less system caller needs. The
+	// safety cap (TFAC-477) reads it from Spawner.Delegate, which runs under
+	// context.Background() with no tf.current_org_id(): an app-pool read there
+	// would see nothing and the cap would never trip, so it MUST use this
+	// variant. Returns spend summed across EVERY team + curator + system row in
+	// the org (the runaway-spend fuse counts all categories). Mirrors
+	// OrgsStore.GetSettingsSystem / ArtifactStore.ListByRunSystem. SQLite is N=1
+	// / no RLS, so it delegates to SpendByCategory.
+	SpendByCategorySystem(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error)
 }
