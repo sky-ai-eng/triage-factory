@@ -300,9 +300,84 @@ function ZeroMini({ label = '—' }: { label?: string }) {
   )
 }
 
-// BurnBar is the category split — a thin segmented meter (one lit segment per
-// category, tones butted with a hairline gap) over a monospace legend. Replaces
-// the donut: flatter, gauge-like, reads in a glance.
+// SegOverlay carves any bar into LED-style segments: thin surface-colored cuts at
+// a fixed pitch, painted over the fill. The cuts ARE the page surface, so they
+// read as gaps between lit cells — and because it's one CSS gradient (not N
+// elements) it stays crisp at any width with no per-cell rounding. This is the
+// motif that makes the bars read as level meters rather than soft progress pills.
+const SEG_PITCH =
+  'repeating-linear-gradient(90deg, transparent 0 6px, var(--color-surface) 6px 7px)'
+function SegOverlay() {
+  return (
+    <span
+      aria-hidden
+      className="pointer-events-none absolute inset-0"
+      style={{ backgroundImage: SEG_PITCH }}
+    />
+  )
+}
+
+// Meter is a single-tone level gauge: a segmented track filled to value/max with
+// a tone glow and a bright "head" cap at the leading edge — a VU/level meter, not
+// a soft progress pill.
+function Meter({
+  value,
+  max,
+  color = 'var(--color-accent)',
+}: {
+  value: number
+  max: number
+  color?: string
+}) {
+  const fill = max > 0 ? Math.min(100, Math.max((value / max) * 100, 2)) : 0
+  return (
+    <div className="relative h-2.5 overflow-hidden rounded-[2px] bg-black/[0.06]">
+      <span
+        className="absolute inset-y-0 left-0"
+        style={{ width: `${fill}%`, background: color, boxShadow: glow(color) }}
+      />
+      <SegOverlay />
+      {/* Hot head — a bright cap riding the fill's leading edge, on top of the
+          segment cuts so it always reads as the live level. */}
+      <span
+        className="absolute inset-y-0 w-[1.5px]"
+        style={{
+          left: `calc(${fill}% - 1.5px)`,
+          background: `color-mix(in srgb, white 45%, ${color})`,
+        }}
+      />
+    </div>
+  )
+}
+
+// StackMeter is the composition sibling: butted color segments (one per category
+// / team) carved by the same overlay, so an allocation reads as a multi-tone LED
+// meter rather than a soft stacked pill.
+function StackMeter({
+  segments,
+  heightClass = 'h-3',
+}: {
+  segments: { key: string; color: string; value: number; title?: string }[]
+  heightClass?: string
+}) {
+  const total = segments.reduce((s, d) => s + d.value, 0)
+  if (total === 0) return null
+  return (
+    <div className={`relative flex ${heightClass} overflow-hidden rounded-[2px] bg-black/[0.06]`}>
+      {segments.map((d) => (
+        <span
+          key={d.key}
+          title={d.title}
+          style={{ width: `${(d.value / total) * 100}%`, background: d.color }}
+        />
+      ))}
+      <SegOverlay />
+    </div>
+  )
+}
+
+// BurnBar is the category split — a segmented level meter over a horizontal
+// monospace legend strip.
 function BurnBar({ data }: { data: UsageCategoryBucket[] }) {
   const segs = data
     .map((d) => ({ bucket: d, label: categoryLabel(d.category), color: categoryColor(d.category) }))
@@ -313,19 +388,14 @@ function BurnBar({ data }: { data: UsageCategoryBucket[] }) {
 
   return (
     <div>
-      <div className="flex h-2 w-full gap-px overflow-hidden rounded-full bg-black/[0.06]">
-        {segs.map((d) => (
-          <span
-            key={d.bucket.category}
-            title={`${d.label} · ${fmtUSD(d.bucket.cost)}`}
-            style={{
-              width: `${(d.bucket.cost / total) * 100}%`,
-              background: d.color,
-              boxShadow: glow(d.color),
-            }}
-          />
-        ))}
-      </div>
+      <StackMeter
+        segments={segs.map((d) => ({
+          key: d.bucket.category,
+          color: d.color,
+          value: d.bucket.cost,
+          title: `${d.label} · ${fmtUSD(d.bucket.cost)}`,
+        }))}
+      />
       {/* Horizontal readout strip — chips wrap, so the bar reads as one wide
           meter rather than a stacked list of rows. */}
       <ul className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5">
@@ -374,16 +444,7 @@ function Gauges({
                 </span>
                 <span className="shrink-0 tabular-nums text-text-tertiary">{fmtUSD(d.value)}</span>
               </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-black/[0.06]">
-                <span
-                  className="block h-full rounded-full"
-                  style={{
-                    width: `${Math.max((d.value / max) * 100, 2)}%`,
-                    background: color,
-                    boxShadow: glow(color),
-                  }}
-                />
-              </div>
+              <Meter value={d.value} max={max} color={color} />
             </li>
           )
         })}
@@ -509,19 +570,14 @@ function AllocationBar({
 
   return (
     <div>
-      <div className="flex h-2.5 w-full gap-px overflow-hidden rounded-full bg-black/[0.06]">
-        {segs.map((d) => (
-          <span
-            key={d.key}
-            title={`${d.label} · ${fmtUSD(d.cost)}`}
-            style={{
-              width: `${(d.cost / total) * 100}%`,
-              background: d.color,
-              boxShadow: glow(d.color),
-            }}
-          />
-        ))}
-      </div>
+      <StackMeter
+        segments={segs.map((d) => ({
+          key: d.key,
+          color: d.color,
+          value: d.cost,
+          title: `${d.label} · ${fmtUSD(d.cost)}`,
+        }))}
+      />
       <ul className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1.5 sm:grid-cols-3">
         {segs.map((d) => (
           <li key={d.key} className="flex items-center justify-between gap-2 font-mono text-[11px]">
@@ -550,15 +606,19 @@ function AllocationBar({
 function ThroughputInstrument({
   byDay,
   byModel,
+  tall = false,
 }: {
   byDay: UsageDayBucket[]
   byModel: UsageModelBucket[]
+  /** Hero mode — a taller screen. Used by Personal, where the throughput is the
+   *  section's only instrument. */
+  tall?: boolean
 }) {
   return (
     <Instrument label="Over time" className="md:col-span-2 lg:col-span-3">
       <div className="flex flex-col gap-5 lg:flex-row">
         <div className="min-w-0 flex-1">
-          <Trace data={byDay} heightClass="h-32" />
+          <Trace data={byDay} heightClass={tall ? 'h-44' : 'h-32'} />
         </div>
         <div className="lg:w-[200px] lg:shrink-0">
           <div className="mb-3 flex items-center gap-2">
@@ -687,12 +747,10 @@ function PersonalSection({ since, days }: { since: string; days: number }) {
       error={error}
       empty={total === 0}
     >
-      <div className="grid grid-cols-1 gap-x-10 gap-y-8 lg:grid-cols-3">
-        <Instrument label="Category" className="lg:col-span-3">
-          <BurnBar data={data?.by_category ?? []} />
-        </Instrument>
-        <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} />
-      </div>
+      {/* Personal is intentionally the leanest scope: just your spend trend +
+          the models behind it. (Category — manual vs curator — added little at
+          the personal level, so it's dropped here; it still lives in Team/Org.) */}
+      <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} tall />
     </Band>
   )
 }

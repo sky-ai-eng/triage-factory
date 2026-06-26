@@ -69,22 +69,15 @@ const ME_EMPTY: UsageMeResponse = {
   by_day: [],
 }
 
-// A category with non-zero cache tokens, to assert the donut tooltip's total
-// (in + out + cache) agrees with its parenthetical breakdown.
-const ME_TOKENS: UsageMeResponse = {
-  total_cost_usd: 8,
-  by_category: [
-    {
-      category: 'manual',
-      cost: 8,
-      input_tokens: 100,
-      output_tokens: 50,
-      cache_read_tokens: 30,
-      cache_creation_tokens: 20,
-    },
-  ],
-  by_model: [{ model: 'claude-opus-4-8', cost: 8 }],
-  by_day: [{ date: '2026-06-01', cost: 8 }],
+// A category bucket with non-zero cache tokens, to assert the burn-bar legend
+// tooltip's total (in + out + cache) agrees with its parenthetical breakdown.
+const TOK_CATEGORY: UsageCategoryBucket = {
+  category: 'autonomous',
+  cost: 25,
+  input_tokens: 100,
+  output_tokens: 50,
+  cache_read_tokens: 30,
+  cache_creation_tokens: 20,
 }
 
 const TEAM: UsageTeamResponse = {
@@ -323,9 +316,14 @@ describe('Usage page', () => {
   })
 
   it('category tooltip total matches its in/out/cache breakdown', async () => {
+    // Category lives in Team/Org now (dropped from Personal), so exercise it via
+    // a team admin's Team band.
     roleMock.isAdmin = false
-    teamsMock.teams = []
-    stubUsageFetch({ '/api/usage/me': ME_TOKENS })
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/teams/t1': { ...TEAM, by_category: [TOK_CATEGORY] },
+    })
 
     render(<Usage />)
 
