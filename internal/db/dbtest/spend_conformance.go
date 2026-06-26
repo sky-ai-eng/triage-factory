@@ -299,14 +299,18 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		}
 	})
 
-	// TeamID filter narrows to one team's runs. Curator + system carry a NULL
-	// team_id, so a non-nil TeamID excludes them — the team dashboard sees its
-	// own runs, not org-level overhead.
+	// TeamID filter narrows to one team's spend — two-sided: it INCLUDES
+	// team-scoped runs AND team-attributed curator (its project carries the team,
+	// TFAC-476), and EXCLUDES null-team curator + system (NULL team_id) so the team
+	// dashboard sees its own work, not org-level overhead or another project's.
 	t.Run("ListSpend_TeamFilter", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()
 
 		runID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
+		// Team-attributed curator (project carries fx.TeamID) → included.
+		teamCuratorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.5, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
+		// Null-team curator (org/private project) + system → NULL team_id, excluded.
 		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.5, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
 		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
 
@@ -315,8 +319,12 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		if err != nil {
 			t.Fatalf("ListSpend team filter: %v", err)
 		}
-		if len(got) != 1 || got[0].SourceID != runID {
-			t.Fatalf("TeamID filter = %d rows, want exactly the run %s (curator/system have NULL team_id)", len(got), runID)
+		gotIDs := map[string]bool{}
+		for _, r := range got {
+			gotIDs[r.SourceID] = true
+		}
+		if len(got) != 2 || !gotIDs[runID] || !gotIDs[teamCuratorID] {
+			t.Fatalf("TeamID filter = %d rows %v, want exactly the run %s + team-attributed curator %s (null-team curator/system excluded)", len(got), gotIDs, runID, teamCuratorID)
 		}
 
 		other := "00000000-0000-0000-0000-0000000009ff"

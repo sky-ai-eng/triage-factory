@@ -1440,12 +1440,13 @@ CREATE TABLE public.runs (
 -- 'manual'/'event'); curator is 'curator'; system jobs are 'system_overhead'
 -- with the job (scorer/repo_profiler/classifier) carried as subtype.
 --
--- team_id: runs are team-scoped; system-overhead has no team (org-level) and
--- curator is org-level in v1 (a projects join could team-attribute curator
--- later — out of scope). So the dashboard sees runs by team; system + curator
--- surface at org scope. actor_agent_id is the org agent that executed the run
--- (audit passthrough) — only runs are agent-executed, so NULL for curator
--- (user-driven) + system (background).
+-- team_id: runs are team-scoped; curator is team-attributed via a point-in-time
+-- snapshot of its project's team (curator_requests.team_id, TFAC-476) — a team
+-- project → that team, a private/org project → NULL; system-overhead has no team
+-- (org-level). So the dashboard sees runs + team-project curator by team, and
+-- system + null-team curator at org scope. actor_agent_id is the org agent that
+-- executed the run (audit passthrough) — only runs are agent-executed, so NULL
+-- for curator (user-driven) + system (background).
 --
 -- Tokens are read NATIVELY from all three tables — every token column is
 -- INTEGER NOT NULL DEFAULT 0 (runs + curator via TFAC-473, system via
