@@ -304,11 +304,9 @@ function ZeroMini({ label = '—' }: { label?: string }) {
   )
 }
 
-// Meter is a single-value gauge drawn as an open "C" bracket — top + left +
-// bottom edges, no right cap — in the rust accent: the board's L-bracket pulled
-// onto a readout. The bracket always spans the full track, so the scale is
-// legible even at zero; the value is a left-anchored gradient that fades to
-// nothing at value/max (no hard right end), so magnitude reads as "reach".
+// Meter is a single-value gauge: just a left-anchored gradient that fades to
+// nothing at value/max — no track, no frame, only the light. A small floor keeps
+// a nonzero-but-tiny value visible.
 function Meter({
   value,
   max,
@@ -318,17 +316,12 @@ function Meter({
   max: number
   color?: string
 }) {
-  const fill = max > 0 ? Math.min(100, (value / max) * 100) : 0
+  const fill = value <= 0 ? 0 : Math.min(100, Math.max(6, (value / max) * 100))
   return (
-    <div className="group/meter relative h-3.5">
-      {/* ⊏ frame — rust, always full width; brightens on hover like the column bracket. */}
-      <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-accent/40 transition-colors group-hover/meter:bg-accent/70" />
-      <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-accent/40 transition-colors group-hover/meter:bg-accent/70" />
-      <span className="pointer-events-none absolute inset-y-0 left-0 w-px bg-accent/55 transition-colors group-hover/meter:bg-accent" />
-      {/* fill — left-anchored gradient fading out at value/max; no right cap. */}
+    <div className="relative h-2.5">
       <span
         aria-hidden
-        className="absolute inset-y-[2px] left-px right-0"
+        className="absolute inset-0"
         style={{ background: `linear-gradient(90deg, ${color} 0%, transparent ${fill}%)` }}
       />
     </div>
@@ -468,17 +461,14 @@ function Gauges({
   )
 }
 
-// Trace is the "over time" readout, styled as a piece of equipment: a dark-glass
-// HMI screen (warm backlit-paper in light mode) with faint scanlines and a cyan
-// oscilloscope line — the one inset screen in the otherwise-warm console, echoing
-// the Run Station.
+// Trace is the "over time" readout: a borderless accent line with a soft area
+// fade, sitting directly on the warm console over a single faint baseline — no
+// panel, no screen, no scanlines. It matches the gauges' gradient language and
+// the "everything melts into the page" ethos.
 function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightClass?: string }) {
   if (data.length === 0)
     return (
-      <div
-        className={`flex ${heightClass} items-center justify-center rounded-[4px]`}
-        style={{ background: 'var(--hmi-screen)', boxShadow: 'inset 0 0 0 1px var(--hmi-line)' }}
-      >
+      <div className={`flex ${heightClass} items-center justify-center`}>
         <ZeroMini label="no activity" />
       </div>
     )
@@ -491,25 +481,13 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
   }))
 
   return (
-    <div
-      className={`relative ${heightClass} overflow-hidden rounded-[4px]`}
-      style={{ background: 'var(--hmi-screen)', boxShadow: 'inset 0 0 0 1px var(--hmi-line)' }}
-    >
-      {/* Scanlines — the HMI screen texture. */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0"
-        style={{
-          backgroundImage:
-            'repeating-linear-gradient(to bottom, var(--hmi-scanline) 0, var(--hmi-scanline) 1px, transparent 1px, transparent 3px)',
-        }}
-      />
+    <div className={`relative ${heightClass}`}>
       <ResponsiveContainer>
-        <AreaChart data={formatted} margin={{ top: 8, right: 8, bottom: 4, left: 8 }}>
+        <AreaChart data={formatted} margin={{ top: 6, right: 2, bottom: 0, left: 2 }}>
           <defs>
             <linearGradient id="usageTrace" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--hmi-cyan)" stopOpacity={0.35} />
-              <stop offset="100%" stopColor="var(--hmi-cyan)" stopOpacity={0} />
+              <stop offset="0%" stopColor="var(--color-accent)" stopOpacity={0.22} />
+              <stop offset="100%" stopColor="var(--color-accent)" stopOpacity={0} />
             </linearGradient>
           </defs>
           <XAxis dataKey="label" hide />
@@ -522,12 +500,17 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
           <Area
             type="monotone"
             dataKey="cost"
-            stroke="var(--hmi-cyan)"
+            stroke="var(--color-accent)"
             strokeWidth={1.5}
             fill="url(#usageTrace)"
           />
         </AreaChart>
       </ResponsiveContainer>
+      {/* A single faint baseline grounds the plot without a panel. */}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-border-subtle"
+      />
     </div>
   )
 }
