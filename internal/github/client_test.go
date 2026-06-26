@@ -134,6 +134,46 @@ func TestClient_UserID(t *testing.T) {
 	})
 }
 
+// TestClient_EmptyToken_UnauthenticatedAcrossMethods pins the invariant behind
+// the setAuth seam (TFAC-474): an empty-token client omits the Authorization
+// header on EVERY request builder — do/Get, GetConditional, GetRaw,
+// DownloadArtifact, PostGraphQL — not just one. A regression that re-adds an
+// unconditional "Bearer " on any of them would resurface the malformed-
+// credential 401 on the unauthenticated registration read.
+func TestClient_EmptyToken_UnauthenticatedAcrossMethods(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "") // unauthenticated client
+
+	checks := []struct {
+		name string
+		call func() error
+	}{
+		{"do/Get", func() error { _, err := c.Get("/x"); return err }},
+		{"GetConditional", func() error { _, _, _, err := c.GetConditional("/x", ""); return err }},
+		{"GetRaw", func() error { _, err := c.GetRaw("/x", "application/json"); return err }},
+		{"DownloadArtifact", func() error {
+			_, err := c.DownloadArtifact(context.Background(), "/x", &strings.Builder{}, 1<<20)
+			return err
+		}},
+		{"PostGraphQL", func() error { _, err := c.PostGraphQL(map[string]any{"query": "{__typename}"}); return err }},
+	}
+	for _, ck := range checks {
+		gotAuth = "sentinel"
+		if err := ck.call(); err != nil {
+			t.Fatalf("%s: %v", ck.name, err)
+		}
+		if gotAuth != "" {
+			t.Errorf("%s sent Authorization=%q, want none (empty-token client must be unauthenticated)", ck.name, gotAuth)
+		}
+	}
+}
+
 func TestGraphQLURL(t *testing.T) {
 	tests := []struct {
 		name    string

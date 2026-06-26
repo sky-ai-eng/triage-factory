@@ -119,7 +119,7 @@ func (c *Client) GetConditional(path, etag string) (body []byte, newEtag string,
 	if err != nil {
 		return nil, "", false, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.pat)
+	c.setAuth(req)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
@@ -205,7 +205,7 @@ func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Write
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.pat)
+	c.setAuth(req)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	// Shallow copy so the long-download timeout doesn't bleed into other
@@ -259,7 +259,7 @@ func (c *Client) GetRaw(path, accept string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.pat)
+	c.setAuth(req)
 	req.Header.Set("Accept", accept)
 
 	resp, err := c.http.Do(req)
@@ -332,7 +332,7 @@ func (c *Client) PostGraphQL(body any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.pat)
+	c.setAuth(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)
@@ -382,6 +382,26 @@ func (c *Client) PostGraphQL(body any) ([]byte, error) {
 	return data, nil
 }
 
+// setAuth applies the bearer Authorization header for an authenticated client,
+// and is the single place every request builder (do, GetConditional, GetRaw,
+// DownloadArtifact, PostGraphQL) sets it — so "empty token ⇒ unauthenticated"
+// holds uniformly across the whole client, not just one method.
+//
+// An empty token means an unauthenticated client. The App-registration path
+// builds one to read the public GET /users/{login} (UserID) before any
+// installation token exists (TFAC-474). We omit the header entirely rather than
+// send a malformed "Bearer " with no value, which GitHub rejects as bad
+// credentials (401) — strictly worse than an anonymous request, which GitHub
+// serves for public reads. Every real call site passes a non-empty token
+// (PAT or minted installation token), so this only affects the deliberate
+// unauthenticated case and never weakens an authenticated request.
+func (c *Client) setAuth(req *http.Request) {
+	if c.pat == "" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+c.pat)
+}
+
 func (c *Client) do(method, path string, body any) ([]byte, error) {
 	url := c.baseURL + path
 
@@ -398,15 +418,7 @@ func (c *Client) do(method, path string, body any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// An empty token means an unauthenticated client (the App-registration path
-	// uses one to read a public GET /users/{login} before any installation token
-	// exists — TFAC-474). Omit the header entirely rather than sending a
-	// malformed "Bearer " with no value, which GitHub rejects as bad credentials;
-	// every real caller passes a non-empty token, so this only affects the
-	// deliberate unauthenticated case.
-	if c.pat != "" {
-		req.Header.Set("Authorization", "Bearer "+c.pat)
-	}
+	c.setAuth(req)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
