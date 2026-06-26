@@ -130,9 +130,13 @@ type Resolver interface {
 	//	       (no stored column; installation-independent — the bot account is
 	//	       one global identity however many accounts the App is installed on).
 	//	PAT  → the stored agents.github_org_login (the login the org PAT
-	//	       authenticates as), persisted by the org-PAT setup/rebind writers.
+	//	       authenticates as), persisted by the org-PAT setup/rebind writers —
+	//	       but returned ONLY while the org still has a PAT. The cached login is
+	//	       gated on the same KeyGitHubPAT presence the credential resolver
+	//	       uses, so a value left behind when the PAT was cleared can't resurface
+	//	       as a stale identity for an org that no longer has that credential.
 	//
-	// ok=false when neither resolves — no App registration, and no stored PAT
+	// ok=false when neither resolves — no App, or no live PAT / no stored PAT
 	// login (an org bound before this ticket, or a read error). The caller then
 	// leaves git identity unset and the agent inherits ambient config, never a
 	// fabricated identity; it self-heals on the next PAT re-save.
@@ -389,9 +393,22 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (string, bo
 	if app, err := r.apps.GetForOrgSystem(ctx, orgID); err == nil && app != nil && app.Active && app.Slug != "" {
 		return app.Slug + "[bot]", true
 	}
-	// PAT tier: the login the org PAT authenticates as, persisted at PAT bind.
-	// Empty (an org bound before TFAC-452, or no PAT) → ok=false; self-heals on
-	// the next PAT re-save.
+	// PAT tier: the login the org PAT authenticates as. agents.github_org_login
+	// is a CACHE of that login, written at PAT bind but deliberately NOT cleared
+	// when the PAT is removed (clearing would mean chasing every scattered
+	// credential-clear path — DELETE /api/integrations, the settings PAT/base-URL
+	// clears, the App-switch teardown — and staying correct as new ones land).
+	// Instead, gate the cached login on the SAME KeyGitHubPAT presence the
+	// resolver's tier-3 uses (tier3PATClient / TokenFor): the login can only
+	// resurface while the credential it describes still exists, so a stale value
+	// left behind after a PAT clear (or a GitHub disconnect) never becomes a
+	// commit identity for an org that no longer has a PAT. A read error is
+	// conservative (treated as no PAT → no identity), never a fabricated one.
+	if pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT); err != nil || pat == "" {
+		return "", false
+	}
+	// PAT present: trust the cached login. Empty (an org bound before TFAC-452,
+	// or a read error) → ok=false; self-heals on the next PAT re-save.
 	if agent, err := r.agents.GetForOrgSystem(ctx, orgID); err == nil && agent != nil && agent.GitHubOrgLogin != "" {
 		return agent.GitHubOrgLogin, true
 	}

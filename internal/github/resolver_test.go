@@ -750,10 +750,18 @@ func TestResolver_AppMintFails_FallsToPAT(t *testing.T) {
 // TestResolver_OrgIdentityFor pins the org commit-identity resolution (TFAC-452):
 // App tier yields "<slug>[bot]" live from the registration (App-preferred, even
 // when a stored PAT login also exists), an inactive/absent App falls through to
-// the stored agents.github_org_login, and neither yields ok=false (the caller
-// then stamps no identity).
+// the stored agents.github_org_login — but ONLY while the org still has a PAT —
+// and an all-miss yields ok=false (the caller then stamps no identity).
 func TestResolver_OrgIdentityFor(t *testing.T) {
+	// withPAT is the fakeSecrets an org with a live PAT presents; the PAT tier is
+	// gated on this presence so a cached login can't outlive the credential.
+	withPAT := func() *fakeSecrets {
+		return &fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}}
+	}
+
 	t.Run("App tier resolves <slug>[bot] live", func(t *testing.T) {
+		// No PAT secret: the App tier must resolve without one (it short-circuits
+		// before the PAT-presence gate).
 		r := NewResolver(
 			&fakeSecrets{},
 			&fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot"}},
@@ -769,7 +777,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 
 	t.Run("App preferred over stored PAT login", func(t *testing.T) {
 		r := NewResolver(
-			&fakeSecrets{},
+			withPAT(),
 			&fakeApps{app: &domain.OrgGitHubApp{Active: true, Slug: "acme-bot"}},
 			&fakeOrgs{},
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "pat-login"}},
@@ -783,7 +791,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 
 	t.Run("inactive App falls through to stored PAT login", func(t *testing.T) {
 		r := NewResolver(
-			&fakeSecrets{},
+			withPAT(),
 			&fakeApps{app: &domain.OrgGitHubApp{Active: false, Slug: "acme-bot"}},
 			&fakeOrgs{},
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat"}},
@@ -797,7 +805,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 
 	t.Run("PAT tier (no App) resolves stored login", func(t *testing.T) {
 		r := NewResolver(
-			&fakeSecrets{},
+			withPAT(),
 			&fakeApps{app: nil},
 			&fakeOrgs{},
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat"}},
@@ -806,6 +814,24 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
 		if !ok || login != "octocat" {
 			t.Fatalf("OrgIdentityFor = (%q, %v), want octocat", login, ok)
+		}
+	})
+
+	t.Run("stored login but PAT cleared yields ok=false", func(t *testing.T) {
+		// The regression this gate closes: a login persisted while the org had a
+		// PAT must NOT resurface once the PAT is gone (no App, empty secrets), or
+		// OrgIdentityFor would stamp a stale identity for an org with no GitHub
+		// credential at all.
+		r := NewResolver(
+			&fakeSecrets{}, // PAT cleared — github_org_login is now stale
+			&fakeApps{app: nil},
+			&fakeOrgs{},
+			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat"}},
+			nil,
+		)
+		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		if ok || login != "" {
+			t.Fatalf("OrgIdentityFor = (%q, %v), want (\"\", false) for a cleared PAT with a stale login", login, ok)
 		}
 	})
 
