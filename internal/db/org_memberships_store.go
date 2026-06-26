@@ -69,13 +69,14 @@ type OrgMembershipsStore interface {
 	ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL string) ([]domain.OrgMember, error)
 
 	// UpdateRole sets userID's org role in orgID to role
-	// ("owner" | "admin" | "member"). App pool: org_memberships_update RLS
-	// gates the write to org admins. Returns ErrLastOwnerGuard when the
-	// change would drop the org's last owner (the guard trigger fires), and
-	// ErrOrgMemberNotFound when no row matches. Callers validate role
-	// against the allowed set before calling, so an invalid enum never
-	// reaches the column.
-	UpdateRole(ctx context.Context, orgID, userID, role string) error
+	// ("owner" | "admin" | "member") and returns the prior role (so the
+	// governance audit log can record the old→new transition). App pool:
+	// org_memberships_update RLS gates the write to org admins. Returns
+	// ErrLastOwnerGuard when the change would drop the org's last owner (the
+	// guard trigger fires), and ErrOrgMemberNotFound when no row matches.
+	// Callers validate role against the allowed set before calling, so an
+	// invalid enum never reaches the column.
+	UpdateRole(ctx context.Context, orgID, userID, role string) (oldRole string, err error)
 
 	// Remove deletes userID's membership in orgID. App pool:
 	// org_memberships_delete RLS permits the caller to remove themselves

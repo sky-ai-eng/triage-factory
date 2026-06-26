@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -139,6 +140,16 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		// conflated. The two may carry the same token value, but they are set
 		// and stored independently.
 
+		// Persist the org credential's OWN GitHub login (the login the PAT
+		// authenticates as) so the resolver's OrgIdentityFor can stamp the org
+		// commit-author identity on delegated-agent commits (TFAC-452). This is
+		// org ACCESS metadata on the agents row, NOT user_github_identities.
+		if resp.GitHub != nil {
+			if err := persistOrgGitHubLogin(r.Context(), tx, orgID, resp.GitHub.Login); err != nil {
+				return fmt.Errorf("persist org github login: %w", err)
+			}
+		}
+
 		// Persist base URLs + clone protocol in org_settings so they
 		// survive without keychain access. Read-modify-write inside
 		// the same tx; the store returns DefaultOrgSettings() on a
@@ -160,6 +171,18 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
 		}
+		// TFAC-471: audit the org GitHub PAT bind/rotate in the same tx. The
+		// setup wizard requires a GitHub PAT (guarded above), so this seam is
+		// the github_pat write-point; the host carries the configured base URL.
+		if req.GitHubPAT != "" {
+			if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+				ActorUserID: userID,
+				Action:      domain.AccessActionCredentialSet,
+				DetailJSON:  accessDetailCredential(domain.CredentialKindGitHubPAT, req.GitHubURL),
+			}); err != nil {
+				return fmt.Errorf("audit credential set: %w", err)
+			}
+		}
 		return nil
 	}); err != nil {
 		// Log the underlying wrap-chain (SQL / vault / FK errors) for
@@ -180,6 +203,33 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// persistOrgGitHubLogin records the org credential's OWN GitHub login on the
+// agents row (TFAC-452) so the credential resolver's OrgIdentityFor PAT tier
+// can stamp the org commit-author identity on delegated-agent commits. Called
+// inside the same WithTx that saves the org PAT, by every org-PAT writer that
+// already validated the login (handleIntegrationsSetup, the App→PAT switch, the
+// settings PAT update). This is org ACCESS metadata — it deliberately does NOT
+// touch user_github_identities (the per-user PAT_2 identity surface).
+//
+// An empty login is a no-op (the caller had no GitHub PAT in this write). A
+// missing agents row (not yet bootstrapped) is skipped rather than erroring —
+// the login self-heals on the next PAT re-save. A real write error propagates so
+// it rolls back with the rest of the caller's tx. The App path never calls this:
+// an App org's bot login (<slug>[bot]) resolves live from the registration.
+func persistOrgGitHubLogin(ctx context.Context, tx db.TxStores, orgID, login string) error {
+	if login == "" {
+		return nil
+	}
+	agent, err := tx.Agents.GetForOrg(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("load agent for org github login: %w", err)
+	}
+	if agent == nil {
+		return nil // not bootstrapped yet; nothing to stamp
+	}
+	return tx.Agents.SetGitHubOrgLogin(ctx, orgID, agent.ID, login)
 }
 
 func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request) {

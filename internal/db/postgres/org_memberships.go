@@ -128,20 +128,35 @@ func (s *orgMembershipsStore) identityMap(ctx context.Context, query string, arg
 	return m, rows.Err()
 }
 
-func (s *orgMembershipsStore) UpdateRole(ctx context.Context, orgID, userID, role string) error {
-	// Cast the bound string to the enum explicitly. role is a public.org_role
-	// column; a text param assigned bare relies on server-side type inference,
-	// and no other call site writes an enum column via a parameter — the
-	// explicit ::org_role keeps it unambiguous (the handler already rejected
-	// any value outside the enum, so this never trips a 22P02).
-	res, err := s.app.ExecContext(ctx, `
-		UPDATE org_memberships SET role = $3::org_role
-		WHERE org_id = $1 AND user_id = $2
-	`, orgID, userID, role)
-	if err != nil {
-		return translateOwnerGuard(fmt.Errorf("update org_membership role: %w", err))
+func (s *orgMembershipsStore) UpdateRole(ctx context.Context, orgID, userID, role string) (string, error) {
+	// Capture the prior role in the same statement (the prev CTE snapshots it
+	// before the UPDATE applies) and return it, so the governance audit log can
+	// record the old→new transition. A zero-row UPDATE — the member doesn't
+	// exist — yields no RETURNING row, which Scan surfaces as sql.ErrNoRows; map
+	// that to ErrOrgMemberNotFound (the assertOneRow contract, expressed through
+	// the query instead of RowsAffected). Cast the bound string to the enum
+	// explicitly: role is a public.org_role column; a bare text param relies on
+	// server-side inference, and the explicit ::org_role keeps it unambiguous
+	// (the handler already rejected any value outside the enum, so 22P02 never
+	// trips).
+	var oldRole string
+	err := s.app.QueryRowContext(ctx, `
+		WITH prev AS (
+			SELECT role FROM org_memberships
+			WHERE org_id = $1 AND user_id = $2
+		)
+		UPDATE org_memberships m SET role = $3::org_role
+		FROM prev
+		WHERE m.org_id = $1 AND m.user_id = $2
+		RETURNING prev.role::text
+	`, orgID, userID, role).Scan(&oldRole)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", db.ErrOrgMemberNotFound
 	}
-	return assertOneRow(res, "update org_membership role")
+	if err != nil {
+		return "", translateOwnerGuard(fmt.Errorf("update org_membership role: %w", err))
+	}
+	return oldRole, nil
 }
 
 func (s *orgMembershipsStore) Remove(ctx context.Context, orgID, userID string) error {

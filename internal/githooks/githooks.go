@@ -62,6 +62,16 @@ var readmeContent []byte
 //go:embed pre-push
 var prePushHook []byte
 
+// prepareCommitMsgHook is the embedded prepare-commit-msg hook (TFAC-452)
+// Ensure writes into the hooks dir. It appends a Co-authored-by: trailer
+// crediting the delegating human on manual runs, gated on the
+// TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER run env var. Generic + idempotent: a
+// no-op when the var is unset (autonomous/event runs), so shipping it
+// unconditionally never affects those runs or the pre-push behavior.
+//
+//go:embed prepare-commit-msg
+var prepareCommitMsgHook []byte
+
 // HostDir returns the host-side TF-controlled hooks directory. In local
 // mode this is what the agent's core.hooksPath points at directly; in
 // multi mode it is the bind-mount source for SandboxDir.
@@ -74,10 +84,10 @@ func HostDir() string {
 // startup. Called before any run can spawn so core.hooksPath always
 // resolves to a real directory with the current hook set.
 //
-// The pre-push hook (A·3, TFAC-460) is rewritten every call so an upgraded
-// binary refreshes a stale on-disk copy — the hooks dir lives under the
-// state root and persists across upgrades. It is written 0755 because git
-// skips non-executable hooks.
+// The managed hooks (A·3, TFAC-460 pre-push; TFAC-452 prepare-commit-msg) are
+// rewritten every call so an upgraded binary refreshes a stale on-disk copy —
+// the hooks dir lives under the state root and persists across upgrades. They
+// are written 0755 because git skips non-executable hooks.
 func Ensure() error {
 	dir := HostDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -92,41 +102,52 @@ func Ensure() error {
 	if err := os.WriteFile(filepath.Join(dir, "pre-push"), prePushHook, 0o755); err != nil {
 		return fmt.Errorf("githooks: write pre-push hook: %w", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "prepare-commit-msg"), prepareCommitMsgHook, 0o755); err != nil {
+		return fmt.Errorf("githooks: write prepare-commit-msg hook: %w", err)
+	}
 	return nil
 }
 
-// DirectAgentEnv returns env extended with core.hooksPath=HostDir() as a
-// git env-config entry, for a non-sandboxed (local) agent subprocess. The
-// returned slice REPLACES the process env (it is env plus our entry), not
-// a fragment to append.
+// DirectAgentEnv returns env extended with core.hooksPath=HostDir() — plus any
+// extraPairs (the org commit identity's user.name/user.email, via
+// IdentityConfigPairs) — as git env-config entries, for a non-sandboxed (local)
+// agent subprocess. The returned slice REPLACES the process env (it is env plus
+// our entries), not a fragment to append. extraPairs is variadic so the
+// hooks-only callers (and tests) stay unchanged; an empty list reproduces the
+// original single-entry behavior exactly.
 //
-// The entry lands at the next free GIT_CONFIG index — one past the
-// inherited GIT_CONFIG_COUNT — so a pre-existing operator GIT_CONFIG_*
-// set (a custom CA, say) is preserved and our hooks entry composes
-// alongside it. Crucially, the inherited GIT_CONFIG_COUNT line is dropped
-// and re-emitted bumped, so git reads a single, correct count regardless
-// of how duplicate env keys resolve (getenv is first-wins on glibc,
-// last-wins elsewhere — depending on either is a portability bug). This
-// mirrors internal/worktree's gitConfigEnviron exactly.
+// Our entries land at successive next-free GIT_CONFIG indices — starting one
+// past the inherited GIT_CONFIG_COUNT — so a pre-existing operator GIT_CONFIG_*
+// set (a custom CA, say) is preserved and our entries compose alongside it.
+// Crucially, the inherited GIT_CONFIG_COUNT line is dropped and re-emitted
+// bumped to cover all our entries, so git reads a single, correct count
+// regardless of how duplicate env keys resolve (getenv is first-wins on glibc,
+// last-wins elsewhere — depending on either is a portability bug). This mirrors
+// internal/worktree's gitConfigEnviron exactly.
 //
 // Git's env-config form (GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/_VALUE_n) is
 // used — not a `git config` write — so nothing touches on-disk config
 // (the operator's ~/.gitconfig stays untouched) and the install is scoped
-// to this one agent process.
-func DirectAgentEnv(env []string) []string {
-	idx := gitConfigCount(env)
-	out := make([]string, 0, len(env)+3)
+// to this one agent process. core.hooksPath is always entry 0 of our block so
+// its index is stable for any test asserting it.
+func DirectAgentEnv(env []string, extraPairs ...[2]string) []string {
+	pairs := append([][2]string{{ConfigKey, HostDir()}}, extraPairs...)
+	base := gitConfigCount(env)
+	out := make([]string, 0, len(env)+1+2*len(pairs))
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "GIT_CONFIG_COUNT=") {
-			continue // re-emitted below, bumped to include our entry
+			continue // re-emitted below, bumped to include our entries
 		}
 		out = append(out, kv)
 	}
-	return append(out,
-		"GIT_CONFIG_KEY_"+strconv.Itoa(idx)+"="+ConfigKey,
-		"GIT_CONFIG_VALUE_"+strconv.Itoa(idx)+"="+HostDir(),
-		"GIT_CONFIG_COUNT="+strconv.Itoa(idx+1),
-	)
+	for i, kv := range pairs {
+		idx := base + i
+		out = append(out,
+			"GIT_CONFIG_KEY_"+strconv.Itoa(idx)+"="+kv[0],
+			"GIT_CONFIG_VALUE_"+strconv.Itoa(idx)+"="+kv[1],
+		)
+	}
+	return append(out, "GIT_CONFIG_COUNT="+strconv.Itoa(base+len(pairs)))
 }
 
 // gitConfigCount parses GIT_CONFIG_COUNT (the number of git's indexed

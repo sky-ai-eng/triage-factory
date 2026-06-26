@@ -9,10 +9,23 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// fakeUsers is a minimal UsersStore for the co-author lookup: it returns a
+// fixed login from GetGitHubLoginSystem and embeds the interface so the
+// unexercised methods compile (and panic only if unexpectedly called).
+type fakeUsers struct {
+	db.UsersStore
+	login string
+}
+
+func (f fakeUsers) GetGitHubLoginSystem(_ context.Context, _, _ string) (string, error) {
+	return f.login, nil
+}
 
 // fakeResolver records ClientFor calls and returns a preconfigured client.
 // Mirrors the poller package's fake so the SKY-389 seam is exercised
@@ -27,6 +40,9 @@ type fakeResolver struct {
 	// baseURL is what BaseURLFor hands back — the org's git host base.
 	// Empty defaults to github.com so existing fixtures need no change.
 	baseURL string
+	// orgLogin is what OrgIdentityFor hands back; empty → ok=false (the default,
+	// so credential-only fixtures keep getting a no-identity result).
+	orgLogin string
 }
 
 type resolverCall struct {
@@ -59,6 +75,13 @@ func (f *fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, er
 		return f.baseURL, nil
 	}
 	return ghclient.DefaultBaseURL, nil
+}
+
+// OrgIdentityFor satisfies the ghclient.Resolver interface. Returns the
+// configured orgLogin (ok iff non-empty); credential-only fixtures leave it
+// unset so the delegate's git-identity resolution stays a no-op.
+func (f *fakeResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, bool) {
+	return f.orgLogin, f.orgLogin != ""
 }
 
 var _ ghclient.Resolver = (*fakeResolver)(nil)
@@ -244,6 +267,57 @@ func TestResolveCloneToken(t *testing.T) {
 		s.SetRunCredentialResolvers(&fakeResolver{token: githubapp.Token{Value: "ghs_clone"}}, nil, nil)
 		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "" {
 			t.Errorf("resolveCloneToken in local mode = %q, want empty (local clones unchanged)", got)
+		}
+	})
+}
+
+// TestResolveCommitIdentity_DelegateSeam pins the delegate's commit-identity
+// resolution (TFAC-452) end to end through the real ghclient.Resolver interface:
+// a resolver miss stamps nothing (so RunOptions.GitUserName/Email stay empty and
+// the agent inherits ambient git config), an event run yields the org identity
+// with no trailer, and a manual run with a distinct delegating login adds the
+// Co-authored-by trailer.
+func TestResolveCommitIdentity_DelegateSeam(t *testing.T) {
+	const orgID = "11111111-2222-3333-4444-555555555555"
+
+	newSpawner := func(resolver ghclient.Resolver, users db.UsersStore) *Spawner {
+		s := NewSpawner(nil, db.Stores{}, ghclient.NewClient("https://fallback", "tok"), nil, "m")
+		s.SetRunCredentialResolvers(resolver, nil, nil)
+		if users != nil {
+			s.SetStores(db.Stores{Users: users})
+		}
+		return s
+	}
+
+	t.Run("resolver miss -> no identity (ambient inherited)", func(t *testing.T) {
+		// orgLogin unset -> OrgIdentityFor returns ok=false.
+		s := newSpawner(&fakeResolver{}, nil)
+		id := s.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1")
+		if id != (githooks.CommitIdentity{}) {
+			t.Fatalf("resolver miss stamped %+v; want zero CommitIdentity (no injection)", id)
+		}
+	})
+
+	t.Run("event run -> org identity, no trailer", func(t *testing.T) {
+		s := newSpawner(&fakeResolver{orgLogin: "acme-bot"}, nil)
+		id := s.resolveCommitIdentity(context.Background(), orgID, "event", "")
+		if id.Name != "acme-bot" || id.Email != "acme-bot@users.noreply.github.com" {
+			t.Errorf("identity = %+v; want the acme-bot org identity", id)
+		}
+		if id.CoAuthorTrailer != "" {
+			t.Errorf("event run carried a trailer: %q", id.CoAuthorTrailer)
+		}
+	})
+
+	t.Run("manual distinct user -> org identity + trailer", func(t *testing.T) {
+		s := newSpawner(&fakeResolver{orgLogin: "acme-bot"}, fakeUsers{login: "alice"})
+		id := s.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1")
+		if id.Name != "acme-bot" {
+			t.Errorf("author = %q; want acme-bot", id.Name)
+		}
+		want := "Co-authored-by: alice <alice@users.noreply.github.com>"
+		if id.CoAuthorTrailer != want {
+			t.Errorf("trailer = %q; want %q", id.CoAuthorTrailer, want)
 		}
 	})
 }

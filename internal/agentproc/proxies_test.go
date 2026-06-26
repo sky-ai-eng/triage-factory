@@ -823,6 +823,53 @@ func TestStartProxiesForSandbox_GitProxyTornDownOnShutdown(t *testing.T) {
 	}
 }
 
+// TestStartProxiesForSandbox_FoldsOrgIdentity pins that the org commit identity
+// (TFAC-452) lands in the sandbox's single GIT_CONFIG_* block: core.hooksPath
+// stays at index 0, user.name/user.email layer in after it, and the one
+// GIT_CONFIG_COUNT covers all three. git=nil here, so the block is hooks +
+// identity only (no proxy pairs).
+func TestStartProxiesForSandbox_FoldsOrgIdentity(t *testing.T) {
+	creds := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-test"}
+	identity := githooks.IdentityConfigPairs("acme-bot[bot]", "acme-bot[bot]@users.noreply.github.com")
+
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, identity...)
+	if err != nil {
+		t.Fatalf("startProxiesForSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = bundle.Shutdown(ctx)
+	})
+
+	cfg := gitConfigMap(t, env)
+	if cfg[githooks.ConfigKey] != githooks.SandboxDir {
+		t.Errorf("%s = %q, want %q (hooks must remain present)", githooks.ConfigKey, cfg[githooks.ConfigKey], githooks.SandboxDir)
+	}
+	if cfg["user.name"] != "acme-bot[bot]" {
+		t.Errorf("user.name = %q, want acme-bot[bot]", cfg["user.name"])
+	}
+	if cfg["user.email"] != "acme-bot[bot]@users.noreply.github.com" {
+		t.Errorf("user.email = %q, want the bot noreply email", cfg["user.email"])
+	}
+	if k := envValue(env, "GIT_CONFIG_KEY_0"); k != githooks.ConfigKey {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want %q (hooks must stay at index 0)", k, githooks.ConfigKey)
+	}
+	if got := envValue(env, "GIT_CONFIG_COUNT"); got != "3" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want 3 (hooks + 2 identity pairs)", got)
+	}
+	// Exactly one GIT_CONFIG_COUNT line — the consolidated-block invariant.
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_CONFIG_COUNT=") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("GIT_CONFIG_COUNT appears %d times, want exactly 1: %v", n, env)
+	}
+}
+
 // envValue returns the value associated with KEY in a slice of
 // KEY=VALUE strings, or "" if KEY is absent. Used by the proxy tests
 // to assert env shape without writing the split-on-equals dance

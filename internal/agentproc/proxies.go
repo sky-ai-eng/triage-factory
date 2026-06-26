@@ -166,10 +166,17 @@ type GitProxyConfig struct {
 // run proceeds, rather than as a 502 mid-push); it does not bound the
 // proxies' own lifetime, which the caller owns via Shutdown.
 //
+// identityPairs (variadic) are the org commit identity's git config pairs
+// (user.name/user.email, via githooks.IdentityConfigPairs) — folded into the
+// single GIT_CONFIG_* block after core.hooksPath so the agent's commits are
+// authored by the org identity in the sandbox too (TFAC-452). Empty → the block
+// carries core.hooksPath (+ proxy pairs) alone, unchanged. Variadic keeps the
+// many test callers that pass no identity compiling untouched.
+//
 // Caller MUST call returned.Shutdown when the run completes (normal
 // or cancelled). On error, no proxies are running and the returned
 // bundle is nil — defer Shutdown is safe but a no-op.
-func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, git *GitProxyConfig) (*runProxies, []string, error) {
+func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, git *GitProxyConfig, identityPairs ...[2]string) (*runProxies, []string, error) {
 	if hostVethIP == "" {
 		return nil, nil, errors.New("agentproc: startProxiesForSandbox: hostVethIP is required")
 	}
@@ -231,6 +238,10 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	gitPairs := [][2]string{
 		{githooks.ConfigKey, githooks.SandboxDir},
 	}
+	// The org commit identity (user.name/email, TFAC-452) layers right after
+	// core.hooksPath (index 0), with the proxy pairs after that. Empty
+	// identityPairs leaves the block as hooks (+ proxy) only — unchanged.
+	gitPairs = append(gitPairs, identityPairs...)
 
 	// Git proxy: a second per-run proxy on its own port of hostVethIP
 	// that holds the GitHub credential host-side and injects Basic auth

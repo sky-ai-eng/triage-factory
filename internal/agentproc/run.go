@@ -99,6 +99,16 @@ type RunOptions struct {
 	// TRIAGE_FACTORY_REPO that the delegated CLI subcommands read.
 	ExtraEnv []string
 
+	// GitUserName / GitUserEmail, when both set, stamp the org's GitHub
+	// identity as the author + committer of every commit the agent makes —
+	// injected as process-scoped user.name / user.email git config alongside
+	// core.hooksPath (githooks.IdentityConfigPairs), in both run modes. The
+	// delegate resolves them from the org GitHub identity (TFAC-452); empty
+	// (either unset) skips the injection entirely, so the agent inherits ambient
+	// git config exactly as before — preserving today's behavior and tests.
+	GitUserName  string
+	GitUserEmail string
+
 	// TraceID is stamped onto every emitted message's RunID field.
 	// Storage-neutral: delegate uses the agent run UUID, the curator
 	// uses its own message-group id.
@@ -615,7 +625,11 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	// See proxies.go for the mapping from resolved creds to proxy provider /
 	// upstream.
 	configureProxies := func(s *sandbox.Sandbox) ([]string, error) {
-		bundle, proxyEnv, perr := startProxiesForSandbox(runCtx, s.HostIP, creds, opts.GitProxy)
+		// Fold the org commit identity (TFAC-452) into the sandbox's GIT_CONFIG_*
+		// block alongside core.hooksPath + the proxy pairs. Empty identity → no
+		// pairs added.
+		identityPairs := githooks.IdentityConfigPairs(opts.GitUserName, opts.GitUserEmail)
+		bundle, proxyEnv, perr := startProxiesForSandbox(runCtx, s.HostIP, creds, opts.GitProxy, identityPairs...)
 		if perr != nil {
 			return nil, perr
 		}
@@ -683,7 +697,12 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	if selfBin, exeErr := os.Executable(); exeErr == nil {
 		hookEnv = append(append([]string(nil), opts.ExtraEnv...), githooks.BinEnvVar+"="+selfBin)
 	}
-	cmd.Env = githooks.DirectAgentEnv(mergeEnv(os.Environ(), hookEnv, creds))
+	// Layer the org commit identity (user.name/user.email) into the same
+	// GIT_CONFIG_* block as core.hooksPath, at the next free indices. Empty
+	// identity → IdentityConfigPairs returns nil → block carries hooks alone
+	// (unchanged behavior). TFAC-452.
+	identityPairs := githooks.IdentityConfigPairs(opts.GitUserName, opts.GitUserEmail)
+	cmd.Env = githooks.DirectAgentEnv(mergeEnv(os.Environ(), hookEnv, creds), identityPairs...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		// Process is non-nil here because the watcher only fires after

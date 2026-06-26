@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -37,6 +38,61 @@ func sessionTranscriptExists(wtPath, sessionID string) bool {
 	}
 	_, err = os.Stat(p)
 	return err == nil
+}
+
+// resolveCommitIdentity resolves the org's GitHub commit-author identity for
+// this run — and, on a manual run whose delegating human differs from the org
+// login, the Co-authored-by trailer crediting them (TFAC-452). This is the
+// single seam: one resolution feeds both run modes (local direct + sandbox) and
+// both the GitHub-PR and Jira-branch paths, via RunOptions.GitUserName/Email
+// (the author/committer) and the prepare-commit-msg hook env var (the trailer).
+//
+// Returns the zero CommitIdentity (stamp nothing) when the GitHub resolver isn't
+// wired (unit tests leave s.ghResolver nil), no org identity resolves
+// (ok=false — no App, no stored PAT login), or the stores aren't set for the
+// co-author lookup. The caller then leaves git identity unset and the agent
+// inherits ambient config — never a fabricated identity; it self-heals once the
+// org's PAT login is (re)persisted.
+//
+// This is also the single seam for a future per-team commit-author NAME: a
+// team_agents name override would replace id.Name here only (the email stays the
+// org-account noreply form so commits still link to the org identity).
+func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType, creatorUserID string) githooks.CommitIdentity {
+	if s.ghResolver == nil {
+		return githooks.CommitIdentity{}
+	}
+	orgLogin, ok := s.ghResolver.OrgIdentityFor(ctx, orgID)
+	if !ok {
+		return githooks.CommitIdentity{}
+	}
+	// Co-author only on manual runs (creatorUserID is NULL for event runs).
+	// Resolve the delegating human's GitHub login on the org's current host;
+	// ResolveCommitIdentity then emits the trailer only when it differs from the
+	// org login (case-insensitive) — the N=1 same-PAT org gets none.
+	manual := triggerType == "manual"
+	var coLogin string
+	if manual && creatorUserID != "" {
+		if stores, set := s.getStores(); set {
+			// The login is host-scoped (user_github_identities is keyed by host), so
+			// a failed base-URL resolve must SKIP the lookup, not pass host="": on a
+			// GHE org an empty host would query the wrong (default) host and silently
+			// miss — or mis-resolve — the human's identity. Both failures are
+			// non-fatal (the run proceeds without a trailer) and debug-logged so an
+			// operator can diagnose a missing/wrong trailer without it surfacing as a
+			// run error.
+			if host, herr := s.ghResolver.BaseURLFor(ctx, orgID); herr != nil {
+				delegateLog.Debug("resolve org github base for co-author lookup failed; manual run will omit the trailer",
+					"org", orgID, "error", herr)
+			} else if login, err := stores.Users.GetGitHubLoginSystem(ctx, creatorUserID, host); err != nil {
+				delegateLog.Debug("resolve co-author github login failed; manual run will omit the trailer",
+					"creator", creatorUserID, "error", err)
+			} else {
+				coLogin = login
+			}
+		}
+	}
+	id, _ := githooks.ResolveCommitIdentity(orgLogin, manual, coLogin)
+	return id
 }
 
 // runAgent is the generic agent execution loop. Works for any task type.
@@ -221,6 +277,21 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		extraEnv = append(extraEnv, "TRIAGE_FACTORY_REPO="+cfg.owner+"/"+cfg.repo)
 	}
 
+	// Resolve the org's GitHub commit identity once for this run (TFAC-452). The
+	// org identity authors + commits every agent commit (injected as
+	// user.name/user.email via baseOpts below, both run modes); a manual run
+	// whose delegating human differs additionally co-attributes them through the
+	// prepare-commit-msg hook, fed by this namespaced env var. A zero identity
+	// (resolver/stores unwired, or no org identity resolves) leaves git config
+	// ambient — no fabricated identity. One resolution feeds both modes and both
+	// the GitHub-PR and Jira-branch paths; it carries across blueprint steps via
+	// the copied creator/trigger. The env var is namespaced (not GIT_*) so it's
+	// never ambient git identity and passes translateEnvForSandbox unchanged.
+	commitIdentity := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
+	if commitIdentity.CoAuthorTrailer != "" {
+		extraEnv = append(extraEnv, "TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER="+commitIdentity.CoAuthorTrailer)
+	}
+
 	s.updateStatus(orgID, runID, "running")
 
 	// StartAgentHost is invoked from inside agentproc.Run's sandbox
@@ -287,6 +358,10 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		Secrets:        s.getRunSecrets(),
 		GitProxy:       gitProxy,
 		StartAgentHost: startAgentHost,
+		// Org commit identity (TFAC-452): empty when none resolved → ambient git
+		// config inherited (today's behavior).
+		GitUserName:  commitIdentity.Name,
+		GitUserEmail: commitIdentity.Email,
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
 

@@ -279,4 +279,47 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 			t.Errorf("SetGitHubPATUser invalid agent UUID: want nil, got %v", err)
 		}
 	})
+
+	t.Run("SetGitHubOrgLogin_WritesScansAndClears", func(t *testing.T) {
+		// The org credential's OWN GitHub login (TFAC-452). Free-form text,
+		// NOT a UUID — the App-bot form "acme-bot[bot]" must round-trip
+		// unmolested (no shape validation, distinct from the PAT-user FK).
+		// Empty clears it back to NULL so an org dropping its PAT path stops
+		// stamping a stale identity. Fresh agents default to empty.
+		store, orgID, _ := factory(t)
+		ctx := context.Background()
+		id, err := store.Create(ctx, orgID, domain.Agent{DisplayName: "Test"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		got, _ := store.GetForOrg(ctx, orgID)
+		if got == nil || got.GitHubOrgLogin != "" {
+			t.Fatalf("fresh agent GitHubOrgLogin=%v, want empty", got)
+		}
+		if err := store.SetGitHubOrgLogin(ctx, orgID, id, "acme-bot[bot]"); err != nil {
+			t.Fatalf("SetGitHubOrgLogin: %v", err)
+		}
+		got, _ = store.GetForOrg(ctx, orgID)
+		if got == nil || got.GitHubOrgLogin != "acme-bot[bot]" {
+			t.Errorf("GitHubOrgLogin=%v want acme-bot[bot]", got)
+		}
+		// Setting the org login must NOT disturb the PAT-user FK or other fields.
+		if got.DisplayName != "Test" {
+			t.Errorf("DisplayName=%q corrupted by SetGitHubOrgLogin", got.DisplayName)
+		}
+		if err := store.SetGitHubOrgLogin(ctx, orgID, id, ""); err != nil {
+			t.Fatalf("SetGitHubOrgLogin clear: %v", err)
+		}
+		got, _ = store.GetForOrg(ctx, orgID)
+		if got == nil || got.GitHubOrgLogin != "" {
+			t.Errorf("GitHubOrgLogin=%v after clear, want empty", got)
+		}
+	})
+
+	t.Run("SetGitHubOrgLogin_OnInvalidAgentUUID_IsNoop", func(t *testing.T) {
+		store, orgID, _ := factory(t)
+		if err := store.SetGitHubOrgLogin(context.Background(), orgID, "not-a-uuid", "octocat"); err != nil {
+			t.Errorf("SetGitHubOrgLogin invalid agent UUID: want nil, got %v", err)
+		}
+	})
 }

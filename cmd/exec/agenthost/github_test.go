@@ -68,6 +68,10 @@ func (f fakeGitHubResolver) BaseURLFor(_ context.Context, _ string) (string, err
 	panic("BaseURLFor is not used by the host-routed gh surface")
 }
 
+func (f fakeGitHubResolver) OrgIdentityFor(_ context.Context, _ string) (string, bool) {
+	panic("OrgIdentityFor is not used by the host-routed gh surface")
+}
+
 // baseOnlyResolver implements ghclient.Resolver WITHOUT the optional
 // RepoIdentityResolver capability, so githubClientAndIdentityForRepo's type
 // assertion fails and it falls back to IdentityUnknown — the conservative
@@ -91,6 +95,10 @@ func (r baseOnlyResolver) TokenFor(_ context.Context, _, _ string) (githubapp.To
 
 func (r baseOnlyResolver) BaseURLFor(_ context.Context, _ string) (string, error) {
 	panic("BaseURLFor is not used by the host-routed gh surface")
+}
+
+func (r baseOnlyResolver) OrgIdentityFor(_ context.Context, _ string) (string, bool) {
+	panic("OrgIdentityFor is not used by the host-routed gh surface")
 }
 
 // ghRecorder captures what the fake GitHub backend saw. Mutex-guarded so the

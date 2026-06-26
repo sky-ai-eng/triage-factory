@@ -414,6 +414,23 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
 		}
+		// TFAC-471: audit the org Jira credential bind/rotate in the same tx.
+		// Record the canonical host (resolveJiraHost) so org-credential rows
+		// share a host string with the per-user jira_user rows for the same
+		// instance — those key off the same resolved org_settings.jira_base_url,
+		// whereas req.URL is whatever the user typed (trailing slash / casing).
+		// Fall back to the raw URL if it doesn't resolve.
+		auditHost := req.URL
+		if canon, ok := resolveJiraHost(req.URL); ok {
+			auditHost = canon
+		}
+		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialSet,
+			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditHost),
+		}); err != nil {
+			return fmt.Errorf("audit credential set: %w", err)
+		}
 		return nil
 	}); err != nil {
 		// Log the underlying wrap-chain (SQL / vault / FK errors) for
@@ -507,7 +524,17 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 			return fmt.Errorf("store Anthropic key: %w", err)
 		}
 		orgSet.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
-		return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
+		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
+			return err
+		}
+		// TFAC-471: audit the org Anthropic key bind/rotate in the same tx. Only
+		// the set branch records — clearing the key (the empty-key arm above) is
+		// a removal, not a credential_set. No host for an API key.
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialSet,
+			DetailJSON:  accessDetailCredential(domain.CredentialKindAnthropicKey, ""),
+		})
 	}); err != nil {
 		settingsLog.Error("anthropic connect persist failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store Claude credentials"})

@@ -1,0 +1,28 @@
+#!/bin/sh
+# Triage Factory prepare-commit-msg hook (TFAC-452).
+#
+# Appends a Co-authored-by: trailer crediting the delegating human on MANUAL
+# delegated-agent runs, so a commit authored by the org's GitHub identity also
+# co-attributes the person who kicked off the run. The org identity remains the
+# sole author/committer (set via injected user.name/user.email git config); this
+# trailer is additive-only.
+#
+# Generic + env-driven: the delegate sets TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER to
+# the full trailer line ONLY for a manual run whose org login differs from the
+# delegating user's. Unset (autonomous/event runs, or the N=1 same-login case)
+# => this hook is a no-op. The hook fires for every commit in every repo via the
+# process-scoped core.hooksPath; the env gate is what scopes it to the right runs.
+#
+# Idempotent: a re-delegation onto an existing branch, a `git commit --amend`, or
+# a commit-message edit re-runs this hook over a message that may already carry
+# the trailer — the grep guard means it's appended at most once. Best-effort and
+# non-blocking by contract: it always exits 0, so it never aborts a commit.
+#
+# git invokes this hook with the path to the commit-message file as $1 (plus an
+# optional source/sha in $2/$3 we don't need).
+
+[ -n "$TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER" ] || exit 0
+f="$1"
+grep -qiF "$TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER" "$f" 2>/dev/null && exit 0
+printf '\n%s\n' "$TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER" >> "$f"
+exit 0

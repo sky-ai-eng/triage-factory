@@ -121,6 +121,26 @@ type Resolver interface {
 	// propagates rather than silently defaulting to github.com: a GHES org
 	// whose base can't be read must not be paired with the public host.
 	BaseURLFor(ctx context.Context, orgID string) (string, error)
+
+	// OrgIdentityFor resolves the org's single GitHub identity — the login the
+	// commit author + committer is stamped as on every delegated-agent commit
+	// (TFAC-452). Two tiers, App-preferred to mirror ClientFor's own order:
+	//
+	//	App  → "<slug>[bot]", the org's App registration slug, resolved live
+	//	       (no stored column; installation-independent — the bot account is
+	//	       one global identity however many accounts the App is installed on).
+	//	PAT  → the stored agents.github_org_login (the login the org PAT
+	//	       authenticates as), persisted by the org-PAT setup/rebind writers —
+	//	       but returned ONLY while the org still has a PAT. The cached login is
+	//	       gated on the same KeyGitHubPAT presence the credential resolver
+	//	       uses, so a value left behind when the PAT was cleared can't resurface
+	//	       as a stale identity for an org that no longer has that credential.
+	//
+	// ok=false when neither resolves — no App, or no live PAT / no stored PAT
+	// login (an org bound before this ticket, or a read error). The caller then
+	// leaves git identity unset and the agent inherits ambient config, never a
+	// fabricated identity; it self-heals on the next PAT re-save.
+	OrgIdentityFor(ctx context.Context, orgID string) (login string, ok bool)
 }
 
 type resolver struct {
@@ -355,6 +375,44 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 // secret, then github.com — so the proxy routes to the host the clone used.
 func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
 	return r.githubBaseFor(ctx, orgID)
+}
+
+// OrgIdentityFor resolves the org's single GitHub commit identity. See the
+// Resolver interface doc for the tier semantics. App is probed first (the bot
+// account "<slug>[bot]") and PAT (agents.github_org_login) second, matching
+// ClientFor's App-preferred order. Both reads use the System (claims-free)
+// door like the rest of the resolver. A read error on either tier is
+// non-fatal — it falls through, and an all-miss returns ok=false so the caller
+// stamps no identity rather than a fabricated one.
+func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (string, bool) {
+	// App tier: the org's registered App acts as "<slug>[bot]". The slug comes
+	// from the App registration, resolved live — no stored column, and
+	// installation-independent (the bot is one global account however many
+	// installations the App has). A staged/inactive App or a read error skips to
+	// PAT rather than claiming an identity the org isn't acting as.
+	if app, err := r.apps.GetForOrgSystem(ctx, orgID); err == nil && app != nil && app.Active && app.Slug != "" {
+		return app.Slug + "[bot]", true
+	}
+	// PAT tier: the login the org PAT authenticates as. agents.github_org_login
+	// is a CACHE of that login, written at PAT bind but deliberately NOT cleared
+	// when the PAT is removed (clearing would mean chasing every scattered
+	// credential-clear path — DELETE /api/integrations, the settings PAT/base-URL
+	// clears, the App-switch teardown — and staying correct as new ones land).
+	// Instead, gate the cached login on the SAME KeyGitHubPAT presence the
+	// resolver's tier-3 uses (tier3PATClient / TokenFor): the login can only
+	// resurface while the credential it describes still exists, so a stale value
+	// left behind after a PAT clear (or a GitHub disconnect) never becomes a
+	// commit identity for an org that no longer has a PAT. A read error is
+	// conservative (treated as no PAT → no identity), never a fabricated one.
+	if pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT); err != nil || pat == "" {
+		return "", false
+	}
+	// PAT present: trust the cached login. Empty (an org bound before TFAC-452,
+	// or a read error) → ok=false; self-heals on the next PAT re-save.
+	if agent, err := r.agents.GetForOrgSystem(ctx, orgID); err == nil && agent != nil && agent.GitHubOrgLogin != "" {
+		return agent.GitHubOrgLogin, true
+	}
+	return "", false
 }
 
 // installationFor selects the App installation whose account matches target.

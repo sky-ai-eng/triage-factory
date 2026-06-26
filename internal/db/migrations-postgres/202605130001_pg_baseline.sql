@@ -622,6 +622,7 @@ CREATE TABLE public.agents (
     default_model text,
     default_autonomy_suitability real,
     github_pat_user_id uuid,
+    github_org_login text,
     jira_service_account_id text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
@@ -767,6 +768,37 @@ CREATE TABLE public.system_llm_runs (
     metadata_json text,
     started_at timestamp with time zone NOT NULL,
     completed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: access_change_log; Type: TABLE; Schema: public; Owner: -
+--
+
+-- Small, low-volume audit log of governance actions that have no external
+-- entity: org/team membership & role grants/changes/revokes, and credential
+-- bind/rotate (GitHub PAT, Jira org + per-user, Anthropic key). Capture only —
+-- the read/display surface is the future team-activity / org-governance view
+-- (TFAC-449 bucket C/D). entities is entity-keyed and team-visible via the task
+-- semi-join, so governance actions (no entity) get their own table rather than
+-- polluting the hot router path.
+--
+-- Written on the APP pool in the SAME transaction as the action it records, so
+-- the log can't diverge from reality — a log-write failure rolls the action
+-- back. action is a free-text discriminator (org_member_granted, org_role_changed,
+-- credential_set, ... — extensible, no CHECK). actor_user_id is the request's
+-- authenticated user (NULL for system/bootstrap). target_user_id / team_id are
+-- set for membership/role actions; detail_json carries the per-action payload
+-- ({old_role,new_role} | {kind,host} | {invite_id} | ...). See TFAC-471.
+CREATE TABLE public.access_change_log (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id uuid NOT NULL,
+    actor_user_id uuid,
+    action text NOT NULL,
+    target_user_id uuid,
+    team_id uuid,
+    detail_json text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -2028,6 +2060,14 @@ ALTER TABLE ONLY public.system_llm_runs
 
 
 --
+-- Name: access_change_log access_change_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.access_change_log
+    ADD CONSTRAINT access_change_log_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: artifacts artifacts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2389,6 +2429,13 @@ CREATE INDEX idx_system_llm_runs_org_started ON public.system_llm_runs USING btr
 --
 
 CREATE INDEX idx_system_llm_runs_org_job_started ON public.system_llm_runs USING btree (org_id, job, started_at DESC);
+
+
+--
+-- Name: idx_access_change_log_org_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_access_change_log_org_created ON public.access_change_log USING btree (org_id, created_at DESC);
 
 
 --
@@ -3170,6 +3217,18 @@ ALTER TABLE ONLY public.repo_profiles
 
 ALTER TABLE ONLY public.system_llm_runs
     ADD CONSTRAINT system_llm_runs_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: access_change_log access_change_log_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+-- Only org_id carries an FK (ON DELETE CASCADE: drop an org's log with the org).
+-- actor_user_id / target_user_id / team_id are deliberately FK-free so the audit
+-- row survives the deletion of the user/team it references — an audit log must
+-- outlive its subjects.
+ALTER TABLE ONLY public.access_change_log
+    ADD CONSTRAINT access_change_log_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
 --
@@ -4150,6 +4209,26 @@ CREATE POLICY system_llm_runs_all ON public.system_llm_runs USING (((org_id = tf
 
 
 --
+-- Name: access_change_log; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.access_change_log ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: access_change_log access_change_log_all; Type: POLICY; Schema: public; Owner: -
+--
+
+-- Mirrors system_llm_runs_all: org-scoped read/write under the app pool. Unlike
+-- system_llm_runs (admin-written), this table IS written through tf_app — every
+-- Record composes inside the claims-bearing WithTx that runs the audited
+-- governance action, so the WITH CHECK side is exercised on write, and the
+-- future org-admin audit view reads under the USING side. (The invite-accept
+-- org_member_granted write is the one admin-pool exception — the invitee has no
+-- RLS standing to insert their own membership — and bypasses this policy.)
+CREATE POLICY access_change_log_all ON public.access_change_log USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+
+--
 -- Name: artifacts; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -5050,6 +5129,22 @@ GRANT ALL ON TABLE public.system_llm_runs TO anon;
 GRANT ALL ON TABLE public.system_llm_runs TO authenticated;
 GRANT ALL ON TABLE public.system_llm_runs TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.system_llm_runs TO tf_app;
+
+
+--
+-- Name: TABLE access_change_log; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.access_change_log TO postgres;
+GRANT ALL ON TABLE public.access_change_log TO anon;
+GRANT ALL ON TABLE public.access_change_log TO authenticated;
+GRANT ALL ON TABLE public.access_change_log TO service_role;
+-- Append-only: tf_app (the app pool) may read + insert but NOT delete/update.
+-- An audit row must be immutable once written, so the app-pool role that serves
+-- every in-org request is deliberately denied UPDATE/DELETE. The admin pool
+-- (postgres) keeps GRANT ALL for the invite-accept insert + orgs ON DELETE
+-- CASCADE; deliberate retention/redaction tooling is an EE concern (TFAC-449 D2).
+GRANT SELECT,INSERT ON TABLE public.access_change_log TO tf_app;
 
 
 --

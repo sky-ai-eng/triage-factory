@@ -536,6 +536,10 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	// (PAT_2) is captured only by the dedicated identity surface (the setup
 	// wizard's User step / the Connect gate page → POST .../identity/github*),
 	// so access and identity stay independent even when the same token is used.
+	// newGitHubLogin captures the login a freshly-validated org PAT authenticates
+	// as, so the tx below can persist it for OrgIdentityFor (TFAC-452). Empty
+	// unless a non-empty PAT was set + validated in this request.
+	var newGitHubLogin string
 	if req.GitHubPAT != nil {
 		if *req.GitHubPAT == "" {
 			creds.GitHubPAT = ""
@@ -545,7 +549,8 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				badRequest(w, "GitHub URL is required before setting a PAT")
 				return
 			}
-			if _, err := auth.ValidateGitHub(r.Context(), url, *req.GitHubPAT); err != nil {
+			ghUser, err := auth.ValidateGitHub(r.Context(), url, *req.GitHubPAT)
+			if err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 					"error": "GitHub: " + err.Error(),
 					"field": "github_pat",
@@ -553,6 +558,7 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			creds.GitHubPAT = *req.GitHubPAT
+			newGitHubLogin = ghUser.Login
 		}
 	}
 
@@ -652,6 +658,12 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := integrations.Save(r.Context(), tx.Secrets, orgID, creds); err != nil {
 			return fmt.Errorf("save credentials: %w", err)
+		}
+		// Persist the org PAT's own GitHub login (set above only when a new PAT
+		// was validated) so OrgIdentityFor can stamp the org commit identity
+		// (TFAC-452). No-op when no PAT was set this request.
+		if err := persistOrgGitHubLogin(r.Context(), tx, orgID, newGitHubLogin); err != nil {
+			return fmt.Errorf("persist org github login: %w", err)
 		}
 		// The Anthropic API key is intentionally not written here — it has its
 		// own validated capture endpoint (POST /api/anthropic/connect). See the

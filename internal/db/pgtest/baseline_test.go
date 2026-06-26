@@ -36,6 +36,9 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		// system_llm_runs: per-call cost + token accounting for the headless
 		// system jobs (scorer/repo-profiler/classifier). TFAC-451.
 		"system_llm_runs",
+		// access_change_log: low-volume audit log of governance actions
+		// (membership/role grants/changes/revokes, credential bind/rotate). TFAC-471.
+		"access_change_log",
 	}
 	for _, table := range expectedTables {
 		var n int
