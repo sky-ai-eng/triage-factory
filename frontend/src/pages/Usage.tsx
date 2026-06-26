@@ -11,6 +11,7 @@ import {
   Tooltip,
 } from 'recharts'
 import TeamSwitch from '../components/TeamSwitch'
+import { useOptionalAuth } from '../contexts/AuthContext'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
 import { readError } from '../lib/api'
@@ -642,11 +643,19 @@ function RangePicker({ value, onChange }: { value: RangeKey; onChange: (r: Range
 }
 
 export default function Usage() {
-  // Org section gates on org-admin; team section on the teams the viewer admins
-  // (filtered from useTeams, NOT the org rollup — drilling into a non-admin team
-  // would 403). Both hooks are mode-safe: local mode reports no org-admin and a
-  // single admin team, so the page shows personal + team there.
+  // The org rollup gates on org-admin; the team section on the teams the viewer
+  // admins (filtered from useTeams, NOT the org rollup — drilling into a non-
+  // admin team would 403). Local mode (no AuthProvider → useOptionalAuth null)
+  // is N=1: the single user owns the whole org and is effectively its admin, so
+  // the org section shows there too. That matters — the org rollup is the ONLY
+  // section that surfaces system-overhead spend (scorer / repo-profiler /
+  // classifier), which carries a NULL creator + NULL team and is excluded from
+  // the personal and team views by design; without it, a local user's system
+  // spend would be invisible. The backend agrees: RequireOrgAdminRole short-
+  // circuits to allowed in local mode.
   const { isAdmin } = useOrgRole()
+  const isLocal = useOptionalAuth() === null
+  const showOrg = isAdmin || isLocal
   const { teams } = useTeams()
   const adminTeams = teams.filter((t) => t.role === 'admin')
 
@@ -679,7 +688,7 @@ export default function Usage() {
       {adminTeams.length > 0 && (
         <TeamSection adminTeams={adminTeams} since={since} reload={reload} />
       )}
-      {isAdmin && <OrgSection since={since} reload={reload} />}
+      {showOrg && <OrgSection since={since} reload={reload} />}
     </div>
   )
 }

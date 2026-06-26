@@ -34,6 +34,14 @@ vi.mock('../hooks/useTeams', () => ({
   }),
 }))
 
+// useOptionalAuth is null in local mode (N=1, no AuthProvider) and a context
+// object in multi mode. The page only checks `=== null` to decide whether the
+// local user counts as the org admin, so the shape doesn't matter here.
+const authMock = vi.hoisted(() => ({ local: false }))
+vi.mock('../contexts/AuthContext', () => ({
+  useOptionalAuth: () => (authMock.local ? null : ({} as unknown)),
+}))
+
 import Usage from './Usage'
 
 // --- fixtures -------------------------------------------------------------
@@ -123,6 +131,7 @@ function fetchedPaths(fetchMock: ReturnType<typeof vi.fn>): string[] {
 beforeEach(() => {
   roleMock.isAdmin = false
   teamsMock.teams = []
+  authMock.local = false
 })
 afterEach(() => vi.unstubAllGlobals())
 
@@ -234,5 +243,34 @@ describe('Usage page', () => {
     // The t2 breakdown loads (its distinct rule name) and the endpoint was hit.
     expect(await screen.findByText('Stale Sweeper')).toBeInTheDocument()
     await waitFor(() => expect(fetchedPaths(fetchMock)).toContain('/api/usage/teams/t2'))
+  })
+
+  it('local mode (N=1) shows the org rollup so system-overhead spend is visible', async () => {
+    // Local mode: no AuthProvider (useOptionalAuth null), useOrgRole reports
+    // non-admin, and the sole team reports admin. The local user is effectively
+    // the org admin, so the org rollup — the only section that surfaces
+    // system-overhead spend (NULL creator + NULL team) — must render.
+    authMock.local = true
+    roleMock.isAdmin = false
+    teamsMock.teams = [{ id: 't1', name: 'Default', slug: 'default', role: 'admin' }]
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/teams/t1': TEAM,
+      '/api/usage/org': ORG,
+    })
+
+    render(<Usage />)
+
+    // All three sections render, and the org rollup is actually fetched.
+    expect(await screen.findByText('Your usage')).toBeInTheDocument()
+    expect(await screen.findByText('Team usage')).toBeInTheDocument()
+    expect(await screen.findByText('Organization')).toBeInTheDocument()
+    await waitFor(() => expect(fetchedPaths(fetchMock)).toContain('/api/usage/org'))
+
+    // The system-overhead row (the org-level NULL-team spend) surfaces — this is
+    // exactly the spend that's invisible without the org section.
+    expect(await screen.findByText('Org-level')).toBeInTheDocument()
+    expect((await screen.findAllByText('System')).length).toBeGreaterThan(0)
+    expect(await screen.findByText('$100.00')).toBeInTheDocument()
   })
 })
