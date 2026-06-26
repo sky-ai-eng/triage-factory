@@ -746,3 +746,80 @@ func TestResolver_AppMintFails_FallsToPAT(t *testing.T) {
 		t.Errorf("a failed mint should fall back to PAT; client carried %q", gh.lastProbe)
 	}
 }
+
+// TestResolver_OrgIdentityFor pins the org commit-identity resolution (TFAC-452):
+// App tier yields "<slug>[bot]" live from the registration (App-preferred, even
+// when a stored PAT login also exists), an inactive/absent App falls through to
+// the stored agents.github_org_login, and neither yields ok=false (the caller
+// then stamps no identity).
+func TestResolver_OrgIdentityFor(t *testing.T) {
+	t.Run("App tier resolves <slug>[bot] live", func(t *testing.T) {
+		r := NewResolver(
+			&fakeSecrets{},
+			&fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot"}},
+			&fakeOrgs{},
+			&fakeAgents{},
+			nil,
+		)
+		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		if !ok || login != "acme-bot[bot]" {
+			t.Fatalf("OrgIdentityFor = (%q, %v), want (acme-bot[bot], true)", login, ok)
+		}
+	})
+
+	t.Run("App preferred over stored PAT login", func(t *testing.T) {
+		r := NewResolver(
+			&fakeSecrets{},
+			&fakeApps{app: &domain.OrgGitHubApp{Active: true, Slug: "acme-bot"}},
+			&fakeOrgs{},
+			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "pat-login"}},
+			nil,
+		)
+		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		if !ok || login != "acme-bot[bot]" {
+			t.Fatalf("OrgIdentityFor = (%q, %v), want App-preferred acme-bot[bot]", login, ok)
+		}
+	})
+
+	t.Run("inactive App falls through to stored PAT login", func(t *testing.T) {
+		r := NewResolver(
+			&fakeSecrets{},
+			&fakeApps{app: &domain.OrgGitHubApp{Active: false, Slug: "acme-bot"}},
+			&fakeOrgs{},
+			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat"}},
+			nil,
+		)
+		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		if !ok || login != "octocat" {
+			t.Fatalf("OrgIdentityFor = (%q, %v), want PAT octocat", login, ok)
+		}
+	})
+
+	t.Run("PAT tier (no App) resolves stored login", func(t *testing.T) {
+		r := NewResolver(
+			&fakeSecrets{},
+			&fakeApps{app: nil},
+			&fakeOrgs{},
+			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat"}},
+			nil,
+		)
+		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		if !ok || login != "octocat" {
+			t.Fatalf("OrgIdentityFor = (%q, %v), want octocat", login, ok)
+		}
+	})
+
+	t.Run("neither yields ok=false", func(t *testing.T) {
+		r := NewResolver(
+			&fakeSecrets{},
+			&fakeApps{app: nil},
+			&fakeOrgs{},
+			&fakeAgents{agent: &domain.Agent{}}, // no stored login
+			nil,
+		)
+		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		if ok || login != "" {
+			t.Fatalf("OrgIdentityFor = (%q, %v), want (\"\", false)", login, ok)
+		}
+	})
+}

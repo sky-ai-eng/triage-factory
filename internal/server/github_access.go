@@ -246,7 +246,10 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 
 	// Validate the PAT against the org's GitHub host (authenticated user
 	// fetch) before touching anything — 422 and nothing changes on failure.
-	if _, err := auth.ValidateGitHub(ctx, base, pat); err != nil {
+	// Keep the resolved login: switching to PAT makes it the org's GitHub
+	// identity, so we persist it for OrgIdentityFor (TFAC-452).
+	ghUser, err := auth.ValidateGitHub(ctx, base, pat)
+	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 			"error": "That token didn't validate against " + base + ". Double-check it and try again.",
 			"field": "pat",
@@ -259,6 +262,11 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		// working PAT with the App intact — recoverable from either side.
 		if err := integrations.Save(ctx, tx.Secrets, orgID, auth.Credentials{GitHubURL: base, GitHubPAT: pat}); err != nil {
 			return fmt.Errorf("save pat: %w", err)
+		}
+		// The PAT is now the org's GitHub identity (the App is torn down below) —
+		// persist its login so OrgIdentityFor resolves the PAT tier (TFAC-452).
+		if err := persistOrgGitHubLogin(ctx, tx, orgID, ghUser.Login); err != nil {
+			return fmt.Errorf("persist org github login: %w", err)
 		}
 		if err := tx.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
 			return fmt.Errorf("delete app: %w", err)

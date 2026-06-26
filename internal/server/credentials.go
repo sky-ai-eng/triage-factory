@@ -139,6 +139,16 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		// conflated. The two may carry the same token value, but they are set
 		// and stored independently.
 
+		// Persist the org credential's OWN GitHub login (the login the PAT
+		// authenticates as) so the resolver's OrgIdentityFor can stamp the org
+		// commit-author identity on delegated-agent commits (TFAC-452). This is
+		// org ACCESS metadata on the agents row, NOT user_github_identities.
+		if resp.GitHub != nil {
+			if err := persistOrgGitHubLogin(r.Context(), tx, orgID, resp.GitHub.Login); err != nil {
+				return fmt.Errorf("persist org github login: %w", err)
+			}
+		}
+
 		// Persist base URLs + clone protocol in org_settings so they
 		// survive without keychain access. Read-modify-write inside
 		// the same tx; the store returns DefaultOrgSettings() on a
@@ -180,6 +190,33 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// persistOrgGitHubLogin records the org credential's OWN GitHub login on the
+// agents row (TFAC-452) so the credential resolver's OrgIdentityFor PAT tier
+// can stamp the org commit-author identity on delegated-agent commits. Called
+// inside the same WithTx that saves the org PAT, by every org-PAT writer that
+// already validated the login (handleIntegrationsSetup, the App→PAT switch, the
+// settings PAT update). This is org ACCESS metadata — it deliberately does NOT
+// touch user_github_identities (the per-user PAT_2 identity surface).
+//
+// An empty login is a no-op (the caller had no GitHub PAT in this write). A
+// missing agents row (not yet bootstrapped) is skipped rather than erroring —
+// the login self-heals on the next PAT re-save. A real write error propagates so
+// it rolls back with the rest of the caller's tx. The App path never calls this:
+// an App org's bot login (<slug>[bot]) resolves live from the registration.
+func persistOrgGitHubLogin(ctx context.Context, tx db.TxStores, orgID, login string) error {
+	if login == "" {
+		return nil
+	}
+	agent, err := tx.Agents.GetForOrg(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("load agent for org github login: %w", err)
+	}
+	if agent == nil {
+		return nil // not bootstrapped yet; nothing to stamp
+	}
+	return tx.Agents.SetGitHubOrgLogin(ctx, orgID, agent.ID, login)
 }
 
 func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request) {

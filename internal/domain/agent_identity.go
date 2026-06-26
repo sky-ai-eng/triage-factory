@@ -23,6 +23,7 @@ type Agent struct {
 	DefaultModel               string   // "" = no default; consumer falls through to global default
 	DefaultAutonomySuitability *float64 // nil = no default; consumer uses the trigger-level threshold instead
 	GitHubPATUserID            string   // "" if not borrowing a PAT; post-SKY-269 local mode populates with the sentinel user at bootstrap
+	GitHubOrgLogin             string   // the org credential's OWN GitHub login (PAT path) — "" until a PAT bind persists it; distinct from GitHubPATUserID (the user who pasted the PAT). The credential resolver's OrgIdentityFor reads this to stamp the org commit identity (TFAC-452).
 	JiraServiceAccountID       string   // "" if no Jira service account (v2 surface)
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time

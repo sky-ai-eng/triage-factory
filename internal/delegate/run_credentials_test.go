@@ -61,6 +61,13 @@ func (f *fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, er
 	return ghclient.DefaultBaseURL, nil
 }
 
+// OrgIdentityFor satisfies the ghclient.Resolver interface. These credential
+// tests don't exercise commit-identity stamping, so a no-identity result keeps
+// the delegate's git-identity resolution a no-op (ambient config inherited).
+func (f *fakeResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, bool) {
+	return "", false
+}
+
 var _ ghclient.Resolver = (*fakeResolver)(nil)
 
 // recordingSecrets is a SecretsReader test double whose identity we can

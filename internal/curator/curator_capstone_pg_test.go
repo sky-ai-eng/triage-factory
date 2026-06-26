@@ -518,6 +518,9 @@ func (r *capstoneResolver) TokenFor(_ context.Context, orgID, target string) (gi
 func (r *capstoneResolver) BaseURLFor(context.Context, string) (string, error) {
 	return "https://github.com", nil
 }
+func (r *capstoneResolver) OrgIdentityFor(context.Context, string) (string, bool) {
+	return "", false
+}
 func (r *capstoneResolver) calledWith(orgID, target string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

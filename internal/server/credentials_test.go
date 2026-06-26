@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -271,5 +272,59 @@ func TestIntegrationsStatus_InactiveAppNotReady(t *testing.T) {
 	}
 	if st["setup_step"] != "org" {
 		t.Errorf("setup_step=%v with only an inactive App; want org", st["setup_step"])
+	}
+}
+
+// TestHandleIntegrationsSetup_PersistsOrgGitHubLogin pins TFAC-452's write path
+// through the setup handler: a validated org PAT persists the credential's own
+// login on agents.github_org_login (so OrgIdentityFor can stamp the org commit
+// identity) WITHOUT writing user_github_identities — org access and per-user
+// identity stay independent. A fake GitHub host returns the login so no real
+// network call is made.
+func TestHandleIntegrationsSetup_PersistsOrgGitHubLogin(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	org := runmode.LocalDefaultOrgID
+
+	// Fake GHE host: ValidateGitHub hits {base}/api/v3/user for non-github.com.
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/user" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"login": "acme-bot"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer gh.Close()
+
+	rec := doJSON(t, s, http.MethodPost, "/api/integrations/setup", map[string]string{
+		"github_url":     gh.URL,
+		"github_pat":     "ghp_test",
+		"clone_protocol": "https",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// agents.github_org_login is the validated login.
+	var login sql.NullString
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT github_org_login FROM agents WHERE org_id = ?`, org,
+	).Scan(&login); err != nil {
+		t.Fatalf("read agents.github_org_login: %v", err)
+	}
+	if login.String != "acme-bot" {
+		t.Errorf("agents.github_org_login = %q, want acme-bot", login.String)
+	}
+
+	// ...and per-user identity is untouched: setup writes ACCESS, not identity.
+	var n int
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM user_github_identities`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count user_github_identities: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("user_github_identities has %d rows; setup must not bind per-user identity", n)
 	}
 }

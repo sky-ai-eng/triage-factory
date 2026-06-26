@@ -50,7 +50,7 @@ func newTxAgentStore(tx queryer) db.AgentStore {
 var _ db.AgentStore = (*agentStore)(nil)
 
 const pgAgentColumns = `id, display_name, default_model, default_autonomy_suitability,
-       github_pat_user_id, jira_service_account_id,
+       github_pat_user_id, github_org_login, jira_service_account_id,
        created_at, updated_at`
 
 func (s *agentStore) GetForOrg(ctx context.Context, orgID string) (*domain.Agent, error) {
@@ -173,6 +173,21 @@ func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userI
 	return err
 }
 
+func (s *agentStore) SetGitHubOrgLogin(ctx context.Context, orgID, agentID, login string) error {
+	if !isValidUUID(agentID) {
+		return nil
+	}
+	// login is a free-form GitHub login (e.g. "octocat" or "acme-bot[bot]"),
+	// stored in the text column github_org_login — no UUID shape check, unlike
+	// SetGitHubPATUser's user FK. Empty clears it (SQL NULL).
+	_, err := s.app.ExecContext(ctx, `
+		UPDATE agents
+		SET github_org_login = $1
+		WHERE org_id = $2 AND id = $3
+	`, nullString(login), orgID, agentID)
+	return err
+}
+
 // nullString returns nil when s is empty so the column ends up SQL NULL.
 func nullString(s string) any {
 	if s == "" {
@@ -194,10 +209,10 @@ func nullUUID(s string) any {
 func scanAgentRowPG(row *sql.Row) (domain.Agent, error) {
 	var a domain.Agent
 	var defaultModel, jiraSvc sql.NullString
-	var ghPATUser sql.NullString
+	var ghPATUser, ghOrgLogin sql.NullString
 	var defAutonomy sql.NullFloat64
 	if err := row.Scan(&a.ID, &a.DisplayName, &defaultModel, &defAutonomy,
-		&ghPATUser, &jiraSvc, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&ghPATUser, &ghOrgLogin, &jiraSvc, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return a, err
 	}
 	a.DefaultModel = defaultModel.String
@@ -206,6 +221,7 @@ func scanAgentRowPG(row *sql.Row) (domain.Agent, error) {
 		a.DefaultAutonomySuitability = &v
 	}
 	a.GitHubPATUserID = ghPATUser.String
+	a.GitHubOrgLogin = ghOrgLogin.String
 	a.JiraServiceAccountID = jiraSvc.String
 	return a, nil
 }

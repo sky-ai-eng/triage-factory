@@ -121,6 +121,22 @@ type Resolver interface {
 	// propagates rather than silently defaulting to github.com: a GHES org
 	// whose base can't be read must not be paired with the public host.
 	BaseURLFor(ctx context.Context, orgID string) (string, error)
+
+	// OrgIdentityFor resolves the org's single GitHub identity — the login the
+	// commit author + committer is stamped as on every delegated-agent commit
+	// (TFAC-452). Two tiers, App-preferred to mirror ClientFor's own order:
+	//
+	//	App  → "<slug>[bot]", the org's App registration slug, resolved live
+	//	       (no stored column; installation-independent — the bot account is
+	//	       one global identity however many accounts the App is installed on).
+	//	PAT  → the stored agents.github_org_login (the login the org PAT
+	//	       authenticates as), persisted by the org-PAT setup/rebind writers.
+	//
+	// ok=false when neither resolves — no App registration, and no stored PAT
+	// login (an org bound before this ticket, or a read error). The caller then
+	// leaves git identity unset and the agent inherits ambient config, never a
+	// fabricated identity; it self-heals on the next PAT re-save.
+	OrgIdentityFor(ctx context.Context, orgID string) (login string, ok bool)
 }
 
 type resolver struct {
@@ -355,6 +371,31 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 // secret, then github.com — so the proxy routes to the host the clone used.
 func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
 	return r.githubBaseFor(ctx, orgID)
+}
+
+// OrgIdentityFor resolves the org's single GitHub commit identity. See the
+// Resolver interface doc for the tier semantics. App is probed first (the bot
+// account "<slug>[bot]") and PAT (agents.github_org_login) second, matching
+// ClientFor's App-preferred order. Both reads use the System (claims-free)
+// door like the rest of the resolver. A read error on either tier is
+// non-fatal — it falls through, and an all-miss returns ok=false so the caller
+// stamps no identity rather than a fabricated one.
+func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (string, bool) {
+	// App tier: the org's registered App acts as "<slug>[bot]". The slug comes
+	// from the App registration, resolved live — no stored column, and
+	// installation-independent (the bot is one global account however many
+	// installations the App has). A staged/inactive App or a read error skips to
+	// PAT rather than claiming an identity the org isn't acting as.
+	if app, err := r.apps.GetForOrgSystem(ctx, orgID); err == nil && app != nil && app.Active && app.Slug != "" {
+		return app.Slug + "[bot]", true
+	}
+	// PAT tier: the login the org PAT authenticates as, persisted at PAT bind.
+	// Empty (an org bound before TFAC-452, or no PAT) → ok=false; self-heals on
+	// the next PAT re-save.
+	if agent, err := r.agents.GetForOrgSystem(ctx, orgID); err == nil && agent != nil && agent.GitHubOrgLogin != "" {
+		return agent.GitHubOrgLogin, true
+	}
+	return "", false
 }
 
 // installationFor selects the App installation whose account matches target.
