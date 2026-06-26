@@ -31,10 +31,21 @@ func recordAccessChangeTx(ctx context.Context, ex execer, orgID string, e domain
 	return err
 }
 
-// accessDetailNewRole builds the detail_json for a role-change action. The new
-// role is the cheap, already-validated value the handler holds; the prior role
-// would need an extra read the "purely additive Record call" mandate avoids, so
-// the audit captures who-set-whom-to-what.
+// accessDetailRoleChange builds the detail_json for a role-change action,
+// recording the old→new transition (the store's UpdateRole / ChangeMemberRole
+// return the prior role from the same UPDATE). The from→to delta is what makes
+// a privilege change auditable — promote vs. demote.
+func accessDetailRoleChange(oldRole, newRole string) string {
+	b, _ := json.Marshal(struct {
+		OldRole string `json:"old_role"`
+		NewRole string `json:"new_role"`
+	}{OldRole: oldRole, NewRole: newRole})
+	return string(b)
+}
+
+// accessDetailNewRole builds the detail_json for a member-ADD action, which has
+// no prior role — only the role the member was added at. (Role *changes* use
+// accessDetailRoleChange, which also carries old_role.)
 func accessDetailNewRole(role string) string {
 	b, _ := json.Marshal(struct {
 		NewRole string `json:"new_role"`

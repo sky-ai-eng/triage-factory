@@ -244,13 +244,14 @@ type TeamsStore interface {
 	// allowed set and confirm the target is an org member before calling.
 	AddMember(ctx context.Context, teamID, userID, role string) error
 
-	// ChangeMemberRole sets userID's team role on teamID. App pool:
-	// memberships_update RLS gates the write to team admins or org admins.
+	// ChangeMemberRole sets userID's team role on teamID and returns the prior
+	// role (so the governance audit log can record the old→new transition). App
+	// pool: memberships_update RLS gates the write to team admins or org admins.
 	// Returns ErrLastTeamAdminGuard when the change would drop the team's last
 	// admin (the guard trigger fires), and ErrTeamMemberNotFound when no row
 	// matches. Callers validate role before calling so an invalid enum never
 	// reaches the column.
-	ChangeMemberRole(ctx context.Context, teamID, userID, role string) error
+	ChangeMemberRole(ctx context.Context, teamID, userID, role string) (oldRole string, err error)
 
 	// RemoveMember deletes userID's membership on teamID. App pool:
 	// memberships_delete RLS permits the caller to remove themselves

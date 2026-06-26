@@ -73,8 +73,10 @@ func TestOrgMemberRoleChange_EmitsAuditRow(t *testing.T) {
 	if row.target.String != r.memb {
 		t.Errorf("target = %q, want %q (the member)", row.target.String, r.memb)
 	}
-	if row.detail.String != `{"new_role":"admin"}` {
-		t.Errorf("detail = %q, want {\"new_role\":\"admin\"}", row.detail.String)
+	// The member is seeded at role "member" and promoted to "admin", so the
+	// detail records the old→new transition.
+	if row.detail.String != `{"old_role":"member","new_role":"admin"}` {
+		t.Errorf("detail = %q, want {\"old_role\":\"member\",\"new_role\":\"admin\"}", row.detail.String)
 	}
 }
 
@@ -98,6 +100,33 @@ func TestOrgMemberRemove_EmitsAuditRow(t *testing.T) {
 	}
 	if got[0].detail.Valid {
 		t.Errorf("detail = %q, want NULL (a revoke carries no detail)", got[0].detail.String)
+	}
+}
+
+// TestOrgMemberRemove_SelfLeaveEmitsAuditRow: a self-leave (the actor removes
+// their OWN membership) both succeeds and writes the org_member_revoked row.
+// The audit Record runs before the delete so the actor still has org access
+// when the row's RLS WITH CHECK (tf.user_has_org_access) is evaluated —
+// recording after the self-removal would fail the policy (SQLSTATE 42501).
+// Regression guard for the failure TestWS_MembershipRemovalClosesSocket caught.
+func TestOrgMemberRemove_SelfLeaveEmitsAuditRow(t *testing.T) {
+	r := newOrgMembersRig(t)
+
+	rec := httptest.NewRecorder()
+	r.omh.handleOrgMemberRemove(rec, r.req(http.MethodDelete, r.memb, r.memb, nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (self-leave); body=%s", rec.Code, rec.Body.String())
+	}
+	if r.isMember(t, r.memb) {
+		t.Errorf("member still present after self-leave, want removed")
+	}
+
+	got := r.auditRows(t, domain.AccessActionOrgMemberRevoked)
+	if len(got) != 1 {
+		t.Fatalf("audit rows = %d, want exactly 1 (self-leave still audited)", len(got))
+	}
+	if got[0].actor.String != r.memb || got[0].target.String != r.memb {
+		t.Errorf("actor/target = %q/%q, want both %q (self-leave)", got[0].actor.String, got[0].target.String, r.memb)
 	}
 }
 

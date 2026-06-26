@@ -34,9 +34,10 @@ type AccessChange struct {
 	// TeamID is set for team-scoped actions (and for an org grant that also
 	// places the member on a team). Empty → SQL NULL.
 	TeamID string `json:"team_id,omitempty"`
-	// DetailJSON carries the action-specific payload, e.g. {"new_role":"admin"}
-	// for a role change, {"kind":"github_pat","host":"..."} for a credential
-	// set, {"invite_id":"..."} for an invite-accept grant. Empty → SQL NULL.
+	// DetailJSON carries the action-specific payload, e.g.
+	// {"old_role":"member","new_role":"admin"} for a role change,
+	// {"kind":"github_pat","host":"..."} for a credential set,
+	// {"invite_id":"..."} for an invite-accept grant. Empty → SQL NULL.
 	DetailJSON string    `json:"detail_json,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 }

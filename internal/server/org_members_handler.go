@@ -137,7 +137,8 @@ func (h *orgMembersHandler) handleOrgMemberRoleChange(w http.ResponseWriter, r *
 	}
 
 	err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.OrgMemberships.UpdateRole(r.Context(), orgID, targetID, role); err != nil {
+		oldRole, err := tx.OrgMemberships.UpdateRole(r.Context(), orgID, targetID, role)
+		if err != nil {
 			return err
 		}
 		// TFAC-471: record the role change in the same tx — a log-write failure
@@ -146,7 +147,7 @@ func (h *orgMembersHandler) handleOrgMemberRoleChange(w http.ResponseWriter, r *
 			ActorUserID:  userID,
 			Action:       domain.AccessActionOrgRoleChanged,
 			TargetUserID: targetID,
-			DetailJSON:   accessDetailNewRole(role),
+			DetailJSON:   accessDetailRoleChange(oldRole, role),
 		})
 	})
 	if !writeOrgMemberMutationResult(w, "org-members", err) {
@@ -190,15 +191,21 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 	}
 
 	err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.OrgMemberships.Remove(r.Context(), orgID, targetID); err != nil {
-			return err
-		}
-		// TFAC-471: audit the revoke in the same tx (rolls back with it).
-		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+		// TFAC-471: audit the revoke BEFORE the delete. The audit row's RLS
+		// WITH CHECK requires the writer to still have org access
+		// (tf.user_has_org_access); a self-leave removes the actor's own
+		// org_memberships row, so recording after Remove would fail the policy
+		// (SQLSTATE 42501). Same tx → the audit row rolls back if Remove fails
+		// (last-owner guard, missing target), so the ordering doesn't let a
+		// phantom revoke persist.
+		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID:  userID,
 			Action:       domain.AccessActionOrgMemberRevoked,
 			TargetUserID: targetID,
-		})
+		}); err != nil {
+			return err
+		}
+		return tx.OrgMemberships.Remove(r.Context(), orgID, targetID)
 	})
 	if !writeOrgMemberMutationResult(w, "org-members", err) {
 		return

@@ -471,15 +471,30 @@ func (s *teamsStore) AddMember(ctx context.Context, teamID, userID, role string)
 	return nil
 }
 
-func (s *teamsStore) ChangeMemberRole(ctx context.Context, teamID, userID, role string) error {
-	res, err := s.app.ExecContext(ctx, `
-		UPDATE memberships SET role = $3::membership_role
-		WHERE team_id = $1 AND user_id = $2
-	`, teamID, userID, role)
-	if err != nil {
-		return translateTeamAdminGuard(fmt.Errorf("update membership role: %w", err))
+func (s *teamsStore) ChangeMemberRole(ctx context.Context, teamID, userID, role string) (string, error) {
+	// Capture and return the prior role via the prev CTE (snapshotted before the
+	// UPDATE applies) so the governance audit log records the old→new
+	// transition. A zero-row UPDATE — the member isn't on the team — yields no
+	// RETURNING row → sql.ErrNoRows → ErrTeamMemberNotFound (the
+	// assertOneTeamMemberRow contract, expressed through the query).
+	var oldRole string
+	err := s.app.QueryRowContext(ctx, `
+		WITH prev AS (
+			SELECT role FROM memberships
+			WHERE team_id = $1 AND user_id = $2
+		)
+		UPDATE memberships m SET role = $3::membership_role
+		FROM prev
+		WHERE m.team_id = $1 AND m.user_id = $2
+		RETURNING prev.role::text
+	`, teamID, userID, role).Scan(&oldRole)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", db.ErrTeamMemberNotFound
 	}
-	return assertOneTeamMemberRow(res, "update membership role")
+	if err != nil {
+		return "", translateTeamAdminGuard(fmt.Errorf("update membership role: %w", err))
+	}
+	return oldRole, nil
 }
 
 func (s *teamsStore) RemoveMember(ctx context.Context, teamID, userID string) error {

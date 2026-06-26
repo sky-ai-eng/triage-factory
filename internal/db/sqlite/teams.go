@@ -365,8 +365,8 @@ func (s *teamsStore) AddMember(_ context.Context, _, _, _ string) error {
 	return db.ErrNotApplicableInLocal
 }
 
-func (s *teamsStore) ChangeMemberRole(_ context.Context, _, _, _ string) error {
-	return db.ErrNotApplicableInLocal
+func (s *teamsStore) ChangeMemberRole(_ context.Context, _, _, _ string) (string, error) {
+	return "", db.ErrNotApplicableInLocal
 }
 
 func (s *teamsStore) RemoveMember(_ context.Context, _, _ string) error {

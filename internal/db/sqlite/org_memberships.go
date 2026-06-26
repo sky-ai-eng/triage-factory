@@ -25,8 +25,8 @@ func (*orgMembershipsStore) ListWithIdentity(_ context.Context, _, _, _ string) 
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (*orgMembershipsStore) UpdateRole(_ context.Context, _, _, _ string) error {
-	return db.ErrNotApplicableInLocal
+func (*orgMembershipsStore) UpdateRole(_ context.Context, _, _, _ string) (string, error) {
+	return "", db.ErrNotApplicableInLocal
 }
 
 func (*orgMembershipsStore) Remove(_ context.Context, _, _ string) error {

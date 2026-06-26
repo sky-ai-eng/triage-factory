@@ -251,7 +251,8 @@ func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r
 	}
 
 	err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.Teams.ChangeMemberRole(r.Context(), teamID, target, role); err != nil {
+		oldRole, err := tx.Teams.ChangeMemberRole(r.Context(), teamID, target, role)
+		if err != nil {
 			return err
 		}
 		// TFAC-471: audit the team role change in the same tx (rolls back with it).
@@ -260,7 +261,7 @@ func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r
 			Action:       domain.AccessActionTeamRoleChanged,
 			TargetUserID: target,
 			TeamID:       teamID,
-			DetailJSON:   accessDetailNewRole(role),
+			DetailJSON:   accessDetailRoleChange(oldRole, role),
 		})
 	})
 	if !writeTeamMemberMutationResult(w, err) {
