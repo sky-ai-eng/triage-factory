@@ -5121,7 +5121,12 @@ GRANT ALL ON TABLE public.access_change_log TO postgres;
 GRANT ALL ON TABLE public.access_change_log TO anon;
 GRANT ALL ON TABLE public.access_change_log TO authenticated;
 GRANT ALL ON TABLE public.access_change_log TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.access_change_log TO tf_app;
+-- Append-only: tf_app (the app pool) may read + insert but NOT delete/update.
+-- An audit row must be immutable once written, so the app-pool role that serves
+-- every in-org request is deliberately denied UPDATE/DELETE. The admin pool
+-- (postgres) keeps GRANT ALL for the invite-accept insert + orgs ON DELETE
+-- CASCADE; deliberate retention/redaction tooling is an EE concern (TFAC-449 D2).
+GRANT SELECT,INSERT ON TABLE public.access_change_log TO tf_app;
 
 
 --

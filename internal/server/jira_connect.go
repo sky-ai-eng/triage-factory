@@ -666,6 +666,16 @@ func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Reques
 		if err := tx.Users.UpsertJiraIdentity(r.Context(), userID, host, jiraUser.StableID(), jiraUser.DisplayName, "connect_oauth"); err != nil {
 			return fmt.Errorf("persist jira identity: %w", err)
 		}
+		// TFAC-471: audit the per-user Jira credential bind/rotate in the same
+		// tx, mirroring the paste path (handleJiraIdentityPAT). actor = the user
+		// binding their own access; host carries the org's Jira host.
+		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialSet,
+			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraUser, host),
+		}); err != nil {
+			return fmt.Errorf("audit credential set: %w", err)
+		}
 		return nil
 	}); err != nil {
 		internalError(w, "jira-connect", err)

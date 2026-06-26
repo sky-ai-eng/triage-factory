@@ -198,7 +198,7 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 			Action:       domain.AccessActionTeamMemberAdded,
 			TargetUserID: target,
 			TeamID:       teamID,
-			DetailJSON:   accessDetailNewRole(role),
+			DetailJSON:   accessDetailAddedRole(role),
 		})
 	})
 	switch {

@@ -43,10 +43,11 @@ func accessDetailRoleChange(oldRole, newRole string) string {
 	return string(b)
 }
 
-// accessDetailNewRole builds the detail_json for a member-ADD action, which has
-// no prior role — only the role the member was added at. (Role *changes* use
-// accessDetailRoleChange, which also carries old_role.)
-func accessDetailNewRole(role string) string {
+// accessDetailAddedRole builds the detail_json for a member-ADD action, which
+// has no prior role — only the role the member was added at. Named for the add
+// case so it isn't mistaken for the role-change builder: role *changes* use
+// accessDetailRoleChange, which also carries old_role.
+func accessDetailAddedRole(role string) string {
 	b, _ := json.Marshal(struct {
 		NewRole string `json:"new_role"`
 	}{NewRole: role})
