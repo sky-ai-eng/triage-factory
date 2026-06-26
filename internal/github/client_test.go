@@ -83,7 +83,7 @@ func TestClient_UserID(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		id, err := NewClient(srv.URL, "").UserID("acme-bot[bot]")
+		id, err := NewClient(srv.URL, "").UserID(context.Background(), "acme-bot[bot]")
 		if err != nil {
 			t.Fatalf("UserID: %v", err)
 		}
@@ -104,19 +104,25 @@ func TestClient_UserID(t *testing.T) {
 		}
 	})
 
-	t.Run("404 -> 0 + error", func(t *testing.T) {
+	t.Run("404 -> 0 + typed *HTTPError (status-discriminable)", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
 		}))
 		defer srv.Close()
 
-		id, err := NewClient(srv.URL, "").UserID("ghost[bot]")
+		id, err := NewClient(srv.URL, "").UserID(context.Background(), "ghost[bot]")
 		if err == nil {
 			t.Fatal("UserID on 404 returned nil error; want an error so the caller falls back to the plain form")
 		}
 		if id != 0 {
 			t.Errorf("id = %d, want 0 on error", id)
+		}
+		// The error wraps a *HTTPError so a caller can status-discriminate
+		// (404 vs 429, …) rather than only checking err != nil.
+		var he *HTTPError
+		if !errors.As(err, &he) || he.StatusCode != http.StatusNotFound {
+			t.Errorf("error = %v, want a wrapped *HTTPError with StatusCode 404", err)
 		}
 	})
 
@@ -127,7 +133,7 @@ func TestClient_UserID(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		id, err := NewClient(srv.URL, "").UserID("acme-bot[bot]")
+		id, err := NewClient(srv.URL, "").UserID(context.Background(), "acme-bot[bot]")
 		if err == nil || id != 0 {
 			t.Fatalf("UserID on idless body = (%d, %v), want (0, error)", id, err)
 		}

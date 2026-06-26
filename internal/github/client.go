@@ -80,11 +80,14 @@ func (c *Client) Get(path string) ([]byte, error) {
 // call routes through c.baseURL like every other request, so it targets
 // github.com or the org's GHES host without hardcoding api.github.com.
 //
-// Returns (0, error) on a non-2xx (notably 404 when the freshly-created bot
-// account hasn't propagated yet) or a malformed/idless body, so the caller can
-// fall back to the plain "<slug>[bot]@users.noreply.github.com" form.
-func (c *Client) UserID(login string) (int64, error) {
-	data, err := c.Get("/users/" + url.PathEscape(login))
+// ctx cancels the request (the call goes through getCtx rather than the
+// ctx-free do() family). Returns (0, error) on a non-2xx (notably 404 when the
+// freshly-created bot account hasn't propagated yet) or a malformed/idless body,
+// so the caller can fall back to the plain "<slug>[bot]@users.noreply.github.com"
+// form. On a non-2xx the error wraps a *HTTPError, so a caller can status-
+// discriminate via errors.As (e.g. 404 vs 429) rather than only checking err != nil.
+func (c *Client) UserID(ctx context.Context, login string) (int64, error) {
+	data, err := c.getCtx(ctx, "/users/"+url.PathEscape(login))
 	if err != nil {
 		return 0, fmt.Errorf("get user %q: %w", login, err)
 	}
@@ -98,6 +101,42 @@ func (c *Client) UserID(login string) (int64, error) {
 		return 0, fmt.Errorf("user %q: response carried no id", login)
 	}
 	return u.ID, nil
+}
+
+// getCtx performs a context-aware authenticated GET (or unauthenticated, when
+// the token is empty — see setAuth) and returns the response body. It differs
+// from the do() family in two ways UserID needs and the broader API doesn't
+// (yet) provide: it honors ctx for cancellation, and it returns a typed
+// *HTTPError on a non-2xx so callers can status-discriminate via errors.As —
+// matching GetConditional / GetRaw / DownloadArtifact, which already do. It's
+// kept as its own seam rather than changing do()'s shared error type across
+// every Get/Post/… caller in this PR.
+func (c *Client) getCtx(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, &HTTPError{
+			StatusCode: resp.StatusCode,
+			Body:       string(data),
+			msg:        fmt.Sprintf("GET %s returned %d: %s", path, resp.StatusCode, string(data)),
+		}
+	}
+	return data, nil
 }
 
 // GetConditional performs an authenticated GET that sends an If-None-Match
