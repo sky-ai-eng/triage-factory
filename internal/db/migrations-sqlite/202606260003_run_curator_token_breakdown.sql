@@ -11,17 +11,17 @@
 -- baseline; the Postgres baseline (unreleased) carries these columns directly.
 --
 -- Both tables populate going forward by SETting each column to the absolute
--- SUM over the owning message table at completion (run_messages for runs via
--- AgentRunStore.Complete; curator_messages for curator turns via
--- CompleteRequest / CompleteCuratorRequest) — idempotent across resumes.
---
--- Completed-spend-only: the roll-up runs ONLY on the terminal completion
--- write. The cancel paths (AgentRunStore.MarkCancelledIfActive /
--- CuratorStore.MarkRequestCancelledIfActive) are plain status flips with no
--- SUM, so a row cancelled mid-turn keeps token columns at 0 even if messages
--- streamed. Symmetric across runs + curator; intentional (the cancel path is
--- kept cheap). The TFAC-472 spend view should therefore read these columns as
--- *completed* token spend — partial spend on cancelled work is not captured.
+-- SUM over the owning message table (run_messages for runs; curator_messages
+-- for curator turns) — idempotent, since the SUM is always the full current
+-- total. EVERY terminal write does this roll-up, not just normal completion:
+-- the streaming sink writes per-message tokens as the turn runs, so a run or
+-- request that ends by cancel or infra-failure has real token rows that must
+-- be reflected rather than stranded at 0. So the SUM lives in Complete /
+-- CompleteRequest AND in MarkFailedIfActive / MarkCancelledIfActive /
+-- MarkRequestCancelledIfActive. (MarkDiscarded is the lone exception — it only
+-- acts on pending_approval rows, already rolled up at completion.) Net: these
+-- columns are trustworthy for every terminal state, so the TFAC-472 spend view
+-- reads them natively without joining the message tables.
 ALTER TABLE runs ADD COLUMN input_tokens          INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE runs ADD COLUMN output_tokens         INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE runs ADD COLUMN cache_read_tokens     INTEGER NOT NULL DEFAULT 0;

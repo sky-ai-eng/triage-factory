@@ -432,6 +432,61 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	// Every terminal write — not just Complete — refreshes the token cache from
+	// the run_messages SUM, so a run that ends by cancel or infra-failure still
+	// reflects the tokens it streamed rather than stranding the columns at 0
+	// (TFAC-473).
+	t.Run("CancelAndFail_DenormalizeRunMessageTokens", func(t *testing.T) {
+		ptr := func(n int) *int { return &n }
+		seedRunningWithTokens := func(t *testing.T, store db.AgentRunStore, orgID string, seed AgentRunSeeder) string {
+			t.Helper()
+			ctx := context.Background()
+			runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+			for _, m := range []*domain.AgentMessage{
+				{RunID: runID, Role: "assistant", Subtype: "text", Content: "a",
+					InputTokens: ptr(100), OutputTokens: ptr(20), CacheReadTokens: ptr(1000), CacheCreationTokens: ptr(7)},
+				{RunID: runID, Role: "assistant", Subtype: "text", Content: "b",
+					InputTokens: ptr(50), OutputTokens: ptr(5), CacheReadTokens: ptr(500), CacheCreationTokens: ptr(3)},
+			} {
+				if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
+					t.Fatalf("InsertMessage: %v", err)
+				}
+			}
+			return runID
+		}
+		assertRolledUp := func(t *testing.T, store db.AgentRunStore, orgID, runID string) {
+			t.Helper()
+			got, err := store.Get(context.Background(), orgID, runID)
+			if err != nil || got == nil {
+				t.Fatalf("Get: err=%v got=%v", err, got)
+			}
+			if got.InputTokens != 150 || got.OutputTokens != 25 || got.CacheReadTokens != 1500 || got.CacheCreationTokens != 10 {
+				t.Errorf("token cols = (%d,%d,%d,%d), want (150,25,1500,10) — terminal write did not roll up the run_messages SUM",
+					got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
+			}
+		}
+
+		t.Run("MarkCancelledIfActive", func(t *testing.T) {
+			store, orgID, _, seed := mk(t)
+			runID := seedRunningWithTokens(t, store, orgID, seed)
+			ok, err := store.MarkCancelledIfActive(context.Background(), orgID, runID, "user_cancelled", "cancelled")
+			if err != nil || !ok {
+				t.Fatalf("MarkCancelledIfActive: ok=%v err=%v", ok, err)
+			}
+			assertRolledUp(t, store, orgID, runID)
+		})
+
+		t.Run("MarkFailedIfActive", func(t *testing.T) {
+			store, orgID, _, seed := mk(t)
+			runID := seedRunningWithTokens(t, store, orgID, seed)
+			ok, err := store.MarkFailedIfActive(context.Background(), orgID, runID)
+			if err != nil || !ok {
+				t.Fatalf("MarkFailedIfActive: ok=%v err=%v", ok, err)
+			}
+			assertRolledUp(t, store, orgID, runID)
+		})
+	})
+
 	t.Run("SetSession_PersistsSessionID", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

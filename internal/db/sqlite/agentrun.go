@@ -235,12 +235,20 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID str
 	// 'open' is deliberately failable here (unlike 'pending_approval') — see
 	// AgentRunStore.MarkFailedIfActive: a warm 'open' run has no durable
 	// snapshot yet, so an infra error reaching failRun must terminate it.
+	//
+	// Refresh the denormalized token columns from the run_messages SUM, same as
+	// Complete — an infra-failed run still streamed (and paid for) messages, so
+	// the cache must reflect them rather than strand at 0 (TFAC-473).
 	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, ?)
+		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, ?),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = ?),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = ?),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = ?),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE run_id = ?)
 		WHERE id = ?
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
 		                     'pending_approval')
-	`, time.Now().UTC(), runID)
+	`, time.Now().UTC(), runID, runID, runID, runID, runID)
 	if err != nil {
 		return false, err
 	}
@@ -299,13 +307,21 @@ func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID,
 		return false, err
 	}
 	now := time.Now()
+	// Refresh the denormalized token columns from the run_messages SUM, same as
+	// Complete — a run cancelled while running/open still streamed (and paid
+	// for) messages, so the cache must reflect them rather than strand at 0
+	// (TFAC-473).
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs
-		SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?
+		SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?,
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = ?),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = ?),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = ?),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE run_id = ?)
 		WHERE id = ?
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
 		                     'pending_approval')
-	`, now, stopReason, summary, runID)
+	`, now, stopReason, summary, runID, runID, runID, runID, runID)
 	if err != nil {
 		return false, err
 	}
@@ -318,6 +334,10 @@ func (s *agentRunStore) MarkDiscarded(ctx context.Context, orgID, runID, stopRea
 		return false, err
 	}
 	now := time.Now()
+	// No token roll-up here (unlike the other terminal writes): this acts only
+	// on 'pending_approval' rows, which already rolled up at the
+	// completed→pending_approval transition via Complete — run_messages can't
+	// grow after that, so the cache is already current (TFAC-473).
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs
 		SET status = 'cancelled',

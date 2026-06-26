@@ -273,6 +273,46 @@ func TestCompleteCuratorRequest_RollsUpTokensFromMessages(t *testing.T) {
 	}
 }
 
+// TestMarkCuratorRequestCancelledIfActive_RollsUpTokensFromMessages pins that
+// the cancel path also refreshes the denormalized token columns from the
+// curator_messages SUM — a request cancelled mid-turn still reflects the
+// tokens it streamed rather than stranding them at 0 (TFAC-473).
+func TestMarkCuratorRequestCancelledIfActive_RollsUpTokensFromMessages(t *testing.T) {
+	database := newTestDB(t)
+	projectID := seedProjectForCurator(t, database)
+
+	id, _ := CreateCuratorRequest(database, projectID, "x")
+	if err := MarkCuratorRequestRunning(database, id); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	for _, m := range []*domain.CuratorMessage{
+		{RequestID: id, Role: "assistant", Subtype: "text", Content: "a",
+			InputTokens: intPtr(100), OutputTokens: intPtr(20), CacheReadTokens: intPtr(1000), CacheCreationTokens: intPtr(7)},
+		{RequestID: id, Role: "assistant", Subtype: "text", Content: "b",
+			InputTokens: intPtr(50), OutputTokens: intPtr(5), CacheReadTokens: intPtr(500), CacheCreationTokens: intPtr(3)},
+	} {
+		if _, err := InsertCuratorMessage(database, m); err != nil {
+			t.Fatalf("insert msg: %v", err)
+		}
+	}
+
+	flipped, err := MarkCuratorRequestCancelledIfActive(database, id, "user cancelled")
+	if err != nil || !flipped {
+		t.Fatalf("cancel: flipped=%v err=%v", flipped, err)
+	}
+
+	var in, out, cr, cc int
+	if err := database.QueryRow(`
+		SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+		FROM curator_requests WHERE id = ?
+	`, id).Scan(&in, &out, &cr, &cc); err != nil {
+		t.Fatalf("read tokens: %v", err)
+	}
+	if in != 150 || out != 25 || cr != 1500 || cc != 10 {
+		t.Errorf("token cols = (%d,%d,%d,%d), want (150,25,1500,10) — cancel did not roll up the curator_messages SUM", in, out, cr, cc)
+	}
+}
+
 func TestProjectDelete_CascadesCuratorRows(t *testing.T) {
 	// FK ON DELETE CASCADE drives the cleanup contract: removing the
 	// project takes its requests + messages with it. Without this,

@@ -140,6 +140,73 @@ func TestCuratorStore_SQLite_FullTurn(t *testing.T) {
 	}
 }
 
+// TestCuratorStore_SQLite_CancelRollsUpTokens pins that the store's cancel
+// path (the production curator runtime's terminal write for a user/shutdown
+// cancel) refreshes the denormalized token columns from the curator_messages
+// SUM, same as CompleteRequest — a request cancelled mid-turn reflects the
+// tokens it streamed rather than stranding them at 0 (TFAC-473).
+func TestCuratorStore_SQLite_CancelRollsUpTokens(t *testing.T) {
+	conn := newSQLiteForCuratorTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	user := runmode.LocalDefaultUserID
+
+	projectID, err := stores.Projects.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Project{Name: "p"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	ip := func(n int) *int { return &n }
+	var requestID string
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		id, err := ts.Curator.CreateRequest(ctx, org, projectID, user, "hello")
+		if err != nil {
+			return err
+		}
+		requestID = id
+		if err := ts.Curator.MarkRequestRunning(ctx, org, requestID); err != nil {
+			return err
+		}
+		_, err = ts.Curator.InsertMessage(ctx, org, &domain.CuratorMessage{
+			RequestID: requestID, Role: "assistant", Subtype: "text", Content: "ack",
+			InputTokens: ip(11), OutputTokens: ip(22), CacheReadTokens: ip(33), CacheCreationTokens: ip(44),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var flipped bool
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		f, err := ts.Curator.MarkRequestCancelledIfActive(ctx, org, requestID, "user cancelled")
+		flipped = f
+		return err
+	}); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if !flipped {
+		t.Fatal("MarkRequestCancelledIfActive flipped=false, want true")
+	}
+
+	var seen *domain.CuratorRequest
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		r, err := ts.Curator.GetRequest(ctx, org, requestID)
+		seen = r
+		return err
+	}); err != nil {
+		t.Fatalf("GetRequest: %v", err)
+	}
+	if seen == nil || seen.Status != "cancelled" {
+		t.Fatalf("want cancelled row, got %+v", seen)
+	}
+	if seen.InputTokens != 11 || seen.OutputTokens != 22 ||
+		seen.CacheReadTokens != 33 || seen.CacheCreationTokens != 44 {
+		t.Errorf("token breakdown = (%d,%d,%d,%d), want (11,22,33,44) — cancel did not roll up curator_messages",
+			seen.InputTokens, seen.OutputTokens, seen.CacheReadTokens, seen.CacheCreationTokens)
+	}
+}
+
 // TestCuratorStore_SQLite_PendingContextRoundTrip pins the consume →
 // finalize and consume → revert flows the goroutine uses for pending
 // context-change rows. The consume path is the most complex SQL in

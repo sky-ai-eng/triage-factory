@@ -395,8 +395,19 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, runID string) (bo
 	// 'open' is deliberately failable here (unlike 'pending_approval') — see
 	// AgentRunStore.MarkFailedIfActive: a warm 'open' run has no durable
 	// snapshot yet, so an infra error reaching failRun must terminate it.
+	//
+	// Refresh the denormalized token columns from the run_messages SUM, same as
+	// completeRun — an infra-failed run still streamed (and paid for) messages,
+	// so the cache must reflect them rather than strand at 0. The subqueries
+	// reuse the org/run binds ($2/$3); org_id scopes run_messages for
+	// defense-in-depth (and so the admin-pool BYPASSRLS path stays
+	// tenant-correct). TFAC-473.
 	res, err := q.ExecContext(ctx, `
-		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, $1)
+		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, $1),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE org_id = $2 AND run_id = $3),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE org_id = $2 AND run_id = $3),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE org_id = $2 AND run_id = $3),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE org_id = $2 AND run_id = $3)
 		WHERE org_id = $2 AND id = $3
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
 		                     'pending_approval')
@@ -465,9 +476,19 @@ func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, 
 
 func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopReason, summary string) (bool, error) {
 	now := time.Now()
+	// Refresh the denormalized token columns from the run_messages SUM, same as
+	// completeRun — a run cancelled while running/open still streamed (and paid
+	// for) messages, so the cache must reflect them rather than strand at 0. The
+	// subqueries reuse the org/run binds ($4/$5); org_id scopes run_messages for
+	// defense-in-depth (and so the admin-pool BYPASSRLS path stays
+	// tenant-correct). TFAC-473.
 	res, err := q.ExecContext(ctx, `
 		UPDATE runs
-		SET status = 'cancelled', completed_at = $1, stop_reason = $2, result_summary = $3
+		SET status = 'cancelled', completed_at = $1, stop_reason = $2, result_summary = $3,
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE org_id = $4 AND run_id = $5),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE org_id = $4 AND run_id = $5),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE org_id = $4 AND run_id = $5),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE org_id = $4 AND run_id = $5)
 		WHERE org_id = $4 AND id = $5
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
 		                     'pending_approval')
@@ -481,6 +502,10 @@ func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopRea
 
 func (s *agentRunStore) MarkDiscarded(ctx context.Context, orgID, runID, stopReason string) (bool, error) {
 	now := time.Now()
+	// No token roll-up here (unlike the other terminal writes): this acts only
+	// on 'pending_approval' rows, which already rolled up at the
+	// completed→pending_approval transition via completeRun — run_messages can't
+	// grow after that, so the cache is already current (TFAC-473).
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs
 		SET status = 'cancelled',

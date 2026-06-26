@@ -140,9 +140,19 @@ func markCuratorRequestCancelledIfActive(ctx context.Context, q queryer, orgID, 
 	if errMsg != "" {
 		errBind = errMsg
 	}
+	// Refresh the denormalized token columns from the curator_messages SUM,
+	// same as completeCuratorRequest — a request cancelled mid-turn still
+	// streamed (and paid for) messages, so the cache must reflect them rather
+	// than strand at 0. The subqueries reuse the org/id binds ($2/$3); org_id
+	// scopes curator_messages for defense-in-depth (and so the admin-pool
+	// BYPASSRLS cancel paths stay tenant-correct). TFAC-473.
 	res, err := q.ExecContext(ctx, `
 		UPDATE curator_requests
-		SET status = 'cancelled', error_msg = $1, finished_at = now()
+		SET status = 'cancelled', error_msg = $1, finished_at = now(),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE org_id = $2 AND request_id = $3),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE org_id = $2 AND request_id = $3),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE org_id = $2 AND request_id = $3),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE org_id = $2 AND request_id = $3)
 		WHERE org_id = $2 AND id = $3 AND status NOT IN ('done', 'cancelled', 'failed')
 	`, errBind, orgID, id)
 	if err != nil {

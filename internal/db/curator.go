@@ -108,12 +108,21 @@ func CompleteCuratorRequest(database *sql.DB, id, status, errMsg string, costUSD
 // for a deleted project lands in the right terminal state. The
 // status-NOT-IN filter makes this safe to call from outside the
 // per-project goroutine — terminal rows are left alone.
+//
+// Refreshes the denormalized token columns from the curator_messages SUM,
+// same as CompleteCuratorRequest — a request cancelled mid-turn still
+// streamed (and paid for) messages, so the cache must reflect them rather
+// than strand at 0 (TFAC-473).
 func MarkCuratorRequestCancelledIfActive(database *sql.DB, id, errMsg string) (bool, error) {
 	res, err := database.Exec(`
 		UPDATE curator_requests
-		SET status = 'cancelled', error_msg = ?, finished_at = ?
+		SET status = 'cancelled', error_msg = ?, finished_at = ?,
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = ?),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = ?),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = ?),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = ?)
 		WHERE id = ? AND status NOT IN ('done', 'cancelled', 'failed')
-	`, nullIfEmpty(errMsg), time.Now().UTC(), id)
+	`, nullIfEmpty(errMsg), time.Now().UTC(), id, id, id, id, id)
 	if err != nil {
 		return false, err
 	}

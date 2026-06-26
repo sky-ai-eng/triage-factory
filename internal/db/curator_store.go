@@ -62,11 +62,10 @@ type CuratorStore interface {
 	// (the streaming sink wrote every message row before this terminal
 	// write), aggregating the turn's token breakdown onto curator_requests
 	// for the unified spend view — same roll-up shape runs uses over
-	// run_messages (TFAC-473). Note the roll-up is completed-spend-only:
-	// MarkRequestCancelledIfActive is a plain status flip with no SUM, so a
-	// request cancelled mid-turn keeps its token columns at 0 (symmetric
-	// with runs' MarkCancelledIfActive; intentional — the cancel path stays
-	// cheap).
+	// run_messages (TFAC-473). The cancel path (MarkRequestCancelledIfActive)
+	// runs the same SUM, so the token columns are kept current at every
+	// terminal write, not just on done/failed — a request cancelled mid-turn
+	// still reflects the tokens it streamed.
 	CompleteRequest(ctx context.Context, orgID, id, status, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error)
 
 	// MarkRequestCancelledIfActive flips any non-terminal row to

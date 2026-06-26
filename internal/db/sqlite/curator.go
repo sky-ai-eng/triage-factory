@@ -115,11 +115,19 @@ func (s *curatorStore) MarkRequestCancelledIfActive(ctx context.Context, orgID, 
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
+	// Refresh the denormalized token columns from the curator_messages SUM,
+	// same as CompleteRequest — a request cancelled mid-turn still streamed
+	// (and paid for) messages, so the cache must reflect them rather than
+	// strand at 0 (TFAC-473).
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE curator_requests
-		SET status = 'cancelled', error_msg = ?, finished_at = ?
+		SET status = 'cancelled', error_msg = ?, finished_at = ?,
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = ?),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = ?),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = ?),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = ?)
 		WHERE id = ? AND status NOT IN ('done', 'cancelled', 'failed')
-	`, nullIfEmpty(errMsg), time.Now().UTC(), id)
+	`, nullIfEmpty(errMsg), time.Now().UTC(), id, id, id, id, id)
 	if err != nil {
 		return false, err
 	}
