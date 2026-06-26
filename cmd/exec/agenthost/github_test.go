@@ -68,7 +68,7 @@ func (f fakeGitHubResolver) BaseURLFor(_ context.Context, _ string) (string, err
 	panic("BaseURLFor is not used by the host-routed gh surface")
 }
 
-func (f fakeGitHubResolver) OrgIdentityFor(_ context.Context, _ string) (string, bool) {
+func (f fakeGitHubResolver) OrgIdentityFor(_ context.Context, _ string) (string, string, bool) {
 	panic("OrgIdentityFor is not used by the host-routed gh surface")
 }
 
@@ -97,7 +97,7 @@ func (r baseOnlyResolver) BaseURLFor(_ context.Context, _ string) (string, error
 	panic("BaseURLFor is not used by the host-routed gh surface")
 }
 
-func (r baseOnlyResolver) OrgIdentityFor(_ context.Context, _ string) (string, bool) {
+func (r baseOnlyResolver) OrgIdentityFor(_ context.Context, _ string) (string, string, bool) {
 	panic("OrgIdentityFor is not used by the host-routed gh surface")
 }
 

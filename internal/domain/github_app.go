@@ -21,6 +21,17 @@ type OrgGitHubApp struct {
 	RegisteredAt       time.Time
 	RegisteredByUserID string
 	Active             bool
+	// BotUserID is the numeric GitHub *user-account* id of the App's bot
+	// (the account "<slug>[bot]"), fetched best-effort at registration via
+	// GET /users/<slug>[bot]. It is NOT the App id — the App id and the bot
+	// user id are distinct numbers. 0 means unknown (an App registered before
+	// this column existed, or a registration-time fetch failure); the commit
+	// identity then falls back to the plain "<slug>[bot]@users.noreply.github.com"
+	// form. When known, the resolver builds the numeric-id noreply email
+	// "<bot_user_id>+<slug>[bot]@users.noreply.github.com", the only form that
+	// links a bot's commits to its account on GitHub's contribution graph
+	// (TFAC-474). Mirrors org_github_apps.bot_user_id (nullable → 0).
+	BotUserID int64
 }
 
 // NormalizedOwnerType returns the App's owner_type, folding an unset value

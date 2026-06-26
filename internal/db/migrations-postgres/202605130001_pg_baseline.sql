@@ -5773,7 +5773,13 @@ CREATE TABLE public.org_github_apps (
     owner_type text DEFAULT 'user'::text NOT NULL,
     registered_at timestamp with time zone DEFAULT now() NOT NULL,
     registered_by_user_id uuid,
-    active boolean DEFAULT true NOT NULL
+    active boolean DEFAULT true NOT NULL,
+    -- Numeric GitHub user-account id of the App's bot ("<slug>[bot]"), fetched
+    -- best-effort at registration (GET /users/<slug>[bot]). NOT the App id. NULL
+    -- = unknown → plain "<slug>[bot]@..." commit email; when set, the resolver
+    -- builds the numeric-id noreply form so bot commits link on github.com
+    -- (TFAC-474).
+    bot_user_id bigint
 );
 
 ALTER TABLE ONLY public.org_github_apps

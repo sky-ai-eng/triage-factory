@@ -747,11 +747,14 @@ func TestResolver_AppMintFails_FallsToPAT(t *testing.T) {
 	}
 }
 
-// TestResolver_OrgIdentityFor pins the org commit-identity resolution (TFAC-452):
-// App tier yields "<slug>[bot]" live from the registration (App-preferred, even
-// when a stored PAT login also exists), an inactive/absent App falls through to
-// the stored agents.github_org_login — but ONLY while the org still has a PAT —
-// and an all-miss yields ok=false (the caller then stamps no identity).
+// TestResolver_OrgIdentityFor pins the org commit-identity resolution (TFAC-452,
+// TFAC-474): the App tier yields name "<slug>[bot]" live from the registration
+// (App-preferred, even when a stored PAT login also exists) with the numeric-id
+// noreply email when org_github_apps.bot_user_id is set and the plain form when
+// it's 0 (unknown); an inactive/absent App falls through to the stored
+// agents.github_org_login with the plain "<login>@..." email — but ONLY while
+// the org still has a PAT — and an all-miss yields ok=false (the caller stamps
+// no identity).
 func TestResolver_OrgIdentityFor(t *testing.T) {
 	// withPAT is the fakeSecrets an org with a live PAT presents; the PAT tier is
 	// gated on this presence so a cached login can't outlive the credential.
@@ -759,9 +762,16 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		return &fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}}
 	}
 
-	t.Run("App tier resolves <slug>[bot] live", func(t *testing.T) {
+	assertIdentity := func(t *testing.T, gotName, gotEmail string, gotOK bool, wantName, wantEmail string) {
+		t.Helper()
+		if !gotOK || gotName != wantName || gotEmail != wantEmail {
+			t.Fatalf("OrgIdentityFor = (%q, %q, %v), want (%q, %q, true)", gotName, gotEmail, gotOK, wantName, wantEmail)
+		}
+	}
+
+	t.Run("App tier resolves <slug>[bot] live, plain email when bot id unknown", func(t *testing.T) {
 		// No PAT secret: the App tier must resolve without one (it short-circuits
-		// before the PAT-presence gate).
+		// before the PAT-presence gate). BotUserID unset (0) → plain noreply form.
 		r := NewResolver(
 			&fakeSecrets{},
 			&fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot"}},
@@ -769,41 +779,50 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 			&fakeAgents{},
 			nil,
 		)
-		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
-		if !ok || login != "acme-bot[bot]" {
-			t.Fatalf("OrgIdentityFor = (%q, %v), want (acme-bot[bot], true)", login, ok)
-		}
+		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		assertIdentity(t, name, email, ok, "acme-bot[bot]", "acme-bot[bot]@users.noreply.github.com")
+	})
+
+	t.Run("App tier with bot_user_id -> numeric-id noreply email", func(t *testing.T) {
+		// TFAC-474: a stored bot user id yields the numeric-id form, the only form
+		// that links a bot's commits to its account on github.com.
+		r := NewResolver(
+			&fakeSecrets{},
+			&fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot", BotUserID: 41898282}},
+			&fakeOrgs{},
+			&fakeAgents{},
+			nil,
+		)
+		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		assertIdentity(t, name, email, ok, "acme-bot[bot]", "41898282+acme-bot[bot]@users.noreply.github.com")
 	})
 
 	t.Run("App preferred over stored PAT login", func(t *testing.T) {
 		r := NewResolver(
 			withPAT(),
-			&fakeApps{app: &domain.OrgGitHubApp{Active: true, Slug: "acme-bot"}},
+			&fakeApps{app: &domain.OrgGitHubApp{Active: true, Slug: "acme-bot", BotUserID: 999}},
 			&fakeOrgs{},
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "pat-login"}},
 			nil,
 		)
-		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
-		if !ok || login != "acme-bot[bot]" {
-			t.Fatalf("OrgIdentityFor = (%q, %v), want App-preferred acme-bot[bot]", login, ok)
-		}
+		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		assertIdentity(t, name, email, ok, "acme-bot[bot]", "999+acme-bot[bot]@users.noreply.github.com")
 	})
 
 	t.Run("inactive App falls through to stored PAT login", func(t *testing.T) {
 		r := NewResolver(
 			withPAT(),
-			&fakeApps{app: &domain.OrgGitHubApp{Active: false, Slug: "acme-bot"}},
+			&fakeApps{app: &domain.OrgGitHubApp{Active: false, Slug: "acme-bot", BotUserID: 12345}},
 			&fakeOrgs{},
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat"}},
 			nil,
 		)
-		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
-		if !ok || login != "octocat" {
-			t.Fatalf("OrgIdentityFor = (%q, %v), want PAT octocat", login, ok)
-		}
+		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		// The PAT tier ignores the (inactive) App's bot id — plain user form.
+		assertIdentity(t, name, email, ok, "octocat", "octocat@users.noreply.github.com")
 	})
 
-	t.Run("PAT tier (no App) resolves stored login", func(t *testing.T) {
+	t.Run("PAT tier (no App) resolves stored login with plain email", func(t *testing.T) {
 		r := NewResolver(
 			withPAT(),
 			&fakeApps{app: nil},
@@ -811,10 +830,8 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat"}},
 			nil,
 		)
-		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
-		if !ok || login != "octocat" {
-			t.Fatalf("OrgIdentityFor = (%q, %v), want octocat", login, ok)
-		}
+		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		assertIdentity(t, name, email, ok, "octocat", "octocat@users.noreply.github.com")
 	})
 
 	t.Run("stored login but PAT cleared yields ok=false", func(t *testing.T) {
@@ -829,9 +846,9 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat"}},
 			nil,
 		)
-		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
-		if ok || login != "" {
-			t.Fatalf("OrgIdentityFor = (%q, %v), want (\"\", false) for a cleared PAT with a stale login", login, ok)
+		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		if ok || name != "" || email != "" {
+			t.Fatalf("OrgIdentityFor = (%q, %q, %v), want (\"\", \"\", false) for a cleared PAT with a stale login", name, email, ok)
 		}
 	})
 
@@ -843,9 +860,9 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 			&fakeAgents{agent: &domain.Agent{}}, // no stored login
 			nil,
 		)
-		login, ok := r.OrgIdentityFor(context.Background(), "org-1")
-		if ok || login != "" {
-			t.Fatalf("OrgIdentityFor = (%q, %v), want (\"\", false)", login, ok)
+		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		if ok || name != "" || email != "" {
+			t.Fatalf("OrgIdentityFor = (%q, %q, %v), want (\"\", \"\", false)", name, email, ok)
 		}
 	})
 }

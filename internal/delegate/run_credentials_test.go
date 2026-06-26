@@ -40,9 +40,14 @@ type fakeResolver struct {
 	// baseURL is what BaseURLFor hands back — the org's git host base.
 	// Empty defaults to github.com so existing fixtures need no change.
 	baseURL string
-	// orgLogin is what OrgIdentityFor hands back; empty → ok=false (the default,
-	// so credential-only fixtures keep getting a no-identity result).
+	// orgLogin is the name OrgIdentityFor hands back; empty → ok=false (the
+	// default, so credential-only fixtures keep getting a no-identity result).
 	orgLogin string
+	// orgEmail is the email OrgIdentityFor hands back. Empty defaults to the
+	// plain "<orgLogin>@users.noreply.github.com" form, so existing fixtures need
+	// no change; a fixture sets it explicitly to exercise the App-bot numeric-id
+	// noreply form passing through the delegate seam verbatim (TFAC-474).
+	orgEmail string
 }
 
 type resolverCall struct {
@@ -78,10 +83,19 @@ func (f *fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, er
 }
 
 // OrgIdentityFor satisfies the ghclient.Resolver interface. Returns the
-// configured orgLogin (ok iff non-empty); credential-only fixtures leave it
-// unset so the delegate's git-identity resolution stays a no-op.
-func (f *fakeResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, bool) {
-	return f.orgLogin, f.orgLogin != ""
+// configured orgLogin (name) + orgEmail (ok iff the name is non-empty);
+// credential-only fixtures leave both unset so the delegate's git-identity
+// resolution stays a no-op. An unset orgEmail defaults to the plain
+// "<orgLogin>@users.noreply.github.com" form.
+func (f *fakeResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool) {
+	if f.orgLogin == "" {
+		return "", "", false
+	}
+	email := f.orgEmail
+	if email == "" {
+		email = f.orgLogin + "@users.noreply.github.com"
+	}
+	return f.orgLogin, email, true
 }
 
 var _ ghclient.Resolver = (*fakeResolver)(nil)
@@ -318,6 +332,27 @@ func TestResolveCommitIdentity_DelegateSeam(t *testing.T) {
 		want := "Co-authored-by: alice <alice@users.noreply.github.com>"
 		if id.CoAuthorTrailer != want {
 			t.Errorf("trailer = %q; want %q", id.CoAuthorTrailer, want)
+		}
+	})
+
+	t.Run("App numeric-id email threads through verbatim, plain human trailer", func(t *testing.T) {
+		// TFAC-474: the resolver's numeric-id noreply email must reach
+		// RunOptions.GitUserEmail untouched, while the co-author trailer keeps the
+		// plain human form.
+		s := newSpawner(&fakeResolver{
+			orgLogin: "acme-bot[bot]",
+			orgEmail: "41898282+acme-bot[bot]@users.noreply.github.com",
+		}, fakeUsers{login: "alice"})
+		id := s.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1")
+		if id.Name != "acme-bot[bot]" {
+			t.Errorf("name = %q; want acme-bot[bot]", id.Name)
+		}
+		if id.Email != "41898282+acme-bot[bot]@users.noreply.github.com" {
+			t.Errorf("email = %q; want the numeric-id noreply form passed through verbatim", id.Email)
+		}
+		want := "Co-authored-by: alice <alice@users.noreply.github.com>"
+		if id.CoAuthorTrailer != want {
+			t.Errorf("trailer = %q; want %q (plain human form, never numeric)", id.CoAuthorTrailer, want)
 		}
 	})
 }

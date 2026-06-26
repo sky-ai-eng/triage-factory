@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -452,9 +453,16 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 	resp, _ := rig.driveCallback(alice)
 	sidA := rig.sidFromResp(resp)
 
-	// Stub GitHub's /app-manifests/{code}/conversions endpoint.
+	// Stub GitHub's /app-manifests/{code}/conversions endpoint, plus the
+	// GET /users/<slug>[bot] bot-user-id lookup (TFAC-474) on a distinct id so
+	// the test can prove the registration persists the BOT user id (67890), not
+	// the App id (12345).
 	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/users/") {
+			fmt.Fprint(w, `{"id": 67890}`)
+			return
+		}
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprintf(w, `{
 			"id": 12345,
@@ -505,11 +513,12 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 		}
 
 		// Verify the org_github_apps row was written, including the owner_type
-		// captured from the signed state.
+		// captured from the signed state and the bot_user_id fetched at callback.
 		var appID, slug, ownerType string
+		var botUserID sql.NullInt64
 		if err := rig.h.AdminDB.QueryRow(`
-			SELECT app_id, slug, owner_type FROM org_github_apps WHERE org_id = $1
-		`, orgA.String()).Scan(&appID, &slug, &ownerType); err != nil {
+			SELECT app_id, slug, owner_type, bot_user_id FROM org_github_apps WHERE org_id = $1
+		`, orgA.String()).Scan(&appID, &slug, &ownerType, &botUserID); err != nil {
 			t.Fatalf("read org_github_apps: %v", err)
 		}
 		if appID != "12345" {
@@ -520,6 +529,10 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 		}
 		if ownerType != "org" {
 			t.Errorf("owner_type=%q, want org (from signed state)", ownerType)
+		}
+		// TFAC-474: the BOT user id (67890 from GET /users/...), not the App id.
+		if !botUserID.Valid || botUserID.Int64 != 67890 {
+			t.Errorf("bot_user_id=%v, want 67890 (fetched at registration)", botUserID)
 		}
 	})
 

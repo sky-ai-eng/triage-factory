@@ -547,6 +547,13 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		secretKeys = append(secretKeys, webhookSecretKey)
 	}
 
+	// Best-effort: resolve the bot's numeric user-account id for the numeric-id
+	// noreply commit email so App-bot commits link on github.com (TFAC-474).
+	// Read against the already-resolved org GitHub base; a failure (404 from
+	// bot-account propagation delay, network) leaves it 0 → NULL → the plain
+	// noreply form, self-healing on re-register, and never blocks registration.
+	botUserID := s.fetchBotUserID(r.Context(), ghBase, convResp.Slug, orgID)
+
 	// Stage the registration when an org PAT is still live (PAT→App switch):
 	// write active=false so the PAT stays the live credential — polling never
 	// blips — until an atomic cutover flips the bit and deletes the PAT. A
@@ -571,6 +578,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 			OwnerType:          state.OwnerType,
 			RegisteredByUserID: userID,
 			Active:             !staged,
+			BotUserID:          botUserID,
 		}); err != nil {
 			return err
 		}
@@ -631,6 +639,30 @@ func settingsRedirectPath(orgID string) string {
 		return "/settings"
 	}
 	return "/orgs/" + orgID + "/settings"
+}
+
+// fetchBotUserID best-effort resolves the numeric GitHub user-account id of an
+// App's bot ("<slug>[bot]") via an unauthenticated GET /users/{login} against
+// the org's GitHub base, for the numeric-id noreply commit email that links
+// App-bot commits on github.com (TFAC-474). Both registration flows (manifest +
+// BYOA import) call it just before persisting the App row.
+//
+// Unauthenticated by design: at registration no installation token exists yet,
+// and /users/{login} is public — registration is rare, so the unauthenticated
+// rate limit is not a concern. A failure (a 404 while the freshly-created bot
+// account propagates, a network blip, a GHES quirk) returns 0 with a warning
+// logged here, so the caller stores NULL and the resolver falls back to the
+// plain "<slug>[bot]@..." form; it self-heals on the next re-register. Never
+// blocks registration.
+func (s *Server) fetchBotUserID(ctx context.Context, ghBase, slug, orgID string) int64 {
+	botLogin := slug + "[bot]"
+	id, err := ghclient.NewClient(ghBase, "").UserID(botLogin)
+	if err != nil {
+		githubAppLog.Warn("resolve bot user id failed; storing NULL (plain noreply commit email until re-register)",
+			"org", orgID, "bot_login", botLogin, "error", err)
+		return 0
+	}
+	return id
 }
 
 // --- manifest code exchange ---

@@ -61,8 +61,8 @@ func (f *fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, er
 
 // OrgIdentityFor satisfies the ghclient.Resolver interface. The poller never
 // resolves a commit identity; a no-identity result keeps the fake compiling.
-func (f *fakeResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, bool) {
-	return "", false
+func (f *fakeResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool) {
+	return "", "", false
 }
 
 // fakeInstallsStore embeds db.GitHubAppsStore (nil) and overrides the reads

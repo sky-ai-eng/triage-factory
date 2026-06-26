@@ -26,6 +26,10 @@ type importStubCfg struct {
 	permissions map[string]string // GET /app permissions; nil → all granted (passes preflight)
 	appStatus   int               // GET /app status; 0 → 200
 	tokenStatus int               // POST /applications/{cid}/token status; 0 → 404 (valid secret)
+	// botUserID drives GET /users/<slug>[bot] (the TFAC-474 best-effort fetch):
+	// >0 → 200 {"id": botUserID}; 0 → 404, modeling the propagation-delay /
+	// not-found case where the bot user id stays unknown (stored NULL).
+	botUserID int64
 }
 
 // importFullPerms grants every permission the manifest requests, so a stub left
@@ -75,6 +79,17 @@ func newImportStub(t *testing.T, cfg importStubCfg) *httptest.Server {
 			st = http.StatusNotFound // GitHub's "creds good, token doesn't exist"
 		}
 		w.WriteHeader(st)
+	})
+
+	// GET /api/v3/users/{login} — the bot-user-id lookup (TFAC-474). Serves the
+	// configured id when set, else 404 (bot account not found / not yet
+	// propagated) so the best-effort fetch fails and the row stores NULL.
+	mux.HandleFunc("/api/v3/users/", func(w http.ResponseWriter, _ *http.Request) {
+		if cfg.botUserID == 0 {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": cfg.botUserID})
 	})
 
 	srv := httptest.NewServer(mux)
@@ -158,6 +173,61 @@ func TestGitHubAppImport_HappyPath_FreshSetup(t *testing.T) {
 	}
 	if len(out.Permissions) != len(importRequiredPermissions) {
 		t.Errorf("permissions table has %d rows, want %d", len(out.Permissions), len(importRequiredPermissions))
+	}
+}
+
+// TestGitHubAppImport_PersistsBotUserID pins TFAC-474's import-flow write: when
+// GET /users/<slug>[bot] resolves, the numeric bot user id is persisted on the
+// org_github_apps row so OrgIdentityFor can later build the numeric-id noreply
+// commit email.
+func TestGitHubAppImport_PersistsBotUserID(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	stub := newImportStub(t, importStubCfg{
+		appID: 41, slug: "acme-bot", clientID: "Iv1.x", botUserID: 41898282,
+	})
+	setOrgGitHubBase(t, s, stub.URL)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+		importBody("41", testRSAPEM(t), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
+	if app == nil {
+		t.Fatal("no app row written")
+	}
+	if app.BotUserID != 41898282 {
+		t.Errorf("BotUserID = %d, want 41898282 (fetched at import)", app.BotUserID)
+	}
+}
+
+// TestGitHubAppImport_BotUserIDFetchFailure_StoresNull pins that a failed
+// GET /users/<slug>[bot] (here a 404) is best-effort: the import still succeeds
+// and the row is written with bot_user_id NULL (0), so the resolver falls back
+// to the plain noreply form — never a worse state than before TFAC-474.
+func TestGitHubAppImport_BotUserIDFetchFailure_StoresNull(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	// botUserID left 0 → the stub's /users handler 404s.
+	stub := newImportStub(t, importStubCfg{appID: 42, slug: "acme-bot", clientID: "Iv1.x"})
+	setOrgGitHubBase(t, s, stub.URL)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+		importBody("42", testRSAPEM(t), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import = %d, want 200 (bot-id fetch failure must not block import); body=%s", rec.Code, rec.Body.String())
+	}
+	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
+	if app == nil {
+		t.Fatal("no app row written — a best-effort bot-id fetch failure must not abort the import")
+	}
+	if app.BotUserID != 0 {
+		t.Errorf("BotUserID = %d, want 0 (NULL on fetch failure)", app.BotUserID)
 	}
 }
 

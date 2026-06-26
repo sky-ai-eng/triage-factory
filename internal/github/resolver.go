@@ -122,25 +122,33 @@ type Resolver interface {
 	// whose base can't be read must not be paired with the public host.
 	BaseURLFor(ctx context.Context, orgID string) (string, error)
 
-	// OrgIdentityFor resolves the org's single GitHub identity — the login the
-	// commit author + committer is stamped as on every delegated-agent commit
-	// (TFAC-452). Two tiers, App-preferred to mirror ClientFor's own order:
+	// OrgIdentityFor resolves the org's single GitHub commit identity — the
+	// author + committer NAME and EMAIL stamped on every delegated-agent commit
+	// (TFAC-452, TFAC-474). The App-vs-PAT email-form decision lives here, where
+	// the data is. Two tiers, App-preferred to mirror ClientFor's own order:
 	//
-	//	App  → "<slug>[bot]", the org's App registration slug, resolved live
-	//	       (no stored column; installation-independent — the bot account is
-	//	       one global identity however many accounts the App is installed on).
-	//	PAT  → the stored agents.github_org_login (the login the org PAT
-	//	       authenticates as), persisted by the org-PAT setup/rebind writers —
-	//	       but returned ONLY while the org still has a PAT. The cached login is
-	//	       gated on the same KeyGitHubPAT presence the credential resolver
-	//	       uses, so a value left behind when the PAT was cleared can't resurface
-	//	       as a stale identity for an org that no longer has that credential.
+	//	App  → name "<slug>[bot]" (the org's App registration slug, resolved
+	//	       live — installation-independent, one global bot identity). The
+	//	       email is the numeric-id noreply form
+	//	       "<bot_user_id>+<slug>[bot]@users.noreply.github.com" when the bot
+	//	       user id is stored (org_github_apps.bot_user_id) — the only form
+	//	       that links a bot's commits to its account on github.com — and falls
+	//	       back to the plain "<slug>[bot]@users.noreply.github.com" when the id
+	//	       is unknown (an App registered before TFAC-474, or a fetch miss;
+	//	       self-heals on re-register). DB-only: no per-run GitHub API call.
+	//	PAT  → name <agents.github_org_login> (the login the org PAT
+	//	       authenticates as), email "<login>@users.noreply.github.com" — the
+	//	       plain form, which links for a user account (the numeric form is
+	//	       App-only). Returned ONLY while the org still has a PAT: the cached
+	//	       login is gated on the same KeyGitHubPAT presence the credential
+	//	       resolver uses, so a value left behind when the PAT was cleared can't
+	//	       resurface as a stale identity for an org that no longer has it.
 	//
 	// ok=false when neither resolves — no App, or no live PAT / no stored PAT
-	// login (an org bound before this ticket, or a read error). The caller then
+	// login (an org bound before TFAC-452, or a read error). The caller then
 	// leaves git identity unset and the agent inherits ambient config, never a
-	// fabricated identity; it self-heals on the next PAT re-save.
-	OrgIdentityFor(ctx context.Context, orgID string) (login string, ok bool)
+	// fabricated identity; it self-heals on the next PAT re-save / App re-register.
+	OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool)
 }
 
 type resolver struct {
@@ -384,14 +392,26 @@ func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error)
 // door like the rest of the resolver. A read error on either tier is
 // non-fatal — it falls through, and an all-miss returns ok=false so the caller
 // stamps no identity rather than a fabricated one.
-func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (string, bool) {
+func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool) {
 	// App tier: the org's registered App acts as "<slug>[bot]". The slug comes
 	// from the App registration, resolved live — no stored column, and
 	// installation-independent (the bot is one global account however many
 	// installations the App has). A staged/inactive App or a read error skips to
 	// PAT rather than claiming an identity the org isn't acting as.
 	if app, err := r.apps.GetForOrgSystem(ctx, orgID); err == nil && app != nil && app.Active && app.Slug != "" {
-		return app.Slug + "[bot]", true
+		name = app.Slug + "[bot]"
+		// The numeric-id noreply form links a bot's commits to its account on
+		// github.com (contribution graph + Verified co-author badge); the plain
+		// "<slug>[bot]@..." form does NOT reliably link for bot accounts. Use the
+		// numeric form when the bot user id is known (org_github_apps.bot_user_id,
+		// fetched best-effort at registration), else fall back to the plain form —
+		// today's behavior, never a worse state (TFAC-474).
+		if app.BotUserID != 0 {
+			email = strconv.FormatInt(app.BotUserID, 10) + "+" + name + "@users.noreply.github.com"
+		} else {
+			email = name + "@users.noreply.github.com"
+		}
+		return name, email, true
 	}
 	// PAT tier: the login the org PAT authenticates as. agents.github_org_login
 	// is a CACHE of that login, written at PAT bind but deliberately NOT cleared
@@ -405,14 +425,16 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (string, bo
 	// commit identity for an org that no longer has a PAT. A read error is
 	// conservative (treated as no PAT → no identity), never a fabricated one.
 	if pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT); err != nil || pat == "" {
-		return "", false
+		return "", "", false
 	}
-	// PAT present: trust the cached login. Empty (an org bound before TFAC-452,
-	// or a read error) → ok=false; self-heals on the next PAT re-save.
+	// PAT present: trust the cached login. The plain "<login>@..." form links for
+	// a user account, so the numeric form is App-only (locked decision 2). Empty
+	// (an org bound before TFAC-452, or a read error) → ok=false; self-heals on
+	// the next PAT re-save.
 	if agent, err := r.agents.GetForOrgSystem(ctx, orgID); err == nil && agent != nil && agent.GitHubOrgLogin != "" {
-		return agent.GitHubOrgLogin, true
+		return agent.GitHubOrgLogin, agent.GitHubOrgLogin + "@users.noreply.github.com", true
 	}
-	return "", false
+	return "", "", false
 }
 
 // installationFor selects the App installation whose account matches target.

@@ -29,19 +29,20 @@ var _ db.GitHubAppsStore = (*gitHubAppsStore)(nil)
 
 func (s *gitHubAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error) {
 	var (
-		a     domain.OrgGitHubApp
-		regBy sql.NullString
+		a         domain.OrgGitHubApp
+		regBy     sql.NullString
+		botUserID sql.NullInt64
 	)
 	err := s.q.QueryRowContext(ctx, `
 		SELECT org_id, app_id, slug, client_id,
 		       client_secret_ref, pem_ref, webhook_secret_ref,
-		       owner_type, registered_at, registered_by_user_id, active
+		       owner_type, registered_at, registered_by_user_id, active, bot_user_id
 		  FROM org_github_apps
 		 WHERE org_id = ?
 	`, orgID).Scan(
 		&a.OrgID, &a.AppID, &a.Slug, &a.ClientID,
 		&a.ClientSecretRef, &a.PEMRef, &a.WebhookSecretRef,
-		&a.OwnerType, &a.RegisteredAt, &regBy, &a.Active,
+		&a.OwnerType, &a.RegisteredAt, &regBy, &a.Active, &botUserID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -50,6 +51,7 @@ func (s *gitHubAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.
 		return nil, fmt.Errorf("get org_github_apps: %w", err)
 	}
 	a.RegisteredByUserID = regBy.String
+	a.BotUserID = botUserID.Int64 // NULL → 0 (bot user id unknown)
 	return &a, nil
 }
 
@@ -65,12 +67,13 @@ func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHub
 		INSERT INTO org_github_apps (
 			org_id, app_id, slug, client_id,
 			client_secret_ref, pem_ref, webhook_secret_ref,
-			owner_type, registered_by_user_id, active
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			owner_type, registered_by_user_id, active, bot_user_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		app.OrgID, app.AppID, app.Slug, app.ClientID,
 		app.ClientSecretRef, app.PEMRef, app.WebhookSecretRef,
 		app.NormalizedOwnerType(), nullStringValue(app.RegisteredByUserID), app.Active,
+		nullBotUserID(app.BotUserID),
 	)
 	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
 		return &db.ErrGitHubAppExists{OrgID: app.OrgID}
@@ -79,6 +82,17 @@ func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHub
 		return fmt.Errorf("insert org_github_apps: %w", err)
 	}
 	return nil
+}
+
+// nullBotUserID maps a zero (unknown) bot user id to a SQL NULL so the column
+// distinguishes "never fetched" from a real id; any non-zero id is written
+// verbatim. On read both NULL and a stored 0 scan back to 0, but writing NULL
+// keeps the column honest.
+func nullBotUserID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
 }
 
 func (s *gitHubAppsStore) SetActive(ctx context.Context, orgID string, active bool) error {

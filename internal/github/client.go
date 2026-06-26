@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -64,6 +65,39 @@ func NewClient(baseURL, pat string) *Client {
 // Get performs an authenticated GET request and returns the response body.
 func (c *Client) Get(path string) ([]byte, error) {
 	return c.do("GET", path, nil)
+}
+
+// UserID resolves the numeric user-account id for a GitHub login (e.g. a bot
+// account "<slug>[bot]") via GET /users/{login}. It is the bot *user* id — the
+// account behind the App — not the App id, and it's the value the numeric-id
+// noreply commit email is built from so App-bot commits link on github.com
+// (TFAC-474).
+//
+// /users/{login} is a public endpoint that works unauthenticated, which is what
+// the App-registration path relies on (it has only the org's GitHub base URL,
+// no installation token yet). The login is url.PathEscape'd because a bot login
+// carries "[bot]" brackets that would otherwise be mangled in the path. The
+// call routes through c.baseURL like every other request, so it targets
+// github.com or the org's GHES host without hardcoding api.github.com.
+//
+// Returns (0, error) on a non-2xx (notably 404 when the freshly-created bot
+// account hasn't propagated yet) or a malformed/idless body, so the caller can
+// fall back to the plain "<slug>[bot]@users.noreply.github.com" form.
+func (c *Client) UserID(login string) (int64, error) {
+	data, err := c.Get("/users/" + url.PathEscape(login))
+	if err != nil {
+		return 0, fmt.Errorf("get user %q: %w", login, err)
+	}
+	var u struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(data, &u); err != nil {
+		return 0, fmt.Errorf("parse user %q: %w", login, err)
+	}
+	if u.ID == 0 {
+		return 0, fmt.Errorf("user %q: response carried no id", login)
+	}
+	return u.ID, nil
 }
 
 // GetConditional performs an authenticated GET that sends an If-None-Match
@@ -364,7 +398,15 @@ func (c *Client) do(method, path string, body any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.pat)
+	// An empty token means an unauthenticated client (the App-registration path
+	// uses one to read a public GET /users/{login} before any installation token
+	// exists — TFAC-474). Omit the header entirely rather than sending a
+	// malformed "Bearer " with no value, which GitHub rejects as bad credentials;
+	// every real caller passes a non-empty token, so this only affects the
+	// deliberate unauthenticated case.
+	if c.pat != "" {
+		req.Header.Set("Authorization", "Bearer "+c.pat)
+	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

@@ -87,6 +87,52 @@ func TestGitHubAppsStore_SQLite_CreateGetRoundTrip(t *testing.T) {
 	}
 }
 
+// TestGitHubAppsStore_SQLite_BotUserID pins the bot_user_id column round-trip
+// (TFAC-474): a set bot user id survives Create→Get, and an unset id (0) is
+// written as NULL and scans back as 0 (the resolver's "unknown → plain noreply
+// form" fallback).
+func TestGitHubAppsStore_SQLite_BotUserID(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	const orgWithID = "00000000-0000-0000-0000-0000000000c1"
+	const orgWithout = "00000000-0000-0000-0000-0000000000c2"
+	seedSQLiteOrgForApps(t, conn, orgWithID)
+	seedSQLiteOrgForApps(t, conn, orgWithout)
+
+	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+		OrgID: orgWithID, AppID: "7001", Slug: "acme-bot", ClientID: "Iv1.x",
+		ClientSecretRef: "cs", PEMRef: "pem", WebhookSecretRef: "wh",
+		BotUserID: 41898282,
+	}); err != nil {
+		t.Fatalf("CreateForOrg (with id): %v", err)
+	}
+	got, err := stores.GitHubApps.GetForOrg(ctx, orgWithID)
+	if err != nil || got == nil {
+		t.Fatalf("GetForOrg (with id) = %+v, %v", got, err)
+	}
+	if got.BotUserID != 41898282 {
+		t.Errorf("BotUserID = %d, want 41898282", got.BotUserID)
+	}
+
+	// Unset id → stored NULL → scans back as 0.
+	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+		OrgID: orgWithout, AppID: "7002", Slug: "no-bot", ClientID: "Iv1.y",
+		ClientSecretRef: "cs", PEMRef: "pem", WebhookSecretRef: "wh",
+		// BotUserID intentionally unset (0).
+	}); err != nil {
+		t.Fatalf("CreateForOrg (without id): %v", err)
+	}
+	got, err = stores.GitHubApps.GetForOrg(ctx, orgWithout)
+	if err != nil || got == nil {
+		t.Fatalf("GetForOrg (without id) = %+v, %v", got, err)
+	}
+	if got.BotUserID != 0 {
+		t.Errorf("BotUserID = %d, want 0 (NULL scans as 0)", got.BotUserID)
+	}
+}
+
 // TestGitHubAppsStore_SQLite_OwnerTypeDefaultsToUser pins that an App
 // created without an explicit OwnerType reads back as "user" — the store
 // folds the empty value (NormalizedOwnerType) so the persisted value is

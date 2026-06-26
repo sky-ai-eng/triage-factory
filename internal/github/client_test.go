@@ -65,6 +65,75 @@ func TestIsHTTP406_WrappedNon406(t *testing.T) {
 	}
 }
 
+// TestClient_UserID pins the bot-user-id lookup the App-registration path uses
+// to build the numeric-id noreply commit email (TFAC-474): GET /users/{login}
+// with the "[bot]" brackets URL-escaped on the wire, parsing {"id":N}; a 404 (or
+// any non-2xx) or an idless body yields 0 + error so the caller falls back to
+// the plain noreply form. It also pins that an empty-token client sends NO
+// Authorization header — the registration read is genuinely unauthenticated,
+// not a malformed "Bearer " GitHub would reject.
+func TestClient_UserID(t *testing.T) {
+	t.Run("resolves id, url-escapes [bot], unauthenticated", func(t *testing.T) {
+		var gotRequestURI, gotAuth string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotRequestURI = r.RequestURI
+			gotAuth = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":424242,"login":"acme-bot[bot]"}`))
+		}))
+		defer srv.Close()
+
+		id, err := NewClient(srv.URL, "").UserID("acme-bot[bot]")
+		if err != nil {
+			t.Fatalf("UserID: %v", err)
+		}
+		if id != 424242 {
+			t.Errorf("id = %d, want 424242", id)
+		}
+		// The brackets must be percent-encoded on the wire (GitHub rejects raw
+		// brackets in a path); the decoded form must NOT appear.
+		if !strings.Contains(gotRequestURI, "acme-bot%5Bbot%5D") {
+			t.Errorf("request URI = %q, want it to carry the escaped %%5Bbot%%5D", gotRequestURI)
+		}
+		if strings.Contains(gotRequestURI, "[bot]") {
+			t.Errorf("request URI = %q carried raw [bot] brackets (must be escaped)", gotRequestURI)
+		}
+		// Empty token → unauthenticated: no Authorization header at all.
+		if gotAuth != "" {
+			t.Errorf("Authorization = %q, want empty (unauthenticated registration read)", gotAuth)
+		}
+	})
+
+	t.Run("404 -> 0 + error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+		}))
+		defer srv.Close()
+
+		id, err := NewClient(srv.URL, "").UserID("ghost[bot]")
+		if err == nil {
+			t.Fatal("UserID on 404 returned nil error; want an error so the caller falls back to the plain form")
+		}
+		if id != 0 {
+			t.Errorf("id = %d, want 0 on error", id)
+		}
+	})
+
+	t.Run("idless body -> 0 + error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"login":"acme-bot[bot]"}`)) // no id field
+		}))
+		defer srv.Close()
+
+		id, err := NewClient(srv.URL, "").UserID("acme-bot[bot]")
+		if err == nil || id != 0 {
+			t.Fatalf("UserID on idless body = (%d, %v), want (0, error)", id, err)
+		}
+	})
+}
+
 func TestGraphQLURL(t *testing.T) {
 	tests := []struct {
 		name    string

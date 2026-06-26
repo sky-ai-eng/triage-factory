@@ -61,7 +61,7 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 	if s.ghResolver == nil {
 		return githooks.CommitIdentity{}
 	}
-	orgLogin, ok := s.ghResolver.OrgIdentityFor(ctx, orgID)
+	orgName, orgEmail, ok := s.ghResolver.OrgIdentityFor(ctx, orgID)
 	if !ok {
 		return githooks.CommitIdentity{}
 	}
@@ -91,7 +91,7 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 			}
 		}
 	}
-	id, _ := githooks.ResolveCommitIdentity(orgLogin, manual, coLogin)
+	id, _ := githooks.ResolveCommitIdentity(orgName, orgEmail, manual, coLogin)
 	return id
 }
 

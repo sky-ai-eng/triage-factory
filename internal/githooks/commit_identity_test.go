@@ -10,64 +10,78 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestResolveCommitIdentity pins the pure resolver's decision table (TFAC-452):
-// the org identity is always the author/committer; the Co-authored-by trailer
-// is emitted iff the run is manual AND a distinct delegating user is known. It
-// also nails the exact email spellings (login@users.noreply.github.com) for the
-// PAT and App forms, since the trailer/email strings are GitHub-linkage-bearing.
+// TestResolveCommitIdentity pins the pure resolver's decision table (TFAC-452,
+// TFAC-474): the org name/email (resolved upstream) is always the
+// author/committer, passed through verbatim — including the App-bot numeric-id
+// noreply email form; the Co-authored-by trailer is emitted iff the run is
+// manual AND a distinct delegating user is known, and always uses the plain
+// human noreply form (never the numeric form). The exact spellings matter
+// because the email/trailer strings are GitHub-linkage-bearing.
 func TestResolveCommitIdentity(t *testing.T) {
 	const aliceTrailer = "Co-authored-by: alice <alice@users.noreply.github.com>"
 
 	cases := []struct {
 		name        string
-		orgLogin    string
+		orgName     string
+		orgEmail    string
 		manual      bool
 		userLogin   string
 		wantStamp   bool
 		wantName    string
-		wantEmail   string
 		wantTrailer string
 	}{
 		{
-			name:     "manual distinct user -> trailer (PAT form)",
-			orgLogin: "octocat", manual: true, userLogin: "alice",
-			wantStamp: true, wantName: "octocat", wantEmail: "octocat@users.noreply.github.com",
-			wantTrailer: aliceTrailer,
+			name:    "manual distinct user -> trailer (PAT form)",
+			orgName: "octocat", orgEmail: "octocat@users.noreply.github.com",
+			manual: true, userLogin: "alice",
+			wantStamp: true, wantName: "octocat", wantTrailer: aliceTrailer,
 		},
 		{
-			name:     "manual App org distinct user -> trailer (bot email form)",
-			orgLogin: "acme-bot[bot]", manual: true, userLogin: "alice",
-			wantStamp: true, wantName: "acme-bot[bot]", wantEmail: "acme-bot[bot]@users.noreply.github.com",
-			wantTrailer: aliceTrailer,
+			name:    "manual App org distinct user -> trailer (plain bot email form)",
+			orgName: "acme-bot[bot]", orgEmail: "acme-bot[bot]@users.noreply.github.com",
+			manual: true, userLogin: "alice",
+			wantStamp: true, wantName: "acme-bot[bot]", wantTrailer: aliceTrailer,
 		},
 		{
-			name:     "manual same login case-insensitive -> no trailer (N=1 same PAT)",
-			orgLogin: "OctoCat", manual: true, userLogin: "octocat",
-			wantStamp: true, wantName: "OctoCat", wantEmail: "OctoCat@users.noreply.github.com",
-			wantTrailer: "",
+			// TFAC-474: an App-bot email in numeric-id noreply form passes through
+			// verbatim (the resolver built it), and the manual co-author trailer
+			// still uses the plain "<userLogin>@..." human form — the numeric form
+			// must never be applied to the co-author. A human login never equals a
+			// "<slug>[bot]" name, so a manual App run always co-attributes.
+			name:    "manual App org numeric-id email -> verbatim email + plain human trailer",
+			orgName: "acme-bot[bot]", orgEmail: "41898282+acme-bot[bot]@users.noreply.github.com",
+			manual: true, userLogin: "alice",
+			wantStamp: true, wantName: "acme-bot[bot]", wantTrailer: aliceTrailer,
 		},
 		{
-			name:     "manual empty user -> no trailer (no GitHub identity)",
-			orgLogin: "octocat", manual: true, userLogin: "",
-			wantStamp: true, wantName: "octocat", wantEmail: "octocat@users.noreply.github.com",
-			wantTrailer: "",
+			name:    "manual same login case-insensitive -> no trailer (N=1 same PAT)",
+			orgName: "OctoCat", orgEmail: "OctoCat@users.noreply.github.com",
+			manual: true, userLogin: "octocat",
+			wantStamp: true, wantName: "OctoCat", wantTrailer: "",
 		},
 		{
-			name:     "event run -> org only, no trailer",
-			orgLogin: "octocat", manual: false, userLogin: "alice",
-			wantStamp: true, wantName: "octocat", wantEmail: "octocat@users.noreply.github.com",
-			wantTrailer: "",
+			name:    "manual empty user -> no trailer (no GitHub identity)",
+			orgName: "octocat", orgEmail: "octocat@users.noreply.github.com",
+			manual: true, userLogin: "",
+			wantStamp: true, wantName: "octocat", wantTrailer: "",
 		},
 		{
-			name:     "empty org login -> ok=false, stamp nothing",
-			orgLogin: "", manual: true, userLogin: "alice",
+			name:    "event run -> org only, no trailer",
+			orgName: "octocat", orgEmail: "octocat@users.noreply.github.com",
+			manual: false, userLogin: "alice",
+			wantStamp: true, wantName: "octocat", wantTrailer: "",
+		},
+		{
+			name:    "empty org name -> ok=false, stamp nothing",
+			orgName: "", orgEmail: "octocat@users.noreply.github.com",
+			manual: true, userLogin: "alice",
 			wantStamp: false,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			id, stamp := ResolveCommitIdentity(tc.orgLogin, tc.manual, tc.userLogin)
+			id, stamp := ResolveCommitIdentity(tc.orgName, tc.orgEmail, tc.manual, tc.userLogin)
 			if stamp != tc.wantStamp {
 				t.Fatalf("stamp = %v, want %v", stamp, tc.wantStamp)
 			}
@@ -80,8 +94,10 @@ func TestResolveCommitIdentity(t *testing.T) {
 			if id.Name != tc.wantName {
 				t.Errorf("Name = %q, want %q", id.Name, tc.wantName)
 			}
-			if id.Email != tc.wantEmail {
-				t.Errorf("Email = %q, want %q", id.Email, tc.wantEmail)
+			// The email is passed through verbatim — the App-vs-PAT form decision
+			// lives upstream in the resolver, not here.
+			if id.Email != tc.orgEmail {
+				t.Errorf("Email = %q, want %q (verbatim passthrough)", id.Email, tc.orgEmail)
 			}
 			if id.CoAuthorTrailer != tc.wantTrailer {
 				t.Errorf("CoAuthorTrailer = %q, want %q", id.CoAuthorTrailer, tc.wantTrailer)
@@ -200,6 +216,52 @@ func TestCommitIdentity_EndToEnd(t *testing.T) {
 	body = mustGit(t, env, dir, "log", "-1", "--format=%B")
 	if n := strings.Count(body, trailer); n != 1 {
 		t.Errorf("trailer appears %d times after amend, want 1 (idempotent):\n%s", n, body)
+	}
+}
+
+// TestCommitIdentity_EndToEnd_NumericNoreplyForm is the git-level acceptance for
+// TFAC-474: when the resolver hands an App bot the numeric-id noreply email
+// "<bot_user_id>+<slug>[bot]@users.noreply.github.com", a real commit carries it
+// verbatim as both the author AND committer email — the only form that links a
+// bot's commits to its account on github.com. The "+" and digits must survive
+// the GIT_CONFIG_* injection untouched, and the NAME stays "<slug>[bot]" (the
+// numeric id lives only in the email — locked decision 1).
+func TestCommitIdentity_EndToEnd_NumericNoreplyForm(t *testing.T) {
+	requireGit(t)
+	runmode.SetForTest(t, runmode.ModeLocal)
+	paths.SetForTest(t, t.TempDir())
+	if err := Ensure(); err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+
+	const (
+		orgName  = "acme-bot[bot]"
+		orgEmail = "41898282+acme-bot[bot]@users.noreply.github.com"
+	)
+
+	home := t.TempDir()
+	base := append(sanitizeEnv(os.Environ()),
+		"HOME="+home,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+		// No trailer env: an autonomous/event run stamps the org identity only.
+	)
+	env := DirectAgentEnv(base, IdentityConfigPairs(orgName, orgEmail)...)
+
+	dir := t.TempDir()
+	mustGit(t, env, dir, "init", "-b", "main")
+	writeFile(t, filepath.Join(dir, "a.txt"), "a")
+	mustGit(t, env, dir, "add", ".")
+	mustGit(t, env, dir, "commit", "-m", "first")
+
+	if ae := strings.TrimSpace(mustGit(t, env, dir, "log", "-1", "--format=%ae")); ae != orgEmail {
+		t.Errorf("author email = %q, want the numeric-id noreply form %q", ae, orgEmail)
+	}
+	if ce := strings.TrimSpace(mustGit(t, env, dir, "log", "-1", "--format=%ce")); ce != orgEmail {
+		t.Errorf("committer email = %q, want the numeric-id noreply form %q", ce, orgEmail)
+	}
+	if an := strings.TrimSpace(mustGit(t, env, dir, "log", "-1", "--format=%an")); an != orgName {
+		t.Errorf("author name = %q, want %q (the numeric id lives only in the email)", an, orgName)
 	}
 }
 

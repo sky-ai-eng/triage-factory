@@ -20,28 +20,36 @@ type CommitIdentity struct {
 }
 
 // ResolveCommitIdentity computes the org commit identity (and, on a manual run
-// whose delegating human differs from the org login, the co-author trailer)
-// from login-only inputs. Pure — no I/O — so it's the single, unit-testable
+// whose delegating human differs from the org name, the co-author trailer) from
+// the resolved name + email. Pure — no I/O — so it's the single, unit-testable
 // seam the delegate threads both run modes through.
 //
-//   - orgLogin is the org's GitHub identity: "<login>" for a PAT org,
-//     "<slug>[bot]" for an App org. Empty → (zero, false): nothing to stamp,
-//     and the caller must leave git identity unset (inherit ambient — never a
+//   - orgName is the org's GitHub identity name: "<login>" for a PAT org,
+//     "<slug>[bot]" for an App org. Empty → (zero, false): nothing to stamp, and
+//     the caller must leave git identity unset (inherit ambient — never a
 //     fabricated identity).
-//   - The author/committer email is always "<orgLogin>@users.noreply.github.com"
-//     (the login form; numeric-id noreply is out of scope — it links fine for a
-//     PAT and is an acceptable approximation for an App bot).
+//   - orgEmail is the author/committer email, already in its final form. The
+//     App-vs-PAT decision lives in the resolver (which has the data): a PAT org
+//     gets "<login>@users.noreply.github.com"; an App org gets the numeric-id
+//     noreply form "<bot_user_id>+<slug>[bot]@users.noreply.github.com" when the
+//     bot user id is known (the form that links a bot's commits on github.com),
+//     else the plain "<slug>[bot]@..." form (TFAC-474). This function passes it
+//     through verbatim.
 //   - The Co-authored-by trailer is emitted iff the run is MANUAL, a delegating
-//     userLogin is known, AND it differs from orgLogin case-insensitively. The
-//     N=1 same-PAT case (orgLogin == userLogin) gets no trailer — a self
-//     co-author GitHub would dedupe anyway. Autonomous/event runs (manual=false)
-//     get the org identity only.
-func ResolveCommitIdentity(orgLogin string, manual bool, userLogin string) (CommitIdentity, bool) {
-	if orgLogin == "" {
+//     userLogin is known, AND it differs from orgName case-insensitively. The
+//     N=1 same-PAT case (orgName == userLogin) gets no trailer — a self
+//     co-author GitHub would dedupe anyway; a human userLogin never equals a
+//     "<slug>[bot]" name, so manual App runs always co-attribute. The trailer's
+//     own email is always the plain "<userLogin>@users.noreply.github.com" form
+//     (the human is a user account — the plain form links; the numeric form is
+//     never applied here). Autonomous/event runs (manual=false) get the org
+//     identity only.
+func ResolveCommitIdentity(orgName, orgEmail string, manual bool, userLogin string) (CommitIdentity, bool) {
+	if orgName == "" {
 		return CommitIdentity{}, false // nothing to stamp
 	}
-	id := CommitIdentity{Name: orgLogin, Email: orgLogin + "@users.noreply.github.com"}
-	if manual && userLogin != "" && !strings.EqualFold(userLogin, orgLogin) {
+	id := CommitIdentity{Name: orgName, Email: orgEmail}
+	if manual && userLogin != "" && !strings.EqualFold(userLogin, orgName) {
 		id.CoAuthorTrailer = "Co-authored-by: " + userLogin + " <" + userLogin + "@users.noreply.github.com>"
 	}
 	return id, true

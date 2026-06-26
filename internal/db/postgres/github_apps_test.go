@@ -81,6 +81,51 @@ func TestGitHubAppsStore_Postgres_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestGitHubAppsStore_Postgres_BotUserID pins the bot_user_id column round-trip
+// (TFAC-474) on the admin/system path: a set id survives Create→GetForOrgSystem,
+// and an unset id (0) is written as NULL and scans back as 0. Wires both pools
+// to AdminDB (BYPASSRLS) so the test exercises the SQL independent of the auth
+// path, like the installation-lifecycle test.
+func TestGitHubAppsStore_Postgres_BotUserID(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgWithID, _ := seedPgOrgAndUserForGitHubApps(t, h)
+	orgWithout, _ := seedPgOrgAndUserForGitHubApps(t, h)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+		OrgID: orgWithID, AppID: "7001", Slug: "acme-bot", ClientID: "Iv1.x",
+		ClientSecretRef: "cs", PEMRef: "pem", WebhookSecretRef: "wh",
+		BotUserID: 41898282,
+	}); err != nil {
+		t.Fatalf("CreateForOrg (with id): %v", err)
+	}
+	got, err := stores.GitHubApps.GetForOrgSystem(ctx, orgWithID)
+	if err != nil || got == nil {
+		t.Fatalf("GetForOrgSystem (with id) = %+v, %v", got, err)
+	}
+	if got.BotUserID != 41898282 {
+		t.Errorf("BotUserID = %d, want 41898282", got.BotUserID)
+	}
+
+	// An unset id stores NULL (CreateForOrg maps 0 → NULL) and scans back as 0.
+	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+		OrgID: orgWithout, AppID: "7002", Slug: "no-bot", ClientID: "Iv1.y",
+		ClientSecretRef: "cs", PEMRef: "pem", WebhookSecretRef: "wh",
+	}); err != nil {
+		t.Fatalf("CreateForOrg (without id): %v", err)
+	}
+	got, err = stores.GitHubApps.GetForOrgSystem(ctx, orgWithout)
+	if err != nil || got == nil {
+		t.Fatalf("GetForOrgSystem (without id) = %+v, %v", got, err)
+	}
+	if got.BotUserID != 0 {
+		t.Errorf("BotUserID = %d, want 0 (NULL scans as 0)", got.BotUserID)
+	}
+}
+
 // TestGitHubAppsStore_Postgres_ConflictOnDuplicate verifies that a
 // second CreateForOrg for the same org returns ErrGitHubAppExists.
 func TestGitHubAppsStore_Postgres_ConflictOnDuplicate(t *testing.T) {

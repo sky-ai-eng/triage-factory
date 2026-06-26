@@ -442,6 +442,13 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		writtenKeys = append(writtenKeys, webhookSecretKey)
 	}
 
+	// Best-effort: resolve the bot's numeric user-account id for the numeric-id
+	// noreply commit email so App-bot commits link on github.com (TFAC-474).
+	// Read against the same resolved base the validation calls used; a failure
+	// leaves it 0 → NULL → the plain noreply form, self-healing on re-import, and
+	// never blocks the import.
+	botUserID := s.fetchBotUserID(ctx, base, app.Slug, orgID)
+
 	// Persist exactly as the manifest callback does, including the staging rule:
 	// an org PAT still live ⇒ active=false (staged, the PAT stays live until a
 	// cutover); a fresh setup ⇒ active=true. integrations.Load reads the PAT
@@ -464,6 +471,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 			OwnerType:          mapAppOwnerType(app.OwnerType),
 			RegisteredByUserID: userID,
 			Active:             !staged,
+			BotUserID:          botUserID,
 		}); err != nil {
 			return err
 		}
