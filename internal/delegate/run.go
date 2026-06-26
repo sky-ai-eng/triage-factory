@@ -74,7 +74,16 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 	if manual && creatorUserID != "" {
 		if stores, set := s.getStores(); set {
 			host, _ := s.ghResolver.BaseURLFor(ctx, orgID)
-			coLogin, _ = stores.Users.GetGitHubLoginSystem(ctx, creatorUserID, host)
+			login, err := stores.Users.GetGitHubLoginSystem(ctx, creatorUserID, host)
+			if err != nil {
+				// Non-fatal: the run proceeds, the human just doesn't get co-author
+				// credit (ResolveCommitIdentity omits the trailer on an empty login).
+				// Debug-logged so an operator can diagnose a missing trailer without
+				// it surfacing as a run error.
+				delegateLog.Debug("resolve co-author github login failed; manual run will omit the trailer",
+					"creator", creatorUserID, "error", err)
+			}
+			coLogin = login
 		}
 	}
 	id, _ := githooks.ResolveCommitIdentity(orgLogin, manual, coLogin)

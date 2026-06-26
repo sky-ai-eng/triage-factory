@@ -6,7 +6,11 @@
 -- org identity as the commit author/committer on delegated-agent commits. App
 -- tier resolves <slug>[bot] live and needs no column. PAT-path only; nullable,
 -- no default — an org bound before this ticket reads back "" and self-heals on
--- the next PAT re-save. Mirrors the Postgres baseline's agents.github_org_login.
+-- the next PAT re-save.
+--
+-- Postgres has no companion migration: that schema is unreleased, so the column
+-- was added directly to the baseline (202605130001_pg_baseline.sql, agents
+-- table). SQLite is shipped, hence this forward-only migration instead.
 ALTER TABLE agents ADD COLUMN github_org_login TEXT;
 
 -- +goose Down
