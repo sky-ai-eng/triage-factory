@@ -10,6 +10,7 @@ import {
   YAxis,
   Tooltip,
 } from 'recharts'
+import * as HintTip from '@radix-ui/react-tooltip'
 import TeamSwitch from '../components/TeamSwitch'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useOrgRole } from '../hooks/useOrgRole'
@@ -237,13 +238,8 @@ function modelBars(rows: UsageModelBucket[] | undefined): BarDatum[] {
   return (rows ?? []).map((m) => ({ key: m.model, label: m.model, value: m.cost }))
 }
 
-function userBars(rows: UsageUserBucket[] | undefined): BarDatum[] {
-  return (rows ?? []).map((u) => ({
-    key: u.user_id,
-    label: u.display_name || u.user_id,
-    value: u.cost,
-  }))
-}
+// by_user has its own roster instrument (avatars + names), so it needs no flat
+// BarDatum adapter.
 
 function ruleBars(rows: UsageRuleBucket[] | undefined): BarDatum[] {
   return (rows ?? []).map((r) => ({
@@ -328,6 +324,37 @@ function Meter({
   )
 }
 
+// InfoHint is a small "?" affordance whose hover popup explains a term — used in
+// the allocation legend so a non-team slice can say what it is without a cryptic
+// inline tag. Styled to match the board/run-detail tooltips.
+function InfoHint({ text }: { text: string }) {
+  return (
+    <HintTip.Provider delayDuration={150}>
+      <HintTip.Root>
+        <HintTip.Trigger asChild>
+          <button
+            type="button"
+            aria-label="What's this?"
+            className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border border-text-tertiary/30 font-mono text-[8px] leading-none text-text-tertiary/70 transition-colors hover:border-accent hover:text-accent"
+          >
+            ?
+          </button>
+        </HintTip.Trigger>
+        <HintTip.Portal>
+          <HintTip.Content
+            side="top"
+            sideOffset={6}
+            className="z-[100] max-w-[240px] rounded-lg border border-border-glass bg-surface-raised px-3 py-2 text-[12px] leading-relaxed text-text-secondary shadow-lg shadow-black/[0.06]"
+          >
+            {text}
+            <HintTip.Arrow className="fill-surface-raised" />
+          </HintTip.Content>
+        </HintTip.Portal>
+      </HintTip.Root>
+    </HintTip.Provider>
+  )
+}
+
 // Donut is the composition instrument — a thin wireframe ring (a stroke, not a
 // bulbous pie) with gapped segments and a monospace legend that carries the
 // numbers. Used for both the category split and the org allocation. The ring is
@@ -337,9 +364,10 @@ interface DonutSeg {
   label: string
   color: string
   value: number
-  /** Marks an org-level overhead slice (curator-on-non-team / system) so the
-   *  legend can tag it. */
-  overhead?: boolean
+  /** Optional explainer — renders a "?" after the label whose hover popup shows
+   *  this text. Used by the org allocation's non-team slices (system jobs /
+   *  team-less curator). */
+  hint?: string
   title?: string
 }
 function Donut({
@@ -386,11 +414,7 @@ function Donut({
             <span className="flex min-w-0 items-center gap-1.5">
               <span className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: d.color }} />
               <span className="truncate text-text-secondary">{d.label}</span>
-              {d.overhead && (
-                <span className="shrink-0 text-[9px] uppercase tracking-wider text-text-tertiary/50">
-                  ovh
-                </span>
-              )}
+              {d.hint && <InfoHint text={d.hint} />}
             </span>
             <span className="shrink-0 tabular-nums text-text-tertiary" title={d.title}>
               {fmtUSD(d.value)} · {pct(d.value, total)}
@@ -461,6 +485,63 @@ function Gauges({
   )
 }
 
+// initialsOf builds a 1–2 char monogram from a display name (first + last word,
+// or the first two letters of a single word).
+function initialsOf(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return '?'
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+}
+
+// Avatar is a square-ish identity chip — a real picture when we have a url, else
+// a rust monogram placeholder. (The spend API carries no avatar_url yet; the
+// `url` path is here so a backend add lights up real pictures with no FE change.)
+function Avatar({ name, url }: { name: string; url?: string }) {
+  if (url) {
+    return <img src={url} alt="" className="h-7 w-7 shrink-0 rounded-[3px] object-cover" />
+  }
+  return (
+    <span
+      aria-hidden
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[3px] bg-accent/10 font-mono text-[10px] font-semibold text-accent"
+    >
+      {initialsOf(name)}
+    </span>
+  )
+}
+
+// UserRoster is the per-person breakdown (team "by member" / org "by user") given
+// real room: a fixed-height, vertically-scrollable column of avatar + name +
+// spend-gauge rows, showing everyone (not a top-N), in the same gradient-gauge
+// language as the rest of the console.
+function UserRoster({ data, emptyLabel = '—' }: { data: UsageUserBucket[]; emptyLabel?: string }) {
+  const rows = data.filter((d) => d.cost > 0).sort((a, b) => b.cost - a.cost)
+  if (rows.length === 0) return <ZeroMini label={emptyLabel} />
+  const max = rows[0].cost
+  return (
+    <div className="h-56 space-y-3 overflow-y-auto pr-1">
+      {rows.map((d) => {
+        const name = d.display_name || d.user_id
+        return (
+          <div key={d.user_id} className="flex items-center gap-2.5">
+            <Avatar name={name} />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline justify-between gap-2 font-mono text-[11px]">
+                <span className="truncate text-text-secondary" title={name}>
+                  {name}
+                </span>
+                <span className="shrink-0 tabular-nums text-text-tertiary">{fmtUSD(d.cost)}</span>
+              </div>
+              <Meter value={d.cost} max={max} />
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // Trace is the "over time" readout: a borderless accent line with a soft area
 // fade, sitting directly on the warm console over a single faint baseline — no
 // panel, no screen, no scanlines. It matches the gauges' gradient language and
@@ -516,7 +597,7 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
 }
 
 // Teams have no inherent tone, so the allocation ring cycles them through a
-// palette (org-level overhead keeps its category color instead).
+// palette (org-level slices keep their category color instead).
 const TEAM_PALETTE = [
   'var(--color-accent)',
   'var(--color-delegate)',
@@ -526,12 +607,22 @@ const TEAM_PALETTE = [
   'var(--color-claim)',
 ]
 
+// Explainers for the org-level (non-team) slices. These stay distinct categories
+// — the backend's org_level is grouped by category, so team-less curator comes
+// back separate from the system jobs — and each gets a "?" rather than a shared
+// "overhead" tag.
+const ORG_LEVEL_HINT: Record<string, string> = {
+  system_overhead:
+    'Org-wide system jobs, not tied to any team — the scorer, repo-profiler, and project classifier.',
+  curator: 'Curator turns on projects that aren’t attached to a team.',
+}
+
 // AllocationDonut is the org hero: the WHOLE org spend as one ring, partitioned
-// across teams + the org-level overhead (curator-on-non-team / system). This is
-// exactly the backend's partition invariant — total == sum(by_team) +
-// sum(org_level) — so it reads as "where every dollar went". Team slices take
-// palette colors; overhead slices keep their category tone and wear an "ovh" tag
-// in the legend so attributable vs overhead is legible.
+// across teams + the org-level (non-team) slices. This is exactly the backend's
+// partition invariant — total == sum(by_team) + sum(org_level) — so it reads as
+// "where every dollar went". Team slices take palette colors; the org-level
+// slices keep their category tone + label (System / Curator) and carry a "?"
+// explainer.
 function AllocationDonut({
   byTeam,
   orgLevel,
@@ -553,12 +644,12 @@ function AllocationDonut({
     .filter((o) => o.cost > 0)
     .sort((a, b) => b.cost - a.cost)
     .map((o) => ({
-      key: `ovh:${o.category}`,
+      key: `org:${o.category}`,
       label: categoryLabel(o.category),
       value: o.cost,
       color: categoryColor(o.category),
-      overhead: true,
-      title: `${categoryLabel(o.category)} (overhead) · ${fmtUSD(o.cost)}`,
+      hint: ORG_LEVEL_HINT[o.category],
+      title: `${categoryLabel(o.category)} · ${fmtUSD(o.cost)}`,
     }))
   // A bigger ring + a two-column legend, since the org hero can carry many teams.
   return (
@@ -570,22 +661,25 @@ function AllocationDonut({
   )
 }
 
-// ThroughputInstrument fuses "over time" + "by model" into one readout shaped
-// like the Run Station: a wide HMI trace screen with a model telemetry rail
-// etched into the housing beside it (stacks below on narrow viewports).
+// ThroughputInstrument fuses "over time" + "by model" into one readout: a wide
+// trace plot with a model telemetry rail beside it (stacks below on narrow
+// viewports).
 function ThroughputInstrument({
   byDay,
   byModel,
   tall = false,
+  spanClass = 'md:col-span-2 lg:col-span-3',
 }: {
   byDay: UsageDayBucket[]
   byModel: UsageModelBucket[]
-  /** Hero mode — a taller screen. Used by Personal, where the throughput is the
+  /** Hero mode — a taller plot. Used by Personal, where the throughput is the
    *  section's only instrument. */
   tall?: boolean
+  /** Grid span override (Team gives it 2/3 so a Category dial can share its row). */
+  spanClass?: string
 }) {
   return (
-    <Instrument label="Over time" className="md:col-span-2 lg:col-span-3">
+    <Instrument label="Over time" className={spanClass}>
       <div className="flex flex-col gap-5 lg:flex-row">
         <div className="min-w-0 flex-1">
           <Trace data={byDay} heightClass={tall ? 'h-44' : 'h-32'} />
@@ -771,9 +865,11 @@ function TeamSection({
       error={error}
       empty={total === 0}
     >
+      {/* By member is the wide, tall, scrollable roster (2/3); by rule rides
+          beside it, then category + throughput share the next row. */}
       <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2 lg:grid-cols-3">
-        <Instrument label="By member">
-          <Gauges data={userBars(data?.by_user)} emptyLabel="no member spend" />
+        <Instrument label="By member" className="md:col-span-2 lg:col-span-2">
+          <UserRoster data={data?.by_user ?? []} emptyLabel="no member spend" />
         </Instrument>
         <Instrument label="By rule">
           <Gauges data={ruleBars(data?.by_rule)} emptyLabel="no automated runs" />
@@ -781,7 +877,11 @@ function TeamSection({
         <Instrument label="Category">
           <CategoryDonut data={data?.by_category ?? []} />
         </Instrument>
-        <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} />
+        <ThroughputInstrument
+          byDay={data?.by_day ?? []}
+          byModel={data?.by_model ?? []}
+          spanClass="md:col-span-2 lg:col-span-2"
+        />
       </div>
     </Band>
   )
@@ -799,19 +899,19 @@ function OrgSection({ since, days }: { since: string; days: number }) {
       error={error}
       empty={total === 0}
     >
-      {/* A dual-dial cluster: the allocation ring (hero) over a category ring +
-          the by-user gauges, then the full-width throughput. */}
-      <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2">
+      {/* Allocation ring (hero, full) over the wide by-user roster + a category
+          dial sharing its row, then the full-width throughput. */}
+      <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2 lg:grid-cols-3">
         {/* Allocation hero — the whole org spend partitioned across teams +
             overhead (merges the old "by team" + "org-level" instruments). */}
-        <Instrument label="Allocation" className="md:col-span-2">
+        <Instrument label="Allocation" className="md:col-span-2 lg:col-span-3">
           <AllocationDonut byTeam={data?.by_team ?? []} orgLevel={data?.org_level ?? []} />
         </Instrument>
-        <Instrument label="Category">
-          <CategoryDonut data={data?.by_category ?? []} />
+        <Instrument label="By user" className="md:col-span-2 lg:col-span-2">
+          <UserRoster data={data?.by_user ?? []} emptyLabel="no user spend" />
         </Instrument>
-        <Instrument label="By user">
-          <Gauges data={userBars(data?.by_user)} emptyLabel="no user spend" />
+        <Instrument label="Category" className="md:col-span-2 lg:col-span-1">
+          <CategoryDonut data={data?.by_category ?? []} />
         </Instrument>
         <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} />
       </div>
