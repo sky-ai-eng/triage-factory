@@ -34,6 +34,8 @@ func TestParseUsageWindow(t *testing.T) {
 		{"both bare dates", map[string]string{"since": "2026-03-01", "until": "2026-04-01"}, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), false},
 		{"invalid since", map[string]string{"since": "not-a-time"}, time.Time{}, time.Time{}, true},
 		{"invalid until", map[string]string{"until": "not-a-time"}, time.Time{}, time.Time{}, true},
+		{"since after until", map[string]string{"since": "2026-04-01", "until": "2026-03-01"}, time.Time{}, time.Time{}, true},
+		{"since equals until", map[string]string{"since": "2026-03-01", "until": "2026-03-01"}, time.Time{}, time.Time{}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -286,6 +288,15 @@ func TestUsageEndpoints_Local(t *testing.T) {
 		rec := doJSON(t, s, "GET", "/api/usage/me?since=not-a-date", nil)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("/me?since=not-a-date = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("inverted_window_400", func(t *testing.T) {
+		// since >= until is a non-positive window — reject rather than return an
+		// empty 200 that masks the client bug.
+		rec := doJSON(t, s, "GET", "/api/usage/me?since=2026-06-30&until=2026-06-01", nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("/me with since>until = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 }

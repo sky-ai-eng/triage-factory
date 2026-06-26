@@ -352,6 +352,14 @@ func parseUsageWindow(q url.Values, now time.Time) (since, until time.Time, errM
 		}
 		until = t
 	}
+	// When both bounds are supplied, reject a non-positive window (since >=
+	// until). The read is half-open [since, until), so since == until is empty
+	// and since > until is inverted — both would otherwise return a misleading
+	// 200 with no rows and mask a client bug. Single-bound requests leave the
+	// other side open (zero), so there's no ordering to check.
+	if !since.IsZero() && !until.IsZero() && !since.Before(until) {
+		return time.Time{}, time.Time{}, "'since' must be before 'until'"
+	}
 	return since, until, ""
 }
 
@@ -403,9 +411,10 @@ func spendByCategory(rows []domain.SpendRow) []usageCategoryBucket {
 	return out
 }
 
-// spendByModel sums cost per model, newest-cost-first. Rows with a NULL model
-// (curator turns) are excluded — by_model is a per-model breakdown, not a
-// total, so the curator share lives only in by_category.
+// spendByModel sums cost per model, highest-cost-first (ties broken by model
+// name). Rows with a NULL model (curator turns) are excluded — by_model is a
+// per-model breakdown, not a total, so the curator share lives only in
+// by_category.
 func spendByModel(rows []domain.SpendRow) []usageModelBucket {
 	byModel := map[string]float64{}
 	for _, r := range rows {
