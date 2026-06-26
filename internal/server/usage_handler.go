@@ -20,16 +20,18 @@ import (
 // (TFAC-472). Spend is core at every scope; the SCOPE is what's role-gated:
 //
 //   - GET /api/usage/me          — the caller's own spend (any org member).
-//   - GET /api/usage/teams/{id}  — one team's breakdown (team admin OR org admin).
+//   - GET /api/usage/teams/{id}  — one team's breakdown (team admin).
 //   - GET /api/usage/org         — the org rollup (org admin).
 //
 // All three take the org from the session claims (like /api/dashboard/*), NOT
-// from the path. The /me read runs on the APP pool under the caller's claims
-// (RLS + a creator filter scope it to them); the team/org reads run on the
-// ADMIN pool via ListSpendSystem — the role gate is the authorization and the
-// System read is the authorized path past RLS (an org admin need not be a
-// member of the team they inspect). Aggregation happens in Go from the rows;
-// per-org/-team/-month volumes are modest, so we materialize nothing here.
+// from the path. /me runs on the APP pool under the caller's claims (RLS + a
+// creator filter scope it to them). /teams is team-admin-only, so its names
+// resolve under the member's own claims; its spend read uses ListSpendSystem
+// because curator_requests RLS is creator-scoped (an app-pool read would miss
+// peers' curator turns) — the team-admin gate authorizes it. /org is the
+// org-admin governance rollup: a cross-team ListSpendSystem read, no per-rule
+// detail. Aggregation happens in Go from the rows; per-org/-team/-month volumes
+// are modest, so we materialize nothing here.
 type usageHandler struct {
 	tx db.TxRunner
 	az *authz.Checker
@@ -100,6 +102,12 @@ type usageTeamResponse struct {
 	ByDay        []usageDayBucket      `json:"by_day"`
 }
 
+// usageOrgResponse is the org rollup. Partition invariant: total_cost_usd ==
+// sum(by_team[*].cost) + sum(org_level[*].cost) — by_team covers the team-
+// attributed rows, org_level the NULL-team rows (curator-on-non-team-projects +
+// system_overhead). by_user and by_category slice the SAME total on different
+// axes (creator / category), so neither sums to total on its own; a consumer
+// reproducing the total must add by_team + org_level, not by_team alone.
 type usageOrgResponse struct {
 	TotalCostUSD float64               `json:"total_cost_usd"`
 	ByTeam       []usageTeamBucket     `json:"by_team"`
@@ -208,6 +216,11 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return e
 		}
+		// Team name via the by-id System getter. Unlike by_rule/by_user below
+		// (team- and creator-scoped data, resolved under the member's own claims),
+		// team rows are org-visible (teams_select is org-scoped) so this is no
+		// privilege bump — and TeamsStore exposes no app-pool Get-by-id, so
+		// GetSystem is the only by-id team getter.
 		t, e := tx.Teams.GetSystem(r.Context(), orgID, teamID)
 		if e != nil {
 			return e
