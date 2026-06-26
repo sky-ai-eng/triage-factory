@@ -365,6 +365,10 @@ func insertImportedProject(tx *sql.Tx, projectID, curatorSessionID, orgID, teamI
 	return nil
 }
 
+// importCuratorRequests restores curator history into the new project. team_id is
+// snapshotted from the destination project (inserted earlier in this same tx) via
+// the (SELECT team_id FROM projects WHERE id = ?) subquery — like every curator
+// INSERT — so imported spend rolls into the importing team's dashboard (TFAC-476).
 func importCuratorRequests(tx *sql.Tx, projectID string, zf *zip.File) (map[string]string, error) {
 	idMap := make(map[string]string)
 	err := decodeZipJSONLines(
@@ -383,12 +387,13 @@ func importCuratorRequests(tx *sql.Tx, projectID string, zf *zip.File) (map[stri
 			}
 			_, err := tx.Exec(`
 			INSERT INTO curator_requests (
-				id, project_id, status, user_input, error_msg,
+				id, project_id, team_id, status, user_input, error_msg,
 				cost_usd, duration_ms, num_turns, started_at,
 				finished_at, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, (SELECT team_id FROM projects WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 				newID,
+				projectID,
 				projectID,
 				row.Status,
 				row.UserInput,

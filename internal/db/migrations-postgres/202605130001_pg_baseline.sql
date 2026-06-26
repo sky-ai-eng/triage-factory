@@ -719,6 +719,16 @@ CREATE TABLE public.curator_requests (
     org_id uuid NOT NULL,
     creator_user_id uuid NOT NULL,
     project_id uuid NOT NULL,
+    -- team_id snapshotted from the project at creation (point-in-time, nullable;
+    -- mirrors runs.team_id). A Curator session is tied to a project and projects
+    -- are team-scoped, so curator spend attributes to the project's team: team
+    -- project -> team-attributed; private/org project -> NULL (still creator- and
+    -- org-visible, just absent from team dashboards). Denormalized (no FK): a
+    -- project later moving teams leaves past spend with the team that incurred it,
+    -- and the security_invoker llm_spend view stays JOIN-free so it doesn't re-gate
+    -- curator rows through projects' RLS. Every curator INSERT must populate this
+    -- via (SELECT team_id FROM projects WHERE id = <project_id>). See TFAC-476.
+    team_id uuid,
     status text DEFAULT 'queued'::text NOT NULL,
     user_input text NOT NULL,
     error_msg text,
@@ -1478,7 +1488,7 @@ UNION ALL
  SELECT 'curator'::text AS source,
     curator_requests.id AS source_id,
     curator_requests.org_id,
-    NULL::uuid AS team_id,
+    curator_requests.team_id,
     'curator'::text AS category,
     NULL::text AS subtype,
     curator_requests.creator_user_id,

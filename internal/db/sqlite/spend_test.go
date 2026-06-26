@@ -24,22 +24,35 @@ func TestSpendStore_SQLite(t *testing.T) {
 		conn := openSQLiteSpendConn(t)
 		stores := sqlitestore.New(conn)
 
-		// One org agent (UNIQUE per org) for the actor_agent_id passthrough,
-		// and one project so curator_requests' NOT NULL project_id FK is
-		// satisfied. The local tenant sentinels (org/team/user) already exist
-		// via BootstrapSchemaForTest → SeedLocalTenantRows.
+		// One org agent (UNIQUE per org) for the actor_agent_id passthrough, and
+		// two projects (team-scoped + null-team) so curator_requests' NOT NULL
+		// project_id FK is satisfied and the curator team_id snapshot has both a
+		// team and a null-team source. The local tenant sentinels (org/team/user)
+		// already exist via BootstrapSchemaForTest → SeedLocalTenantRows.
 		agentID := uuid.New().String()
 		if _, err := conn.Exec(
 			`INSERT INTO agents (id, org_id) VALUES (?, ?)`, agentID, runmode.LocalDefaultOrgID,
 		); err != nil {
 			t.Fatalf("seed agent: %v", err)
 		}
-		projectID := uuid.New().String()
+		// A team-scoped project (curator team-attribution case) and a null-team,
+		// org-visibility project (the null-team case). The CHECK only forces a
+		// team_id for visibility='team', so 'org' + NULL team_id is valid. The
+		// Curator seeder snapshots team_id from whichever project the fixture's
+		// TeamID selects (TFAC-476).
+		teamProjectID := uuid.New().String()
 		if _, err := conn.Exec(
-			`INSERT INTO projects (id, name, team_id, org_id, creator_user_id) VALUES (?, 'spend-test', ?, ?, ?)`,
-			projectID, runmode.LocalDefaultTeamID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
+			`INSERT INTO projects (id, name, team_id, org_id, creator_user_id, visibility) VALUES (?, 'spend-test', ?, ?, ?, 'team')`,
+			teamProjectID, runmode.LocalDefaultTeamID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
 		); err != nil {
-			t.Fatalf("seed project: %v", err)
+			t.Fatalf("seed team project: %v", err)
+		}
+		nullTeamProjectID := uuid.New().String()
+		if _, err := conn.Exec(
+			`INSERT INTO projects (id, name, team_id, org_id, creator_user_id, visibility) VALUES (?, 'spend-test-org', NULL, ?, ?, 'org')`,
+			nullTeamProjectID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
+		); err != nil {
+			t.Fatalf("seed null-team project: %v", err)
 		}
 
 		return dbtest.SpendStoreFixture{
@@ -48,7 +61,7 @@ func TestSpendStore_SQLite(t *testing.T) {
 			TeamID:  runmode.LocalDefaultTeamID,
 			UserID:  runmode.LocalDefaultUserID,
 			AgentID: agentID,
-			Seeder:  newSQLiteSpendSeeder(conn, projectID),
+			Seeder:  newSQLiteSpendSeeder(conn, teamProjectID, nullTeamProjectID),
 		}
 	})
 }
@@ -78,7 +91,7 @@ func openSQLiteSpendConn(t *testing.T) *sql.DB {
 // is 'manual' so the runs_origin_requires_parents CHECK (which only constrains
 // origin='blueprint') is satisfied without a blueprint/task/prompt graph. Empty
 // CreatorUserID / ActorAgentID and a nil Cost serialize to SQL NULL.
-func newSQLiteSpendSeeder(conn *sql.DB, projectID string) dbtest.SpendSeeder {
+func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string) dbtest.SpendSeeder {
 	return dbtest.SpendSeeder{
 		Run: func(t *testing.T, f dbtest.RunSpendFixture) string {
 			t.Helper()
@@ -104,13 +117,21 @@ func newSQLiteSpendSeeder(conn *sql.DB, projectID string) dbtest.SpendSeeder {
 			if status == "" {
 				status = "completed"
 			}
+			// Non-empty TeamID → the team-scoped project (snapshot carries its team);
+			// empty → the null-team project (snapshot is NULL). team_id is captured
+			// via the same (SELECT team_id FROM projects WHERE id = ?) subquery
+			// production uses, so this proves project team → row team → view (TFAC-476).
+			projID := nullTeamProjectID
+			if f.TeamID != "" {
+				projID = teamProjectID
+			}
 			if _, err := conn.Exec(`
 				INSERT INTO curator_requests
-					(id, org_id, creator_user_id, project_id, status, user_input, cost_usd,
+					(id, org_id, creator_user_id, project_id, team_id, status, user_input, cost_usd,
 					 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-				VALUES (?, ?, ?, ?, ?, 'spend-test', ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, (SELECT team_id FROM projects WHERE id = ?), ?, 'spend-test', ?, ?, ?, ?, ?, ?)
 			`,
-				id, runmode.LocalDefaultOrgID, f.CreatorUserID, projectID, status, f.Cost,
+				id, runmode.LocalDefaultOrgID, f.CreatorUserID, projID, projID, status, f.Cost,
 				f.Tokens.Input, f.Tokens.Output, f.Tokens.CacheRead, f.Tokens.CacheCreation, f.CreatedAt,
 			); err != nil {
 				t.Fatalf("seed curator_request: %v", err)
