@@ -98,15 +98,20 @@ func (t *Tracker) publish(evt domain.Event) {
 // loop constructs one Tracker per active org per cycle; in local
 // mode there's one Tracker for the single synthetic tenant.
 //
-// ctx is the poll cycle's context (rooted in the poller's runGitHubCycle);
-// it scopes the GitHub API calls this cycle makes — open-PR listing,
-// discovery, and batch refresh — so a shutdown or restart can abort an
-// in-flight cycle mid-fetch (TFAC-475). The entity/task-store writes below
-// deliberately keep context.Background(): seeding/closing/reactivating an
-// entity is durable bookkeeping that must complete even if the cycle is
-// cancelled (a half-seeded create→snapshot pair would not be re-seeded, since
-// the next cycle's FindOrCreate returns created=false). Threading cancellation
-// into those persistence calls is a separate concern, out of scope here.
+// ctx is the poll cycle's context, threaded through every GitHub API call this
+// cycle makes — open-PR listing, discovery, and batch refresh (TFAC-475).
+// IMPORTANT: the root is currently context.Background() (poller.runGitHubCycle),
+// which is never cancelled, so an in-flight cycle still runs to completion
+// today; close(ghStop) only stops *new* cycles from starting. This threading is
+// the plumbing so that when a cancellable root is eventually wired at the poll
+// root, shutdown/restart can abort an in-flight cycle mid-fetch without touching
+// these call sites — it is not, on its own, live cancellation. The
+// entity/task-store writes below deliberately keep context.Background()
+// regardless: seeding/closing/reactivating an entity is durable bookkeeping that
+// must complete even once the cycle ctx becomes cancellable (a half-seeded
+// create→snapshot pair would not be re-seeded, since the next cycle's
+// FindOrCreate returns created=false). Threading cancellation into those
+// persistence calls is a separate concern, out of scope here.
 func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, username string, repos []string, resolver ReviewerResolver) (int, error) {
 	orgID := t.orgID
 	startedAt := time.Now()

@@ -149,7 +149,7 @@ func (c *Client) request(ctx context.Context, method, path string, body any, acc
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
+		return nil, fmt.Errorf("read response body for %s: %w", path, err)
 	}
 	if resp.StatusCode >= 400 {
 		return nil, newStatusError(method, path, resp.StatusCode, string(data))
@@ -236,7 +236,7 @@ func (c *Client) GetConditional(ctx context.Context, path, etag string) (body []
 
 	data, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		return nil, "", false, fmt.Errorf("read response body: %w", readErr)
+		return nil, "", false, fmt.Errorf("read response body for %s: %w", path, readErr)
 	}
 	if resp.StatusCode >= 400 {
 		return nil, "", false, newStatusError("GET", path, resp.StatusCode, string(data))
@@ -412,7 +412,7 @@ func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
 	// return empty data with no error (silent partial behavior).
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
+		return nil, fmt.Errorf("read graphql response body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		return nil, &HTTPError{
