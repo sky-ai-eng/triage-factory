@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -37,6 +38,19 @@ func NewHTTPError(statusCode int, body, msg string) *HTTPError {
 func IsHTTP406(err error) bool {
 	var he *HTTPError
 	return errors.As(err, &he) && he.StatusCode == 406
+}
+
+// newStatusError builds the *HTTPError for a transport-level non-2xx. The
+// "%s %s returned %d: %s" message format lives here, in one place, so the REST
+// builders (request, GetConditional, DownloadArtifact) can't drift on it — the
+// GET-only methods pass method "GET". (PostGraphQL keeps its own distinct
+// "GraphQL returned %d: %s" shape — it has no REST path to report.)
+func newStatusError(method, path string, statusCode int, body string) *HTTPError {
+	return &HTTPError{
+		StatusCode: statusCode,
+		Body:       body,
+		msg:        fmt.Sprintf("%s %s returned %d: %s", method, path, statusCode, body),
+	}
 }
 
 // acceptJSON is the default Accept header for the GitHub v3 JSON API. Every
@@ -138,11 +152,7 @@ func (c *Client) request(ctx context.Context, method, path string, body any, acc
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, &HTTPError{
-			StatusCode: resp.StatusCode,
-			Body:       string(data),
-			msg:        fmt.Sprintf("%s %s returned %d: %s", method, path, resp.StatusCode, string(data)),
-		}
+		return nil, newStatusError(method, path, resp.StatusCode, string(data))
 	}
 	return data, nil
 }
@@ -229,11 +239,7 @@ func (c *Client) GetConditional(ctx context.Context, path, etag string) (body []
 		return nil, "", false, fmt.Errorf("read response body: %w", readErr)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, "", false, &HTTPError{
-			StatusCode: resp.StatusCode,
-			Body:       string(data),
-			msg:        fmt.Sprintf("GET %s returned %d: %s", path, resp.StatusCode, string(data)),
-		}
+		return nil, "", false, newStatusError("GET", path, resp.StatusCode, string(data))
 	}
 	return data, resp.Header.Get("ETag"), false, nil
 }
@@ -310,11 +316,7 @@ func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Write
 		// status codes (e.g., the download-logs fallback path needs to
 		// detect 404 specifically — GitHub returns it for runs that
 		// haven't finished yet — without resorting to string matching).
-		return 0, &HTTPError{
-			StatusCode: resp.StatusCode,
-			Body:       string(body),
-			msg:        fmt.Sprintf("GET %s returned %d: %s", path, resp.StatusCode, string(body)),
-		}
+		return 0, newStatusError("GET", path, resp.StatusCode, string(body))
 	}
 
 	// Pre-flight size cap. GitHub's signed-URL redirect returns an honest
@@ -325,7 +327,14 @@ func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Write
 
 	// io.LimitReader as a second guard. +1 so we can detect the cap was hit
 	// even when Content-Length was missing and the body actually ran over.
-	limited := io.LimitReader(resp.Body, maxBytes+1)
+	// Guard the arithmetic: at math.MaxInt64 the +1 wraps negative and
+	// io.LimitReader would read nothing — a cap that large can't be exceeded
+	// anyway, so skip the +1 there.
+	readCap := maxBytes
+	if readCap < math.MaxInt64 {
+		readCap++
+	}
+	limited := io.LimitReader(resp.Body, readCap)
 	n, err := io.Copy(dst, limited)
 	if err != nil {
 		return n, fmt.Errorf("stream artifact body: %w", err)
@@ -393,7 +402,7 @@ func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("graphql request: %w", err)
 	}
 	defer resp.Body.Close()
 

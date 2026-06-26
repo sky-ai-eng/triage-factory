@@ -399,19 +399,37 @@ func TestRequestCore_Table(t *testing.T) {
 	}
 }
 
-// TestRequestCore_ContextCancellation proves the core actually honors ctx: the
-// server holds the response open until the request's context fires, and a
-// mid-flight cancel makes the call return promptly with a context error rather
-// than hanging to the 30s client timeout. This is the whole point of the
-// ticket — before unification the do() family ignored ctx entirely.
-func TestRequestCore_ContextCancellation(t *testing.T) {
-	started := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(started)
-		<-r.Context().Done() // hold open until the client cancels
+// blockingServer backs the cancellation tests: its handler signals `started`
+// once, then holds the response open on a test-owned release channel that
+// cleanup always closes. So the only way a client call returns is via its own
+// ctx cancellation, never a server response — and crucially the handler is
+// unblocked before srv.Close(), which otherwise hangs waiting for the in-flight
+// connection (a client cancel does not reliably fire the server's r.Context()
+// for a request whose body the handler never read).
+func blockingServer(t *testing.T) (url string, started <-chan struct{}) {
+	t.Helper()
+	s := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		once.Do(func() { close(s) })
+		<-release
 	}))
-	defer srv.Close()
-	c := clientAgainst(srv.URL)
+	t.Cleanup(func() {
+		close(release) // unblock the handler first, then Close() can drain
+		srv.Close()
+	})
+	return srv.URL, s
+}
+
+// TestRequestCore_ContextCancellation proves the core actually honors ctx: the
+// server holds the response open, and a mid-flight cancel makes the call return
+// promptly with a context error rather than hanging to the 30s client timeout.
+// This is the whole point of the ticket — before unification the do() family
+// ignored ctx entirely.
+func TestRequestCore_ContextCancellation(t *testing.T) {
+	url, started := blockingServer(t)
+	c := clientAgainst(url)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
@@ -456,5 +474,34 @@ func TestDo_PostSurfacesHTTPError(t *testing.T) {
 	}
 	if want := `POST /repos/o/r/pulls returned 422: {"message":"validation failed"}`; he.Error() != want {
 		t.Errorf("Error() = %q, want %q", he.Error(), want)
+	}
+}
+
+// TestPostGraphQL_ContextCancellation pins the GraphQL path specifically: it has
+// its own c.http.Do call rather than threading through request(), so it gets its
+// own cancellation guard. A mid-flight cancel aborts it promptly instead of
+// hanging to the 30s client timeout — the do-family-didn't-honor-ctx motivation
+// applies to PostGraphQL too.
+func TestPostGraphQL_ContextCancellation(t *testing.T) {
+	url, started := blockingServer(t)
+	c := clientAgainst(url)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := c.PostGraphQL(ctx, map[string]any{"query": "{ __typename }"})
+		errc <- err
+	}()
+
+	<-started
+	cancel()
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("PostGraphQL did not return after ctx cancellation — the GraphQL path is not ctx-aware")
 	}
 }
