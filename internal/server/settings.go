@@ -414,12 +414,20 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
 		}
-		// TFAC-471: audit the org Jira credential bind/rotate in the same tx;
-		// the host carries the Jira base URL just connected.
+		// TFAC-471: audit the org Jira credential bind/rotate in the same tx.
+		// Record the canonical host (resolveJiraHost) so org-credential rows
+		// share a host string with the per-user jira_user rows for the same
+		// instance — those key off the same resolved org_settings.jira_base_url,
+		// whereas req.URL is whatever the user typed (trailing slash / casing).
+		// Fall back to the raw URL if it doesn't resolve.
+		auditHost := req.URL
+		if canon, ok := resolveJiraHost(req.URL); ok {
+			auditHost = canon
+		}
 		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
-			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, req.URL),
+			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditHost),
 		}); err != nil {
 			return fmt.Errorf("audit credential set: %w", err)
 		}
