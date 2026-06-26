@@ -397,7 +397,14 @@ func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	data, _ := io.ReadAll(resp.Body)
+	// Surface a body-read failure rather than proceeding with an empty/partial
+	// payload — matching request() and GetConditional. A truncated read on a
+	// 200 would otherwise fall through, fail the partial-error unmarshal, and
+	// return empty data with no error (silent partial behavior).
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, &HTTPError{
 			StatusCode: resp.StatusCode,

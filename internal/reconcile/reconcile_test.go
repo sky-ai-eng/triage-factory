@@ -392,6 +392,7 @@ func newStubClient(t *testing.T, s *stubGH) *github.Client {
 // cancel would race the client's own response read. The GetPRBasic in the
 // write-back is a GET on the detached writeCtx and passes through untouched.
 type cancelAfterFetchRT struct {
+	t      *testing.T
 	base   http.RoundTripper
 	cancel context.CancelFunc
 	once   sync.Once
@@ -402,7 +403,16 @@ func (rt *cancelAfterFetchRT) RoundTrip(req *http.Request) (*http.Response, erro
 	if err != nil || req.Method != http.MethodPost {
 		return resp, err
 	}
-	body, _ := io.ReadAll(resp.Body)
+	// Fully buffer the fetch body BEFORE cancelling so the caller's read never
+	// touches the about-to-be-cancelled connection. A read failure here must be
+	// loud: proceeding with an empty body would surface as a confusing "state =
+	// open" assertion downstream instead of the actual transport fault. RoundTrip
+	// runs synchronously on the test goroutine (Reconcile is called inline), so
+	// t.Fatalf is safe.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		rt.t.Fatalf("buffering fetch response body: %v", err)
+	}
 	_ = resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	rt.once.Do(rt.cancel) // fetch done + buffered → safe to cancel the caller ctx
@@ -867,7 +877,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 	srv := newStubServer(t, stub)
 	ctx, cancel := context.WithCancel(context.Background())
 	client := github.NewClientWithHTTPClient(srv.URL, "test-token",
-		&http.Client{Transport: &cancelAfterFetchRT{base: http.DefaultTransport, cancel: cancel}})
+		&http.Client{Transport: &cancelAfterFetchRT{t: t, base: http.DefaultTransport, cancel: cancel}})
 	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.TaskMemory, nil)
 
 	arts, err := stores.Artifacts.ListByRunSystem(context.Background(), runmode.LocalDefaultOrgID, runID)
