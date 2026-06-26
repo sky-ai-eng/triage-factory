@@ -155,8 +155,8 @@ function ArtifactRow({
 }
 
 // ExternalLinkIcon — the trailing "open on GitHub/Jira" affordance for overlay
-// rows, kept separate from the overlay-opening click. stopPropagation isn't
-// needed (it's a sibling, not nested in the button), but it carries its own
+// rows, a sibling of (not nested in) the overlay-opening button, so a click on
+// it never reaches the button — no stopPropagation needed. It carries its own
 // hover target so the link reads as distinct from the row.
 function ExternalLinkIcon({ url, label }: { url: string; label: string }) {
   return (
@@ -164,7 +164,6 @@ function ExternalLinkIcon({ url, label }: { url: string; label: string }) {
       href={url}
       target="_blank"
       rel="noopener noreferrer"
-      onClick={(e) => e.stopPropagation()}
       className="inline-flex shrink-0 items-center rounded-[4px] p-1.5 text-text-tertiary/70 transition-colors hover:bg-black/[0.04] hover:text-text-secondary"
       aria-label={`Open ${label} on its source (new tab)`}
       title="Open source (new tab)"
