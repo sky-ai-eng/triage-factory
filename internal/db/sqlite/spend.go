@@ -30,9 +30,16 @@ var _ db.SpendStore = (*spendStore)(nil)
 // spendSelectCols is the view's column list in canonical order, shared by the
 // scan helper so the SELECT and Scan can't drift.
 const spendSelectCols = `source, source_id, org_id, team_id, category, subtype,
-	creator_user_id, actor_agent_id, model, total_cost_usd,
+	creator_user_id, actor_agent_id, trigger_id, model, total_cost_usd,
 	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 	occurred_at`
+
+// ListSpendSystem mirrors the Postgres admin-pool variant the role-gated team /
+// org usage reads use (TFAC-478). SQLite is N=1 / no RLS, so the cross-team read
+// is identical to ListSpend — delegate straight through.
+func (s *spendStore) ListSpendSystem(ctx context.Context, orgID string, opts domain.SpendFilter) ([]domain.SpendRow, error) {
+	return s.ListSpend(ctx, orgID, opts)
+}
 
 func (s *spendStore) ListSpend(ctx context.Context, orgID string, opts domain.SpendFilter) ([]domain.SpendRow, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -44,6 +51,10 @@ func (s *spendStore) ListSpend(ctx context.Context, orgID string, opts domain.Sp
 	if opts.TeamID != nil {
 		where.WriteString(` AND team_id = ?`)
 		args = append(args, *opts.TeamID)
+	}
+	if opts.CreatorUserID != nil {
+		where.WriteString(` AND creator_user_id = ?`)
+		args = append(args, *opts.CreatorUserID)
 	}
 	if opts.Category != nil {
 		where.WriteString(` AND category = ?`)
@@ -138,15 +149,15 @@ func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since, u
 	return out, rows.Err()
 }
 
-// scanSpendRow decodes one llm_spend row in spendSelectCols order. The five
-// nullable columns (team_id, subtype, creator_user_id, actor_agent_id, model)
-// scan through sql.NullString → *string.
+// scanSpendRow decodes one llm_spend row in spendSelectCols order. The six
+// nullable columns (team_id, subtype, creator_user_id, actor_agent_id,
+// trigger_id, model) scan through sql.NullString → *string.
 func scanSpendRow(scan func(dst ...any) error) (domain.SpendRow, error) {
 	var r domain.SpendRow
-	var teamID, subtype, creatorUserID, actorAgentID, model sql.NullString
+	var teamID, subtype, creatorUserID, actorAgentID, triggerID, model sql.NullString
 	if err := scan(
 		&r.Source, &r.SourceID, &r.OrgID, &teamID, &r.Category, &subtype,
-		&creatorUserID, &actorAgentID, &model, &r.TotalCostUSD,
+		&creatorUserID, &actorAgentID, &triggerID, &model, &r.TotalCostUSD,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.OccurredAt,
 	); err != nil {
@@ -156,6 +167,7 @@ func scanSpendRow(scan func(dst ...any) error) (domain.SpendRow, error) {
 	r.Subtype = nullStringToPtr(subtype)
 	r.CreatorUserID = nullStringToPtr(creatorUserID)
 	r.ActorAgentID = nullStringToPtr(actorAgentID)
+	r.TriggerID = nullStringToPtr(triggerID)
 	r.Model = nullStringToPtr(model)
 	return r, nil
 }

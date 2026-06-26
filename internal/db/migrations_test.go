@@ -388,6 +388,87 @@ func TestMigrate_CuratorTeamIDBackfillAndView(t *testing.T) {
 		`SELECT team_id FROM llm_spend WHERE source = 'curator' AND source_id = 'co'`, "")
 }
 
+// TestMigrate_LLMSpendTriggerIDView pins the TFAC-478 SQLite migration: applied
+// on a DB that already carries the pre-008 view, it DROP+RECREATEs llm_spend so
+// the runs arm exposes trigger_id while the curator + system arms emit NULL —
+// and it preserves TFAC-476's curator team_id (re-emitted verbatim). The runs
+// arm's trigger_id population is covered by the SpendStore conformance suite
+// (which reads the fully-migrated view); here we assert the migration applies on
+// existing data, the new column appears, and the curator arm stays intact.
+func TestMigrate_LLMSpendTriggerIDView(t *testing.T) {
+	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+
+	goose.SetBaseFS(migrationsSQLiteFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("set dialect: %v", err)
+	}
+
+	// Up to the migration *before* trigger_id: the view exists (already carrying
+	// TFAC-476's curator team_id) but has no trigger_id column yet.
+	const priorVersion = 202606260007
+	if err := goose.UpTo(database, "migrations-sqlite", priorVersion); err != nil {
+		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
+	}
+
+	const teamID = "00000000-0000-0000-0000-000000000010"
+	if _, err := database.Exec(`
+		INSERT INTO projects (id, name, team_id, visibility) VALUES
+			('pteam', 'team-proj', ?,    'team'),
+			('porg',  'org-proj',  NULL, 'org')
+	`, teamID); err != nil {
+		t.Fatalf("seed projects: %v", err)
+	}
+	// curator_requests already has team_id at this version (TFAC-476), so set it
+	// directly: the team project's row carries the team, the org project's NULL.
+	if _, err := database.Exec(`
+		INSERT INTO curator_requests (id, project_id, team_id, status, user_input) VALUES
+			('ct', 'pteam', ?,    'done', 'hi'),
+			('co', 'porg',  NULL, 'done', 'hi')
+	`, teamID); err != nil {
+		t.Fatalf("seed curator_requests: %v", err)
+	}
+
+	// The pre-008 view must NOT yet expose trigger_id.
+	if rows, err := database.Query(`SELECT trigger_id FROM llm_spend LIMIT 0`); err == nil {
+		rows.Close()
+		t.Fatal("llm_spend exposed trigger_id before the 008 migration; prior view shape wrong")
+	}
+
+	// Apply the trigger_id migration (DROP + recreate).
+	if err := goose.Up(database, "migrations-sqlite"); err != nil {
+		t.Fatalf("goose Up: %v", err)
+	}
+
+	// trigger_id column now exists on the recreated view.
+	if rows, err := database.Query(`SELECT trigger_id FROM llm_spend LIMIT 0`); err != nil {
+		t.Fatalf("llm_spend missing trigger_id after the 008 migration: %v", err)
+	} else {
+		rows.Close()
+	}
+
+	// Curator arm: team_id preserved from TFAC-476; trigger_id NULL (only runs
+	// are trigger-fired).
+	assertCuratorTeamID(t, database,
+		`SELECT team_id FROM llm_spend WHERE source = 'curator' AND source_id = 'ct'`, teamID)
+	assertCuratorTeamID(t, database,
+		`SELECT team_id FROM llm_spend WHERE source = 'curator' AND source_id = 'co'`, "")
+	var triggerID sql.NullString
+	if err := database.QueryRow(
+		`SELECT trigger_id FROM llm_spend WHERE source = 'curator' AND source_id = 'ct'`,
+	).Scan(&triggerID); err != nil {
+		t.Fatalf("scan curator trigger_id: %v", err)
+	}
+	if triggerID.Valid {
+		t.Errorf("curator arm trigger_id = %q, want NULL", triggerID.String)
+	}
+}
+
 // assertCuratorTeamID runs a single-row team_id query and checks it against want
 // ("" means SQL NULL is expected).
 func assertCuratorTeamID(t *testing.T, database *sql.DB, query, want string) {

@@ -41,11 +41,25 @@ var _ db.SpendStore = (*spendStore)(nil)
 // spendSelectCols is the view's column list in canonical order, shared by the
 // scan helper so the SELECT and Scan can't drift.
 const spendSelectCols = `source, source_id, org_id, team_id, category, subtype,
-	creator_user_id, actor_agent_id, model, total_cost_usd,
+	creator_user_id, actor_agent_id, trigger_id, model, total_cost_usd,
 	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 	occurred_at`
 
 func (s *spendStore) ListSpend(ctx context.Context, orgID string, opts domain.SpendFilter) ([]domain.SpendRow, error) {
+	return listSpend(ctx, s.app, orgID, opts)
+}
+
+// ListSpendSystem runs listSpend on the admin pool (BYPASSRLS) so a role-gated
+// team / org usage read (TFAC-478) sees spend across teams the caller may not
+// belong to. org_id stays in the WHERE as defense in depth. Mirrors
+// SpendByCategorySystem / ListByRunSystem.
+func (s *spendStore) ListSpendSystem(ctx context.Context, orgID string, opts domain.SpendFilter) ([]domain.SpendRow, error) {
+	return listSpend(ctx, s.admin, orgID, opts)
+}
+
+// listSpend is the shared row read the app- and admin-pool variants both run;
+// q selects which pool (and thus whether RLS applies).
+func listSpend(ctx context.Context, q queryer, orgID string, opts domain.SpendFilter) ([]domain.SpendRow, error) {
 	// Build the WHERE incrementally with $N placeholders. org_id is always
 	// $1; each optional filter appends its own placeholder so the args slice
 	// and the query stay in lock-step.
@@ -58,6 +72,9 @@ func (s *spendStore) ListSpend(ctx context.Context, orgID string, opts domain.Sp
 	}
 	if opts.TeamID != nil {
 		where.WriteString(` AND team_id = ` + next(*opts.TeamID))
+	}
+	if opts.CreatorUserID != nil {
+		where.WriteString(` AND creator_user_id = ` + next(*opts.CreatorUserID))
 	}
 	if opts.Category != nil {
 		where.WriteString(` AND category = ` + next(*opts.Category))
@@ -73,7 +90,7 @@ func (s *spendStore) ListSpend(ctx context.Context, orgID string, opts domain.Sp
 		query += ` LIMIT ` + next(opts.Limit)
 	}
 
-	rows, err := s.app.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list spend: %w", err)
 	}
@@ -154,16 +171,16 @@ func spendByCategory(ctx context.Context, q queryer, orgID string, since, until 
 	return out, rows.Err()
 }
 
-// scanSpendRow decodes one llm_spend row in spendSelectCols order. The five
-// nullable columns (team_id, subtype, creator_user_id, actor_agent_id, model)
-// scan through sql.NullString → *string; uuid columns scan cleanly into string
-// via the pgx stdlib driver.
+// scanSpendRow decodes one llm_spend row in spendSelectCols order. The six
+// nullable columns (team_id, subtype, creator_user_id, actor_agent_id,
+// trigger_id, model) scan through sql.NullString → *string; uuid columns scan
+// cleanly into string via the pgx stdlib driver.
 func scanSpendRow(scan func(dst ...any) error) (domain.SpendRow, error) {
 	var r domain.SpendRow
-	var teamID, subtype, creatorUserID, actorAgentID, model sql.NullString
+	var teamID, subtype, creatorUserID, actorAgentID, triggerID, model sql.NullString
 	if err := scan(
 		&r.Source, &r.SourceID, &r.OrgID, &teamID, &r.Category, &subtype,
-		&creatorUserID, &actorAgentID, &model, &r.TotalCostUSD,
+		&creatorUserID, &actorAgentID, &triggerID, &model, &r.TotalCostUSD,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.OccurredAt,
 	); err != nil {
@@ -173,6 +190,7 @@ func scanSpendRow(scan func(dst ...any) error) (domain.SpendRow, error) {
 	r.Subtype = nullStringToPtr(subtype)
 	r.CreatorUserID = nullStringToPtr(creatorUserID)
 	r.ActorAgentID = nullStringToPtr(actorAgentID)
+	r.TriggerID = nullStringToPtr(triggerID)
 	r.Model = nullStringToPtr(model)
 	return r, nil
 }

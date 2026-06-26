@@ -22,7 +22,12 @@ type SpendStoreFixture struct {
 	TeamID  string
 	UserID  string
 	AgentID string
-	Seeder  SpendSeeder
+	// TriggerID is a pre-seeded trigger event_handler (kind='trigger') in
+	// TeamID. The suite points an autonomous RunSpendFixture.TriggerID at it so
+	// runs.trigger_id has a valid FK target and the view's trigger_id column can
+	// be asserted (TFAC-478).
+	TriggerID string
+	Seeder    SpendSeeder
 }
 
 // SpendStoreFactory returns a fresh fixture per call so subtests don't share
@@ -43,11 +48,15 @@ type RunSpendFixture struct {
 	CreatorUserID string
 	TriggerType   string // "manual" | "event"
 	ActorAgentID  string
-	Model         string
-	Cost          *float64
-	Tokens        SpendTokens
-	Status        string
-	StartedAt     time.Time
+	// TriggerID is the event_handler that fired this run (runs.trigger_id). ""
+	// → NULL (a manual run carries none); set it to the fixture's seeded
+	// TriggerID for an autonomous run to exercise the view's trigger_id column.
+	TriggerID string
+	Model     string
+	Cost      *float64
+	Tokens    SpendTokens
+	Status    string
+	StartedAt time.Time
 }
 
 // CuratorSpendFixture stages one curator_requests row. Status "" defaults to
@@ -431,6 +440,111 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		if len(limited) != 1 {
 			t.Fatalf("Limit=1 = %d rows, want 1", len(limited))
 		}
+	})
+
+	// ListSpendSystem is the admin-pool org-wide read the role-gated team / org
+	// usage endpoints use (TFAC-478). Under the conformance fixture (admin-on-
+	// both for PG, the single conn for SQLite) it returns the same rows as
+	// ListSpend; the RLS divergence — System sees cross-team rows an app-pool
+	// ListSpend wouldn't — is proven in the per-backend Postgres test. Here we
+	// pin it exists, returns every source org-wide, and honors the same
+	// window / TeamID filters as ListSpend.
+	t.Run("ListSpendSystem_ReturnsOrgWide", func(t *testing.T) {
+		fx := factory(t)
+		ctx := context.Background()
+
+		runID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
+		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.50, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
+		systemID := fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
+
+		all, err := fx.Store.ListSpendSystem(ctx, fx.OrgID, domain.SpendFilter{})
+		if err != nil {
+			t.Fatalf("ListSpendSystem: %v", err)
+		}
+		byID := indexSpend(t, all)
+		for _, id := range []string{runID, curatorID, systemID} {
+			if _, ok := byID[id]; !ok {
+				t.Errorf("ListSpendSystem missing %s; want every source org-wide", id)
+			}
+		}
+
+		// Window lower bound honored: since t2 drops the t1 run.
+		since, err := fx.Store.ListSpendSystem(ctx, fx.OrgID, domain.SpendFilter{Since: t2})
+		if err != nil {
+			t.Fatalf("ListSpendSystem since: %v", err)
+		}
+		if _, ok := indexSpend(t, since)[runID]; ok {
+			t.Errorf("ListSpendSystem(since=t2) included the t1 run; lower bound not applied")
+		}
+
+		// TeamID filter narrows to the team's rows (run + team-attributed
+		// curator); the NULL-team system row is excluded.
+		team := fx.TeamID
+		teamRows, err := fx.Store.ListSpendSystem(ctx, fx.OrgID, domain.SpendFilter{TeamID: &team})
+		if err != nil {
+			t.Fatalf("ListSpendSystem team: %v", err)
+		}
+		tIDs := indexSpend(t, teamRows)
+		if _, ok := tIDs[systemID]; ok {
+			t.Errorf("ListSpendSystem(TeamID) included the NULL-team system row")
+		}
+		if _, ok := tIDs[runID]; !ok {
+			t.Errorf("ListSpendSystem(TeamID) missing the team's run")
+		}
+	})
+
+	// CreatorUserID narrows to one human's spend — the /api/usage/me personal
+	// view (TFAC-478): manual runs + curator turns they created. Autonomous runs
+	// (NULL creator) and system rows (NULL creator) are excluded.
+	t.Run("ListSpend_CreatorUserIDFilter", func(t *testing.T) {
+		fx := factory(t)
+		ctx := context.Background()
+
+		manualID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
+		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.50, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
+		// Autonomous run + system row both carry a NULL creator → excluded.
+		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.25), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t2})
+		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
+
+		self := fx.UserID
+		got, err := fx.Store.ListSpend(ctx, fx.OrgID, domain.SpendFilter{CreatorUserID: &self})
+		if err != nil {
+			t.Fatalf("ListSpend creator filter: %v", err)
+		}
+		ids := map[string]bool{}
+		for _, r := range got {
+			ids[r.SourceID] = true
+			if r.CreatorUserID == nil || *r.CreatorUserID != self {
+				t.Errorf("CreatorUserID filter returned %s with creator %v, want %s", r.SourceID, r.CreatorUserID, self)
+			}
+		}
+		if len(got) != 2 || !ids[manualID] || !ids[curatorID] {
+			t.Fatalf("CreatorUserID filter = %d rows %v, want exactly manual %s + curator %s (autonomous/system excluded)", len(got), ids, manualID, curatorID)
+		}
+	})
+
+	// trigger_id surfaces on the runs arm (the autonomous by-rule attribution,
+	// TFAC-478) and is NULL for manual runs, curator turns, and system jobs.
+	t.Run("TriggerID_PopulatedForRuns_NullForCuratorSystem", func(t *testing.T) {
+		fx := factory(t)
+		ctx := context.Background()
+
+		// Autonomous run fired by the fixture's seeded trigger.
+		autoID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", TriggerID: fx.TriggerID, Model: "m", Cost: spendCostPtr(0.25), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
+		// Manual run with no firing trigger → NULL trigger_id.
+		manualID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t2})
+		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.50, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t3})
+		systemID := fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t4})
+
+		rows, err := fx.Store.ListSpend(ctx, fx.OrgID, domain.SpendFilter{})
+		if err != nil {
+			t.Fatalf("ListSpend: %v", err)
+		}
+		byID := indexSpend(t, rows)
+		assertPtrEq(t, "autonomous.trigger_id", byID[autoID].TriggerID, fx.TriggerID)
+		assertNilStr(t, "manual.trigger_id", byID[manualID].TriggerID)
+		assertNilStr(t, "curator.trigger_id", byID[curatorID].TriggerID)
+		assertNilStr(t, "system.trigger_id", byID[systemID].TriggerID)
 	})
 }
 

@@ -31,11 +31,14 @@ const (
 // terminal write lands (normal completion, cancel, infra-failure, or a
 // boot-time orphan sweep). System rows are always terminal.
 //
-// Nullable columns are pointers: TeamID is set only for runs (curator + system
-// are org-level); Subtype carries the job name for system rows (NULL
+// Nullable columns are pointers: TeamID is set only for runs (curator +
+// system are org-level, but TFAC-476 attributes a curator turn to its
+// project's team); Subtype carries the job name for system rows (NULL
 // otherwise); CreatorUserID is the human for runs/curator (NULL for system);
 // ActorAgentID is the executing org agent for runs (NULL for curator/system);
-// Model is NULL for curator turns.
+// TriggerID is the event_handler that fired an autonomous run (NULL for
+// manual runs, curator, and system — TFAC-478); Model is NULL for curator
+// turns.
 type SpendRow struct {
 	Source              string    `json:"source"`
 	SourceID            string    `json:"source_id"`
@@ -45,6 +48,7 @@ type SpendRow struct {
 	Subtype             *string   `json:"subtype"`
 	CreatorUserID       *string   `json:"creator_user_id"`
 	ActorAgentID        *string   `json:"actor_agent_id"`
+	TriggerID           *string   `json:"trigger_id"`
 	Model               *string   `json:"model"`
 	TotalCostUSD        float64   `json:"total_cost_usd"`
 	InputTokens         int       `json:"input_tokens"`
@@ -68,13 +72,18 @@ type SpendBucket struct {
 
 // SpendFilter bounds a db.SpendStore.ListSpend read. Every field is optional:
 // a nil pointer / zero time / non-positive Limit drops that clause. TeamID
-// narrows to one team's runs (curator/system rows carry a NULL team_id and so
-// are excluded by a non-nil TeamID — intended: the team dashboard sees its own
-// runs, not org-level overhead). Rows come back newest-first (occurred_at DESC).
+// narrows to one team's spend (system rows carry a NULL team_id and so are
+// excluded by a non-nil TeamID — intended: the team dashboard sees its own
+// runs + team-attributed curator, not org-level overhead). CreatorUserID
+// narrows to one human's spend (the /api/usage/me personal view, TFAC-478):
+// manual runs + curator turns that human created — autonomous/system rows
+// carry a NULL creator and are excluded. Rows come back newest-first
+// (occurred_at DESC).
 type SpendFilter struct {
-	TeamID   *string
-	Category *string
-	Since    time.Time
-	Until    time.Time
-	Limit    int
+	TeamID        *string
+	CreatorUserID *string
+	Category      *string
+	Since         time.Time
+	Until         time.Time
+	Limit         int
 }

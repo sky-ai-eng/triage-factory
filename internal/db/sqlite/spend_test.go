@@ -55,13 +55,35 @@ func TestSpendStore_SQLite(t *testing.T) {
 			t.Fatalf("seed null-team project: %v", err)
 		}
 
+		// A blueprint + trigger event_handler so an autonomous run can carry a
+		// non-NULL trigger_id (runs.trigger_id FK → event_handlers; the trigger's
+		// same-team FK → blueprints). event_type is a stable seeded catalog id.
+		// The view passes runs.trigger_id straight through (TFAC-478).
+		blueprintID := uuid.New().String()
+		if _, err := conn.Exec(
+			`INSERT INTO blueprints (id, name, org_id, team_id, creator_user_id) VALUES (?, 'spend-bp', ?, ?, ?)`,
+			blueprintID, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
+		); err != nil {
+			t.Fatalf("seed blueprint: %v", err)
+		}
+		triggerID := uuid.New().String()
+		if _, err := conn.Exec(
+			`INSERT INTO event_handlers
+				(id, org_id, team_id, creator_user_id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability)
+			 VALUES (?, ?, ?, ?, 'trigger', 'github:pr:ci_check_failed', ?, 3, 0.5)`,
+			triggerID, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, blueprintID,
+		); err != nil {
+			t.Fatalf("seed trigger: %v", err)
+		}
+
 		return dbtest.SpendStoreFixture{
-			Store:   stores.Spend,
-			OrgID:   runmode.LocalDefaultOrgID,
-			TeamID:  runmode.LocalDefaultTeamID,
-			UserID:  runmode.LocalDefaultUserID,
-			AgentID: agentID,
-			Seeder:  newSQLiteSpendSeeder(conn, teamProjectID, nullTeamProjectID),
+			Store:     stores.Spend,
+			OrgID:     runmode.LocalDefaultOrgID,
+			TeamID:    runmode.LocalDefaultTeamID,
+			UserID:    runmode.LocalDefaultUserID,
+			AgentID:   agentID,
+			TriggerID: triggerID,
+			Seeder:    newSQLiteSpendSeeder(conn, teamProjectID, nullTeamProjectID),
 		}
 	})
 }
@@ -98,12 +120,12 @@ func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string)
 			id := uuid.New().String()
 			if _, err := conn.Exec(`
 				INSERT INTO runs
-					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, model, status,
+					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status,
 					 total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)
-				VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`,
 				id, runmode.LocalDefaultOrgID, f.TeamID, nullStr(f.CreatorUserID), f.TriggerType,
-				nullStr(f.ActorAgentID), f.Model, f.Status,
+				nullStr(f.ActorAgentID), nullStr(f.TriggerID), f.Model, f.Status,
 				costArg(f.Cost), f.Tokens.Input, f.Tokens.Output, f.Tokens.CacheRead, f.Tokens.CacheCreation, f.StartedAt,
 			); err != nil {
 				t.Fatalf("seed run: %v", err)

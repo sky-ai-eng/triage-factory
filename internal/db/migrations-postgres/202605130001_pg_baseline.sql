@@ -1454,7 +1454,9 @@ CREATE TABLE public.runs (
 -- (org-level). So the dashboard sees runs + team-project curator by team, and
 -- system + null-team curator at org scope. actor_agent_id is the org agent that
 -- executed the run (audit passthrough) — only runs are agent-executed, so NULL
--- for curator (user-driven) + system (background).
+-- for curator (user-driven) + system (background). trigger_id is the
+-- event_handler that fired an autonomous run (TFAC-478) — it backs the team
+-- dashboard's by-rule breakdown; NULL for manual runs, curator, and system.
 --
 -- Tokens are read NATIVELY from all three tables — every token column is
 -- INTEGER NOT NULL DEFAULT 0 (runs + curator via TFAC-473, system via
@@ -1485,6 +1487,7 @@ CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
     NULL::text AS subtype,
     runs.creator_user_id,
     runs.actor_agent_id,
+    runs.trigger_id,
     runs.model,
     COALESCE(runs.total_cost_usd, (0)::real) AS total_cost_usd,
     runs.input_tokens,
@@ -1502,6 +1505,7 @@ UNION ALL
     NULL::text AS subtype,
     curator_requests.creator_user_id,
     NULL::uuid AS actor_agent_id,
+    NULL::uuid AS trigger_id,
     NULL::text AS model,
     curator_requests.cost_usd AS total_cost_usd,
     curator_requests.input_tokens,
@@ -1519,6 +1523,7 @@ UNION ALL
     system_llm_runs.job AS subtype,
     NULL::uuid AS creator_user_id,
     NULL::uuid AS actor_agent_id,
+    NULL::uuid AS trigger_id,
     system_llm_runs.model,
     system_llm_runs.total_cost_usd,
     system_llm_runs.input_tokens,

@@ -754,6 +754,16 @@ func (s *Server) routes() {
 	// owner sentinel, demotes the former owner — all in one tx as the owner.
 	s.apiMutating("POST /api/orgs/{org_id}/transfer-ownership", omh.handleOrgOwnershipTransfer)
 
+	// Usage (spend layer) — the core Usage page's read API (TFAC-478). All
+	// session-org-scoped (org from claims, not the path), like /api/dashboard/*.
+	// Scope is role-gated: /me is any org member, /teams/{id} is team-admin OR
+	// org-admin, /org is org-admin. The team/org reads use the admin-pool
+	// ListSpendSystem (the role gate is the authorization for crossing RLS).
+	uh := &usageHandler{tx: s.tx, az: s.az}
+	s.api("GET /api/usage/me", uh.handleUsageMe)
+	s.api("GET /api/usage/teams/{team_id}", uh.handleUsageTeam)
+	s.api("GET /api/usage/org", uh.handleUsageOrg)
+
 	// Org invites (multi-mode only — each handler 404s in local).
 	// The admin-facing create/list/revoke gate on org-admin and write
 	// through the app pool; preview + accept are the redeem surfaces and run

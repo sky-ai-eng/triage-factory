@@ -28,18 +28,19 @@ func TestSpendStore_Postgres(t *testing.T) {
 	dbtest.RunSpendStoreConformance(t, func(t *testing.T) dbtest.SpendStoreFixture {
 		t.Helper()
 		h.Reset(t)
-		orgID, userID, teamID, agentID, projectID, nullTeamProjectID := seedPgSpendOrg(t, h)
+		orgID, userID, teamID, agentID, projectID, nullTeamProjectID, triggerID := seedPgSpendOrg(t, h)
 		// admin-on-both: bypass RLS for SQL-shape coverage (the FK + NOT NULL
 		// + CHECK constraints still apply, so it's the same SQL the app pool
 		// runs). RLS is exercised separately in TestSpendStore_Postgres_RLS_*.
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		return dbtest.SpendStoreFixture{
-			Store:   stores.Spend,
-			OrgID:   orgID,
-			TeamID:  teamID,
-			UserID:  userID,
-			AgentID: agentID,
-			Seeder:  newPgSpendSeeder(h.AdminDB, orgID, projectID, nullTeamProjectID),
+			Store:     stores.Spend,
+			OrgID:     orgID,
+			TeamID:    teamID,
+			UserID:    userID,
+			AgentID:   agentID,
+			TriggerID: triggerID,
+			Seeder:    newPgSpendSeeder(h.AdminDB, orgID, projectID, nullTeamProjectID),
 		}
 	})
 }
@@ -181,6 +182,53 @@ func TestSpendStore_Postgres_SpendByCategorySystem_BypassesRLS(t *testing.T) {
 	}
 }
 
+// TestSpendStore_Postgres_ListSpendSystem_BypassesRLS pins the TFAC-478
+// cross-RLS read: ListSpendSystem (admin pool) returns rows across every team,
+// whereas the app-pool ListSpend under a team member's claims sees only their
+// own team. The role-gated team / org usage endpoints depend on this — an org
+// admin inspecting a team they don't belong to would otherwise see nothing.
+func TestSpendStore_Postgres_ListSpendSystem_BypassesRLS(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "spend-ls-sys")
+	teamB := pgtest.SeedTeam(t, h, orgA, "teamB")
+	bob := pgtest.SeedUser(t, h, "spend-ls-bob")
+	pgtest.AddOrgMember(t, h, bob, orgA, teamB, "member", "member")
+
+	agentA := uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB, `INSERT INTO agents (id, org_id) VALUES ($1, $2)`, agentA, orgA)
+	projectA := uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO projects (id, org_id, creator_user_id, team_id, name, visibility) VALUES ($1, $2, $3, $4, 'spend-ls', 'team')`,
+		projectA, orgA, alice, teamA)
+
+	// Runs only (team_id set directly), so the curator project args are unused.
+	seeder := newPgSpendSeeder(h.AdminDB, orgA, projectA, projectA)
+	runA := seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
+	runB := seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
+
+	// Admin-pool System read: org-wide, sees BOTH teams' runs.
+	adminStore := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	sysRows, err := adminStore.Spend.ListSpendSystem(context.Background(), orgA, domain.SpendFilter{})
+	if err != nil {
+		t.Fatalf("ListSpendSystem: %v", err)
+	}
+	sysIDs := map[string]bool{}
+	for _, r := range sysRows {
+		sysIDs[r.SourceID] = true
+	}
+	if !sysIDs[runA] || !sysIDs[runB] {
+		t.Errorf("ListSpendSystem saw %v, want both runA %s + runB %s (org-wide)", sysIDs, runA, runB)
+	}
+
+	// App-pool ListSpend under alice (teamA member): RLS scopes to teamA → only runA.
+	aliceVisible := spendVisibleIDs(t, h, alice, orgA)
+	if !aliceVisible[runA] || aliceVisible[runB] {
+		t.Errorf("app-pool ListSpend under alice saw %v, want runA %s only (runB excluded by RLS)", aliceVisible, runA)
+	}
+}
+
 // manualBucketCost returns the 'manual' category bucket's total cost, or 0 if
 // absent.
 func manualBucketCost(buckets []domain.SpendBucket) float64 {
@@ -222,7 +270,7 @@ var spendTestTime = time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
 // seedPgSpendOrg bootstraps an org + user + default team + agent + project for
 // the conformance fixture, all via the admin pool. Returns the ids the seeder
 // and the suite thread through the three source tables.
-func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, agentID, projectID, nullTeamProjectID string) {
+func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, agentID, projectID, nullTeamProjectID, triggerID string) {
 	t.Helper()
 	orgID, userID, teamID = pgtest.SeedOrgWithUser(t, h, "spend-"+uuid.NewString()[:8])
 	agentID = uuid.New().String()
@@ -237,6 +285,19 @@ func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, age
 	pgtest.MustExec(t, h.AdminDB,
 		`INSERT INTO projects (id, org_id, creator_user_id, team_id, name, visibility) VALUES ($1, $2, $3, NULL, 'spend-test-org', 'org')`,
 		nullTeamProjectID, orgID, userID)
+	// A blueprint + trigger event_handler so an autonomous run can carry a
+	// non-NULL trigger_id (runs.trigger_id FK → event_handlers; the trigger's
+	// same-team FK → blueprints). The view passes runs.trigger_id straight
+	// through (TFAC-478).
+	blueprintID := uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO blueprints (id, org_id, team_id, creator_user_id, name) VALUES ($1, $2, $3, $4, 'spend-bp')`,
+		blueprintID, orgID, teamID, userID)
+	triggerID = uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability)
+		 VALUES ($1, $2, $3, $4, 'trigger', 'github:pr:ci_check_failed', $5, 3, 0.5)`,
+		triggerID, orgID, teamID, userID, blueprintID)
 	return
 }
 
@@ -251,12 +312,12 @@ func newPgSpendSeeder(conn *sql.DB, orgID, teamProjectID, nullTeamProjectID stri
 			id := uuid.New().String()
 			if _, err := conn.Exec(`
 				INSERT INTO runs
-					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, model, status,
+					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status,
 					 total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)
-				VALUES ($1, $2, $3, $4, $5, 'manual', $6, $7, $8, $9, $10, $11, $12, $13, $14)
+				VALUES ($1, $2, $3, $4, $5, 'manual', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			`,
 				id, orgID, f.TeamID, pgUUIDArg(f.CreatorUserID), f.TriggerType,
-				pgUUIDArg(f.ActorAgentID), f.Model, f.Status,
+				pgUUIDArg(f.ActorAgentID), pgUUIDArg(f.TriggerID), f.Model, f.Status,
 				pgCostArg(f.Cost), f.Tokens.Input, f.Tokens.Output, f.Tokens.CacheRead, f.Tokens.CacheCreation, f.StartedAt,
 			); err != nil {
 				t.Fatalf("seed run: %v", err)

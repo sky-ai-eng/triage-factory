@@ -1,0 +1,620 @@
+package server
+
+import (
+	"context"
+	"net/http"
+	"net/url"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+)
+
+// usageHandler serves the core Usage page's spend layer (TFAC-478): three
+// role-gated, session-org-scoped read endpoints over the llm_spend view
+// (TFAC-472). Spend is core at every scope; the SCOPE is what's role-gated:
+//
+//   - GET /api/usage/me          — the caller's own spend (any org member).
+//   - GET /api/usage/teams/{id}  — one team's breakdown (team admin OR org admin).
+//   - GET /api/usage/org         — the org rollup (org admin).
+//
+// All three take the org from the session claims (like /api/dashboard/*), NOT
+// from the path. The /me read runs on the APP pool under the caller's claims
+// (RLS + a creator filter scope it to them); the team/org reads run on the
+// ADMIN pool via ListSpendSystem — the role gate is the authorization and the
+// System read is the authorized path past RLS (an org admin need not be a
+// member of the team they inspect). Aggregation happens in Go from the rows;
+// per-org/-team/-month volumes are modest, so we materialize nothing here.
+type usageHandler struct {
+	tx db.TxRunner
+	az *authz.Checker
+}
+
+// --- response shapes ---
+
+// usageCategoryBucket is one spend category's cost + token totals over the
+// window. cost is real dollars (SDK token counts × list price; see TFAC-449).
+type usageCategoryBucket struct {
+	Category            string  `json:"category"`
+	Cost                float64 `json:"cost"`
+	InputTokens         int     `json:"input_tokens"`
+	OutputTokens        int     `json:"output_tokens"`
+	CacheReadTokens     int     `json:"cache_read_tokens"`
+	CacheCreationTokens int     `json:"cache_creation_tokens"`
+}
+
+type usageModelBucket struct {
+	Model string  `json:"model"`
+	Cost  float64 `json:"cost"`
+}
+
+// usageDayBucket is one UTC calendar day's total cost (date as YYYY-MM-DD).
+type usageDayBucket struct {
+	Date string  `json:"date"`
+	Cost float64 `json:"cost"`
+}
+
+type usageUserBucket struct {
+	UserID      string  `json:"user_id"`
+	DisplayName string  `json:"display_name"`
+	Cost        float64 `json:"cost"`
+}
+
+type usageRuleBucket struct {
+	TriggerID string  `json:"trigger_id"`
+	RuleName  string  `json:"rule_name"`
+	Cost      float64 `json:"cost"`
+}
+
+type usageTeamBucket struct {
+	TeamID   string  `json:"team_id"`
+	TeamName string  `json:"team_name"`
+	Cost     float64 `json:"cost"`
+}
+
+type usageOrgLevelBucket struct {
+	Category string  `json:"category"`
+	Cost     float64 `json:"cost"`
+}
+
+type usageMeResponse struct {
+	TotalCostUSD float64               `json:"total_cost_usd"`
+	ByCategory   []usageCategoryBucket `json:"by_category"`
+	ByModel      []usageModelBucket    `json:"by_model"`
+	ByDay        []usageDayBucket      `json:"by_day"`
+}
+
+type usageTeamResponse struct {
+	TeamID       string                `json:"team_id"`
+	TeamName     string                `json:"team_name"`
+	TotalCostUSD float64               `json:"total_cost_usd"`
+	ByCategory   []usageCategoryBucket `json:"by_category"`
+	ByUser       []usageUserBucket     `json:"by_user"`
+	ByRule       []usageRuleBucket     `json:"by_rule"`
+	ByModel      []usageModelBucket    `json:"by_model"`
+	ByDay        []usageDayBucket      `json:"by_day"`
+}
+
+type usageOrgResponse struct {
+	TotalCostUSD float64               `json:"total_cost_usd"`
+	ByTeam       []usageTeamBucket     `json:"by_team"`
+	OrgLevel     []usageOrgLevelBucket `json:"org_level"`
+	ByCategory   []usageCategoryBucket `json:"by_category"`
+	ByModel      []usageModelBucket    `json:"by_model"`
+	ByDay        []usageDayBucket      `json:"by_day"`
+}
+
+// --- handlers ---
+
+// handleUsageMe returns the caller's own spend: manual runs + curator turns
+// they created (autonomous/system rows carry a NULL creator and are excluded by
+// the filter). Gate: any authenticated org member. Read on the app pool under
+// the caller's claims, narrowed by CreatorUserID = self.
+//
+// GET /api/usage/me?since=&until=
+func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.resolveCaller(w, r)
+	if !ok {
+		return
+	}
+	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
+	if errMsg != "" {
+		badRequest(w, errMsg)
+		return
+	}
+
+	self := userID
+	var rows []domain.SpendRow
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		rows, e = tx.Spend.ListSpend(r.Context(), orgID, domain.SpendFilter{
+			CreatorUserID: &self, Since: since, Until: until,
+		})
+		return e
+	}); err != nil {
+		internalError(w, "usage", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, usageMeResponse{
+		TotalCostUSD: sumSpendCost(rows),
+		ByCategory:   spendByCategory(rows),
+		ByModel:      spendByModel(rows),
+		ByDay:        spendByDay(rows),
+	})
+}
+
+// handleUsageTeam returns one team's full breakdown. Gate: team admin OR org
+// admin (an org admin may not be a team member, so the read is a System /
+// admin-pool ListSpendSystem — the role gate authorizes the cross-RLS path).
+// by_user groups manual+curator rows by creator; by_rule groups autonomous rows
+// by the firing trigger; system rows (NULL team) never appear (the TeamID
+// filter excludes them).
+//
+// GET /api/usage/teams/{team_id}?since=&until=
+func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.resolveCaller(w, r)
+	if !ok {
+		return
+	}
+	teamID := r.PathValue("team_id")
+	if _, err := uuid.Parse(teamID); err != nil {
+		// A malformed id is "not found" (parity with the team handlers), not a
+		// role failure — don't let it surface as a 500 from a uuid cast.
+		http.NotFound(w, r)
+		return
+	}
+	// Confirm the team is in the caller's org before the role gate so a
+	// cross-org id 404s cleanly rather than returning an empty 200.
+	if !h.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
+		return
+	}
+	if !h.requireTeamOrOrgAdmin(w, r, orgID, userID, teamID) {
+		return
+	}
+	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
+	if errMsg != "" {
+		badRequest(w, errMsg)
+		return
+	}
+
+	var (
+		rows      []domain.SpendRow
+		teamName  string
+		userNames map[string]string
+		ruleNames map[string]string
+	)
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		rows, e = tx.Spend.ListSpendSystem(r.Context(), orgID, domain.SpendFilter{
+			TeamID: &teamID, Since: since, Until: until,
+		})
+		if e != nil {
+			return e
+		}
+		t, e := tx.Teams.GetSystem(r.Context(), orgID, teamID)
+		if e != nil {
+			return e
+		}
+		if t != nil {
+			teamName = t.Name
+		}
+		if userNames, e = resolveSpendUserNames(r.Context(), tx, rows); e != nil {
+			return e
+		}
+		ruleNames, e = resolveSpendRuleNames(r.Context(), tx, orgID, rows)
+		return e
+	}); err != nil {
+		internalError(w, "usage", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, usageTeamResponse{
+		TeamID:       teamID,
+		TeamName:     teamName,
+		TotalCostUSD: sumSpendCost(rows),
+		ByCategory:   spendByCategory(rows),
+		ByUser:       spendByUser(rows, userNames),
+		ByRule:       spendByRule(rows, ruleNames),
+		ByModel:      spendByModel(rows),
+		ByDay:        spendByDay(rows),
+	})
+}
+
+// handleUsageOrg returns the org rollup across every team + curator + system
+// job. Gate: org admin (a cross-team read — the authorized intent, not a
+// workaround). by_team groups the team-attributed rows (and drives the FE
+// team dropdown); org_level is the NULL-team rows (curator on non-team
+// projects + system_overhead) by category.
+//
+// GET /api/usage/org?since=&until=
+func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.resolveCaller(w, r)
+	if !ok {
+		return
+	}
+	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
+		return
+	}
+	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
+	if errMsg != "" {
+		badRequest(w, errMsg)
+		return
+	}
+
+	var (
+		rows      []domain.SpendRow
+		teamNames map[string]string
+	)
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		rows, e = tx.Spend.ListSpendSystem(r.Context(), orgID, domain.SpendFilter{
+			Since: since, Until: until,
+		})
+		if e != nil {
+			return e
+		}
+		teamNames, e = resolveSpendTeamNames(r.Context(), tx, orgID, rows)
+		return e
+	}); err != nil {
+		internalError(w, "usage", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, usageOrgResponse{
+		TotalCostUSD: sumSpendCost(rows),
+		ByTeam:       spendByTeam(rows, teamNames),
+		OrgLevel:     spendOrgLevel(rows),
+		ByCategory:   spendByCategory(rows),
+		ByModel:      spendByModel(rows),
+		ByDay:        spendByDay(rows),
+	})
+}
+
+// --- gating ---
+
+// resolveCaller pulls the active org from the session and the caller's user id
+// from the claims — the shared prefix for every usage read. The active org is
+// one the user belongs to (set at login / active-org switch), so requireOrg is
+// the org-member floor for /me.
+func (h *usageHandler) resolveCaller(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
+	orgID, ok = requireOrg(w, r)
+	if !ok {
+		return "", "", false
+	}
+	claims := ClaimsFrom(r.Context())
+	if claims == nil {
+		writeUnauth(w)
+		return "", "", false
+	}
+	return orgID, claims.Subject, true
+}
+
+// requireTeamOrOrgAdmin gates the team usage read on team admin OR org admin,
+// writing a 403 when neither. Composes the two raw probes (rather than
+// RequireTeamAdmin, which would write its own 403 even for an org admin who
+// isn't on the team). Local mode is the degenerate single implicit admin.
+func (h *usageHandler) requireTeamOrOrgAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
+	if runmode.Current() == runmode.ModeLocal {
+		return true
+	}
+	isTeamAdmin, err := h.az.UserIsTeamAdmin(r.Context(), userID, orgID, teamID)
+	if err != nil {
+		internalError(w, "usage", err)
+		return false
+	}
+	if isTeamAdmin {
+		return true
+	}
+	isOrgAdmin, err := h.az.UserIsOrgAdmin(r.Context(), userID, orgID)
+	if err != nil {
+		internalError(w, "usage", err)
+		return false
+	}
+	if !isOrgAdmin {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "team admin or org admin role required"})
+		return false
+	}
+	return true
+}
+
+// --- window parsing ---
+
+// parseUsageWindow resolves the [since, until) read window from the query
+// string. Both absent → the current calendar month (UTC) up to now. Each
+// present value parses as RFC3339 or YYYY-MM-DD (a bare date → UTC midnight).
+// Returns a non-empty errMsg on a malformed value (the handler 400s with it).
+func parseUsageWindow(q url.Values, now time.Time) (since, until time.Time, errMsg string) {
+	sinceStr := strings.TrimSpace(q.Get("since"))
+	untilStr := strings.TrimSpace(q.Get("until"))
+	if sinceStr == "" && untilStr == "" {
+		since = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		until = now
+		return since, until, ""
+	}
+	if sinceStr != "" {
+		t, err := parseUsageTime(sinceStr)
+		if err != nil {
+			return time.Time{}, time.Time{}, "invalid 'since': want RFC3339 or YYYY-MM-DD"
+		}
+		since = t
+	}
+	if untilStr != "" {
+		t, err := parseUsageTime(untilStr)
+		if err != nil {
+			return time.Time{}, time.Time{}, "invalid 'until': want RFC3339 or YYYY-MM-DD"
+		}
+		until = t
+	}
+	return since, until, ""
+}
+
+// parseUsageTime accepts a full RFC3339 timestamp or a bare YYYY-MM-DD date
+// (interpreted as UTC midnight). Always returns UTC so the day-bucketing and
+// the view's occurred_at compare in one zone.
+func parseUsageTime(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC(), nil
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return t.UTC(), nil
+}
+
+// --- aggregation (pure) ---
+
+func sumSpendCost(rows []domain.SpendRow) float64 {
+	var total float64
+	for _, r := range rows {
+		total += r.TotalCostUSD
+	}
+	return total
+}
+
+// spendByCategory sums cost + the four token totals per category, sorted by
+// category name for a stable response.
+func spendByCategory(rows []domain.SpendRow) []usageCategoryBucket {
+	byCat := map[string]*usageCategoryBucket{}
+	for _, r := range rows {
+		b := byCat[r.Category]
+		if b == nil {
+			b = &usageCategoryBucket{Category: r.Category}
+			byCat[r.Category] = b
+		}
+		b.Cost += r.TotalCostUSD
+		b.InputTokens += r.InputTokens
+		b.OutputTokens += r.OutputTokens
+		b.CacheReadTokens += r.CacheReadTokens
+		b.CacheCreationTokens += r.CacheCreationTokens
+	}
+	out := make([]usageCategoryBucket, 0, len(byCat))
+	for _, b := range byCat {
+		out = append(out, *b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Category < out[j].Category })
+	return out
+}
+
+// spendByModel sums cost per model, newest-cost-first. Rows with a NULL model
+// (curator turns) are excluded — by_model is a per-model breakdown, not a
+// total, so the curator share lives only in by_category.
+func spendByModel(rows []domain.SpendRow) []usageModelBucket {
+	byModel := map[string]float64{}
+	for _, r := range rows {
+		if r.Model == nil {
+			continue
+		}
+		byModel[*r.Model] += r.TotalCostUSD
+	}
+	out := make([]usageModelBucket, 0, len(byModel))
+	for m, c := range byModel {
+		out = append(out, usageModelBucket{Model: m, Cost: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Cost != out[j].Cost {
+			return out[i].Cost > out[j].Cost
+		}
+		return out[i].Model < out[j].Model
+	})
+	return out
+}
+
+// spendByDay sums cost per UTC calendar day, oldest-first (the time-series the
+// dashboard plots).
+func spendByDay(rows []domain.SpendRow) []usageDayBucket {
+	byDay := map[string]float64{}
+	for _, r := range rows {
+		byDay[r.OccurredAt.UTC().Format("2006-01-02")] += r.TotalCostUSD
+	}
+	out := make([]usageDayBucket, 0, len(byDay))
+	for d, c := range byDay {
+		out = append(out, usageDayBucket{Date: d, Cost: c})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Date < out[j].Date })
+	return out
+}
+
+// spendByUser sums cost per human creator (manual runs + curator turns),
+// resolving display names from the supplied map. Rows with a NULL creator
+// (autonomous/system) are excluded. Sorted cost-desc.
+func spendByUser(rows []domain.SpendRow, names map[string]string) []usageUserBucket {
+	byUser := map[string]float64{}
+	for _, r := range rows {
+		if r.CreatorUserID == nil {
+			continue
+		}
+		byUser[*r.CreatorUserID] += r.TotalCostUSD
+	}
+	out := make([]usageUserBucket, 0, len(byUser))
+	for uid, c := range byUser {
+		out = append(out, usageUserBucket{UserID: uid, DisplayName: names[uid], Cost: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Cost != out[j].Cost {
+			return out[i].Cost > out[j].Cost
+		}
+		return out[i].UserID < out[j].UserID
+	})
+	return out
+}
+
+// spendByRule sums cost per firing trigger across the autonomous rows,
+// resolving rule names from the supplied map. Sorted cost-desc.
+func spendByRule(rows []domain.SpendRow, names map[string]string) []usageRuleBucket {
+	byRule := map[string]float64{}
+	for _, r := range rows {
+		if r.Category != domain.SpendCategoryAutonomous || r.TriggerID == nil {
+			continue
+		}
+		byRule[*r.TriggerID] += r.TotalCostUSD
+	}
+	out := make([]usageRuleBucket, 0, len(byRule))
+	for tid, c := range byRule {
+		out = append(out, usageRuleBucket{TriggerID: tid, RuleName: names[tid], Cost: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Cost != out[j].Cost {
+			return out[i].Cost > out[j].Cost
+		}
+		return out[i].TriggerID < out[j].TriggerID
+	})
+	return out
+}
+
+// spendByTeam sums cost per team across the team-attributed rows (NULL-team
+// rows go to org_level instead), resolving team names from the supplied map.
+// Sorted cost-desc. This list also drives the FE org-admin team dropdown.
+func spendByTeam(rows []domain.SpendRow, names map[string]string) []usageTeamBucket {
+	byTeam := map[string]float64{}
+	for _, r := range rows {
+		if r.TeamID == nil {
+			continue
+		}
+		byTeam[*r.TeamID] += r.TotalCostUSD
+	}
+	out := make([]usageTeamBucket, 0, len(byTeam))
+	for tid, c := range byTeam {
+		out = append(out, usageTeamBucket{TeamID: tid, TeamName: names[tid], Cost: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Cost != out[j].Cost {
+			return out[i].Cost > out[j].Cost
+		}
+		return out[i].TeamID < out[j].TeamID
+	})
+	return out
+}
+
+// spendOrgLevel sums the NULL-team rows (curator on non-team projects +
+// system_overhead) per category — the org-level spend that isn't attributable
+// to any one team. Sorted by category.
+func spendOrgLevel(rows []domain.SpendRow) []usageOrgLevelBucket {
+	byCat := map[string]float64{}
+	for _, r := range rows {
+		if r.TeamID != nil {
+			continue
+		}
+		byCat[r.Category] += r.TotalCostUSD
+	}
+	out := make([]usageOrgLevelBucket, 0, len(byCat))
+	for cat, c := range byCat {
+		out = append(out, usageOrgLevelBucket{Category: cat, Cost: c})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Category < out[j].Category })
+	return out
+}
+
+// --- name resolution (N+1 over the small distinct-id sets; fine for v1) ---
+
+// resolveSpendUserNames maps each distinct human creator in rows to a display
+// name. Runs on the app pool under the caller's claims — users_select RLS is
+// org-scoped, so a caller (always an org member here) resolves any co-member's
+// name, which covers every run/curator creator in their org.
+func resolveSpendUserNames(ctx context.Context, tx db.TxStores, rows []domain.SpendRow) (map[string]string, error) {
+	names := map[string]string{}
+	for _, r := range rows {
+		if r.CreatorUserID == nil {
+			continue
+		}
+		if _, done := names[*r.CreatorUserID]; done {
+			continue
+		}
+		name, err := tx.Users.GetDisplayName(ctx, *r.CreatorUserID)
+		if err != nil {
+			return nil, err
+		}
+		names[*r.CreatorUserID] = name
+	}
+	return names, nil
+}
+
+// resolveSpendRuleNames maps each distinct firing trigger (autonomous rows) to
+// a human-readable rule name via the ADMIN pool (GetSystem) — an org admin may
+// not be on the team that owns the trigger, so an app-pool read would be
+// RLS-blocked. A trigger event_handler always carries a NULL name (the
+// trigger_shape CHECK forces it), so the meaningful label is the blueprint it
+// fires; we fall back to that, then to "" (the FE shows the id).
+func resolveSpendRuleNames(ctx context.Context, tx db.TxStores, orgID string, rows []domain.SpendRow) (map[string]string, error) {
+	names := map[string]string{}
+	for _, r := range rows {
+		if r.Category != domain.SpendCategoryAutonomous || r.TriggerID == nil {
+			continue
+		}
+		tid := *r.TriggerID
+		if _, done := names[tid]; done {
+			continue
+		}
+		eh, err := tx.EventHandlers.GetSystem(ctx, orgID, tid)
+		if err != nil {
+			return nil, err
+		}
+		name := ""
+		if eh != nil {
+			name = eh.Name // non-empty only for rules; triggers carry NULL.
+			if name == "" && eh.BlueprintID != "" {
+				bp, err := tx.Blueprints.GetSystem(ctx, orgID, eh.BlueprintID)
+				if err != nil {
+					return nil, err
+				}
+				if bp != nil {
+					name = bp.Name
+				}
+			}
+		}
+		names[tid] = name
+	}
+	return names, nil
+}
+
+// resolveSpendTeamNames maps each distinct team in rows to its name via the
+// ADMIN pool (GetSystem) — the org rollup crosses teams the caller may not
+// belong to.
+func resolveSpendTeamNames(ctx context.Context, tx db.TxStores, orgID string, rows []domain.SpendRow) (map[string]string, error) {
+	names := map[string]string{}
+	for _, r := range rows {
+		if r.TeamID == nil {
+			continue
+		}
+		if _, done := names[*r.TeamID]; done {
+			continue
+		}
+		t, err := tx.Teams.GetSystem(ctx, orgID, *r.TeamID)
+		if err != nil {
+			return nil, err
+		}
+		name := ""
+		if t != nil {
+			name = t.Name
+		}
+		names[*r.TeamID] = name
+	}
+	return names, nil
+}

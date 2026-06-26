@@ -27,7 +27,19 @@ type SpendStore interface {
 	// ListSpend returns raw spend rows for orgID, newest-first, filtered by
 	// opts (all optional — see domain.SpendFilter). Powers row-level / drill-down
 	// reads; SpendByCategory is the cheaper path for the headline totals.
+	// APP pool in Postgres (RLS-active) — team-scoped under the caller's claims.
 	ListSpend(ctx context.Context, orgID string, opts domain.SpendFilter) ([]domain.SpendRow, error)
+
+	// ListSpendSystem is ListSpend on the ADMIN pool (BYPASSRLS) in Postgres —
+	// the authorized cross-RLS read the role-gated team / org usage endpoints
+	// need (TFAC-478). An org admin may not be a member of the team they're
+	// inspecting, so an app-pool ListSpend would exclude that team's rows; the
+	// HTTP role gate is the authorization, this System read is the authorized
+	// path past RLS. Same opts contract as ListSpend (a non-nil TeamID narrows
+	// to one team; an empty filter is the whole org). Mirrors
+	// SpendByCategorySystem / artifactStore.ListByRunSystem. SQLite is N=1 / no
+	// RLS, so it delegates to ListSpend.
+	ListSpendSystem(ctx context.Context, orgID string, opts domain.SpendFilter) ([]domain.SpendRow, error)
 
 	// SpendByCategory aggregates cost + the four token totals per category for
 	// orgID over the window [since, until), one bucket per category present.
