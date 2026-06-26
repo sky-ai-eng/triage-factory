@@ -55,11 +55,14 @@ type AgentRun struct {
 	// ints because the columns are INTEGER NOT NULL DEFAULT 0 (0 for a run
 	// that never streamed a usage-bearing message). Mirrors
 	// system_llm_runs' columns so the unified spend view (TFAC-472) reads
-	// tokens natively for delegated runs. TFAC-473.
-	InputTokens         int
-	OutputTokens        int
-	CacheReadTokens     int
-	CacheCreationTokens int
+	// tokens natively for delegated runs. snake_case json tags match the
+	// curator_requests token fields and AgentRun's own recent additions
+	// (blueprint_run_id, attempts), so a direct json.Marshal stays
+	// consistent. TFAC-473.
+	InputTokens         int `json:"input_tokens"`
+	OutputTokens        int `json:"output_tokens"`
+	CacheReadTokens     int `json:"cache_read_tokens"`
+	CacheCreationTokens int `json:"cache_creation_tokens"`
 
 	StopReason    string
 	WorktreePath  string

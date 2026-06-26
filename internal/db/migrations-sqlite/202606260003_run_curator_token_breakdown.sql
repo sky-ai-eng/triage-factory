@@ -14,6 +14,14 @@
 -- SUM over the owning message table at completion (run_messages for runs via
 -- AgentRunStore.Complete; curator_messages for curator turns via
 -- CompleteRequest / CompleteCuratorRequest) — idempotent across resumes.
+--
+-- Completed-spend-only: the roll-up runs ONLY on the terminal completion
+-- write. The cancel paths (AgentRunStore.MarkCancelledIfActive /
+-- CuratorStore.MarkRequestCancelledIfActive) are plain status flips with no
+-- SUM, so a row cancelled mid-turn keeps token columns at 0 even if messages
+-- streamed. Symmetric across runs + curator; intentional (the cancel path is
+-- kept cheap). The TFAC-472 spend view should therefore read these columns as
+-- *completed* token spend — partial spend on cancelled work is not captured.
 ALTER TABLE runs ADD COLUMN input_tokens          INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE runs ADD COLUMN output_tokens         INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE runs ADD COLUMN cache_read_tokens     INTEGER NOT NULL DEFAULT 0;
