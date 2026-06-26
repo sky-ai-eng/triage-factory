@@ -285,10 +285,11 @@ describe('Usage page', () => {
     expect(await screen.findByText('Org')).toBeInTheDocument()
     await waitFor(() => expect(fetchedPaths(fetchMock)).toContain('/api/usage/org'))
 
-    // The system-overhead row (the org-level NULL-team spend) surfaces — this is
-    // exactly the spend that's invisible without the org section.
-    expect(await screen.findByText('Org-level')).toBeInTheDocument()
+    // System-overhead (NULL creator + NULL team) surfaces only in the org rollup
+    // — here as the allocation meter's overhead ("ovh") segment. This is exactly
+    // the spend that's invisible without the org section.
     expect((await screen.findAllByText('System')).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText('ovh')).length).toBeGreaterThan(0)
     expect(await screen.findByText('$100.00')).toBeInTheDocument()
   })
 

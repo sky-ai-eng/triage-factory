@@ -249,22 +249,9 @@ function ruleBars(rows: UsageRuleBucket[] | undefined): BarDatum[] {
   }))
 }
 
-function teamBars(rows: UsageTeamBucket[] | undefined): BarDatum[] {
-  return (rows ?? []).map((t) => ({
-    key: t.team_id,
-    label: t.team_name || t.team_id,
-    value: t.cost,
-  }))
-}
-
-function orgLevelBars(rows: UsageOrgLevelBucket[] | undefined): BarDatum[] {
-  return (rows ?? []).map((o) => ({
-    key: o.category,
-    label: categoryLabel(o.category),
-    value: o.cost,
-    color: categoryColor(o.category),
-  }))
-}
+// by_team + org_level are consolidated into the org AllocationBar (which inlines
+// its own segment mapping with palette colors + the overhead tag), so they need
+// no flat BarDatum adapter here.
 
 // --- instrument primitives (borderless; separated by light + hairlines) ---
 
@@ -339,17 +326,14 @@ function BurnBar({ data }: { data: UsageCategoryBucket[] }) {
           />
         ))}
       </div>
-      <ul className="mt-3 space-y-1.5">
+      {/* Horizontal readout strip — chips wrap, so the bar reads as one wide
+          meter rather than a stacked list of rows. */}
+      <ul className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5">
         {segs.map((d) => (
-          <li
-            key={d.bucket.category}
-            className="flex items-center justify-between gap-2 font-mono text-[11px]"
-          >
-            <span className="flex min-w-0 items-center gap-1.5">
-              <span className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: d.color }} />
-              <span className="truncate text-text-secondary">{d.label}</span>
-            </span>
-            <span className="shrink-0 tabular-nums text-text-tertiary" title={tokenTitle(d.bucket)}>
+          <li key={d.bucket.category} className="flex items-center gap-1.5 font-mono text-[11px]">
+            <span className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: d.color }} />
+            <span className="text-text-secondary">{d.label}</span>
+            <span className="tabular-nums text-text-tertiary" title={tokenTitle(d.bucket)}>
               {fmtUSD(d.bucket.cost)} · {pct(d.bucket.cost, total)}
             </span>
           </li>
@@ -415,11 +399,11 @@ function Gauges({
 // HMI screen (warm backlit-paper in light mode) with faint scanlines and a cyan
 // oscilloscope line — the one inset screen in the otherwise-warm console, echoing
 // the Run Station.
-function Trace({ data }: { data: UsageDayBucket[] }) {
+function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightClass?: string }) {
   if (data.length === 0)
     return (
       <div
-        className="flex h-24 items-center justify-center rounded-[4px]"
+        className={`flex ${heightClass} items-center justify-center rounded-[4px]`}
         style={{ background: 'var(--hmi-screen)', boxShadow: 'inset 0 0 0 1px var(--hmi-line)' }}
       >
         <ZeroMini label="no activity" />
@@ -435,7 +419,7 @@ function Trace({ data }: { data: UsageDayBucket[] }) {
 
   return (
     <div
-      className="relative h-24 overflow-hidden rounded-[4px]"
+      className={`relative ${heightClass} overflow-hidden rounded-[4px]`}
       style={{ background: 'var(--hmi-screen)', boxShadow: 'inset 0 0 0 1px var(--hmi-line)' }}
     >
       {/* Scanlines — the HMI screen texture. */}
@@ -472,6 +456,121 @@ function Trace({ data }: { data: UsageDayBucket[] }) {
         </AreaChart>
       </ResponsiveContainer>
     </div>
+  )
+}
+
+// Teams have no inherent tone, so the allocation meter cycles them through a
+// palette (org-level overhead keeps its category color instead).
+const TEAM_PALETTE = [
+  'var(--color-accent)',
+  'var(--color-delegate)',
+  'var(--color-snooze)',
+  'var(--color-dismiss)',
+  'var(--hmi-cyan)',
+  'var(--color-claim)',
+]
+
+// AllocationBar is the org hero: the WHOLE org spend in one stacked meter,
+// partitioned across teams + the org-level overhead (curator-on-non-team /
+// system). This is exactly the backend's partition invariant — total ==
+// sum(by_team) + sum(org_level) — so it reads as "where every dollar went".
+// Team segments take palette colors; overhead segments keep their category tone
+// and wear an "ovh" tag in the legend so attributable vs overhead is legible.
+function AllocationBar({
+  byTeam,
+  orgLevel,
+}: {
+  byTeam: UsageTeamBucket[]
+  orgLevel: UsageOrgLevelBucket[]
+}) {
+  const teamSegs = byTeam
+    .filter((t) => t.cost > 0)
+    .sort((a, b) => b.cost - a.cost)
+    .map((t, i) => ({
+      key: `team:${t.team_id}`,
+      label: t.team_name || t.team_id,
+      cost: t.cost,
+      color: TEAM_PALETTE[i % TEAM_PALETTE.length],
+      overhead: false,
+    }))
+  const olSegs = orgLevel
+    .filter((o) => o.cost > 0)
+    .sort((a, b) => b.cost - a.cost)
+    .map((o) => ({
+      key: `ovh:${o.category}`,
+      label: categoryLabel(o.category),
+      cost: o.cost,
+      color: categoryColor(o.category),
+      overhead: true,
+    }))
+  const segs = [...teamSegs, ...olSegs]
+  const total = segs.reduce((s, d) => s + d.cost, 0)
+  if (total === 0) return <ZeroMini label="no spend" />
+
+  return (
+    <div>
+      <div className="flex h-2.5 w-full gap-px overflow-hidden rounded-full bg-black/[0.06]">
+        {segs.map((d) => (
+          <span
+            key={d.key}
+            title={`${d.label} · ${fmtUSD(d.cost)}`}
+            style={{
+              width: `${(d.cost / total) * 100}%`,
+              background: d.color,
+              boxShadow: glow(d.color),
+            }}
+          />
+        ))}
+      </div>
+      <ul className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1.5 sm:grid-cols-3">
+        {segs.map((d) => (
+          <li key={d.key} className="flex items-center justify-between gap-2 font-mono text-[11px]">
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: d.color }} />
+              <span className="truncate text-text-secondary">{d.label}</span>
+              {d.overhead && (
+                <span className="shrink-0 text-[9px] uppercase tracking-wider text-text-tertiary/50">
+                  ovh
+                </span>
+              )}
+            </span>
+            <span className="shrink-0 tabular-nums text-text-tertiary">
+              {fmtUSD(d.cost)} · {pct(d.cost, total)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+// ThroughputInstrument fuses "over time" + "by model" into one readout shaped
+// like the Run Station: a wide HMI trace screen with a model telemetry rail
+// etched into the housing beside it (stacks below on narrow viewports).
+function ThroughputInstrument({
+  byDay,
+  byModel,
+}: {
+  byDay: UsageDayBucket[]
+  byModel: UsageModelBucket[]
+}) {
+  return (
+    <Instrument label="Over time" className="md:col-span-2 lg:col-span-3">
+      <div className="flex flex-col gap-5 lg:flex-row">
+        <div className="min-w-0 flex-1">
+          <Trace data={byDay} heightClass="h-32" />
+        </div>
+        <div className="lg:w-[200px] lg:shrink-0">
+          <div className="mb-3 flex items-center gap-2">
+            <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-text-tertiary/70">
+              by model
+            </span>
+            <span className="h-px flex-1 bg-border-subtle/70" />
+          </div>
+          <Gauges data={modelBars(byModel)} emptyLabel="no model spend" limit={5} />
+        </div>
+      </div>
+    </Instrument>
   )
 }
 
@@ -588,16 +687,11 @@ function PersonalSection({ since, days }: { since: string; days: number }) {
       error={error}
       empty={total === 0}
     >
-      <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-3">
-        <Instrument label="Category">
+      <div className="grid grid-cols-1 gap-x-10 gap-y-8 lg:grid-cols-3">
+        <Instrument label="Category" className="lg:col-span-3">
           <BurnBar data={data?.by_category ?? []} />
         </Instrument>
-        <Instrument label="By model">
-          <Gauges data={modelBars(data?.by_model)} emptyLabel="no model spend" />
-        </Instrument>
-        <Instrument label="Over time">
-          <Trace data={data?.by_day ?? []} />
-        </Instrument>
+        <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} />
       </div>
     </Band>
   )
@@ -659,12 +753,7 @@ function TeamSection({
         <Instrument label="Category">
           <BurnBar data={data?.by_category ?? []} />
         </Instrument>
-        <Instrument label="By model">
-          <Gauges data={modelBars(data?.by_model)} emptyLabel="no model spend" />
-        </Instrument>
-        <Instrument label="Over time" className="md:col-span-2 lg:col-span-1">
-          <Trace data={data?.by_day ?? []} />
-        </Instrument>
+        <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} />
       </div>
     </Band>
   )
@@ -683,24 +772,18 @@ function OrgSection({ since, days }: { since: string; days: number }) {
       empty={total === 0}
     >
       <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2 lg:grid-cols-3">
-        <Instrument label="By team">
-          <Gauges data={teamBars(data?.by_team)} emptyLabel="no team spend" />
+        {/* Allocation hero — the whole org spend partitioned across teams +
+            overhead (merges the old "by team" + "org-level" instruments). */}
+        <Instrument label="Allocation" className="md:col-span-2 lg:col-span-3">
+          <AllocationBar byTeam={data?.by_team ?? []} orgLevel={data?.org_level ?? []} />
         </Instrument>
         <Instrument label="By user">
           <Gauges data={userBars(data?.by_user)} emptyLabel="no user spend" />
         </Instrument>
-        <Instrument label="Category">
+        <Instrument label="Category" className="lg:col-span-2">
           <BurnBar data={data?.by_category ?? []} />
         </Instrument>
-        <Instrument label="Org-level">
-          <Gauges data={orgLevelBars(data?.org_level)} emptyLabel="no org-level spend" />
-        </Instrument>
-        <Instrument label="By model">
-          <Gauges data={modelBars(data?.by_model)} emptyLabel="no model spend" />
-        </Instrument>
-        <Instrument label="Over time">
-          <Trace data={data?.by_day ?? []} />
-        </Instrument>
+        <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} />
       </div>
     </Band>
   )
