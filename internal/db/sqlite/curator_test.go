@@ -58,12 +58,20 @@ func TestCuratorStore_SQLite_FullTurn(t *testing.T) {
 		t.Errorf("second MarkRequestRunning err = %v, want sql.ErrNoRows", err)
 	}
 
+	// One token-bearing message — the streaming sink writes these rows
+	// before the terminal completion write, and CompleteRequest rolls them
+	// up onto curator_requests (TFAC-473).
+	ip := func(n int) *int { return &n }
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
 		_, err := ts.Curator.InsertMessage(ctx, runmode.LocalDefaultOrgID, &domain.CuratorMessage{
-			RequestID: requestID,
-			Role:      "assistant",
-			Subtype:   "text",
-			Content:   "ack",
+			RequestID:           requestID,
+			Role:                "assistant",
+			Subtype:             "text",
+			Content:             "ack",
+			InputTokens:         ip(11),
+			OutputTokens:        ip(22),
+			CacheReadTokens:     ip(33),
+			CacheCreationTokens: ip(44),
 		})
 		return err
 	}); err != nil {
@@ -120,6 +128,82 @@ func TestCuratorStore_SQLite_FullTurn(t *testing.T) {
 	}
 	if seen.CreatorUserID != runmode.LocalDefaultUserID {
 		t.Errorf("CreatorUserID = %q, want %q", seen.CreatorUserID, runmode.LocalDefaultUserID)
+	}
+	// Token breakdown rolled up from curator_messages by the first (winning)
+	// CompleteRequest and read back via the store's scan path; the second
+	// (no-op, already-terminal) call leaves it intact — the status filter
+	// blocks the re-roll-up entirely. TFAC-473.
+	if seen.InputTokens != 11 || seen.OutputTokens != 22 ||
+		seen.CacheReadTokens != 33 || seen.CacheCreationTokens != 44 {
+		t.Errorf("token breakdown = (%d,%d,%d,%d), want (11,22,33,44) — SUM over curator_messages, lost or clobbered",
+			seen.InputTokens, seen.OutputTokens, seen.CacheReadTokens, seen.CacheCreationTokens)
+	}
+}
+
+// TestCuratorStore_SQLite_CancelRollsUpTokens pins that the store's cancel
+// path (the production curator runtime's terminal write for a user/shutdown
+// cancel) refreshes the denormalized token columns from the curator_messages
+// SUM, same as CompleteRequest — a request cancelled mid-turn reflects the
+// tokens it streamed rather than stranding them at 0 (TFAC-473).
+func TestCuratorStore_SQLite_CancelRollsUpTokens(t *testing.T) {
+	conn := newSQLiteForCuratorTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	user := runmode.LocalDefaultUserID
+
+	projectID, err := stores.Projects.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Project{Name: "p"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	ip := func(n int) *int { return &n }
+	var requestID string
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		id, err := ts.Curator.CreateRequest(ctx, org, projectID, user, "hello")
+		if err != nil {
+			return err
+		}
+		requestID = id
+		if err := ts.Curator.MarkRequestRunning(ctx, org, requestID); err != nil {
+			return err
+		}
+		_, err = ts.Curator.InsertMessage(ctx, org, &domain.CuratorMessage{
+			RequestID: requestID, Role: "assistant", Subtype: "text", Content: "ack",
+			InputTokens: ip(11), OutputTokens: ip(22), CacheReadTokens: ip(33), CacheCreationTokens: ip(44),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var flipped bool
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		f, err := ts.Curator.MarkRequestCancelledIfActive(ctx, org, requestID, "user cancelled")
+		flipped = f
+		return err
+	}); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if !flipped {
+		t.Fatal("MarkRequestCancelledIfActive flipped=false, want true")
+	}
+
+	var seen *domain.CuratorRequest
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		r, err := ts.Curator.GetRequest(ctx, org, requestID)
+		seen = r
+		return err
+	}); err != nil {
+		t.Fatalf("GetRequest: %v", err)
+	}
+	if seen == nil || seen.Status != "cancelled" {
+		t.Fatalf("want cancelled row, got %+v", seen)
+	}
+	if seen.InputTokens != 11 || seen.OutputTokens != 22 ||
+		seen.CacheReadTokens != 33 || seen.CacheCreationTokens != 44 {
+		t.Errorf("token breakdown = (%d,%d,%d,%d), want (11,22,33,44) — cancel did not roll up curator_messages",
+			seen.InputTokens, seen.OutputTokens, seen.CacheReadTokens, seen.CacheCreationTokens)
 	}
 }
 
@@ -507,6 +591,18 @@ func TestCuratorStore_SQLite_CancelOrphanedNonTerminalRequests(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("MarkRequestRunning: %v", err)
 	}
+	// The running request streamed a token-bearing message before the "crash";
+	// the boot sweep must roll it up onto the cancelled row (TFAC-473).
+	ip := func(n int) *int { return &n }
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
+		_, err := ts.Curator.InsertMessage(ctx, runmode.LocalDefaultOrgID, &domain.CuratorMessage{
+			RequestID: runningID, Role: "assistant", Subtype: "text", Content: "partial",
+			InputTokens: ip(100), OutputTokens: ip(20), CacheReadTokens: ip(1000), CacheCreationTokens: ip(7),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
 
 	queuedID := create("queued")
 
@@ -548,6 +644,20 @@ func TestCuratorStore_SQLite_CancelOrphanedNonTerminalRequests(t *testing.T) {
 	}
 	if got := getStatus(doneID); got != "done" {
 		t.Errorf("done row status = %q, want done (untouched)", got)
+	}
+	// The running orphan's token cache rolled up from curator_messages in the
+	// same sweep; the queued orphan had no messages, so it stays 0 (TFAC-473).
+	{
+		var in, out, cr, cc int
+		if err := conn.QueryRow(`
+			SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+			FROM curator_requests WHERE id = ?
+		`, runningID).Scan(&in, &out, &cr, &cc); err != nil {
+			t.Fatalf("read running tokens: %v", err)
+		}
+		if in != 100 || out != 20 || cr != 1000 || cc != 7 {
+			t.Errorf("running orphan token cols = (%d,%d,%d,%d), want (100,20,1000,7) — boot sweep did not roll up curator_messages", in, out, cr, cc)
+		}
 	}
 }
 

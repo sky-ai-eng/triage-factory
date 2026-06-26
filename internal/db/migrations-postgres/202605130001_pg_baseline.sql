@@ -725,6 +725,15 @@ CREATE TABLE public.curator_requests (
     cost_usd real DEFAULT 0 NOT NULL,
     duration_ms integer DEFAULT 0 NOT NULL,
     num_turns integer DEFAULT 0 NOT NULL,
+    -- Token breakdown denormalized onto the request at completion (TFAC-473):
+    -- CompleteRequest SETs each to the absolute SUM over curator_messages
+    -- (idempotent), the same roll-up runs uses over run_messages. Mirrors
+    -- system_llm_runs' columns so the unified spend view (TFAC-472) reads
+    -- tokens natively for curator turns.
+    input_tokens integer DEFAULT 0 NOT NULL,
+    output_tokens integer DEFAULT 0 NOT NULL,
+    cache_read_tokens integer DEFAULT 0 NOT NULL,
+    cache_creation_tokens integer DEFAULT 0 NOT NULL,
     started_at timestamp with time zone,
     finished_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL
@@ -1364,6 +1373,14 @@ CREATE TABLE public.runs (
     duration_ms integer,
     num_turns integer,
     total_cost_usd real,
+    -- Token breakdown denormalized onto the run at completion (TFAC-473):
+    -- AgentRunStore.Complete SETs each to the absolute SUM over run_messages
+    -- (idempotent across resumes). Mirrors system_llm_runs' columns so the
+    -- unified spend view (TFAC-472) reads tokens natively for delegated runs.
+    input_tokens integer DEFAULT 0 NOT NULL,
+    output_tokens integer DEFAULT 0 NOT NULL,
+    cache_read_tokens integer DEFAULT 0 NOT NULL,
+    cache_creation_tokens integer DEFAULT 0 NOT NULL,
     actor_agent_id uuid,
     -- blueprint_run_id is NULLABLE (relaxed from NOT NULL at this baseline);
     -- pinned for origin 'blueprint' by runs_origin_requires_parents, so every

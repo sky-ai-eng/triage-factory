@@ -164,6 +164,15 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = 0 WHERE id = 'ra-br'`); err != nil {
 		t.Fatalf("set br A cancelled: %v", err)
 	}
+	// ra-child streamed two token-bearing messages before the crash; the boot
+	// sweep must roll them up onto the run, not leave the columns at 0 (TFAC-473).
+	if _, err := conn.Exec(`
+		INSERT INTO run_messages (run_id, role, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+		VALUES ('ra-child', 'assistant', 100, 20, 1000, 7),
+		       ('ra-child', 'assistant',  50,  5,  500, 3)
+	`); err != nil {
+		t.Fatalf("seed ra-child run_messages: %v", err)
+	}
 
 	// A second orphan that never started: queued child under the same terminal
 	// parent (the parent went terminal before the step was claimed). Must also be
@@ -211,6 +220,20 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	}
 	if got := childRunStatusDB(t, conn, "ra-child-queued"); got != "cancelled" {
 		t.Errorf("queued orphan child status = %q, want cancelled", got)
+	}
+	// The running orphan's token cache rolled up from run_messages in the same
+	// sweep (TFAC-473). The queued orphan had no messages, so it stays 0.
+	{
+		var in, out, cr, cc int
+		if err := conn.QueryRow(`
+			SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+			FROM runs WHERE id = 'ra-child'
+		`).Scan(&in, &out, &cr, &cc); err != nil {
+			t.Fatalf("read ra-child tokens: %v", err)
+		}
+		if in != 150 || out != 25 || cr != 1500 || cc != 10 {
+			t.Errorf("orphan child token cols = (%d,%d,%d,%d), want (150,25,1500,10) — boot sweep did not roll up run_messages", in, out, cr, cc)
+		}
 	}
 	if got := childRunStatusDB(t, conn, "rb-child"); got != "running" {
 		t.Errorf("healthy child status = %q, want running (must not touch children under a running parent)", got)

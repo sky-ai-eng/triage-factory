@@ -38,16 +38,32 @@ func (o RunOutcome) Valid() bool {
 
 // AgentRun represents a delegated agent execution.
 type AgentRun struct {
-	ID            string
-	TaskID        string
-	PromptID      string // FK to prompts.id — which prompt was used for this run
-	Status        string // lifecycle: "queued" | "initializing" | "cloning" | "fetching" | "worktree_created" | "agent_starting" | "running" | "open" (a turn ended without a conclusion — not executing, not concluded); terminal: "completed" | "failed" | "cancelled" | "task_unsolvable" | "pending_approval"
-	Model         string
-	StartedAt     time.Time
-	CompletedAt   *time.Time
-	TotalCostUSD  *float64
-	DurationMs    *int
-	NumTurns      *int
+	ID           string
+	TaskID       string
+	PromptID     string // FK to prompts.id — which prompt was used for this run
+	Status       string // lifecycle: "queued" | "initializing" | "cloning" | "fetching" | "worktree_created" | "agent_starting" | "running" | "open" (a turn ended without a conclusion — not executing, not concluded); terminal: "completed" | "failed" | "cancelled" | "task_unsolvable" | "pending_approval"
+	Model        string
+	StartedAt    time.Time
+	CompletedAt  *time.Time
+	TotalCostUSD *float64
+	DurationMs   *int
+	NumTurns     *int
+
+	// Token breakdown denormalized onto the run at completion — SET to the
+	// full SUM over run_messages by AgentRunStore.Complete (absolute, so
+	// idempotent across resumes; not additive like total_cost_usd). Plain
+	// ints because the columns are INTEGER NOT NULL DEFAULT 0 (0 for a run
+	// that never streamed a usage-bearing message). Mirrors
+	// system_llm_runs' columns so the unified spend view (TFAC-472) reads
+	// tokens natively for delegated runs. snake_case json tags match the
+	// curator_requests token fields and AgentRun's own recent additions
+	// (blueprint_run_id, attempts), so a direct json.Marshal stays
+	// consistent. TFAC-473.
+	InputTokens         int `json:"input_tokens"`
+	OutputTokens        int `json:"output_tokens"`
+	CacheReadTokens     int `json:"cache_read_tokens"`
+	CacheCreationTokens int `json:"cache_creation_tokens"`
+
 	StopReason    string
 	WorktreePath  string
 	ResultSummary string

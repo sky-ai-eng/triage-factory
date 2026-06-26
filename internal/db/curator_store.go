@@ -57,7 +57,15 @@ type CuratorStore interface {
 
 	// CompleteRequest writes a terminal status + accounting, but
 	// ONLY if the row is non-terminal. Returns true if the flip
-	// happened. Status is one of done|cancelled|failed.
+	// happened. Status is one of done|cancelled|failed. The four token
+	// columns are SET from the curator_messages SUM in the same UPDATE
+	// (the streaming sink wrote every message row before this terminal
+	// write), aggregating the turn's token breakdown onto curator_requests
+	// for the unified spend view — same roll-up shape runs uses over
+	// run_messages (TFAC-473). The cancel path (MarkRequestCancelledIfActive)
+	// runs the same SUM, so the token columns are kept current at every
+	// terminal write, not just on done/failed — a request cancelled mid-turn
+	// still reflects the tokens it streamed.
 	CompleteRequest(ctx context.Context, orgID, id, status, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error)
 
 	// MarkRequestCancelledIfActive flips any non-terminal row to
@@ -86,7 +94,8 @@ type CuratorStore interface {
 	// app-pool UPDATE would be rejected by RLS and leave the freshly
 	// created request stuck in `queued`. See
 	// MarkRequestCancelledIfActiveSystem for the pool-attribution
-	// rationale. TFAC-64.
+	// rationale. TFAC-64. Token columns roll up from curator_messages,
+	// same as CompleteRequest (TFAC-473).
 	CompleteRequestSystem(ctx context.Context, orgID, id, status, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error)
 
 	// QueuedRequestsForProjectSystem lists the queued curator_request

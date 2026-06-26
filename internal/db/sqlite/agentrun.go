@@ -115,6 +115,11 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
+	// Token columns are SET to the absolute SUM over run_messages (the
+	// streaming sink wrote every session's messages before this terminal
+	// write), NOT accumulated like total_cost_usd — the SUM is already the
+	// full total, so re-running Complete on a resume re-sets the same
+	// correct value rather than doubling. TFAC-473.
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE runs
 		SET status = ?,
@@ -125,10 +130,14 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 		    stop_reason = ?,
 		    result_summary = ?,
 		    outcome = ?,
-		    outcome_reason = ?
+		    outcome_reason = ?,
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = ?),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = ?),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = ?),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE run_id = ?)
 		WHERE id = ?
 	`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary,
-		nullIfEmpty(outcome), nullIfEmpty(outcomeReason), runID)
+		nullIfEmpty(outcome), nullIfEmpty(outcomeReason), runID, runID, runID, runID, runID)
 	return err
 }
 
@@ -226,12 +235,20 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID str
 	// 'open' is deliberately failable here (unlike 'pending_approval') — see
 	// AgentRunStore.MarkFailedIfActive: a warm 'open' run has no durable
 	// snapshot yet, so an infra error reaching failRun must terminate it.
+	//
+	// Refresh the denormalized token columns from the run_messages SUM, same as
+	// Complete — an infra-failed run still streamed (and paid for) messages, so
+	// the cache must reflect them rather than strand at 0 (TFAC-473).
 	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, ?)
+		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, ?),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = ?),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = ?),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = ?),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE run_id = ?)
 		WHERE id = ?
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
 		                     'pending_approval')
-	`, time.Now().UTC(), runID)
+	`, time.Now().UTC(), runID, runID, runID, runID, runID)
 	if err != nil {
 		return false, err
 	}
@@ -290,13 +307,21 @@ func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID,
 		return false, err
 	}
 	now := time.Now()
+	// Refresh the denormalized token columns from the run_messages SUM, same as
+	// Complete — a run cancelled while running/open still streamed (and paid
+	// for) messages, so the cache must reflect them rather than strand at 0
+	// (TFAC-473).
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs
-		SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?
+		SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?,
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = ?),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = ?),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = ?),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE run_id = ?)
 		WHERE id = ?
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
 		                     'pending_approval')
-	`, now, stopReason, summary, runID)
+	`, now, stopReason, summary, runID, runID, runID, runID, runID)
 	if err != nil {
 		return false, err
 	}
@@ -309,6 +334,10 @@ func (s *agentRunStore) MarkDiscarded(ctx context.Context, orgID, runID, stopRea
 		return false, err
 	}
 	now := time.Now()
+	// No token roll-up here (unlike the other terminal writes): this acts only
+	// on 'pending_approval' rows, which already rolled up at the
+	// completed→pending_approval transition via Complete — run_messages can't
+	// grow after that, so the cache is already current (TFAC-473).
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs
 		SET status = 'cancelled',
@@ -340,6 +369,7 @@ const sqliteRunColumns = `
 	r.team_id,
 	r.executor_id,
 	r.blueprint_run_id, r.blueprint_step_index,
+	r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens,
 	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
 `
 
@@ -848,6 +878,7 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
+		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
@@ -867,6 +898,7 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
+		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing,
 	); err != nil {
 		return err

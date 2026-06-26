@@ -57,6 +57,7 @@ func (s *curatorStore) GetRequest(ctx context.Context, orgID, id string) (*domai
 	row := s.q.QueryRowContext(ctx, `
 		SELECT id, project_id, status, user_input, error_msg,
 		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		       started_at, finished_at, created_at, creator_user_id
 		FROM curator_requests WHERE id = ?
 	`, id)
@@ -89,11 +90,20 @@ func (s *curatorStore) CompleteRequest(ctx context.Context, orgID, id, status, e
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
+	// Token columns are SET from the absolute curator_messages SUM (the
+	// streaming sink wrote every message row before this terminal write) —
+	// the same roll-up runs uses over run_messages. TFAC-473.
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE curator_requests
-		SET status = ?, error_msg = ?, cost_usd = ?, duration_ms = ?, num_turns = ?, finished_at = ?
+		SET status = ?, error_msg = ?, cost_usd = ?, duration_ms = ?, num_turns = ?,
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = ?),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = ?),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = ?),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = ?),
+		    finished_at = ?
 		WHERE id = ? AND status NOT IN ('done', 'cancelled', 'failed')
-	`, status, nullIfEmpty(errMsg), costUSD, durationMs, numTurns, time.Now().UTC(), id)
+	`, status, nullIfEmpty(errMsg), costUSD, durationMs, numTurns,
+		id, id, id, id, time.Now().UTC(), id)
 	if err != nil {
 		return false, err
 	}
@@ -105,11 +115,19 @@ func (s *curatorStore) MarkRequestCancelledIfActive(ctx context.Context, orgID, 
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
+	// Refresh the denormalized token columns from the curator_messages SUM,
+	// same as CompleteRequest — a request cancelled mid-turn still streamed
+	// (and paid for) messages, so the cache must reflect them rather than
+	// strand at 0 (TFAC-473).
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE curator_requests
-		SET status = 'cancelled', error_msg = ?, finished_at = ?
+		SET status = 'cancelled', error_msg = ?, finished_at = ?,
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = ?),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = ?),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = ?),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = ?)
 		WHERE id = ? AND status NOT IN ('done', 'cancelled', 'failed')
-	`, nullIfEmpty(errMsg), time.Now().UTC(), id)
+	`, nullIfEmpty(errMsg), time.Now().UTC(), id, id, id, id, id)
 	if err != nil {
 		return false, err
 	}
@@ -139,6 +157,7 @@ func (s *curatorStore) QueuedRequestsForProjectSystem(ctx context.Context, orgID
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id, project_id, status, user_input, error_msg,
 		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		       started_at, finished_at, created_at, creator_user_id
 		FROM curator_requests
 		WHERE project_id = ? AND status = 'queued'
@@ -375,11 +394,20 @@ func (s *curatorStore) DeletePendingContextForSession(ctx context.Context, orgID
 }
 
 func (s *curatorStore) CancelOrphanedNonTerminalRequests(ctx context.Context) (int, error) {
+	// Roll up the token cache here too (correlated SUM per row) — a 'running'
+	// request stranded by a crash may have streamed curator_messages, so the
+	// boot sweep must reflect them rather than leave the columns at 0. Same
+	// every-terminal-write invariant as the cancel paths; 'queued' rows simply
+	// have no messages and sum to 0 (TFAC-473).
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE curator_requests
 		SET status = 'cancelled',
 		    error_msg = COALESCE(error_msg, 'process restarted'),
-		    finished_at = COALESCE(finished_at, ?)
+		    finished_at = COALESCE(finished_at, ?),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = curator_requests.id),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = curator_requests.id),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = curator_requests.id),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = curator_requests.id)
 		WHERE status IN ('queued', 'running')
 	`, time.Now().UTC())
 	if err != nil {
@@ -426,6 +454,7 @@ func scanCuratorRequestWithUser(row interface {
 	err := row.Scan(
 		&req.ID, &req.ProjectID, &req.Status, &req.UserInput, &errMsg,
 		&req.CostUSD, &req.DurationMs, &req.NumTurns,
+		&req.InputTokens, &req.OutputTokens, &req.CacheReadTokens, &req.CacheCreationTokens,
 		&startedAt, &finishedAt, &req.CreatedAt, &userID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

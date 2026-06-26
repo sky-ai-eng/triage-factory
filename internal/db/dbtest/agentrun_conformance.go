@@ -383,6 +383,110 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("Complete_DenormalizesRunMessageTokens_AbsoluteAcrossResumes", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+
+		// run_messages is the source of truth (written by the streaming
+		// sink as messages arrive). Complete sums the four token columns
+		// onto the run. Two assistant rows so the SUM is non-trivial.
+		ptr := func(n int) *int { return &n }
+		for _, m := range []*domain.AgentMessage{
+			{RunID: runID, Role: "assistant", Subtype: "text", Content: "a",
+				InputTokens: ptr(100), OutputTokens: ptr(20), CacheReadTokens: ptr(1000), CacheCreationTokens: ptr(7)},
+			{RunID: runID, Role: "assistant", Subtype: "text", Content: "b",
+				InputTokens: ptr(50), OutputTokens: ptr(5), CacheReadTokens: ptr(500), CacheCreationTokens: ptr(3)},
+		} {
+			if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
+		}
+
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.1, 1000, 2, "ok", "done", "finish", ""); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.InputTokens != 150 || got.OutputTokens != 25 || got.CacheReadTokens != 1500 || got.CacheCreationTokens != 10 {
+			t.Errorf("token cols = (%d,%d,%d,%d), want (150,25,1500,10) — SUM over run_messages",
+				got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
+		}
+
+		// Re-Complete simulates a resume re-running completion. Tokens are
+		// SET to the absolute run_messages SUM (not added like cost), so a
+		// second Complete with no new messages re-sets the same value — they
+		// must stay (150,25,1500,10), NOT double.
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "ok", "done", "finish", ""); err != nil {
+			t.Fatalf("re-Complete: %v", err)
+		}
+		got2, err := store.Get(ctx, orgID, runID)
+		if err != nil || got2 == nil {
+			t.Fatalf("Get after re-Complete: err=%v got=%v", err, got2)
+		}
+		if got2.InputTokens != 150 || got2.OutputTokens != 25 || got2.CacheReadTokens != 1500 || got2.CacheCreationTokens != 10 {
+			t.Errorf("after re-Complete token cols = (%d,%d,%d,%d), want unchanged (150,25,1500,10) — SET must be absolute, not additive",
+				got2.InputTokens, got2.OutputTokens, got2.CacheReadTokens, got2.CacheCreationTokens)
+		}
+	})
+
+	// Every terminal write — not just Complete — refreshes the token cache from
+	// the run_messages SUM, so a run that ends by cancel or infra-failure still
+	// reflects the tokens it streamed rather than stranding the columns at 0
+	// (TFAC-473).
+	t.Run("CancelAndFail_DenormalizeRunMessageTokens", func(t *testing.T) {
+		ptr := func(n int) *int { return &n }
+		seedRunningWithTokens := func(t *testing.T, store db.AgentRunStore, orgID string, seed AgentRunSeeder) string {
+			t.Helper()
+			ctx := context.Background()
+			runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+			for _, m := range []*domain.AgentMessage{
+				{RunID: runID, Role: "assistant", Subtype: "text", Content: "a",
+					InputTokens: ptr(100), OutputTokens: ptr(20), CacheReadTokens: ptr(1000), CacheCreationTokens: ptr(7)},
+				{RunID: runID, Role: "assistant", Subtype: "text", Content: "b",
+					InputTokens: ptr(50), OutputTokens: ptr(5), CacheReadTokens: ptr(500), CacheCreationTokens: ptr(3)},
+			} {
+				if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
+					t.Fatalf("InsertMessage: %v", err)
+				}
+			}
+			return runID
+		}
+		assertRolledUp := func(t *testing.T, store db.AgentRunStore, orgID, runID string) {
+			t.Helper()
+			got, err := store.Get(context.Background(), orgID, runID)
+			if err != nil || got == nil {
+				t.Fatalf("Get: err=%v got=%v", err, got)
+			}
+			if got.InputTokens != 150 || got.OutputTokens != 25 || got.CacheReadTokens != 1500 || got.CacheCreationTokens != 10 {
+				t.Errorf("token cols = (%d,%d,%d,%d), want (150,25,1500,10) — terminal write did not roll up the run_messages SUM",
+					got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
+			}
+		}
+
+		t.Run("MarkCancelledIfActive", func(t *testing.T) {
+			store, orgID, _, seed := mk(t)
+			runID := seedRunningWithTokens(t, store, orgID, seed)
+			ok, err := store.MarkCancelledIfActive(context.Background(), orgID, runID, "user_cancelled", "cancelled")
+			if err != nil || !ok {
+				t.Fatalf("MarkCancelledIfActive: ok=%v err=%v", ok, err)
+			}
+			assertRolledUp(t, store, orgID, runID)
+		})
+
+		t.Run("MarkFailedIfActive", func(t *testing.T) {
+			store, orgID, _, seed := mk(t)
+			runID := seedRunningWithTokens(t, store, orgID, seed)
+			ok, err := store.MarkFailedIfActive(context.Background(), orgID, runID)
+			if err != nil || !ok {
+				t.Fatalf("MarkFailedIfActive: ok=%v err=%v", ok, err)
+			}
+			assertRolledUp(t, store, orgID, runID)
+		})
+	})
+
 	t.Run("SetSession_PersistsSessionID", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
