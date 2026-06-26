@@ -870,3 +870,104 @@ export type WSEvent =
     }
   | { type: 'repo_profile_updated'; data: { id: string; profile_text: string } }
   | { type: 'toast'; data: ToastPayload }
+
+// ──────────────────────────────────────────────────────────────────────
+// Usage dashboard — spend layer (TFAC-479, consuming the TFAC-478 backend).
+// Three role-gated, session-org-scoped reads over the llm_spend view. The FE
+// calls the literal /api/usage/* paths WITHOUT an org prefix — the backend
+// resolves the org from the session, same as /api/dashboard/*. snake_case
+// fields mirror the Go response structs in internal/server/usage_handler.go.
+// `cost` is real USD (SDK token counts × list price; see the TFAC-449 epic),
+// not an estimate.
+// ──────────────────────────────────────────────────────────────────────
+
+/** One spend category's cost + token totals over the window. `category` is one
+ *  of the domain.SpendCategory* values — 'manual' | 'autonomous' | 'curator' |
+ *  'system_overhead' — rendered via the categoryLabel map in Usage.tsx. */
+export interface UsageCategoryBucket {
+  category: string
+  cost: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+}
+
+/** One model's summed cost, highest-first. Curator turns carry a NULL model and
+ *  are excluded server-side, so by_model is a per-model slice, not a total. */
+export interface UsageModelBucket {
+  model: string
+  cost: number
+}
+
+/** One UTC calendar day's total cost (date as YYYY-MM-DD), oldest-first — the
+ *  time series the "over time" area chart plots. */
+export interface UsageDayBucket {
+  date: string
+  cost: number
+}
+
+/** One human creator's summed cost (their manual runs + curator turns). */
+export interface UsageUserBucket {
+  user_id: string
+  display_name: string
+  cost: number
+}
+
+/** One firing trigger's summed cost across autonomous runs. `rule_name` resolves
+ *  to the trigger's blueprint name, falling back to '' (the UI then shows the
+ *  trigger id). */
+export interface UsageRuleBucket {
+  trigger_id: string
+  rule_name: string
+  cost: number
+}
+
+/** One team's summed cost across team-attributed rows (org rollup only). */
+export interface UsageTeamBucket {
+  team_id: string
+  team_name: string
+  cost: number
+}
+
+/** One category of org-level spend — the NULL-team rows (curator on non-team
+ *  projects + system overhead) that aren't attributable to any one team. */
+export interface UsageOrgLevelBucket {
+  category: string
+  cost: number
+}
+
+/** GET /api/usage/me — the caller's own spend (any org member). */
+export interface UsageMeResponse {
+  total_cost_usd: number
+  by_category: UsageCategoryBucket[]
+  by_model: UsageModelBucket[]
+  by_day: UsageDayBucket[]
+}
+
+/** GET /api/usage/teams/{id} — one team's breakdown (team admin only; an org
+ *  admin who isn't a team admin gets a 403 and sees cross-team numbers in the
+ *  org rollup instead). */
+export interface UsageTeamResponse {
+  team_id: string
+  team_name: string
+  total_cost_usd: number
+  by_category: UsageCategoryBucket[]
+  by_user: UsageUserBucket[]
+  by_rule: UsageRuleBucket[]
+  by_model: UsageModelBucket[]
+  by_day: UsageDayBucket[]
+}
+
+/** GET /api/usage/org — the org rollup (org admin only). Partition invariant
+ *  (from the backend): total_cost_usd === sum(by_team) + sum(org_level); by_user
+ *  and by_category slice the same total on different axes. */
+export interface UsageOrgResponse {
+  total_cost_usd: number
+  by_team: UsageTeamBucket[]
+  by_user: UsageUserBucket[]
+  org_level: UsageOrgLevelBucket[]
+  by_category: UsageCategoryBucket[]
+  by_model: UsageModelBucket[]
+  by_day: UsageDayBucket[]
+}

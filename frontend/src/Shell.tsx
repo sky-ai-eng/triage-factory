@@ -15,6 +15,9 @@ const baseNavLeading = [
   { to: '/prs', label: 'PRs' },
   { to: '/projects', label: 'Projects' },
   { to: '/repos', label: 'Repos' },
+  // Usage — the spend dashboard (TFAC-479). Everyone gets at least the
+  // personal view; the team/org sections inside the page self-gate on role.
+  { to: '/usage', label: 'Usage' },
 ]
 
 export default function Shell() {
