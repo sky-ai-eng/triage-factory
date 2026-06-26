@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip } from 'recharts'
+import {
+  PieChart,
+  Pie,
+  Cell,
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+} from 'recharts'
 import TeamSwitch from '../components/TeamSwitch'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useOrgRole } from '../hooks/useOrgRole'
@@ -172,12 +182,6 @@ function pct(value: number, total: number): string {
   return `${Math.round((value / total) * 100)}%`
 }
 
-// glow is the emissive shadow on a lit gauge fill — the "status via light" move
-// from the board cards / telemetry rail, tinted to the gauge's own color.
-function glow(color: string): string {
-  return `0 0 8px color-mix(in srgb, ${color} 55%, transparent)`
-}
-
 // Category axis (domain.SpendCategory*) → the labels the epic specifies for the
 // org by-category split (automated / delegated / curator / system) and a stable
 // tone per category, reusing the board's semantic color vocabulary.
@@ -249,9 +253,9 @@ function ruleBars(rows: UsageRuleBucket[] | undefined): BarDatum[] {
   }))
 }
 
-// by_team + org_level are consolidated into the org AllocationBar (which inlines
-// its own segment mapping with palette colors + the overhead tag), so they need
-// no flat BarDatum adapter here.
+// by_team + org_level are consolidated into the org AllocationDonut (which builds
+// its own DonutSeg list with palette colors + the overhead tag), so they need no
+// flat BarDatum adapter here.
 
 // --- instrument primitives (borderless; separated by light + hairlines) ---
 
@@ -300,26 +304,11 @@ function ZeroMini({ label = '—' }: { label?: string }) {
   )
 }
 
-// SegOverlay carves any bar into LED-style segments: thin surface-colored cuts at
-// a fixed pitch, painted over the fill. The cuts ARE the page surface, so they
-// read as gaps between lit cells — and because it's one CSS gradient (not N
-// elements) it stays crisp at any width with no per-cell rounding. This is the
-// motif that makes the bars read as level meters rather than soft progress pills.
-const SEG_PITCH =
-  'repeating-linear-gradient(90deg, transparent 0 6px, var(--color-surface) 6px 7px)'
-function SegOverlay() {
-  return (
-    <span
-      aria-hidden
-      className="pointer-events-none absolute inset-0"
-      style={{ backgroundImage: SEG_PITCH }}
-    />
-  )
-}
-
-// Meter is a single-tone level gauge: a segmented track filled to value/max with
-// a tone glow and a bright "head" cap at the leading edge — a VU/level meter, not
-// a soft progress pill.
+// Meter is a single-value gauge drawn as an open "C" bracket — top + left +
+// bottom edges, no right cap — in the rust accent: the board's L-bracket pulled
+// onto a readout. The bracket always spans the full track, so the scale is
+// legible even at zero; the value is a left-anchored gradient that fades to
+// nothing at value/max (no hard right end), so magnitude reads as "reach".
 function Meter({
   value,
   max,
@@ -329,87 +318,110 @@ function Meter({
   max: number
   color?: string
 }) {
-  const fill = max > 0 ? Math.min(100, Math.max((value / max) * 100, 2)) : 0
+  const fill = max > 0 ? Math.min(100, (value / max) * 100) : 0
   return (
-    <div className="relative h-2.5 overflow-hidden rounded-[2px] bg-black/[0.06]">
+    <div className="group/meter relative h-3.5">
+      {/* ⊏ frame — rust, always full width; brightens on hover like the column bracket. */}
+      <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-accent/40 transition-colors group-hover/meter:bg-accent/70" />
+      <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-accent/40 transition-colors group-hover/meter:bg-accent/70" />
+      <span className="pointer-events-none absolute inset-y-0 left-0 w-px bg-accent/55 transition-colors group-hover/meter:bg-accent" />
+      {/* fill — left-anchored gradient fading out at value/max; no right cap. */}
       <span
-        className="absolute inset-y-0 left-0"
-        style={{ width: `${fill}%`, background: color, boxShadow: glow(color) }}
-      />
-      <SegOverlay />
-      {/* Hot head — a bright cap riding the fill's leading edge, on top of the
-          segment cuts so it always reads as the live level. */}
-      <span
-        className="absolute inset-y-0 w-[1.5px]"
-        style={{
-          left: `calc(${fill}% - 1.5px)`,
-          background: `color-mix(in srgb, white 45%, ${color})`,
-        }}
+        aria-hidden
+        className="absolute inset-y-[2px] left-px right-0"
+        style={{ background: `linear-gradient(90deg, ${color} 0%, transparent ${fill}%)` }}
       />
     </div>
   )
 }
 
-// StackMeter is the composition sibling: butted color segments (one per category
-// / team) carved by the same overlay, so an allocation reads as a multi-tone LED
-// meter rather than a soft stacked pill.
-function StackMeter({
+// Donut is the composition instrument — a thin wireframe ring (a stroke, not a
+// bulbous pie) with gapped segments and a monospace legend that carries the
+// numbers. Used for both the category split and the org allocation. The ring is
+// decorative (renders nothing in jsdom); the legend is the readable record.
+interface DonutSeg {
+  key: string
+  label: string
+  color: string
+  value: number
+  /** Marks an org-level overhead slice (curator-on-non-team / system) so the
+   *  legend can tag it. */
+  overhead?: boolean
+  title?: string
+}
+function Donut({
   segments,
-  heightClass = 'h-3',
+  ringClass = 'h-24 w-24',
+  legendClass = 'space-y-1.5',
 }: {
-  segments: { key: string; color: string; value: number; title?: string }[]
-  heightClass?: string
+  segments: DonutSeg[]
+  ringClass?: string
+  legendClass?: string
 }) {
-  const total = segments.reduce((s, d) => s + d.value, 0)
-  if (total === 0) return null
-  return (
-    <div className={`relative flex ${heightClass} overflow-hidden rounded-[2px] bg-black/[0.06]`}>
-      {segments.map((d) => (
-        <span
-          key={d.key}
-          title={d.title}
-          style={{ width: `${(d.value / total) * 100}%`, background: d.color }}
-        />
-      ))}
-      <SegOverlay />
-    </div>
-  )
-}
-
-// BurnBar is the category split — a segmented level meter over a horizontal
-// monospace legend strip.
-function BurnBar({ data }: { data: UsageCategoryBucket[] }) {
-  const segs = data
-    .map((d) => ({ bucket: d, label: categoryLabel(d.category), color: categoryColor(d.category) }))
-    .filter((d) => d.bucket.cost > 0)
-    .sort((a, b) => b.bucket.cost - a.bucket.cost)
-  const total = segs.reduce((s, d) => s + d.bucket.cost, 0)
+  const data = segments.filter((d) => d.value > 0).sort((a, b) => b.value - a.value)
+  const total = data.reduce((s, d) => s + d.value, 0)
   if (total === 0) return <ZeroMini label="no spend" />
 
   return (
-    <div>
-      <StackMeter
-        segments={segs.map((d) => ({
-          key: d.bucket.category,
-          color: d.color,
-          value: d.bucket.cost,
-          title: `${d.label} · ${fmtUSD(d.bucket.cost)}`,
-        }))}
-      />
-      {/* Horizontal readout strip — chips wrap, so the bar reads as one wide
-          meter rather than a stacked list of rows. */}
-      <ul className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5">
-        {segs.map((d) => (
-          <li key={d.bucket.category} className="flex items-center gap-1.5 font-mono text-[11px]">
-            <span className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: d.color }} />
-            <span className="text-text-secondary">{d.label}</span>
-            <span className="tabular-nums text-text-tertiary" title={tokenTitle(d.bucket)}>
-              {fmtUSD(d.bucket.cost)} · {pct(d.bucket.cost, total)}
+    <div className="flex items-center gap-5">
+      <div className={`${ringClass} shrink-0`}>
+        <ResponsiveContainer>
+          <PieChart>
+            <Pie
+              data={data}
+              dataKey="value"
+              nameKey="label"
+              cx="50%"
+              cy="50%"
+              innerRadius="70%"
+              outerRadius="100%"
+              paddingAngle={2}
+              startAngle={90}
+              endAngle={-270}
+              stroke="none"
+            >
+              {data.map((d) => (
+                <Cell key={d.key} fill={d.color} />
+              ))}
+            </Pie>
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+      <ul className={`min-w-0 flex-1 ${legendClass}`}>
+        {data.map((d) => (
+          <li key={d.key} className="flex items-center justify-between gap-2 font-mono text-[11px]">
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: d.color }} />
+              <span className="truncate text-text-secondary">{d.label}</span>
+              {d.overhead && (
+                <span className="shrink-0 text-[9px] uppercase tracking-wider text-text-tertiary/50">
+                  ovh
+                </span>
+              )}
+            </span>
+            <span className="shrink-0 tabular-nums text-text-tertiary" title={d.title}>
+              {fmtUSD(d.value)} · {pct(d.value, total)}
             </span>
           </li>
         ))}
       </ul>
     </div>
+  )
+}
+
+// CategoryDonut renders the spend-by-category split as a Donut; legend values
+// carry the token-breakdown tooltip.
+function CategoryDonut({ data }: { data: UsageCategoryBucket[] }) {
+  return (
+    <Donut
+      segments={data.map((d) => ({
+        key: d.category,
+        label: categoryLabel(d.category),
+        color: categoryColor(d.category),
+        value: d.cost,
+        title: tokenTitle(d),
+      }))}
+    />
   )
 }
 
@@ -520,7 +532,7 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
   )
 }
 
-// Teams have no inherent tone, so the allocation meter cycles them through a
+// Teams have no inherent tone, so the allocation ring cycles them through a
 // palette (org-level overhead keeps its category color instead).
 const TEAM_PALETTE = [
   'var(--color-accent)',
@@ -531,72 +543,47 @@ const TEAM_PALETTE = [
   'var(--color-claim)',
 ]
 
-// AllocationBar is the org hero: the WHOLE org spend in one stacked meter,
-// partitioned across teams + the org-level overhead (curator-on-non-team /
-// system). This is exactly the backend's partition invariant — total ==
-// sum(by_team) + sum(org_level) — so it reads as "where every dollar went".
-// Team segments take palette colors; overhead segments keep their category tone
-// and wear an "ovh" tag in the legend so attributable vs overhead is legible.
-function AllocationBar({
+// AllocationDonut is the org hero: the WHOLE org spend as one ring, partitioned
+// across teams + the org-level overhead (curator-on-non-team / system). This is
+// exactly the backend's partition invariant — total == sum(by_team) +
+// sum(org_level) — so it reads as "where every dollar went". Team slices take
+// palette colors; overhead slices keep their category tone and wear an "ovh" tag
+// in the legend so attributable vs overhead is legible.
+function AllocationDonut({
   byTeam,
   orgLevel,
 }: {
   byTeam: UsageTeamBucket[]
   orgLevel: UsageOrgLevelBucket[]
 }) {
-  const teamSegs = byTeam
+  const teamSegs: DonutSeg[] = byTeam
     .filter((t) => t.cost > 0)
     .sort((a, b) => b.cost - a.cost)
     .map((t, i) => ({
       key: `team:${t.team_id}`,
       label: t.team_name || t.team_id,
-      cost: t.cost,
+      value: t.cost,
       color: TEAM_PALETTE[i % TEAM_PALETTE.length],
-      overhead: false,
+      title: `${t.team_name || t.team_id} · ${fmtUSD(t.cost)}`,
     }))
-  const olSegs = orgLevel
+  const olSegs: DonutSeg[] = orgLevel
     .filter((o) => o.cost > 0)
     .sort((a, b) => b.cost - a.cost)
     .map((o) => ({
       key: `ovh:${o.category}`,
       label: categoryLabel(o.category),
-      cost: o.cost,
+      value: o.cost,
       color: categoryColor(o.category),
       overhead: true,
+      title: `${categoryLabel(o.category)} (overhead) · ${fmtUSD(o.cost)}`,
     }))
-  const segs = [...teamSegs, ...olSegs]
-  const total = segs.reduce((s, d) => s + d.cost, 0)
-  if (total === 0) return <ZeroMini label="no spend" />
-
+  // A bigger ring + a two-column legend, since the org hero can carry many teams.
   return (
-    <div>
-      <StackMeter
-        segments={segs.map((d) => ({
-          key: d.key,
-          color: d.color,
-          value: d.cost,
-          title: `${d.label} · ${fmtUSD(d.cost)}`,
-        }))}
-      />
-      <ul className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1.5 sm:grid-cols-3">
-        {segs.map((d) => (
-          <li key={d.key} className="flex items-center justify-between gap-2 font-mono text-[11px]">
-            <span className="flex min-w-0 items-center gap-1.5">
-              <span className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: d.color }} />
-              <span className="truncate text-text-secondary">{d.label}</span>
-              {d.overhead && (
-                <span className="shrink-0 text-[9px] uppercase tracking-wider text-text-tertiary/50">
-                  ovh
-                </span>
-              )}
-            </span>
-            <span className="shrink-0 tabular-nums text-text-tertiary">
-              {fmtUSD(d.cost)} · {pct(d.cost, total)}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </div>
+    <Donut
+      segments={[...teamSegs, ...olSegs]}
+      ringClass="h-28 w-28"
+      legendClass="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2"
+    />
   )
 }
 
@@ -809,7 +796,7 @@ function TeamSection({
           <Gauges data={ruleBars(data?.by_rule)} emptyLabel="no automated runs" />
         </Instrument>
         <Instrument label="Category">
-          <BurnBar data={data?.by_category ?? []} />
+          <CategoryDonut data={data?.by_category ?? []} />
         </Instrument>
         <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} />
       </div>
@@ -829,17 +816,19 @@ function OrgSection({ since, days }: { since: string; days: number }) {
       error={error}
       empty={total === 0}
     >
-      <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2 lg:grid-cols-3">
+      {/* A dual-dial cluster: the allocation ring (hero) over a category ring +
+          the by-user gauges, then the full-width throughput. */}
+      <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2">
         {/* Allocation hero — the whole org spend partitioned across teams +
             overhead (merges the old "by team" + "org-level" instruments). */}
-        <Instrument label="Allocation" className="md:col-span-2 lg:col-span-3">
-          <AllocationBar byTeam={data?.by_team ?? []} orgLevel={data?.org_level ?? []} />
+        <Instrument label="Allocation" className="md:col-span-2">
+          <AllocationDonut byTeam={data?.by_team ?? []} orgLevel={data?.org_level ?? []} />
+        </Instrument>
+        <Instrument label="Category">
+          <CategoryDonut data={data?.by_category ?? []} />
         </Instrument>
         <Instrument label="By user">
           <Gauges data={userBars(data?.by_user)} emptyLabel="no user spend" />
-        </Instrument>
-        <Instrument label="Category" className="lg:col-span-2">
-          <BurnBar data={data?.by_category ?? []} />
         </Instrument>
         <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} />
       </div>
