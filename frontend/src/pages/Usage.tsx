@@ -675,21 +675,6 @@ function RangePicker({ value, onChange }: { value: RangeKey; onChange: (r: Range
   )
 }
 
-// LiveDot is the passive replacement for a manual refresh button: the page polls
-// and refetches on focus, so this just signals "this is live" with a gentle
-// pulse — no click, nothing to remember to press.
-function LiveDot() {
-  return (
-    <span
-      className="inline-flex items-center gap-1.5 text-[11px] text-text-tertiary"
-      title={`Updates automatically (~${Math.round(POLL_INTERVAL_MS / 1000)}s)`}
-    >
-      <span className="h-1.5 w-1.5 rounded-full bg-claim animate-pulse" />
-      Live
-    </span>
-  )
-}
-
 export default function Usage() {
   // The org rollup gates on org-admin; the team section on the teams the viewer
   // admins (filtered from useTeams, NOT the org rollup — drilling into a non-
@@ -720,7 +705,6 @@ export default function Usage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <LiveDot />
           <RangePicker value={range} onChange={setRange} />
         </div>
       </div>

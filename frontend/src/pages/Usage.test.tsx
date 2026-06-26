@@ -292,7 +292,7 @@ describe('Usage page', () => {
     expect(await screen.findByText('$100.00')).toBeInTheDocument()
   })
 
-  it('auto-updates: shows a live indicator and no refresh button', async () => {
+  it('has no manual refresh button (the page auto-refreshes)', async () => {
     roleMock.isAdmin = false
     teamsMock.teams = []
     stubUsageFetch({ '/api/usage/me': ME })
@@ -300,7 +300,6 @@ describe('Usage page', () => {
     render(<Usage />)
 
     await screen.findByText('$12.50')
-    expect(screen.getByText('Live')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /refresh/i })).not.toBeInTheDocument()
   })
 
