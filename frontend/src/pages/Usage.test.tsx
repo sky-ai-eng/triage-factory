@@ -169,10 +169,10 @@ describe('Usage page', () => {
 
     render(<Usage />)
 
-    // All three section headings render.
-    expect(await screen.findByText('Your usage')).toBeInTheDocument()
-    expect(screen.getByText('Team usage')).toBeInTheDocument()
-    expect(screen.getByText('Organization')).toBeInTheDocument()
+    // All three section bands render.
+    expect(await screen.findByText('Personal')).toBeInTheDocument()
+    expect(screen.getByText('Team')).toBeInTheDocument()
+    expect(screen.getByText('Org')).toBeInTheDocument()
 
     // Section content: personal total, a team-only label, an org-only label.
     expect(await screen.findByText('$12.50')).toBeInTheDocument() // personal total
@@ -200,10 +200,10 @@ describe('Usage page', () => {
 
     render(<Usage />)
 
-    expect(await screen.findByText('Your usage')).toBeInTheDocument()
+    expect(await screen.findByText('Personal')).toBeInTheDocument()
     await screen.findByText('$12.50')
-    expect(screen.queryByText('Team usage')).not.toBeInTheDocument()
-    expect(screen.queryByText('Organization')).not.toBeInTheDocument()
+    expect(screen.queryByText('Team')).not.toBeInTheDocument()
+    expect(screen.queryByText('Org')).not.toBeInTheDocument()
 
     const paths = fetchedPaths(fetchMock)
     expect(paths).toContain('/api/usage/me')
@@ -218,9 +218,9 @@ describe('Usage page', () => {
 
     render(<Usage />)
 
-    expect(await screen.findByText('Team usage')).toBeInTheDocument()
+    expect(await screen.findByText('Team')).toBeInTheDocument()
     expect(await screen.findByText('CI Fixer')).toBeInTheDocument()
-    expect(screen.queryByText('Organization')).not.toBeInTheDocument()
+    expect(screen.queryByText('Org')).not.toBeInTheDocument()
 
     expect(fetchedPaths(fetchMock)).toContain('/api/usage/teams/t1')
     expect(fetchedPaths(fetchMock)).not.toContain('/api/usage/org')
@@ -233,8 +233,8 @@ describe('Usage page', () => {
 
     render(<Usage />)
 
-    expect(await screen.findByText('Your usage')).toBeInTheDocument()
-    expect(await screen.findByText(/no spend in this window/i)).toBeInTheDocument()
+    expect(await screen.findByText('Personal')).toBeInTheDocument()
+    expect(await screen.findByText(/no settled burn/i)).toBeInTheDocument()
   })
 
   it('switching the team via the dropdown refetches the selected team', async () => {
@@ -280,9 +280,9 @@ describe('Usage page', () => {
     render(<Usage />)
 
     // All three sections render, and the org rollup is actually fetched.
-    expect(await screen.findByText('Your usage')).toBeInTheDocument()
-    expect(await screen.findByText('Team usage')).toBeInTheDocument()
-    expect(await screen.findByText('Organization')).toBeInTheDocument()
+    expect(await screen.findByText('Personal')).toBeInTheDocument()
+    expect(await screen.findByText('Team')).toBeInTheDocument()
+    expect(await screen.findByText('Org')).toBeInTheDocument()
     await waitFor(() => expect(fetchedPaths(fetchMock)).toContain('/api/usage/org'))
 
     // The system-overhead row (the org-level NULL-team spend) surfaces — this is
@@ -303,7 +303,7 @@ describe('Usage page', () => {
     expect(screen.queryByRole('button', { name: /refresh/i })).not.toBeInTheDocument()
   })
 
-  it('team subtitle uses the selected team name, not the (possibly stale) response', async () => {
+  it('team header uses the selected team name, not the (possibly stale) response', async () => {
     // Holding the previous response while a switch is in flight means the
     // response team_name can lag the selection — so the label must come from the
     // locally-known team. Here the response name differs to prove which wins.
@@ -316,7 +316,8 @@ describe('Usage page', () => {
 
     render(<Usage />)
 
-    expect(await screen.findByText(/Spend across Platform/)).toBeInTheDocument()
+    // Single admin team → no switcher; the header shows "/ Platform" (local name).
+    expect(await screen.findByText(/Platform/)).toBeInTheDocument()
     expect(screen.queryByText(/STALE-NAME/)).not.toBeInTheDocument()
   })
 
