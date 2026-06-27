@@ -25,6 +25,7 @@ import Repos from './pages/Repos'
 import Factory from './pages/Factory'
 import Projects from './pages/Projects'
 import ProjectDetail from './pages/ProjectDetail'
+import Usage from './pages/Usage'
 import Login from './pages/Login'
 import Onboarding from './pages/Onboarding'
 import InviteAccept from './pages/InviteAccept'
@@ -156,6 +157,7 @@ function LocalRoutes() {
         <Route path="/repos" element={<Repos />} />
         <Route path="/projects" element={<Projects />} />
         <Route path="/projects/:id" element={<ProjectDetail />} />
+        <Route path="/usage" element={<Usage />} />
         <Route path="/settings" element={<Settings />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
@@ -248,6 +250,7 @@ function MultiRoutes() {
             <Route path="repos" element={<Repos />} />
             <Route path="projects" element={<Projects />} />
             <Route path="projects/:id" element={<ProjectDetail />} />
+            <Route path="usage" element={<Usage />} />
             {/* Org surface (TFAC-417) — multi-mode only; mounted under the
                 /orgs/:org_id parent. Non-admins reaching it directly get a
                 read-only roster (OrgPage gates management on org role). */}

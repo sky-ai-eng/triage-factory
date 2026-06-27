@@ -141,13 +141,36 @@ func TestSpendByDay(t *testing.T) {
 	}
 }
 
+func TestSpendByDayModel_SkipsNilModelSortedByDateThenModel(t *testing.T) {
+	got := spendByDayModel(usageTestRows())
+	// Curator rows (NULL model) excluded — c1 (06-15) and c2 (06-17) drop out.
+	// Sorted by date, then model: r1 opus (06-15), r2 haiku (06-16), s1 haiku (06-18).
+	want := []usageDayModelBucket{
+		{Date: "2026-06-15", Model: "opus", Cost: 1.00},
+		{Date: "2026-06-16", Model: "haiku", Cost: 0.25},
+		{Date: "2026-06-18", Model: "haiku", Cost: 0.05},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("byDayModel = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i].Date != want[i].Date || got[i].Model != want[i].Model ||
+			!floatEq(got[i].Cost, want[i].Cost) {
+			t.Errorf("byDayModel[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestSpendByUser_ManualAndCuratorOnly(t *testing.T) {
-	names := map[string]string{"u1": "Alice", "u2": "Bob"}
-	got := spendByUser(usageTestRows(), names)
+	profiles := map[string]userProfile{
+		"u1": {name: "Alice", avatar: "https://ex/a.png"},
+		"u2": {name: "Bob"}, // no avatar → AvatarURL omitted
+	}
+	got := spendByUser(usageTestRows(), profiles)
 	// Autonomous (NULL creator) + system (NULL creator) excluded. Sorted cost-desc.
 	want := []usageUserBucket{
-		{UserID: "u1", DisplayName: "Alice", Cost: 1.50}, // r1 + c1
-		{UserID: "u2", DisplayName: "Bob", Cost: 0.10},   // c2
+		{UserID: "u1", DisplayName: "Alice", AvatarURL: "https://ex/a.png", Cost: 1.50}, // r1 + c1
+		{UserID: "u2", DisplayName: "Bob", Cost: 0.10},                                  // c2
 	}
 	if len(got) != len(want) {
 		t.Fatalf("byUser = %+v, want %+v", got, want)
@@ -285,6 +308,11 @@ func TestUsageEndpoints_Local(t *testing.T) {
 		}
 		if !floatEq(ol[domain.SpendCategoryCurator], 0.10) || !floatEq(ol[domain.SpendCategorySystemOverhead], 0.05) {
 			t.Errorf("/org org_level = %+v, want curator 0.10 + system_overhead 0.05", resp.OrgLevel)
+		}
+		// by_rule: local mode (N=1) carries it on the org rollup too — the
+		// autonomous run's trigger, labeled by its blueprint (0.25).
+		if len(resp.ByRule) != 1 || resp.ByRule[0].RuleName != blueprintName || !floatEq(resp.ByRule[0].Cost, 0.25) {
+			t.Errorf("/org by_rule = %+v, want one rule %q at 0.25 (local mode)", resp.ByRule, blueprintName)
 		}
 		assertByDaySumsToTotal(t, "/org", resp.ByDay, resp.TotalCostUSD)
 	})

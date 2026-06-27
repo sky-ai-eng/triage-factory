@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 )
 
@@ -61,9 +62,20 @@ type usageDayBucket struct {
 	Cost float64 `json:"cost"`
 }
 
+// usageDayModelBucket is one (UTC day, model) cell — the long-format series the
+// FE pivots into a stacked-by-model area over time. Curator rows (NULL model) are
+// excluded, same as by_model, so the stack covers model-attributed spend; the
+// per-day total (by_day) still includes the curator share.
+type usageDayModelBucket struct {
+	Date  string  `json:"date"`
+	Model string  `json:"model"`
+	Cost  float64 `json:"cost"`
+}
+
 type usageUserBucket struct {
 	UserID      string  `json:"user_id"`
 	DisplayName string  `json:"display_name"`
+	AvatarURL   string  `json:"avatar_url,omitempty"`
 	Cost        float64 `json:"cost"`
 }
 
@@ -89,6 +101,7 @@ type usageMeResponse struct {
 	ByCategory   []usageCategoryBucket `json:"by_category"`
 	ByModel      []usageModelBucket    `json:"by_model"`
 	ByDay        []usageDayBucket      `json:"by_day"`
+	ByDayModel   []usageDayModelBucket `json:"by_day_model"`
 }
 
 type usageTeamResponse struct {
@@ -100,6 +113,7 @@ type usageTeamResponse struct {
 	ByRule       []usageRuleBucket     `json:"by_rule"`
 	ByModel      []usageModelBucket    `json:"by_model"`
 	ByDay        []usageDayBucket      `json:"by_day"`
+	ByDayModel   []usageDayModelBucket `json:"by_day_model"`
 }
 
 // usageOrgResponse is the org rollup. Partition invariant: total_cost_usd ==
@@ -116,6 +130,12 @@ type usageOrgResponse struct {
 	ByCategory   []usageCategoryBucket `json:"by_category"`
 	ByModel      []usageModelBucket    `json:"by_model"`
 	ByDay        []usageDayBucket      `json:"by_day"`
+	ByDayModel   []usageDayModelBucket `json:"by_day_model"`
+	// ByRule is populated ONLY in local mode (N=1): there's a single team, so the
+	// cross-team boundary that keeps per-rule detail off the org rollup in multi
+	// mode doesn't apply, and the local console can read everything in one request.
+	// omitempty → absent entirely in multi mode.
+	ByRule []usageRuleBucket `json:"by_rule,omitempty"`
 }
 
 // --- handlers ---
@@ -155,6 +175,7 @@ func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 		ByCategory:   spendByCategory(rows),
 		ByModel:      spendByModel(rows),
 		ByDay:        spendByDay(rows),
+		ByDayModel:   spendByDayModel(rows),
 	})
 }
 
@@ -203,10 +224,10 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		rows      []domain.SpendRow
-		teamName  string
-		userNames map[string]string
-		ruleNames map[string]string
+		rows         []domain.SpendRow
+		teamName     string
+		userProfiles map[string]userProfile
+		ruleNames    map[string]string
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -228,7 +249,7 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		if t != nil {
 			teamName = t.Name
 		}
-		if userNames, e = resolveSpendUserNames(r.Context(), tx, rows); e != nil {
+		if userProfiles, e = resolveSpendUserProfiles(r.Context(), tx, rows); e != nil {
 			return e
 		}
 		ruleNames, e = resolveSpendRuleNames(r.Context(), tx, orgID, rows)
@@ -243,10 +264,11 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		TeamName:     teamName,
 		TotalCostUSD: sumSpendCost(rows),
 		ByCategory:   spendByCategory(rows),
-		ByUser:       spendByUser(rows, userNames),
+		ByUser:       spendByUser(rows, userProfiles),
 		ByRule:       spendByRule(rows, ruleNames),
 		ByModel:      spendByModel(rows),
 		ByDay:        spendByDay(rows),
+		ByDayModel:   spendByDayModel(rows),
 	})
 }
 
@@ -275,10 +297,13 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Local mode (N=1) carries by_rule too — see usageOrgResponse.ByRule.
+	local := runmode.Current() == runmode.ModeLocal
 	var (
-		rows      []domain.SpendRow
-		teamNames map[string]string
-		userNames map[string]string
+		rows         []domain.SpendRow
+		teamNames    map[string]string
+		userProfiles map[string]userProfile
+		ruleNames    map[string]string // local mode only
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -291,24 +316,34 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 		if teamNames, e = resolveSpendTeamNames(r.Context(), tx, orgID, rows); e != nil {
 			return e
 		}
-		// Org-wide creators are co-org-members, so display names resolve under the
+		// Org-wide creators are co-org-members, so profiles resolve under the
 		// org admin's claims (users_select is org-scoped) — no System read needed.
-		userNames, e = resolveSpendUserNames(r.Context(), tx, rows)
+		if userProfiles, e = resolveSpendUserProfiles(r.Context(), tx, rows); e != nil {
+			return e
+		}
+		if local {
+			ruleNames, e = resolveSpendRuleNames(r.Context(), tx, orgID, rows)
+		}
 		return e
 	}); err != nil {
 		internalError(w, "usage", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, usageOrgResponse{
+	resp := usageOrgResponse{
 		TotalCostUSD: sumSpendCost(rows),
 		ByTeam:       spendByTeam(rows, teamNames),
-		ByUser:       spendByUser(rows, userNames),
+		ByUser:       spendByUser(rows, userProfiles),
 		OrgLevel:     spendOrgLevel(rows),
 		ByCategory:   spendByCategory(rows),
 		ByModel:      spendByModel(rows),
 		ByDay:        spendByDay(rows),
-	})
+		ByDayModel:   spendByDayModel(rows),
+	}
+	if local {
+		resp.ByRule = spendByRule(rows, ruleNames)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // --- gating ---
@@ -457,10 +492,43 @@ func spendByDay(rows []domain.SpendRow) []usageDayBucket {
 	return out
 }
 
+// spendByDayModel sums cost per (UTC calendar day, model) — the long-format
+// series the FE pivots into a stacked-by-model area. Rows with a NULL model
+// (curator) are excluded, matching by_model; their share still lands in by_day's
+// per-day total. Sorted by date then model for a stable response.
+func spendByDayModel(rows []domain.SpendRow) []usageDayModelBucket {
+	type key struct{ date, model string }
+	byCell := map[key]float64{}
+	for _, r := range rows {
+		if r.Model == nil {
+			continue
+		}
+		byCell[key{r.OccurredAt.UTC().Format("2006-01-02"), *r.Model}] += r.TotalCostUSD
+	}
+	out := make([]usageDayModelBucket, 0, len(byCell))
+	for k, c := range byCell {
+		out = append(out, usageDayModelBucket{Date: k.date, Model: k.model, Cost: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Date != out[j].Date {
+			return out[i].Date < out[j].Date
+		}
+		return out[i].Model < out[j].Model
+	})
+	return out
+}
+
+// userProfile is a resolved (display name, avatar URL) pair for one creator —
+// the value type of the profiles map spendByUser consumes.
+type userProfile struct {
+	name   string
+	avatar string
+}
+
 // spendByUser sums cost per human creator (manual runs + curator turns),
-// resolving display names from the supplied map. Rows with a NULL creator
+// resolving display name + avatar from the supplied map. Rows with a NULL creator
 // (autonomous/system) are excluded. Sorted cost-desc.
-func spendByUser(rows []domain.SpendRow, names map[string]string) []usageUserBucket {
+func spendByUser(rows []domain.SpendRow, profiles map[string]userProfile) []usageUserBucket {
 	byUser := map[string]float64{}
 	for _, r := range rows {
 		if r.CreatorUserID == nil {
@@ -470,7 +538,8 @@ func spendByUser(rows []domain.SpendRow, names map[string]string) []usageUserBuc
 	}
 	out := make([]usageUserBucket, 0, len(byUser))
 	for uid, c := range byUser {
-		out = append(out, usageUserBucket{UserID: uid, DisplayName: names[uid], Cost: c})
+		p := profiles[uid]
+		out = append(out, usageUserBucket{UserID: uid, DisplayName: p.name, AvatarURL: p.avatar, Cost: c})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Cost != out[j].Cost {
@@ -549,36 +618,43 @@ func spendOrgLevel(rows []domain.SpendRow) []usageOrgLevelBucket {
 
 // --- name resolution (N+1 over the small distinct-id sets; fine for v1) ---
 
-// resolveSpendUserNames maps each distinct human creator in rows to a display
-// name. Runs on the app pool under the caller's claims — users_select RLS is
-// org-scoped, so a caller (always an org member here) resolves any co-member's
-// name, which covers every run/curator creator in their org.
-func resolveSpendUserNames(ctx context.Context, tx db.TxStores, rows []domain.SpendRow) (map[string]string, error) {
-	names := map[string]string{}
+// resolveSpendUserProfiles maps each distinct human creator in rows to a (display
+// name, avatar URL) pair. Runs on the app pool under the caller's claims —
+// users_select RLS is org-scoped, so a caller (always an org member here)
+// resolves any co-member's profile, which covers every run/curator creator in
+// their org. avatar_url is whatever the OAuth login captured (often empty in
+// local mode); the FE roster falls back to a monogram when it's blank.
+func resolveSpendUserProfiles(ctx context.Context, tx db.TxStores, rows []domain.SpendRow) (map[string]userProfile, error) {
+	profiles := map[string]userProfile{}
 	for _, r := range rows {
 		if r.CreatorUserID == nil {
 			continue
 		}
-		if _, done := names[*r.CreatorUserID]; done {
+		if _, done := profiles[*r.CreatorUserID]; done {
 			continue
 		}
-		name, err := tx.Users.GetDisplayName(ctx, *r.CreatorUserID)
+		name, avatar, err := tx.Users.GetProfile(ctx, *r.CreatorUserID)
 		if err != nil {
 			return nil, err
 		}
-		names[*r.CreatorUserID] = name
+		profiles[*r.CreatorUserID] = userProfile{name: name, avatar: avatar}
 	}
-	return names, nil
+	return profiles, nil
 }
 
 // resolveSpendRuleNames maps each distinct firing trigger (autonomous rows) to a
 // human-readable rule name. It uses the plain app-pool Get (RLS-scoped), NOT
-// GetSystem: this only runs for /api/usage/teams, whose caller is a team member
-// (team-admin gate), and event_handlers / blueprints RLS lets a member read
-// their own team's rows. No cross-team read happens — the org rollup never
-// resolves another team's per-rule names. A trigger event_handler always carries
-// a NULL name (the trigger_shape CHECK forces it), so the meaningful label is the
-// blueprint it fires; we fall back to that, then to "" (the FE shows the id).
+// GetSystem, and runs for two callers — both safe under that scoping:
+//   - /api/usage/teams (any mode): the caller is a team member (team-admin gate),
+//     and event_handlers / blueprints RLS lets a member read their own team's rows.
+//   - /api/usage/org in LOCAL mode (N=1): there's one team and no RLS, so reading
+//     its rule names is unrestricted — and the multi-tenant boundary that keeps
+//     per-rule detail off the org rollup is moot at N=1.
+//
+// The MULTI-mode org rollup never calls this (it omits by_rule), so no cross-team
+// per-rule read ever happens. A trigger event_handler always carries a NULL name
+// (the trigger_shape CHECK forces it), so the meaningful label is the blueprint it
+// fires; we fall back to that, then to "" (the FE shows the id).
 func resolveSpendRuleNames(ctx context.Context, tx db.TxStores, orgID string, rows []domain.SpendRow) (map[string]string, error) {
 	names := map[string]string{}
 	for _, r := range rows {
