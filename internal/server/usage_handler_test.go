@@ -141,6 +141,26 @@ func TestSpendByDay(t *testing.T) {
 	}
 }
 
+func TestSpendByDayModel_SkipsNilModelSortedByDateThenModel(t *testing.T) {
+	got := spendByDayModel(usageTestRows())
+	// Curator rows (NULL model) excluded — c1 (06-15) and c2 (06-17) drop out.
+	// Sorted by date, then model: r1 opus (06-15), r2 haiku (06-16), s1 haiku (06-18).
+	want := []usageDayModelBucket{
+		{Date: "2026-06-15", Model: "opus", Cost: 1.00},
+		{Date: "2026-06-16", Model: "haiku", Cost: 0.25},
+		{Date: "2026-06-18", Model: "haiku", Cost: 0.05},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("byDayModel = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i].Date != want[i].Date || got[i].Model != want[i].Model ||
+			!floatEq(got[i].Cost, want[i].Cost) {
+			t.Errorf("byDayModel[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestSpendByUser_ManualAndCuratorOnly(t *testing.T) {
 	profiles := map[string]userProfile{
 		"u1": {name: "Alice", avatar: "https://ex/a.png"},

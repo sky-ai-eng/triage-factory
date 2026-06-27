@@ -61,6 +61,16 @@ type usageDayBucket struct {
 	Cost float64 `json:"cost"`
 }
 
+// usageDayModelBucket is one (UTC day, model) cell — the long-format series the
+// FE pivots into a stacked-by-model area over time. Curator rows (NULL model) are
+// excluded, same as by_model, so the stack covers model-attributed spend; the
+// per-day total (by_day) still includes the curator share.
+type usageDayModelBucket struct {
+	Date  string  `json:"date"`
+	Model string  `json:"model"`
+	Cost  float64 `json:"cost"`
+}
+
 type usageUserBucket struct {
 	UserID      string  `json:"user_id"`
 	DisplayName string  `json:"display_name"`
@@ -90,6 +100,7 @@ type usageMeResponse struct {
 	ByCategory   []usageCategoryBucket `json:"by_category"`
 	ByModel      []usageModelBucket    `json:"by_model"`
 	ByDay        []usageDayBucket      `json:"by_day"`
+	ByDayModel   []usageDayModelBucket `json:"by_day_model"`
 }
 
 type usageTeamResponse struct {
@@ -101,6 +112,7 @@ type usageTeamResponse struct {
 	ByRule       []usageRuleBucket     `json:"by_rule"`
 	ByModel      []usageModelBucket    `json:"by_model"`
 	ByDay        []usageDayBucket      `json:"by_day"`
+	ByDayModel   []usageDayModelBucket `json:"by_day_model"`
 }
 
 // usageOrgResponse is the org rollup. Partition invariant: total_cost_usd ==
@@ -117,6 +129,7 @@ type usageOrgResponse struct {
 	ByCategory   []usageCategoryBucket `json:"by_category"`
 	ByModel      []usageModelBucket    `json:"by_model"`
 	ByDay        []usageDayBucket      `json:"by_day"`
+	ByDayModel   []usageDayModelBucket `json:"by_day_model"`
 }
 
 // --- handlers ---
@@ -156,6 +169,7 @@ func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 		ByCategory:   spendByCategory(rows),
 		ByModel:      spendByModel(rows),
 		ByDay:        spendByDay(rows),
+		ByDayModel:   spendByDayModel(rows),
 	})
 }
 
@@ -248,6 +262,7 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		ByRule:       spendByRule(rows, ruleNames),
 		ByModel:      spendByModel(rows),
 		ByDay:        spendByDay(rows),
+		ByDayModel:   spendByDayModel(rows),
 	})
 }
 
@@ -309,6 +324,7 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 		ByCategory:   spendByCategory(rows),
 		ByModel:      spendByModel(rows),
 		ByDay:        spendByDay(rows),
+		ByDayModel:   spendByDayModel(rows),
 	})
 }
 
@@ -455,6 +471,32 @@ func spendByDay(rows []domain.SpendRow) []usageDayBucket {
 		out = append(out, usageDayBucket{Date: d, Cost: c})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Date < out[j].Date })
+	return out
+}
+
+// spendByDayModel sums cost per (UTC calendar day, model) — the long-format
+// series the FE pivots into a stacked-by-model area. Rows with a NULL model
+// (curator) are excluded, matching by_model; their share still lands in by_day's
+// per-day total. Sorted by date then model for a stable response.
+func spendByDayModel(rows []domain.SpendRow) []usageDayModelBucket {
+	type key struct{ date, model string }
+	byCell := map[key]float64{}
+	for _, r := range rows {
+		if r.Model == nil {
+			continue
+		}
+		byCell[key{r.OccurredAt.UTC().Format("2006-01-02"), *r.Model}] += r.TotalCostUSD
+	}
+	out := make([]usageDayModelBucket, 0, len(byCell))
+	for k, c := range byCell {
+		out = append(out, usageDayModelBucket{Date: k.date, Model: k.model, Cost: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Date != out[j].Date {
+			return out[i].Date < out[j].Date
+		}
+		return out[i].Model < out[j].Model
+	})
 	return out
 }
 
