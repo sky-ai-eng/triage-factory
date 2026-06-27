@@ -563,15 +563,17 @@ function Avatar({ name, url }: { name: string; url?: string }) {
   )
 }
 
-// RosterAvg is the subtle per-day average for a roster's header — the Instrument-
-// header echo of the Band header's $/day. `total` is the roster's summed spend and
-// `days` the active-day denominator (see activeDays), so it matches the band's
-// rate exactly. Null when there's nothing to average.
-function RosterAvg({ total, days }: { total: number; days: number }) {
-  if (total <= 0 || days <= 0) return null
+// RosterAvg is the subtle per-PERSON baseline for a roster's header — mean spend
+// across the people in it (total / head count). Deliberately NOT a per-day rate:
+// the section header already carries the daily burn; when looking at individuals
+// we want a baseline ("the typical person costs ~$X"), not a rate. Null when empty.
+function RosterAvg({ data }: { data: UsageUserBucket[] }) {
+  const rows = data.filter((d) => d.cost > 0)
+  if (rows.length === 0) return null
+  const avg = rows.reduce((s, d) => s + d.cost, 0) / rows.length
   return (
     <span className="shrink-0 font-mono text-[9px] tabular-nums text-text-tertiary/60">
-      {fmtUSD(total / days)}/day
+      avg {fmtUSD(avg)}
     </span>
   )
 }
@@ -901,7 +903,6 @@ function TeamSection({
   )
   const total = data?.total_cost_usd ?? 0
   const active = activeDays(data?.by_day ?? [], days)
-  const userTotal = (data?.by_user ?? []).reduce((s, u) => s + u.cost, 0)
   // Name from the locally-known selection FIRST, not the response: while a switch
   // is in flight we still hold the previous team's data, so data.team_name would
   // momentarily label the section with the wrong (old) team.
@@ -933,7 +934,7 @@ function TeamSection({
         <Instrument
           label="By member"
           className="md:col-span-2 lg:col-span-2"
-          aside={<RosterAvg total={userTotal} days={active} />}
+          aside={<RosterAvg data={data?.by_user ?? []} />}
         >
           <UserRoster data={data?.by_user ?? []} emptyLabel="no member spend" />
         </Instrument>
@@ -957,7 +958,6 @@ function OrgSection({ since, days }: { since: string; days: number }) {
   const { data, error } = useUsageFetch<UsageOrgResponse>(withWindow('/api/usage/org', since))
   const total = data?.total_cost_usd ?? 0
   const active = activeDays(data?.by_day ?? [], days)
-  const userTotal = (data?.by_user ?? []).reduce((s, u) => s + u.cost, 0)
   return (
     <Band
       label="Org"
@@ -982,7 +982,7 @@ function OrgSection({ since, days }: { since: string; days: number }) {
         <Instrument
           label="By user"
           className="md:col-span-2"
-          aside={<RosterAvg total={userTotal} days={active} />}
+          aside={<RosterAvg data={data?.by_user ?? []} />}
         >
           <UserRoster data={data?.by_user ?? []} emptyLabel="no user spend" />
         </Instrument>
