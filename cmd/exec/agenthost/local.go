@@ -987,7 +987,23 @@ func (c *LocalClient) GithubUpdateComment(ctx context.Context, owner, repo strin
 	// id-only path can't recompute.
 	if isIssueComment {
 		c.recordGithubCommentState(ctx, commentID, domain.ArtifactStateCommentPosted)
+		return nil
 	}
+	// A published review line-comment (isIssueComment == false → the PATCH hit
+	// /pulls/comments/{id}) is artifact-less like a review-thread reply: it rides
+	// the review, not a comment artifact, but is still an immediate org-credential
+	// write the audit log of record must capture (TFAC-485). The pending-draft path
+	// edits human-side via the server staging path and is unrecorded, so reaching
+	// here is published-by-construction — no pending check needed. The id-only call
+	// site has no PR number, so Target carries owner/repo (no #N) and URL is left
+	// empty; the action + comment id are enough.
+	c.recordBotAction(ctx, &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderGitHub,
+		Action:     domain.ActionReviewCommentEdited,
+		Target:     owner + "/" + repo,
+		ExternalID: strconv.Itoa(commentID),
+		Credential: domain.CredentialGitHubApp,
+	})
 	return nil
 }
 
@@ -1006,7 +1022,20 @@ func (c *LocalClient) GithubDeleteComment(ctx context.Context, owner, repo strin
 	// dropped.
 	if isIssueComment {
 		c.recordGithubCommentState(ctx, commentID, domain.ArtifactStateCommentDeleted)
+		return nil
 	}
+	// A published review line-comment delete (isIssueComment == false → the DELETE
+	// hit /pulls/comments/{id}) is artifact-less: it rides the review, but is an
+	// immediate org-credential write the audit log must capture (TFAC-485). Same
+	// published-by-construction reasoning as the edit path above; the id-only call
+	// site has no PR number, so Target carries owner/repo and URL stays empty.
+	c.recordBotAction(ctx, &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderGitHub,
+		Action:     domain.ActionReviewCommentDeleted,
+		Target:     owner + "/" + repo,
+		ExternalID: strconv.Itoa(commentID),
+		Credential: domain.CredentialGitHubApp,
+	})
 	return nil
 }
 

@@ -61,8 +61,8 @@ Direct Comments (hit GitHub API immediately):
   gh pr add-comment <number> --body <text>                Add top-level comment
   gh pr comment-reply <comment_id> --pr <N> --body <text> Reply to a thread
   gh pr comment-react <comment_id> --repo o/r --emoji <e> React to a comment
-  gh pr comment-update <comment_id> --body <text>         Edit (local pending or remote)
-  gh pr comment-delete <comment_id>                       Delete (local pending or remote)
+  gh pr comment-update <comment_id> --body <text>         Edit a published comment
+  gh pr comment-delete <comment_id>                       Delete a published comment
 
 GitHub Actions Commands:
   gh actions download-logs <run_id> [--repo o/r]          Download & extract the full log

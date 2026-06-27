@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -215,6 +218,143 @@ func TestCapture_GithubReply_RecordsArtifactlessAction(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCapture_GithubReviewCommentEditDelete_RecordsArtfactlessAction pins
+// TFAC-485: editing/deleting a PUBLISHED review line-comment via the
+// pulls/comments fallback (isIssueComment == false) rides the review, so it
+// writes no comment artifact — but it is still an immediate org-credential write
+// the audit log of record must capture, as an artifact-less review_comment_edited
+// / review_comment_deleted action. (Pending-draft churn edits human-side via the
+// server staging path and is unrecorded, so reaching this branch is
+// published-by-construction.)
+func TestCapture_GithubReviewCommentEditDelete_RecordsArtfactlessAction(t *testing.T) {
+	// A backend that 404s the issue-comments endpoint so the client falls back to
+	// the pulls (review line-comment) endpoint, which succeeds.
+	startReviewCommentBackend := func(t *testing.T) *httptest.Server {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if strings.Contains(r.URL.Path, "/issues/comments/") {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"message":"Not Found"}`)
+				return
+			}
+			switch r.Method {
+			case http.MethodPatch:
+				_, _ = io.WriteString(w, `{"id":999}`)
+			case http.MethodDelete:
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				_, _ = io.WriteString(w, `{}`)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+
+	for _, eventTriggered := range []bool{true, false} {
+		name := "manual"
+		if eventTriggered {
+			name = "event-triggered"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Run("edit records review_comment_edited", func(t *testing.T) {
+				gh := startReviewCommentBackend(t)
+				stores, info, client := newGithubRecordingClient(t, gh.URL, eventTriggered)
+				if !eventTriggered {
+					info.UserID = runmode.LocalDefaultUserID
+					client = NewLocal(stores, info)
+					client.ghResolver = fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"}
+				}
+
+				if err := client.GithubUpdateComment(context.Background(), "octo", "repo", 999, "edit a review comment"); err != nil {
+					t.Fatalf("GithubUpdateComment: %v", err)
+				}
+				// No comment artifact — the review line-comment rides the review.
+				if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+					t.Errorf("a review line-comment edit must record no comment artifact, got %+v", arts)
+				}
+				acts := listExternalActions(t, stores)
+				if len(acts) != 1 {
+					t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
+				}
+				a := acts[0]
+				if a.Action != domain.ActionReviewCommentEdited || a.Provider != domain.ArtifactProviderGitHub ||
+					a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||
+					a.ExternalID != "999" || a.URL != "" || a.RunID != info.RunID {
+					t.Errorf("review-comment edit action mismatch: %+v", a)
+				}
+				assertActor(t, a, eventTriggered)
+			})
+
+			t.Run("delete records review_comment_deleted", func(t *testing.T) {
+				gh := startReviewCommentBackend(t)
+				stores, info, client := newGithubRecordingClient(t, gh.URL, eventTriggered)
+				if !eventTriggered {
+					info.UserID = runmode.LocalDefaultUserID
+					client = NewLocal(stores, info)
+					client.ghResolver = fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"}
+				}
+
+				if err := client.GithubDeleteComment(context.Background(), "octo", "repo", 999); err != nil {
+					t.Fatalf("GithubDeleteComment: %v", err)
+				}
+				if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+					t.Errorf("a review line-comment delete must record no comment artifact, got %+v", arts)
+				}
+				acts := listExternalActions(t, stores)
+				if len(acts) != 1 {
+					t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
+				}
+				a := acts[0]
+				if a.Action != domain.ActionReviewCommentDeleted || a.Provider != domain.ArtifactProviderGitHub ||
+					a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||
+					a.ExternalID != "999" || a.URL != "" || a.RunID != info.RunID {
+					t.Errorf("review-comment delete action mismatch: %+v", a)
+				}
+				assertActor(t, a, eventTriggered)
+			})
+		})
+	}
+}
+
+// TestCapture_GithubStandaloneCommentEditDelete_StillRecordsCommentAction pins
+// that the standalone (top-level issue) comment path is unchanged by TFAC-485: an
+// edit still records ActionCommentEdited and a delete ActionCommentDeleted (via
+// the artifact+action funnel), NOT the review_comment_* actions.
+func TestCapture_GithubStandaloneCommentEditDelete_StillRecordsCommentAction(t *testing.T) {
+	t.Run("edit records comment_edited", func(t *testing.T) {
+		gh := startFakeGitHubComments(t)
+		stores, _, client := newGithubRecordingClient(t, gh.URL, true)
+
+		if err := client.GithubUpdateComment(context.Background(), "octo", "repo", 777, "edited take"); err != nil {
+			t.Fatalf("GithubUpdateComment: %v", err)
+		}
+		acts := listExternalActions(t, stores)
+		if len(acts) != 1 {
+			t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
+		}
+		if a := acts[0]; a.Action != domain.ActionCommentEdited || a.Provider != domain.ArtifactProviderGitHub {
+			t.Errorf("standalone edit action mismatch: %+v", a)
+		}
+	})
+
+	t.Run("delete records comment_deleted", func(t *testing.T) {
+		gh := startFakeGitHubComments(t)
+		stores, _, client := newGithubRecordingClient(t, gh.URL, true)
+
+		if err := client.GithubDeleteComment(context.Background(), "octo", "repo", 777); err != nil {
+			t.Fatalf("GithubDeleteComment: %v", err)
+		}
+		acts := listExternalActions(t, stores)
+		if len(acts) != 1 {
+			t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
+		}
+		if a := acts[0]; a.Action != domain.ActionCommentDeleted || a.Provider != domain.ArtifactProviderGitHub {
+			t.Errorf("standalone delete action mismatch: %+v", a)
+		}
+	})
 }
 
 // TestCapture_EventPath_RecordFailure_DoesNotFailAction pins the event-path
