@@ -224,10 +224,11 @@ func TestResolver_ClientForRepo_AppCoversRepo(t *testing.T) {
 }
 
 // ClientForRepo: the App is installed on the account but the repo is NOT in the
-// grant (a "Selected repositories" install). Resolving on the owner alone would
-// hand back an App token that 403s on this repo; ClientForRepo detects the gap
-// up front and falls through to the PAT.
-func TestResolver_ClientForRepo_AppDoesNotCoverRepo_FallsBackToPAT(t *testing.T) {
+// grant (a "Selected repositories" install). App XOR PAT — an active-App org's
+// credential is the App, so a repo the App can't reach is an error (surface the
+// misconfig: grant the App the repo), NOT a silent borrow of the stale PAT that
+// happens to be present here.
+func TestResolver_ClientForRepo_AppDoesNotCoverRepo_Errors(t *testing.T) {
 	gh := newGHTestServer(t)
 	gh.installRepos = []string{"acme/widget"} // "acme/other" is not granted
 	r := NewResolver(
@@ -238,15 +239,8 @@ func TestResolver_ClientForRepo_AppDoesNotCoverRepo_FallsBackToPAT(t *testing.T)
 		nil,
 	)
 
-	client, err := r.ClientForRepo(context.Background(), "org-1", "acme", "other")
-	if err != nil {
-		t.Fatalf("ClientForRepo: %v", err)
-	}
-	if _, err := client.Get(context.Background(), "/probe"); err != nil {
-		t.Fatalf("probe: %v", err)
-	}
-	if gh.lastProbe != "Bearer ghp_test" {
-		t.Errorf("client carried %q, want the PAT fallback for an uncovered repo", gh.lastProbe)
+	if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "other"); !errors.Is(err, ErrNoGitHubCredentials) {
+		t.Fatalf("ClientForRepo err = %v, want ErrNoGitHubCredentials (active App can't reach the repo; no PAT fallback)", err)
 	}
 }
 
@@ -310,9 +304,9 @@ func TestResolver_ClientForRepo_CachesCoverage(t *testing.T) {
 }
 
 // ClientForRepo must NOT cache a non-coverage answer: a repo newly added to a
-// selective grant has to be picked up on the next call, not pinned to the PAT
-// (or to ErrNoGitHubCredentials for an App-only org) for a whole TTL. So each
-// not-covered resolution re-probes.
+// selective grant has to be picked up on the next call, not pinned to
+// ErrNoGitHubCredentials for a whole TTL. So each not-covered resolution
+// re-probes (and, under App XOR PAT, errors rather than borrowing a PAT).
 func TestResolver_ClientForRepo_DoesNotCacheNonCoverage(t *testing.T) {
 	gh := newGHTestServer(t)
 	gh.installRepos = []string{"acme/widget"} // "acme/other" not granted
@@ -325,8 +319,8 @@ func TestResolver_ClientForRepo_DoesNotCacheNonCoverage(t *testing.T) {
 	)
 
 	for i := 0; i < 2; i++ {
-		if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "other"); err != nil {
-			t.Fatalf("ClientForRepo #%d: %v", i, err)
+		if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "other"); !errors.Is(err, ErrNoGitHubCredentials) {
+			t.Fatalf("ClientForRepo #%d err = %v, want ErrNoGitHubCredentials (App can't reach the repo)", i, err)
 		}
 	}
 	if got := atomic.LoadInt32(&gh.repoProbes); got != 2 {
@@ -399,12 +393,12 @@ func TestResolver_ClientForRepo_NoApp_PAT(t *testing.T) {
 	}
 }
 
-// ClientForRepoWithIdentity reports the tier it resolved as an Identity, so the
-// agenthost pending-review collision check can branch on App-vs-PAT without
-// re-deriving it from the opaque bearer token. The identity must track the same
-// tier decision ClientForRepo makes: App covers the repo → IdentityApp; App
-// doesn't cover (or no App) → the PAT fallback → IdentityPAT; nothing resolves
-// → IdentityUnknown alongside the error.
+// ClientForRepoWithIdentity reports the credential it resolved as an Identity,
+// so the agenthost pending-review collision check can branch on App-vs-PAT
+// without re-deriving it from the opaque bearer token. App XOR PAT: an active
+// App covering the repo → IdentityApp; an active App that can't reach the repo
+// → error (no PAT fallback); no active App → IdentityPAT; nothing resolves →
+// IdentityUnknown alongside the error.
 func TestResolver_ClientForRepoWithIdentity_ReportsTier(t *testing.T) {
 	t.Run("app covers repo → IdentityApp", func(t *testing.T) {
 		gh := newGHTestServer(t)
@@ -431,7 +425,7 @@ func TestResolver_ClientForRepoWithIdentity_ReportsTier(t *testing.T) {
 		}
 	})
 
-	t.Run("app does not cover repo → IdentityPAT", func(t *testing.T) {
+	t.Run("active App does not cover repo → error, no PAT", func(t *testing.T) {
 		gh := newGHTestServer(t)
 		gh.installRepos = []string{"acme/widget"} // "acme/other" not granted
 		r := NewResolver(
@@ -442,11 +436,11 @@ func TestResolver_ClientForRepoWithIdentity_ReportsTier(t *testing.T) {
 			nil,
 		)
 		_, identity, err := r.(RepoIdentityResolver).ClientForRepoWithIdentity(context.Background(), "org-1", "acme", "other")
-		if err != nil {
-			t.Fatalf("ClientForRepoWithIdentity: %v", err)
+		if !errors.Is(err, ErrNoGitHubCredentials) {
+			t.Fatalf("err = %v, want ErrNoGitHubCredentials (active App can't reach the repo; no PAT fallback)", err)
 		}
-		if identity != IdentityPAT {
-			t.Errorf("identity = %v, want IdentityPAT (App didn't cover → PAT fallback)", identity)
+		if identity != IdentityUnknown {
+			t.Errorf("identity = %v, want IdentityUnknown on the error path", identity)
 		}
 	})
 
@@ -598,7 +592,9 @@ func TestResolver_Tier1_EmptyTargetSingleInstall(t *testing.T) {
 	}
 }
 
-func TestResolver_EmptyTargetMultiInstall_FallsToPAT(t *testing.T) {
+// An ambiguous empty target with multiple installs can't pick an installation.
+// App XOR PAT — an active-App org errors rather than borrowing the (stale) PAT.
+func TestResolver_EmptyTargetMultiInstall_Errors(t *testing.T) {
 	gh := newGHTestServer(t)
 	r := NewResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
@@ -607,22 +603,18 @@ func TestResolver_EmptyTargetMultiInstall_FallsToPAT(t *testing.T) {
 		&fakeAgents{},
 		nil,
 	)
-	client, err := r.ClientFor(context.Background(), "org-1", "")
-	if err != nil {
-		t.Fatalf("ClientFor: %v", err)
-	}
-	if _, err := client.Get(context.Background(), "/probe"); err != nil {
-		t.Fatalf("probe: %v", err)
-	}
-	if gh.lastProbe != "Bearer ghp_test" {
-		t.Errorf("ambiguous empty target should fall to PAT; client carried %q", gh.lastProbe)
+	if _, err := r.ClientFor(context.Background(), "org-1", ""); !errors.Is(err, ErrNoGitHubCredentials) {
+		t.Fatalf("ClientFor err = %v, want ErrNoGitHubCredentials (ambiguous target, active App, no PAT fallback)", err)
 	}
 	if gh.mintCalls != 0 {
 		t.Errorf("ambiguous empty target should not mint; mintCalls=%d", gh.mintCalls)
 	}
 }
 
-func TestResolver_TargetNoMatch_FallsToPAT(t *testing.T) {
+// The active App has no installation on the target account. App XOR PAT — error
+// (the App can't serve it, and an active-App org doesn't borrow a PAT), rather
+// than the prior silent PAT fallback.
+func TestResolver_TargetNoMatch_Errors(t *testing.T) {
 	gh := newGHTestServer(t)
 	r := NewResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
@@ -631,8 +623,8 @@ func TestResolver_TargetNoMatch_FallsToPAT(t *testing.T) {
 		&fakeAgents{},
 		nil,
 	)
-	if _, err := r.ClientFor(context.Background(), "org-1", "globex"); err != nil {
-		t.Fatalf("ClientFor: %v", err)
+	if _, err := r.ClientFor(context.Background(), "org-1", "globex"); !errors.Is(err, ErrNoGitHubCredentials) {
+		t.Fatalf("ClientFor err = %v, want ErrNoGitHubCredentials (no installation for target, no PAT fallback)", err)
 	}
 	if gh.mintCalls != 0 {
 		t.Errorf("no installation matches target; should not mint; mintCalls=%d", gh.mintCalls)
@@ -724,9 +716,11 @@ func TestResolver_BaseURLFallbackToSecret(t *testing.T) {
 	}
 }
 
-// An installation match but a missing/invalid PEM must not hard-fail — the
-// resolver logs and falls through to the PAT.
-func TestResolver_AppMintFails_FallsToPAT(t *testing.T) {
+// An installation match but a missing/invalid PEM. App XOR PAT — a mint failure
+// on an active-App org is a hard error (surface the bad PEM), not a silent PAT
+// fallback. The error is the raw mint failure (not ErrNoGitHubCredentials): the
+// org IS configured, the credential just couldn't be minted.
+func TestResolver_AppMintFails_Errors(t *testing.T) {
 	gh := newGHTestServer(t)
 	r := NewResolver(
 		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}}, // PEM absent
@@ -735,15 +729,12 @@ func TestResolver_AppMintFails_FallsToPAT(t *testing.T) {
 		&fakeAgents{},
 		nil,
 	)
-	client, err := r.ClientFor(context.Background(), "org-1", "acme")
-	if err != nil {
-		t.Fatalf("ClientFor: %v", err)
+	_, err := r.ClientFor(context.Background(), "org-1", "acme")
+	if err == nil {
+		t.Fatal("ClientFor err = nil, want a mint error (active App with a bad PEM must not fall back to PAT)")
 	}
-	if _, err := client.Get(context.Background(), "/probe"); err != nil {
-		t.Fatalf("probe: %v", err)
-	}
-	if gh.lastProbe != "Bearer ghp_test" {
-		t.Errorf("a failed mint should fall back to PAT; client carried %q", gh.lastProbe)
+	if errors.Is(err, ErrNoGitHubCredentials) {
+		t.Errorf("err = %v, want the raw mint error, not ErrNoGitHubCredentials (the org IS configured)", err)
 	}
 }
 
@@ -865,4 +856,95 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 			t.Fatalf("OrgIdentityFor = (%q, %q, %v), want (\"\", \"\", false)", name, email, ok)
 		}
 	})
+}
+
+// TestResolver_TokenForRepoScoped_AppXorPAT pins the scoped path's App-XOR-PAT
+// contract: an active App is the credential (scoped mint or error, never the
+// PAT, even when one is present); only a no-App org uses the PAT (unscoped).
+func TestResolver_TokenForRepoScoped_AppXorPAT(t *testing.T) {
+	t.Run("active App mints scoped, ignores a present PAT", func(t *testing.T) {
+		gh := newGHTestServer(t)
+		r := NewResolver(
+			&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+			&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+			&fakeOrgs{base: gh.srv.URL},
+			&fakeAgents{},
+			nil,
+		)
+		tok, err := r.(ScopedResolver).TokenForRepoScoped(context.Background(), "org-1", "acme", "widget", map[string]string{"contents": "write"})
+		if err != nil {
+			t.Fatalf("TokenForRepoScoped: %v", err)
+		}
+		if tok.Value != "ghs_minted" {
+			t.Errorf("token = %q, want the minted App token, not the PAT (App XOR PAT)", tok.Value)
+		}
+	})
+
+	t.Run("active App, no installation for owner → error, not PAT", func(t *testing.T) {
+		gh := newGHTestServer(t)
+		r := NewResolver(
+			&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+			&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+			&fakeOrgs{base: gh.srv.URL},
+			&fakeAgents{},
+			nil,
+		)
+		if _, err := r.(ScopedResolver).TokenForRepoScoped(context.Background(), "org-1", "globex", "widget", nil); !errors.Is(err, ErrNoGitHubCredentials) {
+			t.Errorf("err = %v, want ErrNoGitHubCredentials (no installation; no PAT fallback)", err)
+		}
+	})
+
+	t.Run("no active App → PAT, unscoped", func(t *testing.T) {
+		r := NewResolver(
+			&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
+			&fakeApps{app: nil},
+			&fakeOrgs{base: "https://github.com"},
+			&fakeAgents{},
+			nil,
+		)
+		tok, err := r.(ScopedResolver).TokenForRepoScoped(context.Background(), "org-1", "acme", "widget", map[string]string{"contents": "write"})
+		if err != nil {
+			t.Fatalf("TokenForRepoScoped: %v", err)
+		}
+		if tok.Value != "ghp_test" {
+			t.Errorf("token = %q, want the PAT (no App → PAT, unscoped)", tok.Value)
+		}
+		if !tok.ExpiresAt.IsZero() {
+			t.Errorf("PAT token should carry a zero expiry, got %v", tok.ExpiresAt)
+		}
+	})
+}
+
+// TestResolver_HasAnyCredential pins the run-start probe: true for an active App
+// WITH an installation, or a present PAT; false for an App with no installation
+// and no PAT, or nothing.
+func TestResolver_HasAnyCredential(t *testing.T) {
+	cases := []struct {
+		name  string
+		app   *domain.OrgGitHubApp
+		insts []domain.OrgGitHubAppInstallation
+		pat   string
+		want  bool
+	}{
+		{"active App with installation", activeApp(), []domain.OrgGitHubAppInstallation{installOn("acme")}, "", true},
+		{"PAT only", nil, nil, "ghp_test", true},
+		{"active App, no installation, no PAT", activeApp(), nil, "", false},
+		{"neither", nil, nil, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			vals := map[string]string{}
+			if c.pat != "" {
+				vals[integrations.KeyGitHubPAT] = c.pat
+			}
+			r := NewResolver(&fakeSecrets{vals: vals}, &fakeApps{app: c.app, insts: c.insts}, &fakeOrgs{base: "https://github.com"}, &fakeAgents{}, nil)
+			got, err := r.(ScopedResolver).HasAnyCredential(context.Background(), "org-1")
+			if err != nil {
+				t.Fatalf("HasAnyCredential: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("HasAnyCredential = %v, want %v", got, c.want)
+			}
+		})
+	}
 }
