@@ -223,17 +223,67 @@ func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, op
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	query := `
-		SELECT ` + artifactColumns + `
-		FROM artifacts
-		WHERE org_id = ? AND team_id = ?
-		ORDER BY created_at DESC, id DESC
-	`
-	args := []any{orgID, teamID}
+	// Base WHERE only — the filter helper appends the optional predicates, the
+	// ORDER BY, and LIMIT/OFFSET so this and ListByOrgSystem share one builder.
+	query := `SELECT ` + artifactColumns + ` FROM artifacts WHERE org_id = ? AND team_id = ?`
+	query, args := appendArtifactFilters(query, []any{orgID, teamID}, opts)
+	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanArtifactRows(rows)
+}
+
+// appendArtifactFilters appends opts' optional provider/kind/state/time
+// predicates, the newest-first ORDER BY, and LIMIT/OFFSET paging to a SELECT
+// whose WHERE clause is already open. Time bounds wrap both sides in datetime()
+// — exactly the spend store's pattern — so a bound time.Time compares correctly
+// against the CURRENT_TIMESTAMP-formatted created_at regardless of the driver's
+// bind serialization.
+func appendArtifactFilters(query string, args []any, opts db.ArtifactListOpts) (string, []any) {
+	if opts.Provider != "" {
+		query += ` AND provider = ?`
+		args = append(args, opts.Provider)
+	}
+	if opts.Kind != "" {
+		query += ` AND kind = ?`
+		args = append(args, opts.Kind)
+	}
+	if opts.State != "" {
+		query += ` AND state = ?`
+		args = append(args, opts.State)
+	}
+	if !opts.Since.IsZero() {
+		query += ` AND datetime(created_at) >= datetime(?)`
+		args = append(args, opts.Since)
+	}
+	if !opts.Until.IsZero() {
+		query += ` AND datetime(created_at) < datetime(?)`
+		args = append(args, opts.Until)
+	}
+	query += ` ORDER BY created_at DESC, id DESC`
 	if opts.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, opts.Limit)
+		// OFFSET only with a LIMIT — paging the newest-first feed.
+		if opts.Offset > 0 {
+			query += ` OFFSET ?`
+			args = append(args, opts.Offset)
+		}
 	}
+	return query, args
+}
+
+// ListByOrgSystem is identical to a plain org read in SQLite: local mode is
+// single-tenant (N=1) with no RLS, so there is no admin/app pool split. It
+// returns ALL states (terminal included) for the bot-activity audit feed
+// (TFAC-483), in contrast to ListNonTerminalBySystem's reconciler working set.
+func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	query := `SELECT ` + artifactColumns + ` FROM artifacts WHERE org_id = ?`
+	query, args := appendArtifactFilters(query, []any{orgID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

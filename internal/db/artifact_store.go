@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -121,11 +122,42 @@ type ArtifactStore interface {
 	// artifacts to keep them fresh. org_id stays bound as defense in depth.
 	// Identical to a plain org read in SQLite (single-tenant, no RLS).
 	ListNonTerminalBySystem(ctx context.Context, orgID string) ([]domain.Artifact, error)
+
+	// ListByOrgSystem returns the org's artifacts across EVERY team, newest
+	// first (created_at DESC, id DESC) — the org-wide source for the
+	// bot-activity audit feed (TFAC-483). Unlike ListNonTerminalBySystem (the
+	// reconciler's working set, which hides terminal rows) it returns ALL
+	// states, terminal included: the feed is a history of the actions the
+	// org's bot took, not a worklist, so merged PRs / deleted branches /
+	// dismissed reviews must be present. opts filters (provider / kind / state
+	// / time window) and pages (limit / offset).
+	//
+	// Admin-pool / org-wide in Postgres — the same BYPASSRLS, org-scoped shape
+	// ListNonTerminalBySystem uses (mirrors ListByRunSystem's pool selection):
+	// the org feed is an org-admin-gated cross-team read with no per-team RLS
+	// context, so it must see every team's rows. org_id stays bound in the
+	// WHERE clause as defense in depth. Identical to a plain org read in SQLite
+	// (single-tenant, no RLS).
+	ListByOrgSystem(ctx context.Context, orgID string, opts ArtifactListOpts) ([]domain.Artifact, error)
 }
 
 // ArtifactListOpts carries the optional filters/paging for
-// ArtifactStore.ListByTeam. Zero value lists every artifact for the team.
+// ArtifactStore.ListByTeam and ListByOrgSystem. The zero value lists every
+// artifact (newest first) with no filter or paging.
 type ArtifactListOpts struct {
-	// Limit caps the number of rows returned. Zero means no limit.
+	// Limit caps the number of rows returned. Zero means no limit; the
+	// activity feed passes a page size (~50).
 	Limit int
+	// Offset skips the first N rows, for limit/offset paging ("load more").
+	// Only meaningful alongside a positive Limit.
+	Offset int
+	// Provider / Kind / State are optional exact-match filters on the matching
+	// artifact column. Empty means no filter on that column.
+	Provider string
+	Kind     string
+	State    string
+	// Since / Until bound created_at to the half-open window [Since, Until).
+	// Each side applies only when non-zero, so the zero value is unbounded.
+	Since time.Time
+	Until time.Time
 }

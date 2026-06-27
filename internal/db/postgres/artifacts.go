@@ -224,21 +224,66 @@ func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []s
 }
 
 func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {
-	query := `
-		SELECT ` + pgArtifactColumns + `
-		FROM artifacts
-		WHERE org_id = $1 AND team_id = $2
-		ORDER BY created_at DESC, id DESC
-	`
-	args := []any{orgID, teamID}
+	// Base WHERE only — the filter helper appends the optional predicates, the
+	// ORDER BY, and LIMIT/OFFSET so this and ListByOrgSystem share one builder.
+	query := `SELECT ` + pgArtifactColumns + ` FROM artifacts WHERE org_id = $1 AND team_id = $2`
+	query, args := appendPgArtifactFilters(query, []any{orgID, teamID}, opts)
+	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanArtifactRows(rows)
+}
+
+// appendPgArtifactFilters appends opts' optional provider/kind/state/time
+// predicates, the newest-first ORDER BY, and LIMIT/OFFSET paging to a SELECT
+// whose WHERE clause is already open (the caller emitted at least `WHERE org_id
+// = $1`). Placeholders are numbered from len(args)+1, so a caller can prepend
+// any number of leading binds (org_id, team_id) without a filter colliding with
+// LIMIT — the same defensive numbering ListByTeam used for its lone LIMIT.
+func appendPgArtifactFilters(query string, args []any, opts db.ArtifactListOpts) (string, []any) {
+	if opts.Provider != "" {
+		args = append(args, opts.Provider)
+		query += fmt.Sprintf(" AND provider = $%d", len(args))
+	}
+	if opts.Kind != "" {
+		args = append(args, opts.Kind)
+		query += fmt.Sprintf(" AND kind = $%d", len(args))
+	}
+	if opts.State != "" {
+		args = append(args, opts.State)
+		query += fmt.Sprintf(" AND state = $%d", len(args))
+	}
+	if !opts.Since.IsZero() {
+		args = append(args, opts.Since)
+		query += fmt.Sprintf(" AND created_at >= $%d", len(args))
+	}
+	if !opts.Until.IsZero() {
+		args = append(args, opts.Until)
+		query += fmt.Sprintf(" AND created_at < $%d", len(args))
+	}
+	query += " ORDER BY created_at DESC, id DESC"
 	if opts.Limit > 0 {
-		// Placeholder numbered from the current arg count, not hardcoded, so
-		// a future opt appended before this one (a Kind/State filter, say)
-		// can't silently shift LIMIT onto the wrong $N.
 		args = append(args, opts.Limit)
 		query += fmt.Sprintf(" LIMIT $%d", len(args))
+		// OFFSET only with a LIMIT — paging the newest-first feed.
+		if opts.Offset > 0 {
+			args = append(args, opts.Offset)
+			query += fmt.Sprintf(" OFFSET $%d", len(args))
+		}
 	}
-	rows, err := s.q.QueryContext(ctx, query, args...)
+	return query, args
+}
+
+// ListByOrgSystem runs on the admin pool (BYPASSRLS), org-wide and across every
+// team — the bot-activity audit feed's org source (TFAC-483). It returns ALL
+// states (terminal included), in contrast to ListNonTerminalBySystem's
+// reconciler working set. Same org-wide admin shape as ListNonTerminalBySystem;
+// org_id stays in the WHERE clause as defense in depth.
+func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {
+	query := `SELECT ` + pgArtifactColumns + ` FROM artifacts WHERE org_id = $1`
+	query, args := appendPgArtifactFilters(query, []any{orgID}, opts)
+	rows, err := s.admin.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

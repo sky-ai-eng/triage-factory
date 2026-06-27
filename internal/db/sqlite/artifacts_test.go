@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -554,6 +555,186 @@ func TestArtifactStore_SQLite_ListNonTerminal(t *testing.T) {
 			t.Errorf("ListNonTerminalBySystem returned terminal/unreconcilable row %q (SQL predicate disagrees with domain.IsReconcilableNonTerminal)", k)
 		}
 	}
+}
+
+// TestArtifactStore_SQLite_ListByOrgSystem pins the bot-activity audit feed's
+// org source (TFAC-483): it returns ALL states — terminal included (merged PR,
+// dismissed review) — in contrast to ListNonTerminalBySystem's reconciler
+// working set, newest-first, and honors the provider/kind/state/time filters and
+// the limit/offset paging from ArtifactListOpts. A _time_format=sqlite conn so
+// the bound Since/Until time.Time compares against created_at correctly.
+func TestArtifactStore_SQLite_ListByOrgSystem(t *testing.T) {
+	conn := newSQLiteForArtifactTestTimed(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runID := seedArtifactRun(t, conn)
+
+	// (provider, kind, state, created_at) across the lifecycle, including
+	// terminal rows the reconciler set would hide.
+	seeds := []struct {
+		provider, kind, state, when string
+	}{
+		{domain.ArtifactProviderGit, domain.ArtifactKindBranch, domain.ArtifactStateBranchPushed, "2026-06-01 00:00:00"},
+		{domain.ArtifactProviderGitHub, domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "2026-06-02 00:00:00"},
+		{domain.ArtifactProviderGitHub, domain.ArtifactKindPullRequest, domain.ArtifactStatePRMerged, "2026-06-03 00:00:00"},   // terminal
+		{domain.ArtifactProviderGitHub, domain.ArtifactKindReview, domain.ArtifactStateReviewDismissed, "2026-06-04 00:00:00"}, // terminal
+		{domain.ArtifactProviderJira, domain.ArtifactKindComment, domain.ArtifactStateCommentPosted, "2026-06-05 00:00:00"},
+	}
+	for i, s := range seeds {
+		out, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+			RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			Provider: s.provider, Kind: s.kind, Target: "octo/repo", State: s.state, DedupKey: "k" + string(rune('a'+i)),
+		})
+		if err != nil {
+			t.Fatalf("seed %s/%s: %v", s.kind, s.state, err)
+		}
+		// Pin created_at so the newest-first order + the time window are deterministic.
+		if _, err := conn.Exec(`UPDATE artifacts SET created_at = ? WHERE id = ?`, s.when, out.ID); err != nil {
+			t.Fatalf("set created_at: %v", err)
+		}
+	}
+
+	// No opts: every row, terminal included, newest-first.
+	all, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{})
+	if err != nil {
+		t.Fatalf("ListByOrgSystem: %v", err)
+	}
+	if len(all) != 5 {
+		t.Fatalf("ListByOrgSystem returned %d rows, want all 5 (terminal included)", len(all))
+	}
+	states := map[string]bool{}
+	for _, a := range all {
+		states[a.State] = true
+	}
+	if !states[domain.ArtifactStatePRMerged] || !states[domain.ArtifactStateReviewDismissed] {
+		t.Errorf("feed dropped terminal rows: states=%v (want merged + dismissed present)", states)
+	}
+	// Contrast the reconciler set: it hides exactly those terminal rows.
+	nonTerminal, err := stores.Artifacts.ListNonTerminalBySystem(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("ListNonTerminalBySystem: %v", err)
+	}
+	if len(nonTerminal) != 2 {
+		t.Errorf("ListNonTerminalBySystem returned %d, want 2 (branch pushed + PR open) — the contrast", len(nonTerminal))
+	}
+	// Newest-first: comment (06-05) leads, branch (06-01) trails.
+	if all[0].State != domain.ArtifactStateCommentPosted || all[4].State != domain.ArtifactStateBranchPushed {
+		t.Errorf("order not newest-first: first=%q last=%q", all[0].State, all[4].State)
+	}
+
+	// Filters.
+	gh, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{Provider: domain.ArtifactProviderGitHub})
+	if err != nil {
+		t.Fatalf("filter provider: %v", err)
+	}
+	if len(gh) != 3 {
+		t.Errorf("provider=github returned %d, want 3 (PR open + PR merged + review)", len(gh))
+	}
+	prs, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{Kind: domain.ArtifactKindPullRequest})
+	if err != nil {
+		t.Fatalf("filter kind: %v", err)
+	}
+	if len(prs) != 2 {
+		t.Errorf("kind=pull_request returned %d, want 2 (open + merged)", len(prs))
+	}
+	merged, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{State: domain.ArtifactStatePRMerged})
+	if err != nil {
+		t.Fatalf("filter state: %v", err)
+	}
+	if len(merged) != 1 || merged[0].State != domain.ArtifactStatePRMerged {
+		t.Errorf("state=merged returned %+v, want exactly the merged PR", merged)
+	}
+
+	// Time window [06-03, 06-05): merged (06-03) + review (06-04), excluding the
+	// open PR before it and the comment at the exclusive upper bound.
+	windowed, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{
+		Since: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC),
+		Until: time.Date(2026, 6, 5, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("filter window: %v", err)
+	}
+	if len(windowed) != 2 {
+		t.Fatalf("time window returned %d, want 2 (merged + review)", len(windowed))
+	}
+	if windowed[0].State != domain.ArtifactStateReviewDismissed || windowed[1].State != domain.ArtifactStatePRMerged {
+		t.Errorf("windowed order = [%q, %q], want [dismissed, merged] (newest-first)", windowed[0].State, windowed[1].State)
+	}
+
+	// Paging: page 1 (limit 2) → comment + review; page 2 (offset 2) → merged + open.
+	page1, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{Limit: 2})
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	page2, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{Limit: 2, Offset: 2})
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+	if len(page1) != 2 || len(page2) != 2 {
+		t.Fatalf("paging sizes = %d, %d, want 2, 2", len(page1), len(page2))
+	}
+	if page1[0].State != domain.ArtifactStateCommentPosted || page2[0].State != domain.ArtifactStatePRMerged {
+		t.Errorf("paging boundary wrong: page1[0]=%q page2[0]=%q", page1[0].State, page2[0].State)
+	}
+}
+
+// TestArtifactStore_SQLite_ListByTeam_Filters pins that the shared filter/paging
+// helper applies to the team-scoped path too (not just ListByOrgSystem): a
+// provider filter and an offset both narrow ListByTeam's result. TFAC-483.
+func TestArtifactStore_SQLite_ListByTeam_Filters(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runID := seedArtifactRun(t, conn)
+
+	seed := func(provider, kind, key string) {
+		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+			RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			Provider: provider, Kind: kind, Target: "octo/repo",
+			State: domain.ArtifactStateCommentPosted, DedupKey: key,
+		}); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	seed(domain.ArtifactProviderGitHub, domain.ArtifactKindComment, "g1")
+	seed(domain.ArtifactProviderGitHub, domain.ArtifactKindComment, "g2")
+	seed(domain.ArtifactProviderJira, domain.ArtifactKindComment, "j1")
+
+	gh, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{Provider: domain.ArtifactProviderGitHub})
+	if err != nil {
+		t.Fatalf("ListByTeam provider filter: %v", err)
+	}
+	if len(gh) != 2 {
+		t.Errorf("provider=github returned %d, want 2", len(gh))
+	}
+
+	// limit 2 then offset 2 walks the 3-row team feed without overlap.
+	offset, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{Limit: 2, Offset: 2})
+	if err != nil {
+		t.Fatalf("ListByTeam offset: %v", err)
+	}
+	if len(offset) != 1 {
+		t.Errorf("limit 2 offset 2 over 3 rows returned %d, want 1", len(offset))
+	}
+}
+
+// newSQLiteForArtifactTestTimed is newSQLiteForArtifactTest with
+// _time_format=sqlite, so a bound time.Time (the Since/Until filters) serializes
+// to a datetime()-parseable form matching CURRENT_TIMESTAMP — the same reason
+// the spend store's SQLite test uses it. Used by the time-window filter test.
+func newSQLiteForArtifactTestTimed(t *testing.T) *sql.DB {
+	t.Helper()
+	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)&_time_format=sqlite")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
+	if err := db.BootstrapSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
+	}
+	return conn
 }
 
 func newSQLiteForArtifactTest(t *testing.T) *sql.DB {

@@ -143,6 +143,16 @@ export interface Artifact {
   created_at: string
 }
 
+// ActivityArtifact is the bot-activity audit feed's row shape (TFAC-483): an
+// Artifact plus the owning team's id + name. The team fields are populated ONLY
+// by the org-wide feed (GET /api/usage/org/activity) so a cross-team row shows
+// which team's bot acted; the team-scoped feed omits them (it's already one
+// team). Mirrors internal/server activityArtifactJSON.
+export interface ActivityArtifact extends Artifact {
+  team_id?: string
+  team_name?: string
+}
+
 export interface AgentMessage {
   ID: number
   RunID: string

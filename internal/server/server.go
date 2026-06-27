@@ -763,6 +763,11 @@ func (s *Server) routes() {
 	s.api("GET /api/usage/me", uh.handleUsageMe)
 	s.api("GET /api/usage/teams/{team_id}", uh.handleUsageTeam)
 	s.api("GET /api/usage/org", uh.handleUsageOrg)
+	// Bot-activity audit feed (EE, FeatureGovernance): the team/org artifact
+	// history — same scope gates as the spend reads above, plus the entitlement
+	// (unlicensed → 404). TFAC-483.
+	s.api("GET /api/usage/teams/{team_id}/activity", uh.handleUsageTeamActivity)
+	s.api("GET /api/usage/org/activity", uh.handleUsageOrgActivity)
 
 	// Org invites (multi-mode only — each handler 404s in local).
 	// The admin-facing create/list/revoke gate on org-admin and write

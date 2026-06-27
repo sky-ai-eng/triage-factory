@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -762,6 +763,127 @@ func TestArtifactStore_Postgres_ListByRuns_TeamScoped(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("carol path: %v", err)
 	}
+}
+
+// TestArtifactStore_Postgres_ListByOrgSystem pins the bot-activity audit feed's
+// org source (TFAC-483): on the admin pool it returns the org's artifacts across
+// EVERY team (cross-team), ALL states — terminal included (merged PR, dismissed
+// review), in contrast to ListNonTerminalBySystem — never crosses org
+// boundaries, and honors the provider/kind/state/time filters + limit/offset
+// paging from ArtifactListOpts.
+func TestArtifactStore_Postgres_ListByOrgSystem(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, _, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
+	orgB, _, teamBOther := pgtest.SeedOrgWithUser(t, h, "bob")
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	seedArt := func(orgID, teamID, provider, kind, state, key, createdAt string) {
+		if _, err := h.AdminDB.Exec(`
+			INSERT INTO artifacts (org_id, team_id, provider, kind, target, state, dedup_key, created_at)
+			VALUES ($1, $2, $3, $4, 'octo/repo', $5, $6, $7)
+		`, orgID, teamID, provider, kind, state, key, createdAt); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	// teamA + teamB rows across the lifecycle (terminal included), plus an orgB
+	// row that must never leak into orgA's feed.
+	seedArt(orgA, teamA, domain.ArtifactProviderGit, domain.ArtifactKindBranch, domain.ArtifactStateBranchPushed, "a-branch", "2026-06-01T00:00:00Z")
+	seedArt(orgA, teamB, domain.ArtifactProviderGitHub, domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "b-pr-open", "2026-06-02T00:00:00Z")
+	seedArt(orgA, teamA, domain.ArtifactProviderGitHub, domain.ArtifactKindPullRequest, domain.ArtifactStatePRMerged, "a-pr-merged", "2026-06-03T00:00:00Z") // terminal
+	seedArt(orgA, teamB, domain.ArtifactProviderGitHub, domain.ArtifactKindReview, domain.ArtifactStateReviewDismissed, "b-review", "2026-06-04T00:00:00Z")  // terminal
+	seedArt(orgA, teamA, domain.ArtifactProviderJira, domain.ArtifactKindComment, domain.ArtifactStateCommentPosted, "a-comment", "2026-06-05T00:00:00Z")
+	seedArt(orgB, teamBOther, domain.ArtifactProviderGitHub, domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "other-org", "2026-06-06T00:00:00Z")
+
+	// No opts: every orgA row across both teams, terminal included, newest-first.
+	all, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{})
+	if err != nil {
+		t.Fatalf("ListByOrgSystem: %v", err)
+	}
+	if len(all) != 5 {
+		t.Fatalf("returned %d rows, want 5 (3 teamA + 2 teamB, no orgB)", len(all))
+	}
+	teamsSeen := map[string]bool{}
+	for _, a := range all {
+		if a.OrgID != orgA {
+			t.Errorf("cross-org leak: row %q belongs to org %q", a.DedupKey, a.OrgID)
+		}
+		teamsSeen[a.TeamID] = true
+	}
+	if !teamsSeen[teamA] || !teamsSeen[teamB] {
+		t.Errorf("feed is not cross-team: saw teams %v, want both %s and %s", teamsSeen, teamA, teamB)
+	}
+	if all[0].DedupKey != "a-comment" || all[4].DedupKey != "a-branch" {
+		t.Errorf("order not newest-first: first=%q last=%q", all[0].DedupKey, all[4].DedupKey)
+	}
+
+	// Contrast the reconciler set: terminal rows (merged PR, dismissed review)
+	// drop out, leaving branch pushed + PR open = 2.
+	nonTerminal, err := stores.Artifacts.ListNonTerminalBySystem(ctx, orgA)
+	if err != nil {
+		t.Fatalf("ListNonTerminalBySystem: %v", err)
+	}
+	if len(nonTerminal) != 2 {
+		t.Errorf("ListNonTerminalBySystem returned %d, want 2 (the terminal-hiding contrast)", len(nonTerminal))
+	}
+
+	// Filters.
+	gh, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Provider: domain.ArtifactProviderGitHub})
+	if err != nil {
+		t.Fatalf("filter provider: %v", err)
+	}
+	if len(gh) != 3 {
+		t.Errorf("provider=github returned %d, want 3", len(gh))
+	}
+	prs, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Kind: domain.ArtifactKindPullRequest})
+	if err != nil {
+		t.Fatalf("filter kind: %v", err)
+	}
+	if len(prs) != 2 {
+		t.Errorf("kind=pull_request returned %d, want 2", len(prs))
+	}
+	open, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{State: domain.ArtifactStatePROpen})
+	if err != nil {
+		t.Fatalf("filter state: %v", err)
+	}
+	if len(open) != 1 || open[0].DedupKey != "b-pr-open" {
+		t.Errorf("state=open returned %+v, want exactly the teamB open PR", open)
+	}
+
+	// Time window [06-03, 06-05): merged (06-03) + review (06-04), newest-first.
+	windowed, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{
+		Since: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC),
+		Until: time.Date(2026, 6, 5, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("filter window: %v", err)
+	}
+	if len(windowed) != 2 || windowed[0].DedupKey != "b-review" || windowed[1].DedupKey != "a-pr-merged" {
+		t.Errorf("time window = %+v, want [b-review, a-pr-merged]", dedupKeys(windowed))
+	}
+
+	// Paging: page 1 (limit 2) → comment + review; page 2 (offset 2) → merged + open.
+	page1, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Limit: 2})
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	page2, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Limit: 2, Offset: 2})
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+	if len(page1) != 2 || len(page2) != 2 || page1[0].DedupKey != "a-comment" || page2[0].DedupKey != "a-pr-merged" {
+		t.Errorf("paging wrong: page1=%v page2=%v", dedupKeys(page1), dedupKeys(page2))
+	}
+}
+
+func dedupKeys(arts []domain.Artifact) []string {
+	out := make([]string, len(arts))
+	for i, a := range arts {
+		out[i] = a.DedupKey
+	}
+	return out
 }
 
 // seedPgArtifactRun mints a minimal run the artifacts.run_id FK can point

@@ -2556,6 +2556,16 @@ CREATE INDEX idx_artifacts_team_created ON public.artifacts USING btree (team_id
 
 
 --
+-- Name: idx_artifacts_org_created; Type: INDEX; Schema: public; Owner: -
+-- Backs the org-wide, newest-first scan of the bot-activity audit feed
+-- (ArtifactStore.ListByOrgSystem, TFAC-483) — the org-grain sibling of
+-- idx_artifacts_team_created.
+--
+
+CREATE INDEX idx_artifacts_org_created ON public.artifacts USING btree (org_id, created_at DESC);
+
+
+--
 -- Name: idx_artifacts_run; Type: INDEX; Schema: public; Owner: -
 --
 
