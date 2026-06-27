@@ -3,6 +3,9 @@ version: 2
 project_name: triagefactory
 
 before:
+  # pnpm must be on PATH here. release.yml runs pnpm/action-setup before the
+  # goreleaser-action step, which provisions it; a manual `goreleaser release`
+  # needs pnpm available some other way (corepack enable).
   hooks:
     - sh -c "cd frontend && pnpm install --frozen-lockfile && pnpm run build"
 

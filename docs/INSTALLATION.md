@@ -50,7 +50,7 @@ xattr -d com.apple.quarantine ./triagefactory
 Requirements:
 
 - Go 1.23+
-- Node.js 20+ (the frontend uses pnpm; run `corepack enable` once to provision the pinned version)
+- Node.js 22+ (the frontend uses pnpm, which requires Node 22.13+; run `corepack enable` once to provision the pinned version)
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 
 Build and run:
