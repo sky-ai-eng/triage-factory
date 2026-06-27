@@ -256,35 +256,40 @@ describe('Usage page', () => {
     await waitFor(() => expect(fetchedPaths(fetchMock)).toContain('/api/usage/teams/t2'))
   })
 
-  it('local mode (N=1) shows the org rollup so system-overhead spend is visible', async () => {
+  it('local mode (N=1) renders one flat console (no Personal/Team/Org headings)', async () => {
     // Local mode: no AuthProvider (useOptionalAuth null), useOrgRole reports
-    // non-admin, and the sole team reports admin. The local user is effectively
-    // the org admin, so the org rollup — the only section that surfaces
-    // system-overhead spend (NULL creator + NULL team) — must render.
+    // non-admin, the sole team reports admin. Instead of three duplicated
+    // sections, LocalConsole renders a flat layout: over-time + allocation /
+    // category + by-rule, reading the org rollup (everything but by_rule) and the
+    // sole team (by_rule).
     authMock.local = true
     roleMock.isAdmin = false
     teamsMock.teams = [{ id: 't1', name: 'Default', slug: 'default', role: 'admin' }]
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
       '/api/usage/teams/t1': TEAM,
       '/api/usage/org': ORG,
     })
 
     render(<Usage />)
 
-    // All three sections render, and the org rollup is actually fetched.
-    expect(await screen.findByText('Personal')).toBeInTheDocument()
-    expect(await screen.findByText('Team')).toBeInTheDocument()
-    expect(await screen.findByText('Org')).toBeInTheDocument()
-    await waitFor(() => expect(fetchedPaths(fetchMock)).toContain('/api/usage/org'))
+    // Flat instruments, no section headings.
+    expect(await screen.findByText('Over time')).toBeInTheDocument()
+    expect(screen.getByText('Allocation')).toBeInTheDocument()
+    expect(screen.getByText('Category')).toBeInTheDocument()
+    expect(screen.getByText('By rule')).toBeInTheDocument()
+    expect(screen.queryByText('Personal')).not.toBeInTheDocument()
 
-    // System-overhead (NULL creator + NULL team) surfaces only in the org rollup
-    // — here as the allocation ring's "System" slice, with its "?" explainer.
-    // This is exactly the spend that's invisible without the org section.
+    // Reads the org rollup AND the sole team (for by_rule).
+    await waitFor(() => {
+      const paths = fetchedPaths(fetchMock)
+      expect(paths).toContain('/api/usage/org')
+      expect(paths).toContain('/api/usage/teams/t1')
+    })
+
+    // System-overhead surfaces (allocation), by_rule comes from the team, and the
+    // headline carries the org total.
     expect((await screen.findAllByText('System')).length).toBeGreaterThan(0)
-    expect((await screen.findAllByRole('button', { name: /what's this/i })).length).toBeGreaterThan(
-      0,
-    )
+    expect(await screen.findByText('CI Fixer')).toBeInTheDocument()
     expect(await screen.findByText('$100.00')).toBeInTheDocument()
   })
 

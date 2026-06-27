@@ -1036,6 +1036,54 @@ function ConsoleFrame({ children }: { children: React.ReactNode }) {
   )
 }
 
+// LocalConsole is the flattened N=1 view. In local mode personal == team == org
+// (one user, one team), so the three stacked sections duplicate every total and
+// breakdown. Collapse to a single console with no section headings: a headline
+// total, the over-time throughput, the allocation + category dials, and by-rule.
+// It reads the org rollup for everything except by_rule — the rollup omits that
+// by design (per-rule detail stays with the owning team), so it comes from the
+// sole local team.
+function LocalConsole({ teamId, since, days }: { teamId: string; since: string; days: number }) {
+  const { data: org, error } = useUsageFetch<UsageOrgResponse>(withWindow('/api/usage/org', since))
+  const { data: team } = useUsageFetch<UsageTeamResponse>(
+    teamId ? withWindow(`/api/usage/teams/${teamId}`, since) : null,
+  )
+
+  if (org === null) return error ? <EtchedNote msg={error} tone="error" /> : <SkeletonBand />
+  const total = org.total_cost_usd
+  if (total === 0) return <EtchedNote msg="no settled burn · this window" />
+  const active = activeDays(org.by_day, days)
+
+  return (
+    <div className="space-y-10">
+      {/* Headline — the hero number stands in for the removed section header. */}
+      <div className="flex items-baseline gap-3">
+        <span className="font-mono text-2xl font-semibold tabular-nums text-text-primary">
+          {fmtUSD(total)}
+        </span>
+        <span className="font-mono text-[11px] tabular-nums text-text-tertiary/80">
+          {fmtUSD(total / active)}/day
+        </span>
+      </div>
+
+      <ThroughputInstrument byDay={org.by_day} byModel={org.by_model} tall />
+
+      <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2">
+        <Instrument label="Allocation">
+          <AllocationDonut byTeam={org.by_team} orgLevel={org.org_level} />
+        </Instrument>
+        <Instrument label="Category">
+          <CategoryDonut data={org.by_category} large />
+        </Instrument>
+      </div>
+
+      <Instrument label="By rule">
+        <Gauges data={ruleBars(team?.by_rule)} emptyLabel="no automated runs" />
+      </Instrument>
+    </div>
+  )
+}
+
 export default function Usage() {
   // The org rollup gates on org-admin; the team section on the teams the viewer
   // admins (filtered from useTeams, NOT the org rollup — drilling into a non-
@@ -1069,9 +1117,18 @@ export default function Usage() {
       </div>
 
       <ConsoleFrame>
-        <PersonalSection since={since} days={days} />
-        {adminTeams.length > 0 && <TeamSection adminTeams={adminTeams} since={since} days={days} />}
-        {showOrg && <OrgSection since={since} days={days} />}
+        {isLocal ? (
+          // N=1: one flattened console instead of three duplicated sections.
+          <LocalConsole teamId={adminTeams[0]?.id ?? ''} since={since} days={days} />
+        ) : (
+          <>
+            <PersonalSection since={since} days={days} />
+            {adminTeams.length > 0 && (
+              <TeamSection adminTeams={adminTeams} since={since} days={days} />
+            )}
+            {showOrg && <OrgSection since={since} days={days} />}
+          </>
+        )}
       </ConsoleFrame>
     </div>
   )
