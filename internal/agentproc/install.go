@@ -17,7 +17,7 @@ import (
 // Pinned SDK version. Bump on Triage Factory release after verifying the
 // new release in a spike — see scripts/clean-slate.sh notes. Keep the
 // package.json template in sync with this constant.
-const sdkVersion = "0.2.137"
+const sdkVersion = "0.3.195"
 
 // Embedded shim that translates the flag-based argv BuildArgs emits into
 // Agent SDK Options. Materialized to disk at first install so the Node
