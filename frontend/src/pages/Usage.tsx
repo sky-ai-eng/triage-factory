@@ -17,7 +17,7 @@ import { useOptionalAuth } from '../contexts/AuthContext'
 import { useEntitlements, FeatureGovernance } from '../hooks/useEntitlements'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
-import { readError } from '../lib/api'
+import { avatarProxyUrl, readError } from '../lib/api'
 import type {
   AccessChangeRow,
   AccessLogResponse,
@@ -531,17 +531,20 @@ function initialsOf(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
 }
 
-// Avatar is a square-ish identity chip — a real picture when we have a url, else
-// a rust monogram placeholder. A load failure (404, or — until the CSP img-src
-// allows OAuth-CDN avatars, TFAC-51 follow-up — a CSP block) flips to the
-// monogram via onError, so a blocked picture degrades gracefully instead of
-// rendering broken.
-function Avatar({ name, url }: { name: string; url?: string }) {
+// Avatar is a square-ish identity chip — a real picture when the user has one,
+// else a rust monogram placeholder. The picture loads through the same-origin
+// /api/avatars proxy (TFAC-480): the raw OAuth-CDN avatar url is cross-origin,
+// which the app's `img-src 'self'` CSP blocks, so we render the proxied copy
+// instead. A load failure (the proxy 404s when it can't fetch the upstream)
+// flips to the monogram via onError, so it degrades gracefully instead of
+// rendering broken. `hasAvatar` gates the attempt — a user with no avatar
+// (common in local mode) renders the monogram directly without a wasted request.
+function Avatar({ name, userId, hasAvatar }: { name: string; userId: string; hasAvatar: boolean }) {
   const [failed, setFailed] = useState(false)
-  if (url && !failed) {
+  if (hasAvatar && !failed) {
     return (
       <img
-        src={url}
+        src={avatarProxyUrl(userId)}
         alt=""
         onError={() => setFailed(true)}
         className="h-7 w-7 shrink-0 rounded-[3px] object-cover"
@@ -587,7 +590,7 @@ function UserRoster({ data, emptyLabel = '—' }: { data: UsageUserBucket[]; emp
         const name = d.display_name || d.user_id
         return (
           <div key={d.user_id} className="flex items-center gap-2.5">
-            <Avatar name={name} url={d.avatar_url} />
+            <Avatar name={name} userId={d.user_id} hasAvatar={!!d.avatar_url} />
             <div className="min-w-0 flex-1">
               <div className="flex items-baseline justify-between gap-2 font-mono text-[11px]">
                 <span className="truncate text-text-secondary" title={name}>

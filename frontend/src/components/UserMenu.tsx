@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { LogOut, User as UserIcon } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import { avatarProxyUrl } from '../lib/api'
 import LoginMethods from './LoginMethods'
 
 /**
@@ -11,6 +12,9 @@ import LoginMethods from './LoginMethods'
 export default function UserMenu() {
   const auth = useAuth()
   const [open, setOpen] = useState(false)
+  // Falls back to the initial when the avatar can't load (the proxy 404s when
+  // there's no upstream image), mirroring the Usage roster's monogram fallback.
+  const [avatarFailed, setAvatarFailed] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -50,8 +54,16 @@ export default function UserMenu() {
         aria-expanded={open}
         title={auth.me.display_name || auth.me.email}
       >
-        {auth.me.avatar_url ? (
-          <img src={auth.me.avatar_url} alt="" className="w-full h-full object-cover" />
+        {auth.me.avatar_url && !avatarFailed ? (
+          // Loaded through the same-origin /api/avatars proxy (TFAC-480) — the
+          // raw OAuth-CDN url is cross-origin and the app's `img-src 'self'`
+          // CSP would block it.
+          <img
+            src={avatarProxyUrl(auth.me.id)}
+            alt=""
+            onError={() => setAvatarFailed(true)}
+            className="w-full h-full object-cover"
+          />
         ) : (
           initial
         )}

@@ -59,9 +59,10 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 // default — `default-src 'none'` denies everything, then we
 // allow-list the specific source kinds the SPA actually loads.
 //
-// img-src is the only directive likely to need expansion: when D8
-// (frontend auth integration) adds avatar rendering, the URL source
-// becomes a design question — see the inline TODO.
+// img-src stays `'self' data:` even with avatar rendering live: OAuth-CDN
+// avatars (avatars.githubusercontent.com, the org's Jira host, ...) are served
+// first-party through the /api/avatars/{id} proxy (TFAC-480), so no external
+// host is punched into the policy. See the img-src note below.
 func (s *Server) buildCSP() string {
 	// Each script-src hash is a `'sha256-<base64>'` entry. Joined
 	// after `'self'` so external bundles are still gated by origin
@@ -71,18 +72,16 @@ func (s *Server) buildCSP() string {
 		scriptSources = append(scriptSources, fmt.Sprintf("'sha256-%s'", h))
 	}
 
-	// img-src: 'self' covers the favicon and any first-party assets.
-	// `data:` covers base64-embedded SVGs that some libs emit.
+	// img-src: 'self' covers the favicon, first-party assets, AND user/member
+	// avatars — those render through the same-origin /api/avatars/{id} proxy
+	// (avatars_handler.go), which fetches + caches the OAuth-CDN image server-
+	// side. `data:` covers base64-embedded SVGs that some libs emit.
 	//
-	// TODO(D8): when avatar rendering lands, the source choice becomes:
-	//   (a) proxy avatars through /api/avatars/{id} — keeps img-src 'self'
-	//   (b) allowlist OAuth provider CDNs: avatars.githubusercontent.com,
-	//       secure.gravatar.com, jira-instance/avatars/...
-	//   (c) admin-configurable agent.avatar_url — punches an arbitrary
-	//       hole in CSP per-deployment. NOT recommended; force upload
-	//       through (a) instead.
-	// (a) is the cleanest answer. Pick before D8 ships the Avatar
-	// component.
+	// This is option (a) of the original TFAC-480 choice (proxy vs. allowlist
+	// the provider CDNs vs. an admin-configurable host): it keeps img-src to
+	// `'self'` with no external hosts, and avoids composing the per-deployment
+	// Jira avatar host into the CSP from org settings. Don't widen img-src to
+	// provider CDNs — route new avatar surfaces through the proxy instead.
 	imgSources := []string{"'self'", "data:"}
 
 	directives := []string{

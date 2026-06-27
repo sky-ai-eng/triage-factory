@@ -89,18 +89,10 @@ func isPubliclyReachable(rawURL string) bool {
 		// Not an IP literal — a DNS name we assume resolves publicly.
 		return true
 	}
-	ip = ip.Unmap()
-	// Global unicast rejects loopback, unspecified, multicast, and
-	// link-local in one predicate; IsPrivate adds RFC 1918 / unique-local.
-	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
-		return false
-	}
-	for _, p := range nonPublicPrefixes {
-		if p.Contains(ip) {
-			return false
-		}
-	}
-	return true
+	// Same public-unicast predicate the avatar proxy's dial-time SSRF guard
+	// uses (isPublicUnicastIP, avatars_handler.go) — single-sourced so the two
+	// reachability checks can't drift.
+	return isPublicUnicastIP(ip)
 }
 
 // buildManifestAndState assembles the GitHub App manifest JSON and the

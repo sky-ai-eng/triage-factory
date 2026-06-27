@@ -781,6 +781,16 @@ func (s *Server) routes() {
 	// the handler — the data is core, only the cross-team lens is Enterprise.
 	s.api("GET /api/usage/org/access-log", uh.handleUsageAccessLog)
 
+	// Avatar proxy (TFAC-480): serves a user's OAuth-captured avatar first-party
+	// so it renders under the app's tight `img-src 'self'` CSP instead of being
+	// blocked as a cross-origin image. Any authenticated org member; the target
+	// user_id is resolved under the caller's claims, so RLS scopes it to the
+	// caller + co-org-members (a cross-org id 404s). One process-lifetime fetcher
+	// owns the upstream fetch + cache. Consumed by Usage's by-user roster and the
+	// topbar UserMenu.
+	avh := &avatarsHandler{tx: s.tx, fetcher: newAvatarFetcher()}
+	s.api("GET /api/avatars/{user_id}", avh.handleAvatar)
+
 	// Org invites (multi-mode only — each handler 404s in local).
 	// The admin-facing create/list/revoke gate on org-admin and write
 	// through the app pool; preview + accept are the redeem surfaces and run
