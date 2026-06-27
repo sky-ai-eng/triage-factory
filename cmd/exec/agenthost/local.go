@@ -883,6 +883,9 @@ func (c *LocalClient) recordGithubReview(ctx context.Context, client *ghclient.C
 	var act *domain.ExternalAction
 	if action != "" {
 		act = githubAction(a, action, "", "")
+		// A review artifact carries no URL (its target is the PR), so the audit row
+		// links to the backing PR rather than render a non-clickable row.
+		act.URL = domain.GitHubPullURL(owner+"/"+repo, number)
 	}
 	c.upsertGithubArtifact(ctx, a, act)
 }
@@ -933,7 +936,30 @@ func (c *LocalClient) GithubReplyToComment(ctx context.Context, owner, repo stri
 	if err != nil {
 		return 0, err
 	}
-	return client.ReplyToComment(ctx, owner, repo, number, commentID, body)
+	replyID, err := client.ReplyToComment(ctx, owner, repo, number, commentID, body)
+	if err != nil {
+		return 0, err
+	}
+	// A review-thread reply rides the review (no standalone `comment` artifact —
+	// the same treatment every review line-comment gets, vs a top-level
+	// AddComment), but unlike the staged pending-review comments it posts
+	// IMMEDIATELY under the org credential. So the audit log of record captures it
+	// as an artifact-less comment action (TFAC-483) — the Actions lens is the one
+	// surface that records writes with no artifact. A 2xx with no id (unparseable
+	// body) has no stable key, so recording is skipped (the reply still posted).
+	if replyID > 0 {
+		detail, _ := json.Marshal(map[string]any{"in_reply_to": commentID})
+		c.recordBotAction(ctx, &domain.ExternalAction{
+			Provider:   domain.ArtifactProviderGitHub,
+			Action:     domain.ActionCommentPosted,
+			Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
+			ExternalID: strconv.Itoa(replyID),
+			URL:        fmt.Sprintf("%s#discussion_r%d", domain.GitHubPullURL(owner+"/"+repo, number), replyID),
+			Credential: domain.CredentialGitHubApp,
+			DetailJSON: string(detail),
+		})
+	}
+	return replyID, nil
 }
 
 func (c *LocalClient) GithubReactToComment(ctx context.Context, owner, repo string, commentID int, emoji string) error {
@@ -1198,6 +1224,29 @@ func recordActionTx(ctx context.Context, ts db.TxStores, orgID string, act *doma
 		return nil
 	}
 	return ts.ExternalActions.Record(ctx, orgID, *act)
+}
+
+// recordBotAction records one STANDALONE external-action audit row for a bot
+// write that produces no artifact to compose with — a review-thread reply (it
+// rides the review, not a comment artifact, but is still an immediate
+// org-credential write the audit log of record must capture). It stamps the run
+// identity, then routes the same way the artifact funnels do (admin pool for
+// event-triggered runs, the synthetic-claims tx for manual ones) and is
+// best-effort: a recording failure is logged and swallowed so it never fails the
+// agent's already-applied GitHub write.
+func (c *LocalClient) recordBotAction(ctx context.Context, act *domain.ExternalAction) {
+	if act == nil || c.stores.ExternalActions == nil {
+		return
+	}
+	c.stampActionIdentity(act)
+	err := c.withWrite(ctx,
+		func() error { return c.recordActionSystem(ctx, act) },
+		func(ts db.TxStores) error { return recordActionTx(ctx, ts, c.info.OrgID, act) },
+	)
+	if err != nil {
+		agenthostLog.Warn("external-action recording failed (github write already applied)",
+			"run", c.info.RunID, "action", act.Action, "target", act.Target, "error", err)
+	}
 }
 
 // githubAction builds the external-action row for a GitHub write from the

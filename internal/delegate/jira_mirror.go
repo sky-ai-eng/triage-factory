@@ -49,6 +49,7 @@ package delegate
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -267,6 +268,7 @@ func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, issueKey, teamI
 		Action:     action,
 		Target:     issueKey,
 		ExternalID: issueKey,
+		URL:        s.jiraBrowseURL(ctx, orgID, issueKey),
 		FromState:  from,
 		ToState:    to,
 		Credential: domain.CredentialJiraOrg,
@@ -275,6 +277,22 @@ func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, issueKey, teamI
 		jiraLog.Warn("mirror: external-action recording failed (Jira move already applied)",
 			"issue", issueKey, "action", action, "error", err)
 	}
+}
+
+// jiraBrowseURL builds the issue's human-facing {site}/browse/<KEY> link from the
+// org's configured Jira site URL, or "" when it's unset/unreadable (URL is an
+// optional audit field). Best-effort, admin-pool settings read — same source the
+// agent's exec-side jiraBrowseURL + the poller stamp entity URLs from — so the
+// mirror's audit rows link to the ticket just like the bot's own do.
+func (s *Spawner) jiraBrowseURL(ctx context.Context, orgID, issueKey string) string {
+	if s.orgs == nil {
+		return ""
+	}
+	set, err := s.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil || set.JiraBaseURL == "" {
+		return ""
+	}
+	return strings.TrimRight(set.JiraBaseURL, "/") + "/browse/" + issueKey
 }
 
 // shouldLogForSystemErr reports whether a resolver.ForSystem error is worth

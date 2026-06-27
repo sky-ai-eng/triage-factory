@@ -34,13 +34,22 @@ import (
 // and the object coordinates come from the artifact. from/to carry the lifecycle
 // transition (draft→open, pending→submitted, …). Credential is the org App.
 func githubApprovalAction(art *domain.Artifact, userID, action, from, to string) domain.ExternalAction {
+	// A PR artifact carries its html_url; a review artifact carries none (its
+	// target is the PR), so fall back to the PR web URL from the target — the audit
+	// row links somewhere rather than render non-clickable.
+	url := art.URL
+	if url == "" {
+		if owner, repo, number, ok := domain.ParsePRTarget(art.Target); ok {
+			url = domain.GitHubPullURL(owner+"/"+repo, number)
+		}
+	}
 	return domain.ExternalAction{
 		TeamID:      art.TeamID,
 		Provider:    domain.ArtifactProviderGitHub,
 		Action:      action,
 		Target:      art.Target,
 		ExternalID:  art.ExternalID,
-		URL:         art.URL,
+		URL:         url,
 		FromState:   from,
 		ToState:     to,
 		RunID:       art.RunID,

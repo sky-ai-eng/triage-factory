@@ -4438,9 +4438,13 @@ ALTER TABLE public.external_actions ENABLE ROW LEVEL SECURITY;
 -- Name: external_actions external_actions_all; Type: POLICY; Schema: public; Owner: -
 --
 
--- Org-scoped, like access_change_log (NOT team-scoped like artifacts): the
--- governance read is the cross-team org/team-admin lens, and the team-admin /
--- org-admin authorization is enforced at the HTTP handler. The WITH CHECK gates
+-- Org-scoped, like access_change_log (NOT team-scoped like artifacts). The USING
+-- (SELECT) predicate gates on org MEMBERSHIP, not admin role: like artifacts and
+-- access_change_log, the DB is the cross-ORG boundary, while the within-org
+-- role check (FeatureGovernance + team-admin/org-admin) is enforced at the HTTP
+-- handler. A direct-DB org member could therefore read the audit rows — the
+-- repo's deliberate posture (RLS is the tenant boundary, not the in-app role
+-- boundary), consistent across these audit/artifact tables. The WITH CHECK gates
 -- the app-pool inserts (manual bot runs under synthetic claims + the server
 -- approval/board handlers under the approver's claims) by org; the admin-pool
 -- inserts (event-triggered bot runs + the Jira mirror — no JWT claims) bypass

@@ -339,11 +339,27 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 		if len(out) != 2 {
 			t.Fatalf("teamA actions = %d rows, want 2 (created + marked-ready)", len(out))
 		}
-		// The team feed omits team/actor name fields (already one team).
+		// The team feed omits the team chip (already one team) but DOES resolve the
+		// authorizing actor's name — a team admin shouldn't see raw UUIDs.
+		var sawHumanName bool
 		for _, a := range out {
-			if a.TeamID != "" || a.TeamName != "" || a.ActorName != "" {
-				t.Errorf("team feed row carried org-only fields: %+v", a)
+			if a.TeamID != "" || a.TeamName != "" {
+				t.Errorf("team feed row carried a team chip: %+v", a)
 			}
+			switch a.Action {
+			case "pr_marked_ready":
+				if a.ActorUserID != r.orgAdmin || a.ActorName != "Org Admin" {
+					t.Errorf("team feed human row actor = %q/%q, want orgAdmin/'Org Admin' (resolved)", a.ActorUserID, a.ActorName)
+				}
+				sawHumanName = true
+			case "pr_created":
+				if a.ActorName != "" {
+					t.Errorf("bot row carried an actor name: %+v", a)
+				}
+			}
+		}
+		if !sawHumanName {
+			t.Error("team feed did not resolve the human-authorized row's actor name")
 		}
 	})
 

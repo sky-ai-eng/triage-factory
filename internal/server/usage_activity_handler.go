@@ -378,18 +378,27 @@ func toActionJSON(a domain.ExternalAction) actionJSON {
 
 // handleTeamActionsActivity returns one team's external-action history, newest
 // first — the Actions lens of the team feed. Same gates as the Objects lens (run
-// already by the caller). The team feed omits team_id/team_name/actor_name (it's
-// already one team, and resolving every actor name on a team feed isn't needed).
+// already by the caller). The team feed omits team_id/team_name (it's already one
+// team) but DOES resolve the authorizing actor's display name — this is the audit
+// surface a team admin reads, so raw actor UUIDs would be poor UX, and resolving
+// over one team's small distinct-actor set is cheap.
 func (h *usageHandler) handleTeamActionsActivity(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) {
 	opts, errMsg := parseExternalActionListOpts(r.URL.Query())
 	if errMsg != "" {
 		badRequest(w, errMsg)
 		return
 	}
-	var actions []domain.ExternalAction
+	var (
+		actions    []domain.ExternalAction
+		actorNames map[string]string
+	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		actions, e = tx.ExternalActions.ListByTeam(r.Context(), orgID, teamID, opts)
+		if e != nil {
+			return e
+		}
+		actorNames, e = resolveActionActorNames(r.Context(), tx, actions)
 		return e
 	}); err != nil {
 		internalError(w, "usage", err)
@@ -397,7 +406,9 @@ func (h *usageHandler) handleTeamActionsActivity(w http.ResponseWriter, r *http.
 	}
 	out := make([]actionJSON, len(actions))
 	for i, a := range actions {
-		out[i] = toActionJSON(a)
+		j := toActionJSON(a)
+		j.ActorName = actorNames[a.ActorUserID]
+		out[i] = j
 	}
 	writeJSON(w, http.StatusOK, out)
 }

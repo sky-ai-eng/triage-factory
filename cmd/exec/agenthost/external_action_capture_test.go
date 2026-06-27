@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -163,6 +164,54 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 			}
 			if got := len(listExternalActions(t, stores)); got != 2 {
 				t.Errorf("a new push (new sha) should append: want 2 actions, got %d", got)
+			}
+		})
+	}
+}
+
+// TestCapture_GithubReply_RecordsArtifactlessAction pins that a review-thread
+// reply — which rides the review and produces NO comment artifact — is still
+// captured as a standalone comment_posted external action (the Actions lens is
+// the one surface that records org-credential writes with no artifact). The
+// in_reply_to context lands in detail_json. TFAC-483.
+func TestCapture_GithubReply_RecordsArtifactlessAction(t *testing.T) {
+	for _, eventTriggered := range []bool{true, false} {
+		name := "manual"
+		if eventTriggered {
+			name = "event-triggered"
+		}
+		t.Run(name, func(t *testing.T) {
+			gh := startFakeGitHubComments(t)
+			stores, info, client := newGithubRecordingClient(t, gh.URL, eventTriggered)
+
+			replyID, err := client.GithubReplyToComment(context.Background(), "octo", "repo", 1, 555, "thanks for the catch")
+			if err != nil {
+				t.Fatalf("GithubReplyToComment: %v", err)
+			}
+			if replyID != 777 {
+				t.Fatalf("reply id = %d, want 777", replyID)
+			}
+			// No artifact — the reply rides the review thread, like every line-comment.
+			if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+				t.Errorf("a review-thread reply should produce no artifact, got %+v", arts)
+			}
+			// But exactly one external action (the audit log records artifact-less writes).
+			acts := listExternalActions(t, stores)
+			if len(acts) != 1 {
+				t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
+			}
+			a := acts[0]
+			if a.Action != domain.ActionCommentPosted || a.Provider != domain.ArtifactProviderGitHub ||
+				a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo#1" ||
+				a.ExternalID != "777" || a.RunID != info.RunID {
+				t.Errorf("reply action mismatch: %+v", a)
+			}
+			// The audit row deep-links to the reply on the PR.
+			if a.URL != "https://github.com/octo/repo/pull/1#discussion_r777" {
+				t.Errorf("reply url = %q, want the PR discussion deep link", a.URL)
+			}
+			if !strings.Contains(a.DetailJSON, `"in_reply_to":555`) {
+				t.Errorf("detail_json %q did not carry in_reply_to", a.DetailJSON)
 			}
 		})
 	}

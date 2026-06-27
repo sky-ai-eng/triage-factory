@@ -274,6 +274,7 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 		Action:      draftAction,
 		Target:      fmt.Sprintf("%s/%s#%d", parts[0], parts[1], number),
 		ExternalID:  strconv.Itoa(number),
+		URL:         domain.GitHubPullURL(parts[0]+"/"+parts[1], number),
 		FromState:   draftFrom,
 		ToState:     draftTo,
 		ActorUserID: userID,

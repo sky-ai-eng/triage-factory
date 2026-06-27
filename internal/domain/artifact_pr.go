@@ -43,6 +43,16 @@ func PullRequestTarget(repoPath string, number int) string {
 	return fmt.Sprintf("%s#%d", repoPath, number)
 }
 
+// GitHubPullURL builds the github.com web link for a PR — the human-facing URL
+// the audit feed links a row to when the action's build site has no html_url in
+// hand (a board-drag, a review-thread reply, a review whose artifact carries no
+// URL). Always github.com, matching branchWebURL's documented default (the
+// product is GitHub-focused; GHES web hosts aren't modeled). repoPath is a
+// validated owner/repo, so it isn't re-escaped.
+func GitHubPullURL(repoPath string, number int) string {
+	return fmt.Sprintf("https://github.com/%s/pull/%d", repoPath, number)
+}
+
 // PullRequestDedupKey is the stable key every writer that touches a given PR
 // upserts on: github:pull_request:owner/repo#<number>. The draft PR is created
 // for real immediately (no branch-anchored pending phase in this path), so it
