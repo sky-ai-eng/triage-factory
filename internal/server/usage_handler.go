@@ -64,6 +64,7 @@ type usageDayBucket struct {
 type usageUserBucket struct {
 	UserID      string  `json:"user_id"`
 	DisplayName string  `json:"display_name"`
+	AvatarURL   string  `json:"avatar_url,omitempty"`
 	Cost        float64 `json:"cost"`
 }
 
@@ -203,10 +204,10 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		rows      []domain.SpendRow
-		teamName  string
-		userNames map[string]string
-		ruleNames map[string]string
+		rows         []domain.SpendRow
+		teamName     string
+		userProfiles map[string]userProfile
+		ruleNames    map[string]string
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -228,7 +229,7 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		if t != nil {
 			teamName = t.Name
 		}
-		if userNames, e = resolveSpendUserNames(r.Context(), tx, rows); e != nil {
+		if userProfiles, e = resolveSpendUserProfiles(r.Context(), tx, rows); e != nil {
 			return e
 		}
 		ruleNames, e = resolveSpendRuleNames(r.Context(), tx, orgID, rows)
@@ -243,7 +244,7 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		TeamName:     teamName,
 		TotalCostUSD: sumSpendCost(rows),
 		ByCategory:   spendByCategory(rows),
-		ByUser:       spendByUser(rows, userNames),
+		ByUser:       spendByUser(rows, userProfiles),
 		ByRule:       spendByRule(rows, ruleNames),
 		ByModel:      spendByModel(rows),
 		ByDay:        spendByDay(rows),
@@ -276,9 +277,9 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		rows      []domain.SpendRow
-		teamNames map[string]string
-		userNames map[string]string
+		rows         []domain.SpendRow
+		teamNames    map[string]string
+		userProfiles map[string]userProfile
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -291,9 +292,9 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 		if teamNames, e = resolveSpendTeamNames(r.Context(), tx, orgID, rows); e != nil {
 			return e
 		}
-		// Org-wide creators are co-org-members, so display names resolve under the
+		// Org-wide creators are co-org-members, so profiles resolve under the
 		// org admin's claims (users_select is org-scoped) — no System read needed.
-		userNames, e = resolveSpendUserNames(r.Context(), tx, rows)
+		userProfiles, e = resolveSpendUserProfiles(r.Context(), tx, rows)
 		return e
 	}); err != nil {
 		internalError(w, "usage", err)
@@ -303,7 +304,7 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, usageOrgResponse{
 		TotalCostUSD: sumSpendCost(rows),
 		ByTeam:       spendByTeam(rows, teamNames),
-		ByUser:       spendByUser(rows, userNames),
+		ByUser:       spendByUser(rows, userProfiles),
 		OrgLevel:     spendOrgLevel(rows),
 		ByCategory:   spendByCategory(rows),
 		ByModel:      spendByModel(rows),
@@ -457,10 +458,17 @@ func spendByDay(rows []domain.SpendRow) []usageDayBucket {
 	return out
 }
 
+// userProfile is a resolved (display name, avatar URL) pair for one creator —
+// the value type of the profiles map spendByUser consumes.
+type userProfile struct {
+	name   string
+	avatar string
+}
+
 // spendByUser sums cost per human creator (manual runs + curator turns),
-// resolving display names from the supplied map. Rows with a NULL creator
+// resolving display name + avatar from the supplied map. Rows with a NULL creator
 // (autonomous/system) are excluded. Sorted cost-desc.
-func spendByUser(rows []domain.SpendRow, names map[string]string) []usageUserBucket {
+func spendByUser(rows []domain.SpendRow, profiles map[string]userProfile) []usageUserBucket {
 	byUser := map[string]float64{}
 	for _, r := range rows {
 		if r.CreatorUserID == nil {
@@ -470,7 +478,8 @@ func spendByUser(rows []domain.SpendRow, names map[string]string) []usageUserBuc
 	}
 	out := make([]usageUserBucket, 0, len(byUser))
 	for uid, c := range byUser {
-		out = append(out, usageUserBucket{UserID: uid, DisplayName: names[uid], Cost: c})
+		p := profiles[uid]
+		out = append(out, usageUserBucket{UserID: uid, DisplayName: p.name, AvatarURL: p.avatar, Cost: c})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Cost != out[j].Cost {
@@ -549,26 +558,28 @@ func spendOrgLevel(rows []domain.SpendRow) []usageOrgLevelBucket {
 
 // --- name resolution (N+1 over the small distinct-id sets; fine for v1) ---
 
-// resolveSpendUserNames maps each distinct human creator in rows to a display
-// name. Runs on the app pool under the caller's claims — users_select RLS is
-// org-scoped, so a caller (always an org member here) resolves any co-member's
-// name, which covers every run/curator creator in their org.
-func resolveSpendUserNames(ctx context.Context, tx db.TxStores, rows []domain.SpendRow) (map[string]string, error) {
-	names := map[string]string{}
+// resolveSpendUserProfiles maps each distinct human creator in rows to a (display
+// name, avatar URL) pair. Runs on the app pool under the caller's claims —
+// users_select RLS is org-scoped, so a caller (always an org member here)
+// resolves any co-member's profile, which covers every run/curator creator in
+// their org. avatar_url is whatever the OAuth login captured (often empty in
+// local mode); the FE roster falls back to a monogram when it's blank.
+func resolveSpendUserProfiles(ctx context.Context, tx db.TxStores, rows []domain.SpendRow) (map[string]userProfile, error) {
+	profiles := map[string]userProfile{}
 	for _, r := range rows {
 		if r.CreatorUserID == nil {
 			continue
 		}
-		if _, done := names[*r.CreatorUserID]; done {
+		if _, done := profiles[*r.CreatorUserID]; done {
 			continue
 		}
-		name, err := tx.Users.GetDisplayName(ctx, *r.CreatorUserID)
+		name, avatar, err := tx.Users.GetProfile(ctx, *r.CreatorUserID)
 		if err != nil {
 			return nil, err
 		}
-		names[*r.CreatorUserID] = name
+		profiles[*r.CreatorUserID] = userProfile{name: name, avatar: avatar}
 	}
-	return names, nil
+	return profiles, nil
 }
 
 // resolveSpendRuleNames maps each distinct firing trigger (autonomous rows) to a

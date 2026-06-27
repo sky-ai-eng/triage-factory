@@ -142,12 +142,15 @@ func TestSpendByDay(t *testing.T) {
 }
 
 func TestSpendByUser_ManualAndCuratorOnly(t *testing.T) {
-	names := map[string]string{"u1": "Alice", "u2": "Bob"}
-	got := spendByUser(usageTestRows(), names)
+	profiles := map[string]userProfile{
+		"u1": {name: "Alice", avatar: "https://ex/a.png"},
+		"u2": {name: "Bob"}, // no avatar → AvatarURL omitted
+	}
+	got := spendByUser(usageTestRows(), profiles)
 	// Autonomous (NULL creator) + system (NULL creator) excluded. Sorted cost-desc.
 	want := []usageUserBucket{
-		{UserID: "u1", DisplayName: "Alice", Cost: 1.50}, // r1 + c1
-		{UserID: "u2", DisplayName: "Bob", Cost: 0.10},   // c2
+		{UserID: "u1", DisplayName: "Alice", AvatarURL: "https://ex/a.png", Cost: 1.50}, // r1 + c1
+		{UserID: "u2", DisplayName: "Bob", Cost: 0.10},                                  // c2
 	}
 	if len(got) != len(want) {
 		t.Fatalf("byUser = %+v, want %+v", got, want)

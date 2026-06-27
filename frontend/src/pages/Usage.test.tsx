@@ -333,4 +333,30 @@ describe('Usage page', () => {
     // breakdown parts sum to that stated total.
     expect(await screen.findByTitle('200 tokens (100 in · 50 out · 50 cached)')).toBeInTheDocument()
   })
+
+  it('roster shows an avatar image when present, a monogram otherwise', async () => {
+    roleMock.isAdmin = false
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/teams/t1': {
+        ...TEAM,
+        by_user: [
+          {
+            user_id: 'u1',
+            display_name: 'Alice Smith',
+            avatar_url: 'https://ex/alice.png',
+            cost: 15,
+          },
+          { user_id: 'u2', display_name: 'Bob', cost: 10 }, // no avatar → monogram
+        ],
+      },
+    })
+
+    const { container } = render(<Usage />)
+
+    expect(await screen.findByText('Alice Smith')).toBeInTheDocument()
+    expect(container.querySelector('img[src="https://ex/alice.png"]')).not.toBeNull()
+    expect(screen.getByText('BO')).toBeInTheDocument() // Bob's monogram fallback
+  })
 })

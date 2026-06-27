@@ -373,12 +373,17 @@ interface DonutSeg {
 function Donut({
   segments,
   ringClass = 'h-24 w-24',
-  legendClass = 'space-y-1.5',
+  legendScroll = false,
 }: {
   segments: DonutSeg[]
   ringClass?: string
-  legendClass?: string
+  /** Cap the legend height and let it scroll — for the larger org dials whose
+   *  legends can run long (many teams / users). */
+  legendScroll?: boolean
 }) {
+  // Linked hover: hovering a legend row (or a chart slice) highlights its slice
+  // and dims the rest, so reading "which wedge is this team" is one glance.
+  const [active, setActive] = useState<string | null>(null)
   const data = segments.filter((d) => d.value > 0).sort((a, b) => b.value - a.value)
   const total = data.reduce((s, d) => s + d.value, 0)
   if (total === 0) return <ZeroMini label="no spend" />
@@ -400,17 +405,33 @@ function Donut({
               startAngle={90}
               endAngle={-270}
               stroke="none"
+              onMouseEnter={(_, i) => setActive(data[i]?.key ?? null)}
+              onMouseLeave={() => setActive(null)}
             >
               {data.map((d) => (
-                <Cell key={d.key} fill={d.color} />
+                <Cell
+                  key={d.key}
+                  fill={d.color}
+                  fillOpacity={active && active !== d.key ? 0.25 : 1}
+                  style={{ transition: 'fill-opacity 0.15s ease' }}
+                />
               ))}
             </Pie>
           </PieChart>
         </ResponsiveContainer>
       </div>
-      <ul className={`min-w-0 flex-1 ${legendClass}`}>
+      <ul
+        className={`min-w-0 flex-1 space-y-1.5 ${legendScroll ? 'max-h-44 overflow-y-auto pr-1' : ''}`}
+      >
         {data.map((d) => (
-          <li key={d.key} className="flex items-center justify-between gap-2 font-mono text-[11px]">
+          <li
+            key={d.key}
+            onMouseEnter={() => setActive(d.key)}
+            onMouseLeave={() => setActive(null)}
+            className={`-mx-1 flex items-center justify-between gap-2 rounded-[3px] px-1 font-mono text-[11px] transition-colors ${
+              active === d.key ? 'bg-black/[0.04]' : ''
+            }`}
+          >
             <span className="flex min-w-0 items-center gap-1.5">
               <span className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: d.color }} />
               <span className="truncate text-text-secondary">{d.label}</span>
@@ -427,8 +448,9 @@ function Donut({
 }
 
 // CategoryDonut renders the spend-by-category split as a Donut; legend values
-// carry the token-breakdown tooltip.
-function CategoryDonut({ data }: { data: UsageCategoryBucket[] }) {
+// carry the token-breakdown tooltip. `large` gives the org's half-width dial a
+// bigger ring + scrollable legend (Team's compact 1/3 cell keeps the default).
+function CategoryDonut({ data, large = false }: { data: UsageCategoryBucket[]; large?: boolean }) {
   return (
     <Donut
       segments={data.map((d) => ({
@@ -438,6 +460,8 @@ function CategoryDonut({ data }: { data: UsageCategoryBucket[] }) {
         value: d.cost,
         title: tokenTitle(d),
       }))}
+      ringClass={large ? 'h-32 w-32' : 'h-24 w-24'}
+      legendScroll={large}
     />
   )
 }
@@ -525,7 +549,7 @@ function UserRoster({ data, emptyLabel = '—' }: { data: UsageUserBucket[]; emp
         const name = d.display_name || d.user_id
         return (
           <div key={d.user_id} className="flex items-center gap-2.5">
-            <Avatar name={name} />
+            <Avatar name={name} url={d.avatar_url} />
             <div className="min-w-0 flex-1">
               <div className="flex items-baseline justify-between gap-2 font-mono text-[11px]">
                 <span className="truncate text-text-secondary" title={name}>
@@ -651,14 +675,8 @@ function AllocationDonut({
       hint: ORG_LEVEL_HINT[o.category],
       title: `${categoryLabel(o.category)} · ${fmtUSD(o.cost)}`,
     }))
-  // A bigger ring + a two-column legend, since the org hero can carry many teams.
-  return (
-    <Donut
-      segments={[...teamSegs, ...olSegs]}
-      ringClass="h-28 w-28"
-      legendClass="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2"
-    />
-  )
+  // A bigger ring + a scrollable legend, since the org dial can carry many teams.
+  return <Donut segments={[...teamSegs, ...olSegs]} ringClass="h-32 w-32" legendScroll />
 }
 
 // ThroughputInstrument fuses "over time" + "by model" into one readout: a wide
@@ -899,19 +917,20 @@ function OrgSection({ since, days }: { since: string; days: number }) {
       error={error}
       empty={total === 0}
     >
-      {/* Allocation ring (hero, full) over the wide by-user roster + a category
-          dial sharing its row, then the full-width throughput. */}
-      <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2 lg:grid-cols-3">
-        {/* Allocation hero — the whole org spend partitioned across teams +
-            overhead (merges the old "by team" + "org-level" instruments). */}
-        <Instrument label="Allocation" className="md:col-span-2 lg:col-span-3">
+      {/* Allocation + Category as two half-width dials — larger rings with
+          scrollable, hover-linked side legends — then the wide by-user roster and
+          the full-width throughput. */}
+      <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2">
+        {/* Allocation — the whole org spend partitioned across teams + the org-
+            level (non-team) slices (merges the old "by team" + "org-level"). */}
+        <Instrument label="Allocation">
           <AllocationDonut byTeam={data?.by_team ?? []} orgLevel={data?.org_level ?? []} />
         </Instrument>
-        <Instrument label="By user" className="md:col-span-2 lg:col-span-2">
-          <UserRoster data={data?.by_user ?? []} emptyLabel="no user spend" />
+        <Instrument label="Category">
+          <CategoryDonut data={data?.by_category ?? []} large />
         </Instrument>
-        <Instrument label="Category" className="md:col-span-2 lg:col-span-1">
-          <CategoryDonut data={data?.by_category ?? []} />
+        <Instrument label="By user" className="md:col-span-2">
+          <UserRoster data={data?.by_user ?? []} emptyLabel="no user spend" />
         </Instrument>
         <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} />
       </div>

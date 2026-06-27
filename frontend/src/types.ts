@@ -911,6 +911,9 @@ export interface UsageDayBucket {
 export interface UsageUserBucket {
   user_id: string
   display_name: string
+  /** OAuth-captured avatar URL; omitted when unset (e.g. local mode), where the
+   *  roster falls back to a monogram. */
+  avatar_url?: string
   cost: number
 }
 

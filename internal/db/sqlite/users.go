@@ -88,6 +88,21 @@ func (s *usersStore) GetDisplayName(ctx context.Context, userID string) (string,
 	return name.String, nil
 }
 
+func (s *usersStore) GetProfile(ctx context.Context, userID string) (string, string, error) {
+	var name, avatar sql.NullString
+	err := s.q.QueryRowContext(ctx,
+		`SELECT display_name, avatar_url FROM users WHERE id = ?`,
+		userID,
+	).Scan(&name, &avatar)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("read users profile: %w", err)
+	}
+	return name.String, avatar.String, nil
+}
+
 func (s *usersStore) GetJiraIdentity(ctx context.Context, userID, jiraBaseURL string) (string, string, error) {
 	var accountID, displayName sql.NullString
 	err := s.q.QueryRowContext(ctx,

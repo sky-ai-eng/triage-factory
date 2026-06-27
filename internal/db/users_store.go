@@ -57,6 +57,14 @@ type UsersStore interface {
 	// Variant B's roster dropdown.
 	GetDisplayName(ctx context.Context, userID string) (string, error)
 
+	// GetProfile returns users.display_name + users.avatar_url together
+	// (each "" when NULL or the row is missing) in one read. The usage
+	// by-user / by-member breakdown uses it to render each person's name and
+	// avatar without a second round-trip. avatar_url is populated from the
+	// OAuth identity's claims at login (multi mode); it's typically empty in
+	// local mode, where the roster falls back to a monogram.
+	GetProfile(ctx context.Context, userID string) (displayName, avatarURL string, err error)
+
 	// GetJiraIdentity returns the user's Jira (account_id, display_name)
 	// on a specific host (user_jira_identities, keyed on (user_id,
 	// jira_base_url)), both "" when no row exists for that (user, host)
