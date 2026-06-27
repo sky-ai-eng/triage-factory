@@ -1,24 +1,24 @@
 import { useSyncExternalStore } from 'react'
 
-// Shared store for GET /api/entitlements — the EE features available to the
-// viewer right now. Mirrors the module-store + useSyncExternalStore shape (and
-// the org-switch invalidation) of useTeams: one module-level cache means every
-// EE surface across the app shares one round-trip, and the fetch fires lazily
-// on the first subscriber.
+// Shared store for GET /api/entitlements — the gated EE features licensed in
+// this deployment (for the viewer's active org in multi mode). Mirrors the
+// module-store + useSyncExternalStore + org-switch-invalidation shape of
+// useTeams: one module-level cache means every EE surface shares one
+// round-trip, and the fetch fires lazily on the first subscriber.
 //
-// The licensing POLICY lives entirely server-side (see entitlements.Available),
-// so this hook is a deliberately thin mirror of whatever the probe returns:
-//   - Local mode is fully source-available and free → the probe reports every
-//     feature, so EE surfaces render and buying EE in local changes nothing.
-//   - Multi mode reports the licensed subset for the viewer's active org — a
-//     deployment-wide license today (self-host EE), per-org Stripe state later
-//     (the SaaS tenant model).
+// This is a deliberately thin mirror of the probe. The entitlement check is
+// mode-agnostic server-side — a feature's EE-ness never depends on local vs
+// multi — so the hook carries no local/multi logic. In any unlicensed build
+// (a local install included) the set is empty and has(x) is false for all; that
+// is correct, not a withheld feature, because the EE surfaces are cross-team /
+// org-wide lenses whose within-boundary core counterparts don't gate on
+// entitlements at all. EE surfaces gate on `loaded && has('<feature>')`.
 //
-// Because the multi-mode answer is scoped to the ACTIVE ORG, switching orgs
-// must drop this cache (org A may have governance, org B may not) — exactly
-// like useTeams. OrgPicker calls invalidateEntitlements() on switch. Today a
+// The multi-mode answer is scoped to the ACTIVE ORG, so switching orgs drops
+// this cache (org A may license governance, org B may not) — exactly like
+// useTeams. OrgPicker calls invalidateEntitlements() on switch. Today a
 // deployment license answers the same for every org so the refetch is a no-op
-// in effect; the seam is in place for when per-org entitlements land.
+// in effect; the seam is in place for when per-org (Stripe) entitlements land.
 
 type State = {
   features: Set<string>
@@ -95,9 +95,10 @@ export function invalidateEntitlements(): void {
 }
 
 export interface Entitlements {
-  /** Whether `feature` is available to the viewer. False for every feature
-   *  until the probe resolves; in multi mode, false for features the active
-   *  org isn't licensed for. Always true in local mode (free / fully featured). */
+  /** Whether `feature` is licensed for the viewer. False until the probe
+   *  resolves, and false for any feature the deployment / active org isn't
+   *  licensed for — including unlicensed and local builds, where the EE set is
+   *  empty (the within-boundary core surfaces don't gate on this). */
   has: (feature: string) => boolean
   /** True once GET /api/entitlements has resolved (success or fail-closed).
    *  Gate EE surfaces on `loaded && has('x')` so they don't flash before the

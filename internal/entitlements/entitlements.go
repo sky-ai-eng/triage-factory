@@ -26,11 +26,7 @@
 // sandbox-fleet administration, audit export are the paid tier).
 package entitlements
 
-import (
-	"sync"
-
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-)
+import "sync"
 
 // Feature names a gated enterprise capability. The string values are the
 // stable wire identifiers that appear in a signed license token's
@@ -91,27 +87,6 @@ func Active() Checker {
 	mu.RLock()
 	defer mu.RUnlock()
 	return active
-}
-
-// Available reports whether feature may be used in this deployment right now.
-// It is the single gate every EE code path — backend handlers and the
-// /api/entitlements probe — should consult, rather than calling Active().Has
-// directly, because it encodes the open-core licensing policy in one place:
-//
-//   - Local mode is fully source-available and free. Every feature is on and no
-//     checker is consulted, so purchasing EE while in local changes nothing.
-//     Gating a feature behind a license in a build a developer runs on their own
-//     machine is both wrong (local is free) and futile, so this never restricts
-//     local — entitlements are a multi-mode concept.
-//   - Multi mode consults the registered checker, which fails closed: a
-//     deployment-wide license today (self-host EE), or per-org Stripe state in
-//     future (the SaaS tenant model). When that per-org checker lands, this gate
-//     gains an orgID; the deployment-license checker simply ignores it.
-func Available(f Feature) bool {
-	if runmode.Current() == runmode.ModeLocal {
-		return true
-	}
-	return Active().Has(f)
 }
 
 // Register installs the process-wide checker. Called once, from package

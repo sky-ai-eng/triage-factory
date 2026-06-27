@@ -29,6 +29,12 @@ func authedReq() *http.Request {
 	return req.WithContext(ctx)
 }
 
+func recordEntitlements() *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	(&Server{}).handleEntitlements(rec, authedReq())
+	return rec
+}
+
 func decodeFeatures(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	t.Helper()
 	if rec.Code != http.StatusOK {
@@ -43,58 +49,45 @@ func decodeFeatures(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	return resp.Features
 }
 
-// Local mode is fully source-available and free, so the probe reports EVERY
-// gated feature — even with no license registered. This is the "buying EE in
-// local changes nothing" contract: local is already fully entitled.
-func TestEntitlements_LocalModeFullyEntitled(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	entitlements.Reset() // no checker registered — local must still report all
-	t.Cleanup(entitlements.Reset)
+// The probe reports the checker's state and NOTHING about runmode: the same
+// checker yields the same answer in local and multi. This is the load-bearing
+// invariant — a feature's EE-ness must not depend on local vs multi mode, and
+// local mode gets no free entitlement pass (so an unlicensed local build
+// reports [], exactly like unlicensed multi). "Local is free" lives in the
+// feature set + ungated core surfaces, not in this gate.
+func TestEntitlements_GatingIsModeAgnostic(t *testing.T) {
+	for _, mode := range []runmode.Mode{runmode.ModeLocal, runmode.ModeMulti} {
+		t.Run(string(mode)+"/unlicensed_is_empty", func(t *testing.T) {
+			runmode.SetForTest(t, mode)
+			entitlements.Reset()
+			t.Cleanup(entitlements.Reset)
 
-	got := decodeFeatures(t, recordEntitlements())
-	if len(got) != len(entitlements.AllFeatures) {
-		t.Fatalf("features = %v, want all %d gated features in local mode", got, len(entitlements.AllFeatures))
-	}
-	for _, f := range entitlements.AllFeatures {
-		if !featuresContain(got, string(f)) {
-			t.Fatalf("features = %v, missing %q — local must report every feature", got, f)
-		}
-	}
-}
+			rec := recordEntitlements()
+			if got := decodeFeatures(t, rec); len(got) != 0 {
+				t.Fatalf("features = %v, want [] for an unlicensed build in %s mode", got, mode)
+			}
+			// Wire form must be [] (a non-nil JSON array), never null.
+			if body := rec.Body.String(); !jsonHasEmptyFeaturesArray(body) {
+				t.Fatalf("body = %s, want a features:[] array (not null)", body)
+			}
+		})
 
-// Multi mode, no license (community default): the probe reports an EMPTY set —
-// and crucially `[]`, not null, so the frontend can treat it as a set.
-func TestEntitlements_MultiCommunityDefaultIsEmpty(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	entitlements.Reset()
-	t.Cleanup(entitlements.Reset)
+		t.Run(string(mode)+"/governance_granted", func(t *testing.T) {
+			runmode.SetForTest(t, mode)
+			entitlements.Register(governanceGrant{})
+			t.Cleanup(entitlements.Reset)
 
-	rec := recordEntitlements()
-	if got := decodeFeatures(t, rec); len(got) != 0 {
-		t.Fatalf("features = %v, want empty under the multi-mode community default", got)
-	}
-	if body := rec.Body.String(); !jsonHasEmptyFeaturesArray(body) {
-		t.Fatalf("body = %s, want a features:[] array (not null)", body)
-	}
-}
-
-// Multi mode with a checker that grants governance: the probe reports exactly
-// ["governance"] — the licensed subset of entitlements.AllFeatures.
-func TestEntitlements_MultiReportsGrantedFeature(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	entitlements.Register(governanceGrant{})
-	t.Cleanup(entitlements.Reset)
-
-	got := decodeFeatures(t, recordEntitlements())
-	if len(got) != 1 || got[0] != string(entitlements.FeatureGovernance) {
-		t.Fatalf("features = %v, want [%q]", got, entitlements.FeatureGovernance)
+			got := decodeFeatures(t, recordEntitlements())
+			if len(got) != 1 || got[0] != string(entitlements.FeatureGovernance) {
+				t.Fatalf("features = %v, want [%q] in %s mode", got, entitlements.FeatureGovernance, mode)
+			}
+		})
 	}
 }
 
-// The route is authenticated-session-only, in any mode: no claims in context →
-// 401, never a 200 that would leak the deployment's feature state anonymously.
+// The route is authenticated-session-only: no claims in context → 401, never a
+// 200 that would leak the deployment's feature state to an anonymous caller.
 func TestEntitlements_RequiresSession(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
 	entitlements.Register(governanceGrant{})
 	t.Cleanup(entitlements.Reset)
 
@@ -105,23 +98,6 @@ func TestEntitlements_RequiresSession(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 for an unauthenticated request", rec.Code)
 	}
-}
-
-// recordEntitlements drives the handler with an authenticated request and
-// returns the recorder.
-func recordEntitlements() *httptest.ResponseRecorder {
-	rec := httptest.NewRecorder()
-	(&Server{}).handleEntitlements(rec, authedReq())
-	return rec
-}
-
-func featuresContain(xs []string, want string) bool {
-	for _, x := range xs {
-		if x == want {
-			return true
-		}
-	}
-	return false
 }
 
 // jsonHasEmptyFeaturesArray confirms the encoded body carries an empty JSON
