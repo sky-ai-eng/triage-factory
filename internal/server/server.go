@@ -768,6 +768,10 @@ func (s *Server) routes() {
 	// session wrap. The write is admin-pool: an org admin may cap a team they
 	// don't belong to.
 	s.apiMutating("PUT /api/usage/teams/{team_id}/cap", uh.handleUsageTeamCap)
+	// EE governance audit surface (TFAC-484): the access & credential change-log
+	// viewer. Org-admin-gated AND FeatureGovernance-gated (404 unlicensed) inside
+	// the handler — the data is core, only the cross-team lens is Enterprise.
+	s.api("GET /api/usage/org/access-log", uh.handleUsageAccessLog)
 
 	// Org invites (multi-mode only — each handler 404s in local).
 	// The admin-facing create/list/revoke gate on org-admin and write
