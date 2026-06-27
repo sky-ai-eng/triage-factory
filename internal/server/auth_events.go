@@ -141,12 +141,19 @@ func (s *Server) recordLogout(r *http.Request, userID, sessionID uuid.UUID, org 
 
 // recordLogoutAll records a logout_all auth event (best-effort) after every
 // session for the user is revoked, carrying {"count":n}. org is the caller's
-// active org (nullable → NULL) so the event is org-scopable.
-func (s *Server) recordLogoutAll(r *http.Request, userID uuid.UUID, count int, org uuid.NullUUID) {
+// active org (nullable → NULL) so the event is org-scopable. sessionID is the
+// INITIATING session — the device that triggered the panic logout — pinned as a
+// forensic anchor ("which session was compromised?"); the session row is revoked
+// in the same request, so the audit row is the only durable record of it. Nil →
+// NULL.
+func (s *Server) recordLogoutAll(r *http.Request, userID uuid.UUID, count int, org uuid.NullUUID, sessionID uuid.UUID) {
 	e := authEventBase(r, domain.AuthEventLogoutAll)
 	e.UserID = userID.String()
 	if org.Valid {
 		e.OrgID = org.UUID.String()
+	}
+	if sessionID != uuid.Nil {
+		e.SessionID = sessionID.String()
 	}
 	e.DetailJSON = authDetailJSON(map[string]any{"count": count})
 	s.recordAuthEvent(r.Context(), e)

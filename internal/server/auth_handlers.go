@@ -546,14 +546,17 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authLog.Info("logout-all revoked sessions", "user", userID, "count", n)
-	// Durable logout_all record (best-effort), carrying the revoked count + the
-	// caller's active org (from the session context withSession set) so the event
-	// is org-scopable.
+	// Durable logout_all record (best-effort), carrying the revoked count, the
+	// caller's active org, and the INITIATING session (the device that triggered
+	// the panic logout) — all from the session context withSession set — so the
+	// event is org-scopable and the triggering session is pinned for forensics.
 	var activeOrg uuid.NullUUID
+	var initiatingSID uuid.UUID
 	if sess := SessionFrom(r.Context()); sess != nil {
 		activeOrg = sess.ActiveOrgID
+		initiatingSID = sess.ID
 	}
-	s.recordLogoutAll(r, userID, int(n), activeOrg)
+	s.recordLogoutAll(r, userID, int(n), activeOrg, initiatingSID)
 
 	// Every session is now revoked, so close ALL of this user's live
 	// websocket connections (TFAC-75) — no sid/org filter. Each device's

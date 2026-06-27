@@ -7371,7 +7371,7 @@ CREATE TRIGGER memberships_keep_admin_on_update AFTER UPDATE ON public.membershi
 -- FK ON DELETE SET NULL so an auth_events row OUTLIVES the session reaper (the
 -- durable record must survive the 30-day session window). detail_json carries
 -- the per-event payload ({"method":…,"sso":…} | {"reason":…} | {"count":…} |
--- {"domain":…,"org_id":…}).
+-- {"domain":…}; org is the row's own org_id column, not duplicated into detail).
 --
 -- Admin-pool-only / system table: writes + reads never carry user claims, and
 -- org_id is frequently NULL, so an org-scoped RLS policy can't gate it. Denied

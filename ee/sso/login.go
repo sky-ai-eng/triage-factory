@@ -165,27 +165,28 @@ func (le *loginExt) OnLoginResolved(w http.ResponseWriter, r *http.Request, in s
 
 // ssoAuthEvent builds the auth_events row for an SSO enforcement decision —
 // sso_enforcement_rejected (a non-SSO login bounced) or break_glass_login (a
-// break-glass account bypassed enforcement). Both carry the principal, the
-// org whose enforced domain matched, and {"domain":…,"org_id":…} detail. The
-// request-source fields (ip_address / user_agent) are NOT set here — the
-// RecordAuthEvent seam fills them from the threaded *http.Request via core's
-// canonical clientIP parsing, so ee/sso doesn't duplicate that logic. ee/sso
-// has no direct store access, so it records through the ExtensionAPI seam
-// (server.recordAuthEvent), which owns the best-effort / log-on-failure contract.
+// break-glass account bypassed enforcement). Both carry the principal, the org
+// whose enforced domain matched (the top-level OrgID column), and {"domain":…}
+// detail — the org is NOT duplicated into the detail. The request-source fields
+// (ip_address / user_agent) are NOT set here — the RecordAuthEvent seam fills
+// them from the threaded *http.Request via core's canonical clientIP parsing, so
+// ee/sso doesn't duplicate that logic. ee/sso has no direct store access, so it
+// records through the ExtensionAPI seam (server.recordAuthEvent), which owns the
+// best-effort / log-on-failure contract.
 func ssoAuthEvent(eventType string, in server.LoginResolved, orgID, dom string) domain.AuthEvent {
 	return domain.AuthEvent{
 		EventType:  eventType,
 		UserID:     in.UserID.String(),
 		OrgID:      orgID,
-		DetailJSON: ssoAuthDetail(dom, orgID),
+		DetailJSON: ssoAuthDetail(dom),
 	}
 }
 
-// ssoAuthDetail marshals the {"domain":…,"org_id":…} detail payload. On the
-// near-impossible marshal error it logs and returns "" — the event is still
-// recorded, just without detail.
-func ssoAuthDetail(dom, orgID string) string {
-	b, err := json.Marshal(map[string]string{"domain": dom, "org_id": orgID})
+// ssoAuthDetail marshals the {"domain":…} detail payload (org_id is the row's own
+// column, not duplicated here). On the near-impossible marshal error it logs and
+// returns "" — the event is still recorded, just without detail.
+func ssoAuthDetail(dom string) string {
+	b, err := json.Marshal(map[string]string{"domain": dom})
 	if err != nil {
 		ssoLog.Error("sso auth event detail marshal failed", "error", err)
 		return ""

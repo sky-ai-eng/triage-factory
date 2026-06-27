@@ -196,6 +196,9 @@ func TestAuthEvents_LogoutAll_Recorded(t *testing.T) {
 	if ev.orgID != orgID.String() {
 		t.Errorf("logout_all org=%q, want %q (the caller's active org)", ev.orgID, orgID)
 	}
+	if ev.sessionID != s1.ID.String() {
+		t.Errorf("logout_all session=%q, want %q (the initiating session pinned for forensics)", ev.sessionID, s1.ID)
+	}
 	if ev.detail["count"] != float64(2) {
 		t.Errorf("logout_all count=%v, want 2", ev.detail["count"])
 	}
@@ -375,6 +378,18 @@ func (r *authRig) fireCallbackRaw(code string) *http.Response {
 // state-mismatch case above) each emit ONE login_failure with the rejecting
 // branch in detail. These are the most likely production failure paths. TFAC-76.
 func TestAuthEvents_LoginFailure_Branches(t *testing.T) {
+	// No code on the callback (state OK) — the mechanically-trivial branch.
+	t.Run("missing_code", func(t *testing.T) {
+		r := newAuthRig(t)
+		if got := r.fireCallbackRaw("").StatusCode; got != http.StatusBadRequest {
+			t.Fatalf("missing-code callback status=%d, want 400", got)
+		}
+		ev := r.oneAuthEvent(domain.AuthEventLoginFailure)
+		if ev.detail["reason"] != "missing_code" || ev.detail["method"] != "github" {
+			t.Errorf("detail=%v, want reason=missing_code method=github", ev.detail)
+		}
+	})
+
 	// A failed token exchange.
 	t.Run("exchange_failed", func(t *testing.T) {
 		r := newAuthRig(t)
@@ -426,6 +441,29 @@ func TestAuthEvents_LoginFailure_Branches(t *testing.T) {
 		ev := r.oneAuthEvent(domain.AuthEventLoginFailure)
 		if ev.detail["reason"] != "bad_sub" || ev.detail["email"] != "bad@corp.example" {
 			t.Errorf("detail=%v, want reason=bad_sub email=bad@corp.example", ev.detail)
+		}
+	})
+
+	// The highest-value error path: principal resolution fails at the DB. A sub
+	// that's a valid UUID but absent from auth.users makes the user_identities FK
+	// insert inside resolveOrCreatePrincipal fail → principal_resolve_failed (and a
+	// 500). The email is known from the verified claim.
+	t.Run("principal_resolve_failed", func(t *testing.T) {
+		r := newAuthRig(t)
+		orphan := uuid.New() // never seeded into auth.users → FK insert fails
+		tok := r.signKey.mintJWT(t, validClaimsFor(orphan))
+		r.srv.authDeps.gotrueExchange = func(context.Context, string, string) (string, string, int64, error) {
+			return tok, "refresh", time.Now().Add(time.Hour).Unix(), nil
+		}
+		if got := r.fireCallbackRaw("code").StatusCode; got != http.StatusInternalServerError {
+			t.Fatalf("principal-resolve-fail callback status=%d, want 500", got)
+		}
+		ev := r.oneAuthEvent(domain.AuthEventLoginFailure)
+		if ev.detail["reason"] != "principal_resolve_failed" {
+			t.Errorf("detail=%v, want reason=principal_resolve_failed", ev.detail)
+		}
+		if ev.detail["email"] != orphan.String()+"@test" {
+			t.Errorf("detail email=%v, want %q (known from the verified claim)", ev.detail["email"], orphan.String()+"@test")
 		}
 	})
 }

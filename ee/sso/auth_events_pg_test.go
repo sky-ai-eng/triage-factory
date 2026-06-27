@@ -56,9 +56,9 @@ func (r *authRig) oneSSOAuthEvent(eventType string) capturedSSOAuthEvent {
 }
 
 // An enforced verified domain that rejects a non-SSO login records
-// sso_enforcement_rejected, scoped to the resolved principal + the enforcing org,
-// with {domain, org_id} detail. The principal still gets minted (enforcement
-// blocks only the session), so the event carries the resolved user.
+// sso_enforcement_rejected, scoped to the resolved principal + the enforcing org
+// (top-level column), with {domain} detail. The principal still gets minted
+// (enforcement blocks only the session), so the event carries the resolved user.
 func TestSSOAuthEvents_EnforcementRejected_Recorded(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -83,8 +83,12 @@ func TestSSOAuthEvents_EnforcementRejected_Recorded(t *testing.T) {
 	if ev.orgID != orgA.String() {
 		t.Errorf("event org=%q, want %q", ev.orgID, orgA)
 	}
-	if ev.detail["domain"] != "corp.example" || ev.detail["org_id"] != orgA.String() {
-		t.Errorf("event detail=%v, want domain=corp.example org_id=%s", ev.detail, orgA)
+	// org is the top-level column, not duplicated into detail.
+	if ev.detail["domain"] != "corp.example" {
+		t.Errorf("event detail=%v, want domain=corp.example", ev.detail)
+	}
+	if _, dup := ev.detail["org_id"]; dup {
+		t.Errorf("org_id should not be duplicated into detail: %v", ev.detail)
 	}
 	// The seam fills the source IP from the callback request (httptest's default
 	// RemoteAddr 192.0.2.1:1234 → 192.0.2.1) via core's canonical clientIP parsing.
@@ -94,8 +98,10 @@ func TestSSOAuthEvents_EnforcementRejected_Recorded(t *testing.T) {
 }
 
 // A break-glass account that bypasses enforcement records break_glass_login —
-// the highest-scrutiny SOC2 event — scoped to the principal + org, with the same
-// {domain, org_id} detail. The login still succeeds (a session is minted).
+// the highest-scrutiny SOC2 event — scoped to the principal + org, with {domain}
+// detail. The login still succeeds (a session is minted), and the event is always
+// PAIRED with a login_success — the load-bearing property of recording at the
+// bypass decision rather than post-session.
 func TestSSOAuthEvents_BreakGlassLogin_Recorded(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -123,11 +129,24 @@ func TestSSOAuthEvents_BreakGlassLogin_Recorded(t *testing.T) {
 	if ev.orgID != orgA.String() {
 		t.Errorf("event org=%q, want %q", ev.orgID, orgA)
 	}
-	if ev.detail["domain"] != "corp.example" || ev.detail["org_id"] != orgA.String() {
-		t.Errorf("event detail=%v, want domain=corp.example org_id=%s", ev.detail, orgA)
+	// org is the top-level column, not duplicated into detail.
+	if ev.detail["domain"] != "corp.example" {
+		t.Errorf("event detail=%v, want domain=corp.example", ev.detail)
+	}
+	if _, dup := ev.detail["org_id"]; dup {
+		t.Errorf("org_id should not be duplicated into detail: %v", ev.detail)
 	}
 	if ev.ipAddress != "192.0.2.1" {
 		t.Errorf("event ip_address=%q, want 192.0.2.1 (seam must capture the source IP)", ev.ipAddress)
+	}
+
+	// PAIRING (the load-bearing property): break_glass_login is recorded at the
+	// bypass decision, before the session is minted — so the design relies on a
+	// login_success following for the same principal once CreateSystem succeeds.
+	// An unpaired break_glass_login would be "bypass succeeded but session failed".
+	paired := r.oneSSOAuthEvent("login_success")
+	if paired.userID != owner.String() {
+		t.Errorf("break_glass_login must be paired with a login_success for the same principal; got login_success user=%q, want %q", paired.userID, owner)
 	}
 
 	// And NO enforcement-rejected event for the same login (the BG path bypasses).
