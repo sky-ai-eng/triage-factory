@@ -644,12 +644,17 @@ func resolveSpendUserProfiles(ctx context.Context, tx db.TxStores, rows []domain
 
 // resolveSpendRuleNames maps each distinct firing trigger (autonomous rows) to a
 // human-readable rule name. It uses the plain app-pool Get (RLS-scoped), NOT
-// GetSystem: this only runs for /api/usage/teams, whose caller is a team member
-// (team-admin gate), and event_handlers / blueprints RLS lets a member read
-// their own team's rows. No cross-team read happens — the org rollup never
-// resolves another team's per-rule names. A trigger event_handler always carries
-// a NULL name (the trigger_shape CHECK forces it), so the meaningful label is the
-// blueprint it fires; we fall back to that, then to "" (the FE shows the id).
+// GetSystem, and runs for two callers — both safe under that scoping:
+//   - /api/usage/teams (any mode): the caller is a team member (team-admin gate),
+//     and event_handlers / blueprints RLS lets a member read their own team's rows.
+//   - /api/usage/org in LOCAL mode (N=1): there's one team and no RLS, so reading
+//     its rule names is unrestricted — and the multi-tenant boundary that keeps
+//     per-rule detail off the org rollup is moot at N=1.
+//
+// The MULTI-mode org rollup never calls this (it omits by_rule), so no cross-team
+// per-rule read ever happens. A trigger event_handler always carries a NULL name
+// (the trigger_shape CHECK forces it), so the meaningful label is the blueprint it
+// fires; we fall back to that, then to "" (the FE shows the id).
 func resolveSpendRuleNames(ctx context.Context, tx db.TxStores, orgID string, rows []domain.SpendRow) (map[string]string, error) {
 	names := map[string]string{}
 	for _, r := range rows {

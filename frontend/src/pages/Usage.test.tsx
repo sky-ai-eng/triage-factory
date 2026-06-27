@@ -292,6 +292,52 @@ describe('Usage page', () => {
     expect(fetchedPaths(fetchMock).some((p) => p.startsWith('/api/usage/teams'))).toBe(false)
   })
 
+  it('over-time chart breaks spend out by model — top-N keyed, the tail folded into "other"', async () => {
+    // Six models exercise the whole model-series path: the top five become their
+    // own keyed/colored series and the sixth folds into a single "other", both in
+    // the side key (modelSeries) and the stacked trace's pivot (by_day_model).
+    // Personal is empty so the team's key is the only one on screen.
+    roleMock.isAdmin = false
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    stubUsageFetch({
+      '/api/usage/me': ME_EMPTY,
+      '/api/usage/teams/t1': {
+        ...TEAM,
+        by_model: [
+          { model: 'claude-opus-4-8', cost: 30 },
+          { model: 'claude-sonnet-4-6', cost: 20 },
+          { model: 'claude-haiku-4-5', cost: 10 },
+          { model: 'claude-opus-4-7', cost: 8 },
+          { model: 'claude-opus-4-6', cost: 6 },
+          { model: 'claude-fable-5', cost: 2 }, // 6th by cost → folds into "other"
+        ],
+        by_day_model: [
+          { date: '2026-06-01', model: 'claude-opus-4-8', cost: 18 },
+          { date: '2026-06-01', model: 'claude-sonnet-4-6', cost: 12 },
+          { date: '2026-06-01', model: 'claude-haiku-4-5', cost: 6 },
+          { date: '2026-06-01', model: 'claude-opus-4-7', cost: 5 },
+          { date: '2026-06-01', model: 'claude-opus-4-6', cost: 4 },
+          { date: '2026-06-01', model: 'claude-fable-5', cost: 1 },
+          { date: '2026-06-02', model: 'claude-opus-4-8', cost: 12 },
+          { date: '2026-06-02', model: 'claude-sonnet-4-6', cost: 8 },
+        ],
+      },
+    })
+
+    render(<Usage />)
+
+    // The key carries shortModel-trimmed labels for the top models...
+    expect(await screen.findByText('opus-4-8')).toBeInTheDocument()
+    expect(await screen.findByText('haiku-4-5')).toBeInTheDocument()
+    // ...the sixth model is folded into one "other" row, never shown by name...
+    expect(await screen.findByText('other')).toBeInTheDocument()
+    expect(screen.queryByText('fable-5')).not.toBeInTheDocument()
+    // ...and with by_day_model present the stacked path renders (key + trace), so
+    // neither the empty-trace nor empty-key fallback shows.
+    expect(screen.queryByText('no activity')).not.toBeInTheDocument()
+    expect(screen.queryByText('no model spend')).not.toBeInTheDocument()
+  })
+
   it('has no manual refresh button (the page auto-refreshes)', async () => {
     roleMock.isAdmin = false
     teamsMock.teams = []
