@@ -63,13 +63,13 @@ func authMethod(isSSO bool) string {
 // (ee/sso), so EE captures the same fields without duplicating clientIP. A
 // caller-set value is preserved; a nil r (degenerate call) is a no-op.
 //
-// CAVEAT (shared with the sessions table's ip_addr): clientIP trusts the
-// LEFTMOST X-Forwarded-For entry, which a client can spoof when TF is not behind
-// a header-sanitizing proxy — so ip_address here is attacker-influenceable and
-// must not be treated as a hard identity in the audit log. Hardening (take the
-// rightmost hop, gated by a TF_TRUSTED_PROXY_CIDR allowlist) is a deployment-
-// roadmap item, deliberately not changed here because clientIP is shared with
-// the session path and the correct hop depends on the deployment's proxy depth.
+// ip_address comes from clientIP, which since TFAC-488 is non-spoofable by
+// construction: X-Forwarded-For is honored only when the direct peer is a
+// configured trusted proxy (TF_TRUSTED_PROXY_CIDR), walked right→left to the
+// first untrusted hop; otherwise the real peer (RemoteAddr) is used. The same
+// hardening covers the sessions table's ip_addr and the pre-auth rate limiter,
+// since all three share clientIP. A privacy-conscious deployment can set
+// TF_CAPTURE_CLIENT_IP=false to store NULL here instead.
 func fillRequestSource(e *domain.AuthEvent, r *http.Request) {
 	if r == nil {
 		return

@@ -30,6 +30,7 @@ Fill in:
 - `TF_SECRET_ENCRYPTION_KEY` — 32 random bytes; AES-GCM master key for org + per-user **integration secrets** (GitHub App PEM / client-secret / webhook-secret, PATs, Jira tokens) stored at rest in `public.org_secrets`. **Generate with `openssl rand -hex 32`.** TF encrypts these app-side and stores only opaque ciphertext, so they are **not** in Supabase Vault / pgsodium — a routine `docker compose down && up` (or any postgres container recreate) no longer loses them. Kept distinct from `TF_SESSION_ENCRYPTION_KEY` so the two rotate independently — a session-key rotation must not nuke integration secrets. Rotating *this* key invalidates every stored secret (the ciphertext can no longer be decrypted), so plan it as a "re-enter your integration credentials" event. The same variable also governs **local-mode headless installs** (a single-binary deploy on a box with no OS keychain) — there it encrypts `~/.triagefactory/secrets.enc` instead of `public.org_secrets`; see `docs/usage.md` § Secret storage.
 - `TF_BLOB_ACCESS_KEY` / `TF_BLOB_SECRET_KEY` — credentials for the durable-workspace object store. The compose stack feeds these to the bundled `minio` service's root user *and* to TF's S3 client — one identity, one input, so they can't drift. **Generate each with `openssl rand -hex 32`** (access key must be ≥3 chars, secret ≥8 — a 64-char hex clears both). The endpoint (`http://minio:9000`), bucket (`tf-workspaces`), and region (`us-east-1`) all default in `docker-compose.yml`; leave them unset for self-host. See [Durable workspace storage](#durable-workspace-storage-minio) below for the BYO / hosted-Supabase path.
 - `TF_ATLASSIAN_CLIENT_ID` / `TF_ATLASSIAN_CLIENT_SECRET` — *(optional)* the first-party Atlassian OAuth (3LO) app TF uses for one-click "Connect Jira" against Cloud orgs. Deployment config in the same class as the GoTrue signing material — they live here in `.env`, **not** the keychain/vault, because TF registers one first-party Atlassian app for the whole deployment. Leave unset to run without a hosted Atlassian app; each org can then supply its own from **Workspace Settings → Atlassian OAuth app** (a per-org override always wins over this default). Register the app in the [Atlassian developer console](https://developer.atlassian.com/console/myapps/) and set its callback (redirect) URL to `${TF_PUBLIC_URL}/api/orgs/{org}/jira/connect/callback`.
+- `TF_TRUSTED_PROXY_CIDR` / `TF_CAPTURE_CLIENT_IP` — *(recommended when behind a proxy)* govern how TF derives the client IP it records on sessions, on the SOC2 auth audit log, and keys the pre-auth rate limiter by. **If TF sits behind a load balancer or CDN, set `TF_TRUSTED_PROXY_CIDR`** — otherwise `X-Forwarded-For` is ignored and every request is attributed to the LB. See [Client IP & trusted proxies](#client-ip--trusted-proxies) below for the full rationale and per-topology guidance.
 
 > **Rotating passwords:** edit `.env` and re-run `docker compose up -d`. A short-lived `postgres-postinit` sidecar runs on every boot and reapplies `ALTER USER` for the non-superuser roles (`supabase_auth_admin`, `authenticator`), so password changes propagate without wiping the data volume. Rotating `POSTGRES_PASSWORD` itself requires more care — that's the superuser's password and Postgres only honors the env var on first init, so changing it means `ALTER USER postgres WITH PASSWORD '...'` by hand inside the running container.
 
@@ -99,6 +100,45 @@ echo "$TOKEN" | TF_GOTRUE_JWKS_URL=http://localhost:9999/.well-known/jwks.json \
 ```
 
 You should see the parsed claims printed as JSON (`Subject`, `Email`, `Provider`, etc.). This requires a local TF binary on the host — useful when the in-container TF service is misbehaving and you want to isolate the Verifier path from the rest of the server.
+
+## Client IP & trusted proxies
+
+TF records the client IP in three places, all fed by one extractor:
+
+1. `sessions.ip_addr` — session forensics.
+2. `auth_events.ip_address` — the SOC2 authentication audit log.
+3. The pre-auth **per-IP rate limiter** — a brute-force / abuse control. A spoofable key is a real security hole: rotate fake values to evade the per-IP cap, or stamp a victim's IP to get them throttled.
+
+`X-Forwarded-For` is *appended* by each proxy in the path, never overwritten — so its leftmost entry is whatever the original caller typed, i.e. attacker-controlled. TF therefore trusts `X-Forwarded-For` **only** when the request's direct peer is a proxy you've declared trusted, and then walks the header right-to-left (newest hop first), skipping trusted hops, to the first untrusted address — the real client.
+
+Configure it with two env vars (multi mode only — local mode is single-user and ignores them):
+
+- **`TF_TRUSTED_PROXY_CIDR`** — comma-separated CIDRs of your trusted upstream proxies (a bare IP is accepted, treated as a `/32` or `/128`). Determines which direct peers unlock `X-Forwarded-For`.
+- **`TF_CAPTURE_CLIENT_IP`** — boolean, default `true`. Set `false` to capture no IP at all (store `NULL`), for data-minimization-conscious deployments.
+
+| Deployment | Config | Result |
+| -- | -- | -- |
+| **SaaS / behind a stable edge** | `TF_TRUSTED_PROXY_CIDR` = LB/CDN egress range | accurate, unspoofable |
+| **Self-host, directly exposed** | leave unset | `RemoteAddr` = real peer, unspoofable |
+| **Self-host, behind your own LB** | their proxy CIDR(s) | accurate, unspoofable |
+| **Privacy-sensitive** | `TF_CAPTURE_CLIENT_IP=false` (or `TF_TRUSTED_PROXY_CIDR=none`) | `NULL` IP |
+
+**Secure default:** with `TF_TRUSTED_PROXY_CIDR` unset, `X-Forwarded-For` is ignored entirely and the client IP is the direct peer (`RemoteAddr`). That's never spoofable — but if TF actually *is* behind a proxy, every request collapses onto the proxy's IP: the per-IP rate limiter becomes one global bucket (throttling everyone or no one) and the audit log records the LB, not the client. So **any proxied deployment must set `TF_TRUSTED_PROXY_CIDR`** for the limiter and audit IPs to work per-client. Multi mode logs a loud warning at boot when it's unset.
+
+**Edge header hygiene (complement).** Where you control the edge, configure the outermost proxy to *strip* any inbound `X-Forwarded-For` before appending its own, so a client can't pre-seed the chain. Examples:
+
+```nginx
+# nginx: replace (don't append) — sets XFF to just the real peer
+proxy_set_header X-Forwarded-For $remote_addr;
+```
+
+```
+# HAProxy: option forwardfor already overwrites by default;
+# be explicit if you've customized it:
+http-request set-header X-Forwarded-For %[src]
+```
+
+The right-to-left walk is sound even without the strip (a pre-seeded value sits to the left of the address your first trusted proxy appends, so it's never reached) — but stripping at the edge is defense-in-depth and keeps the header honest for anything else that reads it. This mirrors the outbound `X-Forwarded-For` stripping TF already does in its git/LLM proxies.
 
 ## Durable workspace storage (MinIO)
 

@@ -1437,26 +1437,112 @@ func isHTTPS(r *http.Request) bool {
 	return r.Header.Get("X-Forwarded-Proto") == "https"
 }
 
-// clientIP best-effort extracts the requesting IP. Stored on the session
-// row as `inet`, so the return value must be a valid Postgres `inet`
-// literal — bracketed IPv6 (`[2001:db8::1]`) gets rejected.
+// clientIP best-effort extracts the requesting client's IP for the three
+// consumers that key on it — the session forensics row (sessions.ip_addr),
+// the SOC2 auth audit log (auth_events.ip_address), and the pre-auth
+// per-IP rate limiter. The return value is stored as Postgres `inet`, so it
+// must be a valid `inet` literal (or "" → NULL); net.SplitHostPort unwraps
+// bracketed IPv6 and drops the port so a value like `[2001:db8::1]` can't
+// fail the `::inet` cast and 500 the OAuth callback.
 //
-// IPv6 `RemoteAddr` is the `[addr]:port` form; naive last-colon stripping
-// returns `[addr]` with brackets intact, which then fails Postgres'
-// `::inet` cast and 500s the OAuth callback. net.SplitHostPort handles
-// both v4 + bracketed v6 correctly and unwraps the brackets.
+// X-Forwarded-For is client-*appended* (each proxy adds a hop, none
+// overwrites), so its leftmost entry is attacker-controlled. It is trusted
+// ONLY when the direct peer is a configured trusted proxy. The policy
+// (TFAC-488; configured via runmode / TF_TRUSTED_PROXY_CIDR +
+// TF_CAPTURE_CLIENT_IP):
+//
+//   - Capture disabled → "" (the IP columns store NULL).
+//   - No trusted-proxy allowlist, or the peer is not in it (direct
+//     exposure) → RemoteAddr only; XFF ignored (forgeable). Secure
+//     default: never returns an attacker-chosen value.
+//   - Peer IS a trusted proxy → walk XFF right→left, skip trusted hops,
+//     return the first untrusted entry (the real client). If every entry
+//     is trusted (or XFF is absent), fall back to the peer — degraded but
+//     safe.
 func clientIP(r *http.Request) string {
-	if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
-		if i := strings.Index(xf, ","); i >= 0 {
-			return strings.TrimSpace(xf[:i])
-		}
-		return strings.TrimSpace(xf)
+	if !runmode.CaptureClientIP() {
+		return ""
 	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+
+	peer := remoteHost(r.RemoteAddr)
+
+	trusted := runmode.TrustedProxies()
+	if len(trusted) == 0 || !ipInCIDRs(peer, trusted) {
+		// No allowlist, or the direct peer isn't a trusted proxy: its XFF
+		// is forgeable, so ignore it and attribute the peer itself.
+		return peer
+	}
+
+	// Peer is a trusted proxy. XFF is append-order (leftmost = original
+	// caller, rightmost = nearest hop), so walking right→left past the
+	// trusted hops lands on the first IP the chain didn't vouch for — the
+	// real client. Anything the caller pre-seeded sits to the LEFT of the
+	// address the first trusted proxy appended, so it's never reached.
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			entry := normalizeXFFEntry(parts[i])
+			if entry == "" {
+				continue // empty / unparseable hop — skip
+			}
+			if ipInCIDRs(entry, trusted) {
+				continue // another trusted proxy in the chain
+			}
+			return entry // first untrusted from the right → the client
+		}
+	}
+
+	// Every forwarded hop was trusted (or none present): the closest
+	// attributable address is the trusted peer.
+	return peer
+}
+
+// remoteHost extracts the host portion of a RemoteAddr, unwrapping a
+// bracketed IPv6 and dropping the port. Preserves the historical fallback:
+// when no port is present (degenerate — RemoteAddr almost always carries
+// one in HTTP), the value is returned as-is so a downstream inet cast
+// surfaces a clear error rather than a silent empty.
+func remoteHost(remoteAddr string) string {
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		return host
 	}
-	// No port present (rare — RemoteAddr almost always carries one in
-	// HTTP). Return as-is and let the inet cast either accept it or
-	// fail downstream with a clear error.
-	return r.RemoteAddr
+	return remoteAddr
+}
+
+// normalizeXFFEntry trims one X-Forwarded-For element to a canonical bare-IP
+// string, dropping any port some proxies append and unwrapping a bracketed
+// IPv6. Returns "" for an empty or non-IP token so the right→left walk skips
+// it rather than treating garbage as a client.
+func normalizeXFFEntry(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		s = host // had a port (incl. bracketed "[v6]:port")
+	} else {
+		s = strings.TrimPrefix(strings.TrimSuffix(s, "]"), "[") // bare "[v6]"
+	}
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
+// ipInCIDRs reports whether ipStr parses to an IP contained in any of nets.
+// A non-IP string is never in the set. Cross-family pairs (a v4 IP against a
+// v6 CIDR, or vice versa) never match, since net.IPNet.Contains compares
+// equal-length addresses.
+func ipInCIDRs(ipStr string, nets []*net.IPNet) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

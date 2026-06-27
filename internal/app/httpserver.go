@@ -69,6 +69,24 @@ func (a *App) wireAuth(ctx context.Context) error {
 		return err
 	}
 
+	// Trusted-proxy / client-IP capture policy (TFAC-488). Parsed once here
+	// so clientIP — which feeds sessions.ip_addr, the SOC2 auth audit log,
+	// and the pre-auth per-IP rate limiter — extracts a non-spoofable client
+	// IP. A malformed CIDR / non-boolean toggle fails boot loudly rather than
+	// silently degrading a security-relevant default.
+	if err := runmode.InitClientIPPolicyFromEnv(); err != nil {
+		return err
+	}
+	// Loud warning when we capture IPs but have no trusted-proxy allowlist:
+	// X-Forwarded-For is then ignored and every request is attributed to its
+	// direct peer. Correct for a directly-exposed self-host (ignore the
+	// line); a misconfiguration behind a load balancer / CDN, where it
+	// collapses the per-IP rate limiter to a single global bucket and records
+	// the LB's IP in the audit log instead of the client's.
+	if runmode.CaptureClientIP() && !runmode.TrustedProxyConfigured() {
+		authLog.Warn("TF_TRUSTED_PROXY_CIDR is unset: X-Forwarded-For is ignored and client IP is taken from the direct peer (RemoteAddr). Correct if TF is directly exposed; if it runs behind a load balancer or CDN, set TF_TRUSTED_PROXY_CIDR to the proxy egress CIDR(s) so the per-IP rate limiter and audit logs reflect the real client — and configure the edge to strip inbound X-Forwarded-For")
+	}
+
 	verifier, err := newVerifierWithRetry(
 		ctx,
 		os.Getenv("TF_GOTRUE_JWKS_URL"),

@@ -70,3 +70,29 @@ func SetOrgCreationEnabledForTest(t TestT, enabled bool) {
 		orgCreationMu.Unlock()
 	})
 }
+
+// SetClientIPPolicyForTest configures the trusted-proxy allowlist + client-IP
+// capture toggle for the duration of t, restoring prior state via t.Cleanup.
+// trustedCIDR uses the same syntax as TF_TRUSTED_PROXY_CIDR (comma-separated
+// CIDRs/IPs, "none", or empty); capture maps to TF_CAPTURE_CLIENT_IP. Fatals
+// on a parse error. Same caveats as SetForTest — data-race-free but not safe
+// for overlapping parallel tests that mutate the same globals. Lives here (not
+// a _test.go file) so internal/server tests can drive clientIP's policy.
+func SetClientIPPolicyForTest(t TestT, trustedCIDR string, capture bool) {
+	t.Helper()
+	nets, none, err := ParseTrustedProxyCIDR(trustedCIDR)
+	if err != nil {
+		t.Fatalf("runmode.SetClientIPPolicyForTest: parse %q: %v", trustedCIDR, err)
+	}
+	clientIPMu.Lock()
+	prevNets, prevCapture, prevConfigured := trustedProxies, captureClientIP, trustedProxyConfigured
+	trustedProxies = nets
+	captureClientIP = capture && !none
+	trustedProxyConfigured = len(nets) > 0
+	clientIPMu.Unlock()
+	t.Cleanup(func() {
+		clientIPMu.Lock()
+		trustedProxies, captureClientIP, trustedProxyConfigured = prevNets, prevCapture, prevConfigured
+		clientIPMu.Unlock()
+	})
+}

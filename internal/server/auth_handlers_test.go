@@ -1182,34 +1182,72 @@ func TestNormalizeReturnTo(t *testing.T) {
 	}
 }
 
-// clientIP must produce a value Postgres `inet` accepts. IPv6
-// `RemoteAddr` is `[addr]:port`; naive last-colon stripping returns
-// `[addr]` with brackets, which fails the cast and 500s the OAuth
-// callback. net.SplitHostPort handles both v4 + bracketed v6.
+// clientIP must (a) produce a value Postgres `inet` accepts — IPv6
+// `RemoteAddr` is `[addr]:port`; naive last-colon stripping leaves brackets
+// that fail the cast and 500 the OAuth callback, so net.SplitHostPort
+// unwraps both v4 + bracketed v6 — and (b) be non-spoofable: X-Forwarded-For
+// is honored only behind a configured trusted proxy, via a right→left walk
+// (TFAC-488). The cases cover the secure default, spoof attempts, multi-hop
+// chains, IPv6, and the capture opt-out.
 func TestClientIP(t *testing.T) {
 	cases := []struct {
-		name       string
-		remoteAddr string
-		xff        string
-		want       string
+		name        string
+		trustedCIDR string // TF_TRUSTED_PROXY_CIDR
+		capture     bool   // TF_CAPTURE_CLIENT_IP
+		remoteAddr  string
+		xff         string
+		want        string
 	}{
-		{"ipv4 with port", "192.0.2.1:54321", "", "192.0.2.1"},
-		{"ipv6 with port (bracketed)", "[2001:db8::1]:54321", "", "2001:db8::1"},
-		{"ipv6 loopback", "[::1]:8080", "", "::1"},
-		{"ipv4 no port (degenerate)", "192.0.2.1", "", "192.0.2.1"},
-		{"xff single ip", "192.0.2.1:54321", "203.0.113.5", "203.0.113.5"},
-		{"xff chain takes first", "192.0.2.1:54321", "203.0.113.5, 198.51.100.7", "203.0.113.5"},
-		{"xff ipv6", "192.0.2.1:54321", "2001:db8::abc", "2001:db8::abc"},
+		// --- secure default: no trusted-proxy allowlist, XFF always ignored ---
+		{"default ipv4 with port", "", true, "192.0.2.1:54321", "", "192.0.2.1"},
+		{"default ipv6 with port (bracketed)", "", true, "[2001:db8::1]:54321", "", "2001:db8::1"},
+		{"default ipv6 loopback", "", true, "[::1]:8080", "", "::1"},
+		{"default ipv4 no port (degenerate)", "", true, "192.0.2.1", "", "192.0.2.1"},
+		// Spoof attempt against a directly-exposed deployment: XFF is forged,
+		// must be ignored, the real peer wins.
+		{"default ignores spoofed xff", "", true, "192.0.2.1:54321", "9.9.9.9", "192.0.2.1"},
+		{"default ignores spoofed xff chain", "", true, "192.0.2.1:54321", "9.9.9.9, 8.8.8.8", "192.0.2.1"},
+
+		// --- behind a trusted proxy: walk XFF right→left ---
+		{"proxy single client", "10.0.0.0/8", true, "10.0.0.1:5000", "203.0.113.5", "203.0.113.5"},
+		// Internal hop (health check / internal call) appended after the
+		// client — skipped, client recovered.
+		{"proxy multi-hop skips trusted", "10.0.0.0/8", true, "10.0.0.1:5000", "203.0.113.5, 10.0.0.9", "203.0.113.5"},
+		// Spoof through the proxy: the forged value sits LEFT of the address
+		// the proxy appended, so the right→left walk never reaches it.
+		{"proxy ignores pre-seeded spoof", "10.0.0.0/8", true, "10.0.0.1:5000", "9.9.9.9, 203.0.113.5", "203.0.113.5"},
+		// All XFF entries are trusted hops → fall back to the peer.
+		{"proxy all-trusted falls back to peer", "10.0.0.0/8", true, "10.0.0.1:5000", "10.0.0.5, 10.0.0.9", "10.0.0.1"},
+		// Peer is trusted but no XFF → peer (degraded but safe).
+		{"proxy no xff falls back to peer", "10.0.0.0/8", true, "10.0.0.1:5000", "", "10.0.0.1"},
+		// Allowlist set, but the peer is NOT in it (direct exposure): XFF
+		// still ignored — only a trusted peer unlocks the header.
+		{"untrusted peer ignores xff", "10.0.0.0/8", true, "192.0.2.1:54321", "203.0.113.5", "192.0.2.1"},
+		// IPv6 client behind a trusted proxy.
+		{"proxy ipv6 client", "10.0.0.0/8", true, "10.0.0.1:5000", "2001:db8::abc", "2001:db8::abc"},
+		// Some proxies append "ip:port" in XFF — the port is stripped.
+		{"proxy strips xff port", "10.0.0.0/8", true, "10.0.0.1:5000", "203.0.113.5:9999", "203.0.113.5"},
+		// IPv6 trusted proxy + IPv6 CIDR.
+		{"proxy ipv6 peer ipv6 cidr", "2001:db8::/32", true, "[2001:db8::1]:5000", "203.0.113.5", "203.0.113.5"},
+		// Bare-IP allowlist entry (promoted to /32).
+		{"proxy bare-ip allowlist", "10.0.0.1", true, "10.0.0.1:5000", "203.0.113.5", "203.0.113.5"},
+
+		// --- capture opt-out → "" (stored as NULL) ---
+		{"capture off returns empty", "10.0.0.0/8", false, "10.0.0.1:5000", "203.0.113.5", ""},
+		{"capture off direct returns empty", "", false, "192.0.2.1:54321", "", ""},
+		{"capture off via none sentinel", "none", true, "10.0.0.1:5000", "203.0.113.5", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetClientIPPolicyForTest(t, tc.trustedCIDR, tc.capture)
 			req := httptest.NewRequest("GET", "/", nil)
 			req.RemoteAddr = tc.remoteAddr
 			if tc.xff != "" {
 				req.Header.Set("X-Forwarded-For", tc.xff)
 			}
 			if got := clientIP(req); got != tc.want {
-				t.Errorf("clientIP(%q, xff=%q) = %q, want %q", tc.remoteAddr, tc.xff, got, tc.want)
+				t.Errorf("clientIP(remote=%q, xff=%q, trusted=%q, capture=%v) = %q, want %q",
+					tc.remoteAddr, tc.xff, tc.trustedCIDR, tc.capture, got, tc.want)
 			}
 		})
 	}

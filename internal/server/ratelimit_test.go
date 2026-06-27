@@ -151,6 +151,11 @@ func TestPreAuthRateLimit_LocalModeNoOp(t *testing.T) {
 // cap is keyed per IP (a different client is unaffected).
 func TestPreAuthRateLimit_MultiMode429(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
+	// Trust httptest's default RemoteAddr (192.0.2.1:1234) as the proxy so
+	// clientIP honors the per-request X-Forwarded-For and the cap keys per
+	// client. Without a trusted proxy, XFF is ignored and every request
+	// collapses onto the single peer IP (the spoof-resistance default).
+	runmode.SetClientIPPolicyForTest(t, "192.0.2.0/24", true)
 
 	clk := time.Now()
 	s := &Server{preAuthLimiter: frozenLimiter(1.0, 3.0, time.Minute, &clk)}

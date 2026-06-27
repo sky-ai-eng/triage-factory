@@ -24,6 +24,7 @@ package runmode
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -241,5 +242,160 @@ func ParsePreventOrgCreation(s string) (bool, error) {
 		return true, nil
 	default:
 		return false, fmt.Errorf("unknown TF_PREVENT_ORG_CREATION=%q (want a boolean, e.g. true or false)", s)
+	}
+}
+
+// Trusted-proxy allowlist + client-IP capture policy (TFAC-488).
+//
+// clientIP (internal/server) feeds three consumers — the session
+// forensics row (sessions.ip_addr), the SOC2 authentication audit log
+// (auth_events.ip_address), and the pre-auth per-IP rate limiter (a
+// security control). X-Forwarded-For is *appended* by each proxy, never
+// overwritten, so its leftmost entry is whatever the original caller
+// typed — fully spoofable. Two env knobs make the extraction sound across
+// both deployment shapes (a managed SaaS edge we control; an arbitrary
+// self-host topology we don't):
+//
+//   - TF_TRUSTED_PROXY_CIDR — comma-separated CIDRs of the trusted
+//     upstream proxies (a bare IP is accepted, treated as a /32 or /128).
+//     When the direct peer (RemoteAddr) is in this set, clientIP walks XFF
+//     right→left, skips trusted hops, and takes the first untrusted entry
+//     as the client. When the peer is NOT in it (direct exposure), XFF is
+//     ignored — it's forgeable — and RemoteAddr wins. Unset → RemoteAddr
+//     only, XFF always ignored: the secure default, never spoofable (worst
+//     case records the LB IP, never an attacker-chosen one). A CIDR
+//     allowlist rather than a hop count because chain length varies
+//     (health checks, internal calls, websocket upgrades). The literal
+//     "none" (case-insensitive) is a synonym for TF_CAPTURE_CLIENT_IP=false.
+//
+//   - TF_CAPTURE_CLIENT_IP — boolean, default true. false opts out of IP
+//     capture entirely: clientIP returns "" so sessions.ip_addr /
+//     auth_events.ip_address store NULL (the nullable schema already
+//     supports it), for data-minimization-conscious self-hosts. The per-IP
+//     rate limiter then collapses to a single global bucket — an accepted
+//     tradeoff of the opt-out.
+//
+// Read once at startup (multi-mode wireAuth) and never reassigned outside
+// tests. Local mode never inits these — it's N=1 and clientIP's three
+// consumers are all multi-mode — so the safe defaults (capture on, no
+// trusted proxies → RemoteAddr only) apply and are moot.
+var (
+	trustedProxies         []*net.IPNet
+	captureClientIP        = true
+	trustedProxyConfigured bool
+	clientIPMu             sync.RWMutex
+)
+
+// TrustedProxies returns the parsed trusted-proxy CIDR allowlist. The
+// returned slice is the shared, init-time-frozen value — callers read it
+// (clientIP iterates it per request) and must not mutate it. Safe from any
+// goroutine.
+func TrustedProxies() []*net.IPNet {
+	clientIPMu.RLock()
+	defer clientIPMu.RUnlock()
+	return trustedProxies
+}
+
+// CaptureClientIP reports whether the deployment captures client IPs at
+// all. false (TF_CAPTURE_CLIENT_IP=false, or TF_TRUSTED_PROXY_CIDR=none)
+// makes clientIP return "" so the IP columns store NULL. Defaults to true
+// even before init runs, so local mode and boot-time callers get the
+// permissive default. Safe from any goroutine.
+func CaptureClientIP() bool {
+	clientIPMu.RLock()
+	defer clientIPMu.RUnlock()
+	return captureClientIP
+}
+
+// TrustedProxyConfigured reports whether TF_TRUSTED_PROXY_CIDR named at
+// least one CIDR. Used by the multi-mode startup warning: capturing IPs
+// with no allowlist means X-Forwarded-For is ignored and every request is
+// attributed to its direct peer. Safe from any goroutine.
+func TrustedProxyConfigured() bool {
+	clientIPMu.RLock()
+	defer clientIPMu.RUnlock()
+	return trustedProxyConfigured
+}
+
+// InitClientIPPolicyFromEnv parses TF_TRUSTED_PROXY_CIDR + TF_CAPTURE_CLIENT_IP
+// and installs the process-wide client-IP policy. A malformed CIDR or
+// non-boolean toggle returns an error so a typo in .env fails boot loudly
+// rather than silently degrading to the wrong (and security-relevant)
+// default. Called once from the multi-mode auth-wiring path.
+func InitClientIPPolicyFromEnv() error {
+	nets, none, err := ParseTrustedProxyCIDR(os.Getenv("TF_TRUSTED_PROXY_CIDR"))
+	if err != nil {
+		return err
+	}
+	capture, err := ParseCaptureClientIP(os.Getenv("TF_CAPTURE_CLIENT_IP"))
+	if err != nil {
+		return err
+	}
+	clientIPMu.Lock()
+	defer clientIPMu.Unlock()
+	// Either kill switch ("none" sentinel or an explicit false) disables
+	// capture; the CIDR list is moot once capture is off but stored anyway.
+	captureClientIP = capture && !none
+	trustedProxies = nets
+	trustedProxyConfigured = len(nets) > 0
+	return nil
+}
+
+// ParseTrustedProxyCIDR parses a TF_TRUSTED_PROXY_CIDR value into the
+// trusted-proxy allowlist. Empty → (nil, false, nil): no allowlist. The
+// literal "none" (case-insensitive, trimmed) → (nil, true, nil): the
+// capture kill switch. Otherwise each comma-separated entry is parsed as a
+// CIDR, or as a bare IP (promoted to a /32 or /128 host route); an
+// unparseable entry errors. A pure function so it's unit-testable without
+// touching the environment.
+func ParseTrustedProxyCIDR(s string) (nets []*net.IPNet, none bool, err error) {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return nil, false, nil
+	}
+	if strings.EqualFold(trimmed, "none") {
+		return nil, true, nil
+	}
+	for _, raw := range strings.Split(trimmed, ",") {
+		part := strings.TrimSpace(raw)
+		if part == "" {
+			continue
+		}
+		if _, ipnet, perr := net.ParseCIDR(part); perr == nil {
+			nets = append(nets, ipnet)
+			continue
+		}
+		// Bare IP → host route. Re-parse through ParseCIDR with an explicit
+		// full-length mask so the resulting *net.IPNet is byte-identical to
+		// a CIDR parse (4-byte v4 / 16-byte v6), which net.IPNet.Contains
+		// relies on for correct matching.
+		if ip := net.ParseIP(part); ip != nil {
+			suffix := "/32"
+			if ip.To4() == nil {
+				suffix = "/128"
+			}
+			if _, ipnet, perr := net.ParseCIDR(part + suffix); perr == nil {
+				nets = append(nets, ipnet)
+				continue
+			}
+		}
+		return nil, false, fmt.Errorf("invalid TF_TRUSTED_PROXY_CIDR entry %q (want a CIDR like 10.0.0.0/8 or an IP)", part)
+	}
+	return nets, false, nil
+}
+
+// ParseCaptureClientIP parses a TF_CAPTURE_CLIENT_IP env-var string into a
+// bool. Empty maps to true (capture on — the default), the inverse of
+// ParsePreventOrgCreation's default. Accepts the usual boolean spellings
+// (case-insensitive, whitespace-trimmed); anything else errors so a typo
+// surfaces loudly at boot.
+func ParseCaptureClientIP(s string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "1", "true", "t", "yes", "y", "on":
+		return true, nil
+	case "0", "false", "f", "no", "n", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unknown TF_CAPTURE_CLIENT_IP=%q (want a boolean, e.g. true or false)", s)
 	}
 }

@@ -53,12 +53,16 @@ const (
 // shared/distributed store (Redis, etc.) is only needed once TF runs
 // multiple replicas behind a balancer, and is deliberately deferred.
 //
-// Keyed on the value clientIP returns, which prefers the proxy-forwarded
-// header (X-Forwarded-For). That makes the cap only as trustworthy as the
-// deployment's proxy: a caller able to spoof X-Forwarded-For can rotate
-// the key and slip the limiter. The hosted deployment terminates at a
-// trusted proxy that sets the header, and the edge/WAF layer (out of
-// scope) is the spoofing-resistant complement.
+// Keyed on the value clientIP returns. Since TFAC-488 that is non-spoofable
+// by construction: X-Forwarded-For is honored only when the direct peer is a
+// configured trusted proxy (TF_TRUSTED_PROXY_CIDR), via a right→left walk;
+// otherwise the cap keys on the real peer (RemoteAddr). The one caveat is a
+// *proxied-but-unconfigured* deployment — XFF ignored, every request keyed on
+// the LB IP — which collapses this to a single global bucket; the multi-mode
+// startup warning flags exactly that. With capture disabled
+// (TF_CAPTURE_CLIENT_IP=false) clientIP returns "" and the limiter degrades to
+// one global bucket by design. The edge/WAF layer (out of scope) remains the
+// spoofing-resistant complement.
 type ipRateLimiter struct {
 	rate  float64       // tokens added per second (sustained ceiling)
 	burst float64       // bucket capacity (max instantaneous flurry)
