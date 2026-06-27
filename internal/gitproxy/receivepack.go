@@ -299,7 +299,10 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 	orig := r.Body
 	r.Body = &reconstructedBody{r: io.MultiReader(bytes.NewReader(block), orig), c: orig}
 
-	repoPath := receivePackRepoPath(r.URL.Path)
+	// owner/repo were already parsed + charset-validated by parseGitPath, so use
+	// them directly rather than re-deriving from the URL (receivePackRepoPath
+	// stays the legacy observe-path's helper).
+	repoPath := owner + "/" + repo
 	sr := &statusRecorder{ResponseWriter: w}
 	s.proxy.ServeHTTP(sr, r)
 

@@ -552,6 +552,15 @@ func (s *Server) installationToken(ctx context.Context, owner, repo string) (Tok
 // tokenStale reports whether a cached token needs re-minting: true when it is
 // within refreshThreshold of its expiry. A zero ExpiresAt (a PAT — no tracked
 // lifetime) is never stale, so a PAT source mints exactly once per repo.
+//
+// Consequence worth knowing: if the TokenSource degraded an App org to its PAT
+// for a repo (a transient scoped-mint failure — see github resolver's
+// tier1ScopedToken), that zero-expiry PAT is cached here and never re-tried
+// for the rest of the run, so Layer-1 scoping stays bypassed for that (run,
+// repo) pair even after the App recovers. The impact is bounded by Layers 2/3
+// + the path-shape allowlist (the PAT is only ever injected on the one
+// already-authorized repo, git-only); it is the price of the no-refresh-storm
+// caching that a real PAT org depends on.
 func tokenStale(tok Token, now time.Time) bool {
 	if tok.ExpiresAt.IsZero() {
 		return false

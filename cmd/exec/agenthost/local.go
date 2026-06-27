@@ -817,19 +817,23 @@ func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) 
 // a repo its team tracks AND that it has materialized in run_worktrees. Same
 // predicate as the git proxy's Authorize (run_worktrees holds the run's task
 // repo too — recorded at setup — and any workspace-add'd repo). A partial test
-// wiring (nil stores) skips the gate. A denial records a git_denied audit row
-// and returns a typed error the agent sees.
+// wiring (nil stores) skips the gate. Both a hard deny and a fail-closed
+// backend error record a git_denied audit row before returning, so a transient
+// DB blip during a denied gh op still leaves an audit trail — symmetric with
+// the proxy's "authorize-error" path.
 func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) error {
 	if c.stores.TeamGitHubRepos == nil || c.stores.RunWorktrees == nil {
 		return nil
 	}
 	tracks, err := c.stores.TeamGitHubRepos.TracksRepoSystem(ctx, c.info.TeamID, owner, repo)
 	if err != nil {
+		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, err)
 	}
 	if tracks {
 		rows, lerr := c.stores.RunWorktrees.ListSystem(ctx, c.info.OrgID, c.info.RunID)
 		if lerr != nil {
+			c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 			return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, lerr)
 		}
 		repoID := owner + "/" + repo

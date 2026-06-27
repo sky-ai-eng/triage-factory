@@ -130,34 +130,38 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				// the cold path).
 				return
 			}
-			// Capture the RemoveAt error rather than discarding it.
-			// If the worktree dir failed to remove, the worktree is
-			// still on disk and still attached to the bare's branch
-			// tracking — stripping the per-PR config out from under a
-			// surviving checkout would break its push/pull. Skip
-			// cleanup in that case; the next bootstrap sweep will
-			// reclaim the orphan once the worktree is gone.
+			// Capture the RemoveAt error rather than discarding it. If the
+			// worktree dir failed to remove, the worktree is still on disk and
+			// still attached to the bare's branch tracking — stripping the
+			// per-PR config out from under a surviving checkout would break its
+			// push/pull, so that cleanup is skipped below; the next bootstrap
+			// sweep reclaims the orphan once the dir is gone.
 			rmErr := worktree.RemoveAt(cfg.wtPath, runID)
 			if rmErr != nil {
 				delegateLog.Warn("worktree remove failed; skipping per-PR config cleanup", "run", runID, "error", rmErr)
-				return
-			}
-			// CleanupPRConfig uses a detached internal context so
-			// cancellation of the agent's ctx (timeout, server
-			// shutdown) doesn't short-circuit the cleanup.
-			if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
-				worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.headRef, cfg.prNumber)
 			}
 			// Drop the eager worktree's run_worktrees row (recorded at setup so
-			// the least-privilege gates could authorize the task repo). Past the
-			// parked/blueprint early-returns above, so a resume or chain step
-			// keeps the row; only a real terminal teardown removes it.
-			// Best-effort — a leaked terminal row is harmless (run-scoped, never
-			// collides a future run).
+			// the least-privilege gates could authorize the task repo) —
+			// regardless of the RemoveAt outcome, since the row is run-scoped
+			// metadata, not the worktree, and a lingering dir doesn't need its
+			// ledger entry. Past the parked/blueprint early-returns above, so a
+			// resume or chain step keeps the row; only a real terminal teardown
+			// removes it. Best-effort: a leaked row is harmless (run-scoped,
+			// never collides a future run).
 			if s.runWorktrees != nil && cfg.owner != "" && cfg.repo != "" {
 				if delErr := s.runWorktrees.DeleteByRepoSystem(context.Background(), orgID, runID, cfg.owner+"/"+cfg.repo); delErr != nil {
 					delegateLog.Warn("delete eager worktree run_worktrees row failed", "run", runID, "repo", cfg.owner+"/"+cfg.repo, "error", delErr)
 				}
+			}
+			// Per-PR config cleanup only when the worktree is actually gone (see
+			// above). CleanupPRConfig uses a detached internal context so
+			// cancellation of the agent's ctx (timeout, server shutdown) doesn't
+			// short-circuit it.
+			if rmErr != nil {
+				return
+			}
+			if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
+				worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.headRef, cfg.prNumber)
 			}
 		}()
 	} else if cfg.runRoot != "" {

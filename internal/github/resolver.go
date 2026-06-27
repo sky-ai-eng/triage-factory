@@ -494,6 +494,17 @@ func (r *resolver) tier1ScopedToken(ctx context.Context, orgID, owner, repo, bas
 		// A 422 here means owner/repo isn't in this installation's selected
 		// set; any other error is a transient/mint failure. Either way fall
 		// through to the PAT, which may still reach the repo.
+		//
+		// Trade-off: a TRANSIENT failure (a 5xx / DNS blip) also degrades to the
+		// PAT, and the gitproxy caches that PAT for the (run, repo) with a zero
+		// expiry (tokenStale never re-mints — see gitproxy.tokenStale), so Layer-1
+		// scoping is bypassed for that pair for the rest of the run even after the
+		// App recovers. Accepted: the impact is bounded — the proxy only injects
+		// this token on requests to the one repo Layer 2 already authorized, and
+		// the path-shape allowlist keeps it git-only, so the PAT's extra breadth
+		// is unreachable; Layer 2 (repo gate) + Layer 3 (ref allowlist) are
+		// credential-agnostic and still hold. Degrading-to-success beats failing a
+		// legitimate run's push on a transient blip.
 		ghResolverLog.Warn("mint scoped installation token failed; falling back to PAT",
 			"org", orgID, "owner", owner, "repo", repo, "installation", inst.InstallationID, "error", err)
 		return githubapp.Token{}, false
