@@ -273,7 +273,7 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 	if !sawFlush {
 		// The command list didn't terminate within the cap — we can't see all
 		// the refs being pushed, so fail closed rather than forward blind.
-		s.recordDenial(r.Context(), DeniedGitOp{Owner: owner, Repo: repo, Op: gitOpPush, Reason: "command-block-too-large"})
+		s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: gitOpPush, Reason: "command-block-too-large"})
 		http.Error(w, "gitproxy: receive-pack command block too large", http.StatusForbidden)
 		return
 	}
@@ -282,11 +282,11 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 	for _, c := range parseGateCommands(block) {
 		switch {
 		case c.isDelete:
-			s.recordDenial(r.Context(), DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: "ref-delete"})
+			s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: "ref-delete"})
 			http.Error(w, "gitproxy: ref delete not allowed", http.StatusForbidden)
 			return
 		case !allowed[c.ref]:
-			s.recordDenial(r.Context(), DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: "ref-not-allowed"})
+			s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: "ref-not-allowed"})
 			http.Error(w, "gitproxy: ref not allowed", http.StatusForbidden)
 			return
 		}

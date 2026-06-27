@@ -47,6 +47,13 @@ func TestParseGitPath(t *testing.T) {
 		{"traversal owner", http.MethodPost, "/../octo/git-receive-pack", "", "", "", false},
 		{"traversal repo", http.MethodPost, "/octo/..%2f/git-receive-pack", "", "", "", false},
 		{"dotdot segment", http.MethodGet, "/octo/re..po/info/refs", "", "", "", false},
+
+		// Off-charset segments are rejected (defense-in-depth): a surviving
+		// percent-escape, whitespace, or any byte outside [A-Za-z0-9._-].
+		{"percent-escape in repo", http.MethodGet, "/octo/re%2epo/info/refs", "", "", "", false},
+		{"percent-slash in owner", http.MethodGet, "/oc%2fto/repo/info/refs", "", "", "", false},
+		{"whitespace in owner", http.MethodGet, "/oc to/repo/info/refs", "", "", "", false},
+		{"at-sign in repo", http.MethodPost, "/octo/re@po/git-receive-pack", "", "", "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -236,9 +236,11 @@ type Config struct {
 	Authorize func(ctx context.Context, owner, repo string) (Decision, error)
 
 	// RecordDenial, when non-nil, is invoked once per denied operation (repo
-	// gate, ref gate, path-shape, or fail-closed) for the audit log.
-	// Best-effort; the proxy never blocks on it. Kept domain-free (DeniedGitOp
-	// is pure data) so gitproxy doesn't depend on the artifact/audit model.
+	// gate, ref gate, path-shape, or a fail-closed authorize error) for the
+	// audit log. The proxy calls it on a detached, bounded goroutine, so a slow
+	// sink never adds latency to the denial response; best-effort (a denial
+	// queued right before Shutdown may be dropped). Kept domain-free
+	// (DeniedGitOp is pure data) so gitproxy doesn't depend on the audit model.
 	RecordDenial func(ctx context.Context, denied DeniedGitOp)
 }
 
@@ -392,24 +394,28 @@ func (s *Server) Handler() http.Handler {
 		// GHES, where the host split that protects github.com doesn't exist.
 		owner, repo, op, ok := parseGitPath(r.Method, r.URL.Path)
 		if !ok {
-			s.recordDenial(r.Context(), DeniedGitOp{Op: gitOpPath, Reason: "non-git-path"})
+			s.recordDenial(DeniedGitOp{Op: gitOpPath, Reason: "non-git-path"})
 			http.Error(w, "gitproxy: non-git path", http.StatusForbidden)
 			return
 		}
 
 		// Live per-repo authorization. A nil Authorize is allow-all
 		// (loopback/test); in multi mode the wiring always sets it. A backend
-		// error is a 502 (the gate is up but its data source is broken — fail
-		// closed, don't forward); a !Allowed decision is a 403.
+		// error fails closed with a 502 (the gate is up but its data source is
+		// broken — don't forward); a !Allowed decision is a 403. Both are
+		// blocked git activity, so both leave an audit trail.
 		decision := Decision{Allowed: true}
 		if s.cfg.Authorize != nil {
 			d, err := s.cfg.Authorize(r.Context(), owner, repo)
 			if err != nil {
+				// An authz outage/misconfig blocks the op just as a hard deny
+				// does — record it so the audit trail isn't silent on outages.
+				s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: "authorize-error"})
 				http.Error(w, "gitproxy: authorization check failed", http.StatusBadGateway)
 				return
 			}
 			if !d.Allowed {
-				s.recordDenial(r.Context(), DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: "repo-not-authorized"})
+				s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: "repo-not-authorized"})
 				http.Error(w, "gitproxy: repo not authorized for this run", http.StatusForbidden)
 				return
 			}
@@ -451,13 +457,21 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
-// recordDenial invokes the audit hook for one denied operation, if wired.
-// Best-effort and non-blocking — never affects the response.
-func (s *Server) recordDenial(ctx context.Context, denied DeniedGitOp) {
+// recordDenial invokes the audit hook for one denied operation, if wired. The
+// hook runs on a detached, bounded goroutine (its own context, not the
+// request's, which is cancelled the moment the handler returns) so a slow sink
+// — the default writes a DB row — never adds latency to the denial response
+// sent to the per-run git client. Best-effort: a denial queued right before
+// Shutdown may be dropped, which is acceptable for an audit breadcrumb.
+func (s *Server) recordDenial(denied DeniedGitOp) {
 	if s.cfg.RecordDenial == nil {
 		return
 	}
-	s.cfg.RecordDenial(ctx, denied)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), recordPushTimeout)
+		defer cancel()
+		s.cfg.RecordDenial(ctx, denied)
+	}()
 }
 
 // tokenCtxKey is the request-context key used to hand the resolved

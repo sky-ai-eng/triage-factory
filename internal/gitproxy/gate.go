@@ -51,11 +51,26 @@ func parseGitPath(method, path string) (owner, repo, op string, ok bool) {
 	return "", "", "", false
 }
 
-// validRepoSeg accepts a single owner/repo path segment: non-empty, no
-// path-traversal. GitHub owner/repo names are [A-Za-z0-9._-]; the segment is
-// already slash-free (we split on "/"), so the only thing to reject beyond
-// emptiness is a ".."-bearing segment (a "repo..x" can't be a real GitHub name
-// and ".." would enable traversal).
+// validRepoSeg accepts a single owner/repo path segment: non-empty, drawn from
+// the GitHub owner/repo alphabet [A-Za-z0-9._-], and free of "..". Restricting
+// the charset is defense-in-depth for the allowlist — it rejects a surviving
+// percent-escape (e.g. a smuggled "%2e%2e" or "%2f"), whitespace, and any other
+// byte that could yield an ambiguous or normalized path, so the owner/repo we
+// extract (and feed to the Authorize gate + the per-repo token-cache key) is
+// always a clean, expected shape. ".." is excluded explicitly: it passes the
+// charset (dots) but is no real repo name and enables traversal.
 func validRepoSeg(s string) bool {
-	return s != "" && !strings.Contains(s, "..")
+	if s == "" || strings.Contains(s, "..") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.' || c == '_' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }

@@ -2,6 +2,7 @@ package gitproxy_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -12,9 +13,29 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 )
 
+// denialSink collects denials the (async, detached-goroutine) RecordDenial hook
+// reports, so tests can wait for one rather than race the goroutine.
+type denialSink struct{ ch chan gitproxy.DeniedGitOp }
+
+func newDenialSink() *denialSink { return &denialSink{ch: make(chan gitproxy.DeniedGitOp, 16)} }
+
+func (s *denialSink) record(d gitproxy.DeniedGitOp) { s.ch <- d }
+
+// next waits up to 2s for one denial.
+func (s *denialSink) next(t *testing.T) gitproxy.DeniedGitOp {
+	t.Helper()
+	select {
+	case d := <-s.ch:
+		return d
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for a denial to be recorded")
+		return gitproxy.DeniedGitOp{}
+	}
+}
+
 // startGatedProxy boots a proxy with an Authorize gate (and optional denial
-// capture) in front of upstream. Mirrors startProxy but exercises the gated
-// path the multi-mode wiring uses.
+// sink) in front of upstream. Mirrors startProxy but exercises the gated path
+// the multi-mode wiring uses.
 func startGatedProxy(
 	t *testing.T,
 	ts gitproxy.TokenSource,
@@ -62,10 +83,8 @@ func TestGatedProxy_PathShapeRejectsNonGit(t *testing.T) {
 	upstream := fakeGitHub(rec)
 	defer upstream.Close()
 	ts := &constantTokenSource{value: "ghs", expiresAt: time.Now().Add(time.Hour)}
-	var denials []gitproxy.DeniedGitOp
-	_, proxyURL := startGatedProxy(t, ts.source, upstream.URL, allowAllAuthorize, func(d gitproxy.DeniedGitOp) {
-		denials = append(denials, d)
-	})
+	sink := newDenialSink()
+	_, proxyURL := startGatedProxy(t, ts.source, upstream.URL, allowAllAuthorize, sink.record)
 
 	req, _ := http.NewRequest("GET", proxyURL+"/api/v3/repos/octo/repo", nil)
 	resp, err := directClient().Do(req)
@@ -80,8 +99,8 @@ func TestGatedProxy_PathShapeRejectsNonGit(t *testing.T) {
 	if rec.hits.Load() != 0 {
 		t.Errorf("upstream hit on a non-git path; want fail-closed at the proxy")
 	}
-	if len(denials) != 1 || denials[0].Reason != "non-git-path" {
-		t.Errorf("denials = %+v, want one non-git-path denial", denials)
+	if d := sink.next(t); d.Reason != "non-git-path" {
+		t.Errorf("denial reason = %q, want non-git-path", d.Reason)
 	}
 }
 
@@ -95,10 +114,8 @@ func TestGatedProxy_AuthorizeDenyReturns403(t *testing.T) {
 	deny := func(_ context.Context, _, _ string) (gitproxy.Decision, error) {
 		return gitproxy.Decision{Allowed: false}, nil
 	}
-	var denials []gitproxy.DeniedGitOp
-	_, proxyURL := startGatedProxy(t, ts.source, upstream.URL, deny, func(d gitproxy.DeniedGitOp) {
-		denials = append(denials, d)
-	})
+	sink := newDenialSink()
+	_, proxyURL := startGatedProxy(t, ts.source, upstream.URL, deny, sink.record)
 
 	req, _ := http.NewRequest("GET", proxyURL+"/octo/repo/info/refs", nil)
 	resp, err := directClient().Do(req)
@@ -113,8 +130,40 @@ func TestGatedProxy_AuthorizeDenyReturns403(t *testing.T) {
 	if rec.hits.Load() != 0 {
 		t.Errorf("upstream hit on an unauthorized repo; want fail-closed")
 	}
-	if len(denials) != 1 || denials[0].Reason != "repo-not-authorized" {
-		t.Errorf("denials = %+v, want one repo-not-authorized denial", denials)
+	if d := sink.next(t); d.Reason != "repo-not-authorized" {
+		t.Errorf("denial reason = %q, want repo-not-authorized", d.Reason)
+	}
+}
+
+// TestGatedProxy_AuthorizeErrorFailsClosedAndAudits pins that an authz-backend
+// error fails closed (502, no upstream) AND still records a denial, so an
+// outage/misconfig leaves an audit trail of blocked git activity.
+func TestGatedProxy_AuthorizeErrorFailsClosedAndAudits(t *testing.T) {
+	rec := &fakeUpstreamRecord{}
+	upstream := fakeGitHub(rec)
+	defer upstream.Close()
+	ts := &constantTokenSource{value: "ghs", expiresAt: time.Now().Add(time.Hour)}
+	errAuthorize := func(_ context.Context, _, _ string) (gitproxy.Decision, error) {
+		return gitproxy.Decision{}, errors.New("db is down")
+	}
+	sink := newDenialSink()
+	_, proxyURL := startGatedProxy(t, ts.source, upstream.URL, errAuthorize, sink.record)
+
+	req, _ := http.NewRequest("GET", proxyURL+"/octo/repo/info/refs", nil)
+	resp, err := directClient().Do(req)
+	if err != nil {
+		t.Fatalf("roundtrip: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 on an authz-backend error", resp.StatusCode)
+	}
+	if rec.hits.Load() != 0 {
+		t.Errorf("upstream hit despite a failed authz check; want fail-closed")
+	}
+	if d := sink.next(t); d.Reason != "authorize-error" || d.Repo != "repo" {
+		t.Errorf("denial = %+v, want an authorize-error denial for the repo", d)
 	}
 }
 
@@ -171,10 +220,8 @@ func TestGatedProxy_RefEnforcement(t *testing.T) {
 			upstream := fakeGitHub(rec)
 			defer upstream.Close()
 			ts := &constantTokenSource{value: "ghs", expiresAt: time.Now().Add(time.Hour)}
-			var denials []gitproxy.DeniedGitOp
-			_, proxyURL := startGatedProxy(t, ts.source, upstream.URL, authorize, func(d gitproxy.DeniedGitOp) {
-				denials = append(denials, d)
-			})
+			sink := newDenialSink()
+			_, proxyURL := startGatedProxy(t, ts.source, upstream.URL, authorize, sink.record)
 
 			req, _ := http.NewRequest("POST", proxyURL+"/octo/repo/git-receive-pack", strings.NewReader(c.body))
 			req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
@@ -192,8 +239,8 @@ func TestGatedProxy_RefEnforcement(t *testing.T) {
 				t.Errorf("upstream hit = %v, want %v", gotHit, c.wantHit)
 			}
 			if c.wantReason != "" {
-				if len(denials) == 0 || denials[len(denials)-1].Reason != c.wantReason {
-					t.Errorf("denials = %+v, want a %q denial", denials, c.wantReason)
+				if d := sink.next(t); d.Reason != c.wantReason {
+					t.Errorf("denial reason = %q, want %q", d.Reason, c.wantReason)
 				}
 			}
 		})
