@@ -5,6 +5,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useOrgContext } from '../contexts/OrgContext'
 import { reconnectWebSocket } from '../hooks/useWebSocket'
 import { invalidateTeams } from '../hooks/useTeams'
+import { invalidateEntitlements } from '../hooks/useEntitlements'
 
 /**
  * Topbar dropdown for switching between orgs the user belongs to.
@@ -68,6 +69,10 @@ export default function OrgPicker() {
         // OLD org's teams; doing it here guarantees the reload reads the
         // new org's set. (Codex review on PR #263.)
         invalidateTeams()
+        // Entitlements are scoped to the active org too (multi mode), so drop
+        // their cache on the same commit — the new org may license a different
+        // EE feature set. Same post-persist ordering rationale as teams.
+        invalidateEntitlements()
         // Force the WS to re-handshake so the hub's per-(user, org)
         // Broadcast filter routes events for the just-switched
         // tenant rather than the previous one. Without this the

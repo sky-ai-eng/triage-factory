@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -42,42 +43,58 @@ func decodeFeatures(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	return resp.Features
 }
 
-// Community default (no license registered): the probe reports an EMPTY set —
+// Local mode is fully source-available and free, so the probe reports EVERY
+// gated feature — even with no license registered. This is the "buying EE in
+// local changes nothing" contract: local is already fully entitled.
+func TestEntitlements_LocalModeFullyEntitled(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	entitlements.Reset() // no checker registered — local must still report all
+	t.Cleanup(entitlements.Reset)
+
+	got := decodeFeatures(t, recordEntitlements())
+	if len(got) != len(entitlements.AllFeatures) {
+		t.Fatalf("features = %v, want all %d gated features in local mode", got, len(entitlements.AllFeatures))
+	}
+	for _, f := range entitlements.AllFeatures {
+		if !featuresContain(got, string(f)) {
+			t.Fatalf("features = %v, missing %q — local must report every feature", got, f)
+		}
+	}
+}
+
+// Multi mode, no license (community default): the probe reports an EMPTY set —
 // and crucially `[]`, not null, so the frontend can treat it as a set.
-func TestEntitlements_CommunityDefaultIsEmpty(t *testing.T) {
+func TestEntitlements_MultiCommunityDefaultIsEmpty(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
 	entitlements.Reset()
 	t.Cleanup(entitlements.Reset)
 
-	rec := httptest.NewRecorder()
-	(&Server{}).handleEntitlements(rec, authedReq())
-
+	rec := recordEntitlements()
 	if got := decodeFeatures(t, rec); len(got) != 0 {
-		t.Fatalf("features = %v, want empty under the community default", got)
+		t.Fatalf("features = %v, want empty under the multi-mode community default", got)
 	}
-	// Assert the wire form is [] (a non-nil JSON array), never null.
 	if body := rec.Body.String(); !jsonHasEmptyFeaturesArray(body) {
 		t.Fatalf("body = %s, want a features:[] array (not null)", body)
 	}
 }
 
-// A registered checker that grants governance: the probe reports exactly
+// Multi mode with a checker that grants governance: the probe reports exactly
 // ["governance"] — the licensed subset of entitlements.AllFeatures.
-func TestEntitlements_ReportsGrantedFeature(t *testing.T) {
+func TestEntitlements_MultiReportsGrantedFeature(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
 	entitlements.Register(governanceGrant{})
 	t.Cleanup(entitlements.Reset)
 
-	rec := httptest.NewRecorder()
-	(&Server{}).handleEntitlements(rec, authedReq())
-
-	got := decodeFeatures(t, rec)
+	got := decodeFeatures(t, recordEntitlements())
 	if len(got) != 1 || got[0] != string(entitlements.FeatureGovernance) {
 		t.Fatalf("features = %v, want [%q]", got, entitlements.FeatureGovernance)
 	}
 }
 
-// The route is authenticated-session-only: no claims in context → 401, never a
-// 200 that would leak the deployment's feature state to an anonymous caller.
+// The route is authenticated-session-only, in any mode: no claims in context →
+// 401, never a 200 that would leak the deployment's feature state anonymously.
 func TestEntitlements_RequiresSession(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
 	entitlements.Register(governanceGrant{})
 	t.Cleanup(entitlements.Reset)
 
@@ -88,6 +105,23 @@ func TestEntitlements_RequiresSession(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 for an unauthenticated request", rec.Code)
 	}
+}
+
+// recordEntitlements drives the handler with an authenticated request and
+// returns the recorder.
+func recordEntitlements() *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	(&Server{}).handleEntitlements(rec, authedReq())
+	return rec
+}
+
+func featuresContain(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }
 
 // jsonHasEmptyFeaturesArray confirms the encoded body carries an empty JSON

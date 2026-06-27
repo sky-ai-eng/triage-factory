@@ -17,26 +17,30 @@ type entitlementsResponse struct {
 	Features []string `json:"features"`
 }
 
-// handleEntitlements reports which gated Enterprise features are licensed for
-// this deployment. It is a CORE route: it reads the entitlements checker's
-// state and is deliberately NOT itself gated by any license, so a community
-// build can learn it has nothing licensed (features: []) and an EE build learns
-// what it does. Entitlements are process-global today — one TF_LICENSE verified
-// at boot in ee.Install → entitlements.Register — so the answer is
-// deployment-level: no org or role scoping, just an authenticated session.
+// handleEntitlements reports which gated Enterprise features are available in
+// this deployment. It is a CORE route: it reads the entitlements state and is
+// deliberately NOT itself gated by any license, so any build can learn what it
+// has. It reports through entitlements.Available, which encodes the open-core
+// policy:
+//
+//   - Local mode is fully source-available and free → every feature is
+//     reported, so the frontend renders EE surfaces and buying EE in local
+//     changes nothing. (entitlements are a multi-mode concept.)
+//   - Multi mode reports the licensed subset — a deployment-wide license today
+//     (self-host EE), per-org Stripe state in future. The answer is already
+//     scoped to the session, so when per-org lands this reports for the
+//     session's active org with no change to the URL or response shape.
 //
 // Gate: authenticated session only (mounted via s.api → withSession). Local
-// mode's session shim seeds sentinel claims, so the local user gets the same
-// reply — everything false unless a TF_LICENSE happens to be present.
+// mode's session shim seeds sentinel claims, so the local user passes the gate.
 func (s *Server) handleEntitlements(w http.ResponseWriter, r *http.Request) {
 	if ClaimsFrom(r.Context()) == nil {
 		writeUnauth(w)
 		return
 	}
-	checker := entitlements.Active()
 	features := make([]string, 0, len(entitlements.AllFeatures))
 	for _, f := range entitlements.AllFeatures {
-		if checker.Has(f) {
+		if entitlements.Available(f) {
 			features = append(features, string(f))
 		}
 	}

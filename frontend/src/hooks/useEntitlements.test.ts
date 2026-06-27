@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
-import { useEntitlements, resetEntitlementsForTest } from './useEntitlements'
+import {
+  useEntitlements,
+  invalidateEntitlements,
+  resetEntitlementsForTest,
+} from './useEntitlements'
 
 // useEntitlements holds a module-level cache (one fetch per page), so each test
 // clears it (resetEntitlementsForTest) and stubs fetch to return the
@@ -63,6 +67,28 @@ describe('useEntitlements', () => {
 
     expect(b.result.current.has('governance')).toBe(true)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('refetches the new org feature set on invalidate (org switch)', async () => {
+    // Org A licenses governance; after switching to org B (which does not), an
+    // invalidate must drop the stale set and reflect B's empty entitlements.
+    let features = ['governance']
+    const fetchMock = vi.fn((input: unknown) => {
+      if (String(input).split('?')[0] === '/api/entitlements') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ features }) })
+      }
+      return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result } = renderHook(() => useEntitlements())
+    await waitFor(() => expect(result.current.has('governance')).toBe(true))
+
+    features = [] // org B
+    invalidateEntitlements()
+    await waitFor(() => expect(result.current.has('governance')).toBe(false))
+    expect(result.current.loaded).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('fails closed when the probe errors (loaded, nothing licensed)', async () => {
