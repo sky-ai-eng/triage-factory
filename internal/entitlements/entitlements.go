@@ -42,9 +42,9 @@ const (
 	// enforcement. Multi-mode only.
 	FeatureSSO Feature = "sso"
 
-	// FeatureGovernance gates the Enterprise governance/audit surfaces
-	// (TFAC-449): per-team daily spend caps, the bot-activity audit feed, and
-	// the access/credential change-log viewer. It is the first EE feature with
+	// FeatureGovernance gates the Enterprise governance/audit surfaces:
+	// per-team daily spend caps, the bot-activity audit feed, and the
+	// access/credential change-log viewer. It is the first EE feature with
 	// a real frontend surface — SSO only needed backend route-mounting plus a
 	// 404-and-hide — which is why this feature also motivates the
 	// /api/entitlements probe and the useEntitlements FE hook the governance
