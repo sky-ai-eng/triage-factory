@@ -136,7 +136,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 		if needsRefresh(sess) {
 			if err := s.refreshSessionInline(r.Context(), sess); err != nil {
 				authLog.Warn("refresh failed", "sid", sessions.LogID(sid), "error", err)
-				s.recordRefreshFailure(r, sess.UserID, sid, err.Error())
+				s.recordRefreshFailure(r, sess.UserID, sid, "refresh_failed")
 				writeUnauth(w)
 				return
 			}
