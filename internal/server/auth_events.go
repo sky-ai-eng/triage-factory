@@ -62,6 +62,14 @@ func authMethod(isSSO bool) string {
 // authEventBase (the core write-sites) and the RecordAuthEvent extension seam
 // (ee/sso), so EE captures the same fields without duplicating clientIP. A
 // caller-set value is preserved; a nil r (degenerate call) is a no-op.
+//
+// CAVEAT (shared with the sessions table's ip_addr): clientIP trusts the
+// LEFTMOST X-Forwarded-For entry, which a client can spoof when TF is not behind
+// a header-sanitizing proxy — so ip_address here is attacker-influenceable and
+// must not be treated as a hard identity in the audit log. Hardening (take the
+// rightmost hop, gated by a TF_TRUSTED_PROXY_CIDR allowlist) is a deployment-
+// roadmap item, deliberately not changed here because clientIP is shared with
+// the session path and the correct hop depends on the deployment's proxy depth.
 func fillRequestSource(e *domain.AuthEvent, r *http.Request) {
 	if r == nil {
 		return
@@ -117,20 +125,29 @@ func (s *Server) recordLoginSuccess(r *http.Request, userID uuid.UUID, org uuid.
 }
 
 // recordLogout records a logout auth event (best-effort) after the session is
-// revoked. No detail — the event itself is the signal (a standalone
-// session_revoked is deliberately folded into logout/logout_all).
-func (s *Server) recordLogout(r *http.Request, userID, sessionID uuid.UUID) {
+// revoked. org is the revoked session's active org (nullable → NULL) so the
+// event surfaces in an org-scoped "who logged out of my tenant" read. No detail —
+// the event itself is the signal (a standalone session_revoked is deliberately
+// folded into logout/logout_all).
+func (s *Server) recordLogout(r *http.Request, userID, sessionID uuid.UUID, org uuid.NullUUID) {
 	e := authEventBase(r, domain.AuthEventLogout)
 	e.UserID = userID.String()
 	e.SessionID = sessionID.String()
+	if org.Valid {
+		e.OrgID = org.UUID.String()
+	}
 	s.recordAuthEvent(r.Context(), e)
 }
 
 // recordLogoutAll records a logout_all auth event (best-effort) after every
-// session for the user is revoked, carrying {"count":n}.
-func (s *Server) recordLogoutAll(r *http.Request, userID uuid.UUID, count int) {
+// session for the user is revoked, carrying {"count":n}. org is the caller's
+// active org (nullable → NULL) so the event is org-scopable.
+func (s *Server) recordLogoutAll(r *http.Request, userID uuid.UUID, count int, org uuid.NullUUID) {
 	e := authEventBase(r, domain.AuthEventLogoutAll)
 	e.UserID = userID.String()
+	if org.Valid {
+		e.OrgID = org.UUID.String()
+	}
 	e.DetailJSON = authDetailJSON(map[string]any{"count": count})
 	s.recordAuthEvent(r.Context(), e)
 }

@@ -27,8 +27,10 @@ CREATE TABLE auth_events (
     detail_json TEXT,
     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX idx_auth_events_org_ts  ON auth_events (org_id, created_at DESC);
-CREATE INDEX idx_auth_events_user_ts ON auth_events (user_id, created_at DESC);
+-- Partial on the org/user indexes (matching the Postgres baseline exactly) so the
+-- frequent NULL-org / NULL-user rows are skipped; the type index stays full.
+CREATE INDEX idx_auth_events_org_ts  ON auth_events (org_id, created_at DESC) WHERE org_id IS NOT NULL;
+CREATE INDEX idx_auth_events_user_ts ON auth_events (user_id, created_at DESC) WHERE user_id IS NOT NULL;
 CREATE INDEX idx_auth_events_type_ts ON auth_events (event_type, created_at DESC);
 
 -- +goose Down

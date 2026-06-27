@@ -480,7 +480,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 					"code", int(websocket.CloseSessionRevoked), "n", n)
 				// Durable logout record (best-effort) — only when a live session
 				// was actually revoked (a double-logout no-ops with sess == nil).
-				s.recordLogout(r, sess.UserID, sid)
+				// The session's active org scopes the event to the tenant.
+				s.recordLogout(r, sess.UserID, sid, sess.ActiveOrgID)
 			}
 		}
 	}
@@ -545,8 +546,14 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authLog.Info("logout-all revoked sessions", "user", userID, "count", n)
-	// Durable logout_all record (best-effort), carrying the revoked count.
-	s.recordLogoutAll(r, userID, int(n))
+	// Durable logout_all record (best-effort), carrying the revoked count + the
+	// caller's active org (from the session context withSession set) so the event
+	// is org-scopable.
+	var activeOrg uuid.NullUUID
+	if sess := SessionFrom(r.Context()); sess != nil {
+		activeOrg = sess.ActiveOrgID
+	}
+	s.recordLogoutAll(r, userID, int(n), activeOrg)
 
 	// Every session is now revoked, so close ALL of this user's live
 	// websocket connections (TFAC-75) — no sid/org filter. Each device's

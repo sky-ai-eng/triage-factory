@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -138,11 +139,11 @@ func TestAuthEvents_LoginFailure_StateMismatch_Recorded(t *testing.T) {
 	}
 }
 
-// Logout records a logout event tied to the revoked session.
+// Logout records a logout event tied to the revoked session + its active org.
 func TestAuthEvents_Logout_Recorded(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
-	r.seedOrg(userID, "alice-org")
+	orgID, _ := r.seedOrg(userID, "alice-org")
 
 	resp, _ := r.driveCallback(userID)
 	sid := r.sidFromResp(resp)
@@ -158,17 +159,24 @@ func TestAuthEvents_Logout_Recorded(t *testing.T) {
 	if ev.sessionID != sid {
 		t.Errorf("logout session=%q, want %q", ev.sessionID, sid)
 	}
+	if ev.orgID != orgID.String() {
+		t.Errorf("logout org=%q, want %q (the revoked session's active org)", ev.orgID, orgID)
+	}
 }
 
-// Logout-all records a single logout_all carrying the revoked count.
+// Logout-all records a single logout_all carrying the revoked count + the
+// caller's active org.
 func TestAuthEvents_LogoutAll_Recorded(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
-	r.seedOrg(userID, "alice-org")
+	orgID, _ := r.seedOrg(userID, "alice-org")
 
 	enc := r.srv.authDeps.sessions
+	// s1 (the cookie used for the request) carries a real active org so the
+	// recorded event is org-scoped.
 	s1, err := enc.CreateSystem(context.Background(), userID, r.signKey.mintJWT(t, validClaimsFor(userID)),
-		"refresh-1", time.Now().Add(time.Hour), time.Now().Add(30*24*time.Hour), "d1", "1.1.1.1", uuid.NullUUID{})
+		"refresh-1", time.Now().Add(time.Hour), time.Now().Add(30*24*time.Hour), "d1", "1.1.1.1",
+		uuid.NullUUID{UUID: orgID, Valid: true})
 	if err != nil {
 		t.Fatalf("create s1: %v", err)
 	}
@@ -184,6 +192,9 @@ func TestAuthEvents_LogoutAll_Recorded(t *testing.T) {
 	ev := r.oneAuthEvent(domain.AuthEventLogoutAll)
 	if ev.userID != userID.String() {
 		t.Errorf("logout_all user=%q, want %q", ev.userID, userID)
+	}
+	if ev.orgID != orgID.String() {
+		t.Errorf("logout_all org=%q, want %q (the caller's active org)", ev.orgID, orgID)
 	}
 	if ev.detail["count"] != float64(2) {
 		t.Errorf("logout_all count=%v, want 2", ev.detail["count"])
@@ -338,4 +349,83 @@ func TestRecordAuthEventSeam_EnrichesRequestSource(t *testing.T) {
 	if recorder.last == nil || recorder.last.IPAddress != "" || recorder.last.UserAgent != "" {
 		t.Errorf("nil request should leave source fields empty: %+v", recorder.last)
 	}
+}
+
+// fireCallbackRaw drives /api/auth/callback with a freshly-signed (valid) state
+// cookie + matching csrf and the given code, returning the response. Unlike
+// driveCallback it does NOT stub gotrueExchange — the caller shapes the failure
+// branch under test by setting authDeps.gotrueExchange first.
+func (r *authRig) fireCallbackRaw(code string) *http.Response {
+	r.t.Helper()
+	csrf := "csrf-" + uuid.NewString()
+	stateVal := r.signStateCookie("/dashboard", csrf, "verifier")
+	q := url.Values{}
+	q.Set("state", csrf)
+	if code != "" {
+		q.Set("code", code)
+	}
+	req := httptest.NewRequest("GET", "/api/auth/callback?"+q.Encode(), nil)
+	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateVal})
+	rec := httptest.NewRecorder()
+	r.srv.mux.ServeHTTP(rec, req)
+	return rec.Result()
+}
+
+// The remaining login_failure branches in handleOAuthCallback (beyond the
+// state-mismatch case above) each emit ONE login_failure with the rejecting
+// branch in detail. These are the most likely production failure paths. TFAC-76.
+func TestAuthEvents_LoginFailure_Branches(t *testing.T) {
+	// A failed token exchange.
+	t.Run("exchange_failed", func(t *testing.T) {
+		r := newAuthRig(t)
+		r.srv.authDeps.gotrueExchange = func(context.Context, string, string) (string, string, int64, error) {
+			return "", "", 0, errSimulated
+		}
+		if got := r.fireCallbackRaw("some-code").StatusCode; got != http.StatusBadRequest {
+			t.Fatalf("exchange-fail callback status=%d, want 400", got)
+		}
+		ev := r.oneAuthEvent(domain.AuthEventLoginFailure)
+		if ev.detail["reason"] != "exchange_failed" || ev.detail["method"] != "github" {
+			t.Errorf("detail=%v, want reason=exchange_failed method=github", ev.detail)
+		}
+	})
+
+	// A token whose signing key is absent from the JWKS → verify rejects it.
+	t.Run("verify_failed", func(t *testing.T) {
+		r := newAuthRig(t)
+		badKey := newTestKey(t)
+		badTok := badKey.mintJWT(t, validClaimsFor(uuid.New()))
+		r.srv.authDeps.gotrueExchange = func(context.Context, string, string) (string, string, int64, error) {
+			return badTok, "refresh", time.Now().Add(time.Hour).Unix(), nil
+		}
+		if got := r.fireCallbackRaw("code").StatusCode; got != http.StatusUnauthorized {
+			t.Fatalf("verify-fail callback status=%d, want 401", got)
+		}
+		ev := r.oneAuthEvent(domain.AuthEventLoginFailure)
+		if ev.detail["reason"] != "verify_failed" {
+			t.Errorf("detail=%v, want reason=verify_failed", ev.detail)
+		}
+	})
+
+	// A valid token (signature/iss/aud/exp) whose sub is not a UUID → parse fails
+	// after verify, so the email is known and lands in detail.
+	t.Run("bad_sub", func(t *testing.T) {
+		r := newAuthRig(t)
+		claims := jwt.MapClaims{
+			"sub": "not-a-uuid", "email": "bad@corp.example", "email_verified": true,
+			"iss": testIssuer, "aud": testAudience,
+			"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
+		}
+		tok := r.signKey.mintJWT(t, claims)
+		r.srv.authDeps.gotrueExchange = func(context.Context, string, string) (string, string, int64, error) {
+			return tok, "refresh", time.Now().Add(time.Hour).Unix(), nil
+		}
+		if got := r.fireCallbackRaw("code").StatusCode; got != http.StatusBadRequest {
+			t.Fatalf("bad-sub callback status=%d, want 400", got)
+		}
+		ev := r.oneAuthEvent(domain.AuthEventLoginFailure)
+		if ev.detail["reason"] != "bad_sub" || ev.detail["email"] != "bad@corp.example" {
+			t.Errorf("detail=%v, want reason=bad_sub email=bad@corp.example", ev.detail)
+		}
+	})
 }

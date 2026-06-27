@@ -113,6 +113,19 @@ func (le *loginExt) OnLoginResolved(w http.ResponseWriter, r *http.Request, in s
 				// verified email). The highest-scrutiny SOC2 event — today this path
 				// had no log line at all. Record it, then fall through to a normal
 				// login.
+				//
+				// TIMING: this fires at the enforcement-bypass DECISION (here, before
+				// the session is minted in handleOAuthCallback) rather than strictly
+				// after the full login. That is deliberate — moving it post-session
+				// would require threading break-glass state + its detail back through
+				// the LoginExtension seam into core, leaking SSO semantics into the
+				// core handler (the seam exists to keep core SSO-free). It captures
+				// the authentication + bypass, which IS complete at this point, and a
+				// break_glass_login is always PAIRED with a login_success (recorded
+				// after CreateSystem succeeds): so a break_glass_login with no
+				// matching login_success precisely flags "break-glass auth bypassed
+				// SSO but the session never completed" — a detectable signal, not a
+				// silent false positive.
 				ssoLog.Info("sso enforcement: break-glass login bypassed enforced domain",
 					"user", in.UserID, "org", route.OrgID, "domain", dom)
 				le.api.RecordAuthEvent(r.Context(), r, ssoAuthEvent(
