@@ -88,6 +88,7 @@ func TestEntitlements_GatingIsModeAgnostic(t *testing.T) {
 // The route is authenticated-session-only: no claims in context → 401, never a
 // 200 that would leak the deployment's feature state to an anonymous caller.
 func TestEntitlements_RequiresSession(t *testing.T) {
+	entitlements.Reset() // start from a known baseline, independent of test order
 	entitlements.Register(governanceGrant{})
 	t.Cleanup(entitlements.Reset)
 

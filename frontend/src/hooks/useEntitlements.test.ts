@@ -4,6 +4,7 @@ import {
   useEntitlements,
   invalidateEntitlements,
   resetEntitlementsForTest,
+  FeatureGovernance,
 } from './useEntitlements'
 
 // useEntitlements holds a module-level cache (one fetch per page), so each test
@@ -88,6 +89,42 @@ describe('useEntitlements', () => {
     invalidateEntitlements()
     await waitFor(() => expect(result.current.has('governance')).toBe(false))
     expect(result.current.loaded).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops a previous org slow response that lands after an org switch', async () => {
+    // The generation guard's reason for existing: org A's probe is slow; we hold
+    // its resolver so it lands AFTER we switch to org B. Without the guard, A's
+    // stale governance set would clobber B's empty one.
+    let landA!: () => void
+    const aResponse = { ok: true, json: () => Promise.resolve({ features: ['governance'] }) }
+    let call = 0
+    const fetchMock = vi.fn(() => {
+      call += 1
+      if (call === 1) {
+        return new Promise((resolve) => {
+          landA = () => resolve(aResponse)
+        })
+      }
+      // Org B resolves immediately with no entitlements.
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ features: [] }) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result } = renderHook(() => useEntitlements())
+    expect(result.current.loaded).toBe(false) // org A's fetch is still in flight
+
+    // Switch orgs: invalidate supersedes A (bumps the generation) and dispatches
+    // org B's fetch, which resolves to an empty set.
+    invalidateEntitlements()
+    await waitFor(() => expect(result.current.loaded).toBe(true))
+    expect(result.current.has(FeatureGovernance)).toBe(false) // org B
+
+    // Now A's slow response finally lands. The generation guard must drop it, so
+    // org B's empty set stays put — no governance bleed-through from the old org.
+    landA()
+    await new Promise((r) => setTimeout(r, 0)) // flush the superseded chain
+    expect(result.current.has(FeatureGovernance)).toBe(false)
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 

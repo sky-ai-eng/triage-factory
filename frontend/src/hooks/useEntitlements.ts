@@ -94,11 +94,21 @@ export function invalidateEntitlements(): void {
   if (listeners.size > 0) void load()
 }
 
+// Feature ids gated by entitlements — mirrors the wire values of
+// internal/entitlements Feature (they must match the strings the probe returns).
+// EE surfaces gate with has(FeatureGovernance) rather than a bare 'governance'
+// literal, so a typo is a compile/lint error and every gate is grep-able. Only
+// governance is here: SSO has no FE entitlement consumer (its absence is a route
+// 404 via runmode, not a has() gate), so a constant for it would imply a
+// consumer that doesn't exist.
+export const FeatureGovernance = 'governance' as const
+
 export interface Entitlements {
   /** Whether `feature` is licensed for the viewer. False until the probe
    *  resolves, and false for any feature the deployment / active org isn't
    *  licensed for — including unlicensed and local builds, where the EE set is
-   *  empty (the within-boundary core surfaces don't gate on this). */
+   *  empty (the within-boundary core surfaces don't gate on this). Pass a
+   *  Fe* constant (e.g. FeatureGovernance), not a bare string. */
   has: (feature: string) => boolean
   /** True once GET /api/entitlements has resolved (success or fail-closed).
    *  Gate EE surfaces on `loaded && has('x')` so they don't flash before the

@@ -38,13 +38,19 @@ type entitlementsResponse struct {
 // Gate: authenticated session only (mounted via s.api → withSession). Local
 // mode's session shim seeds sentinel claims, so the local user passes the gate.
 func (s *Server) handleEntitlements(w http.ResponseWriter, r *http.Request) {
+	// Defense-in-depth: the route is mounted withSession (s.api), which already
+	// rejects an unauthenticated request, so in normal operation claims are
+	// always seeded here. This guard keeps the handler safe to call directly and
+	// makes the "never report feature state to an anonymous caller" contract
+	// explicit at the handler boundary.
 	if ClaimsFrom(r.Context()) == nil {
 		writeUnauth(w)
 		return
 	}
 	checker := entitlements.Active()
-	features := make([]string, 0, len(entitlements.AllFeatures))
-	for _, f := range entitlements.AllFeatures {
+	all := entitlements.AllFeatures()
+	features := make([]string, 0, len(all))
+	for _, f := range all {
 		if checker.Has(f) {
 			features = append(features, string(f))
 		}
