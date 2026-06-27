@@ -16,6 +16,6 @@
 #
 # To fast-track a specific package past the cooldown (e.g. an urgent patch),
 # list it under minimumReleaseAgeExclude by name or glob:
-#   minimumReleaseAgeExclude:
-#     - "@my-scope/*"
+# minimumReleaseAgeExclude:
+#   - "@my-scope/*"
 minimumReleaseAge: 1440
