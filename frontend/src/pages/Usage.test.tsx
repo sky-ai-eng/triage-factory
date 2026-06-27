@@ -5,6 +5,7 @@ import type {
   UsageCategoryBucket,
   UsageMeResponse,
   UsageOrgResponse,
+  UsageTeamCapsResponse,
   UsageTeamResponse,
 } from '../types'
 
@@ -122,8 +123,8 @@ const TEAM_T2: UsageTeamResponse = {
 const ORG: UsageOrgResponse = {
   total_cost_usd: 100,
   by_team: [
-    { team_id: 't1', team_name: 'Platform', cost: 60, cap: 50 },
-    { team_id: 't2', team_name: 'Growth', cost: 30, cap: null },
+    { team_id: 't1', team_name: 'Platform', cost: 60 },
+    { team_id: 't2', team_name: 'Growth', cost: 30 },
   ],
   by_user: [{ user_id: 'u1', display_name: 'Alice', cost: 40 }],
   org_level: [{ category: 'system_overhead', cost: 10 }],
@@ -133,6 +134,17 @@ const ORG: UsageOrgResponse = {
   // by_rule is folded into /org in local mode only (multi-tenant orgs omit it).
   // LocalConsole reads it straight from the rollup — no second team fetch.
   by_rule: [{ trigger_id: 'tr1', rule_name: 'CI Fixer', cost: 50 }],
+}
+
+// The governance cap editor reads its team list from /api/usage/org/team-caps
+// (ALL active teams, TFAC-482), not the spend rollup's by_team — so Idle (no spend
+// in ORG.by_team) still appears and can be capped.
+const ORG_TEAM_CAPS: UsageTeamCapsResponse = {
+  teams: [
+    { team_id: 't1', team_name: 'Platform', cap: 50 },
+    { team_id: 't2', team_name: 'Growth', cap: null },
+    { team_id: 't3', team_name: 'Idle', cap: null },
+  ],
 }
 
 // stubUsageFetch routes GET /api/usage/* by path (query stripped) to a canned
@@ -257,13 +269,14 @@ describe('Usage page', () => {
       '/api/usage/me': ME,
       '/api/usage/teams/t1': TEAM,
       '/api/usage/org': ORG,
+      '/api/usage/org/team-caps': ORG_TEAM_CAPS,
       // The PUT echoes the stored value back; stubUsageFetch keys on path only.
       '/api/usage/teams/t1/cap': { max_daily_cost_usd: 75 },
     })
 
     render(<Usage />)
 
-    // The editor renders, seeded from by_team[].cap (Platform = 50).
+    // The editor renders, seeded from /api/usage/org/team-caps (Platform = 50).
     expect(await screen.findByText('Daily caps')).toBeInTheDocument()
     const input = (await screen.findByLabelText('Daily cap for Platform')) as HTMLInputElement
     expect(input.value).toBe('50')
@@ -289,6 +302,7 @@ describe('Usage page', () => {
       '/api/usage/me': ME,
       '/api/usage/teams/t1': TEAM,
       '/api/usage/org': ORG,
+      '/api/usage/org/team-caps': ORG_TEAM_CAPS,
       '/api/usage/teams/t1/cap': { max_daily_cost_usd: null },
     })
 
@@ -320,6 +334,7 @@ describe('Usage page', () => {
       '/api/usage/me': ME,
       '/api/usage/teams/t1': TEAM,
       '/api/usage/org': ORG,
+      '/api/usage/org/team-caps': ORG_TEAM_CAPS,
       '/api/usage/teams/t1/cap': { max_daily_cost_usd: 75 },
     })
     const capPuts = () =>
@@ -344,6 +359,38 @@ describe('Usage page', () => {
     fireEvent.blur(input)
     await new Promise((r) => setTimeout(r, 0)) // let any erroneous async PUT surface
     expect(capPuts()).toHaveLength(1)
+  })
+
+  it('an idle team with no window spend still appears and is cappable', async () => {
+    // The editor reads /api/usage/org/team-caps (ALL active teams), not the spend
+    // rollup's by_team — so Idle (absent from ORG.by_team, no window spend) still
+    // gets an editable cap input, the whole point of pre-capping a runaway.
+    roleMock.isAdmin = true
+    entMock.governance = true
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/teams/t1': TEAM,
+      '/api/usage/org': ORG,
+      '/api/usage/org/team-caps': ORG_TEAM_CAPS,
+      '/api/usage/teams/t3/cap': { max_daily_cost_usd: 20 },
+    })
+
+    render(<Usage />)
+
+    const idle = (await screen.findByLabelText('Daily cap for Idle')) as HTMLInputElement
+    expect(idle.value).toBe('') // cap null → "No cap" placeholder
+
+    // Capping the idle team PUTs to its UUID-keyed endpoint, same as any other.
+    fireEvent.change(idle, { target: { value: '20' } })
+    fireEvent.blur(idle)
+    await waitFor(() => {
+      const put = fetchMock.mock.calls.find(
+        (c) => String(c[0]) === '/api/usage/teams/t3/cap' && c[1]?.method === 'PUT',
+      )
+      expect(put).toBeTruthy()
+      expect(JSON.parse(String(put![1]?.body))).toEqual({ max_daily_cost_usd: 20 })
+    })
   })
 
   it('regular member sees personal only — no team or org reads', async () => {

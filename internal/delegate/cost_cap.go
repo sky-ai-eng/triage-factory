@@ -128,7 +128,15 @@ func (s *Spawner) checkTeamDailyCostCap(ctx context.Context, orgID, teamID strin
 	}
 
 	if total >= settings.MaxDailyCostUSD {
-		return fmt.Errorf("%w: team %s at $%.2f of $%.2f today", ErrDailyCostCapReached, teamID, total, settings.MaxDailyCostUSD)
+		// Resolve the team's display name for the user-facing message (this error
+		// surfaces in the delegate_error payload) — a raw UUID reads as noise. Only
+		// on the cap-tripped path, so the extra read never touches the happy path;
+		// fall back to the teamID if the lookup fails or the name is empty.
+		label := teamID
+		if t, lerr := s.teams.GetSystem(ctx, orgID, teamID); lerr == nil && t != nil && t.Name != "" {
+			label = t.Name
+		}
+		return fmt.Errorf("%w: team %q at $%.2f of $%.2f today", ErrDailyCostCapReached, label, total, settings.MaxDailyCostUSD)
 	}
 	return nil
 }

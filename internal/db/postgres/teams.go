@@ -240,6 +240,28 @@ func (s *teamsStore) ListArchivedForOrgSystem(ctx context.Context, orgID string)
 	return out, rows.Err()
 }
 
+func (s *teamsStore) ListActiveForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT id::text, org_id::text, slug, name, COALESCE(description, ''), created_at
+		FROM teams
+		WHERE org_id = $1 AND deleted_at IS NULL
+		ORDER BY name ASC, id ASC
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list active teams: %w", err)
+	}
+	defer rows.Close()
+	out := []domain.Team{}
+	for rows.Next() {
+		var t domain.Team
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan active team: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func (s *teamsStore) TeamIDsForUserInOrgSystem(ctx context.Context, orgID, userID string) ([]string, error) {
 	// memberships ⋈ teams, scoped to the org. The join to teams is what
 	// applies the org filter (memberships carries no org_id — it FKs to

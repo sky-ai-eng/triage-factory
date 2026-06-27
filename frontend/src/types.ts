@@ -935,16 +935,14 @@ export interface UsageRuleBucket {
   cost: number
 }
 
-/** One team's summed cost across team-attributed rows (org rollup only). */
+/** One team's summed cost across team-attributed rows (org rollup only). Per-team
+ *  caps are NOT here — the governance cap editor reads the full team list from
+ *  /api/usage/org/team-caps (UsageTeamCap), so an idle team absent from this spend
+ *  rollup can still be capped (TFAC-482). */
 export interface UsageTeamBucket {
   team_id: string
   team_name: string
   cost: number
-  /** The team's configured per-team daily spend cap (TFAC-482), or null for no
-   *  cap. EE/governance config: the org section pairs it with `cost` to render an
-   *  inline cap editor, but only when governance is licensed — the value is
-   *  reported regardless (a dormant cap on an unlicensed deployment still shows). */
-  cap: number | null
 }
 
 /** One category of org-level spend — the NULL-team rows (curator on non-team
@@ -994,6 +992,22 @@ export interface UsageOrgResponse {
    *  multi mode (it stays with the owning team). Lets the local console read
    *  everything in one request. */
   by_rule?: UsageRuleBucket[]
+}
+
+/** One team in GET /api/usage/org/team-caps — its id, name, and per-team daily
+ *  spend cap (TFAC-482; null = no cap). The governance cap editor lists EVERY
+ *  active team this way (not just those with spend), so an idle team can be
+ *  pre-capped; window spend is looked up separately from the org rollup's by_team. */
+export interface UsageTeamCap {
+  team_id: string
+  team_name: string
+  cap: number | null
+}
+
+/** GET /api/usage/org/team-caps — every active team + its cap (org admin +
+ *  governance only; 404 unlicensed). */
+export interface UsageTeamCapsResponse {
+  teams: UsageTeamCap[]
 }
 
 /** One row of the EE access & credential change-log (GET

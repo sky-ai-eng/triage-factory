@@ -27,6 +27,8 @@ import type {
   UsageOrgResponse,
   UsageRuleBucket,
   UsageTeamBucket,
+  UsageTeamCap,
+  UsageTeamCapsResponse,
   UsageTeamResponse,
   UsageUserBucket,
   UsageOrgLevelBucket,
@@ -1136,7 +1138,7 @@ function CapStatus({
 // draft so the section's 15s background poll never clobbers a value mid-edit, and
 // re-normalizes the draft from the server echo on a successful save. Mirrors
 // OrgSettings' $-prefixed "No cap" input, in the console's monospace language.
-function CapRow({ team }: { team: UsageTeamBucket }) {
+function CapRow({ team, spend }: { team: UsageTeamCap; spend: number }) {
   const propValue = team.cap == null ? '' : String(team.cap)
   // `draft` is the editable value; `persisted` is what we believe is stored
   // server-side. dirty compares the draft against `persisted` — NOT the polled
@@ -1156,6 +1158,10 @@ function CapRow({ team }: { team: UsageTeamBucket }) {
   draftRef.current = draft
   const persistedRef = useRef(persisted)
   persistedRef.current = persisted
+  // Guards against a concurrent save: a blur→focus→blur before the PUT resolves
+  // would still see dirty=true (persisted hasn't updated yet) and fire a second
+  // PUT with interleaved status transitions. One in-flight save at a time.
+  const savingRef = useRef(false)
 
   // Follow the polled prop when it moves (e.g. another org admin changed the cap):
   // adopt it as the persisted baseline so our own just-saved value reconciles
@@ -1170,7 +1176,7 @@ function CapRow({ team }: { team: UsageTeamBucket }) {
   const dirty = draft.trim() !== persisted
 
   const save = async () => {
-    if (!dirty) return
+    if (!dirty || savingRef.current) return
     const trimmed = draft.trim()
     let payload: number | null
     if (trimmed === '') {
@@ -1184,6 +1190,7 @@ function CapRow({ team }: { team: UsageTeamBucket }) {
       }
       payload = n
     }
+    savingRef.current = true
     setStatus('saving')
     setError(null)
     try {
@@ -1203,6 +1210,8 @@ function CapRow({ team }: { team: UsageTeamBucket }) {
     } catch (err) {
       setStatus('error')
       setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      savingRef.current = false
     }
   }
 
@@ -1213,7 +1222,7 @@ function CapRow({ team }: { team: UsageTeamBucket }) {
         <span className="truncate text-text-secondary" title={name}>
           {name}
         </span>
-        <span className="shrink-0 tabular-nums text-text-tertiary/60">{fmtUSD(team.cost)}</span>
+        <span className="shrink-0 tabular-nums text-text-tertiary/60">{fmtUSD(spend)}</span>
       </span>
       <span className="flex shrink-0 items-center gap-2">
         <span className="relative">
@@ -1246,16 +1255,26 @@ function CapRow({ team }: { team: UsageTeamBucket }) {
   )
 }
 
-// TeamCaps is the EE per-team daily-cap editor body: one CapRow per team in the
-// org's by_team list (the teams with spend this window), highest-spend first. The
-// parent gates rendering on governance + org admin; the backend re-checks both.
-function TeamCaps({ teams }: { teams: UsageTeamBucket[] }) {
-  const rows = [...teams].sort((a, b) => b.cost - a.cost)
-  if (rows.length === 0) return <ZeroMini label="no team spend" />
+// TeamCaps is the EE per-team daily-cap editor body: one CapRow per ACTIVE team
+// in the org — from /api/usage/org/team-caps, NOT the spend rollup's by_team, so
+// a team that hasn't run any agents yet (absent from by_team) can still be
+// pre-capped before any runaway happens. Each row's window spend is looked up
+// from by_team (0 for an idle team) purely for context. The list arrives sorted
+// by name; the parent gates rendering on governance + org admin, and the backend
+// re-checks both. Archived teams are excluded (you can't cap a force-stopped
+// team — the PUT 403s on archived).
+function TeamCaps({
+  teams,
+  spendByTeam,
+}: {
+  teams: UsageTeamCap[]
+  spendByTeam: Map<string, number>
+}) {
+  if (teams.length === 0) return <ZeroMini label="no teams" />
   return (
     <div className="space-y-2.5">
-      {rows.map((t) => (
-        <CapRow key={t.team_id} team={t} />
+      {teams.map((t) => (
+        <CapRow key={t.team_id} team={t} spend={spendByTeam.get(t.team_id) ?? 0} />
       ))}
       <p className="pt-1 font-mono text-[9px] leading-relaxed text-text-tertiary/55">
         Refuses new agent runs for a team once its spend for the UTC day reaches the cap. In-flight
@@ -1269,8 +1288,17 @@ function OrgSection({ since, days }: { since: string; days: number }) {
   const { data, error } = useUsageFetch<UsageOrgResponse>(withWindow('/api/usage/org', since))
   // Per-team caps are an EE/governance surface; render the editor only when the
   // active org is licensed (the OrgSection itself is already org-admin-gated). The
-  // backend enforces both gates on the PUT, so this is purely affordance-level.
+  // backend enforces both gates, so this is purely affordance-level. The editor
+  // lists EVERY active team (TFAC-482) via a separate governance read — fetched
+  // only when licensed — so an idle team (absent from the spend rollup's by_team)
+  // can still be pre-capped; each row's window spend is looked up from by_team.
   const showCaps = useEntitlements().has(FeatureGovernance)
+  const { data: caps } = useUsageFetch<UsageTeamCapsResponse>(
+    showCaps ? '/api/usage/org/team-caps' : null,
+  )
+  const spendByTeam = new Map<string, number>(
+    (data?.by_team ?? []).map((t) => [t.team_id, t.cost] as [string, number]),
+  )
   const total = data?.total_cost_usd ?? 0
   const active = activeDays(data?.by_day ?? [], days)
   return (
@@ -1301,9 +1329,9 @@ function OrgSection({ since, days }: { since: string; days: number }) {
         >
           <UserRoster data={data?.by_user ?? []} emptyLabel="no user spend" />
         </Instrument>
-        {showCaps && (
+        {showCaps && caps && (
           <Instrument label="Daily caps" className="md:col-span-2">
-            <TeamCaps teams={data?.by_team ?? []} />
+            <TeamCaps teams={caps.teams} spendByTeam={spendByTeam} />
           </Instrument>
         )}
         <ThroughputInstrument

@@ -237,6 +237,15 @@ type TeamsStore interface {
 	// would hide those). Empty slice when the org has no archived teams.
 	ListArchivedForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error)
 
+	// ListActiveForOrgSystem returns the org's ACTIVE teams (deleted_at IS NULL),
+	// ordered by name, on the admin pool — the org-scoped sibling of
+	// ListArchivedForOrgSystem. The TFAC-482 governance cap editor lists every team
+	// (not just those with spend in the window) so an org admin can pre-cap an idle
+	// team before any runaway, and crosses teams the admin may not be a member of —
+	// the per-user-scoped ListForUser would hide those. Empty slice for a teamless
+	// org (a bootstrap bug). DeletedAt is left nil (all rows are active).
+	ListActiveForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error)
+
 	// ListMembers returns every member of teamID with their team role and
 	// host-scoped identity readiness, ordered by display name then user id
 	// for a stable roster — the team-tier sibling of
