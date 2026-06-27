@@ -1139,9 +1139,13 @@ func (s *Server) routes() {
 	// typo'd /api/* — with 200 + index.html, which masks client typos and reads
 	// as success to an API consumer. Registered after every real /api/* route:
 	// Go's ServeMux resolves by the most-specific pattern, so a concrete
-	// "GET /api/whatever" still wins over this prefix, and a known path called
-	// with the wrong method still surfaces as 405 from its own route. Only a
-	// genuinely unregistered /api/* subtree falls through to here.
+	// "GET /api/whatever" still wins over this prefix. This handler is
+	// method-agnostic, so it also absorbs wrong-method requests to a known path
+	// (e.g. DELETE /api/health): they match here and become a JSON 404 rather
+	// than a 405 — the method-aware 405 was never reachable anyway, since the
+	// "/" SPA catch-all already matched every method and turned those into
+	// 200 + index.html. So this is a strict improvement (404 JSON over 200 HTML),
+	// not a 405 regression. Only an unregistered /api/* subtree falls here.
 	s.mux.HandleFunc("/api/", s.handleAPINotFound)
 
 	// Frontend: serve embedded SPA, with fallback to index.html for client-side routing

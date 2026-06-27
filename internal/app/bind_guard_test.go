@@ -29,6 +29,12 @@ func TestAssertLocalBindSafe(t *testing.T) {
 		{"specific lan ip", "192.168.1.20", "", "", true},
 		{"dns hostname", "tf.internal.example.com", "", "", true},
 		{"loopback host but public url remote", "127.0.0.1", "https://tf.example.com", "", true},
+		// A fail-closed guard must also catch host-less / unparseable public
+		// URLs a public deployment can produce — not just clean remote hosts.
+		{"public url bare hostname no scheme", "127.0.0.1", "tf.example.com", "", true},
+		{"public url scheme but no slashes", "127.0.0.1", "https:tf.example.com", "", true},
+		{"public url garbage", "127.0.0.1", "://nonsense", "", true},
+		{"public url loopback with port ok", "127.0.0.1", "http://127.0.0.1:3000", "", false},
 
 		{"override allows non-loopback", "0.0.0.0", "", "true", false},
 		{"override allows remote public url", "127.0.0.1", "https://tf.example.com", "1", false},

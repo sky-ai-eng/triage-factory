@@ -77,12 +77,29 @@ func localExposureReasons(host, publicURL string) []string {
 		}
 		reasons = append(reasons, fmt.Sprintf("it binds a non-loopback address (host %q)", shown))
 	}
-	if pub := strings.TrimSpace(publicURL); pub != "" {
-		if u, err := url.Parse(pub); err == nil && u.Host != "" && !isLoopbackHost(u.Hostname()) {
-			reasons = append(reasons, fmt.Sprintf("TF_PUBLIC_URL points at a non-local host (%q)", u.Hostname()))
-		}
+	if pub := strings.TrimSpace(publicURL); pub != "" && !publicURLIsLoopback(pub) {
+		// Any non-empty TF_PUBLIC_URL in local mode is a strong signal the
+		// instance is being fronted publicly. Fail closed on everything that
+		// isn't provably loopback: a remote host, but ALSO an unparseable or
+		// host-less value ("tf.example.com", "https:tf.example.com"), which a
+		// public deployment can produce and which we otherwise can't vouch for.
+		reasons = append(reasons, fmt.Sprintf("TF_PUBLIC_URL is set to a non-local value (%q)", pub))
 	}
 	return reasons
+}
+
+// publicURLIsLoopback reports whether raw is provably a loopback URL. The bar
+// is deliberately high for a fail-closed guard: only a value that parses
+// cleanly, carries a host, and resolves to a loopback host counts. A parse
+// error or an empty Host (a bare hostname like "tf.example.com" parses as a
+// path; "https:tf.example.com" parses as an opaque URL) returns false so the
+// caller treats it as an exposure reason.
+func publicURLIsLoopback(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return isLoopbackHost(u.Hostname())
 }
 
 // isLoopbackHost reports whether binding/advertising host keeps the server
