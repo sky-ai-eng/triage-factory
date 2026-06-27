@@ -150,7 +150,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			// jwt_verify_failure write-site — the anonymous missing/invalid-
 			// cookie 401s above are poke noise and stay uninstrumented.
 			authLog.Warn("verify failed", "sid", sessions.LogID(sid), "error", err)
-			s.recordJWTVerifyFailure(r, sess.UserID, sid, err.Error())
+			s.recordJWTVerifyFailure(r, sess.UserID, sid, "verify_failed")
 			writeUnauth(w)
 			return
 		}
