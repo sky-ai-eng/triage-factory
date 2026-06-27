@@ -134,8 +134,24 @@ else
 fi
 
 # --- Frontend ---------------------------------------------------------------
-blue "prettier"
 cd frontend
+
+# pnpm isn't bundled with Node the way npm is, and `pnpm exec` needs deps
+# already installed — fail with an actionable message instead of a bare
+# "command not found" from the tools below.
+if ! command -v pnpm >/dev/null 2>&1; then
+  corepack enable >/dev/null 2>&1 || true
+fi
+if ! command -v pnpm >/dev/null 2>&1; then
+  red "pnpm not found — run: corepack enable (version pinned in frontend/package.json)"
+  exit 1
+fi
+if [[ ! -d node_modules ]]; then
+  red "frontend deps not installed — run: cd frontend && pnpm install"
+  exit 1
+fi
+
+blue "prettier"
 if (( FIX )); then
   pnpm exec prettier --write "src/**/*.{ts,tsx,css,json}"
   green "prettier applied"
