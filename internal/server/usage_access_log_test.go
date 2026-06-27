@@ -287,6 +287,46 @@ func TestUsageAccessLog_Unlicensed404(t *testing.T) {
 	}
 }
 
+// TestUsageAccessLog_MalformedDetailDoesNotBreakResponse pins that a row whose
+// detail_json isn't valid JSON degrades gracefully: the column is free-form TEXT
+// (no JSON CHECK), and passing a malformed value straight into a json.RawMessage
+// would fail the whole response marshal — httpx.WriteJSON has already written a
+// 200 by then, so the client would get an empty body and the entire page would
+// die. The handler must instead omit that one row's detail and still serve the
+// page (the label, parsed leniently, still renders).
+func TestUsageAccessLog_MalformedDetailDoesNotBreakResponse(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	entitlements.Register(governanceGrant{})
+	t.Cleanup(entitlements.Reset)
+
+	s := newUsageTestServer(t)
+	if _, err := s.db.Exec(`
+		INSERT INTO access_change_log (id, org_id, actor_user_id, action, target_user_id, detail_json, created_at)
+		VALUES ('bad-1', ?, ?, ?, 'u-x', 'not-json', '2026-06-20 10:00:00')`,
+		runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, domain.AccessActionOrgRoleChanged,
+	); err != nil {
+		t.Fatalf("seed malformed-detail row: %v", err)
+	}
+
+	// doUsage fails the test if the status isn't 200 or the body isn't valid JSON —
+	// which is exactly the pre-fix failure mode (200 + empty body), so a green
+	// decode here is the regression guard.
+	var resp accessLogResponse
+	doUsage(t, s, "/api/usage/org/access-log", &resp)
+	if len(resp.Items) != 1 {
+		t.Fatalf("items = %d, want 1: %+v", len(resp.Items), resp.Items)
+	}
+	row := resp.Items[0]
+	// The corrupt detail is dropped so the response stays valid JSON...
+	if len(row.DetailJSON) != 0 {
+		t.Errorf("malformed detail_json passed through as %q; want it omitted", string(row.DetailJSON))
+	}
+	// ...and the label still renders (lenient parse → unknown-role phrasing).
+	if row.ActionLabel == "" {
+		t.Errorf("action_label empty for the malformed-detail row")
+	}
+}
+
 // seedAccessLogLocal stages two named users (Alice, Bob) plus four governance
 // audit rows on the local sentinel org, with explicit ascending timestamps so the
 // newest-first read order is deterministic: a credential bind, an org role change,

@@ -312,11 +312,21 @@ func orFallback(s, fallback string) string {
 	return s
 }
 
-// rawJSONOrNil wraps a non-empty detail_json string as json.RawMessage; an empty
-// string returns nil so the field is omitted (omitempty) rather than encoded as
-// an invalid empty raw message.
+// rawJSONOrNil wraps a detail_json string for passthrough, returning nil (→
+// field omitted) when it's empty OR not valid JSON.
+//
+// The validity check is load-bearing: detail_json is a free-form TEXT column (no
+// JSON CHECK), and json.RawMessage is emitted by the encoder's compaction step
+// without per-field error isolation — a single malformed value would fail the
+// WHOLE response marshal, and httpx.WriteJSON has already sent a 200 by then, so
+// the client gets an empty body and the entire page of audit rows dies. Omitting
+// an invalid detail degrades that one row to "no detail" instead; its
+// action_label still renders (parseAccessDetail is independently lenient). In
+// practice every write-point builds detail_json with json.Marshal, so this only
+// fires on a corrupt/hand-edited row — exactly where an audit viewer must not
+// fall over.
 func rawJSONOrNil(s string) json.RawMessage {
-	if s == "" {
+	if s == "" || !json.Valid([]byte(s)) {
 		return nil
 	}
 	return json.RawMessage(s)
