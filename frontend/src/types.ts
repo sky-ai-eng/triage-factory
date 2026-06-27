@@ -907,6 +907,15 @@ export interface UsageDayBucket {
   cost: number
 }
 
+/** One (UTC day, model) cell — long-format, oldest-first then by model. The FE
+ *  pivots it into a stacked-by-model area over time. Curator rows (NULL model)
+ *  are excluded (their share is still in by_day's per-day total). */
+export interface UsageDayModelBucket {
+  date: string
+  model: string
+  cost: number
+}
+
 /** One human creator's summed cost (their manual runs + curator turns). */
 export interface UsageUserBucket {
   user_id: string
@@ -946,6 +955,7 @@ export interface UsageMeResponse {
   by_category: UsageCategoryBucket[]
   by_model: UsageModelBucket[]
   by_day: UsageDayBucket[]
+  by_day_model?: UsageDayModelBucket[]
 }
 
 /** GET /api/usage/teams/{id} — one team's breakdown (team admin only; an org
@@ -960,6 +970,7 @@ export interface UsageTeamResponse {
   by_rule: UsageRuleBucket[]
   by_model: UsageModelBucket[]
   by_day: UsageDayBucket[]
+  by_day_model?: UsageDayModelBucket[]
 }
 
 /** GET /api/usage/org — the org rollup (org admin only). Partition invariant
@@ -973,4 +984,9 @@ export interface UsageOrgResponse {
   by_category: UsageCategoryBucket[]
   by_model: UsageModelBucket[]
   by_day: UsageDayBucket[]
+  by_day_model?: UsageDayModelBucket[]
+  /** Present ONLY in local mode (N=1) — the org rollup omits per-rule detail in
+   *  multi mode (it stays with the owning team). Lets the local console read
+   *  everything in one request. */
+  by_rule?: UsageRuleBucket[]
 }

@@ -309,6 +309,11 @@ func TestUsageEndpoints_Local(t *testing.T) {
 		if !floatEq(ol[domain.SpendCategoryCurator], 0.10) || !floatEq(ol[domain.SpendCategorySystemOverhead], 0.05) {
 			t.Errorf("/org org_level = %+v, want curator 0.10 + system_overhead 0.05", resp.OrgLevel)
 		}
+		// by_rule: local mode (N=1) carries it on the org rollup too — the
+		// autonomous run's trigger, labeled by its blueprint (0.25).
+		if len(resp.ByRule) != 1 || resp.ByRule[0].RuleName != blueprintName || !floatEq(resp.ByRule[0].Cost, 0.25) {
+			t.Errorf("/org by_rule = %+v, want one rule %q at 0.25 (local mode)", resp.ByRule, blueprintName)
+		}
 		assertByDaySumsToTotal(t, "/org", resp.ByDay, resp.TotalCostUSD)
 	})
 

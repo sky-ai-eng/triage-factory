@@ -28,6 +28,7 @@ import type {
   UsageUserBucket,
   UsageOrgLevelBucket,
   UsageDayBucket,
+  UsageDayModelBucket,
 } from '../types'
 
 // Usage is the core spend dashboard (TFAC-479) over the spend-layer read API
@@ -238,12 +239,9 @@ interface BarDatum {
   color?: string
 }
 
-function modelBars(rows: UsageModelBucket[] | undefined): BarDatum[] {
-  return (rows ?? []).map((m) => ({ key: m.model, label: m.model, value: m.cost }))
-}
-
-// by_user has its own roster instrument (avatars + names), so it needs no flat
-// BarDatum adapter.
+// by_model has its own series/key (modelSeries + ModelKey, color-matched to the
+// stacked area), and by_user its own roster — neither needs a flat BarDatum
+// adapter.
 
 function ruleBars(rows: UsageRuleBucket[] | undefined): BarDatum[] {
   return (rows ?? []).map((r) => ({
@@ -657,9 +655,10 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
   )
 }
 
-// Teams have no inherent tone, so the allocation ring cycles them through a
-// palette (org-level slices keep their category color instead).
-const TEAM_PALETTE = [
+// A shared categorical palette for series with no inherent tone — the allocation
+// ring's teams and the over-time chart's models both cycle through it. (Org-level
+// slices keep their category color instead.)
+const SERIES_PALETTE = [
   'var(--color-accent)',
   'var(--color-delegate)',
   'var(--color-snooze)',
@@ -698,7 +697,7 @@ function AllocationDonut({
       key: `team:${t.team_id}`,
       label: t.team_name || t.team_id,
       value: t.cost,
-      color: TEAM_PALETTE[i % TEAM_PALETTE.length],
+      color: SERIES_PALETTE[i % SERIES_PALETTE.length],
       title: `${t.team_name || t.team_id} · ${fmtUSD(t.cost)}`,
     }))
   const olSegs: DonutSeg[] = orgLevel
@@ -716,28 +715,173 @@ function AllocationDonut({
   return <Donut segments={[...teamSegs, ...olSegs]} ringClass="h-32 w-32" legendScroll />
 }
 
+// --- model series (shared by the stacked-over-time chart + its key) ---
+
+const MODEL_TOP_N = 5
+const OTHER_KEY = '__other__'
+
+interface ModelSeries {
+  key: string // the model id, or OTHER_KEY for the aggregated tail
+  label: string
+  cost: number
+  color: string
+}
+
+// shortModel trims a verbose model id to a readable family/version, e.g.
+// "claude-opus-4-8-20260101" → "opus-4-8".
+function shortModel(model: string): string {
+  return model.replace(/^claude-/, '').replace(/-\d{8}$/, '')
+}
+
+// modelSeries ranks by_model desc, keeps the top N as their own colored series,
+// and folds the rest into one neutral "other" — the single color↔model mapping
+// the stacked area and the key on the right both read, so the key IS the chart's
+// legend.
+function modelSeries(byModel: UsageModelBucket[] | undefined): ModelSeries[] {
+  const sorted = (byModel ?? []).filter((m) => m.cost > 0).sort((a, b) => b.cost - a.cost)
+  const out: ModelSeries[] = sorted.slice(0, MODEL_TOP_N).map((m, i) => ({
+    key: m.model,
+    label: shortModel(m.model),
+    cost: m.cost,
+    color: SERIES_PALETTE[i % SERIES_PALETTE.length],
+  }))
+  const rest = sorted.slice(MODEL_TOP_N)
+  if (rest.length > 0) {
+    out.push({
+      key: OTHER_KEY,
+      label: 'other',
+      cost: rest.reduce((s, m) => s + m.cost, 0),
+      color: 'var(--color-text-tertiary)',
+    })
+  }
+  return out
+}
+
+// StackedTrace is the over-time plot broken out by model: it pivots the long
+// by_day_model series into per-day wide rows (top models + an "other" bucket) and
+// stacks one area per model, colored to match the key. Same borderless treatment
+// as Trace — soft fills on the warm console over a faint baseline.
+function StackedTrace({
+  byDayModel,
+  series,
+  heightClass = 'h-24',
+}: {
+  byDayModel: UsageDayModelBucket[]
+  series: ModelSeries[]
+  heightClass?: string
+}) {
+  const topKeys = new Set(series.filter((s) => s.key !== OTHER_KEY).map((s) => s.key))
+  const byDate = new Map<string, Record<string, number>>()
+  for (const r of byDayModel) {
+    const row = byDate.get(r.date) ?? {}
+    const k = topKeys.has(r.model) ? r.model : OTHER_KEY
+    row[k] = (row[k] ?? 0) + r.cost
+    byDate.set(r.date, row)
+  }
+  const wide = [...byDate.keys()].sort().map((date) => {
+    const row = byDate.get(date)!
+    const out: Record<string, number | string> = {
+      date,
+      label: new Date(date + 'T00:00:00').toLocaleDateString([], {
+        month: 'short',
+        day: 'numeric',
+      }),
+    }
+    for (const s of series) out[s.key] = row[s.key] ?? 0
+    return out
+  })
+
+  return (
+    <div className={`relative ${heightClass}`}>
+      <ResponsiveContainer>
+        <AreaChart data={wide} margin={{ top: 6, right: 2, bottom: 0, left: 2 }}>
+          <XAxis dataKey="label" hide />
+          <YAxis hide />
+          <Tooltip
+            contentStyle={tooltipStyle}
+            formatter={(value, name) => [fmtUSD(Number(value)), String(name)]}
+            labelFormatter={(label) => String(label)}
+          />
+          {series.map((s) => (
+            <Area
+              key={s.key}
+              type="monotone"
+              dataKey={s.key}
+              name={s.label}
+              stackId="spend"
+              stroke={s.color}
+              strokeWidth={1}
+              fill={s.color}
+              fillOpacity={0.45}
+            />
+          ))}
+        </AreaChart>
+      </ResponsiveContainer>
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-border-subtle"
+      />
+    </div>
+  )
+}
+
+// ModelKey is the color legend beside the chart — each model's swatch (its
+// stacked-area color) + label + total + a matching gauge, in stack order (top
+// models, then "other"). Doubles as the per-model totals readout.
+function ModelKey({ series }: { series: ModelSeries[] }) {
+  if (series.length === 0) return <ZeroMini label="no model spend" />
+  const max = Math.max(...series.map((s) => s.cost))
+  return (
+    <ul className="space-y-2.5">
+      {series.map((s) => (
+        <li key={s.key} className="space-y-1">
+          <div className="flex items-baseline justify-between gap-2 font-mono text-[11px]">
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: s.color }} />
+              <span className="truncate text-text-secondary" title={s.key}>
+                {s.label}
+              </span>
+            </span>
+            <span className="shrink-0 tabular-nums text-text-tertiary">{fmtUSD(s.cost)}</span>
+          </div>
+          <Meter value={s.cost} max={max} color={s.color} />
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 // ThroughputInstrument fuses "over time" + "by model" into one readout: a wide
-// trace plot with a model telemetry rail beside it (stacks below on narrow
-// viewports).
+// stacked-by-model plot with the model key beside it (stacks below on narrow
+// viewports). When no spend carries a model (curator-only), it falls back to the
+// single total trace.
 function ThroughputInstrument({
   byDay,
   byModel,
+  byDayModel,
   tall = false,
   spanClass = 'md:col-span-2 lg:col-span-3',
 }: {
   byDay: UsageDayBucket[]
   byModel: UsageModelBucket[]
+  byDayModel: UsageDayModelBucket[]
   /** Hero mode — a taller plot. Used by Personal, where the throughput is the
    *  section's only instrument. */
   tall?: boolean
   /** Grid span override (Team gives it 2/3 so a Category dial can share its row). */
   spanClass?: string
 }) {
+  const series = modelSeries(byModel)
+  const heightClass = tall ? 'h-44' : 'h-32'
   return (
     <Instrument label="Over time" className={spanClass}>
       <div className="flex flex-col gap-5 lg:flex-row">
         <div className="min-w-0 flex-1">
-          <Trace data={byDay} heightClass={tall ? 'h-44' : 'h-32'} />
+          {byDayModel.length > 0 ? (
+            <StackedTrace byDayModel={byDayModel} series={series} heightClass={heightClass} />
+          ) : (
+            <Trace data={byDay} heightClass={heightClass} />
+          )}
         </div>
         <div className="lg:w-[200px] lg:shrink-0">
           <div className="mb-3 flex items-center gap-2">
@@ -746,7 +890,7 @@ function ThroughputInstrument({
             </span>
             <span className="h-px flex-1 bg-border-subtle/70" />
           </div>
-          <Gauges data={modelBars(byModel)} emptyLabel="no model spend" limit={5} />
+          <ModelKey series={series} />
         </div>
       </div>
     </Instrument>
@@ -870,7 +1014,12 @@ function PersonalSection({ since, days }: { since: string; days: number }) {
       {/* Personal is intentionally the leanest scope: just your spend trend +
           the models behind it. (Category — manual vs curator — added little at
           the personal level, so it's dropped here; it still lives in Team/Org.) */}
-      <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} tall />
+      <ThroughputInstrument
+        byDay={data?.by_day ?? []}
+        byModel={data?.by_model ?? []}
+        byDayModel={data?.by_day_model ?? []}
+        tall
+      />
     </Band>
   )
 }
@@ -941,6 +1090,7 @@ function TeamSection({
         <ThroughputInstrument
           byDay={data?.by_day ?? []}
           byModel={data?.by_model ?? []}
+          byDayModel={data?.by_day_model ?? []}
           spanClass="md:col-span-2 lg:col-span-2"
         />
       </div>
@@ -983,6 +1133,7 @@ function OrgSection({ since, days }: { since: string; days: number }) {
         <ThroughputInstrument
           byDay={data?.by_day ?? []}
           byModel={data?.by_model ?? []}
+          byDayModel={data?.by_day_model ?? []}
           spanClass="md:col-span-2"
         />
       </div>
@@ -1040,14 +1191,12 @@ function ConsoleFrame({ children }: { children: React.ReactNode }) {
 // (one user, one team), so the three stacked sections duplicate every total and
 // breakdown. Collapse to a single console with no section headings: a headline
 // total, the over-time throughput, the allocation + category dials, and by-rule.
-// It reads the org rollup for everything except by_rule — the rollup omits that
-// by design (per-rule detail stays with the owning team), so it comes from the
-// sole local team.
-function LocalConsole({ teamId, since, days }: { teamId: string; since: string; days: number }) {
+// One fetch does it all: the org rollup omits by_rule for multi-tenant orgs (per-
+// rule detail stays with the owning team), but in local mode the boundary is moot
+// — there's one team — so /api/usage/org folds by_rule in for exactly this view,
+// sparing the console a second round-trip to the sole team.
+function LocalConsole({ since, days }: { since: string; days: number }) {
   const { data: org, error } = useUsageFetch<UsageOrgResponse>(withWindow('/api/usage/org', since))
-  const { data: team } = useUsageFetch<UsageTeamResponse>(
-    teamId ? withWindow(`/api/usage/teams/${teamId}`, since) : null,
-  )
 
   if (org === null) return error ? <EtchedNote msg={error} tone="error" /> : <SkeletonBand />
   const total = org.total_cost_usd
@@ -1066,7 +1215,12 @@ function LocalConsole({ teamId, since, days }: { teamId: string; since: string; 
         </span>
       </div>
 
-      <ThroughputInstrument byDay={org.by_day} byModel={org.by_model} tall />
+      <ThroughputInstrument
+        byDay={org.by_day}
+        byModel={org.by_model}
+        byDayModel={org.by_day_model ?? []}
+        tall
+      />
 
       <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2">
         <Instrument label="Allocation">
@@ -1078,7 +1232,7 @@ function LocalConsole({ teamId, since, days }: { teamId: string; since: string; 
       </div>
 
       <Instrument label="By rule">
-        <Gauges data={ruleBars(team?.by_rule)} emptyLabel="no automated runs" />
+        <Gauges data={ruleBars(org.by_rule)} emptyLabel="no automated runs" />
       </Instrument>
     </div>
   )
@@ -1119,7 +1273,7 @@ export default function Usage() {
       <ConsoleFrame>
         {isLocal ? (
           // N=1: one flattened console instead of three duplicated sections.
-          <LocalConsole teamId={adminTeams[0]?.id ?? ''} since={since} days={days} />
+          <LocalConsole since={since} days={days} />
         ) : (
           <>
             <PersonalSection since={since} days={days} />

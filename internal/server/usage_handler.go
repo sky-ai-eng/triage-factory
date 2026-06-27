@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 )
 
@@ -130,6 +131,11 @@ type usageOrgResponse struct {
 	ByModel      []usageModelBucket    `json:"by_model"`
 	ByDay        []usageDayBucket      `json:"by_day"`
 	ByDayModel   []usageDayModelBucket `json:"by_day_model"`
+	// ByRule is populated ONLY in local mode (N=1): there's a single team, so the
+	// cross-team boundary that keeps per-rule detail off the org rollup in multi
+	// mode doesn't apply, and the local console can read everything in one request.
+	// omitempty → absent entirely in multi mode.
+	ByRule []usageRuleBucket `json:"by_rule,omitempty"`
 }
 
 // --- handlers ---
@@ -291,10 +297,13 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Local mode (N=1) carries by_rule too — see usageOrgResponse.ByRule.
+	local := runmode.Current() == runmode.ModeLocal
 	var (
 		rows         []domain.SpendRow
 		teamNames    map[string]string
 		userProfiles map[string]userProfile
+		ruleNames    map[string]string // local mode only
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -309,14 +318,19 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 		}
 		// Org-wide creators are co-org-members, so profiles resolve under the
 		// org admin's claims (users_select is org-scoped) — no System read needed.
-		userProfiles, e = resolveSpendUserProfiles(r.Context(), tx, rows)
+		if userProfiles, e = resolveSpendUserProfiles(r.Context(), tx, rows); e != nil {
+			return e
+		}
+		if local {
+			ruleNames, e = resolveSpendRuleNames(r.Context(), tx, orgID, rows)
+		}
 		return e
 	}); err != nil {
 		internalError(w, "usage", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, usageOrgResponse{
+	resp := usageOrgResponse{
 		TotalCostUSD: sumSpendCost(rows),
 		ByTeam:       spendByTeam(rows, teamNames),
 		ByUser:       spendByUser(rows, userProfiles),
@@ -325,7 +339,11 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 		ByModel:      spendByModel(rows),
 		ByDay:        spendByDay(rows),
 		ByDayModel:   spendByDayModel(rows),
-	})
+	}
+	if local {
+		resp.ByRule = spendByRule(rows, ruleNames)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // --- gating ---

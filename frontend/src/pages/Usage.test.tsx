@@ -114,6 +114,9 @@ const ORG: UsageOrgResponse = {
   by_category: [cat('autonomous', 50), cat('curator', 40), cat('system_overhead', 10)],
   by_model: [{ model: 'claude-opus-4-8', cost: 90 }],
   by_day: [{ date: '2026-06-03', cost: 100 }],
+  // by_rule is folded into /org in local mode only (multi-tenant orgs omit it).
+  // LocalConsole reads it straight from the rollup — no second team fetch.
+  by_rule: [{ trigger_id: 'tr1', rule_name: 'CI Fixer', cost: 50 }],
 }
 
 // stubUsageFetch routes GET /api/usage/* by path (query stripped) to a canned
@@ -256,17 +259,16 @@ describe('Usage page', () => {
     await waitFor(() => expect(fetchedPaths(fetchMock)).toContain('/api/usage/teams/t2'))
   })
 
-  it('local mode (N=1) renders one flat console (no Personal/Team/Org headings)', async () => {
+  it('local mode (N=1) renders one flat console from a single /org fetch', async () => {
     // Local mode: no AuthProvider (useOptionalAuth null), useOrgRole reports
     // non-admin, the sole team reports admin. Instead of three duplicated
     // sections, LocalConsole renders a flat layout: over-time + allocation /
-    // category + by-rule, reading the org rollup (everything but by_rule) and the
-    // sole team (by_rule).
+    // category + by-rule, ALL from one /api/usage/org read — in local mode the
+    // rollup folds in by_rule, so there's no second team round-trip.
     authMock.local = true
     roleMock.isAdmin = false
     teamsMock.teams = [{ id: 't1', name: 'Default', slug: 'default', role: 'admin' }]
     const fetchMock = stubUsageFetch({
-      '/api/usage/teams/t1': TEAM,
       '/api/usage/org': ORG,
     })
 
@@ -279,18 +281,15 @@ describe('Usage page', () => {
     expect(screen.getByText('By rule')).toBeInTheDocument()
     expect(screen.queryByText('Personal')).not.toBeInTheDocument()
 
-    // Reads the org rollup AND the sole team (for by_rule).
-    await waitFor(() => {
-      const paths = fetchedPaths(fetchMock)
-      expect(paths).toContain('/api/usage/org')
-      expect(paths).toContain('/api/usage/teams/t1')
-    })
-
-    // System-overhead surfaces (allocation), by_rule comes from the team, and the
-    // headline carries the org total.
+    // System-overhead surfaces (allocation), by_rule comes from the rollup itself,
+    // and the headline carries the org total.
     expect((await screen.findAllByText('System')).length).toBeGreaterThan(0)
     expect(await screen.findByText('CI Fixer')).toBeInTheDocument()
     expect(await screen.findByText('$100.00')).toBeInTheDocument()
+
+    // Exactly one endpoint — the org rollup. No team fetch at all.
+    await waitFor(() => expect(fetchedPaths(fetchMock)).toContain('/api/usage/org'))
+    expect(fetchedPaths(fetchMock).some((p) => p.startsWith('/api/usage/teams'))).toBe(false)
   })
 
   it('has no manual refresh button (the page auto-refreshes)', async () => {
