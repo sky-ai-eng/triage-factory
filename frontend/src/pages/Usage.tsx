@@ -13,10 +13,13 @@ import {
 import * as HintTip from '@radix-ui/react-tooltip'
 import TeamSwitch from '../components/TeamSwitch'
 import { useOptionalAuth } from '../contexts/AuthContext'
+import { useEntitlements, FeatureGovernance } from '../hooks/useEntitlements'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
 import { readError } from '../lib/api'
 import type {
+  AccessChangeRow,
+  AccessLogResponse,
   TeamSummary,
   UsageCategoryBucket,
   UsageMeResponse,
@@ -1141,6 +1144,206 @@ function OrgSection({ since, days }: { since: string; days: number }) {
   )
 }
 
+// --- access & credential change-log (EE governance audit, TFAC-484) ---
+
+// The second audit surface on Usage: WHO changed the org's access/credentials
+// (membership, roles, ownership, credential binds), distinct from the spend
+// console above. Org-admin + governance-gated; the backend 404s when unlicensed,
+// but the section also self-gates on the entitlement so it never flashes.
+
+const ACCESS_LOG_PAGE = 50
+
+type AccessCategory = '' | 'membership' | 'credential'
+
+const ACCESS_CATEGORIES: { key: AccessCategory; label: string }[] = [
+  { key: '', label: 'All' },
+  { key: 'membership', label: 'Membership' },
+  { key: 'credential', label: 'Credential' },
+]
+
+// fmtAccessTime renders an audit row's timestamp as a compact local date + time;
+// the full ISO rides the title attribute for the exact instant.
+function fmtAccessTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+// accessTone colors a row's leading dot by category — credential binds in the
+// claim hue, membership/role/ownership in the rust accent — reusing the console's
+// semantic palette so the two row kinds read apart at a glance.
+function accessTone(action: string): string {
+  return action === 'credential_set' ? 'var(--color-claim)' : 'var(--color-accent)'
+}
+
+// AccessCategoryFilter is the membership/credential toggle, styled like the
+// window Channel (bare mono labels with a rust underline-tick on the active one)
+// — the Board's filter affordance at section scale.
+function AccessCategoryFilter({
+  value,
+  onChange,
+}: {
+  value: AccessCategory
+  onChange: (c: AccessCategory) => void
+}) {
+  return (
+    <div className="flex items-center gap-4">
+      {ACCESS_CATEGORIES.map((c) => {
+        const active = c.key === value
+        return (
+          <button
+            key={c.key || 'all'}
+            type="button"
+            onClick={() => onChange(c.key)}
+            className={`relative font-mono text-[11px] tracking-[0.12em] transition-colors ${
+              active ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
+            }`}
+          >
+            {c.label}
+            {active && <span className="absolute -bottom-1.5 left-0 right-0 h-px bg-accent" />}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+// AccessLogRow is one entry: timestamp, a category dot, then the actor and the
+// server-rendered action label ("Alice changed Bob from member to admin").
+function AccessLogRow({ row }: { row: AccessChangeRow }) {
+  const actor = row.actor_name || 'Unknown'
+  return (
+    <li className="flex items-baseline gap-3 py-2 font-mono text-[11px]">
+      <time
+        dateTime={row.created_at}
+        title={row.created_at}
+        className="w-28 shrink-0 tabular-nums text-text-tertiary/70"
+      >
+        {fmtAccessTime(row.created_at)}
+      </time>
+      <span
+        aria-hidden
+        className="mt-[3px] h-1.5 w-1.5 shrink-0 rounded-[2px]"
+        style={{ background: accessTone(row.action) }}
+      />
+      <span className="min-w-0 leading-relaxed">
+        <span className="font-semibold text-text-primary">{actor}</span>{' '}
+        <span className="text-text-secondary">{row.action_label}</span>
+      </span>
+    </li>
+  )
+}
+
+// AccessLogPager is the offset pager: a "start–end" readout with Newer/Older
+// steps. Newer is disabled on the first page; Older when the server reports no
+// more rows.
+function AccessLogPager({
+  offset,
+  count,
+  hasMore,
+  onChange,
+}: {
+  offset: number
+  count: number
+  hasMore: boolean
+  onChange: (offset: number) => void
+}) {
+  const start = count === 0 ? 0 : offset + 1
+  const end = offset + count
+  return (
+    <div className="mt-5 flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-text-tertiary/70">
+      <span className="tabular-nums">
+        {start}–{end}
+      </span>
+      <div className="flex items-center gap-4">
+        <button
+          type="button"
+          disabled={offset === 0}
+          onClick={() => onChange(Math.max(0, offset - ACCESS_LOG_PAGE))}
+          className="tracking-[0.12em] transition-colors enabled:hover:text-text-secondary disabled:opacity-30"
+        >
+          Newer
+        </button>
+        <button
+          type="button"
+          disabled={!hasMore}
+          onClick={() => onChange(offset + ACCESS_LOG_PAGE)}
+          className="tracking-[0.12em] transition-colors enabled:hover:text-text-secondary disabled:opacity-30"
+        >
+          Older
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// AccessLogSection is the EE audit band: an etched header (label + hairline +
+// category filter) over the chronological row list, paged. It reuses the spend
+// console's skeleton / error / zero-note treatment, but carries no $ total/rate,
+// so it's a sibling of Band rather than a use of it.
+function AccessLogSection() {
+  const [category, setCategory] = useState<AccessCategory>('')
+  const [offset, setOffset] = useState(0)
+  const url = `/api/usage/org/access-log?limit=${ACCESS_LOG_PAGE}&offset=${offset}${
+    category ? `&category=${category}` : ''
+  }`
+  const { data, error } = useUsageFetch<AccessLogResponse>(url)
+  // Changing the filter resets to the first page (an offset into the old filter's
+  // result set is meaningless against the new one).
+  const pickCategory = (c: AccessCategory) => {
+    setCategory(c)
+    setOffset(0)
+  }
+
+  const hasData = data !== null
+  const rows = data?.items ?? []
+  return (
+    <section className="mb-12 last:mb-0">
+      <div className="flex items-end gap-4">
+        <span className="pb-1.5 font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-text-secondary">
+          Access &amp; credential changes
+        </span>
+        <span className="mb-[9px] h-px flex-1 bg-border-subtle" />
+        <div className="pb-1">
+          <AccessCategoryFilter value={category} onChange={pickCategory} />
+        </div>
+      </div>
+      <div className="mt-6">
+        {!hasData ? (
+          error ? (
+            <EtchedNote msg={error} tone="error" />
+          ) : (
+            <SkeletonBand />
+          )
+        ) : rows.length === 0 ? (
+          <EtchedNote
+            msg={category ? 'no changes · this filter' : 'no access or credential changes yet'}
+          />
+        ) : (
+          <>
+            <ul className="divide-y divide-border-subtle/40">
+              {rows.map((row) => (
+                <AccessLogRow key={row.id} row={row} />
+              ))}
+            </ul>
+            <AccessLogPager
+              offset={offset}
+              count={rows.length}
+              hasMore={data?.has_more ?? false}
+              onChange={setOffset}
+            />
+          </>
+        )}
+      </div>
+    </section>
+  )
+}
+
 // --- console chrome ---
 
 // Channel is the window selector, styled as an industrial channel toggle: bare
@@ -1254,6 +1457,14 @@ export default function Usage() {
   const { teams } = useTeams()
   const adminTeams = teams.filter((t) => t.role === 'admin')
 
+  // The access & credential change-log is the EE governance audit surface: shown
+  // to whoever sees the org rollup (org admins, and the local N=1 owner) AND only
+  // when the governance entitlement is licensed. `loaded` gates the flash before
+  // the entitlements probe resolves; an unlicensed build (every local install
+  // included) hides it, matching the backend's 404.
+  const { has, loaded: entLoaded } = useEntitlements()
+  const showAccessLog = showOrg && entLoaded && has(FeatureGovernance)
+
   const [range, setRange] = useState<RangeKey>('month')
   const since = sinceParam(range)
   const days = Math.max(1, windowDays(range))
@@ -1283,6 +1494,9 @@ export default function Usage() {
             {showOrg && <OrgSection since={since} days={days} />}
           </>
         )}
+        {/* EE governance audit — its own band below the spend console, in both
+            the multi sections and the local flat view. */}
+        {showAccessLog && <AccessLogSection />}
       </ConsoleFrame>
     </div>
   )

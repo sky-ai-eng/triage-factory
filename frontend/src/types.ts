@@ -990,3 +990,33 @@ export interface UsageOrgResponse {
    *  everything in one request. */
   by_rule?: UsageRuleBucket[]
 }
+
+/** One row of the EE access & credential change-log (GET
+ *  /api/usage/org/access-log, TFAC-484). `action_label` is the server-rendered
+ *  human predicate ("changed Alice from member to admin") shown after the actor +
+ *  timestamp; the actor/target/team names are pre-resolved ("" when a
+ *  since-removed user/team no longer resolves). `action` is the raw discriminator
+ *  (used FE-side only to tone membership vs credential rows). */
+export interface AccessChangeRow {
+  id: string
+  action: string
+  action_label: string
+  actor_name: string
+  target_name?: string
+  team_name?: string
+  /** Raw captured payload, passed through for power users; the FE renders the
+   *  label, not this. Omitted when the row carried no detail. */
+  detail_json?: Record<string, unknown>
+  created_at: string
+}
+
+/** GET /api/usage/org/access-log — one page of the org-admin EE audit viewer
+ *  (org admin + governance entitlement; 404 unlicensed). Newest-first; paginate
+ *  via limit/offset and `has_more`. The `category` query narrows to membership vs
+ *  credential changes. */
+export interface AccessLogResponse {
+  items: AccessChangeRow[]
+  limit: number
+  offset: number
+  has_more: boolean
+}

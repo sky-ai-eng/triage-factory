@@ -66,9 +66,51 @@ const (
 	CredentialKindAnthropicKey = "anthropic_key"
 )
 
-// AccessChangeListOpts bounds a ListByOrg read for the future audit view. Limit
-// ≤ 0 falls back to a default page size; rows come back newest-first (matching
-// the (org_id, created_at DESC) index).
+// AccessChangeListOpts bounds a ListByOrg read for the audit viewer (TFAC-484).
+// Rows come back newest-first (matching the (org_id, created_at DESC) index).
 type AccessChangeListOpts struct {
+	// Limit is the page size; ≤ 0 falls back to a default (100). The viewer
+	// requests Limit+1 and peeks at the extra row to learn whether a next page
+	// exists, without a separate COUNT.
 	Limit int
+	// Offset skips the first N rows for pagination. 0 (or negative, clamped by
+	// the caller) is the first page.
+	Offset int
+	// Category, when one of AccessCategory*, narrows the read to that bucket's
+	// action discriminators (via AccessActionsInCategory). An empty or
+	// unrecognized value means no category filter — every action.
+	Category string
+}
+
+// Access-change filter categories for the audit viewer (TFAC-484). The viewer
+// groups the action discriminators into two buckets so an org admin can narrow
+// the log to membership/role/ownership changes vs credential binds/rotations.
+const (
+	AccessCategoryMembership = "membership"
+	AccessCategoryCredential = "credential"
+)
+
+// AccessActionsInCategory returns the action discriminators that make up a
+// filter category, or nil for "" / an unrecognized category (the caller treats
+// nil as "no filter — every action"). Membership covers every org/team
+// grant / role-change / revoke / ownership-transfer; credential is the lone
+// credential_set. Keeping the grouping here, next to the action constants, means
+// a newly-added action is classified in exactly one place.
+func AccessActionsInCategory(category string) []string {
+	switch category {
+	case AccessCategoryMembership:
+		return []string{
+			AccessActionOrgMemberGranted,
+			AccessActionOrgRoleChanged,
+			AccessActionOrgMemberRevoked,
+			AccessActionOrgOwnershipTransferred,
+			AccessActionTeamMemberAdded,
+			AccessActionTeamRoleChanged,
+			AccessActionTeamMemberRemoved,
+		}
+	case AccessCategoryCredential:
+		return []string{AccessActionCredentialSet}
+	default:
+		return nil
+	}
 }

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import type {
+  AccessLogResponse,
   UsageCategoryBucket,
   UsageMeResponse,
   UsageOrgResponse,
@@ -40,6 +41,18 @@ vi.mock('../hooks/useTeams', () => ({
 const authMock = vi.hoisted(() => ({ local: false }))
 vi.mock('../contexts/AuthContext', () => ({
   useOptionalAuth: () => (authMock.local ? null : ({} as unknown)),
+}))
+
+// useEntitlements gates the EE access-log band. Default off (so the spend-only
+// tests above never render or fetch it); the access-log tests flip it on. loaded
+// is always true here — the real hook's pre-resolve flash isn't under test.
+const entMock = vi.hoisted(() => ({ governance: false }))
+vi.mock('../hooks/useEntitlements', () => ({
+  FeatureGovernance: 'governance',
+  useEntitlements: () => ({
+    has: (f: string) => f === 'governance' && entMock.governance,
+    loaded: true,
+  }),
 }))
 
 import Usage from './Usage'
@@ -142,10 +155,43 @@ function fetchedPaths(fetchMock: ReturnType<typeof vi.fn>): string[] {
   return fetchMock.mock.calls.map((c) => String(c[0]).split('?')[0])
 }
 
+// Access-log fixtures: one membership row + one credential row, newest-first.
+const ACCESS_LOG: AccessLogResponse = {
+  items: [
+    {
+      id: 'a1',
+      action: 'org_role_changed',
+      action_label: 'changed Bob from member to admin',
+      actor_name: 'Alice',
+      target_name: 'Bob',
+      created_at: '2026-06-20T11:00:00Z',
+    },
+    {
+      id: 'a2',
+      action: 'credential_set',
+      action_label: 'set the GitHub PAT for github.example.com',
+      actor_name: 'Alice',
+      created_at: '2026-06-20T10:00:00Z',
+    },
+  ],
+  limit: 50,
+  offset: 0,
+  has_more: false,
+}
+
+const ACCESS_LOG_EMPTY: AccessLogResponse = { items: [], limit: 50, offset: 0, has_more: false }
+
+// fullUrls returns each fetched URL with its query intact (fetchedPaths strips
+// the query) — for asserting the access-log category param.
+function fullUrls(fetchMock: ReturnType<typeof vi.fn>): string[] {
+  return fetchMock.mock.calls.map((c) => String(c[0]))
+}
+
 beforeEach(() => {
   roleMock.isAdmin = false
   teamsMock.teams = []
   authMock.local = false
+  entMock.governance = false
 })
 afterEach(() => vi.unstubAllGlobals())
 
@@ -408,5 +454,99 @@ describe('Usage page', () => {
     expect(await screen.findByText('Alice Smith')).toBeInTheDocument()
     expect(container.querySelector('img[src="https://ex/alice.png"]')).not.toBeNull()
     expect(screen.getByText('BO')).toBeInTheDocument() // Bob's monogram fallback
+  })
+})
+
+describe('Usage access & credential change-log (EE governance)', () => {
+  it('org admin with governance licensed sees the audit band + rendered rows', async () => {
+    roleMock.isAdmin = true
+    teamsMock.teams = []
+    entMock.governance = true
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/org': ORG,
+      '/api/usage/org/access-log': ACCESS_LOG,
+    })
+
+    render(<Usage />)
+
+    // The band header + both server-rendered action labels render.
+    expect(await screen.findByText('Access & credential changes')).toBeInTheDocument()
+    expect(await screen.findByText('changed Bob from member to admin')).toBeInTheDocument()
+    expect(await screen.findByText('set the GitHub PAT for github.example.com')).toBeInTheDocument()
+    // The endpoint was hit.
+    expect(fetchedPaths(fetchMock)).toContain('/api/usage/org/access-log')
+  })
+
+  it('hides the audit band when the governance entitlement is absent', async () => {
+    roleMock.isAdmin = true
+    teamsMock.teams = []
+    entMock.governance = false // unlicensed
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/org': ORG,
+      '/api/usage/org/access-log': ACCESS_LOG,
+    })
+
+    render(<Usage />)
+
+    // Org section still renders (proves the page mounted), but the audit band
+    // does not — and its endpoint is never fetched.
+    expect(await screen.findByText('Org')).toBeInTheDocument()
+    expect(screen.queryByText('Access & credential changes')).not.toBeInTheDocument()
+    expect(fetchedPaths(fetchMock)).not.toContain('/api/usage/org/access-log')
+  })
+
+  it('hides the audit band from a non-org-admin even when licensed', async () => {
+    roleMock.isAdmin = false // plain member
+    teamsMock.teams = []
+    entMock.governance = true
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/org/access-log': ACCESS_LOG,
+    })
+
+    render(<Usage />)
+
+    expect(await screen.findByText('Personal')).toBeInTheDocument()
+    expect(screen.queryByText('Access & credential changes')).not.toBeInTheDocument()
+    expect(fetchedPaths(fetchMock)).not.toContain('/api/usage/org/access-log')
+  })
+
+  it('renders a zero state for an empty log', async () => {
+    roleMock.isAdmin = true
+    teamsMock.teams = []
+    entMock.governance = true
+    stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/org': ORG,
+      '/api/usage/org/access-log': ACCESS_LOG_EMPTY,
+    })
+
+    render(<Usage />)
+
+    expect(await screen.findByText('Access & credential changes')).toBeInTheDocument()
+    expect(await screen.findByText(/no access or credential changes yet/i)).toBeInTheDocument()
+  })
+
+  it('filtering by category refetches the log with the category param', async () => {
+    roleMock.isAdmin = true
+    teamsMock.teams = []
+    entMock.governance = true
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/org': ORG,
+      '/api/usage/org/access-log': ACCESS_LOG,
+    })
+
+    render(<Usage />)
+
+    // Wait for the band, then pick the Credential filter.
+    expect(await screen.findByText('Access & credential changes')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Credential' }))
+
+    await waitFor(() =>
+      expect(fullUrls(fetchMock).some((u) => u.includes('category=credential'))).toBe(true),
+    )
   })
 })

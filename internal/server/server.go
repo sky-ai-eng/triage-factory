@@ -763,6 +763,10 @@ func (s *Server) routes() {
 	s.api("GET /api/usage/me", uh.handleUsageMe)
 	s.api("GET /api/usage/teams/{team_id}", uh.handleUsageTeam)
 	s.api("GET /api/usage/org", uh.handleUsageOrg)
+	// EE governance audit surface (TFAC-484): the access & credential change-log
+	// viewer. Org-admin-gated AND FeatureGovernance-gated (404 unlicensed) inside
+	// the handler — the data is core, only the cross-team lens is Enterprise.
+	s.api("GET /api/usage/org/access-log", uh.handleUsageAccessLog)
 
 	// Org invites (multi-mode only — each handler 404s in local).
 	// The admin-facing create/list/revoke gate on org-admin and write
