@@ -102,7 +102,22 @@ func (s *spendStore) SpendByCategorySystem(ctx context.Context, orgID string, si
 	return s.SpendByCategory(ctx, orgID, since, until)
 }
 
+// SpendByCategorySystemForTeam mirrors the Postgres admin-pool variant the
+// TFAC-482 per-team cap reads — SpendByCategorySystem narrowed to one team. The
+// team_id filter excludes the org's NULL-team rows (system overhead + non-team
+// curator). SQLite is N=1 / no RLS, so it's the same single-connection read with
+// the team predicate applied.
+func (s *spendStore) SpendByCategorySystemForTeam(ctx context.Context, orgID, teamID string, since, until time.Time) ([]domain.SpendBucket, error) {
+	return s.spendByCategory(ctx, orgID, teamID, since, until)
+}
+
 func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
+	return s.spendByCategory(ctx, orgID, "", since, until)
+}
+
+// spendByCategory is the shared aggregate. A non-empty teamID adds an `AND
+// team_id = teamID` filter (the per-team cap path); "" leaves it org-wide.
+func (s *spendStore) spendByCategory(ctx context.Context, orgID, teamID string, since, until time.Time) ([]domain.SpendBucket, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -113,6 +128,10 @@ func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since, u
 	var where strings.Builder
 	where.WriteString(`WHERE org_id = ?`)
 	args := []any{orgID}
+	if teamID != "" {
+		where.WriteString(` AND team_id = ?`)
+		args = append(args, teamID)
+	}
 	if !since.IsZero() {
 		where.WriteString(` AND datetime(occurred_at) >= datetime(?)`)
 		args = append(args, since)

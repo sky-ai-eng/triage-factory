@@ -940,6 +940,11 @@ export interface UsageTeamBucket {
   team_id: string
   team_name: string
   cost: number
+  /** The team's configured per-team daily spend cap (TFAC-482), or null for no
+   *  cap. EE/governance config: the org section pairs it with `cost` to render an
+   *  inline cap editor, but only when governance is licensed — the value is
+   *  reported regardless (a dormant cap on an unlicensed deployment still shows). */
+  cap: number | null
 }
 
 /** One category of org-level spend — the NULL-team rows (curator on non-team

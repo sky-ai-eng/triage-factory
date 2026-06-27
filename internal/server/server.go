@@ -763,6 +763,11 @@ func (s *Server) routes() {
 	s.api("GET /api/usage/me", uh.handleUsageMe)
 	s.api("GET /api/usage/teams/{team_id}", uh.handleUsageTeam)
 	s.api("GET /api/usage/org", uh.handleUsageOrg)
+	// Per-team daily spend cap (TFAC-482) — org-admin-set, EE/governance-gated
+	// (the handler 404s when unlicensed). Mutating, so it runs through the CSRF +
+	// session wrap. The write is admin-pool: an org admin may cap a team they
+	// don't belong to.
+	s.apiMutating("PUT /api/usage/teams/{team_id}/cap", uh.handleUsageTeamCap)
 
 	// Org invites (multi-mode only — each handler 404s in local).
 	// The admin-facing create/list/revoke gate on org-admin and write

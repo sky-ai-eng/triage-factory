@@ -1687,6 +1687,17 @@ CREATE TABLE public.team_settings (
     -- don't auto-spawn agents until explicitly opted in.
     default_model text DEFAULT 'sonnet'::text NOT NULL,
     auto_delegate_enabled boolean DEFAULT false NOT NULL,
+    -- Per-team daily LLM spend cap (TFAC-482, EE/governance-gated). NULL = no cap;
+    -- the app layer also treats 0 as "no cap". When the team's spend for the
+    -- current UTC calendar day (summed over its team_id rows ONLY — system
+    -- overhead + non-team curator carry a NULL team_id and never count toward a
+    -- team cap) is at or above this value, the delegation choke point refuses new
+    -- agent runs FOR THAT TEAM. Org-admin-configured (a team admin cannot set
+    -- their own team's cap) and enforced only while the governance entitlement is
+    -- active; unlicensed/lapsed → dormant, with the org-wide cap
+    -- (org_settings.max_daily_cost_usd) remaining the safety net. Mirrors that org
+    -- cap's nullable shape; in-flight runs are unaffected and the read fails open.
+    max_daily_cost_usd double precision,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 

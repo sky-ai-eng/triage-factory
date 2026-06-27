@@ -195,13 +195,24 @@ func TestSpendByRule_AutonomousOnly(t *testing.T) {
 
 func TestSpendByTeam_ExcludesNullTeam(t *testing.T) {
 	names := map[string]string{"tA": "Team A"}
-	got := spendByTeam(usageTestRows(), names)
+	caps := map[string]float64{"tA": 50} // a configured per-team cap (TFAC-482)
+	got := spendByTeam(usageTestRows(), names, caps)
 	// c2 (NULL team) + s1 (NULL team) excluded; tA = r1 + r2 + c1.
 	if len(got) != 1 {
 		t.Fatalf("byTeam = %+v, want 1 bucket", got)
 	}
 	if got[0].TeamID != "tA" || got[0].TeamName != "Team A" || !floatEq(got[0].Cost, 1.75) {
 		t.Errorf("byTeam[0] = %+v, want {tA, Team A, 1.75}", got[0])
+	}
+	if got[0].Cap == nil || !floatEq(*got[0].Cap, 50) {
+		t.Errorf("byTeam[0].cap = %v, want 50 (the configured cap)", got[0].Cap)
+	}
+
+	// A team with no cap (absent / 0 in the caps map) renders a null Cap so the FE
+	// shows "No cap".
+	noCap := spendByTeam(usageTestRows(), names, map[string]float64{"tA": 0})
+	if len(noCap) != 1 || noCap[0].Cap != nil {
+		t.Errorf("byTeam[0].cap with a 0 cap = %v, want nil", noCap[0].Cap)
 	}
 }
 

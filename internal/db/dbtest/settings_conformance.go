@@ -216,6 +216,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			AutoDelegateEnabled:             true,
 			PermissionAbsentGraceMS:         30000,
 			PermissionAbsentAutodenyEnabled: false,
+			MaxDailyCostUSD:                 12.50, // TFAC-482 per-team daily cap
 		}
 		if err := stores.Teams.UpdateSettings(ctx, ids.TeamID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
@@ -226,6 +227,62 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("TeamSettings round-trip mismatch\n got: %+v\nwant: %+v", got, want)
+		}
+	})
+
+	// SetDailyCostCapSystem is the org-admin write path for the per-team daily
+	// spend cap (TFAC-482): surgical (touches only the cap), creates the row from
+	// schema defaults when none exists, and the team-settings read-modify-write
+	// path preserves it (a team admin can't change the cap). ≤0 clears it (NULL).
+	t.Run("TeamSettings_DailyCostCap_SetClearAndPreserve", func(t *testing.T) {
+		stores, ids := factory(t)
+
+		// Fresh team, no settings row yet → the partial INSERT must materialize the
+		// row from defaults + the cap, touching only max_daily_cost_usd.
+		if err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 42.50); err != nil {
+			t.Fatalf("SetDailyCostCapSystem (insert): %v", err)
+		}
+		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		want := domain.DefaultTeamSettings()
+		want.MaxDailyCostUSD = 42.50
+		// A materialized row reads jira_projects back as an empty (non-nil) slice,
+		// whereas DefaultTeamSettings leaves it nil — normalize so DeepEqual checks
+		// the fields that matter, not the nil-vs-empty distinction.
+		want.JiraProjects = []string{}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("after SetDailyCostCapSystem on a fresh team\n got: %+v\nwant: %+v (defaults + cap)", got, want)
+		}
+
+		// A read-modify-write team-settings save that changes another field but not
+		// the cap must preserve it — the team-admin path can never alter the cap.
+		got.DefaultModel = "haiku"
+		if err := stores.Teams.UpdateSettings(ctx, ids.TeamID, got); err != nil {
+			t.Fatalf("UpdateSettings (rmw): %v", err)
+		}
+		after, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem after rmw: %v", err)
+		}
+		if after.MaxDailyCostUSD != 42.50 {
+			t.Errorf("UpdateSettings clobbered the cap: got %v, want 42.50 preserved", after.MaxDailyCostUSD)
+		}
+		if after.DefaultModel != "haiku" {
+			t.Errorf("UpdateSettings didn't apply the unrelated change: got %q, want haiku", after.DefaultModel)
+		}
+
+		// ≤ 0 clears the cap (stored NULL → read back as 0 / no cap).
+		if err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 0); err != nil {
+			t.Fatalf("SetDailyCostCapSystem (clear): %v", err)
+		}
+		cleared, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem after clear: %v", err)
+		}
+		if cleared.MaxDailyCostUSD != 0 {
+			t.Errorf("cleared cap = %v, want 0 (NULL)", cleared.MaxDailyCostUSD)
 		}
 	})
 

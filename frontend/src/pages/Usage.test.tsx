@@ -42,6 +42,18 @@ vi.mock('../contexts/AuthContext', () => ({
   useOptionalAuth: () => (authMock.local ? null : ({} as unknown)),
 }))
 
+// useEntitlements gates the EE per-team cap editor (TFAC-482) in the Org section.
+// Mock it like the other hooks so each test toggles governance on/off — and so the
+// page never makes a real /api/entitlements round-trip through the stubbed fetch.
+const entMock = vi.hoisted(() => ({ governance: false }))
+vi.mock('../hooks/useEntitlements', () => ({
+  useEntitlements: () => ({
+    has: (f: string) => entMock.governance && f === 'governance',
+    loaded: true,
+  }),
+  FeatureGovernance: 'governance',
+}))
+
 import Usage from './Usage'
 
 // --- fixtures -------------------------------------------------------------
@@ -106,8 +118,8 @@ const TEAM_T2: UsageTeamResponse = {
 const ORG: UsageOrgResponse = {
   total_cost_usd: 100,
   by_team: [
-    { team_id: 't1', team_name: 'Platform', cost: 60 },
-    { team_id: 't2', team_name: 'Growth', cost: 30 },
+    { team_id: 't1', team_name: 'Platform', cost: 60, cap: 50 },
+    { team_id: 't2', team_name: 'Growth', cost: 30, cap: null },
   ],
   by_user: [{ user_id: 'u1', display_name: 'Alice', cost: 40 }],
   org_level: [{ category: 'system_overhead', cost: 10 }],
@@ -122,7 +134,7 @@ const ORG: UsageOrgResponse = {
 // stubUsageFetch routes GET /api/usage/* by path (query stripped) to a canned
 // payload; an unmapped path resolves to a 404-shaped response (readError-safe).
 function stubUsageFetch(payloads: Record<string, unknown>) {
-  const fetchMock = vi.fn((input: unknown) => {
+  const fetchMock = vi.fn((input: unknown, _init?: RequestInit) => {
     const path = String(input).split('?')[0]
     if (path in payloads) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(payloads[path]) })
@@ -146,6 +158,7 @@ beforeEach(() => {
   roleMock.isAdmin = false
   teamsMock.teams = []
   authMock.local = false
+  entMock.governance = false
 })
 afterEach(() => vi.unstubAllGlobals())
 
@@ -183,6 +196,81 @@ describe('Usage page', () => {
     expect(paths).toContain('/api/usage/me')
     expect(paths).toContain('/api/usage/teams/t1')
     expect(paths).toContain('/api/usage/org')
+  })
+
+  it('org section hides the per-team cap editor unless governance is licensed', async () => {
+    // Org admin, but governance OFF (the default) → no "Daily caps" instrument.
+    roleMock.isAdmin = true
+    entMock.governance = false
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    stubUsageFetch({ '/api/usage/me': ME, '/api/usage/teams/t1': TEAM, '/api/usage/org': ORG })
+
+    render(<Usage />)
+
+    expect(await screen.findByText('Org')).toBeInTheDocument()
+    await screen.findByText('$100.00') // org rollup loaded
+    expect(screen.queryByText('Daily caps')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Daily cap for Platform')).not.toBeInTheDocument()
+  })
+
+  it('org admin with governance edits a team cap, PUTting the new value', async () => {
+    roleMock.isAdmin = true
+    entMock.governance = true
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/teams/t1': TEAM,
+      '/api/usage/org': ORG,
+      // The PUT echoes the stored value back; stubUsageFetch keys on path only.
+      '/api/usage/teams/t1/cap': { max_daily_cost_usd: 75 },
+    })
+
+    render(<Usage />)
+
+    // The editor renders, seeded from by_team[].cap (Platform = 50).
+    expect(await screen.findByText('Daily caps')).toBeInTheDocument()
+    const input = (await screen.findByLabelText('Daily cap for Platform')) as HTMLInputElement
+    expect(input.value).toBe('50')
+
+    // Edit + blur → PUT /api/usage/teams/t1/cap with the new numeric cap.
+    fireEvent.change(input, { target: { value: '75' } })
+    fireEvent.blur(input)
+
+    await waitFor(() => {
+      const put = fetchMock.mock.calls.find(
+        (c) => String(c[0]) === '/api/usage/teams/t1/cap' && c[1]?.method === 'PUT',
+      )
+      expect(put).toBeTruthy()
+      expect(JSON.parse(String(put![1]?.body))).toEqual({ max_daily_cost_usd: 75 })
+    })
+  })
+
+  it('clearing a team cap PUTs null (no cap)', async () => {
+    roleMock.isAdmin = true
+    entMock.governance = true
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/teams/t1': TEAM,
+      '/api/usage/org': ORG,
+      '/api/usage/teams/t1/cap': { max_daily_cost_usd: null },
+    })
+
+    render(<Usage />)
+
+    const input = (await screen.findByLabelText('Daily cap for Platform')) as HTMLInputElement
+    fireEvent.change(input, { target: { value: '' } }) // blank = clear
+    fireEvent.blur(input)
+
+    await waitFor(() => {
+      const put = fetchMock.mock.calls.find(
+        (c) => String(c[0]) === '/api/usage/teams/t1/cap' && c[1]?.method === 'PUT',
+      )
+      expect(put).toBeTruthy()
+      expect(JSON.parse(String(put![1]?.body))).toEqual({
+        max_daily_cost_usd: null,
+      })
+    })
   })
 
   it('regular member sees personal only — no team or org reads', async () => {

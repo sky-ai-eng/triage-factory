@@ -121,6 +121,17 @@ type TeamSettings struct {
 	// the "total wait < idleTimeout()" invariant.
 	PermissionAbsentGraceMS         int
 	PermissionAbsentAutodenyEnabled bool
+
+	// MaxDailyCostUSD is the per-team daily LLM spend cap (TFAC-482), the
+	// team-scoped sibling of OrgSettings.MaxDailyCostUSD. 0 = no cap (round-trips
+	// 0 ↔ NULL). When today's team spend (UTC calendar day, summed over the
+	// team's own rows — system overhead + non-team curator carry a NULL team_id
+	// and never count) is >= this value AND the governance entitlement is active,
+	// the delegation choke point refuses new agent runs for that team. Org-admin-
+	// configured: a team admin cannot set their own team's cap (the team-settings
+	// write path never touches this field — only the org-admin cap endpoint does),
+	// so a team-admin save round-trips the stored value untouched.
+	MaxDailyCostUSD float64
 }
 
 // DefaultTeamSettings returns the NOT NULL DEFAULT values from the

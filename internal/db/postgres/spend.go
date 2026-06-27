@@ -108,7 +108,7 @@ func listSpend(ctx context.Context, q queryer, orgID string, opts domain.SpendFi
 }
 
 func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
-	return spendByCategory(ctx, s.app, orgID, since, until)
+	return spendByCategory(ctx, s.app, orgID, "", since, until)
 }
 
 // SpendByCategorySystem runs SpendByCategory's aggregate on the admin pool
@@ -116,12 +116,23 @@ func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since, u
 // Spawner.Delegate goroutine) sees org-wide spend across every team. org_id
 // stays in the WHERE as defense in depth. Mirrors ListByRunSystem.
 func (s *spendStore) SpendByCategorySystem(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
-	return spendByCategory(ctx, s.admin, orgID, since, until)
+	return spendByCategory(ctx, s.admin, orgID, "", since, until)
+}
+
+// SpendByCategorySystemForTeam narrows SpendByCategorySystem to one team with an
+// `AND team_id = $teamID` predicate (TFAC-482 per-team daily spend cap). The team
+// filter automatically excludes the org's NULL-team rows (system overhead +
+// non-team curator), so a team cap counts only the team's own spend. Admin pool
+// for the same reason as SpendByCategorySystem — the cap reads it claims-less.
+func (s *spendStore) SpendByCategorySystemForTeam(ctx context.Context, orgID, teamID string, since, until time.Time) ([]domain.SpendBucket, error) {
+	return spendByCategory(ctx, s.admin, orgID, teamID, since, until)
 }
 
 // spendByCategory is the shared aggregate the app- and admin-pool variants both
-// run; q selects which pool (and thus whether RLS applies).
-func spendByCategory(ctx context.Context, q queryer, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
+// run; q selects which pool (and thus whether RLS applies). A non-empty teamID
+// adds an `AND team_id = teamID` filter (the per-team cap path); "" leaves the
+// aggregate org-wide.
+func spendByCategory(ctx context.Context, q queryer, orgID, teamID string, since, until time.Time) ([]domain.SpendBucket, error) {
 	// Both bounds optional (see SpendFilter): drop the clause on a zero time.
 	var where strings.Builder
 	where.WriteString(`WHERE org_id = $1`)
@@ -129,6 +140,9 @@ func spendByCategory(ctx context.Context, q queryer, orgID string, since, until 
 	next := func(v any) string {
 		args = append(args, v)
 		return "$" + strconv.Itoa(len(args))
+	}
+	if teamID != "" {
+		where.WriteString(` AND team_id = ` + next(teamID))
 	}
 	if !since.IsZero() {
 		where.WriteString(` AND occurred_at >= ` + next(since))

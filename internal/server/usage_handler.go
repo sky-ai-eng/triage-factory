@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 )
@@ -89,6 +90,13 @@ type usageTeamBucket struct {
 	TeamID   string  `json:"team_id"`
 	TeamName string  `json:"team_name"`
 	Cost     float64 `json:"cost"`
+	// Cap is the team's configured per-team daily spend cap (TFAC-482), or null
+	// for no cap. EE/governance config the FE pairs with Cost to render an inline
+	// editor — but only when governance is licensed; the value is reported
+	// regardless (an org admin sees a dormant cap that an unlicensed deployment
+	// no longer enforces). A nil pointer encodes as JSON null; a set cap as a
+	// number.
+	Cap *float64 `json:"cap"`
 }
 
 type usageOrgLevelBucket struct {
@@ -302,6 +310,7 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	var (
 		rows         []domain.SpendRow
 		teamNames    map[string]string
+		teamCaps     map[string]float64
 		userProfiles map[string]userProfile
 		ruleNames    map[string]string // local mode only
 	)
@@ -314,6 +323,11 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 			return e
 		}
 		if teamNames, e = resolveSpendTeamNames(r.Context(), tx, orgID, rows); e != nil {
+			return e
+		}
+		// Per-team caps (TFAC-482) ride alongside the names so by_team carries
+		// spend + cap together. Same admin-pool / cross-team read as the names.
+		if teamCaps, e = resolveSpendTeamCaps(r.Context(), tx, rows); e != nil {
 			return e
 		}
 		// Org-wide creators are co-org-members, so profiles resolve under the
@@ -332,7 +346,7 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 
 	resp := usageOrgResponse{
 		TotalCostUSD: sumSpendCost(rows),
-		ByTeam:       spendByTeam(rows, teamNames),
+		ByTeam:       spendByTeam(rows, teamNames, teamCaps),
 		ByUser:       spendByUser(rows, userProfiles),
 		OrgLevel:     spendOrgLevel(rows),
 		ByCategory:   spendByCategory(rows),
@@ -344,6 +358,83 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 		resp.ByRule = spendByRule(rows, ruleNames)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// teamCapUpdate is the PUT /api/usage/teams/{team_id}/cap body. A pointer so an
+// explicit null and an omitted field both decode to nil → 0 → "clear the cap".
+type teamCapUpdate struct {
+	MaxDailyCostUSD *float64 `json:"max_daily_cost_usd"`
+}
+
+// handleUsageTeamCap sets one team's per-team daily LLM spend cap (TFAC-482).
+// Gate: the governance entitlement AND org admin. The entitlement is checked
+// first so an unlicensed deployment 404s the route entirely (the EE-feature-
+// hidden posture — per-team caps are dormant without governance, with the org
+// cap as the safety net); a non-org-admin on a licensed deployment then gets a
+// 403. A team admin can NOT set their own team's cap — this is org-admin-only by
+// design, so the write goes through the admin pool (SetDailyCostCapSystem): the
+// org admin need not be a member of the team they're capping. The org comes from
+// the session (like the GET reads), the team from the path.
+//
+// Body: {"max_daily_cost_usd": number|null}. null or 0 clears the cap; a
+// negative value 400s. Echoes the stored value (null when cleared) so the FE can
+// update in place.
+//
+// PUT /api/usage/teams/{team_id}/cap
+func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.resolveCaller(w, r)
+	if !ok {
+		return
+	}
+	// EE gate first: hide the route (404) when governance isn't licensed, before
+	// any role-based disclosure. Mode-agnostic — local is unlicensed, so the
+	// route 404s there too (per-team caps are a multi-tenant EE concept).
+	if !entitlements.Active().Has(entitlements.FeatureGovernance) {
+		http.NotFound(w, r)
+		return
+	}
+	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
+		return
+	}
+	teamID := r.PathValue("team_id")
+	if _, err := uuid.Parse(teamID); err != nil {
+		// A malformed id is "not found" (parity with handleUsageTeam), not a 500.
+		http.NotFound(w, r)
+		return
+	}
+	// Confirm the team is in the caller's org so a cross-org id 404s (non-
+	// disclosure) rather than writing another org's team_settings row.
+	if !h.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
+		return
+	}
+
+	var req teamCapUpdate
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	capUSD := 0.0
+	if req.MaxDailyCostUSD != nil {
+		capUSD = *req.MaxDailyCostUSD
+	}
+	if capUSD < 0 {
+		badRequest(w, "max_daily_cost_usd must be >= 0 (or null to clear the cap)")
+		return
+	}
+
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		return tx.Teams.SetDailyCostCapSystem(r.Context(), teamID, capUSD)
+	}); err != nil {
+		internalError(w, "usage", err)
+		return
+	}
+
+	// Echo the stored value: a number for a set cap, null when cleared (capUSD<=0
+	// stores NULL), so the FE mirrors the persisted state without a refetch.
+	var stored *float64
+	if capUSD > 0 {
+		stored = &capUSD
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"max_daily_cost_usd": stored})
 }
 
 // --- gating ---
@@ -574,9 +665,11 @@ func spendByRule(rows []domain.SpendRow, names map[string]string) []usageRuleBuc
 }
 
 // spendByTeam sums cost per team across the team-attributed rows (NULL-team
-// rows go to org_level instead), resolving team names from the supplied map.
-// Sorted cost-desc. This list also drives the FE org-admin team dropdown.
-func spendByTeam(rows []domain.SpendRow, names map[string]string) []usageTeamBucket {
+// rows go to org_level instead), resolving team names + per-team daily caps
+// (TFAC-482) from the supplied maps. Sorted cost-desc. This list also drives the
+// FE org-admin team dropdown + cap editor. A team's stored cap of 0 (the no-cap
+// sentinel) renders as a null Cap so the FE shows "No cap".
+func spendByTeam(rows []domain.SpendRow, names map[string]string, caps map[string]float64) []usageTeamBucket {
 	byTeam := map[string]float64{}
 	for _, r := range rows {
 		if r.TeamID == nil {
@@ -586,7 +679,11 @@ func spendByTeam(rows []domain.SpendRow, names map[string]string) []usageTeamBuc
 	}
 	out := make([]usageTeamBucket, 0, len(byTeam))
 	for tid, c := range byTeam {
-		out = append(out, usageTeamBucket{TeamID: tid, TeamName: names[tid], Cost: c})
+		var capPtr *float64
+		if v := caps[tid]; v > 0 {
+			capPtr = &v
+		}
+		out = append(out, usageTeamBucket{TeamID: tid, TeamName: names[tid], Cost: c, Cap: capPtr})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Cost != out[j].Cost {
@@ -685,6 +782,30 @@ func resolveSpendRuleNames(ctx context.Context, tx db.TxStores, orgID string, ro
 		names[tid] = name
 	}
 	return names, nil
+}
+
+// resolveSpendTeamCaps maps each distinct team in rows to its configured
+// per-team daily spend cap (TFAC-482, MaxDailyCostUSD) via the ADMIN pool
+// (GetSettingsSystem) — the org rollup crosses teams the caller may not belong
+// to, exactly like resolveSpendTeamNames. The no-cap sentinel (0) is kept as 0
+// here; spendByTeam renders that as a null `cap`. N+1 over the small distinct-
+// team set, matching the other resolvers' deliberate "materialize nothing" stance.
+func resolveSpendTeamCaps(ctx context.Context, tx db.TxStores, rows []domain.SpendRow) (map[string]float64, error) {
+	caps := map[string]float64{}
+	for _, r := range rows {
+		if r.TeamID == nil {
+			continue
+		}
+		if _, done := caps[*r.TeamID]; done {
+			continue
+		}
+		set, err := tx.Teams.GetSettingsSystem(ctx, *r.TeamID)
+		if err != nil {
+			return nil, err
+		}
+		caps[*r.TeamID] = set.MaxDailyCostUSD
+	}
+	return caps, nil
 }
 
 // resolveSpendTeamNames maps each distinct team in rows to its name via the

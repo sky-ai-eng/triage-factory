@@ -118,8 +118,23 @@ type TeamsStore interface {
 	// also want the per-project rules to stay in sync must call
 	// JiraStatusRulesStore.ReplaceForTeam alongside (the existing
 	// config.Save() flow does both). Postgres routes through the app
-	// pool (team_settings_update RLS gates by team admin).
+	// pool (team_settings_update RLS gates by team admin). It writes
+	// MaxDailyCostUSD too, but the team-settings handler reaches this via
+	// read-modify-write and never sets the cap from its request body, so a
+	// team-admin save round-trips the org-admin-configured cap untouched
+	// (TFAC-482) — the cap is *changed* only by SetDailyCostCapSystem.
 	UpdateSettings(ctx context.Context, teamID string, updates domain.TeamSettings) error
+
+	// SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for
+	// teamID — the org-admin per-team daily LLM spend cap (TFAC-482, the team-
+	// scoped sibling of OrgSettings.MaxDailyCostUSD). capUSD ≤ 0 clears the cap
+	// (stored NULL). Admin pool in Postgres (BYPASSRLS): an org admin configuring
+	// a team's cap may not be a member of that team, so the team-admin-gated
+	// team_settings_update RLS would reject an app-pool write — the HTTP
+	// RequireOrgAdminRole gate authorizes this System path. It touches only the
+	// cap column (the other settings are never clobbered) and creates the row from
+	// schema defaults when none exists. SQLite is N=1 / no RLS and writes directly.
+	SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) error
 
 	// ListForUser returns the requesting user's active teams in the org,
 	// ordered oldest-first (the same created_at tiebreak the default-

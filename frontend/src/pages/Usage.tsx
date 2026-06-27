@@ -13,6 +13,7 @@ import {
 import * as HintTip from '@radix-ui/react-tooltip'
 import TeamSwitch from '../components/TeamSwitch'
 import { useOptionalAuth } from '../contexts/AuthContext'
+import { useEntitlements, FeatureGovernance } from '../hooks/useEntitlements'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
 import { readError } from '../lib/api'
@@ -1098,8 +1099,147 @@ function TeamSection({
   )
 }
 
+// --- per-team daily caps (EE / governance, TFAC-482) ---
+
+type CapSaveStatus = 'idle' | 'saving' | 'saved' | 'error'
+
+// CapStatus is the tiny right-aligned save indicator beside a cap input — a
+// fixed-width slot so the inputs stay column-aligned whether or not a row has a
+// pending edit. Error carries the server message as a hover title.
+function CapStatus({
+  status,
+  dirty,
+  error,
+}: {
+  status: CapSaveStatus
+  dirty: boolean
+  error: string | null
+}) {
+  const base = 'w-[56px] shrink-0 text-right font-mono text-[9px] uppercase tracking-wider'
+  if (status === 'saving') return <span className={`${base} text-text-tertiary/70`}>saving…</span>
+  if (status === 'error')
+    return (
+      <span className={`${base} text-dismiss`} title={error ?? undefined}>
+        error
+      </span>
+    )
+  if (dirty) return <span className={`${base} text-accent/80`}>unsaved</span>
+  if (status === 'saved') return <span className={`${base} text-text-tertiary/60`}>saved</span>
+  return <span className={base} aria-hidden />
+}
+
+// CapRow is one team's inline daily-cap editor (TFAC-482): the team name + its
+// window spend on the left, a $-prefixed numeric input on the right that PUTs to
+// /api/usage/teams/{id}/cap. Blank clears the cap (no cap). It holds its own
+// draft so the section's 15s background poll never clobbers a value mid-edit, and
+// re-normalizes the draft from the server echo on a successful save. Mirrors
+// OrgSettings' $-prefixed "No cap" input, in the console's monospace language.
+function CapRow({ team }: { team: UsageTeamBucket }) {
+  const canonical = team.cap == null ? '' : String(team.cap)
+  const [draft, setDraft] = useState(canonical)
+  const [status, setStatus] = useState<CapSaveStatus>('idle')
+  const [error, setError] = useState<string | null>(null)
+
+  const dirty = draft.trim() !== canonical
+
+  const save = async () => {
+    if (!dirty) return
+    const trimmed = draft.trim()
+    let payload: number | null
+    if (trimmed === '') {
+      payload = null // clear the cap
+    } else {
+      const n = Number(trimmed)
+      if (!Number.isFinite(n) || n < 0) {
+        setStatus('error')
+        setError('Enter a non-negative dollar amount, or leave blank for no cap.')
+        return
+      }
+      payload = n
+    }
+    setStatus('saving')
+    setError(null)
+    try {
+      const res = await fetch(`/api/usage/teams/${team.team_id}/cap`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_daily_cost_usd: payload }),
+      })
+      if (!res.ok) throw new Error(await readError(res, 'Failed to save cap'))
+      const body = (await res.json()) as { max_daily_cost_usd: number | null }
+      setDraft(body.max_daily_cost_usd == null ? '' : String(body.max_daily_cost_usd))
+      setStatus('saved')
+    } catch (err) {
+      setStatus('error')
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const name = team.team_name || team.team_id
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="flex min-w-0 items-baseline gap-2 font-mono text-[11px]">
+        <span className="truncate text-text-secondary" title={name}>
+          {name}
+        </span>
+        <span className="shrink-0 tabular-nums text-text-tertiary/60">{fmtUSD(team.cost)}</span>
+      </span>
+      <span className="flex shrink-0 items-center gap-2">
+        <span className="relative">
+          <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-text-tertiary">
+            $
+          </span>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            inputMode="decimal"
+            placeholder="No cap"
+            value={draft}
+            aria-label={`Daily cap for ${name}`}
+            onChange={(e) => {
+              setDraft(e.target.value)
+              setStatus('idle')
+              setError(null)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void save()
+            }}
+            onBlur={() => void save()}
+            className="w-[108px] rounded-[4px] border border-border-subtle bg-transparent py-1 pl-5 pr-2 font-mono text-[11px] tabular-nums text-text-primary transition-colors focus:border-accent focus:outline-none"
+          />
+        </span>
+        <CapStatus status={status} dirty={dirty} error={error} />
+      </span>
+    </div>
+  )
+}
+
+// TeamCaps is the EE per-team daily-cap editor body: one CapRow per team in the
+// org's by_team list (the teams with spend this window), highest-spend first. The
+// parent gates rendering on governance + org admin; the backend re-checks both.
+function TeamCaps({ teams }: { teams: UsageTeamBucket[] }) {
+  const rows = [...teams].sort((a, b) => b.cost - a.cost)
+  if (rows.length === 0) return <ZeroMini label="no team spend" />
+  return (
+    <div className="space-y-2.5">
+      {rows.map((t) => (
+        <CapRow key={t.team_id} team={t} />
+      ))}
+      <p className="pt-1 font-mono text-[9px] leading-relaxed text-text-tertiary/55">
+        Refuses new agent runs for a team once its spend for the UTC day reaches the cap. In-flight
+        runs keep going. Blank = no cap.
+      </p>
+    </div>
+  )
+}
+
 function OrgSection({ since, days }: { since: string; days: number }) {
   const { data, error } = useUsageFetch<UsageOrgResponse>(withWindow('/api/usage/org', since))
+  // Per-team caps are an EE/governance surface; render the editor only when the
+  // active org is licensed (the OrgSection itself is already org-admin-gated). The
+  // backend enforces both gates on the PUT, so this is purely affordance-level.
+  const showCaps = useEntitlements().has(FeatureGovernance)
   const total = data?.total_cost_usd ?? 0
   const active = activeDays(data?.by_day ?? [], days)
   return (
@@ -1130,6 +1270,11 @@ function OrgSection({ since, days }: { since: string; days: number }) {
         >
           <UserRoster data={data?.by_user ?? []} emptyLabel="no user spend" />
         </Instrument>
+        {showCaps && (
+          <Instrument label="Daily caps" className="md:col-span-2">
+            <TeamCaps teams={data?.by_team ?? []} />
+          </Instrument>
+        )}
         <ThroughputInstrument
           byDay={data?.by_day ?? []}
           byModel={data?.by_model ?? []}
