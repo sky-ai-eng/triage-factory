@@ -69,9 +69,11 @@ const (
 // AccessChangeListOpts bounds a ListByOrg read for the audit viewer (TFAC-484).
 // Rows come back newest-first (matching the (org_id, created_at DESC) index).
 type AccessChangeListOpts struct {
-	// Limit is the page size; ≤ 0 falls back to a default (100). The viewer
-	// requests Limit+1 and peeks at the extra row to learn whether a next page
-	// exists, without a separate COUNT.
+	// Limit is the page size. A value ≤ 0 falls back to the store impls' own
+	// internal default (100) — but the HTTP viewer resolves a concrete page size
+	// before it calls, so that 100 fallback only applies to a direct ListByOrg
+	// caller. The viewer requests Limit+1 and peeks at the extra row to learn
+	// whether a next page exists, without a separate COUNT.
 	Limit int
 	// Offset skips the first N rows for pagination. 0 (or negative, clamped by
 	// the caller) is the first page.

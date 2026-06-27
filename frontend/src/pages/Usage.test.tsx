@@ -513,6 +513,28 @@ describe('Usage access & credential change-log (EE governance)', () => {
     expect(fetchedPaths(fetchMock)).not.toContain('/api/usage/org/access-log')
   })
 
+  it('shows the audit band in local mode (N=1 owner) when governance is licensed', async () => {
+    // showOrg = isAdmin || isLocal, so the local implicit owner sees the band
+    // too (the backend short-circuits the admin gate in local mode). The flat
+    // LocalConsole renders above it, not the three multi-mode sections.
+    authMock.local = true
+    roleMock.isAdmin = false
+    teamsMock.teams = [{ id: 't1', name: 'Default', slug: 'default', role: 'admin' }]
+    entMock.governance = true
+    const fetchMock = stubUsageFetch({
+      '/api/usage/org': ORG,
+      '/api/usage/org/access-log': ACCESS_LOG,
+    })
+
+    render(<Usage />)
+
+    expect(await screen.findByText('Access & credential changes')).toBeInTheDocument()
+    expect(await screen.findByText('changed Bob from member to admin')).toBeInTheDocument()
+    // Local layout: no multi-mode section headers.
+    expect(screen.queryByText('Personal')).not.toBeInTheDocument()
+    expect(fetchedPaths(fetchMock)).toContain('/api/usage/org/access-log')
+  })
+
   it('renders a zero state for an empty log', async () => {
     roleMock.isAdmin = true
     teamsMock.teams = []

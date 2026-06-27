@@ -92,6 +92,16 @@ func TestAccessChangeLabel(t *testing.T) {
 			want:   "set the Jira credential for jira.example.net",
 		},
 		{
+			name:   "credential_set jira_user kind (per-user, no host)",
+			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: `{"kind":"jira_user"}`},
+			want:   "set the personal Jira credential",
+		},
+		{
+			name:   "credential_set unknown kind falls back to generic",
+			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: `{"kind":"mystery"}`},
+			want:   "set the credential",
+		},
+		{
 			name:   "unresolved target falls back to a generic noun",
 			change: domain.AccessChange{Action: domain.AccessActionOrgMemberRevoked, TargetUserID: "u9"},
 			target: "", // GetDisplayName returned "" (a since-revoked member)
