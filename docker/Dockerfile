@@ -27,10 +27,14 @@
 
 FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
 WORKDIR /src/frontend
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+# pnpm is provisioned via corepack, pinned by the "packageManager" field
+# in frontend/package.json. COREPACK_ENABLE_DOWNLOAD_PROMPT=0 keeps the
+# pinned-version download non-interactive in the build.
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile
 COPY frontend/ ./
-RUN npm run build
+RUN pnpm run build
 
 # --- stage 2: Agent SDK pre-install -----------------------------------------
 #

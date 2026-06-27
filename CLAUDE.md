@@ -6,7 +6,9 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ```bash
 # Full build — frontend first (Go embeds frontend/dist/), then the binary.
-cd frontend && npm install && npm run build && cd ..
+# Frontend uses pnpm (pinned via the "packageManager" field; `corepack enable`
+# provisions it). The agentproc SDK runtime installer still uses npm by design.
+cd frontend && pnpm install && pnpm run build && cd ..
 go build -o ./triagefactory .
 
 # Run (default :3000, opens browser)
@@ -21,7 +23,7 @@ go test ./...
 go test ./internal/routing -run TestRouter_Dedup
 
 # Frontend dev server (proxies /api to backend)
-cd frontend && npm run dev
+cd frontend && pnpm run dev
 
 # Nuke local DB + config + keychain entries (fresh first-run flow)
 ./scripts/clean-slate.sh

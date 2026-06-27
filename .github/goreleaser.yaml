@@ -4,7 +4,7 @@ project_name: triagefactory
 
 before:
   hooks:
-    - sh -c "cd frontend && npm ci && npm run build"
+    - sh -c "cd frontend && pnpm install --frozen-lockfile && pnpm run build"
 
 builds:
   - id: triagefactory

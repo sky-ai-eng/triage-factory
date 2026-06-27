@@ -25,7 +25,7 @@ func mustReadDistIndex(t *testing.T) string {
 	indexPath := filepath.Join(repoRoot, "frontend", "dist", "index.html")
 	data, err := os.ReadFile(indexPath)
 	if err != nil {
-		t.Skipf("frontend/dist/index.html not present (run `npm run build`): %v", err)
+		t.Skipf("frontend/dist/index.html not present (run `pnpm run build`): %v", err)
 	}
 	return string(data)
 }

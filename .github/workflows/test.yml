@@ -15,11 +15,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
 
       - uses: actions/setup-go@v5
         with:
@@ -30,12 +34,12 @@ jobs:
       # package embeds it via go:embed; without it, package main fails
       # to compile and `go test ./...` blows up before reaching any test.
       - name: Build frontend
-        run: cd frontend && npm ci && npm run build
+        run: cd frontend && pnpm install --frozen-lockfile && pnpm run build
 
       # Frontend unit/component tests (vitest + Testing Library, jsdom).
-      # Runs after the build step so node_modules from its `npm ci` is reused.
+      # Runs after the build step so node_modules from its install is reused.
       - name: Frontend tests
-        run: cd frontend && npm run test:run
+        run: cd frontend && pnpm run test:run
 
       - name: Go build
         run: go build ./...

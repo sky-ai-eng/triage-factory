@@ -88,7 +88,7 @@ The `_scratch/` directory (covering both `_scratch/entity-memory/` from SKY-141 
 ### 10. Build order
 
 ```bash
-cd frontend && npm run build && cd .. && go build -o ./triagefactory .
+cd frontend && pnpm run build && cd .. && go build -o ./triagefactory .
 ```
 
 ---

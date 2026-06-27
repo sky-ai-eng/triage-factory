@@ -137,23 +137,23 @@ fi
 blue "prettier"
 cd frontend
 if (( FIX )); then
-  npx prettier --write "src/**/*.{ts,tsx,css,json}"
+  pnpm exec prettier --write "src/**/*.{ts,tsx,css,json}"
   green "prettier applied"
 else
-  if ! npx prettier --check "src/**/*.{ts,tsx,css,json}"; then
+  if ! pnpm exec prettier --check "src/**/*.{ts,tsx,css,json}"; then
     fail=1
   fi
 fi
 
 blue "eslint"
 if (( FIX )); then
-  npx eslint . --fix || fail=1
+  pnpm exec eslint . --fix || fail=1
 else
-  npx eslint . || fail=1
+  pnpm exec eslint . || fail=1
 fi
 
 blue "tsc"
-if ! npx tsc -b --noEmit; then
+if ! pnpm exec tsc -b --noEmit; then
   fail=1
 fi
 
