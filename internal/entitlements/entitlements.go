@@ -38,7 +38,22 @@ const (
 	// extensions: GoTrue connection management, domain verification, and
 	// enforcement. Multi-mode only.
 	FeatureSSO Feature = "sso"
+
+	// FeatureGovernance gates the Enterprise governance/audit surfaces
+	// (TFAC-449): per-team daily spend caps, the bot-activity audit feed, and
+	// the access/credential change-log viewer. It is the first EE feature with
+	// a real frontend surface — SSO only needed backend route-mounting plus a
+	// 404-and-hide — which is why this feature also motivates the
+	// /api/entitlements probe and the useEntitlements FE hook the governance
+	// surfaces gate on.
+	FeatureGovernance Feature = "governance"
 )
+
+// AllFeatures lists every gated feature, for the /api/entitlements probe. The
+// handler iterates it and reports the subset the active checker licenses, so a
+// new gated Feature must be appended here to show up on the probe (and thus to
+// the frontend's useEntitlements hook).
+var AllFeatures = []Feature{FeatureSSO, FeatureGovernance}
 
 // Checker answers whether a given enterprise feature is licensed for use
 // in this process right now. Implementations must be safe for concurrent

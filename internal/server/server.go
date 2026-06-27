@@ -799,6 +799,14 @@ func (s *Server) routes() {
 	// holder. Listed in preAuthAllowlist; IP-rate-limited (TFAC-433).
 	s.mux.Handle("GET /api/invites/preview", s.preAuthRateLimit(http.HandlerFunc(ih.handleInvitePreview)))
 
+	// Entitlements probe — the deployment's licensed EE feature set. CORE (it
+	// reports the entitlements checker's state and is NOT itself license-gated),
+	// authenticated-session-only: the answer is deployment-level (process-global
+	// TF_LICENSE), so no org/role scoping. The frontend's useEntitlements hook
+	// reads this once to decide which EE surfaces to render; [] in a community /
+	// unlicensed build. See entitlements_handler.go.
+	s.api("GET /api/entitlements", s.handleEntitlements)
+
 	// SSO (connection / domains / break-glass admin surface, the verify-
 	// before-enforce test-start, and the identifier-first discovery probe) is
 	// an Enterprise Edition feature: ee/sso mounts these routes through the
