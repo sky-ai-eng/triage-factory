@@ -56,16 +56,32 @@ func authMethod(isSSO bool) string {
 	return "github"
 }
 
+// fillRequestSource sets the request-derived source fields — client IP (via the
+// canonical clientIP parsing, not a raw RemoteAddr) and user agent — on e when
+// they're unset and r is non-nil. The single source of this logic, shared by
+// authEventBase (the core write-sites) and the RecordAuthEvent extension seam
+// (ee/sso), so EE captures the same fields without duplicating clientIP. A
+// caller-set value is preserved; a nil r (degenerate call) is a no-op.
+func fillRequestSource(e *domain.AuthEvent, r *http.Request) {
+	if r == nil {
+		return
+	}
+	if e.IPAddress == "" {
+		e.IPAddress = clientIP(r)
+	}
+	if e.UserAgent == "" {
+		e.UserAgent = r.UserAgent()
+	}
+}
+
 // authEventBase builds an AuthEvent pre-filled with eventType + the
 // request-derived source fields (client IP + user agent) every request-scoped
 // core write-site captures for SOC2. The caller fills the identity
 // (org/user/session) + detail. Empty IP/UA (no RemoteAddr) serialize to NULL.
 func authEventBase(r *http.Request, eventType string) domain.AuthEvent {
-	return domain.AuthEvent{
-		EventType: eventType,
-		IPAddress: clientIP(r),
-		UserAgent: r.UserAgent(),
-	}
+	e := domain.AuthEvent{EventType: eventType}
+	fillRequestSource(&e, r)
+	return e
 }
 
 // recordLoginFailure records a login_failure auth event (best-effort) with the

@@ -17,16 +17,18 @@ import (
 
 // capturedSSOAuthEvent is one auth_events row read back for assertion.
 type capturedSSOAuthEvent struct {
-	userID, orgID string
-	detail        map[string]any
+	userID, orgID, ipAddress, userAgent string
+	detail                              map[string]any
 }
 
 // oneSSOAuthEvent reads the single auth_events row of eventType; fatal otherwise.
-// detail_json is parsed (jsonb normalizes its text form).
+// detail_json is parsed (jsonb normalizes its text form); host() yields the bare
+// source IP the seam captured.
 func (r *authRig) oneSSOAuthEvent(eventType string) capturedSSOAuthEvent {
 	r.t.Helper()
 	rows, err := r.h.AdminDB.Query(`
 		SELECT COALESCE(user_id::text, ''), COALESCE(org_id::text, ''),
+		       COALESCE(host(ip_address), ''), COALESCE(user_agent, ''),
 		       COALESCE(detail_json::text, '')
 		  FROM auth_events WHERE event_type = $1`, eventType)
 	if err != nil {
@@ -37,7 +39,7 @@ func (r *authRig) oneSSOAuthEvent(eventType string) capturedSSOAuthEvent {
 	for rows.Next() {
 		var ce capturedSSOAuthEvent
 		var detail string
-		if err := rows.Scan(&ce.userID, &ce.orgID, &detail); err != nil {
+		if err := rows.Scan(&ce.userID, &ce.orgID, &ce.ipAddress, &ce.userAgent, &detail); err != nil {
 			r.t.Fatalf("scan auth_event: %v", err)
 		}
 		if detail != "" {
@@ -84,6 +86,11 @@ func TestSSOAuthEvents_EnforcementRejected_Recorded(t *testing.T) {
 	if ev.detail["domain"] != "corp.example" || ev.detail["org_id"] != orgA.String() {
 		t.Errorf("event detail=%v, want domain=corp.example org_id=%s", ev.detail, orgA)
 	}
+	// The seam fills the source IP from the callback request (httptest's default
+	// RemoteAddr 192.0.2.1:1234 → 192.0.2.1) via core's canonical clientIP parsing.
+	if ev.ipAddress != "192.0.2.1" {
+		t.Errorf("event ip_address=%q, want 192.0.2.1 (seam must capture the source IP)", ev.ipAddress)
+	}
 }
 
 // A break-glass account that bypasses enforcement records break_glass_login —
@@ -118,6 +125,9 @@ func TestSSOAuthEvents_BreakGlassLogin_Recorded(t *testing.T) {
 	}
 	if ev.detail["domain"] != "corp.example" || ev.detail["org_id"] != orgA.String() {
 		t.Errorf("event detail=%v, want domain=corp.example org_id=%s", ev.detail, orgA)
+	}
+	if ev.ipAddress != "192.0.2.1" {
+		t.Errorf("event ip_address=%q, want 192.0.2.1 (seam must capture the source IP)", ev.ipAddress)
 	}
 
 	// And NO enforcement-rejected event for the same login (the BG path bypasses).

@@ -279,3 +279,63 @@ func TestAuthEvents_BestEffort_FailingStoreStillSucceeds(t *testing.T) {
 		t.Errorf("expected an ERROR 'auth event record failed' log on the audit write failure; got:\n%s", logbuf.String())
 	}
 }
+
+// capturingAuthEventStore records the last event handed to RecordSystem, so the
+// seam's request-source enrichment can be asserted without a DB / the pg rig.
+type capturingAuthEventStore struct{ last *domain.AuthEvent }
+
+func (c *capturingAuthEventStore) RecordSystem(_ context.Context, e domain.AuthEvent) error {
+	c.last = &e
+	return nil
+}
+func (c *capturingAuthEventStore) ListByOrgSystem(context.Context, string, domain.AuthEventListOpts) ([]domain.AuthEvent, error) {
+	return nil, nil
+}
+func (c *capturingAuthEventStore) ListByUserSystem(context.Context, string, domain.AuthEventListOpts) ([]domain.AuthEvent, error) {
+	return nil, nil
+}
+
+// The RecordAuthEvent extension seam (ee/sso's only door to the audit log) fills
+// the request-source fields — ip_address via the canonical clientIP parsing (port
+// stripped), user_agent — so EE auth events carry them without duplicating
+// clientIP. A caller-set value is preserved; a nil request is a no-op. Runs
+// without the pg rig. TFAC-76.
+func TestRecordAuthEventSeam_EnrichesRequestSource(t *testing.T) {
+	recorder := &capturingAuthEventStore{}
+	api := serverExtensionAPI{&Server{authEvents: recorder}}
+
+	req := httptest.NewRequest("GET", "/api/auth/callback", nil)
+	req.RemoteAddr = "203.0.113.9:5555"
+	req.Header.Set("User-Agent", "EE-Browser/2.0")
+
+	api.RecordAuthEvent(req.Context(), req, domain.AuthEvent{
+		EventType: domain.AuthEventBreakGlassLogin,
+		UserID:    "11111111-1111-1111-1111-111111111111",
+		OrgID:     "22222222-2222-2222-2222-222222222222",
+	})
+	if recorder.last == nil {
+		t.Fatal("seam did not record an event")
+	}
+	if recorder.last.IPAddress != "203.0.113.9" {
+		t.Errorf("ip_address=%q, want 203.0.113.9 (canonical clientIP parsing strips the port)", recorder.last.IPAddress)
+	}
+	if recorder.last.UserAgent != "EE-Browser/2.0" {
+		t.Errorf("user_agent=%q, want EE-Browser/2.0", recorder.last.UserAgent)
+	}
+
+	// A caller-set source value is preserved (defensive — not overwritten).
+	recorder.last = nil
+	api.RecordAuthEvent(req.Context(), req, domain.AuthEvent{
+		EventType: domain.AuthEventBreakGlassLogin, IPAddress: "198.51.100.1",
+	})
+	if recorder.last.IPAddress != "198.51.100.1" {
+		t.Errorf("pre-set ip_address overwritten: got %q, want 198.51.100.1", recorder.last.IPAddress)
+	}
+
+	// A nil request is a no-op, not a panic (degenerate call).
+	recorder.last = nil
+	api.RecordAuthEvent(context.Background(), nil, domain.AuthEvent{EventType: domain.AuthEventBreakGlassLogin})
+	if recorder.last == nil || recorder.last.IPAddress != "" || recorder.last.UserAgent != "" {
+		t.Errorf("nil request should leave source fields empty: %+v", recorder.last)
+	}
+}

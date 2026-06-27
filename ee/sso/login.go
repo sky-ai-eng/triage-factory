@@ -97,8 +97,9 @@ func (le *loginExt) OnLoginResolved(w http.ResponseWriter, r *http.Request, in s
 					ssoLog.Info("sso enforcement: rejected non-sso login on enforced domain",
 						"user", in.UserID, "org", route.OrgID, "domain", dom)
 					// Durable auth record (best-effort): an enforced domain bounced
-					// a non-SSO login. Recorded before the redirect.
-					le.api.RecordAuthEvent(r.Context(), ssoAuthEvent(
+					// a non-SSO login. Recorded before the redirect; r is threaded
+					// so the seam captures the source IP + user agent.
+					le.api.RecordAuthEvent(r.Context(), r, ssoAuthEvent(
 						domain.AuthEventSSOEnforcementRejected, in, route.OrgID, dom))
 					q := url.Values{"error": {"sso_required"}}
 					if in.State.ReturnTo != "" && in.State.ReturnTo != "/" {
@@ -114,7 +115,7 @@ func (le *loginExt) OnLoginResolved(w http.ResponseWriter, r *http.Request, in s
 				// login.
 				ssoLog.Info("sso enforcement: break-glass login bypassed enforced domain",
 					"user", in.UserID, "org", route.OrgID, "domain", dom)
-				le.api.RecordAuthEvent(r.Context(), ssoAuthEvent(
+				le.api.RecordAuthEvent(r.Context(), r, ssoAuthEvent(
 					domain.AuthEventBreakGlassLogin, in, route.OrgID, dom))
 			}
 		}
@@ -152,7 +153,10 @@ func (le *loginExt) OnLoginResolved(w http.ResponseWriter, r *http.Request, in s
 // ssoAuthEvent builds the auth_events row for an SSO enforcement decision —
 // sso_enforcement_rejected (a non-SSO login bounced) or break_glass_login (a
 // break-glass account bypassed enforcement). Both carry the principal, the
-// org whose enforced domain matched, and {"domain":…,"org_id":…} detail. ee/sso
+// org whose enforced domain matched, and {"domain":…,"org_id":…} detail. The
+// request-source fields (ip_address / user_agent) are NOT set here — the
+// RecordAuthEvent seam fills them from the threaded *http.Request via core's
+// canonical clientIP parsing, so ee/sso doesn't duplicate that logic. ee/sso
 // has no direct store access, so it records through the ExtensionAPI seam
 // (server.recordAuthEvent), which owns the best-effort / log-on-failure contract.
 func ssoAuthEvent(eventType string, in server.LoginResolved, orgID, dom string) domain.AuthEvent {
