@@ -28,7 +28,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"event_handlers", "tasks", "task_events", "runs", "artifacts",
 		"run_messages", "run_memory", "pending_firings", "run_worktrees",
 		"swipe_events", "poller_state", "repo_profiles",
-		"preferences", "system_prompt_versions",
+		"system_prompt_versions",
 		"curator_requests", "curator_messages", "curator_pending_context",
 		// org_secrets replaces the Supabase Vault secret path (TFAC-402):
 		// app-encrypted ciphertext in a normal RLS table.

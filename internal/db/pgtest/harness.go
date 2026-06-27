@@ -252,7 +252,6 @@ var orgScopedTables = []string{
 	// Settings:
 	"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
 	"team_github_groups", "team_github_repos",
-	"preferences",
 	"user_github_identities",
 	"user_jira_identities",
 	"org_secrets",

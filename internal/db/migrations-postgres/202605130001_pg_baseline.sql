@@ -34,8 +34,8 @@
 --      this" columns). Postgres FK-constrains these with ON DELETE CASCADE;
 --      SQLite leaves them bare TEXT (or NO-ACTION on runs). Deliberate: local
 --      mode is N=1 and the sentinel user is never deleted. NARROW scope — this
---      does NOT cover identity/ownership user_id PKs (preferences,
---      user_settings, user_github/jira_identities, memberships, org_memberships),
+--      does NOT cover identity/ownership user_id PKs (user_settings,
+--      user_github/jira_identities, memberships, org_memberships),
 --      which carry the users(id) FK in BOTH dialects.
 --   4. Tables that exist in one dialect only. instance_config is SQLite-only
 --      (host port lives in container env under multi mode). sessions and
@@ -1131,17 +1131,6 @@ CREATE TABLE public.poller_state (
 
 
 --
--- Name: preferences; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.preferences (
-    user_id uuid NOT NULL,
-    summary_md text,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
 -- Name: project_knowledge; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2081,14 +2070,6 @@ ALTER TABLE ONLY public.poller_state
 
 
 --
--- Name: preferences preferences_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.preferences
-    ADD CONSTRAINT preferences_pkey PRIMARY KEY (user_id);
-
-
---
 -- Name: project_knowledge project_knowledge_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2821,13 +2802,6 @@ CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.orgs FOR EACH ROW EXECUTE 
 
 
 --
--- Name: preferences set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.preferences FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
-
-
---
 -- Name: project_knowledge set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -3229,14 +3203,6 @@ ALTER TABLE ONLY public.pending_firings
 
 ALTER TABLE ONLY public.poller_state
     ADD CONSTRAINT poller_state_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-
---
--- Name: preferences preferences_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.preferences
-    ADD CONSTRAINT preferences_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -4193,26 +4159,6 @@ ALTER TABLE public.poller_state ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY poller_state_all ON public.poller_state USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
-
-
---
--- Name: preferences; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.preferences ENABLE ROW LEVEL SECURITY;
-
---
--- Name: preferences preferences_modify; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY preferences_modify ON public.preferences USING ((user_id = tf.current_user_id())) WITH CHECK ((user_id = tf.current_user_id()));
-
-
---
--- Name: preferences preferences_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY preferences_select ON public.preferences FOR SELECT USING ((user_id = tf.current_user_id()));
 
 
 --
@@ -5185,17 +5131,6 @@ GRANT ALL ON TABLE public.poller_state TO anon;
 GRANT ALL ON TABLE public.poller_state TO authenticated;
 GRANT ALL ON TABLE public.poller_state TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.poller_state TO tf_app;
-
-
---
--- Name: TABLE preferences; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.preferences TO postgres;
-GRANT ALL ON TABLE public.preferences TO anon;
-GRANT ALL ON TABLE public.preferences TO authenticated;
-GRANT ALL ON TABLE public.preferences TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.preferences TO tf_app;
 
 
 --

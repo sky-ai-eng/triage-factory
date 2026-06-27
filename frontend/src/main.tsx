@@ -17,7 +17,6 @@ import Cards from './pages/Cards'
 import Board from './pages/Board'
 import RunDetail from './pages/RunDetail'
 import PRDashboard from './pages/PRDashboard'
-import Brief from './pages/Brief'
 import Settings from './pages/Settings'
 import Prompts from './pages/Prompts'
 import OrgPage from './pages/OrgPage'
@@ -157,7 +156,6 @@ function LocalRoutes() {
         <Route path="/repos" element={<Repos />} />
         <Route path="/projects" element={<Projects />} />
         <Route path="/projects/:id" element={<ProjectDetail />} />
-        <Route path="/brief" element={<Brief />} />
         <Route path="/settings" element={<Settings />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
@@ -250,7 +248,6 @@ function MultiRoutes() {
             <Route path="repos" element={<Repos />} />
             <Route path="projects" element={<Projects />} />
             <Route path="projects/:id" element={<ProjectDetail />} />
-            <Route path="brief" element={<Brief />} />
             {/* Org surface (TFAC-417) — multi-mode only; mounted under the
                 /orgs/:org_id parent. Non-admins reaching it directly get a
                 read-only roster (OrgPage gates management on org role). */}

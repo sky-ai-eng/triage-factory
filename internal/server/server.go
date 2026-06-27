@@ -876,9 +876,6 @@ func (s *Server) routes() {
 	s.api("GET /api/dashboard/prs/{number}/status", dh.handleDashboardPRStatus)
 	s.apiMutating("POST /api/dashboard/prs/{number}/draft", dh.handleDashboardPRDraft)
 
-	s.api("GET /api/brief", s.handleBrief)
-	s.api("GET /api/preferences", s.handlePreferences)
-
 	s.api("GET /api/settings/user", s.handleUserSettingsGet)
 	s.apiMutating("POST /api/settings/user", s.handleUserSettingsPost)
 	s.api("GET /api/settings/team/{team_id}", s.handleTeamSettingsGet)
@@ -1300,16 +1297,6 @@ func (s *Server) jiraPollReady() bool {
 	s.jiraPollMu.RLock()
 	defer s.jiraPollMu.RUnlock()
 	return !s.jiraLastPollAt.IsZero() && s.jiraLastPollAt.After(s.jiraRestartedAt)
-}
-
-// --- Stub handlers (to be implemented) ---
-
-func (s *Server) handleBrief(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "not yet implemented"})
-}
-
-func (s *Server) handlePreferences(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "not yet implemented"})
 }
 
 // Prompt handlers are in prompts_handler.go

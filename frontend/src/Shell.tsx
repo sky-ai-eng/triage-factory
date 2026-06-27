@@ -99,9 +99,6 @@ export default function Shell() {
                 Prompts
               </NavLink>
             )}
-            <NavLink to={orgHref('/brief')} className={({ isActive }) => pill(isActive)}>
-              Brief
-            </NavLink>
             {orgAdmin && (
               <NavLink to={orgHref('/org')} className={({ isActive }) => pill(isActive)}>
                 Org
