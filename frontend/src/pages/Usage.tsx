@@ -68,13 +68,26 @@ function sinceParam(range: RangeKey): string {
   return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10)
 }
 
-// windowDays is the calendar span of the active window, used only for the "avg
-// $/day" burn-rate readout in each band header. Month → days elapsed so far this
-// month (month-to-date); the rolling presets → their nominal length.
+// windowDays is the calendar span of the selected window. Month → days elapsed so
+// far this month (month-to-date); the rolling presets → their nominal length.
 function windowDays(range: RangeKey): number {
   if (range === '30d') return 30
   if (range === '90d') return 90
   return new Date().getDate()
+}
+
+// activeDays is the denominator for every "$/day" average. It's the span from the
+// FIRST day we actually have spend (by_day is oldest-first) through now, capped at
+// the selected window. A short data history inside a long window — e.g. 3 days of
+// spend in an MTD window — must average over those 3 days, not the whole window,
+// or the daily rate reads far too low. Falls back to the window length when there
+// is no data (the rate is 0 then anyway).
+function activeDays(byDay: UsageDayBucket[], window: number): number {
+  if (byDay.length === 0) return window
+  const first = Date.parse(byDay[0].date + 'T00:00:00Z')
+  if (Number.isNaN(first)) return window
+  const spanned = Math.floor((Date.now() - first) / 86_400_000) + 1
+  return Math.max(1, Math.min(window, spanned))
 }
 
 function withWindow(path: string, since: string): string {
@@ -274,10 +287,14 @@ function Instrument({
   label,
   children,
   className = '',
+  aside,
 }: {
   label: string
   children: React.ReactNode
   className?: string
+  /** Optional subtle stat that rides the right end of the header rule (e.g. the
+   *  roster's per-person average), mirroring the Band header's total + $/day. */
+  aside?: React.ReactNode
 }) {
   return (
     <div className={className}>
@@ -286,6 +303,7 @@ function Instrument({
           {label}
         </span>
         <span className="h-px flex-1 bg-border-subtle/70" />
+        {aside}
       </div>
       {children}
     </div>
@@ -519,11 +537,21 @@ function initialsOf(name: string): string {
 }
 
 // Avatar is a square-ish identity chip — a real picture when we have a url, else
-// a rust monogram placeholder. (The spend API carries no avatar_url yet; the
-// `url` path is here so a backend add lights up real pictures with no FE change.)
+// a rust monogram placeholder. A load failure (404, or — until the CSP img-src
+// allows OAuth-CDN avatars, TFAC-51 follow-up — a CSP block) flips to the
+// monogram via onError, so a blocked picture degrades gracefully instead of
+// rendering broken.
 function Avatar({ name, url }: { name: string; url?: string }) {
-  if (url) {
-    return <img src={url} alt="" className="h-7 w-7 shrink-0 rounded-[3px] object-cover" />
+  const [failed, setFailed] = useState(false)
+  if (url && !failed) {
+    return (
+      <img
+        src={url}
+        alt=""
+        onError={() => setFailed(true)}
+        className="h-7 w-7 shrink-0 rounded-[3px] object-cover"
+      />
+    )
   }
   return (
     <span
@@ -531,6 +559,19 @@ function Avatar({ name, url }: { name: string; url?: string }) {
       className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[3px] bg-accent/10 font-mono text-[10px] font-semibold text-accent"
     >
       {initialsOf(name)}
+    </span>
+  )
+}
+
+// RosterAvg is the subtle per-day average for a roster's header — the Instrument-
+// header echo of the Band header's $/day. `total` is the roster's summed spend and
+// `days` the active-day denominator (see activeDays), so it matches the band's
+// rate exactly. Null when there's nothing to average.
+function RosterAvg({ total, days }: { total: number; days: number }) {
+  if (total <= 0 || days <= 0) return null
+  return (
+    <span className="shrink-0 font-mono text-[9px] tabular-nums text-text-tertiary/60">
+      {fmtUSD(total / days)}/day
     </span>
   )
 }
@@ -820,11 +861,12 @@ function Band({
 function PersonalSection({ since, days }: { since: string; days: number }) {
   const { data, error } = useUsageFetch<UsageMeResponse>(withWindow('/api/usage/me', since))
   const total = data?.total_cost_usd ?? 0
+  const active = activeDays(data?.by_day ?? [], days)
   return (
     <Band
       label="Personal"
       total={total}
-      rate={total / days}
+      rate={total / active}
       hasData={data !== null}
       error={error}
       empty={total === 0}
@@ -858,6 +900,8 @@ function TeamSection({
     teamId ? withWindow(`/api/usage/teams/${teamId}`, since) : null,
   )
   const total = data?.total_cost_usd ?? 0
+  const active = activeDays(data?.by_day ?? [], days)
+  const userTotal = (data?.by_user ?? []).reduce((s, u) => s + u.cost, 0)
   // Name from the locally-known selection FIRST, not the response: while a switch
   // is in flight we still hold the previous team's data, so data.team_name would
   // momentarily label the section with the wrong (old) team.
@@ -878,7 +922,7 @@ function TeamSection({
       label="Team"
       right={right}
       total={total}
-      rate={total / days}
+      rate={total / active}
       hasData={data !== null}
       error={error}
       empty={total === 0}
@@ -886,7 +930,11 @@ function TeamSection({
       {/* By member is the wide, tall, scrollable roster (2/3); by rule rides
           beside it, then category + throughput share the next row. */}
       <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2 lg:grid-cols-3">
-        <Instrument label="By member" className="md:col-span-2 lg:col-span-2">
+        <Instrument
+          label="By member"
+          className="md:col-span-2 lg:col-span-2"
+          aside={<RosterAvg total={userTotal} days={active} />}
+        >
           <UserRoster data={data?.by_user ?? []} emptyLabel="no member spend" />
         </Instrument>
         <Instrument label="By rule">
@@ -908,11 +956,13 @@ function TeamSection({
 function OrgSection({ since, days }: { since: string; days: number }) {
   const { data, error } = useUsageFetch<UsageOrgResponse>(withWindow('/api/usage/org', since))
   const total = data?.total_cost_usd ?? 0
+  const active = activeDays(data?.by_day ?? [], days)
+  const userTotal = (data?.by_user ?? []).reduce((s, u) => s + u.cost, 0)
   return (
     <Band
       label="Org"
       total={total}
-      rate={total / days}
+      rate={total / active}
       hasData={data !== null}
       error={error}
       empty={total === 0}
@@ -929,7 +979,11 @@ function OrgSection({ since, days }: { since: string; days: number }) {
         <Instrument label="Category">
           <CategoryDonut data={data?.by_category ?? []} large />
         </Instrument>
-        <Instrument label="By user" className="md:col-span-2">
+        <Instrument
+          label="By user"
+          className="md:col-span-2"
+          aside={<RosterAvg total={userTotal} days={active} />}
+        >
           <UserRoster data={data?.by_user ?? []} emptyLabel="no user spend" />
         </Instrument>
         <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} />
