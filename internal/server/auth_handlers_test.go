@@ -1253,6 +1253,39 @@ func TestClientIP(t *testing.T) {
 	}
 }
 
+// A proxied deployment trusts X-Forwarded-For, but the header is
+// attacker-controlled — clientIP must not do work (or allocate a slice)
+// proportional to its comma count, which would be a cheap pre-auth DoS
+// amplifier. It scans right→left with no Split, an early return, and a hop
+// cap, so even a megabyte of commas resolves in O(1): the proxy-appended
+// client sits at the far right and is found first, and an all-empty header
+// stops at the cap and falls back to the trusted peer.
+func TestClientIP_LargeXFFHeaderBounded(t *testing.T) {
+	runmode.SetClientIPPolicyForTest(t, "10.0.0.0/8", true)
+
+	t.Run("padding left of the appended client is never walked", func(t *testing.T) {
+		// Attacker pre-seeds a megabyte of commas; the trusted proxy appends
+		// the real (untrusted) peer on the right. Right→left finds it first.
+		xff := strings.Repeat(",", 1<<20) + "203.0.113.5"
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = "10.0.0.1:5000"
+		req.Header.Set("X-Forwarded-For", xff)
+		if got := clientIP(req); got != "203.0.113.5" {
+			t.Fatalf("clientIP = %q, want 203.0.113.5 (right→left finds the appended client)", got)
+		}
+	})
+
+	t.Run("all-empty header falls back to the trusted peer", func(t *testing.T) {
+		xff := strings.Repeat(",", 1<<20)
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = "10.0.0.1:5000"
+		req.Header.Set("X-Forwarded-For", xff)
+		if got := clientIP(req); got != "10.0.0.1" {
+			t.Fatalf("clientIP = %q, want 10.0.0.1 (no client in header → trusted peer)", got)
+		}
+	})
+}
+
 // gotrueHTTPClient must carry a bounded timeout. Without one, a hung
 // GoTrue upstream blocks user-facing requests indefinitely on the
 // /token exchange + /logout paths. This test locks the intent so a

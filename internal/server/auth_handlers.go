@@ -1437,6 +1437,16 @@ func isHTTPS(r *http.Request) bool {
 	return r.Header.Get("X-Forwarded-Proto") == "https"
 }
 
+// maxXFFHops bounds how many X-Forwarded-For entries clientIP examines when
+// walking a trusted proxy's chain right→left. In a proxied deployment the
+// header is attacker-controlled, so without a bound a caller could pad it
+// with commas to force proportional work on a pre-auth route. A real
+// trusted-proxy chain (CDN → LB → app, plus health-check / internal hops) is
+// a handful deep; 64 sits far above any sane topology while keeping the walk
+// O(1) in the header's length. Past the bound, clientIP falls back to the
+// trusted peer (degraded but safe).
+const maxXFFHops = 64
+
 // clientIP best-effort extracts the requesting client's IP for the three
 // consumers that key on it — the session forensics row (sessions.ip_addr),
 // the SOC2 auth audit log (auth_events.ip_address), and the pre-auth
@@ -1478,18 +1488,30 @@ func clientIP(r *http.Request) string {
 	// trusted hops lands on the first IP the chain didn't vouch for — the
 	// real client. Anything the caller pre-seeded sits to the LEFT of the
 	// address the first trusted proxy appended, so it's never reached.
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		for i := len(parts) - 1; i >= 0; i-- {
-			entry := normalizeXFFEntry(parts[i])
-			if entry == "" {
-				continue // empty / unparseable hop — skip
-			}
-			if ipInCIDRs(entry, trusted) {
-				continue // another trusted proxy in the chain
-			}
-			return entry // first untrusted from the right → the client
+	//
+	// Scan with LastIndexByte rather than strings.Split: the header is
+	// attacker-controlled here, and Split would allocate a slice
+	// proportional to its comma count — a cheap pre-auth memory/CPU
+	// amplifier. This slices one field at a time (substring headers into the
+	// original, no copy) from the right, bounded by maxXFFHops, and returns
+	// as soon as it finds the client — typically on the first iteration,
+	// since the proxy appends the real (untrusted) peer at the far right.
+	rest := r.Header.Get("X-Forwarded-For")
+	for hops := 0; rest != "" && hops < maxXFFHops; hops++ {
+		field := rest
+		if i := strings.LastIndexByte(rest, ','); i >= 0 {
+			field, rest = rest[i+1:], rest[:i]
+		} else {
+			rest = ""
 		}
+		entry := normalizeXFFEntry(field)
+		if entry == "" {
+			continue // empty / unparseable hop — skip
+		}
+		if ipInCIDRs(entry, trusted) {
+			continue // another trusted proxy in the chain
+		}
+		return entry // first untrusted from the right → the client
 	}
 
 	// Every forwarded hop was trusted (or none present): the closest
