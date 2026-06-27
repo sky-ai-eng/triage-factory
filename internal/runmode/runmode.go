@@ -379,6 +379,12 @@ func ParseTrustedProxyCIDR(s string) (nets []*net.IPNet, none bool, err error) {
 				continue
 			}
 		}
+		// "none" only disables capture when it's the WHOLE value (handled
+		// above); buried in a list it's an error, but say why rather than
+		// calling it a malformed CIDR.
+		if strings.EqualFold(part, "none") {
+			return nil, false, fmt.Errorf(`invalid TF_TRUSTED_PROXY_CIDR entry %q: "none" is a capture kill switch and must appear alone — use TF_CAPTURE_CLIENT_IP=false to disable capture alongside a CIDR set`, part)
+		}
 		return nil, false, fmt.Errorf("invalid TF_TRUSTED_PROXY_CIDR entry %q (want a CIDR like 10.0.0.0/8 or an IP)", part)
 	}
 	return nets, false, nil

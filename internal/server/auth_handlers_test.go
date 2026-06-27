@@ -1231,6 +1231,9 @@ func TestClientIP(t *testing.T) {
 		{"proxy ipv6 peer ipv6 cidr", "2001:db8::/32", true, "[2001:db8::1]:5000", "203.0.113.5", "203.0.113.5"},
 		// Bare-IP allowlist entry (promoted to /32).
 		{"proxy bare-ip allowlist", "10.0.0.1", true, "10.0.0.1:5000", "203.0.113.5", "203.0.113.5"},
+		// Dual-stack LB: the kernel hands Go an IPv4-mapped IPv6 peer
+		// (::ffff:10.0.0.1); an operator's plain IPv4 CIDR must still match it.
+		{"ipv4-mapped peer matches v4 cidr", "10.0.0.0/8", true, "[::ffff:10.0.0.1]:5000", "203.0.113.5", "203.0.113.5"},
 
 		// --- capture opt-out → "" (stored as NULL) ---
 		{"capture off returns empty", "10.0.0.0/8", false, "10.0.0.1:5000", "203.0.113.5", ""},
@@ -1282,6 +1285,20 @@ func TestClientIP_LargeXFFHeaderBounded(t *testing.T) {
 		req.Header.Set("X-Forwarded-For", xff)
 		if got := clientIP(req); got != "10.0.0.1" {
 			t.Fatalf("clientIP = %q, want 10.0.0.1 (no client in header → trusted peer)", got)
+		}
+	})
+
+	t.Run("walk stops at the hop cap before reaching a far-left client", func(t *testing.T) {
+		// Client at the far left, behind exactly maxXFFHops trusted hops. The
+		// right→left walk spends its whole hop budget skipping trusted entries
+		// and never reaches the client, so it falls back to the trusted peer.
+		// Without the cap the client would win — so this pins the bound.
+		xff := "203.0.113.5" + strings.Repeat(", 10.0.0.1", maxXFFHops)
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = "10.0.0.2:5000" // trusted (10/8), distinct from the hops
+		req.Header.Set("X-Forwarded-For", xff)
+		if got := clientIP(req); got != "10.0.0.2" {
+			t.Fatalf("clientIP = %q, want 10.0.0.2 (cap reached before the far-left client → peer)", got)
 		}
 	})
 }

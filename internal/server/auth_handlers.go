@@ -1430,6 +1430,17 @@ func normalizeReturnTo(raw string) string {
 // behind a reverse proxy that terminated TLS. Used to set the Secure
 // flag on cookies — HTTPS-only in prod, but local-dev runs over HTTP
 // and would otherwise refuse to accept the cookie at all.
+//
+// Unlike clientIP, the X-Forwarded-Proto read is deliberately NOT gated on
+// the trusted-proxy allowlist (TFAC-488). A forged "X-Forwarded-Proto: https"
+// only ever ADDS a Secure flag, which is self-defeating for the forger — the
+// browser then refuses to send that cookie back over plain HTTP — so there's
+// no attacker leverage to remove. Meanwhile the authoritative prod signal is
+// deployCfg.secureCookies (from TF_PUBLIC_URL), which cookieSecure checks
+// first; this header is only the fallback for an HTTP-publicURL deployment
+// behind a TLS-terminating proxy, or local dev, where requiring
+// TF_TRUSTED_PROXY_CIDR just to get Secure cookies would be a footgun. Gating
+// here could only strip a legitimate Secure flag, never block a harmful one.
 func isHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
@@ -1553,13 +1564,24 @@ func normalizeXFFEntry(s string) string {
 }
 
 // ipInCIDRs reports whether ipStr parses to an IP contained in any of nets.
-// A non-IP string is never in the set. Cross-family pairs (a v4 IP against a
-// v6 CIDR, or vice versa) never match, since net.IPNet.Contains compares
-// equal-length addresses.
+// A non-IP string is never in the set.
+//
+// IPv4-mapped IPv6 (::ffff:a.b.c.d) is normalized to its 4-byte v4 form
+// first. Dual-stack load balancers (nginx on Linux, AWS ALB, and many
+// others) deliver connections to Go as the mapped address, so without this
+// an operator who sets an IPv4 allowlist (TF_TRUSTED_PROXY_CIDR=10.0.0.0/8)
+// for such an LB would silently fail the match — net.IPNet.Contains compares
+// equal-length addresses, so a 16-byte mapped peer never matches a 4-byte v4
+// net — and XFF would be quietly ignored, collapsing the rate limiter and
+// recording the LB in the audit log with no signal why. Genuine cross-family
+// pairs (a real v6 peer against a v4 CIDR) still don't match, which is right.
 func ipInCIDRs(ipStr string, nets []*net.IPNet) bool {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
 	}
 	for _, n := range nets {
 		if n.Contains(ip) {

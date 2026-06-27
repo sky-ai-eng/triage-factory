@@ -113,7 +113,7 @@ TF records the client IP in three places, all fed by one extractor:
 
 Configure it with two env vars (multi mode only — local mode is single-user and ignores them):
 
-- **`TF_TRUSTED_PROXY_CIDR`** — comma-separated CIDRs of your trusted upstream proxies (a bare IP is accepted, treated as a `/32` or `/128`). Determines which direct peers unlock `X-Forwarded-For`.
+- **`TF_TRUSTED_PROXY_CIDR`** — comma-separated CIDRs of your trusted upstream proxies (a bare IP is accepted, treated as a `/32` or `/128`). Determines which direct peers unlock `X-Forwarded-For`. An IPv4 CIDR also matches a dual-stack proxy whose connections arrive as IPv4-mapped IPv6 (`::ffff:10.0.0.1`, common with nginx on Linux and AWS ALB); add IPv6 CIDRs only for proxies that connect over native IPv6.
 - **`TF_CAPTURE_CLIENT_IP`** — boolean, default `true`. Set `false` to capture no IP at all (store `NULL`), for data-minimization-conscious deployments.
 
 | Deployment | Config | Result |
