@@ -1005,8 +1005,10 @@ export interface AccessChangeRow {
   target_name?: string
   team_name?: string
   /** Raw captured payload, passed through for power users; the FE renders the
-   *  label, not this. Omitted when the row carried no detail. */
-  detail_json?: Record<string, unknown>
+   *  label, not this. The wire value is a json.RawMessage — arbitrary JSON, not
+   *  necessarily an object — so it's typed `unknown` (narrow before use). Omitted
+   *  when the row carried no (valid) detail. */
+  detail_json?: unknown
   created_at: string
 }
 

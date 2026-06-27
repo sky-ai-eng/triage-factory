@@ -1290,7 +1290,7 @@ function AccessLogSection() {
   const [category, setCategory] = useState<AccessCategory>('')
   const [offset, setOffset] = useState(0)
   const url = `/api/usage/org/access-log?limit=${ACCESS_LOG_PAGE}&offset=${offset}${
-    category ? `&category=${category}` : ''
+    category ? `&category=${encodeURIComponent(category)}` : ''
   }`
   const { data, error } = useUsageFetch<AccessLogResponse>(url)
   // Changing the filter resets to the first page (an offset into the old filter's

@@ -245,6 +245,16 @@ func TestUsageAccessLog_Local(t *testing.T) {
 		}
 	})
 
+	t.Run("unrecognized_category_is_no_filter", func(t *testing.T) {
+		// The handler passes q.Get("category") straight through; an unknown value
+		// must fall back to "no filter" (every row), not an empty page.
+		var resp accessLogResponse
+		doUsage(t, s, "/api/usage/org/access-log?category=bogus", &resp)
+		if len(resp.Items) != 4 {
+			t.Fatalf("category=bogus items = %d, want all 4 (no filter): %+v", len(resp.Items), resp.Items)
+		}
+	})
+
 	t.Run("paging_with_limit_offset_and_has_more", func(t *testing.T) {
 		var page1 accessLogResponse
 		doUsage(t, s, "/api/usage/org/access-log?limit=2&offset=0", &page1)
