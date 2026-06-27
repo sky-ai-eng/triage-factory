@@ -154,6 +154,77 @@ func TestAccessChangeLogStore_Postgres_ListByOrg(t *testing.T) {
 	}
 }
 
+// TestAccessChangeLogStore_Postgres_OffsetAndCategory pins the TFAC-484 viewer
+// reads through the app pool: Offset pages the newest-first window and Category
+// narrows to the membership/credential action sets (an unknown category is no
+// filter), all under RLS inside WithTx.
+func TestAccessChangeLogStore_Postgres_OffsetAndCategory(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "founder")
+
+	base := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	for i, action := range []string{
+		domain.AccessActionOrgMemberGranted, // oldest
+		domain.AccessActionTeamRoleChanged,  //
+		domain.AccessActionCredentialSet,    //
+		domain.AccessActionOrgMemberRevoked, // newest
+	} {
+		pgtest.MustExec(t, h.AdminDB, `
+			INSERT INTO access_change_log (org_id, action, created_at)
+			VALUES ($1, $2, $3)
+		`, orgID, action, base.Add(time.Duration(i)*time.Minute))
+	}
+
+	var off, cred, mem, none []domain.AccessChange
+	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var e error
+		if off, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Limit: 2, Offset: 1}); e != nil {
+			return e
+		}
+		if cred, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Category: domain.AccessCategoryCredential}); e != nil {
+			return e
+		}
+		if mem, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Category: domain.AccessCategoryMembership}); e != nil {
+			return e
+		}
+		none, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Category: "bogus"})
+		return e
+	}); err != nil {
+		t.Fatalf("ListByOrg via WithTx: %v", err)
+	}
+
+	// Newest-first is revoke, credential, team-role, grant; Offset 1 skips revoke.
+	if len(off) != 2 || off[0].Action != domain.AccessActionCredentialSet || off[1].Action != domain.AccessActionTeamRoleChanged {
+		t.Errorf("offset page actions = %+v, want [credential_set team_role_changed]", actionsOf(off))
+	}
+	if len(cred) != 1 || cred[0].Action != domain.AccessActionCredentialSet {
+		t.Errorf("credential category = %+v, want one credential_set", actionsOf(cred))
+	}
+	if len(mem) != 3 {
+		t.Fatalf("membership category = %+v, want 3 rows", actionsOf(mem))
+	}
+	for _, r := range mem {
+		if r.Action == domain.AccessActionCredentialSet {
+			t.Errorf("membership filter leaked credential_set: %+v", actionsOf(mem))
+		}
+	}
+	if len(none) != 4 {
+		t.Errorf("unknown category = %+v, want all 4", actionsOf(none))
+	}
+}
+
+func actionsOf(rows []domain.AccessChange) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.Action
+	}
+	return out
+}
+
 // TestAccessChangeLogStore_Postgres_RLSIsolation pins that the org-scoped policy
 // keeps one org's audit log invisible to another: a row written under org A is
 // readable under A's claims and absent under B's, even when B explicitly asks

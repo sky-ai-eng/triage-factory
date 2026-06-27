@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -51,16 +52,33 @@ func (s *accessChangeLogStore) ListByOrg(ctx context.Context, orgID string, opts
 	if limit <= 0 {
 		limit = 100
 	}
+	// org_id filter first; an optional category narrows to its action set via a
+	// dynamic IN clause; LIMIT/OFFSET page the newest-first window.
+	args := []any{orgID}
+	where := "org_id = ?"
+	if actions := domain.AccessActionsInCategory(opts.Category); len(actions) > 0 {
+		ph := make([]string, len(actions))
+		for i, a := range actions {
+			ph[i] = "?"
+			args = append(args, a)
+		}
+		where += " AND action IN (" + strings.Join(ph, ", ") + ")"
+	}
+	args = append(args, limit)
+	offsetClause := ""
+	if opts.Offset > 0 {
+		offsetClause = " OFFSET ?"
+		args = append(args, opts.Offset)
+	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id, org_id,
 		       COALESCE(actor_user_id, ''), action,
 		       COALESCE(target_user_id, ''), COALESCE(team_id, ''),
 		       COALESCE(detail_json, ''), created_at
 		  FROM access_change_log
-		 WHERE org_id = ?
+		 WHERE `+where+`
 		 ORDER BY created_at DESC, id DESC
-		 LIMIT ?
-	`, orgID, limit)
+		 LIMIT ?`+offsetClause, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import {
   PieChart,
   Pie,
@@ -14,11 +14,13 @@ import * as HintTip from '@radix-ui/react-tooltip'
 import TeamSwitch from '../components/TeamSwitch'
 import ActivityFeed from '../components/ActivityFeed'
 import { useOptionalAuth } from '../contexts/AuthContext'
+import { useEntitlements, FeatureGovernance } from '../hooks/useEntitlements'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
-import { useEntitlements, FeatureGovernance } from '../hooks/useEntitlements'
 import { readError } from '../lib/api'
 import type {
+  AccessChangeRow,
+  AccessLogResponse,
   TeamSummary,
   UsageCategoryBucket,
   UsageMeResponse,
@@ -26,6 +28,8 @@ import type {
   UsageOrgResponse,
   UsageRuleBucket,
   UsageTeamBucket,
+  UsageTeamCap,
+  UsageTeamCapsResponse,
   UsageTeamResponse,
   UsageUserBucket,
   UsageOrgLevelBucket,
@@ -1107,8 +1111,204 @@ function TeamSection({
   )
 }
 
+// --- per-team daily caps (EE / governance, TFAC-482) ---
+
+type CapSaveStatus = 'idle' | 'saving' | 'saved' | 'error'
+
+// CapStatus is the tiny right-aligned save indicator beside a cap input — a
+// fixed-width slot so the inputs stay column-aligned whether or not a row has a
+// pending edit. Error carries the server message as a hover title.
+function CapStatus({
+  status,
+  dirty,
+  error,
+}: {
+  status: CapSaveStatus
+  dirty: boolean
+  error: string | null
+}) {
+  const base = 'w-[56px] shrink-0 text-right font-mono text-[9px] uppercase tracking-wider'
+  if (status === 'saving') return <span className={`${base} text-text-tertiary/70`}>saving…</span>
+  if (status === 'error')
+    return (
+      <span className={`${base} text-dismiss`} title={error ?? undefined}>
+        error
+      </span>
+    )
+  if (dirty) return <span className={`${base} text-accent/80`}>unsaved</span>
+  if (status === 'saved') return <span className={`${base} text-text-tertiary/60`}>saved</span>
+  return <span className={base} aria-hidden />
+}
+
+// CapRow is one team's inline daily-cap editor (TFAC-482): the team name + its
+// window spend on the left, a $-prefixed numeric input on the right that PUTs to
+// /api/usage/teams/{id}/cap. Blank clears the cap (no cap). It holds its own
+// draft so the section's 15s background poll never clobbers a value mid-edit, and
+// re-normalizes the draft from the server echo on a successful save. Mirrors
+// OrgSettings' $-prefixed "No cap" input, in the console's monospace language.
+function CapRow({ team, spend }: { team: UsageTeamCap; spend: number }) {
+  const propValue = team.cap == null ? '' : String(team.cap)
+  // `draft` is the editable value; `persisted` is what we believe is stored
+  // server-side. dirty compares the draft against `persisted` — NOT the polled
+  // prop — and `persisted` is updated immediately on a successful save, so a
+  // just-saved row reads clean ("saved") at once instead of lingering "unsaved"
+  // (and re-PUTing on the next blur) for the ~15s until the org rollup poll
+  // returns the new value.
+  const [draft, setDraft] = useState(propValue)
+  const [persisted, setPersisted] = useState(propValue)
+  const [status, setStatus] = useState<CapSaveStatus>('idle')
+  const [error, setError] = useState<string | null>(null)
+
+  // Refs let the prop-sync effect read the latest draft/persisted without taking
+  // them as deps — depending on them would re-run the effect on our own save and
+  // clobber the optimistic baseline before the prop catches up.
+  const draftRef = useRef(draft)
+  draftRef.current = draft
+  const persistedRef = useRef(persisted)
+  persistedRef.current = persisted
+  // Guards against a concurrent save: a blur→focus→blur before the PUT resolves
+  // would still see dirty=true (persisted hasn't updated yet) and fire a second
+  // PUT with interleaved status transitions. One in-flight save at a time.
+  const savingRef = useRef(false)
+
+  // Follow the polled prop when it moves (e.g. another org admin changed the cap):
+  // adopt it as the persisted baseline so our own just-saved value reconciles
+  // silently once the poll returns it, and re-seed the input too — unless the user
+  // is mid-edit (draft no longer matches what we last persisted), so a background
+  // refresh never stomps a pending edit.
+  useEffect(() => {
+    if (draftRef.current === persistedRef.current) setDraft(propValue)
+    setPersisted(propValue)
+  }, [propValue])
+
+  const dirty = draft.trim() !== persisted
+
+  const save = async () => {
+    if (!dirty || savingRef.current) return
+    const trimmed = draft.trim()
+    let payload: number | null
+    if (trimmed === '') {
+      payload = null // clear the cap
+    } else {
+      const n = Number(trimmed)
+      if (!Number.isFinite(n) || n < 0) {
+        setStatus('error')
+        setError('Enter a non-negative dollar amount, or leave blank for no cap.')
+        return
+      }
+      payload = n
+    }
+    savingRef.current = true
+    setStatus('saving')
+    setError(null)
+    try {
+      const res = await fetch(`/api/usage/teams/${team.team_id}/cap`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_daily_cost_usd: payload }),
+      })
+      if (!res.ok) throw new Error(await readError(res, 'Failed to save cap'))
+      const body = (await res.json()) as { max_daily_cost_usd: number | null }
+      // Adopt the echoed value as BOTH the input and the persisted baseline, so the
+      // row reads clean immediately and a subsequent no-op blur won't re-PUT.
+      const echoed = body.max_daily_cost_usd == null ? '' : String(body.max_daily_cost_usd)
+      setDraft(echoed)
+      setPersisted(echoed)
+      setStatus('saved')
+    } catch (err) {
+      setStatus('error')
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      savingRef.current = false
+    }
+  }
+
+  const name = team.team_name || team.team_id
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="flex min-w-0 items-baseline gap-2 font-mono text-[11px]">
+        <span className="truncate text-text-secondary" title={name}>
+          {name}
+        </span>
+        <span className="shrink-0 tabular-nums text-text-tertiary/60">{fmtUSD(spend)}</span>
+      </span>
+      <span className="flex shrink-0 items-center gap-2">
+        <span className="relative">
+          <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-text-tertiary">
+            $
+          </span>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            inputMode="decimal"
+            placeholder="No cap"
+            value={draft}
+            aria-label={`Daily cap for ${name}`}
+            onChange={(e) => {
+              setDraft(e.target.value)
+              setStatus('idle')
+              setError(null)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void save()
+            }}
+            onBlur={() => void save()}
+            className="w-[108px] rounded-[4px] border border-border-subtle bg-transparent py-1 pl-5 pr-2 font-mono text-[11px] tabular-nums text-text-primary transition-colors focus:border-accent focus:outline-none"
+          />
+        </span>
+        <CapStatus status={status} dirty={dirty} error={error} />
+      </span>
+    </div>
+  )
+}
+
+// TeamCaps is the EE per-team daily-cap editor body: one CapRow per ACTIVE team
+// in the org — from /api/usage/org/team-caps, NOT the spend rollup's by_team, so
+// a team that hasn't run any agents yet (absent from by_team) can still be
+// pre-capped before any runaway happens. Each row's window spend is looked up
+// from by_team (0 for an idle team) purely for context. The list arrives sorted
+// by name; the parent gates rendering on governance + org admin, and the backend
+// re-checks both. Archived teams are excluded (you can't cap a force-stopped
+// team — the PUT 403s on archived).
+function TeamCaps({
+  teams,
+  spendByTeam,
+}: {
+  teams: UsageTeamCap[]
+  spendByTeam: Map<string, number>
+}) {
+  if (teams.length === 0) return <ZeroMini label="no teams" />
+  return (
+    <div className="space-y-2.5">
+      {teams.map((t) => (
+        <CapRow key={t.team_id} team={t} spend={spendByTeam.get(t.team_id) ?? 0} />
+      ))}
+      <p className="pt-1 font-mono text-[9px] leading-relaxed text-text-tertiary/55">
+        Refuses new agent runs for a team once its spend for the UTC day reaches the cap. In-flight
+        runs keep going. Blank = no cap.
+      </p>
+    </div>
+  )
+}
+
 function OrgSection({ since, days, gov }: { since: string; days: number; gov: boolean }) {
   const { data, error } = useUsageFetch<UsageOrgResponse>(withWindow('/api/usage/org', since))
+  // Per-team caps are an EE/governance surface; render the editor only when the
+  // active org is licensed (the OrgSection itself is already org-admin-gated). The
+  // backend enforces both gates, so this is purely affordance-level. The editor
+  // lists EVERY active team (TFAC-482) via a separate governance read — fetched
+  // only when licensed — so an idle team (absent from the spend rollup's by_team)
+  // can still be pre-capped; each row's window spend is looked up from by_team.
+  // gov (the FeatureGovernance entitlement, threaded from the parent) gates both
+  // EE org surfaces here: the per-team daily-cap editor (TFAC-482) and the
+  // activity feed (TFAC-483). The caps list is fetched only when licensed.
+  const { data: caps } = useUsageFetch<UsageTeamCapsResponse>(
+    gov ? '/api/usage/org/team-caps' : null,
+  )
+  const spendByTeam = new Map<string, number>(
+    (data?.by_team ?? []).map((t) => [t.team_id, t.cost] as [string, number]),
+  )
   const total = data?.total_cost_usd ?? 0
   const active = activeDays(data?.by_day ?? [], days)
   return (
@@ -1122,8 +1322,8 @@ function OrgSection({ since, days, gov }: { since: string; days: number; gov: bo
         empty={total === 0}
       >
         {/* Allocation + Category as two half-width dials — larger rings with
-            scrollable, hover-linked side legends — then the wide by-user roster and
-            the full-width throughput. */}
+            scrollable, hover-linked side legends — then the wide by-user roster, the
+            EE daily-cap editor, and the full-width throughput. */}
         <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2">
           {/* Allocation — the whole org spend partitioned across teams + the org-
               level (non-team) slices (merges the old "by team" + "org-level"). */}
@@ -1140,6 +1340,11 @@ function OrgSection({ since, days, gov }: { since: string; days: number; gov: bo
           >
             <UserRoster data={data?.by_user ?? []} emptyLabel="no user spend" />
           </Instrument>
+          {gov && caps && (
+            <Instrument label="Daily caps" className="md:col-span-2">
+              <TeamCaps teams={caps.teams} spendByTeam={spendByTeam} />
+            </Instrument>
+          )}
           <ThroughputInstrument
             byDay={data?.by_day ?? []}
             byModel={data?.by_model ?? []}
@@ -1151,6 +1356,206 @@ function OrgSection({ since, days, gov }: { since: string; days: number; gov: bo
       {/* EE activity feed (Actions / Objects lenses) — org-wide (cross-team), behind FeatureGovernance. */}
       {gov && <ActivityFeed baseUrl="/api/usage/org/activity" showTeam />}
     </>
+  )
+}
+
+// --- access & credential change-log (EE governance audit, TFAC-484) ---
+
+// The second audit surface on Usage: WHO changed the org's access/credentials
+// (membership, roles, ownership, credential binds), distinct from the spend
+// console above. Org-admin + governance-gated; the backend 404s when unlicensed,
+// but the section also self-gates on the entitlement so it never flashes.
+
+const ACCESS_LOG_PAGE = 50
+
+type AccessCategory = '' | 'membership' | 'credential'
+
+const ACCESS_CATEGORIES: { key: AccessCategory; label: string }[] = [
+  { key: '', label: 'All' },
+  { key: 'membership', label: 'Membership' },
+  { key: 'credential', label: 'Credential' },
+]
+
+// fmtAccessTime renders an audit row's timestamp as a compact local date + time;
+// the full ISO rides the title attribute for the exact instant.
+function fmtAccessTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+// accessTone colors a row's leading dot by category — credential binds in the
+// claim hue, membership/role/ownership in the rust accent — reusing the console's
+// semantic palette so the two row kinds read apart at a glance.
+function accessTone(action: string): string {
+  return action === 'credential_set' ? 'var(--color-claim)' : 'var(--color-accent)'
+}
+
+// AccessCategoryFilter is the membership/credential toggle, styled like the
+// window Channel (bare mono labels with a rust underline-tick on the active one)
+// — the Board's filter affordance at section scale.
+function AccessCategoryFilter({
+  value,
+  onChange,
+}: {
+  value: AccessCategory
+  onChange: (c: AccessCategory) => void
+}) {
+  return (
+    <div className="flex items-center gap-4">
+      {ACCESS_CATEGORIES.map((c) => {
+        const active = c.key === value
+        return (
+          <button
+            key={c.key || 'all'}
+            type="button"
+            onClick={() => onChange(c.key)}
+            className={`relative font-mono text-[11px] tracking-[0.12em] transition-colors ${
+              active ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
+            }`}
+          >
+            {c.label}
+            {active && <span className="absolute -bottom-1.5 left-0 right-0 h-px bg-accent" />}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+// AccessLogRow is one entry: timestamp, a category dot, then the actor and the
+// server-rendered action label ("Alice changed Bob from member to admin").
+function AccessLogRow({ row }: { row: AccessChangeRow }) {
+  const actor = row.actor_name || 'Unknown'
+  return (
+    <li className="flex items-baseline gap-3 py-2 font-mono text-[11px]">
+      <time
+        dateTime={row.created_at}
+        title={row.created_at}
+        className="w-28 shrink-0 tabular-nums text-text-tertiary/70"
+      >
+        {fmtAccessTime(row.created_at)}
+      </time>
+      <span
+        aria-hidden
+        className="mt-[3px] h-1.5 w-1.5 shrink-0 rounded-[2px]"
+        style={{ background: accessTone(row.action) }}
+      />
+      <span className="min-w-0 leading-relaxed">
+        <span className="font-semibold text-text-primary">{actor}</span>{' '}
+        <span className="text-text-secondary">{row.action_label}</span>
+      </span>
+    </li>
+  )
+}
+
+// AccessLogPager is the offset pager: a "start–end" readout with Newer/Older
+// steps. Newer is disabled on the first page; Older when the server reports no
+// more rows.
+function AccessLogPager({
+  offset,
+  count,
+  hasMore,
+  onChange,
+}: {
+  offset: number
+  count: number
+  hasMore: boolean
+  onChange: (offset: number) => void
+}) {
+  const start = count === 0 ? 0 : offset + 1
+  const end = offset + count
+  return (
+    <div className="mt-5 flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-text-tertiary/70">
+      <span className="tabular-nums">
+        {start}–{end}
+      </span>
+      <div className="flex items-center gap-4">
+        <button
+          type="button"
+          disabled={offset === 0}
+          onClick={() => onChange(Math.max(0, offset - ACCESS_LOG_PAGE))}
+          className="tracking-[0.12em] transition-colors enabled:hover:text-text-secondary disabled:opacity-30"
+        >
+          Newer
+        </button>
+        <button
+          type="button"
+          disabled={!hasMore}
+          onClick={() => onChange(offset + ACCESS_LOG_PAGE)}
+          className="tracking-[0.12em] transition-colors enabled:hover:text-text-secondary disabled:opacity-30"
+        >
+          Older
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// AccessLogSection is the EE audit band: an etched header (label + hairline +
+// category filter) over the chronological row list, paged. It reuses the spend
+// console's skeleton / error / zero-note treatment, but carries no $ total/rate,
+// so it's a sibling of Band rather than a use of it.
+function AccessLogSection() {
+  const [category, setCategory] = useState<AccessCategory>('')
+  const [offset, setOffset] = useState(0)
+  const url = `/api/usage/org/access-log?limit=${ACCESS_LOG_PAGE}&offset=${offset}${
+    category ? `&category=${encodeURIComponent(category)}` : ''
+  }`
+  const { data, error } = useUsageFetch<AccessLogResponse>(url)
+  // Changing the filter resets to the first page (an offset into the old filter's
+  // result set is meaningless against the new one).
+  const pickCategory = (c: AccessCategory) => {
+    setCategory(c)
+    setOffset(0)
+  }
+
+  const hasData = data !== null
+  const rows = data?.items ?? []
+  return (
+    <section className="mb-12 last:mb-0">
+      <div className="flex items-end gap-4">
+        <span className="pb-1.5 font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-text-secondary">
+          Access &amp; credential changes
+        </span>
+        <span className="mb-[9px] h-px flex-1 bg-border-subtle" />
+        <div className="pb-1">
+          <AccessCategoryFilter value={category} onChange={pickCategory} />
+        </div>
+      </div>
+      <div className="mt-6">
+        {!hasData ? (
+          error ? (
+            <EtchedNote msg={error} tone="error" />
+          ) : (
+            <SkeletonBand />
+          )
+        ) : rows.length === 0 ? (
+          <EtchedNote
+            msg={category ? 'no changes · this filter' : 'no access or credential changes yet'}
+          />
+        ) : (
+          <>
+            <ul className="divide-y divide-border-subtle/40">
+              {rows.map((row) => (
+                <AccessLogRow key={row.id} row={row} />
+              ))}
+            </ul>
+            <AccessLogPager
+              offset={offset}
+              count={rows.length}
+              hasMore={data?.has_more ?? false}
+              onChange={setOffset}
+            />
+          </>
+        )}
+      </div>
+    </section>
   )
 }
 
@@ -1267,11 +1672,14 @@ export default function Usage() {
   const { teams } = useTeams()
   const adminTeams = teams.filter((t) => t.role === 'admin')
 
-  // EE bot-activity feed gate: render only once the entitlement probe resolves
-  // AND it licenses governance. Unlicensed builds (local mode included) keep the
-  // feed dark — agreeing with the backend, which 404s the activity endpoints.
+  // EE governance entitlement (both surfaces gate on it, dark until the probe
+  // resolves; unlicensed builds — local mode included — keep them dark, matching
+  // the backend's 404). `gov` threads into the team/org sections for the activity
+  // feed + the daily-cap editor; `showAccessLog` additionally requires the org
+  // rollup to be visible (org admin, or the local N=1 owner).
   const { has, loaded: entLoaded } = useEntitlements()
   const gov = entLoaded && has(FeatureGovernance)
+  const showAccessLog = showOrg && gov
 
   const [range, setRange] = useState<RangeKey>('month')
   const since = sinceParam(range)
@@ -1302,6 +1710,9 @@ export default function Usage() {
             {showOrg && <OrgSection since={since} days={days} gov={gov} />}
           </>
         )}
+        {/* EE governance audit — its own band below the spend console, in both
+            the multi sections and the local flat view. */}
+        {showAccessLog && <AccessLogSection />}
       </ConsoleFrame>
     </div>
   )

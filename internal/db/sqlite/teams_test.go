@@ -331,6 +331,47 @@ func TestTeamsStore_SQLite_ListArchivedForOrgSystem(t *testing.T) {
 	}
 }
 
+// TestTeamsStore_SQLite_ListActiveForOrgSystem: returns the org's active teams
+// (ordered by name), excluding archived ones — the TFAC-482 cap editor's
+// all-teams source (so an idle team can still be capped).
+func TestTeamsStore_SQLite_ListActiveForOrgSystem(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	orgID, teamID := seedSQLiteTeam(t, conn)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	// A second active team + an archived team in the same org.
+	if _, err := conn.Exec(
+		`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'apollo', 'Apollo')`,
+		"team-apollo", orgID,
+	); err != nil {
+		t.Fatalf("seed second team: %v", err)
+	}
+	if _, err := conn.Exec(
+		`INSERT INTO teams (id, org_id, slug, name, deleted_at) VALUES (?, ?, 'gone', 'Gone', CURRENT_TIMESTAMP)`,
+		"team-gone", orgID,
+	); err != nil {
+		t.Fatalf("seed archived team: %v", err)
+	}
+
+	got, err := stores.Teams.ListActiveForOrgSystem(ctx, orgID)
+	if err != nil {
+		t.Fatalf("ListActiveForOrgSystem: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListActiveForOrgSystem = %+v; want exactly 2 active teams (archived excluded)", got)
+	}
+	if !containsTeam(got, teamID) || !containsTeam(got, "team-apollo") {
+		t.Errorf("ListActiveForOrgSystem = %+v; want the seeded team %s + Apollo", got, teamID)
+	}
+	if containsTeam(got, "team-gone") {
+		t.Errorf("ListActiveForOrgSystem included the archived team 'team-gone'")
+	}
+	if got[0].Name > got[1].Name {
+		t.Errorf("ListActiveForOrgSystem not ordered by name ASC: %q then %q", got[0].Name, got[1].Name)
+	}
+}
+
 func containsTeam(teams []domain.Team, id string) bool {
 	for _, t := range teams {
 		if t.ID == id {

@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import type {
+  AccessLogResponse,
   UsageCategoryBucket,
   UsageMeResponse,
   UsageOrgResponse,
+  UsageTeamCapsResponse,
   UsageTeamResponse,
 } from '../types'
 
@@ -40,6 +42,21 @@ vi.mock('../hooks/useTeams', () => ({
 const authMock = vi.hoisted(() => ({ local: false }))
 vi.mock('../contexts/AuthContext', () => ({
   useOptionalAuth: () => (authMock.local ? null : ({} as unknown)),
+}))
+
+// useEntitlements gates the EE governance surfaces on the Usage page — the
+// per-team cap editor (TFAC-482) and the access & credential change-log band
+// (TFAC-484/471). Mock it like the other hooks so each test toggles governance
+// on/off; default off so the spend-only tests never render or fetch those
+// surfaces. loaded is always true here — the real hook's pre-resolve flash isn't
+// under test, and a stubbed fetch never serves /api/entitlements.
+const entMock = vi.hoisted(() => ({ governance: false }))
+vi.mock('../hooks/useEntitlements', () => ({
+  FeatureGovernance: 'governance',
+  useEntitlements: () => ({
+    has: (f: string) => f === 'governance' && entMock.governance,
+    loaded: true,
+  }),
 }))
 
 import Usage from './Usage'
@@ -119,10 +136,21 @@ const ORG: UsageOrgResponse = {
   by_rule: [{ trigger_id: 'tr1', rule_name: 'CI Fixer', cost: 50 }],
 }
 
+// The governance cap editor reads its team list from /api/usage/org/team-caps
+// (ALL active teams, TFAC-482), not the spend rollup's by_team — so Idle (no spend
+// in ORG.by_team) still appears and can be capped.
+const ORG_TEAM_CAPS: UsageTeamCapsResponse = {
+  teams: [
+    { team_id: 't1', team_name: 'Platform', cap: 50 },
+    { team_id: 't2', team_name: 'Growth', cap: null },
+    { team_id: 't3', team_name: 'Idle', cap: null },
+  ],
+}
+
 // stubUsageFetch routes GET /api/usage/* by path (query stripped) to a canned
 // payload; an unmapped path resolves to a 404-shaped response (readError-safe).
 function stubUsageFetch(payloads: Record<string, unknown>) {
-  const fetchMock = vi.fn((input: unknown) => {
+  const fetchMock = vi.fn((input: unknown, _init?: RequestInit) => {
     const path = String(input).split('?')[0]
     if (path in payloads) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(payloads[path]) })
@@ -142,10 +170,43 @@ function fetchedPaths(fetchMock: ReturnType<typeof vi.fn>): string[] {
   return fetchMock.mock.calls.map((c) => String(c[0]).split('?')[0])
 }
 
+// Access-log fixtures: one membership row + one credential row, newest-first.
+const ACCESS_LOG: AccessLogResponse = {
+  items: [
+    {
+      id: 'a1',
+      action: 'org_role_changed',
+      action_label: 'changed Bob from member to admin',
+      actor_name: 'Alice',
+      target_name: 'Bob',
+      created_at: '2026-06-20T11:00:00Z',
+    },
+    {
+      id: 'a2',
+      action: 'credential_set',
+      action_label: 'set the GitHub PAT for github.example.com',
+      actor_name: 'Alice',
+      created_at: '2026-06-20T10:00:00Z',
+    },
+  ],
+  limit: 50,
+  offset: 0,
+  has_more: false,
+}
+
+const ACCESS_LOG_EMPTY: AccessLogResponse = { items: [], limit: 50, offset: 0, has_more: false }
+
+// fullUrls returns each fetched URL with its query intact (fetchedPaths strips
+// the query) — for asserting the access-log category param.
+function fullUrls(fetchMock: ReturnType<typeof vi.fn>): string[] {
+  return fetchMock.mock.calls.map((c) => String(c[0]))
+}
+
 beforeEach(() => {
   roleMock.isAdmin = false
   teamsMock.teams = []
   authMock.local = false
+  entMock.governance = false
 })
 afterEach(() => vi.unstubAllGlobals())
 
@@ -183,6 +244,153 @@ describe('Usage page', () => {
     expect(paths).toContain('/api/usage/me')
     expect(paths).toContain('/api/usage/teams/t1')
     expect(paths).toContain('/api/usage/org')
+  })
+
+  it('org section hides the per-team cap editor unless governance is licensed', async () => {
+    // Org admin, but governance OFF (the default) → no "Daily caps" instrument.
+    roleMock.isAdmin = true
+    entMock.governance = false
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    stubUsageFetch({ '/api/usage/me': ME, '/api/usage/teams/t1': TEAM, '/api/usage/org': ORG })
+
+    render(<Usage />)
+
+    expect(await screen.findByText('Org')).toBeInTheDocument()
+    await screen.findByText('$100.00') // org rollup loaded
+    expect(screen.queryByText('Daily caps')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Daily cap for Platform')).not.toBeInTheDocument()
+  })
+
+  it('org admin with governance edits a team cap, PUTting the new value', async () => {
+    roleMock.isAdmin = true
+    entMock.governance = true
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/teams/t1': TEAM,
+      '/api/usage/org': ORG,
+      '/api/usage/org/team-caps': ORG_TEAM_CAPS,
+      // The PUT echoes the stored value back; stubUsageFetch keys on path only.
+      '/api/usage/teams/t1/cap': { max_daily_cost_usd: 75 },
+    })
+
+    render(<Usage />)
+
+    // The editor renders, seeded from /api/usage/org/team-caps (Platform = 50).
+    expect(await screen.findByText('Daily caps')).toBeInTheDocument()
+    const input = (await screen.findByLabelText('Daily cap for Platform')) as HTMLInputElement
+    expect(input.value).toBe('50')
+
+    // Edit + blur → PUT /api/usage/teams/t1/cap with the new numeric cap.
+    fireEvent.change(input, { target: { value: '75' } })
+    fireEvent.blur(input)
+
+    await waitFor(() => {
+      const put = fetchMock.mock.calls.find(
+        (c) => String(c[0]) === '/api/usage/teams/t1/cap' && c[1]?.method === 'PUT',
+      )
+      expect(put).toBeTruthy()
+      expect(JSON.parse(String(put![1]?.body))).toEqual({ max_daily_cost_usd: 75 })
+    })
+  })
+
+  it('clearing a team cap PUTs null (no cap)', async () => {
+    roleMock.isAdmin = true
+    entMock.governance = true
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/teams/t1': TEAM,
+      '/api/usage/org': ORG,
+      '/api/usage/org/team-caps': ORG_TEAM_CAPS,
+      '/api/usage/teams/t1/cap': { max_daily_cost_usd: null },
+    })
+
+    render(<Usage />)
+
+    const input = (await screen.findByLabelText('Daily cap for Platform')) as HTMLInputElement
+    fireEvent.change(input, { target: { value: '' } }) // blank = clear
+    fireEvent.blur(input)
+
+    await waitFor(() => {
+      const put = fetchMock.mock.calls.find(
+        (c) => String(c[0]) === '/api/usage/teams/t1/cap' && c[1]?.method === 'PUT',
+      )
+      expect(put).toBeTruthy()
+      expect(JSON.parse(String(put![1]?.body))).toEqual({
+        max_daily_cost_usd: null,
+      })
+    })
+  })
+
+  it('a saved cap reads clean and a no-op blur does not re-PUT', async () => {
+    // Regression: dirty used to compare the draft against the prop-derived value,
+    // which lags the save by a poll — so a just-saved row stayed "unsaved" and
+    // re-PUT on every subsequent blur. It must read "saved" and not re-PUT.
+    roleMock.isAdmin = true
+    entMock.governance = true
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/teams/t1': TEAM,
+      '/api/usage/org': ORG,
+      '/api/usage/org/team-caps': ORG_TEAM_CAPS,
+      '/api/usage/teams/t1/cap': { max_daily_cost_usd: 75 },
+    })
+    const capPuts = () =>
+      fetchMock.mock.calls.filter(
+        (c) => String(c[0]) === '/api/usage/teams/t1/cap' && c[1]?.method === 'PUT',
+      )
+
+    render(<Usage />)
+
+    const input = (await screen.findByLabelText('Daily cap for Platform')) as HTMLInputElement
+    fireEvent.change(input, { target: { value: '75' } })
+    fireEvent.blur(input)
+
+    // The save lands once, the input adopts the echoed value, and the row reads
+    // "saved" — the dirty state clears against the local baseline, not the poll.
+    await waitFor(() => expect(capPuts()).toHaveLength(1))
+    await screen.findByText('saved')
+    expect(input.value).toBe('75')
+    expect(screen.queryByText('unsaved')).not.toBeInTheDocument()
+
+    // A second blur with no edit must NOT fire another PUT.
+    fireEvent.blur(input)
+    await new Promise((r) => setTimeout(r, 0)) // let any erroneous async PUT surface
+    expect(capPuts()).toHaveLength(1)
+  })
+
+  it('an idle team with no window spend still appears and is cappable', async () => {
+    // The editor reads /api/usage/org/team-caps (ALL active teams), not the spend
+    // rollup's by_team — so Idle (absent from ORG.by_team, no window spend) still
+    // gets an editable cap input, the whole point of pre-capping a runaway.
+    roleMock.isAdmin = true
+    entMock.governance = true
+    teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/teams/t1': TEAM,
+      '/api/usage/org': ORG,
+      '/api/usage/org/team-caps': ORG_TEAM_CAPS,
+      '/api/usage/teams/t3/cap': { max_daily_cost_usd: 20 },
+    })
+
+    render(<Usage />)
+
+    const idle = (await screen.findByLabelText('Daily cap for Idle')) as HTMLInputElement
+    expect(idle.value).toBe('') // cap null → "No cap" placeholder
+
+    // Capping the idle team PUTs to its UUID-keyed endpoint, same as any other.
+    fireEvent.change(idle, { target: { value: '20' } })
+    fireEvent.blur(idle)
+    await waitFor(() => {
+      const put = fetchMock.mock.calls.find(
+        (c) => String(c[0]) === '/api/usage/teams/t3/cap' && c[1]?.method === 'PUT',
+      )
+      expect(put).toBeTruthy()
+      expect(JSON.parse(String(put![1]?.body))).toEqual({ max_daily_cost_usd: 20 })
+    })
   })
 
   it('regular member sees personal only — no team or org reads', async () => {
@@ -408,5 +616,121 @@ describe('Usage page', () => {
     expect(await screen.findByText('Alice Smith')).toBeInTheDocument()
     expect(container.querySelector('img[src="https://ex/alice.png"]')).not.toBeNull()
     expect(screen.getByText('BO')).toBeInTheDocument() // Bob's monogram fallback
+  })
+})
+
+describe('Usage access & credential change-log (EE governance)', () => {
+  it('org admin with governance licensed sees the audit band + rendered rows', async () => {
+    roleMock.isAdmin = true
+    teamsMock.teams = []
+    entMock.governance = true
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/org': ORG,
+      '/api/usage/org/access-log': ACCESS_LOG,
+    })
+
+    render(<Usage />)
+
+    // The band header + both server-rendered action labels render.
+    expect(await screen.findByText('Access & credential changes')).toBeInTheDocument()
+    expect(await screen.findByText('changed Bob from member to admin')).toBeInTheDocument()
+    expect(await screen.findByText('set the GitHub PAT for github.example.com')).toBeInTheDocument()
+    // The endpoint was hit.
+    expect(fetchedPaths(fetchMock)).toContain('/api/usage/org/access-log')
+  })
+
+  it('hides the audit band when the governance entitlement is absent', async () => {
+    roleMock.isAdmin = true
+    teamsMock.teams = []
+    entMock.governance = false // unlicensed
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/org': ORG,
+      '/api/usage/org/access-log': ACCESS_LOG,
+    })
+
+    render(<Usage />)
+
+    // Org section still renders (proves the page mounted), but the audit band
+    // does not — and its endpoint is never fetched.
+    expect(await screen.findByText('Org')).toBeInTheDocument()
+    expect(screen.queryByText('Access & credential changes')).not.toBeInTheDocument()
+    expect(fetchedPaths(fetchMock)).not.toContain('/api/usage/org/access-log')
+  })
+
+  it('hides the audit band from a non-org-admin even when licensed', async () => {
+    roleMock.isAdmin = false // plain member
+    teamsMock.teams = []
+    entMock.governance = true
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/org/access-log': ACCESS_LOG,
+    })
+
+    render(<Usage />)
+
+    expect(await screen.findByText('Personal')).toBeInTheDocument()
+    expect(screen.queryByText('Access & credential changes')).not.toBeInTheDocument()
+    expect(fetchedPaths(fetchMock)).not.toContain('/api/usage/org/access-log')
+  })
+
+  it('shows the audit band in local mode (N=1 owner) when governance is licensed', async () => {
+    // showOrg = isAdmin || isLocal, so the local implicit owner sees the band
+    // too (the backend short-circuits the admin gate in local mode). The flat
+    // LocalConsole renders above it, not the three multi-mode sections.
+    authMock.local = true
+    roleMock.isAdmin = false
+    teamsMock.teams = [{ id: 't1', name: 'Default', slug: 'default', role: 'admin' }]
+    entMock.governance = true
+    const fetchMock = stubUsageFetch({
+      '/api/usage/org': ORG,
+      '/api/usage/org/access-log': ACCESS_LOG,
+    })
+
+    render(<Usage />)
+
+    expect(await screen.findByText('Access & credential changes')).toBeInTheDocument()
+    expect(await screen.findByText('changed Bob from member to admin')).toBeInTheDocument()
+    // Local layout: no multi-mode section headers.
+    expect(screen.queryByText('Personal')).not.toBeInTheDocument()
+    expect(fetchedPaths(fetchMock)).toContain('/api/usage/org/access-log')
+  })
+
+  it('renders a zero state for an empty log', async () => {
+    roleMock.isAdmin = true
+    teamsMock.teams = []
+    entMock.governance = true
+    stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/org': ORG,
+      '/api/usage/org/access-log': ACCESS_LOG_EMPTY,
+    })
+
+    render(<Usage />)
+
+    expect(await screen.findByText('Access & credential changes')).toBeInTheDocument()
+    expect(await screen.findByText(/no access or credential changes yet/i)).toBeInTheDocument()
+  })
+
+  it('filtering by category refetches the log with the category param', async () => {
+    roleMock.isAdmin = true
+    teamsMock.teams = []
+    entMock.governance = true
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/org': ORG,
+      '/api/usage/org/access-log': ACCESS_LOG,
+    })
+
+    render(<Usage />)
+
+    // Wait for the band, then pick the Credential filter.
+    expect(await screen.findByText('Access & credential changes')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Credential' }))
+
+    await waitFor(() =>
+      expect(fullUrls(fetchMock).some((u) => u.includes('category=credential'))).toBe(true),
+    )
   })
 })

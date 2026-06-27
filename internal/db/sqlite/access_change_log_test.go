@@ -161,6 +161,71 @@ func TestAccessChangeLogStore_SQLite_ListByOrg(t *testing.T) {
 	}
 }
 
+// TestAccessChangeLogStore_SQLite_OffsetAndCategory pins the TFAC-484 viewer
+// reads: Offset pages the newest-first window, and Category narrows to the
+// action set for "membership" vs "credential" (an empty/unknown category is no
+// filter).
+func TestAccessChangeLogStore_SQLite_OffsetAndCategory(t *testing.T) {
+	conn := newSQLiteForAccessChangeTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	seed := func(id, action string, ts time.Time) {
+		if _, err := conn.Exec(`
+			INSERT INTO access_change_log (id, org_id, action, created_at)
+			VALUES (?, ?, ?, ?)
+		`, id, runmode.LocalDefaultOrgID, action, ts); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	base := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	seed("m1", domain.AccessActionOrgMemberGranted, base)
+	seed("m2", domain.AccessActionTeamRoleChanged, base.Add(time.Minute))
+	seed("c1", domain.AccessActionCredentialSet, base.Add(2*time.Minute))
+	seed("m3", domain.AccessActionOrgMemberRevoked, base.Add(3*time.Minute))
+
+	// Offset skips the newest row(s): newest-first is m3, c1, m2, m1.
+	off, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Limit: 2, Offset: 1})
+	if err != nil {
+		t.Fatalf("ListByOrg offset: %v", err)
+	}
+	if len(off) != 2 || off[0].ID != "c1" || off[1].ID != "m2" {
+		t.Errorf("offset page = %v, want [c1 m2]", idsOf(off))
+	}
+
+	// Category=credential → only the credential_set row.
+	cred, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Category: domain.AccessCategoryCredential})
+	if err != nil {
+		t.Fatalf("ListByOrg credential: %v", err)
+	}
+	if len(cred) != 1 || cred[0].ID != "c1" {
+		t.Errorf("credential category = %v, want [c1]", idsOf(cred))
+	}
+
+	// Category=membership → the three membership rows, no credential_set.
+	mem, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Category: domain.AccessCategoryMembership})
+	if err != nil {
+		t.Fatalf("ListByOrg membership: %v", err)
+	}
+	if len(mem) != 3 {
+		t.Fatalf("membership category = %v, want 3 rows", idsOf(mem))
+	}
+	for _, r := range mem {
+		if r.Action == domain.AccessActionCredentialSet {
+			t.Errorf("membership filter leaked credential_set: %v", idsOf(mem))
+		}
+	}
+
+	// An unrecognized category is no filter — every row comes back.
+	none, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Category: "bogus"})
+	if err != nil {
+		t.Fatalf("ListByOrg unknown category: %v", err)
+	}
+	if len(none) != 4 {
+		t.Errorf("unknown category = %v, want all 4", idsOf(none))
+	}
+}
+
 // TestAccessChangeLogStore_SQLite_RollbackDiscardsRow proves Record composes
 // with the surrounding transaction: a WithTx that records a row then returns an
 // error rolls the row back, so the log can't diverge from a rolled-back action.

@@ -71,16 +71,19 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		autoDelegate            bool
 		permAbsentGraceMS       int
 		permAbsentAutodeny      bool
+		maxDailyCost            sql.NullFloat64
 	)
 	err := q.QueryRowContext(ctx, `
 		SELECT jira_projects, ai_reprioritize_threshold, ai_preference_update_interval,
 		       default_model, auto_delegate_enabled,
-		       permission_absent_grace_ms, permission_absent_autodeny_enabled
+		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
+		       max_daily_cost_usd
 		FROM team_settings WHERE team_id = ?
 	`, teamID).Scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
 		&defaultModel, &autoDelegate,
 		&permAbsentGraceMS, &permAbsentAutodeny,
+		&maxDailyCost,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		// See OrgsStore for the rationale: defaults here are the
@@ -106,6 +109,7 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		AutoDelegateEnabled:             autoDelegate,
 		PermissionAbsentGraceMS:         permAbsentGraceMS,
 		PermissionAbsentAutodenyEnabled: permAbsentAutodeny,
+		MaxDailyCostUSD:                 maxDailyCost.Float64, // NULL → 0 (no cap)
 	}, nil
 }
 
@@ -321,18 +325,47 @@ func (s *teamsStore) ListArchivedForOrgSystem(ctx context.Context, orgID string)
 	return out, rows.Err()
 }
 
+func (s *teamsStore) ListActiveForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id, org_id, slug, name, COALESCE(description, ''), created_at
+		FROM teams
+		WHERE org_id = ? AND deleted_at IS NULL
+		ORDER BY name ASC, id ASC
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list active teams: %w", err)
+	}
+	defer rows.Close()
+	out := []domain.Team{}
+	for rows.Next() {
+		var t domain.Team
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan active team: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain.TeamSettings) error {
 	projectsJSON, err := marshalJSONArray(u.JiraProjects)
 	if err != nil {
 		return fmt.Errorf("marshal team_settings.jira_projects: %w", err)
 	}
+	// max_daily_cost_usd rides along (0 → NULL via nullFloatValue) so a read-
+	// modify-write team-settings save round-trips the org-admin-set cap untouched.
+	// The team-settings handler never populates this field from its request body
+	// (a team admin cannot set their own cap), so its GetSettings→UpdateSettings
+	// flow always writes back exactly what it read. The cap is *changed* only by
+	// the org-admin SetDailyCostCapSystem path.
 	if _, err := s.q.ExecContext(ctx, `
 		INSERT INTO team_settings (
 			team_id, jira_projects, ai_reprioritize_threshold,
 			ai_preference_update_interval, default_model, auto_delegate_enabled,
 			permission_absent_grace_ms, permission_absent_autodeny_enabled,
+			max_daily_cost_usd,
 			updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(team_id) DO UPDATE SET
 			jira_projects = excluded.jira_projects,
 			ai_reprioritize_threshold = excluded.ai_reprioritize_threshold,
@@ -341,13 +374,40 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			auto_delegate_enabled = excluded.auto_delegate_enabled,
 			permission_absent_grace_ms = excluded.permission_absent_grace_ms,
 			permission_absent_autodeny_enabled = excluded.permission_absent_autodeny_enabled,
+			max_daily_cost_usd = excluded.max_daily_cost_usd,
 			updated_at = CURRENT_TIMESTAMP
 	`,
 		teamID, projectsJSON, u.AIReprioritizeThreshold,
 		u.AIPreferenceUpdateInterval, u.DefaultModel, u.AutoDelegateEnabled,
 		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
+		nullFloatValue(u.MaxDailyCostUSD),
 	); err != nil {
 		return fmt.Errorf("upsert team_settings: %w", err)
+	}
+	return nil
+}
+
+// SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for teamID
+// — the org-admin per-team daily spend cap (TFAC-482). SQLite is N=1 / no RLS so
+// it's a plain write; the Postgres twin runs it on the admin pool because an org
+// admin setting a team's cap may not be a member of that team. capUSD ≤ 0 stores
+// SQL NULL ("no cap"). The partial INSERT relies on the schema DEFAULT clauses
+// for every other team_settings column when no row exists yet, and ON CONFLICT
+// touches only the cap so a team's other settings are never clobbered.
+func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) error {
+	// ≤ 0 → SQL NULL ("no cap"); any positive value is the cap.
+	var capArg any
+	if capUSD > 0 {
+		capArg = capUSD
+	}
+	if _, err := s.q.ExecContext(ctx, `
+		INSERT INTO team_settings (team_id, max_daily_cost_usd, updated_at)
+		VALUES (?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(team_id) DO UPDATE SET
+			max_daily_cost_usd = excluded.max_daily_cost_usd,
+			updated_at = CURRENT_TIMESTAMP
+	`, teamID, capArg); err != nil {
+		return fmt.Errorf("set team daily cost cap: %w", err)
 	}
 	return nil
 }

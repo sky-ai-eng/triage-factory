@@ -62,4 +62,16 @@ type SpendStore interface {
 	// OrgsStore.GetSettingsSystem / ArtifactStore.ListByRunSystem. SQLite is N=1
 	// / no RLS, so it delegates to SpendByCategory.
 	SpendByCategorySystem(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error)
+
+	// SpendByCategorySystemForTeam is SpendByCategorySystem narrowed to one team:
+	// the same ADMIN-pool aggregate, plus `AND team_id = teamID`. The per-team
+	// daily spend cap (TFAC-482) reads it from Spawner.Delegate to sum a team's
+	// settled spend for today. Filtering on team_id automatically excludes the
+	// org's NULL-team rows — system overhead and curator turns on non-team
+	// projects — so a team cap never counts spend that isn't the team's (those
+	// belong to the org cap alone). Like SpendByCategorySystem it MUST use the
+	// admin pool: Delegate is claims-less, so an app-pool/RLS read would see
+	// nothing and the cap would never trip. SQLite is N=1 / no RLS, so it
+	// delegates to SpendByCategory with the same team filter applied.
+	SpendByCategorySystemForTeam(ctx context.Context, orgID, teamID string, since, until time.Time) ([]domain.SpendBucket, error)
 }

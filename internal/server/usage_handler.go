@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 )
@@ -346,6 +347,164 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// teamCapUpdate is the PUT /api/usage/teams/{team_id}/cap body. A pointer so an
+// explicit null and an omitted field both decode to nil → 0 → "clear the cap".
+type teamCapUpdate struct {
+	MaxDailyCostUSD *float64 `json:"max_daily_cost_usd"`
+}
+
+// handleUsageTeamCap sets one team's per-team daily LLM spend cap (TFAC-482).
+// Gate: the governance entitlement AND org admin. The entitlement is checked
+// first so an unlicensed deployment 404s the route entirely (the EE-feature-
+// hidden posture — per-team caps are dormant without governance, with the org
+// cap as the safety net); a non-org-admin on a licensed deployment then gets a
+// 403. A team admin can NOT set their own team's cap — this is org-admin-only by
+// design, so the write goes through the admin pool (SetDailyCostCapSystem): the
+// org admin need not be a member of the team they're capping. The org comes from
+// the session (like the GET reads), the team from the path.
+//
+// Body: {"max_daily_cost_usd": number|null}. null or 0 clears the cap; a
+// negative value 400s. Echoes the stored value (null when cleared) so the FE can
+// update in place.
+//
+// PUT /api/usage/teams/{team_id}/cap
+func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.resolveCaller(w, r)
+	if !ok {
+		return
+	}
+	// EE gate first: hide the route (404) when governance isn't licensed, before
+	// any role-based disclosure. Mode-agnostic — local is unlicensed, so the
+	// route 404s there too (per-team caps are a multi-tenant EE concept).
+	if !entitlements.Active().Has(entitlements.FeatureGovernance) {
+		http.NotFound(w, r)
+		return
+	}
+	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
+		return
+	}
+	teamID := r.PathValue("team_id")
+	if _, err := uuid.Parse(teamID); err != nil {
+		// A malformed id is "not found" (parity with handleUsageTeam), not a 500.
+		http.NotFound(w, r)
+		return
+	}
+	// Confirm the team is in the caller's org so a cross-org id 404s (non-
+	// disclosure) rather than writing another org's team_settings row.
+	if !h.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
+		return
+	}
+	// Block writes to an archived team (403), consistent with the rest of the
+	// team-settings write family — a cap on a force-stopped team can never be
+	// enforced (no runs), so it'd be a silently-inert write.
+	if !h.az.VerifyTeamNotArchived(w, r, orgID, userID, teamID) {
+		return
+	}
+
+	var req teamCapUpdate
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	capUSD := 0.0
+	if req.MaxDailyCostUSD != nil {
+		capUSD = *req.MaxDailyCostUSD
+	}
+	if capUSD < 0 {
+		badRequest(w, "max_daily_cost_usd must be >= 0 (or null to clear the cap)")
+		return
+	}
+
+	// Write, then read the value back (both admin-pool) so the echo reflects what
+	// actually landed in team_settings rather than this caller's request body. The
+	// read-back is what keeps two org admins racing on the same team's cap
+	// convergent — each echoes the current DB state, not its own write — instead of
+	// diverging until the next poll. capUSD <= 0 stored NULL, which reads back as 0
+	// (no cap) → a null echo.
+	var stored *float64
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if e := tx.Teams.SetDailyCostCapSystem(r.Context(), teamID, capUSD); e != nil {
+			return e
+		}
+		set, e := tx.Teams.GetSettingsSystem(r.Context(), teamID)
+		if e != nil {
+			return e
+		}
+		if set.MaxDailyCostUSD > 0 {
+			v := set.MaxDailyCostUSD
+			stored = &v
+		}
+		return nil
+	}); err != nil {
+		internalError(w, "usage", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"max_daily_cost_usd": stored})
+}
+
+// usageTeamCapEntry is one team in the GET /api/usage/org/team-caps list: its id,
+// name, and configured per-team daily cap (TFAC-482; null = no cap).
+type usageTeamCapEntry struct {
+	TeamID   string   `json:"team_id"`
+	TeamName string   `json:"team_name"`
+	Cap      *float64 `json:"cap"`
+}
+
+type usageTeamCapsResponse struct {
+	Teams []usageTeamCapEntry `json:"teams"`
+}
+
+// handleUsageTeamCaps lists EVERY active team in the org with its per-team daily
+// cap (TFAC-482), for the governance cap editor. Gate: governance (404 unlicensed)
+// + org admin (403) — same posture as the PUT. Unlike the spend rollup's by_team
+// (only teams with spend in the window), this lists all active teams so an org
+// admin can pre-cap an idle team before any runaway happens. Admin pool
+// throughout: an org admin may not be a member of every team. Archived teams are
+// excluded — they can't be capped (the PUT 403s on archived). The FE pairs each
+// entry with its window spend looked up from /api/usage/org by_team (0 if idle).
+//
+// GET /api/usage/org/team-caps
+func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.resolveCaller(w, r)
+	if !ok {
+		return
+	}
+	// EE gate first (404 unlicensed), then org admin (403) — mirrors the PUT.
+	if !entitlements.Active().Has(entitlements.FeatureGovernance) {
+		http.NotFound(w, r)
+		return
+	}
+	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
+		return
+	}
+
+	entries := []usageTeamCapEntry{}
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		teams, e := tx.Teams.ListActiveForOrgSystem(r.Context(), orgID)
+		if e != nil {
+			return e
+		}
+		for _, t := range teams {
+			set, e := tx.Teams.GetSettingsSystem(r.Context(), t.ID)
+			if e != nil {
+				return e
+			}
+			var capPtr *float64
+			if set.MaxDailyCostUSD > 0 {
+				v := set.MaxDailyCostUSD
+				capPtr = &v
+			}
+			entries = append(entries, usageTeamCapEntry{TeamID: t.ID, TeamName: t.Name, Cap: capPtr})
+		}
+		return nil
+	}); err != nil {
+		internalError(w, "usage", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, usageTeamCapsResponse{Teams: entries})
+}
+
 // --- gating ---
 
 // resolveCaller pulls the active org from the session and the caller's user id
@@ -575,7 +734,9 @@ func spendByRule(rows []domain.SpendRow, names map[string]string) []usageRuleBuc
 
 // spendByTeam sums cost per team across the team-attributed rows (NULL-team
 // rows go to org_level instead), resolving team names from the supplied map.
-// Sorted cost-desc. This list also drives the FE org-admin team dropdown.
+// Sorted cost-desc. Per-team caps are NOT carried here — the governance cap
+// editor reads the full team list (incl. idle teams absent from this spend
+// rollup) from GET /api/usage/org/team-caps instead (TFAC-482).
 func spendByTeam(rows []domain.SpendRow, names map[string]string) []usageTeamBucket {
 	byTeam := map[string]float64{}
 	for _, r := range rows {

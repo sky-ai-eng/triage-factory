@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -250,4 +253,75 @@ func mustDecode(t *testing.T, rec *httptest.ResponseRecorder, out any) {
 	if err := json.Unmarshal(rec.Body.Bytes(), out); err != nil {
 		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
 	}
+}
+
+// TestUsageAccessLog_GatesAndEntitlement_Postgres pins the EE viewer's two-axis
+// gate under real RLS: the org-admin role gate (403 for a plain member or a mere
+// team admin) AND the FeatureGovernance entitlement (404-and-hide when
+// unlicensed, even for the org admin). The 200 path proves the org-admin read
+// resolves actor/target names across the org.
+func TestUsageAccessLog_GatesAndEntitlement_Postgres(t *testing.T) {
+	r := newUsageRig(t)
+	entitlements.Reset() // start unlicensed regardless of test order
+	t.Cleanup(entitlements.Reset)
+
+	// One audit row: the founder promoted the member to org admin. Written on the
+	// admin pool (BYPASSRLS) so the fixture doesn't depend on a request context.
+	pgtest.MustExec(t, r.h.AdminDB, `
+		INSERT INTO access_change_log (org_id, actor_user_id, action, target_user_id, detail_json)
+		VALUES ($1, $2, $3, $4, $5)`,
+		r.orgID, r.owner, domain.AccessActionOrgRoleChanged, r.member, `{"old_role":"member","new_role":"admin"}`)
+
+	t.Run("unlicensed_404_even_for_org_admin", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		r.uh.handleUsageAccessLog(rec, r.req(r.orgAdmin, ""))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("unlicensed org admin = %d, want 404; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	// License governance for the remaining cases.
+	entitlements.Register(governanceGrant{})
+
+	t.Run("org_member_403", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		r.uh.handleUsageAccessLog(rec, r.req(r.member, ""))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("plain member = %d, want 403; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("team_admin_org_member_403", func(t *testing.T) {
+		// A team admin is still only an org member — the audit log is org-admin-only.
+		rec := httptest.NewRecorder()
+		r.uh.handleUsageAccessLog(rec, r.req(r.teamAdmin, ""))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("team admin (org member) = %d, want 403; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("org_admin_200_reads_log_with_names", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		r.uh.handleUsageAccessLog(rec, r.req(r.orgAdmin, ""))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("org admin = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp accessLogResponse
+		mustDecode(t, rec, &resp)
+		if len(resp.Items) != 1 {
+			t.Fatalf("items = %d, want 1: %+v", len(resp.Items), resp.Items)
+		}
+		row := resp.Items[0]
+		if row.Action != domain.AccessActionOrgRoleChanged {
+			t.Errorf("action = %q, want %q", row.Action, domain.AccessActionOrgRoleChanged)
+		}
+		if !strings.Contains(row.ActionLabel, "from member to admin") {
+			t.Errorf("action_label = %q, want it to render the member→admin transition", row.ActionLabel)
+		}
+		// Actor (founder) + target (member) resolve to non-empty display names
+		// under the org admin's claims (users_select RLS is org-scoped).
+		if row.ActorName == "" || row.TargetName == "" {
+			t.Errorf("name resolution failed: actor=%q target=%q", row.ActorName, row.TargetName)
+		}
+	})
 }

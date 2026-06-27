@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	_ "modernc.org/sqlite"
 )
@@ -68,6 +69,23 @@ func seedSpendAt(t *testing.T, database *sql.DB, cost float64, occurredAt time.T
 		runmode.LocalDefaultUserID, cost, occurredAt,
 	); err != nil {
 		t.Fatalf("seed spend run: %v", err)
+	}
+}
+
+// seedSystemSpendAt inserts a settled system_llm_runs row — a NULL-team system
+// job (scorer/classifier/profiler overhead) — at the given instant. The
+// llm_spend view surfaces it with a NULL team_id, so it counts toward the ORG cap
+// but never a team cap (which filters on team_id). Used to prove the per-team cap
+// excludes system spend.
+func seedSystemSpendAt(t *testing.T, database *sql.DB, cost float64, occurredAt time.Time) {
+	t.Helper()
+	if _, err := database.Exec(`
+		INSERT INTO system_llm_runs
+			(id, org_id, job, model, total_cost_usd,
+			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)
+		VALUES (?, ?, 'scorer', 'm', ?, 0, 0, 0, 0, ?)
+	`, uuid.New().String(), runmode.LocalDefaultOrgID, cost, occurredAt); err != nil {
+		t.Fatalf("seed system spend: %v", err)
 	}
 }
 
@@ -321,5 +339,248 @@ func TestDelegate_NoCap_Proceeds(t *testing.T) {
 	}
 	if runID == "" || countBlueprintRuns(t, database, task.ID) != 1 {
 		t.Errorf("no-cap Delegate should mint a blueprint_run; runID=%q", runID)
+	}
+}
+
+// --- per-team daily cost cap (TFAC-482) ----------------------------------
+
+// govGrant licenses ONLY FeatureGovernance — the EE entitlement the per-team cap
+// gates on. licenseGovernance registers it process-wide and resets on cleanup.
+type govGrant struct{}
+
+func (govGrant) Has(f entitlements.Feature) bool { return f == entitlements.FeatureGovernance }
+
+func licenseGovernance(t *testing.T) {
+	t.Helper()
+	entitlements.Register(govGrant{})
+	t.Cleanup(entitlements.Reset)
+}
+
+// setTeamDailyCostCap sets the local team's per-team daily spend cap via the
+// org-admin write path (SetDailyCostCapSystem), mirroring setDailyCostCap for the
+// org tier.
+func setTeamDailyCostCap(t *testing.T, database *sql.DB, cap float64) {
+	t.Helper()
+	store := sqlitestore.New(database).Teams
+	if err := store.SetDailyCostCapSystem(context.Background(), runmode.LocalDefaultTeamID, cap); err != nil {
+		t.Fatalf("set team daily cost cap: %v", err)
+	}
+}
+
+// stubTeamsSettings overrides only GetSettingsSystem (the sole TeamsStore method
+// checkTeamDailyCostCap calls). The embedded interface satisfies the rest.
+type stubTeamsSettings struct {
+	db.TeamsStore
+	settings domain.TeamSettings
+	err      error
+}
+
+func (s stubTeamsSettings) GetSettingsSystem(context.Context, string) (domain.TeamSettings, error) {
+	return s.settings, s.err
+}
+
+// SpendByCategorySystemForTeam extends the existing stubSpend so it can drive the
+// per-team cap path's fail-open test (and any wiring that reaches it).
+func (s stubSpend) SpendByCategorySystemForTeam(context.Context, string, string, time.Time, time.Time) ([]domain.SpendBucket, error) {
+	return s.buckets, s.err
+}
+
+// --- checkTeamDailyCostCap unit tests --------------------------------------
+
+func TestCheckTeamDailyCostCap_AtOrOverCap_Blocks(t *testing.T) {
+	database := newCostCapTestDB(t)
+	licenseGovernance(t)
+	setTeamDailyCostCap(t, database, 10)
+	// Two team-attributed rows so the cap sums across rows, like the org test.
+	now := time.Now().UTC()
+	seedSpendAt(t, database, 6, now)
+	seedSpendAt(t, database, 5, now) // 11 >= 10 trips
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	err := s.checkTeamDailyCostCap(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID)
+	if !errors.Is(err, ErrDailyCostCapReached) {
+		t.Fatalf("team spend at/over cap must return ErrDailyCostCapReached, got: %v", err)
+	}
+}
+
+func TestCheckTeamDailyCostCap_UnderCap_Allows(t *testing.T) {
+	database := newCostCapTestDB(t)
+	licenseGovernance(t)
+	setTeamDailyCostCap(t, database, 10)
+	seedSpendAt(t, database, 4.50, time.Now().UTC())
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	if err := s.checkTeamDailyCostCap(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("team spend below cap must allow, got: %v", err)
+	}
+}
+
+func TestCheckTeamDailyCostCap_NoCap_Allows(t *testing.T) {
+	database := newCostCapTestDB(t)
+	licenseGovernance(t)
+	// No team cap set (0 / NULL = no cap), spend present.
+	seedSpendAt(t, database, 999, time.Now().UTC())
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	if err := s.checkTeamDailyCostCap(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("no team cap (0) must allow, got: %v", err)
+	}
+}
+
+func TestCheckTeamDailyCostCap_EntitlementOff_Dormant(t *testing.T) {
+	database := newCostCapTestDB(t)
+	// Governance NOT licensed (default community checker) → per-team cap dormant.
+	setTeamDailyCostCap(t, database, 10)
+	seedSpendAt(t, database, 50, time.Now().UTC()) // way over, but dormant
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	if err := s.checkTeamDailyCostCap(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("unlicensed governance must make the per-team cap dormant, got: %v", err)
+	}
+}
+
+func TestCheckTeamDailyCostCap_OnlyTeamRowsCount(t *testing.T) {
+	// A team cap sums team_id rows only — system overhead + non-team curator
+	// (NULL team_id) never count. seedSpendAt writes a team row; seedSystemSpendAt
+	// writes a NULL-team system row that must be ignored.
+	database := newCostCapTestDB(t)
+	licenseGovernance(t)
+	setTeamDailyCostCap(t, database, 10)
+	now := time.Now().UTC()
+	seedSystemSpendAt(t, database, 100, now) // NULL team → excluded from the team cap
+	seedSpendAt(t, database, 4, now)         // team row → 4 < 10, under cap
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	if err := s.checkTeamDailyCostCap(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("system spend must not count toward the team cap, got: %v", err)
+	}
+}
+
+func TestCheckTeamDailyCostCap_NilStores_NoOp(t *testing.T) {
+	licenseGovernance(t) // past the entitlement gate, into the nil-store guard
+	s := &Spawner{}
+	if err := s.checkTeamDailyCostCap(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("nil stores must no-op, got: %v", err)
+	}
+}
+
+func TestCheckTeamDailyCostCap_FailsOpenOnSettingsError(t *testing.T) {
+	licenseGovernance(t)
+	s := &Spawner{
+		teams: stubTeamsSettings{err: errors.New("settings boom")},
+		spend: stubSpend{},
+	}
+	if err := s.checkTeamDailyCostCap(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("team settings read error must fail open (allow), got: %v", err)
+	}
+}
+
+func TestCheckTeamDailyCostCap_FailsOpenOnSpendError(t *testing.T) {
+	licenseGovernance(t)
+	s := &Spawner{
+		teams: stubTeamsSettings{settings: domain.TeamSettings{MaxDailyCostUSD: 10}},
+		spend: stubSpend{err: errors.New("spend boom")},
+	}
+	if err := s.checkTeamDailyCostCap(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("team spend read error must fail open (allow), got: %v", err)
+	}
+}
+
+// --- Delegate end-to-end (team cap) ----------------------------------------
+
+func TestDelegate_TeamDailyCostCap_BlocksAndMintsNoBlueprintRun(t *testing.T) {
+	database := newCostCapTestDB(t)
+	licenseGovernance(t)
+	task, bpID := delegatableFixture(t, database, "teamblocked")
+	// No org cap; only the team cap is tripped — proving the team check is what
+	// blocks (the org check runs first and passes).
+	setTeamDailyCostCap(t, database, 10)
+	seedSpendAt(t, database, 12, time.Now().UTC()) // team over cap
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	runID, err := s.Delegate(task, DelegateOpts{
+		OrgID:               runmode.LocalDefaultOrgID,
+		ExplicitBlueprintID: bpID,
+		TriggerType:         "manual",
+		CreatorUserID:       runmode.LocalDefaultUserID,
+	})
+	if !errors.Is(err, ErrDailyCostCapReached) {
+		t.Fatalf("Delegate over team cap must return ErrDailyCostCapReached, got runID=%q err=%v", runID, err)
+	}
+	if runID != "" {
+		t.Errorf("blocked Delegate must return empty runID, got %q", runID)
+	}
+	if n := countBlueprintRuns(t, database, task.ID); n != 0 {
+		t.Errorf("team-cap-blocked Delegate minted %d blueprint_run rows; want 0", n)
+	}
+}
+
+func TestDelegate_TeamUnderCap_Proceeds(t *testing.T) {
+	database := newCostCapTestDB(t)
+	licenseGovernance(t)
+	task, bpID := delegatableFixture(t, database, "teamallowed")
+	setTeamDailyCostCap(t, database, 100)
+	seedSpendAt(t, database, 5, time.Now().UTC()) // well under
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	runID, err := s.Delegate(task, DelegateOpts{
+		OrgID:               runmode.LocalDefaultOrgID,
+		ExplicitBlueprintID: bpID,
+		TriggerType:         "manual",
+		CreatorUserID:       runmode.LocalDefaultUserID,
+	})
+	if err != nil {
+		t.Fatalf("Delegate under team cap must proceed, got err=%v", err)
+	}
+	if runID == "" || countBlueprintRuns(t, database, task.ID) != 1 {
+		t.Errorf("under-team-cap Delegate should mint one blueprint_run; runID=%q", runID)
+	}
+}
+
+func TestDelegate_TeamCap_EntitlementOff_Ignored(t *testing.T) {
+	database := newCostCapTestDB(t)
+	// Governance NOT licensed → the team cap is dormant; the org cap (unset here)
+	// is the only safety net, so an over-team-cap spawn proceeds.
+	task, bpID := delegatableFixture(t, database, "teamdormant")
+	setTeamDailyCostCap(t, database, 10)
+	seedSpendAt(t, database, 50, time.Now().UTC()) // over the (dormant) team cap
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	runID, err := s.Delegate(task, DelegateOpts{
+		OrgID:               runmode.LocalDefaultOrgID,
+		ExplicitBlueprintID: bpID,
+		TriggerType:         "manual",
+		CreatorUserID:       runmode.LocalDefaultUserID,
+	})
+	if err != nil {
+		t.Fatalf("unlicensed governance → team cap dormant → Delegate must proceed, got err=%v", err)
+	}
+	if runID == "" || countBlueprintRuns(t, database, task.ID) != 1 {
+		t.Errorf("dormant-team-cap Delegate should mint one blueprint_run; runID=%q", runID)
+	}
+}
+
+func TestDelegate_TeamCap_UnownedTaskSkipped(t *testing.T) {
+	database := newCostCapTestDB(t)
+	licenseGovernance(t)
+	task, bpID := delegatableFixture(t, database, "teamunowned")
+	task.TeamID = nil // unowned task: no team to cap → the team check is skipped
+	// A tripped cap on the local team that the unowned task is NOT on; it must not
+	// block the spawn (the Delegate call site skips the check for teamID == "").
+	setTeamDailyCostCap(t, database, 10)
+	seedSpendAt(t, database, 50, time.Now().UTC())
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	runID, err := s.Delegate(task, DelegateOpts{
+		OrgID:               runmode.LocalDefaultOrgID,
+		ExplicitBlueprintID: bpID,
+		TriggerType:         "manual",
+		CreatorUserID:       runmode.LocalDefaultUserID,
+	})
+	if err != nil {
+		t.Fatalf("unowned task (teamID \"\") must skip the team cap and proceed, got err=%v", err)
+	}
+	if runID == "" || countBlueprintRuns(t, database, task.ID) != 1 {
+		t.Errorf("unowned-task Delegate should mint one blueprint_run; runID=%q", runID)
 	}
 }

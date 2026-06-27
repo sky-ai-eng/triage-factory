@@ -972,7 +972,10 @@ export interface UsageRuleBucket {
   cost: number
 }
 
-/** One team's summed cost across team-attributed rows (org rollup only). */
+/** One team's summed cost across team-attributed rows (org rollup only). Per-team
+ *  caps are NOT here — the governance cap editor reads the full team list from
+ *  /api/usage/org/team-caps (UsageTeamCap), so an idle team absent from this spend
+ *  rollup can still be capped (TFAC-482). */
 export interface UsageTeamBucket {
   team_id: string
   team_name: string
@@ -1026,4 +1029,52 @@ export interface UsageOrgResponse {
    *  multi mode (it stays with the owning team). Lets the local console read
    *  everything in one request. */
   by_rule?: UsageRuleBucket[]
+}
+
+/** One team in GET /api/usage/org/team-caps — its id, name, and per-team daily
+ *  spend cap (TFAC-482; null = no cap). The governance cap editor lists EVERY
+ *  active team this way (not just those with spend), so an idle team can be
+ *  pre-capped; window spend is looked up separately from the org rollup's by_team. */
+export interface UsageTeamCap {
+  team_id: string
+  team_name: string
+  cap: number | null
+}
+
+/** GET /api/usage/org/team-caps — every active team + its cap (org admin +
+ *  governance only; 404 unlicensed). */
+export interface UsageTeamCapsResponse {
+  teams: UsageTeamCap[]
+}
+
+/** One row of the EE access & credential change-log (GET
+ *  /api/usage/org/access-log, TFAC-484). `action_label` is the server-rendered
+ *  human predicate ("changed Alice from member to admin") shown after the actor +
+ *  timestamp; the actor/target/team names are pre-resolved ("" when a
+ *  since-removed user/team no longer resolves). `action` is the raw discriminator
+ *  (used FE-side only to tone membership vs credential rows). */
+export interface AccessChangeRow {
+  id: string
+  action: string
+  action_label: string
+  actor_name: string
+  target_name?: string
+  team_name?: string
+  /** Raw captured payload, passed through for power users; the FE renders the
+   *  label, not this. The wire value is a json.RawMessage — arbitrary JSON, not
+   *  necessarily an object — so it's typed `unknown` (narrow before use). Omitted
+   *  when the row carried no (valid) detail. */
+  detail_json?: unknown
+  created_at: string
+}
+
+/** GET /api/usage/org/access-log — one page of the org-admin EE audit viewer
+ *  (org admin + governance entitlement; 404 unlicensed). Newest-first; paginate
+ *  via limit/offset and `has_more`. The `category` query narrows to membership vs
+ *  credential changes. */
+export interface AccessLogResponse {
+  items: AccessChangeRow[]
+  limit: number
+  offset: number
+  has_more: boolean
 }

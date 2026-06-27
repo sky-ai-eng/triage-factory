@@ -346,6 +346,62 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertCost(t, "system.win.autonomous", win[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
 	})
 
+	// SpendByCategorySystemForTeam is the admin-pool per-team aggregate the
+	// TFAC-482 per-team daily cap reads. The team_id filter sums ONLY the team's
+	// own rows — it INCLUDES the team's runs + its team-attributed curator (the
+	// curator's project carries the team, TFAC-476) and EXCLUDES the org's
+	// NULL-team rows (system overhead + non-team curator), so a team cap never
+	// counts spend that belongs to the org cap alone.
+	t.Run("SpendByCategorySystemForTeam_SumsTeamOnly", func(t *testing.T) {
+		fx := factory(t)
+		ctx := context.Background()
+
+		// The team's own spend: a manual run, an autonomous run, a team curator.
+		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{10, 1, 0, 0}, Status: "completed", StartedAt: t1})
+		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.50), Tokens: SpendTokens{5, 5, 5, 5}, Status: "completed", StartedAt: t2})
+		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.30, TeamID: fx.TeamID, Tokens: SpendTokens{3, 3, 3, 3}, Status: "completed", CreatedAt: t3})
+		// NOT the team's: a NULL-team (org/private project) curator + a system row.
+		// Both carry a NULL team_id and must be excluded by the team filter.
+		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.40, Tokens: SpendTokens{4, 4, 4, 4}, Status: "completed", CreatedAt: t3})
+		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t4})
+
+		buckets, err := fx.Store.SpendByCategorySystemForTeam(ctx, fx.OrgID, fx.TeamID, time.Time{}, time.Time{})
+		byCat := spendByCat(t, buckets, err)
+		assertCost(t, "team.manual.sum", byCat[domain.SpendCategoryManual].TotalCostUSD, 1.00)
+		assertCost(t, "team.autonomous.sum", byCat[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
+		assertCost(t, "team.curator.sum", byCat[domain.SpendCategoryCurator].TotalCostUSD, 0.30)
+		if _, ok := byCat[domain.SpendCategorySystemOverhead]; ok {
+			t.Errorf("per-team aggregate included a system_overhead bucket; the NULL-team system row must be excluded")
+		}
+
+		// Grand total counts the team's rows ONLY (1.00 + 0.50 + 0.30 = 1.80); the
+		// NULL-team curator (0.40) + system (0.05) are excluded — the team-cap
+		// invariant (system spend is the org cap's concern, never apportioned).
+		var total float64
+		for _, b := range buckets {
+			total += b.TotalCostUSD
+		}
+		assertCost(t, "team.grand_total", total, 1.80)
+
+		// A different team sees none of it.
+		other := "00000000-0000-0000-0000-0000000004ff"
+		none, err := fx.Store.SpendByCategorySystemForTeam(ctx, fx.OrgID, other, time.Time{}, time.Time{})
+		if err != nil {
+			t.Fatalf("SpendByCategorySystemForTeam other-team: %v", err)
+		}
+		if len(none) != 0 {
+			t.Fatalf("other-team aggregate = %d buckets, want 0", len(none))
+		}
+
+		// Window lower bound honored: since t2 drops the t1 manual run.
+		winBuckets, err := fx.Store.SpendByCategorySystemForTeam(ctx, fx.OrgID, fx.TeamID, t2, time.Time{})
+		winTeam := spendByCat(t, winBuckets, err)
+		if _, ok := winTeam[domain.SpendCategoryManual]; ok {
+			t.Errorf("SpendByCategorySystemForTeam(since=t2) included the t1 manual run; lower bound not applied")
+		}
+		assertCost(t, "team.win.autonomous", winTeam[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
+	})
+
 	// TeamID filter narrows to one team's spend — two-sided: it INCLUDES
 	// team-scoped runs AND team-attributed curator (its project carries the team,
 	// TFAC-476), and EXCLUDES null-team curator + system (NULL team_id) so the team

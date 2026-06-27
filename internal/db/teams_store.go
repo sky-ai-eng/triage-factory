@@ -118,8 +118,23 @@ type TeamsStore interface {
 	// also want the per-project rules to stay in sync must call
 	// JiraStatusRulesStore.ReplaceForTeam alongside (the existing
 	// config.Save() flow does both). Postgres routes through the app
-	// pool (team_settings_update RLS gates by team admin).
+	// pool (team_settings_update RLS gates by team admin). It writes
+	// MaxDailyCostUSD too, but the team-settings handler reaches this via
+	// read-modify-write and never sets the cap from its request body, so a
+	// team-admin save round-trips the org-admin-configured cap untouched
+	// (TFAC-482) — the cap is *changed* only by SetDailyCostCapSystem.
 	UpdateSettings(ctx context.Context, teamID string, updates domain.TeamSettings) error
+
+	// SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for
+	// teamID — the org-admin per-team daily LLM spend cap (TFAC-482, the team-
+	// scoped sibling of OrgSettings.MaxDailyCostUSD). capUSD ≤ 0 clears the cap
+	// (stored NULL). Admin pool in Postgres (BYPASSRLS): an org admin configuring
+	// a team's cap may not be a member of that team, so the team-admin-gated
+	// team_settings_update RLS would reject an app-pool write — the HTTP
+	// RequireOrgAdminRole gate authorizes this System path. It touches only the
+	// cap column (the other settings are never clobbered) and creates the row from
+	// schema defaults when none exists. SQLite is N=1 / no RLS and writes directly.
+	SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) error
 
 	// ListForUser returns the requesting user's active teams in the org,
 	// ordered oldest-first (the same created_at tiebreak the default-
@@ -221,6 +236,15 @@ type TeamsStore interface {
 	// teams the admin never joined (the per-user membership join ListForUser uses
 	// would hide those). Empty slice when the org has no archived teams.
 	ListArchivedForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error)
+
+	// ListActiveForOrgSystem returns the org's ACTIVE teams (deleted_at IS NULL),
+	// ordered by name, on the admin pool — the org-scoped sibling of
+	// ListArchivedForOrgSystem. The TFAC-482 governance cap editor lists every team
+	// (not just those with spend in the window) so an org admin can pre-cap an idle
+	// team before any runaway, and crosses teams the admin may not be a member of —
+	// the per-user-scoped ListForUser would hide those. Empty slice for a teamless
+	// org (a bootstrap bug). DeletedAt is left nil (all rows are active).
+	ListActiveForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error)
 
 	// ListMembers returns every member of teamID with their team role and
 	// host-scoped identity readiness, ordered by display name then user id

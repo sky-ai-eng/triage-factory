@@ -167,6 +167,19 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	if task.TeamID != nil {
 		teamID = *task.TeamID
 	}
+
+	// TFAC-482 per-team fuse: after the org-wide cap above, also refuse the spawn
+	// when THIS team has hit its own daily LLM spend cap (EE/governance-gated;
+	// dormant when unlicensed, with the org cap as the safety net). Skipped for an
+	// unowned task (no team to cap). Same claims-less admin-pool read + fail-open
+	// posture as the org cap, and likewise before any blueprint resolution or DB
+	// write so a tripped team cap mints no blueprint_run.
+	if teamID != "" {
+		if err := s.checkTeamDailyCostCap(context.Background(), orgID, teamID); err != nil {
+			return "", err
+		}
+	}
+
 	// model is captured here and stamped onto every enqueued step so the whole
 	// blueprint runs on one model; the GitHub client is resolved per-claim by the
 	// dispatcher (the queue path defers all workspace setup off this call).
