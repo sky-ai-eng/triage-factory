@@ -50,9 +50,6 @@ const (
 	// body, SSRF reject) briefly, so a roster full of broken avatars can't make
 	// the 15s-polling Usage page hammer the upstream (or us) every cycle.
 	avatarFailureTTL = 2 * time.Minute
-	// avatarCacheMaxEntries bounds the in-process cache. Far above any realistic
-	// org's distinct-avatar count; the soonest-to-expire entry is evicted past it.
-	avatarCacheMaxEntries = 4096
 
 	// avatarFetchTimeout bounds one upstream fetch end to end.
 	avatarFetchTimeout = 10 * time.Second
@@ -61,6 +58,18 @@ const (
 	// avatarMaxRedirects caps redirect hops; each hop is re-validated (https +
 	// the dial-time public-IP guard below).
 	avatarMaxRedirects = 5
+)
+
+// Cache size limits are vars (not consts) so tests can shrink them; production
+// never reassigns them. The cache enforces TWO independent bounds because either
+// alone is insufficient:
+//   - avatarCacheMaxBytes caps total memory. An entry-count cap alone, times the
+//     per-image maxAvatarBytes (2 MiB), would permit multi-GiB of resident data.
+//   - avatarCacheMaxEntries caps the map size. A flood of distinct FAILED urls
+//     fills the cache with zero-byte negative entries the byte budget can't evict.
+var (
+	avatarCacheMaxBytes   int64 = 64 << 20 // 64 MiB across all cached images
+	avatarCacheMaxEntries       = 4096
 )
 
 // errAvatarUnavailable is the generic error returned for any non-deliverable
@@ -173,6 +182,9 @@ type avatarFetcher struct {
 	group  singleflight.Group
 	mu     sync.Mutex
 	cache  map[string]avatarCacheEntry
+	// totalBytes is the sum of cached image sizes (negative entries count 0),
+	// guarded by mu — the running figure cachePut keeps under avatarCacheMaxBytes.
+	totalBytes int64
 }
 
 func newAvatarFetcher() *avatarFetcher {
@@ -194,23 +206,47 @@ func (f *avatarFetcher) cacheGet(key string) (img *fetchedAvatar, hit, failed bo
 	return e.img, true, e.img == nil
 }
 
-// cachePut stores img (nil → negative cache) under key with the matching TTL.
-// It sweeps expired entries on the way in and, if still at the cap, evicts the
-// soonest-to-expire entry — keeping the map bounded without a full LRU.
+// entryBytes is the cached-image size of an entry (0 for a negative entry).
+func entryBytes(e avatarCacheEntry) int64 {
+	if e.img == nil {
+		return 0
+	}
+	return int64(len(e.img.data))
+}
+
+// cachePut stores img (nil → negative cache) under key with the matching TTL,
+// keeping totalBytes accurate. It sweeps expired entries on the way in, then
+// evicts soonest-to-expire entries until BOTH bounds hold for the incoming entry:
+// total bytes within avatarCacheMaxBytes (memory) and entry count within
+// avatarCacheMaxEntries (map size, the bound that catches a flood of zero-byte
+// negative entries). A single image larger than the whole budget still stores
+// once into an otherwise-empty cache — the loop never spins on an empty map.
 func (f *avatarFetcher) cachePut(key string, img *fetchedAvatar) {
 	ttl := avatarSuccessTTL
 	if img == nil {
 		ttl = avatarFailureTTL
 	}
+	var size int64
+	if img != nil {
+		size = int64(len(img.data))
+	}
 	now := time.Now()
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	// Drop any existing entry for this key first, so its old size doesn't linger
+	// in totalBytes and the count below reflects the post-insert state.
+	if old, exists := f.cache[key]; exists {
+		f.totalBytes -= entryBytes(old)
+		delete(f.cache, key)
+	}
 	for k, e := range f.cache {
 		if now.After(e.expiresAt) {
+			f.totalBytes -= entryBytes(e)
 			delete(f.cache, k)
 		}
 	}
-	if _, exists := f.cache[key]; !exists && len(f.cache) >= avatarCacheMaxEntries {
+	for len(f.cache) > 0 && (len(f.cache)+1 > avatarCacheMaxEntries || f.totalBytes+size > avatarCacheMaxBytes) {
 		var evictKey string
 		var soonest time.Time
 		for k, e := range f.cache {
@@ -218,9 +254,11 @@ func (f *avatarFetcher) cachePut(key string, img *fetchedAvatar) {
 				evictKey, soonest = k, e.expiresAt
 			}
 		}
+		f.totalBytes -= entryBytes(f.cache[evictKey])
 		delete(f.cache, evictKey)
 	}
 	f.cache[key] = avatarCacheEntry{img: img, expiresAt: now.Add(ttl)}
+	f.totalBytes += size
 }
 
 // fetch returns the avatar at rawURL, from cache when fresh. A miss runs one
@@ -294,26 +332,26 @@ func (f *avatarFetcher) doFetch(ctx context.Context, rawURL string) (*fetchedAva
 		return nil, fmt.Errorf("avatar exceeds %d bytes", int64(maxAvatarBytes))
 	}
 
-	ct := normalizeImageType(resp.Header.Get("Content-Type"), data)
+	ct := normalizeImageType(data)
 	if ct == "" {
 		return nil, fmt.Errorf("avatar is not an allowed image type")
 	}
 	return &fetchedAvatar{data: data, contentType: ct}, nil
 }
 
-// normalizeImageType resolves the content-type to serve: it trusts the upstream
-// header when it names an allowed image type, else sniffs the bytes. Returns ""
-// when neither yields an allowed type (the caller then rejects the fetch). A
-// concrete type matters because the global X-Content-Type-Options: nosniff
-// header makes our declared type authoritative in the browser.
-func normalizeImageType(header string, data []byte) string {
-	if mt, _, err := mime.ParseMediaType(header); err == nil && allowedAvatarTypes[mt] {
-		return mt
+// normalizeImageType resolves the content-type to serve by SNIFFING the bytes
+// (http.DetectContentType) — deliberately NOT the upstream Content-Type header.
+// We re-serve third-party content from our own origin, so a spoofed/incorrect
+// header must not decide the type the browser sees; the bytes must actually be
+// an allowed raster image. Returns the sniffed type when it's allowed, else ""
+// (the caller rejects the fetch). The concrete type also matters because the
+// global X-Content-Type-Options: nosniff makes our declared type authoritative.
+func normalizeImageType(data []byte) string {
+	mt, _, err := mime.ParseMediaType(http.DetectContentType(data))
+	if err != nil || !allowedAvatarTypes[mt] {
+		return ""
 	}
-	if mt, _, err := mime.ParseMediaType(http.DetectContentType(data)); err == nil && allowedAvatarTypes[mt] {
-		return mt
-	}
-	return ""
+	return mt
 }
 
 // avatarsHandler serves GET /api/avatars/{user_id}.

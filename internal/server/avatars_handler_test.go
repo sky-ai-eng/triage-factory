@@ -3,7 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
+	"image/jpeg"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +25,17 @@ func tinyPNG(t *testing.T) []byte {
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
 		t.Fatalf("encode test png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// tinyJPEG returns a valid 1x1 JPEG — a second allowed raster type, so the
+// sniff-based content-type check is exercised across formats.
+func tinyJPEG(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1, 1)), nil); err != nil {
+		t.Fatalf("encode test jpeg: %v", err)
 	}
 	return buf.Bytes()
 }
@@ -91,27 +104,25 @@ func TestSafeAvatarDialControl(t *testing.T) {
 	}
 }
 
-// TestNormalizeImageType pins the content-type resolution: trust an allowed
-// upstream header, else sniff, else reject (so the response we serve under the
-// global nosniff header always carries a real image type).
+// TestNormalizeImageType pins the content-type resolution: it SNIFFS the bytes
+// and ignores any upstream header, so only data that really is an allowed raster
+// image is served (the response carries a real image type under the global
+// nosniff header, and a spoofed header can't smuggle non-image content).
 func TestNormalizeImageType(t *testing.T) {
-	png := tinyPNG(t)
 	cases := []struct {
-		name   string
-		header string
-		data   []byte
-		want   string
+		name string
+		data []byte
+		want string
 	}{
-		{"allowed header", "image/png", png, "image/png"},
-		{"header with params", "image/jpeg; charset=binary", png, "image/jpeg"},
-		{"sniff when header missing", "", png, "image/png"},
-		{"sniff overrides bogus header", "application/octet-stream", png, "image/png"},
-		{"reject non-image", "text/html", []byte("<html>"), ""},
-		{"reject svg", "image/svg+xml", []byte(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`), ""},
+		{"sniffs png", tinyPNG(t), "image/png"},
+		{"sniffs jpeg", tinyJPEG(t), "image/jpeg"},
+		{"rejects html", []byte("<!doctype html><html></html>"), ""},
+		{"rejects svg (not a raster image)", []byte(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`), ""},
+		{"rejects empty body", []byte{}, ""},
 	}
 	for _, tc := range cases {
-		if got := normalizeImageType(tc.header, tc.data); got != tc.want {
-			t.Errorf("%s: normalizeImageType(%q) = %q, want %q", tc.name, tc.header, got, tc.want)
+		if got := normalizeImageType(tc.data); got != tc.want {
+			t.Errorf("%s: normalizeImageType() = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }
@@ -195,6 +206,51 @@ func TestAvatarFetcher_RejectsNonHTTPS(t *testing.T) {
 	f := newAvatarFetcher()
 	if _, err := f.doFetch(context.Background(), "http://avatars.example.com/u/1.png"); err == nil {
 		t.Fatal("want error on non-https avatar url")
+	}
+}
+
+// TestAvatarFetcher_BoundsCacheBytes confirms the total-bytes budget evicts so
+// many distinct large images can't grow the cache without limit (the OOM risk a
+// pure entry-count cap leaves open). Limits are shrunk for a cheap test.
+func TestAvatarFetcher_BoundsCacheBytes(t *testing.T) {
+	defer func(b int64, e int) { avatarCacheMaxBytes, avatarCacheMaxEntries = b, e }(avatarCacheMaxBytes, avatarCacheMaxEntries)
+	avatarCacheMaxBytes = 8 * 1024 // 8 KiB budget
+	avatarCacheMaxEntries = 1000   // high, so the byte budget is what binds here
+
+	f := newAvatarFetcher()
+	for i := 0; i < 64; i++ {
+		f.cachePut(fmt.Sprintf("https://cdn/%d", i), &fetchedAvatar{data: make([]byte, 1024), contentType: "image/png"})
+	}
+	f.mu.Lock()
+	total, n := f.totalBytes, len(f.cache)
+	f.mu.Unlock()
+	if total > avatarCacheMaxBytes {
+		t.Errorf("totalBytes = %d, want <= %d (byte budget)", total, avatarCacheMaxBytes)
+	}
+	if n == 0 || n > 8 {
+		t.Errorf("entries = %d, want a small nonzero count within the 8-image byte budget", n)
+	}
+}
+
+// TestAvatarFetcher_BoundsNegativeEntries confirms the entry-count cap bounds a
+// flood of distinct FAILED urls — negative entries hold no bytes, so the byte
+// budget can't evict them; the count cap must.
+func TestAvatarFetcher_BoundsNegativeEntries(t *testing.T) {
+	defer func(e int) { avatarCacheMaxEntries = e }(avatarCacheMaxEntries)
+	avatarCacheMaxEntries = 16
+
+	f := newAvatarFetcher()
+	for i := 0; i < 100; i++ {
+		f.cachePut(fmt.Sprintf("https://cdn/fail/%d", i), nil) // negative cache, 0 bytes
+	}
+	f.mu.Lock()
+	n, total := len(f.cache), f.totalBytes
+	f.mu.Unlock()
+	if n > avatarCacheMaxEntries {
+		t.Errorf("entries = %d, want <= %d (entry-count cap)", n, avatarCacheMaxEntries)
+	}
+	if total != 0 {
+		t.Errorf("totalBytes = %d, want 0 (negative entries hold no bytes)", total)
 	}
 }
 

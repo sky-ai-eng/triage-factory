@@ -616,9 +616,15 @@ describe('Usage page', () => {
     expect(await screen.findByText('Alice Smith')).toBeInTheDocument()
     // Rendered through the same-origin avatar proxy (TFAC-480), keyed by user id
     // — not the raw cross-origin url, which the `img-src 'self'` CSP would block.
-    expect(container.querySelector('img[src="/api/avatars/u1"]')).not.toBeNull()
+    const aliceImg = container.querySelector('img[src="/api/avatars/u1"]')
+    expect(aliceImg).not.toBeNull()
     expect(container.querySelector('img[src="https://ex/alice.png"]')).toBeNull()
     expect(screen.getByText('BO')).toBeInTheDocument() // Bob's monogram fallback
+
+    // A proxy load failure falls back to the monogram via onError.
+    fireEvent.error(aliceImg!)
+    expect(await screen.findByText('AS')).toBeInTheDocument() // Alice's monogram after the error
+    expect(container.querySelector('img[src="/api/avatars/u1"]')).toBeNull()
   })
 })
 

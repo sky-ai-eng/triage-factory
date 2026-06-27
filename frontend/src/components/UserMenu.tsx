@@ -14,7 +14,10 @@ export default function UserMenu() {
   const [open, setOpen] = useState(false)
   // Falls back to the initial when the avatar can't load (the proxy 404s when
   // there's no upstream image), mirroring the Usage roster's monogram fallback.
-  const [avatarFailed, setAvatarFailed] = useState(false)
+  // The latch holds the avatar IDENTITY (id + url) that failed, not a bare bool,
+  // so switching account/org or an updated avatar url clears it and retries
+  // instead of sticking on the initial for the session.
+  const [failedAvatarKey, setFailedAvatarKey] = useState('')
   const rootRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -44,6 +47,10 @@ export default function UserMenu() {
     '?'
   ).toUpperCase()
 
+  // Identity of the avatar we'd render — id + url, so the failure latch retries
+  // when either changes. Empty when there's no avatar (→ show the initial).
+  const avatarKey = auth.me.avatar_url ? `${auth.me.id}\n${auth.me.avatar_url}` : ''
+
   return (
     <div ref={rootRef} className="relative">
       <button
@@ -54,14 +61,14 @@ export default function UserMenu() {
         aria-expanded={open}
         title={auth.me.display_name || auth.me.email}
       >
-        {auth.me.avatar_url && !avatarFailed ? (
+        {avatarKey && failedAvatarKey !== avatarKey ? (
           // Loaded through the same-origin /api/avatars proxy (TFAC-480) — the
           // raw OAuth-CDN url is cross-origin and the app's `img-src 'self'`
           // CSP would block it.
           <img
             src={avatarProxyUrl(auth.me.id)}
             alt=""
-            onError={() => setAvatarFailed(true)}
+            onError={() => setFailedAvatarKey(avatarKey)}
             className="w-full h-full object-cover"
           />
         ) : (

@@ -535,18 +535,19 @@ function initialsOf(name: string): string {
 // else a rust monogram placeholder. The picture loads through the same-origin
 // /api/avatars proxy (TFAC-480): the raw OAuth-CDN avatar url is cross-origin,
 // which the app's `img-src 'self'` CSP blocks, so we render the proxied copy
-// instead. A load failure (the proxy 404s when it can't fetch the upstream)
-// flips to the monogram via onError, so it degrades gracefully instead of
-// rendering broken. `hasAvatar` gates the attempt — a user with no avatar
-// (common in local mode) renders the monogram directly without a wasted request.
-function Avatar({ name, userId, hasAvatar }: { name: string; userId: string; hasAvatar: boolean }) {
-  const [failed, setFailed] = useState(false)
-  if (hasAvatar && !failed) {
+// instead. `avatarUrl` (the upstream url, presence + identity only — not the img
+// src) gates the attempt, so a user with no avatar renders the monogram directly
+// without a wasted request. A load failure flips to the monogram via onError;
+// the latch is keyed to `avatarUrl`, so a changed url (e.g. a poll surfaces a new
+// one) retries while a stably-broken url stays on the monogram (no retry storm).
+function Avatar({ name, userId, avatarUrl }: { name: string; userId: string; avatarUrl?: string }) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
+  if (avatarUrl && failedUrl !== avatarUrl) {
     return (
       <img
         src={avatarProxyUrl(userId)}
         alt=""
-        onError={() => setFailed(true)}
+        onError={() => setFailedUrl(avatarUrl)}
         className="h-7 w-7 shrink-0 rounded-[3px] object-cover"
       />
     )
@@ -590,7 +591,7 @@ function UserRoster({ data, emptyLabel = '—' }: { data: UsageUserBucket[]; emp
         const name = d.display_name || d.user_id
         return (
           <div key={d.user_id} className="flex items-center gap-2.5">
-            <Avatar name={name} userId={d.user_id} hasAvatar={!!d.avatar_url} />
+            <Avatar name={name} userId={d.user_id} avatarUrl={d.avatar_url} />
             <div className="min-w-0 flex-1">
               <div className="flex items-baseline justify-between gap-2 font-mono text-[11px]">
                 <span className="truncate text-text-secondary" title={name}>
