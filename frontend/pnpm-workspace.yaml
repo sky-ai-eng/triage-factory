@@ -1,0 +1,21 @@
+# pnpm supply-chain hardening.
+#
+# minimumReleaseAge: refuse to *resolve* a dependency version until it has been
+# published for at least this many minutes. Most malicious npm releases are
+# detected and yanked within hours, so a cooldown filters out smash-and-grab
+# supply-chain attacks. pnpm 11 ships a 1-day (1440) default; we pin it
+# explicitly so the control is documented and can't silently regress — e.g. a
+# contributor on an older pnpm, or a future change to pnpm's default.
+#
+# Scope: gates resolution only (`pnpm add` / `pnpm update` / lockfile
+# regeneration). `--frozen-lockfile` installs (CI, Docker, session-start)
+# reinstall the pinned lockfile and are unaffected. Does NOT cover
+# internal/agentproc, which installs the Agent SDK via `npm ci` (npm has no
+# equivalent); that lockfile is pinned and only moves on a reviewed sdkVersion
+# bump, so it isn't an auto-resolve smash-and-grab surface.
+#
+# To fast-track a specific package past the cooldown (e.g. an urgent patch),
+# list it under minimumReleaseAgeExclude by name or glob:
+#   minimumReleaseAgeExclude:
+#     - "@my-scope/*"
+minimumReleaseAge: 1440
