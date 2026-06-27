@@ -136,6 +136,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 		if needsRefresh(sess) {
 			if err := s.refreshSessionInline(r.Context(), sess); err != nil {
 				authLog.Warn("refresh failed", "sid", sessions.LogID(sid), "error", err)
+				s.recordRefreshFailure(r, sess.UserID, sid, err.Error())
 				writeUnauth(w)
 				return
 			}
@@ -145,8 +146,11 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 		if err != nil {
 			// Either the JWT decrypted cleanly but failed verification
 			// (rotated signing key, replay across issuers) — in either
-			// case the session is unrecoverable. 401.
+			// case the session is unrecoverable. 401. This is the ONLY
+			// jwt_verify_failure write-site — the anonymous missing/invalid-
+			// cookie 401s above are poke noise and stay uninstrumented.
 			authLog.Warn("verify failed", "sid", sessions.LogID(sid), "error", err)
+			s.recordJWTVerifyFailure(r, sess.UserID, sid, err.Error())
 			writeUnauth(w)
 			return
 		}

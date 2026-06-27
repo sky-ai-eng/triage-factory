@@ -124,6 +124,10 @@ func New(conn *sql.DB) db.Stores {
 		// Spend is app-pool (RLS-scoped) in Postgres; SQLite collapses to the one
 		// connection (N=1, no RLS). Read-only view over llm_spend. See TFAC-472.
 		Spend: newSpendStore(conn),
+		// AuthEvents is admin-pool only in Postgres; SQLite collapses to the one
+		// connection (N=1, no RLS). SOC2 authentication audit log; parity-only in
+		// local mode (no login flow). See TFAC-76.
+		AuthEvents: newAuthEventStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

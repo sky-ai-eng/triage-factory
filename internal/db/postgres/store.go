@@ -309,6 +309,12 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// safety cap reads from a claims-less Spawner.Delegate goroutine). Read-
 		// only; owns no table. See TFAC-472 / TFAC-477.
 		Spend: newSpendStore(app, admin),
+		// AuthEvents is admin-pool only: auth_events is a system table (RLS
+		// deny-by-default, REVOKEd from the app roles like user_identities) — its
+		// writes + reads never carry user claims and org_id is frequently NULL, so
+		// an app-pool statement would be rejected. Same admin-only shape as
+		// SystemLLMRuns. SOC2 authentication audit log of record. See TFAC-76.
+		AuthEvents: newAuthEventStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),
@@ -390,6 +396,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		AccessChangeLog: newAccessChangeLogStore(tx),
 		ExternalActions: newExternalActionStore(tx, tx),
 		Spend:           newSpendStore(tx, tx),
+		AuthEvents:      newAuthEventStore(tx),
 		Ext:             db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

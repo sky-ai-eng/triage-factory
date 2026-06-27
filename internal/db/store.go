@@ -309,6 +309,18 @@ type Stores struct {
 	// safety cap (TFAC-449) read from.
 	Spend SpendStore
 
+	// AuthEvents owns the auth_events table — the SOC2 authentication audit log
+	// of record: durable, append-only capture of every authentication / session
+	// outcome (login, logout, refresh failure, JWT-verify failure, SSO
+	// enforcement, break-glass). The authentication sibling of AccessChangeLog
+	// (the authorization-CHANGE log). Admin-pool-only / system table in Postgres:
+	// writes + reads never carry user claims and org_id is frequently NULL, so an
+	// org-scoped RLS policy can't gate it — it is denied to the app roles like
+	// public.user_identities, and the superuser pool does all I/O (same shape as
+	// SystemLLMRuns). SQLite is N=1, parity-only (local mode has no login). See
+	// TFAC-76.
+	AuthEvents AuthEventStore
+
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
 	// core holds no SSO symbols.
@@ -371,6 +383,7 @@ type TxStores struct {
 	AccessChangeLog  AccessChangeLogStore
 	ExternalActions  ExternalActionStore
 	Spend            SpendStore
+	AuthEvents       AuthEventStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same

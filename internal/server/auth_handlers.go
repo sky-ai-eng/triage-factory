@@ -256,16 +256,20 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	stateCookie, err := r.Cookie(stateCookieName)
 	if err != nil {
+		// No state cookie yet → method unknown (state not parsed).
+		s.recordLoginFailure(r, "missing_state_cookie", "", "")
 		http.Error(w, "missing state cookie", http.StatusBadRequest)
 		return
 	}
 	state, err := parseStateCookie(stateCookie.Value, s.deployCfg.hmacKey)
 	if err != nil {
 		authLog.Warn("state cookie parse failed", "error", err)
+		s.recordLoginFailure(r, "state_parse_failed", "", "")
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
 	}
 	if r.URL.Query().Get("state") != state.CSRF {
+		s.recordLoginFailure(r, "state_mismatch", authMethod(state.ProviderID != ""), "")
 		http.Error(w, "state mismatch", http.StatusBadRequest)
 		return
 	}
@@ -297,6 +301,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	authCode := r.URL.Query().Get("code")
 	if authCode == "" {
+		s.recordLoginFailure(r, "missing_code", authMethod(state.ProviderID != ""), "")
 		http.Error(w, "missing code", http.StatusBadRequest)
 		return
 	}
@@ -309,6 +314,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	accessToken, refreshToken, _, err := s.authDeps.gotrueExchange(r.Context(), authCode, state.CodeVerifier)
 	if err != nil {
 		authLog.Warn("pkce exchange failed", "error", err)
+		s.recordLoginFailure(r, "exchange_failed", authMethod(state.ProviderID != ""), "")
 		http.Error(w, "token exchange failed", http.StatusBadRequest)
 		return
 	}
@@ -316,12 +322,15 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.authDeps.verifier.Verify(accessToken)
 	if err != nil {
 		authLog.Warn("verify callback jwt failed", "error", err)
+		s.recordLoginFailure(r, "verify_failed", authMethod(state.ProviderID != ""), "")
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return
 	}
 
 	authUserID, err := uuid.Parse(claims.Subject)
 	if err != nil {
+		// claims verified, so the email is known even though the sub is malformed.
+		s.recordLoginFailure(r, "bad_sub", authMethod(state.ProviderID != ""), claims.Email)
 		http.Error(w, "invalid sub", http.StatusBadRequest)
 		return
 	}
@@ -341,6 +350,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	userUUID, err := resolveOrCreatePrincipal(r.Context(), s.db, authUserID, claims, isSSO)
 	if err != nil {
 		authLog.Error("resolve principal failed", "identity", authUserID, "error", err)
+		s.recordLoginFailure(r, "principal_resolve_failed", authMethod(isSSO), claims.Email)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -404,6 +414,10 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Session minted → the durable login_success record. defaultOrg is nullable
+	// (a zero-membership first login lands with NULL active org).
+	s.recordLoginSuccess(r, userUUID, defaultOrg, sess.ID, isSSO)
+
 	http.SetCookie(w, &http.Cookie{
 		Name:     s.sidCookieName(),
 		Value:    sess.ID.String(),
@@ -464,6 +478,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 				authLog.Info("kicked ws connections on logout",
 					"user", sess.UserID, "sid", sessions.LogID(sid),
 					"code", int(websocket.CloseSessionRevoked), "n", n)
+				// Durable logout record (best-effort) — only when a live session
+				// was actually revoked (a double-logout no-ops with sess == nil).
+				s.recordLogout(r, sess.UserID, sid)
 			}
 		}
 	}
@@ -528,6 +545,8 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authLog.Info("logout-all revoked sessions", "user", userID, "count", n)
+	// Durable logout_all record (best-effort), carrying the revoked count.
+	s.recordLogoutAll(r, userID, int(n))
 
 	// Every session is now revoked, so close ALL of this user's live
 	// websocket connections (TFAC-75) — no sid/org filter. Each device's

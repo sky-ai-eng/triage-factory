@@ -1,6 +1,7 @@
 package sso
 
 import (
+	"encoding/json"
 	"html/template"
 	"net/http"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	ssostore "github.com/sky-ai-eng/triage-factory/ee/sso/store"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -94,6 +96,10 @@ func (le *loginExt) OnLoginResolved(w http.ResponseWriter, r *http.Request, in s
 				if !isBG {
 					ssoLog.Info("sso enforcement: rejected non-sso login on enforced domain",
 						"user", in.UserID, "org", route.OrgID, "domain", dom)
+					// Durable auth record (best-effort): an enforced domain bounced
+					// a non-SSO login. Recorded before the redirect.
+					le.api.RecordAuthEvent(r.Context(), ssoAuthEvent(
+						domain.AuthEventSSOEnforcementRejected, in, route.OrgID, dom))
 					q := url.Values{"error": {"sso_required"}}
 					if in.State.ReturnTo != "" && in.State.ReturnTo != "/" {
 						q.Set("return_to", in.State.ReturnTo)
@@ -101,6 +107,15 @@ func (le *loginExt) OnLoginResolved(w http.ResponseWriter, r *http.Request, in s
 					http.Redirect(w, r, "/login?"+q.Encode(), http.StatusFound)
 					return uuid.NullUUID{}, true, nil
 				}
+				// isBG == true: the break-glass account bypassed enforcement that
+				// would OTHERWISE have applied (route enabled + enforced, on-domain
+				// verified email). The highest-scrutiny SOC2 event — today this path
+				// had no log line at all. Record it, then fall through to a normal
+				// login.
+				ssoLog.Info("sso enforcement: break-glass login bypassed enforced domain",
+					"user", in.UserID, "org", route.OrgID, "domain", dom)
+				le.api.RecordAuthEvent(r.Context(), ssoAuthEvent(
+					domain.AuthEventBreakGlassLogin, in, route.OrgID, dom))
 			}
 		}
 	}
@@ -132,6 +147,33 @@ func (le *loginExt) OnLoginResolved(w http.ResponseWriter, r *http.Request, in s
 		}
 	}
 	return uuid.NullUUID{}, false, nil
+}
+
+// ssoAuthEvent builds the auth_events row for an SSO enforcement decision —
+// sso_enforcement_rejected (a non-SSO login bounced) or break_glass_login (a
+// break-glass account bypassed enforcement). Both carry the principal, the
+// org whose enforced domain matched, and {"domain":…,"org_id":…} detail. ee/sso
+// has no direct store access, so it records through the ExtensionAPI seam
+// (server.recordAuthEvent), which owns the best-effort / log-on-failure contract.
+func ssoAuthEvent(eventType string, in server.LoginResolved, orgID, dom string) domain.AuthEvent {
+	return domain.AuthEvent{
+		EventType:  eventType,
+		UserID:     in.UserID.String(),
+		OrgID:      orgID,
+		DetailJSON: ssoAuthDetail(dom, orgID),
+	}
+}
+
+// ssoAuthDetail marshals the {"domain":…,"org_id":…} detail payload. On the
+// near-impossible marshal error it logs and returns "" — the event is still
+// recorded, just without detail.
+func ssoAuthDetail(dom, orgID string) string {
+	b, err := json.Marshal(map[string]string{"domain": dom, "org_id": orgID})
+	if err != nil {
+		ssoLog.Error("sso auth event detail marshal failed", "error", err)
+		return ""
+	}
+	return string(b)
 }
 
 // handleDiscover is POST /api/sso/discover — identifier-first SSO discovery.

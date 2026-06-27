@@ -50,6 +50,7 @@ type Server struct {
 	jiraRules    db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
 	githubApps   db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
 	orgTemplate  db.OrgTemplateStore     // SKY-381: org-admin-editable template new teams are seeded from
+	authEvents   db.AuthEventStore       // TFAC-76: SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
 	// serverPort is the stored instance_config.server_port value
 	// surfaced to the settings GET response. The actual bind port
 	// comes from --port at boot, not this field — the Settings page
@@ -461,6 +462,7 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 		githubApps:   stores.GitHubApps,
 		jiraApps:     stores.JiraApps,
 		orgTemplate:  stores.OrgTemplate,
+		authEvents:   stores.AuthEvents,
 		tx:           stores.Tx,
 		az:           authz.New(database, stores.Tx),
 		allStores:    stores,

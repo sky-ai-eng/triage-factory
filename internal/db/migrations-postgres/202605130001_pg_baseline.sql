@@ -7353,5 +7353,73 @@ CREATE TRIGGER memberships_keep_admin_on_delete AFTER DELETE ON public.membershi
 CREATE TRIGGER memberships_keep_admin_on_update AFTER UPDATE ON public.memberships REFERENCING OLD TABLE AS affected FOR EACH STATEMENT EXECUTE FUNCTION tf.guard_team_admins();
 
 
+--
+-- TFAC-76: auth_events — the SOC2 authentication audit log of record. Durable,
+-- append-only capture of every authentication / session outcome: login,
+-- logout, refresh failure, JWT-verify failure, SSO enforcement, break-glass.
+-- The AUTHENTICATION sibling of access_change_log (the authorization-CHANGE
+-- log) — together the two halves of the SOC2 access-controls surface (CC6.1
+-- logical access, CC7.2 monitoring).
+--
+-- Uniform BEST-EFFORT writes: every row is recorded AFTER the auth action; a
+-- write failure is logged and swallowed, never failing or rolling back the
+-- action (the audit table is deliberately off the login critical path — the
+-- ERROR log line is the accepted "known gap" guarantee, in lieu of
+-- gaplessness). event_type is a free-text discriminator (domain.AuthEvent* —
+-- extensible, NO CHECK). org_id is NULLABLE (a pre-auth failure has no org);
+-- user_id is NULLABLE (a pre-identity failure has no principal); session_id is
+-- FK ON DELETE SET NULL so an auth_events row OUTLIVES the session reaper (the
+-- durable record must survive the 30-day session window). detail_json carries
+-- the per-event payload ({"method":…,"sso":…} | {"reason":…} | {"count":…} |
+-- {"domain":…,"org_id":…}).
+--
+-- Admin-pool-only / system table: writes + reads never carry user claims, and
+-- org_id is frequently NULL, so an org-scoped RLS policy can't gate it. Denied
+-- to the app roles exactly like public.user_identities (the established
+-- system-only-table pattern): RLS enabled with NO policy (deny-by-default to
+-- non-BYPASSRLS roles) + REVOKE ALL from PUBLIC + the app roles. The
+-- superuser/admin pool bypasses RLS and does all I/O. NO reaper — auth_events
+-- is the durable record and is never auto-purged. See TFAC-76.
+CREATE TABLE public.auth_events (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id uuid,
+    user_id uuid,
+    session_id uuid,
+    event_type text NOT NULL,
+    ip_address inet,
+    user_agent text,
+    detail_json jsonb,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.auth_events
+    ADD CONSTRAINT auth_events_pkey PRIMARY KEY (id);
+
+-- org_id / user_id FKs are plain (NO ACTION): an org/user deletion is blocked
+-- while it still has auth_events, preserving the authentication trail. NULLABLE
+-- because pre-auth / pre-identity failures reference neither.
+ALTER TABLE ONLY public.auth_events
+    ADD CONSTRAINT auth_events_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id);
+
+ALTER TABLE ONLY public.auth_events
+    ADD CONSTRAINT auth_events_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id);
+
+-- ON DELETE SET NULL: reaping a session keeps its auth_events, nulling the link
+-- — the audit row survives the session-retention window.
+ALTER TABLE ONLY public.auth_events
+    ADD CONSTRAINT auth_events_session_id_fkey FOREIGN KEY (session_id) REFERENCES public.sessions(id) ON DELETE SET NULL;
+
+-- Partial indexes skip the frequent NULL-org / NULL-user rows; the type index
+-- backs alerting-style "all of event_type X over time" reads.
+CREATE INDEX auth_events_org_ts ON public.auth_events USING btree (org_id, created_at DESC) WHERE (org_id IS NOT NULL);
+CREATE INDEX auth_events_user_ts ON public.auth_events USING btree (user_id, created_at DESC) WHERE (user_id IS NOT NULL);
+CREATE INDEX auth_events_type_ts ON public.auth_events USING btree (event_type, created_at DESC);
+
+ALTER TABLE public.auth_events ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.auth_events FROM PUBLIC;
+REVOKE ALL ON public.auth_events FROM anon, authenticated, service_role;
+
+
 -- +goose Down
 SELECT 'down not supported';

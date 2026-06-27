@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 )
@@ -87,6 +88,12 @@ type ExtensionAPI interface {
 	// (relative-path-only), so an extension building a redirect URL can't be
 	// coaxed into an off-site bounce.
 	NormalizeReturnTo(raw string) string
+	// RecordAuthEvent writes one auth_events row best-effort (the SOC2
+	// authentication audit log of record) — the seam ee/sso records its
+	// sso_enforcement_rejected + break_glass_login events through, having no
+	// direct store access. Delegates to the server's recordAuthEvent: on a store
+	// failure it logs at ERROR and the auth flow proceeds, never rolled back.
+	RecordAuthEvent(ctx context.Context, e domain.AuthEvent)
 }
 
 // extensionInstaller is one registered extension: a name (diagnostics), a
@@ -191,3 +198,7 @@ func (a serverExtensionAPI) GrantOrgMembership(ctx context.Context, userID, orgI
 
 func (a serverExtensionAPI) EmailDomain(email string) (string, bool) { return emailDomain(email) }
 func (a serverExtensionAPI) NormalizeReturnTo(raw string) string     { return normalizeReturnTo(raw) }
+
+func (a serverExtensionAPI) RecordAuthEvent(ctx context.Context, e domain.AuthEvent) {
+	a.s.recordAuthEvent(ctx, e)
+}
