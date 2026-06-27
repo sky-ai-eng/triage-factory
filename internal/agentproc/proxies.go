@@ -123,12 +123,13 @@ const defaultGitUpstream = "https://github.com"
 // nil disables the git proxy entirely (prompt-only runs — scorer,
 // classifier — and Jira-only runs that pre-clone nothing).
 type GitProxyConfig struct {
-	// TokenSource resolves the host-side GitHub credential the proxy
-	// injects on outbound git-over-HTTPS. Built over the GitHub
-	// resolver's TokenFor (App installation token tier-1 or org PAT
-	// tier-3, App preferred) so App-and-PAT orgs both work with no proxy
-	// change. Required when GitProxyConfig is non-nil. Lazy + cached
-	// inside the proxy; a zero-expiry token (a PAT) mints exactly once.
+	// TokenSource resolves the host-side GitHub credential the proxy injects
+	// on outbound git-over-HTTPS for ONE repo (owner/repo). Built over the
+	// GitHub resolver's per-repo scoped mint (TokenForRepoScoped with
+	// {contents:write}) so the injected App token is narrowed to exactly the
+	// repo being touched; a PAT org falls through unscoped (a PAT can't be
+	// narrowed). Required when GitProxyConfig is non-nil. Lazy + cached
+	// per-repo inside the proxy; a zero-expiry token (a PAT) mints once per repo.
 	TokenSource gitproxy.TokenSource
 
 	// Upstream is the real git host base — empty defaults to
@@ -144,6 +145,25 @@ type GitProxyConfig struct {
 	// (a test fixture, or a caller that doesn't record) disables the backstop.
 	// See gitproxy.Config.RecordPush and TFAC-467.
 	RecordPush func(ctx context.Context, push gitproxy.PushedRef)
+
+	// Authorize, when non-nil, is the per-request live authorization gate
+	// (gitproxy.Config.Authorize): the proxy calls it with the (owner, repo)
+	// the request targets and a !Allowed decision is a 403. In multi mode the
+	// delegate always wires it (repo ∈ the run's tracked + materialized set,
+	// with the per-repo allowed push refs); a nil here is allow-all (test).
+	Authorize func(ctx context.Context, owner, repo string) (gitproxy.Decision, error)
+
+	// RecordDenial, when non-nil, is the audit hook for a denied git op
+	// (gitproxy.Config.RecordDenial). Best-effort; never blocks a request.
+	RecordDenial func(ctx context.Context, denied gitproxy.DeniedGitOp)
+
+	// ProbeCredentials, when non-nil, is the run-start credential check: it
+	// resolves whether the org has ANY usable GitHub credential, returning
+	// ErrNoSandboxGitCredentials if not, so a no-credential org surfaces a
+	// clear admin failure at run start rather than a mid-push 502. Replaces
+	// the old eager repo-less TokenSource probe (which no longer type-checks
+	// now that TokenSource is per-repo).
+	ProbeCredentials func(ctx context.Context) error
 }
 
 // startProxiesForSandbox starts the per-run LLM proxy, plus the git
@@ -287,12 +307,20 @@ func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitPro
 		return nil, nil, errors.New("agentproc: GitProxyConfig.TokenSource is required")
 	}
 
-	if _, err := git.TokenSource(ctx); err != nil {
-		// ErrNoSandboxGitCredentials (wrapped by the caller's TokenSource)
-		// propagates as-is so the run fails with the typed admin message;
-		// any other (transient) resolve error fails the run too rather
-		// than spawning a proxy that can't authenticate.
-		return nil, nil, fmt.Errorf("agentproc: resolve git credential for sandbox: %w", err)
+	// Eager credential probe: surface a no-credentials org as
+	// ErrNoSandboxGitCredentials at run start (a clear admin failure) rather
+	// than a confusing 502 the first time the agent pushes. Per-repo scoped
+	// mints stay lazy — this only confirms SOME credential resolves, not any
+	// specific repo's token. (Replaces the old repo-less TokenSource probe,
+	// which no longer type-checks now that TokenSource is per-repo.)
+	if git.ProbeCredentials != nil {
+		if err := git.ProbeCredentials(ctx); err != nil {
+			// ErrNoSandboxGitCredentials propagates as-is so the run fails with
+			// the typed admin message; any other (transient) resolve error
+			// fails the run too rather than spawning a proxy that can't
+			// authenticate.
+			return nil, nil, fmt.Errorf("agentproc: resolve git credential for sandbox: %w", err)
+		}
 	}
 
 	incoming, err := randomHexToken()
@@ -311,6 +339,8 @@ func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitPro
 		AllowNonLoopback: true,
 		IncomingToken:    incoming,
 		RecordPush:       git.RecordPush,
+		Authorize:        git.Authorize,
+		RecordDenial:     git.RecordDenial,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("agentproc: construct git proxy: %w", err)

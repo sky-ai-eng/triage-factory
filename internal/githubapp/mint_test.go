@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -332,6 +333,84 @@ func TestMintInstallationToken_HappyPath(t *testing.T) {
 	}
 	if !tok.ExpiresAt.Equal(expiresAt) {
 		t.Errorf("Token.ExpiresAt = %v, want %v", tok.ExpiresAt, expiresAt)
+	}
+}
+
+// TestMintScopedInstallationToken pins that the scoped mint narrows the token:
+// the request body carries the requested repositories, and permissions only
+// when non-empty (an empty/nil map omits the field, yielding the installation's
+// full permissions on the single repo). Same response handling as the unscoped
+// path, so a 201 still parses token + expiry.
+func TestMintScopedInstallationToken(t *testing.T) {
+	const (
+		installationID int64 = 7654321
+		appID          int64 = 12345
+		mintedTok            = "ghs_SCOPED_TOKEN"
+	)
+	key := newTestKey(t)
+	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+
+	cases := []struct {
+		name        string
+		repos       []string
+		permissions map[string]string
+		wantRepos   []any
+		wantPerms   map[string]any // nil → the permissions field must be absent
+	}{
+		{
+			name:        "repo + contents:write (the git proxy's Layer 1)",
+			repos:       []string{"core"},
+			permissions: map[string]string{"contents": "write"},
+			wantRepos:   []any{"core"},
+			wantPerms:   map[string]any{"contents": "write"},
+		},
+		{
+			name:      "repo only, nil permissions → full-install perms on the repo",
+			repos:     []string{"core"},
+			wantRepos: []any{"core"},
+			wantPerms: nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var gotBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&gotBody)
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"token":      mintedTok,
+					"expires_at": expiresAt.Format(time.RFC3339),
+				})
+			}))
+			defer srv.Close()
+
+			m, err := githubapp.NewMinter(githubapp.Config{
+				PrivateKey: key, AppID: appID, APIBase: srv.URL, HTTPClient: srv.Client(),
+			})
+			if err != nil {
+				t.Fatalf("NewMinter: %v", err)
+			}
+
+			tok, err := m.MintScopedInstallationToken(context.Background(), installationID, c.repos, c.permissions)
+			if err != nil {
+				t.Fatalf("MintScopedInstallationToken: %v", err)
+			}
+			if tok.Value != mintedTok {
+				t.Errorf("Token.Value = %q, want %q", tok.Value, mintedTok)
+			}
+
+			if repos, _ := gotBody["repositories"].([]any); !reflect.DeepEqual(repos, c.wantRepos) {
+				t.Errorf("repositories = %v, want %v", repos, c.wantRepos)
+			}
+			perms, hasPerms := gotBody["permissions"]
+			if c.wantPerms == nil {
+				if hasPerms {
+					t.Errorf("permissions present = %v, want the field omitted", perms)
+				}
+			} else if !reflect.DeepEqual(perms, any(c.wantPerms)) {
+				t.Errorf("permissions = %v, want %v", perms, c.wantPerms)
+			}
+		})
 	}
 }
 

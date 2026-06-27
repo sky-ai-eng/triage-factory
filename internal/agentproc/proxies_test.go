@@ -659,7 +659,7 @@ func TestStartGitProxyForSandbox_RoutesAndAuthenticates(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	src := func(ctx context.Context) (gitproxy.Token, error) {
+	src := func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 		return gitproxy.Token{Value: realToken, ExpiresAt: time.Now().Add(time.Hour)}, nil
 	}
 	pairs, srv, err := startGitProxyForSandbox(context.Background(), "127.0.0.1", &GitProxyConfig{TokenSource: src, Upstream: upstream.URL})
@@ -757,13 +757,18 @@ func TestStartProxiesForSandbox_GitNoCredentialsTypedError(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer upstream.Close()
 
-	src := func(ctx context.Context) (gitproxy.Token, error) {
-		return gitproxy.Token{}, fmt.Errorf("resolver said: %w", ErrNoSandboxGitCredentials)
+	src := func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
+		return gitproxy.Token{Value: "unused"}, nil
+	}
+	// The no-credentials check now lives in ProbeCredentials (the run-start
+	// probe), not the per-repo TokenSource.
+	probe := func(ctx context.Context) error {
+		return fmt.Errorf("resolver said: %w", ErrNoSandboxGitCredentials)
 	}
 	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
 		"ANTHROPIC_API_KEY":  "k",
 		"ANTHROPIC_BASE_URL": upstream.URL,
-	}, &GitProxyConfig{TokenSource: src})
+	}, &GitProxyConfig{TokenSource: src, ProbeCredentials: probe})
 	if !errors.Is(err, ErrNoSandboxGitCredentials) {
 		t.Fatalf("err = %v, want ErrNoSandboxGitCredentials", err)
 	}
@@ -785,7 +790,7 @@ func TestStartProxiesForSandbox_GitProxyTornDownOnShutdown(t *testing.T) {
 	gitUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer gitUp.Close()
 
-	src := func(ctx context.Context) (gitproxy.Token, error) {
+	src := func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 		return gitproxy.Token{Value: "ghs_x", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	}
 	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{

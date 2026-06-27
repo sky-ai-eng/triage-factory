@@ -148,6 +148,17 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
 				worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.headRef, cfg.prNumber)
 			}
+			// Drop the eager worktree's run_worktrees row (recorded at setup so
+			// the least-privilege gates could authorize the task repo). Past the
+			// parked/blueprint early-returns above, so a resume or chain step
+			// keeps the row; only a real terminal teardown removes it.
+			// Best-effort — a leaked terminal row is harmless (run-scoped, never
+			// collides a future run).
+			if s.runWorktrees != nil && cfg.owner != "" && cfg.repo != "" {
+				if delErr := s.runWorktrees.DeleteByRepoSystem(context.Background(), orgID, runID, cfg.owner+"/"+cfg.repo); delErr != nil {
+					delegateLog.Warn("delete eager worktree run_worktrees row failed", "run", runID, "repo", cfg.owner+"/"+cfg.repo, "error", delErr)
+				}
+			}
 		}()
 	} else if cfg.runRoot != "" {
 		// Jira lazy cleanup: the agent materialized zero or more worktrees
@@ -321,11 +332,12 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		}
 	}
 
-	// Git proxy (multi mode, repo in scope): wire its receive-pack backstop to
-	// the same record path the pre-push hook uses, so a `git push --no-verify`
-	// the hook can't see still records a branch artifact (TFAC-467). nil in
-	// local mode / no repo / no stores — no proxy, accepted gap.
-	gitProxy := s.gitProxyConfigFor(ctx, orgID, cfg.owner)
+	// Git proxy (multi mode, org has a GitHub credential): the per-repo
+	// scoped-token source + the live repo/ref gate, plus the receive-pack
+	// backstop wired to the same record path the pre-push hook uses so a
+	// `git push --no-verify` the hook can't see still records a branch artifact
+	// (TFAC-467). nil in local mode / no GitHub credential — no proxy.
+	gitProxy := s.gitProxyConfigFor(ctx, info, stores)
 	if gitProxy != nil && storesSet {
 		gitProxy.RecordPush = gitPushRecorder(stores, info)
 	}

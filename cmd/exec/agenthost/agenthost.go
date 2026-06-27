@@ -161,6 +161,10 @@ type Client interface {
 	GetTask(ctx context.Context, taskID string) (*domain.Task, error)
 	ListRepos(ctx context.Context) ([]domain.RepoProfile, error)
 	GetRepo(ctx context.Context, repoID string) (*domain.RepoProfile, error)
+	// TeamTracksRepo reports whether the run's team tracks owner/repo — the
+	// gate `workspace add` applies (alongside the org-configured check) so it
+	// only materializes repos the proxy will then authorize pushes to.
+	TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error)
 	GetRunWorktreeByRepo(ctx context.Context, repoID string) (*domain.RunWorktree, error)
 	ListRunWorktrees(ctx context.Context) ([]domain.RunWorktree, error)
 	InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (inserted bool, winningPath string, err error)

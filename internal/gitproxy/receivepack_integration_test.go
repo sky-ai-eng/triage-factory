@@ -57,7 +57,7 @@ func runReceivePack(t *testing.T, upstreamStatus int, method, path, body string)
 
 	var res pushResult
 	srv, err := gitproxy.New(gitproxy.Config{
-		TokenSource: func(context.Context) (gitproxy.Token, error) {
+		TokenSource: func(context.Context, string, string) (gitproxy.Token, error) {
 			return gitproxy.Token{Value: "ghs_tok"}, nil
 		},
 		Upstream: upstream.URL,
@@ -207,8 +207,10 @@ func TestReceivePackBackstop_InterimResponseStillRecords(t *testing.T) {
 	var mu sync.Mutex
 	var pushes []gitproxy.PushedRef
 	srv, err := gitproxy.New(gitproxy.Config{
-		TokenSource: func(context.Context) (gitproxy.Token, error) { return gitproxy.Token{Value: "ghs"}, nil },
-		Upstream:    upstream.URL,
+		TokenSource: func(context.Context, string, string) (gitproxy.Token, error) {
+			return gitproxy.Token{Value: "ghs"}, nil
+		},
+		Upstream: upstream.URL,
 		RecordPush: func(_ context.Context, p gitproxy.PushedRef) {
 			mu.Lock()
 			pushes = append(pushes, p)
@@ -262,8 +264,10 @@ func TestReceivePackBackstop_NilRecordPushDisablesBackstop(t *testing.T) {
 	defer upstream.Close()
 
 	srv, err := gitproxy.New(gitproxy.Config{
-		TokenSource: func(context.Context) (gitproxy.Token, error) { return gitproxy.Token{Value: "ghs"}, nil },
-		Upstream:    upstream.URL,
+		TokenSource: func(context.Context, string, string) (gitproxy.Token, error) {
+			return gitproxy.Token{Value: "ghs"}, nil
+		},
+		Upstream: upstream.URL,
 		// RecordPush deliberately nil.
 	})
 	if err != nil {

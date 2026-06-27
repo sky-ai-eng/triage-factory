@@ -73,7 +73,7 @@ type constantTokenSource struct {
 	err       error
 }
 
-func (c *constantTokenSource) source(ctx context.Context) (gitproxy.Token, error) {
+func (c *constantTokenSource) source(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 	c.mints.Add(1)
 	if c.err != nil {
 		return gitproxy.Token{}, c.err
@@ -199,7 +199,7 @@ func TestProxyCachesToken(t *testing.T) {
 	srv, proxyURL := startProxy(t, ts.source, upstream.URL)
 
 	for i := 0; i < 5; i++ {
-		req, _ := http.NewRequest("GET", proxyURL+"/x.git/info/refs", nil)
+		req, _ := http.NewRequest("GET", proxyURL+"/o/x.git/info/refs", nil)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("call %d: %v", i, err)
@@ -255,7 +255,7 @@ func TestProxyRefreshesNearExpiry(t *testing.T) {
 		callsMu sync.Mutex
 		calls   int
 	)
-	source := func(ctx context.Context) (gitproxy.Token, error) {
+	source := func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 		callsMu.Lock()
 		defer callsMu.Unlock()
 		calls++
@@ -268,7 +268,7 @@ func TestProxyRefreshesNearExpiry(t *testing.T) {
 	srv.SetNowForTest(clock)
 
 	// First request: cache empty → mint → cache (1h TTL from now).
-	req1, _ := http.NewRequest("GET", proxyURL+"/x.git/info/refs", nil)
+	req1, _ := http.NewRequest("GET", proxyURL+"/o/x.git/info/refs", nil)
 	resp1, err := http.DefaultClient.Do(req1)
 	if err != nil {
 		t.Fatalf("first call: %v", err)
@@ -281,7 +281,7 @@ func TestProxyRefreshesNearExpiry(t *testing.T) {
 	advance(56 * time.Minute)
 
 	// Second request: cache check fails (within threshold) → re-mint.
-	req2, _ := http.NewRequest("GET", proxyURL+"/x.git/info/refs", nil)
+	req2, _ := http.NewRequest("GET", proxyURL+"/o/x.git/info/refs", nil)
 	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil {
 		t.Fatalf("second call: %v", err)
@@ -333,7 +333,7 @@ func TestProxyRejectsExpiredTokenFromSource(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			source := func(ctx context.Context) (gitproxy.Token, error) {
+			source := func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 				return gitproxy.Token{
 					Value:     "ghs_STALE",
 					ExpiresAt: time.Now().Add(c.expiresIn),
@@ -341,7 +341,7 @@ func TestProxyRejectsExpiredTokenFromSource(t *testing.T) {
 			}
 			startCount := rec.hits.Load()
 			_, proxyURL := startProxy(t, source, upstream.URL)
-			req, _ := http.NewRequest("GET", proxyURL+"/x.git/info/refs", nil)
+			req, _ := http.NewRequest("GET", proxyURL+"/o/x.git/info/refs", nil)
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatalf("roundtrip: %v", err)
@@ -371,7 +371,7 @@ func TestProxyTokenSourceFailureReturns502(t *testing.T) {
 	ts := &constantTokenSource{err: errors.New("mint failed: bad app key")}
 	_, proxyURL := startProxy(t, ts.source, upstream.URL)
 
-	req, _ := http.NewRequest("GET", proxyURL+"/x.git/info/refs", nil)
+	req, _ := http.NewRequest("GET", proxyURL+"/o/x.git/info/refs", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("roundtrip: %v", err)
@@ -461,7 +461,7 @@ func TestProxyStripsProxyAuthorization(t *testing.T) {
 	ts := &constantTokenSource{value: "ghs_x", expiresAt: time.Now().Add(time.Hour)}
 	_, proxyURL := startProxy(t, ts.source, upstream.URL)
 
-	req, _ := http.NewRequest("GET", proxyURL+"/x.git/info/refs", nil)
+	req, _ := http.NewRequest("GET", proxyURL+"/o/x.git/info/refs", nil)
 	req.Header.Set("Proxy-Authorization", "Basic Y2FsbGVyOnNlY3JldA==")
 	req.Header.Set("Proxy-Connection", "keep-alive")
 	resp, err := http.DefaultClient.Do(req)
@@ -489,7 +489,7 @@ func TestProxyForwardsHostHeader(t *testing.T) {
 	ts := &constantTokenSource{value: "ghs_x", expiresAt: time.Now().Add(time.Hour)}
 	_, proxyURL := startProxy(t, ts.source, upstream.URL)
 
-	req, _ := http.NewRequest("GET", proxyURL+"/x.git/info/refs", nil)
+	req, _ := http.NewRequest("GET", proxyURL+"/o/x.git/info/refs", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("roundtrip: %v", err)
@@ -552,7 +552,7 @@ func TestProxyDropsForwardedHeaders(t *testing.T) {
 	ts := &constantTokenSource{value: "ghs_x", expiresAt: time.Now().Add(time.Hour)}
 	_, proxyURL := startProxy(t, ts.source, upstream.URL)
 
-	req, _ := http.NewRequest("GET", proxyURL+"/x.git/info/refs", nil)
+	req, _ := http.NewRequest("GET", proxyURL+"/o/x.git/info/refs", nil)
 	req.Header.Set("X-Forwarded-For", "1.2.3.4")
 	req.Header.Set("X-Forwarded-Host", "evil.example")
 	req.Header.Set("X-Forwarded-Proto", "https")
@@ -572,7 +572,7 @@ func TestProxyDropsForwardedHeaders(t *testing.T) {
 
 // TestProxyRejectsInvalidConfig pins construction-time validation.
 func TestProxyRejectsInvalidConfig(t *testing.T) {
-	ts := func(ctx context.Context) (gitproxy.Token, error) {
+	ts := func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 		return gitproxy.Token{}, nil
 	}
 	cases := []struct {
@@ -598,7 +598,7 @@ func TestProxyRejectsInvalidConfig(t *testing.T) {
 // TestProxyUpstreamDefault pins that an empty Upstream defaults to
 // https://github.com so callers using stock GitHub can omit the field.
 func TestProxyUpstreamDefault(t *testing.T) {
-	ts := func(ctx context.Context) (gitproxy.Token, error) {
+	ts := func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 		return gitproxy.Token{Value: "x", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	}
 	_, err := gitproxy.New(gitproxy.Config{TokenSource: ts})
@@ -611,7 +611,7 @@ func TestProxyUpstreamDefault(t *testing.T) {
 // "https://github.com/" is semantically equivalent to "https://github.com"
 // and accepted.
 func TestProxyUpstreamTrailingSlashAccepted(t *testing.T) {
-	ts := func(ctx context.Context) (gitproxy.Token, error) {
+	ts := func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 		return gitproxy.Token{Value: "x", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	}
 	if _, err := gitproxy.New(gitproxy.Config{TokenSource: ts, Upstream: "https://github.com/"}); err != nil {
@@ -625,7 +625,7 @@ func TestProxyUpstreamTrailingSlashAccepted(t *testing.T) {
 // guard: bare "[::1]" leaves u.Host bracketed, and a naive
 // SplitHostPort + ParseIP would reject it.
 func TestProxyUpstreamLoopbackHTTPVariants(t *testing.T) {
-	ts := func(ctx context.Context) (gitproxy.Token, error) {
+	ts := func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 		return gitproxy.Token{Value: "x", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	}
 	cases := []string{
@@ -925,7 +925,7 @@ func TestProxyConcurrentRequestsCoalesceMint(t *testing.T) {
 	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
-			req, _ := http.NewRequest("GET", proxyURL+"/x.git/info/refs", nil)
+			req, _ := http.NewRequest("GET", proxyURL+"/o/x.git/info/refs", nil)
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Errorf("concurrent call: %v", err)

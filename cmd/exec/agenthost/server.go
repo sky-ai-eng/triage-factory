@@ -280,6 +280,17 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return repoResult{Repo: r}, nil
 
+	case methodTeamTracksRepo:
+		var a teamTracksRepoArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		tracks, err := client.TeamTracksRepo(ctx, a.Owner, a.Repo)
+		if err != nil {
+			return nil, err
+		}
+		return teamTracksRepoResult{Tracks: tracks}, nil
+
 	case methodGetRunWorktreeByRepo:
 		var a runWorktreeByRepoArgs
 		if err := dec(&a); err != nil {

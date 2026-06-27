@@ -205,6 +205,14 @@ func (c *IPCClient) GetRepo(ctx context.Context, repoID string) (*domain.RepoPro
 	return res.Repo, nil
 }
 
+func (c *IPCClient) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
+	var res teamTracksRepoResult
+	if err := c.call(ctx, methodTeamTracksRepo, teamTracksRepoArgs{Owner: owner, Repo: repo}, &res); err != nil {
+		return false, err
+	}
+	return res.Tracks, nil
+}
+
 func (c *IPCClient) GetRunWorktreeByRepo(ctx context.Context, repoID string) (*domain.RunWorktree, error) {
 	var res runWorktreeResult
 	if err := c.call(ctx, methodGetRunWorktreeByRepo, runWorktreeByRepoArgs{RepoID: repoID}, &res); err != nil {

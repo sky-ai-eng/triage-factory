@@ -51,6 +51,7 @@
 package githubapp
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"encoding/json"
@@ -278,14 +279,55 @@ type installationTokenResponse struct {
 }
 
 // MintInstallationToken signs an app JWT and exchanges it for a
-// short-lived installation access token, scoped to the given
-// installationID's repositories and permissions.
+// short-lived installation access token carrying the installation's
+// FULL granted repositories and permissions (no narrowing — nil request
+// body). Callers that want a least-privilege token narrowed to one repo
+// (or a permission subset) use MintScopedInstallationToken.
 //
 // Network failures, non-2xx responses, and malformed JSON all surface
 // as errors with the HTTP status and (truncated) body included for
 // debuggability. A successful return guarantees Value != "" and
 // ExpiresAt is non-zero and in the future at receipt time.
 func (m *Minter) MintInstallationToken(ctx context.Context, installationID int64) (Token, error) {
+	return m.mintInstallationToken(ctx, installationID, nil)
+}
+
+// MintScopedInstallationToken mints an installation access token narrowed
+// below the installation's grant: scoped to exactly repos (bare repo
+// NAMES, not "owner/repo" — GitHub's API takes names because the
+// installation already fixes the account) and, when permissions is
+// non-empty, to that permission subset. Both fields can only *narrow* —
+// requesting a repo outside the installation or a permission it lacks is a
+// 422, which the caller treats as "this credential can't serve this repo"
+// and falls through (see the resolver's scoped tier).
+//
+// An empty permissions map omits the field entirely, yielding the
+// installation's full permission set on the single repo — the right
+// default for the API channel, whose verb set spans several permissions
+// and would break under an over-narrow fixed set. The git proxy passes
+// {"contents":"write"}, the only permission a clone/fetch/push needs.
+//
+// Same response handling as MintInstallationToken.
+func (m *Minter) MintScopedInstallationToken(ctx context.Context, installationID int64, repos []string, permissions map[string]string) (Token, error) {
+	body := map[string]any{}
+	if len(repos) > 0 {
+		body["repositories"] = repos
+	}
+	if len(permissions) > 0 {
+		body["permissions"] = permissions
+	}
+	if len(body) == 0 {
+		// No narrowing requested — identical to the full-install mint.
+		return m.mintInstallationToken(ctx, installationID, nil)
+	}
+	return m.mintInstallationToken(ctx, installationID, body)
+}
+
+// mintInstallationToken is the shared POST/parse core behind both mint
+// entry points. body nil means the full-install token (no request body);
+// a non-nil body is JSON-marshalled to narrow the token (repositories /
+// permissions).
+func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64, body any) (Token, error) {
 	if installationID <= 0 {
 		return Token{}, fmt.Errorf("githubapp: installationID must be positive, got %d", installationID)
 	}
@@ -294,8 +336,17 @@ func (m *Minter) MintInstallationToken(ctx context.Context, installationID int64
 		return Token{}, err
 	}
 
+	var bodyReader io.Reader
+	if body != nil {
+		b, mErr := json.Marshal(body)
+		if mErr != nil {
+			return Token{}, fmt.Errorf("githubapp: marshal token request body: %w", mErr)
+		}
+		bodyReader = bytes.NewReader(b)
+	}
+
 	url := fmt.Sprintf("%s/app/installations/%d/access_tokens", m.apiBase, installationID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bodyReader)
 	if err != nil {
 		return Token{}, fmt.Errorf("githubapp: build request: %w", err)
 	}
@@ -306,6 +357,9 @@ func (m *Minter) MintInstallationToken(ctx context.Context, installationID int64
 	// return 403. The string is informational — GitHub doesn't validate
 	// it beyond "non-empty".
 	req.Header.Set("User-Agent", "triage-factory-githubapp")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
@@ -313,14 +367,14 @@ func (m *Minter) MintInstallationToken(ctx context.Context, installationID int64
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if resp.StatusCode != http.StatusCreated {
 		return Token{}, fmt.Errorf("githubapp: mint installation token: status %d, body: %s",
-			resp.StatusCode, truncate(string(body), 512))
+			resp.StatusCode, truncate(string(respBody), 512))
 	}
 
 	var parsed installationTokenResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return Token{}, fmt.Errorf("githubapp: parse installation token response: %w", err)
 	}
 	if parsed.Token == "" {

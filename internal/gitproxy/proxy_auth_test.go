@@ -142,7 +142,7 @@ func TestProxyAppAndPATTokensBothForward(t *testing.T) {
 			upstream := fakeGitHub(rec)
 			defer upstream.Close()
 
-			source := func(ctx context.Context) (gitproxy.Token, error) { return c.token, nil }
+			source := func(ctx context.Context, owner, repo string) (gitproxy.Token, error) { return c.token, nil }
 			_, proxyURL := startProxy(t, source, upstream.URL)
 
 			req, _ := http.NewRequest("GET", proxyURL+"/owner/repo.git/info/refs", nil)

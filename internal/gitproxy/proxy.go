@@ -76,6 +76,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -110,15 +111,40 @@ type Token struct {
 }
 
 // TokenSource is the abstraction over "how to get a fresh installation
-// token". Production callers wrap githubapp.Minter.MintInstallationToken
-// closing over the installationID; tests pass a stub returning a fixed
-// value.
+// token for ONE repo". owner/repo identify the repo the request targets;
+// production callers wrap the resolver's per-repo scoped mint
+// (TokenForRepoScoped), so the injected credential is narrowed to exactly
+// that repo. Tests pass a stub returning a fixed value (ignoring owner/repo).
 //
-// The Server calls TokenSource lazily on first request, caches the
-// result, and re-invokes when the cached token is within
-// refreshThreshold of expiry. Implementations should be safe for
+// The Server calls TokenSource lazily on first request for a repo, caches
+// the result per owner/repo, and re-invokes when that repo's cached token is
+// within refreshThreshold of expiry. Implementations should be safe for
 // concurrent invocation, though the proxy serializes calls itself.
-type TokenSource func(ctx context.Context) (Token, error)
+type TokenSource func(ctx context.Context, owner, repo string) (Token, error)
+
+// Decision is the result of Config.Authorize for one (owner, repo): whether
+// the run may touch the repo at all, and — for a push — the exact set of full
+// refs (refs/heads/...) it may update. An empty AllowedRefs on an Allowed
+// decision means "no push is permitted" (every receive-pack ref will be
+// rejected); a fetch/advertise only needs Allowed.
+type Decision struct {
+	Allowed     bool
+	AllowedRefs []string
+}
+
+// DeniedGitOp is one denied git operation handed to Config.RecordDenial for
+// the audit log. Op is one of the gitOp* discriminators ("advertise",
+// "fetch", "push", "path"); Ref is the offending ref on a ref-level denial
+// (empty otherwise); Reason is a short machine token. Pure data — no domain
+// dependency — so the proxy stays free of the audit model; the wiring layer
+// maps it to an external_actions row.
+type DeniedGitOp struct {
+	Owner  string
+	Repo   string
+	Ref    string
+	Op     string
+	Reason string
+}
 
 // Config bundles the inputs a Server needs. Per-run construction; the
 // token cache is per-Server so a new run gets a fresh credential and a
@@ -195,6 +221,25 @@ type Config struct {
 	// bounded context, and any failure is the callback's to swallow. See
 	// TFAC-467.
 	RecordPush func(ctx context.Context, push PushedRef)
+
+	// Authorize, when non-nil, is the per-request live authorization gate. The
+	// proxy calls it with the (owner, repo) parsed from the request path
+	// BEFORE minting/forwarding; a !Allowed decision is a 403 (the request is
+	// never forwarded and no token is minted-for-use). For a push the returned
+	// AllowedRefs is enforced per-ref against the receive-pack command block.
+	// Reads live host-side state each call, so untracking a repo / removing a
+	// worktree propagates to the very next request with no re-mint.
+	//
+	// A nil Authorize disables the gate (allow-all) — the loopback/test path,
+	// mirroring an empty IncomingToken. In multi mode the wiring always sets
+	// it, so production is always gated.
+	Authorize func(ctx context.Context, owner, repo string) (Decision, error)
+
+	// RecordDenial, when non-nil, is invoked once per denied operation (repo
+	// gate, ref gate, path-shape, or fail-closed) for the audit log.
+	// Best-effort; the proxy never blocks on it. Kept domain-free (DeniedGitOp
+	// is pure data) so gitproxy doesn't depend on the artifact/audit model.
+	RecordDenial func(ctx context.Context, denied DeniedGitOp)
 }
 
 // PushedRef is one non-delete ref update the backstop parsed from a
@@ -221,16 +266,17 @@ type Server struct {
 
 	requestCount atomic.Int64
 
-	// tokenMu serializes token cache access. The cache is a single
-	// (value, expiry) tuple; concurrent requests during refresh
-	// coalesce on the mutex rather than thundering-herd the minter.
-	tokenMu     sync.Mutex
-	cachedToken Token
-	// cachedNonces counts the number of successful mint-and-cache
-	// cycles (TokenSource returned a valid token and we wrote it to
-	// cachedToken). Failed TokenSource calls produce a 502 and do
-	// NOT increment this. Observable via MintCount() for tests.
-	cachedNonces atomic.Int64
+	// tokenMu serializes per-repo token cache access. Concurrent requests
+	// for the same repo during a refresh coalesce on the mutex rather than
+	// thundering-herd the minter. Cross-repo concurrency is serialized too
+	// (one mutex); git ops per run are few, so the simplicity wins.
+	tokenMu      sync.Mutex
+	cachedTokens map[string]Token // keyed lower("owner/repo")
+	// mintCount counts successful mint-and-cache cycles across all repos
+	// (TokenSource returned a valid token we cached). Failed TokenSource
+	// calls produce a 502 and do NOT increment this. Observable via
+	// MintCount() for tests.
+	mintCount atomic.Int64
 
 	// listener is owned once Start has been called. nil until then.
 	listener net.Listener
@@ -338,7 +384,39 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		tok, err := s.installationToken(r.Context())
+		// Path-shape allowlist: forward ONLY the three git smart-HTTP shapes
+		// and extract the (owner, repo) they target. Everything else — most
+		// importantly a GHES API path "/api/v3/..." (same host as git), plus
+		// LFS and web routes — is rejected here, before any credential is
+		// injected. This is what makes "the git proxy can only do git" real on
+		// GHES, where the host split that protects github.com doesn't exist.
+		owner, repo, op, ok := parseGitPath(r.Method, r.URL.Path)
+		if !ok {
+			s.recordDenial(r.Context(), DeniedGitOp{Op: gitOpPath, Reason: "non-git-path"})
+			http.Error(w, "gitproxy: non-git path", http.StatusForbidden)
+			return
+		}
+
+		// Live per-repo authorization. A nil Authorize is allow-all
+		// (loopback/test); in multi mode the wiring always sets it. A backend
+		// error is a 502 (the gate is up but its data source is broken — fail
+		// closed, don't forward); a !Allowed decision is a 403.
+		decision := Decision{Allowed: true}
+		if s.cfg.Authorize != nil {
+			d, err := s.cfg.Authorize(r.Context(), owner, repo)
+			if err != nil {
+				http.Error(w, "gitproxy: authorization check failed", http.StatusBadGateway)
+				return
+			}
+			if !d.Allowed {
+				s.recordDenial(r.Context(), DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: "repo-not-authorized"})
+				http.Error(w, "gitproxy: repo not authorized for this run", http.StatusForbidden)
+				return
+			}
+			decision = d
+		}
+
+		tok, err := s.installationToken(r.Context(), owner, repo)
 		if err != nil {
 			// 502 Bad Gateway maps cleanly: the proxy is alive but the
 			// upstream credential pipeline is broken. Avoid leaking the
@@ -353,18 +431,33 @@ func (s *Server) Handler() http.Handler {
 		// which means it never appears in a log of pr.In.Header.
 		r = r.WithContext(context.WithValue(r.Context(), tokenCtxKey{}, tok.Value))
 
-		// Receive-pack backstop (TFAC-467): when a push transits the proxy,
-		// tee its ref-update commands and record a branch artifact per
-		// non-delete ref — the network-layer mirror of the pre-push hook,
-		// which `git push --no-verify` skips but this cannot. Only engaged
-		// when RecordPush is wired (multi mode); everything else, including
-		// fetches and the ref advertisement, proxies untouched.
-		if s.cfg.RecordPush != nil && isReceivePackPush(r) {
-			s.serveReceivePack(w, r)
-			return
+		if op == gitOpPush {
+			if s.cfg.Authorize != nil {
+				// Gated path: buffer the ref-update command block, enforce the
+				// per-ref allowlist (reject deletes / foreign refs) BEFORE
+				// forwarding, then proxy the reconstructed stream and run the
+				// RecordPush backstop on a 2xx.
+				s.serveReceivePackGated(w, r, owner, repo, decision.AllowedRefs)
+				return
+			}
+			// Non-gated (loopback/test): the legacy observe-only backstop
+			// (TFAC-467) — tee the body and record after a 2xx, never block.
+			if s.cfg.RecordPush != nil {
+				s.serveReceivePack(w, r)
+				return
+			}
 		}
 		s.proxy.ServeHTTP(w, r)
 	})
+}
+
+// recordDenial invokes the audit hook for one denied operation, if wired.
+// Best-effort and non-blocking — never affects the response.
+func (s *Server) recordDenial(ctx context.Context, denied DeniedGitOp) {
+	if s.cfg.RecordDenial == nil {
+		return
+	}
+	s.cfg.RecordDenial(ctx, denied)
 }
 
 // tokenCtxKey is the request-context key used to hand the resolved
@@ -398,25 +491,26 @@ func (s *Server) callerAuthorized(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(presented), []byte(s.cfg.IncomingToken)) == 1
 }
 
-// installationToken returns a valid cached token, minting a fresh one
-// if the cache is empty or within refreshThreshold of expiry.
+// installationToken returns a valid cached token for owner/repo, minting a
+// fresh one (scoped to that repo) if the cache is empty for it or within
+// refreshThreshold of expiry.
 //
-// Serialized via tokenMu — concurrent requests during a refresh
-// coalesce on the mutex rather than stampeding the upstream mint
-// endpoint. The mutex held during the upstream call is acceptable here
-// because mint is on the run's critical path anyway and TokenSource
-// implementations are expected to be fast (sub-second for the GitHub
-// /app/installations/.../access_tokens endpoint).
-func (s *Server) installationToken(ctx context.Context) (Token, error) {
+// Serialized via tokenMu — concurrent requests during a refresh coalesce on
+// the mutex rather than stampeding the upstream mint endpoint. The mutex held
+// during the upstream call is acceptable here because mint is on the run's
+// critical path anyway and TokenSource implementations are expected to be fast
+// (sub-second for the GitHub /app/installations/.../access_tokens endpoint).
+func (s *Server) installationToken(ctx context.Context, owner, repo string) (Token, error) {
+	key := strings.ToLower(owner + "/" + repo)
 	s.tokenMu.Lock()
 	defer s.tokenMu.Unlock()
 
 	now := s.timeNow()
-	if s.cachedToken.Value != "" && !s.cachedTokenStale(now) {
-		return s.cachedToken, nil
+	if tok, ok := s.cachedTokens[key]; ok && tok.Value != "" && !tokenStale(tok, now) {
+		return tok, nil
 	}
 
-	tok, err := s.cfg.TokenSource(ctx)
+	tok, err := s.cfg.TokenSource(ctx, owner, repo)
 	if err != nil {
 		return Token{}, fmt.Errorf("token source: %w", err)
 	}
@@ -433,20 +527,22 @@ func (s *Server) installationToken(ctx context.Context) (Token, error) {
 	if !tok.ExpiresAt.IsZero() && !tok.ExpiresAt.After(now.Add(refreshThreshold)) {
 		return Token{}, fmt.Errorf("token source returned expired or near-expiry token (expires_at=%s)", tok.ExpiresAt.Format(time.RFC3339))
 	}
-	s.cachedToken = tok
-	s.cachedNonces.Add(1)
+	if s.cachedTokens == nil {
+		s.cachedTokens = make(map[string]Token)
+	}
+	s.cachedTokens[key] = tok
+	s.mintCount.Add(1)
 	return tok, nil
 }
 
-// cachedTokenStale reports whether the cached token needs re-minting:
-// true when it is within refreshThreshold of its expiry. A zero
-// ExpiresAt (a PAT — no tracked lifetime) is never stale, so a PAT
-// source mints exactly once for the life of the Server.
-func (s *Server) cachedTokenStale(now time.Time) bool {
-	if s.cachedToken.ExpiresAt.IsZero() {
+// tokenStale reports whether a cached token needs re-minting: true when it is
+// within refreshThreshold of its expiry. A zero ExpiresAt (a PAT — no tracked
+// lifetime) is never stale, so a PAT source mints exactly once per repo.
+func tokenStale(tok Token, now time.Time) bool {
+	if tok.ExpiresAt.IsZero() {
 		return false
 	}
-	return !now.Add(refreshThreshold).Before(s.cachedToken.ExpiresAt)
+	return !now.Add(refreshThreshold).Before(tok.ExpiresAt)
 }
 
 // rewrite is the Go 1.20+ ReverseProxy hook (replacing Director). It
@@ -587,11 +683,12 @@ func (s *Server) RequestCount() int64 { return s.requestCount.Load() }
 // TokenSource calls that returned an error or a stale/invalid token
 // are NOT counted — those produce a 502 and the cache is unchanged.
 //
-// Exposed so tests can verify caching behavior (first request mints;
-// subsequent requests reuse). Tests asserting "mint was attempted at
-// all" should pin upstream hits or response status instead, since a
-// failed attempt is still observable via the 502 it produces.
-func (s *Server) MintCount() int64 { return s.cachedNonces.Load() }
+// Exposed so tests can verify caching behavior (first request for a repo
+// mints; subsequent requests for the same repo reuse; a second repo mints
+// again). Tests asserting "mint was attempted at all" should pin upstream
+// hits or response status instead, since a failed attempt is still
+// observable via the 502 it produces.
+func (s *Server) MintCount() int64 { return s.mintCount.Load() }
 
 // timeNow returns the current time, honoring the testable now hook.
 func (s *Server) timeNow() time.Time {

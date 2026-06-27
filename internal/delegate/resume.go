@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -559,16 +558,14 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		}
 	}
 
-	// Resume runs follow the sandbox branch in multi mode, so wire the
-	// same per-run git proxy the initial invocation got. The repo owner
-	// rides in RepoEnv ("owner/repo"); a Jira-only run leaves it empty,
-	// so gitProxyConfigFor returns nil and no git proxy is wired.
-	gitOwner, _, _ := strings.Cut(opts.RepoEnv, "/")
-
-	// Wire the proxy's receive-pack backstop to the same record path the
-	// pre-push hook uses (TFAC-467), matching the initial run. nil config
-	// (local mode / Jira-only / no stores) leaves the --no-verify gap accepted.
-	gitProxy := s.gitProxyConfigFor(ctx, orgID, gitOwner)
+	// Resume runs follow the sandbox branch in multi mode, so wire the same
+	// per-run git proxy the initial invocation got. Authority is re-derived
+	// live (per-repo lazy mint + the run_worktrees-backed gate), so no head-ref
+	// or owner needs threading through resume — the durable rows carry it. Also
+	// wire the receive-pack backstop to the same record path the pre-push hook
+	// uses (TFAC-467). nil config (local mode / no GitHub credential) leaves the
+	// --no-verify gap accepted.
+	gitProxy := s.gitProxyConfigFor(ctx, info, stores)
 	if gitProxy != nil && storesSet {
 		gitProxy.RecordPush = gitPushRecorder(stores, info)
 	}

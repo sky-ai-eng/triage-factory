@@ -205,6 +205,15 @@ type repoResult struct {
 	Repo *domain.RepoProfile `json:"repo,omitempty"`
 }
 
+type teamTracksRepoArgs struct {
+	Owner string `json:"owner"`
+	Repo  string `json:"repo"`
+}
+
+type teamTracksRepoResult struct {
+	Tracks bool `json:"tracks"`
+}
+
 type runWorktreeByRepoArgs struct {
 	RepoID string `json:"repo_id"`
 }
@@ -541,6 +550,7 @@ const (
 	methodGetTask                 = "GetTask"
 	methodListRepos               = "ListRepos"
 	methodGetRepo                 = "GetRepo"
+	methodTeamTracksRepo          = "TeamTracksRepo"
 	methodGetRunWorktreeByRepo    = "GetRunWorktreeByRepo"
 	methodListRunWorktrees        = "ListRunWorktrees"
 	methodInsertRunWorktree       = "InsertRunWorktree"

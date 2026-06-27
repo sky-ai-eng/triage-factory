@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // LocalClient is the in-process implementation of Client. Holds a
@@ -39,6 +40,13 @@ type LocalClient struct {
 	// tests to inject a fake resolver covering both the App-installation and
 	// PAT tiers without standing up the full App-mint plumbing.
 	ghResolver ghclient.Resolver
+
+	// ghClients memoizes the per-repo scoped GitHub client (+ identity) built
+	// for this run, so several gh calls in one exec subcommand (e.g. pr
+	// start-review's GetPR + GetPRDiff + GetPRFiles) mint the repo-scoped token
+	// once rather than per call. Multi mode only; keyed lower("owner/repo").
+	// LocalClient is single-goroutine (see the type doc), so no lock.
+	ghClients map[string]repoClient
 }
 
 // NewLocal builds a LocalClient bound to the given stores + identity.
@@ -206,6 +214,10 @@ func (c *LocalClient) ListRepos(ctx context.Context) ([]domain.RepoProfile, erro
 
 func (c *LocalClient) GetRepo(ctx context.Context, repoID string) (*domain.RepoProfile, error) {
 	return c.stores.Repos.GetSystem(ctx, c.info.OrgID, repoID)
+}
+
+func (c *LocalClient) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
+	return c.stores.TeamGitHubRepos.TracksRepoSystem(ctx, c.info.TeamID, owner, repo)
 }
 
 func (c *LocalClient) GetRunWorktreeByRepo(ctx context.Context, repoID string) (*domain.RunWorktree, error) {
@@ -708,24 +720,85 @@ func mapGithubResolveErr(err error) error {
 	return err
 }
 
-// githubClientForRepo resolves an authenticated client for owner/repo.
+// repoClient memoizes one repo's resolved client + acting identity for the
+// life of a single exec subcommand (one LocalClient).
+type repoClient struct {
+	client   *ghclient.Client
+	identity ghclient.Identity
+}
+
+// githubClientForRepo resolves an authenticated client for owner/repo, gated +
+// down-scoped in multi mode (see resolveRepoClient).
 func (c *LocalClient) githubClientForRepo(ctx context.Context, owner, repo string) (*ghclient.Client, error) {
-	client, err := c.githubResolver().ClientForRepo(ctx, c.info.OrgID, owner, repo)
-	if err != nil {
-		return nil, mapGithubResolveErr(err)
-	}
-	return client, nil
+	client, _, err := c.resolveRepoClient(ctx, owner, repo)
+	return client, err
 }
 
 // githubClientAndIdentityForRepo resolves the client AND the acting credential's
 // identity (App/service-account vs real-user PAT) in one pass, for the
-// pending-review collision check. The identity is knowable only here, where the
-// token resolves. When the resolver implements ghclient.RepoIdentityResolver
-// (the production resolver does), the two come from a single resolution so they
-// describe the same credential; otherwise it falls back to ClientForRepo and
-// reports IdentityUnknown, which the collision check treats conservatively
-// (never reuses, so it can't hijack a review it can't prove is the bot's own).
+// pending-review collision check. Routes through the same gated funnel as
+// githubClientForRepo so the collision read is repo-gated + scoped too; the
+// identity rides out of the resolution that built the client, so the two always
+// describe the same credential (IdentityUnknown only when no resolver reports it,
+// which the collision check treats conservatively — never reuses).
 func (c *LocalClient) githubClientAndIdentityForRepo(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
+	return c.resolveRepoClient(ctx, owner, repo)
+}
+
+// resolveRepoClient is the single funnel every exec-gh GitHub call goes
+// through. In MULTI mode it enforces the per-run repo gate (the run may only
+// touch a repo its team tracks AND that it has materialized — its eagerly-
+// cloned task repo, recorded in run_worktrees, or a workspace-add'd one) and
+// resolves a per-repo DOWN-SCOPED client (the injected token is narrowed to
+// owner/repo), memoized per repo so several calls in one subcommand mint once.
+// In LOCAL mode (N=1, unscoped — mirroring the git proxy being nil locally) it
+// is the prior behavior verbatim: no gate, no scoping.
+func (c *LocalClient) resolveRepoClient(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
+	if runmode.Current() != runmode.ModeMulti {
+		return c.legacyRepoClient(ctx, owner, repo)
+	}
+	if err := c.authorizeRepo(ctx, owner, repo); err != nil {
+		return nil, ghclient.IdentityUnknown, err
+	}
+	key := strings.ToLower(owner + "/" + repo)
+	if rc, ok := c.ghClients[key]; ok {
+		return rc.client, rc.identity, nil
+	}
+	client, identity, err := c.scopedRepoClient(ctx, owner, repo)
+	if err != nil {
+		return nil, ghclient.IdentityUnknown, err
+	}
+	if c.ghClients == nil {
+		c.ghClients = make(map[string]repoClient)
+	}
+	c.ghClients[key] = repoClient{client: client, identity: identity}
+	return client, identity, nil
+}
+
+// scopedRepoClient builds a per-repo down-scoped client via the resolver's
+// ScopedRepoResolver extension (the production resolver), falling back to the
+// unscoped path when the resolver doesn't implement it (test fakes). nil
+// permissions keeps the installation's FULL permission set on the single repo —
+// the exec-gh verb surface spans pull_requests/issues/contents/checks/actions,
+// so a fixed narrow set risks a 422 or a broken verb; repo-scoping is the
+// confinement that matters.
+func (c *LocalClient) scopedRepoClient(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
+	if sr, ok := c.githubResolver().(ghclient.ScopedRepoResolver); ok {
+		client, identity, err := sr.ClientForRepoScoped(ctx, c.info.OrgID, owner, repo, nil)
+		if err != nil {
+			return nil, ghclient.IdentityUnknown, mapGithubResolveErr(err)
+		}
+		return client, identity, nil
+	}
+	return c.legacyRepoClient(ctx, owner, repo)
+}
+
+// legacyRepoClient is the pre-scoping resolution: the App/PAT client + its
+// identity, unscoped. Used in local mode and as the fallback for a resolver
+// that doesn't implement ScopedRepoResolver. Mirrors the original
+// githubClientAndIdentityForRepo (RepoIdentityResolver, else ClientForRepo +
+// IdentityUnknown).
+func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
 	if ir, ok := c.githubResolver().(ghclient.RepoIdentityResolver); ok {
 		client, identity, err := ir.ClientForRepoWithIdentity(ctx, c.info.OrgID, owner, repo)
 		if err != nil {
@@ -733,8 +806,41 @@ func (c *LocalClient) githubClientAndIdentityForRepo(ctx context.Context, owner,
 		}
 		return client, identity, nil
 	}
-	client, err := c.githubClientForRepo(ctx, owner, repo)
-	return client, ghclient.IdentityUnknown, err
+	client, err := c.githubResolver().ClientForRepo(ctx, c.info.OrgID, owner, repo)
+	if err != nil {
+		return nil, ghclient.IdentityUnknown, mapGithubResolveErr(err)
+	}
+	return client, ghclient.IdentityUnknown, nil
+}
+
+// authorizeRepo is the exec-gh repo gate (multi mode): the run may only act on
+// a repo its team tracks AND that it has materialized in run_worktrees. Same
+// predicate as the git proxy's Authorize (run_worktrees holds the run's task
+// repo too — recorded at setup — and any workspace-add'd repo). A partial test
+// wiring (nil stores) skips the gate. A denial records a git_denied audit row
+// and returns a typed error the agent sees.
+func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) error {
+	if c.stores.TeamGitHubRepos == nil || c.stores.RunWorktrees == nil {
+		return nil
+	}
+	tracks, err := c.stores.TeamGitHubRepos.TracksRepoSystem(ctx, c.info.TeamID, owner, repo)
+	if err != nil {
+		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, err)
+	}
+	if tracks {
+		rows, lerr := c.stores.RunWorktrees.ListSystem(ctx, c.info.OrgID, c.info.RunID)
+		if lerr != nil {
+			return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, lerr)
+		}
+		repoID := owner + "/" + repo
+		for _, w := range rows {
+			if strings.EqualFold(w.RepoID, repoID) {
+				return nil
+			}
+		}
+	}
+	c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-authorized")
+	return fmt.Errorf("repo %s/%s not authorized for this run", owner, repo)
 }
 
 func (c *LocalClient) GithubGetPR(ctx context.Context, owner, repo string, number int, verbose bool) (*ghclient.PRView, error) {
@@ -1276,6 +1382,29 @@ func (c *LocalClient) recordBotAction(ctx context.Context, act *domain.ExternalA
 		agenthostLog.Warn("external-action recording failed (github write already applied)",
 			"run", c.info.RunID, "action", act.Action, "target", act.Target, "error", err)
 	}
+}
+
+// RecordGitDenied appends a git_denied external-action audit row for a git op
+// the per-run least-privilege gate refused — the git proxy (off-repo / off-ref
+// / non-git path) or the exec-gh channel (off-repo). Host-side only (not on the
+// Client interface): the gate runs on the host, never in the sandbox. ref is
+// the offending ref on a ref-level denial (empty otherwise); op/reason are the
+// gitproxy discriminators. Best-effort like the rest of recording — a failure
+// is logged and swallowed, and a denial is a security signal recorded even for
+// a denied read.
+func (c *LocalClient) RecordGitDenied(ctx context.Context, owner, repo, ref, op, reason string) {
+	if c.stores.ExternalActions == nil {
+		return
+	}
+	detail, _ := json.Marshal(map[string]string{"op": op, "ref": ref, "reason": reason})
+	c.recordBotAction(ctx, &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderGitHub,
+		Action:     domain.ActionGitDenied,
+		Target:     owner + "/" + repo,
+		ExternalID: ref,
+		Credential: domain.CredentialGitHubApp,
+		DetailJSON: string(detail),
+	})
 }
 
 // githubAction builds the external-action row for a GitHub write from the

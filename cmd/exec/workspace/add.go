@@ -66,6 +66,7 @@ var (
 	errTaskNotFound        = errors.New("workspace add: task not found")
 	errNotJiraRun          = errors.New("workspace add: only supported for Jira runs; GitHub PR runs have an eagerly-materialized worktree")
 	errRepoNotConfigured   = errors.New("workspace add: repo is not configured in Triage Factory; add it on the Settings page first")
+	errRepoNotTracked      = errors.New("workspace add: repo is not tracked by this team; add it to the team on the Settings page first")
 	errRepoMissingCloneURL = errors.New("workspace add: repo has no clone URL on its profile; try re-profiling from the Settings page")
 	errInvalidEntityKey    = errors.New("workspace add: task entity key contains characters disallowed for git refs")
 )
@@ -216,6 +217,17 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, deps addDe
 	}
 	if profile == nil {
 		return "", fmt.Errorf("%w: %s", errRepoNotConfigured, repoID)
+	}
+	// Team-tracking gate: a run may only materialize a repo its team tracks, so
+	// `workspace add` and the git proxy's push gate agree — otherwise the agent
+	// could clone a repo the proxy will then refuse to push to. Same
+	// TracksRepoSystem predicate the proxy's Authorize uses, keyed by the run's
+	// team. (Org-configured ≠ team-tracked: a repo can be configured org-wide
+	// yet not attached to this run's team.)
+	if tracks, terr := host.TeamTracksRepo(ctx, owner, repo); terr != nil {
+		return "", fmt.Errorf("workspace add: check team tracking: %w", terr)
+	} else if !tracks {
+		return "", fmt.Errorf("%w: %s", errRepoNotTracked, repoID)
 	}
 	if profile.CloneURL == "" {
 		return "", fmt.Errorf("%w: %s", errRepoMissingCloneURL, repoID)

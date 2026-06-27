@@ -96,6 +96,12 @@ const (
 	// Git branch push (the one double-capture case — see BranchPushDedupKey).
 	ActionBranchPushed = "branch_pushed"
 
+	// Git operation denied by the per-run least-privilege gate — the git proxy
+	// (off-repo / off-ref / non-git path) or the exec-gh channel (off-repo).
+	// A security signal, recorded even for a denied read. detail_json carries
+	// {op, ref, reason}.
+	ActionGitDenied = "git_denied"
+
 	// Jira issue lifecycle + comments.
 	ActionIssueCreated       = "issue_created"
 	ActionIssueTransitioned  = "issue_transitioned"

@@ -456,6 +456,24 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 		delegateLog.Warn("update worktree path for run failed", "run", runID, "error", err)
 	}
 
+	// Record the eager worktree in run_worktrees so the least-privilege gates
+	// (git proxy + exec gh) treat the task repo uniformly with workspace-add'd
+	// repos: a run may touch a repo only if its team tracks it AND it appears in
+	// this ledger, and the allowed push ref is its FeatureBranch — here the PR
+	// head. Durable, so a resume re-derives authority with no head-ref
+	// threading. Log-and-continue like SetWorktreePathSystem above: a failure
+	// degrades to denied pushes (a clear 403), never a crash.
+	if s.runWorktrees != nil {
+		if _, _, werr := s.runWorktrees.InsertSystem(context.Background(), orgID, domain.RunWorktree{
+			RunID:         runID,
+			RepoID:        owner + "/" + repo,
+			Path:          wtPath,
+			FeatureBranch: pr.HeadRef,
+		}); werr != nil {
+			delegateLog.Warn("record eager worktree in run_worktrees failed; pushes to this repo will be denied until retried", "run", runID, "repo", owner+"/"+repo, "error", werr)
+		}
+	}
+
 	// SKY-220: block briefly so the project classifier (post-poll
 	// runner) can decide this entity before we read project_id for KB
 	// injection. Nil-safe — tests and pre-classifier configurations

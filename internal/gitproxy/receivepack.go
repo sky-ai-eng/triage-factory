@@ -3,6 +3,7 @@ package gitproxy
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -253,3 +254,161 @@ func isZeroOID(s string) bool {
 	}
 	return true
 }
+
+// serveReceivePackGated is the enforcing receive-pack path (multi mode, an
+// Authorize gate wired). Unlike the observe-only serveReceivePack, it buffers
+// the leading pkt-line command block and validates every ref update BEFORE
+// forwarding: a delete, or a ref outside allowedRefs, rejects the WHOLE push
+// (single stream — can't partially forward) with a 403 and no upstream call.
+// A command block that overflows the capture cap before its flush-pkt fails
+// closed. On success it reconstructs the body (buffered block + the still-
+// unread packfile) and proxies it, then runs the RecordPush backstop on a 2xx
+// exactly like the observe path.
+func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, owner, repo string, allowedRefs []string) {
+	block, sawFlush, err := readCommandBlock(r.Body, maxReceivePackCapture)
+	if err != nil {
+		http.Error(w, "gitproxy: malformed receive-pack request", http.StatusBadRequest)
+		return
+	}
+	if !sawFlush {
+		// The command list didn't terminate within the cap — we can't see all
+		// the refs being pushed, so fail closed rather than forward blind.
+		s.recordDenial(r.Context(), DeniedGitOp{Owner: owner, Repo: repo, Op: gitOpPush, Reason: "command-block-too-large"})
+		http.Error(w, "gitproxy: receive-pack command block too large", http.StatusForbidden)
+		return
+	}
+
+	allowed := refSet(allowedRefs)
+	for _, c := range parseGateCommands(block) {
+		switch {
+		case c.isDelete:
+			s.recordDenial(r.Context(), DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: "ref-delete"})
+			http.Error(w, "gitproxy: ref delete not allowed", http.StatusForbidden)
+			return
+		case !allowed[c.ref]:
+			s.recordDenial(r.Context(), DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: "ref-not-allowed"})
+			http.Error(w, "gitproxy: ref not allowed", http.StatusForbidden)
+			return
+		}
+	}
+
+	// Every command authorized (or the push had no commands — a capability
+	// probe). Reconstruct the body: the buffered command block followed by the
+	// untouched packfile still sitting in r.Body. Byte-for-byte the original
+	// stream, so Content-Length is unchanged.
+	orig := r.Body
+	r.Body = &reconstructedBody{r: io.MultiReader(bytes.NewReader(block), orig), c: orig}
+
+	repoPath := receivePackRepoPath(r.URL.Path)
+	sr := &statusRecorder{ResponseWriter: w}
+	s.proxy.ServeHTTP(sr, r)
+
+	// Backstop record (--no-verify capture) on a 2xx, same contract as the
+	// observe path. The command block is already in hand, so re-parse the
+	// non-delete refs from it rather than re-reading the (consumed) body.
+	if s.cfg.RecordPush != nil && sr.status >= 200 && sr.status < 300 {
+		s.recordReceivePack(repoPath, block)
+	}
+}
+
+// readCommandBlock reads the leading pkt-line command block of a receive-pack
+// body up to and including the terminating flush-pkt ("0000"), bounded by max.
+// Returns the raw bytes read, whether the flush-pkt was seen (false ⇒ the cap
+// was hit first — the caller fails closed), and a transport error on a short
+// read. The packfile that follows the flush-pkt is left unread in r.
+func readCommandBlock(r io.Reader, max int) (block []byte, sawFlush bool, err error) {
+	var buf []byte
+	hdr := make([]byte, pktLineLenWidth)
+	for {
+		if _, rerr := io.ReadFull(r, hdr); rerr != nil {
+			// EOF/short read before a flush-pkt: malformed (a well-formed
+			// command list always ends with one).
+			return buf, false, rerr
+		}
+		buf = append(buf, hdr...)
+		n, ok := pktLineLen(hdr)
+		if !ok {
+			return buf, false, fmt.Errorf("gitproxy: malformed pkt-line length")
+		}
+		if n == 0 {
+			return buf, true, nil // flush-pkt: command list complete
+		}
+		if n < pktLineLenWidth {
+			return buf, false, fmt.Errorf("gitproxy: invalid pkt-line length %d", n)
+		}
+		payloadLen := n - pktLineLenWidth
+		if len(buf)+payloadLen > max {
+			return buf, false, nil // would exceed the cap before flush — fail closed
+		}
+		payload := make([]byte, payloadLen)
+		if _, rerr := io.ReadFull(r, payload); rerr != nil {
+			return buf, false, rerr
+		}
+		buf = append(buf, payload...)
+	}
+}
+
+// gateCommand is one ref-update command parsed for enforcement — including
+// deletes (which parseReceivePackCommands drops), since the gate must reject
+// them.
+type gateCommand struct {
+	ref      string
+	isDelete bool
+}
+
+// parseGateCommands decodes every ref-update command from the pkt-line block,
+// deletes included. Mirrors parseReceivePackCommands' framing but keeps
+// zero-new-sha (delete) lines so the gate can reject them.
+func parseGateCommands(body []byte) []gateCommand {
+	var cmds []gateCommand
+	for len(body) >= pktLineLenWidth {
+		n, ok := pktLineLen(body[:pktLineLenWidth])
+		if !ok || n == 0 {
+			break
+		}
+		if n < pktLineLenWidth || n > len(body) {
+			break
+		}
+		if c, ok := parseGateRefUpdate(body[pktLineLenWidth:n]); ok {
+			cmds = append(cmds, c)
+		}
+		body = body[n:]
+	}
+	return cmds
+}
+
+// parseGateRefUpdate decodes one "<old-sha> <new-sha> <ref>" line into a
+// gateCommand, flagging a delete (new-sha all zeros). ok=false for a line that
+// isn't a 3-field command.
+func parseGateRefUpdate(line []byte) (gateCommand, bool) {
+	line = bytes.TrimSuffix(line, []byte{'\n'})
+	if i := bytes.IndexByte(line, 0); i >= 0 {
+		line = line[:i] // strip "\0<capabilities>" (first command line only)
+	}
+	fields := strings.Fields(string(line))
+	if len(fields) != 3 {
+		return gateCommand{}, false
+	}
+	return gateCommand{ref: fields[2], isDelete: isZeroOID(fields[1])}, true
+}
+
+// refSet builds a lookup set from a slice of full refs.
+func refSet(refs []string) map[string]bool {
+	m := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		m[ref] = true
+	}
+	return m
+}
+
+// reconstructedBody re-presents a receive-pack body whose command block was
+// buffered for the gate: Read serves the buffered block then the original
+// body's remaining packfile (via an io.MultiReader); Close closes the original
+// body.
+type reconstructedBody struct {
+	r io.Reader
+	c io.Closer
+}
+
+func (b *reconstructedBody) Read(p []byte) (int, error) { return b.r.Read(p) }
+func (b *reconstructedBody) Close() error               { return b.c.Close() }

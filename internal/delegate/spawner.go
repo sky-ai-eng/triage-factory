@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -517,17 +518,35 @@ func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner string) st
 // error from inside the sandbox. The resolver is read under the same
 // lock as resolveCloneToken so a startup-time credential hot-swap can't
 // race it.
-func (s *Spawner) gitProxyConfigFor(ctx context.Context, orgID, owner string) *agentproc.GitProxyConfig {
+func (s *Spawner) gitProxyConfigFor(ctx context.Context, info agenthost.RunInfo, stores db.Stores) *agentproc.GitProxyConfig {
 	if runmode.Current() == runmode.ModeLocal {
-		return nil
-	}
-	if owner == "" {
 		return nil
 	}
 	s.mu.Lock()
 	resolver := s.ghResolver
 	s.mu.Unlock()
 	if resolver == nil {
+		return nil
+	}
+	// The per-repo scoped mint + run-start probe live on the ScopedResolver
+	// extension (the production resolver implements it). A resolver that
+	// doesn't (a test fake) gets no git proxy — better no egress than an
+	// unconstrained one.
+	scoped, ok := resolver.(ghclient.ScopedResolver)
+	if !ok {
+		return nil
+	}
+	orgID := info.OrgID
+
+	// Only wire a git proxy when the org has SOME GitHub credential. A
+	// Jira-only / no-GitHub org gets none — no regression, its runs do no git
+	// (and a GitHub-PR run with no credential already fails earlier in
+	// setupGitHub). A read error is treated as "proceed" so a transient outage
+	// doesn't strip egress from a run that has credentials; the per-request
+	// mint then surfaces the real failure. Only a definitive false disables it.
+	if has, err := scoped.HasAnyCredential(ctx, orgID); err != nil {
+		delegateLog.Warn("probe github credential for git proxy failed; proceeding (per-request mint surfaces a real failure)", "org", orgID, "error", err)
+	} else if !has {
 		return nil
 	}
 
@@ -538,19 +557,84 @@ func (s *Spawner) gitProxyConfigFor(ctx context.Context, orgID, owner string) *a
 		upstream = base
 	}
 
+	// The audit sink for denied git ops, routed through the same host-side
+	// recording the push backstop uses (admin pool for an event-triggered run,
+	// the kicking-off user's synthetic claims for a manual one).
+	denialHost := agenthost.NewLocal(stores, info)
+
 	return &agentproc.GitProxyConfig{
 		Upstream: upstream,
-		TokenSource: func(ctx context.Context) (gitproxy.Token, error) {
-			tok, err := resolver.TokenFor(ctx, orgID, owner)
+		TokenSource: func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
+			// Layer 1: a fresh token scoped to exactly owner/repo with the only
+			// permission a clone/fetch/push needs. An over-scoped App can't
+			// leak its breadth through this token; a PAT org falls through
+			// unscoped (a PAT can't be narrowed) and Layer 2/3 enforce it.
+			tok, err := scoped.TokenForRepoScoped(ctx, orgID, owner, repo, map[string]string{"contents": "write"})
 			if err != nil {
 				if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-					return gitproxy.Token{}, fmt.Errorf("%w: org %s owner %s", agentproc.ErrNoSandboxGitCredentials, orgID, owner)
+					return gitproxy.Token{}, fmt.Errorf("%w: org %s repo %s/%s", agentproc.ErrNoSandboxGitCredentials, orgID, owner, repo)
 				}
 				return gitproxy.Token{}, err
 			}
 			return gitproxy.Token{Value: tok.Value, ExpiresAt: tok.ExpiresAt}, nil
 		},
+		ProbeCredentials: func(ctx context.Context) error {
+			has, err := scoped.HasAnyCredential(ctx, orgID)
+			if err != nil {
+				return err
+			}
+			if !has {
+				return fmt.Errorf("%w: org %s", agentproc.ErrNoSandboxGitCredentials, orgID)
+			}
+			return nil
+		},
+		Authorize: func(ctx context.Context, owner, repo string) (gitproxy.Decision, error) {
+			return gitAuthorizeDecision(ctx, stores, info, owner, repo)
+		},
+		RecordDenial: func(ctx context.Context, denied gitproxy.DeniedGitOp) {
+			denialHost.RecordGitDenied(ctx, denied.Owner, denied.Repo, denied.Ref, denied.Op, denied.Reason)
+		},
 	}
+}
+
+// gitAuthorizeDecision is the git proxy's live per-repo gate (Layer 2 + the
+// Layer-3 ref allowlist): the run may touch a repo only if its team tracks it
+// AND it appears in the run's run_worktrees ledger (the eagerly-cloned task
+// repo — recorded at setup — or a workspace-add'd one). The allowed push refs
+// are that repo's FeatureBranch rows. Reads live each call, so untracking a
+// repo or removing a worktree propagates to the next request with no re-mint.
+// Fails closed (deny) when the stores it needs are absent — a misconfigured
+// gate must never allow-all.
+func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.RunInfo, owner, repo string) (gitproxy.Decision, error) {
+	if stores.TeamGitHubRepos == nil || stores.RunWorktrees == nil {
+		return gitproxy.Decision{Allowed: false}, nil
+	}
+	tracks, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, info.TeamID, owner, repo)
+	if err != nil {
+		return gitproxy.Decision{}, err
+	}
+	if !tracks {
+		return gitproxy.Decision{Allowed: false}, nil
+	}
+	rows, err := stores.RunWorktrees.ListSystem(ctx, info.OrgID, info.RunID)
+	if err != nil {
+		return gitproxy.Decision{}, err
+	}
+	repoID := owner + "/" + repo
+	var allowedRefs []string
+	found := false
+	for _, w := range rows {
+		if strings.EqualFold(w.RepoID, repoID) {
+			found = true
+			if w.FeatureBranch != "" {
+				allowedRefs = append(allowedRefs, "refs/heads/"+w.FeatureBranch)
+			}
+		}
+	}
+	if !found {
+		return gitproxy.Decision{Allowed: false}, nil
+	}
+	return gitproxy.Decision{Allowed: true, AllowedRefs: allowedRefs}, nil
 }
 
 // gitPushRecorder builds the git proxy's RecordPush callback for one run. The

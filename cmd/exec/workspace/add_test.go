@@ -31,6 +31,7 @@ func hostFor(stores db.Stores, runID string) agenthost.Client {
 	return agenthost.NewLocal(stores, agenthost.RunInfo{
 		OrgID:  runmode.LocalDefaultOrgID,
 		UserID: runmode.LocalDefaultUserID,
+		TeamID: runmode.LocalDefaultTeamID,
 		RunID:  runID,
 	})
 }
@@ -175,12 +176,25 @@ func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
 
 func seedRepoProfile(t *testing.T, database *db.DB, owner, repo, cloneURL, defaultBranch string) {
 	t.Helper()
-	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
+	store := sqlitestore.New(database.Conn)
+	if err := store.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
 		ID: owner + "/" + repo, Owner: owner, Repo: repo,
 		CloneURL: cloneURL, DefaultBranch: defaultBranch,
 		ProfileText: "test profile",
 	}); err != nil {
 		t.Fatalf("upsert profile: %v", err)
+	}
+	// Track the repo for the run's team too — materializeWorkspace gates
+	// `workspace add` on team-tracking (org-configured ≠ team-tracked), so an
+	// org-only seed would be rejected. Additive so a test seeding several repos
+	// keeps them all tracked.
+	tracked, err := store.TeamGitHubRepos.ListForTeamSystem(context.Background(), runmode.LocalDefaultTeamID)
+	if err != nil {
+		t.Fatalf("list team repos: %v", err)
+	}
+	tracked = append(tracked, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
+	if err := store.TeamGitHubRepos.ReplaceForTeam(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, tracked); err != nil {
+		t.Fatalf("track team repo: %v", err)
 	}
 }
 
@@ -455,6 +469,31 @@ func TestMaterializeWorkspace_SuccessfulFirstAdd(t *testing.T) {
 	}
 	if row.FeatureBranch != "feature/SKY-220" {
 		t.Errorf("row.FeatureBranch = %q", row.FeatureBranch)
+	}
+}
+
+// TestMaterializeWorkspace_RejectsUntrackedRepo pins the team-tracking gate: a
+// repo that's org-configured (a profile exists) but NOT attached to the run's
+// team is refused before any worktree is created — so `workspace add` can't
+// materialize a repo the git proxy will then refuse to push to.
+func TestMaterializeWorkspace_RejectsUntrackedRepo(t *testing.T) {
+	stores, database := newTestDB(t)
+	seedJiraRun(t, database, "r1", "SKY-9")
+	// Org-configured but team-untracked: seed only the profile (not via
+	// seedRepoProfile, which would also track it for the team).
+	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
+		ID: "sky/untracked", Owner: "sky", Repo: "untracked",
+		CloneURL: "https://x", DefaultBranch: "main", ProfileText: "test",
+	}); err != nil {
+		t.Fatalf("upsert profile: %v", err)
+	}
+	stub := &stubCalls{}
+
+	if _, err := materializeWorkspace(hostFor(stores, "r1"), "sky/untracked", stub.deps()); !errors.Is(err, errRepoNotTracked) {
+		t.Fatalf("err = %v, want errRepoNotTracked", err)
+	}
+	if stub.createCalls != 0 {
+		t.Errorf("createWorktree called for an untracked repo; want the gate to reject before create")
 	}
 }
 
