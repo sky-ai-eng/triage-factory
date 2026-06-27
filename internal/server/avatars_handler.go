@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -44,7 +45,7 @@ const (
 
 	// avatarSuccessTTL is how long a fetched image is served from cache before a
 	// re-fetch. Avatars change rarely, and a re-login refreshes the stored URL
-	// anyway, so a long TTL is fine — at most it serves a day-stale picture.
+	// anyway, so a long TTL is fine — at most it serves a picture ~6h stale.
 	avatarSuccessTTL = 6 * time.Hour
 	// avatarFailureTTL negative-caches a failed fetch (unreachable host, non-image
 	// body, SSRF reject) briefly, so a roster full of broken avatars can't make
@@ -76,6 +77,14 @@ var (
 // avatar (bad scheme, SSRF reject, upstream error, non-image body, oversize).
 // The handler maps it to a 502 and the frontend Avatar falls back to a monogram.
 var errAvatarUnavailable = errors.New("avatar unavailable")
+
+// errBlockedAvatarHost marks a fetch rejected by the dial-time SSRF guard
+// (non-public / non-IP resolved address). It's wrapped through the dial Control
+// hook so the fetch path can errors.Is it and log at Warn — a private-IP avatar
+// url is a probe signal, not a routine broken image. The chain survives the net
+// stack (net.OpError / url.Error both Unwrap), verified by TestAvatarFetcher_
+// BlockedHostIsClassified.
+var errBlockedAvatarHost = errors.New("avatar host is not a public address")
 
 // allowedAvatarTypes is the raster image set the proxy will serve. SVG is
 // excluded deliberately: even loaded via <img> (where scripts don't run) it's
@@ -120,10 +129,10 @@ func safeAvatarDialControl(_, address string, _ syscall.RawConn) error {
 	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil {
-		return fmt.Errorf("avatar dial: non-IP address %q", host)
+		return fmt.Errorf("avatar dial: non-IP address %q: %w", host, errBlockedAvatarHost)
 	}
 	if !isPublicUnicastIP(ip) {
-		return fmt.Errorf("avatar dial: refusing non-public address %s", ip)
+		return fmt.Errorf("avatar dial: refusing non-public address %s: %w", ip, errBlockedAvatarHost)
 	}
 	return nil
 }
@@ -285,8 +294,20 @@ func (f *avatarFetcher) fetch(rawURL string) (*fetchedAvatar, error) {
 		defer cancel()
 		img, ferr := f.doFetch(ctx, rawURL)
 		if ferr != nil {
+			// Log here, where the specific cause is still in hand and the
+			// singleflight + negative cache naturally rate-limit it to ~once per
+			// fetch attempt. A dial-time SSRF rejection is a probe signal (Warn) —
+			// e.g. a private IP hand-inserted into users.avatar_url; a routine
+			// broken avatar is just noise (Debug). Then negative-cache and return
+			// the generic sentinel, so first-failure and cached-failure callers
+			// see the same error.
+			if errors.Is(ferr, errBlockedAvatarHost) {
+				avatarLog.Warn("avatar fetch blocked by host policy", "url", rawURL, "error", ferr)
+			} else {
+				avatarLog.Debug("avatar fetch failed", "url", rawURL, "error", ferr)
+			}
 			f.cachePut(rawURL, nil) // negative-cache the failure
-			return nil, ferr
+			return nil, errAvatarUnavailable
 		}
 		f.cachePut(rawURL, img)
 		return img, nil
@@ -408,14 +429,17 @@ func (h *avatarsHandler) handleAvatar(w http.ResponseWriter, r *http.Request) {
 	img, err := h.fetcher.fetch(avatarURL)
 	if err != nil {
 		// Expected failure mode (unreachable host, non-image body, SSRF reject).
-		// The frontend Avatar's onError falls back to a monogram, so this is a
-		// debug breadcrumb, not an error-level page.
-		avatarLog.Debug("avatar fetch failed", "user", targetID, "error", err)
+		// fetch() already logged the specific cause (Warn for an SSRF rejection,
+		// Debug otherwise), rate-limited by its cache; the frontend Avatar's
+		// onError falls back to a monogram, so just 502 here.
 		http.Error(w, "avatar unavailable", http.StatusBadGateway)
 		return
 	}
 
 	w.Header().Set("Content-Type", img.contentType)
+	// Explicit length so net/http sends a sized body rather than chunking a
+	// multi-hundred-KB image.
+	w.Header().Set("Content-Length", strconv.Itoa(len(img.data)))
 	// Authz-gated, so private (never a shared/CDN cache). A short browser cache
 	// keeps the 15s Usage poll + re-renders from re-hitting this endpoint.
 	w.Header().Set("Cache-Control", "private, max-age=600")

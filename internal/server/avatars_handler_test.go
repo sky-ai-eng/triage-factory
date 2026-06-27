@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -209,6 +211,21 @@ func TestAvatarFetcher_RejectsNonHTTPS(t *testing.T) {
 	}
 }
 
+// TestAvatarFetcher_BlockedHostIsClassified verifies a dial-time SSRF rejection
+// is detectable via errors.Is(errBlockedAvatarHost) through the full net/http
+// error chain — the signal fetch() keys its Warn log on. Uses the REAL SSRF-
+// guarded client (not a test client) against a loopback target the guard blocks.
+func TestAvatarFetcher_BlockedHostIsClassified(t *testing.T) {
+	f := newAvatarFetcher()
+	_, err := f.doFetch(context.Background(), "https://127.0.0.1:9/avatar.png")
+	if err == nil {
+		t.Fatal("want error dialing a loopback avatar host")
+	}
+	if !errors.Is(err, errBlockedAvatarHost) {
+		t.Errorf("error not classified as blocked host (Warn path won't fire): %v", err)
+	}
+}
+
 // TestAvatarFetcher_BoundsCacheBytes confirms the total-bytes budget evicts so
 // many distinct large images can't grow the cache without limit (the OOM risk a
 // pure entry-count cap leaves open). Limits are shrunk for a cheap test.
@@ -301,6 +318,9 @@ func TestAvatarsHandler_Postgres(t *testing.T) {
 		}
 		if cc := rec.Header().Get("Cache-Control"); cc == "" {
 			t.Errorf("missing Cache-Control header")
+		}
+		if cl := rec.Header().Get("Content-Length"); cl != strconv.Itoa(len(want)) {
+			t.Errorf("Content-Length = %q, want %d", cl, len(want))
 		}
 	})
 
