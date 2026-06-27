@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useId, useState } from 'react'
 import {
   PieChart,
   Pie,
@@ -108,9 +108,6 @@ const POLL_INTERVAL_MS = 15_000
 
 interface UsageFetch<T> {
   data: T | null
-  /** True ONLY on the cold load (no data yet). A refetch (window switch, team
-   *  switch, poll) keeps the last data on screen instead of flashing. */
-  loading: boolean
   error: string | null
 }
 
@@ -119,24 +116,22 @@ interface UsageFetch<T> {
 // visible, and refetches immediately when the tab regains focus. Crucially it
 // HOLDS the previous response while a new one is in flight (never clears `data`
 // mid-fetch), so switching the range/team or a background poll updates the
-// numbers in place rather than flashing the whole section. A null url means
-// "don't fetch" (the team section before a team resolves). setState lives in the
-// `load` callback (not the effect body) — mirrors PRDashboard and keeps the
-// set-state-in-effect lint rule happy.
+// numbers in place rather than flashing the whole section. Sections branch on
+// `data !== null` (skeleton vs content) — there's no separate loading flag.
+// A null url means "don't fetch" (the team section before a team resolves).
+// setState lives in the `load` callback (not the effect body) — mirrors
+// PRDashboard and keeps the set-state-in-effect lint rule happy.
 function useUsageFetch<T>(url: string | null): UsageFetch<T> {
   const [data, setData] = useState<T | null>(null)
-  const [fetching, setFetching] = useState<boolean>(url !== null)
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(
     async (signal: { cancelled: boolean }) => {
       if (!url) {
         setData(null)
-        setFetching(false)
         setError(null)
         return
       }
-      setFetching(true)
       // Deliberately do NOT clear data/error here — the last good data stays on
       // screen until the new response lands, so a refetch never flashes.
       try {
@@ -146,12 +141,10 @@ function useUsageFetch<T>(url: string | null): UsageFetch<T> {
         if (!signal.cancelled) {
           setData(body)
           setError(null)
-          setFetching(false)
         }
       } catch (err) {
         if (!signal.cancelled) {
           setError(err instanceof Error ? err.message : String(err))
-          setFetching(false)
         }
       }
     },
@@ -175,9 +168,7 @@ function useUsageFetch<T>(url: string | null): UsageFetch<T> {
     }
   }, [load])
 
-  // loading = cold load only (no data yet). Once we have data, a refetch keeps it
-  // visible, so callers render the data, not a skeleton.
-  return { data, loading: data === null && fetching, error }
+  return { data, error }
 }
 
 // --- formatting + category mapping ---
@@ -614,6 +605,9 @@ function UserRoster({ data, emptyLabel = '—' }: { data: UsageUserBucket[]; emp
 // panel, no screen, no scanlines. It matches the gauges' gradient language and
 // the "everything melts into the page" ethos.
 function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightClass?: string }) {
+  // Unique per instance — three traces render at once, and a duplicated gradient
+  // id would be invalid HTML. Strip useId's colons so it's a clean SVG fragment ref.
+  const gradId = `usageTrace-${useId().replace(/:/g, '')}`
   if (data.length === 0)
     return (
       <div className={`flex ${heightClass} items-center justify-center`}>
@@ -633,7 +627,7 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
       <ResponsiveContainer>
         <AreaChart data={formatted} margin={{ top: 6, right: 2, bottom: 0, left: 2 }}>
           <defs>
-            <linearGradient id="usageTrace" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="var(--color-accent)" stopOpacity={0.22} />
               <stop offset="100%" stopColor="var(--color-accent)" stopOpacity={0} />
             </linearGradient>
@@ -650,7 +644,7 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
             dataKey="cost"
             stroke="var(--color-accent)"
             strokeWidth={1.5}
-            fill="url(#usageTrace)"
+            fill={`url(#${gradId})`}
           />
         </AreaChart>
       </ResponsiveContainer>
@@ -986,7 +980,11 @@ function OrgSection({ since, days }: { since: string; days: number }) {
         >
           <UserRoster data={data?.by_user ?? []} emptyLabel="no user spend" />
         </Instrument>
-        <ThroughputInstrument byDay={data?.by_day ?? []} byModel={data?.by_model ?? []} />
+        <ThroughputInstrument
+          byDay={data?.by_day ?? []}
+          byModel={data?.by_model ?? []}
+          spanClass="md:col-span-2"
+        />
       </div>
     </Band>
   )
