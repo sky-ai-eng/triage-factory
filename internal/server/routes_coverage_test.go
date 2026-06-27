@@ -30,6 +30,7 @@ var preAuthAllowlist = []string{
 	// seam, pre-auth + IP-rate-limited there), so it's no longer a core routes()
 	// mount and isn't checked by this core coverage test.
 	"/auth/v1/", // GoTrue reverse proxy; auth happens upstream
+	"/api/",     // JSON 404 for unknown /api/* (TFAC-409 item 5); no identity dependency, intentionally before the SPA fallback
 	"/",         // SPA fallback; no identity dependency
 }
 

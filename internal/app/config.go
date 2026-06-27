@@ -12,8 +12,10 @@ const (
 	// DefaultHost binds to loopback only. Triage Factory is a local-first
 	// tool that holds keychain-backed credentials and an unauthenticated
 	// HTTP API; exposing it on all interfaces by default would let anyone
-	// on the same network drive delegated runs. Override with --host if
-	// you genuinely want LAN access.
+	// on the same network drive delegated runs. Override with --host if you
+	// genuinely want LAN access — but note the local-mode public-exposure
+	// guardrail (assertLocalBindSafe) then refuses to boot unless you also
+	// set TF_ALLOW_PUBLIC_LOCAL=true to acknowledge the zero-auth exposure.
 	DefaultHost = "127.0.0.1"
 )
 

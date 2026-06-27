@@ -89,6 +89,16 @@ func New(ctx context.Context, cfg Config, static fs.FS) (*App, error) {
 	a := &App{cfg: cfg, announce: newAnnouncer()}
 
 	if a.local() {
+		// Local-mode public-exposure guardrail (TFAC-409 item 1): local mode
+		// runs with zero auth, so refuse to boot if it would bind a
+		// non-loopback address (or a non-local TF_PUBLIC_URL is set) unless the
+		// operator explicitly acknowledges via TF_ALLOW_PUBLIC_LOCAL. Checked
+		// first, before any store/secret wiring, so a misconfigured public bind
+		// fails fast and cheap.
+		if err := a.checkLocalBind(); err != nil {
+			return nil, err
+		}
+
 		// Resolve (and, for the headless encrypted-file backend, construct +
 		// validate) the local secret backend up front, so a missing
 		// TF_SECRET_ENCRYPTION_KEY or an undecryptable secrets file fails the

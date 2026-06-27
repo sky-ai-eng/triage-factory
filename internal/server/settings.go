@@ -597,7 +597,7 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 	for i, proj := range projects {
 		projectStatuses, err := client.ProjectStatuses(r.Context(), proj)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch statuses for " + proj + ": " + err.Error()})
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch statuses for " + proj + " from Jira" + localDetail(err)})
 			return
 		}
 		if i == 0 {

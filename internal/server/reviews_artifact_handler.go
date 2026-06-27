@@ -192,7 +192,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	if err := gh.SubmitExistingReview(r.Context(), owner, repo, art.ExternalID, details.ReviewEvent, body); err != nil {
 		artifactsLog.Warn("SubmitExistingReview failed",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "review", art.ExternalID, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
 
@@ -281,7 +281,7 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 	// (baked into its GitHub body) to re-bake the badge onto the human's edit.
 	pendingID, comments, err := gh.GetPendingReview(r.Context(), owner, repo, number)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
 	// If the live pending review isn't the one the artifact records, it was
@@ -307,7 +307,7 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 	_, clean := domain.ParseSeverityBadge(req.Body)
 	if err := gh.UpdatePendingReviewComment(r.Context(), commentID, domain.SeverityBadgeMarkdown(severity)+clean); err != nil {
 		artifactsLog.Warn("UpdatePendingReviewComment failed", "artifact", art.ID, "comment", commentID, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -343,7 +343,7 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 	// deletable through this artifact-scoped route.
 	pendingID, comments, err := gh.GetPendingReview(r.Context(), owner, repo, number)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
 	// A live pending review that isn't the recorded one was replaced out-of-band;
@@ -365,7 +365,7 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 	}
 	if err := gh.DeletePendingReviewComment(r.Context(), commentID); err != nil {
 		artifactsLog.Warn("DeletePendingReviewComment failed", "artifact", art.ID, "comment", commentID, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

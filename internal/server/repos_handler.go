@@ -69,7 +69,8 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
 				return
 			}
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch repos: " + err.Error()})
+			reposLog.Warn("fetch installation repos failed", "org", orgID, "error", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch repos from GitHub" + localDetail(err)})
 			return
 		}
 	} else {
@@ -121,7 +122,8 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		var err error
 		repos, err = client.ListUserRepos(r.Context())
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch repos: " + err.Error()})
+			reposLog.Warn("fetch user repos failed", "org", orgID, "error", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch repos from GitHub" + localDetail(err)})
 			return
 		}
 	}
@@ -356,7 +358,8 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	branches, err := client.ListBranches(r.Context(), owner, repo, query, 30)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch branches: " + err.Error()})
+		reposLog.Warn("fetch branches failed", "org", orgID, "owner", owner, "repo", repo, "error", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch branches from GitHub" + localDetail(err)})
 		return
 	}
 

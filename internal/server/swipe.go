@@ -125,7 +125,7 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "swipe", err)
 		return "", nil, false
 	}
 	if task == nil {
@@ -180,7 +180,7 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 			return e
 		}); err != nil {
 			swipeLog.Error("takeover claim flip failed", "task", id, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed" + localDetail(err)})
 			return "", nil, false
 		}
 		if !claimOK {
@@ -198,7 +198,7 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 			return e
 		}); err != nil {
 			swipeLog.Error("user claim stamp failed", "task", id, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed" + localDetail(err)})
 			return "", nil, false
 		}
 		if !claimOK {
@@ -254,7 +254,7 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "swipe", err)
 		return "", false
 	}
 	if task == nil {
@@ -279,13 +279,13 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 		return e
 	}); err != nil {
 		swipeLog.Error("delegate aborted", "task", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed" + localDetail(err)})
 		return "", false
 	}
 	a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, claimTeamID)
 	if err != nil {
 		swipeLog.Error("delegate aborted", "task", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed" + localDetail(err)})
 		return "", false
 	}
 	if !enabled {
@@ -301,7 +301,7 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 		return e
 	}); err != nil {
 		swipeLog.Error("failed to stamp agent claim", "task", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed" + localDetail(err)})
 		return "", false
 	}
 	if result == db.HandoffRefused {
@@ -351,7 +351,7 @@ func (s *Server) swipeLifecycle(w http.ResponseWriter, r *http.Request, orgID, u
 		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, req.Action, req.HesitationMs)
 		return e
 	}); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "swipe", err)
 		return "", false
 	}
 	// Broadcast on the status axis so peer sessions refetch — without this a

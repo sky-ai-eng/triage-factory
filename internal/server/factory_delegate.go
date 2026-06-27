@@ -271,7 +271,8 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// wrongly reporting the bot disabled).
 	a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, claimTeamID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
+		factoryLog.Error("delegate aborted", "task", task.ID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed" + localDetail(err)})
 		return
 	}
 	if !enabled {
@@ -291,7 +292,8 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		handoffResult, e = tx.Tasks.HandoffAgentClaim(r.Context(), orgID, task.ID, a.ID, userID)
 		return e
 	}); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+		factoryLog.Error("failed to stamp agent claim", "task", task.ID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed" + localDetail(err)})
 		return
 	}
 	switch handoffResult {

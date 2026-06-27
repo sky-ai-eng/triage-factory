@@ -210,7 +210,7 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 			// We can't reconstruct the omitted field without the current PR state,
 			// and guessing from a stale snapshot risks clobbering. Fail loudly.
 			artifactsLog.Warn("GetPR for partial-edit baseline failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't read the current PR to apply a partial edit: " + err.Error()})
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't read the current PR to apply a partial edit" + localDetail(err)})
 			return
 		}
 		title = live.Title
@@ -236,7 +236,7 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	// a readable reason.
 	if err := gh.UpdatePR(r.Context(), owner, repo, number, title, body); err != nil {
 		artifactsLog.Warn("UpdatePR failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
 
@@ -299,7 +299,7 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 		if !ghclient.IsHTTP406(err) {
 			artifactsLog.Error("PR diff failed",
 				"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 			return
 		}
 		files, filesErr := gh.GetPRFiles(r.Context(), owner, repo, number)
@@ -398,7 +398,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	live, err := gh.GetPRBasic(r.Context(), owner, repo, number)
 	if err != nil {
 		artifactsLog.Warn("approve GetPR failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't read the PR to promote it: " + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't read the PR to promote it" + localDetail(err)})
 		return
 	}
 	finalTitle := live.Title
@@ -409,12 +409,12 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.agentRuns, orgID, art.RunID, "PR")
 	if err := gh.UpdatePR(r.Context(), owner, repo, number, finalTitle, footeredBody); err != nil {
 		artifactsLog.Warn("approve UpdatePR (footer) failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
 	if err := gh.MarkPRReady(r.Context(), owner, repo, number); err != nil {
 		artifactsLog.Warn("MarkPRReady failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
 

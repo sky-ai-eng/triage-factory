@@ -195,7 +195,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 	// what made the original picker dead-end untraceable).
 	if err := s.githubApps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
 		githubAppLog.Error("refresh installations failed", "org", orgID, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to refresh GitHub App installations" + localDetail(err)})
 		return
 	}
 

@@ -33,6 +33,8 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any, msg string) bool 
 
 func isUniqueViolation(err error) bool { return httpx.IsUniqueViolation(err) }
 
+func localDetail(err error) string { return httpx.LocalDetail(err) }
+
 func requireOrg(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return httpx.RequireOrg(w, r)
 }

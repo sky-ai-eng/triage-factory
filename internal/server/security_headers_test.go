@@ -222,3 +222,34 @@ func TestSecurityHeaders_NilDeployCfg(t *testing.T) {
 		t.Error("HSTS leaked in local mode")
 	}
 }
+
+// TestBuildHSTS pins the TFAC-409 item-4 contract: no header without HTTPS,
+// base directive under HTTPS, and "; preload" appended ONLY when the explicit
+// opt-in env is truthy. preload is never default-on (it's a near-irreversible
+// domain-wide commitment) and never emitted on plain HTTP.
+func TestBuildHSTS(t *testing.T) {
+	const base = "max-age=31536000; includeSubDomains"
+	cases := []struct {
+		name        string
+		deployHTTPS bool
+		preloadEnv  string
+		want        string
+	}{
+		{"no https no header", false, "", ""},
+		{"no https ignores preload", false, "true", ""},
+		{"https base no preload", true, "", base},
+		{"https preload off", true, "false", base},
+		{"https preload on", true, "true", base + "; preload"},
+		{"https preload on alt spelling", true, "1", base + "; preload"},
+		{"https preload typo falls back off", true, "yesss", base},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TF_HSTS_PRELOAD", tc.preloadEnv)
+			if got := buildHSTS(tc.deployHTTPS); got != tc.want {
+				t.Errorf("buildHSTS(%v) with TF_HSTS_PRELOAD=%q = %q, want %q",
+					tc.deployHTTPS, tc.preloadEnv, got, tc.want)
+			}
+		})
+	}
+}

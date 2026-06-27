@@ -52,5 +52,27 @@ func newGotrueProxy(rawURL string) (http.Handler, error) {
 			pr.Out.Host = target.Host
 		},
 	}
-	return proxy, nil
+	return denyGotrueAdmin(proxy), nil
+}
+
+// denyGotrueAdmin wraps the GoTrue proxy to refuse /auth/v1/admin/* — GoTrue's
+// service-role user-management API (create/delete/list users, etc.). The
+// browser SPA never calls it; only a server-side holder of the service-role
+// JWT legitimately would, and that path doesn't traverse this public proxy.
+// Denying the subpath here means a future GoTrue misconfig or a leaked
+// service-role key isn't directly reachable from the internet — defense in
+// depth on top of GoTrue's own service-role gate (TFAC-409 item 3).
+//
+// Responds 404 (not 403) so the deny is indistinguishable from "no such route"
+// — we don't confirm to a prober that an admin surface exists behind the proxy.
+// The match is on the raw request path (before the proxy strips the /auth/v1
+// prefix): an exact "/auth/v1/admin" and anything under "/auth/v1/admin/".
+func denyGotrueAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/v1/admin" || strings.HasPrefix(r.URL.Path, "/auth/v1/admin/") {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -614,6 +615,8 @@ func (s *Server) routes() {
 	//        (registered with the SSO routes below; see TFAC-427).
 	//   /auth/v1/                        — GoTrue reverse proxy; auth
 	//        happens upstream, not in our middleware.
+	//   /api/                            — JSON 404 for any unmatched
+	//        /api/* path (TFAC-409 item 5); no identity dependency.
 	//   /                                — SPA fallback; static-file
 	//        serving with no identity dependency.
 	//
@@ -1131,8 +1134,27 @@ func (s *Server) routes() {
 	// routes take precedence over "/" regardless.
 	s.installExtensions()
 
+	// Unknown /api/* → JSON 404 (TFAC-409 item 5). Without this, the greedy "/"
+	// SPA fallback below answers any unmatched path — including a stray or
+	// typo'd /api/* — with 200 + index.html, which masks client typos and reads
+	// as success to an API consumer. Registered after every real /api/* route:
+	// Go's ServeMux resolves by the most-specific pattern, so a concrete
+	// "GET /api/whatever" still wins over this prefix, and a known path called
+	// with the wrong method still surfaces as 405 from its own route. Only a
+	// genuinely unregistered /api/* subtree falls through to here.
+	s.mux.HandleFunc("/api/", s.handleAPINotFound)
+
 	// Frontend: serve embedded SPA, with fallback to index.html for client-side routing
 	s.mux.HandleFunc("/", s.handleFrontend)
+}
+
+// handleAPINotFound answers any unmatched /api/* path with a JSON 404 instead
+// of letting the SPA fallback serve index.html. Keeps the API surface honest:
+// an unknown endpoint reads as a 404 to a programmatic caller rather than a
+// 200 page of HTML. See the registration in routes() for why this can't shadow
+// a real route.
+func (s *Server) handleAPINotFound(w http.ResponseWriter, r *http.Request) {
+	httpx.NotFound(w, "endpoint")
 }
 
 // handleFrontend serves the embedded React SPA. Non-file requests fall back to index.html

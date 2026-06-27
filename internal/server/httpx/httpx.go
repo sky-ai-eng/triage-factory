@@ -72,6 +72,26 @@ func InternalError(w http.ResponseWriter, scope string, err error) {
 	WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 }
 
+// LocalDetail returns ": " + err.Error() in local mode and "" in multi mode.
+// It is the redaction seam for handlers that compose a client-facing message
+// around an error whose status is NOT a plain 500 — an upstream 502, a 4xx —
+// so InternalError (which always writes a 500) doesn't fit. Append it to a
+// static, author-controlled prefix:
+//
+//	writeJSON(w, http.StatusBadGateway, map[string]string{
+//	    "error": "failed to fetch repos from GitHub" + httpx.LocalDetail(err)})
+//
+// In local mode a developer sees the raw driver/upstream detail; in multi mode
+// other tenants' browsers see only the static prefix. The caller keeps
+// ownership of its own logging — unlike InternalError, this neither logs nor
+// touches the status code. nil err yields "" in both modes.
+func LocalDetail(err error) string {
+	if err == nil || runmode.Current() == runmode.ModeMulti {
+		return ""
+	}
+	return ": " + err.Error()
+}
+
 // IsClientGone reports whether err carries a canceled request context — the
 // signature of a caller that disconnected while a handler was mid-flight. The
 // cancellation surfaces from whatever query was running when it tripped,

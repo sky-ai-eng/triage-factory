@@ -595,7 +595,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 				visible, e = tx.Blueprints.List(r.Context(), orgID, existing.TeamID)
 				return e
 			}); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load blueprint: " + err.Error()})
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load blueprint" + localDetail(err)})
 				return
 			}
 			found := false
@@ -656,7 +656,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		fresh, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "updated but read-back failed: " + err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "updated but read-back failed" + localDetail(err)})
 		return
 	}
 	writeJSON(w, http.StatusOK, fresh)

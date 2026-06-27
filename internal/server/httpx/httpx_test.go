@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestDecodeJSON_RejectsTrailingData pins the contract that DecodeJSON
@@ -120,6 +121,33 @@ func TestInternalError_ClientGone(t *testing.T) {
 			// level and so absent from the buffer too).
 			if gotErrLog := strings.Contains(logs.String(), "handler error"); gotErrLog != tc.wantErrLog {
 				t.Errorf("error-level log present = %v, want %v (logs=%q)", gotErrLog, tc.wantErrLog, logs.String())
+			}
+		})
+	}
+}
+
+// TestLocalDetail is the TFAC-409 item-2 contract: the raw error detail is
+// appended in local mode (developer convenience) but stripped in multi mode so
+// driver/internal/upstream strings don't leak to other tenants' browsers.
+func TestLocalDetail(t *testing.T) {
+	err := errors.New("dial tcp 10.0.0.5:5432: connection refused")
+
+	cases := []struct {
+		name string
+		mode runmode.Mode
+		err  error
+		want string
+	}{
+		{"local appends detail", runmode.ModeLocal, err, ": dial tcp 10.0.0.5:5432: connection refused"},
+		{"multi strips detail", runmode.ModeMulti, err, ""},
+		{"nil err local", runmode.ModeLocal, nil, ""},
+		{"nil err multi", runmode.ModeMulti, nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, tc.mode)
+			if got := LocalDetail(tc.err); got != tc.want {
+				t.Errorf("LocalDetail(%v) in %s = %q, want %q", tc.err, tc.mode, got, tc.want)
 			}
 		})
 	}

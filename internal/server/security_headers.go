@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -36,11 +37,15 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 	// pick up that late-bound state.
 	deployHTTPS := s.deployCfg != nil && s.deployCfg.secureCookies
 
+	// HSTS is resolved once here too — its inputs (deployHTTPS, the
+	// TF_HSTS_PRELOAD env) are fixed for the process lifetime.
+	hstsValue := buildHSTS(deployHTTPS)
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 
-		if deployHTTPS {
-			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		if hstsValue != "" {
+			h.Set("Strict-Transport-Security", hstsValue)
 		}
 		h.Set("Content-Security-Policy", s.buildCSP())
 		h.Set("X-Frame-Options", "DENY")
@@ -53,6 +58,50 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// buildHSTS returns the Strict-Transport-Security header value, or "" when no
+// HSTS should be emitted. HSTS is meaningful only under HTTPS: setting it on a
+// plain-HTTP localhost deployment would teach the browser to always-HTTPS
+// localhost and break neighboring projects on the same port. So a non-HTTPS
+// deployment gets "" (no header) regardless of the preload toggle.
+//
+// Under HTTPS the base is a 1-year max-age with includeSubDomains. The optional
+// "; preload" suffix is gated behind TF_HSTS_PRELOAD because preload is a
+// heavyweight, slow-to-reverse commitment: submitting a domain to the browser
+// preload list hardcodes "HTTPS-only, including every subdomain" into shipped
+// browser binaries for that whole registrable domain. That's the right call for
+// a single hosted SaaS on a domain its operator controls, but a footgun to
+// default-on in the self-host image, where operators run TF on a subdomain of a
+// larger domain they may not be entitled to commit org-wide. So it's strictly
+// opt-in: the hosted deploy sets TF_HSTS_PRELOAD=true (and submits its domain),
+// self-hosters leave it unset. See TFAC-409 item 4.
+func buildHSTS(deployHTTPS bool) string {
+	if !deployHTTPS {
+		return ""
+	}
+	v := "max-age=31536000; includeSubDomains"
+	if hstsPreloadEnabled() {
+		v += "; preload"
+	}
+	return v
+}
+
+// hstsPreloadEnabled parses TF_HSTS_PRELOAD. Unset/empty → false (the safe
+// default). Accepts the usual boolean spellings; an unparseable value logs a
+// warning and falls back to false rather than failing boot — preload is a
+// hardening nicety, not load-bearing, so a typo shouldn't keep the server down.
+func hstsPreloadEnabled() bool {
+	raw := strings.TrimSpace(os.Getenv("TF_HSTS_PRELOAD"))
+	switch strings.ToLower(raw) {
+	case "", "0", "false", "f", "no", "n", "off":
+		return false
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	default:
+		serverLog.Warn("unrecognized TF_HSTS_PRELOAD value; treating as off", "value", raw)
+		return false
+	}
 }
 
 // buildCSP composes the Content-Security-Policy string. Tight by
