@@ -220,7 +220,7 @@ func TestCapture_GithubReply_RecordsArtifactlessAction(t *testing.T) {
 	}
 }
 
-// TestCapture_GithubReviewCommentEditDelete_RecordsArtfactlessAction pins
+// TestCapture_GithubReviewCommentEditDelete_RecordsArtifactlessAction pins
 // TFAC-485: editing/deleting a PUBLISHED review line-comment via the
 // pulls/comments fallback (isIssueComment == false) rides the review, so it
 // writes no comment artifact — but it is still an immediate org-credential write
@@ -228,7 +228,7 @@ func TestCapture_GithubReply_RecordsArtifactlessAction(t *testing.T) {
 // / review_comment_deleted action. (Pending-draft churn edits human-side via the
 // server staging path and is unrecorded, so reaching this branch is
 // published-by-construction.)
-func TestCapture_GithubReviewCommentEditDelete_RecordsArtfactlessAction(t *testing.T) {
+func TestCapture_GithubReviewCommentEditDelete_RecordsArtifactlessAction(t *testing.T) {
 	// A backend that 404s the issue-comments endpoint so the client falls back to
 	// the pulls (review line-comment) endpoint, which succeeds.
 	startReviewCommentBackend := func(t *testing.T) *httptest.Server {
