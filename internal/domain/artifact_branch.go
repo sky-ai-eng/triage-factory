@@ -64,6 +64,24 @@ func NewBranchArtifact(repoPath, ref, sha string, created bool) (Artifact, bool)
 	}, true
 }
 
+// ParseBranchArtifactSHA extracts the pushed commit SHA from a branch artifact's
+// DetailsJSON (the {"sha":...,"new":...} payload), or "" when it's absent or
+// unparseable. The external-action audit log keys a branch push on
+// (run, ref, sha) — the ref is the artifact's ExternalID and the sha lives here —
+// so the git hook+proxy twin (identical sha) collapses to one row while a new
+// push (different sha) is recorded distinctly. Best-effort: an empty sha just
+// yields a less-specific dedup key, never a dropped audit row.
+func ParseBranchArtifactSHA(detailsJSON string) string {
+	if strings.TrimSpace(detailsJSON) == "" {
+		return ""
+	}
+	var d branchDetails
+	if err := json.Unmarshal([]byte(detailsJSON), &d); err != nil {
+		return ""
+	}
+	return d.SHA
+}
+
 // validOwnerRepo reports whether repoPath is exactly two non-empty segments
 // (owner/repo). A single segment, a trailing slash, or a nested path (GHES
 // /scm/..., nested GitLab groups) is rejected rather than guessed.

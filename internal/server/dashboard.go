@@ -258,6 +258,28 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// Audit the org-credential board-drag draft toggle (TFAC-483): a
+	// human-authorized, org-executed GitHub write. No run (a direct dashboard
+	// action, not an agent's) and no team (an org-wide PR with no team context),
+	// so it surfaces in the org governance feed, not a team feed. Best-effort in
+	// its own tx after the pessimistic GitHub write — never fails the toggle.
+	draftAction := domain.ActionPRMarkedReady
+	draftFrom, draftTo := domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen
+	if body.Draft {
+		draftAction = domain.ActionPRConvertedToDraft
+		draftFrom, draftTo = domain.ArtifactStatePROpen, domain.ArtifactStatePRDraft
+	}
+	recordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, domain.ExternalAction{
+		Provider:    domain.ArtifactProviderGitHub,
+		Action:      draftAction,
+		Target:      fmt.Sprintf("%s/%s#%d", parts[0], parts[1], number),
+		ExternalID:  strconv.Itoa(number),
+		FromState:   draftFrom,
+		ToState:     draftTo,
+		ActorUserID: userID,
+		Credential:  domain.CredentialGitHubApp,
+	})
+
 	// Patch the local entity snapshot to match the state we just pushed to
 	// GitHub. Without this, the frontend's subsequent fetchAll() reads the
 	// stale pre-mutation snapshot and the card snaps back to its old column

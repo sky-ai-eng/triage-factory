@@ -88,6 +88,11 @@ type Spawner struct {
 	// NewSpawner — a plain store ref like s.tasks, set once and never
 	// mutated, so it needs no mu guard (its sibling seam jiraResolver does).
 	jiraRules db.JiraStatusRulesStore
+	// externalActions records the TFAC-300 board→Jira mirror's writes into the
+	// append-only external-action audit log (TFAC-483) under the admin pool
+	// (RecordSystem — the detached mirror has no JWT-claims context). A plain
+	// store ref like s.jiraRules; nil-safe (a partial test Stores skips recording).
+	externalActions db.ExternalActionStore
 	// teams reads per-team settings under the admin pool (GetSettingsSystem)
 	// at spawn time — currently the TFAC-392 presence-gated absent-auto-deny
 	// knobs (grace window + on/off toggle). Resolved once per run when the
@@ -217,32 +222,33 @@ type Spawner struct {
 // partial db.Stores{} — every field is a nil-safe interface.
 func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	s := &Spawner{
-		database:     database,
-		prompts:      stores.Prompts,
-		agents:       stores.Agents,
-		blueprints:   stores.Blueprints,
-		runQueue:     stores.RunQueue,
-		tasks:        stores.Tasks,
-		agentRuns:    stores.AgentRuns,
-		entities:     stores.Entities,
-		artifacts:    stores.Artifacts,
-		events:       stores.Events,
-		taskMemory:   stores.TaskMemory,
-		runWorktrees: stores.RunWorktrees,
-		orgs:         stores.Orgs,
-		spend:        stores.Spend,
-		jiraRules:    stores.JiraStatusRules,
-		teams:        stores.Teams,
-		tx:           stores.Tx,
-		ghClient:     ghClient,
-		wsHub:        wsHub,
-		model:        model,
-		cancels:      make(map[string]context.CancelFunc),
-		dispatchWake: make(chan struct{}, 1),
-		procs:        make(map[string]*liveRunHandle),
-		permPending:  make(map[string]*pendingPermission),
-		executorID:   uuid.New().String(),
-		runSem:       make(chan struct{}, DefaultMaxConcurrentRuns),
+		database:        database,
+		prompts:         stores.Prompts,
+		agents:          stores.Agents,
+		blueprints:      stores.Blueprints,
+		runQueue:        stores.RunQueue,
+		tasks:           stores.Tasks,
+		agentRuns:       stores.AgentRuns,
+		entities:        stores.Entities,
+		artifacts:       stores.Artifacts,
+		events:          stores.Events,
+		taskMemory:      stores.TaskMemory,
+		runWorktrees:    stores.RunWorktrees,
+		orgs:            stores.Orgs,
+		spend:           stores.Spend,
+		jiraRules:       stores.JiraStatusRules,
+		externalActions: stores.ExternalActions,
+		teams:           stores.Teams,
+		tx:              stores.Tx,
+		ghClient:        ghClient,
+		wsHub:           wsHub,
+		model:           model,
+		cancels:         make(map[string]context.CancelFunc),
+		dispatchWake:    make(chan struct{}, 1),
+		procs:           make(map[string]*liveRunHandle),
+		permPending:     make(map[string]*pendingPermission),
+		executorID:      uuid.New().String(),
+		runSem:          make(chan struct{}, DefaultMaxConcurrentRuns),
 	}
 	s.controller = inProcessController{s: s}
 	return s

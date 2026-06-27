@@ -296,6 +296,12 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// audit view's read) by org. Unlike SystemLLMRuns, it is not
 		// system-written. See TFAC-471.
 		AccessChangeLog: newAccessChangeLogStore(app),
+		// ExternalActions holds both pools (like Artifacts): app for Record
+		// (manual bot runs + server approval/board handlers, under claims) +
+		// ListByTeam, admin for RecordSystem (event-triggered runs + the Jira
+		// mirror, no claims) + ListByOrgSystem (the org-wide governance read).
+		// Append-only audit log of org-credential external writes. See TFAC-483.
+		ExternalActions: newExternalActionStore(app, admin),
 		// Spend holds both pools: app for ListSpend + SpendByCategory (the
 		// llm_spend view is security_invoker, so reading it under tf_app applies
 		// the base tables' RLS — team-scoped runs + org-scoped system/curator),
@@ -382,6 +388,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Invites:         newInvitesStore(tx, tx),
 		SystemLLMRuns:   newSystemLLMRunStore(tx),
 		AccessChangeLog: newAccessChangeLogStore(tx),
+		ExternalActions: newExternalActionStore(tx, tx),
 		Spend:           newSpendStore(tx, tx),
 		Ext:             db.BuildStoreExtensions("postgres", tx, tx),
 	}

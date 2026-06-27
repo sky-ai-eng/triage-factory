@@ -240,6 +240,13 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Audit the org-credential PR edit (TFAC-483). The GitHub write already landed
+	// (pessimistic); record best-effort in its own tx so it fires regardless of
+	// the snapshot refresh below (which is itself best-effort and skipped when
+	// details don't parse). No state transition — it's an in-place title/body edit.
+	recordExternalActionBestEffort(r.Context(), ah.tx, orgID, userID,
+		githubApprovalAction(art, userID, domain.ActionPREdited, "", ""))
+
 	// Refresh the artifact's mutable snapshot to the new title/body; proposed
 	// stays frozen. Best-effort-but-reported: the GitHub edit already landed, so
 	// a snapshot-write failure isn't fatal to the user's edit, but we log it.
@@ -427,11 +434,18 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		details.Snapshot = domain.PRArtifactSnapshot{Title: finalTitle, Body: finalBody}
 		openArt.DetailsJSON = domain.MarshalPRArtifactDetails(details)
 	}
+	// Compose the audit row with the flip (TFAC-483): the org-App MarkPRReady is a
+	// human-authorized, org-executed write — run_id is the drafting run, actor is
+	// the approver. Recording inside the flip tx keeps the audit row and the
+	// artifact state atomic (both land or neither).
 	if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Artifacts.Upsert(cleanupCtx, orgID, openArt)
-		return e
+		if _, e := tx.Artifacts.Upsert(cleanupCtx, orgID, openArt); e != nil {
+			return e
+		}
+		return tx.ExternalActions.Record(cleanupCtx, orgID,
+			githubApprovalAction(art, userID, domain.ActionPRMarkedReady, domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen))
 	}); err != nil {
-		artifactsLog.Warn("flip PR artifact to open failed", "artifact", art.ID, "error", err)
+		artifactsLog.Warn("flip PR artifact to open + record action failed", "artifact", art.ID, "error", err)
 	}
 
 	// Step 2: human verdict capture — only when we recovered the agent's proposed

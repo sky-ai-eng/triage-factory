@@ -86,6 +86,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Invites:          newInvitesStore(tx, tx),
 		SystemLLMRuns:    newSystemLLMRunStore(tx),
 		AccessChangeLog:  newAccessChangeLogStore(tx),
+		ExternalActions:  newExternalActionStore(tx),
 		Spend:            newSpendStore(tx),
 		Ext:              db.BuildStoreExtensions("sqlite", tx, tx),
 	}

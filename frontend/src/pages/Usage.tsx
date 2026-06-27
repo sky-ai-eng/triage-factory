@@ -12,7 +12,7 @@ import {
 } from 'recharts'
 import * as HintTip from '@radix-ui/react-tooltip'
 import TeamSwitch from '../components/TeamSwitch'
-import BotActivityFeed from '../components/BotActivityFeed'
+import ActivityFeed from '../components/ActivityFeed'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
@@ -1101,8 +1101,8 @@ function TeamSection({
           />
         </div>
       </Band>
-      {/* EE bot-activity audit feed — team-scoped, behind FeatureGovernance. */}
-      {gov && teamId && <BotActivityFeed baseUrl={`/api/usage/teams/${teamId}/activity`} />}
+      {/* EE activity feed (Actions / Objects lenses) — team-scoped, behind FeatureGovernance. */}
+      {gov && teamId && <ActivityFeed baseUrl={`/api/usage/teams/${teamId}/activity`} />}
     </>
   )
 }
@@ -1148,8 +1148,8 @@ function OrgSection({ since, days, gov }: { since: string; days: number; gov: bo
           />
         </div>
       </Band>
-      {/* EE bot-activity audit feed — org-wide (cross-team), behind FeatureGovernance. */}
-      {gov && <BotActivityFeed baseUrl="/api/usage/org/activity" showTeam />}
+      {/* EE activity feed (Actions / Objects lenses) — org-wide (cross-team), behind FeatureGovernance. */}
+      {gov && <ActivityFeed baseUrl="/api/usage/org/activity" showTeam />}
     </>
   )
 }

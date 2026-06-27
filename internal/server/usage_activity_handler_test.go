@@ -66,6 +66,49 @@ func TestParseArtifactListOpts(t *testing.T) {
 	}
 }
 
+// TestParseExternalActionListOpts is the Docker-free unit test for the Actions
+// lens's query parser: defaults, the action/actor pass-through filters, the time
+// window (bound on occurred_at), and the limit/offset clamps. Mirrors
+// TestParseArtifactListOpts (provider/time/paging are identical; kind/state →
+// action/actor).
+func TestParseExternalActionListOpts(t *testing.T) {
+	opts, errMsg := parseExternalActionListOpts(url.Values{})
+	if errMsg != "" {
+		t.Fatalf("empty query errored: %q", errMsg)
+	}
+	if opts.Limit != activityPageDefault || opts.Provider != "" || opts.Action != "" || opts.ActorUserID != "" {
+		t.Errorf("default opts wrong: %+v", opts)
+	}
+
+	opts, errMsg = parseExternalActionListOpts(url.Values{
+		"provider": {"github"}, "action": {"pr_marked_ready"}, "actor": {"u-123"},
+		"since": {"2026-06-01"}, "until": {"2026-06-30"}, "limit": {"10"}, "offset": {"20"},
+	})
+	if errMsg != "" {
+		t.Fatalf("valid query errored: %q", errMsg)
+	}
+	if opts.Provider != "github" || opts.Action != "pr_marked_ready" || opts.ActorUserID != "u-123" {
+		t.Errorf("filters not parsed: %+v", opts)
+	}
+	if !opts.Since.Equal(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)) || opts.Limit != 10 || opts.Offset != 20 {
+		t.Errorf("window/paging not parsed: %+v", opts)
+	}
+
+	if opts, _ = parseExternalActionListOpts(url.Values{"limit": {"100000"}}); opts.Limit != activityPageMax {
+		t.Errorf("over-max limit = %d, want clamp to %d", opts.Limit, activityPageMax)
+	}
+	for name, q := range map[string]url.Values{
+		"bad_since":       {"since": {"never"}},
+		"inverted_window": {"since": {"2026-06-30"}, "until": {"2026-06-01"}},
+		"zero_limit":      {"limit": {"0"}},
+		"negative_offset": {"offset": {"-1"}},
+	} {
+		if _, errMsg := parseExternalActionListOpts(q); errMsg == "" {
+			t.Errorf("%s: expected a validation error, got none", name)
+		}
+	}
+}
+
 // activityReq builds a GET for the bot-activity endpoints carrying the active
 // org + caller claims (and the team_id path value when set), with an optional
 // raw query string for the filter cases. Mirrors usageRig.req but lets the
@@ -236,6 +279,128 @@ func TestUsageActivityHandler_GatesAndScope_Postgres(t *testing.T) {
 		mustDecode(t, rec, &out)
 		if len(out) != 1 || out[0].Kind != "pull_request" {
 			t.Errorf("kind=pull_request filter returned %d rows (%+v), want exactly the one PR", len(out), out)
+		}
+	})
+}
+
+// seedExternalActions stages the Actions-lens rows: two on teamA (a bot
+// pr_created with no actor + a human-authorized pr_marked_ready by orgAdmin) and
+// one system row on teamB (a Jira transition, no actor). orgAdmin's display name
+// is pinned so the org feed's resolved actor_name is deterministic.
+func (r *usageRig) seedExternalActions(t *testing.T) {
+	t.Helper()
+	pgtest.MustExec(t, r.h.AdminDB, `UPDATE users SET display_name = 'Org Admin' WHERE id = $1`, r.orgAdmin)
+	seed := func(teamID, provider, action, target, cred, key, actor, from, to string) {
+		var actorArg any
+		if actor != "" {
+			actorArg = actor
+		}
+		pgtest.MustExec(t, r.h.AdminDB, `
+			INSERT INTO external_actions (org_id, team_id, provider, action, target, credential, dedup_key, actor_user_id, from_state, to_state)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9,''), NULLIF($10,''))
+		`, r.orgID, teamID, provider, action, target, cred, key, actorArg, from, to)
+	}
+	seed(r.teamA, "github", "pr_created", "octo/repo#1", "github_app", "tA-created", "", "", "draft")
+	seed(r.teamA, "github", "pr_marked_ready", "octo/repo#1", "github_app", "tA-ready", r.orgAdmin, "draft", "open")
+	seed(r.teamB, "jira", "issue_transitioned", "SKY-1", "jira_org", "tB-trans", "", "To Do", "Done")
+}
+
+// TestUsageActionsActivityHandler_Postgres pins the Actions lens (?view=actions):
+// the same FeatureGovernance gate (unlicensed → 404), the cross-team org read
+// with resolved team + actor names (a human row names its authorizer, a system
+// row carries none), the team-scoped read, and the action filter passthrough.
+func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
+	r := newUsageRig(t)
+	r.seedExternalActions(t)
+	t.Cleanup(entitlements.Reset)
+
+	// Unlicensed → 404, exactly like the Objects lens (the gate runs before the
+	// view branch).
+	t.Run("unlicensed_404", func(t *testing.T) {
+		entitlements.Reset()
+		rec := httptest.NewRecorder()
+		r.uh.handleUsageOrgActivity(rec, r.activityReq(r.orgAdmin, "", "view=actions"))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("org actions unlicensed = %d, want 404; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	license := func() { entitlements.Register(governanceGrant{}) }
+
+	t.Run("team_admin_200_scoped", func(t *testing.T) {
+		license()
+		rec := httptest.NewRecorder()
+		r.uh.handleUsageTeamActivity(rec, r.activityReq(r.teamAdmin, r.teamA, "view=actions"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("team actions as team admin = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var out []actionJSON
+		mustDecode(t, rec, &out)
+		if len(out) != 2 {
+			t.Fatalf("teamA actions = %d rows, want 2 (created + marked-ready)", len(out))
+		}
+		// The team feed omits team/actor name fields (already one team).
+		for _, a := range out {
+			if a.TeamID != "" || a.TeamName != "" || a.ActorName != "" {
+				t.Errorf("team feed row carried org-only fields: %+v", a)
+			}
+		}
+	})
+
+	t.Run("org_admin_200_cross_team_with_names", func(t *testing.T) {
+		license()
+		rec := httptest.NewRecorder()
+		r.uh.handleUsageOrgActivity(rec, r.activityReq(r.orgAdmin, "", "view=actions"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("org actions as org admin = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var out []actionJSON
+		mustDecode(t, rec, &out)
+		if len(out) != 3 {
+			t.Fatalf("org actions = %d rows, want 3 (cross-team)", len(out))
+		}
+		var sawTeamB, sawHumanActor, sawSystem bool
+		for _, a := range out {
+			if a.TeamID == "" || a.TeamName == "" {
+				t.Errorf("org feed action missing team id/name: %+v", a)
+			}
+			if a.TeamID == r.teamB {
+				sawTeamB = true
+			}
+			switch a.Action {
+			case "pr_marked_ready":
+				// The human-authorized row names its authorizer + carries the transition.
+				if a.ActorUserID != r.orgAdmin || a.ActorName != "Org Admin" {
+					t.Errorf("human row actor = %q/%q, want orgAdmin/'Org Admin'", a.ActorUserID, a.ActorName)
+				}
+				if a.FromState != "draft" || a.ToState != "open" {
+					t.Errorf("human row transition = %q→%q, want draft→open", a.FromState, a.ToState)
+				}
+				sawHumanActor = true
+			case "pr_created", "issue_transitioned":
+				// System/bot rows have no actor.
+				if a.ActorUserID != "" || a.ActorName != "" {
+					t.Errorf("system row carried an actor: %+v", a)
+				}
+				sawSystem = true
+			}
+		}
+		if !sawTeamB || !sawHumanActor || !sawSystem {
+			t.Errorf("missing coverage: teamB=%v human=%v system=%v", sawTeamB, sawHumanActor, sawSystem)
+		}
+	})
+
+	t.Run("filter_passthrough_action", func(t *testing.T) {
+		license()
+		rec := httptest.NewRecorder()
+		r.uh.handleUsageOrgActivity(rec, r.activityReq(r.orgAdmin, "", "view=actions&action=pr_created"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("action filter = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var out []actionJSON
+		mustDecode(t, rec, &out)
+		if len(out) != 1 || out[0].Action != "pr_created" {
+			t.Errorf("action=pr_created returned %d rows (%+v), want exactly the one", len(out), out)
 		}
 	})
 }

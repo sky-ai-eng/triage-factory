@@ -289,6 +289,17 @@ type Stores struct {
 	// and unscoped. See TFAC-471.
 	AccessChangeLog AccessChangeLogStore
 
+	// ExternalActions owns the external_actions table — the append-only audit
+	// log of record: one row per external write TF performs under an ORG-scoped
+	// credential (the org GitHub App / org Jira service account). Holds both
+	// pools in Postgres: app for Record (the manual bot runs + server
+	// approval/board handlers, under claims, org-scoped RLS) and ListByTeam,
+	// admin for RecordSystem (event-triggered runs + the Jira mirror, no claims)
+	// and ListByOrgSystem (the org-wide governance read). Append-only — both
+	// Record paths ON CONFLICT DO NOTHING. SQLite is N=1 and unscoped. See
+	// TFAC-483.
+	ExternalActions ExternalActionStore
+
 	// Spend is the read-only aggregation over the llm_spend view — the unified
 	// shape that UNION-ALLs runs + curator_requests + system_llm_runs onto the
 	// category axis (TFAC-472). App pool in Postgres: the view is
@@ -358,6 +369,7 @@ type TxStores struct {
 	Invites          InvitesStore
 	SystemLLMRuns    SystemLLMRunStore
 	AccessChangeLog  AccessChangeLogStore
+	ExternalActions  ExternalActionStore
 	Spend            SpendStore
 
 	// Ext carries opaque store bundles built by registered

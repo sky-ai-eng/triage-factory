@@ -699,6 +699,13 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 			if _, err := tx.Artifacts.Upsert(ctx, orgID, dismissed); err != nil {
 				return fmt.Errorf("artifacts.Upsert(dismissed): %w", err)
 			}
+			// Audit the abandon (TFAC-483), atomic with the flip: the org-App
+			// pending-review delete that follows after the tx is a human-authorized,
+			// org-executed write — run_id is the drafting run, actor is the discarder.
+			if err := tx.ExternalActions.Record(ctx, orgID,
+				githubApprovalAction(reviewArtifact, userID, domain.ActionReviewDismissed, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewDismissed)); err != nil {
+				return fmt.Errorf("external_actions.Record(dismissed): %w", err)
+			}
 		}
 		// Abandon a draft PR by flipping its artifact to closed (the GitHub close
 		// runs after the tx). The pushed branch and the proposed snapshot are
@@ -708,6 +715,13 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 			closed.State = domain.ArtifactStatePRClosed
 			if _, err := tx.Artifacts.Upsert(ctx, orgID, closed); err != nil {
 				return fmt.Errorf("artifacts.Upsert(closed): %w", err)
+			}
+			// Audit the abandon (TFAC-483), atomic with the flip — the GitHub PR
+			// close runs best-effort after the tx; the audit row records the intent
+			// alongside the artifact state so the two agree.
+			if err := tx.ExternalActions.Record(ctx, orgID,
+				githubApprovalAction(prArtifact, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed)); err != nil {
+				return fmt.Errorf("external_actions.Record(closed): %w", err)
 			}
 		}
 

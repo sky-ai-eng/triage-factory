@@ -813,6 +813,52 @@ CREATE TABLE public.access_change_log (
 
 
 --
+-- Name: external_actions; Type: TABLE; Schema: public; Owner: -
+--
+
+-- The append-only audit log of record: one row per external write TF performs
+-- under an ORG-scoped credential (the org GitHub App / the org Jira service
+-- account). Both autonomous (bot/system) and human-authorized-but-org-executed
+-- (the GitHub approval flow, the board-drag draft toggle) writes land here;
+-- writes under an individual user's OWN credential (the Jira claim/swipe/done/
+-- requeue flows) are deliberately EXCLUDED and never instrumented. Event-grain
+-- and immutable — the counterpart to the mutable, object-grain `artifacts` table
+-- (which stays the agent-run state aid the reconciler maintains).
+--
+-- Written in the SAME transaction as the action it records wherever the action
+-- has a DB state change to compose with (the server approval flips), so the log
+-- can't diverge from the action. action is a free-text discriminator (no CHECK —
+-- extensible, like access_change_log); credential names the org credential used
+-- (github_app | jira_org); from_state/to_state carry a transition's endpoints;
+-- run_id is the producing run (the agent's, or the drafter's for an approval, FK
+-- ON DELETE SET NULL so it outlives a run purge); actor_user_id is the human
+-- authorizer/initiator (NULL for an autonomous system write). dedup_key is the
+-- natural per-action key — a branch push (the one true double-capture case: the
+-- pre-push hook AND the git-proxy backstop both observe it) carries a
+-- deterministic key so the twin collapses under ON CONFLICT DO NOTHING; every
+-- other action gets a unique key, so DO NOTHING only ever collapses the twin.
+-- See TFAC-483.
+CREATE TABLE public.external_actions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id uuid NOT NULL,
+    team_id uuid,
+    provider text NOT NULL,
+    action text NOT NULL,
+    target text NOT NULL,
+    external_id text,
+    url text,
+    from_state text,
+    to_state text,
+    run_id uuid,
+    actor_user_id uuid,
+    credential text NOT NULL,
+    dedup_key text NOT NULL,
+    detail_json text,
+    occurred_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: entities; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2171,6 +2217,14 @@ ALTER TABLE ONLY public.access_change_log
 
 
 --
+-- Name: external_actions external_actions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.external_actions
+    ADD CONSTRAINT external_actions_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: artifacts artifacts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2539,6 +2593,42 @@ CREATE INDEX idx_system_llm_runs_org_job_started ON public.system_llm_runs USING
 --
 
 CREATE INDEX idx_access_change_log_org_created ON public.access_change_log USING btree (org_id, created_at DESC);
+
+
+--
+-- Name: idx_external_actions_dedup; Type: INDEX; Schema: public; Owner: -
+-- The natural-key uniqueness the append-only dedup rides on: ON CONFLICT
+-- (org_id, dedup_key) DO NOTHING collapses the branch hook+proxy twin (which
+-- share a deterministic key) and rejects any other true duplicate, never a
+-- mutation.
+--
+
+CREATE UNIQUE INDEX idx_external_actions_dedup ON public.external_actions USING btree (org_id, dedup_key);
+
+
+--
+-- Name: idx_external_actions_org_occurred; Type: INDEX; Schema: public; Owner: -
+-- Backs the org-wide, newest-first scan of the action-log org feed
+-- (ExternalActionStore.ListByOrgSystem) — the cross-team governance read.
+--
+
+CREATE INDEX idx_external_actions_org_occurred ON public.external_actions USING btree (org_id, occurred_at DESC);
+
+
+--
+-- Name: idx_external_actions_team_occurred; Type: INDEX; Schema: public; Owner: -
+-- Backs the team-scoped action feed (ExternalActionStore.ListByTeam), the
+-- team-grain sibling of the org index.
+--
+
+CREATE INDEX idx_external_actions_team_occurred ON public.external_actions USING btree (org_id, team_id, occurred_at DESC);
+
+
+--
+-- Name: idx_external_actions_run; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_external_actions_run ON public.external_actions USING btree (run_id);
 
 
 --
@@ -3327,6 +3417,27 @@ ALTER TABLE ONLY public.system_llm_runs
 -- outlive its subjects.
 ALTER TABLE ONLY public.access_change_log
     ADD CONSTRAINT access_change_log_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: external_actions external_actions_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+-- org_id CASCADE (drop an org's log with the org); run_id SET NULL (the action
+-- outlives a purged run for the audit trail, like artifacts). team_id and
+-- actor_user_id are deliberately FK-free so the audit row outlives the team/user
+-- it references — an audit log must outlive its subjects (same rule as
+-- access_change_log).
+ALTER TABLE ONLY public.external_actions
+    ADD CONSTRAINT external_actions_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: external_actions external_actions_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.external_actions
+    ADD CONSTRAINT external_actions_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.runs(id) ON DELETE SET NULL;
 
 
 --
@@ -4307,6 +4418,27 @@ CREATE POLICY access_change_log_all ON public.access_change_log USING (((org_id 
 
 
 --
+-- Name: external_actions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.external_actions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: external_actions external_actions_all; Type: POLICY; Schema: public; Owner: -
+--
+
+-- Org-scoped, like access_change_log (NOT team-scoped like artifacts): the
+-- governance read is the cross-team org/team-admin lens, and the team-admin /
+-- org-admin authorization is enforced at the HTTP handler. The WITH CHECK gates
+-- the app-pool inserts (manual bot runs under synthetic claims + the server
+-- approval/board handlers under the approver's claims) by org; the admin-pool
+-- inserts (event-triggered bot runs + the Jira mirror — no JWT claims) bypass
+-- this policy. ListByTeam filters team_id in the WHERE clause under this org gate;
+-- ListByOrgSystem reads admin-pool, org-wide.
+CREATE POLICY external_actions_all ON public.external_actions USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+
+--
 -- Name: artifacts; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -5212,6 +5344,22 @@ GRANT ALL ON TABLE public.access_change_log TO service_role;
 -- (postgres) keeps GRANT ALL for the invite-accept insert + orgs ON DELETE
 -- CASCADE; deliberate retention/redaction tooling is an EE concern (TFAC-449 D2).
 GRANT SELECT,INSERT ON TABLE public.access_change_log TO tf_app;
+
+
+--
+-- Name: TABLE external_actions; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.external_actions TO postgres;
+GRANT ALL ON TABLE public.external_actions TO anon;
+GRANT ALL ON TABLE public.external_actions TO authenticated;
+GRANT ALL ON TABLE public.external_actions TO service_role;
+-- Append-only, exactly like access_change_log: tf_app (the app pool) may read +
+-- insert but NOT delete/update — an audit row is immutable once written, so the
+-- role serving every in-org request is denied UPDATE/DELETE. The admin pool
+-- (postgres) keeps GRANT ALL for the system/event inserts + orgs ON DELETE
+-- CASCADE; retention/redaction tooling is a later compliance concern (TFAC-483).
+GRANT SELECT,INSERT ON TABLE public.external_actions TO tf_app;
 
 
 --

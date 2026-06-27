@@ -143,14 +143,41 @@ export interface Artifact {
   created_at: string
 }
 
-// ActivityArtifact is the bot-activity audit feed's row shape (TFAC-483): an
+// ActivityArtifact is the activity feed's Objects-lens row shape (TFAC-483): an
 // Artifact plus the owning team's id + name. The team fields are populated ONLY
-// by the org-wide feed (GET /api/usage/org/activity) so a cross-team row shows
-// which team's bot acted; the team-scoped feed omits them (it's already one
-// team). Mirrors internal/server activityArtifactJSON.
+// by the org-wide feed (GET /api/usage/org/activity?view=objects) so a cross-team
+// row shows which team's bot acted; the team-scoped feed omits them (it's already
+// one team). Mirrors internal/server activityArtifactJSON.
 export interface ActivityArtifact extends Artifact {
   team_id?: string
   team_name?: string
+}
+
+// ActivityAction is the activity feed's Actions-lens row shape (TFAC-483): one
+// row of the append-only external-action audit log — a single external WRITE TF
+// performed under an org credential. `action` is the discriminator (the backend
+// domain.Action* consts); `from_state`/`to_state` carry a transition; `details`
+// is the parsed per-action payload (or absent). team_id/team_name/actor_name are
+// populated ONLY by the org-wide feed (GET …/org/activity?view=actions) so a
+// cross-team row shows which team acted and who authorized it; the team feed
+// omits them. Mirrors internal/server actionJSON.
+export interface ActivityAction {
+  id: string
+  provider: string
+  action: string
+  target: string
+  external_id?: string
+  url?: string
+  from_state?: string
+  to_state?: string
+  run_id?: string
+  actor_user_id?: string
+  credential: string
+  details?: unknown
+  occurred_at: string
+  team_id?: string
+  team_name?: string
+  actor_name?: string
 }
 
 export interface AgentMessage {

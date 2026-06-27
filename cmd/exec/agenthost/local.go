@@ -261,14 +261,32 @@ func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (do
 	a.OrgID = c.info.OrgID
 	a.TeamID = c.info.TeamID
 	a.RunID = c.info.RunID
+	// A branch push is also an external action (ActionBranchPushed) — record it in
+	// the same write as the artifact so the audit log of record and the artifact
+	// agree (TFAC-483). nil for any other kind (the review-draft snapshot this
+	// method also serves is not a fresh external write).
+	act := c.branchPushAction(a)
 	if c.info.IsEventTriggered {
-		return c.stores.Artifacts.UpsertSystem(ctx, c.info.OrgID, a)
+		stored, err := c.stores.Artifacts.UpsertSystem(ctx, c.info.OrgID, a)
+		if err != nil {
+			return domain.Artifact{}, err
+		}
+		// Event path: no admin tx to compose with, so the action is a second
+		// best-effort admin write — log a failure, never lose the stored artifact.
+		if rerr := c.recordActionSystem(ctx, act); rerr != nil {
+			agenthostLog.Warn("branch external-action recording failed (push already applied)",
+				"run", c.info.RunID, "target", a.Target, "error", rerr)
+		}
+		return stored, nil
 	}
 	var out domain.Artifact
 	err := c.stores.Tx.SyntheticClaimsWithTx(ctx, c.info.OrgID, c.info.UserID, func(ts db.TxStores) error {
 		stored, uerr := ts.Artifacts.Upsert(ctx, c.info.OrgID, a)
+		if uerr != nil {
+			return uerr
+		}
 		out = stored
-		return uerr
+		return recordActionTx(ctx, ts, c.info.OrgID, act)
 	})
 	return out, err
 }
@@ -314,7 +332,7 @@ func (c *LocalClient) JiraTransitionTo(ctx context.Context, key, status string) 
 	if err := client.TransitionTo(ctx, key, status); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, key, domain.ArtifactStateIssueUpdated, jiraDetailsJSON(map[string]any{"status": status}))
+	c.recordJiraIssue(ctx, key, domain.ActionIssueTransitioned, domain.ArtifactStateIssueUpdated, status, jiraDetailsJSON(map[string]any{"status": status}))
 	return nil
 }
 
@@ -347,7 +365,7 @@ func (c *LocalClient) JiraAssignToSelf(ctx context.Context, key string) error {
 	if err := client.AssignToSelf(ctx, key); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, key, domain.ArtifactStateIssueUpdated, jiraDetailsJSON(map[string]any{"assignee": "self"}))
+	c.recordJiraIssue(ctx, key, domain.ActionIssueAssigned, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"assignee": "self"}))
 	return nil
 }
 
@@ -359,7 +377,7 @@ func (c *LocalClient) JiraUnassign(ctx context.Context, key string) error {
 	if err := client.Unassign(ctx, key); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, key, domain.ArtifactStateIssueUpdated, jiraDetailsJSON(map[string]any{"assignee": nil}))
+	c.recordJiraIssue(ctx, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"assignee": nil}))
 	return nil
 }
 
@@ -372,7 +390,7 @@ func (c *LocalClient) JiraCreateIssue(ctx context.Context, project, issueType, s
 	if err != nil {
 		return "", err
 	}
-	c.recordJiraIssue(ctx, key, domain.ArtifactStateIssueCreated, "")
+	c.recordJiraIssue(ctx, key, domain.ActionIssueCreated, domain.ArtifactStateIssueCreated, "", "")
 	return key, nil
 }
 
@@ -384,7 +402,7 @@ func (c *LocalClient) JiraUpdateIssue(ctx context.Context, key string, fields ji
 	if err := client.UpdateIssue(ctx, key, fields); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, key, domain.ArtifactStateIssueUpdated, jiraDetailsJSON(map[string]any{"fields": updatedFieldNames(fields)}))
+	c.recordJiraIssue(ctx, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"fields": updatedFieldNames(fields)}))
 	return nil
 }
 
@@ -396,7 +414,7 @@ func (c *LocalClient) JiraSetParent(ctx context.Context, key, parentKey string) 
 	if err := client.SetParent(ctx, key, parentKey); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, key, domain.ArtifactStateIssueUpdated, jiraDetailsJSON(map[string]any{"parent": parentKey}))
+	c.recordJiraIssue(ctx, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"parent": parentKey}))
 	return nil
 }
 
@@ -432,7 +450,7 @@ func (c *LocalClient) JiraSetPriority(ctx context.Context, key, priority string)
 	if err := client.SetPriority(ctx, key, priority); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, key, domain.ArtifactStateIssueUpdated, jiraDetailsJSON(map[string]any{"priority": priority}))
+	c.recordJiraIssue(ctx, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"priority": priority}))
 	return nil
 }
 
@@ -471,11 +489,17 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([
 // them on empty either way — see ArtifactStore.Upsert). state + details_json
 // carry the most recent action — by design the row tracks the last action, not
 // the first (domain.Artifact).
-func (c *LocalClient) recordJiraIssue(ctx context.Context, key, state, detailsJSON string) {
+// action is the audit discriminator (issue_created / issue_transitioned /
+// issue_assigned / issue_updated) — finer-grained than the artifact's
+// created/updated state, which can't distinguish a transition from an assign from
+// a field edit. toState carries a transition's target status (the Jira status the
+// agent moved the ticket to), empty otherwise; the agent's exec transition can't
+// cheaply know the prior status, so fromState stays empty.
+func (c *LocalClient) recordJiraIssue(ctx context.Context, key, action, state, toState, detailsJSON string) {
 	if c.stores.Artifacts == nil || key == "" {
 		return
 	}
-	c.upsertJiraArtifact(ctx, domain.Artifact{
+	a := domain.Artifact{
 		Kind:        domain.ArtifactKindIssue,
 		Target:      key,
 		ExternalID:  key,
@@ -483,7 +507,8 @@ func (c *LocalClient) recordJiraIssue(ctx context.Context, key, state, detailsJS
 		State:       state,
 		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, key, ""),
 		DetailsJSON: detailsJSON,
-	})
+	}
+	c.upsertJiraArtifact(ctx, a, jiraAction(a, action, "", toState))
 }
 
 // recordJiraComment upserts a `comment` artifact keyed jira:comment:<id>. A
@@ -501,7 +526,7 @@ func (c *LocalClient) recordJiraComment(ctx context.Context, key, commentID, bod
 			"run", c.info.RunID, "issue", key)
 		return
 	}
-	c.upsertJiraArtifact(ctx, domain.Artifact{
+	a := domain.Artifact{
 		Kind:        domain.ArtifactKindComment,
 		Target:      key,
 		ExternalID:  commentID,
@@ -509,7 +534,8 @@ func (c *LocalClient) recordJiraComment(ctx context.Context, key, commentID, bod
 		State:       domain.ArtifactStateCommentPosted,
 		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindComment, commentID, ""),
 		DetailsJSON: jiraDetailsJSON(map[string]any{"body": jiraBodySnippet(body)}),
-	})
+	}
+	c.upsertJiraArtifact(ctx, a, jiraAction(a, domain.ActionIssueCommentPosted, "", ""))
 }
 
 // upsertJiraArtifact stamps the run attribution (run/org/team) + provider onto
@@ -517,7 +543,12 @@ func (c *LocalClient) recordJiraComment(ctx context.Context, key, commentID, bod
 // it never fails the agent's already-applied Jira action. The write routes the
 // same way every other exec choke-point write does (withWrite) — admin pool
 // for event-triggered runs (no user), a synthetic-claims tx for manual ones.
-func (c *LocalClient) upsertJiraArtifact(ctx context.Context, a domain.Artifact) {
+//
+// act is the external-action audit row appended in the SAME write as the
+// artifact (TFAC-483), under the org Jira service-account credential. Composed in
+// one tx on the manual path; two admin-pool writes on the event path. See
+// upsertGithubArtifact.
+func (c *LocalClient) upsertJiraArtifact(ctx context.Context, a domain.Artifact, act *domain.ExternalAction) {
 	if c.stores.Artifacts == nil {
 		return
 	}
@@ -525,15 +556,22 @@ func (c *LocalClient) upsertJiraArtifact(ctx context.Context, a domain.Artifact)
 	a.OrgID = c.info.OrgID
 	a.TeamID = c.info.TeamID
 	a.Provider = domain.ArtifactProviderJira
+	if act != nil {
+		c.stampActionIdentity(act)
+	}
 
 	err := c.withWrite(ctx,
 		func() error {
-			_, e := c.stores.Artifacts.UpsertSystem(ctx, c.info.OrgID, a)
-			return e
+			if _, e := c.stores.Artifacts.UpsertSystem(ctx, c.info.OrgID, a); e != nil {
+				return e
+			}
+			return c.recordActionSystem(ctx, act)
 		},
 		func(ts db.TxStores) error {
-			_, e := ts.Artifacts.Upsert(ctx, c.info.OrgID, a)
-			return e
+			if _, e := ts.Artifacts.Upsert(ctx, c.info.OrgID, a); e != nil {
+				return e
+			}
+			return recordActionTx(ctx, ts, c.info.OrgID, act)
 		},
 	)
 	if err != nil {
@@ -800,7 +838,9 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 		if identity == ghclient.IdentityApp {
 			// The bot's own review from a prior run — reuse it, and (re)record the
 			// artifact so it attributes to this run, the one now working the review.
-			c.recordGithubReview(ctx, client, owner, repo, number, existingID)
+			// No external write happened (the review already existed), so record NO
+			// review_started action — the audit log captures real writes only.
+			c.recordGithubReview(ctx, client, owner, repo, number, existingID, "")
 			return existingID, nil
 		}
 		// Real-user PAT (or an identity we couldn't determine): the existing
@@ -812,7 +852,7 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 	if err != nil {
 		return "", err
 	}
-	c.recordGithubReview(ctx, client, owner, repo, number, reviewID)
+	c.recordGithubReview(ctx, client, owner, repo, number, reviewID, domain.ActionReviewStarted)
 	return reviewID, nil
 }
 
@@ -823,7 +863,11 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 // best-effort for details_json context (reconciliation keys on it, TFAC-464); a
 // failure there degrades to an empty node id rather than dropping the artifact —
 // nothing in the approval flow reads it, and the review row is what matters.
-func (c *LocalClient) recordGithubReview(ctx context.Context, client *ghclient.Client, owner, repo string, number int, reviewID string) {
+// action is the external-action to record (domain.ActionReviewStarted on a fresh
+// create) or "" when the artifact is being re-recorded without a new GitHub write
+// (the App-identity reuse of a prior run's pending review — no review_started, the
+// review already existed).
+func (c *LocalClient) recordGithubReview(ctx context.Context, client *ghclient.Client, owner, repo string, number int, reviewID, action string) {
 	if c.stores.Artifacts == nil {
 		return
 	}
@@ -835,7 +879,12 @@ func (c *LocalClient) recordGithubReview(ctx context.Context, client *ghclient.C
 	if pr, perr := client.GetPRBasic(ctx, owner, repo, number); perr == nil && pr != nil {
 		nodeID = pr.NodeID
 	}
-	c.upsertGithubArtifact(ctx, domain.NewReviewArtifact(owner+"/"+repo, number, nodeID, reviewID))
+	a := domain.NewReviewArtifact(owner+"/"+repo, number, nodeID, reviewID)
+	var act *domain.ExternalAction
+	if action != "" {
+		act = githubAction(a, action, "", "")
+	}
+	c.upsertGithubArtifact(ctx, a, act)
 }
 
 // GithubAddPendingReviewComment adds one inline comment to an existing pending
@@ -984,14 +1033,15 @@ func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo strin
 			"run", c.info.RunID, "repo", owner+"/"+repo, "pr", number)
 		return
 	}
-	c.upsertGithubArtifact(ctx, domain.Artifact{
+	a := domain.Artifact{
 		Kind:       domain.ArtifactKindComment,
 		Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
 		ExternalID: strconv.Itoa(commentID),
 		URL:        htmlURL,
 		State:      domain.ArtifactStateCommentPosted,
 		DedupKey:   githubCommentDedupKey(commentID),
-	})
+	}
+	c.upsertGithubArtifact(ctx, a, githubAction(a, domain.ActionCommentPosted, "", ""))
 }
 
 // recordGithubCommentState upserts the comment artifact for an edit (state
@@ -1011,12 +1061,19 @@ func (c *LocalClient) recordGithubCommentState(ctx context.Context, commentID in
 			"run", c.info.RunID, "state", state)
 		return
 	}
-	c.upsertGithubArtifact(ctx, domain.Artifact{
+	// The audit action follows the state: a top-level comment edit re-stamps the
+	// row posted (→ comment_edited), a delete flips it deleted (→ comment_deleted).
+	action := domain.ActionCommentEdited
+	if state == domain.ArtifactStateCommentDeleted {
+		action = domain.ActionCommentDeleted
+	}
+	a := domain.Artifact{
 		Kind:       domain.ArtifactKindComment,
 		ExternalID: strconv.Itoa(commentID),
 		State:      state,
 		DedupKey:   githubCommentDedupKey(commentID),
-	})
+	}
+	c.upsertGithubArtifact(ctx, a, githubAction(a, action, "", ""))
 }
 
 // --- github PR artifact recording ---
@@ -1049,9 +1106,11 @@ func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, bas
 			"run", c.info.RunID, "repo", owner+"/"+repo)
 		return
 	}
-	c.upsertGithubArtifact(ctx, domain.NewPullRequestArtifact(
+	a := domain.NewPullRequestArtifact(
 		owner+"/"+repo, number, nodeID, head, base, htmlURL, title, body, draft,
-	))
+	)
+	// to=the created state (draft/open) so the feed can read "created as draft".
+	c.upsertGithubArtifact(ctx, a, githubAction(a, domain.ActionPRCreated, "", a.State))
 }
 
 // githubCommentDedupKey is the stable key every comment action upserts on:
@@ -1065,7 +1124,14 @@ func githubCommentDedupKey(commentID int) string {
 // it never fails the agent's already-applied GitHub action. The write routes the
 // same way every other exec choke-point write does (withWrite) — admin pool for
 // event-triggered runs (no user), a synthetic-claims tx for manual ones.
-func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifact) {
+//
+// act is the external-action audit row to append in the SAME write as the
+// artifact (the audit log of record, TFAC-483) — nil when this upsert carries no
+// distinct external action (a review reuse that re-records the artifact without a
+// new GitHub write). On the manual path both compose in one synthetic-claims tx,
+// so a Record failure rolls the artifact back too (they agree); on the event path
+// they are two admin-pool writes (no admin tx), both best-effort.
+func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifact, act *domain.ExternalAction) {
 	if c.stores.Artifacts == nil {
 		return
 	}
@@ -1073,19 +1139,122 @@ func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifac
 	a.OrgID = c.info.OrgID
 	a.TeamID = c.info.TeamID
 	a.Provider = domain.ArtifactProviderGitHub
+	if act != nil {
+		c.stampActionIdentity(act)
+	}
 
 	err := c.withWrite(ctx,
 		func() error {
-			_, e := c.stores.Artifacts.UpsertSystem(ctx, c.info.OrgID, a)
-			return e
+			if _, e := c.stores.Artifacts.UpsertSystem(ctx, c.info.OrgID, a); e != nil {
+				return e
+			}
+			return c.recordActionSystem(ctx, act)
 		},
 		func(ts db.TxStores) error {
-			_, e := ts.Artifacts.Upsert(ctx, c.info.OrgID, a)
-			return e
+			if _, e := ts.Artifacts.Upsert(ctx, c.info.OrgID, a); e != nil {
+				return e
+			}
+			return recordActionTx(ctx, ts, c.info.OrgID, act)
 		},
 	)
 	if err != nil {
 		agenthostLog.Warn("github artifact recording failed (action already applied)",
 			"run", c.info.RunID, "kind", a.Kind, "target", a.Target, "error", err)
 	}
+}
+
+// --- external-action recording (TFAC-483) ---
+//
+// The bot funnels compose an append-only external_actions row alongside the
+// artifact upsert (the audit log of record for every org-credential write). The
+// credential is the org GitHub App / org Jira service account by construction —
+// exec resolves the org's system credential, never a user's own — so every bot
+// write qualifies. run_id is this run, actor_user_id is the kicking-off user
+// (empty → NULL for an event-triggered run, an autonomous system action).
+
+// stampActionIdentity fills the run/org/team/actor common to every
+// bot-attributed action from this client's RunInfo. The action-specific fields
+// (provider, action, target, credential, from/to, dedup) are set by the caller.
+func (c *LocalClient) stampActionIdentity(act *domain.ExternalAction) {
+	act.OrgID = c.info.OrgID
+	act.TeamID = c.info.TeamID
+	act.RunID = c.info.RunID
+	act.ActorUserID = c.info.UserID // empty for event-triggered → SQL NULL
+}
+
+// recordActionSystem appends act on the admin pool (event-triggered runs). A nil
+// act — or a partial test wiring with no ExternalActions store — is a no-op.
+func (c *LocalClient) recordActionSystem(ctx context.Context, act *domain.ExternalAction) error {
+	if act == nil || c.stores.ExternalActions == nil {
+		return nil
+	}
+	return c.stores.ExternalActions.RecordSystem(ctx, c.info.OrgID, *act)
+}
+
+// recordActionTx appends act inside the caller's synthetic-claims tx (manual
+// runs), composing with the artifact upsert. A nil act is a no-op.
+func recordActionTx(ctx context.Context, ts db.TxStores, orgID string, act *domain.ExternalAction) error {
+	if act == nil || ts.ExternalActions == nil {
+		return nil
+	}
+	return ts.ExternalActions.Record(ctx, orgID, *act)
+}
+
+// githubAction builds the external-action row for a GitHub write from the
+// artifact's coordinates. detail_json is left empty — the rich payload (PR body,
+// review draft) lives on the artifact; the audit row carries who/what/when/from→to.
+func githubAction(a domain.Artifact, action, from, to string) *domain.ExternalAction {
+	return &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderGitHub,
+		Action:     action,
+		Target:     a.Target,
+		ExternalID: a.ExternalID,
+		URL:        a.URL,
+		FromState:  from,
+		ToState:    to,
+		Credential: domain.CredentialGitHubApp,
+	}
+}
+
+// jiraAction builds the external-action row for a Jira write, carrying the
+// artifact's concise details (status / assignee / fields / comment snippet) into
+// the audit detail_json.
+func jiraAction(a domain.Artifact, action, from, to string) *domain.ExternalAction {
+	return &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderJira,
+		Action:     action,
+		Target:     a.Target,
+		ExternalID: a.ExternalID,
+		URL:        a.URL,
+		FromState:  from,
+		ToState:    to,
+		Credential: domain.CredentialJiraOrg,
+		DetailJSON: a.DetailsJSON,
+	}
+}
+
+// branchPushAction builds the ActionBranchPushed row for a branch artifact, or
+// nil for any other kind (a review-draft snapshot is not a fresh external write).
+// The dedup key is deterministic — branch:<run>:<ref>:<sha> — so the git pre-push
+// hook and the git-proxy backstop, which both observe the same push, collapse to
+// one row; a force-push (new sha) is recorded distinctly. The push lands on
+// GitHub under the org App credential.
+func (c *LocalClient) branchPushAction(a domain.Artifact) *domain.ExternalAction {
+	if a.Kind != domain.ArtifactKindBranch {
+		return nil
+	}
+	sha := domain.ParseBranchArtifactSHA(a.DetailsJSON)
+	act := &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderGitHub,
+		Action:     domain.ActionBranchPushed,
+		Target:     a.Target,
+		ExternalID: a.ExternalID, // the ref (refs/heads/...)
+		URL:        a.URL,
+		ToState:    domain.ArtifactStateBranchPushed,
+		Credential: domain.CredentialGitHubApp,
+		DedupKey:   domain.BranchPushDedupKey(c.info.RunID, a.ExternalID, sha),
+		DetailJSON: a.DetailsJSON, // {"sha":...,"new":...}
+	}
+	c.stampActionIdentity(act)
+	return act
 }

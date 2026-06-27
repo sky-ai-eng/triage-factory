@@ -234,7 +234,7 @@ func TestRunJiraMirror_InProgress_AssignsAndTransitions(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 1 {
@@ -252,7 +252,7 @@ func TestRunJiraMirror_Done_TransitionsOnly_NoAssign(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), true)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), true)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 0 {
@@ -271,7 +271,7 @@ func TestRunJiraMirror_Idempotent_AlreadyInBucket_NoWrites(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 0 || len(transitions) != 0 {
@@ -288,9 +288,9 @@ func TestRunJiraMirror_InReviewCollapsesToInProgress_NoDistinctMove(t *testing.T
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
 	// First in-progress (board in_progress) — assign + transition.
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 	// Board bounces to in_review, which also maps to InProgressCanonical.
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 1 {
@@ -306,7 +306,7 @@ func TestRunJiraMirror_InReviewCollapsesToInProgress_NoDistinctMove(t *testing.T
 func TestRunJiraMirror_NoResolver_NoOp(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	// No SetJiraResolver → getJiraResolver returns nil.
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 	// Reaching here without a panic / outbound call is the assertion.
 }
 
@@ -319,7 +319,7 @@ func TestRunJiraMirror_InProgress_SkipsWhenAlreadyDone(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
 		t.Errorf("assigns=%d transitions=%v, want no writes (forward-only: a Done ticket is never moved back)", assigns, transitions)
@@ -341,8 +341,8 @@ func TestRunJiraMirror_ConcurrentInProgressAndDone_EndsInDone(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", rule, false) }()
-	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", rule, true) }()
+	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", rule, false) }()
+	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", rule, true) }()
 	wg.Wait()
 
 	if got := fake.currentStatus(); got != "Done" {
@@ -382,7 +382,7 @@ func TestRunJiraMirror_InProgress_SkipsOnUnreadableState(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
 		t.Errorf("assigns=%d transitions=%v, want no writes (unreadable state must not regress a possibly-Done ticket)", assigns, transitions)
@@ -400,7 +400,7 @@ func TestRunJiraMirror_Done_ProceedsWhenStateUnreadable(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), true)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), true)
 
 	if _, transitions := fake.snapshot(); len(transitions) != 1 || transitions[0] != "Done" {
 		t.Errorf("transitions = %v, want [Done] (unreadable state must not prevent the done transition)", transitions)
@@ -416,7 +416,7 @@ func TestRunJiraMirror_InProgress_AssignFails_SkipsTransition(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	if _, transitions := fake.snapshot(); len(transitions) != 0 {
 		t.Errorf("transitions = %v, want none (a failed assign must skip the transition)", transitions)

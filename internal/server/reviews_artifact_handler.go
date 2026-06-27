@@ -198,14 +198,20 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 
 	cleanupCtx := context.WithoutCancel(r.Context())
 
-	// Step 1: flip the artifact pending → submitted.
+	// Step 1: flip the artifact pending → submitted, and compose the audit row
+	// with the flip (TFAC-483). The org-App SubmitExistingReview is a
+	// human-authorized, org-executed write — run_id is the drafting run, actor is
+	// the approver. Atomic with the flip.
 	submitted := *art
 	submitted.State = domain.ArtifactStateReviewSubmitted
 	if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Artifacts.Upsert(cleanupCtx, orgID, submitted)
-		return e
+		if _, e := tx.Artifacts.Upsert(cleanupCtx, orgID, submitted); e != nil {
+			return e
+		}
+		return tx.ExternalActions.Record(cleanupCtx, orgID,
+			githubApprovalAction(art, userID, domain.ActionReviewSubmitted, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted))
 	}); err != nil {
-		artifactsLog.Warn("flip review artifact to submitted failed", "artifact", art.ID, "error", err)
+		artifactsLog.Warn("flip review artifact to submitted + record action failed", "artifact", art.ID, "error", err)
 	}
 
 	// Step 2: human verdict capture — diff the agent's proposed draft against the

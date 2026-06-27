@@ -117,6 +117,10 @@ func New(conn *sql.DB) db.Stores {
 		// AccessChangeLog is app-pool in Postgres; SQLite collapses to the one
 		// connection (N=1, no RLS). See TFAC-471.
 		AccessChangeLog: newAccessChangeLogStore(conn),
+		// ExternalActions holds both pools in Postgres; SQLite collapses to the
+		// one connection (N=1, no RLS). Append-only audit log of org-credential
+		// external writes. See TFAC-483.
+		ExternalActions: newExternalActionStore(conn),
 		// Spend is app-pool (RLS-scoped) in Postgres; SQLite collapses to the one
 		// connection (N=1, no RLS). Read-only view over llm_spend. See TFAC-472.
 		Spend: newSpendStore(conn),

@@ -108,7 +108,13 @@ func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 		jiraLog.Warn("mirror: no in_progress rule for project, skipping", "issue", task.EntitySourceID)
 		return
 	}
-	go s.runJiraMirror(orgID, task.EntitySourceID, *rule, false)
+	// teamID scopes the audit row to the bot-owned task's team (TFAC-483). Empty
+	// for a team-less task → the action still lands in the org governance feed.
+	teamID := ""
+	if task.TeamID != nil {
+		teamID = *task.TeamID
+	}
+	go s.runJiraMirror(orgID, task.EntitySourceID, teamID, *rule, false)
 }
 
 // mirrorJiraInProgressForTask loads the task and re-asserts the InProgress
@@ -158,7 +164,7 @@ func (s *Spawner) mirrorJiraInProgressForTask(ctx context.Context, orgID, taskID
 //
 // The whole sequence is bounded by jiraMirrorTimeout so a slow ticket releases
 // the lock rather than pinning it.
-func (s *Spawner) runJiraMirror(orgID, issueKey string, rule domain.JiraProjectStatusRules, done bool) {
+func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.JiraProjectStatusRules, done bool) {
 	resolver := s.getJiraResolver()
 	if resolver == nil {
 		return
@@ -195,7 +201,14 @@ func (s *Spawner) runJiraMirror(orgID, issueKey string, rule domain.JiraProjectS
 		}
 		if err := client.TransitionTo(ctx, issueKey, rule.DoneCanonical); err != nil {
 			jiraLog.Warn("mirror: transition to done failed", "issue", issueKey, "target", rule.DoneCanonical, "error", err)
+			return
 		}
+		// from is the status read before the move (nil state → unknown/"").
+		from := ""
+		if state != nil {
+			from = state.StatusName
+		}
+		s.recordMirrorAction(ctx, orgID, issueKey, teamID, domain.ActionIssueTransitioned, from, rule.DoneCanonical)
 		return
 	}
 
@@ -225,11 +238,42 @@ func (s *Spawner) runJiraMirror(orgID, issueKey string, rule domain.JiraProjectS
 			jiraLog.Warn("mirror: assign to service account failed", "issue", issueKey, "error", err)
 			return
 		}
+		s.recordMirrorAction(ctx, orgID, issueKey, teamID, domain.ActionIssueAssigned, "", "")
 	}
 	if !rule.InProgressContains(state.StatusName) {
 		if err := client.TransitionTo(ctx, issueKey, rule.InProgressCanonical); err != nil {
 			jiraLog.Warn("mirror: transition to in-progress failed", "issue", issueKey, "target", rule.InProgressCanonical, "error", err)
+			return
 		}
+		s.recordMirrorAction(ctx, orgID, issueKey, teamID, domain.ActionIssueTransitioned, state.StatusName, rule.InProgressCanonical)
+	}
+}
+
+// recordMirrorAction appends one external_actions row for a board→Jira mirror
+// write (TFAC-483): a system/bot action under the org Jira service-account
+// credential, with no human actor (actor_user_id NULL). team_id scopes it to the
+// bot-owned task's team. The detached mirror holds no run handle, so run_id is
+// left NULL, and it doesn't resolve the issue's browse URL (the issue key is the
+// target). Admin pool (RecordSystem — no JWT claims). Best-effort: a recording
+// failure is logged and swallowed so it never unwinds the Jira move it observed,
+// and nil-safe for a partial test Stores.
+func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, issueKey, teamID, action, from, to string) {
+	if s.externalActions == nil {
+		return
+	}
+	err := s.externalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
+		TeamID:     teamID,
+		Provider:   domain.ArtifactProviderJira,
+		Action:     action,
+		Target:     issueKey,
+		ExternalID: issueKey,
+		FromState:  from,
+		ToState:    to,
+		Credential: domain.CredentialJiraOrg,
+	})
+	if err != nil {
+		jiraLog.Warn("mirror: external-action recording failed (Jira move already applied)",
+			"issue", issueKey, "action", action, "error", err)
 	}
 }
 

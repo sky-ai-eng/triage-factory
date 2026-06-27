@@ -246,6 +246,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// the audit row commits or rolls back atomically with the action.
 		// access_change_log_all RLS gates the in-tx write by org. See TFAC-471.
 		AccessChangeLog: newAccessChangeLogStore(tx),
+		// ExternalActions: app-side Record routes through the tx so the audit row
+		// commits or rolls back atomically with the action it records (the server
+		// approval flips, manual bot runs); admin half stays pinned to s.admin so
+		// RecordSystem + ListByOrgSystem inside WithTx route outside the tx — same
+		// autonomous-commit shape Artifacts / Events use for their admin halves.
+		ExternalActions: newExternalActionStore(tx, s.admin),
 		// Spend: app half is the claims-set tx (ListSpend / SpendByCategory run
 		// under the surrounding claims, so the security_invoker view's base-table
 		// RLS scopes them to the requesting user); admin half stays pinned to
