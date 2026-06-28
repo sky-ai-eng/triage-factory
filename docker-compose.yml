@@ -206,26 +206,33 @@ services:
   # single-identity s3.json from the same TF_BLOB_ACCESS_KEY / TF_BLOB_SECRET_KEY
   # the TF binary reads: there's no second credential to drift, and the bundled
   # store is never reachable without creds on the compose network. The wrapper
-  # writes that config as root, then execs the image's own /entrypoint.sh, which
-  # keeps its /data chown + su-exec drop to the non-root `seaweed` user + FIPS
-  # setup. $$ defers expansion to the in-container shell; the secret lives only
-  # in the container env + tmpfs, never on disk. Keep the creds hex (see
-  # .env.example) so they stay JSON-safe inside the templated config.
+  # writes that config as root to a tmpfs (/run/seaweedfs, declared below), then
+  # execs the image's own /entrypoint.sh, which keeps its /data chown + su-exec
+  # drop to the non-root `seaweed` user + FIPS setup. $$ defers expansion to the
+  # in-container shell. Because the config lives on tmpfs, the templated secret
+  # stays in memory and never lands on the container's writable layer — the same
+  # exposure as the env var it's built from. Keep the creds hex (see .env.example)
+  # so they stay JSON-safe inside the config.
   seaweedfs:
     image: chrislusf/seaweedfs:4.36
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eu
-        cat > /etc/seaweedfs/s3.json <<EOF
+        cat > /run/seaweedfs/s3.json <<EOF
         {"identities":[{"name":"tf","credentials":[{"accessKey":"$$TF_BLOB_ACCESS_KEY","secretKey":"$$TF_BLOB_SECRET_KEY"}],"actions":["Admin","Read","Write","List","Tagging"]}]}
         EOF
-        exec /entrypoint.sh server -s3 -s3.config=/etc/seaweedfs/s3.json
+        exec /entrypoint.sh server -s3 -s3.config=/run/seaweedfs/s3.json
     environment:
       TF_BLOB_ACCESS_KEY: ${TF_BLOB_ACCESS_KEY:?missing TF_BLOB_ACCESS_KEY (see .env.example)}
       TF_BLOB_SECRET_KEY: ${TF_BLOB_SECRET_KEY:?missing TF_BLOB_SECRET_KEY (see .env.example)}
     volumes:
       - seaweed-data:/data
+    # The s3.json identity is written here (see the auth note above), so the
+    # templated secret stays in memory and never persists on the container's
+    # writable layer.
+    tmpfs:
+      - /run/seaweedfs
     # No published ports. The S3 API (8333) is reached only over the compose
     # network as http://seaweedfs:8333 — by TF and the bucket sidecar. Nothing
     # needs it on the host (the docs smoke test runs through the sidecar), so
