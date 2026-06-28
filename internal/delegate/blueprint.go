@@ -377,7 +377,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	}
 
 	// Paused blueprint: rebuild just enough cfg for terminateBlueprint's worktree
-	// cleanup (mirrors ResumeBlueprintAfterApproval — owner/repo/prNumber
+	// cleanup (mirrors finalizeParkedBlueprintOnCancel — owner/repo/prNumber
 	// aren't persisted on blueprint_runs, so CleanupPRConfig is skipped).
 	task, err := s.tasks.GetSystem(context.Background(), orgID, cr.TaskID)
 	if err != nil || task == nil {
@@ -441,7 +441,7 @@ func (s *Spawner) finalizeParkedBlueprintOnCancel(ctx context.Context, orgID str
 			_, _ = s.blueprints.MarkRunStatusSystem(ctx, orgID, cr.ID, domain.BlueprintRunStatusCancelled, reason, run.BlueprintStepIndex)
 		}
 		// Reconstruct just enough cfg for the worktree cleanup (mirrors
-		// CancelBlueprint / ResumeBlueprintAfterApproval — owner/repo/prNumber
+		// CancelBlueprint — owner/repo/prNumber
 		// aren't persisted on blueprint_runs, so CleanupPRConfig is skipped).
 		cfg := runConfig{orgID: orgID, wtPath: cr.WorktreePath}
 		if task, _ := s.tasks.GetSystem(ctx, orgID, cr.TaskID); task != nil && task.EntitySource == "github" {
