@@ -1744,6 +1744,16 @@ CREATE TABLE public.team_settings (
     -- (org_settings.max_daily_cost_usd) remaining the safety net. Mirrors that org
     -- cap's nullable shape; in-flight runs are unaffected and the read fails open.
     max_daily_cost_usd double precision,
+    -- Per-team branch-name template (TFAC-498): a free-text convention shown to
+    -- the delegated agent as envelope guidance (NOT enforced — the push gate is
+    -- the enforcement point). The literal "<ticket-id>" is substituted with the
+    -- run's ticket id at prompt-render time. NOT NULL with a literal DEFAULT so
+    -- partial upserts (e.g. SetDailyCostCapSystem) materialize it without the
+    -- writer naming the column; the app coalesces an empty write to the default.
+    -- Rolled into the baseline (not a forward migration) because multi-mode /
+    -- Postgres is net-new and unshipped; the SQLite tree, which HAS shipped,
+    -- carries the equivalent forward migration 202606280001_team_branch_template.sql.
+    branch_template text DEFAULT 'tfac/<ticket-id>'::text NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 

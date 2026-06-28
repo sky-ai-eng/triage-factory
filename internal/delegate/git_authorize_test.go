@@ -159,6 +159,74 @@ func TestGitAuthorizeDecision_ProtectedAndDetached(t *testing.T) {
 	}
 }
 
+// TestGitAuthorizeDecision_UniversalProtectionWithoutProfile pins that main and
+// master are refused even when the repo has no profile row to name them (the
+// universal protected set), so an unprofiled repo can't be pushed to on its
+// default branch. A non-default feature branch on the same repo is still
+// authorized.
+func TestGitAuthorizeDecision_UniversalProtectionWithoutProfile(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := sqlitestore.New(database)
+	ctx := context.Background()
+	seedRun(t, database, "run-3", "sess", "/tmp/wt")
+	info := agenthost.RunInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, RunID: "run-3"}
+
+	// Track + materialize a repo with NO repo_profiles row.
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+		{Owner: "acme", Repo: "noprofile"},
+	}); err != nil {
+		t.Fatalf("track repo: %v", err)
+	}
+	if _, _, err := stores.RunWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.RunWorktree{
+		RunID: "run-3", RepoID: "acme/noprofile", Path: "/tmp/np", FeatureBranch: "ignored",
+	}); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+
+	for _, base := range []string{"main", "master"} {
+		stubLiveBranch(t, map[string]string{"/tmp/np": base})
+		if d, err := gitAuthorizeDecision(ctx, stores, info, "acme", "noprofile"); err != nil || !d.Allowed || len(d.AllowedRefs) != 0 {
+			t.Errorf("on %q without a profile: decision=%+v err=%v; want Allowed=true, no refs", base, d, err)
+		}
+	}
+
+	// A feature branch is still authorized.
+	stubLiveBranch(t, map[string]string{"/tmp/np": "fix/thing"})
+	if d, err := gitAuthorizeDecision(ctx, stores, info, "acme", "noprofile"); err != nil || !equalRefs(d.AllowedRefs, []string{"refs/heads/fix/thing"}) {
+		t.Errorf("on feature branch without a profile: decision=%+v err=%v; want refs/heads/fix/thing", d, err)
+	}
+}
+
+// TestGitAuthorizeDecision_FailsClosedWithoutReposStore pins that a wiring
+// missing the Repos store denies — it can't name the protected refs, so it must
+// not fall through to authorizing whatever branch the checkout is on.
+func TestGitAuthorizeDecision_FailsClosedWithoutReposStore(t *testing.T) {
+	database := newDelegateTestDB(t)
+	full := sqlitestore.New(database)
+	ctx := context.Background()
+	seedRun(t, database, "run-4", "sess", "/tmp/wt")
+	info := agenthost.RunInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, RunID: "run-4"}
+
+	if err := full.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+		{Owner: "acme", Repo: "api"},
+	}); err != nil {
+		t.Fatalf("track repo: %v", err)
+	}
+	if _, _, err := full.RunWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.RunWorktree{
+		RunID: "run-4", RepoID: "acme/api", Path: "/tmp/api4", FeatureBranch: "ignored",
+	}); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	stubLiveBranch(t, map[string]string{"/tmp/api4": "agent/feature"})
+
+	// Repos omitted from the wiring — even a clean feature-branch checkout must
+	// deny, because the gate can't determine the protected set.
+	partial := db.Stores{TeamGitHubRepos: full.TeamGitHubRepos, RunWorktrees: full.RunWorktrees}
+	if d, err := gitAuthorizeDecision(ctx, partial, info, "acme", "api"); err != nil || d.Allowed {
+		t.Errorf("missing Repos store: decision=%+v err=%v; want deny (fail closed)", d, err)
+	}
+}
+
 func equalRefs(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

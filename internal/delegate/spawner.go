@@ -615,10 +615,16 @@ func (s *Spawner) gitProxyConfigFor(ctx context.Context, info agenthost.RunInfo,
 // creates its own branch; the repo's base / default branch is never authorized
 // even when the checkout sits on it. Reads live each call, so untracking a
 // repo, removing a worktree, or switching branches propagates to the next
-// request with no re-mint. Fails closed (deny) when the stores it needs are
-// absent — a misconfigured gate must never allow-all.
+// request with no re-mint. Fails closed (deny) when a store it needs is absent
+// or a lookup it depends on errors — a misconfigured or degraded gate must
+// never allow-all, and in particular must never authorize a base/protected ref
+// just because the profile that names them couldn't be read.
 func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.RunInfo, owner, repo string) (gitproxy.Decision, error) {
-	if stores.TeamGitHubRepos == nil || stores.RunWorktrees == nil {
+	// Repos is required: it names the repo's protected refs. Without it we can't
+	// honor the "base/protected refs are refused" guarantee, so a wiring missing
+	// it must deny rather than fall through to authorizing whatever branch the
+	// checkout is on (which could be the base branch).
+	if stores.TeamGitHubRepos == nil || stores.RunWorktrees == nil || stores.Repos == nil {
 		return gitproxy.Decision{Allowed: false}, nil
 	}
 	tracks, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, info.TeamID, owner, repo)
@@ -635,10 +641,14 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	repoID := owner + "/" + repo
 
 	// Base / protected refs are never pushable, regardless of what the worktree
-	// is checked out on. Best-effort: a missing/unreadable profile just means no
-	// protected filtering — the default checkout is detached, so the live branch
-	// is rarely a base branch anyway.
-	protected := protectedBranches(ctx, stores, info.OrgID, repoID)
+	// is checked out on. A failure to resolve them fails the whole decision
+	// closed (proxy denies) rather than silently authorizing — being unable to
+	// tell whether the live branch IS the base branch is exactly when we must
+	// not allow the push.
+	protected, err := protectedBranches(ctx, stores, info.OrgID, repoID)
+	if err != nil {
+		return gitproxy.Decision{}, err
+	}
 
 	var allowedRefs []string
 	found := false
@@ -659,27 +669,32 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	return gitproxy.Decision{Allowed: true, AllowedRefs: allowedRefs}, nil
 }
 
-// protectedBranches returns the refs that must never be pushed for a repo — its
-// default branch and the user-configured base branch. Empty when the profile
-// can't be read (Repos store absent, lookup error, or no profile yet); the
-// caller treats that as "no protected filtering," which is safe because the
-// generalized default checkout is detached (no live branch to authorize).
-func protectedBranches(ctx context.Context, stores db.Stores, orgID, repoID string) map[string]bool {
-	out := map[string]bool{}
-	if stores.Repos == nil {
-		return out
-	}
+// protectedBranches returns the refs that must never be pushed for a repo. The
+// universal default-branch names (main, master) are ALWAYS protected, so a repo
+// that has no profile yet — or whose profile omits the default — still can't be
+// pushed to on them; the repo's recorded default branch and the user-configured
+// base branch are added on top when the profile is readable.
+//
+// A profile lookup error is returned (not swallowed): the caller fails the
+// decision closed, since authorizing a push without knowing the protected set
+// risks allowing a base-branch push. A nil profile (configured-but-unprofiled
+// repo) is NOT an error — the universal set still applies.
+func protectedBranches(ctx context.Context, stores db.Stores, orgID, repoID string) (map[string]bool, error) {
+	// Universal protected names, refused regardless of profile state.
+	out := map[string]bool{"main": true, "master": true}
 	profile, err := stores.Repos.GetSystem(ctx, orgID, repoID)
-	if err != nil || profile == nil {
-		return out
+	if err != nil {
+		return nil, fmt.Errorf("resolve protected branches for %s: %w", repoID, err)
 	}
-	if profile.DefaultBranch != "" {
-		out[profile.DefaultBranch] = true
+	if profile != nil {
+		if profile.DefaultBranch != "" {
+			out[profile.DefaultBranch] = true
+		}
+		if profile.BaseBranch != "" {
+			out[profile.BaseBranch] = true
+		}
 	}
-	if profile.BaseBranch != "" {
-		out[profile.BaseBranch] = true
-	}
-	return out
+	return out, nil
 }
 
 // gitPushRecorder builds the git proxy's RecordPush callback for one run. The
