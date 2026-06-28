@@ -446,9 +446,11 @@ export default function Board() {
               ].includes(r.Status),
             ) ?? stepRuns[stepRuns.length - 1]
           nextRuns[task.id] = activeStep
-          // The aggregated payload carries the primary (newest) run's
-          // transcript; for a sequential chain that's the active step. If they
-          // differ, the WS agent_message path seeds the active step shortly.
+          // messagesByRun is keyed by each task's PRIMARY (newest-started) run.
+          // For a sequential chain the most recently started step IS the active
+          // step, so activeStep.ID === runs[0].ID and this lookup hits. If they
+          // ever differ, the WS agent_message handler seeds the active step
+          // shortly — keep this keyed by activeStep.ID so it stays aligned.
           const msgs = messagesByRun[activeStep.ID]
           if (msgs) nextMessages[activeStep.ID] = msgs
           chainSeeds.push(

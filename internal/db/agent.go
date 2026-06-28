@@ -194,10 +194,13 @@ type AgentRunStore interface {
 	ListForTask(ctx context.Context, orgID, taskID string) ([]domain.AgentRun, error)
 
 	// ListForTasks is the batched form of ListForTask: every run for
-	// any of the given task IDs in one query, ordered started_at DESC.
-	// The Board's aggregated agent-run fetch groups the flat result by
-	// run.TaskID, so a board with N tasks costs one query instead of N.
-	// Empty taskIDs returns nil. MemoryMissing derived per Get.
+	// any of the given task IDs, each task's runs newest-first
+	// (started_at DESC). The Board's aggregated agent-run fetch groups
+	// the flat result by run.TaskID, so a board with N tasks costs one
+	// read instead of N. Only per-task order is guaranteed — order
+	// across distinct tasks is unspecified (the SQLite read chunks its
+	// IN-list to stay under the variable limit). Empty taskIDs returns
+	// nil. MemoryMissing derived per Get.
 	ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.AgentRun, error)
 
 	// PendingApprovalIDForTask returns the id of the (single)
@@ -289,10 +292,12 @@ type AgentRunStore interface {
 	Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error)
 
 	// MessagesForRuns is the batched form of Messages: every message
-	// for any of the given run IDs as one flat slice, ordered
-	// (run_id, id) so the caller can group by RunID with per-run order
-	// preserved. Backs the Board's aggregated include=messages read.
-	// Empty runIDs returns nil.
+	// for any of the given run IDs as one flat slice. Each run's
+	// messages are contiguous and in insertion order (id ASC), so the
+	// caller groups by RunID with per-run order preserved; order across
+	// distinct runs is unspecified (the SQLite read chunks its IN-list).
+	// Backs the Board's aggregated include=messages read. Empty runIDs
+	// returns nil.
 	MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.AgentMessage, error)
 
 	// TokenTotals sums token usage across all assistant messages

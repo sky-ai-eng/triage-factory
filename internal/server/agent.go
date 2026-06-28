@@ -671,6 +671,11 @@ const maxBatchTaskIDs = 500
 // task, matching the single-task path's latestRun; this is exactly the data the
 // Board seeds onto each card, now in one round-trip instead of 2–3 per task.
 // `messages` is omitted unless include=messages.
+//
+// Reading every task in one WithTx also makes the snapshot internally
+// consistent: the old per-task serial loop read each task at a different
+// transaction boundary, so a status change mid-refresh could return some tasks
+// in the old state and some in the new. One tx removes that flicker class.
 func (ag *agentHandler) handleAgentRunsBatched(w http.ResponseWriter, r *http.Request, orgID, userID, raw string) {
 	taskIDs := splitCommaList(raw)
 	if len(taskIDs) == 0 {

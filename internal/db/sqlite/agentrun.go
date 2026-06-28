@@ -431,9 +431,9 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 	// ?-placeholder IN list (SQLite has no array bind), mirroring
 	// artifactStore.ListByRuns, chunked to stay inside SQLite's variable
 	// limit (chunkIDs). Each task_id falls in exactly one chunk, so a task's
-	// runs are returned contiguously and newest-first within the merged
-	// slice — which is all the caller (group-by-task) relies on; global order
-	// across tasks is unspecified. Same projection as ListForTask.
+	// runs are returned contiguously and newest-first among themselves
+	// (order ACROSS tasks is chunk order, not started_at) — which is all the
+	// caller, grouping by run.TaskID, relies on. Same projection as ListForTask.
 	var runs []domain.AgentRun
 	for _, chunk := range chunkIDs(taskIDs) {
 		placeholders := make([]string, len(chunk))
