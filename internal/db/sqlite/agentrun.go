@@ -421,6 +421,45 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 	return runs, rows.Err()
 }
 
+func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.AgentRun, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if len(taskIDs) == 0 {
+		return nil, nil
+	}
+	// ?-placeholder IN list (SQLite has no array bind), mirroring
+	// artifactStore.ListByRuns. Same projection as ListForTask; the
+	// caller groups the flat result by run.TaskID.
+	placeholders := make([]string, len(taskIDs))
+	args := make([]any, 0, len(taskIDs))
+	for i, id := range taskIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+sqliteRunColumns+`
+		FROM runs r
+		LEFT JOIN run_memory rm ON rm.run_id = r.id
+		WHERE r.task_id IN (`+strings.Join(placeholders, ", ")+`)
+		ORDER BY r.started_at DESC
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []domain.AgentRun
+	for rows.Next() {
+		var r domain.AgentRun
+		if err := scanAgentRunRows(rows, &r); err != nil {
+			return nil, err
+		}
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
 func (s *agentRunStore) PendingApprovalIDForTask(ctx context.Context, orgID, taskID string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
@@ -747,20 +786,13 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 	return result.LastInsertId()
 }
 
-func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
-		       model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at
-		FROM run_messages WHERE run_id = ? ORDER BY id ASC
-	`, runID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+const sqliteMessageColumns = `id, run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
+	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at`
 
+// scanAgentMessageRows drains a run_messages result set selecting
+// sqliteMessageColumns into domain.AgentMessage values. Shared by the
+// single-run Messages and the batched MessagesForRuns.
+func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 	var messages []domain.AgentMessage
 	for rows.Next() {
 		var m domain.AgentMessage
@@ -806,6 +838,50 @@ func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]do
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
+}
+
+func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+sqliteMessageColumns+`
+		FROM run_messages WHERE run_id = ? ORDER BY id ASC
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAgentMessageRows(rows)
+}
+
+func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.AgentMessage, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if len(runIDs) == 0 {
+		return nil, nil
+	}
+	// ?-placeholder IN list (SQLite has no array bind), mirroring
+	// artifactStore.ListByRuns. ORDER BY (run_id, id) so the caller can
+	// group by RunID with each run's messages in insertion order.
+	placeholders := make([]string, len(runIDs))
+	args := make([]any, 0, len(runIDs))
+	for i, id := range runIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+sqliteMessageColumns+`
+		FROM run_messages
+		WHERE run_id IN (`+strings.Join(placeholders, ", ")+`)
+		ORDER BY run_id ASC, id ASC
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAgentMessageRows(rows)
 }
 
 func (s *agentRunStore) TokenTotals(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {

@@ -553,74 +553,176 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	}
 }
 
+// enrichRuns projects runs onto the wire shape, augmenting each with a
+// batched artifact_count and (for parked runs) pending_kind. Both artifact
+// reads stay O(1) in queries regardless of how many runs — or parked runs —
+// the set has. Board's useWebSocket re-fetches on every status transition, so
+// a per-run read would scale with the task's run history.
+//
+//   - artifact_count for every run: one CountByRun (runID→count; a run with no
+//     artifacts is absent → 0).
+//   - pending_kind for the parked runs: one ListByRuns over just those run ids,
+//     grouped per run. pending_kind needs the actual artifacts, but only a
+//     parked run has a gating one, so non-parked runs cost nothing. Without the
+//     discriminator the Open-PR vs Review button choice would flicker on first
+//     paint until the per-run fetch.
+//
+// Best-effort pending_kind: a ListByRuns failure drops the discriminator
+// (logged) but leaves counts and the rest intact. Shared by the single-task and
+// batched (task_ids) run-list paths.
+func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain.AgentRun) ([]map[string]any, error) {
+	runIDs := make([]string, len(runs))
+	var parkedIDs []string
+	for i := range runs {
+		runIDs[i] = runs[i].ID
+		if runs[i].Status == "pending_approval" {
+			parkedIDs = append(parkedIDs, runs[i].ID)
+		}
+	}
+	counts, err := tx.Artifacts.CountByRun(ctx, orgID, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	artsByRun := map[string][]domain.Artifact{}
+	if len(parkedIDs) > 0 {
+		if arts, lerr := tx.Artifacts.ListByRuns(ctx, orgID, parkedIDs); lerr != nil {
+			serverLog.Warn("pending_kind batch lookup failed; omitting pending_kind (artifact_count unaffected)", "error", lerr)
+		} else {
+			for _, a := range arts {
+				artsByRun[a.RunID] = append(artsByRun[a.RunID], a)
+			}
+		}
+	}
+	out := make([]map[string]any, len(runs))
+	for i := range runs {
+		out[i] = runResponse(&runs[i], counts[runs[i].ID], pendingApprovalFor(&runs[i], artsByRun[runs[i].ID]))
+	}
+	return out, nil
+}
+
+// splitCommaList splits a comma-separated query value into trimmed,
+// de-duplicated, non-empty ids, preserving first-seen order.
+func splitCommaList(raw string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
 func (ag *agentHandler) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	taskID := r.URL.Query().Get("task_id")
-	if taskID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "task_id query parameter required"})
+
+	// Batched path: ?task_ids=a,b,c[&include=messages] returns runs keyed by
+	// task id (and, when requested, each task's primary-run transcript keyed by
+	// run id) in one payload — the Board's per-refresh fan-out collapsed from
+	// O(tasks) serial round-trips to one. The single ?task_id path below is
+	// unchanged for back-compat.
+	if raw := r.URL.Query().Get("task_ids"); raw != "" {
+		ag.handleAgentRunsBatched(w, r, orgID, userID, raw)
 		return
 	}
-	var runs []domain.AgentRun
+
+	taskID := r.URL.Query().Get("task_id")
+	if taskID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "task_id or task_ids query parameter required"})
+		return
+	}
 	var out []map[string]any
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		runs, e = tx.AgentRuns.ListForTask(r.Context(), orgID, taskID)
+		runs, e := tx.AgentRuns.ListForTask(r.Context(), orgID, taskID)
 		if e != nil {
 			return e
 		}
 		if runs == nil {
 			runs = []domain.AgentRun{}
 		}
-		// Both artifact reads are batched so the list stays O(1) in queries
-		// regardless of how many runs — or parked runs — a task has. Board's
-		// useWebSocket re-fetches this on every status transition, so a per-run
-		// read (count or list) would scale with the task's run history.
-		//
-		//   - artifact_count for every run: one CountByRun (runID→count; a run
-		//     with no artifacts is absent → 0).
-		//   - pending_kind for the parked runs: one ListByRuns over just those run
-		//     ids, grouped per run. pending_kind needs the actual artifacts, but
-		//     only a parked run has a gating one, so non-parked runs cost nothing.
-		//     Without the discriminator on the list response the Open-PR vs Review
-		//     button choice would flicker on first paint until the per-run fetch.
-		runIDs := make([]string, len(runs))
-		var parkedIDs []string
-		for i := range runs {
-			runIDs[i] = runs[i].ID
-			if runs[i].Status == "pending_approval" {
-				parkedIDs = append(parkedIDs, runs[i].ID)
-			}
+		out, e = enrichRuns(r.Context(), tx, orgID, runs)
+		return e
+	}); err != nil {
+		internalError(w, "agent", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleAgentRunsBatched serves GET /api/agent/runs?task_ids=a,b,c. The
+// response is { "runs": { <taskID>: []run }, "messages": { <runID>: []message } }:
+// runs grouped per task (newest-first, same per-run projection as the single
+// path), and — when include=messages — the transcript of each task's PRIMARY
+// (newest-started) run, keyed by that run's id. The primary run is runs[0] per
+// task, matching the single-task path's latestRun; this is exactly the data the
+// Board seeds onto each card, now in one round-trip instead of 2–3 per task.
+// `messages` is omitted unless include=messages.
+func (ag *agentHandler) handleAgentRunsBatched(w http.ResponseWriter, r *http.Request, orgID, userID, raw string) {
+	taskIDs := splitCommaList(raw)
+	if len(taskIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "task_ids must contain at least one id"})
+		return
+	}
+	includeMessages := false
+	for _, inc := range splitCommaList(r.URL.Query().Get("include")) {
+		if inc == "messages" {
+			includeMessages = true
 		}
-		counts, e := tx.Artifacts.CountByRun(r.Context(), orgID, runIDs)
+	}
+
+	runsByTask := map[string][]map[string]any{}
+	messagesByRun := map[string][]domain.AgentMessage{}
+	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		runs, e := tx.AgentRuns.ListForTasks(r.Context(), orgID, taskIDs)
 		if e != nil {
 			return e
 		}
-		// Best-effort, like the single-run path: a failure here drops pending_kind
-		// for the parked runs (logged) but leaves counts and the rest intact.
-		artsByRun := map[string][]domain.Artifact{}
-		if len(parkedIDs) > 0 {
-			if arts, lerr := tx.Artifacts.ListByRuns(r.Context(), orgID, parkedIDs); lerr != nil {
-				serverLog.Warn("pending_kind batch lookup failed; omitting pending_kind (artifact_count unaffected)", "task", taskID, "error", lerr)
-			} else {
-				for _, a := range arts {
-					artsByRun[a.RunID] = append(artsByRun[a.RunID], a)
-				}
+		// One enrichRuns over the whole flat slice keeps the artifact reads
+		// O(1) regardless of task/run count; the index alignment lets us group
+		// the projected responses by task without re-projecting.
+		enriched, e := enrichRuns(r.Context(), tx, orgID, runs)
+		if e != nil {
+			return e
+		}
+		var primaryRunIDs []string
+		seenTask := map[string]bool{}
+		for i := range runs {
+			tid := runs[i].TaskID
+			runsByTask[tid] = append(runsByTask[tid], enriched[i])
+			// runs come back started_at DESC, so the first seen per task is its
+			// primary (newest) run — the one whose transcript the card shows.
+			if !seenTask[tid] {
+				seenTask[tid] = true
+				primaryRunIDs = append(primaryRunIDs, runs[i].ID)
 			}
 		}
-		out = make([]map[string]any, len(runs))
-		for i := range runs {
-			out[i] = runResponse(&runs[i], counts[runs[i].ID], pendingApprovalFor(&runs[i], artsByRun[runs[i].ID]))
+		if includeMessages && len(primaryRunIDs) > 0 {
+			msgs, e := tx.AgentRuns.MessagesForRuns(r.Context(), orgID, primaryRunIDs)
+			if e != nil {
+				return e
+			}
+			for _, m := range msgs {
+				messagesByRun[m.RunID] = append(messagesByRun[m.RunID], m)
+			}
 		}
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, out)
+
+	resp := map[string]any{"runs": runsByTask}
+	if includeMessages {
+		resp["messages"] = messagesByRun
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // WSHub returns the websocket hub for use by the delegation spawner.

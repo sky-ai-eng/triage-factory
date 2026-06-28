@@ -605,6 +605,38 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 	return runs, rows.Err()
 }
 
+func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.AgentRun, error) {
+	if len(taskIDs) == 0 {
+		return nil, nil
+	}
+	// App pool (RLS-active): rows are team-scoped exactly like ListForTask.
+	// task_id is a uuid column, so the slice binds as a uuid[] literal
+	// through one $N (pgUUIDArray), like artifactStore.ListByRuns — not a
+	// raw []string. Same projection as ListForTask; the caller groups the
+	// flat result by run.TaskID.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+pgRunColumns+`
+		FROM runs r
+		LEFT JOIN run_memory rm ON rm.run_id = r.id AND rm.org_id = r.org_id
+		WHERE r.org_id = $1 AND r.task_id = ANY($2)
+		ORDER BY r.started_at DESC
+	`, orgID, pgUUIDArray(taskIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []domain.AgentRun
+	for rows.Next() {
+		var r domain.AgentRun
+		if err := scanAgentRunRows(rows, &r); err != nil {
+			return nil, err
+		}
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
 func (s *agentRunStore) PendingApprovalIDForTask(ctx context.Context, orgID, taskID string) (string, error) {
 	var id string
 	err := s.q.QueryRowContext(ctx, `
@@ -847,19 +879,13 @@ func nullIntPtr(p *int) any {
 	return *p
 }
 
-func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, run_id, role, content, subtype, tool_calls::text, tool_call_id, is_error, metadata::text,
-		       model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at
-		FROM run_messages
-		WHERE org_id = $1 AND run_id = $2
-		ORDER BY id ASC
-	`, orgID, runID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+const pgMessageColumns = `id, run_id, role, content, subtype, tool_calls::text, tool_call_id, is_error, metadata::text,
+	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at`
 
+// scanAgentMessageRows drains a run_messages result set selecting
+// pgMessageColumns into domain.AgentMessage values. Shared by the
+// single-run Messages and the batched MessagesForRuns.
+func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 	var messages []domain.AgentMessage
 	for rows.Next() {
 		var m domain.AgentMessage
@@ -905,6 +931,41 @@ func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]do
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
+}
+
+func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+pgMessageColumns+`
+		FROM run_messages
+		WHERE org_id = $1 AND run_id = $2
+		ORDER BY id ASC
+	`, orgID, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAgentMessageRows(rows)
+}
+
+func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.AgentMessage, error) {
+	if len(runIDs) == 0 {
+		return nil, nil
+	}
+	// App pool (RLS-active): run_id is a uuid column, so the slice binds
+	// as a uuid[] literal through one $N (pgUUIDArray), mirroring
+	// artifactStore.ListByRuns. ORDER BY (run_id, id) so the caller groups
+	// by RunID with each run's messages in insertion order.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+pgMessageColumns+`
+		FROM run_messages
+		WHERE org_id = $1 AND run_id = ANY($2)
+		ORDER BY run_id ASC, id ASC
+	`, orgID, pgUUIDArray(runIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAgentMessageRows(rows)
 }
 
 func (s *agentRunStore) TokenTotals(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {

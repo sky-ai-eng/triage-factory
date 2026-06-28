@@ -723,6 +723,56 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("ListForTasks_BatchedAcrossTasks", func(t *testing.T) {
+		// The batched twin of ListForTask: one query returns runs for
+		// many tasks, each attributed to its own TaskID, with unknown
+		// ids contributing nothing and empty input a no-op. Backs the
+		// Board's aggregated agent-run fetch.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		if runs, err := store.ListForTasks(ctx, orgID, nil); err != nil || runs != nil {
+			t.Fatalf("ListForTasks(nil) = (%v, %v), want (nil, nil)", runs, err)
+		}
+
+		entA := seed.Entity(t, "lft-a")
+		evA := seed.Event(t, entA, domain.EventGitHubPROpened)
+		taskA := seed.Task(t, entA, domain.EventGitHubPROpened, evA)
+		entB := seed.Entity(t, "lft-b")
+		evB := seed.Event(t, entB, domain.EventGitHubPROpened)
+		taskB := seed.Task(t, entB, domain.EventGitHubPROpened, evB)
+
+		runA1 := seedAgentRunForTaskTest(t, store, orgID, taskA, "running", seed)
+		runA2 := seedAgentRunForTaskTest(t, store, orgID, taskA, "completed", seed)
+		runB1 := seedAgentRunForTaskTest(t, store, orgID, taskB, "running", seed)
+
+		runs, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB, uuid.New().String()})
+		if err != nil {
+			t.Fatalf("ListForTasks: %v", err)
+		}
+		byTask := map[string][]string{}
+		for _, r := range runs {
+			byTask[r.TaskID] = append(byTask[r.TaskID], r.ID)
+		}
+		if len(byTask[taskA]) != 2 {
+			t.Errorf("task A: got %v, want 2 runs", byTask[taskA])
+		}
+		if len(byTask[taskB]) != 1 {
+			t.Errorf("task B: got %v, want 1 run", byTask[taskB])
+		}
+		seen := map[string]bool{}
+		for _, ids := range byTask {
+			for _, id := range ids {
+				seen[id] = true
+			}
+		}
+		for _, want := range []string{runA1, runA2, runB1} {
+			if !seen[want] {
+				t.Errorf("run %s missing from batched result", want)
+			}
+		}
+	})
+
 	t.Run("HasActiveAndActiveIDs_ForTask", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -1000,6 +1050,49 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 		if got.Metadata["k"] != "v" {
 			t.Errorf("Metadata round-trip: %+v", got.Metadata)
+		}
+	})
+
+	t.Run("MessagesForRuns_BatchedAcrossRuns", func(t *testing.T) {
+		// The batched twin of Messages: one query returns every message
+		// for many runs, grouped by RunID with each run's messages still
+		// in insertion (id ASC) order. Empty input is a no-op. Backs the
+		// Board's aggregated include=messages read.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		if msgs, err := store.MessagesForRuns(ctx, orgID, nil); err != nil || msgs != nil {
+			t.Fatalf("MessagesForRuns(nil) = (%v, %v), want (nil, nil)", msgs, err)
+		}
+
+		runA := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runB := seedAgentRunForTest(t, store, orgID, seed, "running")
+		for _, c := range []string{"a-first", "a-second"} {
+			if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{
+				RunID: runA, Role: "assistant", Content: c, Subtype: "text",
+			}); err != nil {
+				t.Fatalf("InsertMessage A: %v", err)
+			}
+		}
+		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{
+			RunID: runB, Role: "assistant", Content: "b-only", Subtype: "text",
+		}); err != nil {
+			t.Fatalf("InsertMessage B: %v", err)
+		}
+
+		msgs, err := store.MessagesForRuns(ctx, orgID, []string{runA, runB})
+		if err != nil {
+			t.Fatalf("MessagesForRuns: %v", err)
+		}
+		byRun := map[string][]string{}
+		for _, m := range msgs {
+			byRun[m.RunID] = append(byRun[m.RunID], m.Content)
+		}
+		if got := byRun[runA]; len(got) != 2 || got[0] != "a-first" || got[1] != "a-second" {
+			t.Errorf("run A messages = %v, want [a-first a-second] (per-run order preserved)", got)
+		}
+		if got := byRun[runB]; len(got) != 1 || got[0] != "b-only" {
+			t.Errorf("run B messages = %v, want [b-only]", got)
 		}
 	})
 

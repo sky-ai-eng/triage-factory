@@ -193,6 +193,13 @@ type AgentRunStore interface {
 	// started_at DESC. MemoryMissing derived per Get.
 	ListForTask(ctx context.Context, orgID, taskID string) ([]domain.AgentRun, error)
 
+	// ListForTasks is the batched form of ListForTask: every run for
+	// any of the given task IDs in one query, ordered started_at DESC.
+	// The Board's aggregated agent-run fetch groups the flat result by
+	// run.TaskID, so a board with N tasks costs one query instead of N.
+	// Empty taskIDs returns nil. MemoryMissing derived per Get.
+	ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.AgentRun, error)
+
 	// PendingApprovalIDForTask returns the id of the (single)
 	// pending_approval run on a task, or "" if none. Bounded to
 	// one row by construction.
@@ -280,6 +287,13 @@ type AgentRunStore interface {
 
 	// Messages returns all messages for a given run, ordered by id.
 	Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error)
+
+	// MessagesForRuns is the batched form of Messages: every message
+	// for any of the given run IDs as one flat slice, ordered
+	// (run_id, id) so the caller can group by RunID with per-run order
+	// preserved. Backs the Board's aggregated include=messages read.
+	// Empty runIDs returns nil.
+	MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.AgentMessage, error)
 
 	// TokenTotals sums token usage across all assistant messages
 	// in a run. Model is MAX(model) (preserves the

@@ -288,18 +288,21 @@ export default function Board() {
     artifactId?: string
   } | null>(null)
 
-  // Pads /api/blueprint-runs/{id} into a length-N array with synthetic
-  // 'pending' placeholders so the rail can render before all steps exist.
-  const seedChainStepRuns = useCallback(async (taskID: string, chainRunID: string) => {
+  // Fetches a blueprint run's step structure and pads it into a length-N
+  // array of step runs — synthetic 'pending' placeholders for steps without
+  // a run yet — the shape the chain rail renders. Pure: returns the array
+  // (null on error / empty) and writes no state, so fetchTasks can resolve
+  // many chains in parallel and apply them in one batched setChainStepRuns.
+  const fetchChainStepRuns = useCallback(async (chainRunID: string): Promise<AgentRun[] | null> => {
     try {
       const res = await fetch(`/api/blueprint-runs/${chainRunID}`)
-      if (!res.ok) return
+      if (!res.ok) return null
       const data: {
         steps?: Array<{ step: { step_index: number }; run?: AgentRun | null }>
       } = await res.json()
       const total = data.steps?.length ?? 0
-      if (total === 0) return
-      const padded: AgentRun[] = Array.from({ length: total }, (_, i) => {
+      if (total === 0) return null
+      return Array.from({ length: total }, (_, i) => {
         const existing = data.steps?.[i]?.run
         if (existing) return existing
         return {
@@ -309,12 +312,23 @@ export default function Board() {
           blueprint_step_index: i,
         } as unknown as AgentRun
       })
-      setChainStepRuns((prev) => ({ ...prev, [taskID]: padded }))
     } catch {
       // Network error — leave chain indicator empty for now; the
       // next fetchTasks pass will retry.
+      return null
     }
   }, [])
+
+  // Seeds chainStepRuns for one task from its blueprint run. Thin wrapper
+  // over fetchChainStepRuns for the WS handlers (which seed one task at a
+  // time); fetchTasks batches via fetchChainStepRuns directly.
+  const seedChainStepRuns = useCallback(
+    async (taskID: string, chainRunID: string) => {
+      const steps = await fetchChainStepRuns(chainRunID)
+      if (steps) setChainStepRuns((prev) => ({ ...prev, [taskID]: steps }))
+    },
+    [fetchChainStepRuns],
+  )
 
   // Fetch members + bot once at mount. The picker degrades gracefully
   // if this fails (members=[], bot=null → only the avatar renders,
@@ -378,50 +392,93 @@ export default function Board() {
       setInReview(inReviewRes)
       setDone(doneRes)
 
-      // Fetch agent runs for any task that might carry one — claimed,
-      // in_progress, in_review, and done can all have runs attached.
-      // Queued tasks never do (claim cleared = no active run).
-      const withRuns = [...claimedRes, ...inProgressRes, ...inReviewRes, ...doneRes]
+      // Paint the board as soon as the five columns are in state. The agent-run
+      // enrichment below fills cards progressively and must not hold the
+      // spinner — it used to: setLoading sat in `finally` after the whole serial
+      // loop, so first paint waited on every per-task round-trip (TFAC-98).
+      setLoading(false)
+
+      // Agent runs for any task that might carry one — claimed, in_progress,
+      // in_review, done can all have runs attached. Queued never does (claim
+      // cleared = no active run). ONE aggregated call returns every task's runs
+      // plus each task's primary-run transcript, replacing the old per-task
+      // serial loop of 2–3 round-trips each (TFAC-98).
+      const withRuns: Task[] = [...claimedRes, ...inProgressRes, ...inReviewRes, ...doneRes]
+      if (withRuns.length === 0) return
+      const aggParams = new URLSearchParams()
+      aggParams.set('task_ids', withRuns.map((t) => t.id).join(','))
+      aggParams.set('include', 'messages')
+      const aggRes = await fetch(`/api/agent/runs?${aggParams.toString()}`)
+      if (!aggRes.ok) return
+      const agg = (await aggRes.json()) as {
+        runs?: Record<string, AgentRun[]>
+        messages?: Record<string, AgentMessage[]>
+      }
+      const runsByTask = agg.runs ?? {}
+      const messagesByRun = agg.messages ?? {}
+
+      // Accumulate into plain objects, then commit each map in ONE setState
+      // (the old loop fired up to three setState calls per task — a render per
+      // iteration). Chains need a second per-chain fetch for their blueprint
+      // step structure; resolve those concurrently rather than serially.
+      const nextRuns: Record<string, AgentRun> = {}
+      const nextMessages: Record<string, AgentMessage[]> = {}
+      const chainSeeds: Array<Promise<{ taskID: string; steps: AgentRun[] } | null>> = []
+
       for (const task of withRuns) {
-        try {
-          const runsRes = await fetch(`/api/agent/runs?task_id=${task.id}`)
-          if (!runsRes.ok) continue
-          const runs: AgentRun[] = await runsRes.json()
-          if (runs.length > 0) {
-            const latestRun = runs[0]
-            const chainRunID = latestRun.blueprint_run_id
-            if (chainRunID) {
-              const stepRuns = runs
-                .filter((r) => r.blueprint_run_id === chainRunID)
-                .sort((a, b) => (a.blueprint_step_index ?? 0) - (b.blueprint_step_index ?? 0))
-              await seedChainStepRuns(task.id, chainRunID)
-              const activeStep =
-                stepRuns.find((r) =>
-                  [
-                    'running',
-                    'cloning',
-                    'fetching',
-                    'worktree_created',
-                    'agent_starting',
-                    'initializing',
-                  ].includes(r.Status),
-                ) ?? stepRuns[stepRuns.length - 1]
-              setAgentRuns((prev) => ({ ...prev, [task.id]: activeStep }))
-              const msgsRes = await fetch(`/api/agent/runs/${activeStep.ID}/messages`)
-              if (msgsRes.ok) {
-                const msgs: AgentMessage[] = await msgsRes.json()
-                setAgentMessages((prev) => ({ ...prev, [activeStep.ID]: msgs }))
-              }
-            } else {
-              setAgentRuns((prev) => ({ ...prev, [task.id]: latestRun }))
-              const msgsRes = await fetch(`/api/agent/runs/${latestRun.ID}/messages`)
-              if (!msgsRes.ok) continue
-              const msgs: AgentMessage[] = await msgsRes.json()
-              setAgentMessages((prev) => ({ ...prev, [latestRun.ID]: msgs }))
-            }
-          }
-        } catch {
-          // Individual agent run fetch failed — skip
+        const runs = runsByTask[task.id]
+        if (!runs || runs.length === 0) continue
+        const latestRun = runs[0]
+        const chainRunID = latestRun.blueprint_run_id
+        if (chainRunID) {
+          const stepRuns = runs
+            .filter((r) => r.blueprint_run_id === chainRunID)
+            .sort((a, b) => (a.blueprint_step_index ?? 0) - (b.blueprint_step_index ?? 0))
+          const activeStep =
+            stepRuns.find((r) =>
+              [
+                'running',
+                'cloning',
+                'fetching',
+                'worktree_created',
+                'agent_starting',
+                'initializing',
+              ].includes(r.Status),
+            ) ?? stepRuns[stepRuns.length - 1]
+          nextRuns[task.id] = activeStep
+          // The aggregated payload carries the primary (newest) run's
+          // transcript; for a sequential chain that's the active step. If they
+          // differ, the WS agent_message path seeds the active step shortly.
+          const msgs = messagesByRun[activeStep.ID]
+          if (msgs) nextMessages[activeStep.ID] = msgs
+          chainSeeds.push(
+            fetchChainStepRuns(chainRunID).then((steps) =>
+              steps ? { taskID: task.id, steps } : null,
+            ),
+          )
+        } else {
+          nextRuns[task.id] = latestRun
+          const msgs = messagesByRun[latestRun.ID]
+          if (msgs) nextMessages[latestRun.ID] = msgs
+        }
+      }
+
+      setAgentRuns((prev) => ({ ...prev, ...nextRuns }))
+      setAgentMessages((prev) => ({ ...prev, ...nextMessages }))
+
+      // Apply all chain step rails in one batch once their blueprint fetches
+      // settle (concurrent above), so the whole refresh costs ~3 renders, not
+      // one per task.
+      if (chainSeeds.length > 0) {
+        const seeded = (await Promise.all(chainSeeds)).filter(
+          (s): s is { taskID: string; steps: AgentRun[] } => s !== null,
+        )
+        if (seeded.length > 0) {
+          setChainStepRuns((prev) => {
+            const next = { ...prev }
+            for (const { taskID, steps } of seeded) next[taskID] = steps
+            return next
+          })
         }
       }
     } catch {
@@ -429,7 +486,7 @@ export default function Board() {
     } finally {
       setLoading(false)
     }
-  }, [seedChainStepRuns, showSnoozed])
+  }, [fetchChainStepRuns, showSnoozed])
 
   useEffect(() => {
     fetchTasks()
