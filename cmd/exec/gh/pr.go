@@ -436,6 +436,12 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 	// Read the head SHA so the review pins to the reviewed commit at submit.
 	pr, err := client.GetPR(ctx, owner, repo, number, false)
 	exitOnErr(err)
+	// Fail early on a missing head SHA: it's the commit the atomic submit pins to,
+	// so staging it empty just defers an opaque GitHub 422 (surfaced as a 502) to
+	// approval time. Bail here with an actionable message instead.
+	if pr.HeadSHA == "" {
+		exitErr(fmt.Sprintf("PR #%d has no head commit SHA — cannot start a review (push a commit to the PR branch first)", number))
+	}
 
 	// Record the local review-draft artifact through the host. No GitHub write,
 	// no collision check — the draft is run-scoped, so two runs reviewing the same

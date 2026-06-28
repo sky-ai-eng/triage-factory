@@ -193,27 +193,35 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	}
 
 	// Create + submit the review in one POST, pinned to the commit the agent
-	// reviewed (details.HeadSHA), with the staged body + event + footer.
+	// reviewed (details.HeadSHA), with the staged body + event + footer. SubmitReview
+	// downgrades APPROVE→COMMENT when auto-merge is enabled on the PR and returns the
+	// event GitHub actually recorded — capture it so the persisted artifact, the
+	// verdict diff, and the response all reflect what landed, not what was requested.
 	body := details.ReviewBody + agentmeta.Build(ah.agentRuns, orgID, art.RunID, "review")
-	reviewID, _, err := gh.SubmitReview(r.Context(), owner, repo, number, details.HeadSHA, details.ReviewEvent, body, submitComments)
+	reviewID, submittedEvent, err := gh.SubmitReview(r.Context(), owner, repo, number, details.HeadSHA, details.ReviewEvent, body, submitComments)
 	if err != nil {
 		artifactsLog.Warn("SubmitReview failed",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
+	// Record the event GitHub actually applied (post auto-merge downgrade) so a
+	// later reader — and the proposed-vs-final diff below — sees the truth.
+	details.ReviewEvent = submittedEvent
 
 	cleanupCtx := context.WithoutCancel(r.Context())
 
 	// Step 1: stamp the submitted review's id + URL onto the artifact (a submitted
-	// review finally has both — a never-published draft had neither), flip it
-	// pending → submitted, and compose the audit row with the flip (TFAC-483). The
-	// org-App submit is a human-authorized, org-executed write — run_id is the
-	// drafting run, actor is the approver. Atomic with the flip.
+	// review finally has both — a never-published draft had neither) and the actual
+	// submitted event into details, flip it pending → submitted, and compose the
+	// audit row with the flip (TFAC-483). The org-App submit is a human-authorized,
+	// org-executed write — run_id is the drafting run, actor is the approver. Atomic
+	// with the flip.
 	submitted := *art
 	submitted.State = domain.ArtifactStateReviewSubmitted
 	submitted.ExternalID = strconv.Itoa(reviewID)
 	submitted.URL = fmt.Sprintf("%s#pullrequestreview-%d", domain.GitHubPullURL(owner+"/"+repo, number), reviewID)
+	submitted.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
 	if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 		if _, e := tx.Artifacts.Upsert(cleanupCtx, orgID, submitted); e != nil {
 			return e
@@ -245,7 +253,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": submitted.ExternalID,
 		"url":       submitted.URL,
-		"event":     details.ReviewEvent,
+		"event":     submittedEvent,
 		"state":     domain.ArtifactStateReviewSubmitted,
 	})
 }
