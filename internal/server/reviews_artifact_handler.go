@@ -230,14 +230,60 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Step 3: shared run/task/blueprint bookkeeping.
-	ah.finishApprovedRun(cleanupCtx, orgID, userID, art.RunID)
+	// Step 3: terminal-on-last task closure. Approval is a decoupled sidecar — it
+	// never flips run status or resumes/terminates a blueprint. The only lifecycle
+	// effect is closing the task when this was the LAST unresolved artifact on an
+	// already-terminal blueprint; otherwise a no-op.
+	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": submitted.ExternalID,
 		"url":       submitted.URL,
 		"event":     details.ReviewEvent,
 		"state":     domain.ArtifactStateReviewSubmitted,
+	})
+}
+
+// reviewDismiss resolves a pending review artifact by abandoning it: it flips the
+// artifact pending → dismissed, records the audit row, then runs the
+// terminal-on-last task-closure check. The per-item counterpart to reviewApprove;
+// like approve it never touches the run's lifecycle. No GitHub call — the review
+// is staged entirely TF-side (TFAC-494), so there is no pending review object to
+// delete; the flip is the whole resolution. An already-submitted /
+// already-dismissed review is terminal → 409. A pending review is dismissable
+// whether or not it reached the ready sentinel (a started-but-unfinalized review
+// is still abandonable).
+func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Artifact) {
+	if art.State != domain.ArtifactStateReviewPending {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending (state: " + art.State + ")"})
+		return
+	}
+
+	// Flip pending → dismissed + audit, atomic and pessimistic — the flip is the
+	// resolution. The proposed snapshot is preserved for the audit ledger;
+	// abandonment retires the staged draft, not the record of what the agent wrote.
+	dismissed := *art
+	dismissed.State = domain.ArtifactStateReviewDismissed
+	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if _, e := tx.Artifacts.Upsert(r.Context(), orgID, dismissed); e != nil {
+			return e
+		}
+		return tx.ExternalActions.Record(r.Context(), orgID,
+			githubApprovalAction(art, userID, domain.ActionReviewDismissed, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewDismissed))
+	}); err != nil {
+		internalError(w, "artifacts", err)
+		return
+	}
+
+	// The dismiss is fully resolved by the flip above (no GitHub object). Run the
+	// terminal-on-last task-closure check detached so a client disconnect can't
+	// strand it now that the artifact is resolved.
+	cleanupCtx := context.WithoutCancel(r.Context())
+	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"review_id": art.ExternalID,
+		"state":     domain.ArtifactStateReviewDismissed,
 	})
 }
 

@@ -16,11 +16,12 @@ import (
 )
 
 // pendingApprovalFixture installs the full FK chain for a task whose
-// delegated run is sitting in pending_approval with a saved review +
-// comments + agent-side memory row. Returns (taskID, runID,
-// reviewID). Centralized here so each requeue test exercises the
-// exact shape SKY-206 is meant to clean up: agent finished, wrote
-// memory, prepared a review, awaiting human submit.
+// delegated run has COMPLETED (terminal) while leaving an unresolved review
+// artifact in the approval column — a finalized pending review plus the
+// agent-side memory row. Returns (taskID, runID, reviewID). Centralized here so
+// each teardown test exercises the shape the task-level resolve-all gesture is
+// meant to clean up: agent finished, wrote memory, prepared a review, the human
+// then dragged the card to Done / Queue / dismissed it instead of approving.
 func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, reviewID string) {
 	t.Helper()
 	// The review-abandon path resolves a GitHub client (to delete the pending
@@ -66,7 +67,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	blueprintRunID := seedBlueprintRunSQLite(t, database, "t_pa")
 	if _, err := database.Exec(
 		`INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, blueprint_run_id)
-		 VALUES ('r_pa', 't_pa', 'p_pa', 'pending_approval', 'manual', ?)`,
+		 VALUES ('r_pa', 't_pa', 'p_pa', 'completed', 'manual', ?)`,
 		blueprintRunID,
 	); err != nil {
 		t.Fatalf("seed run: %v", err)
@@ -104,16 +105,19 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	return "t_pa", "r_pa", stored.ID
 }
 
-// assertPendingApprovalCleanedUp checks every post-condition the
-// SKY-206 cleanup is meant to deliver: task at the expected
-// post-state, run cancelled with the discriminator stop_reason,
-// pending_reviews + comments gone, human_content recording the
-// discard with a marker phrase that distinguishes the requeue
-// from the dismiss flavor, agent_content preserved (the whole
-// point of SKY-204 was keeping both halves). wantTaskStatus and
-// wantHumanContentMarker let callers vary the assertion across
-// the requeue (`queued` + "returned to the triage queue") and
+// assertPendingApprovalCleanedUp checks every post-condition the task-level
+// resolve-all teardown is meant to deliver: task at the expected post-state, the
+// unresolved review artifact flipped to dismissed, human_content recording the
+// discard with a marker phrase that distinguishes the requeue from the dismiss
+// flavor, agent_content preserved (the whole point of SKY-204 was keeping both
+// halves). wantTaskStatus and wantHumanContentMarker let callers vary the
+// assertion across the requeue (`queued` + "returned to the triage queue") and
 // dismiss (`dismissed` + "dismissed the task entirely") paths.
+//
+// Decoupled-lifecycle invariant (TFAC-379): teardown NEVER flips runs.status —
+// the completed run stays completed. The live-run cancellation that the old park
+// model folded in here is now the spawner's job (only a still-running run is
+// cancelled, by swipeTeardownRuns), so a terminal run is left untouched.
 func assertPendingApprovalCleanedUp(
 	t *testing.T,
 	database *sql.DB,
@@ -130,21 +134,14 @@ func assertPendingApprovalCleanedUp(
 		t.Errorf("task.status = %q, want %q", taskStatus, wantTaskStatus)
 	}
 
-	var runStatus, stopReason string
-	var completedAt sql.NullTime
-	if err := database.QueryRow(
-		`SELECT status, COALESCE(stop_reason, ''), completed_at FROM runs WHERE id = ?`, runID,
-	).Scan(&runStatus, &stopReason, &completedAt); err != nil {
+	// The run is untouched by the resolve — it stays terminal (completed). A
+	// resolve must never flip runs.status.
+	var runStatus string
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&runStatus); err != nil {
 		t.Fatalf("scan run: %v", err)
 	}
-	if runStatus != "cancelled" {
-		t.Errorf("run.status = %q, want %q", runStatus, "cancelled")
-	}
-	if stopReason != "review_discarded_by_user" {
-		t.Errorf("run.stop_reason = %q, want %q", stopReason, "review_discarded_by_user")
-	}
-	if !completedAt.Valid {
-		t.Errorf("run.completed_at not populated")
+	if runStatus != "completed" {
+		t.Errorf("run.status = %q, want %q (teardown must not flip run lifecycle)", runStatus, "completed")
 	}
 
 	// The review artifact must be flipped to dismissed (its proposed snapshot is
@@ -314,15 +311,13 @@ func TestHandleSwipe_CompleteCleansUpPendingApprovalRun(t *testing.T) {
 // TestHandleSwipe_ClaimCleansUpPendingApprovalRun guards the SKY-206
 // race the PR #77 review flagged: Board's drag-Agent-to-You issues
 // /swipe claim, but the frontend's agentRuns map can be transiently
-// empty during a fetchTasks refresh — so any frontend gating on
-// agentRuns[taskId]?.Status === 'pending_approval' would silently
-// skip the cleanup, stranding the prepared review row and leaving a
-// phantom pending_approval run.
+// empty during a fetchTasks refresh — so any frontend gating on a stale
+// run-status snapshot would silently skip the cleanup, stranding the prepared
+// review and leaving an unresolved artifact behind.
 //
-// Backend-authoritative cleanup closes that hole: the swipe handler
-// runs cleanupPendingApprovalRun for every claim, and the
-// pending_approval-row lookup makes it a no-op for tasks without a
-// review. The claim-flavored marker carries its own
+// Backend-authoritative teardown closes that hole: the swipe handler runs
+// teardownTaskArtifacts for every claim, resolving every unresolved artifact (a
+// no-op for tasks without one). The claim-flavored marker carries its own
 // recalibration signal — "human took over manually" — distinct from
 // requeue/dismiss/complete.
 func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
@@ -355,9 +350,9 @@ func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
 }
 
 // TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp pins the
-// idempotency contract: cleanupPendingApprovalRun must be a no-op
-// when the task has no pending_approval run, so adding the cleanup
-// to the claim path doesn't disturb the queue → claim flow used by
+// idempotency contract: teardownTaskArtifacts must be a no-op
+// when the task has no unresolved artifact, so wiring the teardown
+// into the claim path doesn't disturb the queue → claim flow used by
 // Cards.tsx and the existing Board queue → you drag.
 func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 	s := newTestServer(t)
@@ -1204,114 +1199,101 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 	}
 }
 
-// TestCleanupPendingApprovalRun_Idempotent calls the cleanup twice
-// against the same task with a different outcome the second time.
-// The second call must find the run already cancelled (the
-// PendingApprovalRunIDForTask filter returns "" once status flips
-// off pending_approval) and exit silently — otherwise:
+// TestTeardownTaskArtifacts_Idempotent calls the teardown twice against the same
+// task with a different outcome the second time. The first call resolves the
+// review artifact (→ dismissed) and writes the requeue verdict; the second call
+// finds no unresolved artifact left, so it writes nothing — otherwise:
 //
-//   - human_content would be overwritten with the second outcome's
-//     text, erasing the first verdict from memory
-//   - the websocket would double-fire agent_run_update
-//   - the audit row's stop_reason / completed_at would shift
+//   - human_content would be overwritten with the second outcome's text, erasing
+//     the first verdict from memory
 //
-// We pick discardOutcomeDismissed for the second call so that if
-// the early-out broke, the human_content marker would visibly
-// flip from "returned to the triage queue" to "dismissed the task
-// entirely" — making the test failure mode loud rather than silent.
-func TestCleanupPendingApprovalRun_Idempotent(t *testing.T) {
+// We pick discardOutcomeDismissed for the second call so that if the no-op broke,
+// the human_content marker would visibly flip from "returned to the triage queue"
+// to "dismissed the task entirely" — making the test failure mode loud rather
+// than silent. The completed run stays completed across both calls (a resolve
+// never flips run lifecycle).
+func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 	s := newTestServer(t)
 	taskID, runID, _ := pendingApprovalFixture(t, s.db)
 
-	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
+	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
 	var humanContentBefore sql.NullString
-	var completedAtBefore sql.NullTime
 	if err := s.db.QueryRow(
-		`SELECT rm.human_content, r.completed_at
-		 FROM run_memory rm JOIN runs r ON r.id = rm.run_id
-		 WHERE rm.run_id = ?`, runID,
-	).Scan(&humanContentBefore, &completedAtBefore); err != nil {
+		`SELECT human_content FROM run_memory WHERE run_id = ?`, runID,
+	).Scan(&humanContentBefore); err != nil {
 		t.Fatalf("scan after first call: %v", err)
 	}
 	if !strings.Contains(humanContentBefore.String, "returned to the triage queue") {
 		t.Fatalf("first call didn't write requeue marker; got %q", humanContentBefore.String)
 	}
 
-	// Second call: different outcome, must not take effect.
-	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeDismissed)
+	// Second call: different outcome, must not take effect — the review is already
+	// dismissed, so there's nothing unresolved to re-resolve.
+	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeDismissed)
 
 	var humanContentAfter sql.NullString
-	var completedAtAfter sql.NullTime
 	var runStatusAfter string
 	if err := s.db.QueryRow(
-		`SELECT rm.human_content, r.completed_at, r.status
+		`SELECT rm.human_content, r.status
 		 FROM run_memory rm JOIN runs r ON r.id = rm.run_id
 		 WHERE rm.run_id = ?`, runID,
-	).Scan(&humanContentAfter, &completedAtAfter, &runStatusAfter); err != nil {
+	).Scan(&humanContentAfter, &runStatusAfter); err != nil {
 		t.Fatalf("scan after second call: %v", err)
 	}
-	if runStatusAfter != "cancelled" {
-		t.Errorf("run.status drifted after second call: %q", runStatusAfter)
+	if runStatusAfter != "completed" {
+		t.Errorf("run.status drifted after second call: %q (teardown must not flip run lifecycle)", runStatusAfter)
 	}
 	if humanContentAfter.String != humanContentBefore.String {
 		t.Errorf("human_content overwritten by second call:\n  before: %q\n  after:  %q",
 			humanContentBefore.String, humanContentAfter.String)
 	}
-	if !completedAtBefore.Valid || !completedAtAfter.Valid ||
-		!completedAtAfter.Time.Equal(completedAtBefore.Time) {
-		t.Errorf("completed_at shifted on idempotent re-call: before=%v after=%v",
-			completedAtBefore, completedAtAfter)
-	}
 }
 
-// TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry is the regression
-// for the ordering bug: if a DB op inside the cleanup tx fails transiently, the
-// cleanup must NOT flip the run off status='pending_approval'.
-// PendingApprovalRunIDForTask filters on that status, so cancelling the run too
-// eagerly would strand the parked artifact with no path back to retry.
+// TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry is the regression for
+// the all-or-nothing contract: if a DB op inside the teardown tx fails
+// transiently, the whole batch rolls back, leaving the artifact unresolved
+// (still pending) and the run untouched — a subsequent call retries cleanly.
 //
-// We force a failure by temporarily renaming the artifacts table — the cleanup's
-// kind-detecting ListByRun (and the dismiss upsert) reference it by name and the
-// whole tx rolls back. After restoring it, a second cleanup call must find the
-// run still in pending_approval, succeed, and leave the expected terminal state.
-func TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry(t *testing.T) {
+// We force a failure by temporarily renaming the artifacts table — the teardown's
+// ListByRun (and the dismiss upsert) reference it by name and the whole tx rolls
+// back. After restoring it, a second call resolves the review.
+func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 	s := newTestServer(t)
 	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
 
-	// Sabotage: rename the artifacts table so the cleanup's ListByRun fails with
-	// "no such table" and the tx rolls back before MarkDiscarded.
+	// Sabotage: rename the artifacts table so the teardown's ListByRun fails with
+	// "no such table" and the tx rolls back before any flip.
 	if _, err := s.db.Exec(`ALTER TABLE artifacts RENAME TO artifacts_temp`); err != nil {
 		t.Fatalf("rename artifacts table: %v", err)
 	}
 
-	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
+	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
-	// Run must still be pending_approval — the lookup failed and MarkDiscarded
-	// must have been skipped.
+	// Run is untouched (it was never flipped — teardown doesn't touch run status),
+	// and human_content was rolled back with the rest of the batch.
 	var runStatus string
 	if err := s.db.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&runStatus); err != nil {
-		t.Fatalf("scan run after sabotaged cleanup: %v", err)
+		t.Fatalf("scan run after sabotaged teardown: %v", err)
 	}
-	if runStatus != "pending_approval" {
-		t.Fatalf("run.status = %q after failure; want %q (cleanup must hold for retry)",
-			runStatus, "pending_approval")
+	if runStatus != "completed" {
+		t.Fatalf("run.status = %q after failure; want %q (run untouched)", runStatus, "completed")
+	}
+	var humanContent sql.NullString
+	if err := s.db.QueryRow(`SELECT human_content FROM run_memory WHERE run_id = ?`, runID).Scan(&humanContent); err != nil {
+		t.Fatalf("scan run_memory after failure: %v", err)
+	}
+	if humanContent.Valid {
+		t.Errorf("human_content = %q after failure; want NULL (batch must roll back atomically)", humanContent.String)
 	}
 
-	// Heal the table; the next cleanup call must rediscover the run via
-	// PendingApprovalRunIDForTask and complete the work.
+	// Heal the table; the next call must resolve the still-pending review.
 	if _, err := s.db.Exec(`ALTER TABLE artifacts_temp RENAME TO artifacts`); err != nil {
 		t.Fatalf("restore artifacts table: %v", err)
 	}
 
-	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
+	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
-	if err := s.db.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&runStatus); err != nil {
-		t.Fatalf("scan run after retry: %v", err)
-	}
-	if runStatus != "cancelled" {
-		t.Errorf("run.status = %q after successful retry; want %q", runStatus, "cancelled")
-	}
 	var artState string
 	if err := s.db.QueryRow(`SELECT state FROM artifacts WHERE id = ?`, reviewID).Scan(&artState); err != nil {
 		t.Fatalf("scan review artifact after retry: %v", err)
@@ -1321,13 +1303,13 @@ func TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry(t *testing.T) {
 	}
 }
 
-// TestCleanupPendingApprovalRun_AgentContentNullSurvives is the
+// TestTeardownTaskArtifacts_AgentContentNullSurvives is the
 // SKY-204 synthetic-row case: agent skipped the memory file, so
-// run_memory exists with agent_content NULL. The discard cleanup
+// run_memory exists with agent_content NULL. The discard teardown
 // still lands human_content cleanly on the existing row (the spec's
 // guarantee that the unconditional termination-time upsert means
 // no INSERT-or-UPDATE branching is needed downstream).
-func TestCleanupPendingApprovalRun_AgentContentNullSurvives(t *testing.T) {
+func TestTeardownTaskArtifacts_AgentContentNullSurvives(t *testing.T) {
 	s := newTestServer(t)
 	taskID, runID, _ := pendingApprovalFixture(t, s.db)
 
@@ -1340,7 +1322,7 @@ func TestCleanupPendingApprovalRun_AgentContentNullSurvives(t *testing.T) {
 		t.Fatalf("force null agent_content: %v", err)
 	}
 
-	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
+	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
 	var agentContent, humanContent sql.NullString
 	if err := s.db.QueryRow(

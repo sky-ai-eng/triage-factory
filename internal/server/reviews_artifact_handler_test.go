@@ -15,14 +15,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedReviewArtifactWithRun mints a pending_approval run chain and a finalized
-// review-draft artifact hung off it (TFAC-494): state=pending, ready sentinel
-// set, the head SHA pinned, one staged inline comment, and the agent's draft
-// snapshotted into proposed. The whole review is staged TF-side — no GitHub
-// object exists until approval. Returns (artifactID, runID, taskID).
+// seedReviewArtifactWithRun mints a completed (terminal) run chain and a
+// finalized review-draft artifact hung off it (TFAC-494): state=pending, ready
+// sentinel set, the head SHA pinned, one staged inline comment, and the agent's
+// draft snapshotted into proposed. The whole review is staged TF-side — no GitHub
+// object exists until approval. The run is completed because approval/dismiss are
+// decoupled sidecars that never flip run lifecycle (TFAC-379). Returns
+// (artifactID, runID, taskID).
 func seedReviewArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo string, number int, event string) (artifactID, runID, taskID string) {
 	t.Helper()
-	runID = seedSteerRun(t, s.db, suffix, "pending_approval")
+	runID = seedSteerRun(t, s.db, suffix, "completed")
 	taskID = "t_" + suffix
 	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, runID, "e_"+suffix, "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
@@ -325,5 +327,43 @@ func TestReviewArtifactUpdate_NonPending_409(t *testing.T) {
 	// The staged body must be unchanged.
 	if d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON); d.ReviewBody != "## Review\nlgtm" {
 		t.Errorf("review_body = %q after rejected PATCH, want unchanged", d.ReviewBody)
+	}
+}
+
+// TestReviewArtifactDismiss pins the per-artifact dismiss for reviews: POST
+// /api/artifacts/{id}/dismiss flips the artifact pending → dismissed with NO
+// GitHub call (the review is staged TF-side, TFAC-494) and never touches the run
+// lifecycle (the decoupled sidecar, TFAC-379).
+func TestReviewArtifactDismiss(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+
+	artID, runID, _ := seedReviewArtifactWithRun(t, srv, "rdis", "acme", "api", 7, "COMMENT")
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStateReviewDismissed {
+		t.Errorf("artifact state = %q, want dismissed", got)
+	}
+	var runStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&runStatus); err != nil {
+		t.Fatalf("read run: %v", err)
+	}
+	if runStatus != "completed" {
+		t.Errorf("run status = %q, want completed (dismiss must not flip run lifecycle)", runStatus)
+	}
+}
+
+// TestReviewArtifactDismiss_NonPending_409 pins the state guard: dismissing an
+// already-submitted (terminal) review returns 409.
+func TestReviewArtifactDismiss_NonPending_409(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rdis409", "acme", "api", 7, "COMMENT")
+	execSQL(t, srv.db, `UPDATE artifacts SET state = ? WHERE id = ?`, domain.ArtifactStateReviewSubmitted, artID)
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("dismiss of submitted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 }

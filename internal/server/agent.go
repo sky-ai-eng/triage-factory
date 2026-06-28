@@ -233,8 +233,10 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 // runResponse projects an AgentRun into the wire shape the frontend consumes,
 // augmented with `artifact_count` (so the Board card can show how many artifacts
 // a run produced without a per-card fetch) and the derived approval signal:
-// `has_unresolved_artifacts` (bool) plus `unresolved_pr_count` /
-// `unresolved_review_count`. These replace the legacy `pending_kind` /
+// `has_unresolved_artifacts` (bool), `unresolved_pr_count` /
+// `unresolved_review_count`, and `pending_artifact_ids` (the set of unresolved
+// approvable artifact ids — all draft PRs + all ready reviews — for the per-item
+// resolve UI). These replace the legacy `pending_kind` /
 // `pending_artifact_id` overlay discriminators — approval is no longer a stored
 // run status but a view over the unresolved-artifact set.
 //
@@ -280,6 +282,11 @@ func runResponse(run *domain.AgentRun, artifactCount int, arts []domain.Artifact
 		out["has_unresolved_artifacts"] = prCount > 0 || reviewCount > 0
 		out["unresolved_pr_count"] = prCount
 		out["unresolved_review_count"] = reviewCount
+		// The set of unresolved approvable artifact ids (all draft PRs + all ready
+		// reviews) — what the approval UI lists for per-item resolve. Emitted under
+		// the same definitive-only guard as the counts above, and always non-nil so
+		// the field is [] rather than null when nothing is unresolved.
+		out["pending_artifact_ids"] = domain.UnresolvedArtifactIDs(arts)
 	}
 	return out
 }

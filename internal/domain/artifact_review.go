@@ -178,6 +178,38 @@ func FirstReadyReview(arts []Artifact) *Artifact {
 	return nil
 }
 
+// AllPendingReviewArtifacts returns every pending review artifact in arts (the
+// plural of FirstPendingReviewArtifact), in slice order — Kind==review,
+// State==pending, regardless of the ready sentinel. The task-level resolve-all
+// teardown uses this to dismiss every abandoned review (finalized or not), the
+// same "abandon whether or not it reached the ready sentinel" rule the
+// single-artifact teardown path applied via FirstPendingReviewArtifact.
+func AllPendingReviewArtifacts(arts []Artifact) []Artifact {
+	var out []Artifact
+	for i := range arts {
+		if arts[i].Kind == ArtifactKindReview && arts[i].State == ArtifactStateReviewPending {
+			out = append(out, arts[i])
+		}
+	}
+	return out
+}
+
+// AllReadyReviews returns every finalized pending review artifact in arts (the
+// plural of FirstReadyReview), in slice order — the ones a human can actually
+// approve (the ready sentinel is set). The projection (pending_artifact_ids)
+// uses this so only finalized reviews count as approvable, mirroring
+// AllDraftPullRequests for the review kind. Shares isReadyReview with the
+// single-artifact predicate.
+func AllReadyReviews(arts []Artifact) []Artifact {
+	var out []Artifact
+	for i := range arts {
+		if isReadyReview(arts[i]) {
+			out = append(out, arts[i])
+		}
+	}
+	return out
+}
+
 // isReadyReview is the single-artifact predicate for "a finalized pending review
 // awaiting approval" — Kind==review, State==pending, and the ready sentinel
 // (details.ReviewEvent) set. FirstReadyReview and UnresolvedArtifactCounts both
