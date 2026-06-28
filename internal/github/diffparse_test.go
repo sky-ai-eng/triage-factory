@@ -206,6 +206,27 @@ func TestDiffLines_EmptyDiff(t *testing.T) {
 	}
 }
 
+func TestDiffLines_CRLF(t *testing.T) {
+	// A CRLF diff must key the file cleanly ("foo.go", not "foo.go\r").
+	diff := "diff --git a/foo.go b/foo.go\r\n@@ -1,4 +1,4 @@\r\n context\r\n-old\r\n+new\r\n line3\r\n line4\r\n"
+	got := DiffLines(diff)
+	if _, ok := got["foo.go"]; !ok {
+		t.Fatalf("expected clean key \"foo.go\", got keys %v", keysOf(got))
+	}
+	want := map[int]bool{1: true, 2: true, 3: true, 4: true}
+	if !intSetEqual(got["foo.go"], want) {
+		t.Errorf("DiffLines CRLF = %v, want %v", got["foo.go"], want)
+	}
+}
+
+func keysOf(m map[string]map[int]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // --- DiffHunks ---
 
 func hunksEqual(a, b []Hunk) bool {
@@ -290,6 +311,20 @@ func TestDiffHunks_TrailingNewlineDoesNotInflateRange(t *testing.T) {
 func TestDiffHunks_EmptyDiff(t *testing.T) {
 	if got := DiffHunks(""); len(got) != 0 {
 		t.Errorf("DiffHunks empty = %v, want empty map", got)
+	}
+}
+
+func TestDiffHunks_CRLF(t *testing.T) {
+	// A CRLF diff must key the file cleanly so ValidateCommentRange resolves it.
+	diff := "diff --git a/foo.go b/foo.go\r\n@@ -1,4 +1,4 @@\r\n ctx\r\n-old\r\n+new\r\n line3\r\n line4\r\n"
+	got := DiffHunks(diff)
+	want := []Hunk{{NewStart: 1, NewEnd: 4}}
+	if !hunksEqual(got["foo.go"], want) {
+		t.Errorf("DiffHunks CRLF = %v, want %v (keys: %v)", got["foo.go"], want, got)
+	}
+	// The clean key means the downstream validator finds the file.
+	if msg := ValidateCommentRange(got, "foo.go", 3, nil); msg != "" {
+		t.Errorf("ValidateCommentRange on CRLF diff = %q, want valid", msg)
 	}
 }
 

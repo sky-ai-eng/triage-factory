@@ -12,7 +12,11 @@ func DiffLines(diff string) map[string]map[int]bool {
 	var currentFile string
 	var lineNum int
 
-	for _, line := range strings.Split(diff, "\n") {
+	for _, raw := range strings.Split(diff, "\n") {
+		// Strip the trailing CR of a CRLF diff so it never leaks into a file-path
+		// key (a "path\r" key would never match a clean lookup).
+		line := strings.TrimSuffix(raw, "\r")
+
 		if strings.HasPrefix(line, "diff --git") {
 			// Extract file path from "diff --git a/path b/path"
 			parts := strings.SplitN(line, " b/", 2)
@@ -64,7 +68,8 @@ func DiffLinesFromPatches(files []PRFile) map[string]map[int]bool {
 func parsePatchLines(patch string) map[int]bool {
 	result := make(map[int]bool)
 	var lineNum int
-	for _, line := range strings.Split(patch, "\n") {
+	for _, raw := range strings.Split(patch, "\n") {
+		line := strings.TrimSuffix(raw, "\r") // CRLF-safe, mirroring DiffLines
 		if strings.HasPrefix(line, "@@") {
 			lineNum = parseHunkNewStart(line)
 			continue
@@ -118,7 +123,11 @@ func DiffHunks(diff string) map[string][]Hunk {
 		inHunk = false
 	}
 
-	for _, line := range strings.Split(diff, "\n") {
+	for _, raw := range strings.Split(diff, "\n") {
+		// Strip the trailing CR of a CRLF diff so it never leaks into a file-path
+		// key (a "path\r" key would never match a clean lookup).
+		line := strings.TrimSuffix(raw, "\r")
+
 		if strings.HasPrefix(line, "diff --git") {
 			flush()
 			parts := strings.SplitN(line, " b/", 2)
@@ -190,7 +199,8 @@ func parsePatchHunks(patch string) []Hunk {
 		inHunk = false
 	}
 
-	for _, line := range strings.Split(patch, "\n") {
+	for _, raw := range strings.Split(patch, "\n") {
+		line := strings.TrimSuffix(raw, "\r") // CRLF-safe, mirroring DiffHunks
 		if strings.HasPrefix(line, "@@") {
 			flush()
 			start := parseHunkNewStart(line)
