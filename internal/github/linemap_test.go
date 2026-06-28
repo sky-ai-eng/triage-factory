@@ -281,13 +281,6 @@ func TestMapComment_PresentButNoHunks(t *testing.T) {
 		t.Errorf("binary file = %+v, want outdated", got)
 	}
 
-	// A rename-only change (100% similarity, no hunks) under its new path.
-	renameOnly := "diff --git a/old.go b/new.go\n" +
-		"similarity index 100%\nrename from old.go\nrename to new.go\n"
-	if got := ParseLineMap(renameOnly).MapComment("new.go", 3, nil); got != (LineMapResult{Status: LineMapOutdated}) {
-		t.Errorf("rename-only (new path) = %+v, want outdated", got)
-	}
-
 	// A mode-only change (chmod): "diff --git" header + old/new mode, no @@.
 	// Content is identical, but with no line-level data we stay conservative.
 	modeOnly := "diff --git a/run.sh b/run.sh\n" +
@@ -315,6 +308,77 @@ func TestMapComment_PureInsertionHunk(t *testing.T) {
 	// Old line 3 onward is after the insertion → shifted by +2.
 	if got := m.MapComment("f.go", 3, nil); got != (LineMapResult{Status: LineMapMoved, Line: 5}) {
 		t.Errorf("line 3 = %+v, want moved→5", got)
+	}
+}
+
+// --- renamed files: anchor carries the old path; result reports the new one ---
+
+func TestMapComment_Rename(t *testing.T) {
+	// Rename-only (100% similarity, no hunks): content byte-identical, line
+	// numbers preserved, but relocated → moved + new path.
+	renameOnly := "diff --git a/old.go b/new.go\n" +
+		"similarity index 100%\nrename from old.go\nrename to new.go\n"
+	if got := ParseLineMap(renameOnly).MapComment("old.go", 3, nil); got != (LineMapResult{Status: LineMapMoved, Line: 3, Path: "new.go"}) {
+		t.Errorf("rename-only single = %+v, want moved→new.go:3", got)
+	}
+	sl := 2
+	if got := ParseLineMap(renameOnly).MapComment("old.go", 4, &sl); got != (LineMapResult{Status: LineMapMoved, Line: 4, StartLine: 2, Path: "new.go"}) {
+		t.Errorf("rename-only range = %+v, want moved→new.go:2-4", got)
+	}
+
+	// Rename + edits: an insertion above shifts the anchor; still a move, now
+	// also to the new path.
+	renameEdit := "diff --git a/old.go b/new.go\n" +
+		"similarity index 80%\nrename from old.go\nrename to new.go\n" +
+		"--- a/old.go\n+++ b/new.go\n" +
+		"@@ -1,4 +1,5 @@\n+X\n a\n b\n c\n d\n"
+	if got := ParseLineMap(renameEdit).MapComment("old.go", 3, nil); got != (LineMapResult{Status: LineMapMoved, Line: 4, Path: "new.go"}) {
+		t.Errorf("rename+edit shift = %+v, want moved→new.go:4", got)
+	}
+
+	// Rename + edit *on the anchored line* → outdated (no Path; nothing usable).
+	renameEditLine := "diff --git a/old.go b/new.go\n" +
+		"similarity index 80%\nrename from old.go\nrename to new.go\n" +
+		"@@ -1,4 +1,4 @@\n a\n b\n-c\n+c2\n d\n"
+	if got := ParseLineMap(renameEditLine).MapComment("old.go", 3, nil); got != (LineMapResult{Status: LineMapOutdated}) {
+		t.Errorf("rename+edit on line = %+v, want outdated", got)
+	}
+
+	// A copy (copy from/copy to) leaves the source in place — it must NOT be
+	// treated as a rename, so the anchor on the original maps unchanged.
+	copyDiff := "diff --git a/orig.go b/dup.go\n" +
+		"similarity index 100%\ncopy from orig.go\ncopy to dup.go\n"
+	if got := ParseLineMap(copyDiff).MapComment("orig.go", 2, nil); got != (LineMapResult{Status: LineMapUnchanged, Line: 2}) {
+		t.Errorf("copy source = %+v, want unchanged→2 (copies don't redirect)", got)
+	}
+}
+
+func TestMapComment_RenameFromPatches(t *testing.T) {
+	// Pure rename via the files API: status "renamed", zero add/del, empty patch.
+	pure := ParseLineMapFromPatches([]PRFile{
+		{Filename: "new.go", Status: "renamed", PreviousFilename: "old.go"},
+	})
+	if got := pure.MapComment("old.go", 5, nil); got != (LineMapResult{Status: LineMapMoved, Line: 5, Path: "new.go"}) {
+		t.Errorf("patch pure rename = %+v, want moved→new.go:5", got)
+	}
+
+	// Rename + edits with a patch present → map through it, report the new path.
+	edited := ParseLineMapFromPatches([]PRFile{{
+		Filename: "new.go", Status: "renamed", PreviousFilename: "old.go",
+		Additions: 1, Patch: "@@ -1,4 +1,5 @@\n+X\n a\n b\n c\n d",
+	}})
+	if got := edited.MapComment("old.go", 3, nil); got != (LineMapResult{Status: LineMapMoved, Line: 4, Path: "new.go"}) {
+		t.Errorf("patch rename+edit = %+v, want moved→new.go:4", got)
+	}
+
+	// Rename + edits whose patch was omitted (oversized diff): nonzero counts but
+	// no hunks → not content-identical → outdated.
+	omitted := ParseLineMapFromPatches([]PRFile{{
+		Filename: "new.go", Status: "renamed", PreviousFilename: "old.go",
+		Additions: 3, Deletions: 1, Patch: "",
+	}})
+	if got := omitted.MapComment("old.go", 5, nil); got != (LineMapResult{Status: LineMapOutdated}) {
+		t.Errorf("patch rename omitted = %+v, want outdated", got)
 	}
 }
 

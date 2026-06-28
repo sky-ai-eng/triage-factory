@@ -33,6 +33,14 @@ import (
 // validating a fresh comment but insufficient to forward-map an old-side
 // anchor — we need the old↔new correspondence and the deletion markers — so
 // this builds its own per-file parse retaining both sides.
+//
+// Renames are handled too: the diff keys a renamed file under its new path, but
+// a staged comment carries the *old* path. ParseLineMap records old→new from
+// the "rename from"/"rename to" header (copies are intentionally excluded — the
+// source still exists); the patch fallback uses PRFile.Status=="renamed" +
+// PreviousFilename. A surviving anchor on a renamed file maps to LineMapMoved
+// with LineMapResult.Path set to the new path (the anchor relocated even if its
+// line number didn't change).
 
 // LineMapStatus is the typed verdict for a forward-mapped comment anchor.
 type LineMapStatus string
@@ -41,9 +49,10 @@ const (
 	// LineMapUnchanged: the anchored code is identical and its line number did
 	// not move (new-side line == old-side line).
 	LineMapUnchanged LineMapStatus = "unchanged"
-	// LineMapMoved: the anchored code is identical but its line number shifted
-	// (insertions/deletions above moved it; the content the comment points at
-	// is the same).
+	// LineMapMoved: the anchored code is identical but its location changed —
+	// its line number shifted (insertions/deletions above moved it) and/or its
+	// file was renamed (LineMapResult.Path then holds the new path). The content
+	// the comment points at is the same; it just isn't where the anchor said.
 	LineMapMoved LineMapStatus = "moved"
 	// LineMapOutdated: the anchored line's content changed or was deleted, the
 	// file/hunk no longer contains it, or (for a multi-line range) a change
@@ -56,10 +65,16 @@ const (
 // the target commit. Both are 0 when Status is LineMapOutdated. StartLine is
 // additionally 0 for any single-line comment (the startLine arg was nil),
 // regardless of status.
+//
+// Path, when non-empty, is the new-side path the comment must be re-anchored to
+// — set only when the anchored file was renamed between A and B (Status is then
+// LineMapMoved). Empty means the path is unchanged (use the comment's original
+// path). It is always empty for LineMapOutdated.
 type LineMapResult struct {
 	Status    LineMapStatus
 	Line      int
 	StartLine int
+	Path      string
 }
 
 // LineMap is a parsed A→B diff prepared for forward-mapping comment anchors.
@@ -73,8 +88,24 @@ type LineMapResult struct {
 // no line-level data (binary, rename-only, mode-only, or an omitted oversized
 // patch). MapComment maps the former unchanged and the latter outdated, so a
 // future writer must not collapse "absent" to "present, empty".
+//
+// renames maps an old (pre-rename) path to its new path and whether the rename
+// preserved content. A staged comment carries the old path, so MapComment
+// consults this before concluding a path is absent: the new path's hunks (keyed
+// in files) drive the mapping, and the result reports the new path.
 type LineMap struct {
-	files map[string][]lineMapHunk
+	files   map[string][]lineMapHunk
+	renames map[string]renameInfo
+}
+
+// renameInfo is a rename's new path plus whether it preserved content byte-for-
+// byte (a 100%-similarity rename, which carries no hunks). contentIdentical
+// lets MapComment tell a pure relocation (line numbers preserved) apart from a
+// rename whose edits we have no line data for (an omitted oversized patch),
+// which must stay outdated.
+type renameInfo struct {
+	to               string
+	contentIdentical bool
 }
 
 // lineMapHunk is one diff hunk retaining both old-side and new-side starts plus
@@ -93,9 +124,13 @@ type lineMapHunk struct {
 // headers) into a LineMap. New-side line numbers are keyed by the diff's b/
 // path, matching DiffHunks.
 func ParseLineMap(diff string) LineMap {
-	m := LineMap{files: make(map[string][]lineMapHunk)}
-	var currentFile string
+	m := LineMap{
+		files:   make(map[string][]lineMapHunk),
+		renames: make(map[string]renameInfo),
+	}
+	var currentFile, renameFrom string
 	var cur *lineMapHunk
+	var sawHunk bool
 
 	flush := func() {
 		if cur != nil && currentFile != "" {
@@ -103,10 +138,21 @@ func ParseLineMap(diff string) LineMap {
 		}
 		cur = nil
 	}
+	// finishFile records the just-ended file's rename, if any. A rename with no
+	// hunks is a 100%-similarity (content-identical) relocation; with hunks it's
+	// a rename + edits.
+	finishFile := func() {
+		if renameFrom != "" && currentFile != "" {
+			m.renames[renameFrom] = renameInfo{to: currentFile, contentIdentical: !sawHunk}
+		}
+		renameFrom = ""
+		sawHunk = false
+	}
 
 	for _, line := range strings.Split(diff, "\n") {
 		if strings.HasPrefix(line, "diff --git") {
 			flush()
+			finishFile()
 			parts := strings.SplitN(line, " b/", 2)
 			if len(parts) == 2 {
 				currentFile = parts[1]
@@ -124,6 +170,7 @@ func ParseLineMap(diff string) LineMap {
 			if currentFile == "" {
 				continue
 			}
+			sawHunk = true
 			// Keep the hunk even when one side starts at 0 (a deleted file's
 			// "+0,0" or a new file's "-0,0") — unlike DiffHunks, which only
 			// cares about commentable new-side ranges, the forward map needs
@@ -136,15 +183,21 @@ func ParseLineMap(diff string) LineMap {
 		}
 
 		if cur == nil {
-			// Inside a file header (index/---/+++) or between files — also where
-			// "--- a/x" / "+++ b/x" are safely skipped, since they precede the
-			// first "@@" of every file.
+			// Inside a file header (index/---/+++/rename/similarity) or between
+			// files. "--- a/x" / "+++ b/x" are safely skipped here since they
+			// precede the first "@@". "rename from <p>" gives the old path a
+			// staged comment is anchored to; "copy from" is deliberately not
+			// matched (a copy leaves the source in place).
+			if strings.HasPrefix(line, "rename from ") {
+				renameFrom = strings.TrimPrefix(line, "rename from ")
+			}
 			continue
 		}
 
 		appendOp(cur, line)
 	}
 	flush()
+	finishFile()
 
 	return m
 }
@@ -153,9 +206,23 @@ func ParseLineMap(diff string) LineMap {
 // strings returned by GetCompareFiles / GetPRFiles — the JSON fallback when the
 // raw diff media type is refused (HTTP 406). Mirrors DiffHunksFromPatches.
 func ParseLineMapFromPatches(files []PRFile) LineMap {
-	m := LineMap{files: make(map[string][]lineMapHunk)}
+	m := LineMap{
+		files:   make(map[string][]lineMapHunk),
+		renames: make(map[string]renameInfo),
+	}
 	for _, f := range files {
-		m.files[f.Filename] = parsePatchLineMapHunks(f.Patch)
+		hunks := parsePatchLineMapHunks(f.Patch)
+		m.files[f.Filename] = hunks
+		if f.Status == "renamed" && f.PreviousFilename != "" {
+			// A pure rename reports zero additions/deletions and no patch; a
+			// rename + edits has hunks (or, if the patch was omitted for an
+			// oversized diff, nonzero counts but no hunks — not content-identical,
+			// so it stays outdated rather than mapping 1:1).
+			m.renames[f.PreviousFilename] = renameInfo{
+				to:               f.Filename,
+				contentIdentical: len(hunks) == 0 && f.Additions == 0 && f.Deletions == 0,
+			}
+		}
 	}
 	return m
 }
@@ -225,13 +292,18 @@ func appendOp(h *lineMapHunk, line string) {
 // A file absent from the diff is unchanged between A and B, so its lines map to
 // themselves (unchanged). A file present in the diff but carrying no parsed
 // hunks is the opposite — it changed in a way we have no line-level mapping for
-// (a binary "files differ", a rename-only / mode-only change, or a patch the
-// files API omitted for an oversized diff) — so we report outdated rather than
-// falsely claim the anchor is fresh. (A file renamed *with* content changes is
-// the known gap — the diff keys it under the new path; out of scope here.)
+// (a binary "files differ", a mode-only change, or a patch the files API
+// omitted for an oversized diff) — so we report outdated rather than falsely
+// claim the anchor is fresh. A renamed file is keyed under its new path, so an
+// anchor on the old path is redirected through the rename index and, if it
+// survives, reported as LineMapMoved with Path set to the new path.
 func (m LineMap) MapComment(path string, line int, startLine *int) LineMapResult {
 	hunks, ok := m.files[path]
 	if !ok {
+		// Not changed under this path — but it may have been renamed away from it.
+		if r, renamed := m.renames[path]; renamed {
+			return m.mapRenamed(r, line, startLine)
+		}
 		// File absent from the diff: unchanged between A and B, anchor unshifted.
 		if startLine != nil {
 			return LineMapResult{Status: LineMapUnchanged, Line: line, StartLine: *startLine}
@@ -240,29 +312,70 @@ func (m LineMap) MapComment(path string, line int, startLine *int) LineMapResult
 	}
 	if len(hunks) == 0 {
 		// File is in the diff but has no line-level mapping data (binary,
-		// rename-only / mode-only, or an omitted oversized-diff patch). We can't
-		// prove the anchor still points at the same code, so be conservative: a
-		// false "outdated" only over-flags for re-anchoring, whereas a false
+		// mode-only, or an omitted oversized-diff patch). We can't prove the
+		// anchor still points at the same code, so be conservative: a false
+		// "outdated" only over-flags for re-anchoring, whereas a false
 		// "unchanged" would land the comment on code that may have moved.
 		return LineMapResult{Status: LineMapOutdated}
 	}
 
+	newLine, newStart, sameLine, survived := mapSpan(hunks, line, startLine)
+	if !survived {
+		return LineMapResult{Status: LineMapOutdated}
+	}
+	if sameLine {
+		return LineMapResult{Status: LineMapUnchanged, Line: newLine, StartLine: newStart}
+	}
+	return LineMapResult{Status: LineMapMoved, Line: newLine, StartLine: newStart}
+}
+
+// mapRenamed maps an anchor whose file was renamed (old path → r.to). A rename
+// is a relocation, so a surviving anchor is always LineMapMoved (even at the
+// same line number) and carries the new path; only a destroyed anchor is
+// outdated.
+func (m LineMap) mapRenamed(r renameInfo, line int, startLine *int) LineMapResult {
+	hunks := m.files[r.to]
+	if len(hunks) == 0 {
+		if r.contentIdentical {
+			// Pure rename: content is byte-identical, line numbers preserved —
+			// the anchor just lives at a new path now.
+			res := LineMapResult{Status: LineMapMoved, Line: line, Path: r.to}
+			if startLine != nil {
+				res.StartLine = *startLine
+			}
+			return res
+		}
+		// Renamed with edits whose patch we lack (omitted oversized diff): no
+		// line data, so we can't prove the anchor survived.
+		return LineMapResult{Status: LineMapOutdated}
+	}
+	newLine, newStart, _, survived := mapSpan(hunks, line, startLine)
+	if !survived {
+		return LineMapResult{Status: LineMapOutdated}
+	}
+	return LineMapResult{Status: LineMapMoved, Line: newLine, StartLine: newStart, Path: r.to}
+}
+
+// mapSpan maps a single-line (startLine == nil) or multi-line anchor against one
+// file's hunks. survived is false when the anchor (or any line in its range) was
+// edited/deleted or the range no longer remaps contiguously. sameLine is true
+// when a surviving anchor kept its exact line number(s) — the unchanged-vs-moved
+// discriminator for a same-path mapping (ignored for a rename, which is always a
+// move). newStart is 0 for a single-line anchor.
+func mapSpan(hunks []lineMapHunk, line int, startLine *int) (newLine, newStart int, sameLine, survived bool) {
 	if startLine == nil {
-		newLine, outdated := mapOldLine(hunks, line)
+		nl, outdated := mapOldLine(hunks, line)
 		if outdated {
-			return LineMapResult{Status: LineMapOutdated}
+			return 0, 0, false, false
 		}
-		if newLine == line {
-			return LineMapResult{Status: LineMapUnchanged, Line: newLine}
-		}
-		return LineMapResult{Status: LineMapMoved, Line: newLine}
+		return nl, 0, nl == line, true
 	}
 
 	start := *startLine
 	if start > line {
 		// Malformed anchor (ValidateCommentRange enforces start ≤ line at
 		// staging time); treat as no longer mappable.
-		return LineMapResult{Status: LineMapOutdated}
+		return 0, 0, false, false
 	}
 
 	// Map every old line in [start, line]. The block survives only if all lines
@@ -271,25 +384,20 @@ func (m LineMap) MapComment(path string, line int, startLine *int) LineMapResult
 	// breaks contiguity — either way the anchored block changed.
 	// prev holds the previous line's mapped position; it's seeded on the first
 	// iteration (k == start) before any read, so its zero value is never used.
-	var newStart, prev int
+	var ns, prev int
 	for k := start; k <= line; k++ {
 		nl, outdated := mapOldLine(hunks, k)
 		if outdated {
-			return LineMapResult{Status: LineMapOutdated}
+			return 0, 0, false, false
 		}
 		if k == start {
-			newStart = nl
+			ns = nl
 		} else if nl != prev+1 {
-			return LineMapResult{Status: LineMapOutdated}
+			return 0, 0, false, false
 		}
 		prev = nl
 	}
-	newEnd := prev
-
-	if newStart == start && newEnd == line {
-		return LineMapResult{Status: LineMapUnchanged, Line: newEnd, StartLine: newStart}
-	}
-	return LineMapResult{Status: LineMapMoved, Line: newEnd, StartLine: newStart}
+	return prev, ns, ns == start && prev == line, true
 }
 
 // mapOldLine translates a single old-side line number to its new-side line
