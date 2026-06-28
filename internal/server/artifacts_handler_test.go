@@ -334,8 +334,15 @@ func TestArtifactDismiss_TerminalBlueprintLastArtifactClosesTask(t *testing.T) {
 // mirroring terminateBlueprint — a stray draft PR on an aborted blueprint doesn't
 // override the "needs a human" disposition.
 func TestArtifactDismiss_AbortedBlueprintLeavesTaskOpen(t *testing.T) {
-	for _, terminal := range []string{"aborted", "failed", "cancelled"} {
-		t.Run(terminal, func(t *testing.T) {
+	// The non-completed terminal vocabulary, from the domain constants (compile-
+	// checked against the real blueprint_runs.status values terminateBlueprint
+	// writes) — only 'completed' is a clean finalization that may close the task.
+	for _, terminal := range []domain.BlueprintRunStatus{
+		domain.BlueprintRunStatusAborted,
+		domain.BlueprintRunStatusFailed,
+		domain.BlueprintRunStatusCancelled,
+	} {
+		t.Run(string(terminal), func(t *testing.T) {
 			keyring.MockInit()
 			srv := newTestServer(t)
 			mux := newAppAPIMux()
@@ -346,8 +353,8 @@ func TestArtifactDismiss_AbortedBlueprintLeavesTaskOpen(t *testing.T) {
 			t.Cleanup(stub.Close)
 			seedApp(t, srv, stub, acmeInstall())
 
-			artID, _, taskID := seedDraftPRArtifactWithRun(t, srv, "tolab-"+terminal, "acme", "api", 42)
-			execSQL(t, srv.db, `UPDATE blueprint_runs SET status = ? WHERE task_id = ?`, terminal, taskID)
+			artID, _, taskID := seedDraftPRArtifactWithRun(t, srv, "tolab-"+string(terminal), "acme", "api", 42)
+			execSQL(t, srv.db, `UPDATE blueprint_runs SET status = ? WHERE task_id = ?`, string(terminal), taskID)
 
 			rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
 			if rec.Code != http.StatusOK {
