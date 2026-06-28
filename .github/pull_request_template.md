@@ -30,9 +30,10 @@ Call out anything deliberately left OUT of scope.
 
 <!--
 Required. The exact commands you ran and what passed, then what the new tests
-cover:
-  Go:        go build ./...  ·  go vet ./...  ·  goimports  ·  go test ./...
-  Frontend:  tsc -b  ·  eslint  ·  vitest
+cover. Suggested baseline (matches ./scripts/lint.sh):
+  Go:        ./scripts/lint.sh  ·  go test ./...
+  Frontend:  (in ./scripts/lint.sh) prettier  ·  eslint  ·  tsc -b --noEmit
+             (tests) cd frontend && pnpm exec vitest
   If local docker was unavailable, Postgres-touching changes will run under the
   pgtest testcontainer. A one-line note is fine in this case.
 CHANGELOG is left to release-please — don't hand-edit it.
