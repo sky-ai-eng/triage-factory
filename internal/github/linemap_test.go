@@ -382,6 +382,23 @@ func TestMapComment_RenameFromPatches(t *testing.T) {
 	}
 }
 
+// --- CRLF line endings must not leak \r into path keys or rename paths ---
+
+func TestMapComment_CRLF(t *testing.T) {
+	// A normal changed file must key cleanly so a clean anchor resolves and maps.
+	changed := "diff --git a/f.go b/f.go\r\n@@ -1,4 +1,5 @@\r\n+X\r\n a\r\n b\r\n c\r\n d\r\n"
+	if got := ParseLineMap(changed).MapComment("f.go", 3, nil); got != (LineMapResult{Status: LineMapMoved, Line: 4}) {
+		t.Errorf("CRLF changed file = %+v, want moved→4", got)
+	}
+
+	// A rename must index under the clean old path, not "old.go\r".
+	rename := "diff --git a/old.go b/new.go\r\n" +
+		"similarity index 100%\r\nrename from old.go\r\nrename to new.go\r\n"
+	if got := ParseLineMap(rename).MapComment("old.go", 3, nil); got != (LineMapResult{Status: LineMapMoved, Line: 3, Path: "new.go"}) {
+		t.Errorf("CRLF rename = %+v, want moved→new.go:3", got)
+	}
+}
+
 // --- empty / degenerate inputs ---
 
 func TestMapComment_EmptyDiff(t *testing.T) {

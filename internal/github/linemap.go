@@ -149,7 +149,12 @@ func ParseLineMap(diff string) LineMap {
 		sawHunk = false
 	}
 
-	for _, line := range strings.Split(diff, "\n") {
+	for _, raw := range strings.Split(diff, "\n") {
+		// Strip the trailing CR of a CRLF diff so it never leaks into a file-path
+		// key or rename path (op detection and hunk-header parsing tolerate it,
+		// but "new.go\r" would never match a clean "new.go" anchor).
+		line := strings.TrimSuffix(raw, "\r")
+
 		if strings.HasPrefix(line, "diff --git") {
 			flush()
 			finishFile()
@@ -238,7 +243,8 @@ func parsePatchLineMapHunks(patch string) []lineMapHunk {
 		cur = nil
 	}
 
-	for _, line := range strings.Split(patch, "\n") {
+	for _, raw := range strings.Split(patch, "\n") {
+		line := strings.TrimSuffix(raw, "\r") // CRLF-safe, mirroring ParseLineMap
 		if strings.HasPrefix(line, "@@") {
 			flush()
 			cur = &lineMapHunk{
