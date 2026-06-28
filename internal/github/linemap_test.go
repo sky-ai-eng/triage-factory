@@ -251,9 +251,39 @@ func TestMapComment_FromPatches(t *testing.T) {
 	if got := m.MapComment("g.go", 3, nil); got != (LineMapResult{Status: LineMapOutdated}) {
 		t.Errorf("g.go line 3 = %+v, want outdated", got)
 	}
-	// A binary / unlisted file maps unchanged.
+	// A file not in the changed-files list maps unchanged.
 	if got := m.MapComment("h.go", 7, nil); got != (LineMapResult{Status: LineMapUnchanged, Line: 7}) {
 		t.Errorf("h.go line 7 = %+v, want unchanged→7", got)
+	}
+}
+
+// A file the files API listed but whose patch was omitted (binary, or too large
+// for the diff) carries no line-level mapping data — the anchor can't be proven
+// fresh, so it maps outdated rather than falsely unchanged.
+func TestMapComment_PresentButNoHunks(t *testing.T) {
+	// From the patch fallback: the file is in the changed list with an empty patch.
+	pm := ParseLineMapFromPatches([]PRFile{{Filename: "big.go", Patch: ""}})
+	if got := pm.MapComment("big.go", 10, nil); got != (LineMapResult{Status: LineMapOutdated}) {
+		t.Errorf("omitted-patch file line 10 = %+v, want outdated", got)
+	}
+	sl := 8
+	if got := pm.MapComment("big.go", 12, &sl); got != (LineMapResult{Status: LineMapOutdated}) {
+		t.Errorf("omitted-patch file range = %+v, want outdated", got)
+	}
+
+	// From unified diff text: a binary file change ("diff --git" header, no @@).
+	binary := "diff --git a/img.png b/img.png\n" +
+		"index 0000000..1111111 100644\n" +
+		"Binary files a/img.png and b/img.png differ\n"
+	if got := ParseLineMap(binary).MapComment("img.png", 1, nil); got != (LineMapResult{Status: LineMapOutdated}) {
+		t.Errorf("binary file = %+v, want outdated", got)
+	}
+
+	// A rename-only change (100% similarity, no hunks) under its new path.
+	renameOnly := "diff --git a/old.go b/new.go\n" +
+		"similarity index 100%\nrename from old.go\nrename to new.go\n"
+	if got := ParseLineMap(renameOnly).MapComment("new.go", 3, nil); got != (LineMapResult{Status: LineMapOutdated}) {
+		t.Errorf("rename-only (new path) = %+v, want outdated", got)
 	}
 }
 

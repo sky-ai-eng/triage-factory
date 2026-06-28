@@ -214,16 +214,28 @@ func appendOp(h *lineMapHunk, line string) {
 //     same code). Otherwise unchanged (no shift) or moved (shifted as a block).
 //
 // A file absent from the diff is unchanged between A and B, so its lines map to
-// themselves (unchanged). (A file renamed without content change is the known
-// gap — the diff keys it under the new path; out of scope here.)
+// themselves (unchanged). A file present in the diff but carrying no parsed
+// hunks is the opposite — it changed in a way we have no line-level mapping for
+// (a binary "files differ", a rename-only / mode-only change, or a patch the
+// files API omitted for an oversized diff) — so we report outdated rather than
+// falsely claim the anchor is fresh. (A file renamed *with* content changes is
+// the known gap — the diff keys it under the new path; out of scope here.)
 func (m LineMap) MapComment(path string, line int, startLine *int) LineMapResult {
 	hunks, ok := m.files[path]
 	if !ok {
-		// File unchanged between A and B: the anchor is still valid, unshifted.
+		// File absent from the diff: unchanged between A and B, anchor unshifted.
 		if startLine != nil {
 			return LineMapResult{Status: LineMapUnchanged, Line: line, StartLine: *startLine}
 		}
 		return LineMapResult{Status: LineMapUnchanged, Line: line}
+	}
+	if len(hunks) == 0 {
+		// File is in the diff but has no line-level mapping data (binary,
+		// rename-only / mode-only, or an omitted oversized-diff patch). We can't
+		// prove the anchor still points at the same code, so be conservative: a
+		// false "outdated" only over-flags for re-anchoring, whereas a false
+		// "unchanged" would land the comment on code that may have moved.
+		return LineMapResult{Status: LineMapOutdated}
 	}
 
 	if startLine == nil {
