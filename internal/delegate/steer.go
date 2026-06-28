@@ -31,7 +31,7 @@ var ErrRunNotSteerable = errors.New("run is not steerable")
 //   - completed + abort  — the agent voluntarily stopped; a follow-up can pick
 //     the work back up (its blueprint is re-opened on resume).
 //
-// pending_approval is gone (TFAC-492): runs never park for approval anymore. A
+// pending_approval is gone: runs never park for approval anymore. A
 // terminal blueprint run that left an unresolved artifact (draft PR / ready
 // review) is still message-resumable through the completed+abort path + the
 // feedback ledger — not through a parked status.

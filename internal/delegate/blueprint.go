@@ -128,11 +128,11 @@ func (s *Spawner) terminateBlueprint(
 	}
 
 	if status == domain.BlueprintRunStatusCompleted {
-		// Completion and task-closure are independent now (TFAC-492). A clean
+		// Completion and task-closure are independent now. A clean
 		// finalization closes the task ONLY when no artifact remains unresolved; a
 		// blueprint that completed with an open draft PR / ready review leaves the
 		// task open, surfaced in the derived approval column, until the last
-		// artifact is resolved (TFAC-382 closes it on the last resolution).
+		// artifact is resolved (the last resolution closes it).
 		if s.blueprintHasUnresolvedArtifacts(bgCtx, orgID, blueprintRunID) {
 			// Leave the task open and place it in the approval column. Don't close.
 			s.placeTaskInApprovalColumn(bgCtx, orgID, taskID)
@@ -561,25 +561,44 @@ func blueprintTerminalForResumedStep(stepRun *domain.AgentRun, isFinal bool) (do
 // produced an artifact still awaiting human resolution (a draft PR or a ready
 // pending review — domain.HasUnresolvedArtifacts). This is the derived signal
 // that decides whether a completed blueprint closes its task (none unresolved)
-// or leaves it open in the approval column (≥1 unresolved), TFAC-492. Runs from
+// or leaves it open in the approval column (≥1 unresolved). It loads the
+// blueprint's step runs, then delegates to runsHaveUnresolvedArtifacts. Runs from
 // a detached goroutine with no request claims, so it reads via the admin-pool
-// `...System` artifact reader. A read error is treated as "no unresolved" and
-// logged — a transient miss must not strand a task open with nothing to resolve;
-// the next derivation (or a Tier-2 refresh) corrects it.
+// `...System` readers.
+//
+// Fails OPEN: any read error returns true. Closing a task that still has an
+// unresolved artifact would silently drop the approval workflow (and is hard to
+// recover); leaving a task open spuriously is self-correcting on the next
+// derivation and recoverable by a human. So on error we assume "may be
+// unresolved" rather than risk the destructive direction.
 func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, blueprintRunID string) bool {
 	if s.artifacts == nil || s.blueprints == nil || blueprintRunID == "" {
 		return false
 	}
 	runs, err := s.blueprints.RunsForBlueprintSystem(ctx, orgID, blueprintRunID)
 	if err != nil {
-		blueprintLog.Warn("list step runs for unresolved-artifact check failed", "blueprint_run", blueprintRunID, "error", err)
+		blueprintLog.Warn("list step runs for unresolved-artifact check failed; treating as unresolved (fail open)", "blueprint_run", blueprintRunID, "error", err)
+		return true
+	}
+	return s.runsHaveUnresolvedArtifacts(ctx, orgID, runs)
+}
+
+// runsHaveUnresolvedArtifacts reports whether any of the given runs produced an
+// unresolved artifact, reading each run's artifacts via the admin-pool reader.
+// Split out so a caller that already holds the run set (recomputeTaskBoardColumn)
+// reuses it without re-loading. Fails OPEN like blueprintHasUnresolvedArtifacts:
+// a per-run read error returns true rather than risk under-reporting. The read is
+// one query per run; the run set is a single blueprint_run's steps, so it is
+// bounded by step count, not blueprint history.
+func (s *Spawner) runsHaveUnresolvedArtifacts(ctx context.Context, orgID string, runs []domain.AgentRun) bool {
+	if s.artifacts == nil {
 		return false
 	}
 	for _, r := range runs {
 		arts, err := s.artifacts.ListByRunSystem(ctx, orgID, r.ID)
 		if err != nil {
-			blueprintLog.Warn("list artifacts for unresolved check failed", "blueprint_run", blueprintRunID, "step_run", r.ID, "error", err)
-			continue
+			blueprintLog.Warn("list artifacts for unresolved check failed; treating as unresolved (fail open)", "step_run", r.ID, "error", err)
+			return true
 		}
 		if domain.HasUnresolvedArtifacts(arts) {
 			return true

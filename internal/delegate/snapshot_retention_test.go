@@ -14,7 +14,7 @@ import (
 )
 
 // TestProcessCompletion_DraftPRWritesNoSnapshot: a completed step that queued a
-// draft PR no longer parks or snapshots (TFAC-492). The artifact is an async
+// draft PR no longer parks or snapshots. The artifact is an async
 // sidecar — the step completes with its real outcome (continue) and is not
 // resumable through a parked status, so no workspace snapshot is written.
 func TestProcessCompletion_DraftPRWritesNoSnapshot(t *testing.T) {

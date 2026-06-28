@@ -128,7 +128,7 @@ func ParsePRArtifactDetails(detailsJSON string) (PRArtifactDetails, error) {
 
 // FirstDraftPullRequest returns the first draft pull_request artifact in arts,
 // or nil if none. A draft PR is an unresolved artifact (the derived approval
-// signal, TFAC-492) and what an abandon closes; sharing this predicate keeps
+// signal) and what an abandon closes; sharing this predicate keeps
 // every consumer (HasUnresolvedArtifacts, the abandon path) agreeing on what "the
 // run has an unresolved PR" means.
 func FirstDraftPullRequest(arts []Artifact) *Artifact {

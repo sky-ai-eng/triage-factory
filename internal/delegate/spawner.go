@@ -712,7 +712,7 @@ func (s *Spawner) updateStatus(orgID, runID, status string) {
 // blueprint_run's step runs, never a mirror of one run. For a bot-claimed task
 // with an active blueprint_run it sets in_review ("needs 👀") when the blueprint
 // has an unresolved artifact (a draft PR / ready review — the derived approval
-// signal that replaced the pending_approval run status, TFAC-492) or any step
+// signal that replaced the pending_approval run status) or any step
 // run is parked open, else in_progress, writing tasks.status only when it
 // changes and pushing a WS nudge so peer boards follow.
 //
@@ -769,12 +769,13 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 		}
 	}
 	// An unresolved artifact (draft PR / ready review) is the derived approval
-	// signal that replaced the pending_approval run status (TFAC-492): a step that
-	// completed leaving one keeps the task in the approval column even though no
-	// run is open. Precedence: has-unresolved → approval; else parked-open →
-	// approval; else in-progress. Checked only when not already in_review so the
-	// common all-running path skips the extra artifact reads.
-	if target != "in_review" && s.blueprintHasUnresolvedArtifacts(ctx, orgID, br.ID) {
+	// signal that replaced the pending_approval run status: a step that completed
+	// leaving one keeps the task in the approval column even though no run is open.
+	// Precedence: has-unresolved → approval; else parked-open → approval; else
+	// in-progress. Checked only when not already in_review so the common
+	// all-running path skips the extra artifact reads; reuses the runs already
+	// loaded above rather than re-fetching them.
+	if target != "in_review" && s.runsHaveUnresolvedArtifacts(ctx, orgID, runs) {
 		target = "in_review"
 	}
 	// Idempotent: skip the write + WS broadcast when already at the target.
@@ -800,7 +801,7 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 // placeTaskInApprovalColumn lands a task in the derived approval column
 // (in_review) and leaves it open — the terminal-time counterpart to
 // recomputeTaskBoardColumn for a blueprint that COMPLETED with an unresolved
-// artifact (TFAC-492). recomputeTaskBoardColumn no-ops once the blueprint is
+// artifact. recomputeTaskBoardColumn no-ops once the blueprint is
 // terminal (no active run), so terminateBlueprint calls this instead to surface
 // the still-open task for approval rather than closing it. Same ownership guards
 // as recomputeTaskBoardColumn (bot-claimed, non-terminal, idempotent); the Jira

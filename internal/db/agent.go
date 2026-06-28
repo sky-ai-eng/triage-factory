@@ -98,7 +98,7 @@ type AgentRunStore interface {
 	// MarkResuming flips a resumable run back to running when it is woken by a
 	// follow-up message (a resume goroutine is about to spawn). The resumable
 	// set is every non-finish parked/terminal state: `open` and an aborted run
-	// (completed + outcome='abort'). pending_approval is gone (TFAC-492) — runs
+	// (completed + outcome='abort'). pending_approval is gone — runs
 	// never park for approval. The (status, outcome) compare-and-swap is the wake
 	// race gate — ok=false means the run is no longer resumable (a concurrent
 	// resume already flipped it running, or a finish finalized it), so the caller
@@ -162,9 +162,9 @@ type AgentRunStore interface {
 
 	// MarkCompletedIfPendingApproval flips a legacy 'pending_approval' run back
 	// to 'completed' iff the row is currently 'pending_approval'. Runs never park
-	// in pending_approval anymore (TFAC-492), so this is a no-op on current data;
+	// in pending_approval anymore, so this is a no-op on current data;
 	// it is retained only until the legacy approve/dismiss resolve endpoints that
-	// still call it are reworked (TFAC-382). The guard prevents racing terminal
+	// still call it are reworked. The guard prevents racing terminal
 	// writes from being clobbered if they reach the row first.
 	MarkCompletedIfPendingApproval(ctx context.Context, orgID, runID string) (bool, error)
 
@@ -196,9 +196,9 @@ type AgentRunStore interface {
 
 	// PendingApprovalIDForTask returns the id of the (single) legacy
 	// pending_approval run on a task, or "" if none. Runs never park in
-	// pending_approval anymore (TFAC-492), so on current data this always returns
+	// pending_approval anymore, so on current data this always returns
 	// "" — retained only until the legacy requeue/discard resolve endpoint that
-	// still calls it is reworked (TFAC-382). Bounded to one row by construction.
+	// still calls it is reworked. Bounded to one row by construction.
 	PendingApprovalIDForTask(ctx context.Context, orgID, taskID string) (string, error)
 
 	// HasActiveForTask returns true if the task has any agent

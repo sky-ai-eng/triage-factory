@@ -149,7 +149,7 @@ func TestResumableState(t *testing.T) {
 // TestSendMessage_CompletedAbortIsResumable: a completed+abort run passes the
 // steerable gate and routes to a resume (the agent's voluntary stop can be
 // picked back up). This is also the path a terminal run with an unresolved
-// artifact resumes through now that pending_approval is gone (TFAC-492).
+// artifact resumes through now that pending_approval is gone.
 func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-ab", "sess-ab", "/tmp/does-not-exist-ab")

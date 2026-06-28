@@ -1,6 +1,6 @@
 package domain
 
-// Unresolved-artifact derivation (TFAC-492). A blueprint run no longer parks in
+// Unresolved-artifact derivation. A blueprint run no longer parks in
 // pending_approval while a human approves a queued draft PR / pending review;
 // instead the approval state is *derived* from the run's (blueprint's) artifact
 // set. An artifact is "unresolved" when it still awaits a human verdict:

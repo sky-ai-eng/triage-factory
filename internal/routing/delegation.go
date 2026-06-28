@@ -331,7 +331,7 @@ func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.Ev
 // DrainEntity is the spawner's hook into the per-entity firing queue.
 // Called when an auto run terminates on the entity (any terminal status).
 // A completed run that left an unresolved artifact still counts as terminal
-// here — the artifact is an async sidecar (TFAC-492), so it releases the entity
+// here — the artifact is an async sidecar, so it releases the entity
 // lock and doesn't block downstream processing.
 //
 // Pops pending firings in FIFO order, validates each against current

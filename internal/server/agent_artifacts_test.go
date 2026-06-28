@@ -177,7 +177,7 @@ func TestRunResponse_ArtifactCount(t *testing.T) {
 // TestRunResponse_ArtifactCount_Unresolved pins that a completed run with an
 // unresolved draft PR reports the right artifact_count (from CountByRun) and the
 // derived approval signal (has_unresolved_artifacts + unresolved_pr_count) — the
-// successor to the legacy pending_kind overlay (TFAC-492).
+// successor to the legacy pending_kind overlay.
 func TestRunResponse_ArtifactCount_Unresolved(t *testing.T) {
 	s := newTestServer(t)
 	runID := seedSteerRun(t, s.db, "park", "completed")

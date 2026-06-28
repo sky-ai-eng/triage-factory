@@ -525,10 +525,10 @@ func (ah *artifactsHandler) finishApprovedRun(ctx context.Context, orgID, userID
 	spawner := ah.spawner()
 	// A blueprint run reaches its terminal status through normal step progression
 	// and terminateBlueprint owns task closure (deferred until the last artifact
-	// resolves, TFAC-492/TFAC-382) — there is nothing to resume on approval. A
+	// resolves) — there is nothing to resume on approval. A
 	// standalone run's approval is its terminal, so drop the durable workspace
 	// snapshot. (The full per-artifact resolve + terminal-on-last task closure is
-	// TFAC-382; this keeps the legacy approve path compiling in the interim.)
+	// a follow-up; this keeps the legacy approve path compiling in the interim.)
 	if blueprintRun == nil && spawner != nil {
 		spawner.DiscardWorkspaceSnapshot(orgID, runID)
 	}

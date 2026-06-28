@@ -50,7 +50,7 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 			return e
 		}
 		// Derive has_unresolved_artifacts (+ per-kind counts) from the run's
-		// artifact set (TFAC-492). Only read the artifacts when the run has any —
+		// artifact set. Only read the artifacts when the run has any —
 		// counts==0 means there's nothing unresolved, so skip the list. A list
 		// failure is best-effort: it omits the derived flags (logged) but must not
 		// fail the status fetch or touch the authoritative count above.
@@ -234,45 +234,52 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 // augmented with `artifact_count` (so the Board card can show how many artifacts
 // a run produced without a per-card fetch) and the derived approval signal:
 // `has_unresolved_artifacts` (bool) plus `unresolved_pr_count` /
-// `unresolved_review_count` (TFAC-492). These replace the legacy
-// `pending_kind` / `pending_artifact_id` overlay discriminators — approval is no
-// longer a stored run status but a view over the unresolved-artifact set. The
-// full per-artifact set projection lands in TFAC-382.
+// `unresolved_review_count`. These replace the legacy `pending_kind` /
+// `pending_artifact_id` overlay discriminators — approval is no longer a stored
+// run status but a view over the unresolved-artifact set.
 //
 // Pure projection — it does no I/O. The caller supplies both inputs, which is
 // what lets the run-list path batch its reads instead of issuing them per run:
 //   - artifactCount from Artifacts.CountByRun (the single-run path counts one
 //     run; the list path batches every run in one query — N+1 avoidance).
 //   - arts is the run's artifact set, which the caller reads best-effort (only
-//     for runs that have any artifact, so a run with none costs no list). A
-//     transient miss yields nil arts → the derived flags read false/0 without
-//     touching artifact_count.
+//     for runs that have any artifact, so a run with none costs no list).
+//
+// The derived approval keys are emitted only when the answer is definitive: when
+// the run has no artifacts (artifactCount == 0, so nothing can be unresolved) or
+// when the artifact set is actually in hand (len(arts) > 0). When artifactCount
+// is positive but arts is empty — a best-effort read failed — the keys are
+// OMITTED rather than reported as a misleading false, so a transient DB/RLS hiccup
+// can't hide approval-required work; the client treats their absence as "unknown"
+// and re-derives on the next refresh.
 func runResponse(run *domain.AgentRun, artifactCount int, arts []domain.Artifact) map[string]any {
-	prCount, reviewCount := domain.UnresolvedArtifactCounts(arts)
 	out := map[string]any{
-		"ID":                       run.ID,
-		"TaskID":                   run.TaskID,
-		"PromptID":                 run.PromptID,
-		"Status":                   run.Status,
-		"Model":                    run.Model,
-		"StartedAt":                run.StartedAt,
-		"CompletedAt":              run.CompletedAt,
-		"TotalCostUSD":             run.TotalCostUSD,
-		"DurationMs":               run.DurationMs,
-		"NumTurns":                 run.NumTurns,
-		"StopReason":               run.StopReason,
-		"WorktreePath":             run.WorktreePath,
-		"ResultSummary":            run.ResultSummary,
-		"SessionID":                run.SessionID,
-		"MemoryMissing":            run.MemoryMissing,
-		"TriggerType":              run.TriggerType,
-		"TriggerID":                run.TriggerID,
-		"blueprint_run_id":         run.BlueprintRunID,
-		"blueprint_step_index":     run.BlueprintStepIndex,
-		"artifact_count":           artifactCount,
-		"has_unresolved_artifacts": prCount > 0 || reviewCount > 0,
-		"unresolved_pr_count":      prCount,
-		"unresolved_review_count":  reviewCount,
+		"ID":                   run.ID,
+		"TaskID":               run.TaskID,
+		"PromptID":             run.PromptID,
+		"Status":               run.Status,
+		"Model":                run.Model,
+		"StartedAt":            run.StartedAt,
+		"CompletedAt":          run.CompletedAt,
+		"TotalCostUSD":         run.TotalCostUSD,
+		"DurationMs":           run.DurationMs,
+		"NumTurns":             run.NumTurns,
+		"StopReason":           run.StopReason,
+		"WorktreePath":         run.WorktreePath,
+		"ResultSummary":        run.ResultSummary,
+		"SessionID":            run.SessionID,
+		"MemoryMissing":        run.MemoryMissing,
+		"TriggerType":          run.TriggerType,
+		"TriggerID":            run.TriggerID,
+		"blueprint_run_id":     run.BlueprintRunID,
+		"blueprint_step_index": run.BlueprintStepIndex,
+		"artifact_count":       artifactCount,
+	}
+	if artifactCount == 0 || len(arts) > 0 {
+		prCount, reviewCount := domain.UnresolvedArtifactCounts(arts)
+		out["has_unresolved_artifacts"] = prCount > 0 || reviewCount > 0
+		out["unresolved_pr_count"] = prCount
+		out["unresolved_review_count"] = reviewCount
 	}
 	return out
 }

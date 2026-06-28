@@ -360,7 +360,7 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 
 	// Parked mid-step: leave the blueprint running, the worktree on disk, and the
 	// snapshot in the blob store for the resume path. The aggregate column lands
-	// the task in_review. Only `open` parks now (TFAC-492): a step that queued a
+	// the task in_review. Only `open` parks now: a step that queued a
 	// draft PR / pending review completes normally and the orchestrator advances —
 	// the artifact is a sidecar, surfaced via the derived approval column below.
 	if stepRun.Status == "open" {

@@ -634,7 +634,7 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	}
 
 	// Verify on admin: row landed in completed (runs never park in
-	// pending_approval anymore, TFAC-492), totals reflect the
+	// pending_approval anymore), totals reflect the
 	// AddPartialTotals + Complete merge, creator stayed the original user.
 	var (
 		status        string

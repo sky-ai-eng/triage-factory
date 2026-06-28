@@ -181,7 +181,7 @@ func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID string) (
 	// (completed + outcome='abort'). Keyed on (status, outcome) so a finish run
 	// (completed + outcome='finish') is excluded and a racing resume that already
 	// moved the row loses this compare-and-swap. pending_approval is gone
-	// (TFAC-492) — runs never park for approval.
+	// Runs never park for approval.
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs SET status = 'running', parked_at = NULL
 		WHERE id = ?

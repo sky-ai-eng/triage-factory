@@ -2,7 +2,7 @@
 // terminal completion into the right DB state — record the parsed outcome,
 // finalize the run row, and snapshot a voluntarily-aborted run for resume. A
 // queued draft PR / pending review is an async sidecar artifact that never parks
-// the run (TFAC-492) — the step completes with its real outcome and the
+// the run — the step completes with its real outcome and the
 // orchestrator advances. Shared between the initial Delegate path and the
 // resume-with-message flow. The concluded-vs-open turn classification and the
 // invalid-envelope re-prompt live on the live driver (live.go); by the time a
@@ -117,7 +117,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// defers below read it to KEEP the worktree and session JSONL on disk as the
 	// warm resume cache — mirroring the isBlueprintStep skip. Captured by
 	// reference by the deferred closures, so they observe its final value at
-	// return. A completed run never parks anymore (TFAC-492): a queued artifact is
+	// return. A completed run never parks anymore: a queued artifact is
 	// a sidecar, not a reason to hold the run open.
 	var parked bool
 	if cfg.hasWT {
@@ -454,7 +454,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 //
 //   - valid conclusion → record the outcome (finalize / let the orchestrator
 //     advance or close). A queued review/PR is an async sidecar artifact and
-//     never parks the run (TFAC-492); the step completes with its real outcome.
+//     never parks the run; the step completes with its real outcome.
 //   - no conclusion (prose / nothing) → the run is open, not a termination:
 //     park it open (snapshot + flip + keep the warm worktree) and return. The
 //     live driver normally consumes this in its loop; it reaches here only from
@@ -565,7 +565,7 @@ func (s *Spawner) processCompletion(
 	// bypass via the admin pool.
 	bgCtx := context.Background()
 
-	// A queued draft PR / pending review NO LONGER parks the run (TFAC-492). The
+	// A queued draft PR / pending review NO LONGER parks the run. The
 	// artifact was already recorded by the exec choke point and is an async
 	// sidecar: a human resolves it independently and it never blocks step
 	// progression. So there's no external-action coercion and no pending_approval
@@ -592,7 +592,7 @@ func (s *Spawner) processCompletion(
 	// acceptable, so cold rehydrate from this blob is the resume path).
 	// terminateBlueprint retains the blob for an aborted terminal; the TTL sweep
 	// reaps it. A completed run that produced a draft PR / pending review does NOT
-	// park or snapshot for that reason (TFAC-492) — the artifact is a sidecar
+	// park or snapshot for that reason — the artifact is a sidecar
 	// resolved asynchronously, the step completed with its real outcome, and the
 	// approval state is derived from the unresolved-artifact set downstream.
 	if status == "completed" && domain.RunOutcome(outcome) == domain.RunOutcomeAbort {

@@ -87,9 +87,9 @@ func TestDecideBlueprintStep(t *testing.T) {
 	}
 }
 
-// --- Draft-PR sidecar never parks the step (TFAC-492) ----------------------
+// --- Draft-PR sidecar never parks the step ----------------------
 
-// TestProcessCompletion_BlueprintStepDraftPRDoesNotPark pins the post-TFAC-492
+// TestProcessCompletion_BlueprintStepDraftPRDoesNotPark pins the post-park-removal
 // behavior: a non-final blueprint step that emits continue AND queued a draft PR
 // is NOT coerced and does NOT park — the artifact is an async sidecar, so the
 // step completes with its real outcome (continue) and the orchestrator advances
@@ -183,10 +183,10 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 }
 
 // TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen pins the
-// TFAC-492 terminal gate: a blueprint that completes while a draft PR / ready
+// terminal-on-last gate: a blueprint that completes while a draft PR / ready
 // review is still unresolved does NOT close its task — it leaves it open and
 // surfaced in the derived approval column (in_review). The last artifact
-// resolution closes it (TFAC-382).
+// resolution closes it.
 func TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "term-unresolved")
 	stampBotClaim(t, database, taskID)

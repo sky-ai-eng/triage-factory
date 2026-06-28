@@ -871,7 +871,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Fatalf("set worktree (open): %v", err)
 		}
 		// completed WITH a worktree → excluded by the status filter. A completed run
-		// that left an unresolved artifact no longer parks (TFAC-492), so its
+		// that left an unresolved artifact no longer parks, so its
 		// worktree is not preserved as a warm resume cache.
 		completed := seedAgentRunForTest(t, store, orgID, seed, "completed")
 		if err := store.SetWorktreePath(ctx, orgID, completed, "/tmp/triagefactory-runs/completed"); err != nil {
