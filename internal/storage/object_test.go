@@ -137,7 +137,7 @@ func TestValidateEndpoint(t *testing.T) {
 		wantErr bool
 	}{
 		{in: "https://ref.supabase.co/storage/v1/s3", wantErr: false}, // base path is allowed and preserved
-		{in: "http://localhost:9000", wantErr: false},
+		{in: "http://localhost:8333", wantErr: false},
 		{in: "https://s3.amazonaws.com", wantErr: false},
 		{in: "seaweedfs:8333", wantErr: true},                   // scheme-less host-only form no longer accepted
 		{in: "ftp://nope", wantErr: true},                       // unsupported scheme
