@@ -419,34 +419,30 @@ func prReviewDismiss(ctx context.Context, client ghAPI, args []string) {
 	printJSON(map[string]any{"ok": true, "review_id": reviewID, "status": "dismissed"})
 }
 
-// --- Review lifecycle (local state) ---
+// --- Review lifecycle (local staging) ---
 
-// prStartReview creates a real GitHub *pending* review (private to the bot until
-// submit) and prints its review id. The durable `review` artifact is recorded at
-// the host choke point (LocalClient.GithubCreatePendingReview), which also runs
-// the identity-aware collision check. No local staging: the review now lives on
-// GitHub, edited 1:1.
+// prStartReview records a fully TF-side review draft and prints its local handle.
+// Zero GitHub writes (TFAC-494): the review is staged entirely in the artifact's
+// details_json and created+submitted atomically only at approval, so concurrent
+// runs on one PR never collide on GitHub's one-per-identity pending-review slot.
+// It reads the PR head SHA (a read, not a write) so the review pins to the
+// reviewed commit at submit. The durable run-scoped `review` artifact is recorded
+// at the host choke point (LocalClient.GithubCreatePendingReview); the returned
+// handle (the artifact id) is what add-review-comment / submit-review speak.
 func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	_ = lookupRun(host) // validates identity is present; routing happens inside host
 
-	// Fetch the head SHA so the pending review pins to the reviewed commit.
+	// Read the head SHA so the review pins to the reviewed commit at submit.
 	pr, err := client.GetPR(ctx, owner, repo, number, false)
 	exitOnErr(err)
 
-	// Create the pending review through the host (→ GithubCreatePendingReview):
-	// it folds in the collision check and records the artifact. Seed no inline
-	// comments — the agent adds them one at a time via add-review-comment.
-	reviewID, err := client.CreatePendingReview(ctx, owner, repo, number, pr.HeadSHA, nil)
-	if err != nil {
-		if errors.Is(err, agenthost.ErrPendingReviewCollision) {
-			exitErr(fmt.Sprintf(
-				"a pending review already exists for this identity on PR #%d. Use a GitHub App / service-account credential so the bot manages its own review — a real-user PAT's in-progress review must never be hijacked.",
-				number,
-			))
-		}
-		exitOnErr(err)
-	}
+	// Record the local review-draft artifact through the host. No GitHub write,
+	// no collision check — the draft is run-scoped, so two runs reviewing the same
+	// PR never share a row. Seed no inline comments (the agent adds them via
+	// add-review-comment).
+	reviewID, err := host.GithubCreatePendingReview(ctx, owner, repo, number, pr.HeadSHA, nil)
+	exitOnErr(err)
 
 	printJSON(map[string]any{
 		"review_id":  reviewID,
@@ -456,11 +452,11 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 	})
 }
 
-// prAddReviewComment bakes the severity badge into the comment body, then adds it
-// to the real GitHub pending review (→ GithubAddPendingReviewComment). Severity
-// lives only in the GitHub comment body now (no local column); the overlay parses
-// it back out for the chip. No local diff-shape pre-check — the live PR is the
-// source of truth, so GitHub's own out-of-diff line rejection surfaces instead.
+// prAddReviewComment bakes the severity badge into the comment body, then stages
+// it on this run's review draft (→ GithubAddPendingReviewComment, a local write).
+// The host validates the (path, line, start_line) range against the live PR diff
+// and rejects out-of-diff / cross-hunk ranges before staging. Severity lives only
+// in the comment body (the overlay parses it back out for the chip).
 func prAddReviewComment(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr add-review-comment <review_id> --file <path> --line <N> (--body <text> | --body-file <path>) [--start-line <N>] [--severity <blocker|major|minor|clean>]")
@@ -515,18 +511,11 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	owner, repo := ownerRepo(args)
 	_ = lookupRun(host)
 
-	// Bake the badge in, then add to the GitHub pending review. The add op keys
-	// off the review node id, but the host needs owner/repo to resolve the repo's
-	// credential — so build a repo-scoped adapter (the shared PR dispatch adapter
-	// is unscoped).
+	// Bake the badge in, then stage onto this run's review draft. The host resolves
+	// the run's review artifact, validates the range against the live diff, and
+	// appends the staged comment — returning a TF-local comment id.
 	badgedBody := domain.SeverityBadgeMarkdown(severity) + body
-	client := newHostAPI(host, owner, repo)
-	commentID, err := client.AddPendingReviewComment(ctx, reviewID, ghclient.SubmitReviewComment{
-		Path:      file,
-		Line:      line,
-		StartLine: startLine,
-		Body:      badgedBody,
-	})
+	commentID, err := host.GithubAddPendingReviewComment(ctx, owner, repo, reviewID, file, badgedBody, line, startLine)
 	exitOnErr(err)
 
 	printJSON(map[string]any{

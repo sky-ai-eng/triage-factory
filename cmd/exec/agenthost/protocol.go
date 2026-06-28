@@ -86,9 +86,9 @@ type request struct {
 // ErrCode is the second structured-error channel: a stable string tag for a
 // daemon-side sentinel error that the client must reconstruct as a typed value
 // (not just a message), where there's no HTTP status to key on. Today the only
-// value is errCodePendingReviewCollision, mapped back to
-// ErrPendingReviewCollision so the start-review collision stays errors.Is-able
-// across the wire. Empty means "no typed sentinel" — the common case.
+// value is errCodeReviewAlreadyFinalized, mapped back to ErrReviewAlreadyFinalized
+// so the submit-review double-call guard stays errors.Is-able across the wire.
+// Empty means "no typed sentinel" — the common case.
 //
 // ErrCode is only meaningful alongside a non-empty Error: the client inspects it
 // inside the `Error != ""` branch (an error response always sets Error first,
@@ -102,12 +102,7 @@ type response struct {
 	ErrCode    string          `json:"ec,omitempty"`
 }
 
-// errCodePendingReviewCollision is the response.ErrCode marker the daemon sets
-// when dispatch returns ErrPendingReviewCollision, so the IPC client rebuilds
-// the typed sentinel instead of a bare string.
-const errCodePendingReviewCollision = "pending_review_collision"
-
-// errCodeReviewAlreadyFinalized is the same marker mechanism for
+// errCodeReviewAlreadyFinalized is the response.ErrCode marker mechanism for
 // ErrReviewAlreadyFinalized — the submit-review double-call guard — so the
 // sandbox client rebuilds the typed sentinel and exec emits the same "your work
 // is done, stop calling submit-review" message on both paths.
@@ -443,7 +438,11 @@ type githubCreatePRResult struct {
 	NodeID  string `json:"node_id"`
 }
 
-// --- github-native pending reviews (TFAC-469) ---
+// --- review draft staging (TFAC-494) ---
+//
+// start-review / add-review-comment are pure local artifact writes routed
+// host-side so the sandbox (no DB) reaches them over the socket. CommitSHA pins
+// the reviewed commit for the atomic submit at approval; Comments is unused.
 
 type githubCreatePendingReviewArgs struct {
 	githubRepoRef
@@ -467,16 +466,6 @@ type githubAddPendingReviewCommentArgs struct {
 
 type githubCommentIDStringResult struct {
 	CommentID string `json:"comment_id"`
-}
-
-type githubGetPendingReviewArgs struct {
-	githubRepoRef
-	Number int `json:"number"`
-}
-
-type githubGetPendingReviewResult struct {
-	ReviewID string                          `json:"review_id"`
-	Comments []ghclient.PendingReviewComment `json:"comments"`
 }
 
 type githubAddCommentArgs struct {
@@ -592,5 +581,4 @@ const (
 
 	methodGithubCreatePendingReview     = "GithubCreatePendingReview"
 	methodGithubAddPendingReviewComment = "GithubAddPendingReviewComment"
-	methodGithubGetPendingReview        = "GithubGetPendingReview"
 )

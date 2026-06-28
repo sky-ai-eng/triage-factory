@@ -79,12 +79,12 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
 
-	// A finalized pending review parks the run: a review artifact in state=pending
+	// A finalized review draft parks the run: a review artifact in state=pending
 	// whose ready sentinel (details.review_event) is set, with the agent's draft
-	// snapshotted into details.proposed. Abandon flips it to dismissed (and
-	// best-effort deletes the GitHub pending review). Returns the artifact id.
+	// snapshotted into details.proposed. Abandon flips it to dismissed (no GitHub
+	// call — the draft is local). Returns the artifact id.
 	line := 1
-	reviewArt := domain.NewReviewArtifact("owner/repo", 7, "PR_node_pa", "rev_pa")
+	reviewArt := domain.NewReviewArtifact("owner/repo", 7, "headsha_pa", "r_pa")
 	reviewArt.RunID = "r_pa"
 	reviewArt.OrgID = runmode.LocalDefaultOrgID
 	reviewArt.TeamID = runmode.LocalDefaultTeamID

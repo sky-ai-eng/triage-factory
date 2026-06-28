@@ -2,7 +2,6 @@ package agenthost
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -13,50 +12,53 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// pendingReviewGQL returns a GetPendingReview GraphQL response carrying one
-// inline comment whose body has a severity badge baked in.
-func pendingReviewGQL(reviewID, commentID, badgedBody string) string {
-	b, _ := json.Marshal(badgedBody)
-	return `{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"id":"` + reviewID +
-		`","viewerDidAuthor":true,"comments":{"nodes":[{"id":"` + commentID +
-		`","path":"a.go","line":3,"startLine":null,"body":` + string(b) + `}]}}]}}}}}`
+// reviewDiffServer is a fake GitHub serving just the PR diff GetPRDiff fetches —
+// a.go with new-side lines 1..5 commentable — so the add-review-comment range
+// validation has something live to check against. Any other request gets {}.
+func reviewDiffServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	const diff = "diff --git a/a.go b/a.go\n" +
+		"--- a/a.go\n+++ b/a.go\n" +
+		"@@ -1,3 +1,5 @@\n line1\n+added2\n+added3\n line4\n line5\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Accept"), "diff") {
+			_, _ = io.WriteString(w, diff)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
-// TestLocalClient_GithubCreatePendingReview_RecordsArtifact pins that start-review
-// lands one `review` artifact: state=pending (no ready sentinel yet), the review
-// node id as ExternalID, the PR node id + number in details, deduped on
-// github:review:owner/repo#<number> — across both write paths.
-func TestLocalClient_GithubCreatePendingReview_RecordsArtifact(t *testing.T) {
+// TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft pins that
+// start-review lands one run-scoped `review` artifact with ZERO GitHub writes:
+// state=pending (no ready sentinel), empty ExternalID (no GitHub review until
+// approval), the head SHA pinned into details, deduped on
+// github:review:owner/repo#<number>:<run_id> — across both write paths. The
+// returned handle is the artifact id.
+func TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
 		if eventTriggered {
 			name = "event-triggered"
 		}
 		t.Run(name, func(t *testing.T) {
+			// No GitHub call should happen during start-review; fail loudly if one does.
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				switch {
-				case strings.HasSuffix(r.URL.Path, "/graphql"):
-					// Collision check: no existing pending review on the PR.
-					_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[]}}}}}`)
-				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/reviews"):
-					_, _ = io.WriteString(w, `{"id":555,"node_id":"PRR_new"}`)
-				case r.Method == http.MethodGet:
-					// GetPRBasic for the PR node_id recorded into details.
-					_, _ = io.WriteString(w, `{"number":7,"node_id":"PR_node7"}`)
-				default:
-					_, _ = io.WriteString(w, `{}`)
-				}
+				t.Errorf("unexpected GitHub call during start-review: %s %s", r.Method, r.URL.Path)
+				_, _ = io.WriteString(w, `{}`)
 			}))
 			t.Cleanup(srv.Close)
 			stores, info, client := newGithubRecordingClient(t, srv.URL, eventTriggered)
 
-			reviewID, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "sha", nil)
+			handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
 			if err != nil {
 				t.Fatalf("GithubCreatePendingReview: %v", err)
 			}
-			if reviewID != "PRR_new" {
-				t.Fatalf("reviewID = %q, want PRR_new", reviewID)
+			if handle == "" {
+				t.Fatal("expected a non-empty local review handle")
 			}
 
 			arts := listRunArtifacts(t, stores, info.RunID)
@@ -64,18 +66,21 @@ func TestLocalClient_GithubCreatePendingReview_RecordsArtifact(t *testing.T) {
 				t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 			}
 			a := arts[0]
+			if a.ID != handle {
+				t.Errorf("handle = %q, want the artifact id %q", handle, a.ID)
+			}
+			wantDedup := "github:review:octo/repo#7:" + info.RunID
 			if a.Kind != domain.ArtifactKindReview || a.State != domain.ArtifactStateReviewPending ||
-				a.Target != "octo/repo#7" || a.ExternalID != "PRR_new" || a.DedupKey != "github:review:octo/repo#7" {
-				t.Errorf("review artifact mismatch: %+v", a)
+				a.Target != "octo/repo#7" || a.ExternalID != "" || a.DedupKey != wantDedup {
+				t.Errorf("review artifact mismatch: %+v (want dedup %q)", a, wantDedup)
 			}
 			d, derr := domain.ParseReviewArtifactDetails(a.DetailsJSON)
 			if derr != nil {
 				t.Fatalf("ParseReviewArtifactDetails: %v", derr)
 			}
-			if d.NodeID != "PR_node7" || d.Number != 7 {
-				t.Errorf("details coords mismatch: %+v", d)
+			if d.HeadSHA != "headsha7" || d.Number != 7 {
+				t.Errorf("details mismatch: %+v", d)
 			}
-			// Fresh review: no ready sentinel until submit-review.
 			if d.ReviewEvent != "" {
 				t.Errorf("fresh review must have no ready sentinel: %+v", d)
 			}
@@ -83,30 +88,64 @@ func TestLocalClient_GithubCreatePendingReview_RecordsArtifact(t *testing.T) {
 	}
 }
 
-// TestLocalClient_FinalizeReviewDraft pins submit-review's host behavior: no
-// GitHub submit, the agent's draft (body + event + live comments) snapshotted into
-// the artifact, the ready sentinel set, and the TFAC-358 anti-double-submit guard.
-func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if strings.HasSuffix(r.URL.Path, "/graphql") {
-			_, _ = io.WriteString(w, pendingReviewGQL("PRR_1", "PRRC_1", domain.SeverityBadgeMarkdown(domain.SeverityMajor)+"nit: rename"))
-			return
-		}
-		// Any REST hit here would mean an unexpected GitHub submit — fail loudly.
-		t.Errorf("unexpected GitHub REST call during finalize: %s %s", r.Method, r.URL.Path)
-		_, _ = io.WriteString(w, `{}`)
-	}))
-	t.Cleanup(srv.Close)
+// TestLocalClient_GithubAddPendingReviewComment_StagesLocally pins that
+// add-review-comment validates the range against the live diff and stages the
+// comment into details.staged_comments with a local id — no GitHub write.
+func TestLocalClient_GithubAddPendingReviewComment_StagesLocally(t *testing.T) {
+	srv := reviewDiffServer(t)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	// Seed the run's pending review artifact (as start-review would have).
-	seed := domain.NewReviewArtifact("octo/repo", 7, "PR_node7", "PRR_1")
-	if _, err := client.UpsertArtifact(context.Background(), seed); err != nil {
-		t.Fatalf("seed review artifact: %v", err)
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
 
-	if err := client.FinalizeReviewDraft(context.Background(), "PRR_1", "COMMENT", "## Review body"); err != nil {
+	// An in-diff line (3) stages.
+	cid, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit: rename", 3, nil)
+	if err != nil {
+		t.Fatalf("GithubAddPendingReviewComment: %v", err)
+	}
+	if cid == "" {
+		t.Fatal("expected a non-empty staged comment id")
+	}
+
+	arts := listRunArtifacts(t, stores, info.RunID)
+	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if len(d.StagedComments) != 1 || d.StagedComments[0].ID != cid {
+		t.Fatalf("comment not staged: %+v", d.StagedComments)
+	}
+	if d.StagedComments[0].Line == nil || *d.StagedComments[0].Line != 3 {
+		t.Errorf("staged line = %+v, want 3", d.StagedComments[0].Line)
+	}
+
+	// An out-of-diff line (99) is rejected before staging.
+	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "bad", 99, nil); err == nil {
+		t.Error("expected an out-of-diff line to be rejected")
+	}
+	arts = listRunArtifacts(t, stores, info.RunID)
+	d, _ = domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if len(d.StagedComments) != 1 {
+		t.Errorf("a rejected comment must not be staged, got %d", len(d.StagedComments))
+	}
+}
+
+// TestLocalClient_FinalizeReviewDraft pins submit-review's host behavior: no
+// GitHub call, the agent's draft (body + event + the locally staged comments)
+// snapshotted into the artifact, the ready sentinel set, and the TFAC-358
+// anti-double-submit guard.
+func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
+	srv := reviewDiffServer(t)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit: rename", 3, nil); err != nil {
+		t.Fatalf("GithubAddPendingReviewComment: %v", err)
+	}
+
+	if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## Review body"); err != nil {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
 
@@ -121,48 +160,13 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 	if d.ReviewEvent != "COMMENT" || d.ReviewBody != "## Review body" {
 		t.Errorf("ready sentinel / staged body not set: %+v", d)
 	}
-	if len(d.Proposed.Comments) != 1 || d.Proposed.Comments[0].ID != "PRRC_1" {
-		t.Errorf("proposed comments not snapshotted from the live pending review: %+v", d.Proposed)
+	if len(d.Proposed.Comments) != 1 || d.Proposed.Comments[0].Path != "a.go" {
+		t.Errorf("proposed comments not snapshotted from the staged set: %+v", d.Proposed)
 	}
 
 	// Anti-double-submit (TFAC-358): a second finalize hard-errors.
-	err := client.FinalizeReviewDraft(context.Background(), "PRR_1", "COMMENT", "## again")
+	err = client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## again")
 	if !errors.Is(err, ErrReviewAlreadyFinalized) {
 		t.Errorf("second submit-review = %v, want ErrReviewAlreadyFinalized", err)
-	}
-}
-
-// TestLocalClient_FinalizeReviewDraft_ReviewIDDrift pins the drift guard: when the
-// live pending review on the PR isn't the one recorded on the artifact (replaced
-// out-of-band), finalize errors and does NOT snapshot the foreign comments or set
-// the ready sentinel.
-func TestLocalClient_FinalizeReviewDraft_ReviewIDDrift(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if strings.HasSuffix(r.URL.Path, "/graphql") {
-			// The live pending review id differs from the recorded PRR_1.
-			_, _ = io.WriteString(w, pendingReviewGQL("PRR_OTHER", "PRRC_foreign", "someone else's nit"))
-			return
-		}
-		t.Errorf("unexpected GitHub REST call during drift finalize: %s %s", r.Method, r.URL.Path)
-		_, _ = io.WriteString(w, `{}`)
-	}))
-	t.Cleanup(srv.Close)
-	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
-
-	seed := domain.NewReviewArtifact("octo/repo", 7, "PR_node7", "PRR_1")
-	if _, err := client.UpsertArtifact(context.Background(), seed); err != nil {
-		t.Fatalf("seed review artifact: %v", err)
-	}
-
-	err := client.FinalizeReviewDraft(context.Background(), "PRR_1", "COMMENT", "## body")
-	if err == nil || !strings.Contains(err.Error(), "replaced out-of-band") {
-		t.Fatalf("FinalizeReviewDraft = %v, want a drift error", err)
-	}
-	// Not finalized: ready sentinel still empty, no foreign comments snapshotted.
-	arts := listRunArtifacts(t, stores, info.RunID)
-	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
-	if d.ReviewEvent != "" || len(d.Proposed.Comments) != 0 {
-		t.Errorf("artifact finalized despite drift: %+v", d)
 	}
 }

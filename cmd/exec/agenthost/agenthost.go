@@ -103,26 +103,14 @@ var ErrUnknownMethod = errors.New("agenthost: unknown method")
 // daemon's reply; mismatches abort the request with this error.
 var ErrProtocolVersion = errors.New("agenthost: protocol version mismatch")
 
-// ErrPendingReviewCollision is returned by GithubCreatePendingReview when a
-// pending review already exists on the PR for the acting identity AND that
-// identity is a real-user PAT (not a GitHub App / service account) — i.e. the
-// existing review might be a human's in-progress work the bot must not touch.
-// The App/service-account case reuses the existing review instead (it is the
-// bot's own from a prior run). exec (TFAC-463) turns this typed error into the
-// actionable "configure a GitHub App / service-account credential so the bot
-// manages its own review" message. It crosses the IPC boundary as a marker on
-// the response envelope so the sandbox client reconstructs the same sentinel
-// the in-process path returns (errors.Is matches on both paths).
-var ErrPendingReviewCollision = errors.New("agenthost: a pending review already exists on this PR under a real-user PAT identity; refusing to modify it (use a GitHub App / service-account credential so the bot manages its own review)")
-
 // ErrReviewAlreadyFinalized is returned by FinalizeReviewDraft when the run's
 // review artifact already carries a ready sentinel (details_json.review_event is
 // set) — i.e. the agent already called submit-review once. exec (TFAC-358) turns
 // it into the "do not call submit-review again, your work on this review is
-// complete" message that stops agents looping on the approval hand-off. Like
-// ErrPendingReviewCollision it crosses the IPC boundary as a response-envelope
-// marker so the sandbox client reconstructs the same sentinel (errors.Is matches
-// on both the in-process and daemon paths).
+// complete" message that stops agents looping on the approval hand-off. It
+// crosses the IPC boundary as a response-envelope marker so the sandbox client
+// reconstructs the same sentinel (errors.Is matches on both the in-process and
+// daemon paths).
 var ErrReviewAlreadyFinalized = errors.New("agenthost: this run's review has already been finalized for human approval; do not call submit-review again")
 
 // Client is the surface every cmd/exec/* subcommand consumes. Every
@@ -146,13 +134,14 @@ type Client interface {
 
 	// --- review draft finalization (gh pr submit-review) ---
 	//
-	// FinalizeReviewDraft snapshots the agent's finished review into its run's
-	// `review` artifact: it locates the run's pending review artifact, reads the
-	// live GitHub pending review for the inline comments, stages body + event,
-	// and sets the ready sentinel (details_json.review_event) that parks the run
-	// for human approval. No GitHub submit happens here — approval does that.
-	// Returns ErrReviewAlreadyFinalized when the ready sentinel is already set
-	// (the TFAC-358 anti-double-submit guard).
+	// FinalizeReviewDraft finalizes the run's fully TF-side `review` draft for
+	// human approval: it locates the run's review artifact, stages body + event,
+	// snapshots the agent's draft (body + event + the locally staged inline
+	// comments) into details.proposed, and sets the ready sentinel
+	// (details_json.review_event) that marks it awaiting approval. No GitHub write
+	// happens here — the atomic create+submit happens at approval. Returns
+	// ErrReviewAlreadyFinalized when the ready sentinel is already set (the
+	// TFAC-358 anti-double-submit guard).
 	FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) error
 
 	// --- workspace (workspace add + list) ---
@@ -249,28 +238,24 @@ type Client interface {
 	GithubUpdateComment(ctx context.Context, owner, repo string, commentID int, body string) error
 	GithubDeleteComment(ctx context.Context, owner, repo string, commentID int) error
 
-	// --- github-native pending reviews (gh pr start-review / add-review-comment) ---
+	// --- review draft staging (gh pr start-review / add-review-comment) ---
 	//
-	// The GitHub-native preview rework (TFAC-454 Sub-epic B) backs the review
-	// editor with a real GitHub *pending* review — private to the acting
-	// identity until submitted — instead of a local draft. These three bridge
-	// the agent-invoked subset of the TFAC-461 client methods; the server's
-	// live-edit/approve path calls github.Client directly and needs no bridge.
-	// owner/repo ride on every call so the host resolves the right per-repo
-	// credential tier; GithubCreatePR's node_id (above) and these node-ID-keyed
-	// ops compose into one preview.
+	// A review is staged entirely TF-side (TFAC-494) — start-review records a
+	// run-scoped `review` artifact and add-review-comment appends to its
+	// details.staged_comments, both pure local writes with zero GitHub calls. The
+	// review never occupies GitHub's one-per-identity pending-review slot during
+	// the draft window; the atomic create+submit happens at approval. These bridge
+	// those writes host-side so the sandbox (no DB) routes them through the daemon,
+	// exactly like UpsertArtifact. owner/repo ride along to build the artifact
+	// target; reviewID is the local handle (the artifact id) start-review returns.
 	//
-	// GithubCreatePendingReview folds in the start-review collision check, which
-	// must run host-side because it branches on the acting credential's identity
-	// (App/service-account vs real-user PAT) — knowable only where ClientForRepo
-	// resolves the token. It checks for an existing pending review first, then:
-	// an App/service-account identity reuses it (the review is the bot's own
-	// from a prior run), returning its id; a real-user-PAT identity returns
-	// ErrPendingReviewCollision rather than risk hijacking a human's in-progress
-	// review. exec stays simple — it gets a review id or the typed error.
+	// GithubCreatePendingReview returns the local review handle; the comments param
+	// is unused (start-review seeds none). GithubAddPendingReviewComment returns a
+	// stable TF-local comment id. Concurrent runs on one PR never collide — the
+	// dedup key is run-scoped — so there is no identity branch and no collision
+	// error.
 	GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (reviewID string, err error)
 	GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int) (commentID string, err error)
-	GithubGetPendingReview(ctx context.Context, owner, repo string, number int) (reviewID string, comments []ghclient.PendingReviewComment, err error)
 
 	// GithubAPIGet is the raw authenticated GET the actions verbs lean on
 	// (workflow-run + job listings have no typed ghclient method). Returns

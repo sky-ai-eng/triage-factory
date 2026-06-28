@@ -480,11 +480,12 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, runID, content
 }
 
 // TestReconcile_TransitionsAndFinalMemory is the headline end-to-end: a draft PR
-// that merged, a pending review that was submitted, and a pushed branch that was
-// deleted all reflect their new state; the run's post-run memory is ONE composed
-// note covering all three (proving multi-artifact runs accumulate, not clobber),
-// with the merged PR diffed against the agent's draft; and a terminal artifact
-// already in the set is never re-queried.
+// that merged and a pushed branch that was deleted reflect their new state; the
+// run's post-run memory is ONE composed note covering both (proving multi-artifact
+// runs accumulate, not clobber), with the merged PR diffed against the agent's
+// draft; and a terminal artifact already in the set is never re-queried. A
+// review-draft artifact is seeded too and must stay pending — reviews are staged
+// TF-side and never reconciled (TFAC-494 §8).
 func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 	stores, seedRun, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
@@ -493,7 +494,7 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 1, "PR_1", "feat", "main", "https://github.com/octo/repo/pull/1", "t", "b", true)
 	prArt.RunID = runID
-	reviewArt := domain.NewReviewArtifact("octo/repo", 2, "PR_2", "REV_2")
+	reviewArt := domain.NewReviewArtifact("octo/repo", 2, "headsha2", runID)
 	reviewArt.RunID = runID
 	branchArt, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/feature", "sha", true)
 	branchArt.RunID = runID
@@ -510,7 +511,6 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 	stub := &stubGH{
 		prs: map[string]string{
 			"PR_1": prNodeJSON("PR_1", 1, "MERGED", false, true),
-			"PR_2": prNodeJSON("PR_2", 2, "OPEN", false, false, [2]string{"REV_2", "APPROVED"}),
 		},
 		branches: map[string]bool{"octo/repo/feature": false}, // gone
 		// PR_1 shipped with an edited title vs the agent's draft ("t"/"b").
@@ -525,8 +525,9 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 
 	// States transitioned.
 	assertState(t, stores, runmode.LocalDefaultOrgID, prArt.DedupKey, domain.ArtifactStatePRMerged)
-	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewSubmitted)
 	assertState(t, stores, runmode.LocalDefaultOrgID, branchArt.DedupKey, domain.ArtifactStateBranchDeleted)
+	// The review draft is staged TF-side and never reconciled — it stays pending.
+	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewPending)
 
 	// Terminal artifact never re-queried.
 	if stub.prCalls["PR_9"] {
@@ -543,10 +544,14 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 	if !strings.HasPrefix(mem.Content, "agent narrative") {
 		t.Errorf("agent narrative was trampled: %q", mem.Content)
 	}
-	for _, want := range []string{"was merged on GitHub", "was submitted on GitHub", "was deleted on GitHub"} {
+	for _, want := range []string{"was merged on GitHub", "was deleted on GitHub"} {
 		if !strings.Contains(mem.Content, want) {
 			t.Errorf("composed outcome missing %q; got:\n%s", want, mem.Content)
 		}
+	}
+	// The review draft was never reconciled, so it contributes no outcome note.
+	if strings.Contains(mem.Content, "was submitted on GitHub") {
+		t.Errorf("a TF-side review draft must not produce a reconcile note; got:\n%s", mem.Content)
 	}
 	// The merged PR carries the title delta vs the agent's draft.
 	if !strings.Contains(mem.Content, "shipped title") {
@@ -554,9 +559,10 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 	}
 }
 
-// TestReconcile_PRClosedAndReviewDismissed pins the other terminal branches: a
-// PR closed-without-merging, and a review dismissed.
-func TestReconcile_PRClosedAndReviewDismissed(t *testing.T) {
+// TestReconcile_PRClosed pins the close-without-merging terminal branch. A
+// review-draft artifact is seeded alongside and must stay pending — reviews are
+// staged TF-side and never reconciled (TFAC-494).
+func TestReconcile_PRClosed(t *testing.T) {
 	stores, seedRun, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
 	const runID = "22222222-2222-2222-2222-222222222222"
@@ -564,86 +570,26 @@ func TestReconcile_PRClosedAndReviewDismissed(t *testing.T) {
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 3, "PR_3", "x", "main", "u", "t", "b", false)
 	prArt.RunID = runID
-	reviewArt := domain.NewReviewArtifact("octo/repo", 4, "PR_4", "REV_4")
+	reviewArt := domain.NewReviewArtifact("octo/repo", 4, "headsha4", runID)
 	reviewArt.RunID = runID
 	seedArt(prArt)
 	seedArt(reviewArt)
 
 	stub := &stubGH{prs: map[string]string{
 		"PR_3": prNodeJSON("PR_3", 3, "CLOSED", false, false),
-		"PR_4": prNodeJSON("PR_4", 4, "OPEN", false, false, [2]string{"REV_4", "DISMISSED"}),
 	}}
 	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}
 	assertState(t, stores, runmode.LocalDefaultOrgID, prArt.DedupKey, domain.ArtifactStatePRClosed)
-	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewDismissed)
+	// The review draft is never reconciled — it stays pending.
+	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewPending)
 
-	// One composed note covers both dispositions.
+	// The note covers the PR disposition; the un-reconciled review contributes none.
 	mem, _ := stores.TaskMemory.GetRunMemory(ctx, runmode.LocalDefaultOrgID, runID)
-	if mem == nil || !strings.Contains(mem.Content, "closed without merging") || !strings.Contains(mem.Content, "dismissed") {
-		t.Errorf("composed note missing a disposition; got: %v", mem)
-	}
-}
-
-// TestReconcile_ReviewContentDiff pins that an externally-submitted review's note
-// carries the diff between the agent's drafted review (Proposed) and what landed
-// — the content signal, not just the disposition. The review is fetched by its
-// node id (GetReview), so a submitted review's body/comments are recovered.
-func TestReconcile_ReviewContentDiff(t *testing.T) {
-	stores, seedRun, seedArt := reconcileTestStores(t)
-	ctx := context.Background()
-	const runID = "88888888-8888-8888-8888-888888888888"
-	seedRun("ent-8", runID, "narrative")
-
-	// Review artifact with a finalized draft (Proposed) — a comment the human
-	// then edits, and a body/verdict that shift before submit.
-	reviewArt := domain.NewReviewArtifact("octo/repo", 11, "PR_11", "REV_11")
-	d, _ := domain.ParseReviewArtifactDetails(reviewArt.DetailsJSON)
-	line := 5
-	d.Proposed = domain.ReviewArtifactProposed{
-		Body:  "draft summary",
-		Event: "COMMENT",
-		Comments: []domain.ReviewArtifactComment{
-			{ID: "PRRC_1", Path: "a.go", Line: &line, Body: "draft comment"},
-		},
-	}
-	reviewArt.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	reviewArt.RunID = runID
-	seedArt(reviewArt)
-
-	stub := &stubGH{
-		// The PR snapshot surfaces REV_11 as a landed (non-pending) review, so
-		// the artifact transitions pending → submitted.
-		prs: map[string]string{"PR_11": prNodeJSON("PR_11", 11, "OPEN", false, false, [2]string{"REV_11", "CHANGES_REQUESTED"})},
-		// GetReview(REV_11) returns the final content: the comment edited, plus
-		// a body/verdict shift.
-		reviews: map[string]string{"REV_11": `{
-			"state":"CHANGES_REQUESTED","body":"final summary",
-			"comments":{"nodes":[{"id":"PRRC_1","path":"a.go","line":5,"startLine":null,"body":"final comment"}]}
-		}`},
-	}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
-	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
-		t.Fatalf("ReconcileOrg: %v", err)
-	}
-	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewSubmitted)
-
-	mem, err := stores.TaskMemory.GetRunMemory(ctx, runmode.LocalDefaultOrgID, runID)
-	if err != nil || mem == nil {
-		t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
-	}
-	for _, want := range []string{
-		"was submitted on GitHub",
-		"Verdict shipped as changes requested",
-		"Body was edited",
-		"`a.go:5` — edited before submit",
-		"final comment",
-	} {
-		if !strings.Contains(mem.Content, want) {
-			t.Errorf("review note missing %q; got:\n%s", want, mem.Content)
-		}
+	if mem == nil || !strings.Contains(mem.Content, "closed without merging") {
+		t.Errorf("composed note missing the PR disposition; got: %v", mem)
 	}
 }
 
@@ -658,7 +604,7 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 5, "PR_5", "x", "main", "u", "t", "b", false) // open
 	prArt.RunID = runID
-	reviewArt := domain.NewReviewArtifact("octo/repo", 6, "PR_6", "REV_6") // pending
+	reviewArt := domain.NewReviewArtifact("octo/repo", 6, "headsha6", runID) // pending draft
 	reviewArt.RunID = runID
 	branchArt, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/keep", "sha", true)
 	branchArt.RunID = runID
@@ -669,8 +615,6 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 	stub := &stubGH{
 		prs: map[string]string{
 			"PR_5": prNodeJSON("PR_5", 5, "OPEN", false, false),
-			// REV_6 still PENDING — surfaced or not, it must not transition.
-			"PR_6": prNodeJSON("PR_6", 6, "OPEN", false, false, [2]string{"REV_6", "PENDING"}),
 		},
 		branches: map[string]bool{"octo/repo/keep": true}, // still there
 	}

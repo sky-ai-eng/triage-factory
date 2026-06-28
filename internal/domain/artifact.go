@@ -177,9 +177,13 @@ func ArtifactDedupKey(provider, kind, resource, anchor string) string {
 // reconciled until a create writer turns it real. Terminal states (PR
 // merged/closed, review submitted/dismissed, branch deleted, every comment /
 // issue state) are absent, so a terminal artifact is never re-queried.
+//
+// Review is absent entirely (TFAC-494): a review is staged TF-side until the
+// atomic create+submit at approval, so a pending review draft has no GitHub
+// object to reconcile — a never-published draft can't drift out-of-band, and the
+// instant it submits it is already terminal.
 var reconcilableNonTerminal = map[string]map[string]bool{
 	ArtifactKindPullRequest: {ArtifactStatePRDraft: true, ArtifactStatePROpen: true},
-	ArtifactKindReview:      {ArtifactStateReviewPending: true},
 	ArtifactKindBranch:      {ArtifactStateBranchPushed: true},
 }
 

@@ -128,10 +128,7 @@ func (c *IPCClient) callWithin(ctx context.Context, timeout time.Duration, metho
 	if resp.Error != "" {
 		// A tagged sentinel (no HTTP status to key on) rebuilds as the typed
 		// value so errors.Is matches identically to the in-process path —
-		// today only the start-review pending-review collision.
-		if resp.ErrCode == errCodePendingReviewCollision {
-			return ErrPendingReviewCollision
-		}
+		// today only the submit-review double-call guard.
 		if resp.ErrCode == errCodeReviewAlreadyFinalized {
 			return ErrReviewAlreadyFinalized
 		}
@@ -445,14 +442,6 @@ func (c *IPCClient) GithubAddPendingReviewComment(ctx context.Context, owner, re
 		return "", err
 	}
 	return res.CommentID, nil
-}
-
-func (c *IPCClient) GithubGetPendingReview(ctx context.Context, owner, repo string, number int) (string, []ghclient.PendingReviewComment, error) {
-	var res githubGetPendingReviewResult
-	if err := c.call(ctx, methodGithubGetPendingReview, githubGetPendingReviewArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number}, &res); err != nil {
-		return "", nil, err
-	}
-	return res.ReviewID, res.Comments, nil
 }
 
 func (c *IPCClient) GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {

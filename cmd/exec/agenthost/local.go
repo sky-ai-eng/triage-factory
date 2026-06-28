@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -93,18 +94,18 @@ func (c *LocalClient) withWrite(
 
 // --- review draft finalization ---
 
-// FinalizeReviewDraft is the host side of `gh pr submit-review` under the
-// GitHub-native model: it does NOT submit to GitHub (approval does that). It
-// locates the run's pending review artifact, reads the live GitHub pending
-// review for the inline comments the agent added, stages the body + event, and
-// sets the ready sentinel (details_json.review_event) that parks the run for
-// human approval — snapshotting the agent's first draft into details.proposed so
-// the approve-time human-feedback diff has a baseline.
+// FinalizeReviewDraft is the host side of `gh pr submit-review`: it finalizes a
+// fully TF-side review draft for human approval and makes NO GitHub write (the
+// atomic create+submit happens at approval). It locates the run's review
+// artifact, stages the body + event, snapshots the agent's draft (body + event +
+// the locally staged inline comments) into details.proposed as the approve-time
+// human-feedback baseline, and sets the ready sentinel (details_json.review_event)
+// that marks the review awaiting approval.
 //
-// reviewID is the review node id the agent passes through; it's validated
-// against the artifact's ExternalID so a stale id fails loudly rather than
-// finalizing the wrong review. The TFAC-358 anti-double-submit guard fires here:
-// a ready sentinel that's already set returns ErrReviewAlreadyFinalized.
+// reviewID is the local review handle the agent passes through (the artifact id);
+// it's validated against the artifact's id so a stale handle fails loudly rather
+// than finalizing the wrong review. The TFAC-358 anti-double-submit guard fires
+// here: a ready sentinel that's already set returns ErrReviewAlreadyFinalized.
 func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) error {
 	arts, err := c.listArtifactsByRun(ctx)
 	if err != nil {
@@ -114,8 +115,8 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	if art == nil {
 		return fmt.Errorf("no pending review for this run — run `gh pr start-review` first")
 	}
-	if reviewID != "" && art.ExternalID != reviewID {
-		return fmt.Errorf("review %s does not match this run's pending review %s", reviewID, art.ExternalID)
+	if reviewID != "" && art.ID != reviewID {
+		return fmt.Errorf("review %s does not match this run's pending review %s", reviewID, art.ID)
 	}
 
 	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
@@ -128,48 +129,18 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 		return ErrReviewAlreadyFinalized
 	}
 
-	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
-		return fmt.Errorf("review artifact has a malformed target %q", art.Target)
-	}
-	client, err := c.githubClientForRepo(ctx, owner, repo)
-	if err != nil {
-		return err
-	}
-	// Read the live pending review for the inline comments the agent staged on
-	// GitHub (each add-review-comment baked the severity badge into the body).
-	liveID, liveComments, err := client.GetPendingReview(ctx, owner, repo, number)
-	if err != nil {
-		return fmt.Errorf("read pending review from github: %w", err)
-	}
-	// Guard against the recorded review drifting from the live one: if the bot's
-	// pending review was deleted and recreated out-of-band between start-review and
-	// now, GetPendingReview returns a different review's comments — which would be
-	// snapshotted into details.Proposed as if they were the agent's. Bail rather
-	// than record a draft built from someone else's review. (This is the only place
-	// art.ExternalID isn't validated against the live state.)
-	if liveID != "" && liveID != art.ExternalID {
-		return fmt.Errorf("the pending review on GitHub (%s) no longer matches this run's recorded review (%s); it was replaced out-of-band — start a fresh review", liveID, art.ExternalID)
-	}
-
 	// A comment / request_changes review must carry something actionable: a body,
 	// inline comments, or both. An approve needs neither (the approval is the
-	// signal). Mirrors the old submit-review guard, now that the comments live on
-	// GitHub rather than a local table.
-	if body == "" && event != "APPROVE" && len(liveComments) == 0 {
+	// signal). The comments are the locally staged set the agent added.
+	if body == "" && event != "APPROVE" && len(details.StagedComments) == 0 {
 		return fmt.Errorf("a %s review needs --body/--body-file or at least one inline comment", strings.ToLower(event))
 	}
 
+	// Snapshot the agent's draft as the write-once Proposed baseline — a copy of
+	// the staged comments as they stand now, so a later human edit to
+	// StagedComments still diffs against what the agent originally wrote.
 	proposed := domain.ReviewArtifactProposed{Body: body, Event: event}
-	for _, cm := range liveComments {
-		proposed.Comments = append(proposed.Comments, domain.ReviewArtifactComment{
-			ID:        cm.ID,
-			Path:      cm.Path,
-			Line:      cm.Line,
-			StartLine: cm.StartLine,
-			Body:      cm.Body,
-		})
-	}
+	proposed.Comments = append(proposed.Comments, details.StagedComments...)
 	details.ReviewBody = body
 	details.ReviewEvent = event // the ready sentinel
 	details.Proposed = proposed
@@ -734,17 +705,6 @@ func (c *LocalClient) githubClientForRepo(ctx context.Context, owner, repo strin
 	return client, err
 }
 
-// githubClientAndIdentityForRepo resolves the client AND the acting credential's
-// identity (App/service-account vs real-user PAT) in one pass, for the
-// pending-review collision check. Routes through the same gated funnel as
-// githubClientForRepo so the collision read is repo-gated + scoped too; the
-// identity rides out of the resolution that built the client, so the two always
-// describe the same credential (IdentityUnknown only when no resolver reports it,
-// which the collision check treats conservatively — never reuses).
-func (c *LocalClient) githubClientAndIdentityForRepo(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
-	return c.resolveRepoClient(ctx, owner, repo)
-}
-
 // resolveRepoClient is the single funnel every exec-gh GitHub call goes
 // through. In MULTI mode it enforces the per-run repo gate (the run may only
 // touch a repo its team tracks AND that it has materialized — its eagerly-
@@ -916,116 +876,114 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 	return number, htmlURL, nodeID, nil
 }
 
-// GithubCreatePendingReview resolves the client and acting identity, then folds
-// in the start-review collision check before creating. If a pending review
-// already exists for the acting identity on this PR: an App/service-account
-// identity reuses it (the review is the bot's own from a prior run) and returns
-// its id; a real-user-PAT (or unknown) identity returns ErrPendingReviewCollision
-// rather than risk modifying a human's in-progress review. Only when no pending
-// review exists does it create a fresh one, seeding it with commitSHA/comments.
+// GithubCreatePendingReview records this run's review draft — a fully TF-side
+// artifact, with zero GitHub writes (TFAC-494). It mints a run-scoped `review`
+// artifact (state=pending, no ready sentinel, empty ExternalID; the reviewed
+// commitSHA pinned into details for the atomic submit at approval) and returns
+// the artifact id as the local review handle the agent passes to add/finalize.
 //
-// Reuse (return the existing id) is chosen over clear-and-recreate: it's
-// non-destructive and lets the caller keep appending to the bot's own review.
-//
-// The GetPendingReview→CreatePendingReview window is not locked across runs: the
-// daemon serializes one run's RPCs over its socket, but two delegated runs on
-// the same PR have separate sockets and no shared lock, so both could observe
-// "none" and both attempt a create. GitHub backstops this — it allows at most
-// one pending review per identity per PR, so the loser's create fails with
-// CreatePendingReview's mapped "one pending review" 422, never a duplicate (and
-// never a hijack). The window is benign: worst case is a rare, safe error.
-func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error) {
-	client, identity, err := c.githubClientAndIdentityForRepo(ctx, owner, repo)
+// Because the dedup key is run-scoped, two runs (different teams, a re-delegate,
+// interactive steering) reviewing the same PR each get their own draft row and
+// never collide — the multi-tenant pending-review-slot collision the
+// GitHub-native model (TFAC-463) introduced is gone, along with the identity
+// branch and ErrPendingReviewCollision. The comments param is unused (start-review
+// seeds no inline comments; the agent adds them via add-review-comment).
+func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, _ []ghclient.SubmitReviewComment) (string, error) {
+	a := domain.NewReviewArtifact(owner+"/"+repo, number, commitSHA, c.info.RunID)
+	stored, err := c.UpsertArtifact(ctx, a)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("record review draft artifact: %w", err)
 	}
-
-	existingID, _, err := client.GetPendingReview(ctx, owner, repo, number)
-	if err != nil {
-		return "", err
-	}
-	if existingID != "" {
-		if identity == ghclient.IdentityApp {
-			// The bot's own review from a prior run — reuse it, and (re)record the
-			// artifact so it attributes to this run, the one now working the review.
-			// No external write happened (the review already existed), so record NO
-			// review_started action — the audit log captures real writes only.
-			c.recordGithubReview(ctx, client, owner, repo, number, existingID, "")
-			return existingID, nil
-		}
-		// Real-user PAT (or an identity we couldn't determine): the existing
-		// review might be a human's live work. Never hijack it.
-		return "", ErrPendingReviewCollision
-	}
-
-	reviewID, err := client.CreatePendingReview(ctx, owner, repo, number, commitSHA, comments)
-	if err != nil {
-		return "", err
-	}
-	c.recordGithubReview(ctx, client, owner, repo, number, reviewID, domain.ActionReviewStarted)
-	return reviewID, nil
+	return stored.ID, nil
 }
 
-// recordGithubReview upserts the `review` artifact for a freshly created (or
-// reused) GitHub pending review, mirroring recordGithubPR. reviewID is the
-// review's GraphQL node id (stored as the artifact ExternalID — the handle
-// add-comment / submit / delete speak). The backing PR's own node id is fetched
-// best-effort for details_json context (reconciliation keys on it, TFAC-464); a
-// failure there degrades to an empty node id rather than dropping the artifact —
-// nothing in the approval flow reads it, and the review row is what matters.
-// action is the external-action to record (domain.ActionReviewStarted on a fresh
-// create) or "" when the artifact is being re-recorded without a new GitHub write
-// (the App-identity reuse of a prior run's pending review — no review_started, the
-// review already existed).
-func (c *LocalClient) recordGithubReview(ctx context.Context, client *ghclient.Client, owner, repo string, number int, reviewID, action string) {
-	if c.stores.Artifacts == nil {
-		return
-	}
-	if reviewID == "" {
-		agenthostLog.Debug("github pending review recorded without a review id; skipping artifact", "run", c.info.RunID, "repo", owner+"/"+repo)
-		return
-	}
-	nodeID := ""
-	if pr, perr := client.GetPRBasic(ctx, owner, repo, number); perr == nil && pr != nil {
-		nodeID = pr.NodeID
-	}
-	a := domain.NewReviewArtifact(owner+"/"+repo, number, nodeID, reviewID)
-	var act *domain.ExternalAction
-	if action != "" {
-		act = githubAction(a, action, "", "")
-		// A review artifact carries no URL (its target is the PR), so the audit row
-		// links to the backing PR rather than render a non-clickable row.
-		act.URL = domain.GitHubPullURL(owner+"/"+repo, number)
-	}
-	c.upsertGithubArtifact(ctx, a, act)
-}
-
-// GithubAddPendingReviewComment adds one inline comment to an existing pending
-// review (addressed by its GraphQL node id). owner/repo resolve the per-repo
-// credential host-side; the github.Client op keys solely off the review node
-// id. line>0 with a non-nil startLine makes it a multi-line range.
+// GithubAddPendingReviewComment appends one inline comment to this run's review
+// draft, staged entirely TF-side (TFAC-494) — no GitHub *write*. It locates the
+// run's pending review artifact, validates the local handle, validates the
+// comment's (path, line, start_line) against the LIVE PR diff (rejecting
+// out-of-diff / cross-hunk ranges before staging — recovering the immediate
+// feedback GitHub used to give at add time, since it now only validates at the
+// atomic submit on approval), mints a stable TF-local comment id, appends it to
+// details.StagedComments, and returns the id. body already carries the severity
+// badge baked in (the caller bakes it); line>0 with a non-nil startLine makes it
+// a multi-line range.
 func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int) (string, error) {
+	arts, err := c.listArtifactsByRun(ctx)
+	if err != nil {
+		return "", err
+	}
+	art := domain.FirstPendingReviewArtifact(arts)
+	if art == nil {
+		return "", fmt.Errorf("no pending review for this run — run `gh pr start-review` first")
+	}
+	if reviewID != "" && art.ID != reviewID {
+		return "", fmt.Errorf("review %s does not match this run's pending review %s", reviewID, art.ID)
+	}
+	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	if err != nil {
+		return "", fmt.Errorf("parse review artifact details: %w", err)
+	}
+	// Staging onto a finalized review (ready sentinel set) would mutate a draft the
+	// human is already approving — and the Proposed snapshot is frozen, so the new
+	// comment would never enter the verdict diff. Reject it.
+	if details.ReviewEvent != "" {
+		return "", fmt.Errorf("this review has already been finalized for approval; start a fresh review to add more comments")
+	}
+
+	// Validate the range against the live diff before staging. The PR number comes
+	// from the artifact target (the handle the agent passes carries no coordinates).
+	_, _, number, ok := domain.ParsePRTarget(art.Target)
+	if !ok {
+		return "", fmt.Errorf("review artifact has a malformed target %q", art.Target)
+	}
 	client, err := c.githubClientForRepo(ctx, owner, repo)
 	if err != nil {
 		return "", err
 	}
-	return client.AddPendingReviewComment(ctx, reviewID, ghclient.SubmitReviewComment{
+	hunks, err := hostDiffHunks(ctx, client, owner, repo, number)
+	if err != nil {
+		return "", fmt.Errorf("fetch PR diff for comment validation: %w", err)
+	}
+	if msg := ghclient.ValidateCommentRange(hunks, path, line, startLine); msg != "" {
+		return "", fmt.Errorf("%s", msg)
+	}
+
+	commentID := uuid.New().String()
+	ln := line
+	comment := domain.ReviewArtifactComment{
+		ID:        commentID,
 		Path:      path,
-		Line:      line,
+		Line:      &ln,
 		StartLine: startLine,
 		Body:      body,
-	})
+	}
+	details.StagedComments = append(details.StagedComments, comment)
+
+	updated := *art
+	updated.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
+	if _, err := c.UpsertArtifact(ctx, updated); err != nil {
+		return "", fmt.Errorf("stage review comment: %w", err)
+	}
+	return commentID, nil
 }
 
-// GithubGetPendingReview returns the acting identity's current pending review on
-// the PR (its node id plus inline comments), or ("", nil, nil) when there is
-// none. It backs both the start-review collision read and a plain editor sync.
-func (c *LocalClient) GithubGetPendingReview(ctx context.Context, owner, repo string, number int) (string, []ghclient.PendingReviewComment, error) {
-	client, err := c.githubClientForRepo(ctx, owner, repo)
+// hostDiffHunks fetches the PR's diff and returns the per-file hunk ranges
+// ValidateCommentRange checks a review comment's (path, line, start_line)
+// against. Tries the verbatim diff first; on HTTP 406 ("diff too large") GitHub
+// refuses it, so it reassembles hunks from the per-file patches instead.
+func hostDiffHunks(ctx context.Context, client *ghclient.Client, owner, repo string, number int) (map[string][]ghclient.Hunk, error) {
+	diff, err := client.GetPRDiff(ctx, owner, repo, number, "")
 	if err != nil {
-		return "", nil, err
+		if ghclient.IsHTTP406(err) {
+			files, ferr := client.GetPRFiles(ctx, owner, repo, number)
+			if ferr != nil {
+				return nil, ferr
+			}
+			return ghclient.DiffHunksFromPatches(files), nil
+		}
+		return nil, err
 	}
-	return client.GetPendingReview(ctx, owner, repo, number)
+	return ghclient.DiffHunks(diff), nil
 }
 
 func (c *LocalClient) GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {

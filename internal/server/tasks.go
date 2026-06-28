@@ -752,12 +752,10 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 	if prArtifact != nil {
 		s.closeDraftPRBestEffort(ctx, orgID, prArtifact)
 	}
-	// Delete the GitHub pending review (best-effort, outside the tx). The artifact
-	// is already marked dismissed; a private pending review left on GitHub would
-	// otherwise linger and collide with the next start-review on the PR.
-	if reviewArtifact != nil {
-		s.deletePendingReviewBestEffort(ctx, orgID, reviewArtifact)
-	}
+	// A dismissed review needs no GitHub call: the draft was staged entirely
+	// TF-side and never occupied GitHub's pending-review slot (TFAC-494), so
+	// flipping the artifact to dismissed in the tx above is the whole teardown —
+	// there is nothing to orphan.
 
 	if !flippedToDone || runID == "" {
 		return
@@ -789,27 +787,6 @@ func (s *Server) closeDraftPRBestEffort(ctx context.Context, orgID string, art *
 	}
 	if err := gh.ClosePR(ctx, owner, repo, number); err != nil {
 		approvalDiscardLog.Warn("close draft PR on github failed (artifact already marked closed)", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-	}
-}
-
-// deletePendingReviewBestEffort deletes the abandoned GitHub pending review.
-// Best-effort, mirroring closeDraftPRBestEffort: every failure is logged, never
-// returned — the artifact is already marked dismissed and the run/task already
-// requeued, so a GitHub hiccup mustn't unwind that. owner/repo/number come from
-// the artifact target; ExternalID is the review node id.
-func (s *Server) deletePendingReviewBestEffort(ctx context.Context, orgID string, art *domain.Artifact) {
-	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
-		approvalDiscardLog.Warn("review artifact has a malformed target; skipping GitHub pending-review delete", "artifact", art.ID, "target", art.Target)
-		return
-	}
-	gh, err := s.ghResolver.ClientForRepo(ctx, orgID, owner, repo)
-	if err != nil {
-		approvalDiscardLog.Warn("resolve github client for pending-review delete failed", "artifact", art.ID, "owner", owner, "repo", repo, "error", err)
-		return
-	}
-	if err := gh.DeletePendingReview(ctx, owner, repo, number, art.ExternalID); err != nil {
-		approvalDiscardLog.Warn("delete pending review on github failed (artifact already marked dismissed)", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 	}
 }
 

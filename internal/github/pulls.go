@@ -411,9 +411,9 @@ type SubmitReviewComment struct {
 }
 
 // reviewCommentsPayload converts typed review comments into the REST request
-// shape shared by the atomic SubmitReview and the pending-review
-// CreatePendingReview. Returns nil for an empty slice so callers can omit the
-// "comments" key entirely (GitHub rejects an empty array on some paths).
+// shape the atomic SubmitReview embeds under "comments". Returns nil for an empty
+// slice so the caller can omit the key entirely (GitHub rejects an empty array on
+// some paths).
 func reviewCommentsPayload(comments []SubmitReviewComment) []map[string]any {
 	if len(comments) == 0 {
 		return nil

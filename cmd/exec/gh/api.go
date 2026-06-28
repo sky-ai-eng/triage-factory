@@ -2,7 +2,6 @@ package gh
 
 import (
 	"context"
-	"errors"
 	"io"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -36,19 +35,6 @@ type ghAPI interface {
 	UpdateComment(ctx context.Context, owner, repo string, commentID int, body string) error
 	DeleteComment(ctx context.Context, owner, repo string, commentID int) error
 
-	// Pending-review surface (TFAC-469): the GitHub-native preview backing.
-	// Signatures mirror *github.Client exactly (so a real client still
-	// satisfies ghAPI); the host-backed adapter routes them through the
-	// agenthost daemon, where CreatePendingReview also runs the start-review
-	// collision check (the real client does a raw create — the check is a
-	// host-only concern keyed on the resolved credential identity).
-	// AddPendingReviewComment carries no owner/repo (it keys off the review
-	// node id), so the host adapter folds in the repo it was constructed with,
-	// like Get/DownloadArtifact below.
-	CreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error)
-	AddPendingReviewComment(ctx context.Context, reviewID string, comment ghclient.SubmitReviewComment) (string, error)
-	GetPendingReview(ctx context.Context, owner, repo string, number int) (string, []ghclient.PendingReviewComment, error)
-
 	// Get / DownloadArtifact are the raw transport the actions verbs lean on
 	// (workflow-run + job listings and log archives have no typed method).
 	// They carry no owner/repo, so the host-backed adapter folds in the repo
@@ -56,13 +42,6 @@ type ghAPI interface {
 	Get(ctx context.Context, path string) ([]byte, error)
 	DownloadArtifact(ctx context.Context, path string, dst io.Writer, maxBytes int64) (int64, error)
 }
-
-// errUnscopedReviewAdapter is returned by AddPendingReviewComment when the
-// adapter has no repo to fold in. It's a programming-error guard (a caller built
-// the shared unscoped adapter for a path that keys off the review node id), so
-// it's a sentinel for a robust errors.Is check rather than a brittle message
-// match — the message itself still carries the actionable fix.
-var errUnscopedReviewAdapter = errors.New("hostAPIClient.AddPendingReviewComment needs a repo-scoped adapter: construct newHostAPI(host, owner, repo) (this op keys off the review node id and has no owner/repo to forward for credential resolution)")
 
 // hostAPIClient adapts an agenthost.Client to the ghAPI surface. The PR
 // methods carry owner/repo explicitly and forward them; the raw Get /
@@ -112,29 +91,6 @@ func (a hostAPIClient) SubmitReview(ctx context.Context, owner, repo string, num
 
 func (a hostAPIClient) CreatePR(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (int, string, string, error) {
 	return a.host.GithubCreatePR(ctx, owner, repo, head, base, title, body, draft)
-}
-
-func (a hostAPIClient) CreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error) {
-	return a.host.GithubCreatePendingReview(ctx, owner, repo, number, commitSHA, comments)
-}
-
-// AddPendingReviewComment carries no owner/repo (it keys off the review node
-// id, matching *github.Client), so — like Get/DownloadArtifact — the adapter
-// folds in the owner/repo it was constructed with for the host's per-repo
-// credential resolution. The shared PR-dispatch adapter is built unscoped
-// (newHostAPI(host, "", "")), so a caller of this op must reconstruct a
-// repo-scoped adapter (as the actions dispatch does); the guard turns the
-// otherwise-confusing "GitHub not configured for /" into an actionable error if
-// that's missed.
-func (a hostAPIClient) AddPendingReviewComment(ctx context.Context, reviewID string, comment ghclient.SubmitReviewComment) (string, error) {
-	if a.owner == "" || a.repo == "" {
-		return "", errUnscopedReviewAdapter
-	}
-	return a.host.GithubAddPendingReviewComment(ctx, a.owner, a.repo, reviewID, comment.Path, comment.Body, comment.Line, comment.StartLine)
-}
-
-func (a hostAPIClient) GetPendingReview(ctx context.Context, owner, repo string, number int) (string, []ghclient.PendingReviewComment, error) {
-	return a.host.GithubGetPendingReview(ctx, owner, repo, number)
 }
 
 func (a hostAPIClient) AddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {

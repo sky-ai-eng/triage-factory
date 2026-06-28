@@ -81,8 +81,9 @@ const (
 	ActionPREdited           = "pr_edited"
 	ActionPRClosed           = "pr_closed"
 
-	// GitHub review lifecycle.
-	ActionReviewStarted        = "review_started"
+	// GitHub review lifecycle. There is no review_started action: a review is
+	// staged TF-side and makes no GitHub write until the atomic submit at
+	// approval (TFAC-494 §9), so the only review external-action is the submit.
 	ActionReviewSubmitted      = "review_submitted"
 	ActionReviewDismissed      = "review_dismissed"
 	ActionReviewCommentEdited  = "review_comment_edited"

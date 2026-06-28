@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
 // strPtr returns a pointer to a string literal so test fixtures can
@@ -239,7 +238,7 @@ func TestBuildReviewHumanFeedbackInput_ClassifiesComments(t *testing.T) {
 			},
 		},
 	}
-	finalComments := []ghclient.PendingReviewComment{
+	finalComments := []domain.ReviewArtifactComment{
 		// Edited: same id, body differs from the proposed snapshot.
 		{ID: "c1", Path: "x.go", Line: line(1), Body: domain.SeverityBadgeMarkdown(domain.SeverityMajor) + "user edit"},
 		// Unchanged.

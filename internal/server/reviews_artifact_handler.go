@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -11,10 +12,11 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
-// reviewArtifactJSON is the wire shape the review overlay consumes. The staged
-// body/event come from the artifact's details_json (TF-side staging, applied to
-// GitHub only at approval); the comments are read LIVE from the GitHub pending
-// review, each with its severity parsed back out of the body for the chip.
+// reviewArtifactJSON is the wire shape the review overlay consumes. The whole
+// review is staged TF-side (TFAC-494): body/event and the inline comments all
+// come from the artifact's details_json, applied to GitHub only by the atomic
+// submit at approval. Each comment's severity is parsed back out of its body for
+// the chip. ReviewID is empty until approval stamps the submitted review's id.
 type reviewArtifactJSON struct {
 	ID          string                      `json:"id"`
 	RunID       string                      `json:"run_id,omitempty"`
@@ -37,15 +39,15 @@ type reviewArtifactCommentJSON struct {
 	Severity  string `json:"severity,omitempty"`
 }
 
-// reviewGet returns the review artifact augmented with its LIVE GitHub
-// pending-review comments. Each comment body carries the severity badge baked in
-// (the GitHub-native form); ParseSeverityBadge splits it back into a chip level +
-// clean body for display. Body + event are the staged values from details_json.
-// A live-fetch failure degrades to staged body/event with no comments rather than
-// blanking the overlay.
+// reviewGet returns the review artifact with its TF-side staged comments
+// (TFAC-494) — no GitHub call. Each comment body carries the severity badge baked
+// in; ParseSeverityBadge splits it back into a chip level + clean body for
+// display. Body + event are the staged values; the whole review is local until
+// the atomic submit at approval.
 func (ah *artifactsHandler) reviewGet(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Artifact) {
-	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
+	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
+		internalError(w, "artifacts", fmt.Errorf("malformed artifact target %q (artifact %s)", art.Target, art.ID))
 		return
 	}
 	details, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
@@ -62,21 +64,16 @@ func (ah *artifactsHandler) reviewGet(w http.ResponseWriter, r *http.Request, or
 		State:       art.State,
 		Comments:    []reviewArtifactCommentJSON{},
 	}
-	if _, comments, err := gh.GetPendingReview(r.Context(), owner, repo, number); err != nil {
-		artifactsLog.Warn("live pending-review fetch failed; serving staged body/event with no comments",
-			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-	} else {
-		for _, c := range comments {
-			sev, clean := domain.ParseSeverityBadge(c.Body)
-			out.Comments = append(out.Comments, reviewArtifactCommentJSON{
-				ID:        c.ID,
-				Path:      c.Path,
-				Line:      derefInt(c.Line),
-				StartLine: c.StartLine,
-				Body:      clean,
-				Severity:  sev,
-			})
-		}
+	for _, c := range details.StagedComments {
+		sev, clean := domain.ParseSeverityBadge(c.Body)
+		out.Comments = append(out.Comments, reviewArtifactCommentJSON{
+			ID:        c.ID,
+			Path:      c.Path,
+			Line:      derefInt(c.Line),
+			StartLine: c.StartLine,
+			Body:      clean,
+			Severity:  sev,
+		})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -134,12 +131,15 @@ func (ah *artifactsHandler) reviewUpdate(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// reviewApprove submits the staged pending review to GitHub
-// (SubmitExistingReview, applying the staged body + event + the agentmeta
-// footer), flips the artifact pending → submitted, records the human verdict into
-// run_memory, and runs the shared run/task/blueprint bookkeeping. The GitHub
-// submit is pessimistic (non-2xx on failure, artifact untouched); everything
-// after is detached best-effort.
+// reviewApprove creates and submits the staged review to GitHub atomically
+// (SubmitReview — one POST carrying commit_id + event + body + footer + the staged
+// comments[]), stamps the submitted review's id + URL onto the artifact, flips it
+// pending → submitted, records the human verdict into run_memory, and runs the
+// shared run/task/blueprint bookkeeping. Nothing touched GitHub before this point
+// (the review was staged entirely TF-side), so concurrent runs on one PR each
+// submit their own review here — GitHub allows unlimited submitted reviews per
+// identity. The submit is pessimistic (non-2xx on failure, artifact untouched);
+// everything after is detached best-effort.
 func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Artifact) {
 	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
@@ -160,64 +160,69 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	}
 	// The ready sentinel must be set — the agent finalized the review via
 	// submit-review. A pending artifact without it was started but never
-	// submitted, so there's nothing to approve.
+	// finalized, so there's nothing to approve.
 	if details.ReviewEvent == "" {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review has not been finalized by the agent yet"})
 		return
 	}
 
-	// Capture the final (human-edited) inline comments for the verdict diff BEFORE
-	// submitting — once submitted the review leaves the PENDING state and
-	// GetPendingReview returns nothing. A read failure just drops the comment diff.
-	// If the live pending review's id doesn't match the one we recorded, the
-	// original was replaced out-of-band: submitting art.ExternalID would diff the
-	// verdict against a different review (or fail at GitHub), so 409 before any
-	// mutation and let the user restart the preview. (An empty id means no live
-	// pending review — the stale-submit failure surfaces from GitHub below.)
-	var finalComments []ghclient.PendingReviewComment
-	if pendingID, comments, gerr := gh.GetPendingReview(r.Context(), owner, repo, number); gerr != nil {
-		artifactsLog.Warn("pre-approve pending-review re-read failed; verdict comment diff skipped",
-			"artifact", art.ID, "error", gerr)
-	} else if pendingID != "" && pendingID != art.ExternalID {
-		artifactsLog.Warn("live pending review id differs from the recorded one; refusing to approve",
-			"artifact", art.ID, "recorded", art.ExternalID, "live", pendingID)
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "the pending review on this PR no longer matches the one prepared here — return it to the queue and start a fresh review"})
-		return
-	} else {
-		finalComments = comments
+	// Translate the staged comments into the SubmitReview payload. A comment with
+	// no anchor (nil Line) can't be submitted to GitHub — surface it rather than
+	// silently dropping it. (A stale anchor after a force-push surfaces as
+	// GitHub's 422, already classified in SubmitReview.)
+	submitComments := make([]ghclient.SubmitReviewComment, 0, len(details.StagedComments))
+	for _, c := range details.StagedComments {
+		if c.Line == nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": "a staged review comment on " + c.Path + " has no line anchor and can't be submitted — edit or delete it, then approve again",
+			})
+			return
+		}
+		submitComments = append(submitComments, ghclient.SubmitReviewComment{
+			Path:      c.Path,
+			Line:      *c.Line,
+			StartLine: c.StartLine,
+			Body:      c.Body,
+		})
 	}
 
-	// Submit the pending review to GitHub with the staged body + event + footer.
+	// Create + submit the review in one POST, pinned to the commit the agent
+	// reviewed (details.HeadSHA), with the staged body + event + footer.
 	body := details.ReviewBody + agentmeta.Build(ah.agentRuns, orgID, art.RunID, "review")
-	if err := gh.SubmitExistingReview(r.Context(), owner, repo, art.ExternalID, details.ReviewEvent, body); err != nil {
-		artifactsLog.Warn("SubmitExistingReview failed",
-			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "review", art.ExternalID, "error", err)
+	reviewID, _, err := gh.SubmitReview(r.Context(), owner, repo, number, details.HeadSHA, details.ReviewEvent, body, submitComments)
+	if err != nil {
+		artifactsLog.Warn("SubmitReview failed",
+			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
 
 	cleanupCtx := context.WithoutCancel(r.Context())
 
-	// Step 1: flip the artifact pending → submitted, and compose the audit row
-	// with the flip (TFAC-483). The org-App SubmitExistingReview is a
-	// human-authorized, org-executed write — run_id is the drafting run, actor is
-	// the approver. Atomic with the flip.
+	// Step 1: stamp the submitted review's id + URL onto the artifact (a submitted
+	// review finally has both — a never-published draft had neither), flip it
+	// pending → submitted, and compose the audit row with the flip (TFAC-483). The
+	// org-App submit is a human-authorized, org-executed write — run_id is the
+	// drafting run, actor is the approver. Atomic with the flip.
 	submitted := *art
 	submitted.State = domain.ArtifactStateReviewSubmitted
+	submitted.ExternalID = strconv.Itoa(reviewID)
+	submitted.URL = fmt.Sprintf("%s#pullrequestreview-%d", domain.GitHubPullURL(owner+"/"+repo, number), reviewID)
 	if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 		if _, e := tx.Artifacts.Upsert(cleanupCtx, orgID, submitted); e != nil {
 			return e
 		}
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
-			githubApprovalAction(art, userID, domain.ActionReviewSubmitted, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted))
+			githubApprovalAction(&submitted, userID, domain.ActionReviewSubmitted, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted))
 	}); err != nil {
 		artifactsLog.Warn("flip review artifact to submitted + record action failed", "artifact", art.ID, "error", err)
 	}
 
 	// Step 2: human verdict capture — diff the agent's proposed draft against the
-	// human-edited final (body, event, comments) into run_memory.human_content.
+	// human-edited final (body, event, the staged comments) into
+	// run_memory.human_content.
 	if art.RunID != "" {
-		humanContent := FormatHumanFeedback(buildReviewHumanFeedbackInput(details, finalComments))
+		humanContent := FormatHumanFeedback(buildReviewHumanFeedbackInput(details, details.StagedComments))
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, art.RunID, humanContent)
 		}); err != nil {
@@ -229,17 +234,18 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	ah.finishApprovedRun(cleanupCtx, orgID, userID, art.RunID)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"review_id": art.ExternalID,
+		"review_id": submitted.ExternalID,
+		"url":       submitted.URL,
 		"event":     details.ReviewEvent,
 		"state":     domain.ArtifactStateReviewSubmitted,
 	})
 }
 
-// handleArtifactCommentUpdate edits one inline comment on the live GitHub pending
-// review (PUT /api/artifacts/{id}/comments/{commentId}). Review-only. Pessimistic:
-// a GitHub failure returns non-2xx. The severity badge is re-baked onto the
-// human's edited (clean) body — severity isn't editable, just preserved — by
-// recovering it from the comment's current GitHub body.
+// handleArtifactCommentUpdate edits one staged inline comment on the review draft
+// (PUT /api/artifacts/{id}/comments/{commentId}). Review-only, no GitHub call —
+// the whole review is staged TF-side until approval (TFAC-494). The severity
+// badge is re-baked onto the human's edited (clean) body — severity isn't
+// editable, just preserved — by recovering it from the staged comment's body.
 func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -268,54 +274,49 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 		notFound(w, "review artifact")
 		return
 	}
-	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
-	if !ok {
+	// Only a still-pending review can be edited: once submitted, its comments are
+	// public and immutable through this path.
+	if art.State != domain.ArtifactStateReviewPending {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending (state: " + art.State + ")"})
 		return
 	}
-
-	// Read this artifact's pending review (scoped to its owner/repo/number) and
-	// require the comment to belong to it before editing. The GraphQL update keys
-	// solely on the comment node id, so without this a commentId from another
-	// pending review the credential can see would be editable through this
-	// artifact-scoped route. The same fetch recovers the comment's current severity
-	// (baked into its GitHub body) to re-bake the badge onto the human's edit.
-	pendingID, comments, err := gh.GetPendingReview(r.Context(), owner, repo, number)
+	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+		internalError(w, "artifacts", fmt.Errorf("parse review artifact details: %w", err))
 		return
 	}
-	// If the live pending review isn't the one the artifact records, it was
-	// replaced out-of-band — the comment-membership check below would pass against
-	// the wrong review. 409 so the edit can't land on a review this artifact no
-	// longer represents.
-	if pendingID != "" && pendingID != art.ExternalID {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "the pending review on this PR no longer matches the one prepared here — return it to the queue and start a fresh review"})
-		return
-	}
-	severity, found := "", false
-	for _, c := range comments {
+	// Find the staged comment by its local id and re-bake its current severity onto
+	// the human's clean edit.
+	idx := -1
+	for i, c := range details.StagedComments {
 		if c.ID == commentID {
-			severity, _ = domain.ParseSeverityBadge(c.Body)
-			found = true
+			idx = i
 			break
 		}
 	}
-	if !found {
+	if idx < 0 {
 		notFound(w, "review comment")
 		return
 	}
+	severity, _ := domain.ParseSeverityBadge(details.StagedComments[idx].Body)
 	_, clean := domain.ParseSeverityBadge(req.Body)
-	if err := gh.UpdatePendingReviewComment(r.Context(), commentID, domain.SeverityBadgeMarkdown(severity)+clean); err != nil {
-		artifactsLog.Warn("UpdatePendingReviewComment failed", "artifact", art.ID, "comment", commentID, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+	details.StagedComments[idx].Body = domain.SeverityBadgeMarkdown(severity) + clean
+
+	next := *art
+	next.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
+	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		_, e := tx.Artifacts.Upsert(r.Context(), orgID, next)
+		return e
+	}); err != nil {
+		internalError(w, "artifacts", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleArtifactCommentDelete removes one inline comment from the live GitHub
-// pending review (DELETE /api/artifacts/{id}/comments/{commentId}). Review-only,
-// pessimistic.
+// handleArtifactCommentDelete removes one staged inline comment from the review
+// draft (DELETE /api/artifacts/{id}/comments/{commentId}). Review-only, no GitHub
+// call — the staged set is local until approval (TFAC-494).
 func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -333,50 +334,46 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 		notFound(w, "review artifact")
 		return
 	}
-	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
-	if !ok {
+	if art.State != domain.ArtifactStateReviewPending {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending (state: " + art.State + ")"})
 		return
 	}
-	// DeletePendingReviewComment keys solely off the comment node id, so require the
-	// comment to belong to THIS artifact's pending review first — otherwise a
-	// commentId from another pending review the credential can see would be
-	// deletable through this artifact-scoped route.
-	pendingID, comments, err := gh.GetPendingReview(r.Context(), owner, repo, number)
+	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+		internalError(w, "artifacts", fmt.Errorf("parse review artifact details: %w", err))
 		return
 	}
-	// A live pending review that isn't the recorded one was replaced out-of-band;
-	// 409 rather than delete against a review this artifact no longer represents.
-	if pendingID != "" && pendingID != art.ExternalID {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "the pending review on this PR no longer matches the one prepared here — return it to the queue and start a fresh review"})
-		return
-	}
-	found := false
-	for _, c := range comments {
+	idx := -1
+	for i, c := range details.StagedComments {
 		if c.ID == commentID {
-			found = true
+			idx = i
 			break
 		}
 	}
-	if !found {
+	if idx < 0 {
 		notFound(w, "review comment")
 		return
 	}
-	if err := gh.DeletePendingReviewComment(r.Context(), commentID); err != nil {
-		artifactsLog.Warn("DeletePendingReviewComment failed", "artifact", art.ID, "comment", commentID, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+	details.StagedComments = append(details.StagedComments[:idx], details.StagedComments[idx+1:]...)
+
+	next := *art
+	next.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
+	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		_, e := tx.Artifacts.Upsert(r.Context(), orgID, next)
+		return e
+	}); err != nil {
+		internalError(w, "artifacts", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // buildReviewHumanFeedbackInput diffs the agent's proposed review draft (snapshot
-// in details_json) against the human-edited final (staged body/event + the live
-// comments captured at approval), producing the input FormatHumanFeedback renders
-// into run_memory.human_content. Comments are joined by their GitHub node id;
+// in details_json) against the human-edited final (staged body/event + the staged
+// comments at approval), producing the input FormatHumanFeedback renders into
+// run_memory.human_content. Comments are joined by their stable TF-local id;
 // severity badges are stripped from both sides so the diff shows clean prose.
-func buildReviewHumanFeedbackInput(details domain.ReviewArtifactDetails, finalComments []ghclient.PendingReviewComment) HumanFeedbackInput {
+func buildReviewHumanFeedbackInput(details domain.ReviewArtifactDetails, finalComments []domain.ReviewArtifactComment) HumanFeedbackInput {
 	type cmt struct {
 		path string
 		line int

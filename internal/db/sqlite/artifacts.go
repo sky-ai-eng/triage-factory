@@ -18,13 +18,14 @@ import (
 // literals) so it can't drift from domain.IsReconcilableNonTerminal, which
 // TestArtifactStore_SQLite_ListNonTerminal pins it equal to. The state strings
 // carry no quotes, so the concatenation is injection-safe.
+// Review is intentionally absent: a review is staged TF-side until the atomic
+// submit at approval, so a pending review draft has no GitHub object to
+// reconcile (TFAC-494). Mirrors domain.reconcilableNonTerminal.
 var artifactNonTerminalPredicate = fmt.Sprintf(`(
 		   (kind = '%s' AND state IN ('%s', '%s'))
 		OR (kind = '%s' AND state = '%s')
-		OR (kind = '%s' AND state = '%s')
 	)`,
 	domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen,
-	domain.ArtifactKindReview, domain.ArtifactStateReviewPending,
 	domain.ArtifactKindBranch, domain.ArtifactStateBranchPushed,
 )
 
