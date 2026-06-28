@@ -228,7 +228,11 @@ type accessDetail struct {
 	Kind     string `json:"kind"`
 	Host     string `json:"host"`
 	InviteID string `json:"invite_id"`
-	Source   string `json:"source"`
+	// Source + Role are the sso_jit grant payload. Role is the granted role and
+	// is deliberately distinct from NewRole (which the team-add / role-change
+	// actions carry) — the sso_jit builder writes a "role" key, not "new_role".
+	Source string `json:"source"`
+	Role   string `json:"role"`
 }
 
 // accessChangeLabel renders one row's action + detail_json into the human
