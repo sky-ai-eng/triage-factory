@@ -154,7 +154,7 @@ func (s *Spawner) resolvePrompt(orgID string, task domain.Task, explicitPromptID
 // through as literal braces so they're obvious to prompt authors on first
 // run. metadataJSON is the primary event's metadata blob ("" is fine —
 // event-derived placeholders just render empty).
-func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binaryPath, runID, runRoot, blueprintRunID string) string {
+func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binaryPath, runID, runRoot, blueprintRunID, branchTemplate string) string {
 	// Compatibility shim: some early prompts were written with the literal
 	// "triagefactory exec" prefix on CLI invocations, assuming the binary
 	// was on PATH. The binary lives at an absolute path in the worktree
@@ -166,15 +166,43 @@ func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binar
 	// Inline the scope and tools sections into the template text FIRST.
 	// strings.Replacer does a single non-re-scanning pass, so a section
 	// injected as a replacement *value* keeps any placeholders it carries
-	// verbatim — and the tools docs reference {{BINARY_PATH}} and the
-	// run-root entity-memory paths. Folding them into the template here lets
-	// the single BuildPromptReplacer pass below interpolate them too.
+	// verbatim — and the tools docs reference {{BINARY_PATH}}, {{BRANCH_TEMPLATE}},
+	// and the run-root entity-memory paths. Folding them in here lets the single
+	// BuildPromptReplacer pass below interpolate them too.
 	full = strings.NewReplacer(
 		"{{TOOLS_REFERENCE}}", toolsRef,
 		"{{SCOPE}}", scope,
 	).Replace(full)
 
-	return BuildPromptReplacer(task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID).Replace(full)
+	return BuildPromptReplacer(task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate).Replace(full)
+}
+
+// resolveBranchTemplate returns the team's branch-naming convention with the
+// run's ticket id substituted, falling back to domain.DefaultBranchTemplate
+// when the team has no setting (or the teams store isn't wired — test
+// fixtures). Read under the admin pool: this runs in a background goroutine
+// with no JWT claims, like the rest of the spawner's reads.
+func (s *Spawner) resolveBranchTemplate(ctx context.Context, task domain.Task) string {
+	tmpl := domain.DefaultBranchTemplate
+	if s.teams != nil && task.TeamID != nil && *task.TeamID != "" {
+		if ts, err := s.teams.GetSettingsSystem(ctx, *task.TeamID); err == nil && ts.BranchTemplate != "" {
+			tmpl = ts.BranchTemplate
+		}
+	}
+	return renderBranchTemplate(tmpl, task)
+}
+
+// renderBranchTemplate substitutes the literal "<ticket-id>" in a branch-name
+// template with the run's ticket id when one is known — the Jira issue key. For
+// runs with no ticket (GitHub PR, taskless), the placeholder is left verbatim
+// so the agent fills in a sensible identifier itself. This is envelope guidance
+// only; the push gate authorizes whatever branch the worktree lands on, so a
+// branch named off-template is never blocked.
+func renderBranchTemplate(tmpl string, task domain.Task) string {
+	if task.EntitySource == "jira" && task.EntitySourceID != "" {
+		return strings.ReplaceAll(tmpl, "<ticket-id>", task.EntitySourceID)
+	}
+	return tmpl
 }
 
 func (s *Spawner) cachedAgentTools() string {

@@ -24,13 +24,18 @@ func TestBuildPrompt_InterpolatesInjectedSections(t *testing.T) {
 	toolsRef := ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate
 
 	out := buildPrompt(task, "", "mission body", "Repository: owner/repo", toolsRef,
-		"/usr/local/bin/triagefactory", "run-1", "/work", "bp-run-1")
+		"/usr/local/bin/triagefactory", "run-1", "/work", "bp-run-1", "tfac/SKY-9")
 
 	if strings.Contains(out, "{{BINARY_PATH}}") {
 		t.Error("literal {{BINARY_PATH}} survived in the composed prompt (tools section not interpolated)")
 	}
-	if strings.Contains(out, "{{TOOLS_REFERENCE}}") || strings.Contains(out, "{{SCOPE}}") {
+	if strings.Contains(out, "{{TOOLS_REFERENCE}}") || strings.Contains(out, "{{SCOPE}}") || strings.Contains(out, "{{BRANCH_TEMPLATE}}") {
 		t.Error("an injected section placeholder survived in the composed prompt")
+	}
+	// The branch template (already ticket-id-resolved) must surface in the
+	// envelope guidance.
+	if !strings.Contains(out, "tfac/SKY-9") {
+		t.Error("expected the resolved branch template in the composed prompt envelope")
 	}
 	// The env-var-style run-root reference in the tools docs must be expanded
 	// to the concrete agent-visible path, not left for (absent) shell expansion.

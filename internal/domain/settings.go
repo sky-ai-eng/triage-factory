@@ -12,6 +12,11 @@ import (
 // EffectiveModel (the resolution fallback) so the two can't drift.
 const DefaultModel = "sonnet"
 
+// DefaultBranchTemplate is the branch-name convention suggested to delegated
+// agents as envelope guidance (not enforced). The literal "<ticket-id>" is
+// substituted with the run's ticket id at prompt-render time.
+const DefaultBranchTemplate = "tfac/<ticket-id>"
+
 // OrgSettings is the org-scope settings row (org_settings table).
 //
 // Field nullability:
@@ -132,6 +137,14 @@ type TeamSettings struct {
 	// write path never touches this field — only the org-admin cap endpoint does),
 	// so a team-admin save round-trips the stored value untouched.
 	MaxDailyCostUSD float64
+
+	// BranchTemplate is the team's branch-name convention (TFAC-498), rendered
+	// into the delegated agent's prompt as envelope guidance — it is NOT
+	// enforced. The literal "<ticket-id>" is substituted with the run's ticket
+	// id at prompt-render time. NOT NULL with a schema DEFAULT; defaults to
+	// DefaultBranchTemplate. The write path coalesces an empty string to the
+	// default so a blank never persists.
+	BranchTemplate string
 }
 
 // DefaultTeamSettings returns the NOT NULL DEFAULT values from the
@@ -152,6 +165,7 @@ func DefaultTeamSettings() TeamSettings {
 		AutoDelegateEnabled:             false,
 		PermissionAbsentGraceMS:         15000,
 		PermissionAbsentAutodenyEnabled: true,
+		BranchTemplate:                  DefaultBranchTemplate,
 	}
 }
 

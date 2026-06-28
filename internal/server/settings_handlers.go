@@ -174,6 +174,11 @@ type teamSettingsUpdate struct {
 	AIReprioritizeThreshold    *int                   `json:"ai_reprioritize_threshold,omitempty"`
 	AIPreferenceUpdateInterval *int                   `json:"ai_preference_update_interval,omitempty"`
 	JiraProjects               *[]jiraProjectSettings `json:"jira_projects,omitempty"`
+	// BranchTemplate is the team's branch-name convention shown to delegated
+	// agents as envelope guidance (TFAC-498), not enforced. Pointer so an
+	// unrelated save that omits it leaves the stored value untouched; an empty
+	// string coalesces to domain.DefaultBranchTemplate so a blank never persists.
+	BranchTemplate *string `json:"branch_template,omitempty"`
 	// Presence-gated absent auto-deny knobs (TFAC-392). Pointers so an
 	// unrelated save (e.g. editing projects) that omits them leaves the
 	// stored values untouched. Grace is in seconds on the wire (the UI input
@@ -246,6 +251,16 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 		}
 		if req.AIPreferenceUpdateInterval != nil {
 			teamSet.AIPreferenceUpdateInterval = *req.AIPreferenceUpdateInterval
+		}
+		if req.BranchTemplate != nil {
+			// Coalesce a blank to the default so an empty string never persists
+			// (mirrors the model-cap "" → default convention). The literal
+			// "<ticket-id>" stays verbatim — it's substituted at prompt-render time.
+			bt := *req.BranchTemplate
+			if bt == "" {
+				bt = domain.DefaultBranchTemplate
+			}
+			teamSet.BranchTemplate = bt
 		}
 		if req.PermissionAbsentAutodenyEnabled != nil {
 			teamSet.PermissionAbsentAutodenyEnabled = *req.PermissionAbsentAutodenyEnabled

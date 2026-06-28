@@ -42,6 +42,10 @@ export interface GitHubGroup {
 export interface TeamConfigForm {
   default_model: string
   auto_delegate_enabled: boolean
+  // Branch-name template suggested (not enforced) to delegated agents when they
+  // create a branch (TFAC-498). The `<ticket-id>` literal is replaced with the
+  // ticket id at run time. Same key on the GET and POST wire.
+  branch_template: string
   // Carried for round-trip fidelity (they're part of the team_settings the
   // GET returns and the POST accepts) even though no surface exposes an
   // input for them yet — seeded from the GET and written back unchanged, so
@@ -75,6 +79,7 @@ export interface TeamSettingsData {
     AIPreferenceUpdateInterval: number
     DefaultModel: string
     AutoDelegateEnabled: boolean
+    BranchTemplate: string
     PermissionAbsentGraceMS: number
     PermissionAbsentAutodenyEnabled: boolean
   }
@@ -138,6 +143,7 @@ export function teamProjectsBlocked(projects: JiraProjectConfig[], connected: bo
 export const emptyTeamConfig = (): TeamConfigForm => ({
   default_model: 'sonnet',
   auto_delegate_enabled: true,
+  branch_template: 'tfac/<ticket-id>',
   ai_reprioritize_threshold: 0,
   ai_preference_update_interval: 0,
   permission_absent_autodeny_enabled: true,
@@ -154,6 +160,7 @@ export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
   return {
     default_model: data.team_settings.DefaultModel || 'sonnet',
     auto_delegate_enabled: data.team_settings.AutoDelegateEnabled,
+    branch_template: data.team_settings.BranchTemplate || 'tfac/<ticket-id>',
     ai_reprioritize_threshold: data.team_settings.AIReprioritizeThreshold,
     ai_preference_update_interval: data.team_settings.AIPreferenceUpdateInterval,
     permission_absent_autodeny_enabled: data.team_settings.PermissionAbsentAutodenyEnabled,
@@ -213,6 +220,7 @@ export async function saveTeamSettings(teamId: string, form: TeamConfigForm): Pr
     body: JSON.stringify({
       ai_model: form.default_model,
       ai_auto_delegate_enabled: form.auto_delegate_enabled,
+      branch_template: form.branch_template,
       ai_reprioritize_threshold: form.ai_reprioritize_threshold,
       ai_preference_update_interval: form.ai_preference_update_interval,
       permission_absent_autodeny_enabled: form.permission_absent_autodeny_enabled,

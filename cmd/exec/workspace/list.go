@@ -55,11 +55,10 @@ type listMaterialized struct {
 // extracted from runList so it returns errors instead of os.Exit-ing.
 // Mirrors the runAdd / materializeWorkspace split for testability.
 //
-// Jira-only, mirroring materializeWorkspace. GitHub PR runs have a
-// single eagerly-materialized worktree and don't use the workspace
-// surface at all; surfacing configured-repo discovery on those runs
-// would advertise a path the agent can't take and contradict the docs
-// in jira-tools.txt.
+// Run-agnostic (TFAC-498), mirroring materializeWorkspace: it serves any run
+// — Jira, GitHub, or taskless — since `workspace add` now does too. It only
+// needs the run identity (for scoping the materialized list) plus the
+// org-configured repos, not the task.
 //
 // All reads route through the agenthost client — in local mode the
 // LocalClient hits the SQLite store directly, in sandbox mode the
@@ -78,16 +77,6 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 	}
 	if run == nil {
 		return listOutput{}, fmt.Errorf("%w: %s", errRunNotFound, info.RunID)
-	}
-	task, err := host.GetTask(ctx, run.TaskID)
-	if err != nil {
-		return listOutput{}, fmt.Errorf("workspace list: load task: %w", err)
-	}
-	if task == nil {
-		return listOutput{}, fmt.Errorf("%w: %s", errTaskNotFound, run.TaskID)
-	}
-	if task.EntitySource != "jira" {
-		return listOutput{}, fmt.Errorf("%w (run task source is %q)", errNotJiraRun, task.EntitySource)
 	}
 
 	configured, err := host.ListRepos(ctx)

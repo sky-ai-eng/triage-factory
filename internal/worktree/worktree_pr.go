@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -45,7 +46,42 @@ import (
 // shared config and would otherwise accumulate forever.
 func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID string, opts ...CloneOption) (string, error) {
 	auth := resolveCloneOptions(opts).auth
+	wtDir, err := makeWorktreeDir(runID)
+	if err != nil {
+		return "", err
+	}
+	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, prNumber, runID, wtDir, auth)
+}
 
+// CreateForPRInRoot is the lazy-materialization variant of CreateForPR: the
+// PR-head worktree lands at filepath.Join(runRoot, owner, repo) so a single
+// run can host it as a sibling under the shared run-root (the `workspace add
+// --pr` path), rather than at the run-dir CreateForPR uses for the eager
+// one-repo GitHub PR delegation. Other than the path — and the absence of a
+// host clone credential, matching CreateForBranchInRoot — behavior is
+// identical: same fork / own-repo / deleted-fork handling, same push-tracking
+// config. The run-root must already exist (created by MakeRunRoot in the
+// spawner); the owner-level subdir is created here.
+func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID, runRoot string) (string, error) {
+	if runRoot == "" {
+		return "", fmt.Errorf("CreateForPRInRoot: runRoot is required")
+	}
+	wtDir := filepath.Join(runRoot, owner, repo)
+	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
+		return "", fmt.Errorf("mkdir owner subdir: %w", err)
+	}
+	// No CloneAuth: this is the in-sandbox `workspace add --pr` path, where
+	// in-sandbox git credentials are SKY-394's concern, not the host-side clone
+	// path — the same rationale as CreateForBranchInRoot.
+	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, prNumber, runID, wtDir, CloneAuth{})
+}
+
+// createPRWorktreeAt is the shared body of CreateForPR / CreateForPRInRoot —
+// bare-clone setup, refs/pull/<n>/head fetch, `git worktree add`, the fork /
+// own-repo / deleted-fork push-tracking config, and exclude-or-rollback. The
+// two public callers differ only in where wtDir lives on disk and whether a
+// host clone credential is threaded; wtDir's parent is created by the caller.
+func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID, wtDir string, auth CloneAuth) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -92,11 +128,6 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 		return "", fmt.Errorf("fetch PR #%d head into %s: %w", prNumber, localBranch, err)
 	}
 	worktreeLog.Debug("fetch PR head completed", "number", prNumber, "branch", localBranch, "duration", time.Since(start).Round(time.Millisecond))
-
-	wtDir, err := makeWorktreeDir(runID)
-	if err != nil {
-		return "", err
-	}
 
 	// Pass the bare branch name (not refs/heads/<name>) so git
 	// attaches the worktree to the local branch instead of going

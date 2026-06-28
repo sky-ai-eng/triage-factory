@@ -106,6 +106,8 @@ export default function TeamSettings({
   const [projects, setProjects] = useState<JiraProjectConfig[]>([])
   const [defaultModel, setDefaultModel] = useState('sonnet')
   const [autoDelegate, setAutoDelegate] = useState(true)
+  // Advisory branch-name template suggested to delegated agents (TFAC-498).
+  const [branchTemplate, setBranchTemplate] = useState('tfac/<ticket-id>')
   // Presence-gated absent auto-deny (TFAC-392).
   const [absentAutodeny, setAbsentAutodeny] = useState(true)
   const [absentGraceSeconds, setAbsentGraceSeconds] = useState(15)
@@ -148,6 +150,7 @@ export default function TeamSettings({
         setProjects(form.jira_projects)
         setDefaultModel(form.default_model)
         setAutoDelegate(form.auto_delegate_enabled)
+        setBranchTemplate(form.branch_template)
         setAbsentAutodeny(form.permission_absent_autodeny_enabled)
         setAbsentGraceSeconds(form.permission_absent_grace_seconds)
         setRepos(teamRepos ?? [])
@@ -238,7 +241,9 @@ export default function TeamSettings({
 
   // ── Team defaults (rides team-settings POST) ──
   const defaultsDirty =
-    defaultModel !== baseline.default_model || autoDelegate !== baseline.auto_delegate_enabled
+    defaultModel !== baseline.default_model ||
+    autoDelegate !== baseline.auto_delegate_enabled ||
+    branchTemplate !== baseline.branch_template
   const saveDefaults = async (): Promise<boolean> => {
     setSavingDefaults(true)
     try {
@@ -246,6 +251,7 @@ export default function TeamSettings({
         ...baseline,
         default_model: defaultModel,
         auto_delegate_enabled: autoDelegate,
+        branch_template: branchTemplate,
       })
       if (!res.ok) {
         toast.error(res.error)
@@ -255,6 +261,7 @@ export default function TeamSettings({
         ...b,
         default_model: defaultModel,
         auto_delegate_enabled: autoDelegate,
+        branch_template: branchTemplate,
       }))
       if (res.warning) toast.info(res.warning)
       toast.success('Team defaults saved')
@@ -419,6 +426,7 @@ export default function TeamSettings({
         onCancel={() => {
           setDefaultModel(baseline.default_model)
           setAutoDelegate(baseline.auto_delegate_enabled)
+          setBranchTemplate(baseline.branch_template)
         }}
       >
         {/* The actual /setup team-model body — same heading + tier ladder. */}
@@ -457,6 +465,20 @@ export default function TeamSettings({
               }`}
             />
           </button>
+        </div>
+        <div>
+          <p className="text-[13px] text-text-primary">Branch name template</p>
+          <p className="mt-0.5 text-[11px] text-text-tertiary">
+            Suggested to delegated agents when they create a branch. &lt;ticket-id&gt; is replaced
+            with the ticket id. Guidance only — not enforced.
+          </p>
+          <input
+            type="text"
+            value={branchTemplate}
+            onChange={(e) => setBranchTemplate(e.target.value)}
+            placeholder="tfac/<ticket-id>"
+            className="mt-1.5 w-full rounded-md border border-border-subtle bg-transparent px-2 py-1 text-[13px] text-text-primary focus:border-accent focus:outline-none"
+          />
         </div>
       </SettingsSection>
 

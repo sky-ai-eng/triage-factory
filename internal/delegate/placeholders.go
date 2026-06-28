@@ -42,7 +42,7 @@ import (
 // inlines those sections into the template text before this pass, because
 // strings.Replacer does not re-scan replacement values and the tools docs carry
 // their own placeholders ({{BINARY_PATH}}, the run-root memory paths).
-func BuildPromptReplacer(task domain.Task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID string) *strings.Replacer {
+func BuildPromptReplacer(task domain.Task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate string) *strings.Replacer {
 	pairs := []string{
 		"{{RUN_ID}}", runID,
 		"{{BINARY_PATH}}", binaryPath,
@@ -53,6 +53,11 @@ func BuildPromptReplacer(task domain.Task, metadataJSON, runID, binaryPath, runR
 		"{{TASK_TITLE}}", task.Title,
 		"{{EVENT_TYPE}}", task.EventType,
 		"{{EVENT_METADATA_JSON}}", metadataJSON,
+		// Branch-naming convention (team setting, ticket-id-resolved), surfaced
+		// as envelope + tools-doc guidance. Resolved in the second pass — not
+		// buildPrompt's pre-pass — so it also interpolates inside the injected
+		// {{TOOLS_REFERENCE}} value (which the non-rescanning pre-pass can't reach).
+		"{{BRANCH_TEMPLATE}}", branchTemplate,
 	}
 
 	var meta map[string]any

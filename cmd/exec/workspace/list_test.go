@@ -24,13 +24,27 @@ func TestListWorkspaces_RunNotFound(t *testing.T) {
 	}
 }
 
-func TestListWorkspaces_RejectsGitHubPRRun(t *testing.T) {
+// TestListWorkspaces_GitHubRunAllowed pins the dropped Jira gate (TFAC-498):
+// `workspace list` is now run-agnostic and serves a GitHub run too (it used to
+// reject one), mirroring `workspace add`.
+func TestListWorkspaces_GitHubRunAllowed(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedGitHubRun(t, database, "gh-run")
+	seedRepoProfile(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
 
-	_, err := listWorkspaces(hostFor(stores, "gh-run"))
-	if !errors.Is(err, errNotJiraRun) {
-		t.Errorf("err = %v, want errNotJiraRun (workspace list must reject GitHub PR runs to keep its contract aligned with workspace add)", err)
+	out, err := listWorkspaces(hostFor(stores, "gh-run"))
+	if err != nil {
+		t.Fatalf("listWorkspaces on a GitHub run: %v", err)
+	}
+	// The configured-and-profilable repo surfaces as available.
+	found := false
+	for _, a := range out.Available {
+		if a.Repo == "sky/core" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected sky/core in available, got %+v", out.Available)
 	}
 }
 

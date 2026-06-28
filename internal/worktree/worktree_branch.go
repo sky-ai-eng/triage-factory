@@ -47,6 +47,104 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir, CloneAuth{})
 }
 
+// CreateForCheckoutInRoot materializes a worktree at filepath.Join(runRoot,
+// owner, repo) checked out — in DETACHED HEAD — at the fresh tip of an existing
+// branch on origin. When ref is empty the repo's default branch is detected and
+// used. This is the generalized `workspace add` / `workspace add --ref <branch>`
+// path (TFAC-498): unlike CreateForBranchInRoot it does NOT mint a prescribed
+// feature branch — it hands back a checkout of the named branch as-is and lets
+// the agent create its own working branch (`git checkout -b ...`) before
+// pushing. The push gate then authorizes whatever branch the worktree lands on
+// (its live current branch), not a prescribed name.
+//
+// Detached (rather than a local branch) is deliberate: many runs default to the
+// same repo's default branch, and git refuses to check out one local branch ref
+// in two worktrees of a shared bare. A detached checkout claims no branch ref,
+// so concurrent runs sharing this bare never collide; a detached HEAD also
+// yields no live branch, so the push gate authorizes nothing until the agent
+// has created its own branch — exactly the intended flow.
+//
+// The run-root must already exist (created by MakeRunRoot in the spawner); the
+// owner-level subdir is created here.
+func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, runID, runRoot string) (string, error) {
+	if runRoot == "" {
+		return "", fmt.Errorf("CreateForCheckoutInRoot: runRoot is required")
+	}
+	wtDir := filepath.Join(runRoot, owner, repo)
+	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
+		return "", fmt.Errorf("mkdir owner subdir: %w", err)
+	}
+	// No CloneAuth here for the same reason as CreateForBranchInRoot: this is
+	// the in-sandbox `workspace add` path; in-sandbox git credentials are
+	// SKY-394's concern, not the host-side clone path.
+	return createCheckoutWorktreeAt(ctx, owner, repo, cloneURL, ref, runID, wtDir, CloneAuth{})
+}
+
+// createCheckoutWorktreeAt fetches ref fresh from origin and adds a detached
+// worktree at its tip. Empty ref → the repo's default branch. Shares the
+// per-repo lock, bare-clone reuse, and exclude-or-rollback with the other
+// Create* helpers; differs in that it never creates or reattaches a local
+// branch — the checkout is detached.
+func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, runID, wtDir string, auth CloneAuth) (string, error) {
+	mu := lockRepo(owner, repo)
+	mu.Lock()
+	defer mu.Unlock()
+
+	bareDir, err := ensureBareCloneLocked(ctx, owner, repo, cloneURL, auth)
+	if err != nil {
+		return "", err
+	}
+
+	if ref == "" {
+		ref = detectDefaultBranch(ctx, bareDir)
+	}
+
+	// Fetch the ref fresh into its remote-tracking ref (never the local branch
+	// ref — same conflict-avoidance reasoning as createBranchWorktreeAt: a
+	// local branch ref may be live in another worktree of this shared bare).
+	remoteRef := "refs/remotes/origin/" + ref
+	fetchSpec := fmt.Sprintf("+refs/heads/%s:%s", ref, remoteRef)
+	start := time.Now()
+	if err := gitRunCtxAuth(ctx, bareDir, auth, "fetch", "origin", fetchSpec); err != nil {
+		return "", fmt.Errorf("fetch ref %s: %w", ref, err)
+	}
+	worktreeLog.Debug("fetch completed", "ref", ref, "duration", time.Since(start).Round(time.Millisecond))
+
+	// Detached checkout at the fetched tip. Routed through gitRunCtxAuth so the
+	// blobless bare's lazy promisor fetch (working-tree blobs deferred by the
+	// partial clone) authenticates against origin on a private repo.
+	if err := gitRunCtxAuth(ctx, bareDir, auth, "worktree", "add", "--detach", wtDir, remoteRef); err != nil {
+		// A cancelled/killed add can leave wtDir half-built and the bare's
+		// worktree registration behind. Reclaim only THIS add (keyed on wtDir)
+		// so a concurrent add against the same bare isn't disturbed.
+		_ = os.RemoveAll(wtDir)
+		removeWorktreeRegFor(bareDir, wtDir)
+		return "", fmt.Errorf("worktree add (detached %s): %w", ref, err)
+	}
+
+	if err := addExcludesOrRollback(runID, wtDir); err != nil {
+		return "", err
+	}
+
+	worktreeLog.Debug("checkout worktree at", "dir", wtDir, "ref", ref, "detached", true)
+	return wtDir, nil
+}
+
+// CurrentBranch returns the worktree's checked-out branch (the short symbolic
+// ref of HEAD), or "" when HEAD is detached, the path isn't a git worktree, or
+// the command otherwise fails. The push gate (internal/delegate) uses this to
+// authorize "whatever branch the checkout is currently on" rather than a
+// prescribed run_worktrees.FeatureBranch (TFAC-498): a detached HEAD — the
+// state a fresh default / --ref `workspace add` lands in — yields "" so no push
+// is authorized until the agent creates its own branch.
+func CurrentBranch(path string) string {
+	out, err := gitOutputCtx(context.Background(), path, "symbolic-ref", "--short", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
 // createBranchWorktreeAt is the shared body of the two CreateForBranch
 // variants — bare-clone setup, base-branch fetch, `git worktree add`
 // (with branchExists reattach), and exclude-or-rollback. The two

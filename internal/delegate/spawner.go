@@ -26,8 +26,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
+
+// worktreeCurrentBranch reads a worktree's live checked-out branch (the short
+// symbolic ref of HEAD, or "" when detached / unreadable). A package var so the
+// push-authorization tests can inject a deterministic path→branch mapping
+// without standing up real git worktrees on disk.
+var worktreeCurrentBranch = worktree.CurrentBranch
 
 // shortRunID truncates a run UUID to 8 chars for toast messages — full UUIDs
 // are noisy in a notification. Kept consistent so users can cross-reference
@@ -600,11 +607,16 @@ func (s *Spawner) gitProxyConfigFor(ctx context.Context, info agenthost.RunInfo,
 // gitAuthorizeDecision is the git proxy's live per-repo gate (Layer 2 + the
 // Layer-3 ref allowlist): the run may touch a repo only if its team tracks it
 // AND it appears in the run's run_worktrees ledger (the eagerly-cloned task
-// repo — recorded at setup — or a workspace-add'd one). The allowed push refs
-// are that repo's FeatureBranch rows. Reads live each call, so untracking a
-// repo or removing a worktree propagates to the next request with no re-mint.
-// Fails closed (deny) when the stores it needs are absent — a misconfigured
-// gate must never allow-all.
+// repo — recorded at setup — or a workspace-add'd one). The allowed push ref is
+// the worktree's LIVE current branch — "you may push whatever branch your
+// checkout is on" (TFAC-498) — read fresh from disk per call rather than a
+// prescribed run_worktrees.FeatureBranch. A detached HEAD (the state a fresh
+// default / --ref `workspace add` lands in) authorizes nothing until the agent
+// creates its own branch; the repo's base / default branch is never authorized
+// even when the checkout sits on it. Reads live each call, so untracking a
+// repo, removing a worktree, or switching branches propagates to the next
+// request with no re-mint. Fails closed (deny) when the stores it needs are
+// absent — a misconfigured gate must never allow-all.
 func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.RunInfo, owner, repo string) (gitproxy.Decision, error) {
 	if stores.TeamGitHubRepos == nil || stores.RunWorktrees == nil {
 		return gitproxy.Decision{Allowed: false}, nil
@@ -621,20 +633,53 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		return gitproxy.Decision{}, err
 	}
 	repoID := owner + "/" + repo
+
+	// Base / protected refs are never pushable, regardless of what the worktree
+	// is checked out on. Best-effort: a missing/unreadable profile just means no
+	// protected filtering — the default checkout is detached, so the live branch
+	// is rarely a base branch anyway.
+	protected := protectedBranches(ctx, stores, info.OrgID, repoID)
+
 	var allowedRefs []string
 	found := false
 	for _, w := range rows {
-		if strings.EqualFold(w.RepoID, repoID) {
-			found = true
-			if w.FeatureBranch != "" {
-				allowedRefs = append(allowedRefs, "refs/heads/"+w.FeatureBranch)
-			}
+		if !strings.EqualFold(w.RepoID, repoID) {
+			continue
 		}
+		found = true
+		branch := worktreeCurrentBranch(w.Path)
+		if branch == "" || protected[branch] {
+			continue
+		}
+		allowedRefs = append(allowedRefs, "refs/heads/"+branch)
 	}
 	if !found {
 		return gitproxy.Decision{Allowed: false}, nil
 	}
 	return gitproxy.Decision{Allowed: true, AllowedRefs: allowedRefs}, nil
+}
+
+// protectedBranches returns the refs that must never be pushed for a repo — its
+// default branch and the user-configured base branch. Empty when the profile
+// can't be read (Repos store absent, lookup error, or no profile yet); the
+// caller treats that as "no protected filtering," which is safe because the
+// generalized default checkout is detached (no live branch to authorize).
+func protectedBranches(ctx context.Context, stores db.Stores, orgID, repoID string) map[string]bool {
+	out := map[string]bool{}
+	if stores.Repos == nil {
+		return out
+	}
+	profile, err := stores.Repos.GetSystem(ctx, orgID, repoID)
+	if err != nil || profile == nil {
+		return out
+	}
+	if profile.DefaultBranch != "" {
+		out[profile.DefaultBranch] = true
+	}
+	if profile.BaseBranch != "" {
+		out[profile.BaseBranch] = true
+	}
+	return out
 }
 
 // gitPushRecorder builds the git proxy's RecordPush callback for one run. The

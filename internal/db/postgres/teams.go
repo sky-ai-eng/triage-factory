@@ -73,6 +73,7 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		permAbsentGraceMS       int
 		permAbsentAutodeny      bool
 		maxDailyCost            sql.NullFloat64
+		branchTemplate          string
 	)
 	// array_to_json(...)::text round-trips text[] as a JSON literal.
 	// database/sql + pgx stdlib doesn't ship a scanner for *[]string,
@@ -83,13 +84,13 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		       ai_reprioritize_threshold, ai_preference_update_interval,
 		       default_model, auto_delegate_enabled,
 		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
-		       max_daily_cost_usd
+		       max_daily_cost_usd, branch_template
 		FROM team_settings WHERE team_id = $1
 	`, teamID).Scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
 		&defaultModel, &autoDelegate,
 		&permAbsentGraceMS, &permAbsentAutodeny,
-		&maxDailyCost,
+		&maxDailyCost, &branchTemplate,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		// See OrgsStore for the rationale. Matches team_settings'
@@ -117,6 +118,7 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		PermissionAbsentGraceMS:         permAbsentGraceMS,
 		PermissionAbsentAutodenyEnabled: permAbsentAutodeny,
 		MaxDailyCostUSD:                 maxDailyCost.Float64, // NULL → 0 (no cap)
+		BranchTemplate:                  branchTemplate,
 	}, nil
 }
 
@@ -376,9 +378,9 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			team_id, jira_projects, ai_reprioritize_threshold,
 			ai_preference_update_interval, default_model, auto_delegate_enabled,
 			permission_absent_grace_ms, permission_absent_autodeny_enabled,
-			max_daily_cost_usd,
+			max_daily_cost_usd, branch_template,
 			updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
 		ON CONFLICT (team_id) DO UPDATE SET
 			jira_projects = EXCLUDED.jira_projects,
 			ai_reprioritize_threshold = EXCLUDED.ai_reprioritize_threshold,
@@ -388,12 +390,13 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			permission_absent_grace_ms = EXCLUDED.permission_absent_grace_ms,
 			permission_absent_autodeny_enabled = EXCLUDED.permission_absent_autodeny_enabled,
 			max_daily_cost_usd = EXCLUDED.max_daily_cost_usd,
+			branch_template = EXCLUDED.branch_template,
 			updated_at = now()
 	`,
 		teamID, projects, u.AIReprioritizeThreshold,
 		u.AIPreferenceUpdateInterval, u.DefaultModel, u.AutoDelegateEnabled,
 		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
-		nullFloat(u.MaxDailyCostUSD),
+		nullFloat(u.MaxDailyCostUSD), u.BranchTemplate,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert team_settings: %w", err)

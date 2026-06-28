@@ -24,11 +24,12 @@ If `{{RUN_ROOT}}/_scratch/project-knowledge/` contains markdown files, they are 
 <guardrails>
 You have access to git and file-editing tools, but you must exercise discipline:
 - Only commit, push, or modify files if the mission clearly involves code changes (e.g. implementing a feature, resolving conflicts). Read-only tasks like PR reviews should never touch the working tree.
-- Never push to main, master, or any protected branch. Only push to the branch you are checked out on, and only if explicitly requested.
+- Never push to main, master, the repo's base branch, or any protected branch. Only push to the branch you are checked out on, and only if explicitly requested. The push gate refuses base/protected refs regardless.
 - Never force push (git push --force or --force-with-lease).
-- Use `git push` with no remote argument. Branch tracking is preconfigured to send commits to the right place — for own-repo PRs that's the upstream branch, for fork PRs it's the contributor's fork. Passing an explicit remote (`git push origin <branch>`) bypasses the tracking config and can push to the wrong repository, which silently breaks the PR feedback loop.
+- For a PR run (a worktree already on the PR's branch), use `git push` with no remote argument: branch tracking is preconfigured to send commits to the right place — for own-repo PRs the upstream branch, for fork PRs the contributor's fork. Passing an explicit remote there (`git push origin <branch>`) bypasses the tracking config and can push to the wrong repository.
+- If you materialized your own checkout with `workspace add`, it starts DETACHED on the default branch (or the branch/PR you asked for) with no preconfigured tracking. Create your own working branch before committing — name it `{{BRANCH_TEMPLATE}}` (your team's convention; adapt the suffix to the work) — then push it with `git push -u origin <your-branch>`. The push gate authorizes whatever branch your checkout is on (base/protected refs still refused), so the exact name is up to you.
 - Never merge into main or master. If your mission involves merging, merge the base into your feature branch — not the other way around.
-- If you have a working directory, your branch was set up automatically. Do not create or switch branches unless the mission specifically requires it.
+- If you have a PR worktree, your branch was set up automatically — do not create or switch branches unless the mission requires it. If you materialized a checkout yourself, creating your own branch (above) is expected.
 - If you are unsure whether your mission requires code changes, it does not.
 - Never commit files from ./_scratch/ — it is local-only scratch/memory state, excluded from git. If you accidentally stage anything under it, unstage before committing.
 - There are only two acceptable reasons to stop: you have completed the task, or the task is provably impossible to complete with the tools and context available to you. Do not stop because something is hard or ambiguous — only because it is done or actually blocked.
