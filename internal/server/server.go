@@ -978,7 +978,8 @@ func (s *Server) routes() {
 	// (TFAC-463) replaced the local pending_reviews path: GET serves the artifact
 	// + live pending-review comments, PATCH stages body/event, the comment routes
 	// edit/delete inline comments on the live pending review, approve submits it,
-	// and abandon flows through the task /requeue path (cleanupPendingApprovalRun).
+	// and dismiss resolves a single artifact (per-item). The task-level
+	// resolve-all (drag-to-Done / Return-to-queue) flows through teardownTaskArtifacts.
 	ah := &artifactsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghResolver: s.ghResolver}
 	s.api("GET /api/artifacts/{id}", ah.handleArtifactGet)
 	s.apiMutating("PATCH /api/artifacts/{id}", ah.handleArtifactUpdate)

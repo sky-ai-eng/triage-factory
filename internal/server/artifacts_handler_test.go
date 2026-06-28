@@ -326,6 +326,42 @@ func TestArtifactDismiss_TerminalBlueprintLastArtifactClosesTask(t *testing.T) {
 	}
 }
 
+// TestArtifactDismiss_AbortedBlueprintLeavesTaskOpen pins the clean-completion
+// gate: resolving the last artifact on a NON-completed terminal blueprint
+// (aborted / failed / cancelled) must leave the task open for human attention,
+// mirroring terminateBlueprint — a stray draft PR on an aborted blueprint doesn't
+// override the "needs a human" disposition.
+func TestArtifactDismiss_AbortedBlueprintLeavesTaskOpen(t *testing.T) {
+	for _, terminal := range []string{"aborted", "failed", "cancelled"} {
+		t.Run(terminal, func(t *testing.T) {
+			keyring.MockInit()
+			srv := newTestServer(t)
+			mux := newAppAPIMux()
+			mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "state": "closed"})
+			})
+			stub := httptest.NewServer(mux)
+			t.Cleanup(stub.Close)
+			seedApp(t, srv, stub, acmeInstall())
+
+			artID, _, taskID := seedDraftPRArtifactWithRun(t, srv, "tolab-"+terminal, "acme", "api", 42)
+			execSQL(t, srv.db, `UPDATE blueprint_runs SET status = ? WHERE task_id = ?`, terminal, taskID)
+
+			rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			var taskStatus string
+			if err := srv.db.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&taskStatus); err != nil {
+				t.Fatalf("read task: %v", err)
+			}
+			if taskStatus == "done" {
+				t.Errorf("task.status = done; a %s blueprint must leave the task open for a human", terminal)
+			}
+		})
+	}
+}
+
 // TestArtifactDismiss_LiveBlueprintLeavesTaskOpen is the counterpart: resolving
 // the last artifact while the blueprint is still LIVE (not terminal) leaves the
 // task open — the running blueprint keeps going and re-checks task closure when

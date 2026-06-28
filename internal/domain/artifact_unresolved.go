@@ -22,8 +22,9 @@ func HasUnresolvedArtifacts(arts []Artifact) bool {
 }
 
 // UnresolvedArtifactIDs returns the ids of every unresolved approvable artifact
-// in arts — every draft pull request plus every ready (finalized) pending review
-// — in slice order. Same predicates as HasUnresolvedArtifacts /
+// in arts — every draft pull request plus every ready (finalized) pending review.
+// Grouped by kind: all draft-PR ids first (in slice order), then all ready-review
+// ids (in slice order). Same predicates as HasUnresolvedArtifacts /
 // UnresolvedArtifactCounts, projected to ids for the run wire shape
 // (pending_artifact_ids): the set of artifacts a human can still approve or
 // dismiss. Always non-nil (empty slice when none) so the JSON field is [] rather
