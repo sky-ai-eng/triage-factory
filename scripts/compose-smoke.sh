@@ -160,10 +160,15 @@ pass "postgres-postinit + seaweedfs-postinit exited 0"
 # 2. The workspace bucket exists and is reachable WITH credentials. head-bucket
 #    exits 0 only if the bucket is present and the request authenticated. Run
 #    through the aws-cli sidecar on the compose network (seaweedfs publishes no
-#    host port); it inherits AWS_* from the service env.
-dc run --rm --no-deps --entrypoint aws seaweedfs-postinit \
-  --endpoint-url http://seaweedfs:8333 s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1 \
-  || fail "bucket '$BUCKET' missing or not reachable with credentials"
+#    host port); it inherits AWS_* from the service env. Capture output so a
+#    failure surfaces the real aws error (network vs auth vs missing bucket),
+#    not just the generic message — head-bucket prints nothing on success.
+if ! head_out=$(dc run --rm --no-deps --entrypoint aws seaweedfs-postinit \
+    --endpoint-url http://seaweedfs:8333 s3api head-bucket --bucket "$BUCKET" 2>&1); then
+  echo "--- head-bucket error ---" >&2
+  echo "$head_out" >&2
+  fail "bucket '$BUCKET' missing or not reachable with credentials"
+fi
 pass "bucket '$BUCKET' exists (authenticated head-bucket ok)"
 
 # 3. THE load-bearing assertion: an UNAUTHENTICATED request must be REJECTED.
