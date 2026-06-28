@@ -32,6 +32,9 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # go-licenses is fast; cap it so a hung `go install` / classify can't sit on
+    # GitHub's 6h default.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

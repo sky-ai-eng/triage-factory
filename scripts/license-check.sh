@@ -82,9 +82,10 @@ ignore_args=()
 for m in "${IGNORE[@]}"; do ignore_args+=(--ignore "$m"); done
 
 if [ "${1:-}" = "--report" ]; then
-  # Best-effort CSV for regenerating the inventory doc; ignored modules are
-  # documented separately, so a classify failure on those shouldn't abort.
-  "$GO_LICENSES" report ./... "${ignore_args[@]}" 2>/dev/null
+  # On-demand inventory: CSV to stdout, go-licenses warnings / classify notes to
+  # stderr so whoever runs this sees them (redirect stdout to capture just the
+  # CSV). Ignored modules (IGNORE above) are intentionally absent.
+  "$GO_LICENSES" report ./... "${ignore_args[@]}"
   exit 0
 fi
 

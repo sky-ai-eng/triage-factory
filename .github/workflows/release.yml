@@ -23,6 +23,9 @@ jobs:
   # on PRs + main.
   dependency-licenses:
     runs-on: ubuntu-latest
+    # Cap the gate so a hung install/check can't block the release for GitHub's
+    # 6h default.
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:

@@ -53,7 +53,7 @@ cleanup() {
     dc logs --no-color --tail 200 2>/dev/null || true
   fi
   dc down -v --remove-orphans >/dev/null 2>&1 || true
-  rm -f "$ENV_FILE"
+  rm -f "$ENV_FILE" "${unauth_out:-}"
 }
 trap cleanup EXIT
 
@@ -127,7 +127,8 @@ dc up -d --build
 # migrate-up succeeded and the server is serving. So waiting for it healthy is a
 # full boot+migrate gate.
 echo "Waiting for triagefactory to become healthy (timeout ${HEALTH_TIMEOUT}s)..."
-cid=$(dc ps -aq triagefactory)
+# head -1: a service can map to >1 container id in a degraded project; inspect one.
+cid=$(dc ps -aq triagefactory | head -1)
 [ -n "$cid" ] || fail "triagefactory container was not created"
 elapsed=0
 while :; do
@@ -149,7 +150,7 @@ echo "Asserting the deployment contract..."
 # 1. One-shot sidecars exited 0. `up` already gates dependents on this, but
 #    assert it explicitly so a regression names the offending sidecar.
 for svc in postgres-postinit seaweedfs-postinit; do
-  scid=$(dc ps -aq "$svc")
+  scid=$(dc ps -aq "$svc" | head -1)
   [ -n "$scid" ] || fail "$svc container was not created"
   ec=$(docker inspect -f '{{.State.ExitCode}}' "$scid")
   [ "$ec" = "0" ] || fail "$svc exited $ec (expected 0)"
@@ -189,8 +190,12 @@ fi
 
 # 4. /api/health → 200 from the host's published port (the binary booted and is
 #    serving). triagefactory publishes 3000:3000.
-code=$(curl -fsS -o /dev/null -w '%{http_code}' "$PUBLIC_URL/api/health" 2>/dev/null || echo 000)
-[ "$code" = "200" ] || fail "GET /api/health returned $code (expected 200)"
+# No -f: it makes curl exit non-zero on an HTTP error and (version-dependently)
+# garbles or suppresses the -w status code. Without it, curl exits 0 for any
+# response so %{http_code} is the real status; || true keeps the connection-
+# failure path graceful (curl prints 000 and exits non-zero there).
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$PUBLIC_URL/api/health" 2>/dev/null || true)
+[ "$code" = "200" ] || fail "GET /api/health returned ${code:-<none>} (expected 200)"
 pass "GET /api/health → 200"
 
 # 5. Migrations actually applied. A healthy container already implies this (the
