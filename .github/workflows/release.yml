@@ -16,7 +16,26 @@ permissions:
   contents: write
 
 jobs:
+  # Hard pre-release gate on third-party dependency licenses. A v* tag must not
+  # publish binaries unless the check passes — goreleaser `needs` this job below,
+  # so a copyleft/forbidden dep blocks the release rather than merely warning on
+  # it. Same scripts/license-check.sh the dependency-licenses.yml workflow runs
+  # on PRs + main.
+  dependency-licenses:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check third-party dependency licenses
+        run: ./scripts/license-check.sh
+
   goreleaser:
+    needs: dependency-licenses
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

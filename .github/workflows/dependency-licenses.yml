@@ -1,0 +1,44 @@
+name: dependency-licenses
+
+# Compliance gate for the licenses of our THIRD-PARTY dependencies (not our own
+# product license). Fails if any statically-linked Go dependency in the
+# distributed binary carries a copyleft / source-available license
+# (GPL/LGPL/AGPL, or an unclassifiable one like SSPL/BSL). See
+# scripts/license-check.sh — it's the single source of truth, also run as a hard
+# pre-release gate in release.yml.
+#
+# A new dependency can only enter via go.mod/go.sum, so PR runs are filtered to
+# those (plus the script/workflow); main runs unconditionally so every merge is
+# checked. The check stubs frontend/dist itself (package main's go:embed must
+# compile), so no frontend build is needed here.
+
+on:
+  pull_request:
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - 'scripts/license-check.sh'
+      - '.github/workflows/dependency-licenses.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-licenses-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check third-party dependency licenses
+        run: ./scripts/license-check.sh
