@@ -359,14 +359,24 @@ Still in progress (not configured here yet):
   does not re-fetch metadata. Rotating a connection's metadata is a deferred
   follow-up; for now, removing and re-registering a connection requires operator
   action against GoTrue's admin API.
-- **A first-time SSO user's login succeeds but they land in onboarding with no
-  membership.** JIT provisioning writes its `access_change_log` audit row in the
-  *same* admin-pool transaction as the membership grant — the audit log can't
-  diverge from the grant (a SOC2 authorization-change control, deliberately not
-  best-effort). So if that audit write fails, the whole transaction rolls back and
-  the membership is **not** granted, while the login itself still completes — the
-  user reads as zero-membership onboarding. Check the `triagefactory` logs for an
-  `audit jit member granted` error and the health of the `access_change_log` write
-  path (schema present, disk not full). This is by design: there is no break-glass
-  that grants membership while the audit write is down, so restoring it (not
-  bypassing it) is the fix.
+- **An SSO sign-in fails at the callback with a 500 and the user isn't logged
+  in.** JIT provisioning grants the membership and writes its `access_change_log`
+  audit row in **one** admin-pool transaction — the audit can't diverge from the
+  grant (a SOC2 authorization-change control, deliberately not best-effort). If
+  that transaction can't commit because the database is unhealthy (disk full, in
+  recovery/read-only, `access_change_log` schema drift), the grant rolls back and
+  the callback fails **closed**: a 500, no session, nothing half-provisioned.
+  Check the `triagefactory` logs for `jit: grant membership failed` /
+  `audit jit member granted` and the health of the database. The user simply
+  retries once it's restored (the grant is idempotent); there is no break-glass
+  that grants membership while the audit write is down — by design.
+- **An SSO user authenticates fine but lands in onboarding ("Start your
+  Factory"), not in their org.** Their login resolved no org to join, so the
+  session was minted with a NULL active org. The usual cause is the connection
+  being **disabled** — you ran the verify-before-enable test
+  ([step 2.6](#26-test-the-connection-before-enabling-it)) but never flipped it on
+  — or the `provider_id` → org binding being gone. The sign-in itself succeeds (no
+  error), which is why it's quiet. Enable the connection; the user's next login
+  JIT-provisions them. Enable it **before** pointing users at SSO: with org
+  creation on, a user who lands here could create a duplicate personal org from
+  that screen.

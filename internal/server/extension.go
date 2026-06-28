@@ -208,11 +208,13 @@ func (a serverExtensionAPI) PKCEChallenge(verifier string) string { return pkceC
 // access_change_log can't diverge from the grant. This audit contract is
 // deliberately NOT best-effort (cf. RecordAuthEvent, which logs-and-continues):
 // an audit-write failure rolls the whole tx back, so the membership is NOT
-// granted — the login still completes, so the user lands in onboarding rather
-// than seeing an error. A broken access_change_log write path therefore blocks
-// JIT provisioning by design; there is no break-glass that grants while auditing
-// is down (restoring it is a code change). Operator troubleshooting note lives in
-// docs/sso-entra.md. The net-new gate keeps JIT —
+// granted, and the error propagates up through OnLoginResolved BEFORE the session
+// is minted — the callback fails CLOSED (a 500, no session), so the user isn't
+// logged in rather than landing half-provisioned. They retry once the DB is
+// healthy, and the net-new gate makes that retry converge to exactly one grant +
+// one audit row. A broken access_change_log write path therefore blocks JIT
+// provisioning by design — there is no break-glass that grants while auditing is
+// down (restoring it is a code change). The net-new gate keeps JIT —
 // which fires on every SSO login — from logging "joined" each time. The actor is
 // the user themselves (a self-grant via the org's SSO domain binding), matching
 // invite-accept's "joined the org"; team_id is NULL (JIT grants org-only); the
