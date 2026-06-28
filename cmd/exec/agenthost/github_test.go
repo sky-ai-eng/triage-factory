@@ -520,6 +520,50 @@ func TestServer_GithubAddPendingReviewComment_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestServer_GithubUpdatePendingReviewComment_RoundTrip pins the comment-update
+// pending path: the GraphQL updatePullRequestReviewComment mutation runs under
+// the daemon-resolved token and crosses the wire without error.
+func TestServer_GithubUpdatePendingReviewComment_RoundTrip(t *testing.T) {
+	rec := &ghRecorder{}
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(r)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":{"updatePullRequestReviewComment":{"pullRequestReviewComment":{"id":"PRRC_1"}}}}`)
+	}))
+	defer gh.Close()
+
+	client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: gh.URL, token: "app-installation-token"}, ghInfo())
+
+	if err := client.GithubUpdatePendingReviewComment(context.Background(), "o", "r", "PRRC_1", "edited body"); err != nil {
+		t.Fatalf("GithubUpdatePendingReviewComment: %v", err)
+	}
+	if got := rec.readAuth(); got != "Bearer app-installation-token" {
+		t.Errorf("GitHub saw Authorization %q, want the host-resolved token", got)
+	}
+}
+
+// TestServer_GithubDeletePendingReviewComment_RoundTrip pins the comment-delete
+// pending path: the GraphQL deletePullRequestReviewComment mutation runs under
+// the daemon-resolved token.
+func TestServer_GithubDeletePendingReviewComment_RoundTrip(t *testing.T) {
+	rec := &ghRecorder{}
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(r)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":{"deletePullRequestReviewComment":{"pullRequestReviewComment":{"id":"PRRC_1"}}}}`)
+	}))
+	defer gh.Close()
+
+	client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: gh.URL, token: "app-installation-token"}, ghInfo())
+
+	if err := client.GithubDeletePendingReviewComment(context.Background(), "o", "r", "PRRC_1"); err != nil {
+		t.Fatalf("GithubDeletePendingReviewComment: %v", err)
+	}
+	if got := rec.readAuth(); got != "Bearer app-installation-token" {
+		t.Errorf("GitHub saw Authorization %q, want the host-resolved token", got)
+	}
+}
+
 // pendingReviewBackend is a fake GitHub serving the two calls
 // GithubCreatePendingReview makes — the GetPendingReview GraphQL read (routed by
 // the /graphql path) and the REST pending-review create — so the collision
@@ -533,6 +577,7 @@ type pendingReviewBackend struct {
 	existingReview string
 	createNodeID   string
 	createFired    bool
+	deleteFired    bool
 }
 
 func newPendingReviewBackend(t *testing.T, existingReview, createNodeID string) *pendingReviewBackend {
@@ -541,6 +586,14 @@ func newPendingReviewBackend(t *testing.T, existingReview, createNodeID string) 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasSuffix(r.URL.Path, "/graphql") {
+			// DeletePendingReview resolves the node id to a databaseId first; that
+			// query is distinguishable from the reviews read by its body, and must
+			// return a non-zero databaseId so the REST delete can fire.
+			body, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(body), "databaseId") {
+				_, _ = io.WriteString(w, `{"data":{"node":{"databaseId":4242}}}`)
+				return
+			}
 			b.mu.Lock()
 			existing := b.existingReview
 			b.mu.Unlock()
@@ -549,6 +602,14 @@ func newPendingReviewBackend(t *testing.T, existingReview, createNodeID string) 
 				return
 			}
 			_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"id":"`+existing+`","viewerDidAuthor":true,"comments":{"nodes":[]}}]}}}}}`)
+			return
+		}
+		// REST DELETE of the resolved pending review (start-review --fresh).
+		if r.Method == http.MethodDelete {
+			b.mu.Lock()
+			b.deleteFired = true
+			b.mu.Unlock()
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 		// REST pending-review create.
@@ -569,6 +630,12 @@ func (b *pendingReviewBackend) didCreate() bool {
 	return b.createFired
 }
 
+func (b *pendingReviewBackend) didDelete() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.deleteFired
+}
+
 // TestServer_GithubCreatePendingReview_CreatesWhenNone is the no-collision path:
 // GetPendingReview reports nothing, so the host creates a fresh pending review
 // and returns its node id over the RPC.
@@ -576,7 +643,7 @@ func TestServer_GithubCreatePendingReview_CreatesWhenNone(t *testing.T) {
 	b := newPendingReviewBackend(t, "", "PRR_fresh")
 	client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: b.url, token: "org-pat", identity: ghclient.IdentityApp}, ghInfo())
 
-	id, err := client.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha123", nil)
+	id, err := client.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha123", nil, false)
 	if err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
@@ -599,7 +666,7 @@ func TestGithub_CreatePendingReview_Collision(t *testing.T) {
 		b := newPendingReviewBackend(t, "PRR_existing", "PRR_should_not_create")
 		client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: b.url, token: "app-installation-token", identity: ghclient.IdentityApp}, ghInfo())
 
-		id, err := client.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil)
+		id, err := client.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil, false)
 		if err != nil {
 			t.Fatalf("GithubCreatePendingReview: %v", err)
 		}
@@ -616,7 +683,7 @@ func TestGithub_CreatePendingReview_Collision(t *testing.T) {
 		lc := NewLocal(emptyStores(), ghInfo())
 		lc.ghResolver = fakeGitHubResolver{baseURL: b.url, token: "org-pat", identity: ghclient.IdentityPAT}
 
-		_, err := lc.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil)
+		_, err := lc.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil, false)
 		if !errors.Is(err, ErrPendingReviewCollision) {
 			t.Fatalf("err = %v, want ErrPendingReviewCollision", err)
 		}
@@ -629,7 +696,7 @@ func TestGithub_CreatePendingReview_Collision(t *testing.T) {
 		b := newPendingReviewBackend(t, "PRR_existing", "PRR_should_not_create")
 		client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: b.url, token: "org-pat", identity: ghclient.IdentityPAT}, ghInfo())
 
-		_, err := client.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil)
+		_, err := client.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil, false)
 		if !errors.Is(err, ErrPendingReviewCollision) {
 			t.Fatalf("err = %v, want ErrPendingReviewCollision reconstructed over the wire", err)
 		}
@@ -647,12 +714,75 @@ func TestGithub_CreatePendingReview_Collision(t *testing.T) {
 		lc := NewLocal(emptyStores(), ghInfo())
 		lc.ghResolver = baseOnlyResolver{baseURL: b.url, token: "org-pat"}
 
-		_, err := lc.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil)
+		_, err := lc.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil, false)
 		if !errors.Is(err, ErrPendingReviewCollision) {
 			t.Fatalf("err = %v, want ErrPendingReviewCollision (unknown identity must not reuse)", err)
 		}
 		if b.didCreate() {
 			t.Error("unknown-identity collision must NOT create a pending review")
+		}
+	})
+}
+
+// TestGithub_CreatePendingReview_Fresh is the start-review --fresh reset: for the
+// bot's OWN (App/service-identity) pending review, fresh deletes-and-recreates it
+// instead of reusing the stale one. The anti-hijack guard is unchanged — a
+// real-user-PAT collision still refuses even with fresh set.
+func TestGithub_CreatePendingReview_Fresh(t *testing.T) {
+	t.Run("app identity deletes-and-recreates", func(t *testing.T) {
+		b := newPendingReviewBackend(t, "PRR_existing", "PRR_fresh")
+		lc := NewLocal(emptyStores(), ghInfo())
+		lc.ghResolver = fakeGitHubResolver{baseURL: b.url, token: "app-installation-token", identity: ghclient.IdentityApp}
+
+		id, err := lc.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil, true)
+		if err != nil {
+			t.Fatalf("GithubCreatePendingReview(fresh): %v", err)
+		}
+		if id != "PRR_fresh" {
+			t.Errorf("reviewID = %q, want the freshly created PRR_fresh", id)
+		}
+		if !b.didDelete() {
+			t.Error("fresh must DELETE the bot's stale pending review")
+		}
+		if !b.didCreate() {
+			t.Error("fresh must CREATE a new empty pending review after the delete")
+		}
+	})
+
+	t.Run("pat identity still collides with fresh", func(t *testing.T) {
+		b := newPendingReviewBackend(t, "PRR_existing", "PRR_should_not_create")
+		lc := NewLocal(emptyStores(), ghInfo())
+		lc.ghResolver = fakeGitHubResolver{baseURL: b.url, token: "org-pat", identity: ghclient.IdentityPAT}
+
+		_, err := lc.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil, true)
+		if !errors.Is(err, ErrPendingReviewCollision) {
+			t.Fatalf("err = %v, want ErrPendingReviewCollision (fresh never hijacks a human's review)", err)
+		}
+		if b.didDelete() {
+			t.Error("fresh must NOT delete a real-user-PAT's pending review")
+		}
+		if b.didCreate() {
+			t.Error("fresh must NOT create over a real-user-PAT collision")
+		}
+	})
+
+	t.Run("no existing review just creates", func(t *testing.T) {
+		b := newPendingReviewBackend(t, "", "PRR_fresh")
+		lc := NewLocal(emptyStores(), ghInfo())
+		lc.ghResolver = fakeGitHubResolver{baseURL: b.url, token: "app-installation-token", identity: ghclient.IdentityApp}
+
+		id, err := lc.GithubCreatePendingReview(context.Background(), "o", "r", 7, "sha", nil, true)
+		if err != nil {
+			t.Fatalf("GithubCreatePendingReview(fresh, none existing): %v", err)
+		}
+		if id != "PRR_fresh" {
+			t.Errorf("reviewID = %q, want PRR_fresh", id)
+		}
+		if b.didDelete() {
+			t.Error("fresh with no existing review must NOT issue a delete")
+		}
+		if !b.didCreate() {
+			t.Error("fresh with no existing review must still create one")
 		}
 	})
 }

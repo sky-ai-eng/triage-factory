@@ -114,8 +114,11 @@ func (a hostAPIClient) CreatePR(ctx context.Context, owner, repo, head, base, ti
 	return a.host.GithubCreatePR(ctx, owner, repo, head, base, title, body, draft)
 }
 
+// CreatePendingReview mirrors *github.Client's signature (no fresh flag — that is
+// a host-only reset concern), so it always forwards fresh=false. The
+// start-review --fresh path calls host.GithubCreatePendingReview directly.
 func (a hostAPIClient) CreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error) {
-	return a.host.GithubCreatePendingReview(ctx, owner, repo, number, commitSHA, comments)
+	return a.host.GithubCreatePendingReview(ctx, owner, repo, number, commitSHA, comments, false)
 }
 
 // AddPendingReviewComment carries no owner/repo (it keys off the review node

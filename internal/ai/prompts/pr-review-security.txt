@@ -92,7 +92,7 @@ If the change introduces no vulnerability, write `{"findings": [], "summary": "<
 4. Run the data-flow <method>. Read beyond the diff freely — the enclosing function, the sink's definition, the call sites — both to confirm a real vulnerability and to rule one out.
 5. Write the findings file per <handoff>.
 
-This task is read-only. Do not edit, stage, commit, or push anything, and do not call `start-review`, `add-review-comment`, or `submit-review` — posting the review is a later step's job.
+This task is read-only. Do not edit, stage, commit, or push anything, and do not call `start-review`, `add-review-comment`, or `finalize-review` — posting the review is a later step's job.
 </process>
 
 <verify>

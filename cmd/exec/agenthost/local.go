@@ -93,7 +93,7 @@ func (c *LocalClient) withWrite(
 
 // --- review draft finalization ---
 
-// FinalizeReviewDraft is the host side of `gh pr submit-review` under the
+// FinalizeReviewDraft is the host side of `gh pr finalize-review` under the
 // GitHub-native model: it does NOT submit to GitHub (approval does that). It
 // locates the run's pending review artifact, reads the live GitHub pending
 // review for the inline comments the agent added, stages the body + event, and
@@ -154,7 +154,7 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 
 	// A comment / request_changes review must carry something actionable: a body,
 	// inline comments, or both. An approve needs neither (the approval is the
-	// signal). Mirrors the old submit-review guard, now that the comments live on
+	// signal). Mirrors the old finalize-review guard, now that the comments live on
 	// GitHub rather than a local table.
 	if body == "" && event != "APPROVE" && len(liveComments) == 0 {
 		return fmt.Errorf("a %s review needs --body/--body-file or at least one inline comment", strings.ToLower(event))
@@ -934,7 +934,12 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 // one pending review per identity per PR, so the loser's create fails with
 // CreatePendingReview's mapped "one pending review" 422, never a duplicate (and
 // never a hijack). The window is benign: worst case is a rare, safe error.
-func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error) {
+//
+// fresh (start-review --fresh) flips the App/service-identity reuse branch to a
+// delete-and-recreate: the bot's own stale pending review is removed and a clean
+// one created in its place. The real-user-PAT collision branch is untouched —
+// fresh never licenses hijacking a human's in-progress review.
+func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment, fresh bool) (string, error) {
 	client, identity, err := c.githubClientAndIdentityForRepo(ctx, owner, repo)
 	if err != nil {
 		return "", err
@@ -945,7 +950,12 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 		return "", err
 	}
 	if existingID != "" {
-		if identity == ghclient.IdentityApp {
+		if identity != ghclient.IdentityApp {
+			// Real-user PAT (or an identity we couldn't determine): the existing
+			// review might be a human's live work. Never hijack it — even with fresh.
+			return "", ErrPendingReviewCollision
+		}
+		if !fresh {
 			// The bot's own review from a prior run — reuse it, and (re)record the
 			// artifact so it attributes to this run, the one now working the review.
 			// No external write happened (the review already existed), so record NO
@@ -953,9 +963,12 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 			c.recordGithubReview(ctx, client, owner, repo, number, existingID, "")
 			return existingID, nil
 		}
-		// Real-user PAT (or an identity we couldn't determine): the existing
-		// review might be a human's live work. Never hijack it.
-		return "", ErrPendingReviewCollision
+		// fresh: delete the bot's own stale pending review so the create below
+		// yields an empty clean slate (old inline comments gone). Only reached for
+		// the App/service identity — a human's review never gets here.
+		if err := client.DeletePendingReview(ctx, owner, repo, number, existingID); err != nil {
+			return "", fmt.Errorf("reset pending review: %w", err)
+		}
 	}
 
 	reviewID, err := client.CreatePendingReview(ctx, owner, repo, number, commitSHA, comments)
@@ -1026,6 +1039,31 @@ func (c *LocalClient) GithubGetPendingReview(ctx context.Context, owner, repo st
 		return "", nil, err
 	}
 	return client.GetPendingReview(ctx, owner, repo, number)
+}
+
+// GithubUpdatePendingReviewComment edits one pending-review inline comment by its
+// GraphQL node id (PRRC_…). owner/repo resolve the per-repo credential host-side;
+// the GraphQL mutation keys solely off the comment node id. Like
+// GithubAddPendingReviewComment, the comment rides its review artifact rather than
+// a standalone comment artifact, and the review is unsubmitted (private), so there
+// is nothing to record here — the edit is a staged change, captured at approval.
+func (c *LocalClient) GithubUpdatePendingReviewComment(ctx context.Context, owner, repo, commentID, body string) error {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return err
+	}
+	return client.UpdatePendingReviewComment(ctx, commentID, body)
+}
+
+// GithubDeletePendingReviewComment removes one pending-review inline comment by its
+// GraphQL node id (PRRC_…). Same credential resolution and no-recording rationale
+// as GithubUpdatePendingReviewComment.
+func (c *LocalClient) GithubDeletePendingReviewComment(ctx context.Context, owner, repo, commentID string) error {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return err
+	}
+	return client.DeletePendingReviewComment(ctx, commentID)
 }
 
 func (c *LocalClient) GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {

@@ -51,7 +51,7 @@ func TestLocalClient_GithubCreatePendingReview_RecordsArtifact(t *testing.T) {
 			t.Cleanup(srv.Close)
 			stores, info, client := newGithubRecordingClient(t, srv.URL, eventTriggered)
 
-			reviewID, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "sha", nil)
+			reviewID, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "sha", nil, false)
 			if err != nil {
 				t.Fatalf("GithubCreatePendingReview: %v", err)
 			}
@@ -75,7 +75,7 @@ func TestLocalClient_GithubCreatePendingReview_RecordsArtifact(t *testing.T) {
 			if d.NodeID != "PR_node7" || d.Number != 7 {
 				t.Errorf("details coords mismatch: %+v", d)
 			}
-			// Fresh review: no ready sentinel until submit-review.
+			// Fresh review: no ready sentinel until finalize-review.
 			if d.ReviewEvent != "" {
 				t.Errorf("fresh review must have no ready sentinel: %+v", d)
 			}
@@ -83,7 +83,7 @@ func TestLocalClient_GithubCreatePendingReview_RecordsArtifact(t *testing.T) {
 	}
 }
 
-// TestLocalClient_FinalizeReviewDraft pins submit-review's host behavior: no
+// TestLocalClient_FinalizeReviewDraft pins finalize-review's host behavior: no
 // GitHub submit, the agent's draft (body + event + live comments) snapshotted into
 // the artifact, the ready sentinel set, and the TFAC-358 anti-double-submit guard.
 func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
@@ -128,7 +128,7 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 	// Anti-double-submit (TFAC-358): a second finalize hard-errors.
 	err := client.FinalizeReviewDraft(context.Background(), "PRR_1", "COMMENT", "## again")
 	if !errors.Is(err, ErrReviewAlreadyFinalized) {
-		t.Errorf("second submit-review = %v, want ErrReviewAlreadyFinalized", err)
+		t.Errorf("second finalize-review = %v, want ErrReviewAlreadyFinalized", err)
 	}
 }
 

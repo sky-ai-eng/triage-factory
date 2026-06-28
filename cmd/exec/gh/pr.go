@@ -94,8 +94,8 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 		prStartReview(ctx, api, host, flags)
 	case "add-review-comment":
 		prAddReviewComment(ctx, host, flags)
-	case "submit-review":
-		prSubmitReview(ctx, host, flags)
+	case "finalize-review":
+		prFinalizeReview(ctx, host, flags)
 	case "add-comment":
 		prAddComment(ctx, api, flags)
 	case "comment-reply":
@@ -103,9 +103,9 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 	case "comment-react":
 		prCommentReact(ctx, api, flags)
 	case "comment-update":
-		prCommentUpdate(ctx, api, flags)
+		prCommentUpdate(ctx, api, host, flags)
 	case "comment-delete":
-		prCommentDelete(ctx, api, flags)
+		prCommentDelete(ctx, api, host, flags)
 	default:
 		exitErr(fmt.Sprintf("unknown pr action: %s", action))
 	}
@@ -426,8 +426,15 @@ func prReviewDismiss(ctx context.Context, client ghAPI, args []string) {
 // the host choke point (LocalClient.GithubCreatePendingReview), which also runs
 // the identity-aware collision check. No local staging: the review now lives on
 // GitHub, edited 1:1.
+//
+// --fresh resets the bot's own pending review to a clean slate: if a prior run
+// left an App/service-identity pending review on this PR (which a plain
+// start-review would silently readopt, stale comments and all), --fresh
+// deletes-and-recreates it host-side. It NEVER overrides the anti-hijack guard —
+// a real-user-PAT collision still refuses, with or without the flag.
 func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
+	fresh := hasFlag(args, "--fresh")
 	_ = lookupRun(host) // validates identity is present; routing happens inside host
 
 	// Fetch the head SHA so the pending review pins to the reviewed commit.
@@ -435,9 +442,10 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 	exitOnErr(err)
 
 	// Create the pending review through the host (→ GithubCreatePendingReview):
-	// it folds in the collision check and records the artifact. Seed no inline
+	// it folds in the collision check (and, when fresh, the delete-and-recreate
+	// for the bot's own review) and records the artifact. Seed no inline
 	// comments — the agent adds them one at a time via add-review-comment.
-	reviewID, err := client.CreatePendingReview(ctx, owner, repo, number, pr.HeadSHA, nil)
+	reviewID, err := host.GithubCreatePendingReview(ctx, owner, repo, number, pr.HeadSHA, nil, fresh)
 	if err != nil {
 		if errors.Is(err, agenthost.ErrPendingReviewCollision) {
 			exitErr(fmt.Sprintf(
@@ -537,14 +545,20 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	})
 }
 
-// prSubmitReview hands the finished review off for human approval — it does NOT
+// prFinalizeReview hands the finished review off for human approval — it does NOT
 // submit to GitHub (approval does that). The host snapshots the agent's draft
 // (body + event + the live inline comments) into the run's review artifact and
 // sets the ready sentinel that parks the run. The TFAC-358 anti-double-submit
 // guard fires host-side: a second call gets a hard error.
-func prSubmitReview(ctx context.Context, host agenthost.Client, args []string) {
+//
+// The verb is "finalize-review", not "submit-review": it does not submit to
+// GitHub, so "submit" misleads a GitHub-literate agent (it implies
+// submitPullRequestReview). "finalize" matches the internal vocabulary
+// (FinalizeReviewDraft, the ready sentinel) and the drafted_awaiting_approval
+// status this prints.
+func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr submit-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)")
+		exitErr("usage: gh pr finalize-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)")
 	}
 	reviewID := args[0]
 	event := flagVal(args, "--event")
@@ -594,7 +608,7 @@ func prSubmitReview(ctx context.Context, host agenthost.Client, args []string) {
 	err := host.FinalizeReviewDraft(ctx, reviewID, ghEvent, body)
 	if errors.Is(err, agenthost.ErrReviewAlreadyFinalized) {
 		exitErr(fmt.Sprintf(
-			"review %s has already been finalized for human approval. Do not call submit-review again — your work on this review is complete. Finish the run by writing %s and returning your completion JSON.",
+			"review %s has already been finalized for human approval. Do not call finalize-review again — your work on this review is complete. Finish the run by writing %s and returning your completion JSON.",
 			reviewID, agentMemoryFile(),
 		))
 	}
@@ -608,7 +622,7 @@ func prSubmitReview(ctx context.Context, host agenthost.Client, args []string) {
 		"status":    "drafted_awaiting_approval",
 		"review_id": reviewID,
 		"event":     ghEvent,
-		"next_step": "Review is drafted and awaiting human approval. Do not call submit-review again. Finish the run by writing " + agentMemoryFile() + " and returning your completion JSON.",
+		"next_step": "Review is drafted and awaiting human approval. Do not call finalize-review again. Finish the run by writing " + agentMemoryFile() + " and returning your completion JSON.",
 	})
 }
 
@@ -778,30 +792,66 @@ func prCommentReact(ctx context.Context, client ghAPI, args []string) {
 	printJSON(map[string]any{"ok": true})
 }
 
-// prCommentUpdate edits a real GitHub comment by its numeric id (an issue comment
-// or a submitted review comment). Pending-review comments are edited human-side
-// through the overlay (server-direct), never here — the agent flow is add-only.
-func prCommentUpdate(ctx context.Context, client ghAPI, args []string) {
+// prCommentUpdate edits a GitHub comment, polymorphic on the id space the agent
+// passes back from whichever add verb produced it:
+//
+//   - a numeric id is a REST comment (a top-level issue comment from add-comment,
+//     or a submitted-review diff comment) → UpdateComment, unchanged.
+//   - a non-numeric PRRC_… GraphQL node id is a *pending*-review comment (from
+//     add-review-comment) → UpdatePendingReviewComment via the host bridge, with
+//     the severity badge re-baked so the chip survives the edit.
+//
+// REST ids are all-digits and node ids never are, so a successful int parse is
+// the discriminator. One verb serves both adds.
+func prCommentUpdate(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr comment-update <comment_id> --body <text>")
+		exitErr("usage: gh pr comment-update <comment_id> --body <text> [--severity <blocker|major|minor|clean>]")
 	}
 	owner, repo := ownerRepo(args)
-	id := mustInt(args[0], "comment_id")
 	body := flagVal(args, "--body")
 	if body == "" {
 		exitErr("--body is required")
 	}
-	exitOnErr(client.UpdateComment(ctx, owner, repo, id, body))
-	printJSON(map[string]any{"ok": true})
+
+	// Numeric → REST path (unchanged). --severity is meaningless for a REST
+	// issue/submitted-review comment (no chip), so it's ignored there.
+	if id, err := strconv.Atoi(args[0]); err == nil {
+		exitOnErr(client.UpdateComment(ctx, owner, repo, id, body))
+		printJSON(map[string]any{"ok": true})
+		return
+	}
+
+	// PRRC_… node id → pending-review comment via the host bridge. Re-bake the
+	// severity badge (mirroring add-review-comment and the server's edit-time
+	// re-bake) so editing a pending comment doesn't silently drop its chip. An
+	// omitted --severity bakes no badge — same as add-review-comment.
+	severity, err := domain.NormalizeSeverity(flagVal(args, "--severity"))
+	if err != nil {
+		exitErr(err.Error())
+	}
+	_ = lookupRun(host)
+	badgedBody := domain.SeverityBadgeMarkdown(severity) + body
+	exitOnErr(host.GithubUpdatePendingReviewComment(ctx, owner, repo, args[0], badgedBody))
+	printJSON(map[string]any{"ok": true, "severity": severity})
 }
 
-func prCommentDelete(ctx context.Context, client ghAPI, args []string) {
+// prCommentDelete deletes a GitHub comment, polymorphic on the id space exactly
+// like prCommentUpdate: a numeric id deletes a REST comment (unchanged), a
+// PRRC_… node id deletes a *pending*-review comment via the host bridge.
+func prCommentDelete(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-delete <comment_id>")
 	}
 	owner, repo := ownerRepo(args)
-	id := mustInt(args[0], "comment_id")
-	exitOnErr(client.DeleteComment(ctx, owner, repo, id))
+
+	if id, err := strconv.Atoi(args[0]); err == nil {
+		exitOnErr(client.DeleteComment(ctx, owner, repo, id))
+		printJSON(map[string]any{"ok": true})
+		return
+	}
+
+	_ = lookupRun(host)
+	exitOnErr(host.GithubDeletePendingReviewComment(ctx, owner, repo, args[0]))
 	printJSON(map[string]any{"ok": true})
 }
 

@@ -431,9 +431,9 @@ func (c *IPCClient) GithubCreatePR(ctx context.Context, owner, repo, head, base,
 	return res.Number, res.HTMLURL, res.NodeID, nil
 }
 
-func (c *IPCClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error) {
+func (c *IPCClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment, fresh bool) (string, error) {
 	var res githubReviewIDResult
-	if err := c.call(ctx, methodGithubCreatePendingReview, githubCreatePendingReviewArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, CommitSHA: commitSHA, Comments: comments}, &res); err != nil {
+	if err := c.call(ctx, methodGithubCreatePendingReview, githubCreatePendingReviewArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, CommitSHA: commitSHA, Comments: comments, Fresh: fresh}, &res); err != nil {
 		return "", err
 	}
 	return res.ReviewID, nil
@@ -453,6 +453,14 @@ func (c *IPCClient) GithubGetPendingReview(ctx context.Context, owner, repo stri
 		return "", nil, err
 	}
 	return res.ReviewID, res.Comments, nil
+}
+
+func (c *IPCClient) GithubUpdatePendingReviewComment(ctx context.Context, owner, repo, commentID, body string) error {
+	return c.call(ctx, methodGithubUpdatePendingReviewComment, githubUpdatePendingReviewCommentArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, CommentID: commentID, Body: body}, nil)
+}
+
+func (c *IPCClient) GithubDeletePendingReviewComment(ctx context.Context, owner, repo, commentID string) error {
+	return c.call(ctx, methodGithubDeletePendingReviewComment, githubDeletePendingReviewCommentArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, CommentID: commentID}, nil)
 }
 
 func (c *IPCClient) GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {

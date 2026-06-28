@@ -186,7 +186,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		if errors.Is(err, ErrPendingReviewCollision) {
 			resp.ErrCode = errCodePendingReviewCollision
 		}
-		// Same for the submit-review double-call guard.
+		// Same for the finalize-review double-call guard.
 		if errors.Is(err, ErrReviewAlreadyFinalized) {
 			resp.ErrCode = errCodeReviewAlreadyFinalized
 		}
@@ -571,7 +571,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		reviewID, err := client.GithubCreatePendingReview(ctx, a.Owner, a.Repo, a.Number, a.CommitSHA, a.Comments)
+		reviewID, err := client.GithubCreatePendingReview(ctx, a.Owner, a.Repo, a.Number, a.CommitSHA, a.Comments, a.Fresh)
 		if err != nil {
 			return nil, err
 		}
@@ -598,6 +598,20 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 			return nil, err
 		}
 		return githubGetPendingReviewResult{ReviewID: reviewID, Comments: comments}, nil
+
+	case methodGithubUpdatePendingReviewComment:
+		var a githubUpdatePendingReviewCommentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.GithubUpdatePendingReviewComment(ctx, a.Owner, a.Repo, a.CommentID, a.Body)
+
+	case methodGithubDeletePendingReviewComment:
+		var a githubDeletePendingReviewCommentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.GithubDeletePendingReviewComment(ctx, a.Owner, a.Repo, a.CommentID)
 
 	case methodGithubAddComment:
 		var a githubAddCommentArgs

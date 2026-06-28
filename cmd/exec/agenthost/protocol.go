@@ -108,9 +108,9 @@ type response struct {
 const errCodePendingReviewCollision = "pending_review_collision"
 
 // errCodeReviewAlreadyFinalized is the same marker mechanism for
-// ErrReviewAlreadyFinalized — the submit-review double-call guard — so the
+// ErrReviewAlreadyFinalized — the finalize-review double-call guard — so the
 // sandbox client rebuilds the typed sentinel and exec emits the same "your work
-// is done, stop calling submit-review" message on both paths.
+// is done, stop calling finalize-review" message on both paths.
 const errCodeReviewAlreadyFinalized = "review_already_finalized"
 
 // writeFrame serializes msg as a length-prefixed JSON frame on w.
@@ -450,6 +450,7 @@ type githubCreatePendingReviewArgs struct {
 	Number    int                            `json:"number"`
 	CommitSHA string                         `json:"commit_sha"`
 	Comments  []ghclient.SubmitReviewComment `json:"comments"`
+	Fresh     bool                           `json:"fresh,omitempty"`
 }
 
 type githubReviewIDResult struct {
@@ -466,6 +467,17 @@ type githubAddPendingReviewCommentArgs struct {
 }
 
 type githubCommentIDStringResult struct {
+	CommentID string `json:"comment_id"`
+}
+
+type githubUpdatePendingReviewCommentArgs struct {
+	githubRepoRef
+	CommentID string `json:"comment_id"`
+	Body      string `json:"body"`
+}
+
+type githubDeletePendingReviewCommentArgs struct {
+	githubRepoRef
 	CommentID string `json:"comment_id"`
 }
 
@@ -590,7 +602,9 @@ const (
 	methodGithubAPIGet           = "GithubAPIGet"
 	methodGithubDownloadArtifact = "GithubDownloadArtifact"
 
-	methodGithubCreatePendingReview     = "GithubCreatePendingReview"
-	methodGithubAddPendingReviewComment = "GithubAddPendingReviewComment"
-	methodGithubGetPendingReview        = "GithubGetPendingReview"
+	methodGithubCreatePendingReview        = "GithubCreatePendingReview"
+	methodGithubAddPendingReviewComment    = "GithubAddPendingReviewComment"
+	methodGithubGetPendingReview           = "GithubGetPendingReview"
+	methodGithubUpdatePendingReviewComment = "GithubUpdatePendingReviewComment"
+	methodGithubDeletePendingReviewComment = "GithubDeletePendingReviewComment"
 )

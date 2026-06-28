@@ -27,7 +27,7 @@
 //
 // The interface intentionally mirrors the existing store-method surface
 // 1:1 rather than introducing higher-level operations. That keeps the
-// subcommand bodies (gh pr submit-review, workspace add, etc.)
+// subcommand bodies (gh pr finalize-review, workspace add, etc.)
 // byte-identical in shape to what they did before — the only change at
 // each call site is `stores.X.Foo(...)` → `client.Foo(...)`, with the
 // routing branch (synthetic-claims vs admin pool) collapsed into the
@@ -117,13 +117,13 @@ var ErrPendingReviewCollision = errors.New("agenthost: a pending review already 
 
 // ErrReviewAlreadyFinalized is returned by FinalizeReviewDraft when the run's
 // review artifact already carries a ready sentinel (details_json.review_event is
-// set) — i.e. the agent already called submit-review once. exec (TFAC-358) turns
-// it into the "do not call submit-review again, your work on this review is
+// set) — i.e. the agent already called finalize-review once. exec (TFAC-358) turns
+// it into the "do not call finalize-review again, your work on this review is
 // complete" message that stops agents looping on the approval hand-off. Like
 // ErrPendingReviewCollision it crosses the IPC boundary as a response-envelope
 // marker so the sandbox client reconstructs the same sentinel (errors.Is matches
 // on both the in-process and daemon paths).
-var ErrReviewAlreadyFinalized = errors.New("agenthost: this run's review has already been finalized for human approval; do not call submit-review again")
+var ErrReviewAlreadyFinalized = errors.New("agenthost: this run's review has already been finalized for human approval; do not call finalize-review again")
 
 // Client is the surface every cmd/exec/* subcommand consumes. Every
 // state-mutating operation that used to call stores.X.Y directly with
@@ -144,7 +144,7 @@ type Client interface {
 	// returns its cached value, the IPCClient does one round-trip.
 	LookupRun(ctx context.Context) (RunInfo, error)
 
-	// --- review draft finalization (gh pr submit-review) ---
+	// --- review draft finalization (gh pr finalize-review) ---
 	//
 	// FinalizeReviewDraft snapshots the agent's finished review into its run's
 	// `review` artifact: it locates the run's pending review artifact, reads the
@@ -268,9 +268,27 @@ type Client interface {
 	// from a prior run), returning its id; a real-user-PAT identity returns
 	// ErrPendingReviewCollision rather than risk hijacking a human's in-progress
 	// review. exec stays simple — it gets a review id or the typed error.
-	GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (reviewID string, err error)
+	//
+	// fresh (start-review --fresh) resets the bot's OWN pending review to a clean
+	// slate: when the existing review is the App/service-identity's, it is
+	// deleted-and-recreated (stale comments gone) instead of reused. It never
+	// loosens the anti-hijack guard — a real-user-PAT collision still returns
+	// ErrPendingReviewCollision, with or without the flag.
+	GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment, fresh bool) (reviewID string, err error)
 	GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int) (commentID string, err error)
 	GithubGetPendingReview(ctx context.Context, owner, repo string, number int) (reviewID string, comments []ghclient.PendingReviewComment, err error)
+
+	// GithubUpdatePendingReviewComment / GithubDeletePendingReviewComment mutate a
+	// single *pending*-review inline comment, addressed by its GraphQL node id
+	// (PRRC_…). These are the agent-facing half of the server-only
+	// Update/DeletePendingReviewComment client ops, exposed here so
+	// comment-update / comment-delete can serve a pending-review comment over the
+	// same bridge add-review-comment uses (REST review-comment endpoints can't
+	// touch a pending review's comments — they live in a separate id space and
+	// API). owner/repo resolve the per-repo credential host-side; the GraphQL
+	// mutation keys solely off the comment node id.
+	GithubUpdatePendingReviewComment(ctx context.Context, owner, repo, commentID, body string) error
+	GithubDeletePendingReviewComment(ctx context.Context, owner, repo, commentID string) error
 
 	// GithubAPIGet is the raw authenticated GET the actions verbs lean on
 	// (workflow-run + job listings have no typed ghclient method). Returns
