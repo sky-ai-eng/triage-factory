@@ -330,10 +330,12 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 
 // handleArtifactApprove promotes the draft PR to ready-for-review: it appends the
 // agentmeta footer to the body (UpdatePR), marks the PR ready (MarkPRReady),
-// flips the artifact to state=open, captures the human verdict into run_memory,
-// and runs the run-completion / task-close / blueprint-resume bookkeeping — the
-// same post-approval flow the old pending_prs submit handler ran, minus the
-// CreatePR (the PR already exists).
+// flips the artifact to state=open, and captures the human verdict into
+// run_memory. Approval is a decoupled sidecar — it does NOT flip run status or
+// resume/terminate a blueprint; the only lifecycle effect is the shared
+// terminal-on-last task-closure check (closeTaskIfTerminalAndResolved), which
+// closes the task iff this was the last unresolved artifact on a cleanly-completed
+// run.
 //
 // The content promoted is read LIVE from GitHub (never the cached snapshot), so a
 // stale or malformed snapshot can neither revert a direct GitHub edit nor write an
@@ -569,11 +571,12 @@ func artifactPRNumber(art *domain.Artifact) int {
 // ONLY lifecycle effect of a resolve: it never flips runs.status or
 // resumes/terminates a blueprint.
 //
-// Governing set: a blueprint step run is judged by its blueprint run's status
-// (completed = clean) and the unresolved-artifact set spanning ALL the blueprint's
-// step runs; a standalone run by its own status+outcome (completed & not abort)
-// and its own artifacts. A run-less artifact (no run linkage) is a no-op — there
-// is no task to close.
+// Governing signals: the run that produced the resolved artifact decides clean
+// completion — a blueprint step by its blueprint run's status (completed = clean),
+// a standalone run by its own status+outcome (completed & not abort). The
+// "anything still unresolved?" check is scoped to the whole TASK (all its runs),
+// matching teardownTaskArtifacts, so a stranded artifact from a prior attempt
+// blocks closure. A run-less artifact (no run linkage) is a no-op — no task to close.
 //
 // Detached + best-effort: the caller already mutated the GitHub object and flipped
 // the artifact, so a failure here must not unwind that. Fails CLOSED on the close
@@ -590,45 +593,52 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		unresolved    bool
 	)
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		// Step 1: derive the task + whether the run that produced the resolved
+		// artifact reached a CLEAN completion.
 		br, _, bpErr := tx.Blueprints.GetRunForRun(ctx, orgID, runID)
 		if bpErr != nil {
 			return fmt.Errorf("blueprint lookup: %w", bpErr)
 		}
 		if br != nil {
 			// Blueprint step: a clean finalization is status=completed (an abort/fail/
-			// cancel maps to a non-completed terminal and leaves the task open). The
-			// unresolved-artifact set spans the whole blueprint run.
+			// cancel maps to a non-completed terminal and leaves the task open).
 			taskID = br.TaskID
 			closeEligible = br.Status == domain.BlueprintRunStatusCompleted
-			stepRuns, e := tx.Blueprints.RunsForBlueprint(ctx, orgID, br.ID)
+		} else {
+			// Standalone run (origin <> 'blueprint' — reserved for future
+			// interactive/ad-hoc runs, which the schema allows a NULL blueprint_run_id;
+			// no such run exists today, every run is a blueprint step). A clean
+			// completion is status=completed with a non-abort outcome (processCompletion
+			// leaves an aborted run's task open).
+			run, e := tx.AgentRuns.Get(ctx, orgID, runID)
 			if e != nil {
-				return fmt.Errorf("runs for blueprint: %w", e)
+				return fmt.Errorf("get run: %w", e)
 			}
-			has, e := runsHaveUnresolvedArtifacts(ctx, tx, orgID, stepRuns)
-			if e != nil {
-				return e
+			if run == nil {
+				// Run vanished — nothing to close on.
+				return nil
 			}
-			unresolved = has
-			return nil
+			taskID = run.TaskID
+			closeEligible = run.Status == "completed" && domain.RunOutcome(run.Outcome) != domain.RunOutcomeAbort
 		}
-		// Standalone run: a clean completion is status=completed with a non-abort
-		// outcome (processCompletion leaves an aborted run's task open). Judge the
-		// run's own artifacts.
-		run, e := tx.AgentRuns.Get(ctx, orgID, runID)
+		if !closeEligible {
+			return nil // no need to scan artifacts if we can't close anyway
+		}
+		// Step 2: unresolved check scoped to the TASK (all its runs), matching
+		// teardownTaskArtifacts — not just the current blueprint's step runs. A
+		// stranded artifact from a prior attempt (e.g. a teardown that partially
+		// failed on a network blip) must block closure rather than be silently
+		// skipped, so we never close the task with an unresolved draft PR / pending
+		// review sitting on GitHub.
+		runs, e := tx.AgentRuns.ListForTask(ctx, orgID, taskID)
 		if e != nil {
-			return fmt.Errorf("get run: %w", e)
+			return fmt.Errorf("list runs for task: %w", e)
 		}
-		if run == nil {
-			// Run vanished — nothing to close on.
-			return nil
-		}
-		taskID = run.TaskID
-		closeEligible = run.Status == "completed" && domain.RunOutcome(run.Outcome) != domain.RunOutcomeAbort
-		arts, e := tx.Artifacts.ListByRun(ctx, orgID, runID)
+		has, e := runsHaveUnresolvedArtifacts(ctx, tx, orgID, runs)
 		if e != nil {
-			return fmt.Errorf("list artifacts: %w", e)
+			return e
 		}
-		unresolved = domain.HasUnresolvedArtifacts(arts)
+		unresolved = has
 		return nil
 	}); err != nil {
 		artifactsLog.Warn("terminal-on-last close check failed; leaving task open (fail closed)", "run", runID, "error", err)
@@ -638,6 +648,10 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		return
 	}
 
+	// Close in its own tx. Tasks.Close is idempotent (UPDATE ... WHERE status NOT IN
+	// ('done','dismissed')), so two concurrent resolves that both pass the gate
+	// above race harmlessly — the second close is a 0-row no-op (worst case a
+	// duplicate task_updated broadcast), not an error.
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		return tx.Tasks.Close(ctx, orgID, taskID, "run_completed", "")
 	}); err != nil {

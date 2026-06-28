@@ -93,10 +93,12 @@ func TestArtifactUpdate_GitHubFailure_Pessimistic(t *testing.T) {
 
 // TestArtifactApprove pins the promote-on-approval flow: the body gets the
 // agentmeta footer (UpdatePR), the draft is marked ready (MarkPRReady via
-// GraphQL), the artifact flips to open, the run completes, and the human verdict
-// lands in run_memory. Task closure rides the blueprint resume (spawner-driven),
-// covered by the delegate blueprint tests; here the run has no spawner so we
-// assert the deterministic server-side bookkeeping.
+// GraphQL), the artifact flips to open, and the human verdict lands in run_memory.
+// Approval is a decoupled sidecar: it must NOT touch run status. The fixture
+// pre-seeds the run as 'completed', and we assert it STAYS 'completed' (approve
+// didn't flip it). Task closure here is a no-op because the fixture blueprint_run
+// is still 'running' (not a clean completion); the terminal-on-last closure is
+// covered by the dedicated dismiss/closure tests.
 func TestArtifactApprove(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -359,6 +361,52 @@ func TestArtifactDismiss_AbortedBlueprintLeavesTaskOpen(t *testing.T) {
 				t.Errorf("task.status = done; a %s blueprint must leave the task open for a human", terminal)
 			}
 		})
+	}
+}
+
+// TestArtifactDismiss_StandaloneAbortLeavesTaskOpen pins the standalone-run gate
+// (the non-blueprint branch, reserved for future origin='interactive'/ad-hoc
+// runs the schema already anticipates): a run that completed with outcome=abort
+// must leave the task open even after its last artifact is resolved, mirroring
+// processCompletion's leave-open-on-abort contract. Seeds an origin='interactive'
+// run with a NULL blueprint_run_id (allowed by runs_origin_requires_parents only
+// for origin <> 'blueprint') so GetRunForRun routes to the standalone path.
+func TestArtifactDismiss_StandaloneAbortLeavesTaskOpen(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	mux := newAppAPIMux()
+	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "state": "closed"})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	execSQL(t, srv.db, `INSERT INTO entities (id, source, source_id, kind, state) VALUES ('e_sa', 'github', 'acme/api#42', 'pr', 'active')`)
+	execSQL(t, srv.db, `INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES ('ev_sa', 'e_sa', 'github:pr:ci_check_passed', '')`)
+	execSQL(t, srv.db, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_sa', 'P', 'b', ?, ?)`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
+	execSQL(t, srv.db, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status) VALUES ('t_sa', 'e_sa', 'github:pr:ci_check_passed', 'ev_sa', 'queued')`)
+	// origin='interactive' + NULL blueprint_run_id → standalone path; completed + outcome=abort.
+	execSQL(t, srv.db, `INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, origin, outcome) VALUES ('r_sa', 't_sa', 'p_sa', 'completed', 'manual', 'interactive', 'abort')`)
+	a := domain.NewPullRequestArtifact("acme/api", 42, "PR_node", "feature/x", "main", "https://example.test/acme/api/pull/42", "Proposed title", "Proposed body", true)
+	a.RunID = "r_sa"
+	a.OrgID = runmode.LocalDefaultOrgID
+	a.TeamID = runmode.LocalDefaultTeamID
+	stored, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
+	if err != nil {
+		t.Fatalf("seed draft PR artifact: %v", err)
+	}
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+stored.ID+"/dismiss", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var taskStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM tasks WHERE id = 't_sa'`).Scan(&taskStatus); err != nil {
+		t.Fatalf("read task: %v", err)
+	}
+	if taskStatus == "done" {
+		t.Errorf("task.status = done; a standalone run with outcome=abort must leave the task open")
 	}
 }
 
