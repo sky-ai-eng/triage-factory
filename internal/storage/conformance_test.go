@@ -14,7 +14,7 @@ import (
 // must satisfy: round-trip, overwrite, idempotent delete, exists, the
 // missing-key signal, and a large streamed blob. fs_test.go runs it
 // against fsStorage on a temp dir; object_test.go runs it against
-// objectStorage on a throwaway MinIO container. Anything backend-specific
+// objectStorage on a throwaway SeaweedFS container. Anything backend-specific
 // (filesystem traversal rejection, env parsing) lives in the per-backend
 // test files, not here.
 func runConformance(t *testing.T, store Storage) {
@@ -83,7 +83,12 @@ func runConformance(t *testing.T, store Storage) {
 	})
 
 	t.Run("large streamed blob", func(t *testing.T) {
-		const size = 8 << 20 // 8 MiB — well past any single read buffer
+		// 24 MiB is deliberately over the transfer manager's 16 MiB multipart
+		// threshold (8 MiB parts), so Put streams as a real multipart upload —
+		// CreateMultipartUpload / UploadPart×3 / CompleteMultipartUpload. That
+		// path (not a single PutObject) is the part an S3-compatible backend is
+		// most likely to get wrong, so the conformance suite must cross it.
+		const size = 24 << 20 // 24 MiB
 		key := "org-1/run-4/workspace.tar"
 		if err := store.Put(ctx, key, &patternReader{n: size}); err != nil {
 			t.Fatalf("Put large: %v", err)

@@ -28,7 +28,7 @@ Fill in:
 - `TF_SESSION_ENCRYPTION_KEY` — 32 random bytes; AES-GCM master key for the access/refresh tokens stored at rest in `public.sessions`. **Generate with `openssl rand -hex 32`.** Rotating this key invalidates every existing session (ciphertext can't be decrypted) — plan it as a forced re-auth event.
 - `TF_COOKIE_SECRET` — 32 random bytes; HMAC-SHA256 key for the short-lived OAuth state cookie (carries PKCE verifier + CSRF token). **Generate with `openssl rand -hex 32`.** Kept distinct from `TF_SESSION_ENCRYPTION_KEY` so the two rotate independently — rotating only this one invalidates in-flight OAuth handshakes (10-minute window), not active sessions.
 - `TF_SECRET_ENCRYPTION_KEY` — 32 random bytes; AES-GCM master key for org + per-user **integration secrets** (GitHub App PEM / client-secret / webhook-secret, PATs, Jira tokens) stored at rest in `public.org_secrets`. **Generate with `openssl rand -hex 32`.** TF encrypts these app-side and stores only opaque ciphertext, so they are **not** in Supabase Vault / pgsodium — a routine `docker compose down && up` (or any postgres container recreate) no longer loses them. Kept distinct from `TF_SESSION_ENCRYPTION_KEY` so the two rotate independently — a session-key rotation must not nuke integration secrets. Rotating *this* key invalidates every stored secret (the ciphertext can no longer be decrypted), so plan it as a "re-enter your integration credentials" event. The same variable also governs **local-mode headless installs** (a single-binary deploy on a box with no OS keychain) — there it encrypts `~/.triagefactory/secrets.enc` instead of `public.org_secrets`; see `docs/usage.md` § Secret storage.
-- `TF_BLOB_ACCESS_KEY` / `TF_BLOB_SECRET_KEY` — credentials for the durable-workspace object store. The compose stack feeds these to the bundled `minio` service's root user *and* to TF's S3 client — one identity, one input, so they can't drift. **Generate each with `openssl rand -hex 32`** (access key must be ≥3 chars, secret ≥8 — a 64-char hex clears both). The endpoint (`http://minio:9000`), bucket (`tf-workspaces`), and region (`us-east-1`) all default in `docker-compose.yml`; leave them unset for self-host. See [Durable workspace storage](#durable-workspace-storage-minio) below for the BYO / hosted-Supabase path.
+- `TF_BLOB_ACCESS_KEY` / `TF_BLOB_SECRET_KEY` — credentials for the durable-workspace object store. The compose stack templates these into the bundled `seaweedfs` service's S3 identity *and* feeds them to TF's S3 client — one identity, one input, so they can't drift. **Generate each with `openssl rand -hex 32`** (access key must be ≥3 chars, secret ≥8 — a 64-char hex clears both, and keeps them JSON-safe inside SeaweedFS's `s3.json`). The endpoint (`http://seaweedfs:8333`), bucket (`tf-workspaces`), and region (`us-east-1`) all default in `docker-compose.yml`; leave them unset for self-host. See [Durable workspace storage](#durable-workspace-storage-seaweedfs) below for the BYO / hosted-Supabase path.
 - `TF_ATLASSIAN_CLIENT_ID` / `TF_ATLASSIAN_CLIENT_SECRET` — *(optional)* the first-party Atlassian OAuth (3LO) app TF uses for one-click "Connect Jira" against Cloud orgs. Deployment config in the same class as the GoTrue signing material — they live here in `.env`, **not** the keychain/vault, because TF registers one first-party Atlassian app for the whole deployment. Leave unset to run without a hosted Atlassian app; each org can then supply its own from **Workspace Settings → Atlassian OAuth app** (a per-org override always wins over this default). Register the app in the [Atlassian developer console](https://developer.atlassian.com/console/myapps/) and set its callback (redirect) URL to `${TF_PUBLIC_URL}/api/orgs/{org}/jira/connect/callback`.
 - `TF_TRUSTED_PROXY_CIDR` / `TF_CAPTURE_CLIENT_IP` — *(recommended when behind a proxy)* govern how TF derives the client IP it records on sessions, on the SOC2 auth audit log, and keys the pre-auth rate limiter by. **If TF sits behind a load balancer or CDN, set `TF_TRUSTED_PROXY_CIDR`** — otherwise `X-Forwarded-For` is ignored and every request is attributed to the LB. See [Client IP & trusted proxies](#client-ip--trusted-proxies) below for the full rationale and per-topology guidance.
 
@@ -50,17 +50,16 @@ This generates a fresh RS256 keypair, formats it as GoTrue’s `GOTRUE_JWT_KEYS`
 docker compose up -d
 ```
 
-This brings up the full stack: Postgres, GoTrue, MinIO (the durable-workspace object store), and the `triagefactory` service running the TF binary in a container. The Postgres image is `supabase/postgres`, which pre-provisions the `auth` schema, the `supabase_auth_admin` role GoTrue connects as, the `authenticator` role TF's app pool uses, and the vault / pgsodium / pgvector extensions for per-org secret storage.
+This brings up the full stack: Postgres, GoTrue, SeaweedFS (the durable-workspace object store), and the `triagefactory` service running the TF binary in a container. The Postgres image is `supabase/postgres`, which pre-provisions the `auth` schema, the `supabase_auth_admin` role GoTrue connects as, the `authenticator` role TF's app pool uses, and the vault / pgsodium / pgvector extensions for per-org secret storage.
 
-On first boot, the `postgres-postinit` sidecar reconciles the `supabase_auth_admin` and `authenticator` role passwords, the `minio-postinit` sidecar creates the workspace bucket (idempotent — `mc mb --ignore-existing`), then the `triagefactory` container's entrypoint runs `triagefactory migrate up` against the admin DSN before starting the server.
+On first boot, the `postgres-postinit` sidecar reconciles the `supabase_auth_admin` and `authenticator` role passwords, the `seaweedfs-postinit` sidecar creates the workspace bucket (idempotent — `head-bucket || create-bucket` via aws-cli), then the `triagefactory` container's entrypoint runs `triagefactory migrate up` against the admin DSN before starting the server.
 
 Smoke-check the stack came up:
 
 ```sh
-docker compose ps                         # all services should be "running"/"healthy" (postgres-postinit and minio-postinit show "exited(0)")
+docker compose ps                         # all services should be "running"/"healthy" (postgres-postinit and seaweedfs-postinit show "exited(0)")
 curl -fsS http://localhost:3000/api/health   # 200 OK
 curl -s http://localhost:9999/.well-known/jwks.json | jq .   # JWKS with one public RSA key
-curl -fsS http://localhost:9000/minio/health/live   # MinIO S3 API is live
 ```
 
 ## 5. Verify the GitHub OAuth flow
@@ -140,26 +139,25 @@ http-request set-header X-Forwarded-For %[src]
 
 The right-to-left walk is sound even without the strip (a pre-seeded value sits to the left of the address your first trusted proxy appends, so it's never reached) — but stripping at the edge is defense-in-depth and keeps the header honest for anything else that reads it. This mirrors the outbound `X-Forwarded-For` stripping TF already does in its git/LLM proxies.
 
-## Durable workspace storage (MinIO)
+## Durable workspace storage (SeaweedFS)
 
 A blueprint's workspace — the git worktree plus the scratch space its steps hand off through — must survive the executor that created it (an open run can outlast the process; an executor can scale down mid-run). The TF binary snapshots that workspace to an **S3-compatible object store** and rehydrates it on resume; the host worktree is only a warm cache.
 
-Self-host runs **MinIO** for this: one self-contained S3 container, no Postgres or JWT coupling. The workspace snapshots are opaque server-internal tarballs — they need a dumb bucket, not a storage API's RLS / resumable-upload / CDN layer. The `minio` service in `docker-compose.yml` provides exactly that, and a one-shot `minio-postinit` sidecar creates the bucket on every `up` (`mc mb --ignore-existing` — idempotent).
+Self-host runs **SeaweedFS** for this: one self-contained S3 container (Apache-2.0, Go), no Postgres or JWT coupling. The workspace snapshots are opaque server-internal tarballs — they need a dumb bucket, not a storage API's RLS / resumable-upload / CDN layer. The `seaweedfs` service in `docker-compose.yml` runs `weed server -s3` (the all-in-one master+volume+filer+S3 process), and a one-shot `seaweedfs-postinit` sidecar creates the bucket on every `up` (`head-bucket || create-bucket` via aws-cli — idempotent).
 
-The TF binary talks to it through the `TF_BLOB_*` env (read only in multi mode; local mode writes blobs to `~/.triagefactory/blobs` and runs none of this). The compose stack derives MinIO's root user/password from the single `TF_BLOB_ACCESS_KEY` / `TF_BLOB_SECRET_KEY` pair you set in `.env`, so server, bucket sidecar, and client all share one credential — there's no second `MINIO_ROOT_*` input to drift.
+The TF binary talks to it through the `TF_BLOB_*` env (read only in multi mode; local mode writes blobs to `~/.triagefactory/blobs` and runs none of this). The compose stack templates a single-identity `s3.json` from the same `TF_BLOB_ACCESS_KEY` / `TF_BLOB_SECRET_KEY` pair you set in `.env`, so server, bucket sidecar, and client all share one credential — there's no second input to drift. Supplying that identity is also what takes SeaweedFS **out of its open-by-default "allow-all" mode**: the bundled store always requires the creds, never serving anonymously on the compose network. The S3 port (`8333`) is deliberately **not** published to the host — TF and the sidecar reach it only over the compose network.
 
-Smoke-test the round-trip against the composed MinIO (exercises the same bucket and creds TF's S3 client uses):
+Smoke-test the round-trip through the aws-cli sidecar (exercises the same bucket and creds TF's S3 client uses; the stack must already be up):
 
 ```sh
-# set -a; source .env; set +a   # load TF_BLOB_* into your shell first
-docker compose run --rm --no-deps minio-postinit '
-  mc alias set tf http://minio:9000 "$TF_BLOB_ACCESS_KEY" "$TF_BLOB_SECRET_KEY" &&
-  echo hello | mc pipe tf/"${TF_BLOB_BUCKET:-tf-workspaces}"/smoke.txt &&
-  mc cat tf/"${TF_BLOB_BUCKET:-tf-workspaces}"/smoke.txt &&        # -> hello
-  mc rm tf/"${TF_BLOB_BUCKET:-tf-workspaces}"/smoke.txt'
+docker compose run --rm --no-deps --entrypoint sh seaweedfs-postinit -c '
+  EP=http://seaweedfs:8333; B=${TF_BLOB_BUCKET:-tf-workspaces}
+  echo hello | aws --endpoint-url "$EP" s3 cp - "s3://$B/smoke.txt" &&
+  aws --endpoint-url "$EP" s3 cp "s3://$B/smoke.txt" - &&            # -> hello
+  aws --endpoint-url "$EP" s3 rm "s3://$B/smoke.txt"'
 ```
 
-The console (port `9001`, `http://localhost:9001`) is handy for eyeballing snapshot objects; log in with the same access key / secret.
+To eyeball stored snapshot objects there's no published browser console; list them through the same sidecar: `aws --endpoint-url http://seaweedfs:8333 s3 ls "s3://${TF_BLOB_BUCKET:-tf-workspaces}/"`.
 
 ### Hosted Supabase Storage, S3, or R2 (SaaS / BYO)
 
@@ -171,7 +169,7 @@ TF_BLOB_BUCKET=tf-workspaces
 TF_BLOB_REGION=us-east-1
 ```
 
-`TF_BLOB_ENDPOINT` is a full URL — its scheme selects TLS and any base path (Supabase Storage's `/storage/v1/s3`) is kept intact. The bundled `minio` service still starts in this configuration but goes unused; drop it via a compose override (and remove `minio-postinit` from `triagefactory`'s `depends_on` in that override) if you don't want it running. Pre-create the bucket on the hosted side (the `minio-postinit` sidecar only ensures the bucket on the bundled MinIO).
+`TF_BLOB_ENDPOINT` is a full URL — its scheme selects TLS and any base path (Supabase Storage's `/storage/v1/s3`) is kept intact. The bundled `seaweedfs` service still starts in this configuration but goes unused; drop it via a compose override (and remove `seaweedfs-postinit` from `triagefactory`'s `depends_on` in that override) if you don't want it running. Pre-create the bucket on the hosted side (the `seaweedfs-postinit` sidecar only ensures the bucket on the bundled SeaweedFS).
 
 ## Rotating the signing key
 

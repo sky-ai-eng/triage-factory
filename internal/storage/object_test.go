@@ -19,14 +19,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// minioImage pins the MinIO server the object-backend conformance test
+// seaweedImage pins the SeaweedFS server the object-backend conformance test
 // runs against. Pinned (not :latest) so a server-side behavior change
 // can't silently alter what the suite asserts — same rationale as
-// pgtest.Image.
-const minioImage = "minio/minio:RELEASE.2025-09-07T16-13-09Z"
+// pgtest.Image. Same tag the compose stack pins.
+const seaweedImage = "chrislusf/seaweedfs:4.36"
 
 func TestObjectStorage_Conformance(t *testing.T) {
-	endpoint, accessKey, secretKey := startMinIO(t)
+	endpoint, accessKey, secretKey := startSeaweedFS(t)
 	cfg := ObjectConfig{
 		Endpoint:  endpoint,
 		Bucket:    "tf-conformance",
@@ -82,27 +82,33 @@ func TestObjectStorage_PreservesBasePath(t *testing.T) {
 	}
 }
 
-// startMinIO boots a throwaway MinIO and returns its endpoint URL + root
-// credentials. Like pgtest, it skips cleanly when Docker is unavailable —
-// the SQLite/local suite stays green on machines with no daemon — but a
-// reachable-but-broken daemon fails loudly rather than skipping a real
-// regression into a green pass.
-func startMinIO(t *testing.T) (endpoint, accessKey, secretKey string) {
+// startSeaweedFS boots a throwaway SeaweedFS and returns its S3 endpoint URL
+// plus a credential pair. It runs `weed mini` — the all-in-one single-process
+// cluster (master+volume+filer+S3) built for fast startup — with no identity
+// config, so the S3 gateway is in allow-all mode and the returned keys are
+// accepted but unchecked (the conformance suite tests round-trip behavior, not
+// auth enforcement; the compose stack runs with an s3.json identity instead).
+// Like pgtest, it skips cleanly when Docker is unavailable — the SQLite/local
+// suite stays green on machines with no daemon — but a reachable-but-broken
+// daemon fails loudly rather than skipping a real regression into a green pass.
+func startSeaweedFS(t *testing.T) (endpoint, accessKey, secretKey string) {
 	t.Helper()
 	testcontainers.SkipIfProviderIsNotHealthy(t)
 
 	ctx := context.Background()
-	const user, pass = "minioadmin", "minioadmin"
+	// Any non-empty pair works: allow-all mode ignores the SigV4 signature, and
+	// newObjectStorage only requires that both halves are set.
+	const user, pass = "tfaccesskey", "tfsecretkey"
 	req := testcontainers.ContainerRequest{
-		Image:        minioImage,
-		ExposedPorts: []string{"9000/tcp"},
-		Env: map[string]string{
-			"MINIO_ROOT_USER":     user,
-			"MINIO_ROOT_PASSWORD": pass,
-		},
-		Cmd: []string{"server", "/data"},
-		WaitingFor: wait.ForHTTP("/minio/health/ready").
-			WithPort("9000/tcp").
+		Image:        seaweedImage,
+		ExposedPorts: []string{"8333/tcp"},
+		Cmd:          []string{"mini", "-dir=/data"},
+		// Gate on the S3 gateway itself answering on 8333 (the master/filer
+		// come up first): any non-5xx status means it's serving — ListBuckets
+		// returns 200 in allow-all mode.
+		WaitingFor: wait.ForHTTP("/").
+			WithPort("8333/tcp").
+			WithStatusCodeMatcher(func(status int) bool { return status >= 200 && status < 500 }).
 			WithStartupTimeout(2 * time.Minute),
 	}
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -110,17 +116,17 @@ func startMinIO(t *testing.T) (endpoint, accessKey, secretKey string) {
 		Started:          true,
 	})
 	if err != nil {
-		t.Fatalf("start minio (Docker reachable but bring-up failed — not a skip): %v", err)
+		t.Fatalf("start seaweedfs (Docker reachable but bring-up failed — not a skip): %v", err)
 	}
 	t.Cleanup(func() { _ = c.Terminate(ctx) })
 
 	host, err := c.Host(ctx)
 	if err != nil {
-		t.Fatalf("minio host: %v", err)
+		t.Fatalf("seaweedfs host: %v", err)
 	}
-	port, err := c.MappedPort(ctx, "9000/tcp")
+	port, err := c.MappedPort(ctx, "8333/tcp")
 	if err != nil {
-		t.Fatalf("minio port: %v", err)
+		t.Fatalf("seaweedfs port: %v", err)
 	}
 	return fmt.Sprintf("http://%s:%s", host, port.Port()), user, pass
 }
@@ -133,11 +139,11 @@ func TestValidateEndpoint(t *testing.T) {
 		{in: "https://ref.supabase.co/storage/v1/s3", wantErr: false}, // base path is allowed and preserved
 		{in: "http://localhost:9000", wantErr: false},
 		{in: "https://s3.amazonaws.com", wantErr: false},
-		{in: "minio:9000", wantErr: true},                   // scheme-less host-only form no longer accepted
-		{in: "ftp://nope", wantErr: true},                   // unsupported scheme
-		{in: "https://", wantErr: true},                     // no host
-		{in: "http://minio:9000?debug=true", wantErr: true}, // query string rejected
-		{in: "https://host/path#frag", wantErr: true},       // fragment rejected
+		{in: "seaweedfs:8333", wantErr: true},                   // scheme-less host-only form no longer accepted
+		{in: "ftp://nope", wantErr: true},                       // unsupported scheme
+		{in: "https://", wantErr: true},                         // no host
+		{in: "http://seaweedfs:8333?debug=true", wantErr: true}, // query string rejected
+		{in: "https://host/path#frag", wantErr: true},           // fragment rejected
 	}
 	for _, tc := range cases {
 		if err := validateEndpoint(tc.in); (err != nil) != tc.wantErr {
@@ -155,7 +161,7 @@ func TestObjectConfigFromEnv(t *testing.T) {
 	})
 
 	t.Run("requires bucket", func(t *testing.T) {
-		t.Setenv(envBlobEndpoint, "http://minio:9000")
+		t.Setenv(envBlobEndpoint, "http://seaweedfs:8333")
 		if _, err := ObjectConfigFromEnv(); err == nil {
 			t.Fatal("ObjectConfigFromEnv with no bucket = nil; want error")
 		}
@@ -178,7 +184,7 @@ func TestObjectConfigFromEnv(t *testing.T) {
 	})
 
 	t.Run("rejects scheme-less endpoint", func(t *testing.T) {
-		t.Setenv(envBlobEndpoint, "minio:9000")
+		t.Setenv(envBlobEndpoint, "seaweedfs:8333")
 		t.Setenv(envBlobBucket, "b")
 		if _, err := ObjectConfigFromEnv(); err == nil {
 			t.Fatal("ObjectConfigFromEnv with scheme-less endpoint = nil; want error")
@@ -197,7 +203,7 @@ func TestNew_MultiRequiresBlobConfig(t *testing.T) {
 
 func TestNew_MultiIsObject(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	t.Setenv(envBlobEndpoint, "http://minio:9000")
+	t.Setenv(envBlobEndpoint, "http://seaweedfs:8333")
 	t.Setenv(envBlobBucket, "blobs")
 	t.Setenv(envBlobAccessKey, "ak")
 	t.Setenv(envBlobSecretKey, "sk")
@@ -216,7 +222,7 @@ func TestNewObjectStorage_NoCredsUsesDefaultChain(t *testing.T) {
 	// lazily on first call, not at construction). HOME is pinned so the
 	// shared-config loader can't trip over an unset home in the sandbox.
 	t.Setenv("HOME", t.TempDir())
-	store, err := newObjectStorage(ObjectConfig{Endpoint: "http://minio:9000", Bucket: "b", Region: "us-east-1"})
+	store, err := newObjectStorage(ObjectConfig{Endpoint: "http://seaweedfs:8333", Bucket: "b", Region: "us-east-1"})
 	if err != nil {
 		t.Fatalf("newObjectStorage (default chain): %v", err)
 	}
@@ -229,7 +235,7 @@ func TestNewObjectStorage_PartialCredsRejected(t *testing.T) {
 	// Exactly one of access key / secret key set is a misconfiguration —
 	// signing with an empty half fails every request with an opaque 403, so
 	// it must be caught at construction, not deferred to the server.
-	base := ObjectConfig{Endpoint: "http://minio:9000", Bucket: "b", Region: "us-east-1"}
+	base := ObjectConfig{Endpoint: "http://seaweedfs:8333", Bucket: "b", Region: "us-east-1"}
 	for _, tc := range []struct {
 		name string
 		cfg  ObjectConfig

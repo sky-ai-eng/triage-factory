@@ -33,7 +33,7 @@ const (
 // reached over the network, so a blob written by one executor is readable
 // by the next to own the shard. The client is aws-sdk-go-v2 rather than a
 // host-only S3 client because its BaseEndpoint carries a full URL including
-// a base path — which is what lets one client target a bare MinIO/S3/R2
+// a base path — which is what lets one client target a bare SeaweedFS/S3/R2
 // endpoint AND Supabase Storage's path-prefixed S3 endpoint
 // (https://<ref>.supabase.co/storage/v1/s3). Signing happens after endpoint
 // resolution, so SigV4 covers the prefixed path the server verifies.
@@ -45,13 +45,13 @@ type objectStorage struct {
 
 // ObjectConfig is the S3 connection config for objectStorage, normally
 // built from the environment by ObjectConfigFromEnv. Tests construct it
-// directly to point at a throwaway MinIO container.
+// directly to point at a throwaway SeaweedFS container.
 type ObjectConfig struct {
 	Endpoint  string // full URL: scheme://host[:port][/base/path]
 	Bucket    string
 	AccessKey string
 	SecretKey string
-	Region    string // S3 wants one; MinIO ignores it. Defaults to us-east-1.
+	Region    string // S3 wants one; SeaweedFS ignores it. Defaults to us-east-1.
 }
 
 // ObjectConfigFromEnv reads the TF_BLOB_* environment into an ObjectConfig.
@@ -111,7 +111,7 @@ func validateEndpoint(s string) error {
 // static V4; with neither key set it falls through to the standard AWS
 // provider chain (AWS_* env, shared creds file, then EC2/ECS instance role)
 // rather than signing with empty credentials. UsePathStyle is required by
-// Supabase Storage and harmless for MinIO/S3.
+// Supabase Storage and harmless for SeaweedFS/S3.
 func newObjectStorage(cfg ObjectConfig) (*objectStorage, error) {
 	if cfg.Endpoint == "" {
 		return nil, fmt.Errorf("storage: object endpoint is empty")
@@ -121,7 +121,7 @@ func newObjectStorage(cfg ObjectConfig) (*objectStorage, error) {
 	}
 	region := cfg.Region
 	if region == "" {
-		// MinIO ignores the region; S3/Supabase want one. Defaulting it
+		// SeaweedFS ignores the region; S3/Supabase want one. Defaulting it
 		// also keeps the default-chain branch below from probing IMDS for a
 		// region at construction time.
 		region = "us-east-1"
