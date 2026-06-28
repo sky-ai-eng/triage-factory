@@ -661,20 +661,16 @@ func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskI
 			}
 
 			// Abandon each pending review by flipping its artifact to dismissed. No
-			// GitHub call: the review is staged TF-side (TFAC-494), so the flip is the
-			// whole teardown. The proposed snapshot is preserved for the audit ledger —
-			// abandonment retires the staged draft, not the record of what was drafted.
+			// GitHub call and no audit row: the review is staged TF-side (TFAC-494), so
+			// a dismiss is a purely local state change, not an org-credential write
+			// (external_actions records only writes). The flip is the whole teardown;
+			// the proposed snapshot is preserved on the row.
 			for j := range pendingReviews {
 				rv := pendingReviews[j]
 				dismissed := rv
 				dismissed.State = domain.ArtifactStateReviewDismissed
 				if _, err := tx.Artifacts.Upsert(ctx, orgID, dismissed); err != nil {
 					return fmt.Errorf("artifacts.Upsert(dismissed): %w", err)
-				}
-				// Audit the abandon (TFAC-483), atomic with the flip.
-				if err := tx.ExternalActions.Record(ctx, orgID,
-					githubApprovalAction(&rv, userID, domain.ActionReviewDismissed, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewDismissed)); err != nil {
-					return fmt.Errorf("external_actions.Record(dismissed): %w", err)
 				}
 			}
 			// Abandon each draft PR by flipping its artifact to closed (the GitHub

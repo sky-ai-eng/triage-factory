@@ -94,6 +94,31 @@ func (c *LocalClient) withWrite(
 
 // --- review draft finalization ---
 
+// runReviewArtifact locates the pending review draft this run's add/finalize op
+// is acting on. A run can hold several review drafts at once (run-scoped dedup,
+// one per PR — TFAC-494), so it resolves by the handle the agent passes (the
+// artifact id) rather than just the first pending review, which could be a
+// different PR's draft. An empty handle (defensive — exec always passes one)
+// falls back to the run's sole pending review. Returns an actionable error when
+// no matching pending review exists.
+func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*domain.Artifact, error) {
+	arts, err := c.listArtifactsByRun(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if reviewID != "" {
+		if art := domain.PendingReviewArtifactByID(arts, reviewID); art != nil {
+			return art, nil
+		}
+		return nil, fmt.Errorf("review %s is not a pending review for this run — run `gh pr start-review` first", reviewID)
+	}
+	art := domain.FirstPendingReviewArtifact(arts)
+	if art == nil {
+		return nil, fmt.Errorf("no pending review for this run — run `gh pr start-review` first")
+	}
+	return art, nil
+}
+
 // FinalizeReviewDraft is the host side of `gh pr submit-review`: it finalizes a
 // fully TF-side review draft for human approval and makes NO GitHub write (the
 // atomic create+submit happens at approval). It locates the run's review
@@ -107,16 +132,9 @@ func (c *LocalClient) withWrite(
 // than finalizing the wrong review. The TFAC-358 anti-double-submit guard fires
 // here: a ready sentinel that's already set returns ErrReviewAlreadyFinalized.
 func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) error {
-	arts, err := c.listArtifactsByRun(ctx)
+	art, err := c.runReviewArtifact(ctx, reviewID)
 	if err != nil {
 		return err
-	}
-	art := domain.FirstPendingReviewArtifact(arts)
-	if art == nil {
-		return fmt.Errorf("no pending review for this run — run `gh pr start-review` first")
-	}
-	if reviewID != "" && art.ID != reviewID {
-		return fmt.Errorf("review %s does not match this run's pending review %s", reviewID, art.ID)
 	}
 
 	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
@@ -908,16 +926,9 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 // badge baked in (the caller bakes it); line>0 with a non-nil startLine makes it
 // a multi-line range.
 func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int) (string, error) {
-	arts, err := c.listArtifactsByRun(ctx)
+	art, err := c.runReviewArtifact(ctx, reviewID)
 	if err != nil {
 		return "", err
-	}
-	art := domain.FirstPendingReviewArtifact(arts)
-	if art == nil {
-		return "", fmt.Errorf("no pending review for this run — run `gh pr start-review` first")
-	}
-	if reviewID != "" && art.ID != reviewID {
-		return "", fmt.Errorf("review %s does not match this run's pending review %s", reviewID, art.ID)
 	}
 	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
 	if err != nil {

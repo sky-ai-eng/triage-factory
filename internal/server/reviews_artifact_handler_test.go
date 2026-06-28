@@ -367,3 +367,18 @@ func TestReviewArtifactDismiss_NonPending_409(t *testing.T) {
 		t.Fatalf("dismiss of submitted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestReviewArtifactGet_MalformedDetails_500 pins that a corrupt details_json
+// surfaces as a 500, not a misleadingly empty review overlay the user might act on.
+func TestReviewArtifactGet_MalformedDetails_500(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rbad", "acme", "api", 7, "COMMENT")
+	// Corrupt the details_json out-of-band.
+	execSQL(t, srv.db, `UPDATE artifacts SET details_json = ? WHERE id = ?`, `{not valid json`, artID)
+	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("get with corrupt details = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+}

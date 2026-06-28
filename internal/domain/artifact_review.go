@@ -149,12 +149,26 @@ func ParseReviewArtifactDetails(detailsJSON string) (ReviewArtifactDetails, erro
 
 // FirstPendingReviewArtifact returns the first pending review artifact in arts
 // (Kind==review, State==pending), or nil. "Pending" means not yet submitted or
-// dismissed — the TF-side draft is still live. Used by the add/finalize host
-// path (which locates this run's draft) and the abandon path (which flips it
-// dismissed), and shared by FirstReadyReview.
+// dismissed — the TF-side draft is still live. Used by the abandon path (which
+// flips it dismissed) and shared by FirstReadyReview.
 func FirstPendingReviewArtifact(arts []Artifact) *Artifact {
 	for i := range arts {
 		if arts[i].Kind == ArtifactKindReview && arts[i].State == ArtifactStateReviewPending {
+			return &arts[i]
+		}
+	}
+	return nil
+}
+
+// PendingReviewArtifactByID returns the pending review artifact in arts whose id
+// matches handle (Kind==review, State==pending), or nil. A single run can hold
+// several review drafts at once — dedup is run-scoped per PR (TFAC-494), so a run
+// reviewing multiple PRs gets one draft row each — so add-review-comment /
+// submit-review must locate the specific draft the agent named by its handle, not
+// just the first pending review (which could be a different PR's draft).
+func PendingReviewArtifactByID(arts []Artifact, handle string) *Artifact {
+	for i := range arts {
+		if arts[i].ID == handle && arts[i].Kind == ArtifactKindReview && arts[i].State == ArtifactStateReviewPending {
 			return &arts[i]
 		}
 	}

@@ -50,7 +50,13 @@ func (ah *artifactsHandler) reviewGet(w http.ResponseWriter, r *http.Request, or
 		internalError(w, "artifacts", fmt.Errorf("malformed artifact target %q (artifact %s)", art.Target, art.ID))
 		return
 	}
-	details, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	// Surface a corrupt details_json as a 500 rather than serving a misleadingly
+	// empty review (no body, no comments) the user might approve or act on.
+	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	if err != nil {
+		internalError(w, "artifacts", fmt.Errorf("parse review artifact details (artifact %s): %w", art.ID, err))
+		return
+	}
 
 	out := reviewArtifactJSON{
 		ID:          art.ID,
@@ -245,31 +251,29 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 }
 
 // reviewDismiss resolves a pending review artifact by abandoning it: it flips the
-// artifact pending → dismissed, records the audit row, then runs the
-// terminal-on-last task-closure check. The per-item counterpart to reviewApprove;
-// like approve it never touches the run's lifecycle. No GitHub call — the review
-// is staged entirely TF-side (TFAC-494), so there is no pending review object to
-// delete; the flip is the whole resolution. An already-submitted /
-// already-dismissed review is terminal → 409. A pending review is dismissable
-// whether or not it reached the ready sentinel (a started-but-unfinalized review
-// is still abandonable).
+// artifact pending → dismissed, then runs the terminal-on-last task-closure check.
+// The per-item counterpart to reviewApprove; like approve it never touches the
+// run's lifecycle. No GitHub call and NO external-actions audit row — the review
+// is staged entirely TF-side (TFAC-494), so a dismiss is a purely local state
+// change, not an org-credential write (external_actions records only writes). The
+// flip is the whole resolution. An already-submitted / already-dismissed review
+// is terminal → 409. A pending review is dismissable whether or not it reached the
+// ready sentinel (a started-but-unfinalized review is still abandonable).
 func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Artifact) {
 	if art.State != domain.ArtifactStateReviewPending {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending (state: " + art.State + ")"})
 		return
 	}
 
-	// Flip pending → dismissed + audit, atomic and pessimistic — the flip is the
-	// resolution. The proposed snapshot is preserved for the audit ledger;
-	// abandonment retires the staged draft, not the record of what the agent wrote.
+	// Flip pending → dismissed, pessimistic — the flip is the resolution. The
+	// proposed snapshot is preserved on the row; abandonment retires the staged
+	// draft, not the record of what the agent wrote. No audit row: there is no
+	// org-credential write to record (the draft never reached GitHub).
 	dismissed := *art
 	dismissed.State = domain.ArtifactStateReviewDismissed
 	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if _, e := tx.Artifacts.Upsert(r.Context(), orgID, dismissed); e != nil {
-			return e
-		}
-		return tx.ExternalActions.Record(r.Context(), orgID,
-			githubApprovalAction(art, userID, domain.ActionReviewDismissed, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewDismissed))
+		_, e := tx.Artifacts.Upsert(r.Context(), orgID, dismissed)
+		return e
 	}); err != nil {
 		internalError(w, "artifacts", err)
 		return

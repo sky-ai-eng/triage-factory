@@ -170,3 +170,57 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 		t.Errorf("second submit-review = %v, want ErrReviewAlreadyFinalized", err)
 	}
 }
+
+// TestLocalClient_MultipleReviewDrafts_ResolveByHandle pins that when one run
+// holds several review drafts (run-scoped dedup, one per PR — TFAC-494),
+// add-review-comment and submit-review act on the draft named by the handle, not
+// just the first pending review. A naive "first pending review" lookup would
+// stage/finalize against the wrong PR's draft.
+func TestLocalClient_MultipleReviewDrafts_ResolveByHandle(t *testing.T) {
+	srv := reviewDiffServer(t)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	// Two drafts on different PRs in the same run.
+	h7, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "sha7", nil)
+	if err != nil {
+		t.Fatalf("create review 7: %v", err)
+	}
+	h8, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 8, "sha8", nil)
+	if err != nil {
+		t.Fatalf("create review 8: %v", err)
+	}
+	if h7 == h8 {
+		t.Fatalf("two drafts must get distinct handles, both = %q", h7)
+	}
+
+	// Stage a comment on the SECOND draft's handle; it must land on PR 8's draft.
+	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", h8, "a.go", "on 8", 3, nil); err != nil {
+		t.Fatalf("add comment to review 8: %v", err)
+	}
+	// Finalize the SECOND draft by its handle.
+	if err := client.FinalizeReviewDraft(context.Background(), h8, "COMMENT", "## review 8"); err != nil {
+		t.Fatalf("finalize review 8: %v", err)
+	}
+
+	arts := listRunArtifacts(t, stores, info.RunID)
+	byID := map[string]domain.ReviewArtifactDetails{}
+	for _, a := range arts {
+		d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
+		byID[a.ID] = d
+	}
+	// PR 8's draft got the comment + the ready sentinel.
+	d8 := byID[h8]
+	if len(d8.StagedComments) != 1 || d8.ReviewEvent != "COMMENT" || d8.ReviewBody != "## review 8" {
+		t.Errorf("review 8 draft: %+v, want one staged comment + finalized COMMENT", d8)
+	}
+	// PR 7's draft is untouched — no comment, no sentinel.
+	d7 := byID[h7]
+	if len(d7.StagedComments) != 0 || d7.ReviewEvent != "" {
+		t.Errorf("review 7 draft must be untouched, got %+v", d7)
+	}
+
+	// An unknown handle is rejected (not silently routed to the first draft).
+	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", "nope", "a.go", "x", 3, nil); err == nil {
+		t.Error("an unknown handle must be rejected")
+	}
+}
