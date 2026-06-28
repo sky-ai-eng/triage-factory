@@ -656,6 +656,13 @@ func (ag *agentHandler) handleAgentRuns(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, out)
 }
 
+// maxBatchTaskIDs caps how many task ids one batched run-list request
+// processes, bounding the DB work and response size a single call can trigger.
+// 500 matches the store's IN-list chunk size, so the common board (well under
+// it) is one chunk per read; a larger board is truncated (see the handler) and
+// logged rather than allowed to fan out unbounded.
+const maxBatchTaskIDs = 500
+
 // handleAgentRunsBatched serves GET /api/agent/runs?task_ids=a,b,c. The
 // response is { "runs": { <taskID>: []run }, "messages": { <runID>: []message } }:
 // runs grouped per task (newest-first, same per-run projection as the single
@@ -669,6 +676,18 @@ func (ag *agentHandler) handleAgentRunsBatched(w http.ResponseWriter, r *http.Re
 	if len(taskIDs) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "task_ids must contain at least one id"})
 		return
+	}
+	if len(taskIDs) > maxBatchTaskIDs {
+		// Bound the DB work / payload one request can trigger. The board sends
+		// its visible tasks in column order (active columns first, then done —
+		// which is 7-day- but not count-capped), so truncating the tail drops
+		// the oldest done cards' run enrichment (they just miss a run badge
+		// until a WS update), never the active work. Logged so an oversized
+		// board is observable. This is the request bound; the SQLite
+		// variable-limit safety is separate (the store reads chunk regardless).
+		serverLog.Warn("batched run-list task_ids exceeded cap; truncating",
+			"requested", len(taskIDs), "cap", maxBatchTaskIDs)
+		taskIDs = taskIDs[:maxBatchTaskIDs]
 	}
 	includeMessages := false
 	for _, inc := range splitCommaList(r.URL.Query().Get("include")) {

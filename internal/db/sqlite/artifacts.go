@@ -161,34 +161,43 @@ func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []s
 	if len(runIDs) == 0 {
 		return counts, nil
 	}
-	// Expand to a ?-placeholder IN list (SQLite has no array bind). A NULL
-	// run_id never matches IN, so detached artifacts are excluded for free.
-	placeholders := make([]string, len(runIDs))
-	args := make([]any, 0, len(runIDs)+1)
-	args = append(args, orgID)
-	for i, id := range runIDs {
-		placeholders[i] = "?"
-		args = append(args, id)
-	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT run_id, COUNT(*)
-		FROM artifacts
-		WHERE org_id = ? AND run_id IN (`+strings.Join(placeholders, ", ")+`)
-		GROUP BY run_id
-	`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var runID string
-		var n int
-		if err := rows.Scan(&runID, &n); err != nil {
+	// ?-placeholder IN list (SQLite has no array bind), chunked to stay inside
+	// SQLite's variable limit (chunkIDs) — the batched run-list path counts
+	// every run across many tasks, which can exceed the limit. A NULL run_id
+	// never matches IN, so detached artifacts are excluded for free.
+	for _, chunk := range chunkIDs(runIDs) {
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, orgID)
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		rows, err := s.q.QueryContext(ctx, `
+			SELECT run_id, COUNT(*)
+			FROM artifacts
+			WHERE org_id = ? AND run_id IN (`+strings.Join(placeholders, ", ")+`)
+			GROUP BY run_id
+		`, args...)
+		if err != nil {
 			return nil, err
 		}
-		counts[runID] = n
+		for rows.Next() {
+			var runID string
+			var n int
+			if err := rows.Scan(&runID, &n); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			counts[runID] = n
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	return counts, rows.Err()
+	return counts, nil
 }
 
 func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Artifact, error) {
@@ -198,25 +207,35 @@ func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []s
 	if len(runIDs) == 0 {
 		return nil, nil
 	}
-	// Expand to a ?-placeholder IN list (SQLite has no array bind). A NULL
-	// run_id never matches IN, so detached artifacts are excluded for free.
-	placeholders := make([]string, len(runIDs))
-	args := make([]any, 0, len(runIDs)+1)
-	args = append(args, orgID)
-	for i, id := range runIDs {
-		placeholders[i] = "?"
-		args = append(args, id)
+	// ?-placeholder IN list (SQLite has no array bind), chunked to stay inside
+	// SQLite's variable limit (chunkIDs). A NULL run_id never matches IN, so
+	// detached artifacts are excluded for free. Each run_id is in one chunk, so
+	// per-run grouping by the caller is unaffected by the chunk boundary.
+	var arts []domain.Artifact
+	for _, chunk := range chunkIDs(runIDs) {
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, orgID)
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		rows, err := s.q.QueryContext(ctx, `
+			SELECT `+artifactColumns+`
+			FROM artifacts
+			WHERE org_id = ? AND run_id IN (`+strings.Join(placeholders, ", ")+`)
+			ORDER BY created_at DESC, id DESC
+		`, args...)
+		if err != nil {
+			return nil, err
+		}
+		batch, err := scanArtifactRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		arts = append(arts, batch...)
 	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT `+artifactColumns+`
-		FROM artifacts
-		WHERE org_id = ? AND run_id IN (`+strings.Join(placeholders, ", ")+`)
-		ORDER BY created_at DESC, id DESC
-	`, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanArtifactRows(rows)
+	return arts, nil
 }
 
 func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {

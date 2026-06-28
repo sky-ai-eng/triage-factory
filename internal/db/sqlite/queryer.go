@@ -18,6 +18,33 @@ type queryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+// inListChunkSize bounds the number of `?` placeholders an IN-list query
+// binds in one statement. SQLite's SQLITE_LIMIT_VARIABLE_NUMBER is 999 on
+// older builds (32766 on modern ones); 500 stays comfortably inside both,
+// matching the chunking in entities.go / factory.go / tasks.go. Read methods
+// that take a caller-supplied id slice run their query once per chunk and
+// merge the results, so an unbounded id set degrades to extra round-trips
+// rather than a "too many SQL variables" error.
+const inListChunkSize = 500
+
+// chunkIDs splits ids into consecutive sub-slices of at most inListChunkSize.
+// Returns nil for an empty input (the caller's range loop then no-ops). The
+// sub-slices alias ids — callers only read them.
+func chunkIDs(ids []string) [][]string {
+	if len(ids) == 0 {
+		return nil
+	}
+	chunks := make([][]string, 0, (len(ids)+inListChunkSize-1)/inListChunkSize)
+	for start := 0; start < len(ids); start += inListChunkSize {
+		end := start + inListChunkSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunks = append(chunks, ids[start:end])
+	}
+	return chunks
+}
+
 // inTx runs fn against a queryer that's guaranteed to be a transaction:
 //   - if q is already a *sql.Tx (caller composed us inside Stores.Tx.WithTx),
 //     fn runs against that tx directly so the outer commit/rollback wins.

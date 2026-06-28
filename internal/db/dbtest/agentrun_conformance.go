@@ -746,7 +746,10 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		runA2 := seedAgentRunForTaskTest(t, store, orgID, taskA, "completed", seed)
 		runB1 := seedAgentRunForTaskTest(t, store, orgID, taskB, "running", seed)
 
-		runs, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB, uuid.New().String()})
+		// Mix in a valid-but-absent UUID and a non-UUID literal: both must be
+		// tolerated (no rows, no error). The non-UUID guards the Postgres path,
+		// where a uuid[] bind would otherwise 22P02 — filtered per uuid.go.
+		runs, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB, uuid.New().String(), "not-a-uuid"})
 		if err != nil {
 			t.Fatalf("ListForTasks: %v", err)
 		}
@@ -1080,7 +1083,9 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Fatalf("InsertMessage B: %v", err)
 		}
 
-		msgs, err := store.MessagesForRuns(ctx, orgID, []string{runA, runB})
+		// A non-UUID id must be tolerated (no rows, no error) — guards the
+		// Postgres uuid[] bind path, same as ListForTasks above.
+		msgs, err := store.MessagesForRuns(ctx, orgID, []string{runA, runB, "not-a-uuid"})
 		if err != nil {
 			t.Fatalf("MessagesForRuns: %v", err)
 		}

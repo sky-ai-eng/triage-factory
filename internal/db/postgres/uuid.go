@@ -30,3 +30,18 @@ func isValidUUID(s string) bool {
 	_, err := uuid.Parse(s)
 	return err == nil
 }
+
+// filterValidUUIDs returns the subset of ids that parse as UUIDs, preserving
+// order. Read methods that bind an id slice as a uuid[] (pgUUIDArray) call this
+// first so a caller-supplied non-UUID degrades to "no rows" instead of a 22P02
+// parse error surfacing as a 500 — the slice analogue of isValidUUID's
+// single-id short-circuit, same read-method convention as Get.
+func filterValidUUIDs(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if isValidUUID(id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}

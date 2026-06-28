@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -107,5 +109,48 @@ func TestHandleAgentRuns_MissingParams(t *testing.T) {
 	}
 	if rec := doJSON(t, s, http.MethodGet, "/api/agent/runs?task_ids=%20,%20", nil); rec.Code != http.StatusBadRequest {
 		t.Errorf("GET runs (empty task_ids) = %d, want 400", rec.Code)
+	}
+}
+
+// TestHandleAgentRuns_BatchedCap pins the task_ids cap: a request beyond
+// maxBatchTaskIDs is truncated to the first N (not rejected), so a real task at
+// the head still resolves while one placed past the cap is dropped.
+func TestHandleAgentRuns_BatchedCap(t *testing.T) {
+	s := newTestServer(t)
+	_ = seedSteerRun(t, s.db, "cap", "running") // run on task t_cap
+	const taskID = "t_cap"
+
+	pad := func(n int) []string {
+		ids := make([]string, n)
+		for i := range ids {
+			ids[i] = uuid.New().String()
+		}
+		return ids
+	}
+	runsFor := func(ids []string) map[string][]map[string]any {
+		rec := doJSON(t, s, http.MethodGet, "/api/agent/runs?task_ids="+strings.Join(ids, ","), nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET batched (cap) = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Runs map[string][]map[string]any `json:"runs"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp.Runs
+	}
+
+	// Real task at the head, then > cap padding → kept after truncation.
+	head := append([]string{taskID}, pad(maxBatchTaskIDs+50)...)
+	if got := runsFor(head); len(got[taskID]) != 1 {
+		t.Errorf("head within cap: task runs = %d, want 1", len(got[taskID]))
+	}
+
+	// Real task placed just past the cap (after maxBatchTaskIDs padding ids) →
+	// truncated out, so it's absent from the response.
+	tail := append(pad(maxBatchTaskIDs), taskID)
+	if got := runsFor(tail); len(got[taskID]) != 0 {
+		t.Errorf("tail beyond cap: task should be truncated out, got %d runs", len(got[taskID]))
 	}
 }

@@ -606,6 +606,11 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 }
 
 func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.AgentRun, error) {
+	// task_id is a uuid column: a non-UUID id (these are client-supplied on the
+	// batched run-list path) would fail Postgres parsing with 22P02 → 500
+	// before the row filter runs, so drop invalid ids up front and treat them
+	// as "no rows" — the read-method convention in uuid.go.
+	taskIDs = filterValidUUIDs(taskIDs)
 	if len(taskIDs) == 0 {
 		return nil, nil
 	}
@@ -948,6 +953,10 @@ func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]do
 }
 
 func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.AgentMessage, error) {
+	// run_id is a uuid column; drop any non-UUID id (22P02 → 500 guard, same
+	// read convention as ListForTasks). These ids are server-derived today, so
+	// this is defense in depth against a future caller passing raw input.
+	runIDs = filterValidUUIDs(runIDs)
 	if len(runIDs) == 0 {
 		return nil, nil
 	}
