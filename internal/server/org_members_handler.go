@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -33,6 +34,14 @@ type orgMembersHandler struct {
 	// org-scoped connections (TFAC-75) so their event stream stops at
 	// removal rather than lingering until the socket drops.
 	ws *websocket.Hub
+	// revokeUserOrgSessions revokes a removed member's auth sessions scoped
+	// to one org (TFAC-487) — deprovisioning hygiene alongside the WS-kick.
+	// It's a closure over the Server because s.authDeps.sessions is wired
+	// late (SetAuthDeps runs after routes()), so the store can't be captured
+	// at construction. Nil-safe: nil in local mode (handleOrgMemberRemove
+	// 404s first) and the closure nil-checks authDeps for the boot race.
+	// Returns the count of newly-revoked rows.
+	revokeUserOrgSessions func(ctx context.Context, userID, orgID string) (int64, error)
 }
 
 // orgMemberRow is one roster row. github_username / jira_account_id are null
@@ -221,6 +230,22 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 	membershipLog.Info("kicked ws connections on membership removal",
 		"user", targetID, "org", orgID,
 		"code", int(websocket.CloseMembershipChanged), "n", n)
+	// Deprovisioning hygiene (TFAC-487): revoke the removed member's auth
+	// sessions scoped to THIS org, best-effort, mirroring the WS-kick's org
+	// filter (their sessions active in other orgs are untouched). Per-request
+	// gates (RLS + role checks) already deny the org's data on the next
+	// request, so a revoke failure isn't a data hole — log and continue. The
+	// closure is nil in local mode, but we 404'd above before reaching here.
+	if h.revokeUserOrgSessions != nil {
+		revoked, err := h.revokeUserOrgSessions(r.Context(), targetID, orgID)
+		if err != nil {
+			membershipLog.Warn("revoke sessions on membership removal failed",
+				"user", targetID, "org", orgID, "error", err)
+		} else {
+			membershipLog.Info("revoked sessions on membership removal",
+				"user", targetID, "org", orgID, "n", revoked)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

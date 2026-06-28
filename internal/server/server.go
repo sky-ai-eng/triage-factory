@@ -750,7 +750,26 @@ func (s *Server) routes() {
 	// Multi-mode only (each handler 404s in local). GET is any-member;
 	// PATCH/DELETE gate org-admin (DELETE also allows a self-leave). The
 	// last-owner guard is a DB trigger surfaced as a 409.
-	omh := &orgMembersHandler{tx: s.tx, az: s.az, ws: s.ws}
+	// revokeUserOrgSessions is read lazily because authDeps lands after
+	// routes() runs (SetAuthDeps); the closure nil-checks it for the boot
+	// race and parses the string ids the handler carries into the UUIDs the
+	// store expects. See TFAC-487.
+	omh := &orgMembersHandler{tx: s.tx, az: s.az, ws: s.ws,
+		revokeUserOrgSessions: func(ctx context.Context, userID, orgID string) (int64, error) {
+			if s.authDeps == nil {
+				return 0, errors.New("auth not wired")
+			}
+			uid, err := uuid.Parse(userID)
+			if err != nil {
+				return 0, fmt.Errorf("parse user id: %w", err)
+			}
+			oid, err := uuid.Parse(orgID)
+			if err != nil {
+				return 0, fmt.Errorf("parse org id: %w", err)
+			}
+			return s.authDeps.sessions.RevokeForUserInOrgSystem(ctx, uid, oid)
+		},
+	}
 	s.api("GET /api/orgs/{org_id}/members", omh.handleOrgMembersList)
 	s.apiMutating("PATCH /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRoleChange)
 	s.apiMutating("DELETE /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRemove)

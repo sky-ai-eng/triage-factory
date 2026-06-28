@@ -2,16 +2,21 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 )
 
 // orgMembersRig is the multi-mode fixture for the org People roster handler:
@@ -21,6 +26,7 @@ import (
 type orgMembersRig struct {
 	h     *pgtest.Harness
 	omh   *orgMembersHandler
+	sess  *sessions.Store
 	orgID string
 	owner string
 	admin string
@@ -43,14 +49,66 @@ func newOrgMembersRig(t *testing.T) *orgMembersRig {
 	memb := pgtest.SeedUser(t, h, "member")
 	pgtest.AddOrgMember(t, h, memb, orgID, teamID, "member", "member")
 
+	// A real sessions store so the TFAC-487 deprovisioning revoke can be
+	// exercised end-to-end. The closure mirrors server.go's wiring: parse the
+	// string ids the handler carries and call the org-scoped revoke.
+	var encKey [32]byte
+	if _, err := rand.Read(encKey[:]); err != nil {
+		t.Fatalf("seed session key: %v", err)
+	}
+	sessStore := sessions.NewStore(h.AdminDB, sessions.Key(encKey))
+	omh := &orgMembersHandler{tx: s.tx, az: s.az,
+		revokeUserOrgSessions: func(ctx context.Context, userID, orgID string) (int64, error) {
+			uid, err := uuid.Parse(userID)
+			if err != nil {
+				return 0, err
+			}
+			oid, err := uuid.Parse(orgID)
+			if err != nil {
+				return 0, err
+			}
+			return sessStore.RevokeForUserInOrgSystem(ctx, uid, oid)
+		},
+	}
+
 	return &orgMembersRig{
 		h:     h,
-		omh:   &orgMembersHandler{tx: s.tx, az: s.az},
+		omh:   omh,
+		sess:  sessStore,
 		orgID: orgID,
 		owner: owner,
 		admin: admin,
 		memb:  memb,
 	}
+}
+
+// newSession creates an active session for userID scoped to the given org and
+// returns its id. orgID may be "" for a NULL active-org session.
+func (r *orgMembersRig) newSession(t *testing.T, userID, orgID string) uuid.UUID {
+	t.Helper()
+	active := uuid.NullUUID{}
+	if orgID != "" {
+		active = uuid.NullUUID{UUID: uuid.MustParse(orgID), Valid: true}
+	}
+	s, err := r.sess.CreateSystem(context.Background(), uuid.MustParse(userID),
+		"jwt", "ref", time.Now().Add(time.Hour), time.Now().Add(24*time.Hour),
+		"ua", "1.2.3.4", active)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	return s.ID
+}
+
+// sessionRevoked reports whether the session row's revoked_at is set.
+func (r *orgMembersRig) sessionRevoked(t *testing.T, sid uuid.UUID) bool {
+	t.Helper()
+	var revoked bool
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT revoked_at IS NOT NULL FROM public.sessions WHERE id = $1`, sid,
+	).Scan(&revoked); err != nil {
+		t.Fatalf("read revoked_at for %s: %v", sid, err)
+	}
+	return revoked
 }
 
 // req builds a request to the roster handler as callerID, with the org_id (and
@@ -294,6 +352,49 @@ func TestOrgMemberRemove_AdminRemovesMember(t *testing.T) {
 	}
 	if r.isMember(t, r.memb) {
 		t.Errorf("member still present after admin removal, want removed")
+	}
+}
+
+// TestOrgMemberRemove_RevokesOrgSession: removing a member revokes the
+// member's session whose active_org_id is this org (TFAC-487 deprovisioning
+// hygiene), but leaves a session of theirs active in ANOTHER org alone
+// (org-scoped revoke, mirroring the WS-kick's org filter).
+func TestOrgMemberRemove_RevokesOrgSession(t *testing.T) {
+	r := newOrgMembersRig(t)
+
+	// A second org (owned by the founder so the FK resolves) where the member
+	// also holds a session — that session must survive the removal.
+	otherOrg := pgtest.SeedOrg(t, r.h, "other-org", r.owner)
+	thisOrgSid := r.newSession(t, r.memb, r.orgID)
+	otherOrgSid := r.newSession(t, r.memb, otherOrg)
+
+	rec := httptest.NewRecorder()
+	r.omh.handleOrgMemberRemove(rec, r.req(http.MethodDelete, r.admin, r.memb, nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if !r.sessionRevoked(t, thisOrgSid) {
+		t.Errorf("member's session for this org not revoked after removal")
+	}
+	if r.sessionRevoked(t, otherOrgSid) {
+		t.Errorf("member's other-org session revoked — org-scoped revoke bled across orgs")
+	}
+}
+
+// TestOrgMemberRemove_SelfLeaveRevokesOwnSession: a self-leave revokes the
+// leaver's own session scoped to this org, same path as an admin removal.
+func TestOrgMemberRemove_SelfLeaveRevokesOwnSession(t *testing.T) {
+	r := newOrgMembersRig(t)
+
+	sid := r.newSession(t, r.memb, r.orgID)
+
+	rec := httptest.NewRecorder()
+	r.omh.handleOrgMemberRemove(rec, r.req(http.MethodDelete, r.memb, r.memb, nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (self-leave); body=%s", rec.Code, rec.Body.String())
+	}
+	if !r.sessionRevoked(t, sid) {
+		t.Errorf("leaver's own org session not revoked after self-leave")
 	}
 }
 

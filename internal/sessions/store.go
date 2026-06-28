@@ -325,6 +325,30 @@ func (s *Store) RevokeAllForUserSystem(ctx context.Context, userID uuid.UUID) (i
 	return n, nil
 }
 
+// RevokeForUserInOrgSystem flips revoked_at on every active session the
+// user holds whose active_org_id is the given org. Returns the count of
+// newly-revoked rows (already-revoked rows are not counted again).
+//
+// This is the deprovisioning-hygiene revoke for a membership removal
+// (TFAC-487): it is org-scoped on purpose — a session of the same user
+// active in a DIFFERENT org is left alone, mirroring the WS-kick's org
+// filter so a multi-org user isn't logged out of unrelated orgs by a
+// removal that didn't touch them. Soft-delete like RevokeSystem.
+func (s *Store) RevokeForUserInOrgSystem(ctx context.Context, userID, orgID uuid.UUID) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE public.sessions
+		   SET revoked_at = now()
+		 WHERE user_id = $1
+		   AND active_org_id = $2
+		   AND revoked_at IS NULL
+	`, userID, orgID)
+	if err != nil {
+		return 0, fmt.Errorf("revoke sessions for user %s in org %s: %w", userID, orgID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // TouchLastSeen bumps last_seen_at to now(). Best-effort — errors are
 // swallowed by the caller (middleware fires this in a goroutine).
 func (s *Store) TouchLastSeenSystem(ctx context.Context, sid uuid.UUID) error {
