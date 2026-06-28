@@ -431,6 +431,9 @@ func TestValidateGitRef(t *testing.T) {
 		{"foo\nbar", false},
 		{"$(whoami)", false},
 		{"foo:bar", false},
+		{"refs/heads/main", false}, // would double up into +refs/heads/refs/heads/main:...
+		{"refs/tags/v1", false},
+		{"feature/", false},               // trailing slash → git refuses the refname
 		{strings.Repeat("a", 200), false}, // length cap
 	}
 	for _, c := range cases {

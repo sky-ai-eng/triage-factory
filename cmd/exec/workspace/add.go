@@ -107,8 +107,21 @@ var (
 // refnames forbid it (and it enables path traversal in the worktree dir).
 var gitRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,128}$`)
 
+// validateGitRef rejects a --ref value that the character class lets through but
+// git would refuse at fetch time with an opaque error. Beyond the `..` substring:
+//   - a "refs/" prefix (e.g. "refs/heads/main"), which we'd double up into
+//     "+refs/heads/refs/heads/main:..." → git "couldn't find remote ref";
+//   - a trailing slash (e.g. "feature/"), which git refuses as an illegal
+//     refname.
+//
+// Surfacing these here turns them into a clear "invalid ref" message rather
+// than a confusing fetch failure. Neither is a security concern (git blocks
+// both) — this is purely UX.
 func validateGitRef(ref string) error {
-	if !gitRefPattern.MatchString(ref) || strings.Contains(ref, "..") {
+	if !gitRefPattern.MatchString(ref) ||
+		strings.Contains(ref, "..") ||
+		strings.HasSuffix(ref, "/") ||
+		strings.HasPrefix(ref, "refs/") {
 		return fmt.Errorf("%w: %q", errInvalidRef, ref)
 	}
 	return nil

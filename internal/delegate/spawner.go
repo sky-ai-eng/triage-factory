@@ -657,6 +657,10 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 			continue
 		}
 		found = true
+		// One `git symbolic-ref` subprocess per matching row. Bounded to one
+		// today by the (run_id, repo_id) uniqueness of run_worktrees; if
+		// TFAC-502 re-keys to (run_id, repo_id, ref) this should pre-read all
+		// matching rows' branches once rather than spawning per row in-loop.
 		branch := worktreeCurrentBranch(w.Path)
 		if branch == "" || protected[branch] {
 			continue
