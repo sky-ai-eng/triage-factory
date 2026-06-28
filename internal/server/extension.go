@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -80,7 +81,9 @@ type ExtensionAPI interface {
 	// PKCEChallenge derives the S256 code_challenge from a PKCE verifier.
 	PKCEChallenge(verifier string) string
 	// GrantOrgMembership grants (idempotently, admin pool) an org membership —
-	// the JIT-provisioning primitive for an SSO login.
+	// the JIT-provisioning primitive for an SSO login. A net-new grant is audited
+	// in access_change_log atomically (a returning member's no-op grant is not);
+	// the caller (ee/sso) needs no awareness of the audit. See TFAC-486.
 	GrantOrgMembership(ctx context.Context, userID, orgID uuid.UUID, role string) error
 	// EmailDomain extracts the lower-cased domain from an email address.
 	EmailDomain(email string) (domain string, ok bool)
@@ -196,8 +199,39 @@ func (a serverExtensionAPI) VerifyAccessToken(accessToken string) (*verify.Claim
 
 func (a serverExtensionAPI) PKCEChallenge(verifier string) string { return pkceChallenge(verifier) }
 
+// GrantOrgMembership grants the SSO JIT org membership and audits the net-new
+// grant atomically on the admin pool. The JIT actor has no claims/membership at
+// provisioning time, so this can't route through the app-pool AccessChangeLog
+// store; it mirrors invite-accept's admin-pool tx instead — grant the membership,
+// and if it was NET-NEW (not an ON CONFLICT DO NOTHING no-op on a returning
+// member), record the org_member_granted audit row on the SAME tx so the
+// access_change_log can't diverge from the grant. The net-new gate keeps JIT —
+// which fires on every SSO login — from logging "joined" each time. The actor is
+// the user themselves (a self-grant via the org's SSO domain binding), matching
+// invite-accept's "joined the org"; team_id is NULL (JIT grants org-only); the
+// source in detail_json lets the viewer render "joined via SSO". See TFAC-486.
 func (a serverExtensionAPI) GrantOrgMembership(ctx context.Context, userID, orgID uuid.UUID, role string) error {
-	return grantOrgMembership(ctx, a.s.db, userID, orgID, role, uuid.NullUUID{}, "")
+	tx, err := a.s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin jit grant tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	netNew, err := grantOrgMembership(ctx, tx, userID, orgID, role, uuid.NullUUID{}, "")
+	if err != nil {
+		return err
+	}
+	if netNew {
+		if err := recordAccessChangeTx(ctx, tx, orgID.String(), domain.AccessChange{
+			ActorUserID:  userID.String(),
+			Action:       domain.AccessActionOrgMemberGranted,
+			TargetUserID: userID.String(),
+			DetailJSON:   accessDetailSSOJIT(role),
+		}); err != nil {
+			return fmt.Errorf("audit jit member granted: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (a serverExtensionAPI) EmailDomain(email string) (string, bool) { return emailDomain(email) }

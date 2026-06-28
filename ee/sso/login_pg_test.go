@@ -1,6 +1,7 @@
 package sso_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -128,6 +130,43 @@ func (r *authRig) driveSAMLCallback(userID uuid.UUID, stateProviderID, jwtProvid
 
 // meBody, me, membershipCount, principalOf live on the rig in rig_test.go.
 
+// accessChangeRow is one access_change_log row read back in a test — the columns
+// the JIT audit assertions care about (NULLs folded to "").
+type accessChangeRow struct {
+	actor, target, team, detail string
+}
+
+// accessChangeRows reads orgID's access_change_log rows of the given action on
+// the admin pool (the test has no claims; admin bypasses RLS), newest-first. The
+// JIT audit assertions count these to prove a net-new login writes exactly one
+// row and a returning login writes none.
+func (r *authRig) accessChangeRows(orgID uuid.UUID, action string) []accessChangeRow {
+	r.t.Helper()
+	rows, err := r.h.AdminDB.Query(`
+		SELECT COALESCE(actor_user_id::text, ''), COALESCE(target_user_id::text, ''),
+		       COALESCE(team_id::text, ''), COALESCE(detail_json, '')
+		  FROM access_change_log
+		 WHERE org_id = $1 AND action = $2
+		 ORDER BY created_at DESC, id DESC
+	`, orgID, action)
+	if err != nil {
+		r.t.Fatalf("query access_change_log: %v", err)
+	}
+	defer rows.Close()
+	var out []accessChangeRow
+	for rows.Next() {
+		var a accessChangeRow
+		if err := rows.Scan(&a.actor, &a.target, &a.team, &a.detail); err != nil {
+			r.t.Fatalf("scan access_change_log: %v", err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		r.t.Fatalf("iterate access_change_log: %v", err)
+	}
+	return out
+}
+
 // ---------- callback / JIT tests ----------
 
 // Existing member via SAML → session, lands in their org.
@@ -200,6 +239,84 @@ func TestSSOLogin_NewUser_JITProvisionsMember(t *testing.T) {
 	me := r.me(sid)
 	if me.ActiveOrgID != orgA.String() {
 		t.Errorf("active_org_id=%q, want %q (a JIT'd user must land in the app, not onboarding)", me.ActiveOrgID, orgA)
+	}
+}
+
+// A net-new SSO login (JIT auto-provision) writes exactly one org_member_granted
+// audit row: actor == target (the user joined themselves, the self-grant via the
+// org's SSO domain binding), team_id NULL (org-only), detail
+// {"source":"sso_jit","role":"member"}. This is the TFAC-471 gap TFAC-486 closes —
+// JIT is the SSO analog of the audited invite-accept.
+func TestSSOLogin_JIT_WritesAccessChangeLog(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+
+	user := r.seedAuthOnlyUser() // genuine first login
+	resp := r.driveSAMLCallback(user, providerID, providerID)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
+	}
+	principal := r.principalOf(user)
+
+	rows := r.accessChangeRows(orgA, domain.AccessActionOrgMemberGranted)
+	if len(rows) != 1 {
+		t.Fatalf("org_member_granted rows=%d, want exactly 1 (the net-new JIT grant)", len(rows))
+	}
+	got := rows[0]
+	if got.actor != principal.String() || got.target != principal.String() {
+		t.Errorf("actor/target = %s/%s, want %s/%s (self-grant)", got.actor, got.target, principal, principal)
+	}
+	if got.team != "" {
+		t.Errorf("team_id = %q, want empty (JIT grants org-only)", got.team)
+	}
+	var d struct {
+		Source string `json:"source"`
+		Role   string `json:"role"`
+	}
+	if err := json.Unmarshal([]byte(got.detail), &d); err != nil {
+		t.Fatalf("detail_json %q not valid JSON: %v", got.detail, err)
+	}
+	if d.Source != domain.AccessSourceSSOJIT {
+		t.Errorf("detail source=%q, want %q", d.Source, domain.AccessSourceSSOJIT)
+	}
+	if d.Role != "member" {
+		t.Errorf("detail role=%q, want member (the binding's default role)", d.Role)
+	}
+}
+
+// A returning SSO login (already a member) writes NO new audit row — the net-new
+// gate. JIT fires on every SSO login and grants via ON CONFLICT DO NOTHING, so an
+// unconditional record would log "joined" on each login; the orgRowInserted gate
+// keeps the log to the one real grant. TFAC-486.
+func TestSSOLogin_JIT_ReturningMember_NoAccessChangeLog(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+
+	// Already a member before the SSO login — the grant will be a no-op.
+	user := r.seedUser()
+	if _, err := r.h.AdminDB.Exec(
+		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`,
+		user, orgA); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+
+	resp := r.driveSAMLCallback(user, providerID, providerID)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
+	}
+
+	if rows := r.accessChangeRows(orgA, domain.AccessActionOrgMemberGranted); len(rows) != 0 {
+		t.Errorf("org_member_granted rows=%d, want 0 (returning member — the net-new gate)", len(rows))
 	}
 }
 

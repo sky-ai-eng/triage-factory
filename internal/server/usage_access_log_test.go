@@ -25,6 +25,11 @@ func TestAccessChangeLabel(t *testing.T) {
 			want:   "joined the org",
 		},
 		{
+			name:   "org_member_granted self via SSO JIT reads as joined via SSO",
+			change: domain.AccessChange{Action: domain.AccessActionOrgMemberGranted, ActorUserID: "u1", TargetUserID: "u1", DetailJSON: `{"source":"sso_jit","role":"member"}`},
+			want:   "joined the org via SSO",
+		},
+		{
 			name:   "org_member_granted by another reads as granted",
 			change: domain.AccessChange{Action: domain.AccessActionOrgMemberGranted, ActorUserID: "u1", TargetUserID: "u2"},
 			target: "Alice",

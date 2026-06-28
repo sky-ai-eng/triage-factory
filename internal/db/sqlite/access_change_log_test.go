@@ -67,6 +67,41 @@ func TestAccessChangeLogStore_SQLite_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestAccessChangeLogStore_SQLite_RecordSystem confirms RecordSystem forwards to
+// Record in local mode (N=1, no admin/app pool split) — the row lands and reads
+// back. The method exists for parity with the Postgres admin pool (TFAC-486).
+func TestAccessChangeLogStore_SQLite_RecordSystem(t *testing.T) {
+	conn := newSQLiteForAccessChangeTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	if err := stores.AccessChangeLog.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.AccessChange{
+		ActorUserID:  "u1",
+		Action:       domain.AccessActionOrgMemberGranted,
+		TargetUserID: "u1",
+		DetailJSON:   `{"source":"sso_jit","role":"member"}`,
+	}); err != nil {
+		t.Fatalf("RecordSystem: %v", err)
+	}
+
+	var action, detail string
+	var actor, target sql.NullString
+	if err := conn.QueryRow(`
+		SELECT action, actor_user_id, target_user_id, detail_json FROM access_change_log
+	`).Scan(&action, &actor, &target, &detail); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if action != domain.AccessActionOrgMemberGranted {
+		t.Errorf("action = %q, want %q", action, domain.AccessActionOrgMemberGranted)
+	}
+	if actor.String != "u1" || target.String != "u1" {
+		t.Errorf("actor/target = %q/%q, want u1/u1", actor.String, target.String)
+	}
+	if detail != `{"source":"sso_jit","role":"member"}` {
+		t.Errorf("detail_json = %q, want the sso_jit payload", detail)
+	}
+}
+
 // TestAccessChangeLogStore_SQLite_OptionalColumnsAreNull confirms a credential
 // action with no actor/target/team and an empty detail lands those columns as
 // SQL NULL (not the empty string).

@@ -44,6 +44,14 @@ func (s *accessChangeLogStore) Record(ctx context.Context, orgID string, e domai
 	return err
 }
 
+// RecordSystem is identical to Record in SQLite: local mode is single-tenant
+// (N=1) with no RLS, so there is no admin/app pool split. The method exists for
+// parity with the Postgres store, where the SSO JIT auto-provisioning seam (no
+// JWT-claims context) needs the admin pool. See TFAC-486.
+func (s *accessChangeLogStore) RecordSystem(ctx context.Context, orgID string, e domain.AccessChange) error {
+	return s.Record(ctx, orgID, e)
+}
+
 func (s *accessChangeLogStore) ListByOrg(ctx context.Context, orgID string, opts domain.AccessChangeListOpts) ([]domain.AccessChange, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

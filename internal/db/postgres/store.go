@@ -290,12 +290,13 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// under system_llm_runs_all RLS would be rejected. Same admin-only
 		// shape as PendingFirings / EventQueue.
 		SystemLLMRuns: newSystemLLMRunStore(admin),
-		// AccessChangeLog is APP-pool: every Record composes inside the
-		// claims-bearing WithTx that runs the audited governance action, so
-		// the access_change_log_all RLS policy gates the write (and the future
-		// audit view's read) by org. Unlike SystemLLMRuns, it is not
-		// system-written. See TFAC-471.
-		AccessChangeLog: newAccessChangeLogStore(app),
+		// AccessChangeLog holds both pools (like ExternalActions): app for Record
+		// (governance handlers, composing inside their claims-bearing WithTx so the
+		// access_change_log_all RLS policy gates the write + the audit view's read
+		// by org) + ListByOrg, admin for RecordSystem (the SSO JIT auto-provision
+		// seam, whose user has no claims/membership at grant time). See TFAC-471 /
+		// TFAC-486.
+		AccessChangeLog: newAccessChangeLogStore(app, admin),
 		// ExternalActions holds both pools (like Artifacts): app for Record
 		// (manual bot runs + server approval/board handlers, under claims) +
 		// ListByTeam, admin for RecordSystem (event-triggered runs + the Jira
@@ -393,7 +394,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		OrgTemplate:     newTxOrgTemplateStore(tx),
 		Invites:         newInvitesStore(tx, tx),
 		SystemLLMRuns:   newSystemLLMRunStore(tx),
-		AccessChangeLog: newAccessChangeLogStore(tx),
+		AccessChangeLog: newAccessChangeLogStore(tx, tx),
 		ExternalActions: newExternalActionStore(tx, tx),
 		Spend:           newSpendStore(tx, tx),
 		AuthEvents:      newAuthEventStore(tx),

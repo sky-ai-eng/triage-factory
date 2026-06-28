@@ -68,26 +68,39 @@ type execer interface {
 //
 // teamID NULL → only the org_memberships row is written: the deliberate
 // "org member, zero teams" state an org-only invite produces.
+//
+// Returns orgRowInserted — whether the org_memberships INSERT actually landed a
+// NET-NEW row (RowsAffected > 0) vs. an ON CONFLICT DO NOTHING no-op on an
+// existing member. The JIT seam (which fires on every SSO login) gates its audit
+// write on this so a returning member isn't logged as "joined" on each login;
+// provisionOrg + invite-accept ignore it (they grant net-new members by
+// construction). It tracks ONLY the org row, not the team row.
 func grantOrgMembership(ctx context.Context, ex execer,
 	userID, orgID uuid.UUID, orgRole string,
-	teamID uuid.NullUUID, teamRole string) error {
-	if _, err := ex.ExecContext(ctx, `
+	teamID uuid.NullUUID, teamRole string) (orgRowInserted bool, err error) {
+	res, err := ex.ExecContext(ctx, `
 		INSERT INTO public.org_memberships (user_id, org_id, role)
 		VALUES ($1, $2, $3)
 		ON CONFLICT DO NOTHING
-	`, userID, orgID, orgRole); err != nil {
-		return fmt.Errorf("insert org_memberships: %w", err)
+	`, userID, orgID, orgRole)
+	if err != nil {
+		return false, fmt.Errorf("insert org_memberships: %w", err)
 	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("org_memberships rows affected: %w", err)
+	}
+	orgRowInserted = n > 0
 	if teamID.Valid {
 		if _, err := ex.ExecContext(ctx, `
 			INSERT INTO public.memberships (user_id, team_id, role)
 			VALUES ($1, $2, $3)
 			ON CONFLICT DO NOTHING
 		`, userID, teamID.UUID, teamRole); err != nil {
-			return fmt.Errorf("insert memberships: %w", err)
+			return orgRowInserted, fmt.Errorf("insert memberships: %w", err)
 		}
 	}
-	return nil
+	return orgRowInserted, nil
 }
 
 // lookupEarliestMembership returns the user's earliest org membership
@@ -203,7 +216,7 @@ func (s *Server) provisionOrg(ctx context.Context, userID uuid.UUID, name, slugB
 	// third-party actor whose action needs auditing (the founder grants
 	// themselves). The audit log captures governance changes *after* the org
 	// exists (role changes, revokes, transfers, later grants via invite).
-	if err := grantOrgMembership(ctx, tx, userID, orgID, "owner",
+	if _, err := grantOrgMembership(ctx, tx, userID, orgID, "owner",
 		uuid.NullUUID{UUID: teamID, Valid: true}, "admin"); err != nil {
 		return uuid.Nil, uuid.Nil, "", err
 	}

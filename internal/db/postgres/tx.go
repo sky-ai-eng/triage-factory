@@ -241,11 +241,14 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// tx and commits autonomously — the same admin-pool shape Events /
 		// TaskMemory use for their write-only halves.
 		SystemLLMRuns: newSystemLLMRunStore(s.admin),
-		// AccessChangeLog is tx-bound (app-pool): the Record calls the
-		// governance handlers make compose with their surrounding claims tx, so
-		// the audit row commits or rolls back atomically with the action.
-		// access_change_log_all RLS gates the in-tx write by org. See TFAC-471.
-		AccessChangeLog: newAccessChangeLogStore(tx),
+		// AccessChangeLog: app half is the tx-bound (app-pool) Record the
+		// governance handlers compose with their surrounding claims tx, so the
+		// audit row commits or rolls back atomically with the action
+		// (access_change_log_all RLS gates the in-tx write by org); admin half
+		// stays pinned to s.admin so RecordSystem inside WithTx routes outside the
+		// tx — same autonomous-commit shape ExternalActions uses. See TFAC-471 /
+		// TFAC-486.
+		AccessChangeLog: newAccessChangeLogStore(tx, s.admin),
 		// ExternalActions: app-side Record routes through the tx so the audit row
 		// commits or rolls back atomically with the action it records (the server
 		// approval flips, manual bot runs); admin half stays pinned to s.admin so

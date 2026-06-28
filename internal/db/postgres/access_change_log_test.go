@@ -70,6 +70,63 @@ func TestAccessChangeLogStore_Postgres_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestAccessChangeLogStore_Postgres_RecordSystem_RoundTrip pins the admin-pool
+// write path (TFAC-486): RecordSystem inserts a row with NO claims context — the
+// SSO JIT seam has no membership at provisioning time — bypassing RLS, and every
+// field reads back intact (server-side gen_random_uuid() id, the now() created_at
+// default, the sso_jit detail, and a NULL team_id since JIT grants org-only).
+// Mirrors external_actions' RecordSystem.
+func TestAccessChangeLogStore_Postgres_RecordSystem_RoundTrip(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "jit-user")
+
+	// No WithTx, no claims — the bare admin-pool write the JIT seam relies on.
+	if err := stores.AccessChangeLog.RecordSystem(ctx, orgID, domain.AccessChange{
+		ActorUserID:  userID,
+		Action:       domain.AccessActionOrgMemberGranted,
+		TargetUserID: userID,
+		DetailJSON:   `{"source":"sso_jit","role":"member"}`,
+	}); err != nil {
+		t.Fatalf("RecordSystem: %v", err)
+	}
+
+	var (
+		id, org, action             string
+		actor, target, team, detail *string
+		createdAt                   time.Time
+	)
+	if err := h.AdminDB.QueryRow(`
+		SELECT id::text, org_id::text, actor_user_id::text, action,
+		       target_user_id::text, team_id::text, detail_json, created_at
+		FROM access_change_log WHERE org_id = $1
+	`, orgID).Scan(&id, &org, &actor, &action, &target, &team, &detail, &createdAt); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+
+	if id == "" {
+		t.Error("expected gen_random_uuid() id, got empty")
+	}
+	if action != domain.AccessActionOrgMemberGranted {
+		t.Errorf("action = %q, want %q", action, domain.AccessActionOrgMemberGranted)
+	}
+	if actor == nil || *actor != userID || target == nil || *target != userID {
+		t.Errorf("actor/target = %v/%v, want %s/%s (self-grant)", actor, target, userID, userID)
+	}
+	if team != nil {
+		t.Errorf("team_id = %v, want NULL (JIT grants org-only)", team)
+	}
+	if detail == nil || *detail != `{"source":"sso_jit","role":"member"}` {
+		t.Errorf("detail_json = %v, want the sso_jit payload", detail)
+	}
+	if createdAt.IsZero() {
+		t.Error("created_at is zero, want the now() default")
+	}
+}
+
 // TestAccessChangeLogStore_Postgres_OptionalColumnsAreNull confirms a credential
 // action with no actor/target/team and empty detail serializes those columns to
 // SQL NULL via the NULLIF guards.

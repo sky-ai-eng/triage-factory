@@ -228,6 +228,7 @@ type accessDetail struct {
 	Kind     string `json:"kind"`
 	Host     string `json:"host"`
 	InviteID string `json:"invite_id"`
+	Source   string `json:"source"`
 }
 
 // accessChangeLabel renders one row's action + detail_json into the human
@@ -241,9 +242,14 @@ func accessChangeLabel(e domain.AccessChange, targetName, teamName string) strin
 	d := parseAccessDetail(e.DetailJSON)
 	switch e.Action {
 	case domain.AccessActionOrgMemberGranted:
-		// Invite-accept writes actor == target (the invitee redeemed the link),
-		// which reads as "joined"; a future direct-grant path would differ.
+		// Invite-accept and SSO JIT both write actor == target (the user joined
+		// themselves), which reads as "joined"; JIT carries source=sso_jit so it
+		// reads as "joined via SSO". A future direct-grant path (actor != target)
+		// reads as "granted ... org membership".
 		if e.ActorUserID != "" && e.ActorUserID == e.TargetUserID {
+			if d.Source == domain.AccessSourceSSOJIT {
+				return "joined the org via SSO"
+			}
 			return "joined the org"
 		}
 		return "granted " + target + " org membership"

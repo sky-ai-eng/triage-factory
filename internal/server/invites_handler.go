@@ -540,7 +540,7 @@ func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Requ
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if err := grantOrgMembership(r.Context(), tx, inviteeID, orgUUID, invite.Role, teamID, "member"); err != nil {
+	if _, err := grantOrgMembership(r.Context(), tx, inviteeID, orgUUID, invite.Role, teamID, "member"); err != nil {
 		internalError(w, "invites", err)
 		return
 	}

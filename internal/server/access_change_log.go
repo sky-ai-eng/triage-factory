@@ -73,3 +73,17 @@ func accessDetailInvite(inviteID string) string {
 	}{InviteID: inviteID})
 	return string(b)
 }
+
+// accessDetailSSOJIT builds the detail_json for an SSO JIT auto-provisioned org
+// grant: {"source":"sso_jit","role":...}. The source distinguishes a
+// policy-driven SSO join from an interactive invite-accept in the audit viewer
+// (the label renders "joined via SSO"); role is the connection binding's default
+// role the member was granted at. SCIM (future) records the same shape with its
+// own source. See TFAC-486.
+func accessDetailSSOJIT(role string) string {
+	b, _ := json.Marshal(struct {
+		Source string `json:"source"`
+		Role   string `json:"role"`
+	}{Source: domain.AccessSourceSSOJIT, Role: role})
+	return string(b)
+}

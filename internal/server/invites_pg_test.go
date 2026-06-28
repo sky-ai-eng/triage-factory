@@ -30,10 +30,14 @@ func TestGrantOrgMembership_OrgOnly(t *testing.T) {
 	orgID, _, teamID := pgtest.SeedOrgWithUser(t, h, "grant-orgonly")
 	invitee := pgtest.SeedUser(t, h, "grant-orgonly-invitee")
 
-	if err := grantOrgMembership(context.Background(), h.AdminDB,
+	inserted, err := grantOrgMembership(context.Background(), h.AdminDB,
 		uuid.MustParse(invitee), uuid.MustParse(orgID), "member",
-		uuid.NullUUID{}, "member"); err != nil {
+		uuid.NullUUID{}, "member")
+	if err != nil {
 		t.Fatalf("grantOrgMembership: %v", err)
+	}
+	if !inserted {
+		t.Error("orgRowInserted = false; want true (net-new org membership)")
 	}
 
 	if n := countOrgMemberships(t, h, invitee, orgID); n != 1 {
@@ -52,10 +56,14 @@ func TestGrantOrgMembership_WithTeam(t *testing.T) {
 	orgID, _, teamID := pgtest.SeedOrgWithUser(t, h, "grant-team")
 	invitee := pgtest.SeedUser(t, h, "grant-team-invitee")
 
-	if err := grantOrgMembership(context.Background(), h.AdminDB,
+	inserted, err := grantOrgMembership(context.Background(), h.AdminDB,
 		uuid.MustParse(invitee), uuid.MustParse(orgID), "admin",
-		uuid.NullUUID{UUID: uuid.MustParse(teamID), Valid: true}, "member"); err != nil {
+		uuid.NullUUID{UUID: uuid.MustParse(teamID), Valid: true}, "member")
+	if err != nil {
 		t.Fatalf("grantOrgMembership: %v", err)
+	}
+	if !inserted {
+		t.Error("orgRowInserted = false; want true (net-new org membership)")
 	}
 
 	if n := countOrgMemberships(t, h, invitee, orgID); n != 1 {
@@ -76,7 +84,9 @@ func TestGrantOrgMembership_WithTeam(t *testing.T) {
 }
 
 // TestGrantOrgMembership_Idempotent: re-calling with the same args is a
-// no-op (ON CONFLICT DO NOTHING) — no error, no duplicate rows.
+// no-op (ON CONFLICT DO NOTHING) — no error, no duplicate rows. The orgRowInserted
+// return distinguishes the net-new first grant (true) from the no-op re-grant
+// (false) — the gate JIT uses to audit only the net-new membership (TFAC-486).
 func TestGrantOrgMembership_Idempotent(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -85,9 +95,15 @@ func TestGrantOrgMembership_Idempotent(t *testing.T) {
 	tid := uuid.NullUUID{UUID: uuid.MustParse(teamID), Valid: true}
 
 	for i := 0; i < 2; i++ {
-		if err := grantOrgMembership(context.Background(), h.AdminDB,
-			uuid.MustParse(invitee), uuid.MustParse(orgID), "member", tid, "member"); err != nil {
+		inserted, err := grantOrgMembership(context.Background(), h.AdminDB,
+			uuid.MustParse(invitee), uuid.MustParse(orgID), "member", tid, "member")
+		if err != nil {
 			t.Fatalf("grantOrgMembership call %d: %v", i, err)
+		}
+		// First call lands a net-new row (true); the second is an ON CONFLICT
+		// DO NOTHING no-op (false) — the net-new gate.
+		if want := i == 0; inserted != want {
+			t.Errorf("call %d orgRowInserted = %v; want %v", i, inserted, want)
 		}
 	}
 	if n := countOrgMemberships(t, h, invitee, orgID); n != 1 {

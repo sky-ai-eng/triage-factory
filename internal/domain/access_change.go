@@ -55,6 +55,16 @@ const (
 	AccessActionCredentialSet           = "credential_set"
 )
 
+// Access-change "source" values carried in an org_member_granted action's
+// DetailJSON {"source":...} when the grant was AUTOMATED rather than an
+// interactive invite-accept. The viewer uses it to render "joined via SSO"
+// instead of the plain "joined" an invite-accept shows; an empty source (the
+// invite-accept case) keeps the generic phrasing. SCIM (future) grafts onto the
+// same grantOrgMembership seam and records its own source. See TFAC-486.
+const (
+	AccessSourceSSOJIT = "sso_jit"
+)
+
 // Credential kinds carried in a credential_set action's DetailJSON {"kind":...}.
 // Bind-vs-rotate isn't reliably distinguishable at the write-point, so every
 // credential write records credential_set and lets the detail carry the kind
