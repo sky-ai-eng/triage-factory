@@ -36,8 +36,8 @@ var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 // than seeing the run silently fail mid-resume. Callers map it to 410 Gone.
 var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired and can no longer be resumed")
 
-// ResumeOpenRun wakes a parked/terminal-but-resumable run (open,
-// pending_approval, or completed+abort — see resumableState) with a new
+// ResumeOpenRun wakes a parked/terminal-but-resumable run (open or
+// completed+abort — see resumableState) with a new
 // message. This method:
 //  1. validates the run is resumable (session id, worktree path, task)
 //  2. registers a cancellation handle in s.cancels[runID]
@@ -77,7 +77,7 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 	if run == nil {
 		return fmt.Errorf("run not found")
 	}
-	// Only a resumable run (open / pending_approval / completed+abort) can be
+	// Only a resumable run (open / completed+abort) can be
 	// woken; a finish/failed/cancelled or actively-running run is rejected up
 	// front so the workspace pre-flight below never mislabels a non-resumable run
 	// as "expired". The MarkResuming compare-and-swap re-checks under the row
@@ -140,7 +140,7 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 	// step stopped. Re-open it to running in the same tx as the run flip (below)
 	// so the resumed step's new conclusion re-finalizes the blueprint through the
 	// normal post-resume disposition (ResumeBlueprintAfterResume). An
-	// open/pending_approval resume leaves its still-running blueprint alone —
+	// An open resume leaves its still-running blueprint alone —
 	// ReopenRunForResume's CAS (status='aborted') is a no-op there.
 	reopenAbortedBlueprint := run.Status == "completed" && domain.RunOutcome(run.Outcome) == domain.RunOutcomeAbort
 	// trigger_type is non-null in the schema (the CHECK pairs it
@@ -252,7 +252,7 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 			// resumable state). So re-finalize for every blueprint step that didn't
 			// dispose. ResumeBlueprintAfterResume is the safe single authority: a
 			// cancelled/failed step maps to a terminal blueprint (terminateBlueprint
-			// discards the snapshot), a still-parked (open/pending_approval) step or
+			// discards the snapshot), a still-parked (open) step or
 			// an already-terminal blueprint early-returns. The success path set
 			// disposed=true, so this never doubles up.
 			if blueprintRunID != "" && !disposed {

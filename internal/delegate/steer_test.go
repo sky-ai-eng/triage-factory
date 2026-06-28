@@ -131,8 +131,6 @@ func TestResumableState(t *testing.T) {
 		want            bool
 	}{
 		{"open", "", true},
-		{"pending_approval", "", true},
-		{"pending_approval", "finish", true}, // pending is resumable whatever the coerced outcome
 		{"completed", "abort", true},
 		{"completed", "finish", false}, // finish is the one terminal excluded
 		{"completed", "", false},
@@ -148,28 +146,10 @@ func TestResumableState(t *testing.T) {
 	}
 }
 
-// TestSendMessage_PendingApprovalIsResumable: a pending_approval run (no live
-// process) passes the steerable gate and routes to a resume rather than
-// returning ErrRunNotSteerable — the conversation is independent of the queued
-// artifact's approval.
-func TestSendMessage_PendingApprovalIsResumable(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-pa", "sess-pa", "/tmp/does-not-exist-pa")
-	if _, err := database.Exec(`UPDATE runs SET status='pending_approval' WHERE id='r-pa'`); err != nil {
-		t.Fatalf("pending_approval: %v", err)
-	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-pa", runmode.LocalDefaultUserID, "carry on")
-	if errors.Is(err, ErrRunNotSteerable) {
-		t.Errorf("pending_approval run rejected at the steerable gate: %v", err)
-	}
-	awaitResumeGoroutine(t, s, "r-pa")
-}
-
 // TestSendMessage_CompletedAbortIsResumable: a completed+abort run passes the
 // steerable gate and routes to a resume (the agent's voluntary stop can be
-// picked back up).
+// picked back up). This is also the path a terminal run with an unresolved
+// artifact resumes through now that pending_approval is gone (TFAC-492).
 func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-ab", "sess-ab", "/tmp/does-not-exist-ab")

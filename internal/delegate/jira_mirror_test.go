@@ -558,7 +558,7 @@ func TestRecomputeBoard_JiraTask_MirrorsInProgress(t *testing.T) {
 func TestRecomputeBoard_UserClaimedJiraTask_NoMirror(t *testing.T) {
 	s, database, runID, taskID, fake, res := setupJiraMirrorFixture(t, "user", "To Do", "")
 	stampUserClaim(t, database, taskID)
-	setRunStatus(t, database, runID, "pending_approval")
+	setRunStatus(t, database, runID, "open")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 

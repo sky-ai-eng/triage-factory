@@ -174,12 +174,13 @@ func TestRunResponse_ArtifactCount(t *testing.T) {
 	}
 }
 
-// TestRunResponse_ArtifactCount_Parked pins that a parked run reports the right
-// artifact_count (from CountByRun, independent of the best-effort pending_kind
-// list read) and that pending_kind rides along (a draft PR → "pr").
-func TestRunResponse_ArtifactCount_Parked(t *testing.T) {
+// TestRunResponse_ArtifactCount_Unresolved pins that a completed run with an
+// unresolved draft PR reports the right artifact_count (from CountByRun) and the
+// derived approval signal (has_unresolved_artifacts + unresolved_pr_count) — the
+// successor to the legacy pending_kind overlay (TFAC-492).
+func TestRunResponse_ArtifactCount_Unresolved(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "park", "pending_approval")
+	runID := seedSteerRun(t, s.db, "park", "completed")
 	seedRunArtifact(t, s, runID, domain.NewPullRequestArtifact(
 		"octo/repo", 7, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/7", "T", "B", true))
@@ -197,22 +198,24 @@ func TestRunResponse_ArtifactCount_Parked(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if m["artifact_count"] != float64(2) {
-		t.Errorf("artifact_count = %v, want 2 (self-counted on the parked path)", m["artifact_count"])
+		t.Errorf("artifact_count = %v, want 2", m["artifact_count"])
 	}
-	if m["pending_kind"] != "pr" {
-		t.Errorf("pending_kind = %v, want pr", m["pending_kind"])
+	if m["has_unresolved_artifacts"] != true {
+		t.Errorf("has_unresolved_artifacts = %v, want true", m["has_unresolved_artifacts"])
+	}
+	if m["unresolved_pr_count"] != float64(1) {
+		t.Errorf("unresolved_pr_count = %v, want 1", m["unresolved_pr_count"])
 	}
 }
 
-// TestRunResponse_PendingKind_List pins that pending_kind / pending_artifact_id
-// propagate through the run-LIST endpoint for a parked run — the batched
-// ListByRuns path, distinct from the single-run path covered by
-// TestRunResponse_ArtifactCount_Parked. Guards the list endpoint against a
-// silent pending_kind regression.
-func TestRunResponse_PendingKind_List(t *testing.T) {
+// TestRunResponse_HasUnresolved_List pins that the derived approval signal
+// propagates through the run-LIST endpoint — the batched ListByRuns path,
+// distinct from the single-run path. Guards the list endpoint against a silent
+// has_unresolved_artifacts regression.
+func TestRunResponse_HasUnresolved_List(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "pklist", "pending_approval")
-	pr := seedRunArtifact(t, s, runID, domain.NewPullRequestArtifact(
+	runID := seedSteerRun(t, s.db, "pklist", "completed")
+	seedRunArtifact(t, s, runID, domain.NewPullRequestArtifact(
 		"octo/repo", 9, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/9", "T", "B", true))
 
@@ -227,11 +230,11 @@ func TestRunResponse_PendingKind_List(t *testing.T) {
 	if len(runs) != 1 {
 		t.Fatalf("listed %d runs, want 1", len(runs))
 	}
-	if got := runs[0]["pending_kind"]; got != "pr" {
-		t.Errorf("pending_kind = %v, want pr", got)
+	if got := runs[0]["has_unresolved_artifacts"]; got != true {
+		t.Errorf("has_unresolved_artifacts = %v, want true", got)
 	}
-	if got := runs[0]["pending_artifact_id"]; got != pr.ID {
-		t.Errorf("pending_artifact_id = %v, want %s", got, pr.ID)
+	if got := runs[0]["unresolved_pr_count"]; got != float64(1) {
+		t.Errorf("unresolved_pr_count = %v, want 1", got)
 	}
 }
 

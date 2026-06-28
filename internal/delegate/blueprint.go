@@ -43,8 +43,8 @@ const (
 
 // decideBlueprintStep maps a completed step's terminal outcome + position to
 // the orchestrator's next move. Only valid for a step whose run reached
-// status='completed'; the non-terminal statuses (open, pending_approval,
-// cancelled, failed) are handled by the caller before this is consulted.
+// status='completed'; the non-terminal statuses (open, cancelled, failed) are
+// handled by the caller before this is consulted.
 //
 // abortReason is non-empty only for the missing-outcome-on-a-non-final-step
 // case ("no-outcome"); for an explicit abort it is empty and the caller
@@ -128,17 +128,28 @@ func (s *Spawner) terminateBlueprint(
 	}
 
 	if status == domain.BlueprintRunStatusCompleted {
-		// Mirror single-run behavior: a clean blueprint finalization closes the task.
-		var closeErr error
-		if triggerType == "manual" {
-			closeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-				return ts.Tasks.Close(bgCtx, orgID, taskID, "run_completed", "")
-			})
+		// Completion and task-closure are independent now (TFAC-492). A clean
+		// finalization closes the task ONLY when no artifact remains unresolved; a
+		// blueprint that completed with an open draft PR / ready review leaves the
+		// task open, surfaced in the derived approval column, until the last
+		// artifact is resolved (TFAC-382 closes it on the last resolution).
+		if s.blueprintHasUnresolvedArtifacts(bgCtx, orgID, blueprintRunID) {
+			// Leave the task open and place it in the approval column. Don't close.
+			s.placeTaskInApprovalColumn(bgCtx, orgID, taskID)
 		} else {
-			closeErr = s.tasks.CloseSystem(bgCtx, orgID, taskID, "run_completed", "")
-		}
-		if closeErr != nil {
-			blueprintLog.Warn("close task failed", "task", taskID, "error", closeErr)
+			// Mirror single-run behavior: a clean blueprint finalization with no
+			// unresolved artifact closes the task.
+			var closeErr error
+			if triggerType == "manual" {
+				closeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
+					return ts.Tasks.Close(bgCtx, orgID, taskID, "run_completed", "")
+				})
+			} else {
+				closeErr = s.tasks.CloseSystem(bgCtx, orgID, taskID, "run_completed", "")
+			}
+			if closeErr != nil {
+				blueprintLog.Warn("close task failed", "task", taskID, "error", closeErr)
+			}
 		}
 
 		// TFAC-442: a clean completion means the agent opened its PR and the work is now
@@ -484,9 +495,9 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 		blueprintLog.Warn("read step run failed", "step_run", stepRunID, "error", err)
 		return
 	}
-	// Still dormant after the resume (went open again / queued an approval) → the
-	// blueprint stays running; the next resume/approval drives finalization.
-	if stepRun.Status == "open" || stepRun.Status == "pending_approval" {
+	// Still dormant after the resume (went open again) → the blueprint stays
+	// running; the next resume drives finalization.
+	if stepRun.Status == "open" {
 		return
 	}
 
@@ -546,89 +557,33 @@ func blueprintTerminalForResumedStep(stepRun *domain.AgentRun, isFinal bool) (do
 	}
 }
 
-// ResumeBlueprintAfterApproval is invoked by the reviews / pending-PR
-// approval handlers after they flip a step run from pending_approval back to
-// completed. Two outcomes legally reach pending_approval — both gated by the
-// external-action coercion in processCompletion, which forces a step that
-// queued a terminal external action to finish UNLESS the agent explicitly
-// aborted:
-//
-//   - finish → the work is done; terminate the blueprint completed, which
-//     closes the task and re-asserts the Jira ticket as In Progress (the agent
-//     opened its PR — awaiting review + merge, not shipped). The common case.
-//   - abort  → the agent queued an artifact (a draft PR / review) and then
-//     deliberately stopped in the same turn ("opened a draft, decided the
-//     approach is wrong"). The approved artifact still landed, but an abort
-//     leaves the task open for a human (the run.go coercion's one exception),
-//     so terminate the blueprint aborted carrying the abort reason. Without
-//     this arm the blueprint stranded in 'running' forever — the bug this
-//     resolves.
-//
-// Any other outcome can't legitimately reach here post-coercion (continue and
-// a missing outcome are both coerced to finish before the pending_approval
-// flip); the blueprint is left running for a human to inspect rather than
-// guessing at a terminal disposition.
-//
-// userID identifies the approving user for audit. Local mode passes
-// runmode.LocalDefaultUserID; multi-mode handlers extract it from JWT
-// claims.
-func (s *Spawner) ResumeBlueprintAfterApproval(orgID, stepRunID, userID string) {
-	cr, stepIdx, err := s.blueprints.GetRunForRunSystem(context.Background(), orgID, stepRunID)
-	if err != nil || cr == nil {
-		return
+// blueprintHasUnresolvedArtifacts reports whether any step run of the blueprint
+// produced an artifact still awaiting human resolution (a draft PR or a ready
+// pending review — domain.HasUnresolvedArtifacts). This is the derived signal
+// that decides whether a completed blueprint closes its task (none unresolved)
+// or leaves it open in the approval column (≥1 unresolved), TFAC-492. Runs from
+// a detached goroutine with no request claims, so it reads via the admin-pool
+// `...System` artifact reader. A read error is treated as "no unresolved" and
+// logged — a transient miss must not strand a task open with nothing to resolve;
+// the next derivation (or a Tier-2 refresh) corrects it.
+func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, blueprintRunID string) bool {
+	if s.artifacts == nil || s.blueprints == nil || blueprintRunID == "" {
+		return false
 	}
-	if cr.Status != domain.BlueprintRunStatusRunning {
-		return
+	runs, err := s.blueprints.RunsForBlueprintSystem(ctx, orgID, blueprintRunID)
+	if err != nil {
+		blueprintLog.Warn("list step runs for unresolved-artifact check failed", "blueprint_run", blueprintRunID, "error", err)
+		return false
 	}
-
-	stepRun, err := s.agentRuns.GetSystem(context.Background(), orgID, stepRunID)
-	if err != nil || stepRun == nil {
-		blueprintLog.Warn("approval-resume read step run failed", "step_run", stepRunID, "error", err)
-		return
+	for _, r := range runs {
+		arts, err := s.artifacts.ListByRunSystem(ctx, orgID, r.ID)
+		if err != nil {
+			blueprintLog.Warn("list artifacts for unresolved check failed", "blueprint_run", blueprintRunID, "step_run", r.ID, "error", err)
+			continue
+		}
+		if domain.HasUnresolvedArtifacts(arts) {
+			return true
+		}
 	}
-	// Map the approved step's recorded outcome to the blueprint's terminal shape.
-	// finish closes the task; abort leaves it open (terminateBlueprint keys task
-	// disposition off the status). Anything else is an illegal pending_approval
-	// outcome → leave the blueprint running for manual resolution.
-	var (
-		terminalStatus domain.BlueprintRunStatus
-		abortReason    string
-	)
-	switch domain.RunOutcome(stepRun.Outcome) {
-	case domain.RunOutcomeFinish:
-		terminalStatus = domain.BlueprintRunStatusCompleted
-	case domain.RunOutcomeAbort:
-		terminalStatus = domain.BlueprintRunStatusAborted
-		abortReason = stepRun.OutcomeReason
-	default:
-		blueprintLog.Warn("approval-resume outcome is neither finish nor abort; blueprint left running", "blueprint_run", cr.ID, "step_run", stepRunID, "outcome", stepRun.Outcome)
-		return
-	}
-
-	task, err := s.tasks.GetSystem(context.Background(), orgID, cr.TaskID)
-	if err != nil || task == nil {
-		blueprintLog.Warn("approval-resume load task failed", "blueprint_run", cr.ID, "error", err)
-		return
-	}
-
-	// No workspace rehydrate here: approval finalizes the blueprint (it does
-	// not re-invoke the agent), so there is no resumed run to hand a warm
-	// worktree to. A cold-swept worktree is fine — terminateBlueprint's cleanup
-	// RemoveAt/RemoveClaudeProjectDir no-op on a missing dir, and it drops the
-	// durable snapshot regardless.
-	//
-	// Reconstruct just enough runConfig for terminateBlueprint's worktree
-	// cleanup. The original orchestrator goroutine (which held the full
-	// cfg) returned when the step landed in pending_approval, so we
-	// rebuild from durable state. owner/repo/prNumber/headRef are not
-	// stored on blueprint_runs; CleanupPRConfig is best-effort and skipped
-	// here — leaves a few stale git config entries but no user-visible
-	// effect.
-	cfg := runConfig{orgID: orgID, wtPath: cr.WorktreePath}
-	if task.EntitySource == "github" {
-		cfg.hasWT = true
-	}
-
-	s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
-		terminalStatus, abortReason, stepIdx, false)
+	return false
 }

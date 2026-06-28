@@ -144,12 +144,12 @@ func FirstPendingReviewArtifact(arts []Artifact) *Artifact {
 
 // FirstReadyReview returns the first *finalized* pending review artifact in arts
 // — Kind==review, State==pending, AND details.ReviewEvent != "" (the ready
-// sentinel set by submit-review). Only a finalized review parks a completed run
-// in pending_approval: a run that called start-review but never submit-review has
-// a pending artifact with an empty ReviewEvent and must NOT park (it would strand
-// on an approval card with nothing to approve). Mirrors FirstDraftPullRequest for
-// the review kind; shared by the spawner park check and the run-response
-// discriminator so both agree on "the run has a review awaiting approval".
+// sentinel set by submit-review). Only a finalized review is an unresolved
+// artifact: a run that called start-review but never submit-review has a pending
+// artifact with an empty ReviewEvent and must NOT count (it would strand on an
+// approval card with nothing to approve). Mirrors FirstDraftPullRequest for the
+// review kind; shared by HasUnresolvedArtifacts so consumers agree on "the run
+// has a review awaiting approval".
 func FirstReadyReview(arts []Artifact) *Artifact {
 	for i := range arts {
 		if arts[i].Kind != ArtifactKindReview || arts[i].State != ArtifactStateReviewPending {

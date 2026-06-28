@@ -87,18 +87,19 @@ func TestDecideBlueprintStep(t *testing.T) {
 	}
 }
 
-// --- Multi-step external-action coercion -----------------------------------
+// --- Draft-PR sidecar never parks the step (TFAC-492) ----------------------
 
-// TestProcessCompletion_BlueprintStepExternalActionCoercesToFinish pins the
-// run.go coercion: a non-final blueprint step that emits continue but queued a
-// terminal external action (a PR awaiting human approval) is coerced
-// continue→finish before flipping to pending_approval, so the post-approval
-// resume terminates the blueprint completed. This is the successor to the
-// synthetic --final verdict the chain path inserted.
-func TestProcessCompletion_BlueprintStepExternalActionCoercesToFinish(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "bp-coerce")
+// TestProcessCompletion_BlueprintStepDraftPRDoesNotPark pins the post-TFAC-492
+// behavior: a non-final blueprint step that emits continue AND queued a draft PR
+// is NOT coerced and does NOT park — the artifact is an async sidecar, so the
+// step completes with its real outcome (continue) and the orchestrator advances
+// to the next step. (Previously this was coerced continue→finish and flipped to
+// pending_approval, freezing the blueprint.)
+func TestProcessCompletion_BlueprintStepDraftPRDoesNotPark(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "bp-nopark")
 	makeRunBlueprintStep(t, database, runID, taskID)
-	// Queue a draft PR for human approval so the run has a pending external action.
+	// Queue a draft PR — the legacy "pending external action" — and confirm it no
+	// longer parks the step.
 	seedDraftPRArtifact(t, s, runID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
@@ -107,11 +108,11 @@ func TestProcessCompletion_BlueprintStepExternalActionCoercesToFinish(t *testing
 		res(`{"outcome":"continue","summary":"opened a PR"}`), cwd, "", "event", "")
 
 	run := loadRun(t, s, runID)
-	if run.Outcome != "finish" {
-		t.Errorf("run.outcome = %q, want finish (a blueprint step that queued a PR is coerced continue→finish)", run.Outcome)
+	if run.Outcome != "continue" {
+		t.Errorf("run.outcome = %q, want continue (a queued draft PR no longer coerces the outcome)", run.Outcome)
 	}
-	if run.Status != "pending_approval" {
-		t.Errorf("run.status = %q, want pending_approval", run.Status)
+	if run.Status != "completed" {
+		t.Errorf("run.status = %q, want completed (a draft PR is a sidecar; the step never parks)", run.Status)
 	}
 }
 
@@ -181,54 +182,45 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 	}
 }
 
-// TestResumeBlueprintAfterApproval_AbortFinalizesBlueprintTaskOpen is the Part-1
-// floor fix: a blueprint step that queues an external artifact AND aborts in the
-// same turn parks pending_approval with outcome=abort (the coercion's one
-// exception). On approval, ResumeBlueprintAfterApproval must finalize the
-// blueprint — terminate it aborted, leaving the task open — rather than
-// stranding it in 'running' forever (the bug). Mirrors the handler path: flip
-// pending_approval → completed, then call the resume.
-func TestResumeBlueprintAfterApproval_AbortFinalizesBlueprintTaskOpen(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "approve-abort")
+// TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen pins the
+// TFAC-492 terminal gate: a blueprint that completes while a draft PR / ready
+// review is still unresolved does NOT close its task — it leaves it open and
+// surfaced in the derived approval column (in_review). The last artifact
+// resolution closes it (TFAC-382).
+func TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "term-unresolved")
 	stampBotClaim(t, database, taskID)
 	makeRunBlueprintStep(t, database, runID, taskID)
 	blueprintRunID := "bpr-" + runID
-
-	// Queue a draft PR for approval, then conclude the same turn with abort: the
-	// step lands pending_approval with outcome=abort (no continue→finish coercion
-	// — abort is the exception the run.go coercion exempts).
+	// The step completed and left a draft PR unresolved.
+	setRunStatus(t, database, runID, "completed")
 	seedDraftPRArtifact(t, s, runID)
-	task := loadTask(t, s, taskID)
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, blueprintRunID, task,
-		res(`{"outcome":"abort","summary":"opened a draft PR","reason":"approach is wrong; needs a human"}`),
-		t.TempDir(), "", "event", "")
 
-	if got := loadRun(t, s, runID); got.Status != "pending_approval" || got.Outcome != "abort" {
-		t.Fatalf("pre-approval run = {status:%q outcome:%q}, want {pending_approval abort}", got.Status, got.Outcome)
-	}
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
+		loadRun(t, s, runID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
+		domain.BlueprintRunStatusCompleted, "", nil, true)
 
-	// Approve: the handler flips pending_approval → completed, then resumes the
-	// blueprint. With the fix, abort is a legal terminal shape (not a strand).
-	if _, err := s.agentRuns.MarkCompletedIfPendingApproval(context.Background(), runmode.LocalDefaultOrgID, runID); err != nil {
-		t.Fatalf("flip pending_approval → completed: %v", err)
+	if got := readTaskStatus(t, database, taskID); got != "in_review" {
+		t.Errorf("task.status = %q, want in_review (completed with an unresolved artifact leaves the task open in the approval column)", got)
 	}
-	s.ResumeBlueprintAfterApproval(runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID)
+}
 
-	// Blueprint reaches a terminal status (aborted), never stranded running, with
-	// the step's abort reason recorded in the terminal note.
-	var bpStatus, abortReason string
-	if err := database.QueryRow(`SELECT status, COALESCE(abort_reason, '') FROM blueprint_runs WHERE id = ?`, blueprintRunID).Scan(&bpStatus, &abortReason); err != nil {
-		t.Fatalf("read blueprint_run: %v", err)
-	}
-	if bpStatus != "aborted" {
-		t.Errorf("blueprint_run.status = %q, want aborted (approved abort finalizes the blueprint, never strands running)", bpStatus)
-	}
-	if abortReason != "approach is wrong; needs a human" {
-		t.Errorf("blueprint_run.abort_reason = %q, want the step's abort reason recorded", abortReason)
-	}
-	// Abort leaves the task open for a human — never closed done.
-	if got := readTaskStatus(t, database, taskID); got == "done" {
-		t.Errorf("task.status = done; an approved abort must leave the task open")
+// TestTerminateBlueprint_CompletedWithNoUnresolvedArtifactClosesTask is the
+// contrast: a blueprint that completes with no unresolved artifact closes the
+// task as before.
+func TestTerminateBlueprint_CompletedWithNoUnresolvedArtifactClosesTask(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "term-clean")
+	stampBotClaim(t, database, taskID)
+	makeRunBlueprintStep(t, database, runID, taskID)
+	blueprintRunID := "bpr-" + runID
+	setRunStatus(t, database, runID, "completed")
+
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
+		loadRun(t, s, runID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
+		domain.BlueprintRunStatusCompleted, "", nil, true)
+
+	if got := readTaskStatus(t, database, taskID); got != "done" {
+		t.Errorf("task.status = %q, want done (a clean completion with no unresolved artifact closes the task)", got)
 	}
 }
 

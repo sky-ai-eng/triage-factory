@@ -9,11 +9,12 @@ import (
 
 // recomputeTaskBoardColumn is the blueprint-era board placement rule: a
 // bot-claimed task's live column is a recomputed aggregate over its active
-// blueprint_run's step runs — in_review if any run is parked (open or
-// pending_approval), else in_progress. Terminal columns (done / leave-open) are
-// owned by terminateBlueprint, not this helper. These tests pin the aggregate
-// directly by mutating run state and invoking the recompute, without spawning a
-// real agent.
+// blueprint_run's step runs — in_review if the blueprint has an unresolved
+// artifact (a draft PR / ready review, the derived approval signal that replaced
+// pending_approval, TFAC-492) or any run is parked open, else in_progress.
+// Terminal columns (done / leave-open) are owned by terminateBlueprint, not this
+// helper. These tests pin the aggregate directly by mutating run state and
+// invoking the recompute, without spawning a real agent.
 //
 // setupAdvanceFixture seeds an entity + event + task + a 1-step blueprint_run
 // whose single run starts 'running' (see seedRun → seedRunBlueprint).
@@ -42,17 +43,19 @@ func TestRecomputeBoard_OpenSetsInReview(t *testing.T) {
 	}
 }
 
-// pending_approval is the other parked state and lands in the same column —
-// one "needs 👀" column for both human-interaction points.
-func TestRecomputeBoard_PendingApprovalSetsInReview(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "pa")
+// An unresolved artifact (a draft PR) is the derived approval signal and lands
+// the task in the same "needs 👀" column even though no run is parked open — the
+// successor to the pending_approval run status (TFAC-492).
+func TestRecomputeBoard_UnresolvedArtifactSetsInReview(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "unresolved")
 	stampBotClaim(t, database, taskID)
-	setRunStatus(t, database, runID, "pending_approval")
+	// Run stays running; the draft PR it queued is what surfaces the approval column.
+	seedDraftPRArtifact(t, s, runID)
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
-		t.Errorf("task.status = %q, want in_review (pending_approval → needs 👀)", got)
+		t.Errorf("task.status = %q, want in_review (unresolved draft PR → needs 👀)", got)
 	}
 }
 
@@ -80,7 +83,7 @@ func TestRecomputeBoard_BouncesAcrossInteractionPoints(t *testing.T) {
 		t.Fatalf("after resume: status = %q, want in_progress", got)
 	}
 
-	setRunStatus(t, database, runID, "pending_approval")
+	setRunStatus(t, database, runID, "open")
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Fatalf("after second park: status = %q, want in_review", got)
@@ -103,8 +106,8 @@ func TestRecomputeBoard_MultiStepAggregate(t *testing.T) {
 		t.Errorf("all-unparked: status = %q, want in_progress", got)
 	}
 
-	// Now step 1 parks → in_review (any parked run flips the aggregate).
-	setRunStatus(t, database, "step1-multi", "pending_approval")
+	// Now step 1 parks open → in_review (any parked run flips the aggregate).
+	setRunStatus(t, database, "step1-multi", "open")
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Errorf("step parked: status = %q, want in_review", got)
@@ -116,7 +119,7 @@ func TestRecomputeBoard_MultiStepAggregate(t *testing.T) {
 func TestRecomputeBoard_UserClaimedTaskNeutral(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "user-claim")
 	stampUserClaim(t, database, taskID)
-	setRunStatus(t, database, runID, "pending_approval")
+	setRunStatus(t, database, runID, "open")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
@@ -143,7 +146,7 @@ func TestRecomputeBoard_AlreadyTerminalNeutral(t *testing.T) {
 	if _, err := database.Exec(`UPDATE tasks SET status = 'dismissed' WHERE id = ?`, taskID); err != nil {
 		t.Fatalf("park: %v", err)
 	}
-	setRunStatus(t, database, runID, "pending_approval")
+	setRunStatus(t, database, runID, "open")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 

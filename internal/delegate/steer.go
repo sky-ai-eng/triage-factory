@@ -28,18 +28,20 @@ var ErrRunNotSteerable = errors.New("run is not steerable")
 // state:
 //
 //   - open               — a turn ended without a conclusion (works today).
-//   - pending_approval   — a queued review/PR awaits a human; conversation is
-//     independent of approval, so a message resumes the session and the queued
-//     artifact survives untouched.
 //   - completed + abort  — the agent voluntarily stopped; a follow-up can pick
 //     the work back up (its blueprint is re-opened on resume).
+//
+// pending_approval is gone (TFAC-492): runs never park for approval anymore. A
+// terminal blueprint run that left an unresolved artifact (draft PR / ready
+// review) is still message-resumable through the completed+abort path + the
+// feedback ledger — not through a parked status.
 //
 // Keyed on (status, outcome), not status alone: a finish run (completed +
 // outcome='finish') is deliberately excluded — resuming finish runs is a
 // gray area held out to avoid snapshotting every completed run.
 func resumableState(status, outcome string) bool {
 	switch status {
-	case "open", "pending_approval":
+	case "open":
 		return true
 	case "completed":
 		return domain.RunOutcome(outcome) == domain.RunOutcomeAbort
@@ -53,8 +55,8 @@ func resumableState(status, outcome string) bool {
 //
 //   - live (a registered warm process) → Steer it in place through the control
 //     seam (no DB read — the fast path).
-//   - a resumable run (no warm process; open / pending_approval / completed+abort
-//     — see resumableState) → wake it via ResumeOpenRun, which re-invokes the
+//   - a resumable run (no warm process; open / completed+abort — see
+//     resumableState) → wake it via ResumeOpenRun, which re-invokes the
 //     session with the message as the next turn's input.
 //   - anything else → ErrRunNotSteerable.
 //

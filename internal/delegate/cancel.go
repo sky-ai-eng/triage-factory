@@ -67,8 +67,8 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 		return nil
 	}
 
-	// No active goroutine — the run may be parked `open` (or pending_approval)
-	// with no subprocess to kill. Mark it cancelled directly via DB.
+	// No active goroutine — the run may be parked `open` with no subprocess to
+	// kill. Mark it cancelled directly via DB.
 	// MarkCancelledIfActive's status-NOT-IN filter handles every non-terminal
 	// state, so this is also a defensive catch for any other "no goroutine but
 	// row not terminal" edge case.
@@ -119,7 +119,7 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 	}
 	s.broadcastRunUpdate(orgID, runID, "cancelled")
 	// This DB-only cancel path runs only with no live orchestrator goroutine —
-	// the step had parked (open / pending_approval), so the orchestrator already
+	// the step had parked (open), so the orchestrator already
 	// returned and the owning blueprint_run is stuck in 'running'. Finalize it
 	// (cancel the blueprint_run, clean the shared worktree, discard the
 	// blueprint_run-keyed snapshot) so neither the row nor the blob is orphaned.

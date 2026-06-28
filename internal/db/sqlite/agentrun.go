@@ -177,14 +177,15 @@ func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID string) (
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	// Wake any non-finish parked/terminal state: open, pending_approval, or an
-	// aborted run (completed + outcome='abort'). Keyed on (status, outcome) so a
-	// finish run (completed + outcome='finish') is excluded and a racing
-	// approval/resume that already moved the row loses this compare-and-swap.
+	// Wake any non-finish parked/terminal state: open, or an aborted run
+	// (completed + outcome='abort'). Keyed on (status, outcome) so a finish run
+	// (completed + outcome='finish') is excluded and a racing resume that already
+	// moved the row loses this compare-and-swap. pending_approval is gone
+	// (TFAC-492) — runs never park for approval.
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs SET status = 'running', parked_at = NULL
 		WHERE id = ?
-		  AND (status IN ('open', 'pending_approval')
+		  AND (status = 'open'
 		       OR (status = 'completed' AND outcome = 'abort'))
 	`, runID)
 	if err != nil {
@@ -249,20 +250,6 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID str
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
 		                     'pending_approval')
 	`, time.Now().UTC(), runID, runID, runID, runID, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
-}
-
-func (s *agentRunStore) MarkPendingApprovalIfCompleted(ctx context.Context, orgID, runID string) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'pending_approval' WHERE id = ? AND status = 'completed'
-	`, runID)
 	if err != nil {
 		return false, err
 	}
@@ -611,19 +598,19 @@ func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID str
 }
 
 func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {
-	// Resumable-state runs (open / pending_approval / completed+abort) grouped by
-	// their shared snapshot key (org, blueprint_run_id); a key is reapable once
-	// its newest resumable run last parked before the cutoff. The park timestamp
-	// is COALESCE(parked_at, completed_at, started_at): parked_at for an open run
+	// Resumable-state runs (open / completed+abort) grouped by their shared
+	// snapshot key (org, blueprint_run_id); a key is reapable once its newest
+	// resumable run last parked before the cutoff. The park timestamp is
+	// COALESCE(parked_at, completed_at, started_at): parked_at for an open run
 	// (re-stamped each park, so resumes don't age it), completed_at for the
-	// pending_approval / completed+abort terminals, started_at a legacy fallback.
-	// datetime() normalizes the mixed on-disk timestamp formats (CURRENT_TIMESTAMP
-	// text vs Go-bound values) so the MAX is consistent; the cutoff binds as a
-	// canonical UTC string.
+	// completed+abort terminal, started_at a legacy fallback. datetime()
+	// normalizes the mixed on-disk timestamp formats (CURRENT_TIMESTAMP text vs
+	// Go-bound values) so the MAX is consistent; the cutoff binds as a canonical
+	// UTC string.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT org_id, blueprint_run_id
 		FROM runs
-		WHERE status IN ('open', 'pending_approval')
+		WHERE status = 'open'
 		   OR (status = 'completed' AND outcome = 'abort')
 		GROUP BY org_id, blueprint_run_id
 		HAVING MAX(datetime(COALESCE(parked_at, completed_at, started_at))) < datetime(?)
@@ -663,10 +650,6 @@ func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, run
 	return s.MarkFailedIfActive(ctx, orgID, runID)
 }
 
-func (s *agentRunStore) MarkPendingApprovalIfCompletedSystem(ctx context.Context, orgID, runID string) (bool, error) {
-	return s.MarkPendingApprovalIfCompleted(ctx, orgID, runID)
-}
-
 func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
 	return s.MarkCancelledIfActive(ctx, orgID, runID, stopReason, summary)
 }
@@ -680,12 +663,12 @@ func (s *agentRunStore) ListParkedWorktreePathsSystem(ctx context.Context, orgID
 }
 
 // ListParkedWorktreePaths returns the worktree dirs the startup sweep must keep
-// warm — parked (open/pending_approval) runs whose owning blueprint_run is still
-// 'running'. A parked run under an already-terminal blueprint_run is NOT
-// resumable (every resume path gates on cr.Status == running), so its worktree
-// must NOT be preserved: preserving it would leave a checked-out
-// branch on disk that the boot reconcile then orphans by cancelling the row,
-// reviving the "refusing to fetch into a branch checked out in a worktree" loop.
+// warm — parked `open` runs whose owning blueprint_run is still 'running'. A
+// parked run under an already-terminal blueprint_run is NOT resumable (every
+// resume path gates on cr.Status == running), so its worktree must NOT be
+// preserved: preserving it would leave a checked-out branch on disk that the
+// boot reconcile then orphans by cancelling the row, reviving the "refusing to
+// fetch into a branch checked out in a worktree" loop.
 func (s *agentRunStore) ListParkedWorktreePaths(ctx context.Context, orgID string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -693,7 +676,7 @@ func (s *agentRunStore) ListParkedWorktreePaths(ctx context.Context, orgID strin
 	rows, err := s.q.QueryContext(ctx,
 		`SELECT r.worktree_path FROM runs r
 		 LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
-		 WHERE r.status IN ('open', 'pending_approval')
+		 WHERE r.status = 'open'
 		   AND COALESCE(r.worktree_path, '') != ''
 		   AND (br.id IS NULL OR br.status = 'running')`)
 	if err != nil {

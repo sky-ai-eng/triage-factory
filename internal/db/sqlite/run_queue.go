@@ -29,7 +29,7 @@ var _ db.RunQueueStore = (*runQueueStore)(nil)
 // a SQL IN-list body. The reconcile sweep and the orphaned-child cancel
 // (blueprints.go) interpolate it instead of re-spelling the literal, so the
 // "non-terminal child" predicate has one definition. Other queries that add
-// dormant statuses (open/pending_approval) to this set keep their own list.
+// the dormant `open` status to this set keep their own list.
 const runTerminalStatusesSQL = `'completed','failed','cancelled','task_unsolvable'`
 
 // runQueueClaimCols is the column list ClaimNextRun returns, shared with the
@@ -115,7 +115,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
 		WHERE status NOT IN (
 			'queued',
 			'completed','failed','cancelled','task_unsolvable',
-			'open','pending_approval'
+			'open'
 		)
 		AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
 	`)

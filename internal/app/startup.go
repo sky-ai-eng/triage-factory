@@ -96,7 +96,7 @@ func (a *App) startPolling() {
 }
 
 // cleanupWorktrees removes orphaned worktrees from crashed runs. Parked
-// runs (open / pending_approval) are preserved whole — their worktree dir
+// `open` runs are preserved whole — their worktree dir
 // and ~/.claude/projects session JSONL are the warm resume cache. A load
 // failure just forgoes that optimization; those runs still resume by
 // rehydrating from snapshot.

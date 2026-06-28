@@ -547,13 +547,6 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Errorf("double-resume from running succeeded; want refused")
 		}
 
-		// pending_approval → ok (a queued review/PR is message-resumable; the
-		// conversation is independent of approval).
-		paRun := seedAgentRunForTest(t, store, orgID, seed, "pending_approval")
-		if ok, err := store.MarkResuming(ctx, orgID, paRun); err != nil || !ok {
-			t.Errorf("Resuming from pending_approval: ok=%v err=%v, want true", ok, err)
-		}
-
 		// completed + outcome=abort → ok (an aborted run is message-resumable).
 		abortRun := seedAgentRunForTest(t, store, orgID, seed, "running")
 		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human"); err != nil {
@@ -872,14 +865,17 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 
-		// open + pending_approval WITH a worktree path → included.
+		// open WITH a worktree path → included.
 		openRun := seedAgentRunForTest(t, store, orgID, seed, "open")
 		if err := store.SetWorktreePath(ctx, orgID, openRun, "/tmp/triagefactory-runs/open"); err != nil {
 			t.Fatalf("set worktree (open): %v", err)
 		}
-		pending := seedAgentRunForTest(t, store, orgID, seed, "pending_approval")
-		if err := store.SetWorktreePath(ctx, orgID, pending, "/tmp/triagefactory-runs/pending"); err != nil {
-			t.Fatalf("set worktree (pending): %v", err)
+		// completed WITH a worktree → excluded by the status filter. A completed run
+		// that left an unresolved artifact no longer parks (TFAC-492), so its
+		// worktree is not preserved as a warm resume cache.
+		completed := seedAgentRunForTest(t, store, orgID, seed, "completed")
+		if err := store.SetWorktreePath(ctx, orgID, completed, "/tmp/triagefactory-runs/completed"); err != nil {
+			t.Fatalf("set worktree (completed): %v", err)
 		}
 		// open WITHOUT a worktree → excluded by the COALESCE filter.
 		_ = seedAgentRunForTest(t, store, orgID, seed, "open")
@@ -912,8 +908,8 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if !got["/tmp/triagefactory-runs/open"] {
 			t.Error("open worktree missing from ListParkedWorktreePaths")
 		}
-		if !got["/tmp/triagefactory-runs/pending"] {
-			t.Error("pending_approval worktree missing from ListParkedWorktreePaths")
+		if got["/tmp/triagefactory-runs/completed"] {
+			t.Error("completed worktree leaked — status filter failed (completed runs no longer park)")
 		}
 		if got["/tmp/triagefactory-runs/running"] {
 			t.Error("running worktree leaked — status filter failed")
@@ -921,8 +917,8 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if got["/tmp/triagefactory-runs/orphan"] {
 			t.Error("parked worktree under a terminal blueprint_run leaked — running-parent filter failed")
 		}
-		if len(got) != 2 {
-			t.Errorf("got %d parked paths, want 2 (%v)", len(got), paths)
+		if len(got) != 1 {
+			t.Errorf("got %d parked paths, want 1 (%v)", len(got), paths)
 		}
 
 		// System variant (admin pool; the startup sweep has no JWT-claims

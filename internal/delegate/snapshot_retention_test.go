@@ -13,14 +13,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 )
 
-// TestProcessCompletion_PendingApprovalWritesSnapshot: every pending_approval
-// flip now writes a workspace snapshot — not just abort-outcome ones — so a user
-// can cold-resume a parked run before approving the queued artifact. Here a
-// continue outcome is coerced finish by the queued PR, and the finish-coerced
-// flip still snapshots.
-func TestProcessCompletion_PendingApprovalWritesSnapshot(t *testing.T) {
+// TestProcessCompletion_DraftPRWritesNoSnapshot: a completed step that queued a
+// draft PR no longer parks or snapshots (TFAC-492). The artifact is an async
+// sidecar — the step completes with its real outcome (continue) and is not
+// resumable through a parked status, so no workspace snapshot is written.
+func TestProcessCompletion_DraftPRWritesNoSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "pa-snap")
+	s, database, runID, taskID := setupAdvanceFixture(t, "draftpr-nosnap")
 	wireBlobStore(t, s)
 	bpr := blueprintRunIDForRun(t, database, runID)
 
@@ -30,13 +29,13 @@ func TestProcessCompletion_PendingApprovalWritesSnapshot(t *testing.T) {
 	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
 		res(`{"outcome":"continue","summary":"opened a PR"}`), t.TempDir(), "", "event", "")
 
-	if !parked {
-		t.Fatal("processCompletion(pending flip) = false; want parked=true")
+	if parked {
+		t.Fatal("processCompletion(draft PR) = true; want parked=false (a draft PR is a sidecar; the step never parks)")
 	}
-	if run := loadRun(t, s, runID); run.Status != "pending_approval" || run.Outcome != "finish" {
-		t.Fatalf("run = {status:%q outcome:%q}, want {pending_approval finish}", run.Status, run.Outcome)
+	if run := loadRun(t, s, runID); run.Status != "completed" || run.Outcome != "continue" {
+		t.Fatalf("run = {status:%q outcome:%q}, want {completed continue}", run.Status, run.Outcome)
 	}
-	assertSnapshotPresent(t, s, bpr, true)
+	assertSnapshotPresent(t, s, bpr, false)
 }
 
 // TestProcessCompletion_PlainAbortWritesSnapshot: a plain abort (completed +

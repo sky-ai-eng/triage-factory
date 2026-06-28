@@ -155,23 +155,24 @@ func TestResumeOpenRun_InitiatesResume(t *testing.T) {
 	}
 }
 
-// TestResumeOpenRun_EarlyExitFinalizesBlueprint is the regression for the
-// pending_approval strand: a resume that exits early (here a cold-rehydrate
-// failure; a mid-resume cancel shares the same non-disposed defer) must finalize
-// the blueprint and discard its snapshot — not strand the blueprint_run
-// `running` with a blob the reaper will never see (the run is no longer in a
-// resumable state). pending_approval is the case that regressed: it doesn't
-// re-open a blueprint, so the old abort-only defer never fired for it.
+// TestResumeOpenRun_EarlyExitFinalizesBlueprint is the regression for the parked
+// resume strand: a resume that exits early (here a cold-rehydrate failure; a
+// mid-resume cancel shares the same non-disposed defer) must finalize the
+// blueprint and discard its snapshot — not strand the blueprint_run `running`
+// with a blob the reaper will never see (the run is no longer in a resumable
+// state). An `open` step under a still-running blueprint is the case that
+// regressed: it doesn't re-open a blueprint, so the old abort-only defer never
+// fired for it.
 func TestResumeOpenRun_EarlyExitFinalizesBlueprint(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, run, _ := setupAdvanceFixture(t, "pa-strand")
+	s, database, run, _ := setupAdvanceFixture(t, "open-strand")
 	bpr := blueprintRunIDForRun(t, database, run)
 	wireBlobStore(t, s)
 	// A snapshot passes the workspace pre-flight; the stub blob then fails the
 	// cold rehydrate (no subprocess), driving the early failure exit.
 	putTestSnapshot(t, s, bpr)
-	if _, err := database.Exec(`UPDATE runs SET status='pending_approval', worktree_path='/tmp/does-not-exist-pa-strand' WHERE id=?`, run); err != nil {
-		t.Fatalf("park pending_approval: %v", err)
+	if _, err := database.Exec(`UPDATE runs SET status='open', worktree_path='/tmp/does-not-exist-open-strand' WHERE id=?`, run); err != nil {
+		t.Fatalf("park open: %v", err)
 	}
 
 	if err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, run, "carry on", runmode.LocalDefaultUserID); err != nil {
@@ -184,7 +185,7 @@ func TestResumeOpenRun_EarlyExitFinalizesBlueprint(t *testing.T) {
 		t.Fatalf("read blueprint_run status: %v", err)
 	}
 	if bpStatus == "running" {
-		t.Errorf("blueprint_run stranded 'running' after a failed pending_approval resume; want finalized")
+		t.Errorf("blueprint_run stranded 'running' after a failed resume; want finalized")
 	}
 	assertSnapshotPresent(t, s, bpr, false) // discarded, not orphaned
 }

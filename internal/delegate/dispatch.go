@@ -83,8 +83,8 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 // reconcileRunQueue is the boot crash-recovery sweep (decision #4). Runs left
 // mid-flight by a crash (claimed/running/setup statuses) are re-queued so the
 // dispatcher re-claims and re-runs them; a mid-flight blueprint thus resumes by
-// re-running its current step. Dormant runs (open, pending_approval) are left
-// parked — they resume through their own paths, not the queue.
+// re-running its current step. Dormant `open` runs are left parked — they resume
+// through their own paths, not the queue.
 func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	// No step-plan handling needed: a re-queued mid-flight run is re-claimed by
 	// dispatchClaimedRun, which reads the plan frozen on its blueprint_run (off
@@ -347,7 +347,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 // that has reached a terminal (or parked) state, advance the blueprint_run.
 // This is the post-step switch lifted out of the old runBlueprint loop —
 // continue→enqueue-next, finish→complete+close, abort→leave-open,
-// open/pending_approval→leave parked — now driven by the DB rather than a
+// open→leave parked — now driven by the DB rather than a
 // goroutine stack. It calls recomputeTaskBoardColumn on every transition so the
 // board stays live under the queue model.
 func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, stepRun domain.AgentRun, cfg runConfig, startTime time.Time) {
@@ -360,8 +360,10 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 
 	// Parked mid-step: leave the blueprint running, the worktree on disk, and the
 	// snapshot in the blob store for the resume path. The aggregate column lands
-	// the task in_review.
-	if stepRun.Status == "open" || stepRun.Status == "pending_approval" {
+	// the task in_review. Only `open` parks now (TFAC-492): a step that queued a
+	// draft PR / pending review completes normally and the orchestrator advances —
+	// the artifact is a sidecar, surfaced via the derived approval column below.
+	if stepRun.Status == "open" {
 		dispatchLog.Info("blueprint_run step paused; blueprint remains running", "blueprint_run", br.ID, "step", stepIdx, "status", stepRun.Status)
 		s.recomputeTaskBoardColumn(orgID, br.TaskID)
 		return

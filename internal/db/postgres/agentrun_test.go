@@ -532,9 +532,9 @@ func TestAgentRunStore_Postgres_Create_UnderAppPoolRLS(t *testing.T) {
 // TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims
 // pins the routing the SKY-299 delegate spawner uses for manual-run
 // bookkeeping: lifecycle writes (Complete, MarkCancelledIfActive,
-// MarkResuming, MarkPendingApprovalIfCompleted) wrapped in
-// SyntheticClaimsWithTx must pass RLS under tf_app and land the
-// expected status. Mirrors the spawner's per-call-site branch:
+// MarkResuming) wrapped in SyntheticClaimsWithTx must pass RLS under
+// tf_app and land the expected status. Mirrors the spawner's per-call-site
+// branch:
 //
 //	if triggerType == "manual" {
 //	    s.tx.SyntheticClaimsWithTx(...) // this path
@@ -633,23 +633,9 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 		t.Fatalf("Complete under synth claims: %v", err)
 	}
 
-	// MarkPendingApprovalIfCompleted (the guarded transition for
-	// pending-review/PR runs).
-	var flipped bool
-	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		f, mErr := tx.AgentRuns.MarkPendingApprovalIfCompleted(ctx, orgID, runID)
-		flipped = f
-		return mErr
-	}); err != nil {
-		t.Fatalf("MarkPendingApprovalIfCompleted under synth claims: %v", err)
-	}
-	if !flipped {
-		t.Errorf("MarkPendingApprovalIfCompleted: flipped=false, want true (row was completed)")
-	}
-
-	// Verify on admin: row landed in pending_approval, totals
-	// reflect the AddPartialTotals + Complete merge, creator stayed
-	// the original user.
+	// Verify on admin: row landed in completed (runs never park in
+	// pending_approval anymore, TFAC-492), totals reflect the
+	// AddPartialTotals + Complete merge, creator stayed the original user.
 	var (
 		status        string
 		totalCostUSD  float64
@@ -664,8 +650,8 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	`, runID).Scan(&status, &totalCostUSD, &durationMs, &numTurns, &stopReason, &creatorUserID); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if status != "pending_approval" {
-		t.Errorf("status = %q, want pending_approval", status)
+	if status != "completed" {
+		t.Errorf("status = %q, want completed", status)
 	}
 	if totalCostUSD != 0.75 {
 		t.Errorf("total_cost_usd = %v, want 0.75 (0.5 partial + 0.25 complete)", totalCostUSD)

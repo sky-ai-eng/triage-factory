@@ -1,7 +1,9 @@
 // Generic agent execution loop and the post-stream branching that turns a
 // terminal completion into the right DB state — record the parsed outcome,
-// finalize the run row, and (when the agent queued a review/PR) park it in
-// pending_approval. Shared between the initial Delegate path and the
+// finalize the run row, and snapshot a voluntarily-aborted run for resume. A
+// queued draft PR / pending review is an async sidecar artifact that never parks
+// the run (TFAC-492) — the step completes with its real outcome and the
+// orchestrator advances. Shared between the initial Delegate path and the
 // resume-with-message flow. The concluded-vs-open turn classification and the
 // invalid-envelope re-prompt live on the live driver (live.go); by the time a
 // result reaches processCompletion it is a conclusion (or an IsError / crash
@@ -111,11 +113,12 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string) {
 	orgID := cfg.orgID
 	// parked is set true when this run ends dormant rather than terminating:
-	// idle hibernation flips it to `open` (runAgent, below), or processCompletion
-	// parks it in `pending_approval`. The per-run cleanup defers below read it to
-	// KEEP the worktree and session JSONL on disk as the warm resume cache —
-	// mirroring the isBlueprintStep skip. Captured by reference
-	// by the deferred closures, so they observe its final value at return.
+	// idle hibernation flips it to `open` (runAgent, below). The per-run cleanup
+	// defers below read it to KEEP the worktree and session JSONL on disk as the
+	// warm resume cache — mirroring the isBlueprintStep skip. Captured by
+	// reference by the deferred closures, so they observe its final value at
+	// return. A completed run never parks anymore (TFAC-492): a queued artifact is
+	// a sidecar, not a reason to hold the run open.
 	var parked bool
 	if cfg.hasWT {
 		// GitHub PR cleanup. Best-effort cleanup on return; the worktree ID is unique per run
@@ -125,9 +128,8 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				return
 			}
 			if parked {
-				// Dormant (idle-closed `open`, or `pending_approval`): the worktree
-				// is the warm cache the resume reuses (a snapshot was taken too, for
-				// the cold path).
+				// Dormant (idle-closed `open`): the worktree is the warm cache the
+				// resume reuses (a snapshot was taken too, for the cold path).
 				return
 			}
 			// Capture the RemoveAt error rather than discarding it. If the
@@ -451,7 +453,8 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 // resume). It classifies the turn-end and acts uniformly:
 //
 //   - valid conclusion → record the outcome (finalize / let the orchestrator
-//     advance or close); a queued review/PR parks it in pending_approval.
+//     advance or close). A queued review/PR is an async sidecar artifact and
+//     never parks the run (TFAC-492); the step completes with its real outcome.
 //   - no conclusion (prose / nothing) → the run is open, not a termination:
 //     park it open (snapshot + flip + keep the warm worktree) and return. The
 //     live driver normally consumes this in its loop; it reaches here only from
@@ -472,9 +475,11 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 // a DB hiccup can't silently mis-namespace the memory or mis-route the task
 // close.
 //
-// Returns parked: true when the run ended dormant (open, or pending_approval)
-// rather than terminal, so runAgent's cleanup defers keep the worktree +
-// session JSONL on disk as the warm resume cache.
+// Returns parked: true when the run ended dormant (open) rather than terminal,
+// so runAgent's cleanup defers keep the worktree + session JSONL on disk as the
+// warm resume cache. A terminal completion (including one that produced a draft
+// PR / pending review) returns false — the artifact is a resolvable sidecar, not
+// a reason to park.
 func (s *Spawner) processCompletion(
 	ctx context.Context,
 	orgID, runID, blueprintRunID string,
@@ -560,48 +565,13 @@ func (s *Spawner) processCompletion(
 	// bypass via the admin pool.
 	bgCtx := context.Background()
 
-	// Does this completed run carry a queued external action awaiting human
-	// approval? Two artifact kinds park a completed run in pending_approval:
-	//   - a review artifact whose ready sentinel is set: agent ran `pr
-	//     submit-review`, which finalized the GitHub pending review for approval.
-	//     A start-review that never reached submit-review has a pending review
-	//     artifact with NO ready sentinel and must NOT park (fixes the spurious
-	//     start-but-not-submit park) — FirstReadyReview enforces that.
-	//   - a draft PR artifact: agent ran `pr create`, which opens a real draft
-	//     PR and records a pull_request artifact in state=draft.
-	// Detected once here — before the terminal write — so a blueprint step's
-	// outcome can be coerced (below) before it's persisted, and reused for the
-	// pending_approval flip after the write. One admin-pool by-run read (no JWT
-	// claims in scope), on bgCtx so a racing cancel doesn't silently strand a
-	// queued action outside the approval queue.
-	hasPending := false
-	if status == "completed" {
-		// A lookup error leaves hasPending=false, which would let the run finish
-		// 'completed' while a queued review/PR strands outside the approval queue
-		// (and skips the blueprint-step coercion below) — log it so that failure
-		// mode is observable rather than silent.
-		arts, aErr := s.artifacts.ListByRunSystem(bgCtx, orgID, runID)
-		if aErr != nil {
-			delegateLog.Warn("artifact lookup for run failed; a queued review/PR may strand outside the approval queue", "run", runID, "error", aErr)
-		}
-		if domain.FirstReadyReview(arts) != nil || domain.FirstDraftPullRequest(arts) != nil {
-			hasPending = true
-		}
-	}
-
-	// External-action coercion: a step that took a terminal external action
-	// (queued a review or PR for human approval) ends the blueprint — there's
-	// nothing for a follow-on step to do once the work is awaiting a human, and
-	// the post-approval resume (ResumeBlueprintAfterApproval) finalizes only on a
-	// finish outcome. Coerce anything-but-abort → finish before the terminal
-	// write: continue (hand-off is moot), a missing outcome (gate exhausted —
-	// the old single-run finish fallback that's now gone), and finish itself
-	// (no-op) all resolve to finish. An explicit abort is the one exception — the
-	// agent deliberately stopped, so the task stays open even with a queued
-	// action. Replaces the synthetic --final verdict the chain path inserted.
-	if hasPending && domain.RunOutcome(outcome) != domain.RunOutcomeAbort {
-		outcome = string(domain.RunOutcomeFinish)
-	}
+	// A queued draft PR / pending review NO LONGER parks the run (TFAC-492). The
+	// artifact was already recorded by the exec choke point and is an async
+	// sidecar: a human resolves it independently and it never blocks step
+	// progression. So there's no external-action coercion and no pending_approval
+	// flip here — the step completes with its real outcome (continue advances,
+	// finish terminates) per decideBlueprintStep, and the approval state is
+	// derived downstream from the unresolved-artifact set (has_unresolved_artifacts).
 
 	if triggerType == "manual" {
 		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
@@ -615,64 +585,19 @@ func (s *Spawner) processCompletion(
 
 	s.updateBreakerCounter(task.ID, triggerType, status)
 
-	if status == "completed" {
-		// A queued external action (detected above) parks the run in
-		// pending_approval: the user approves via the UI and the server
-		// flips it back to completed. Frontend distinguishes by which
-		// side-table has a row (the /api/agent/runs/{id} response carries
-		// pending_kind). A single run stays pending_approval; a blueprint
-		// step's outcome was already coerced to finish above so the
-		// post-approval resume terminates the blueprint.
-		if hasPending {
-			// Guarded transition: only flip to pending_approval if the
-			// row is still 'completed'. A racing cancel/takeover after
-			// agentRuns.Complete would otherwise be silently clobbered
-			// by an unconditional UPDATE. The flip comes FIRST — the
-			// review/PR approval card keys off this status, so nothing
-			// user-visible waits on workspace I/O.
-			var flippedToPending bool
-			var flipErr error
-			if triggerType == "manual" {
-				flipErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-					f, ferr := ts.AgentRuns.MarkPendingApprovalIfCompleted(bgCtx, orgID, runID)
-					flippedToPending = f
-					return ferr
-				})
-			} else {
-				flippedToPending, flipErr = s.agentRuns.MarkPendingApprovalIfCompletedSystem(bgCtx, orgID, runID)
-			}
-			if flipErr != nil {
-				delegateLog.Warn("set pending_approval for run failed", "run", runID, "error", flipErr)
-			} else if flippedToPending {
-				status = "pending_approval"
-				// Dormant: keep the worktree as the warm cache.
-				parked = true
-				// Snapshot every pending_approval flip, whatever the outcome: a
-				// run parked in any non-finish state is message-resumable, and a
-				// user can message it (resuming the session) before approving the
-				// queued artifact — a resume that lands without the warm worktree
-				// (host loss / sandbox reclaim) must rebuild from this blob.
-				// Written AFTER the flip: the snapshot only matters once the warm
-				// worktree is gone, never in the flip-to-visible window, so
-				// nothing user-visible waits on the git-bundle cost. Keyed by
-				// namespace (blueprint_run_id). A finish-coerced flip's blob is
-				// dropped by terminateBlueprint on approval if never resumed;
-				// retention is otherwise bounded by the TTL sweep.
-				if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
-					delegateLog.Warn("snapshot workspace for run after pending_approval failed", "run", runID, "error", err)
-				}
-			}
-		} else if domain.RunOutcome(outcome) == domain.RunOutcomeAbort {
-			// A plain abort (completed + outcome=abort, no queued artifact) is
-			// message-resumable, so snapshot its workspace now — while the
-			// worktree and session transcript are still on disk — then let the
-			// per-run cleanup defers tear the worktree down (parked stays false:
-			// keeping every aborted run's worktree warm is not acceptable, so
-			// cold rehydrate from this blob is the resume path). terminateBlueprint
-			// retains the blob for an aborted terminal; the TTL sweep reaps it.
-			if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
-				delegateLog.Warn("snapshot workspace for aborted run failed", "run", runID, "error", err)
-			}
+	// A completed+abort run (the agent deliberately stopped) is message-resumable,
+	// so snapshot its workspace now — while the worktree and session transcript
+	// are still on disk — then let the per-run cleanup defers tear the worktree
+	// down (parked stays false: keeping every aborted run's worktree warm is not
+	// acceptable, so cold rehydrate from this blob is the resume path).
+	// terminateBlueprint retains the blob for an aborted terminal; the TTL sweep
+	// reaps it. A completed run that produced a draft PR / pending review does NOT
+	// park or snapshot for that reason (TFAC-492) — the artifact is a sidecar
+	// resolved asynchronously, the step completed with its real outcome, and the
+	// approval state is derived from the unresolved-artifact set downstream.
+	if status == "completed" && domain.RunOutcome(outcome) == domain.RunOutcomeAbort {
+		if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
+			delegateLog.Warn("snapshot workspace for aborted run failed", "run", runID, "error", err)
 		}
 	}
 
@@ -682,8 +607,9 @@ func (s *Spawner) processCompletion(
 	// terminal column. A step completion must never close the task here — the
 	// next step may be about to run.
 	s.broadcastRunUpdate(orgID, runID, status)
-	// Recompute the aggregate board column. A pending_approval flip lands the
-	// task in in_review here; a plain completion keeps it in_progress until the
+	// Recompute the aggregate board column. A completed step that left an
+	// unresolved artifact (draft PR / ready review) lands the task in_review (the
+	// derived approval column); otherwise it stays in_progress until the
 	// orchestrator advances (next step) or terminates (done / leave-open).
 	s.recomputeTaskBoardColumn(orgID, task.ID)
 
@@ -691,7 +617,7 @@ func (s *Spawner) processCompletion(
 	// show as an error toast so the user notices even if they've clicked
 	// away from the runs page.
 	switch status {
-	case "completed", "pending_approval":
+	case "completed":
 		toast.Success(s.wsHub, orgID, fmt.Sprintf("Run %s completed", shortRunID(runID)))
 	case "failed":
 		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s failed: %s", shortRunID(runID), truncateToastMsg(resultSummary, 160)))

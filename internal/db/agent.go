@@ -97,12 +97,13 @@ type AgentRunStore interface {
 
 	// MarkResuming flips a resumable run back to running when it is woken by a
 	// follow-up message (a resume goroutine is about to spawn). The resumable
-	// set is every non-finish parked/terminal state: `open`, `pending_approval`,
-	// and an aborted run (completed + outcome='abort'). The (status, outcome)
-	// compare-and-swap is the wake race gate — ok=false means the run is no
-	// longer resumable (a concurrent resume already flipped it running, or an
-	// approval/finish finalized it), so the caller must not spawn the resume and
-	// maps the miss to 409. A finish run (completed + outcome='finish') is
+	// set is every non-finish parked/terminal state: `open` and an aborted run
+	// (completed + outcome='abort'). pending_approval is gone (TFAC-492) — runs
+	// never park for approval. The (status, outcome) compare-and-swap is the wake
+	// race gate — ok=false means the run is no longer resumable (a concurrent
+	// resume already flipped it running, or a finish finalized it), so the caller
+	// must not spawn the resume and maps the miss to 409. A finish run (completed
+	// + outcome='finish') is
 	// deliberately excluded. Clears parked_at on the wake (the run is no longer
 	// parked) so an open run's next park stamps a fresh timestamp.
 	MarkResuming(ctx context.Context, orgID, runID string) (bool, error)
@@ -125,9 +126,8 @@ type AgentRunStore interface {
 
 	// SetStatus writes runs.status without a guard. Used by the
 	// delegate spawner for transient progress transitions
-	// (fetching, cloning, agent_starting, running) and the
-	// completed → pending_approval flip the side-table gates
-	// trigger. Guarded transitions go through the Mark* methods.
+	// (fetching, cloning, agent_starting, running). Guarded
+	// transitions go through the Mark* methods.
 	SetStatus(ctx context.Context, orgID, runID, status string) error
 
 	// SetWorktreePath writes runs.worktree_path. Set as the
@@ -160,21 +160,12 @@ type AgentRunStore interface {
 	// resumable run.
 	MarkFailedIfActive(ctx context.Context, orgID, runID string) (bool, error)
 
-	// MarkPendingApprovalIfCompleted flips a 'completed' run to
-	// 'pending_approval' iff the row is currently 'completed'.
-	// The delegate spawner's processCompletion uses this when a
-	// pending review/PR side-table row gates the terminal status.
-	// Returns ok=false on a racing terminal write (cancel) so the
-	// racing path's status stands.
-	MarkPendingApprovalIfCompleted(ctx context.Context, orgID, runID string) (bool, error)
-
-	// MarkCompletedIfPendingApproval is the inverse transition: flips
-	// a 'pending_approval' run back to 'completed' iff the row is
-	// currently 'pending_approval'. The reviews / artifact-PR handlers
-	// call this after the user submits the artifact (review posted or
-	// PR opened) so the run row leaves the approval queue. The guard
-	// prevents racing terminal writes (cancel, discard) from
-	// being clobbered if they reach the row first.
+	// MarkCompletedIfPendingApproval flips a legacy 'pending_approval' run back
+	// to 'completed' iff the row is currently 'pending_approval'. Runs never park
+	// in pending_approval anymore (TFAC-492), so this is a no-op on current data;
+	// it is retained only until the legacy approve/dismiss resolve endpoints that
+	// still call it are reworked (TFAC-382). The guard prevents racing terminal
+	// writes from being clobbered if they reach the row first.
 	MarkCompletedIfPendingApproval(ctx context.Context, orgID, runID string) (bool, error)
 
 	// MarkDiscarded marks a pending_approval run as cancelled
@@ -203,9 +194,11 @@ type AgentRunStore interface {
 	// nil. MemoryMissing derived per Get.
 	ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.AgentRun, error)
 
-	// PendingApprovalIDForTask returns the id of the (single)
-	// pending_approval run on a task, or "" if none. Bounded to
-	// one row by construction.
+	// PendingApprovalIDForTask returns the id of the (single) legacy
+	// pending_approval run on a task, or "" if none. Runs never park in
+	// pending_approval anymore (TFAC-492), so on current data this always returns
+	// "" — retained only until the legacy requeue/discard resolve endpoint that
+	// still calls it is reworked (TFAC-382). Bounded to one row by construction.
 	PendingApprovalIDForTask(ctx context.Context, orgID, taskID string) (string, error)
 
 	// HasActiveForTask returns true if the task has any agent
@@ -341,21 +334,19 @@ type AgentRunStore interface {
 	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error
 	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID string) (bool, error)
-	MarkPendingApprovalIfCompletedSystem(ctx context.Context, orgID, runID string) (bool, error)
 	HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
 
 	// ListReapableSnapshotKeysSystem returns the (org, blueprint_run_id) of
 	// every blueprint_run all of whose resumable-state runs (open /
-	// pending_approval / completed+abort) last parked before cutoff — the
-	// workspace snapshot keys the retention reaper may safely drop. A
-	// blueprint_run with any resumable run still within the TTL is omitted (its
-	// shared blob is still wanted). The park timestamp is COALESCE(parked_at,
-	// completed_at, started_at): parked_at tracks an open run's last park (stamped
-	// by MarkOpen, cleared by MarkResuming, so a repeatedly-resumed long-lived
-	// run is keyed off its most recent park rather than its initial start),
-	// completed_at covers the pending_approval / completed+abort terminals, and
-	// started_at is a legacy fallback. System-wide / no org scoping — the
+	// completed+abort) last parked before cutoff — the workspace snapshot keys the
+	// retention reaper may safely drop. A blueprint_run with any resumable run
+	// still within the TTL is omitted (its shared blob is still wanted). The park
+	// timestamp is COALESCE(parked_at, completed_at, started_at): parked_at tracks
+	// an open run's last park (stamped by MarkOpen, cleared by MarkResuming, so a
+	// repeatedly-resumed long-lived run is keyed off its most recent park rather
+	// than its initial start), completed_at covers the completed+abort terminal,
+	// and started_at is a legacy fallback. System-wide / no org scoping — the
 	// retention sweep is a maintenance job that spans tenants; the admin pool is
 	// the right door (BYPASSRLS) since the reaper holds no JWT claims.
 	ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error)

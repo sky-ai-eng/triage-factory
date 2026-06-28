@@ -237,9 +237,9 @@ func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
 }
 
 // TestProcessCompletion_FinishReturnsNotParked: a terminal finish returns
-// parked=false so runAgent's cleanup defers tear the worktree down (a
-// pending_approval flip is the only thing that parks a completed run, and that's
-// covered in blueprint_advance_test.go).
+// parked=false so runAgent's cleanup defers tear the worktree down. A completed
+// run never parks anymore (TFAC-492) — only an idle-hibernated `open` turn does,
+// covered elsewhere.
 func TestProcessCompletion_FinishReturnsNotParked(t *testing.T) {
 	s, _, runID, taskID := setupAdvanceFixture(t, "pc-finish")
 	if parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, "",

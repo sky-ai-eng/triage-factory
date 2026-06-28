@@ -5,9 +5,9 @@
 // fast path (resume uses it directly, rehydrate is a no-op); a missing one
 // rebuilds from the snapshot — never a brick.
 //
-// Two dormancy triggers are wired today: idle hibernation to `open`
-// (hibernatePark, live.go) and a flip to pending_approval (processCompletion).
-// A third — an executor-drain/scale-down trigger — is a forward seam for the
+// Two snapshot triggers are wired today: idle hibernation to `open`
+// (hibernatePark, live.go) and a completed+abort terminal (processCompletion),
+// both message-resumable. A third — an executor-drain/scale-down trigger — is a forward seam for the
 // execution-plane split: there are no executors to drain yet, so it is
 // intentionally NOT wired. When it lands it calls snapshotWorkspace with the
 // same key, identically to the two triggers above.
@@ -352,10 +352,10 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID, owner, repo,
 
 // DiscardWorkspaceSnapshot deletes the durable workspace snapshot for a
 // standalone (non-blueprint) run that has reached a terminal state via the
-// approval path: the reviews / pending-PR handlers call it after flipping a
-// pending_approval run back to completed — the single-run mirror of
-// terminateBlueprint's snapshot cleanup. Keyed by run_id (a standalone run's
-// snapshot key). Idempotent and nil-safe.
+// approval path: the artifact-approve handler calls it for a standalone run
+// whose approval is its terminal — the single-run mirror of terminateBlueprint's
+// snapshot cleanup. Keyed by run_id (a standalone run's snapshot key).
+// Idempotent and nil-safe.
 func (s *Spawner) DiscardWorkspaceSnapshot(orgID, runID string) {
 	s.discardWorkspaceSnapshot(context.Background(), orgID, runID)
 }
