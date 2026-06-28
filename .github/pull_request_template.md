@@ -54,5 +54,4 @@ FOOTER — keep exactly ONE of the two lines below:
 -->
 
 Resolves [TFAC-NNN](https://linear.app/sky-ai-eng/issues/TFAC-NNN)
-
-<!-- Unticketed -->
+Unticketed
