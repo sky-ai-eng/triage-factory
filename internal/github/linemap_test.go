@@ -11,10 +11,12 @@ func TestParseHunkOldStart(t *testing.T) {
 	}{
 		{"@@ -1,4 +1,4 @@", 1},
 		{"@@ -10,7 +12,8 @@", 10},
-		{"@@ -0,0 +1,3 @@", 0},               // new file
-		{"@@ -1,3 +0,0 @@", 1},               // deleted file
-		{"@@ -5 +5 @@", 5},                   // counts omitted (== 1)
-		{"@@ -42,6 +42,6 @@ func foo()", 42}, // with section text
+		{"@@ -0,0 +1,3 @@", 0},                // new file
+		{"@@ -1,3 +0,0 @@", 1},                // deleted file
+		{"@@ -5 +5 @@", 5},                    // counts omitted (== 1)
+		{"@@ -42,6 +42,6 @@ func foo()", 42},  // with section text
+		{"@@ -1,3 +1,3 @@ -deprecated_fn", 1}, // section text starting with a hyphen
+		{"@@ -2,0 +3,1 @@", 2},                // pure-insertion hunk (oldLen 0)
 		{"no header here", 0},
 	}
 	for _, c := range cases {
@@ -284,6 +286,35 @@ func TestMapComment_PresentButNoHunks(t *testing.T) {
 		"similarity index 100%\nrename from old.go\nrename to new.go\n"
 	if got := ParseLineMap(renameOnly).MapComment("new.go", 3, nil); got != (LineMapResult{Status: LineMapOutdated}) {
 		t.Errorf("rename-only (new path) = %+v, want outdated", got)
+	}
+
+	// A mode-only change (chmod): "diff --git" header + old/new mode, no @@.
+	// Content is identical, but with no line-level data we stay conservative.
+	modeOnly := "diff --git a/run.sh b/run.sh\n" +
+		"old mode 100644\nnew mode 100755\n"
+	if got := ParseLineMap(modeOnly).MapComment("run.sh", 4, nil); got != (LineMapResult{Status: LineMapOutdated}) {
+		t.Errorf("mode-only change = %+v, want outdated", got)
+	}
+}
+
+// A pure-insertion hunk (oldLen 0, e.g. "-N,0" from --unified=0) inserts after
+// old line N: line N itself must not absorb the hunk's delta, while N+1 onward
+// shifts by the inserted count.
+func TestMapComment_PureInsertionHunk(t *testing.T) {
+	// Insert two lines after old line 2 (between old lines 2 and 3).
+	diff := "diff --git a/f.go b/f.go\n@@ -2,0 +3,2 @@\n+X\n+Y\n"
+	m := ParseLineMap(diff)
+
+	if got := m.MapComment("f.go", 1, nil); got != (LineMapResult{Status: LineMapUnchanged, Line: 1}) {
+		t.Errorf("line 1 = %+v, want unchanged→1", got)
+	}
+	// Old line 2 is *before* the insertion → not shifted.
+	if got := m.MapComment("f.go", 2, nil); got != (LineMapResult{Status: LineMapUnchanged, Line: 2}) {
+		t.Errorf("line 2 = %+v, want unchanged→2 (insertion is after it)", got)
+	}
+	// Old line 3 onward is after the insertion → shifted by +2.
+	if got := m.MapComment("f.go", 3, nil); got != (LineMapResult{Status: LineMapMoved, Line: 5}) {
+		t.Errorf("line 3 = %+v, want moved→5", got)
 	}
 }
 

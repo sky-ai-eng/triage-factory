@@ -52,9 +52,10 @@ const (
 )
 
 // LineMapResult is the forward-mapping verdict plus the remapped new-side
-// position. Line and StartLine are the comment's new-side line and start_line
-// in the target commit; both are 0 when Status is LineMapOutdated, and
-// StartLine is 0 for a single-line comment (one with no start_line).
+// position. Line and StartLine are the comment's new-side line and start_line in
+// the target commit. Both are 0 when Status is LineMapOutdated. StartLine is
+// additionally 0 for any single-line comment (the startLine arg was nil),
+// regardless of status.
 type LineMapResult struct {
 	Status    LineMapStatus
 	Line      int
@@ -64,6 +65,14 @@ type LineMapResult struct {
 // LineMap is a parsed A→B diff prepared for forward-mapping comment anchors.
 // Parse once (the source diff is shared across a draft's comments) and call
 // MapComment per comment.
+//
+// The files map's *membership* (not slice length) is load-bearing: a path
+// absent from the map is unchanged between A and B, while a path present with no
+// hunks (nil or empty slice — every file the parser sees is registered, hunks
+// appended only as "@@" sections are read) is a file that changed but carries
+// no line-level data (binary, rename-only, mode-only, or an omitted oversized
+// patch). MapComment maps the former unchanged and the latter outdated, so a
+// future writer must not collapse "absent" to "present, empty".
 type LineMap struct {
 	files map[string][]lineMapHunk
 }
@@ -260,6 +269,8 @@ func (m LineMap) MapComment(path string, line int, startLine *int) LineMapResult
 	// survive and remap contiguously (each one immediately after the previous):
 	// a deleted/edited interior line maps outdated, and an interior insertion
 	// breaks contiguity — either way the anchored block changed.
+	// prev holds the previous line's mapped position; it's seeded on the first
+	// iteration (k == start) before any read, so its zero value is never used.
 	var newStart, prev int
 	for k := start; k <= line; k++ {
 		nl, outdated := mapOldLine(hunks, k)
@@ -287,9 +298,12 @@ func (m LineMap) MapComment(path string, line int, startLine *int) LineMapResult
 func mapOldLine(hunks []lineMapHunk, oldLine int) (newLine int, outdated bool) {
 	offset := 0
 	for _, h := range hunks {
-		if oldLine < h.oldStart {
-			// Before this hunk, in an unchanged region governed by the net
-			// delta of all preceding hunks.
+		// "Before this hunk" → an unchanged region governed by the net delta of
+		// all preceding hunks. A pure-insertion hunk (oldLen == 0, e.g. a
+		// "-N,0" hunk from --unified=0) touches no old line and places its
+		// content *after* old line N, so old line N itself is still before the
+		// insertion and must not absorb this hunk's delta.
+		if oldLine < h.oldStart || (h.oldLen == 0 && oldLine == h.oldStart) {
 			return oldLine + offset, false
 		}
 		oldEnd := h.oldStart + h.oldLen - 1
