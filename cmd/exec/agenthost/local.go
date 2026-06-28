@@ -917,15 +917,20 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 
 // GithubAddPendingReviewComment appends one inline comment to this run's review
 // draft, staged entirely TF-side (TFAC-494) — no GitHub *write*. It locates the
-// run's pending review artifact, validates the local handle, validates the
-// comment's (path, line, start_line) against the LIVE PR diff (rejecting
-// out-of-diff / cross-hunk ranges before staging — recovering the immediate
-// feedback GitHub used to give at add time, since it now only validates at the
-// atomic submit on approval), mints a stable TF-local comment id, appends it to
-// details.StagedComments, and returns the id. body already carries the severity
-// badge baked in (the caller bakes it); line>0 with a non-nil startLine makes it
-// a multi-line range.
-func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int) (string, error) {
+// run's pending review artifact, validates the local handle, mints a stable
+// TF-local comment id, appends it to details.StagedComments, and returns the id.
+// body already carries the severity badge baked in (the caller bakes it);
+// line>0 with a non-nil startLine makes it a multi-line range.
+//
+// commitSHA is the anchor: the commit GitHub reads the comment's line in the
+// frame of, carried through to the atomic submit at approval. When the CLI
+// supplied it (the normal path — the agent has a worktree), it's the worktree
+// HEAD, and the comment is validated against THAT commit's diff (compare
+// base...HEAD) — the same frame the agent read the code in, so a line it saw
+// maps to the line GitHub anchors to. When it's empty (no checkout), the host
+// anchors to and validates against the live PR head instead — the pre-TFAC-494
+// behavior, internally consistent on its own.
+func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int, commitSHA string) (string, error) {
 	art, err := c.runReviewArtifact(ctx, reviewID)
 	if err != nil {
 		return "", err
@@ -941,8 +946,9 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 		return "", fmt.Errorf("this review has already been finalized for approval; start a fresh review to add more comments")
 	}
 
-	// Validate the range against the live diff before staging. The PR number comes
-	// from the artifact target (the handle the agent passes carries no coordinates).
+	// The PR number comes from the artifact target (the handle the agent passes
+	// carries no coordinates). Needed for both the live-head fallback and to
+	// resolve the base ref the compare-validation diffs against.
 	_, _, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
 		return "", fmt.Errorf("review artifact has a malformed target %q", art.Target)
@@ -951,21 +957,33 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 	if err != nil {
 		return "", err
 	}
-	// Capture the PR head this comment is validated + anchored against. GitHub
-	// reads a comment's line in the frame of a commit, so the commit we pin the
-	// submitted review to must be the one whose diff we validated here. Fetching
-	// the head and the diff is two calls with a sub-second window; a force-push
-	// landing inside it surfaces as a submit-time 422, never a silent mis-anchor.
 	pr, err := client.GetPRBasic(ctx, owner, repo, number)
 	if err != nil {
-		return "", fmt.Errorf("fetch PR head for comment anchor: %w", err)
+		return "", fmt.Errorf("fetch PR for comment anchor: %w", err)
 	}
-	if pr.HeadSHA == "" {
-		return "", fmt.Errorf("PR #%d has no head commit SHA; cannot anchor a review comment", number)
-	}
-	hunks, err := hostDiffHunks(ctx, client, owner, repo, number)
-	if err != nil {
-		return "", fmt.Errorf("fetch PR diff for comment validation: %w", err)
+
+	var hunks map[string][]ghclient.Hunk
+	anchorSHA := commitSHA
+	if anchorSHA != "" {
+		// Validate against the diff at the agent's checkout (base...worktree-HEAD),
+		// so the commentable lines match what the agent read and the anchor frame.
+		if pr.BaseRef == "" {
+			return "", fmt.Errorf("PR #%d has no base ref; cannot validate a review comment against commit %s", number, anchorSHA)
+		}
+		hunks, err = hostCompareDiffHunks(ctx, client, owner, repo, pr.BaseRef, anchorSHA)
+		if err != nil {
+			return "", fmt.Errorf("fetch diff at commit %s for comment validation: %w", anchorSHA, err)
+		}
+	} else {
+		// No local checkout: anchor + validate against the live head.
+		if pr.HeadSHA == "" {
+			return "", fmt.Errorf("PR #%d has no head commit SHA; cannot anchor a review comment", number)
+		}
+		hunks, err = hostDiffHunks(ctx, client, owner, repo, number)
+		if err != nil {
+			return "", fmt.Errorf("fetch PR diff for comment validation: %w", err)
+		}
+		anchorSHA = pr.HeadSHA
 	}
 	if msg := ghclient.ValidateCommentRange(hunks, path, line, startLine); msg != "" {
 		return "", fmt.Errorf("%s", msg)
@@ -979,7 +997,7 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 		Line:      &ln,
 		StartLine: startLine,
 		Body:      body,
-		CommitSHA: pr.HeadSHA,
+		CommitSHA: anchorSHA,
 	}
 	details.StagedComments = append(details.StagedComments, comment)
 
@@ -1000,6 +1018,26 @@ func hostDiffHunks(ctx context.Context, client *ghclient.Client, owner, repo str
 	if err != nil {
 		if ghclient.IsHTTP406(err) {
 			files, ferr := client.GetPRFiles(ctx, owner, repo, number)
+			if ferr != nil {
+				return nil, ferr
+			}
+			return ghclient.DiffHunksFromPatches(files), nil
+		}
+		return nil, err
+	}
+	return ghclient.DiffHunks(diff), nil
+}
+
+// hostCompareDiffHunks returns the per-file hunk ranges for base...head — the
+// diff in a specific commit's frame, used to validate a review comment against
+// the agent's worktree HEAD rather than the live PR head. Mirrors hostDiffHunks'
+// HTTP-406 fallback: on "diff too large" it reassembles hunks from the compare
+// endpoint's per-file patches.
+func hostCompareDiffHunks(ctx context.Context, client *ghclient.Client, owner, repo, base, head string) (map[string][]ghclient.Hunk, error) {
+	diff, err := client.GetCompareDiff(ctx, owner, repo, base, head)
+	if err != nil {
+		if ghclient.IsHTTP406(err) {
+			files, ferr := client.GetCompareFiles(ctx, owner, repo, base, head)
 			if ferr != nil {
 				return nil, ferr
 			}

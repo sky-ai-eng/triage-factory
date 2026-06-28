@@ -578,7 +578,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		commentID, err := client.GithubAddPendingReviewComment(ctx, a.Owner, a.Repo, a.ReviewID, a.Path, a.Body, a.Line, a.StartLine)
+		commentID, err := client.GithubAddPendingReviewComment(ctx, a.Owner, a.Repo, a.ReviewID, a.Path, a.Body, a.Line, a.StartLine, a.CommitSHA)
 		if err != nil {
 			return nil, err
 		}

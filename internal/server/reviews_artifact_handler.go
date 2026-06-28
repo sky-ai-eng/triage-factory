@@ -175,13 +175,15 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// Translate the staged comments into the SubmitReview payload, and derive the
 	// commit_id to pin the review to. GitHub reads each comment's line in the frame
 	// of a commit; the atomic submit carries ONE commit_id for the whole review, so
-	// every comment must have been validated against the same commit (its
-	// CommitSHA, captured at add-time). When they agree, that's the pin. When they
-	// diverge, the PR was force-pushed mid-review and the comments live in different
-	// frames — the atomic endpoint can't express that, and submitting under one
-	// commit_id would silently re-anchor the others to the wrong lines, so refuse
-	// (409) rather than mis-anchor. A comment-less review (approve / body-only) has
-	// no inline anchor, so it falls back to the start-review head (details.HeadSHA).
+	// every comment must have been authored against the same commit (its CommitSHA,
+	// the agent's worktree HEAD when it added the comment). When they agree, that's
+	// the pin. When they diverge, the agent's checkout advanced mid-review — it
+	// pulled new commits between adding one comment and the next — so the comments
+	// live in different frames. The atomic endpoint can't express that, and
+	// submitting under one commit_id would silently re-anchor the others to the
+	// wrong lines, so refuse (409) rather than mis-anchor. A comment-less review
+	// (approve / body-only) has no inline anchor, so it falls back to the
+	// start-review head (details.HeadSHA).
 	submitComments := make([]ghclient.SubmitReviewComment, 0, len(details.StagedComments))
 	commitID, anchor := details.HeadSHA, ""
 	for _, c := range details.StagedComments {
@@ -200,7 +202,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 			anchor = sha
 		case sha != anchor:
 			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "this review's comments were written against different commits — the PR was updated while the review was in progress. Return it to the queue and start a fresh review against the current diff.",
+				"error": "this review's comments were authored against different commits — the checkout advanced (new commits pulled in) while the review was in progress, so its comments span more than one commit and can't be submitted atomically. Return it to the queue and start a fresh review against the current diff.",
 			})
 			return
 		}

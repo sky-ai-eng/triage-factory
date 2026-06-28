@@ -462,6 +462,10 @@ type githubAddPendingReviewCommentArgs struct {
 	Body      string `json:"body"`
 	Line      int    `json:"line"`
 	StartLine *int   `json:"start_line,omitempty"`
+	// CommitSHA is the worktree HEAD the CLI validated and anchors this comment
+	// against. Empty when the CLI had no local checkout — the host then resolves
+	// the anchor from the live PR head and validates against the API diff.
+	CommitSHA string `json:"commit_sha,omitempty"`
 }
 
 type githubCommentIDStringResult struct {

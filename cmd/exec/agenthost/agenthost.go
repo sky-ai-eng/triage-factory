@@ -254,8 +254,17 @@ type Client interface {
 	// stable TF-local comment id. Concurrent runs on one PR never collide — the
 	// dedup key is run-scoped — so there is no identity branch and no collision
 	// error.
+	//
+	// GithubAddPendingReviewComment's commitSHA is the run's worktree HEAD: the
+	// commit the CLI validated the comment's (path, line, start_line) against and
+	// the commit the submitted comment anchors to. The CLI passes it because the
+	// agent reads the diff from its checkout, not the live PR head — sourcing the
+	// anchor and the validation from that same HEAD keeps a line the agent saw
+	// mapped to the line GitHub anchors to. Empty when the CLI had no checkout, in
+	// which case the host anchors to the live head and validates against the API
+	// diff (internally consistent on its own).
 	GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (reviewID string, err error)
-	GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int) (commentID string, err error)
+	GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int, commitSHA string) (commentID string, err error)
 
 	// GithubAPIGet is the raw authenticated GET the actions verbs lean on
 	// (workflow-run + job listings have no typed ghclient method). Returns

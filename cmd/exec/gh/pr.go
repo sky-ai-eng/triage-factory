@@ -81,7 +81,7 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 	case "view":
 		prView(ctx, api, flags)
 	case "diff":
-		prDiff(ctx, api, flags)
+		prDiff(ctx, host, flags)
 	case "files":
 		prFiles(ctx, api, flags)
 	case "thread-view":
@@ -125,20 +125,38 @@ func prView(ctx context.Context, client ghAPI, args []string) {
 // persisted diff directly without reasoning about cwd. Truncated flags the
 // HTTP-406 fallback path where full.diff was reassembled from per-file
 // patches rather than fetched verbatim.
+//
+// Source records which frame full.diff is in: "local_checkout" means it was
+// produced from the run's worktree HEAD (the commit the agent is actually
+// looking at, and the commit add-review-comment anchors to), "github_api"
+// means the live-head diff from the API fallback. HeadSHA is the commit that
+// frame is against. When the local checkout has fallen behind the live PR head,
+// RemoteHeadSHA / BehindBy / Stale describe the gap and Warning tells the agent
+// to `git pull` for the current code.
 type diffManifest struct {
-	Owner        string        `json:"owner"`
-	Repo         string        `json:"repo"`
-	Number       int           `json:"number"`
-	HeadSHA      string        `json:"head_sha"`
-	BaseRef      string        `json:"base_ref"`
-	ChangedFiles int           `json:"changed_files"`
-	Additions    int           `json:"additions"`
-	Deletions    int           `json:"deletions"`
-	Dir          string        `json:"dir"`
-	FullDiffPath string        `json:"full_diff_path"`
-	Truncated    bool          `json:"truncated"`
-	Files        []fileSummary `json:"files"`
+	Owner         string        `json:"owner"`
+	Repo          string        `json:"repo"`
+	Number        int           `json:"number"`
+	HeadSHA       string        `json:"head_sha"`
+	BaseRef       string        `json:"base_ref"`
+	Source        string        `json:"source"`
+	RemoteHeadSHA string        `json:"remote_head_sha,omitempty"`
+	BehindBy      int           `json:"behind_by,omitempty"`
+	Stale         bool          `json:"stale,omitempty"`
+	Warning       string        `json:"warning,omitempty"`
+	ChangedFiles  int           `json:"changed_files"`
+	Additions     int           `json:"additions"`
+	Deletions     int           `json:"deletions"`
+	Dir           string        `json:"dir"`
+	FullDiffPath  string        `json:"full_diff_path"`
+	Truncated     bool          `json:"truncated"`
+	Files         []fileSummary `json:"files"`
 }
+
+const (
+	diffSourceLocal = "local_checkout"
+	diffSourceAPI   = "github_api"
+)
 
 // fileSummary is the per-file overview shared by `pr diff`'s manifest and
 // `pr files`: path, change status, line counts, a binary hint, and the
@@ -163,83 +181,122 @@ const (
 // delegated agent's context in one shot — unbounded and not navigable with
 // Read/Grep/Glob).
 //
-// Two escape hatches keep the old inline behavior available:
+// The diff is framed against the run's WORKTREE HEAD — the commit the agent's
+// checkout is actually on, which is also the commit add-review-comment anchors
+// comments to. Reading and commenting against the same frame is what keeps a
+// line the agent saw mapped to the line GitHub anchors the comment to. If the
+// live PR head has moved past the local checkout, the manifest carries a
+// staleness warning pointing the agent at `git pull`; the diff still reflects
+// the code the agent has in hand. Outside a worktree (no checkout to anchor
+// against) it falls back to the live-head diff from the GitHub API.
+//
+// Two escape hatches keep the inline behavior available:
 //   - --file <path>: targeted single-file diff stays inline (bounded). No
 //     file written.
 //   - --stdout: whole-diff-to-stdout, for scripts/pipelines. No file written.
 //
-// Both inline paths share persistPRDiff's HTTP-406 ("diff too large")
-// fallback: GitHub refuses the diff media type, so we reassemble from
-// per-file patches — the whole diff for --stdout, or just the requested
-// file for --file — instead of erroring.
-func prDiff(ctx context.Context, client ghAPI, args []string) {
+// Both inline paths prefer the local-checkout diff and fall back to the API
+// (including persistPRDiff's HTTP-406 "diff too large" reassembly from per-file
+// patches) when there's no worktree.
+func prDiff(ctx context.Context, host agenthost.Client, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
+	// Repo-scoped adapter so the raw compare Get used for the staleness check
+	// resolves the org's credential tier (the bare PR dispatch builds an
+	// owner/repo-less client; the compare endpoint needs both).
+	client := newHostAPI(host, owner, repo)
 	file := flagVal(args, "--file")
 	stdout := hasFlag(args, "--stdout")
-
-	if file != "" || stdout {
-		diff, err := client.GetPRDiff(ctx, owner, repo, number, file)
-		if err != nil {
-			if !ghclient.IsHTTP406(err) {
-				exitOnErr(err)
-			}
-			files, ferr := client.GetPRFiles(ctx, owner, repo, number)
-			exitOnErr(ferr)
-			if file != "" {
-				diff = ghclient.SingleFileDiff(files, file)
-				if diff == "" {
-					exitErr(fmt.Sprintf("file %q is not part of PR #%d's diff", file, number))
-				}
-			} else {
-				diff = ghclient.ReassemblePRDiff(files)
-			}
-		}
-		fmt.Print(diff)
-		return
-	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
 		exitErr(fmt.Sprintf("resolve cwd: %v", err))
 	}
-	manifest, err := persistPRDiff(ctx, client, cwd, owner, repo, number)
+	checkout := resolveLocalCheckout(cwd)
+
+	if file != "" || stdout {
+		fmt.Print(inlineDiff(ctx, client, checkout, owner, repo, number, file))
+		return
+	}
+
+	manifest, err := persistPRDiff(ctx, client, checkout, cwd, owner, repo, number)
 	exitOnErr(err)
 	printJSON(manifest)
 }
 
-// persistPRDiff fetches the PR's diff + metadata, writes full.diff and
-// manifest.json into a per-PR directory under _scratch/, and returns the
-// manifest. The directory is keyed by (owner, repo, number) — the task's
-// identity, which the agent always knows — so a later blueprint step can
-// locate an earlier capture without first looking up the head SHA. Each
-// `pr diff` overwrites the capture in place; the manifest records head_sha so
-// a reader that cares about freshness can compare it to the live head.
-func persistPRDiff(ctx context.Context, client ghAPI, cwd, owner, repo string, number int) (diffManifest, error) {
-	// Three separate REST calls follow (GetPR → GetPRFiles → GetPRDiff): the
-	// API has no transactional snapshot, so a force-push mid-sequence could
-	// leave manifest.head_sha (from GetPR) describing a different commit than
-	// full.diff. We accept that race — head_sha is recorded precisely so a
-	// reader can detect the drift — rather than adding fragile re-fetch loops.
+// inlineDiff returns the diff text for the --file / --stdout escape hatches.
+// Prefers the worktree-HEAD diff (same frame as the persisted manifest and the
+// comment anchors); falls back to the live-head API diff — with the HTTP-406
+// per-file reassembly — when there's no local checkout.
+func inlineDiff(ctx context.Context, client ghAPI, checkout localCheckout, owner, repo string, number int, file string) string {
+	if checkout.ok {
+		if pr, err := client.GetPR(ctx, owner, repo, number, false); err == nil {
+			if base, ok := resolveBaseCommit(checkout.cwd, pr.BaseRef); ok {
+				if diff, err := localUnifiedDiff(checkout.cwd, base, file); err == nil {
+					if file != "" && strings.TrimSpace(diff) == "" {
+						exitErr(fmt.Sprintf("file %q is not part of PR #%d's diff", file, number))
+					}
+					return diff
+				}
+			}
+		}
+	}
+
+	diff, err := client.GetPRDiff(ctx, owner, repo, number, file)
+	if err != nil {
+		if !ghclient.IsHTTP406(err) {
+			exitOnErr(err)
+		}
+		files, ferr := client.GetPRFiles(ctx, owner, repo, number)
+		exitOnErr(ferr)
+		if file != "" {
+			diff = ghclient.SingleFileDiff(files, file)
+			if diff == "" {
+				exitErr(fmt.Sprintf("file %q is not part of PR #%d's diff", file, number))
+			}
+		} else {
+			diff = ghclient.ReassemblePRDiff(files)
+		}
+	}
+	return diff
+}
+
+// persistPRDiff writes full.diff and manifest.json into a per-PR directory
+// under _scratch/ and returns the manifest. The directory is keyed by (owner,
+// repo, number) — the task's identity, which the agent always knows — so a
+// later blueprint step can locate an earlier capture without first looking up
+// the head SHA. Each `pr diff` overwrites the capture in place.
+//
+// When the run has a local checkout, full.diff is the worktree-HEAD diff and
+// manifest.head_sha is that worktree HEAD — the same frame add-review-comment
+// anchors against. The live PR head + a behind-by count are recorded alongside
+// so a reader can detect (and the agent can act on) the checkout having fallen
+// behind. Outside a worktree it falls back to the live-head API diff.
+func persistPRDiff(ctx context.Context, client ghAPI, checkout localCheckout, cwd, owner, repo string, number int) (diffManifest, error) {
 	pr, err := client.GetPR(ctx, owner, repo, number, false)
 	if err != nil {
 		return diffManifest{}, fmt.Errorf("fetch PR #%d: %w", number, err)
 	}
 
-	// GetPRFiles is needed for the per-file manifest rows and doubles as the
-	// reassembly source if the full diff is too large (HTTP 406).
-	files, err := client.GetPRFiles(ctx, owner, repo, number)
-	if err != nil {
-		return diffManifest{}, fmt.Errorf("list PR files: %w", err)
+	manifest := diffManifest{
+		Owner:         owner,
+		Repo:          repo,
+		Number:        number,
+		BaseRef:       pr.BaseRef,
+		RemoteHeadSHA: pr.HeadSHA,
 	}
 
-	fullDiff, truncated, err := fetchFullDiff(ctx, client, owner, repo, number, files)
-	if err != nil {
-		return diffManifest{}, err
+	var fullDiff string
+	if local, ok := buildLocalDiffManifest(ctx, client, checkout, owner, repo, &manifest, pr); ok {
+		fullDiff = local
+	} else {
+		fullDiff, err = buildAPIDiffManifest(ctx, client, owner, repo, number, &manifest, pr)
+		if err != nil {
+			return diffManifest{}, err
+		}
 	}
 
 	// Key on the task identity (owner, repo, number) the agent always knows,
-	// so it can locate an earlier capture without first resolving the head
-	// SHA. head_sha goes in the manifest for freshness comparison.
+	// so it can locate an earlier capture without first resolving the head SHA.
 	dirKey := owner + "__" + repo + "__" + strconv.Itoa(number)
 	destDir, err := safeScratchSubdir(cwd, "_scratch", "pr-diffs", dirKey)
 	if err != nil {
@@ -260,21 +317,90 @@ func persistPRDiff(ctx context.Context, client ghAPI, cwd, owner, repo string, n
 	if err := os.WriteFile(fullDiffPath, []byte(fullDiff), 0o644); err != nil {
 		return diffManifest{}, fmt.Errorf("write %s: %w", fullDiffFilename, err)
 	}
+	manifest.Dir = destDir
+	manifest.FullDiffPath = fullDiffPath
 
-	manifest := diffManifest{
-		Owner:        owner,
-		Repo:         repo,
-		Number:       number,
-		HeadSHA:      pr.HeadSHA,
-		BaseRef:      pr.BaseRef,
-		ChangedFiles: pr.ChangedFiles,
-		Additions:    pr.Additions,
-		Deletions:    pr.Deletions,
-		Dir:          destDir,
-		FullDiffPath: fullDiffPath,
-		Truncated:    truncated,
-		Files:        make([]fileSummary, 0, len(files)),
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return diffManifest{}, fmt.Errorf("marshal manifest: %w", err)
 	}
+	if err := os.WriteFile(filepath.Join(destDir, manifestFilename), manifestBytes, 0o644); err != nil {
+		return diffManifest{}, fmt.Errorf("write %s: %w", manifestFilename, err)
+	}
+
+	return manifest, nil
+}
+
+// buildLocalDiffManifest fills the manifest from the run's worktree-HEAD diff
+// and returns the full diff text + ok=true. Returns ok=false (caller falls back
+// to the API) when there's no checkout or the base ref can't be resolved
+// locally. Populates head_sha = worktree HEAD, the per-file rows from the diff
+// itself, and the staleness fields when the live head has moved ahead.
+func buildLocalDiffManifest(ctx context.Context, client ghAPI, checkout localCheckout, owner, repo string, manifest *diffManifest, pr *ghclient.PRView) (string, bool) {
+	if !checkout.ok {
+		return "", false
+	}
+	base, ok := resolveBaseCommit(checkout.cwd, pr.BaseRef)
+	if !ok {
+		return "", false
+	}
+	diff, err := localUnifiedDiff(checkout.cwd, base, "")
+	if err != nil {
+		return "", false
+	}
+
+	manifest.Source = diffSourceLocal
+	manifest.HeadSHA = checkout.headSHA
+	manifest.Files = parseDiffSummaries(diff)
+	manifest.ChangedFiles = len(manifest.Files)
+	for _, f := range manifest.Files {
+		manifest.Additions += f.Additions
+		manifest.Deletions += f.Deletions
+	}
+
+	if behind := remoteAheadBy(ctx, client, owner, repo, checkout.headSHA, pr.HeadSHA); behind > 0 {
+		manifest.Stale = true
+		manifest.BehindBy = behind
+		manifest.Warning = fmt.Sprintf(
+			"This diff reflects your local checkout (HEAD %s), which is %d commit(s) behind the live PR head (%s). "+
+				"New commits have landed on the PR branch that you do not have. Run `git pull` to update your checkout "+
+				"before reviewing or commenting if you want the current code — review comments anchor to the commit you have checked out.",
+			shortSHA(checkout.headSHA), behind, shortSHA(pr.HeadSHA),
+		)
+	} else if pr.HeadSHA != "" && checkout.headSHA != pr.HeadSHA {
+		// SHAs differ but compare reported no commits ahead (force-push that
+		// rewrote rather than appended, or a compare that couldn't be fetched).
+		// Flag the divergence without a precise count.
+		manifest.Stale = true
+		manifest.Warning = fmt.Sprintf(
+			"Your local checkout (HEAD %s) differs from the live PR head (%s). The PR branch may have been "+
+				"force-pushed. Run `git pull` to reconcile if you want the current code.",
+			shortSHA(checkout.headSHA), shortSHA(pr.HeadSHA),
+		)
+	}
+	return diff, true
+}
+
+// buildAPIDiffManifest fills the manifest from the live-head GitHub diff (the
+// no-worktree fallback). head_sha is the live PR head; per-file rows come from
+// GetPRFiles, which doubles as the HTTP-406 reassembly source.
+func buildAPIDiffManifest(ctx context.Context, client ghAPI, owner, repo string, number int, manifest *diffManifest, pr *ghclient.PRView) (string, error) {
+	files, err := client.GetPRFiles(ctx, owner, repo, number)
+	if err != nil {
+		return "", fmt.Errorf("list PR files: %w", err)
+	}
+	fullDiff, truncated, err := fetchFullDiff(ctx, client, owner, repo, number, files)
+	if err != nil {
+		return "", err
+	}
+
+	manifest.Source = diffSourceAPI
+	manifest.HeadSHA = pr.HeadSHA
+	manifest.Truncated = truncated
+	manifest.ChangedFiles = pr.ChangedFiles
+	manifest.Additions = pr.Additions
+	manifest.Deletions = pr.Deletions
+	manifest.Files = make([]fileSummary, 0, len(files))
 	// Some hosts don't populate the PR-level counts; fall back to the file
 	// list length so changed_files is never a misleading zero.
 	if manifest.ChangedFiles == 0 {
@@ -290,16 +416,7 @@ func persistPRDiff(ctx context.Context, client ghAPI, cwd, owner, repo string, n
 			PreviousFilename: f.PreviousFilename,
 		})
 	}
-
-	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return diffManifest{}, fmt.Errorf("marshal manifest: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(destDir, manifestFilename), manifestBytes, 0o644); err != nil {
-		return diffManifest{}, fmt.Errorf("write %s: %w", manifestFilename, err)
-	}
-
-	return manifest, nil
+	return fullDiff, nil
 }
 
 // fetchFullDiff returns the PR's unified diff and whether it was reassembled
@@ -316,6 +433,15 @@ func fetchFullDiff(ctx context.Context, client ghAPI, owner, repo string, number
 		return "", false, fmt.Errorf("fetch PR diff: %w", err)
 	}
 	return ghclient.ReassemblePRDiff(files), true, nil
+}
+
+// shortSHA abbreviates a commit SHA to 7 chars for human/agent-facing messages,
+// leaving anything already shorter untouched.
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 // prFilesResult is the slim overview `pr files` prints: one summary row per
@@ -460,9 +586,18 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 
 // prAddReviewComment bakes the severity badge into the comment body, then stages
 // it on this run's review draft (→ GithubAddPendingReviewComment, a local write).
-// The host validates the (path, line, start_line) range against the live PR diff
-// and rejects out-of-diff / cross-hunk ranges before staging. Severity lives only
-// in the comment body (the overlay parses it back out for the chip).
+//
+// The comment is anchored to — and validated against — the run's WORKTREE HEAD:
+// the commit the agent's checkout is on, which is the frame the agent read the
+// diff in (`pr diff` shows that same frame). Validating the (path, line,
+// start_line) against the local checkout's diff and anchoring the submitted
+// comment to that same commit is what keeps a line the agent saw mapped to the
+// line GitHub anchors to — sourcing either from the live PR head would re-open
+// the skew when the checkout has fallen behind. Outside a worktree it hands an
+// empty anchor to the host, which falls back to live-head validation.
+//
+// Severity lives only in the comment body (the overlay parses it back out for
+// the chip).
 func prAddReviewComment(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr add-review-comment <review_id> --file <path> --line <N> (--body <text> | --body-file <path>) [--start-line <N>] [--severity <blocker|major|minor|clean>]")
@@ -517,11 +652,22 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	owner, repo := ownerRepo(args)
 	_ = lookupRun(host)
 
+	// Resolve the anchor: the run's worktree HEAD — the commit the agent's
+	// checkout is on, which is the frame it read the diff in. The host validates
+	// the range against this commit's diff (compare base...HEAD) and pins the
+	// submitted comment to it. Empty when there's no checkout, in which case the
+	// host falls back to live-head validation + anchoring.
+	cwd, err := os.Getwd()
+	if err != nil {
+		exitErr(fmt.Sprintf("resolve cwd: %v", err))
+	}
+	anchorSHA := resolveLocalCheckout(cwd).headSHA
+
 	// Bake the badge in, then stage onto this run's review draft. The host resolves
-	// the run's review artifact, validates the range against the live diff, and
-	// appends the staged comment — returning a TF-local comment id.
+	// the run's review artifact, validates the range against the anchor commit's
+	// diff, and appends the staged comment — returning a TF-local comment id.
 	badgedBody := domain.SeverityBadgeMarkdown(severity) + body
-	commentID, err := host.GithubAddPendingReviewComment(ctx, owner, repo, reviewID, file, badgedBody, line, startLine)
+	commentID, err := host.GithubAddPendingReviewComment(ctx, owner, repo, reviewID, file, badgedBody, line, startLine, anchorSHA)
 	exitOnErr(err)
 
 	printJSON(map[string]any{

@@ -436,9 +436,9 @@ func (c *IPCClient) GithubCreatePendingReview(ctx context.Context, owner, repo s
 	return res.ReviewID, nil
 }
 
-func (c *IPCClient) GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int) (string, error) {
+func (c *IPCClient) GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int, commitSHA string) (string, error) {
 	var res githubCommentIDStringResult
-	if err := c.call(ctx, methodGithubAddPendingReviewComment, githubAddPendingReviewCommentArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, ReviewID: reviewID, Path: path, Body: body, Line: line, StartLine: startLine}, &res); err != nil {
+	if err := c.call(ctx, methodGithubAddPendingReviewComment, githubAddPendingReviewCommentArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, ReviewID: reviewID, Path: path, Body: body, Line: line, StartLine: startLine, CommitSHA: commitSHA}, &res); err != nil {
 		return "", err
 	}
 	return res.CommentID, nil

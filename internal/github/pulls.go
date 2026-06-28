@@ -279,6 +279,48 @@ func (c *Client) GetPRDiff(ctx context.Context, owner, repo string, number int, 
 	return filterDiffByFile(string(diff), file), nil
 }
 
+// GetCompareDiff fetches the unified diff for base...head — the three-dot
+// (merge-base) form GitHub uses for a PR's own diff. Used to validate and
+// anchor a review comment against a specific commit (the agent's worktree HEAD)
+// rather than the live PR head, so the comment lands on the line the agent
+// actually read. base and head may be refs or SHAs.
+func (c *Client) GetCompareDiff(ctx context.Context, owner, repo, base, head string) (string, error) {
+	diff, err := c.GetRaw(ctx, fmt.Sprintf("/repos/%s/%s/compare/%s...%s", owner, repo, base, head), "application/vnd.github.v3.diff")
+	if err != nil {
+		return "", err
+	}
+	return string(diff), nil
+}
+
+// GetCompareFiles lists the files changed in base...head with per-file patches,
+// the JSON fallback for GetCompareDiff when the diff media type is refused
+// (HTTP 406, "diff too large"). Returns the first page only — parity with the
+// PR-diff fallback, which also doesn't paginate the reassembly source.
+func (c *Client) GetCompareFiles(ctx context.Context, owner, repo, base, head string) ([]PRFile, error) {
+	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/compare/%s...%s", owner, repo, base, head))
+	if err != nil {
+		return nil, err
+	}
+	var raw struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	files := make([]PRFile, 0, len(raw.Files))
+	for _, f := range raw.Files {
+		files = append(files, PRFile{
+			Filename:         strVal(f, "filename"),
+			Status:           strVal(f, "status"),
+			PreviousFilename: strVal(f, "previous_filename"),
+			Additions:        intVal(f, "additions"),
+			Deletions:        intVal(f, "deletions"),
+			Patch:            strVal(f, "patch"),
+		})
+	}
+	return files, nil
+}
+
 // CommentThread is a top-level comment with its replies.
 type CommentThread struct {
 	ID        int           `json:"id"`
