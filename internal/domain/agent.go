@@ -144,23 +144,6 @@ type AgentRun struct {
 	ExecutorID string `json:"-"`
 }
 
-// RunStatusTerminal reports whether an AgentRun.Status is an end state — the run
-// has concluded and no further execution will occur. This is the canonical
-// terminal set, mirroring the run-queue stores' runTerminalStatusesSQL. The
-// terminal-on-last task-closure check reads it to decide whether resolving the
-// last artifact on a standalone run should close the task (a live run never
-// closes the task on resolve; its own termination re-checks). pending_approval is
-// gone — approval is a derived view over the unresolved-artifact set, not a
-// stored status.
-func RunStatusTerminal(status string) bool {
-	switch status {
-	case "completed", "failed", "cancelled", "task_unsolvable":
-		return true
-	default:
-		return false
-	}
-}
-
 // SnapshotReapKey identifies a parked workspace snapshot eligible for retention
 // reaping: the owning org and the blueprint_run_id (which is the snapshot key
 // id — every run is a blueprint step, so one blueprint_run shares one workspace

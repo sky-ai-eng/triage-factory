@@ -571,12 +571,12 @@ func artifactPRNumber(art *domain.Artifact) int {
 // ONLY lifecycle effect of a resolve: it never flips runs.status or
 // resumes/terminates a blueprint.
 //
-// Governing signals: the run that produced the resolved artifact decides clean
-// completion — a blueprint step by its blueprint run's status (completed = clean),
-// a standalone run by its own status+outcome (completed & not abort). The
-// "anything still unresolved?" check is scoped to the whole TASK (all its runs),
-// matching teardownTaskArtifacts, so a stranded artifact from a prior attempt
-// blocks closure. A run-less artifact (no run linkage) is a no-op — no task to close.
+// Governing signals: only a blueprint run is a task run, so only it can close a
+// task — clean completion is its blueprint run reaching status=completed. A
+// non-blueprint run (origin <> 'blueprint' — a future interactive/ad-hoc run) is
+// task-less and is a no-op here. The "anything still unresolved?" check is scoped
+// to the whole TASK (all its runs), matching teardownTaskArtifacts, so a stranded
+// artifact from a prior attempt blocks closure.
 //
 // Detached + best-effort: the caller already mutated the GitHub object and flipped
 // the artifact, so a failure here must not unwind that. Fails CLOSED on the close
@@ -593,34 +593,21 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		unresolved    bool
 	)
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		// Step 1: derive the task + whether the run that produced the resolved
-		// artifact reached a CLEAN completion.
+		// Step 1: only a blueprint run is a task run, so only it can drive
+		// terminal-on-last task closure. A non-blueprint run (origin <> 'blueprint'
+		// — a future interactive/ad-hoc run) is task-less by construction (NULL
+		// task_id), so there is nothing to close: leave taskID empty and no-op below.
 		br, _, bpErr := tx.Blueprints.GetRunForRun(ctx, orgID, runID)
 		if bpErr != nil {
 			return fmt.Errorf("blueprint lookup: %w", bpErr)
 		}
-		if br != nil {
-			// Blueprint step: a clean finalization is status=completed (an abort/fail/
-			// cancel maps to a non-completed terminal and leaves the task open).
-			taskID = br.TaskID
-			closeEligible = br.Status == domain.BlueprintRunStatusCompleted
-		} else {
-			// Standalone run (origin <> 'blueprint' — reserved for future
-			// interactive/ad-hoc runs, which the schema allows a NULL blueprint_run_id;
-			// no such run exists today, every run is a blueprint step). A clean
-			// completion is status=completed with a non-abort outcome (processCompletion
-			// leaves an aborted run's task open).
-			run, e := tx.AgentRuns.Get(ctx, orgID, runID)
-			if e != nil {
-				return fmt.Errorf("get run: %w", e)
-			}
-			if run == nil {
-				// Run vanished — nothing to close on.
-				return nil
-			}
-			taskID = run.TaskID
-			closeEligible = run.Status == "completed" && domain.RunOutcome(run.Outcome) != domain.RunOutcomeAbort
+		if br == nil {
+			return nil
 		}
+		// A clean blueprint finalization is status=completed; an abort/fail/cancel
+		// maps to a non-completed terminal and leaves the task open for a human.
+		taskID = br.TaskID
+		closeEligible = br.Status == domain.BlueprintRunStatusCompleted
 		if !closeEligible {
 			return nil // no need to scan artifacts if we can't close anyway
 		}

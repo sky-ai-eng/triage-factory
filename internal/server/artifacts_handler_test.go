@@ -364,14 +364,15 @@ func TestArtifactDismiss_AbortedBlueprintLeavesTaskOpen(t *testing.T) {
 	}
 }
 
-// TestArtifactDismiss_StandaloneAbortLeavesTaskOpen pins the standalone-run gate
-// (the non-blueprint branch, reserved for future origin='interactive'/ad-hoc
-// runs the schema already anticipates): a run that completed with outcome=abort
-// must leave the task open even after its last artifact is resolved, mirroring
-// processCompletion's leave-open-on-abort contract. Seeds an origin='interactive'
-// run with a NULL blueprint_run_id (allowed by runs_origin_requires_parents only
-// for origin <> 'blueprint') so GetRunForRun routes to the standalone path.
-func TestArtifactDismiss_StandaloneAbortLeavesTaskOpen(t *testing.T) {
+// TestArtifactDismiss_TaskLessRunClosesNoTask pins the non-blueprint branch
+// against the actual model: a future user-triggered run (origin='interactive') is
+// neither a blueprint nor a task run — it carries a NULL blueprint_run_id AND a
+// NULL task_id (both allowed once origin <> 'blueprint'). Resolving an artifact on
+// such a run must be a clean no-op for task closure: GetRunForRun routes to the
+// standalone branch, the run has no task, and the taskID == "" guard short-circuits
+// — no task is closed, no error. (No such run exists in production today; this
+// pins the forward-compat path so it can't regress into closing a phantom task.)
+func TestArtifactDismiss_TaskLessRunClosesNoTask(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	mux := newAppAPIMux()
@@ -382,14 +383,12 @@ func TestArtifactDismiss_StandaloneAbortLeavesTaskOpen(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	execSQL(t, srv.db, `INSERT INTO entities (id, source, source_id, kind, state) VALUES ('e_sa', 'github', 'acme/api#42', 'pr', 'active')`)
-	execSQL(t, srv.db, `INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES ('ev_sa', 'e_sa', 'github:pr:ci_check_passed', '')`)
-	execSQL(t, srv.db, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_sa', 'P', 'b', ?, ?)`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
-	execSQL(t, srv.db, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status) VALUES ('t_sa', 'e_sa', 'github:pr:ci_check_passed', 'ev_sa', 'queued')`)
-	// origin='interactive' + NULL blueprint_run_id → standalone path; completed + outcome=abort.
-	execSQL(t, srv.db, `INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, origin, outcome) VALUES ('r_sa', 't_sa', 'p_sa', 'completed', 'manual', 'interactive', 'abort')`)
+	// A task-less, blueprint-less interactive run: origin='interactive' with NULL
+	// task_id and NULL blueprint_run_id (tolerated by runs_origin_requires_parents
+	// only for origin <> 'blueprint').
+	execSQL(t, srv.db, `INSERT INTO runs (id, status, trigger_type, origin, outcome, team_id, visibility) VALUES ('r_int', 'completed', 'manual', 'interactive', 'abort', ?, 'team')`, runmode.LocalDefaultTeamID)
 	a := domain.NewPullRequestArtifact("acme/api", 42, "PR_node", "feature/x", "main", "https://example.test/acme/api/pull/42", "Proposed title", "Proposed body", true)
-	a.RunID = "r_sa"
+	a.RunID = "r_int"
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	stored, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
@@ -401,12 +400,10 @@ func TestArtifactDismiss_StandaloneAbortLeavesTaskOpen(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var taskStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM tasks WHERE id = 't_sa'`).Scan(&taskStatus); err != nil {
-		t.Fatalf("read task: %v", err)
-	}
-	if taskStatus == "done" {
-		t.Errorf("task.status = done; a standalone run with outcome=abort must leave the task open")
+	// The artifact resolved (the load-bearing effect), and the closure check no-oped
+	// cleanly — a task-less run has no task to close.
+	if got := getArtifact(t, srv, stored.ID).State; got != domain.ArtifactStatePRClosed {
+		t.Errorf("artifact state = %q, want closed", got)
 	}
 }
 

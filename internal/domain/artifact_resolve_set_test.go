@@ -89,16 +89,3 @@ func TestUnresolvedArtifactIDs(t *testing.T) {
 		t.Errorf("UnresolvedArtifactIDs(nil) = %v, want non-nil empty slice", got)
 	}
 }
-
-func TestRunStatusTerminal(t *testing.T) {
-	for _, s := range []string{"completed", "failed", "cancelled", "task_unsolvable"} {
-		if !RunStatusTerminal(s) {
-			t.Errorf("RunStatusTerminal(%q) = false, want true", s)
-		}
-	}
-	for _, s := range []string{"running", "open", "queued", "initializing", "pending_approval", ""} {
-		if RunStatusTerminal(s) {
-			t.Errorf("RunStatusTerminal(%q) = true, want false", s)
-		}
-	}
-}
