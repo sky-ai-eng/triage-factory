@@ -128,7 +128,7 @@ func (c *IPCClient) callWithin(ctx context.Context, timeout time.Duration, metho
 	if resp.Error != "" {
 		// A tagged sentinel (no HTTP status to key on) rebuilds as the typed
 		// value so errors.Is matches identically to the in-process path —
-		// today only the submit-review double-call guard.
+		// today only the finalize-review double-call guard.
 		if resp.ErrCode == errCodeReviewAlreadyFinalized {
 			return ErrReviewAlreadyFinalized
 		}
@@ -168,6 +168,22 @@ func (c *IPCClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, bo
 	return c.call(ctx, methodFinalizeReviewDraft, finalizeReviewDraftArgs{
 		ReviewID: reviewID, Event: event, Body: body,
 	}, nil)
+}
+
+func (c *IPCClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (string, error) {
+	var res githubReviewIDResult
+	if err := c.call(ctx, methodResetReviewDraft, resetReviewDraftArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number}, &res); err != nil {
+		return "", err
+	}
+	return res.ReviewID, nil
+}
+
+func (c *IPCClient) UpdateStagedReviewComment(ctx context.Context, commentID, body string) error {
+	return c.call(ctx, methodUpdateStagedReviewComment, updateStagedReviewCommentArgs{CommentID: commentID, Body: body}, nil)
+}
+
+func (c *IPCClient) DeleteStagedReviewComment(ctx context.Context, commentID string) error {
+	return c.call(ctx, methodDeleteStagedReviewComment, deleteStagedReviewCommentArgs{CommentID: commentID}, nil)
 }
 
 func (c *IPCClient) GetAgentRun(ctx context.Context) (*domain.AgentRun, error) {

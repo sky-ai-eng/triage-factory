@@ -40,7 +40,7 @@ type ReviewArtifactComment struct {
 }
 
 // ReviewArtifactProposed is the agent's first-draft review, snapshotted once at
-// submit-review (the moment the agent hands the review off for human approval).
+// finalize-review (the moment the agent hands the review off for human approval).
 // Write-once: the approve-time human-feedback diff compares it against the
 // human-edited final, so it must not change as the human edits.
 type ReviewArtifactProposed struct {
@@ -178,7 +178,7 @@ func FirstPendingReviewArtifact(arts []Artifact) *Artifact {
 // matches handle (Kind==review, State==pending), or nil. A single run can hold
 // several review drafts at once — dedup is run-scoped per PR (TFAC-494), so a run
 // reviewing multiple PRs gets one draft row each — so add-review-comment /
-// submit-review must locate the specific draft the agent named by its handle, not
+// finalize-review must locate the specific draft the agent named by its handle, not
 // just the first pending review (which could be a different PR's draft).
 func PendingReviewArtifactByID(arts []Artifact, handle string) *Artifact {
 	for i := range arts {
@@ -191,8 +191,8 @@ func PendingReviewArtifactByID(arts []Artifact, handle string) *Artifact {
 
 // FirstReadyReview returns the first *finalized* pending review artifact in arts
 // — Kind==review, State==pending, AND details.ReviewEvent != "" (the ready
-// sentinel set by submit-review). Only a finalized review is an unresolved
-// artifact: a run that called start-review but never submit-review has a pending
+// sentinel set by finalize-review). Only a finalized review is an unresolved
+// artifact: a run that called start-review but never finalize-review has a pending
 // artifact with an empty ReviewEvent and must NOT count (it would strand on an
 // approval card with nothing to approve). Mirrors FirstDraftPullRequest for the
 // review kind; shared by HasUnresolvedArtifacts so consumers agree on "the run

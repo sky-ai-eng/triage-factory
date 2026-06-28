@@ -87,7 +87,7 @@ type request struct {
 // daemon-side sentinel error that the client must reconstruct as a typed value
 // (not just a message), where there's no HTTP status to key on. Today the only
 // value is errCodeReviewAlreadyFinalized, mapped back to ErrReviewAlreadyFinalized
-// so the submit-review double-call guard stays errors.Is-able across the wire.
+// so the finalize-review double-call guard stays errors.Is-able across the wire.
 // Empty means "no typed sentinel" — the common case.
 //
 // ErrCode is only meaningful alongside a non-empty Error: the client inspects it
@@ -103,9 +103,9 @@ type response struct {
 }
 
 // errCodeReviewAlreadyFinalized is the response.ErrCode marker mechanism for
-// ErrReviewAlreadyFinalized — the submit-review double-call guard — so the
+// ErrReviewAlreadyFinalized — the finalize-review double-call guard — so the
 // sandbox client rebuilds the typed sentinel and exec emits the same "your work
-// is done, stop calling submit-review" message on both paths.
+// is done, stop calling finalize-review" message on both paths.
 const errCodeReviewAlreadyFinalized = "review_already_finalized"
 
 // writeFrame serializes msg as a length-prefixed JSON frame on w.
@@ -455,6 +455,26 @@ type githubReviewIDResult struct {
 	ReviewID string `json:"review_id"`
 }
 
+// resetReviewDraftArgs carries the PR coordinates `start-review --fresh` resets
+// the run's local draft for. Reuses githubReviewIDResult (the reset draft's
+// handle, or "" when there was none to reset).
+type resetReviewDraftArgs struct {
+	githubRepoRef
+	Number int `json:"number"`
+}
+
+// updateStagedReviewCommentArgs / deleteStagedReviewCommentArgs address one
+// comment on the run's review draft by its TF-local id (not a repo-scoped op —
+// the host resolves the owning draft from the run's artifacts).
+type updateStagedReviewCommentArgs struct {
+	CommentID string `json:"comment_id"`
+	Body      string `json:"body"`
+}
+
+type deleteStagedReviewCommentArgs struct {
+	CommentID string `json:"comment_id"`
+}
+
 type githubAddPendingReviewCommentArgs struct {
 	githubRepoRef
 	ReviewID  string `json:"review_id"`
@@ -537,18 +557,21 @@ type emptyResult struct{}
 // methodCallNames are the wire-name constants. Used by both client
 // and server so a rename here is the only edit needed to propagate.
 const (
-	methodLookupRun               = "LookupRun"
-	methodFinalizeReviewDraft     = "FinalizeReviewDraft"
-	methodGetAgentRun             = "GetAgentRun"
-	methodGetTask                 = "GetTask"
-	methodListRepos               = "ListRepos"
-	methodGetRepo                 = "GetRepo"
-	methodTeamTracksRepo          = "TeamTracksRepo"
-	methodGetRunWorktreeByRepo    = "GetRunWorktreeByRepo"
-	methodListRunWorktrees        = "ListRunWorktrees"
-	methodInsertRunWorktree       = "InsertRunWorktree"
-	methodDeleteRunWorktreeByRepo = "DeleteRunWorktreeByRepo"
-	methodBuildAgentRunFooter     = "BuildAgentRunFooter"
+	methodLookupRun                 = "LookupRun"
+	methodFinalizeReviewDraft       = "FinalizeReviewDraft"
+	methodResetReviewDraft          = "ResetReviewDraft"
+	methodUpdateStagedReviewComment = "UpdateStagedReviewComment"
+	methodDeleteStagedReviewComment = "DeleteStagedReviewComment"
+	methodGetAgentRun               = "GetAgentRun"
+	methodGetTask                   = "GetTask"
+	methodListRepos                 = "ListRepos"
+	methodGetRepo                   = "GetRepo"
+	methodTeamTracksRepo            = "TeamTracksRepo"
+	methodGetRunWorktreeByRepo      = "GetRunWorktreeByRepo"
+	methodListRunWorktrees          = "ListRunWorktrees"
+	methodInsertRunWorktree         = "InsertRunWorktree"
+	methodDeleteRunWorktreeByRepo   = "DeleteRunWorktreeByRepo"
+	methodBuildAgentRunFooter       = "BuildAgentRunFooter"
 
 	methodUpsertArtifact = "UpsertArtifact"
 

@@ -119,7 +119,7 @@ func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*
 	return art, nil
 }
 
-// FinalizeReviewDraft is the host side of `gh pr submit-review`: it finalizes a
+// FinalizeReviewDraft is the host side of `gh pr finalize-review`: it finalizes a
 // fully TF-side review draft for human approval and makes NO GitHub write (the
 // atomic create+submit happens at approval). It locates the run's review
 // artifact, stages the body + event, snapshots the agent's draft (body + event +
@@ -169,6 +169,55 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 		return fmt.Errorf("snapshot review draft into artifact: %w", err)
 	}
 	return nil
+}
+
+// ResetReviewDraft is the host side of `gh pr start-review --fresh`: a pure local
+// reset of this run's review draft for owner/repo#number, with zero GitHub calls.
+// It clears the staged comments, the body/event ready sentinel, and the
+// write-once Proposed snapshot back to an empty pending draft, keeping the
+// artifact row, its handle, and its pinned head SHA so the agent can restart the
+// review cleanly. Returns the draft's handle, or "" when the run has no draft for
+// that PR (the caller falls through to a normal start-review).
+//
+// Post-494 the whole review lives in details_json, so the reset is a single
+// artifact rewrite — there is no GitHub pending review to delete and no identity
+// branch (the multi-tenant collision the GitHub-native model had is gone).
+func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (string, error) {
+	arts, err := c.listArtifactsByRun(ctx)
+	if err != nil {
+		return "", err
+	}
+	target := domain.ReviewTarget(owner+"/"+repo, number)
+	var art *domain.Artifact
+	for i := range arts {
+		if arts[i].Kind == domain.ArtifactKindReview && arts[i].State == domain.ArtifactStateReviewPending && arts[i].Target == target {
+			art = &arts[i]
+			break
+		}
+	}
+	if art == nil {
+		// No draft to reset — the caller starts a normal one. Not an error: --fresh
+		// as the first start-review is a valid (if degenerate) clean slate.
+		return "", nil
+	}
+
+	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	if err != nil {
+		return "", fmt.Errorf("parse review artifact details: %w", err)
+	}
+	// Clear the staged set + ready sentinel + frozen Proposed baseline, keeping
+	// Number/HeadSHA so the restarted review still pins to the same reviewed commit.
+	details.StagedComments = nil
+	details.ReviewBody = ""
+	details.ReviewEvent = ""
+	details.Proposed = domain.ReviewArtifactProposed{}
+
+	updated := *art
+	updated.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
+	if _, err := c.UpsertArtifact(ctx, updated); err != nil {
+		return "", fmt.Errorf("reset review draft: %w", err)
+	}
+	return art.ID, nil
 }
 
 // listArtifactsByRun reads the calling run's artifacts respecting the pool split:
@@ -1007,6 +1056,74 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 		return "", fmt.Errorf("stage review comment: %w", err)
 	}
 	return commentID, nil
+}
+
+// UpdateStagedReviewComment rewrites the body of one staged comment on this run's
+// review draft, addressed by the TF-local id add-review-comment minted. body
+// already carries the (re-baked) severity badge — the CLI bakes it, mirroring
+// add-review-comment — so the comment submits verbatim at approval. Pure local
+// write, no GitHub call. An unknown id is an error.
+func (c *LocalClient) UpdateStagedReviewComment(ctx context.Context, commentID, body string) error {
+	art, details, idx, err := c.runStagedComment(ctx, commentID)
+	if err != nil {
+		return err
+	}
+	details.StagedComments[idx].Body = body
+
+	updated := *art
+	updated.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
+	if _, err := c.UpsertArtifact(ctx, updated); err != nil {
+		return fmt.Errorf("update staged review comment: %w", err)
+	}
+	return nil
+}
+
+// DeleteStagedReviewComment removes one staged comment from this run's review
+// draft by its TF-local id. Pure local write, no GitHub call. An unknown id is an
+// error.
+func (c *LocalClient) DeleteStagedReviewComment(ctx context.Context, commentID string) error {
+	art, details, idx, err := c.runStagedComment(ctx, commentID)
+	if err != nil {
+		return err
+	}
+	details.StagedComments = append(details.StagedComments[:idx], details.StagedComments[idx+1:]...)
+
+	updated := *art
+	updated.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
+	if _, err := c.UpsertArtifact(ctx, updated); err != nil {
+		return fmt.Errorf("delete staged review comment: %w", err)
+	}
+	return nil
+}
+
+// runStagedComment locates this run's pending review draft that holds the staged
+// comment with the given TF-local id, returning the artifact, its parsed details,
+// and the comment's index in details.StagedComments. The id is a UUID minted at
+// add-review-comment, unique within the run, so scanning every pending review
+// draft (a run can hold one per PR) finds the owning draft. Returns an actionable
+// error when no draft carries it — the most likely cause is the agent passing a
+// numeric (live GitHub) comment id, which belongs on the REST update/delete path.
+func (c *LocalClient) runStagedComment(ctx context.Context, commentID string) (*domain.Artifact, domain.ReviewArtifactDetails, int, error) {
+	arts, err := c.listArtifactsByRun(ctx)
+	if err != nil {
+		return nil, domain.ReviewArtifactDetails{}, 0, err
+	}
+	for i := range arts {
+		if arts[i].Kind != domain.ArtifactKindReview || arts[i].State != domain.ArtifactStateReviewPending {
+			continue
+		}
+		d, derr := domain.ParseReviewArtifactDetails(arts[i].DetailsJSON)
+		if derr != nil {
+			continue
+		}
+		for idx := range d.StagedComments {
+			if d.StagedComments[idx].ID == commentID {
+				return &arts[i], d, idx, nil
+			}
+		}
+	}
+	return nil, domain.ReviewArtifactDetails{}, 0, fmt.Errorf(
+		"no staged review comment %q for this run — its id comes from add-review-comment (a numeric id is a live GitHub comment, edited via the REST path)", commentID)
 }
 
 // hostDiffHunks fetches the PR's diff and returns the per-file hunk ranges

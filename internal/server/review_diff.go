@@ -11,7 +11,7 @@ import (
 type HumanFeedbackInput struct {
 	// OriginalBody is the agent's drafted review body (write-once snapshot
 	// from the review artifact's details.proposed.body, captured at
-	// submit-review). nil means no snapshot — buildReviewHumanFeedbackInput
+	// finalize-review). nil means no snapshot — buildReviewHumanFeedbackInput
 	// always supplies a non-nil pointer, so nil is reserved for legacy /
 	// degenerate callers. A non-nil pointer to "" is a real snapshot of an
 	// empty drafted body (common — agents that produce inline comments alone
@@ -33,7 +33,7 @@ type HumanFeedbackInput struct {
 // ReviewCommentDiffEntry is the per-comment classification driving the bullet
 // list. buildReviewHumanFeedbackInput builds these by joining the agent's drafted
 // comments (the review artifact's details.proposed.comments, snapshotted at
-// submit-review) with the human-edited final comments (read live from the GitHub
+// finalize-review) with the human-edited final comments (read live from the GitHub
 // pending review at approval), keyed by GitHub comment node id. Status is one of:
 //
 //   - CommentDiffUnchanged: same id, body matches the proposed snapshot.
