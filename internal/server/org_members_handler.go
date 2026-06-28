@@ -38,9 +38,11 @@ type orgMembersHandler struct {
 	// to one org (TFAC-487) — deprovisioning hygiene alongside the WS-kick.
 	// It's a closure over the Server because s.authDeps.sessions is wired
 	// late (SetAuthDeps runs after routes()), so the store can't be captured
-	// at construction. Nil-safe: nil in local mode (handleOrgMemberRemove
-	// 404s first) and the closure nil-checks authDeps for the boot race.
-	// Returns the count of newly-revoked rows.
+	// at construction. routes() always wires a non-nil closure; the closure
+	// itself nil-checks authDeps for the boot race (and local mode never
+	// reaches it — handleOrgMemberRemove 404s first). The nil guard on the
+	// field is belt-and-suspenders for a future caller that constructs the
+	// handler without it (e.g. a test). Returns the count of revoked rows.
 	revokeUserOrgSessions func(ctx context.Context, userID, orgID string) (int64, error)
 }
 
@@ -234,8 +236,10 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 	// sessions scoped to THIS org, best-effort, mirroring the WS-kick's org
 	// filter (their sessions active in other orgs are untouched). Per-request
 	// gates (RLS + role checks) already deny the org's data on the next
-	// request, so a revoke failure isn't a data hole — log and continue. The
-	// closure is nil in local mode, but we 404'd above before reaching here.
+	// request, so a revoke failure isn't a data hole — log and continue.
+	// routes() always wires the closure; the nil guard only matters for a
+	// handler constructed without it (a test). Local mode never reaches here
+	// — handleOrgMemberRemove 404s at the top.
 	if h.revokeUserOrgSessions != nil {
 		revoked, err := h.revokeUserOrgSessions(r.Context(), targetID, orgID)
 		if err != nil {

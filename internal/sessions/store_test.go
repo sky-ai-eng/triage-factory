@@ -543,17 +543,25 @@ func TestStore_RevokeForUserInOrg(t *testing.T) {
 	orgA := seedOrg(t, h, uid, "revoke-org-a")
 	orgB := seedOrg(t, h, uid, "revoke-org-b")
 
+	// mustCreate inserts a session for user in org and asserts success, so a
+	// CreateSystem failure (schema/constraint regression) surfaces here with a
+	// clear message rather than as a confusing nil-deref later in the test.
+	mustCreate := func(user uuid.UUID, jwt string, org uuid.UUID) *Session {
+		t.Helper()
+		s, err := store.CreateSystem(ctx, user, jwt, "r",
+			time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "",
+			uuid.NullUUID{UUID: org, Valid: true})
+		if err != nil {
+			t.Fatalf("create session (user=%s org=%s): %v", user, org, err)
+		}
+		return s
+	}
+
 	// The target user's sessions: two in orgA (both should be revoked) and
 	// one in orgB (must survive — org-scoped revoke leaves other orgs alone).
-	a1, _ := store.CreateSystem(ctx, uid, "a1", "r",
-		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "",
-		uuid.NullUUID{UUID: orgA, Valid: true})
-	a2, _ := store.CreateSystem(ctx, uid, "a2", "r",
-		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "",
-		uuid.NullUUID{UUID: orgA, Valid: true})
-	bSess, _ := store.CreateSystem(ctx, uid, "b", "r",
-		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "",
-		uuid.NullUUID{UUID: orgB, Valid: true})
+	a1 := mustCreate(uid, "a1", orgA)
+	a2 := mustCreate(uid, "a2", orgA)
+	bSess := mustCreate(uid, "b", orgB)
 
 	// Another user active in orgA — same org, different user; must survive.
 	other := seedUser(t, h)
@@ -562,9 +570,7 @@ func TestStore_RevokeForUserInOrg(t *testing.T) {
 		other, orgA); err != nil {
 		t.Fatalf("seed other membership: %v", err)
 	}
-	otherSess, _ := store.CreateSystem(ctx, other, "o", "r",
-		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "",
-		uuid.NullUUID{UUID: orgA, Valid: true})
+	otherSess := mustCreate(other, "o", orgA)
 
 	n, err := store.RevokeForUserInOrgSystem(ctx, uid, orgA)
 	if err != nil {
