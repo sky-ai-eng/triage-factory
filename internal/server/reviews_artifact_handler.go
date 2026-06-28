@@ -172,15 +172,35 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Translate the staged comments into the SubmitReview payload. A comment with
-	// no anchor (nil Line) can't be submitted to GitHub — surface it rather than
-	// silently dropping it. (A stale anchor after a force-push surfaces as
-	// GitHub's 422, already classified in SubmitReview.)
+	// Translate the staged comments into the SubmitReview payload, and derive the
+	// commit_id to pin the review to. GitHub reads each comment's line in the frame
+	// of a commit; the atomic submit carries ONE commit_id for the whole review, so
+	// every comment must have been validated against the same commit (its
+	// CommitSHA, captured at add-time). When they agree, that's the pin. When they
+	// diverge, the PR was force-pushed mid-review and the comments live in different
+	// frames — the atomic endpoint can't express that, and submitting under one
+	// commit_id would silently re-anchor the others to the wrong lines, so refuse
+	// (409) rather than mis-anchor. A comment-less review (approve / body-only) has
+	// no inline anchor, so it falls back to the start-review head (details.HeadSHA).
 	submitComments := make([]ghclient.SubmitReviewComment, 0, len(details.StagedComments))
+	commitID, anchor := details.HeadSHA, ""
 	for _, c := range details.StagedComments {
 		if c.Line == nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 				"error": "a staged review comment on " + c.Path + " has no line anchor and can't be submitted — edit or delete it, then approve again",
+			})
+			return
+		}
+		sha := c.CommitSHA
+		if sha == "" {
+			sha = details.HeadSHA // staged before per-comment anchoring; fall back to the start head
+		}
+		switch {
+		case anchor == "":
+			anchor = sha
+		case sha != anchor:
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "this review's comments were written against different commits — the PR was updated while the review was in progress. Return it to the queue and start a fresh review against the current diff.",
 			})
 			return
 		}
@@ -191,14 +211,18 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 			Body:      c.Body,
 		})
 	}
+	if anchor != "" {
+		commitID = anchor
+	}
 
-	// Create + submit the review in one POST, pinned to the commit the agent
-	// reviewed (details.HeadSHA), with the staged body + event + footer. SubmitReview
-	// downgrades APPROVE→COMMENT when auto-merge is enabled on the PR and returns the
-	// event GitHub actually recorded — capture it so the persisted artifact, the
-	// verdict diff, and the response all reflect what landed, not what was requested.
+	// Create + submit the review in one POST, pinned to commitID (the commit its
+	// inline comments were validated against), with the staged body + event +
+	// footer. SubmitReview downgrades APPROVE→COMMENT when auto-merge is enabled on
+	// the PR and returns the event GitHub actually recorded — capture it so the
+	// persisted artifact, the verdict diff, and the response all reflect what
+	// landed, not what was requested.
 	body := details.ReviewBody + agentmeta.Build(ah.agentRuns, orgID, art.RunID, "review")
-	reviewID, submittedEvent, err := gh.SubmitReview(r.Context(), owner, repo, number, details.HeadSHA, details.ReviewEvent, body, submitComments)
+	reviewID, submittedEvent, err := gh.SubmitReview(r.Context(), owner, repo, number, commitID, details.ReviewEvent, body, submitComments)
 	if err != nil {
 		artifactsLog.Warn("SubmitReview failed",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)

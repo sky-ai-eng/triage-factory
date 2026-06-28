@@ -427,3 +427,86 @@ func TestReviewArtifactApprove_AutoMergeDowngrade(t *testing.T) {
 		t.Errorf("persisted ReviewEvent = %q, want COMMENT", d.ReviewEvent)
 	}
 }
+
+// TestReviewArtifactApprove_SharedCommitSHA_PinsToIt pins that the submitted
+// review's commit_id is the commit the inline comments were validated against
+// (their CommitSHA), not the start-review head — so the comments anchor to the
+// frame they were authored in even if the PR advanced after start-review.
+func TestReviewArtifactApprove_SharedCommitSHA_PinsToIt(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var submitBody map[string]any
+	mux := newAppAPIMux()
+	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&submitBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 7})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rshare", "acme", "api", 7, "COMMENT")
+	// Two comments both anchored to commit_v2 — a different commit than the
+	// start-review head ("headsharshare"). The pin must follow the comments.
+	art := getArtifact(t, srv, artID)
+	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	l1, l2 := 3, 4
+	d.StagedComments = []domain.ReviewArtifactComment{
+		{ID: "c1", Path: "a.go", Line: &l1, Body: "first", CommitSHA: "commit_v2"},
+		{ID: "c2", Path: "a.go", Line: &l2, Body: "second", CommitSHA: "commit_v2"},
+	}
+	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if submitBody["commit_id"] != "commit_v2" {
+		t.Errorf("submit commit_id = %v, want commit_v2 (the comments' anchor, not the start head)", submitBody["commit_id"])
+	}
+}
+
+// TestReviewArtifactApprove_DivergentCommits_409 pins the agreement check: when
+// the staged comments are anchored to different commits (the PR was force-pushed
+// mid-review), the atomic submit can't carry them all under one commit_id, so
+// approval 409s instead of silently re-anchoring the others to the wrong lines.
+func TestReviewArtifactApprove_DivergentCommits_409(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var submitHit bool
+	mux := newAppAPIMux()
+	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
+		submitHit = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rdiv", "acme", "api", 7, "COMMENT")
+	art := getArtifact(t, srv, artID)
+	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	l1, l2 := 3, 4
+	d.StagedComments = []domain.ReviewArtifactComment{
+		{ID: "c1", Path: "a.go", Line: &l1, Body: "first", CommitSHA: "commit_v1"},
+		{ID: "c2", Path: "a.go", Line: &l2, Body: "second", CommitSHA: "commit_v2"},
+	}
+	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("approve with divergent commits = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if submitHit {
+		t.Error("a divergent-commit 409 must not submit to GitHub")
+	}
+	if getArtifact(t, srv, artID).State != domain.ArtifactStateReviewPending {
+		t.Error("artifact must stay pending after a 409")
+	}
+}

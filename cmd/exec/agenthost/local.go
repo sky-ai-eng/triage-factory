@@ -951,6 +951,18 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 	if err != nil {
 		return "", err
 	}
+	// Capture the PR head this comment is validated + anchored against. GitHub
+	// reads a comment's line in the frame of a commit, so the commit we pin the
+	// submitted review to must be the one whose diff we validated here. Fetching
+	// the head and the diff is two calls with a sub-second window; a force-push
+	// landing inside it surfaces as a submit-time 422, never a silent mis-anchor.
+	pr, err := client.GetPRBasic(ctx, owner, repo, number)
+	if err != nil {
+		return "", fmt.Errorf("fetch PR head for comment anchor: %w", err)
+	}
+	if pr.HeadSHA == "" {
+		return "", fmt.Errorf("PR #%d has no head commit SHA; cannot anchor a review comment", number)
+	}
 	hunks, err := hostDiffHunks(ctx, client, owner, repo, number)
 	if err != nil {
 		return "", fmt.Errorf("fetch PR diff for comment validation: %w", err)
@@ -967,6 +979,7 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 		Line:      &ln,
 		StartLine: startLine,
 		Body:      body,
+		CommitSHA: pr.HeadSHA,
 	}
 	details.StagedComments = append(details.StagedComments, comment)
 

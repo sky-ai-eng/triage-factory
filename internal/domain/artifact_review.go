@@ -20,12 +20,23 @@ import (
 // a real line: nil means "no anchor", never silently collapsed to 0. A staged
 // comment with a nil Line can't be submitted to GitHub — approval surfaces that
 // rather than dropping it.
+//
+// CommitSHA is the PR head the comment's (path, line) was validated and anchored
+// against at add-review-comment time — GitHub interprets a comment's line in the
+// frame of a commit, so the atomic submit must pin commit_id to the same commit
+// the line was validated against. GitHub anchors each comment independently (a
+// review can carry comments against different commits); the atomic submit can't —
+// it takes one commit_id for the whole review — so all of a draft's comments must
+// share this SHA at approval, else the PR moved mid-review and the draft can't be
+// submitted coherently (approval surfaces that rather than mis-anchoring). Empty
+// only on rows staged before per-comment anchoring landed.
 type ReviewArtifactComment struct {
 	ID        string `json:"id,omitempty"`
 	Path      string `json:"path"`
 	Line      *int   `json:"line,omitempty"`
 	StartLine *int   `json:"start_line,omitempty"`
 	Body      string `json:"body"`
+	CommitSHA string `json:"commit_sha,omitempty"`
 }
 
 // ReviewArtifactProposed is the agent's first-draft review, snapshotted once at
@@ -44,13 +55,16 @@ type ReviewArtifactProposed struct {
 // holds the full draft, not just a pointer to a live GitHub pending review:
 //
 //   - Number: the backing PR's per-repo number (a review anchors to a PR).
-//   - HeadSHA: the reviewed commit, captured at start-review, passed as
-//     commit_id when the review is created+submitted atomically at approval so
-//     the comments pin to the commit the agent actually reviewed.
+//   - HeadSHA: the PR head at start-review. It is the FALLBACK commit_id for a
+//     comment-less review (an approve / body-only request-changes, which has no
+//     inline anchor); a review WITH comments pins commit_id to the commit those
+//     comments were validated against (each comment's CommitSHA), not this — the
+//     PR head can advance between start-review and the comments.
 //   - StagedComments: the mutable inline-comment set — appended at
-//     add-review-comment, edited/deleted live by the human (local writes to this
-//     slice), and submitted as the review's comments[] at approval. Comment ids
-//     are TF-local and stable so edit/delete address them.
+//     add-review-comment (each anchored to the PR head it was validated against,
+//     ReviewArtifactComment.CommitSHA), edited/deleted live by the human (local
+//     writes to this slice), and submitted as the review's comments[] at approval.
+//     Comment ids are TF-local and stable so edit/delete address them.
 //   - ReviewBody / ReviewEvent: the *staged* review summary + verdict —
 //     finalized at finalize-review, then mutated 1:1 by the human via PATCH, and
 //     applied to GitHub at approval. ReviewEvent doubles as the **ready

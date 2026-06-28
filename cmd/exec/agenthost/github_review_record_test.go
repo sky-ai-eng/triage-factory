@@ -12,10 +12,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// reviewDiffServer is a fake GitHub serving just the PR diff GetPRDiff fetches —
-// a.go with new-side lines 1..5 commentable — so the add-review-comment range
-// validation has something live to check against. Any other request gets {}.
-func reviewDiffServer(t *testing.T) *httptest.Server {
+// reviewDiffServer is a fake GitHub serving the two reads add-review-comment
+// makes: the PR diff (GetPRDiff — a.go with new-side lines 1..5 commentable, for
+// the range validation) and the PR object (GetPRBasic — for the head SHA each
+// comment anchors to). The head SHA is read live from *headSHA so a test can flip
+// it between calls to simulate a force-push mid-review.
+func reviewDiffServer(t *testing.T, headSHA *string) *httptest.Server {
 	t.Helper()
 	const diff = "diff --git a/a.go b/a.go\n" +
 		"--- a/a.go\n+++ b/a.go\n" +
@@ -26,7 +28,7 @@ func reviewDiffServer(t *testing.T) *httptest.Server {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{}`)
+		_, _ = io.WriteString(w, `{"number":7,"head":{"sha":"`+*headSHA+`"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -92,7 +94,8 @@ func TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft(t *testing.T) {
 // add-review-comment validates the range against the live diff and stages the
 // comment into details.staged_comments with a local id — no GitHub write.
 func TestLocalClient_GithubAddPendingReviewComment_StagesLocally(t *testing.T) {
-	srv := reviewDiffServer(t)
+	head := "commit_v1"
+	srv := reviewDiffServer(t, &head)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
 	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
@@ -117,6 +120,10 @@ func TestLocalClient_GithubAddPendingReviewComment_StagesLocally(t *testing.T) {
 	if d.StagedComments[0].Line == nil || *d.StagedComments[0].Line != 3 {
 		t.Errorf("staged line = %+v, want 3", d.StagedComments[0].Line)
 	}
+	// The comment is anchored to the PR head it was validated against.
+	if d.StagedComments[0].CommitSHA != "commit_v1" {
+		t.Errorf("staged CommitSHA = %q, want commit_v1 (the validated head)", d.StagedComments[0].CommitSHA)
+	}
 
 	// An out-of-diff line (99) is rejected before staging.
 	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "bad", 99, nil); err == nil {
@@ -134,7 +141,8 @@ func TestLocalClient_GithubAddPendingReviewComment_StagesLocally(t *testing.T) {
 // snapshotted into the artifact, the ready sentinel set, and the TFAC-358
 // anti-double-submit guard.
 func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
-	srv := reviewDiffServer(t)
+	head := "commit_v1"
+	srv := reviewDiffServer(t, &head)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
 	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
@@ -177,7 +185,8 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 // just the first pending review. A naive "first pending review" lookup would
 // stage/finalize against the wrong PR's draft.
 func TestLocalClient_MultipleReviewDrafts_ResolveByHandle(t *testing.T) {
-	srv := reviewDiffServer(t)
+	head := "commit_v1"
+	srv := reviewDiffServer(t, &head)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
 	// Two drafts on different PRs in the same run.
@@ -222,5 +231,38 @@ func TestLocalClient_MultipleReviewDrafts_ResolveByHandle(t *testing.T) {
 	// An unknown handle is rejected (not silently routed to the first draft).
 	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", "nope", "a.go", "x", 3, nil); err == nil {
 		t.Error("an unknown handle must be rejected")
+	}
+}
+
+// TestLocalClient_PerCommentHeadSHA_CapturedAcrossForcePush pins that each staged
+// comment records the PR head it was validated against — so a force-push between
+// two adds yields two comments anchored to different commits (the signal the
+// submit-time agreement check refuses on, instead of mis-anchoring).
+func TestLocalClient_PerCommentHeadSHA_CapturedAcrossForcePush(t *testing.T) {
+	head := "commit_v1"
+	srv := reviewDiffServer(t, &head)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "commit_v1", nil)
+	if err != nil {
+		t.Fatalf("create review: %v", err)
+	}
+	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "first", 3, nil); err != nil {
+		t.Fatalf("add comment 1: %v", err)
+	}
+	// The PR is force-pushed: the live head advances.
+	head = "commit_v2"
+	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "second", 4, nil); err != nil {
+		t.Fatalf("add comment 2: %v", err)
+	}
+
+	arts := listRunArtifacts(t, stores, info.RunID)
+	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if len(d.StagedComments) != 2 {
+		t.Fatalf("want 2 staged comments, got %d", len(d.StagedComments))
+	}
+	if d.StagedComments[0].CommitSHA != "commit_v1" || d.StagedComments[1].CommitSHA != "commit_v2" {
+		t.Errorf("per-comment anchors = %q,%q, want commit_v1,commit_v2",
+			d.StagedComments[0].CommitSHA, d.StagedComments[1].CommitSHA)
 	}
 }
