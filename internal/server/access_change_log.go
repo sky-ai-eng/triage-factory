@@ -10,18 +10,23 @@ import (
 // Access-change audit log (TFAC-471) write helpers shared across the
 // governance handlers. The bulk of the write-points record through the
 // tx-bound db.AccessChangeLogStore inside their existing WithTx; this file
-// holds the one raw-execer path (invite-accept, which runs on the admin pool)
-// plus the small detail_json builders the handlers reuse.
+// holds the raw-execer path (invite-accept + SSO JIT, which run on the admin
+// pool) plus the small detail_json builders the handlers reuse.
 
 // recordAccessChangeTx writes one access_change_log row through a raw execer —
-// the seam for the invite-accept grant, which runs on the admin pool's raw
-// *sql.Tx because the invitee has no RLS standing to insert their own
-// membership and therefore can't route through the app-pool store. Every other
-// write-point uses the tx-bound db.AccessChangeLogStore inside its WithTx. The
-// admin pool is BYPASSRLS, so org_id is set explicitly (defense in depth);
-// id + created_at fall to their column DEFAULTs. Postgres-only (the invite
-// surface is multi-mode); mirrors grantOrgMembership's raw style. Empty
-// actor/target/team/detail values serialize to SQL NULL.
+// the seam for the admin-pool grants that compose their audit row atomically
+// with the membership INSERT: invite-accept (the invitee has no RLS standing to
+// insert their own membership) and SSO JIT (the user has no claims/membership at
+// provisioning time); a future SCIM grant grafts here too. Each runs on the admin
+// pool's raw *sql.Tx, so it can't route through the app-pool store — this is how
+// the audit row commits or rolls back together with the grant, and it's why these
+// callers use this rather than the store's RecordSystem (which can't compose into
+// a caller-supplied tx). Every other write-point uses the tx-bound
+// db.AccessChangeLogStore inside its WithTx. The admin pool is BYPASSRLS, so
+// org_id is set explicitly (defense in depth); id + created_at fall to their
+// column DEFAULTs. Postgres-only (these surfaces are multi-mode); mirrors
+// grantOrgMembership's raw style. Empty actor/target/team/detail values serialize
+// to SQL NULL.
 func recordAccessChangeTx(ctx context.Context, ex execer, orgID string, e domain.AccessChange) error {
 	_, err := ex.ExecContext(ctx, `
 		INSERT INTO public.access_change_log

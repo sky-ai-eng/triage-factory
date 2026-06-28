@@ -205,7 +205,14 @@ func (a serverExtensionAPI) PKCEChallenge(verifier string) string { return pkceC
 // store; it mirrors invite-accept's admin-pool tx instead — grant the membership,
 // and if it was NET-NEW (not an ON CONFLICT DO NOTHING no-op on a returning
 // member), record the org_member_granted audit row on the SAME tx so the
-// access_change_log can't diverge from the grant. The net-new gate keeps JIT —
+// access_change_log can't diverge from the grant. This audit contract is
+// deliberately NOT best-effort (cf. RecordAuthEvent, which logs-and-continues):
+// an audit-write failure rolls the whole tx back, so the membership is NOT
+// granted — the login still completes, so the user lands in onboarding rather
+// than seeing an error. A broken access_change_log write path therefore blocks
+// JIT provisioning by design; there is no break-glass that grants while auditing
+// is down (restoring it is a code change). Operator troubleshooting note lives in
+// docs/sso-entra.md. The net-new gate keeps JIT —
 // which fires on every SSO login — from logging "joined" each time. The actor is
 // the user themselves (a self-grant via the org's SSO domain binding), matching
 // invite-accept's "joined the org"; team_id is NULL (JIT grants org-only); the

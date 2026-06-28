@@ -359,3 +359,14 @@ Still in progress (not configured here yet):
   does not re-fetch metadata. Rotating a connection's metadata is a deferred
   follow-up; for now, removing and re-registering a connection requires operator
   action against GoTrue's admin API.
+- **A first-time SSO user's login succeeds but they land in onboarding with no
+  membership.** JIT provisioning writes its `access_change_log` audit row in the
+  *same* admin-pool transaction as the membership grant — the audit log can't
+  diverge from the grant (a SOC2 authorization-change control, deliberately not
+  best-effort). So if that audit write fails, the whole transaction rolls back and
+  the membership is **not** granted, while the login itself still completes — the
+  user reads as zero-membership onboarding. Check the `triagefactory` logs for an
+  `audit jit member granted` error and the health of the `access_change_log` write
+  path (schema present, disk not full). This is by design: there is no break-glass
+  that grants membership while the audit write is down, so restoring it (not
+  bypassing it) is the fix.
