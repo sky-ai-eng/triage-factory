@@ -157,7 +157,7 @@ docker compose run --rm --no-deps --entrypoint sh seaweedfs-postinit -c '
   aws --endpoint-url "$EP" s3 rm "s3://$B/smoke.txt"'
 ```
 
-To eyeball stored snapshot objects there's no published browser console; list them through the same sidecar: `aws --endpoint-url http://seaweedfs:8333 s3 ls "s3://${TF_BLOB_BUCKET:-tf-workspaces}/"`.
+To eyeball stored snapshot objects there's no published browser console; list them through the same sidecar: `docker compose run --rm --no-deps --entrypoint sh seaweedfs-postinit -c 'aws --endpoint-url http://seaweedfs:8333 s3 ls "s3://${TF_BLOB_BUCKET:-tf-workspaces}/"'`.
 
 ### Hosted Supabase Storage, S3, or R2 (SaaS / BYO)
 
