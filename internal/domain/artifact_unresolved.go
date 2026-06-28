@@ -28,17 +28,15 @@ func HasUnresolvedArtifacts(arts []Artifact) bool {
 // each kind (multiple draft PRs / reviews per run), so this counts every match
 // rather than just the first.
 func UnresolvedArtifactCounts(arts []Artifact) (prCount, reviewCount int) {
+	// Go through the same single-artifact predicates FirstDraftPullRequest /
+	// FirstReadyReview use, so the count can't drift from the bool derivation if
+	// either predicate changes.
 	for i := range arts {
 		switch {
-		case arts[i].Kind == ArtifactKindPullRequest && arts[i].State == ArtifactStatePRDraft:
+		case isDraftPullRequest(arts[i]):
 			prCount++
-		case arts[i].Kind == ArtifactKindReview && arts[i].State == ArtifactStateReviewPending:
-			// A pending review only counts once it's finalized for approval — the
-			// ready sentinel (ReviewEvent) is set. A started-but-not-submitted
-			// review has nothing to approve yet, mirroring FirstReadyReview.
-			if d, err := ParseReviewArtifactDetails(arts[i].DetailsJSON); err == nil && d.ReviewEvent != "" {
-				reviewCount++
-			}
+		case isReadyReview(arts[i]):
+			reviewCount++
 		}
 	}
 	return prCount, reviewCount

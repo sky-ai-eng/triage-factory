@@ -771,10 +771,11 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 	// An unresolved artifact (draft PR / ready review) is the derived approval
 	// signal that replaced the pending_approval run status: a step that completed
 	// leaving one keeps the task in the approval column even though no run is open.
-	// Precedence: has-unresolved → approval; else parked-open → approval; else
-	// in-progress. Checked only when not already in_review so the common
-	// all-running path skips the extra artifact reads; reuses the runs already
-	// loaded above rather than re-fetching them.
+	// A parked-open run and an unresolved artifact both map to the same column
+	// (in_review), so the two checks are unordered as far as the result goes; the
+	// loop above runs first only as an optimization — the artifact reads are
+	// skipped once a parked-open run has already forced in_review (and reuse the
+	// runs slice already loaded above rather than re-fetching).
 	if target != "in_review" && s.runsHaveUnresolvedArtifacts(ctx, orgID, runs) {
 		target = "in_review"
 	}

@@ -227,7 +227,7 @@ type AgentRunStore interface {
 	ActiveIDsForTask(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// ListParkedWorktreePaths returns the worktree_path of every run
-	// parked in `open` or pending_approval with a non-empty
+	// parked in `open` with a non-empty
 	// worktree_path. Read at startup so the worktree-cleanup sweep
 	// preserves a parked run's warm workspace (worktree dir + session
 	// JSONL) as the fast resume path. A swept entry still resumes via

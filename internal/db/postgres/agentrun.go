@@ -251,6 +251,8 @@ func (s *agentRunStore) MarkOpenSystem(ctx context.Context, orgID, runID string)
 }
 
 func markOpen(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+	// pending_approval stays in the exclusion list as a backward-compat guard:
+	// runs no longer park in it, but a legacy row must not be re-opened from it.
 	res, err := q.ExecContext(ctx, `
 		UPDATE runs
 		SET status = 'open', parked_at = now()

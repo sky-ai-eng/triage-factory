@@ -152,13 +152,21 @@ func FirstPendingReviewArtifact(arts []Artifact) *Artifact {
 // has a review awaiting approval".
 func FirstReadyReview(arts []Artifact) *Artifact {
 	for i := range arts {
-		if arts[i].Kind != ArtifactKindReview || arts[i].State != ArtifactStateReviewPending {
-			continue
-		}
-		d, err := ParseReviewArtifactDetails(arts[i].DetailsJSON)
-		if err == nil && d.ReviewEvent != "" {
+		if isReadyReview(arts[i]) {
 			return &arts[i]
 		}
 	}
 	return nil
+}
+
+// isReadyReview is the single-artifact predicate for "a finalized pending review
+// awaiting approval" — Kind==review, State==pending, and the ready sentinel
+// (details.ReviewEvent) set. FirstReadyReview and UnresolvedArtifactCounts both
+// go through it so the "ready review" definition lives in exactly one place.
+func isReadyReview(a Artifact) bool {
+	if a.Kind != ArtifactKindReview || a.State != ArtifactStateReviewPending {
+		return false
+	}
+	d, err := ParseReviewArtifactDetails(a.DetailsJSON)
+	return err == nil && d.ReviewEvent != ""
 }

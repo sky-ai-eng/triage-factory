@@ -24,9 +24,9 @@ import (
 // ErrRunNotResumable is returned by ResumeOpenRun when the run can't be
 // resumed in its current state — typically a concurrent cancel, approval, or a
 // competing resume moved it between the caller's validation read and our status
-// flip (MarkResuming only flips a resumable run: open / pending_approval /
-// completed+abort). Callers map this to 409 Conflict so the client can refresh
-// and see the actual state.
+// flip (MarkResuming only flips a resumable run: open / completed+abort).
+// Callers map this to 409 Conflict so the client can refresh and see the actual
+// state.
 var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 
 // ErrWorkspaceExpired is returned by ResumeOpenRun when a resumable run's

@@ -571,6 +571,11 @@ func blueprintTerminalForResumedStep(stepRun *domain.AgentRun, isFinal bool) (do
 // recover); leaving a task open spuriously is self-correcting on the next
 // derivation and recoverable by a human. So on error we assume "may be
 // unresolved" rather than risk the destructive direction.
+//
+// The unwired-store / empty-id guard below is NOT a read error and does not
+// trigger fail-open: a nil artifact store (a test fixture without artifact
+// tracking) or an empty blueprint id means there are no artifacts to be
+// unresolved, so it returns false.
 func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, blueprintRunID string) bool {
 	if s.artifacts == nil || s.blueprints == nil || blueprintRunID == "" {
 		return false

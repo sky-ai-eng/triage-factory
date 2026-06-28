@@ -159,6 +159,8 @@ func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
+	// pending_approval stays in the exclusion list as a backward-compat guard:
+	// runs no longer park in it, but a legacy row must not be re-opened from it.
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs
 		SET status = 'open', parked_at = ?
