@@ -31,7 +31,9 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
-PROJECT=tf-smoke
+# Override-able so concurrent runs (or a coincidental real project of the same
+# name) don't collide; the default is an obvious throwaway.
+PROJECT="${TF_SMOKE_PROJECT:-tf-smoke}"
 ENV_FILE=$(mktemp "${TMPDIR:-/tmp}/tf-smoke-env.XXXXXX")
 BUCKET=tf-workspaces            # matches docker-compose.yml's TF_BLOB_BUCKET default
 PUBLIC_URL=http://localhost:3000
@@ -63,6 +65,7 @@ pass() { echo "  ✓ $*"; }
 command -v docker >/dev/null 2>&1 || fail "docker not found on PATH"
 docker compose version >/dev/null 2>&1 || fail "'docker compose' (v2) not available"
 command -v openssl >/dev/null 2>&1 || fail "openssl not found on PATH (needed to generate throwaway secrets)"
+command -v curl >/dev/null 2>&1 || fail "curl not found on PATH (needed for the /api/health probe)"
 
 # jwk-init must run from a built TF binary — GoTrue won't boot without valid
 # RS256 signing material, and re-implementing the keygen here would drift from
@@ -113,6 +116,9 @@ TF_PUBLIC_URL="$PUBLIC_URL" "$BIN" jwk-init --write-env "$ENV_FILE"
 # `up` wait for postgres/gotrue healthy and both postinit sidecars to complete
 # successfully before starting triagefactory — so a sidecar that errors aborts
 # `up` here with a non-zero exit.
+# Clear any leftovers from a previously-crashed run so stale named volumes (an
+# old bucket, an old migration set) from a reused project can't taint this run.
+dc down -v --remove-orphans >/dev/null 2>&1 || true
 echo "Building + starting the stack (this builds the TF image; first run is slow)..."
 dc up -d --build
 

@@ -7,7 +7,7 @@
 # source-available license that would impose obligations we don't intend to
 # take on (e.g. an AGPL network-copyleft clause that would land on
 # self-hosters). It's the single source of truth for the license check: run by
-# .github/workflows/license.yml on PRs + main, and as a hard prerequisite of
+# .github/workflows/dependency-licenses.yml on PRs + main, and as a hard prerequisite of
 # the release job (.github/workflows/release.yml) so a tag can't ship binaries
 # without it passing.
 #
@@ -53,7 +53,11 @@ IGNORE=(
 
 command -v go >/dev/null 2>&1 || { echo "go not found on PATH" >&2; exit 1; }
 
-GOBIN_DIR=$(go env GOPATH)/bin
+# go install drops the binary in $GOBIN when set, else the first GOPATH entry's
+# bin (GOPATH can be a colon-separated list). Resolve it the same way so we find
+# the installed go-licenses instead of reinstalling / looking in the wrong place.
+GOBIN_DIR=$(go env GOBIN)
+[ -n "$GOBIN_DIR" ] || GOBIN_DIR="$(go env GOPATH | cut -d: -f1)/bin"
 GO_LICENSES="$GOBIN_DIR/go-licenses"
 if ! [ -x "$GO_LICENSES" ]; then
   echo "installing go-licenses@$GO_LICENSES_VERSION..."
