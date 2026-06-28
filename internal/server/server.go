@@ -979,11 +979,12 @@ func (s *Server) routes() {
 	// + live pending-review comments, PATCH stages body/event, the comment routes
 	// edit/delete inline comments on the live pending review, approve submits it,
 	// and abandon flows through the task /requeue path (cleanupPendingApprovalRun).
-	ah := &artifactsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
+	ah := &artifactsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghResolver: s.ghResolver}
 	s.api("GET /api/artifacts/{id}", ah.handleArtifactGet)
 	s.apiMutating("PATCH /api/artifacts/{id}", ah.handleArtifactUpdate)
 	s.api("GET /api/artifacts/{id}/diff", ah.handleArtifactDiff)
 	s.apiMutating("POST /api/artifacts/{id}/approve", ah.handleArtifactApprove)
+	s.apiMutating("POST /api/artifacts/{id}/dismiss", ah.handleArtifactDismiss)
 	s.apiMutating("PUT /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentUpdate)
 	s.apiMutating("DELETE /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentDelete)
 

@@ -91,8 +91,8 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Any user gesture that takes a task off the agent's hands — dismiss,
-	// complete, claim, or delegate — tears down a pending_approval review and
-	// cancels any in-flight run (SKY-206).
+	// complete, claim, or delegate — resolves every unresolved artifact the task
+	// holds and cancels any in-flight run (SKY-206).
 	if req.Action == "dismiss" || req.Action == "complete" || req.Action == "claim" || req.Action == "delegate" {
 		s.swipeTeardownRuns(r, orgID, userID, id, req.Action)
 	}
@@ -365,12 +365,13 @@ func (s *Server) swipeLifecycle(w http.ResponseWriter, r *http.Request, orgID, u
 	return newStatus, true
 }
 
-// swipeTeardownRuns stops any run a task is handed off from. It tears down a
-// pending_approval review (cleanupPendingApprovalRun, idempotent and a no-op
-// when no review exists) and cancels in-flight runs. The discard memory note
-// differs per action so the next agent reading run_memory can tell apart
-// "human walked away" (dismiss) from "human resolved it" (complete) from
-// "human took over" (claim) from "re-delegate" (SKY-330). Best-effort.
+// swipeTeardownRuns stops any run a task is handed off from. It resolves every
+// unresolved artifact the task holds (teardownTaskArtifacts — closes all draft
+// PRs, dismisses all pending reviews, a no-op when none exist) and cancels
+// in-flight runs. The discard memory note differs per action so the next agent
+// reading run_memory can tell apart "human walked away" (dismiss) from "human
+// resolved it" (complete) from "human took over" (claim) from "re-delegate"
+// (SKY-330). Best-effort.
 func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action string) {
 	outcome := discardOutcomeDismissed
 	switch action {
@@ -382,10 +383,10 @@ func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action st
 		outcome = discardOutcomeRedelegated
 	}
 	// Teardown runs detached from r.Context() so a client disconnect after the
-	// swipe response doesn't strand the run: both the pending_approval cleanup
-	// and the active-run lookup + cancellation below must complete regardless.
+	// swipe response doesn't strand work: both the artifact teardown and the
+	// active-run lookup + cancellation below must complete regardless.
 	cleanupCtx := context.WithoutCancel(r.Context())
-	s.cleanupPendingApprovalRun(cleanupCtx, orgID, userID, id, outcome)
+	s.teardownTaskArtifacts(cleanupCtx, orgID, userID, id, outcome)
 	if s.spawner == nil {
 		return
 	}

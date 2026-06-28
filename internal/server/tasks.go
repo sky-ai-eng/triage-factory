@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -544,13 +545,11 @@ const (
 // finalizeRequeue runs the side-effect cleanup that both /undo and
 // /requeue need after the task status flips back to queued:
 //
-//   - pending_approval cleanup: if the task had a delegated agent run
-//     in pending_approval (review prepared, awaiting human submit),
-//     write the discard verdict to run_memory.human_content, delete
-//     the pending_reviews row, mark the run cancelled, and broadcast
-//     the run-status change to the websocket. SKY-206 — closes the
-//     bug where a discarded review left a stale pending_reviews row
-//     and a phantom pending_approval run on a now-queued task.
+//   - artifact teardown: resolve every unresolved artifact the task's
+//     runs hold (close all draft PRs, dismiss all pending reviews) and
+//     write the discard verdict to run_memory.human_content, so a
+//     returned-to-queue task leaves no stranded GitHub draft / pending
+//     review. Decoupled from run lifecycle — it never flips runs.status.
 //
 //   - Jira reversal: if the task is Jira-backed and we have a
 //     SourceStatus snapshot (recorded at claim time), unassign and
@@ -563,12 +562,12 @@ const (
 // already queued by the time we get here; failing the response would
 // confuse callers about what actually changed.
 //
-// taskID is taken separately from task because the pending_approval
-// cleanup only needs the id — running it under a nil-task short-
-// circuit (e.g. when db.GetTask transiently fails or the task row was
-// deleted concurrently) would silently strand the very state this
-// helper is meant to clean up. Jira reversal needs the loaded row so
-// it nil-guards internally.
+// taskID is taken separately from task because the artifact teardown
+// only needs the id — running it under a nil-task short-circuit (e.g.
+// when db.GetTask transiently fails or the task row was deleted
+// concurrently) would silently strand the very state this helper is
+// meant to clean up. Jira reversal needs the loaded row so it
+// nil-guards internally.
 //
 // orgID + userID are captured BEFORE the goroutine launches so the
 // detached cleanup context inherits the requesting user's identity
@@ -576,19 +575,20 @@ const (
 func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, task *domain.Task) {
 	// Cleanup must outlive the request — the user already committed
 	// to requeueing via the surrounding /undo or /requeue handler,
-	// and bailing on browser close would strand the run in
-	// pending_approval. WithoutCancel inherits values from
+	// and bailing on browser close would strand an unresolved GitHub
+	// draft / pending review. WithoutCancel inherits values from
 	// r.Context() (D9 will put request claims there) while breaking
 	// the cancel chain.
 	cleanupCtx := context.WithoutCancel(r.Context())
-	s.cleanupPendingApprovalRun(cleanupCtx, orgID, userID, taskID, discardOutcomeRequeued)
+	s.teardownTaskArtifacts(cleanupCtx, orgID, userID, taskID, discardOutcomeRequeued)
 	s.revertJiraStateIfApplicable(cleanupCtx, orgID, userID, task)
 	// SKY-330: requeue clears both claim cols and flips status to
 	// 'queued'. Peer Board sessions need a task_updated event to
 	// pull the card back into the Queued column; without this they
 	// keep showing the stale claim/status until the next refresh.
-	// The cleanupPendingApprovalRun broadcast only fires for tasks
-	// with a pending_approval run — most requeues don't.
+	// teardownTaskArtifacts no longer broadcasts a run-status change
+	// (a resolve is decoupled from run lifecycle), so this is the sole
+	// board-update signal for a requeue.
 	if s.ws != nil {
 		s.ws.Broadcast(websocket.Event{
 			Type:  "task_updated",
@@ -598,191 +598,139 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 	}
 }
 
-// cleanupPendingApprovalRun handles the SKY-206 case: the user
-// returned a task to the queue (or dismissed it) while it had a
-// pending_approval agent run — i.e. the agent prepared a PR review
-// and the user threw it away rather than submitting. The agent
-// process has long since exited (pending_approval is reached after
-// the spawner's runAgent defer ran), so there's nothing to cancel
-// at the process level — this is purely a DB cleanup: write the
-// discard outcome to human_content, delete the pending_reviews +
-// comments, flip the run row to cancelled with a discriminating
-// stop_reason.
+// teardownTaskArtifacts is the task-level "force-resolve-all" gesture: the user
+// dragged a card to Done / dismissed it / claimed it / returned it to the queue
+// while it still had unresolved artifacts (draft PRs, pending reviews — same or
+// different repos). It resolves EVERY unresolved artifact the task's runs hold so
+// nothing strands: each draft PR is closed on GitHub + flipped to closed; each
+// pending review (finalized or not) has its GitHub pending review deleted +
+// flipped to dismissed. Pushed branches are kept (retention is separate).
 //
-// outcome shapes the human_content note baked into run_memory so
-// the next agent reading memory can distinguish "still on the
-// docket, the human just didn't like this verdict" (requeued) from
-// "the entity is done with — the human chose to walk away from it
-// entirely" (dismissed). Same on-disk DB cleanup either way.
+// Decoupled from run lifecycle (TFAC-379): this never flips runs.status. A live
+// run is cancelled by the caller (swipeTeardownRuns' spawner.Cancel pass) — the
+// process teardown owns that transition; a terminal run simply stays terminal.
+// Keyed on the task's runs (ListForTask spans the blueprint's step runs and any
+// standalone run) rather than the retired pending_approval lookup.
 //
-// Run-status broadcast lets the AgentCard collapse and the
-// requeued/dismissed TaskCard reflect the new state without a
-// manual refetch.
+// outcome shapes the discard note baked into run_memory.human_content so the next
+// agent reading memory can distinguish "still on the docket, the human just
+// didn't like this verdict" (requeued) from "walked away from the entity"
+// (dismissed) from "resolved it themselves" (completed) from "took over"
+// (claimed). The note is written per run that held a resolved artifact, keyed on
+// that run's dominant kind (PR precedence, matching the legacy single-artifact
+// path).
 //
-// All failures here are logged, not fatal: the calling handler has
-// already flipped the task to its new state and the response should
-// reflect that. Idempotent — a repeat call against an already-
-// cancelled run finds no pending_approval row (the lookup filters on
-// status='pending_approval') and exits silently.
-func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, taskID string, outcome discardOutcome) {
-	// The whole cleanup runs as one tx-bound batch under the
-	// requesting user's claims: in multi-mode every store call must
-	// see request.jwt.claims set so RLS gates on creator/visibility
-	// pass. Callers pass a cancellation-detached cleanupCtx
-	// (context.WithoutCancel of r.Context()) so a client disconnect
-	// mid-handler doesn't roll the cleanup back.
-	//
-	// All-or-nothing semantics: any DB error inside the closure
-	// rolls back the human_content write + side-table deletes + the
-	// status flip. The run stays in pending_approval, and a
-	// subsequent /undo, /requeue, or dismiss re-enters here to
-	// retry. UpdateRunMemoryHumanContent is idempotent (UPDATE)
-	// and the deletes are no-ops when no row exists, so retry is
-	// safe.
+// All-or-nothing per call: any DB error inside the closure rolls back the whole
+// batch (notes + flips + audit rows), leaving the artifacts unresolved for a
+// retry on the next /undo, /requeue, dismiss, or complete. UpdateRunMemoryHumanContent
+// is idempotent and the flips re-target the same predicate set, so retry is safe.
+// All failures are logged, not fatal: the calling handler has already flipped the
+// task to its new state.
+func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskID string, outcome discardOutcome) {
+	// Artifacts captured inside the tx (state already flipped) and resolved on
+	// GitHub AFTER it commits — a network call must not hold the tx open.
 	var (
-		runID         string
-		flippedToDone bool
-		// prArtifact is the run's draft PR, if any. Captured in the tx and closed
-		// on GitHub AFTER it commits — a network call must not hold the tx open.
-		prArtifact *domain.Artifact
-		// reviewArtifact is the run's pending review, if any. Same pattern: marked
-		// dismissed in the tx, its GitHub pending review deleted after commit.
-		reviewArtifact *domain.Artifact
+		prArtifacts     []domain.Artifact
+		reviewArtifacts []domain.Artifact
 	)
 	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		var lookupErr error
-		runID, lookupErr = tx.AgentRuns.PendingApprovalIDForTask(ctx, orgID, taskID)
-		if lookupErr != nil {
-			return fmt.Errorf("pending_approval lookup: %w", lookupErr)
+		runs, err := tx.AgentRuns.ListForTask(ctx, orgID, taskID)
+		if err != nil {
+			return fmt.Errorf("list runs for task: %w", err)
 		}
-		if runID == "" {
-			return nil
-		}
-
-		// Detect what parked the run BEFORE the teardown, so the stop_reason and
-		// human_content name the right kind. A draft PR parks on its pull_request
-		// artifact; a review parks on its review artifact. Without this, a
-		// discarded PR ends up tagged "review_discarded_by_user" — confusing in
-		// the UI and wrong for anything keyed on stop_reason.
-		kind := "review"
-		arts, artErr := tx.Artifacts.ListByRun(ctx, orgID, runID)
-		if artErr != nil {
-			return fmt.Errorf("artifacts.ListByRun: %w", artErr)
-		}
-		if pr := domain.FirstDraftPullRequest(arts); pr != nil {
-			kind = "pr"
-			prArtifact = pr
-		} else if rv := domain.FirstPendingReviewArtifact(arts); rv != nil {
-			// A pending review (started, maybe finalized) — abandoned whether or not
-			// it reached the ready sentinel, so key on FirstPendingReviewArtifact, not
-			// FirstReadyReview.
-			reviewArtifact = rv
-		}
-
-		// Write the discard outcome to run_memory.human_content
-		// BEFORE the row teardown. The next agent reading memory
-		// on this entity should see the human's verdict as
-		// authoritative — alongside the existing agent_content
-		// (the agent's self-report) — so it can recalibrate.
-		humanContent := buildDiscardHumanContent(outcome, kind)
-		if err := tx.TaskMemory.UpdateRunMemoryHumanContent(ctx, orgID, runID, humanContent); err != nil {
-			return fmt.Errorf("human_content write: %w", err)
-		}
-
-		// Abandon a pending review by flipping its artifact to dismissed (the GitHub
-		// pending-review delete runs after the tx). The proposed snapshot is
-		// preserved for the audit ledger — abandonment retires the GitHub review
-		// object, not the record of what the agent drafted.
-		if reviewArtifact != nil {
-			dismissed := *reviewArtifact
-			dismissed.State = domain.ArtifactStateReviewDismissed
-			if _, err := tx.Artifacts.Upsert(ctx, orgID, dismissed); err != nil {
-				return fmt.Errorf("artifacts.Upsert(dismissed): %w", err)
+		for i := range runs {
+			runID := runs[i].ID
+			arts, artErr := tx.Artifacts.ListByRun(ctx, orgID, runID)
+			if artErr != nil {
+				return fmt.Errorf("artifacts.ListByRun(%s): %w", runID, artErr)
 			}
-			// Audit the abandon (TFAC-483), atomic with the flip: the org-App
-			// pending-review delete that follows after the tx is a human-authorized,
-			// org-executed write — run_id is the drafting run, actor is the discarder.
-			if err := tx.ExternalActions.Record(ctx, orgID,
-				githubApprovalAction(reviewArtifact, userID, domain.ActionReviewDismissed, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewDismissed)); err != nil {
-				return fmt.Errorf("external_actions.Record(dismissed): %w", err)
+			draftPRs := domain.AllDraftPullRequests(arts)
+			pendingReviews := domain.AllPendingReviewArtifacts(arts)
+			if len(draftPRs) == 0 && len(pendingReviews) == 0 {
+				continue
 			}
-		}
-		// Abandon a draft PR by flipping its artifact to closed (the GitHub close
-		// runs after the tx). The pushed branch and the proposed snapshot are
-		// preserved — abandonment retires the PR object, not the work.
-		if prArtifact != nil {
-			closed := *prArtifact
-			closed.State = domain.ArtifactStatePRClosed
-			if _, err := tx.Artifacts.Upsert(ctx, orgID, closed); err != nil {
-				return fmt.Errorf("artifacts.Upsert(closed): %w", err)
+
+			// Write the discard note BEFORE the flips so the next agent reading
+			// memory on this entity sees the human's verdict alongside the agent's
+			// self-report. Keyed on the run's dominant kind (PR precedence).
+			kind := "review"
+			if len(draftPRs) > 0 {
+				kind = "pr"
 			}
-			// Audit the abandon (TFAC-483), atomic with the flip — the GitHub PR
-			// close runs best-effort after the tx; the audit row records the intent
-			// alongside the artifact state so the two agree.
-			if err := tx.ExternalActions.Record(ctx, orgID,
-				githubApprovalAction(prArtifact, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed)); err != nil {
-				return fmt.Errorf("external_actions.Record(closed): %w", err)
+			if err := tx.TaskMemory.UpdateRunMemoryHumanContent(ctx, orgID, runID, buildDiscardHumanContent(outcome, kind)); err != nil {
+				return fmt.Errorf("human_content write: %w", err)
+			}
+
+			// Abandon each pending review by flipping its artifact to dismissed (the
+			// GitHub pending-review delete runs after the tx). The proposed snapshot
+			// is preserved for the audit ledger — abandonment retires the GitHub
+			// review object, not the record of what the agent drafted.
+			for j := range pendingReviews {
+				rv := pendingReviews[j]
+				dismissed := rv
+				dismissed.State = domain.ArtifactStateReviewDismissed
+				if _, err := tx.Artifacts.Upsert(ctx, orgID, dismissed); err != nil {
+					return fmt.Errorf("artifacts.Upsert(dismissed): %w", err)
+				}
+				// Audit the abandon (TFAC-483), atomic with the flip: the org-App
+				// pending-review delete that follows is a human-authorized, org-executed
+				// write — run_id is the drafting run, actor is the discarder.
+				if err := tx.ExternalActions.Record(ctx, orgID,
+					githubApprovalAction(&rv, userID, domain.ActionReviewDismissed, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewDismissed)); err != nil {
+					return fmt.Errorf("external_actions.Record(dismissed): %w", err)
+				}
+				reviewArtifacts = append(reviewArtifacts, rv)
+			}
+			// Abandon each draft PR by flipping its artifact to closed (the GitHub
+			// close runs after the tx). The pushed branch and the proposed snapshot
+			// are preserved — abandonment retires the PR object, not the work.
+			for j := range draftPRs {
+				pr := draftPRs[j]
+				closed := pr
+				closed.State = domain.ArtifactStatePRClosed
+				if _, err := tx.Artifacts.Upsert(ctx, orgID, closed); err != nil {
+					return fmt.Errorf("artifacts.Upsert(closed): %w", err)
+				}
+				if err := tx.ExternalActions.Record(ctx, orgID,
+					githubApprovalAction(&pr, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed)); err != nil {
+					return fmt.Errorf("external_actions.Record(closed): %w", err)
+				}
+				prArtifacts = append(prArtifacts, pr)
 			}
 		}
-
-		stopReason := "review_discarded_by_user"
-		if kind == "pr" {
-			stopReason = "pr_discarded_by_user"
-		}
-
-		// Flip the run row terminal. ok=false means the row was
-		// already cancelled by a concurrent path (idempotent
-		// re-call, rare race) — skip the broadcast in that case
-		// so we don't double-fire.
-		ok, markErr := tx.AgentRuns.MarkDiscarded(ctx, orgID, runID, stopReason)
-		if markErr != nil {
-			return fmt.Errorf("MarkDiscarded: %w", markErr)
-		}
-		flippedToDone = ok
 		return nil
 	})
 	if err != nil {
-		approvalDiscardLog.Error("task cleanup failed, run held in pending_approval for retry", "task", taskID, "error", err)
+		approvalDiscardLog.Error("task artifact teardown failed; artifacts left unresolved for retry", "task", taskID, "error", err)
 		return
 	}
 
-	// Close the draft PR on GitHub (best-effort, outside the tx). The artifact is
-	// already marked closed; a GitHub failure leaves the PR open for reconciliation
-	// to retire later and must never fail the requeue. The branch stays regardless.
-	if prArtifact != nil {
-		s.closeDraftPRBestEffort(ctx, orgID, prArtifact)
+	// Resolve on GitHub (best-effort, outside the tx). The artifacts are already
+	// marked closed/dismissed; a GitHub failure leaves the object for reconciliation
+	// to retire later and must never fail the requeue/complete. Branches stay.
+	for i := range prArtifacts {
+		closeDraftPRBestEffort(ctx, s.ghResolver, orgID, &prArtifacts[i])
 	}
-	// Delete the GitHub pending review (best-effort, outside the tx). The artifact
-	// is already marked dismissed; a private pending review left on GitHub would
-	// otherwise linger and collide with the next start-review on the PR.
-	if reviewArtifact != nil {
-		s.deletePendingReviewBestEffort(ctx, orgID, reviewArtifact)
+	for i := range reviewArtifacts {
+		deletePendingReviewBestEffort(ctx, s.ghResolver, orgID, &reviewArtifacts[i])
 	}
-
-	if !flippedToDone || runID == "" {
-		return
-	}
-
-	s.ws.Broadcast(websocket.Event{
-		Type:  "agent_run_update",
-		OrgID: orgID,
-		RunID: runID,
-		Data:  map[string]string{"status": "cancelled"},
-	})
 }
 
 // closeDraftPRBestEffort closes the abandoned draft PR on GitHub. Best-effort:
 // every failure is logged, never returned — the artifact is already marked
-// closed and the run/task already requeued, so a GitHub hiccup mustn't unwind
+// closed and the run/task already resolved, so a GitHub hiccup mustn't unwind
 // that. owner/repo/number come from the artifact's target; the per-repo client
-// resolves App-installation-token → PAT like every other PR mutation.
-func (s *Server) closeDraftPRBestEffort(ctx context.Context, orgID string, art *domain.Artifact) {
+// resolves App-installation-token → PAT like every other PR mutation. A free
+// function (taking the resolver) so both the task-level teardown and the
+// per-artifact dismiss endpoint share one GitHub-resolution path. The pushed
+// branch is never touched (retention is a separate concern).
+func closeDraftPRBestEffort(ctx context.Context, resolver ghclient.Resolver, orgID string, art *domain.Artifact) {
 	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
 		approvalDiscardLog.Warn("draft PR artifact has a malformed target; skipping GitHub close", "artifact", art.ID, "target", art.Target)
 		return
 	}
-	gh, err := s.ghResolver.ClientForRepo(ctx, orgID, owner, repo)
+	gh, err := resolver.ClientForRepo(ctx, orgID, owner, repo)
 	if err != nil {
 		approvalDiscardLog.Warn("resolve github client for draft PR close failed", "artifact", art.ID, "owner", owner, "repo", repo, "error", err)
 		return
@@ -795,15 +743,16 @@ func (s *Server) closeDraftPRBestEffort(ctx context.Context, orgID string, art *
 // deletePendingReviewBestEffort deletes the abandoned GitHub pending review.
 // Best-effort, mirroring closeDraftPRBestEffort: every failure is logged, never
 // returned — the artifact is already marked dismissed and the run/task already
-// requeued, so a GitHub hiccup mustn't unwind that. owner/repo/number come from
-// the artifact target; ExternalID is the review node id.
-func (s *Server) deletePendingReviewBestEffort(ctx context.Context, orgID string, art *domain.Artifact) {
+// resolved, so a GitHub hiccup mustn't unwind that. owner/repo/number come from
+// the artifact target; ExternalID is the review node id. A free function (taking
+// the resolver) so the teardown and the per-artifact dismiss endpoint share it.
+func deletePendingReviewBestEffort(ctx context.Context, resolver ghclient.Resolver, orgID string, art *domain.Artifact) {
 	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
 		approvalDiscardLog.Warn("review artifact has a malformed target; skipping GitHub pending-review delete", "artifact", art.ID, "target", art.Target)
 		return
 	}
-	gh, err := s.ghResolver.ClientForRepo(ctx, orgID, owner, repo)
+	gh, err := resolver.ClientForRepo(ctx, orgID, owner, repo)
 	if err != nil {
 		approvalDiscardLog.Warn("resolve github client for pending-review delete failed", "artifact", art.ID, "owner", owner, "repo", repo, "error", err)
 		return

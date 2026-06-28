@@ -15,13 +15,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedReviewArtifactWithRun mints a pending_approval run chain and a finalized
+// seedReviewArtifactWithRun mints a completed (terminal) run chain and a finalized
 // review artifact hung off it (state=pending, ready sentinel set, agent draft
 // snapshotted into proposed). Returns (artifactID, runID, taskID). reviewID is
 // the GitHub review node id stored as ExternalID.
 func seedReviewArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo string, number int, reviewID, event string) (artifactID, runID, taskID string) {
 	t.Helper()
-	runID = seedSteerRun(t, s.db, suffix, "pending_approval")
+	runID = seedSteerRun(t, s.db, suffix, "completed")
 	taskID = "t_" + suffix
 	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, runID, "e_"+suffix, "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
@@ -184,6 +184,61 @@ func TestReviewArtifactApprove(t *testing.T) {
 	}
 	if !strings.Contains(human, "as drafted") {
 		t.Errorf("human_content = %q, want the 'as drafted' verdict (proposed==final)", human)
+	}
+}
+
+// TestReviewArtifactDismiss pins the per-artifact dismiss for reviews: POST
+// /api/artifacts/{id}/dismiss deletes the GitHub pending review (best-effort) and
+// flips the artifact pending → dismissed, never touching the run lifecycle.
+func TestReviewArtifactDismiss(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var deleted bool
+	mux := newAppAPIMux()
+	// DeletePendingReview resolves the review node id to its databaseId via
+	// GraphQL, then issues a REST DELETE keyed on that database id.
+	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"node":{"databaseId":555}}}`))
+	})
+	mux.HandleFunc("DELETE /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews/{rid}", func(w http.ResponseWriter, r *http.Request) {
+		deleted = true
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, runID, _ := seedReviewArtifactWithRun(t, srv, "rdis", "acme", "api", 7, "PRR_1", "COMMENT")
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !deleted {
+		t.Errorf("dismiss must delete the GitHub pending review")
+	}
+	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStateReviewDismissed {
+		t.Errorf("artifact state = %q, want dismissed", got)
+	}
+	var runStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&runStatus); err != nil {
+		t.Fatalf("read run: %v", err)
+	}
+	if runStatus != "completed" {
+		t.Errorf("run status = %q, want completed (dismiss must not flip run lifecycle)", runStatus)
+	}
+}
+
+// TestReviewArtifactDismiss_NonPending_409 pins the state guard: dismissing an
+// already-submitted (terminal) review returns 409.
+func TestReviewArtifactDismiss_NonPending_409(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rdis409", "acme", "api", 7, "PRR_1", "COMMENT")
+	execSQL(t, srv.db, `UPDATE artifacts SET state = ? WHERE id = ?`, domain.ArtifactStateReviewSubmitted, artID)
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("dismiss of submitted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

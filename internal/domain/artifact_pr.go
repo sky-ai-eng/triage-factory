@@ -148,6 +148,22 @@ func FirstDraftPullRequest(arts []Artifact) *Artifact {
 	return nil
 }
 
+// AllDraftPullRequests returns every draft pull_request artifact in arts (the
+// plural of FirstDraftPullRequest), in slice order. The artifact set is plural
+// per run — a run can open several draft PRs — so the projection
+// (pending_artifact_ids) and the task-level resolve-all teardown both iterate the
+// whole set rather than just the first. Shares isDraftPullRequest so it can't
+// drift from the single-artifact predicate.
+func AllDraftPullRequests(arts []Artifact) []Artifact {
+	var out []Artifact
+	for i := range arts {
+		if isDraftPullRequest(arts[i]) {
+			out = append(out, arts[i])
+		}
+	}
+	return out
+}
+
 // ParsePRTarget splits a pull_request artifact's Target (owner/repo#<number>)
 // into its parts. ok=false when the shape doesn't match — a caller acting on the
 // PR (edit / approve / close) needs all three coordinates, so it must fail

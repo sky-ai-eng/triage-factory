@@ -9,7 +9,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -22,15 +21,13 @@ import (
 // object 1:1 instead of staging a local row.
 //
 // ghResolver picks the right GitHub client (org App installation token → PAT)
-// per repo at call time, so App-only orgs work identically to PAT orgs. spawner
-// is read through a getter so the handler always sees the current value, (re)wired
-// onto the server after construction. Mirrors pendingPRsHandler's deps.
+// per repo at call time, so App-only orgs work identically to PAT orgs. Mirrors
+// pendingPRsHandler's deps.
 type artifactsHandler struct {
 	tx         db.TxRunner
 	ws         *websocket.Hub
 	agentRuns  db.AgentRunStore
 	ghResolver ghclient.Resolver
-	spawner    func() *delegate.Spawner
 }
 
 // prArtifactJSON is the wire shape the PR overlay consumes. Title/Body are the
@@ -460,9 +457,11 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		}
 	}
 
-	// Step 3: run/task/blueprint bookkeeping — flip the run out of the approval
-	// queue, then either resume the blueprint or close the standalone task.
-	ah.finishApprovedRun(cleanupCtx, orgID, userID, art.RunID)
+	// Step 3: terminal-on-last task closure. Approval is a decoupled sidecar — it
+	// never flips run status or resumes/terminates a blueprint. The only lifecycle
+	// effect is closing the task when this was the LAST unresolved artifact on an
+	// already-terminal blueprint (§3); otherwise a no-op.
+	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"number":   number,
@@ -471,67 +470,193 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	})
 }
 
-// finishApprovedRun runs the shared post-approval run/task/blueprint bookkeeping
-// for an approved artifact (PR ready / review submitted): flip the run out of
-// pending_approval, then either resume the blueprint (which closes the task via
-// terminateBlueprint) or close the standalone task, broadcast the completion, and
-// resume the blueprint or drop the parked workspace snapshot. A no-op for a
-// run-less artifact (standalone CLI). Detached + best-effort + each step logged:
-// the external action already landed, so a client disconnect mustn't strand the
-// run/task half-flipped. Ported from the old pending_reviews/pending_prs submit
-// handlers; shared by the PR and review approve paths so they can't drift.
-func (ah *artifactsHandler) finishApprovedRun(ctx context.Context, orgID, userID, runID string) {
+// handleArtifactDismiss resolves ONE artifact as a decoupled sidecar operation,
+// the per-item counterpart to approve: it abandons the GitHub object and flips
+// the artifact's state, never touching the run's lifecycle. A draft PR is closed
+// on GitHub (best-effort) and flipped to closed; a pending review has its GitHub
+// pending review deleted and is flipped to dismissed. Branches are never touched.
+// An already-terminal artifact (a non-draft PR / non-pending review) is a 409 —
+// there is nothing left to resolve. After the flip it runs the shared
+// terminal-on-last task-closure check.
+func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id := r.PathValue("id")
+
+	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
+	if !ok {
+		return
+	}
+	switch art.Kind {
+	case domain.ArtifactKindReview:
+		ah.reviewDismiss(w, r, orgID, userID, art)
+		return
+	case domain.ArtifactKindPullRequest:
+		// fall through to the PR path below
+	default:
+		notFound(w, "artifact")
+		return
+	}
+
+	// Only a draft PR can be dismissed. An already-open / merged / closed PR is
+	// terminal — there's no draft to abandon — so 409 rather than re-closing a PR
+	// the user already shipped or a prior dismiss already retired.
+	if art.State != domain.ArtifactStatePRDraft {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this PR is no longer a draft awaiting resolution (state: " + art.State + ")"})
+		return
+	}
+
+	// Flip the artifact to closed + audit, atomic and pessimistic (the flip is the
+	// resolution, so a DB failure is a real error the client must see). The GitHub
+	// close + the terminal-on-last check run detached afterwards so a client
+	// disconnect can't strand them once the artifact is resolved.
+	closed := *art
+	closed.State = domain.ArtifactStatePRClosed
+	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if _, e := tx.Artifacts.Upsert(r.Context(), orgID, closed); e != nil {
+			return e
+		}
+		return tx.ExternalActions.Record(r.Context(), orgID,
+			githubApprovalAction(art, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed))
+	}); err != nil {
+		internalError(w, "artifacts", err)
+		return
+	}
+
+	cleanupCtx := context.WithoutCancel(r.Context())
+	// Close the draft PR on GitHub (best-effort). The artifact is already closed; a
+	// GitHub hiccup leaves the PR for reconciliation to retire later. Branch kept.
+	closeDraftPRBestEffort(cleanupCtx, ah.ghResolver, orgID, art)
+	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"number":   artifactPRNumber(art),
+		"html_url": art.URL,
+		"state":    domain.ArtifactStatePRClosed,
+	})
+}
+
+// artifactPRNumber parses the PR number from an artifact's target for the dismiss
+// response. Returns 0 on a malformed target — the field is informational (the
+// artifact is already resolved), so it never blocks the success response.
+func artifactPRNumber(art *domain.Artifact) int {
+	_, _, n, _ := domain.ParsePRTarget(art.Target)
+	return n
+}
+
+// closeTaskIfTerminalAndResolved is the shared terminal-on-last task-closure
+// check, run after any per-artifact resolve (approve or dismiss). It re-reads the
+// artifact set governing the run and closes the task IFF the controlling run is
+// terminal AND no unresolved artifact remains. Otherwise it no-ops:
+//
+//   - a LIVE run keeps running — resolving an artifact never closes its task; the
+//     run's own eventual termination (terminateBlueprint / standalone completion)
+//     re-checks this and closes the task then.
+//   - a TERMINAL run with other unresolved artifacts stays in the approval column;
+//     the last resolution is what closes it.
+//
+// No accept/dismiss distinction — the task closes on the last resolution
+// regardless of whether anything was accepted (epic decision #3). This is the
+// ONLY lifecycle effect of a resolve: it never flips runs.status or
+// resumes/terminates a blueprint.
+//
+// Governing set: a blueprint step run is judged by its blueprint run's terminality
+// and the unresolved-artifact set spanning ALL the blueprint's step runs; a
+// standalone run by its own terminality and its own artifacts. A run-less artifact
+// (standalone CLI, no run linkage) is a no-op — there is no task to close.
+//
+// Detached + best-effort: the caller already mutated the GitHub object and flipped
+// the artifact, so a failure here must not unwind that. Fails CLOSED on the close
+// direction — any read error leaves the task open (recoverable; the next resolve
+// or run termination re-checks) rather than closing a task that may still hold
+// unresolved work.
+func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, orgID, userID, runID string) {
 	if runID == "" {
 		return
 	}
-	var blueprintRun *domain.BlueprintRun
+	var (
+		taskID     string
+		terminal   bool
+		unresolved bool
+	)
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		if _, err := tx.AgentRuns.MarkCompletedIfPendingApproval(ctx, orgID, runID); err != nil {
-			return fmt.Errorf("mark run completed: %w", err)
+		br, _, bpErr := tx.Blueprints.GetRunForRun(ctx, orgID, runID)
+		if bpErr != nil {
+			return fmt.Errorf("blueprint lookup: %w", bpErr)
 		}
-		// Skip the blanket task-mark-done for blueprint steps; terminateBlueprint
-		// owns task closure so the blueprint_runs row finalizes first. A blueprint
-		// lookup error leaves the task open for human follow-up rather than racing
-		// terminateBlueprint.
-		cr, _, blueprintLookupErr := tx.Blueprints.GetRunForRun(ctx, orgID, runID)
-		if blueprintLookupErr != nil {
-			artifactsLog.Warn("blueprint lookup failed, skipping task closure", "run", runID, "error", blueprintLookupErr)
+		if br != nil {
+			// Blueprint step: terminality + artifact set span the whole blueprint run.
+			taskID = br.TaskID
+			terminal = br.Status.Terminal()
+			stepRuns, e := tx.Blueprints.RunsForBlueprint(ctx, orgID, br.ID)
+			if e != nil {
+				return fmt.Errorf("runs for blueprint: %w", e)
+			}
+			has, e := runsHaveUnresolvedArtifacts(ctx, tx, orgID, stepRuns)
+			if e != nil {
+				return e
+			}
+			unresolved = has
 			return nil
 		}
-		blueprintRun = cr
-		if cr != nil {
+		// Standalone run: judge by the run's own status + its own artifacts.
+		run, e := tx.AgentRuns.Get(ctx, orgID, runID)
+		if e != nil {
+			return fmt.Errorf("get run: %w", e)
+		}
+		if run == nil {
+			// Run vanished — nothing to close on.
 			return nil
 		}
-		// Stand-alone run: resolve the run's task_id and flip the task to done.
-		run, runErr := tx.AgentRuns.Get(ctx, orgID, runID)
-		if runErr != nil || run == nil {
-			artifactsLog.Warn("read run for task closure failed", "run", runID, "error", runErr)
-			return nil
+		taskID = run.TaskID
+		terminal = domain.RunStatusTerminal(run.Status)
+		arts, e := tx.Artifacts.ListByRun(ctx, orgID, runID)
+		if e != nil {
+			return fmt.Errorf("list artifacts: %w", e)
 		}
-		if err := tx.Tasks.Close(ctx, orgID, run.TaskID, "run_completed", ""); err != nil {
-			artifactsLog.Warn("failed to close task for run", "run", runID, "error", err)
-		}
+		unresolved = domain.HasUnresolvedArtifacts(arts)
 		return nil
 	}); err != nil {
-		artifactsLog.Warn("post-approve run bookkeeping failed", "run", runID, "error", err)
+		artifactsLog.Warn("terminal-on-last close check failed; leaving task open (fail closed)", "run", runID, "error", err)
+		return
+	}
+	if taskID == "" || !terminal || unresolved {
+		return
 	}
 
-	ah.ws.Broadcast(websocket.Event{
-		Type:  "agent_run_update",
-		OrgID: orgID,
-		RunID: runID,
-		Data:  map[string]string{"status": "completed"},
-	})
-	spawner := ah.spawner()
-	// A blueprint run reaches its terminal status through normal step progression
-	// and terminateBlueprint owns task closure (deferred until the last artifact
-	// resolves) — there is nothing to resume on approval. A
-	// standalone run's approval is its terminal, so drop the durable workspace
-	// snapshot. (The full per-artifact resolve + terminal-on-last task closure is
-	// a follow-up; this keeps the legacy approve path compiling in the interim.)
-	if blueprintRun == nil && spawner != nil {
-		spawner.DiscardWorkspaceSnapshot(orgID, runID)
+	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		return tx.Tasks.Close(ctx, orgID, taskID, "run_completed", "")
+	}); err != nil {
+		artifactsLog.Warn("terminal-on-last task close failed", "task", taskID, "run", runID, "error", err)
+		return
 	}
+	// Move the card to Done on peer boards without a refetch.
+	ah.ws.Broadcast(websocket.Event{
+		Type:  "task_updated",
+		OrgID: orgID,
+		Data:  map[string]any{"task_id": taskID, "status": "done"},
+	})
+}
+
+// runsHaveUnresolvedArtifacts reports whether any of the given runs still holds an
+// unresolved artifact (a draft PR or a ready review — domain.HasUnresolvedArtifacts),
+// reading each run's artifacts under the caller's tx. One query per run, bounded
+// by a blueprint's step count. Shared by the terminal-on-last check so the
+// "blueprint still has unresolved work" definition lives next to its single use.
+func runsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, runs []domain.AgentRun) (bool, error) {
+	for i := range runs {
+		arts, err := tx.Artifacts.ListByRun(ctx, orgID, runs[i].ID)
+		if err != nil {
+			return false, fmt.Errorf("artifacts.ListByRun(%s): %w", runs[i].ID, err)
+		}
+		if domain.HasUnresolvedArtifacts(arts) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // upsertPRDetails writes the artifact back with new details_json, inside a

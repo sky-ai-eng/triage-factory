@@ -182,6 +182,180 @@ func TestArtifactAbandon_ClosesDraftPR(t *testing.T) {
 	}
 }
 
+// TestArtifactTeardown_ResolvesAllArtifacts pins the task-level resolve-all
+// gesture (Return-to-queue): a task whose run holds MULTIPLE unresolved artifacts
+// — a draft PR and a pending review — has them ALL resolved (PR closed, review
+// dismissed) with nothing stranded on GitHub. Branches are kept.
+func TestArtifactTeardown_ResolvesAllArtifacts(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var prClosed, reviewDeleted bool
+	mux := newAppAPIMux()
+	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		prClosed = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "state": "closed"})
+	})
+	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"node":{"databaseId":555}}}`))
+	})
+	mux.HandleFunc("DELETE /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews/{rid}", func(w http.ResponseWriter, r *http.Request) {
+		reviewDeleted = true
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	// seedClaimedPRApprovalFixture hangs a draft PR (#7) off run r_ab; add a
+	// finalized pending review on the same run so the task holds two unresolved
+	// artifacts of different kinds.
+	taskID, runID, prArtID := seedClaimedPRApprovalFixture(t, srv, "acme", "api", 7)
+	rv := domain.NewReviewArtifact("acme/api", 7, "PR_node", "PRR_1")
+	rv.RunID = runID
+	rv.OrgID = runmode.LocalDefaultOrgID
+	rv.TeamID = runmode.LocalDefaultTeamID
+	rd, _ := domain.ParseReviewArtifactDetails(rv.DetailsJSON)
+	rd.ReviewBody = "body"
+	rd.ReviewEvent = "COMMENT"
+	rv.DetailsJSON = domain.MarshalReviewArtifactDetails(rd)
+	reviewStored, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, rv)
+	if err != nil {
+		t.Fatalf("seed review artifact: %v", err)
+	}
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("requeue = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !prClosed || !reviewDeleted {
+		t.Errorf("resolve-all must close the PR (got %v) AND delete the review (got %v)", prClosed, reviewDeleted)
+	}
+	if got := getArtifact(t, srv, prArtID).State; got != domain.ArtifactStatePRClosed {
+		t.Errorf("PR artifact state = %q, want closed", got)
+	}
+	if got := getArtifact(t, srv, reviewStored.ID).State; got != domain.ArtifactStateReviewDismissed {
+		t.Errorf("review artifact state = %q, want dismissed", got)
+	}
+}
+
+// TestArtifactDismiss_PR pins the per-artifact dismiss sidecar: POST
+// /api/artifacts/{id}/dismiss closes the draft PR on GitHub (ClosePR → state
+// closed), flips the artifact to closed, and — crucially — never touches the
+// run's lifecycle. The pushed branch is untouched (we send only state=closed).
+func TestArtifactDismiss_PR(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var closeState string
+	mux := newAppAPIMux()
+	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		closeState, _ = body["state"].(string)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "state": "closed"})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, runID, _ := seedDraftPRArtifactWithRun(t, srv, "dis", "acme", "api", 42)
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if closeState != "closed" {
+		t.Errorf("ClosePR sent state=%q, want closed", closeState)
+	}
+	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePRClosed {
+		t.Errorf("artifact state = %q, want closed", got)
+	}
+	// The run lifecycle is untouched — dismiss is a decoupled sidecar.
+	var runStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&runStatus); err != nil {
+		t.Fatalf("read run: %v", err)
+	}
+	if runStatus != "completed" {
+		t.Errorf("run status = %q, want completed (dismiss must not flip run lifecycle)", runStatus)
+	}
+}
+
+// TestArtifactDismiss_TerminalArtifact409 pins the guard: dismissing an artifact
+// that's already resolved (a non-draft PR) is a 409 — there's nothing left to
+// resolve. A second dismiss on an already-closed PR exercises the path.
+func TestArtifactDismiss_TerminalArtifact409(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	artID, _, _ := seedDraftPRArtifactWithRun(t, srv, "dis409", "acme", "api", 42)
+	// Pre-resolve the artifact so the state guard fires before any GitHub call.
+	execSQL(t, srv.db, `UPDATE artifacts SET state = ? WHERE id = ?`, domain.ArtifactStatePRClosed, artID)
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("dismiss of terminal artifact = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestArtifactDismiss_TerminalBlueprintLastArtifactClosesTask pins §3: resolving
+// the LAST unresolved artifact on an already-terminal blueprint closes the task
+// (done), with no accept/dismiss distinction — a dismiss closes it just like an
+// approve would.
+func TestArtifactDismiss_TerminalBlueprintLastArtifactClosesTask(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	mux := newAppAPIMux()
+	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "state": "closed"})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, taskID := seedDraftPRArtifactWithRun(t, srv, "tolc", "acme", "api", 42)
+	// Drive the blueprint to a terminal status so resolving the only artifact is
+	// the last-on-terminal trigger.
+	execSQL(t, srv.db, `UPDATE blueprint_runs SET status = 'completed' WHERE task_id = ?`, taskID)
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var taskStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&taskStatus); err != nil {
+		t.Fatalf("read task: %v", err)
+	}
+	if taskStatus != "done" {
+		t.Errorf("task.status = %q, want done (last resolution on a terminal blueprint closes the task)", taskStatus)
+	}
+}
+
+// TestArtifactDismiss_LiveBlueprintLeavesTaskOpen is the counterpart: resolving
+// the last artifact while the blueprint is still LIVE (not terminal) leaves the
+// task open — the running blueprint keeps going and re-checks task closure when
+// it terminates.
+func TestArtifactDismiss_LiveBlueprintLeavesTaskOpen(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	mux := newAppAPIMux()
+	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "state": "closed"})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	// seedDraftPRArtifactWithRun leaves the blueprint_run 'running' (live).
+	artID, _, taskID := seedDraftPRArtifactWithRun(t, srv, "tolo", "acme", "api", 42)
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var taskStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&taskStatus); err != nil {
+		t.Fatalf("read task: %v", err)
+	}
+	if taskStatus == "done" {
+		t.Errorf("task.status = done; a live blueprint must leave the task open on resolve")
+	}
+}
+
 // TestArtifactUpdate_SingleField_UsesLiveBaseline pins the lost-update fix: a
 // PATCH that touches only the title fills the untouched body from the PR's CURRENT
 // live value, not a stale cached snapshot — so a body edited directly on GitHub
@@ -355,11 +529,11 @@ func TestArtifactApprove_NonDraft_409(t *testing.T) {
 	}
 }
 
-// seedDraftPRArtifactWithRun mints a pending_approval run chain (entity → … →
+// seedDraftPRArtifactWithRun mints a completed (terminal) run chain (entity → … →
 // run) and a draft pull_request artifact hung off it, returning all three ids.
 func seedDraftPRArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo string, number int) (artifactID, runID, taskID string) {
 	t.Helper()
-	runID = seedSteerRun(t, s.db, suffix, "pending_approval")
+	runID = seedSteerRun(t, s.db, suffix, "completed")
 	taskID = "t_" + suffix
 	// run_memory row so the human-verdict UPDATE has a target (the termination
 	// upsert guarantees this in production).
@@ -379,7 +553,7 @@ func seedDraftPRArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo str
 }
 
 // seedClaimedPRApprovalFixture builds a claimed task (the shape /requeue expects)
-// whose pending_approval run opened a draft PR. Returns (taskID, runID, artifactID).
+// whose completed run opened a draft PR. Returns (taskID, runID, artifactID).
 func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, number int) (taskID, runID, artifactID string) {
 	t.Helper()
 	const eventType = "github:pr:ci_check_passed"
@@ -388,7 +562,7 @@ func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, n
 	execSQL(t, s.db, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_ab', 'P', 'b', ?, ?)`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
 	execSQL(t, s.db, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id) VALUES ('t_ab', 'e_ab', ?, 'ev_ab', 'queued', ?)`, eventType, runmode.LocalDefaultAgentID)
 	brID := seedBlueprintRunSQLite(t, s.db, "t_ab")
-	execSQL(t, s.db, `INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, blueprint_run_id) VALUES ('r_ab', 't_ab', 'p_ab', 'pending_approval', 'manual', ?)`, brID)
+	execSQL(t, s.db, `INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, blueprint_run_id) VALUES ('r_ab', 't_ab', 'p_ab', 'completed', 'manual', ?)`, brID)
 	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_ab", "e_ab", "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
