@@ -1,0 +1,73 @@
+name: compose-smoke
+
+# Brings the whole multi-mode self-host compose stack up and asserts its
+# deployment contract (service entrypoints, healthchecks, sidecars, identity
+# auth, migrate-up). This is the only CI coverage of the compose *deploy*
+# surface — the Go suite tests the S3 client, never the stack. See
+# scripts/compose-smoke.sh for what's asserted.
+#
+# Triggered on PRs that touch the deploy surface (compose file, image build,
+# env template, Postgres migrations, the script/workflow, or the module graph)
+# and on every push to main — the release source — so a regression that lands
+# is caught before a release is cut from it. ubuntu-latest ships Docker +
+# compose v2, so no extra setup is needed.
+
+on:
+  pull_request:
+    paths:
+      - 'docker-compose.yml'
+      - 'docker/**'
+      - '.env.example'
+      - 'internal/db/migrations-postgres/**'
+      - 'scripts/compose-smoke.sh'
+      - '.github/workflows/compose-smoke.yml'
+      - 'go.mod'
+      - 'go.sum'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer commit supersedes an in-flight run on the same ref; the Docker build
+# is expensive, so don't pile them up.
+concurrency:
+  group: compose-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose-smoke:
+    runs-on: ubuntu-latest
+    # The cold image build downloads + verifies the gVisor runsc binary and
+    # compiles frontend + SDK + Go; 30m is generous headroom over that.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Host binary used ONLY for `jwk-init` (mints the GoTrue RS256 signing
+      # material into the throwaway .env). The stack itself runs the TF image,
+      # which builds its own frontend inside docker/Dockerfile — this host
+      # build exists because package main's go:embed of frontend/dist won't
+      # compile without dist present.
+      - name: Build frontend (for go:embed) + TF binary
+        run: |
+          cd frontend && pnpm install --frozen-lockfile && pnpm run build && cd ..
+          go build -o triagefactory .
+
+      - name: Compose smoke test
+        run: ./scripts/compose-smoke.sh
