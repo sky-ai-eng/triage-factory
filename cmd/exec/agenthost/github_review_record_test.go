@@ -170,7 +170,7 @@ func TestLocalClient_GithubAddPendingReviewComment_FallbackLiveHead(t *testing.T
 	}
 }
 
-// TestLocalClient_FinalizeReviewDraft pins submit-review's host behavior: no
+// TestLocalClient_FinalizeReviewDraft pins finalize-review's host behavior: no
 // GitHub call, the agent's draft (body + event + the locally staged comments)
 // snapshotted into the artifact, the ready sentinel set, and the TFAC-358
 // anti-double-submit guard.
@@ -209,13 +209,13 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 	// Anti-double-submit (TFAC-358): a second finalize hard-errors.
 	err = client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## again")
 	if !errors.Is(err, ErrReviewAlreadyFinalized) {
-		t.Errorf("second submit-review = %v, want ErrReviewAlreadyFinalized", err)
+		t.Errorf("second finalize-review = %v, want ErrReviewAlreadyFinalized", err)
 	}
 }
 
 // TestLocalClient_MultipleReviewDrafts_ResolveByHandle pins that when one run
 // holds several review drafts (run-scoped dedup, one per PR — TFAC-494),
-// add-review-comment and submit-review act on the draft named by the handle, not
+// add-review-comment and finalize-review act on the draft named by the handle, not
 // just the first pending review. A naive "first pending review" lookup would
 // stage/finalize against the wrong PR's draft.
 func TestLocalClient_MultipleReviewDrafts_ResolveByHandle(t *testing.T) {

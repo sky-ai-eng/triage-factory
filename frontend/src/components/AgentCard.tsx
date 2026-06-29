@@ -458,17 +458,22 @@ function formatToolCall(name: string, input: Record<string, unknown>): string {
     if (cmd.includes('triagefactory exec gh pr diff')) return 'Reading full diff'
     if (cmd.includes('triagefactory exec gh pr files')) return 'Listing changed files'
     if (cmd.includes('triagefactory exec gh pr review-view')) return 'Expanding previous review'
-    if (cmd.includes('triagefactory exec gh pr start-review')) return 'Starting review'
+    if (cmd.includes('triagefactory exec gh pr start-review'))
+      return cmd.includes('--fresh') ? 'Restarting review' : 'Starting review'
     if (cmd.includes('triagefactory exec gh pr add-review-comment')) {
       const file = extractFlag(cmd, '--file')
       return file ? `Adding comment on ${file}` : 'Adding review comment'
     }
-    if (cmd.includes('triagefactory exec gh pr submit-review')) {
+    // finalize-review (renamed from submit-review): hands the drafted review to
+    // human approval — it does not submit to GitHub, so the label says "Finalizing".
+    if (cmd.includes('triagefactory exec gh pr finalize-review')) {
       const event = extractFlag(cmd, '--event')
-      return `Submitting review (${event || 'comment'})`
+      return `Finalizing review (${event || 'comment'})`
     }
     if (cmd.includes('triagefactory exec gh pr comment-list-pending'))
       return 'Reviewing pending comments'
+    if (cmd.includes('triagefactory exec gh pr comment-update')) return 'Editing comment'
+    if (cmd.includes('triagefactory exec gh pr comment-delete')) return 'Deleting comment'
     if (cmd.includes('triagefactory exec gh pr add-comment')) return 'Adding comment'
     if (cmd.includes('triagefactory exec'))
       return `Running: ${cmd.split('triagefactory exec ')[1]?.slice(0, 60)}`

@@ -983,14 +983,19 @@ func prCommentUpdate(ctx context.Context, client ghAPI, host agenthost.Client, a
 	}
 
 	// Non-numeric → staged review comment. Re-bake the severity badge (mirroring
-	// add-review-comment) so editing a staged comment doesn't silently drop its
-	// chip. An omitted --severity bakes no badge — same as add-review-comment.
+	// add-review-comment) so the chip survives the edit. Strip any badge already
+	// on the supplied body FIRST: a staged comment's stored body carries its baked
+	// badge, so an agent that edits by copying the current body back in would
+	// otherwise stack a second badge — and omitting --severity would leave the old
+	// one. Stripping then re-baking makes --severity authoritative: present →
+	// exactly that badge, omitted → no badge (chip dropped).
 	severity, err := domain.NormalizeSeverity(flagVal(args, "--severity"))
 	if err != nil {
 		exitErr(err.Error())
 	}
 	_ = lookupRun(host)
-	badgedBody := domain.SeverityBadgeMarkdown(severity) + body
+	_, unbadged := domain.ParseSeverityBadge(body)
+	badgedBody := domain.SeverityBadgeMarkdown(severity) + unbadged
 	exitOnErr(host.UpdateStagedReviewComment(ctx, args[0], badgedBody))
 	printJSON(map[string]any{"ok": true, "severity": severity})
 }
