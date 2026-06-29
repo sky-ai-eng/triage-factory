@@ -70,6 +70,12 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   // submitError is the approve (submit-to-GitHub) failure, shown inline so the
   // user can retry in place rather than close-and-reopen.
   const [submitError, setSubmitError] = useState<string | null>(null)
+  // refreshing/refreshError back the Refresh action (TFAC-500): re-reconcile the
+  // staged comments to the live head. reloadKey re-triggers the load effect after
+  // a successful refresh so the overlay re-renders the new finalize frame.
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
 
   // Fetch the review artifact (blocking), then the diff (isolated).
   useEffect(() => {
@@ -121,7 +127,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     return () => {
       cancelled = true
     }
-  }, [open, artifactId])
+  }, [open, artifactId, reloadKey])
 
   // Pessimistic comment ops on the live GitHub pending review: await the request,
   // throw on !ok so the child (ReviewComment) surfaces the error and stays in edit
@@ -236,15 +242,44 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     }
   }, [artifactId, onClose])
 
-  // Group comments by file path for the diff renderer. A "moved" comment is keyed
-  // under its remapped (new-side) path so it lands on the file the code lives in on
-  // the live head, not the path it was authored against (TFAC-500).
+  // Re-reconcile the staged comments to the PR's live head (TFAC-500): survivors
+  // are remapped, outdated comments dropped, the finalize frame re-pinned. On
+  // success, re-trigger the load effect so the overlay re-renders the new frame
+  // (count resets to 0, badges to current).
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true)
+    setRefreshError(null)
+    try {
+      const res = await fetch(`/api/artifacts/${artifactId}/review/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}))
+        throw new Error(e.error || `Refresh failed (${res.status})`)
+      }
+      setReloadKey((k) => k + 1)
+    } catch (err) {
+      setRefreshError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRefreshing(false)
+    }
+  }, [artifactId])
+
+  // Per-verdict counts for the Refresh confirmation (computed from the freshness
+  // the GET already returned — no extra round-trip): how many comments would be
+  // remapped vs. dropped as outdated.
+  const movedCount = (review?.comments ?? []).filter((c) => c.freshness === 'moved').length
+  const outdatedCount = (review?.comments ?? []).filter((c) => c.freshness === 'outdated').length
+
+  // Group comments by file path for the diff renderer. The overlay renders the
+  // finalize-time frame, so a comment anchors by the path + line it was written
+  // against (TFAC-500); freshness + mappedLine ride along for the badge only.
   const commentsByFile = (review?.comments ?? []).reduce<Record<string, FileComment[]>>(
     (acc, c) => {
-      const path = c.freshness === 'moved' && c.mapped_path ? c.mapped_path : c.path
-      ;(acc[path] ??= []).push({
+      ;(acc[c.path] ??= []).push({
         id: c.id,
-        path,
+        path: c.path,
         line: c.line,
         startLine: c.start_line,
         body: c.body,
@@ -342,6 +377,11 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
                     reviewBody={review.review_body}
                     commentCount={review.comments.length}
                     commitsSinceFinalize={review.commits_since_finalize}
+                    movedCount={movedCount}
+                    outdatedCount={outdatedCount}
+                    onRefresh={handleRefresh}
+                    refreshing={refreshing}
+                    refreshError={refreshError}
                     onUpdateBody={handleUpdateBody}
                     onUpdateEvent={handleUpdateEvent}
                     onSubmit={handleSubmit}

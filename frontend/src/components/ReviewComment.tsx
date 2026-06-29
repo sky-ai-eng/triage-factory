@@ -9,6 +9,9 @@ interface Props {
   // Per-comment freshness vs. the live PR head (TFAC-500): 'current' | 'moved' |
   // 'outdated' | 'unknown'. Drives the staleness badge; 'current' shows none.
   freshness?: string
+  // For a 'moved' comment, the line it now sits at on the live head (shown in the
+  // badge tooltip). The comment still renders at its finalize-frame line.
+  mappedLine?: number
   // Pessimistic: edit/delete the comment on the live GitHub pending review and
   // reject on failure, so this component can surface the error and stay in edit
   // mode instead of optimistically dropping/changing the comment. void return is
@@ -66,13 +69,18 @@ const FRESHNESS_BADGE: Record<string, { label: string; title: string; cls: strin
   },
 }
 
-function FreshnessBadge({ freshness }: { freshness?: string }) {
+function FreshnessBadge({ freshness, mappedLine }: { freshness?: string; mappedLine?: number }) {
   if (!freshness) return null
   const badge = FRESHNESS_BADGE[freshness.toLowerCase()]
   if (!badge) return null // 'current' (and anything unexpected) shows no badge
+  // For a moved comment, name where the code now lives on the latest commit.
+  const title =
+    freshness.toLowerCase() === 'moved' && mappedLine
+      ? `${badge.title} On the latest commit it's at line ${mappedLine}.`
+      : badge.title
   return (
     <span
-      title={badge.title}
+      title={title}
       className={`inline-flex items-center rounded px-1.5 py-px text-[9px] font-semibold uppercase tracking-wider border ${badge.cls}`}
     >
       {badge.label}
@@ -87,6 +95,7 @@ export default function ReviewComment({
   body,
   severity,
   freshness,
+  mappedLine,
   onUpdate,
   onDelete,
 }: Props) {
@@ -180,7 +189,7 @@ export default function ReviewComment({
         <div className="flex items-center justify-between px-3 py-1.5 border-b border-border-subtle">
           <div className="flex items-center gap-2 min-w-0">
             <SeverityChip severity={severity} />
-            <FreshnessBadge freshness={freshness} />
+            <FreshnessBadge freshness={freshness} mappedLine={mappedLine} />
             <span className="text-[10px] text-text-tertiary font-medium truncate">
               {path}:{line}
             </span>
