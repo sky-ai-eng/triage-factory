@@ -122,8 +122,9 @@ func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*
 // FinalizeReviewDraft is the host side of `gh pr finalize-review`: it finalizes a
 // fully TF-side review draft for human approval and makes NO GitHub write (the
 // atomic create+submit happens at approval). It locates the run's review
-// artifact, stages the body + event, snapshots the agent's draft (body + event +
-// the locally staged inline comments) into details.proposed as the approve-time
+// artifact, gates on comment freshness vs. the PR's current head (TFAC-499),
+// stages the body + event, snapshots the agent's draft (body + event + the
+// locally staged inline comments) into details.proposed as the approve-time
 // human-feedback baseline, and sets the ready sentinel (details_json.review_event)
 // that marks the review awaiting approval.
 //
@@ -131,6 +132,17 @@ func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*
 // it's validated against the artifact's id so a stale handle fails loudly rather
 // than finalizing the wrong review. The TFAC-358 anti-double-submit guard fires
 // here: a ready sentinel that's already set returns ErrReviewAlreadyFinalized.
+//
+// Freshness gate (TFAC-499): a review submits to GitHub atomically under one
+// commit_id, so every staged comment must be coherent against one head — but each
+// comment was anchored to whatever the agent's worktree HEAD was when it was added
+// (ReviewArtifactComment.CommitSHA), and the PR may have advanced since. Finalize
+// is the last point the agent can still act, so it reconciles each comment forward
+// to the PR's current head: a pure shift (content identical, line moved) auto-
+// remaps the stored line silently; an outdated comment (line content changed or
+// deleted) fails finalize with a per-comment list so the agent re-reads the new
+// diff, edits/deletes/re-adds against the new head, and retries. On success every
+// comment shares the current head, so approval pins that single commit_id.
 func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) error {
 	art, err := c.runReviewArtifact(ctx, reviewID)
 	if err != nil {
@@ -154,8 +166,21 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 		return fmt.Errorf("a %s review needs --body/--body-file or at least one inline comment", strings.ToLower(event))
 	}
 
+	// Freshness gate (TFAC-499): reconcile the staged comments to the PR's current
+	// head before snapshotting + arming the ready sentinel. A pure shift auto-
+	// remaps in place (mutating details.StagedComments); an outdated comment
+	// returns a per-comment error here, before anything is persisted, so the agent
+	// can still fix it. Skipped when there are no comments (a pure approve / body-
+	// only review has no inline anchor to reconcile).
+	if len(details.StagedComments) > 0 {
+		if err := c.reconcileStagedCommentsToHead(ctx, art, &details); err != nil {
+			return err
+		}
+	}
+
 	// Snapshot the agent's draft as the write-once Proposed baseline — a copy of
-	// the staged comments as they stand now, so a later human edit to
+	// the staged comments as they stand now (post-reconcile, so the baseline is
+	// coherent against the same head the review pins to), so a later human edit to
 	// StagedComments still diffs against what the agent originally wrote.
 	proposed := domain.ReviewArtifactProposed{Body: body, Event: event}
 	proposed.Comments = append(proposed.Comments, details.StagedComments...)
@@ -169,6 +194,155 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 		return fmt.Errorf("snapshot review draft into artifact: %w", err)
 	}
 	return nil
+}
+
+// reconcileStagedCommentsToHead forward-maps every staged comment from the commit
+// it was anchored against to the PR's current head (TFAC-499), mutating
+// details.StagedComments in place. A comment whose code survived — identical
+// content, at the same line (LineMapUnchanged) or a shifted/renamed location
+// (LineMapMoved) — is auto-remapped to its new-side line/path and re-anchored to
+// the current head. A comment whose anchored code changed or was deleted
+// (LineMapOutdated) is collected; if any are outdated the whole finalize fails
+// with a per-comment error and NOTHING is persisted (the caller returns before the
+// upsert), so the agent re-reads the new diff, edits/deletes/re-adds, and retries.
+//
+// The forward line-map is computed from the anchor→head compare diff and cached
+// per distinct anchor commit, so comments staged against the same checkout share
+// one GitHub read rather than fetching the same compare once per comment. A
+// comment already anchored at the current head needs no map (and no read).
+func (c *LocalClient) reconcileStagedCommentsToHead(ctx context.Context, art *domain.Artifact, details *domain.ReviewArtifactDetails) error {
+	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
+	if !ok {
+		return fmt.Errorf("review artifact has a malformed target %q", art.Target)
+	}
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return err
+	}
+	pr, err := client.GetPRBasic(ctx, owner, repo, number)
+	if err != nil {
+		return fmt.Errorf("fetch PR #%d to reconcile the review against its current head: %w", number, err)
+	}
+	head := pr.HeadSHA
+	if head == "" {
+		return fmt.Errorf("PR #%d has no head commit SHA; cannot reconcile the review's comments against the current head", number)
+	}
+
+	lineMaps := map[string]ghclient.LineMap{}
+	var stale []staleReviewComment
+
+	for i := range details.StagedComments {
+		cmt := &details.StagedComments[i]
+		// A comment with no line anchor can't be forward-mapped; leave it for the
+		// approve path (which already rejects an unpositioned comment) rather than
+		// crash here.
+		if cmt.Line == nil {
+			continue
+		}
+		anchor := cmt.CommitSHA
+		if anchor == "" {
+			anchor = details.HeadSHA // staged before per-comment anchoring landed
+		}
+		// Already coherent against the current head — nothing to map; just make the
+		// (possibly empty) anchor explicit so approval pins one commit_id.
+		if anchor == head {
+			cmt.CommitSHA = head
+			continue
+		}
+
+		lm, ok := lineMaps[anchor]
+		if !ok {
+			lm, err = hostCompareLineMap(ctx, client, owner, repo, anchor, head)
+			if err != nil {
+				return fmt.Errorf("reconcile review comment on %s (commit %s → head %s): %w",
+					cmt.Path, shortCommit(anchor), shortCommit(head), err)
+			}
+			lineMaps[anchor] = lm
+		}
+
+		res := lm.MapComment(cmt.Path, *cmt.Line, cmt.StartLine)
+		switch res.Status {
+		case ghclient.LineMapUnchanged, ghclient.LineMapMoved:
+			// The anchored code survived: re-point to its new-side line/path and
+			// re-anchor to the current head. Silent — a shift needs no agent action.
+			newLine := res.Line
+			cmt.Line = &newLine
+			if cmt.StartLine != nil {
+				newStart := res.StartLine
+				cmt.StartLine = &newStart
+			}
+			if res.Path != "" {
+				cmt.Path = res.Path
+			}
+			cmt.CommitSHA = head
+		default: // ghclient.LineMapOutdated
+			stale = append(stale, staleReviewComment{
+				id:   cmt.ID,
+				path: cmt.Path,
+				line: *cmt.Line,
+				body: cmt.Body,
+			})
+		}
+	}
+
+	if len(stale) > 0 {
+		return staleReviewCommentsError(number, head, stale)
+	}
+	return nil
+}
+
+// staleReviewComment is one outdated staged comment, captured for the finalize
+// failure listing: its TF-local id (the edit/delete address), path + line (where
+// it no longer anchors), and body (snippeted for the message).
+type staleReviewComment struct {
+	id   string
+	path string
+	line int
+	body string
+}
+
+// staleReviewCommentsError renders the actionable finalize failure: which comments
+// went stale against the current head and the concrete verbs to fix each, so the
+// agent can re-read the new diff, edit/delete the stale comment, re-add it against
+// the new code, and retry finalize. Editing/deleting staged comments is the
+// TFAC-383 affordance this gate depends on — without it the failure would be a
+// dead end.
+func staleReviewCommentsError(number int, head string, stale []staleReviewComment) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d staged review comment(s) are outdated against PR #%d's current head (%s): the code each anchors to has changed or been deleted since you wrote it. A review submits atomically under one commit, so every comment must match the current head before this review can be finalized.\n",
+		len(stale), number, shortCommit(head))
+	for _, s := range stale {
+		fmt.Fprintf(&b, "  - %s:%d (comment %s): %q\n", s.path, s.line, s.id, commentBodySnippet(s.body))
+	}
+	fmt.Fprintf(&b, "\nFor each comment above: re-read the current diff (`gh pr diff %d`), then delete it (`gh pr comment-delete <comment_id>`) or edit it (`gh pr comment-update <comment_id> ...`) and re-add it against the new code (`gh pr add-review-comment ...`). Then run finalize-review again.", number)
+	return errors.New(b.String())
+}
+
+// commentBodySnippet trims a staged comment's body to a short, single-line
+// reference for the stale-comment listing. The severity badge is stripped (it's
+// baked into the body for GitHub, noise here) and the body collapsed to its first
+// line; rune-aware so a multibyte char isn't split.
+func commentBodySnippet(body string) string {
+	_, clean := domain.ParseSeverityBadge(body)
+	clean = strings.TrimSpace(clean)
+	if i := strings.IndexAny(clean, "\r\n"); i >= 0 {
+		clean = strings.TrimSpace(clean[:i])
+	}
+	const max = 120
+	r := []rune(clean)
+	if len(r) <= max {
+		return clean
+	}
+	return string(r[:max]) + "…"
+}
+
+// shortCommit abbreviates a commit SHA to 7 chars for agent-facing messages,
+// leaving anything already shorter (a test stub SHA, an empty fallback) untouched.
+func shortCommit(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 // ResetReviewDraft is the host side of `gh pr start-review --fresh`: a pure local
@@ -1199,6 +1373,26 @@ func hostCompareDiffHunks(ctx context.Context, client *ghclient.Client, owner, r
 		return nil, err
 	}
 	return ghclient.DiffHunks(diff), nil
+}
+
+// hostCompareLineMap returns the forward line-map (TFAC-497) for base...head — the
+// diff in commit base's frame mapped onto commit head's — used by the finalize
+// freshness gate to translate a staged comment's anchored line forward to the
+// current head. Mirrors hostCompareDiffHunks' HTTP-406 fallback: on "diff too
+// large" it reassembles the map from the compare endpoint's per-file patches.
+func hostCompareLineMap(ctx context.Context, client *ghclient.Client, owner, repo, base, head string) (ghclient.LineMap, error) {
+	diff, err := client.GetCompareDiff(ctx, owner, repo, base, head)
+	if err != nil {
+		if ghclient.IsHTTP406(err) {
+			files, ferr := client.GetCompareFiles(ctx, owner, repo, base, head)
+			if ferr != nil {
+				return ghclient.LineMap{}, ferr
+			}
+			return ghclient.ParseLineMapFromPatches(files), nil
+		}
+		return ghclient.LineMap{}, err
+	}
+	return ghclient.ParseLineMap(diff), nil
 }
 
 func (c *LocalClient) GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {
