@@ -35,6 +35,7 @@ type PRView struct {
 	HeadRef      string            `json:"head_ref"`
 	BaseRef      string            `json:"base_ref"`
 	HeadSHA      string            `json:"head_sha"`
+	BaseSHA      string            `json:"base_sha"`
 	HTMLURL      string            `json:"html_url"`
 	CloneURL     string            `json:"clone_url"`
 	BaseCloneURL string            `json:"base_clone_url"`
@@ -115,6 +116,7 @@ func prViewFromRaw(raw map[string]any) *PRView {
 	}
 	if base, ok := raw["base"].(map[string]any); ok {
 		pr.BaseRef = strVal(base, "ref")
+		pr.BaseSHA = strVal(base, "sha")
 		if baseRepo, ok := base["repo"].(map[string]any); ok {
 			pr.BaseCloneURL = strVal(baseRepo, "clone_url")
 			pr.BaseSSHURL = strVal(baseRepo, "ssh_url")

@@ -285,10 +285,15 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleArtifactDiff returns the PR's unified diff from GitHub (the PR exists
-// now, so there's no bare-clone path). Ports the review-diff 406→per-file
-// fallback: GitHub refuses the verbatim diff media type on very large diffs, so
-// reassemble from the files API rather than 502-ing the overlay.
+// handleArtifactDiff returns the unified diff the overlay renders. A PR artifact
+// (and a legacy/comment-less review with no stored frame) renders the LIVE PR diff
+// at its current head. A review artifact with a stored finalize frame renders that
+// frame — FinalizedBaseSHA...FinalizedHeadSHA, the PR diff as of finalize — so
+// every staged comment anchors in the frame it was written against (TFAC-500);
+// drift since is conveyed by the per-comment freshness badges + the
+// commits-since-finalize count, and reconciled by Refresh. Both frames port the
+// 406→per-file fallback: GitHub refuses the verbatim diff media type on very large
+// diffs, so reassemble from the files API rather than 502-ing the overlay.
 func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -297,9 +302,6 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 
-	// The diff is the backing PR's diff regardless of artifact kind — a review
-	// artifact targets the same owner/repo#<number> as a PR artifact, so the
-	// review overlay and the PR overlay share this endpoint (TFAC-462).
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
 		return
@@ -314,35 +316,54 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 	}
 
 	file := r.URL.Query().Get("file")
-	diff, err := gh.GetPRDiff(r.Context(), owner, repo, number, file)
-	truncationNote := ""
-	if err != nil {
-		if !ghclient.IsHTTP406(err) {
-			artifactsLog.Error("PR diff failed",
-				"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
-			return
-		}
-		files, filesErr := gh.GetPRFiles(r.Context(), owner, repo, number)
-		if filesErr != nil {
-			artifactsLog.Error("PR diff fallback failed",
-				"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", filesErr)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + filesErr.Error()})
-			return
-		}
-		if file != "" {
-			diff = ghclient.SingleFileDiff(files, file)
-			if diff == "" {
-				writeJSON(w, http.StatusNotFound, map[string]string{"error": "file " + file + " is not part of this PR's diff (or lies beyond the file-listing cap)"})
+	finBase, finHead := reviewFinalizeFrame(art)
+	useFin := finBase != "" && finHead != ""
+
+	var (
+		diff           string
+		truncationNote string
+		err            error
+	)
+	switch {
+	case useFin && file != "":
+		// The compare endpoint has no built-in single-file filter, so narrow via the
+		// files API for a single-file request in the finalize frame.
+		var files []ghclient.PRFile
+		if files, err = gh.GetCompareFiles(r.Context(), owner, repo, finBase, finHead); err == nil {
+			if diff = ghclient.SingleFileDiff(files, file); diff == "" {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "file " + file + " is not part of this review's diff (or lies beyond the file-listing cap)"})
 				return
 			}
-		} else {
-			diff = ghclient.ReassemblePRDiff(files)
 		}
-		truncationNote = "diff too large to fetch in full from GitHub; showing per-file patches reassembled from the files API (binary and oversized files may be summarized rather than shown)"
-		if len(files) >= ghclient.MaxPRFiles {
-			truncationNote += fmt.Sprintf("; only the first %d files are listed", ghclient.MaxPRFiles)
+	case useFin:
+		if diff, err = gh.GetCompareDiff(r.Context(), owner, repo, finBase, finHead); err != nil && ghclient.IsHTTP406(err) {
+			var files []ghclient.PRFile
+			if files, err = gh.GetCompareFiles(r.Context(), owner, repo, finBase, finHead); err == nil {
+				diff = ghclient.ReassemblePRDiff(files)
+				truncationNote = diffTruncationNote(len(files))
+			}
 		}
+	default:
+		if diff, err = gh.GetPRDiff(r.Context(), owner, repo, number, file); err != nil && ghclient.IsHTTP406(err) {
+			var files []ghclient.PRFile
+			if files, err = gh.GetPRFiles(r.Context(), owner, repo, number); err == nil {
+				if file != "" {
+					if diff = ghclient.SingleFileDiff(files, file); diff == "" {
+						writeJSON(w, http.StatusNotFound, map[string]string{"error": "file " + file + " is not part of this PR's diff (or lies beyond the file-listing cap)"})
+						return
+					}
+				} else {
+					diff = ghclient.ReassemblePRDiff(files)
+				}
+				truncationNote = diffTruncationNote(len(files))
+			}
+		}
+	}
+	if err != nil {
+		artifactsLog.Error("artifact diff failed",
+			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "finalize_frame", useFin, "error", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+		return
 	}
 
 	if truncationNote != "" {
@@ -350,6 +371,32 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(diff))
+}
+
+// reviewFinalizeFrame returns the stored finalize-time base+head SHAs for a review
+// artifact (TFAC-500), or ("","") for a PR artifact, a malformed/legacy review
+// with no stored frame, or a comment-less review (which records no frame). Both
+// must be present for the caller to render the finalize frame.
+func reviewFinalizeFrame(art *domain.Artifact) (base, head string) {
+	if art.Kind != domain.ArtifactKindReview {
+		return "", ""
+	}
+	d, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	if err != nil {
+		return "", ""
+	}
+	return d.FinalizedBaseSHA, d.FinalizedHeadSHA
+}
+
+// diffTruncationNote is the X-Diff-Truncated banner shown when a diff was
+// reassembled from the per-file patches API (GitHub refused the verbatim diff as
+// too large), noting the file-listing cap when hit.
+func diffTruncationNote(fileCount int) string {
+	note := "diff too large to fetch in full from GitHub; showing per-file patches reassembled from the files API (binary and oversized files may be summarized rather than shown)"
+	if fileCount >= ghclient.MaxPRFiles {
+		note += fmt.Sprintf("; only the first %d files are listed", ghclient.MaxPRFiles)
+	}
+	return note
 }
 
 // handleArtifactApprove promotes the draft PR to ready-for-review: it appends the

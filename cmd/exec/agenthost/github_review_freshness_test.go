@@ -40,7 +40,7 @@ func reviewFreshnessServer(t *testing.T, headSHA string, diffs map[string]string
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"number":7,"base":{"ref":"main"},"head":{"sha":"`+headSHA+`"}}`)
+		_, _ = io.WriteString(w, `{"number":7,"base":{"ref":"main","sha":"base0"},"head":{"sha":"`+headSHA+`"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -273,6 +273,9 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 		d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
 		if d.FinalizedHeadSHA != "head2" {
 			t.Errorf("FinalizedHeadSHA = %q, want head2 (the reconcile head)", d.FinalizedHeadSHA)
+		}
+		if d.FinalizedBaseSHA != "base0" {
+			t.Errorf("FinalizedBaseSHA = %q, want base0 (the PR base tip at finalize)", d.FinalizedBaseSHA)
 		}
 	})
 

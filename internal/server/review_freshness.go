@@ -5,50 +5,27 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-)
-
-// Per-comment freshness verdicts (TFAC-500), the human-facing mirror of the
-// finalize gate's forward line-map (TFAC-499). They translate the LineMap status
-// into the wire vocabulary the review overlay renders as a badge.
-const (
-	// reviewFreshnessCurrent: the anchored code is unchanged at the same line on
-	// the live PR head (LineMapUnchanged).
-	reviewFreshnessCurrent = "current"
-	// reviewFreshnessMoved: the anchored code survived but its location changed —
-	// line shifted and/or file renamed (LineMapMoved). The remapped position is on
-	// MappedLine/MappedPath.
-	reviewFreshnessMoved = "moved"
-	// reviewFreshnessOutdated: the anchored code changed or was deleted
-	// (LineMapOutdated) — the comment no longer points at the same code.
-	reviewFreshnessOutdated = "outdated"
-	// reviewFreshnessUnknown: freshness couldn't be computed (the live head wasn't
-	// reachable, GitHub wasn't configured, or the comment carries no line anchor).
-	// The overlay still renders so the human can act; the badge just says so.
-	reviewFreshnessUnknown = "unknown"
+	"github.com/sky-ai-eng/triage-factory/internal/review"
 )
 
 // annotateReviewFreshness fills in each comment's freshness verdict and the
 // commits-since-finalize count on out, in place (TFAC-500). It resolves the PR's
 // live head and forward-maps each staged comment's anchor commit onto it via the
-// line-map primitive (TFAC-497), then counts how far the live head is ahead of
-// the finalize-time head.
+// shared reconcile (internal/review, the same transform the agent finalize gate
+// uses), then counts how far the live head is ahead of the finalize-time head.
 //
 // Best-effort by contract: ANY failure (GitHub not configured, live-head fetch
 // error, a compare that won't load) degrades to "unknown" freshness and a nil
 // count rather than failing the overlay — a stale review must still render so the
 // human can read and act on it. Comments are left at the caller's pre-seeded
-// "unknown" default whenever their anchor can't be mapped, so this never needs to
-// roll anything back on a partial failure.
+// "unknown" default whenever their anchor can't be mapped.
 //
-// Freshness lands on each out-comment by matching the staged comment's stable
-// TF-local id, not by slice position — out.Comments is built 1:1 from
-// StagedComments today, but joining on id keeps that from becoming a silent
-// correctness dependency on iteration order if either side is later filtered or
-// reordered.
+// Freshness joins each out-comment to its staged comment by stable TF-local id, so
+// it never depends on slice ordering.
 func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID string, art *domain.Artifact, details domain.ReviewArtifactDetails, out *reviewArtifactJSON) {
 	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
-		return // malformed target — leave everything "unknown" (reviewGet already 500s a bad target before us)
+		return // malformed target — leave everything "unknown" (reviewGet 500s a bad target before us)
 	}
 	// Resolve the per-repo client directly (not ghForArtifact, which writes an
 	// error response): a missing credential must degrade to "unknown", not 503 the
@@ -75,108 +52,70 @@ func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID s
 		finalizeHead = details.HeadSHA
 	}
 
-	cmp := newCompareCache(ctx, gh, owner, repo, liveHead)
-
-	// commits-since-finalize: how many commits the live head is ahead of the
-	// finalize head. Skipped (left nil/unknown) if we have no finalize anchor or
-	// the compare won't load.
-	if cc, ok := cmp.from(finalizeHead); ok {
-		n := cc.aheadBy
-		out.CommitsSinceFinalize = &n
-	}
-
-	// Index the staged comments by their stable TF-local id so freshness joins the
-	// right out-comment without depending on slice order (see the doc comment).
-	staged := make(map[string]domain.ReviewArtifactComment, len(details.StagedComments))
-	for _, c := range details.StagedComments {
-		if c.ID != "" {
-			staged[c.ID] = c
+	// Prefetch finalizeHead...liveHead once. It yields BOTH the commits-since count
+	// (ahead_by) and the forward line-map for the common case (every comment shares
+	// the finalize head as its anchor), so the resolver below reuses it instead of
+	// re-fetching. A base equal to the live head means no drift — count 0, no fetch.
+	var baseCmp *ghclient.CommitComparison
+	switch {
+	case finalizeHead == "":
+		// no anchor to count from — leave CommitsSinceFinalize nil (unknown)
+	case finalizeHead == liveHead:
+		zero := 0
+		out.CommitsSinceFinalize = &zero
+	default:
+		if cmp, e := gh.CompareCommits(ctx, owner, repo, finalizeHead, liveHead); e == nil {
+			baseCmp = cmp
+			n := cmp.AheadBy
+			out.CommitsSinceFinalize = &n
+		} else {
+			artifactsLog.Warn("review freshness: commits-since-finalize compare failed; serving unknown count",
+				"artifact", art.ID, "owner", owner, "repo", repo, "base", finalizeHead, "head", liveHead, "error", e)
 		}
 	}
 
-	// Per-comment freshness. Each comment maps from its own anchor (normally the
-	// shared finalize head, so the cache fetches one compare) forward to the live
-	// head.
-	for i := range out.Comments {
-		c, ok := staged[out.Comments[i].ID]
-		if !ok || c.Line == nil {
-			continue // no matching staged comment, or no line anchor — stays "unknown"
+	lineMapFor := func(anchor string) (ghclient.LineMap, error) {
+		if anchor == finalizeHead && baseCmp != nil {
+			return ghclient.ParseLineMapFromPatches(baseCmp.Files), nil
 		}
-		anchor := c.CommitSHA
-		if anchor == "" {
-			anchor = finalizeHead // staged before per-comment anchoring landed
-		}
-		cc, ok := cmp.from(anchor)
-		if !ok {
-			continue // compare unavailable for this anchor — stays "unknown"
-		}
-		res := cc.lineMap.MapComment(c.Path, *c.Line, c.StartLine)
-		switch res.Status {
-		case ghclient.LineMapUnchanged:
-			out.Comments[i].Freshness = reviewFreshnessCurrent
-		case ghclient.LineMapMoved:
-			out.Comments[i].Freshness = reviewFreshnessMoved
-			out.Comments[i].MappedLine = res.Line
-			out.Comments[i].MappedPath = res.Path
-		default: // ghclient.LineMapOutdated
-			out.Comments[i].Freshness = reviewFreshnessOutdated
-		}
-	}
-}
-
-// compareCache memoizes base...liveHead compares for a single reviewGet, keyed by
-// base commit. In the normal case every staged comment shares the finalize head
-// as its anchor, so the per-comment line-map and the commits-since-finalize count
-// all resolve from one fetched compare. A base equal to the live head needs no
-// fetch — there's no drift — so it yields an empty line-map (every anchor maps
-// unchanged) and aheadBy 0.
-type compareCache struct {
-	ctx      context.Context
-	gh       *ghclient.Client
-	owner    string
-	repo     string
-	liveHead string
-	byBase   map[string]cachedCompare
-}
-
-// cachedCompare is one base...liveHead result. ok records whether the fetch
-// succeeded so a cached miss (zero value) is distinguishable from a real compare
-// without re-requesting.
-type cachedCompare struct {
-	lineMap ghclient.LineMap
-	aheadBy int
-	ok      bool
-}
-
-func newCompareCache(ctx context.Context, gh *ghclient.Client, owner, repo, liveHead string) *compareCache {
-	return &compareCache{ctx: ctx, gh: gh, owner: owner, repo: repo, liveHead: liveHead, byBase: map[string]cachedCompare{}}
-}
-
-// from returns the cached compare for base...liveHead, fetching it once. ok is
-// false when base is empty or the compare can't be loaded — the caller then
-// leaves the affected fields at "unknown".
-func (m *compareCache) from(base string) (cachedCompare, bool) {
-	if base == "" {
-		return cachedCompare{}, false
-	}
-	if c, seen := m.byBase[base]; seen {
-		return c, c.ok
-	}
-	var c cachedCompare
-	if base == m.liveHead {
-		// No drift from this base: an empty line-map maps every anchor unchanged.
-		c = cachedCompare{lineMap: ghclient.ParseLineMap(""), ok: true}
-	} else {
-		cc, err := m.gh.CompareCommits(m.ctx, m.owner, m.repo, base, m.liveHead)
-		if err != nil {
+		cmp, e := gh.CompareCommits(ctx, owner, repo, anchor, liveHead)
+		if e != nil {
 			artifactsLog.Warn("review freshness: compare failed; serving unknown for this anchor",
-				"owner", m.owner, "repo", m.repo, "base", base, "head", m.liveHead, "error", err)
-			// Cache the miss so a shared anchor doesn't re-request.
-			m.byBase[base] = cachedCompare{}
-			return cachedCompare{}, false
+				"artifact", art.ID, "owner", owner, "repo", repo, "base", anchor, "head", liveHead, "error", e)
+			return ghclient.LineMap{}, e
 		}
-		c = cachedCompare{lineMap: ghclient.ParseLineMapFromPatches(cc.Files), aheadBy: cc.AheadBy, ok: true}
+		return ghclient.ParseLineMapFromPatches(cmp.Files), nil
 	}
-	m.byBase[base] = c
-	return c, true
+
+	// Forward-map every staged comment to the live head, then join the verdicts back
+	// onto the wire comments by id. We keep the original staged comment alongside
+	// each outcome so a "moved" verdict can report a renamed path (Outcome.Comment
+	// carries the new path only when it actually changed).
+	type joined struct {
+		outcome  review.Outcome
+		original domain.ReviewArtifactComment
+	}
+	outcomes := review.ReconcileToHead(details.StagedComments, liveHead, finalizeHead, lineMapFor)
+	byID := make(map[string]joined, len(outcomes))
+	for i, o := range outcomes {
+		if c := details.StagedComments[i]; c.ID != "" {
+			byID[c.ID] = joined{outcome: o, original: c}
+		}
+	}
+
+	for i := range out.Comments {
+		j, ok := byID[out.Comments[i].ID]
+		if !ok || !j.outcome.Classified() {
+			continue // unmatched, unpositioned, or compare unavailable — stays "unknown"
+		}
+		out.Comments[i].Freshness = review.Freshness(j.outcome.Status)
+		if j.outcome.Status == ghclient.LineMapMoved {
+			if j.outcome.Comment.Line != nil {
+				out.Comments[i].MappedLine = *j.outcome.Comment.Line
+			}
+			if j.outcome.Comment.Path != j.original.Path {
+				out.Comments[i].MappedPath = j.outcome.Comment.Path // rename only
+			}
+		}
+	}
 }

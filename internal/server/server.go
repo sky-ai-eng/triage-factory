@@ -986,6 +986,7 @@ func (s *Server) routes() {
 	s.api("GET /api/artifacts/{id}/diff", ah.handleArtifactDiff)
 	s.apiMutating("POST /api/artifacts/{id}/approve", ah.handleArtifactApprove)
 	s.apiMutating("POST /api/artifacts/{id}/dismiss", ah.handleArtifactDismiss)
+	s.apiMutating("POST /api/artifacts/{id}/review/refresh", ah.handleReviewRefresh)
 	s.apiMutating("PUT /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentUpdate)
 	s.apiMutating("DELETE /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentDelete)
 

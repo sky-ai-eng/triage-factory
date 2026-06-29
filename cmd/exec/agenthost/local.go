@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/review"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -173,21 +174,24 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	// can still fix it. Skipped when there are no comments (a pure approve / body-
 	// only review has no inline anchor to reconcile).
 	//
-	// finalizeHead is the PR head this review is finalized against — the commit
-	// every comment was reconciled to. It's stamped onto details (TFAC-500) so the
-	// human-facing freshness check can later count commits-since-finalize against
-	// the live head. A review WITH comments learns it from the reconcile (which
-	// already fetched the head); a comment-less review (pure approve / body-only)
-	// makes no GitHub call here, so it falls back to the start-review head — the
-	// only anchor available without an extra fetch, and good enough for an
-	// advisory count on a review with no inline anchors.
+	// finalizeBase/finalizeHead are the PR base+head this review is finalized
+	// against — head is the commit every comment was reconciled to. Both are
+	// stamped onto details (TFAC-500): head anchors the commits-since-finalize
+	// count, and base+head together reproduce the finalize-time PR diff the human
+	// overlay renders (FinalizedBaseSHA...FinalizedHeadSHA). A review WITH comments
+	// learns both from the reconcile (which already fetched the PR); a comment-less
+	// review (pure approve / body-only) makes no GitHub call here, so head falls
+	// back to the start-review head and base stays empty (the overlay then falls
+	// back to the live diff — a comment-less review has no inline anchors anyway).
 	finalizeHead := details.HeadSHA
+	finalizeBase := ""
 	if len(details.StagedComments) > 0 {
-		head, err := c.reconcileStagedCommentsToHead(ctx, art, &details)
+		base, head, err := c.reconcileStagedCommentsToHead(ctx, art, &details)
 		if err != nil {
 			return err
 		}
 		finalizeHead = head
+		finalizeBase = base
 	}
 
 	// Snapshot the agent's draft as the write-once Proposed baseline — a copy of
@@ -199,6 +203,7 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	details.ReviewBody = body
 	details.ReviewEvent = event // the ready sentinel
 	details.FinalizedHeadSHA = finalizeHead
+	details.FinalizedBaseSHA = finalizeBase
 	details.Proposed = proposed
 
 	updated := *art
@@ -224,87 +229,76 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 // one GitHub read rather than fetching the same compare once per comment. A
 // comment already anchored at the current head needs no map (and no read).
 //
-// Returns the PR's current head — the commit every comment was reconciled to —
-// so the caller can stamp it onto details as the finalize-time head (TFAC-500).
-func (c *LocalClient) reconcileStagedCommentsToHead(ctx context.Context, art *domain.Artifact, details *domain.ReviewArtifactDetails) (string, error) {
+// Returns the PR's base+head SHA at finalize — head is the commit every comment
+// was reconciled to, base is the PR base branch tip — so the caller can stamp both
+// onto details (TFAC-500): head anchors the commits-since-finalize count, and
+// base+head reproduce the finalize-time diff the human overlay renders.
+//
+// The classify/remap transform is shared with the human-facing freshness +
+// Refresh paths via internal/review; agenthost supplies the GitHub fetch (the
+// anchor→head compare line-map) and applies the finalize-gate POLICY: a transient
+// map error aborts (never silently arm a review against an unverified head), and
+// any outdated comment fails the whole finalize with the actionable per-comment
+// listing.
+func (c *LocalClient) reconcileStagedCommentsToHead(ctx context.Context, art *domain.Artifact, details *domain.ReviewArtifactDetails) (baseSHA, headSHA string, err error) {
 	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
-		return "", fmt.Errorf("review artifact has a malformed target %q", art.Target)
+		return "", "", fmt.Errorf("review artifact has a malformed target %q", art.Target)
 	}
 	client, err := c.githubClientForRepo(ctx, owner, repo)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	pr, err := client.GetPRBasic(ctx, owner, repo, number)
 	if err != nil {
-		return "", fmt.Errorf("fetch PR #%d to reconcile the review against its current head: %w", number, err)
+		return "", "", fmt.Errorf("fetch PR #%d to reconcile the review against its current head: %w", number, err)
 	}
 	head := pr.HeadSHA
 	if head == "" {
-		return "", fmt.Errorf("PR #%d has no head commit SHA; cannot reconcile the review's comments against the current head", number)
+		return "", "", fmt.Errorf("PR #%d has no head commit SHA; cannot reconcile the review's comments against the current head", number)
 	}
 
-	lineMaps := map[string]ghclient.LineMap{}
+	outcomes := review.ReconcileToHead(details.StagedComments, head, details.HeadSHA,
+		func(anchor string) (ghclient.LineMap, error) {
+			return hostCompareLineMap(ctx, client, owner, repo, anchor, head)
+		})
+
 	var stale []staleReviewComment
-
-	for i := range details.StagedComments {
-		cmt := &details.StagedComments[i]
-		// A comment with no line anchor can't be forward-mapped; leave it for the
-		// approve path (which already rejects an unpositioned comment) rather than
-		// crash here.
-		if cmt.Line == nil {
-			continue
+	remapped := make([]domain.ReviewArtifactComment, len(outcomes))
+	for i, o := range outcomes {
+		// A transient compare failure must abort finalize, not silently arm a review
+		// against an unverified head.
+		if o.MapErr != nil {
+			return "", "", fmt.Errorf("reconcile review comment on %s (head %s): %w",
+				o.Comment.Path, shortCommit(head), o.MapErr)
 		}
-		anchor := cmt.CommitSHA
-		if anchor == "" {
-			anchor = details.HeadSHA // staged before per-comment anchoring landed
-		}
-		// Already coherent against the current head — nothing to map; just make the
-		// (possibly empty) anchor explicit so approval pins one commit_id.
-		if anchor == head {
-			cmt.CommitSHA = head
-			continue
-		}
-
-		lm, ok := lineMaps[anchor]
-		if !ok {
-			lm, err = hostCompareLineMap(ctx, client, owner, repo, anchor, head)
-			if err != nil {
-				return "", fmt.Errorf("reconcile review comment on %s (commit %s → head %s): %w",
-					cmt.Path, shortCommit(anchor), shortCommit(head), err)
-			}
-			lineMaps[anchor] = lm
-		}
-
-		res := lm.MapComment(cmt.Path, *cmt.Line, cmt.StartLine)
-		switch res.Status {
-		case ghclient.LineMapUnchanged, ghclient.LineMapMoved:
-			// The anchored code survived: re-point to its new-side line/path and
-			// re-anchor to the current head. Silent — a shift needs no agent action.
-			newLine := res.Line
-			cmt.Line = &newLine
-			if cmt.StartLine != nil {
-				newStart := res.StartLine
-				cmt.StartLine = &newStart
-			}
-			if res.Path != "" {
-				cmt.Path = res.Path
-			}
-			cmt.CommitSHA = head
-		default: // ghclient.LineMapOutdated
+		if o.Outdated() {
 			stale = append(stale, staleReviewComment{
-				id:   cmt.ID,
-				path: cmt.Path,
-				line: *cmt.Line,
-				body: cmt.Body,
+				id:   o.Comment.ID,
+				path: o.Comment.Path,
+				line: derefInt(o.Comment.Line),
+				body: o.Comment.Body,
 			})
 		}
+		remapped[i] = o.Comment
 	}
-
 	if len(stale) > 0 {
-		return "", staleReviewCommentsError(number, head, stale)
+		return "", "", staleReviewCommentsError(number, head, stale)
 	}
-	return head, nil
+	// Persist the survivors' remap (ReconcileToHead returns copies). Done only on
+	// success, so a failed finalize leaves the staged set untouched for the retry.
+	details.StagedComments = remapped
+	return pr.BaseSHA, head, nil
+}
+
+// derefInt returns the pointed-to int, or 0 for nil — only the stale-comment
+// listing uses it, and an outdated comment is always positioned, so the 0 is never
+// actually hit.
+func derefInt(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // staleReviewComment is one outdated staged comment, captured for the finalize

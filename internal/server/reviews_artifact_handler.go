@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/review"
 )
 
 // reviewArtifactJSON is the wire shape the review overlay consumes. The whole
@@ -97,7 +98,7 @@ func (ah *artifactsHandler) reviewGet(w http.ResponseWriter, r *http.Request, or
 			// Default to "unknown"; annotateReviewFreshness upgrades it per comment
 			// when the live head + compare resolve. Pre-seeding here means a GitHub
 			// failure simply leaves it at "unknown" with no extra branching.
-			Freshness: reviewFreshnessUnknown,
+			Freshness: review.FreshnessUnknown,
 		})
 	}
 	// Augment with per-comment freshness + commits-since-finalize against the live
@@ -335,6 +336,128 @@ func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": art.ExternalID,
 		"state":     domain.ArtifactStateReviewDismissed,
+	})
+}
+
+// handleReviewRefresh re-reconciles a finalized review draft to the PR's current
+// head (POST /api/artifacts/{id}/review/refresh, TFAC-500) — the human-driven
+// counterpart to the agent's finalize gate, sharing the same forward-map
+// (internal/review). Review-only; dispatches to reviewRefresh.
+func (ah *artifactsHandler) handleReviewRefresh(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	art, ok := ah.loadArtifact(w, r, orgID, userID, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if art.Kind != domain.ArtifactKindReview {
+		notFound(w, "review artifact")
+		return
+	}
+	ah.reviewRefresh(w, r, orgID, userID, art)
+}
+
+// reviewRefresh advances a finalized review draft from the head it was written
+// against to the PR's live head (TFAC-500): it forward-maps every staged comment,
+// remaps + re-anchors survivors to the live head, DROPS the outdated ones (the
+// human confirmed the count first), and re-pins the finalize frame (base+head) to
+// the live PR so the overlay's diff and the comments move forward together. The
+// surviving comments all share the live head afterward, so the atomic submit stays
+// coherent — and the GC-422 risk shrinks (the pin follows a fresher commit).
+//
+// Pessimistic and atomic: a transient compare failure aborts before anything is
+// persisted (never half-refresh against an unverified head). Refresh is optional —
+// a review submits fine without it (GitHub renders post-finalize drift as
+// "outdated" once submitted); this just clears that drift up front.
+func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Artifact) {
+	// Only a finalized, still-pending review can be refreshed: a submitted/dismissed
+	// one is terminal, and an unfinalized draft is still the agent's to shape.
+	if art.State != domain.ArtifactStateReviewPending {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending (state: " + art.State + ")"})
+		return
+	}
+	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	if err != nil {
+		internalError(w, "artifacts", fmt.Errorf("parse review artifact details (artifact %s): %w", art.ID, err))
+		return
+	}
+	if details.ReviewEvent == "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review has not been finalized by the agent yet"})
+		return
+	}
+
+	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
+	if !ok {
+		return
+	}
+	pr, err := gh.GetPRBasic(r.Context(), owner, repo, number)
+	if err != nil || pr.HeadSHA == "" {
+		artifactsLog.Warn("review refresh: live PR head unavailable",
+			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't fetch the PR's current head from GitHub" + localDetail(err)})
+		return
+	}
+	liveHead := pr.HeadSHA
+
+	finalizeHead := details.FinalizedHeadSHA
+	if finalizeHead == "" {
+		finalizeHead = details.HeadSHA
+	}
+
+	lineMapFor := func(anchor string) (ghclient.LineMap, error) {
+		cmp, e := gh.CompareCommits(r.Context(), owner, repo, anchor, liveHead)
+		if e != nil {
+			return ghclient.LineMap{}, e
+		}
+		return ghclient.ParseLineMapFromPatches(cmp.Files), nil
+	}
+
+	outcomes := review.ReconcileToHead(details.StagedComments, liveHead, finalizeHead, lineMapFor)
+	survivors := make([]domain.ReviewArtifactComment, 0, len(outcomes))
+	moved, dropped := 0, 0
+	for _, o := range outcomes {
+		// A transient compare failure aborts the whole refresh — better to leave the
+		// review on its known-good finalize frame than to half-advance it against a
+		// head we couldn't fully verify.
+		if o.MapErr != nil {
+			artifactsLog.Warn("review refresh: reconcile failed", "artifact", art.ID, "head", liveHead, "error", o.MapErr)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't reconcile a comment against the current head" + localDetail(o.MapErr)})
+			return
+		}
+		if o.Outdated() {
+			dropped++ // the human confirmed dropping outdated comments before refreshing
+			continue
+		}
+		if o.Status == ghclient.LineMapMoved {
+			moved++
+		}
+		survivors = append(survivors, o.Comment)
+	}
+
+	// Re-pin the staged set + the finalize frame to the live PR. Survivors all share
+	// liveHead now, so the submit stays atomic; the overlay re-renders the new frame.
+	details.StagedComments = survivors
+	details.FinalizedHeadSHA = liveHead
+	details.FinalizedBaseSHA = pr.BaseSHA
+
+	next := *art
+	next.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
+	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		_, e := tx.Artifacts.Upsert(r.Context(), orgID, next)
+		return e
+	}); err != nil {
+		internalError(w, "artifacts", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"moved":   moved,
+		"dropped": dropped,
+		"head":    liveHead,
+		"state":   domain.ArtifactStateReviewPending,
 	})
 }
 
