@@ -22,8 +22,11 @@ CREATE TABLE staged_agent_injections (
     body       TEXT NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
--- Flush reads/deletes by (org_id, run_id) ordered created_at ASC; the run index
--- mirrors run_messages' idx_run_messages_run and serves the per-run claim.
+-- The index covers the per-run claim's run_id lookup + the created_at sort,
+-- mirroring run_messages' idx_run_messages_run (also run_id-leading, no org_id).
+-- org_id is applied as a residual filter, NOT indexed: run_id alone is already
+-- selective (a run holds O(few) injections) and functionally determines org_id,
+-- so a leading org_id would buy nothing — and local-mode is N=1 regardless.
 CREATE INDEX idx_staged_agent_injections_run ON staged_agent_injections(run_id, created_at);
 
 -- +goose Down

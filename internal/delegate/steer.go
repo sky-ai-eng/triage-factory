@@ -83,24 +83,37 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 	if run == nil || !resumableState(run.Status, run.Outcome) {
 		return ErrRunNotSteerable
 	}
-	// Resuming a terminal/paused run: prepend the artifact-change ledger — every
-	// artifact this run produced that a human resolved while it wasn't running,
-	// bundled into one <system-note> ahead of the user's message (TFAC-493). The
-	// live branch above needs none: a live run was steered each resolution as it
-	// happened. Derived (no ledger table); a read failure degrades to no prepend.
-	if block := s.artifactLedgerForResume(ctx, orgID, run); block != "" {
-		text = block + "\n\n" + text
-	}
-	// Then flush the durable staged-injection queue (TFAC-501) — every producer-
-	// agnostic injection staged while the run wasn't running (e.g. the new-commits
-	// freshness injection), bundled into its own <system-note> ahead of the user's
-	// message. Destructive flush: delivered exactly once. This prepend runs after
-	// the artifact-ledger prepend above but writes to the front of the string, so
-	// the staged-injection block lands first: the final order is
-	// [staged injections][artifact ledger][user text]. Both are out-of-band
-	// <system-note> blocks, so their order relative to each other is cosmetic.
-	if block := s.stagedInjectionsForResume(ctx, orgID, run.ID); block != "" {
-		text = block + "\n\n" + text
-	}
+	// Resuming a terminal/paused run: prepend the out-of-band <system-note> blocks
+	// that accumulated while it wasn't running, ahead of the user's text. The live
+	// branch above needs none — a warm run was steered each event as it happened.
+	text = s.resumeSystemPrepends(ctx, orgID, run) + text
 	return s.ResumeOpenRun(orgID, runID, text, userID)
+}
+
+// resumeSystemPrepends assembles the out-of-band <system-note> blocks prepended
+// ahead of a resuming run's user message, in their final read order
+// [staged injections][artifact ledger]:
+//
+//   - the durable staged-injection queue flush (TFAC-501) — every producer-
+//     agnostic injection staged while the run wasn't running (e.g. the new-commits
+//     freshness injection), destructively flushed (delivered exactly once); and
+//   - the artifact-change ledger (TFAC-493) — every artifact this run produced
+//     that a human resolved while it wasn't running, derived from the artifact
+//     rows (no ledger table).
+//
+// The artifact ledger is composed first and the staged-injection flush second, so
+// the injection block lands FIRST in the returned prefix (each step writes to the
+// front). Both are out-of-band <system-note> blocks, so their order relative to
+// each other is cosmetic. Returns "" (prepend nothing) when neither has anything
+// pending; a read failure in either source degrades to no block for that source,
+// never blocking the resume.
+func (s *Spawner) resumeSystemPrepends(ctx context.Context, orgID string, run *domain.AgentRun) string {
+	var prefix string
+	if block := s.artifactLedgerForResume(ctx, orgID, run); block != "" {
+		prefix = block + "\n\n"
+	}
+	if block := s.stagedInjectionsForResume(ctx, orgID, run.ID); block != "" {
+		prefix = block + "\n\n" + prefix
+	}
+	return prefix
 }

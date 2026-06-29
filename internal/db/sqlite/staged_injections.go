@@ -68,7 +68,13 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, ru
 	}
 	// DELETE … RETURNING does not honor ORDER BY in SQLite, so sort by
 	// created_at (ties broken by id) to restore oldest-first — the order the
-	// bundled block reads in.
+	// bundled block reads in. Known limitation: SQLite's CURRENT_TIMESTAMP is
+	// 1-second resolution, so two injections staged in the same second tie on
+	// created_at and fall back to their random uuid — an indeterminate but
+	// harmless order (the new-commits producer fires once per poll cycle, far
+	// coarser than 1s, and the bundle content is identical either way). Postgres
+	// now() is microsecond, so its twin has no such tie in practice. A SERIAL/
+	// rowid tiebreaker would make it monotonic if it ever matters.
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
 			return out[i].ID < out[j].ID

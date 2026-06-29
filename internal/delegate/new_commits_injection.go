@@ -40,7 +40,11 @@ func (s *Spawner) HandlePRNewCommits(evt domain.Event) {
 		delegateLog.Warn("new-commits injection: parse metadata failed", "event", evt.ID, "error", err)
 		return
 	}
-	// Need the PR coordinates + the new head to name the injection and gate on freshness.
+	// Need the PR coordinates + the new head to name the injection and gate on
+	// freshness. PrevHeadSHA is deliberately not guarded: the tracker emits
+	// pr:new_commits only on a prev→curr head transition guarded by
+	// prev.HeadSHA != "" (tracker/diff.go), so a reached event always carries it
+	// and the "advanced from <old>" half of the copy is never blank.
 	if meta.Repo == "" || meta.PRNumber == 0 || meta.HeadSHA == "" {
 		return
 	}

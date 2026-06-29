@@ -65,7 +65,9 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, ru
 	}
 	// DELETE … RETURNING does not honor ORDER BY, so sort by created_at (ties
 	// broken by id) to restore oldest-first — the order the bundled block reads
-	// in. Mirrors the SQLite impl.
+	// in. Mirrors the SQLite impl. now() is microsecond-resolution here, so the
+	// created_at tie the SQLite twin documents (1-second CURRENT_TIMESTAMP) is
+	// effectively impossible — the id tiebreaker is a formality.
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
 			return out[i].ID < out[j].ID

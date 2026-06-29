@@ -7458,8 +7458,10 @@ CREATE TABLE public.staged_agent_injections (
 ALTER TABLE ONLY public.staged_agent_injections
     ADD CONSTRAINT staged_agent_injections_pkey PRIMARY KEY (id);
 
--- Flush reads/deletes by (org_id, run_id) ordered created_at; mirrors
--- idx_run_messages_run plus the created_at the per-run claim sorts on.
+-- The index covers the per-run claim's run_id lookup + the created_at sort,
+-- mirroring idx_run_messages_run (run_id-leading, no org_id). org_id is applied
+-- as a residual filter, NOT indexed: run_id is already selective and functionally
+-- determines org_id, so leading with org_id buys nothing.
 CREATE INDEX idx_staged_agent_injections_run ON public.staged_agent_injections USING btree (run_id, created_at);
 
 ALTER TABLE ONLY public.staged_agent_injections

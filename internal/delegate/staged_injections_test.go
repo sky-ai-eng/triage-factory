@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -105,6 +106,63 @@ func TestStagedInjectionsForResume_FlushesAndDrains(t *testing.T) {
 	// Destructive: the flush drained the queue.
 	if again := s.stagedInjectionsForResume(ctx, runmode.LocalDefaultOrgID, "run-resume"); again != "" {
 		t.Errorf("second resume should prepend nothing (queue drained), got %q", again)
+	}
+}
+
+// TestResumeSystemPrepends_OrdersInjectionsThenLedger: a resumable run with BOTH
+// a staged injection AND a human-resolved artifact composes both <system-note>
+// blocks ahead of the user's text, staged-injection block first:
+// [staged injections][artifact ledger]. Guards the composed order against a
+// refactor dropping or reordering a block (the components are tested individually
+// elsewhere; this pins SendMessage's assembly).
+func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-compose", "sess", "/tmp/wt")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	ctx := context.Background()
+
+	// Artifact ledger: a watermark in the past so the resolved PR lands in it.
+	seedAgentMessageAt(t, s, "r-compose", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	approvedPR := domain.NewPullRequestArtifact("o/r", 1, "node1", "h", "main",
+		"https://github.com/o/r/pull/1", "PR one", "", false) // draft=false → open (approved)
+	seedResolvedArtifact(t, s, "r-compose", approvedPR)
+
+	// Staged injection on the same run.
+	s.StageOrDeliverInjection(runmode.LocalDefaultOrgID, "r-compose",
+		domain.StagedInjectionProducerPRNewCommits, "the staged injection body")
+
+	run, err := s.agentRuns.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-compose")
+	if err != nil || run == nil {
+		t.Fatalf("GetSystem: err=%v run=%v", err, run)
+	}
+	prefix := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, run)
+
+	inj := strings.Index(prefix, "the staged injection body")
+	ledger := strings.Index(prefix, "o/r#1")
+	if inj < 0 || ledger < 0 {
+		t.Fatalf("a block is missing: injection=%d ledger=%d in %q", inj, ledger, prefix)
+	}
+	if inj > ledger {
+		t.Errorf("staged-injection block must precede the artifact ledger: %q", prefix)
+	}
+	if strings.Count(prefix, "<system-note>") != 2 {
+		t.Errorf("want two distinct <system-note> blocks, got %d: %q", strings.Count(prefix, "<system-note>"), prefix)
+	}
+}
+
+// TestResumeSystemPrepends_EmptyWhenNothingPending: no staged injection and no
+// resolved artifact → empty prefix, so a plain resume prepends nothing.
+func TestResumeSystemPrepends_EmptyWhenNothingPending(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-none", "sess", "/tmp/wt")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	ctx := context.Background()
+	run, err := s.agentRuns.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-none")
+	if err != nil || run == nil {
+		t.Fatalf("GetSystem: err=%v run=%v", err, run)
+	}
+	if got := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, run); got != "" {
+		t.Errorf("want empty prefix when nothing pending, got %q", got)
 	}
 }
 
