@@ -713,7 +713,14 @@ func reviewedPRWorktreePath(host agenthost.Client, owner, repo string) string {
 			continue
 		}
 		if match != "" {
-			return "" // more than one PR worktree for this repo — ambiguous
+			// Two PR worktrees in one repo for this run — we can't tell which PR
+			// this comment targets from owner/repo alone, so fall back to cwd
+			// HEAD. Warn (stderr, so the success JSON on stdout stays clean) so a
+			// "comment anchored to the wrong commit" symptom is diagnosable: the
+			// agent must run add-review-comment from inside the reviewed PR's
+			// worktree in that case.
+			fmt.Fprintf(os.Stderr, "gh pr add-review-comment: %s has multiple PR worktrees this run; anchoring to cwd HEAD — run this from the reviewed PR's worktree\n", repoID)
+			return ""
 		}
 		match = w.Path
 	}

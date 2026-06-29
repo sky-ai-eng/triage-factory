@@ -332,6 +332,14 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	// filepath.Join(runRoot, owner, repo, ref-slug). The ref-slug subdir is
 	// what lets two PRs (or a PR + a branch) coexist in one repo for one run.
 	// Compute it here so we can reserve the row BEFORE the create runs.
+	//
+	// INVARIANT: this must equal the path CreateForCheckoutInRoot /
+	// CreateForPRInRoot will land at — filepath.Join(runRoot, owner, repo,
+	// {worktree.CheckoutRefSlug(spec.ref) | worktree.PRRefSlug(spec.pr)}). It
+	// holds because `ref` here is refForSpec(spec), which calls those same slug
+	// helpers, and createCheckout below passes the RAW spec to the create funcs,
+	// which re-derive the identical slug internally. The divergence check after
+	// the create (gotPath != wtPath) is the backstop if this ever drifts.
 	wtPath := filepath.Join(runRoot, profile.Owner, profile.Repo, ref)
 
 	// Reserve. Two concurrent processes that both reach this point with the

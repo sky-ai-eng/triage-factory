@@ -213,11 +213,11 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 			worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.prNumber, filepath.Base(cfg.wtPath))
 		}
 	} else if cfg.runRoot != "" {
-		// Jira blueprints materialize worktrees lazily via `workspace add`,
-		// which keys run_worktrees rows by each *step's* run_id (the
-		// agent's TRIAGE_FACTORY_RUN_ID), not by the blueprint_run_id.
-		// Iterate every step run in the blueprint so we actually find and
-		// remove their reservations.
+		// Jira blueprints materialize worktrees lazily via `workspace add`, which
+		// keys run_worktrees rows AND the on-disk run-root (runDir) by each
+		// *step's* run_id (the agent's TRIAGE_FACTORY_RUN_ID), not the
+		// blueprint_run_id. Iterate every step run so we find + remove their
+		// worktrees and their run-root dirs.
 		stepRuns, err := s.blueprints.RunsForBlueprintSystem(context.Background(), cfg.orgID, blueprintRunID)
 		if err != nil {
 			blueprintLog.Warn("list step runs for cleanup failed", "blueprint_run", blueprintRunID, "error", err)
@@ -246,7 +246,20 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 				}
 			}
 		}
-		worktree.RemoveRunRoot(blueprintRunID)
+		// Clean the agent's ghost ~/.claude/projects entry (keyed on the session
+		// cwd = cfg.wtPath, the first step's run-root) BEFORE removing the
+		// run-root dirs — RemoveClaudeProjectDir resolves the cwd via EvalSymlinks
+		// and silently no-ops once the dir is gone.
+		worktree.RemoveClaudeProjectDir(cfg.wtPath)
+		// Remove each step's run-root dir. `workspace add` materializes under
+		// runDir(stepRunID), and the first step's run-root holds _scratch; the
+		// old RemoveRunRoot(blueprintRunID) was a no-op (no dir is ever created
+		// under the blueprint_run id — the agent's RUN_ID is always a step run
+		// id). RemoveRunRoot is a safe no-op for a step that materialized nothing.
+		for _, sr := range stepRuns {
+			worktree.RemoveRunRoot(sr.ID)
+		}
+		return
 	}
 	worktree.RemoveClaudeProjectDir(cfg.wtPath)
 }
