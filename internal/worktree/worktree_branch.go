@@ -47,28 +47,38 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir, CloneAuth{})
 }
 
-// CheckoutRefSlug is the run_worktrees ref and worktree-subdir name for a
-// default/--ref checkout: "@default" for the repo's default branch (empty ref),
-// else the ref with path separators and other path-unsafe bytes folded to '-'
-// so it nests as a single directory. "@" is disallowed in a validated --ref, so
-// "@default" can never collide with a user-named branch. Exported so the
-// workspace CLI reserves the run_worktrees row and computes the worktree path
-// with the same slug CreateForCheckoutInRoot lands the worktree at.
+// CheckoutRefSlug is the run_worktrees ref (PK discriminator) AND the
+// worktree-subdir name for a default/--ref checkout. It MUST be a single
+// filesystem-safe path segment that is injective over valid refs (distinct refs
+// → distinct slugs) and disjoint from the reserved "pr-<N>" and "@default"
+// forms. Otherwise one run would treat two different `workspace add --ref`
+// targets — or a branch literally named "pr-42" and PR #42 — as the same
+// worktree: the idempotent re-add hands back the wrong checkout, and the
+// detached worktree the agent branches/pushes from is the wrong one.
+//
+//   - ""         → "@default"      ("@" is disallowed in a validated --ref, so
+//     the default form can't collide with a branch)
+//   - "<branch>" → "ref-<branch>"  with every '/' replaced by '~'
+//
+// Two properties make this collision-free:
+//
+//   - The "ref-" namespace keeps branch slugs disjoint from "pr-<N>" (a "ref-"
+//     slug never starts with "pr-") and "@default".
+//   - A validated --ref's alphabet is [A-Za-z0-9._/-] (see validateGitRef), so
+//     '/' is the only path-unsafe byte AND '~' can never appear literally in the
+//     input. Replacing only '/' → '~' is therefore injective: "feature/foo" →
+//     "ref-feature~foo" and "feature-foo" → "ref-feature-foo" stay distinct
+//     (the old fold-everything-to-'-' scheme collapsed both to "feature-foo").
+//
+// The slug is never handed to git (the fetch uses the raw ref); it is only the
+// PK + on-disk subdir + `workspace list` display. Exported so the workspace CLI
+// reserves the run_worktrees row and computes the worktree path with the same
+// slug CreateForCheckoutInRoot lands the worktree at.
 func CheckoutRefSlug(ref string) string {
 	if ref == "" {
 		return "@default"
 	}
-	var b strings.Builder
-	for _, r := range ref {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
-			r == '.', r == '_', r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	return b.String()
+	return "ref-" + strings.ReplaceAll(ref, "/", "~")
 }
 
 // CreateForCheckoutInRoot materializes a worktree at filepath.Join(runRoot,

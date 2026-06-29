@@ -556,12 +556,14 @@ func TestMaterializeWorkspace_RefCheckout(t *testing.T) {
 	if stub.checkoutCalls != 1 {
 		t.Fatalf("checkoutCalls = %d, want 1", stub.checkoutCalls)
 	}
+	// The git fetch ref is the RAW branch (feature-x); the stored run_worktrees
+	// ref is the namespaced slug (ref-feature-x).
 	if got := stub.checkoutArgs[0].ref; got != "feature-x" {
 		t.Errorf("ref = %q, want feature-x", got)
 	}
-	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "feature-x")
-	if row == nil || row.Ref != "feature-x" {
-		t.Errorf("row.Ref = %v, want feature-x", row)
+	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "ref-feature-x")
+	if row == nil || row.Ref != "ref-feature-x" {
+		t.Errorf("row.Ref = %v, want ref-feature-x", row)
 	}
 }
 
@@ -981,14 +983,26 @@ func TestRefForSpec(t *testing.T) {
 		want string
 	}{
 		{checkoutSpec{}, "@default"},
-		{checkoutSpec{ref: "feature-x"}, "feature-x"},
-		{checkoutSpec{ref: "feature/foo"}, "feature-foo"}, // slug folds '/'
+		{checkoutSpec{ref: "feature-x"}, "ref-feature-x"},
+		{checkoutSpec{ref: "feature/foo"}, "ref-feature~foo"}, // '/' → '~'
 		{checkoutSpec{pr: 42}, "pr-42"},
+		// A branch literally named "pr-42" must NOT collide with PR #42's
+		// reserved "pr-42" slug — the "ref-" namespace keeps them disjoint.
+		{checkoutSpec{ref: "pr-42"}, "ref-pr-42"},
 	}
 	for _, c := range cases {
 		if got := refForSpec(c.spec); got != c.want {
 			t.Errorf("refForSpec(%+v) = %q, want %q", c.spec, got, c.want)
 		}
+	}
+
+	// Injectivity guard: distinct refs that the old fold-to-'-' scheme collapsed
+	// must now map to distinct slugs.
+	if a, b := refForSpec(checkoutSpec{ref: "feature/foo"}), refForSpec(checkoutSpec{ref: "feature-foo"}); a == b {
+		t.Errorf("refForSpec collision: feature/foo and feature-foo both → %q", a)
+	}
+	if a, b := refForSpec(checkoutSpec{ref: "pr-42"}), refForSpec(checkoutSpec{pr: 42}); a == b {
+		t.Errorf("refForSpec collision: branch pr-42 and PR #42 both → %q", a)
 	}
 }
 
