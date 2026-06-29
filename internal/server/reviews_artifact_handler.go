@@ -165,7 +165,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// The ready sentinel must be set — the agent finalized the review via
-	// submit-review. A pending artifact without it was started but never
+	// finalize-review. A pending artifact without it was started but never
 	// finalized, so there's nothing to approve.
 	if details.ReviewEvent == "" {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review has not been finalized by the agent yet"})

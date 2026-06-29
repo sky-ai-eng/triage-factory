@@ -44,7 +44,10 @@ PR Creation:
                                                           "status" field that disambiguates.
 
 Review Lifecycle (managed locally, submitted atomically):
-  gh pr start-review <number> [--repo o/r]                Start a local pending review
+  gh pr start-review <number> [--repo o/r] [--fresh]      Start a local review draft. --fresh resets an
+                                                          in-progress draft to a clean slate (clears the
+                                                          staged comments + finalized body/verdict) so
+                                                          you can restart a botched review.
   gh pr add-review-comment <review_id> --file <path> --line <N> (--body <text> | --body-file <path>) [--start-line <N>] [--severity <level>]
                                                           --body-file reads the body from a file ("-" for
                                                           stdin), mutually exclusive with --body — safer
@@ -55,14 +58,22 @@ Review Lifecycle (managed locally, submitted atomically):
                                                           approval UI and a badge on the posted comment.
                                                           Optional — omit for an un-badged comment.
   gh pr comment-list-pending <review_id>                  List pending review comments
-  gh pr submit-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)
+  gh pr finalize-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)
+                                                          Hand the drafted review off for human approval
+                                                          (does NOT submit to GitHub — approval does).
+                                                          Output: {"status":"drafted_awaiting_approval"}.
 
 Direct Comments (hit GitHub API immediately):
   gh pr add-comment <number> --body <text>                Add top-level comment
   gh pr comment-reply <comment_id> --pr <N> --body <text> Reply to a thread
   gh pr comment-react <comment_id> --repo o/r --emoji <e> React to a comment
-  gh pr comment-update <comment_id> --body <text>         Edit a published comment (top-level or review)
-  gh pr comment-delete <comment_id>                       Delete a published comment (top-level or review)
+  gh pr comment-update <comment_id> --body <text> [--severity <level>]
+                                                          Edit a comment. Numeric id = published comment
+                                                          (top-level or review). A non-numeric id (from
+                                                          add-review-comment) = a staged review comment;
+                                                          pass --severity to keep its chip on edit.
+  gh pr comment-delete <comment_id>                       Delete a comment. Numeric id = published;
+                                                          non-numeric id = staged review comment.
 
 GitHub Actions Commands:
   gh actions download-logs <run_id> [--repo o/r]          Download & extract the full log

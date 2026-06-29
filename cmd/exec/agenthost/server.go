@@ -181,7 +181,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			resp.HTTPStatus = he.StatusCode
 			resp.HTTPBody = he.Body
 		}
-		// Tag the submit-review double-call guard so the client rebuilds the typed
+		// Tag the finalize-review double-call guard so the client rebuilds the typed
 		// sentinel (it has no HTTP status to key on — it's a host-side decision).
 		if errors.Is(err, ErrReviewAlreadyFinalized) {
 			resp.ErrCode = errCodeReviewAlreadyFinalized
@@ -239,6 +239,31 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 			return nil, err
 		}
 		return emptyResult{}, client.FinalizeReviewDraft(ctx, a.ReviewID, a.Event, a.Body)
+
+	case methodResetReviewDraft:
+		var a resetReviewDraftArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		reviewID, commitSHA, err := client.ResetReviewDraft(ctx, a.Owner, a.Repo, a.Number)
+		if err != nil {
+			return nil, err
+		}
+		return resetReviewDraftResult{ReviewID: reviewID, CommitSHA: commitSHA}, nil
+
+	case methodUpdateStagedReviewComment:
+		var a updateStagedReviewCommentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.UpdateStagedReviewComment(ctx, a.CommentID, a.Body)
+
+	case methodDeleteStagedReviewComment:
+		var a deleteStagedReviewCommentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.DeleteStagedReviewComment(ctx, a.CommentID)
 
 	case methodGetAgentRun:
 		run, err := client.GetAgentRun(ctx)

@@ -94,8 +94,8 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 		prStartReview(ctx, api, host, flags)
 	case "add-review-comment":
 		prAddReviewComment(ctx, host, flags)
-	case "submit-review":
-		prSubmitReview(ctx, host, flags)
+	case "finalize-review":
+		prFinalizeReview(ctx, host, flags)
 	case "add-comment":
 		prAddComment(ctx, api, flags)
 	case "comment-reply":
@@ -103,9 +103,9 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 	case "comment-react":
 		prCommentReact(ctx, api, flags)
 	case "comment-update":
-		prCommentUpdate(ctx, api, flags)
+		prCommentUpdate(ctx, api, host, flags)
 	case "comment-delete":
-		prCommentDelete(ctx, api, flags)
+		prCommentDelete(ctx, api, host, flags)
 	default:
 		exitErr(fmt.Sprintf("unknown pr action: %s", action))
 	}
@@ -554,10 +554,39 @@ func prReviewDismiss(ctx context.Context, client ghAPI, args []string) {
 // It reads the PR head SHA (a read, not a write) so the review pins to the
 // reviewed commit at submit. The durable run-scoped `review` artifact is recorded
 // at the host choke point (LocalClient.GithubCreatePendingReview); the returned
-// handle (the artifact id) is what add-review-comment / submit-review speak.
+// handle (the artifact id) is what add-review-comment / finalize-review speak.
+//
+// --fresh resets an in-progress draft to a clean slate so the agent can restart
+// a review it has botched: it clears the run's staged comments + the body/event
+// ready sentinel in place, keeping the same handle and pinned head SHA. Post-494
+// this is a pure local artifact reset — zero GitHub calls, no identity / no
+// anti-hijack logic (the GitHub pending-review model that needed those is gone).
+// On a clean slate (no prior start-review in this run) --fresh has nothing to
+// reset and falls through to a normal start.
 func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	_ = lookupRun(host) // validates identity is present; routing happens inside host
+
+	if hasFlag(args, "--fresh") {
+		// Pure-local reset of this run's existing draft for the PR — no GitHub
+		// call. An empty handle means there was no draft to reset, so we fall
+		// through to a normal start below (which reads the head SHA and creates
+		// one), keeping --fresh usable even as the first start-review. commit_sha
+		// is the draft's preserved head SHA, echoed so the reset output matches the
+		// shape a normal start-review prints.
+		handle, commitSHA, err := host.ResetReviewDraft(ctx, owner, repo, number)
+		exitOnErr(err)
+		if handle != "" {
+			printJSON(map[string]any{
+				"review_id":  handle,
+				"pr_number":  number,
+				"commit_sha": commitSHA,
+				"status":     "pending",
+				"reset":      true,
+			})
+			return
+		}
+	}
 
 	// Read the head SHA so the review pins to the reviewed commit at submit.
 	pr, err := client.GetPR(ctx, owner, repo, number, false)
@@ -727,14 +756,20 @@ func reviewedPRWorktreePath(host agenthost.Client, owner, repo string) string {
 	return match
 }
 
-// prSubmitReview hands the finished review off for human approval — it does NOT
+// prFinalizeReview hands the finished review off for human approval — it does NOT
 // submit to GitHub (approval does that). The host snapshots the agent's draft
-// (body + event + the live inline comments) into the run's review artifact and
-// sets the ready sentinel that parks the run. The TFAC-358 anti-double-submit
-// guard fires host-side: a second call gets a hard error.
-func prSubmitReview(ctx context.Context, host agenthost.Client, args []string) {
+// (body + event + the locally staged inline comments) into the run's review
+// artifact and sets the ready sentinel. The TFAC-358 anti-double-submit guard
+// fires host-side: a second call gets a hard error.
+//
+// The verb is "finalize-review", not "submit-review": post-494 it makes no
+// GitHub call at all (approval submits), so "submit" misleads a GitHub-literate
+// agent (it implies submitPullRequestReview / publish). "finalize" matches the
+// internal vocabulary (FinalizeReviewDraft, the ready sentinel) and the
+// drafted_awaiting_approval status this prints.
+func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr submit-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)")
+		exitErr("usage: gh pr finalize-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)")
 	}
 	reviewID := args[0]
 	event := flagVal(args, "--event")
@@ -784,7 +819,7 @@ func prSubmitReview(ctx context.Context, host agenthost.Client, args []string) {
 	err := host.FinalizeReviewDraft(ctx, reviewID, ghEvent, body)
 	if errors.Is(err, agenthost.ErrReviewAlreadyFinalized) {
 		exitErr(fmt.Sprintf(
-			"review %s has already been finalized for human approval. Do not call submit-review again — your work on this review is complete. Finish the run by writing %s and returning your completion JSON.",
+			"review %s has already been finalized for human approval. Do not call finalize-review again — your work on this review is complete. Finish the run by writing %s and returning your completion JSON.",
 			reviewID, agentMemoryFile(),
 		))
 	}
@@ -798,7 +833,7 @@ func prSubmitReview(ctx context.Context, host agenthost.Client, args []string) {
 		"status":    "drafted_awaiting_approval",
 		"review_id": reviewID,
 		"event":     ghEvent,
-		"next_step": "Review is drafted and awaiting human approval. Do not call submit-review again. Finish the run by writing " + agentMemoryFile() + " and returning your completion JSON.",
+		"next_step": "Review is drafted and awaiting human approval. Do not call finalize-review again. Finish the run by writing " + agentMemoryFile() + " and returning your completion JSON.",
 	})
 }
 
@@ -968,30 +1003,73 @@ func prCommentReact(ctx context.Context, client ghAPI, args []string) {
 	printJSON(map[string]any{"ok": true})
 }
 
-// prCommentUpdate edits a real GitHub comment by its numeric id (an issue comment
-// or a submitted review comment). Pending-review comments are edited human-side
-// through the overlay (server-direct), never here — the agent flow is add-only.
-func prCommentUpdate(ctx context.Context, client ghAPI, args []string) {
+// prCommentUpdate edits a GitHub comment, polymorphic on the id space the agent
+// passes back from whichever add verb produced it:
+//
+//   - a numeric id is a live GitHub comment (a top-level issue comment from
+//     add-comment, or an already-submitted review-diff comment) → UpdateComment,
+//     unchanged.
+//   - a non-numeric id is a comment on this run's TF-side review draft (from
+//     add-review-comment, staged not yet submitted) → rewrite the staged comment
+//     on the review artifact via the host, with the severity badge re-baked so
+//     the chip survives the edit. No GitHub call until the review submits.
+//
+// REST ids are all-digits and staged ids never are, so a successful int parse is
+// the discriminator. One verb serves both adds.
+func prCommentUpdate(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr comment-update <comment_id> --body <text>")
+		exitErr("usage: gh pr comment-update <comment_id> --body <text> [--severity <blocker|major|minor|clean>]")
 	}
-	owner, repo := ownerRepo(args)
-	id := mustInt(args[0], "comment_id")
 	body := flagVal(args, "--body")
 	if body == "" {
 		exitErr("--body is required")
 	}
-	exitOnErr(client.UpdateComment(ctx, owner, repo, id, body))
-	printJSON(map[string]any{"ok": true})
+
+	// Numeric → live GitHub comment (REST path, unchanged). --severity is
+	// meaningless for a submitted comment (no chip), so it's ignored there.
+	if id, err := strconv.Atoi(args[0]); err == nil {
+		owner, repo := ownerRepo(args)
+		exitOnErr(client.UpdateComment(ctx, owner, repo, id, body))
+		printJSON(map[string]any{"ok": true})
+		return
+	}
+
+	// Non-numeric → staged review comment. Re-bake the severity badge (mirroring
+	// add-review-comment) so the chip survives the edit. Strip any badge already
+	// on the supplied body FIRST: a staged comment's stored body carries its baked
+	// badge, so an agent that edits by copying the current body back in would
+	// otherwise stack a second badge — and omitting --severity would leave the old
+	// one. Stripping then re-baking makes --severity authoritative: present →
+	// exactly that badge, omitted → no badge (chip dropped).
+	severity, err := domain.NormalizeSeverity(flagVal(args, "--severity"))
+	if err != nil {
+		exitErr(err.Error())
+	}
+	_ = lookupRun(host)
+	_, unbadged := domain.ParseSeverityBadge(body)
+	badgedBody := domain.SeverityBadgeMarkdown(severity) + unbadged
+	exitOnErr(host.UpdateStagedReviewComment(ctx, args[0], badgedBody))
+	printJSON(map[string]any{"ok": true, "severity": severity})
 }
 
-func prCommentDelete(ctx context.Context, client ghAPI, args []string) {
+// prCommentDelete deletes a GitHub comment, polymorphic on the id space exactly
+// like prCommentUpdate: a numeric id deletes a live GitHub comment (unchanged), a
+// non-numeric id removes a staged comment from this run's review draft via the
+// host (no GitHub call until the review submits).
+func prCommentDelete(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-delete <comment_id>")
 	}
-	owner, repo := ownerRepo(args)
-	id := mustInt(args[0], "comment_id")
-	exitOnErr(client.DeleteComment(ctx, owner, repo, id))
+
+	if id, err := strconv.Atoi(args[0]); err == nil {
+		owner, repo := ownerRepo(args)
+		exitOnErr(client.DeleteComment(ctx, owner, repo, id))
+		printJSON(map[string]any{"ok": true})
+		return
+	}
+
+	_ = lookupRun(host)
+	exitOnErr(host.DeleteStagedReviewComment(ctx, args[0]))
 	printJSON(map[string]any{"ok": true})
 }
 

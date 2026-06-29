@@ -27,7 +27,7 @@
 //
 // The interface intentionally mirrors the existing store-method surface
 // 1:1 rather than introducing higher-level operations. That keeps the
-// subcommand bodies (gh pr submit-review, workspace add, etc.)
+// subcommand bodies (gh pr finalize-review, workspace add, etc.)
 // byte-identical in shape to what they did before — the only change at
 // each call site is `stores.X.Foo(...)` → `client.Foo(...)`, with the
 // routing branch (synthetic-claims vs admin pool) collapsed into the
@@ -105,13 +105,13 @@ var ErrProtocolVersion = errors.New("agenthost: protocol version mismatch")
 
 // ErrReviewAlreadyFinalized is returned by FinalizeReviewDraft when the run's
 // review artifact already carries a ready sentinel (details_json.review_event is
-// set) — i.e. the agent already called submit-review once. exec (TFAC-358) turns
-// it into the "do not call submit-review again, your work on this review is
+// set) — i.e. the agent already called finalize-review once. exec (TFAC-358) turns
+// it into the "do not call finalize-review again, your work on this review is
 // complete" message that stops agents looping on the approval hand-off. It
 // crosses the IPC boundary as a response-envelope marker so the sandbox client
 // reconstructs the same sentinel (errors.Is matches on both the in-process and
 // daemon paths).
-var ErrReviewAlreadyFinalized = errors.New("agenthost: this run's review has already been finalized for human approval; do not call submit-review again")
+var ErrReviewAlreadyFinalized = errors.New("agenthost: this run's review has already been finalized for human approval; do not call finalize-review again")
 
 // Client is the surface every cmd/exec/* subcommand consumes. Every
 // state-mutating operation that used to call stores.X.Y directly with
@@ -132,7 +132,7 @@ type Client interface {
 	// returns its cached value, the IPCClient does one round-trip.
 	LookupRun(ctx context.Context) (RunInfo, error)
 
-	// --- review draft finalization (gh pr submit-review) ---
+	// --- review draft finalization (gh pr finalize-review) ---
 	//
 	// FinalizeReviewDraft finalizes the run's fully TF-side `review` draft for
 	// human approval: it locates the run's review artifact, stages body + event,
@@ -143,6 +143,19 @@ type Client interface {
 	// ErrReviewAlreadyFinalized when the ready sentinel is already set (the
 	// TFAC-358 anti-double-submit guard).
 	FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) error
+
+	// ResetReviewDraft is the host side of `gh pr start-review --fresh`: a pure
+	// local reset of this run's review draft for owner/repo#number, with zero
+	// GitHub calls. It clears the staged comments and the body/event ready
+	// sentinel (and the write-once Proposed snapshot) back to an empty pending
+	// draft, keeping the artifact row, its handle, and its pinned head SHA so the
+	// agent can restart the review cleanly. Returns the draft's handle and that
+	// preserved head SHA (so the CLI can echo the same commit_sha a normal
+	// start-review prints), or ("", "") when the run has no draft for that PR (the
+	// caller falls through to a normal start-review). Post-494 there is no GitHub
+	// pending review to delete and no identity / anti-hijack logic — the draft
+	// lives entirely in the artifact.
+	ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID, commitSHA string, err error)
 
 	// --- workspace (workspace add + list) ---
 
@@ -265,6 +278,21 @@ type Client interface {
 	// diff (internally consistent on its own).
 	GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (reviewID string, err error)
 	GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int, commitSHA string) (commentID string, err error)
+
+	// UpdateStagedReviewComment / DeleteStagedReviewComment mutate one inline
+	// comment on this run's TF-side review draft, addressed by the stable TF-local
+	// comment id add-review-comment minted (a non-numeric id, distinct from the
+	// REST numeric ids GithubUpdate/DeleteComment take). They rewrite the matching
+	// entry in the review artifact's details.staged_comments — a pure local write,
+	// no GitHub call until the review submits at approval. These are the staged
+	// counterpart of the comment-update / comment-delete REST path; the CLI picks
+	// between them by try-parsing the id as an int. UpdateStagedReviewComment's
+	// body already carries the (re-baked) severity badge — the CLI bakes it, as it
+	// does for add-review-comment. An unknown id is an error (the run has no staged
+	// comment with that id). These replace the GraphQL pending-review-comment
+	// mutations the GitHub-native model used, removed by TFAC-494.
+	UpdateStagedReviewComment(ctx context.Context, commentID, body string) error
+	DeleteStagedReviewComment(ctx context.Context, commentID string) error
 
 	// GithubAPIGet is the raw authenticated GET the actions verbs lean on
 	// (workflow-run + job listings have no typed ghclient method). Returns

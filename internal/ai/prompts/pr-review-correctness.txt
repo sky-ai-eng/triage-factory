@@ -122,7 +122,7 @@ If the change is sound, write `{"findings": [], "summary": "<short natural take 
 4. Run the passes in <how_to_find>. Read beyond the diff freely — surrounding source, callers, neighboring files — both to confirm a real bug and to kill a low-confidence one. The earlier security pass may have written `{{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/security.json`; if it's there, skim it so you don't duplicate what it already flagged.
 5. Write the findings file per <handoff>.
 
-This task is read-only. Do not edit, stage, commit, or push anything, and do not call `start-review`, `add-review-comment`, or `submit-review` — assembling and posting the review is a later step's job. The worktree exists for reading context.
+This task is read-only. Do not edit, stage, commit, or push anything, and do not call `start-review`, `add-review-comment`, or `finalize-review` — assembling and posting the review is a later step's job. The worktree exists for reading context.
 </process>
 
 <verify>

@@ -170,7 +170,7 @@ func TestLocalClient_GithubAddPendingReviewComment_FallbackLiveHead(t *testing.T
 	}
 }
 
-// TestLocalClient_FinalizeReviewDraft pins submit-review's host behavior: no
+// TestLocalClient_FinalizeReviewDraft pins finalize-review's host behavior: no
 // GitHub call, the agent's draft (body + event + the locally staged comments)
 // snapshotted into the artifact, the ready sentinel set, and the TFAC-358
 // anti-double-submit guard.
@@ -209,13 +209,13 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 	// Anti-double-submit (TFAC-358): a second finalize hard-errors.
 	err = client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## again")
 	if !errors.Is(err, ErrReviewAlreadyFinalized) {
-		t.Errorf("second submit-review = %v, want ErrReviewAlreadyFinalized", err)
+		t.Errorf("second finalize-review = %v, want ErrReviewAlreadyFinalized", err)
 	}
 }
 
 // TestLocalClient_MultipleReviewDrafts_ResolveByHandle pins that when one run
 // holds several review drafts (run-scoped dedup, one per PR — TFAC-494),
-// add-review-comment and submit-review act on the draft named by the handle, not
+// add-review-comment and finalize-review act on the draft named by the handle, not
 // just the first pending review. A naive "first pending review" lookup would
 // stage/finalize against the wrong PR's draft.
 func TestLocalClient_MultipleReviewDrafts_ResolveByHandle(t *testing.T) {
@@ -266,6 +266,184 @@ func TestLocalClient_MultipleReviewDrafts_ResolveByHandle(t *testing.T) {
 	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", "nope", "a.go", "x", 3, nil, "worktree_head"); err == nil {
 		t.Error("an unknown handle must be rejected")
 	}
+}
+
+// TestLocalClient_ResetReviewDraft pins start-review --fresh's host behavior: a
+// finalized draft (staged comment + ready sentinel + proposed snapshot) is reset
+// in place to an empty pending draft — same handle, same pinned head SHA — with
+// zero GitHub calls beyond the comment staging that set it up.
+func TestLocalClient_ResetReviewDraft(t *testing.T) {
+	head := "commit_v1"
+	srv := reviewDiffServer(t, &head)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit", 3, nil, "worktree_head"); err != nil {
+		t.Fatalf("GithubAddPendingReviewComment: %v", err)
+	}
+	if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
+		t.Fatalf("FinalizeReviewDraft: %v", err)
+	}
+
+	// Reset the draft for the same PR.
+	got, gotSHA, err := client.ResetReviewDraft(context.Background(), "octo", "repo", 7)
+	if err != nil {
+		t.Fatalf("ResetReviewDraft: %v", err)
+	}
+	if got != handle {
+		t.Errorf("reset handle = %q, want the same draft handle %q", got, handle)
+	}
+	// The preserved head SHA is returned so the CLI echoes the same commit_sha a
+	// normal start-review prints.
+	if gotSHA != "headsha7" {
+		t.Errorf("reset commit_sha = %q, want the preserved headsha7", gotSHA)
+	}
+
+	arts := listRunArtifacts(t, stores, info.RunID)
+	if len(arts) != 1 {
+		t.Fatalf("reset must keep the one draft row, got %d", len(arts))
+	}
+	if arts[0].State != domain.ArtifactStateReviewPending {
+		t.Errorf("draft must stay pending after reset, got %q", arts[0].State)
+	}
+	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if len(d.StagedComments) != 0 {
+		t.Errorf("reset must clear staged comments, got %+v", d.StagedComments)
+	}
+	if d.ReviewEvent != "" || d.ReviewBody != "" || len(d.Proposed.Comments) != 0 {
+		t.Errorf("reset must clear the ready sentinel + proposed snapshot, got %+v", d)
+	}
+	// The pinned head SHA + PR number survive so the restarted review still anchors.
+	if d.HeadSHA != "headsha7" || d.Number != 7 {
+		t.Errorf("reset must preserve Number/HeadSHA, got %+v", d)
+	}
+}
+
+// TestLocalClient_ResetReviewDraft_NoDraft pins that --fresh with no draft for
+// the PR returns an empty handle (not an error) so the CLI falls through to a
+// normal start-review.
+func TestLocalClient_ResetReviewDraft_NoDraft(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected GitHub call during reset-with-no-draft: %s %s", r.Method, r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+	_, _, client := newGithubRecordingClient(t, srv.URL, true)
+
+	got, gotSHA, err := client.ResetReviewDraft(context.Background(), "octo", "repo", 7)
+	if err != nil {
+		t.Fatalf("ResetReviewDraft (no draft): %v", err)
+	}
+	if got != "" || gotSHA != "" {
+		t.Errorf("reset = (%q, %q), want (\"\", \"\") when there's no draft to reset", got, gotSHA)
+	}
+}
+
+// TestLocalClient_StagedReviewComment_UpdateDelete pins comment-update /
+// comment-delete on the staged (non-numeric id) path: update rewrites one staged
+// comment's body in place, delete removes it, an unknown id errors, and neither
+// touches a sibling comment.
+func TestLocalClient_StagedReviewComment_UpdateDelete(t *testing.T) {
+	head := "commit_v1"
+	srv := reviewDiffServer(t, &head)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	cid1, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "first", 3, nil, "worktree_head")
+	if err != nil {
+		t.Fatalf("add comment 1: %v", err)
+	}
+	cid2, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "second", 4, nil, "worktree_head")
+	if err != nil {
+		t.Fatalf("add comment 2: %v", err)
+	}
+
+	// Update the first staged comment (body already badge-baked by the CLI).
+	if err := client.UpdateStagedReviewComment(context.Background(), cid1, "first edited"); err != nil {
+		t.Fatalf("UpdateStagedReviewComment: %v", err)
+	}
+	d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	if len(d.StagedComments) != 2 {
+		t.Fatalf("update must not change the comment count, got %d", len(d.StagedComments))
+	}
+	if byID(d.StagedComments, cid1).Body != "first edited" {
+		t.Errorf("comment 1 body = %q, want \"first edited\"", byID(d.StagedComments, cid1).Body)
+	}
+	if byID(d.StagedComments, cid2).Body != "second" {
+		t.Errorf("sibling comment 2 must be untouched, got %q", byID(d.StagedComments, cid2).Body)
+	}
+
+	// Delete the second staged comment; only the first remains.
+	if err := client.DeleteStagedReviewComment(context.Background(), cid2); err != nil {
+		t.Fatalf("DeleteStagedReviewComment: %v", err)
+	}
+	d, _ = domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	if len(d.StagedComments) != 1 || d.StagedComments[0].ID != cid1 {
+		t.Fatalf("delete must leave only comment 1, got %+v", d.StagedComments)
+	}
+
+	// An unknown id is rejected on both verbs (most likely a numeric REST id sent
+	// to the staged path).
+	if err := client.UpdateStagedReviewComment(context.Background(), "nope", "x"); err == nil {
+		t.Error("update with an unknown staged id must error")
+	}
+	if err := client.DeleteStagedReviewComment(context.Background(), "nope"); err == nil {
+		t.Error("delete with an unknown staged id must error")
+	}
+}
+
+// TestLocalClient_StagedReviewComment_RejectedAfterFinalize pins that once a
+// review is finalized (ready sentinel set, Proposed snapshot frozen), an agent
+// looping after finalize-review can't mutate the staged set — update and delete
+// both reject, mirroring add-review-comment's guard, so the approve-time
+// proposed-vs-live diff isn't corrupted. The comment survives untouched.
+func TestLocalClient_StagedReviewComment_RejectedAfterFinalize(t *testing.T) {
+	head := "commit_v1"
+	srv := reviewDiffServer(t, &head)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	cid, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "first", 3, nil, "worktree_head")
+	if err != nil {
+		t.Fatalf("add comment: %v", err)
+	}
+	if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
+		t.Fatalf("FinalizeReviewDraft: %v", err)
+	}
+
+	if err := client.UpdateStagedReviewComment(context.Background(), cid, "sneaky post-finalize edit"); err == nil {
+		t.Error("update on a finalized review must be rejected")
+	}
+	if err := client.DeleteStagedReviewComment(context.Background(), cid); err == nil {
+		t.Error("delete on a finalized review must be rejected")
+	}
+
+	// The staged comment + frozen proposed snapshot are untouched.
+	d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	if len(d.StagedComments) != 1 || byID(d.StagedComments, cid).Body != "first" {
+		t.Errorf("a rejected mutation must leave the staged comment intact, got %+v", d.StagedComments)
+	}
+	if len(d.Proposed.Comments) != 1 || d.Proposed.Comments[0].Body != "first" {
+		t.Errorf("the frozen proposed snapshot must be intact, got %+v", d.Proposed)
+	}
+}
+
+// byID returns the staged comment with the given id, or a zero value.
+func byID(comments []domain.ReviewArtifactComment, id string) domain.ReviewArtifactComment {
+	for _, c := range comments {
+		if c.ID == id {
+			return c
+		}
+	}
+	return domain.ReviewArtifactComment{}
 }
 
 // TestLocalClient_PerCommentHeadSHA_CapturedAcrossCheckoutAdvance pins that each
