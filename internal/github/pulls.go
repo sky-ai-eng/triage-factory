@@ -286,13 +286,23 @@ func (c *Client) GetPRDiff(ctx context.Context, owner, repo string, number int, 
 	return filterDiffByFile(string(diff), file), nil
 }
 
+// comparePath builds the compare endpoint path for base...head. base and head
+// are URL-escaped so a ref name containing "/" (e.g. "feature/foo") isn't split
+// into extra path segments and break the route; SHAs and slash-free refs pass
+// through unchanged. The "..." separator is left literal (it's the merge-base
+// operator, not data). owner/repo follow the rest of this file's convention of
+// being interpolated raw (they carry no slashes).
+func comparePath(owner, repo, base, head string) string {
+	return fmt.Sprintf("/repos/%s/%s/compare/%s...%s", owner, repo, url.PathEscape(base), url.PathEscape(head))
+}
+
 // GetCompareDiff fetches the unified diff for base...head — the three-dot
 // (merge-base) form GitHub uses for a PR's own diff. Used to validate and
 // anchor a review comment against a specific commit (the agent's worktree HEAD)
 // rather than the live PR head, so the comment lands on the line the agent
 // actually read. base and head may be refs or SHAs.
 func (c *Client) GetCompareDiff(ctx context.Context, owner, repo, base, head string) (string, error) {
-	diff, err := c.GetRaw(ctx, fmt.Sprintf("/repos/%s/%s/compare/%s...%s", owner, repo, base, head), "application/vnd.github.v3.diff")
+	diff, err := c.GetRaw(ctx, comparePath(owner, repo, base, head), "application/vnd.github.v3.diff")
 	if err != nil {
 		return "", err
 	}
@@ -304,7 +314,7 @@ func (c *Client) GetCompareDiff(ctx context.Context, owner, repo, base, head str
 // (HTTP 406, "diff too large"). Returns the first page only — parity with the
 // PR-diff fallback, which also doesn't paginate the reassembly source.
 func (c *Client) GetCompareFiles(ctx context.Context, owner, repo, base, head string) ([]PRFile, error) {
-	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/compare/%s...%s", owner, repo, base, head))
+	data, err := c.Get(ctx, comparePath(owner, repo, base, head))
 	if err != nil {
 		return nil, err
 	}
@@ -341,11 +351,12 @@ type CommitComparison struct {
 
 // CompareCommits fetches base...head via the compare API's JSON form and returns
 // the freshness-relevant slice (ahead_by + per-file patches). base and head may
-// be refs or SHAs. Unlike GetCompareDiff there is no 406 fallback: this IS the
-// JSON form, so an oversized diff degrades to patch-less file entries (which
-// ParseLineMapFromPatches maps conservatively to "outdated") rather than erroring.
+// be refs or SHAs (ref names with "/" are escaped by comparePath). Unlike
+// GetCompareDiff there is no 406 fallback: this IS the JSON form, so an oversized
+// diff degrades to patch-less file entries (which ParseLineMapFromPatches maps
+// conservatively to "outdated") rather than erroring.
 func (c *Client) CompareCommits(ctx context.Context, owner, repo, base, head string) (*CommitComparison, error) {
-	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/compare/%s...%s", owner, repo, base, head))
+	data, err := c.Get(ctx, comparePath(owner, repo, base, head))
 	if err != nil {
 		return nil, err
 	}

@@ -532,6 +532,37 @@ func TestClosePR_HappyPath(t *testing.T) {
 	}
 }
 
+// TestCompareCommits_EscapesRefAndParses pins two things: (1) a base/head ref
+// containing "/" (e.g. "feature/foo") is URL-escaped into a single path segment
+// rather than splitting the compare route into extra segments, and (2) the
+// response's ahead_by + per-file patches parse into the CommitComparison.
+func TestCompareCommits_EscapesRefAndParses(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ahead_by":3,"files":[{"filename":"a.go","status":"modified","patch":"@@ -1 +1 @@\n-a\n+b\n"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := clientAgainst(srv.URL)
+	cmp, err := c.CompareCommits(context.Background(), "owner", "repo", "feature/foo", "abc123")
+	if err != nil {
+		t.Fatalf("CompareCommits: %v", err)
+	}
+	// The slash in the base ref must be percent-encoded so it stays one segment;
+	// the "..." separator and the SHA head pass through literally.
+	if want := "/repos/owner/repo/compare/feature%2Ffoo...abc123"; gotPath != want {
+		t.Errorf("requested path = %q, want %q (base ref slash escaped)", gotPath, want)
+	}
+	if cmp.AheadBy != 3 {
+		t.Errorf("AheadBy = %d, want 3", cmp.AheadBy)
+	}
+	if len(cmp.Files) != 1 || cmp.Files[0].Filename != "a.go" {
+		t.Fatalf("Files = %+v, want one a.go", cmp.Files)
+	}
+}
+
 // TestFilterDiffByFile_ExactMatch verifies the file filter matches the new-side
 // path exactly and never via substring, so a request for "foo.go" can't
 // accidentally capture a different file whose path merely contains it.
