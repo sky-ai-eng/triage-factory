@@ -66,9 +66,14 @@ export default function RunDetail() {
   // set on softRefresh / artifact_updated), close the roster: there's nothing
   // left to approve, and the card re-derives to in-progress (live) / done
   // (terminal) on its own. No "mark done vs keep open" prompt.
+  //
+  // Gate on the run's authoritative derived predicate, NOT unresolved.length:
+  // the intersection can be transiently empty (the roster opened before
+  // /artifacts loaded, or a fetch race) while approvals genuinely remain —
+  // closing on that would yank the UI out from under the user.
   useEffect(() => {
-    if (listOpen && unresolved.length === 0) setListOpen(false)
-  }, [listOpen, unresolved.length])
+    if (listOpen && !hasUnresolvedArtifacts(run)) setListOpen(false)
+  }, [listOpen, run])
 
   // Presence (TFAC-392): this run's detail page is an answer-capable surface for
   // ITS run's permission prompts. Report run:<id> while mounted (re-firing if the
@@ -271,6 +276,7 @@ export default function RunDetail() {
         open={listOpen}
         onClose={() => setListOpen(false)}
         items={unresolved}
+        pendingExpected={hasUnresolvedArtifacts(run)}
         onOpenItem={handleOpenArtifact}
         onDismissed={softRefresh}
       />

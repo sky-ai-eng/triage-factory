@@ -25,6 +25,7 @@ import PendingPROverlay from '../components/PendingPROverlay'
 import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import AssigneePicker from '../components/board/AssigneePicker'
 import { toast } from '../components/Toast/toastStore'
+import { readError } from '../lib/api'
 import BoardColumn, { CollapsedColumn } from '../components/board/BoardColumn'
 import {
   applyColumnFilter,
@@ -782,11 +783,17 @@ export default function Board() {
   const fireComplete = useCallback(
     async (taskId: string) => {
       try {
-        await fetch(`/api/tasks/${taskId}/swipe`, {
+        const res = await fetch(`/api/tasks/${taskId}/swipe`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'complete', hesitation_ms: 0 }),
         })
+        if (!res.ok) {
+          // A non-2xx (e.g. a teardown that partially failed) must surface — a
+          // silent fetchTasks would repaint as if the move succeeded.
+          toast.error(await readError(res, 'Failed to mark done'))
+          return
+        }
         fetchTasks()
       } catch {
         toast.error('Move failed — please try again')
@@ -798,7 +805,11 @@ export default function Board() {
   const fireRequeue = useCallback(
     async (taskId: string) => {
       try {
-        await fetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
+        const res = await fetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
+        if (!res.ok) {
+          toast.error(await readError(res, 'Failed to return to queue'))
+          return
+        }
         fetchTasks()
       } catch {
         toast.error('Return to queue failed — please try again')
@@ -1422,8 +1433,11 @@ function ColumnContents({
                 // open the FIRST unresolved artifact — pending_artifact_ids lists
                 // every draft PR first, then ready reviews, so unresolved_pr_count
                 // discriminates the head's kind. Resolving it re-derives the set;
-                // the next click opens the next.
+                // the next click opens the next. Guard the empty/undefined set
+                // (a transient projection omission / fetch race) so we never open
+                // an overlay with an undefined artifact id.
                 const ids = run.pending_artifact_ids ?? []
+                if (ids.length === 0) return
                 const kind: 'review' | 'pr' = (run.unresolved_pr_count ?? 0) > 0 ? 'pr' : 'review'
                 onReview(run.ID, kind, ids[0])
               }}

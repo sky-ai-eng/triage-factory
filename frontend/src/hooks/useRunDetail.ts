@@ -57,15 +57,24 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
 
   const refetch = useCallback(() => setRefetchTick((n) => n + 1), [])
 
+  // Track the runID the current state belongs to so we can distinguish a
+  // same-run refetch (merge messages) from a navigation to a different
+  // run (reset, otherwise message IDs from two runs would interleave). It also
+  // gates the async setters below so a fetch for the previous run can't land
+  // after navigation and overwrite the new run's state.
+  const lastRunIDRef = useRef<string | undefined>(runID)
+
   // Pull the run's artifact set fresh. Shared by the initial load, the WS
   // handlers, and the reconcile poll so an approve/dismiss anywhere (this tab or
   // another) repaints the approval list. Best-effort: a transient failure leaves
-  // the prior set in place rather than blanking the surface mid-resolve.
+  // the prior set in place rather than blanking the surface mid-resolve. Guards
+  // on lastRunIDRef so a slow fetch for a since-navigated-away run is discarded
+  // rather than clobbering the current run's artifacts.
   const refetchArtifacts = useCallback((id: string) => {
     fetch(`/api/agent/runs/${id}/artifacts`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data: Artifact[] | null) => {
-        if (data) setArtifacts(data)
+        if (data && id === lastRunIDRef.current) setArtifacts(data)
       })
       .catch(() => {})
   }, [])
@@ -73,21 +82,18 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // softRefresh re-pulls the run row + artifact set without the loading toggle
   // (refetch sets loading=true → the full-screen spinner). A per-item resolve
   // must update the derived approval surface in place, not flash the station.
+  // Same stale-navigation guard as refetchArtifacts.
   const softRefresh = useCallback(() => {
     if (!runID) return
-    fetch(`/api/agent/runs/${runID}`)
+    const id = runID
+    fetch(`/api/agent/runs/${id}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data: AgentRun | null) => {
-        if (data) setRun(data)
+        if (data && id === lastRunIDRef.current) setRun(data)
       })
       .catch(() => {})
-    refetchArtifacts(runID)
+    refetchArtifacts(id)
   }, [runID, refetchArtifacts])
-
-  // Track the runID the current state belongs to so we can distinguish a
-  // same-run refetch (merge messages) from a navigation to a different
-  // run (reset, otherwise message IDs from two runs would interleave).
-  const lastRunIDRef = useRef<string | undefined>(runID)
 
   // Permission prompts run through the shared queue core (the same one the
   // board uses), filtered to this single run so the two surfaces can't diverge

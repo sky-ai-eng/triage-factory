@@ -22,6 +22,11 @@ interface Props {
    *  artifact set (the resolved card drops out, and the last resolution
    *  re-derives the run's column). */
   onDismissed: () => void
+  /** The run's authoritative "still has unresolved artifacts" flag. When `items`
+   *  is empty but this is true, the rows just haven't loaded yet (a fetch race) —
+   *  so the empty state reads "Loading…" rather than falsely claiming all
+   *  resolved. The parent closes the roster once this flips false. */
+  pendingExpected?: boolean
 }
 
 // ApprovalList is the artifact-sidecar approval roster (TFAC-384 §1/§2): the set
@@ -33,7 +38,14 @@ interface Props {
 // last is gone (no "mark done vs keep open" prompt — the task auto-resolves from
 // the derived state). The full mixed-kind dock is TFAC-385; this is the minimal
 // list.
-export default function ApprovalList({ open, onClose, items, onOpenItem, onDismissed }: Props) {
+export default function ApprovalList({
+  open,
+  onClose,
+  items,
+  onOpenItem,
+  onDismissed,
+  pendingExpected,
+}: Props) {
   // Per-id in-flight guard so a card's [x] disables only itself while its POST
   // is in flight (and rapid double-clicks can't fire two dismisses).
   const [dismissing, setDismissing] = useState<Record<string, boolean>>({})
@@ -112,7 +124,7 @@ export default function ApprovalList({ open, onClose, items, onOpenItem, onDismi
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
               {items.length === 0 ? (
                 <p className="py-12 text-center text-[12.5px] text-text-tertiary">
-                  All artifacts resolved.
+                  {pendingExpected ? 'Loading approvals…' : 'All artifacts resolved.'}
                 </p>
               ) : (
                 <ul className="space-y-2.5">
