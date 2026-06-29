@@ -280,13 +280,13 @@ func PRRefSlug(prNumber int) string {
 }
 
 // trackedBranchMarkerKey is the per-branch config key that marks a
-// branch as triagefactory-managed. We write it from both
-// configureForkPRTracking and configureOwnRepoPRTracking; the sweep
-// reads it via `git config --get-regexp` to identify orphaned
-// branches that need cleanup, including own-repo branches the
-// fork-only sweep would otherwise miss after a run's worktree is
-// removed. The value is the PR number — preserved as the source
-// of truth for the head-<n> remote name when one exists.
+// branch as triagefactory-managed. configurePRPushTracking writes it on
+// every per-run PR branch (triagefactory/<runID>/pr-<n>, fork and
+// own-repo alike); the sweep reads it via `git config --get-regexp` to
+// find orphaned branches that need cleanup after a run's worktree is
+// gone. The value is the PR number — preserved as the source of truth
+// for reconstructing the per-run push remote (tfpush-<runID>-<n>) during
+// reclamation.
 //
 // Git lower-cases config variable names internally, so the regex
 // in the sweep matches against `tfprnumber` even though we set
