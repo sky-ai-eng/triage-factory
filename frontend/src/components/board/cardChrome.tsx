@@ -197,9 +197,9 @@ export function SourceTag({ task }: { task: Task }) {
 }
 
 // AttentionRow is the canonical "this needs you" row — a toned kicker + a
-// one-line message + a trailing verb with an arrow. Used for pending_approval
-// (Review / Open PR); kept generic so any future "your move" moment looks the
-// same.
+// one-line message + a trailing verb with an arrow. Used for the derived
+// approval surface (unresolved draft PRs / ready reviews — "Open PR" / "Review N
+// items"); kept generic so any future "your move" moment looks the same.
 export function AttentionRow({
   tone = 'attention',
   kicker,

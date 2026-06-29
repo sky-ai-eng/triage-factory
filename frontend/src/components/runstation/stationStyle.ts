@@ -1,5 +1,6 @@
 import type { AgentMessage, AgentRun } from '../../types'
 import { isActiveRun } from '../../lib/runStatus'
+import { hasUnresolvedArtifacts } from '../../lib/approval'
 
 // stationStyle — the design system for the run-station HMI. It maps a run's
 // status to the single "light" the whole machine wears, plus the motion knobs
@@ -58,6 +59,22 @@ export function stationState(run: AgentRun): StationState {
       belt: 1,
     }
   }
+  // Approval is derived, not a stored status (TFAC-382/TFAC-492): a settled run
+  // (idle / terminal) that still holds unresolved draft PRs or ready reviews
+  // wears the amber "your move" light, regardless of its run status. A live run
+  // keeps WORKING (handled above) — the dock surfaces the approval affordance
+  // without recoloring the whole machine mid-turn.
+  if (hasUnresolvedArtifacts(run)) {
+    return {
+      key: 'attention',
+      light: 'var(--color-snooze)',
+      label: 'YOUR MOVE',
+      live: false,
+      scanner: false,
+      heat: 0.36,
+      belt: 0.16,
+    }
+  }
   switch (run.Status) {
     case 'open':
       // Honest idle: not executing, not concluded. Powered, waiting — the
@@ -80,16 +97,6 @@ export function stationState(run: AgentRun): StationState {
         scanner: false,
         heat: 0.3,
         belt: 0.5,
-      }
-    case 'pending_approval':
-      return {
-        key: 'attention',
-        light: 'var(--color-snooze)',
-        label: 'YOUR MOVE',
-        live: false,
-        scanner: false,
-        heat: 0.36,
-        belt: 0.16,
       }
     case 'completed':
       return {

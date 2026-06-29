@@ -12,6 +12,7 @@ import {
   isActiveRun,
   isResumableRun,
 } from '../../lib/runStatus'
+import { approvalAction, approvalCounts, hasUnresolvedArtifacts } from '../../lib/approval'
 import { EventTag, SourceTag } from '../board/cardChrome'
 import { STEP_VAR, type StepState } from '../board/cardStyle'
 import { PermissionPrompt } from '../permissions/PermissionPrompt'
@@ -428,21 +429,27 @@ function IntakeDock({
   actions: StationActions
   pending: PendingPermission[]
 }) {
-  const isPending = run.Status === 'pending_approval'
+  // Approval is derived from the unresolved-artifact set, not a run status: a
+  // card surfaces "your move" whenever has_unresolved_artifacts is true, whether
+  // the run is live or terminal (TFAC-382/TFAC-492).
+  const counts = approvalCounts(run)
+  const hasUnresolved = hasUnresolvedArtifacts(run)
   const isTerminal =
     run.Status === 'failed' ||
     run.Status === 'cancelled' ||
     run.Status === 'task_unsolvable' ||
     run.Status === 'completed'
   // A run takes steering when a turn is executing or it's resumable by message
-  // (open / pending_approval / completed+abort — same gate the backend wakes on).
+  // (open / completed+abort — same gate the backend wakes on).
   const steerable = active || isResumableRun(run)
   const hasPrompt = pending.length > 0
 
-  const sublabel = isPending
-    ? run.pending_kind === 'pr'
-      ? 'a pull request is staged for your approval'
-      : 'a review is staged for your approval'
+  const sublabel = hasUnresolved
+    ? counts.total === 1
+      ? counts.pr === 1
+        ? 'a draft PR is ready for your approval'
+        : 'a review is ready for your approval'
+      : `${counts.total} artifacts await your approval`
     : active
       ? 'agent is executing — streaming live'
       : run.Status === 'open'
@@ -495,9 +502,9 @@ function IntakeDock({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          {isPending && actions.onReview && (
-            <DockButton tone={state.light} solid onClick={actions.onReview}>
-              {run.pending_kind === 'pr' ? 'Open PR' : 'Review'} →
+          {hasUnresolved && actions.onReview && (
+            <DockButton tone="var(--color-snooze)" solid onClick={actions.onReview}>
+              {approvalAction(counts)} →
             </DockButton>
           )}
           {/* Interrupt pauses the turn (→ open); distinct from Cancel's abandon. */}
@@ -520,7 +527,7 @@ function IntakeDock({
               Cancel
             </DockButton>
           )}
-          {(isTerminal || isPending) && actions.onRequeue && (
+          {(isTerminal || hasUnresolved) && actions.onRequeue && (
             <DockButton tone="var(--color-text-tertiary)" onClick={actions.onRequeue}>
               Return to queue
             </DockButton>

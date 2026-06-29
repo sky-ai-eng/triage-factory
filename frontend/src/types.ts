@@ -98,17 +98,31 @@ export interface AgentRun {
   OutcomeReason?: string
   SessionID?: string
   WorktreePath?: string
-  // pending_kind is set by the server's runResponse projection when
-  // status == 'pending_approval'. The discriminator tells the Board
-  // which approval card variant to render: a queued review opens
-  // ReviewOverlay (with inline-comment editing); a draft PR opens
-  // PendingPROverlay (title/body editor + Open-PR button). Empty /
-  // undefined for non-pending runs.
-  pending_kind?: 'review' | 'pr'
-  // pending_artifact_id is the id of the gating artifact — the review artifact
-  // (pending_kind === 'review') or the draft-PR artifact (pending_kind === 'pr').
-  // Both overlays are addressed by it (the artifact id), not the run id.
-  pending_artifact_id?: string
+  // Derived approval signal (TFAC-382/TFAC-492). Runs no longer park in a
+  // `pending_approval` status; instead the "needs approval" state is a *view*
+  // over the run's unresolved-artifact set. A card surfaces in the approval
+  // column whenever has_unresolved_artifacts is true — whether the run is live
+  // or terminal — and re-derives back to in-progress (live) / done (terminal)
+  // once the last artifact is resolved. These four fields replace the legacy
+  // single-kind `pending_kind` / `pending_artifact_id` overlay discriminators.
+  //
+  // The server emits them only when the answer is *definitive* (the run has no
+  // artifacts, or its artifact set was read successfully); on a transient
+  // read failure they're OMITTED rather than reported as a misleading false, so
+  // consumers treat absence as "unknown" and re-derive on the next refresh.
+  has_unresolved_artifacts?: boolean
+  // pending_artifact_ids is the set of unresolved approvable artifact ids — every
+  // draft PR first (in slice order), then every ready review — the per-item
+  // resolve UI lists one card per id. Each is editable (PATCH /api/artifacts/{id})
+  // and approvable (POST /api/artifacts/{id}/approve) / dismissable
+  // (POST /api/artifacts/{id}/dismiss). [] (not undefined) when nothing is
+  // unresolved but the set was read; undefined under the transient-failure guard.
+  pending_artifact_ids?: string[]
+  // Per-kind counts of the unresolved set, for count-aware labels ("N ready",
+  // "Review N items →") and the resolve-all confirmation copy. unresolved_pr_count
+  // draft PRs + unresolved_review_count ready reviews === pending_artifact_ids.length.
+  unresolved_pr_count?: number
+  unresolved_review_count?: number
   // artifact_count is the number of artifacts this run produced (TFAC-465's
   // runResponse projection — branch / PR / review / issue / comment, the
   // primary gating one included). The Board card shows it as a footer

@@ -10,7 +10,8 @@ import type {
 } from '../types'
 import { useWebSocket, setPresenceView } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
-import { isPermissionTerminalStatus } from '../lib/runStatus'
+import { isActiveRun, isPermissionTerminalStatus } from '../lib/runStatus'
+import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
 import { useOrgRole } from '../hooks/useOrgRole'
@@ -21,6 +22,7 @@ import TaskCard from '../components/TaskCard'
 import PromptPicker from '../components/PromptPicker'
 import ReviewOverlay from '../components/ReviewOverlay'
 import PendingPROverlay from '../components/PendingPROverlay'
+import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import AssigneePicker from '../components/board/AssigneePicker'
 import { toast } from '../components/Toast/toastStore'
 import BoardColumn, { CollapsedColumn } from '../components/board/BoardColumn'
@@ -281,12 +283,25 @@ export default function Board() {
   // to fire. Cleared when a run for the task lands.
   const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
 
-  // Approval overlay for pending_approval runs.
+  // Per-item approval overlay (open one unresolved artifact's editor).
   const [approvalCtx, setApprovalCtx] = useState<{
     runID: string
     kind: 'review' | 'pr'
     artifactId?: string
   } | null>(null)
+
+  // Resolve-all confirmation (TFAC-384 §4): drag-to-Done (complete) and
+  // Return-to-queue (requeue) force-resolve every unresolved artifact and cancel
+  // a live run. When the target task has unresolved artifacts we stash the
+  // intended action here and gate the request behind the confirmation modal.
+  const [confirmResolve, setConfirmResolve] = useState<{
+    taskId: string
+    prCount: number
+    reviewCount: number
+    isLive: boolean
+    action: 'complete' | 'requeue'
+  } | null>(null)
+  const [confirmBusy, setConfirmBusy] = useState(false)
 
   // Fetches a blueprint run's step structure and pads it into a length-N
   // array of step runs — synthetic 'pending' placeholders for steps without
@@ -679,10 +694,10 @@ export default function Board() {
       const weight = (t: Task) => {
         const run = agentRuns[t.id]
         if (!run) return 2
-        // A live tool-permission prompt is the most urgent "needs you" — same
-        // top weight as pending_approval — so it can't be missed in the column.
+        // A live tool-permission prompt or an unresolved artifact set is the most
+        // urgent "needs you" — top weight — so it can't be missed in the column.
         if ((permQueueMap[run.ID]?.length ?? 0) > 0) return 0
-        if (run.Status === 'pending_approval') return 0
+        if (hasUnresolvedArtifacts(run)) return 0
         if (
           run.Status === 'failed' ||
           run.Status === 'cancelled' ||
@@ -759,6 +774,58 @@ export default function Board() {
   const getColumn = useCallback(
     (taskId: string): ColumnId | null => columnByTask.get(taskId) ?? null,
     [columnByTask],
+  )
+
+  // The raw task-level resolve-all requests. complete = drag-to-Done (keep the
+  // card in Done); requeue = back to the queue. Both force-resolve every
+  // unresolved artifact server-side and cancel a live run; we only confirm first.
+  const fireComplete = useCallback(
+    async (taskId: string) => {
+      try {
+        await fetch(`/api/tasks/${taskId}/swipe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'complete', hesitation_ms: 0 }),
+        })
+        fetchTasks()
+      } catch {
+        toast.error('Move failed — please try again')
+      }
+    },
+    [fetchTasks],
+  )
+
+  const fireRequeue = useCallback(
+    async (taskId: string) => {
+      try {
+        await fetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
+        fetchTasks()
+      } catch {
+        toast.error('Return to queue failed — please try again')
+      }
+    },
+    [fetchTasks],
+  )
+
+  // requestResolveAll gates a complete/requeue behind the confirmation modal when
+  // the task's run still has unresolved artifacts. Returns true when it deferred
+  // to the modal (the caller must NOT fire its own request); false when there's
+  // nothing to resolve and the caller should proceed directly.
+  const requestResolveAll = useCallback(
+    (taskId: string, action: 'complete' | 'requeue'): boolean => {
+      const run = agentRuns[taskId]
+      if (!run || !hasUnresolvedArtifacts(run)) return false
+      const c = approvalCounts(run)
+      setConfirmResolve({
+        taskId,
+        prCount: c.pr,
+        reviewCount: c.review,
+        isLive: isActiveRun(run),
+        action,
+      })
+      return true
+    },
+    [agentRuns],
   )
 
   // SKY-330: the board opens at the left (Queued first). With Claimed + In
@@ -926,22 +993,20 @@ export default function Board() {
         return
       }
 
-      // Any → Queued: requeue. Clears the claim and resets status.
+      // Any → Queued: requeue. Clears the claim and resets status. When the run
+      // still has unresolved artifacts this force-resolves them (+ cancels a live
+      // run), so confirm first; otherwise requeue straight away.
       if (targetCol === 'queued') {
-        await fetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
-        fetchTasks()
+        if (requestResolveAll(taskId, 'requeue')) return
+        await fireRequeue(taskId)
         return
       }
 
-      // Any → Done: complete (preserves the card in Done; distinct
-      // from queue → done which dismisses).
+      // Any → Done: complete (preserves the card in Done; distinct from queue →
+      // done which dismisses). Same resolve-all gate as requeue.
       if (targetCol === 'done') {
-        await fetch(`/api/tasks/${taskId}/swipe`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'complete', hesitation_ms: 0 }),
-        })
-        fetchTasks()
+        if (requestResolveAll(taskId, 'complete')) return
+        await fireComplete(taskId)
         return
       }
 
@@ -978,10 +1043,10 @@ export default function Board() {
 
   const handleRequeue = useCallback(
     async (taskId: string) => {
-      await fetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
-      fetchTasks()
+      if (requestResolveAll(taskId, 'requeue')) return
+      await fireRequeue(taskId)
     },
-    [fetchTasks],
+    [requestResolveAll, fireRequeue],
   )
 
   // Assignee picker callbacks. The picker is the primary surface for
@@ -1001,11 +1066,12 @@ export default function Board() {
   const handlePickerUnclaim = useCallback(
     async (task: Task) => {
       // Unclaim = requeue (clears both claim cols + resets status to
-      // queued). Same path the drag-to-Queue gesture uses.
-      await fetch(`/api/tasks/${task.id}/requeue`, { method: 'POST' })
-      fetchTasks()
+      // queued). Same path the drag-to-Queue gesture uses — so an unclaim that
+      // would strand unresolved artifacts is gated by the same confirmation.
+      if (requestResolveAll(task.id, 'requeue')) return
+      await fireRequeue(task.id)
     },
-    [fetchTasks],
+    [requestResolveAll, fireRequeue],
   )
 
   const handlePickerDelegate = useCallback((task: Task) => {
@@ -1239,6 +1305,27 @@ export default function Board() {
           fetchTasks()
         }}
       />
+
+      <ResolveAllConfirm
+        open={confirmResolve !== null}
+        prCount={confirmResolve?.prCount ?? 0}
+        reviewCount={confirmResolve?.reviewCount ?? 0}
+        isLive={confirmResolve?.isLive ?? false}
+        actionLabel={confirmResolve?.action === 'complete' ? 'Mark done' : 'Return to queue'}
+        busy={confirmBusy}
+        onConfirm={async () => {
+          if (!confirmResolve) return
+          setConfirmBusy(true)
+          try {
+            if (confirmResolve.action === 'complete') await fireComplete(confirmResolve.taskId)
+            else await fireRequeue(confirmResolve.taskId)
+            setConfirmResolve(null)
+          } finally {
+            setConfirmBusy(false)
+          }
+        }}
+        onCancel={() => setConfirmResolve(null)}
+      />
     </DndContext>
   )
 }
@@ -1331,8 +1418,14 @@ function ColumnContents({
               }
               onRequeue={() => onRequeue(task.id)}
               onReview={() => {
-                const kind: 'review' | 'pr' = run.pending_kind === 'pr' ? 'pr' : 'review'
-                onReview(run.ID, kind, run.pending_artifact_id)
+                // Minimal multi handling (the full mixed-kind dock is TFAC-385):
+                // open the FIRST unresolved artifact — pending_artifact_ids lists
+                // every draft PR first, then ready reviews, so unresolved_pr_count
+                // discriminates the head's kind. Resolving it re-derives the set;
+                // the next click opens the next.
+                const ids = run.pending_artifact_ids ?? []
+                const kind: 'review' | 'pr' = (run.unresolved_pr_count ?? 0) > 0 ? 'pr' : 'review'
+                onReview(run.ID, kind, ids[0])
               }}
               onOpenArtifact={(kind, artifactId) => onReview(run.ID, kind, artifactId)}
               assigneeSlot={picker}
@@ -1420,13 +1513,7 @@ function SortableTaskCard({
 // Active states (running, cloning, etc.) stay anchored — the cancel
 // button is the right intent there, and dragging mid-run would race
 // with the spawner's status transitions.
-const draggableRunStatuses = new Set([
-  'pending_approval',
-  'failed',
-  'cancelled',
-  'completed',
-  'task_unsolvable',
-])
+const draggableRunStatuses = new Set(['failed', 'cancelled', 'completed', 'task_unsolvable'])
 
 function SortableAgentCard({
   task,
@@ -1459,7 +1546,13 @@ function SortableAgentCard({
   // affordance that always snaps back.
   const botManaged =
     !!task.claimed_by_agent_id && (task.status === 'in_progress' || task.status === 'in_review')
-  const draggable = draggableRunStatuses.has(run.Status) && !botManaged
+  // A terminal run is draggable; so is a settled run (idle/open) that still has
+  // unresolved artifacts — drag-to-Done / Return-to-queue is how you resolve them
+  // (behind the confirmation). An actively-executing turn stays anchored (cancel
+  // is the right intent; dragging mid-run races the spawner).
+  const draggable =
+    (draggableRunStatuses.has(run.Status) || (hasUnresolvedArtifacts(run) && !isActiveRun(run))) &&
+    !botManaged
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
     disabled: !draggable,

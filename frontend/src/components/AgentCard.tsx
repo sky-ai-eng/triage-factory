@@ -18,6 +18,12 @@ import { AttentionRow, CardPlane, EventTag, HudHeader, SourceTag } from './board
 import { compactNum, runGlow, TONE_TEXT, type Glow, type StepState } from './board/cardStyle'
 import { PermissionPrompt } from './permissions/PermissionPrompt'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
+import {
+  approvalAction,
+  approvalCounts,
+  approvalKicker,
+  hasUnresolvedArtifacts,
+} from '../lib/approval'
 
 interface Props {
   task: Task
@@ -72,7 +78,11 @@ export default function AgentCard({
     !isActive && run.DurationMs != null
       ? formatDurationMs(run.DurationMs)
       : formatElapsed(run.StartedAt, now)
-  const isPendingApproval = run.Status === 'pending_approval'
+  // Approval is derived from the unresolved-artifact set (draft PRs + ready
+  // reviews), not a `pending_approval` run status — a card needs the user
+  // whenever has_unresolved_artifacts is true, live or terminal.
+  const needsApproval = hasUnresolvedArtifacts(run)
+  const approval = approvalCounts(run)
   const isFailed = run.Status === 'failed'
   const isCancelled = run.Status === 'cancelled'
   // task_unsolvable: the agent's self-reported "can't finish without a human."
@@ -82,12 +92,13 @@ export default function AgentCard({
   // A terminal run is settled — show its outcome, not a live feed.
   const isTerminal = isFailed || isCancelled || isUnsolvable || run.Status === 'completed'
 
-  // A parked tool-permission prompt is the card's "needs you" moment — it takes
-  // the steady amber attention glow (over the live violet of the parked turn) so
-  // it can't be missed in the column, mirroring pending_approval's tone.
+  // A parked tool-permission prompt OR an unresolved artifact set is the card's
+  // "needs you" moment — it takes the steady amber attention glow so it can't be
+  // missed in the column.
   const pending = pendingPermissions ?? []
   const hasPending = pending.length > 0
-  const glow: Glow | null = hasPending ? { tone: 'attention', breathing: false } : runGlow(run)
+  const glow: Glow | null =
+    hasPending || needsApproval ? { tone: 'attention', breathing: false } : runGlow(run)
   const stats = computeStats(messages, run)
 
   const hasChain = !!chainSteps && chainSteps.length > 1
@@ -203,12 +214,13 @@ export default function AgentCard({
           </div>
         )}
 
-        {/* Attention row — your move, in the canonical toned pattern. */}
-        {isPendingApproval && onReview && (
+        {/* Attention row — your move, in the canonical toned pattern. Count-aware
+            over the unresolved set; opening it raises the approval surface. */}
+        {needsApproval && onReview && (
           <div className="mx-4 mb-2">
             <AttentionRow
-              kicker={run.pending_kind === 'pr' ? 'PR ready to open' : 'Review ready'}
-              action={run.pending_kind === 'pr' ? 'Open PR' : 'Review'}
+              kicker={approvalKicker(approval)}
+              action={approvalAction(approval)}
               onClick={onReview}
             />
           </div>
@@ -226,7 +238,7 @@ export default function AgentCard({
           </div>
 
           <div className="flex items-center gap-3">
-            {(isFailed || isCancelled || isUnsolvable || isPendingApproval) && onRequeue && (
+            {(isFailed || isCancelled || isUnsolvable || needsApproval) && onRequeue && (
               <button
                 onClick={onRequeue}
                 className="text-[12px] font-medium text-text-tertiary transition-colors hover:text-text-secondary"
