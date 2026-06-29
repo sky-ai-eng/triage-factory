@@ -652,16 +652,28 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	owner, repo := ownerRepo(args)
 	_ = lookupRun(host)
 
-	// Resolve the anchor: the run's worktree HEAD — the commit the agent's
-	// checkout is on, which is the frame it read the diff in. The host validates
-	// the range against this commit's diff (compare base...HEAD) and pins the
-	// submitted comment to it. Empty when there's no checkout, in which case the
-	// host falls back to live-head validation + anchoring.
+	// Resolve the anchor: the reviewed PR's worktree HEAD — the commit the
+	// agent's checkout is on, which is the frame it read the diff in. The host
+	// validates the range against this commit's diff (compare base...HEAD) and
+	// pins the submitted comment to it. Empty when there's no checkout, in which
+	// case the host falls back to live-head validation + anchoring.
+	//
+	// Prefer the PR's worktree resolved from the run's (run, repo, ref) registry
+	// over cwd: in a multi-PR run cwd may sit in a DIFFERENT PR's checkout
+	// (TFAC-494/TFAC-502), which would anchor this comment to the wrong commit.
+	// Falls back to cwd HEAD when the registry has no unambiguous PR worktree for
+	// this repo (single-PR runs, or a path the CLI can't rev-parse), preserving
+	// prior behavior.
 	cwd, err := os.Getwd()
 	if err != nil {
 		exitErr(fmt.Sprintf("resolve cwd: %v", err))
 	}
 	anchorSHA := resolveLocalCheckout(cwd).headSHA
+	if wt := reviewedPRWorktreePath(host, owner, repo); wt != "" {
+		if sha := resolveLocalCheckout(wt).headSHA; sha != "" {
+			anchorSHA = sha
+		}
+	}
 
 	// Bake the badge in, then stage onto this run's review draft. The host resolves
 	// the run's review artifact, validates the range against the anchor commit's
@@ -676,6 +688,36 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 		"severity":   severity,
 		"status":     "pending",
 	})
+}
+
+// reviewedPRWorktreePath returns the absolute worktree path of the PR being
+// reviewed in owner/repo, resolved from the run's (run, repo, ref) worktree
+// registry: the unique run_worktrees row whose repo matches and whose ref is a
+// PR ref ("pr-<N>"). This is what lets add-review-comment anchor to the RIGHT
+// PR's worktree HEAD in a multi-PR run instead of trusting cwd (TFAC-502).
+//
+// Returns "" when there is no such row, or more than one (two PRs reviewed in
+// the SAME repo within one run is ambiguous without the PR number, so the
+// caller falls back to cwd — the agent is expected to have cd'd into the
+// reviewed PR's worktree). A list error is non-fatal: anchoring degrades to
+// cwd, never blocking the comment.
+func reviewedPRWorktreePath(host agenthost.Client, owner, repo string) string {
+	rows, err := host.ListRunWorktrees(context.Background())
+	if err != nil {
+		return ""
+	}
+	repoID := owner + "/" + repo
+	match := ""
+	for _, w := range rows {
+		if !strings.EqualFold(w.RepoID, repoID) || !strings.HasPrefix(w.Ref, "pr-") {
+			continue
+		}
+		if match != "" {
+			return "" // more than one PR worktree for this repo — ambiguous
+		}
+		match = w.Path
+	}
+	return match
 }
 
 // prSubmitReview hands the finished review off for human approval — it does NOT

@@ -243,9 +243,9 @@ func seedRepoProfile(t *testing.T, database *db.DB, owner, repo, cloneURL, defau
 }
 
 // expectedPath returns the deterministic worktree path materializeWorkspace
-// will compute for a given runID + owner/repo.
-func expectedPath(runID, owner, repo string) string {
-	return filepath.Join(worktree.RunRoot(runID), owner, repo)
+// will compute for a given runID + owner/repo + ref-slug.
+func expectedPath(runID, owner, repo, ref string) string {
+	return filepath.Join(worktree.RunRoot(runID), owner, repo, ref)
 }
 
 // stubCalls records checkout / PR-checkout / fetchPR / remove / stat
@@ -302,14 +302,18 @@ func (f fakeFileInfo) IsDir() bool        { return true }
 func (f fakeFileInfo) Sys() any           { return nil }
 
 func (s *stubCalls) deps() addDeps {
-	pathOrDefault := func(runRoot, owner, repo string) (string, error) {
+	// pathOrDefault mirrors the InRoot create contract: land at
+	// {runRoot}/{owner}/{repo}/{ref-slug}. The slug is computed from the same
+	// helpers production uses so the stub's returned path matches the path
+	// materializeWorkspace reserved (no spurious divergence warning).
+	pathOrDefault := func(runRoot, owner, repo, slug string) (string, error) {
 		if s.createErr != nil {
 			return "", s.createErr
 		}
 		if s.createPath != "" {
 			return s.createPath, nil
 		}
-		return filepath.Join(runRoot, owner, repo), nil
+		return filepath.Join(runRoot, owner, repo, slug), nil
 	}
 	return addDeps{
 		checkout: func(_ context.Context, owner, repo, cloneURL, ref, runID, runRoot string) (string, error) {
@@ -317,14 +321,14 @@ func (s *stubCalls) deps() addDeps {
 			defer s.mu.Unlock()
 			s.checkoutCalls++
 			s.checkoutArgs = append(s.checkoutArgs, checkoutCall{owner, repo, cloneURL, ref, runID, runRoot})
-			return pathOrDefault(runRoot, owner, repo)
+			return pathOrDefault(runRoot, owner, repo, worktree.CheckoutRefSlug(ref))
 		},
 		checkoutPR: func(_ context.Context, owner, repo, upstream, head, headBranch string, prNumber int, runID, runRoot string) (string, error) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			s.prCheckoutCalls++
 			s.prCheckoutArgs = append(s.prCheckoutArgs, prCheckoutCall{owner, repo, upstream, head, headBranch, runID, runRoot, prNumber})
-			return pathOrDefault(runRoot, owner, repo)
+			return pathOrDefault(runRoot, owner, repo, worktree.PRRefSlug(prNumber))
 		},
 		fetchPR: func(_ context.Context, _, _ string, _ int) (*ghclient.PRView, error) {
 			s.mu.Lock()
@@ -404,7 +408,7 @@ func TestMaterializeWorkspace_GitHubRunCanAdd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("materializeWorkspace on a GitHub run: %v", err)
 	}
-	if path != expectedPath("gh-run", "sky", "core") {
+	if path != expectedPath("gh-run", "sky", "core", "@default") {
 		t.Errorf("path = %q", path)
 	}
 	if stub.checkoutCalls != 1 {
@@ -499,7 +503,7 @@ func TestMaterializeWorkspace_DefaultBranchCheckout(t *testing.T) {
 	seedRepoProfile(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
 	stub := &stubCalls{}
 
-	wantPath := expectedPath("r1", "sky", "core")
+	wantPath := expectedPath("r1", "sky", "core", "@default")
 	path, err := materializeWorkspace(hostFor(stores, "r1"), "sky/core", checkoutSpec{}, stub.deps())
 	if err != nil {
 		t.Fatalf("materializeWorkspace: %v", err)
@@ -524,18 +528,19 @@ func TestMaterializeWorkspace_DefaultBranchCheckout(t *testing.T) {
 		t.Errorf("removeWorktree called %d times on success path", stub.removeCalls)
 	}
 
-	// The row records the deterministic path and an empty FeatureBranch — a
-	// detached default checkout claims no branch (the push gate reads the
-	// worktree's live branch, set once the agent makes its own).
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
+	// The row records the deterministic path and ref "@default" — a detached
+	// default checkout claims no working branch (the push gate reads the
+	// worktree's live branch, set once the agent makes its own); the ref is the
+	// materialization selector, not a working branch.
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
 	if err != nil || row == nil {
-		t.Fatalf("GetByRepo: row=%v err=%v", row, err)
+		t.Fatalf("GetByRepoRef: row=%v err=%v", row, err)
 	}
 	if row.Path != wantPath {
 		t.Errorf("row.Path = %q, want %q", row.Path, wantPath)
 	}
-	if row.FeatureBranch != "" {
-		t.Errorf("row.FeatureBranch = %q, want empty for a default checkout", row.FeatureBranch)
+	if row.Ref != "@default" {
+		t.Errorf("row.Ref = %q, want @default for a default checkout", row.Ref)
 	}
 }
 
@@ -554,9 +559,9 @@ func TestMaterializeWorkspace_RefCheckout(t *testing.T) {
 	if got := stub.checkoutArgs[0].ref; got != "feature-x" {
 		t.Errorf("ref = %q, want feature-x", got)
 	}
-	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
-	if row == nil || row.FeatureBranch != "feature-x" {
-		t.Errorf("row.FeatureBranch = %v, want feature-x", row)
+	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "feature-x")
+	if row == nil || row.Ref != "feature-x" {
+		t.Errorf("row.Ref = %v, want feature-x", row)
 	}
 }
 
@@ -572,7 +577,7 @@ func TestMaterializeWorkspace_PRCheckout(t *testing.T) {
 		},
 	}
 
-	wantPath := expectedPath("r1", "sky", "core")
+	wantPath := expectedPath("r1", "sky", "core", "pr-42")
 	path, err := materializeWorkspace(hostFor(stores, "r1"), "sky/core", checkoutSpec{pr: 42}, stub.deps())
 	if err != nil {
 		t.Fatalf("materializeWorkspace: %v", err)
@@ -601,9 +606,9 @@ func TestMaterializeWorkspace_PRCheckout(t *testing.T) {
 	if pc.head != "https://github.com/fork/core.git" {
 		t.Errorf("head = %q", pc.head)
 	}
-	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
-	if row == nil || row.FeatureBranch != "pull/42" {
-		t.Errorf("row.FeatureBranch = %v, want pull/42", row)
+	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "pr-42")
+	if row == nil || row.Ref != "pr-42" {
+		t.Errorf("row.Ref = %v, want pr-42", row)
 	}
 }
 
@@ -621,7 +626,7 @@ func TestMaterializeWorkspace_PRFetchFailureReleasesReservation(t *testing.T) {
 		t.Errorf("prCheckoutCalls = %d, want 0 (fetch failed before create)", stub.prCheckoutCalls)
 	}
 	// Reservation released so a retry can re-reserve.
-	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
+	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "pr-7")
 	if row != nil {
 		t.Errorf("expected reservation released after PR-fetch failure, found %+v", row)
 	}
@@ -642,7 +647,7 @@ func TestMaterializeWorkspace_PRFetchWiredFromHost(t *testing.T) {
 	if _, err := materializeWorkspace(hostFor(stores, "r1"), "sky/core", checkoutSpec{pr: 1}, d); err == nil {
 		t.Fatal("expected an error from the host PR fetch (no GitHub credentials configured)")
 	}
-	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
+	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "pr-1")
 	if row != nil {
 		t.Errorf("expected reservation released after host PR-fetch failure, found %+v", row)
 	}
@@ -673,7 +678,7 @@ func TestMaterializeWorkspace_IdempotentSecondAdd(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
-	wantPath := expectedPath("r1", "sky", "core")
+	wantPath := expectedPath("r1", "sky", "core", "@default")
 
 	stub := &stubCalls{}
 
@@ -707,7 +712,7 @@ func TestMaterializeWorkspace_RaceLossAtReservation(t *testing.T) {
 	winnerPath := "/tmp/somewhere-else/winner"
 	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
-		Path: winnerPath, FeatureBranch: "feature/SKY-1",
+		Path: winnerPath, Ref: "@default",
 	}); err != nil {
 		t.Fatalf("seed winner row: %v", err)
 	}
@@ -734,10 +739,10 @@ func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) 
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
 
-	winnerPath := expectedPath("r1", "sky", "core")
+	winnerPath := expectedPath("r1", "sky", "core", "@default")
 	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
-		Path: winnerPath, FeatureBranch: "feature/SKY-1",
+		Path: winnerPath, Ref: "@default",
 	}); err != nil {
 		t.Fatalf("seed winner row: %v", err)
 	}
@@ -753,9 +758,9 @@ func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) 
 	if stub.checkoutCalls != 0 {
 		t.Errorf("checkoutCalls = %d, want 0; loser must not create when a reservation already exists", stub.checkoutCalls)
 	}
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
 	if err != nil {
-		t.Fatalf("GetByRepo: %v", err)
+		t.Fatalf("GetByRepoRef: %v", err)
 	}
 	if row == nil {
 		t.Fatal("winner's reservation row was deleted by the loser; expected it to remain")
@@ -766,11 +771,11 @@ func TestMaterializeWorkspace_LiveDirShortCircuitsAgeCheck(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
-	wantPath := expectedPath("r1", "sky", "core")
+	wantPath := expectedPath("r1", "sky", "core", "@default")
 
 	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
-		Path: wantPath, FeatureBranch: "feature/SKY-1",
+		Path: wantPath, Ref: "@default",
 	}); err != nil {
 		t.Fatalf("seed row: %v", err)
 	}
@@ -796,11 +801,11 @@ func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
-	wantPath := expectedPath("r1", "sky", "core")
+	wantPath := expectedPath("r1", "sky", "core", "@default")
 
 	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
-		Path: wantPath, FeatureBranch: "feature/SKY-1",
+		Path: wantPath, Ref: "@default",
 	}); err != nil {
 		t.Fatalf("seed stale row: %v", err)
 	}
@@ -819,7 +824,7 @@ func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
 	if stub.checkoutCalls != 1 {
 		t.Errorf("checkoutCalls = %d, want 1; stale reservation should not block recreate", stub.checkoutCalls)
 	}
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
 	if err != nil || row == nil {
 		t.Fatalf("expected fresh row after reclaim; got row=%v err=%v", row, err)
 	}
@@ -829,16 +834,16 @@ func TestMaterializeWorkspace_FreshRowMissingDirIsInFlight(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
-	wantPath := expectedPath("r1", "sky", "core")
+	wantPath := expectedPath("r1", "sky", "core", "@default")
 
 	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
-		Path: wantPath, FeatureBranch: "feature/SKY-1",
+		Path: wantPath, Ref: "@default",
 	}); err != nil {
 		t.Fatalf("seed in-flight row: %v", err)
 	}
 
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
 	if err != nil || row == nil {
 		t.Fatalf("re-read row: %v", err)
 	}
@@ -876,9 +881,9 @@ func TestMaterializeWorkspace_CreateFailureReleasesReservation(t *testing.T) {
 		t.Errorf("checkoutCalls = %d, want 1", stub.checkoutCalls)
 	}
 
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
 	if err != nil {
-		t.Fatalf("GetByRepo: %v", err)
+		t.Fatalf("GetByRepoRef: %v", err)
 	}
 	if row != nil {
 		t.Errorf("expected run_worktrees row to be released after create failure, found %+v", row)
@@ -889,7 +894,7 @@ func TestMaterializeWorkspace_CreateFailureRetryable(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
-	wantPath := expectedPath("r1", "sky", "core")
+	wantPath := expectedPath("r1", "sky", "core", "@default")
 
 	stub1 := &stubCalls{createErr: errors.New("network blip")}
 	if _, err := materializeWorkspace(hostFor(stores, "r1"), "sky/core", checkoutSpec{}, stub1.deps()); err == nil {
@@ -970,18 +975,19 @@ func TestPRCloneURLs(t *testing.T) {
 	}
 }
 
-func TestReservedBranchFor(t *testing.T) {
+func TestRefForSpec(t *testing.T) {
 	cases := []struct {
 		spec checkoutSpec
 		want string
 	}{
-		{checkoutSpec{}, ""},
+		{checkoutSpec{}, "@default"},
 		{checkoutSpec{ref: "feature-x"}, "feature-x"},
-		{checkoutSpec{pr: 42}, "pull/42"},
+		{checkoutSpec{ref: "feature/foo"}, "feature-foo"}, // slug folds '/'
+		{checkoutSpec{pr: 42}, "pr-42"},
 	}
 	for _, c := range cases {
-		if got := reservedBranchFor(c.spec); got != c.want {
-			t.Errorf("reservedBranchFor(%+v) = %q, want %q", c.spec, got, c.want)
+		if got := refForSpec(c.spec); got != c.want {
+			t.Errorf("refForSpec(%+v) = %q, want %q", c.spec, got, c.want)
 		}
 	}
 }
@@ -1038,7 +1044,7 @@ func TestMaterializeWorkspace_EventTriggeredRunRouting(t *testing.T) {
 	if stub.checkoutCalls != 1 {
 		t.Errorf("checkoutCalls = %d, want 1; event-triggered path should reserve + create", stub.checkoutCalls)
 	}
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "e1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "e1", "sky/core", "@default")
 	if err != nil || row == nil {
 		t.Fatalf("expected run_worktrees row from event-triggered insert; got row=%v err=%v", row, err)
 	}
@@ -1055,9 +1061,9 @@ func TestMaterializeWorkspace_EventTriggeredCreateFailureReleases(t *testing.T) 
 	if _, err := materializeWorkspace(hostFor(stores, "e2"), "sky/core", checkoutSpec{}, stub.deps()); err == nil {
 		t.Fatal("expected error from create failure, got nil")
 	}
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "e2", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "e2", "sky/core", "@default")
 	if err != nil {
-		t.Fatalf("GetByRepo: %v", err)
+		t.Fatalf("GetByRepoRef: %v", err)
 	}
 	if row != nil {
 		t.Errorf("expected event-triggered reservation to be released after create failure, found %+v", row)

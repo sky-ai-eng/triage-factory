@@ -58,7 +58,7 @@ func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 	// Materialize one of the three.
 	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r1", RepoID: "owner/beta",
-		Path: "/tmp/wt/beta", FeatureBranch: "feature/SKY-1",
+		Path: "/tmp/wt/beta", Ref: "@default",
 	}); err != nil {
 		t.Fatalf("seed materialized: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 	if len(out.Materialized) != 1 || out.Materialized[0].Repo != "owner/beta" {
 		t.Errorf("materialized = %+v, want one entry for owner/beta", out.Materialized)
 	}
-	if out.Materialized[0].Path != "/tmp/wt/beta" || out.Materialized[0].Branch != "feature/SKY-1" {
+	if out.Materialized[0].Path != "/tmp/wt/beta" || out.Materialized[0].Ref != "@default" {
 		t.Errorf("materialized entry mismatch: %+v", out.Materialized[0])
 	}
 }
@@ -116,7 +116,7 @@ func TestListWorkspaces_ScopedToRun(t *testing.T) {
 
 	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r2", RepoID: "owner/shared",
-		Path: "/tmp/wt/r2/owner/shared", FeatureBranch: "feature/SKY-2",
+		Path: "/tmp/wt/r2/owner/shared", Ref: "@default",
 	}); err != nil {
 		t.Fatalf("seed r2 materialized: %v", err)
 	}

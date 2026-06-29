@@ -17,14 +17,14 @@ import (
 //     this since the spawner gates on profile readiness, but the shape
 //     stays consistent).
 //   - materialized: repos the agent has already `workspace add`'d for
-//     this run, with the absolute worktree path and the feature branch
-//     `git worktree add` checked out.
+//     this run, with the absolute worktree path and the ref the worktree
+//     was materialized for ("@default", "pr-<N>", or a slugified branch).
 //
 // Two-section structure (rather than a flat list with a `materialized`
 // boolean) keeps the field shape per entry uniform — available entries
-// don't carry a path, materialized entries don't need a default branch
-// — and makes the "what could I add vs. what have I added" split
-// obvious to a reader skimming the JSON.
+// don't carry a path, materialized entries carry path + ref — and makes
+// the "what could I add vs. what have I added" split obvious to a reader
+// skimming the JSON.
 type listOutput struct {
 	Available    []listAvailable    `json:"available"`
 	Materialized []listMaterialized `json:"materialized"`
@@ -46,9 +46,13 @@ type listAvailable struct {
 }
 
 type listMaterialized struct {
-	Repo   string `json:"repo"`
-	Path   string `json:"path"`
-	Branch string `json:"branch"`
+	Repo string `json:"repo"`
+	Path string `json:"path"`
+	// Ref is the materialization selector the worktree was created for:
+	// "@default", "pr-<N>", or a slugified branch name. It is the checkout
+	// intent, not the agent's live working branch (the agent creates its own
+	// branch off the checkout; the push gate authorizes that live branch).
+	Ref string `json:"ref"`
 }
 
 // listWorkspaces is the orchestration body of `workspace list`,
@@ -93,9 +97,9 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 	for _, r := range rows {
 		materializedSet[r.RepoID] = struct{}{}
 		materialized = append(materialized, listMaterialized{
-			Repo:   r.RepoID,
-			Path:   r.Path,
-			Branch: r.FeatureBranch,
+			Repo: r.RepoID,
+			Path: r.Path,
+			Ref:  r.Ref,
 		})
 	}
 

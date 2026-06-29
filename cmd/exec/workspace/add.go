@@ -225,6 +225,12 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		}
 	}
 
+	// ref is the (run, repo, ref) discriminator: a run can materialize several
+	// worktrees in one repo (two PRs, or a PR + the default branch), so every
+	// lookup / reservation / path below is keyed on it. It doubles as the
+	// worktree path-slug subdirectory.
+	ref := refForSpec(spec)
+
 	ctx := context.Background()
 	info, err := host.LookupRun(ctx)
 	if err != nil {
@@ -268,7 +274,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	// inside the `staleReservationAge` window; killed-mid-create rows
 	// outlive it. Pre-staleness, trust the row. Past staleness with
 	// the path still missing, drop the row and re-reserve.
-	existing, err := host.GetRunWorktreeByRepo(ctx, repoID)
+	existing, err := host.GetRunWorktreeByRepoRef(ctx, repoID, ref)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: lookup existing worktree: %w", err)
 	}
@@ -288,8 +294,8 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 			}
 			// Stale: reservation outlived its creator without a
 			// completed worktree. Drop and fall through to re-reserve.
-			workspaceLog.Warn("dropping stale reservation; path missing and row age exceeds threshold", "run_id", info.RunID, "repo", repoID, "path", existing.Path, "age", age, "threshold", staleReservationAge)
-			if delErr := host.DeleteRunWorktreeByRepo(ctx, repoID); delErr != nil {
+			workspaceLog.Warn("dropping stale reservation; path missing and row age exceeds threshold", "run_id", info.RunID, "repo", repoID, "ref", ref, "path", existing.Path, "age", age, "threshold", staleReservationAge)
+			if delErr := host.DeleteRunWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
 				return "", fmt.Errorf("workspace add: delete stale reservation: %w", delErr)
 			}
 		default:
@@ -323,20 +329,21 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 
 	runRoot := worktree.RunRoot(info.RunID)
 	// Path is deterministic from the InRoot create contract:
-	// filepath.Join(runRoot, owner, repo). Compute it here so we can
-	// reserve the row BEFORE the create runs.
-	wtPath := filepath.Join(runRoot, profile.Owner, profile.Repo)
+	// filepath.Join(runRoot, owner, repo, ref-slug). The ref-slug subdir is
+	// what lets two PRs (or a PR + a branch) coexist in one repo for one run.
+	// Compute it here so we can reserve the row BEFORE the create runs.
+	wtPath := filepath.Join(runRoot, profile.Owner, profile.Repo, ref)
 
-	// Reserve. Two concurrent processes that both reach this point
-	// race at the PK; the loser short-circuits before touching git.
-	// FeatureBranch is now informational only (the push gate reads the
-	// worktree's live current branch, not this column) — store the checkout
-	// intent so `workspace list` stays legible.
+	// Reserve. Two concurrent processes that both reach this point with the
+	// SAME (run, repo, ref) race at the PK; the loser short-circuits before
+	// touching git. Ref records the checkout intent — the PK discriminator and
+	// the path slug — and is what `workspace list` surfaces; the push gate reads
+	// the worktree's live current branch, never this row.
 	row := domain.RunWorktree{
-		RunID:         info.RunID,
-		RepoID:        repoID,
-		Path:          wtPath,
-		FeatureBranch: reservedBranchFor(spec),
+		RunID:  info.RunID,
+		RepoID: repoID,
+		Path:   wtPath,
+		Ref:    ref,
 	}
 	inserted, winningPath, err := host.InsertRunWorktree(ctx, row)
 	if err != nil {
@@ -360,18 +367,18 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		// Release the reservation so the next attempt can retry.
 		// Delete failures are logged but don't shadow the create error
 		// the caller actually needs.
-		if delErr := host.DeleteRunWorktreeByRepo(ctx, repoID); delErr != nil {
+		if delErr := host.DeleteRunWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
 			workspaceLog.Warn("release reservation after create failure failed", "error", delErr)
 		}
 		return "", fmt.Errorf("workspace add: create worktree: %w", err)
 	}
 	if gotPath != wtPath {
 		// The InRoot create contract is to land at
-		// filepath.Join(runRoot, owner, repo); a divergence means the
+		// filepath.Join(runRoot, owner, repo, ref-slug); a divergence means the
 		// worktree library changed and our reservation path no longer
 		// matches reality. Surface loudly rather than silently storing
 		// the wrong path.
-		workspaceLog.Warn("created path diverges from reserved; investigate", "got_path", gotPath, "reserved_path", wtPath, "run_id", info.RunID, "repo", repoID)
+		workspaceLog.Warn("created path diverges from reserved; investigate", "got_path", gotPath, "reserved_path", wtPath, "run_id", info.RunID, "repo", repoID, "ref", ref)
 	}
 
 	return wtPath, nil
@@ -415,19 +422,22 @@ func prCloneURLs(originURL string, pr *ghclient.PRView) (upstream, head string) 
 	return upstream, pr.SSHURL
 }
 
-// reservedBranchFor computes the informational FeatureBranch stored on the
-// reservation row for `workspace list` display. The push gate no longer reads
-// it (it reads the worktree's live current branch), so this is purely the
-// checkout intent: the PR ref, the named --ref, or empty for a detached
-// default-branch checkout (no branch claimed until the agent makes one).
-func reservedBranchFor(spec checkoutSpec) string {
+// refForSpec computes the run_worktrees ref for a checkout spec — the
+// (run, repo, ref) PK discriminator AND the worktree path-slug subdirectory.
+// "pr-<N>" for a PR, the slugified branch for --ref, or "@default" for a
+// detached default-branch checkout. It uses the same slug helpers the InRoot
+// create funcs land the worktree at, so the reserved path and the created path
+// agree. The push gate reads the worktree's live current branch, never this
+// value, so it carries no authorization — only the checkout intent `workspace
+// list` surfaces.
+func refForSpec(spec checkoutSpec) string {
 	switch {
 	case spec.pr > 0:
-		return fmt.Sprintf("pull/%d", spec.pr)
+		return worktree.PRRefSlug(spec.pr)
 	case spec.ref != "":
-		return spec.ref
+		return worktree.CheckoutRefSlug(spec.ref)
 	default:
-		return ""
+		return worktree.CheckoutRefSlug("")
 	}
 }
 

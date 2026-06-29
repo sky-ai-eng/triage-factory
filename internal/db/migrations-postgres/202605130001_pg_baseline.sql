@@ -1379,7 +1379,7 @@ CREATE TABLE public.run_worktrees (
     org_id uuid NOT NULL,
     repo_id text NOT NULL,
     path text NOT NULL,
-    feature_branch text NOT NULL,
+    ref text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -2282,7 +2282,7 @@ ALTER TABLE ONLY public.run_messages
 --
 
 ALTER TABLE ONLY public.run_worktrees
-    ADD CONSTRAINT run_worktrees_pkey PRIMARY KEY (run_id, repo_id);
+    ADD CONSTRAINT run_worktrees_pkey PRIMARY KEY (run_id, repo_id, ref);
 
 
 --

@@ -196,16 +196,15 @@ func TestCreateForPR_ForkPR(t *testing.T) {
 		t.Errorf("worktree HEAD = %q, want %q", got, originalForkCommit)
 	}
 
-	// For fork PRs the local branch is namespaced under
-	// triagefactory/pr-<n>. The slash-prefix puts it out of reach
-	// of any literal contributor branch name (e.g. one called pr-42)
-	// that could otherwise share refs/heads/pr-42 in the bare.
+	// The local branch is namespaced per run under
+	// triagefactory/<runID>/pr-<n> so two concurrent runs on the same PR
+	// (sharing one bare) never collide on a branch ref.
 	out, err = exec.Command("git", "-C", wtPath, "rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {
 		t.Fatalf("worktree rev-parse abbrev: %v", err)
 	}
-	if got := strings.TrimSpace(string(out)); got != "triagefactory/pr-42" {
-		t.Errorf("worktree branch = %q, want %q", got, "triagefactory/pr-42")
+	if got := strings.TrimSpace(string(out)); got != "triagefactory/fork-pr-test-run/pr-42" {
+		t.Errorf("worktree branch = %q, want %q", got, "triagefactory/fork-pr-test-run/pr-42")
 	}
 
 	// Simulate an agent: commit a change in the worktree, push (no
@@ -237,10 +236,10 @@ func TestCreateForPR_ForkPR(t *testing.T) {
 	}
 
 	// Upstream must NOT have grown a stray branch. Pre-tracking-fix,
-	// the agent's push would have created refs/heads/triagefactory/pr-42
-	// on upstream; this assertion catches a regression of that bug.
-	if out, err := exec.Command("git", "-C", upstream, "show-ref", "--verify", "refs/heads/triagefactory/pr-42").CombinedOutput(); err == nil {
-		t.Errorf("upstream gained a stray refs/heads/triagefactory/pr-42 branch — push leaked: %s", out)
+	// the agent's push would have created the per-run branch on upstream;
+	// this assertion catches a regression of that bug.
+	if out, err := exec.Command("git", "-C", upstream, "show-ref", "--verify", "refs/heads/triagefactory/fork-pr-test-run/pr-42").CombinedOutput(); err == nil {
+		t.Errorf("upstream gained a stray per-run branch — push leaked: %s", out)
 	}
 	if out, err := exec.Command("git", "-C", upstream, "show-ref", "--verify", "refs/heads/feature-branch").CombinedOutput(); err == nil {
 		t.Errorf("upstream gained a stray refs/heads/feature-branch branch — push leaked: %s", out)
@@ -249,8 +248,9 @@ func TestCreateForPR_ForkPR(t *testing.T) {
 
 // TestCleanupPRConfig_RemovesForkPRArtifacts is the regression test
 // for the bare-repo accumulation bug: every fork PR delegation adds
-// a head-<n> remote, branch.triagefactory/pr-<n>.* config block, and
-// refs/heads/triagefactory/pr-<n> branch to the shared bare. Without
+// a per-run tfpush-<runID>-<n> remote, a per-run
+// branch.triagefactory/<runID>/pr-<n>.* config block, and the
+// triagefactory/<runID>/pr-<n> branch to the shared bare. Without
 // CleanupPRConfig, repeated PR runs leak these into the config file
 // indefinitely. After CleanupPRConfig, all three artifacts must be
 // gone — and the bare must still be functional (no collateral
@@ -286,15 +286,17 @@ func TestCleanupPRConfig_RemovesForkPRArtifacts(t *testing.T) {
 		t.Fatalf("CreateForPR: %v", err)
 	}
 	bareDir, _ := repoDir("owner-cleanup-test", "repo-cleanup-test")
+	const branch = "triagefactory/cleanup-test-run/pr-99"
+	const remote = "tfpush-cleanup-test-run-99"
 
 	// Sanity-check the artifacts are present before cleanup.
-	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || !strings.Contains(string(out), "head-99") {
-		t.Fatalf("setup: head-99 remote missing pre-cleanup: %v / %s", err, out)
+	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || !strings.Contains(string(out), remote) {
+		t.Fatalf("setup: %s remote missing pre-cleanup: %v / %s", remote, err, out)
 	}
-	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/triagefactory/pr-99").CombinedOutput(); err != nil {
-		t.Fatalf("setup: triagefactory/pr-99 branch missing pre-cleanup: %v / %s", err, out)
+	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err != nil {
+		t.Fatalf("setup: %s branch missing pre-cleanup: %v / %s", branch, err, out)
 	}
-	if out, err := exec.Command("git", "-C", bareDir, "config", "--get", "branch.triagefactory/pr-99.remote").Output(); err != nil || strings.TrimSpace(string(out)) != "head-99" {
+	if out, err := exec.Command("git", "-C", bareDir, "config", "--get", "branch."+branch+".remote").Output(); err != nil || strings.TrimSpace(string(out)) != remote {
 		t.Fatalf("setup: branch tracking missing pre-cleanup: %v / %s", err, out)
 	}
 
@@ -303,15 +305,15 @@ func TestCleanupPRConfig_RemovesForkPRArtifacts(t *testing.T) {
 	if err := RemoveAt(wtPath, "cleanup-test-run"); err != nil {
 		t.Fatalf("RemoveAt: %v", err)
 	}
-	CleanupPRConfig("owner-cleanup-test", "repo-cleanup-test", "feature", 99)
+	CleanupPRConfig("owner-cleanup-test", "repo-cleanup-test", 99, "cleanup-test-run")
 
-	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || strings.Contains(string(out), "head-99") {
-		t.Errorf("head-99 remote still present after cleanup: %s", out)
+	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || strings.Contains(string(out), remote) {
+		t.Errorf("%s remote still present after cleanup: %s", remote, out)
 	}
-	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/triagefactory/pr-99").CombinedOutput(); err == nil {
-		t.Errorf("triagefactory/pr-99 branch still present after cleanup: %s", out)
+	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err == nil {
+		t.Errorf("%s branch still present after cleanup: %s", branch, out)
 	}
-	if _, err := exec.Command("git", "-C", bareDir, "config", "--get", "branch.triagefactory/pr-99.remote").Output(); err == nil {
+	if _, err := exec.Command("git", "-C", bareDir, "config", "--get", "branch."+branch+".remote").Output(); err == nil {
 		t.Errorf("branch tracking config still present after cleanup")
 	}
 
@@ -322,12 +324,11 @@ func TestCleanupPRConfig_RemovesForkPRArtifacts(t *testing.T) {
 	}
 }
 
-// TestCleanupPRConfig_OwnRepoIsNoOp confirms that calling cleanup on
-// an own-repo PR (where head-<n> and triagefactory/pr-<n> never get
-// created in the first place) is silent. The spawner calls cleanup
-// unconditionally for every PR run, so the no-op path must not log
-// errors or fail.
-func TestCleanupPRConfig_OwnRepoIsNoOp(t *testing.T) {
+// TestCleanupPRConfig_NeverSetUpIsNoOp confirms that calling cleanup for a
+// (run, PR) whose per-run branch + remote were never created is silent. The
+// spawner calls cleanup unconditionally for every PR run, so the no-op path
+// must not log errors, fail, or touch the bare.
+func TestCleanupPRConfig_NeverSetUpIsNoOp(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
 
@@ -337,7 +338,7 @@ func TestCleanupPRConfig_OwnRepoIsNoOp(t *testing.T) {
 
 	// Cleanup for a PR that was never set up. Should not panic, fail,
 	// or affect the bare.
-	CleanupPRConfig("owner-noop-test", "repo-noop-test", "", 12345)
+	CleanupPRConfig("owner-noop-test", "repo-noop-test", 12345, "noop-run")
 
 	bareDir, _ := repoDir("owner-noop-test", "repo-noop-test")
 	if out, err := exec.Command("git", "-C", bareDir, "config", "--get", "remote.origin.url").Output(); err != nil || strings.TrimSpace(string(out)) != upstream {
@@ -347,12 +348,12 @@ func TestCleanupPRConfig_OwnRepoIsNoOp(t *testing.T) {
 
 // TestCreateForPR_DeletedFork_NoTrackingConfigured covers the
 // deleted-fork PR edge case: head.repo is null, so headCloneURL is
-// empty and isFork is false — but the PR is also not own-repo, and
-// configuring origin as the push target would silently send commits
-// to the upstream's refs/heads/<headBranch> when the agent runs
-// `git push`. The right behavior is to skip tracking entirely so
-// `git push` (no args) errors with "no upstream branch" instead of
-// pushing to the wrong place.
+// empty — the PR is reviewable (refs/pull/<n>/head exists) but has no
+// contributor remote to push back to. Configuring origin as the push
+// target would silently send commits to the upstream's
+// refs/heads/<headBranch> when the agent runs `git push`. The right
+// behavior is to skip push tracking entirely so `git push` (no args)
+// errors with "no upstream branch" instead of pushing to the wrong place.
 func TestCreateForPR_DeletedFork_NoTrackingConfigured(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
@@ -386,9 +387,9 @@ func TestCreateForPR_DeletedFork_NoTrackingConfigured(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = RemoveAt(wtPath, "deleted-test-run") })
 
-	// No branch tracking should be configured — push must fail.
-	if _, err := exec.Command("git", "-C", wtPath, "config", "--get", "branch.feature.remote").Output(); err == nil {
-		t.Errorf("branch.feature.remote configured for deleted-fork PR; push would silently target upstream")
+	// No push tracking should be configured on the per-run branch — push must fail.
+	if _, err := exec.Command("git", "-C", wtPath, "config", "--get", "branch.triagefactory/deleted-test-run/pr-55.remote").Output(); err == nil {
+		t.Errorf("push tracking configured for deleted-fork PR; push would silently target upstream")
 	}
 	// Sanity: `git push` (no args) should fail loudly.
 	cmd := exec.Command("git", "-C", wtPath, "config", "user.email", "x@y.z")
@@ -458,11 +459,12 @@ func TestCreateForPR_DeletedFork_PushFailsAfterPriorOwnRepoPR(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = RemoveAt(deletedWtPath, "deleted-cross-run") })
 
-	// Per-branch tracking means the own-repo PR's config sits in
-	// branch.real-feature.* and does NOT bleed into the deleted-fork
-	// worktree. Verify by attempting `git push` and asserting it
-	// errors with "no upstream branch". Pre-fix this would silently
-	// push to upstream:refs/heads/deleted-feature.
+	// Per-run, per-branch tracking means the own-repo PR's config sits in
+	// branch.triagefactory/own-cross-run/pr-100.* on its own per-run remote
+	// and does NOT bleed into the deleted-fork worktree (which has its own
+	// run-namespaced branch and no push tracking). Verify by attempting
+	// `git push` and asserting it errors with "no upstream branch". Pre-fix
+	// this would silently push to upstream:refs/heads/deleted-feature.
 	for _, c := range [][]string{
 		{"-C", deletedWtPath, "config", "user.email", "agent@example.com"},
 		{"-C", deletedWtPath, "config", "user.name", "Agent"},
@@ -483,12 +485,12 @@ func TestCreateForPR_DeletedFork_PushFailsAfterPriorOwnRepoPR(t *testing.T) {
 }
 
 // TestSweepStaleForkPRConfig_ReclaimsOwnRepoPR is the regression for
-// the own-repo leak: when a run's inline cleanup doesn't fire (e.g. a
+// the per-run leak: when a run's inline cleanup doesn't fire (e.g. a
 // cancel above the runAgent defer, or a crash), the bare keeps the
-// branch.<headRef>.* tracking config. Once the worktree dir is gone,
-// the sweep must reclaim branch.<headRef>.* — which the older sweep
-// that walked head-<n> remotes would have missed, since own-repo PRs
-// don't have one.
+// per-run branch.triagefactory/<runID>/pr-<n>.* tracking config + branch.
+// Once the worktree dir is gone, the sweep must reclaim them by walking the
+// marker — uniformly for fork and own-repo PRs, which now share the same
+// per-run branch shape.
 func TestSweepStaleForkPRConfig_ReclaimsOwnRepoPR(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
@@ -526,32 +528,36 @@ func TestSweepStaleForkPRConfig_ReclaimsOwnRepoPR(t *testing.T) {
 	}
 
 	bareDir, _ := repoDir("owner-takeover-test", "repo-takeover-test")
-	// Sanity: tracking and ref are still in the bare pre-sweep.
-	if _, err := exec.Command("git", "-C", bareDir, "config", "--get", "branch.stale-feature.remote").Output(); err != nil {
+	const branch = "triagefactory/takeover-test-run/pr-300"
+	const remote = "tfpush-takeover-test-run-300"
+	// Sanity: per-run tracking + ref + remote are still in the bare pre-sweep.
+	if _, err := exec.Command("git", "-C", bareDir, "config", "--get", "branch."+branch+".remote").Output(); err != nil {
 		t.Fatalf("setup: branch tracking missing pre-sweep: %v", err)
 	}
-	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/stale-feature").CombinedOutput(); err != nil {
-		t.Fatalf("setup: stale-feature branch missing pre-sweep: %v / %s", err, out)
+	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err != nil {
+		t.Fatalf("setup: %s branch missing pre-sweep: %v / %s", branch, err, out)
 	}
 
 	SweepStaleForkPRConfig("owner-takeover-test", "repo-takeover-test")
 
-	if _, err := exec.Command("git", "-C", bareDir, "config", "--get", "branch.stale-feature.remote").Output(); err == nil {
-		t.Errorf("branch.stale-feature.remote tracking survived sweep")
+	if _, err := exec.Command("git", "-C", bareDir, "config", "--get", "branch."+branch+".remote").Output(); err == nil {
+		t.Errorf("per-run branch tracking survived sweep")
 	}
-	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/stale-feature").CombinedOutput(); err == nil {
-		t.Errorf("refs/heads/stale-feature ref survived sweep — would poison future Jira delegations: %s", out)
+	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err == nil {
+		t.Errorf("refs/heads/%s ref survived sweep: %s", branch, out)
+	}
+	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || strings.Contains(string(out), remote) {
+		t.Errorf("per-run push remote survived sweep: %v / %s", err, out)
 	}
 }
 
-// TestCreateForPR_DeletedFork_CleanupRemovesStaleHeadBranch locks
-// down issue #2: deleted-fork PRs fetch into refs/heads/<headBranch>
-// but inline cleanup historically only deleted the synthetic
-// triagefactory/pr-<n> ref. The leftover refs/heads/<headBranch>
-// would cause CreateForBranch's branchExists path to reuse the stale
-// PR tip on a future Jira delegation that happened to use the same
-// branch name.
-func TestCreateForPR_DeletedFork_CleanupRemovesStaleHeadBranch(t *testing.T) {
+// TestCreateForPR_DeletedFork_PerRunBranchCleanedUp locks down that a
+// deleted-fork PR fetches into the run-namespaced branch (NOT a
+// refs/heads/<headBranch> copy that an older scheme created and could leave
+// behind to poison a future Jira delegation on the same branch name), and that
+// CleanupPRConfig reclaims that per-run branch. The head-branch ref is never
+// created in the first place, so there's nothing stale to leak.
+func TestCreateForPR_DeletedFork_PerRunBranchCleanedUp(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
 
@@ -579,25 +585,32 @@ func TestCreateForPR_DeletedFork_CleanupRemovesStaleHeadBranch(t *testing.T) {
 		t.Fatalf("CreateForPR: %v", err)
 	}
 	bareDir, _ := repoDir("owner-stale-test", "repo-stale-test")
-	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/feature/SKY-X").CombinedOutput(); err != nil {
-		t.Fatalf("setup: feature/SKY-X branch missing pre-cleanup: %v / %s", err, out)
+	const branch = "triagefactory/stale-test-run/pr-400"
+	// The PR head lands on the run-namespaced branch...
+	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err != nil {
+		t.Fatalf("setup: %s branch missing pre-cleanup: %v / %s", branch, err, out)
+	}
+	// ...and NEVER as a refs/heads/<headBranch> copy that could poison a future
+	// CreateForBranch delegation on the same name.
+	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/feature/SKY-X").CombinedOutput(); err == nil {
+		t.Errorf("deleted-fork fetched a stray refs/heads/feature/SKY-X copy: %s", out)
 	}
 
 	if err := RemoveAt(wtPath, "stale-test-run"); err != nil {
 		t.Fatalf("RemoveAt: %v", err)
 	}
-	CleanupPRConfig("owner-stale-test", "repo-stale-test", "feature/SKY-X", 400)
+	CleanupPRConfig("owner-stale-test", "repo-stale-test", 400, "stale-test-run")
 
-	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/feature/SKY-X").CombinedOutput(); err == nil {
-		t.Errorf("refs/heads/feature/SKY-X survived cleanup — would poison future Jira delegations: %s", out)
+	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err == nil {
+		t.Errorf("refs/heads/%s survived cleanup: %s", branch, out)
 	}
 }
 
-// TestSweepStaleForkPRConfig_PreservesUserAddedRemotes locks down
-// the exact-match check: a user-added remote named like `head-42-mine`
-// would parse as head-<42> if Sscanf allowed trailing input. The
-// sweep must reject any remote whose canonical name doesn't equal
-// "head-<n>" exactly.
+// TestSweepStaleForkPRConfig_PreservesUserAddedRemotes locks down that the
+// marker-driven sweep never touches a remote that isn't reconstructed from one
+// of our per-run PR branch markers. User-added remotes (here named to look
+// superficially like ours) carry no branch marker, so the sweep can't even
+// derive them — they must survive untouched.
 func TestSweepStaleForkPRConfig_PreservesUserAddedRemotes(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
@@ -628,15 +641,15 @@ func TestSweepStaleForkPRConfig_PreservesUserAddedRemotes(t *testing.T) {
 
 // TestSweepStaleForkPRConfig_RemovesOrphanedRemotes is the regression
 // test for the cancelled/taken-over leak path: when inline cleanup
-// in the runAgent defer doesn't fire, head-<n> remotes accumulate
-// in the bare. The sweep is the bootstrap-time backstop that walks
-// the bare's remotes and removes any whose synthetic branch isn't
-// held by a live worktree.
+// in the runAgent defer doesn't fire, per-run PR branches + their
+// tfpush-<runID>-<n> remotes accumulate in the bare. The sweep is the
+// bootstrap-time backstop that walks the bare's per-run PR branch markers
+// and removes any whose branch isn't held by a live worktree, reconstructing
+// the per-run remote from each branch name.
 //
-// Test setup: configure two fork-PR-like config blocks (head-50 and
-// head-51) and a stray non-PR remote (extra), without ever creating
-// a worktree. With no live worktrees on triagefactory/pr-50 or
-// triagefactory/pr-51, the sweep must remove both PR remotes and
+// Test setup: configure two per-run PR config blocks for orphaned PRs (no
+// worktree) and a stray non-PR remote (extra). With no live worktrees on the
+// per-run branches, the sweep must remove both PR remotes + branch config and
 // preserve everything else.
 func TestSweepStaleForkPRConfig_RemovesOrphanedRemotes(t *testing.T) {
 	withTestHome(t)
@@ -646,17 +659,20 @@ func TestSweepStaleForkPRConfig_RemovesOrphanedRemotes(t *testing.T) {
 	}
 	bareDir, _ := repoDir("owner-sweep-test", "repo-sweep-test")
 
-	// Stand up the per-PR config that fork-PR setup would have
-	// produced for two PRs that are now orphaned (no worktree).
-	// The trackedBranchMarkerKey is what makes the sweep find these
-	// generically — without it, own-repo PRs would be invisible to
-	// the sweep too.
+	// Stand up the per-run PR config that PR setup would have produced for two
+	// PRs that are now orphaned (no worktree). The trackedBranchMarkerKey on the
+	// per-run branch is what makes the sweep find them, and the branch name is
+	// what lets it reconstruct the matching tfpush-<runID>-<n> remote.
+	prRunID := func(n int) string { return fmt.Sprintf("sweep-run-%d", n) }
+	prRemote := func(n int) string { return fmt.Sprintf("tfpush-%s-%d", prRunID(n), n) }
+	prBranch := func(n int) string { return fmt.Sprintf("triagefactory/%s/pr-%d", prRunID(n), n) }
 	for _, n := range []int{50, 51} {
-		remote := fmt.Sprintf("head-%d", n)
-		branch := fmt.Sprintf("triagefactory/pr-%d", n)
+		remote := prRemote(n)
+		branch := prBranch(n)
 		setup := [][]string{
 			{"-C", bareDir, "remote", "add", remote, upstream},
 			{"-C", bareDir, "fetch", remote, "main:" + branch},
+			{"-C", bareDir, "config", fmt.Sprintf("remote.%s.push", remote), "refs/heads/" + branch + ":refs/heads/main"},
 			{"-C", bareDir, "config", fmt.Sprintf("branch.%s.remote", branch), remote},
 			{"-C", bareDir, "config", fmt.Sprintf("branch.%s.merge", branch), "refs/heads/main"},
 			{"-C", bareDir, "config", fmt.Sprintf("branch.%s.%s", branch, trackedBranchMarkerKey), fmt.Sprintf("%d", n)},
@@ -680,7 +696,7 @@ func TestSweepStaleForkPRConfig_RemovesOrphanedRemotes(t *testing.T) {
 	}
 	remotes := strings.Fields(string(remotesOut))
 	for _, r := range remotes {
-		if r == "head-50" || r == "head-51" {
+		if r == prRemote(50) || r == prRemote(51) {
 			t.Errorf("orphan remote %q survived sweep", r)
 		}
 	}
@@ -700,17 +716,17 @@ func TestSweepStaleForkPRConfig_RemovesOrphanedRemotes(t *testing.T) {
 		t.Errorf("non-PR remote 'extra' removed by sweep")
 	}
 	for _, n := range []int{50, 51} {
-		if _, err := exec.Command("git", "-C", bareDir, "config", "--get", fmt.Sprintf("branch.triagefactory/pr-%d.remote", n)).Output(); err == nil {
+		if _, err := exec.Command("git", "-C", bareDir, "config", "--get", fmt.Sprintf("branch.%s.remote", prBranch(n))).Output(); err == nil {
 			t.Errorf("orphan branch tracking config for pr-%d survived sweep", n)
 		}
 	}
 }
 
 // TestSweepStaleForkPRConfig_PreservesLiveWorktree is the safety
-// regression: the sweep must NOT remove a head-<n> remote whose
-// synthetic branch is checked out by a live worktree (a delegated run
-// is still using it for push/pull). With the worktree present, both
-// the remote and the branch tracking config must survive the sweep.
+// regression: the sweep must NOT reclaim a per-run PR branch (and its
+// tfpush-<runID>-<n> remote) whose branch is checked out by a live worktree
+// (a delegated run is still using it for push/pull). With the worktree
+// present, both the remote and the branch tracking config must survive.
 func TestSweepStaleForkPRConfig_PreservesLiveWorktree(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
@@ -743,8 +759,8 @@ func TestSweepStaleForkPRConfig_PreservesLiveWorktree(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = RemoveAt(wtPath, "live-test-run") })
 
-	// Sweep with the worktree still present. head-77 is in use, so
-	// the sweep must skip it.
+	// Sweep with the worktree still present. The per-run branch is in use, so
+	// the sweep must skip it (and its remote).
 	SweepStaleForkPRConfig("owner-live-test", "repo-live-test")
 
 	bareDir, _ := repoDir("owner-live-test", "repo-live-test")
@@ -752,10 +768,10 @@ func TestSweepStaleForkPRConfig_PreservesLiveWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list remotes: %v", err)
 	}
-	if !strings.Contains(string(out), "head-77") {
-		t.Errorf("head-77 remote removed by sweep while worktree live: %s", out)
+	if !strings.Contains(string(out), "tfpush-live-test-run-77") {
+		t.Errorf("per-run remote removed by sweep while worktree live: %s", out)
 	}
-	if _, err := exec.Command("git", "-C", bareDir, "config", "--get", "branch.triagefactory/pr-77.remote").Output(); err != nil {
+	if _, err := exec.Command("git", "-C", bareDir, "config", "--get", "branch.triagefactory/live-test-run/pr-77.remote").Output(); err != nil {
 		t.Errorf("branch tracking config for live PR removed by sweep: %v", err)
 	}
 }
@@ -804,11 +820,11 @@ func TestCleanupPRConfig_RunsAfterContextCancellation(t *testing.T) {
 	// CleanupPRConfig takes no ctx — it constructs its own internal
 	// background ctx. Even if the caller's ctx is fully cancelled,
 	// cleanup must still run.
-	CleanupPRConfig("owner-cancel-test", "repo-cancel-test", "feature", 123)
+	CleanupPRConfig("owner-cancel-test", "repo-cancel-test", 123, "cancel-test-run")
 
 	bareDir, _ := repoDir("owner-cancel-test", "repo-cancel-test")
-	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || strings.Contains(string(out), "head-123") {
-		t.Errorf("head-123 remote not cleaned up despite detached context: %v / %s", err, out)
+	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || strings.Contains(string(out), "tfpush-cancel-test-run-123") {
+		t.Errorf("per-run remote not cleaned up despite detached context: %v / %s", err, out)
 	}
 }
 
@@ -849,8 +865,9 @@ func TestCreateForPR_OwnRepoPR_FetchesViaPullRef(t *testing.T) {
 	expected := strings.TrimSpace(string(out))
 
 	// Own-repo PRs pass the same URL as both upstream and head — the
-	// PR's head.repo and base.repo are the same repo. CreateForPR
-	// detects this and skips the fork-tracking configuration.
+	// PR's head.repo and base.repo are the same repo. CreateForPR uses the
+	// same per-run branch + push-tracking scheme as fork PRs; only the push
+	// remote's URL (origin's, here) differs.
 	wtPath, err := CreateForPR(context.Background(), "owner-own-test", "repo-own-test", upstream, upstream, "my-feature", 7, "own-pr-test-run")
 	if err != nil {
 		t.Fatalf("CreateForPR for own-repo PR: %v", err)
@@ -868,8 +885,8 @@ func TestCreateForPR_OwnRepoPR_FetchesViaPullRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("worktree rev-parse abbrev: %v", err)
 	}
-	if got := strings.TrimSpace(string(out)); got != "my-feature" {
-		t.Errorf("worktree branch = %q, want %q (git push relies on attached branch, not detached HEAD)", got, "my-feature")
+	if got := strings.TrimSpace(string(out)); got != "triagefactory/own-pr-test-run/pr-7" {
+		t.Errorf("worktree branch = %q, want %q (git push relies on attached branch, not detached HEAD)", got, "triagefactory/own-pr-test-run/pr-7")
 	}
 
 	// Tracking is preconfigured so `git push` (no remote argument)
@@ -892,6 +909,157 @@ func TestCreateForPR_OwnRepoPR_FetchesViaPullRef(t *testing.T) {
 	}
 	if newTip := strings.TrimSpace(string(out)); newTip == expected {
 		t.Errorf("upstream's my-feature did not advance after agent push (still %q) — tracking didn't take effect", newTip)
+	}
+}
+
+// TestCreateForPR_ConcurrentSamePR_OwnRepo is the TFAC-87 regression: two
+// concurrent runs reviewing the SAME own-repo PR off one shared bare must BOTH
+// materialize (pre-fix the second failed — git refuses to fetch into / check
+// out a local branch already live in another worktree), on distinct run-
+// namespaced branches, and each `git push` (no remote arg) must land on the
+// upstream PR head.
+func TestCreateForPR_ConcurrentSamePR_OwnRepo(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+
+	// Own-repo PR: head branch lives on the upstream and is mirrored at
+	// refs/pull/8/head.
+	work := filepath.Join(t.TempDir(), "own-work")
+	if out, err := exec.Command("git", "init", "-b", "main", work).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	for _, c := range [][]string{
+		{"-C", work, "config", "user.email", "me@example.com"},
+		{"-C", work, "config", "user.name", "Me"},
+		{"-C", work, "remote", "add", "origin", upstream},
+		{"-C", work, "fetch", "origin", "main"},
+		{"-C", work, "checkout", "-b", "shared-feature", "FETCH_HEAD"},
+		{"-C", work, "commit", "--allow-empty", "-m", "PR commit"},
+		{"-C", work, "push", "origin", "shared-feature:refs/heads/shared-feature"},
+		{"-C", work, "push", "origin", "shared-feature:refs/pull/8/head"},
+	} {
+		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", c, err, out)
+		}
+	}
+
+	// Two runs on the same PR, sharing one bare (same owner/repo).
+	wtA, err := CreateForPR(context.Background(), "owner-conc-own", "repo-conc-own", upstream, upstream, "shared-feature", 8, "run-A")
+	if err != nil {
+		t.Fatalf("CreateForPR run A: %v", err)
+	}
+	t.Cleanup(func() { _ = RemoveAt(wtA, "run-A") })
+	wtB, err := CreateForPR(context.Background(), "owner-conc-own", "repo-conc-own", upstream, upstream, "shared-feature", 8, "run-B")
+	if err != nil {
+		t.Fatalf("CreateForPR run B (concurrent same-PR materialization must succeed): %v", err)
+	}
+	t.Cleanup(func() { _ = RemoveAt(wtB, "run-B") })
+
+	if wtA == wtB {
+		t.Fatalf("both runs landed at the same worktree dir %q", wtA)
+	}
+	// Distinct run-namespaced bare-local branches.
+	if b := strings.TrimSpace(coOut(t, wtA, "rev-parse", "--abbrev-ref", "HEAD")); b != "triagefactory/run-A/pr-8" {
+		t.Errorf("run A branch = %q, want triagefactory/run-A/pr-8", b)
+	}
+	if b := strings.TrimSpace(coOut(t, wtB, "rev-parse", "--abbrev-ref", "HEAD")); b != "triagefactory/run-B/pr-8" {
+		t.Errorf("run B branch = %q, want triagefactory/run-B/pr-8", b)
+	}
+
+	// Run A's `git push` (no remote arg) must land on the upstream head
+	// (refs/heads/shared-feature), not a stray branch.
+	for _, c := range [][]string{
+		{"-C", wtA, "config", "user.email", "agent@example.com"},
+		{"-C", wtA, "config", "user.name", "Agent"},
+		{"-C", wtA, "commit", "--allow-empty", "-m", "agent fix A"},
+		{"-C", wtA, "push"},
+	} {
+		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", c, err, out)
+		}
+	}
+	if got, want := coOut(t, upstream, "rev-parse", "refs/heads/shared-feature"), coOut(t, wtA, "rev-parse", "HEAD"); got != want {
+		t.Errorf("after run A push, upstream shared-feature = %q, want %q", got, want)
+	}
+	if out, err := exec.Command("git", "-C", upstream, "show-ref", "--verify", "refs/heads/triagefactory/run-A/pr-8").CombinedOutput(); err == nil {
+		t.Errorf("upstream gained a stray run-A branch — push leaked: %s", out)
+	}
+
+	// Run B is independently configured to push at the SAME upstream head (a
+	// real concurrent push to it races at the remote — an orthogonal, expected
+	// non-fast-forward — so assert the DESTINATION refspec, which is what proves
+	// run B also lands on the PR head, not a stray branch).
+	bareDir, _ := repoDir("owner-conc-own", "repo-conc-own")
+	if got, want := coOut(t, bareDir, "config", "--get", "remote.tfpush-run-B-8.push"),
+		"refs/heads/triagefactory/run-B/pr-8:refs/heads/shared-feature"; got != want {
+		t.Errorf("run B push refspec = %q, want %q (must target the PR head)", got, want)
+	}
+	if got, want := coOut(t, bareDir, "config", "--get", "branch.triagefactory/run-B/pr-8.pushRemote"), "tfpush-run-B-8"; got != want {
+		t.Errorf("run B pushRemote = %q, want %q", got, want)
+	}
+}
+
+// TestCreateForPR_ConcurrentSamePR_Fork is the fork-PR half of the TFAC-87
+// regression: two concurrent runs on the same fork PR both materialize on
+// distinct run-namespaced branches, and each `git push` lands on the
+// contributor's fork branch (not the upstream).
+func TestCreateForPR_ConcurrentSamePR_Fork(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+	fork := makeTestUpstream(t)
+
+	work := filepath.Join(t.TempDir(), "fork-work")
+	if out, err := exec.Command("git", "init", "-b", "main", work).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	for _, c := range [][]string{
+		{"-C", work, "config", "user.email", "fork@example.com"},
+		{"-C", work, "config", "user.name", "Forker"},
+		{"-C", work, "remote", "add", "fork", fork},
+		{"-C", work, "remote", "add", "up", upstream},
+		{"-C", work, "fetch", "up", "main"},
+		{"-C", work, "checkout", "-b", "contrib", "FETCH_HEAD"},
+		{"-C", work, "commit", "--allow-empty", "-m", "fork PR commit"},
+		{"-C", work, "push", "fork", "contrib:refs/heads/contrib"},
+		{"-C", work, "push", "up", "HEAD:refs/pull/9/head"},
+	} {
+		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", c, err, out)
+		}
+	}
+	originalForkTip := coOut(t, fork, "rev-parse", "refs/heads/contrib")
+
+	wtA, err := CreateForPR(context.Background(), "owner-conc-fork", "repo-conc-fork", upstream, fork, "contrib", 9, "run-A")
+	if err != nil {
+		t.Fatalf("CreateForPR run A: %v", err)
+	}
+	t.Cleanup(func() { _ = RemoveAt(wtA, "run-A") })
+	wtB, err := CreateForPR(context.Background(), "owner-conc-fork", "repo-conc-fork", upstream, fork, "contrib", 9, "run-B")
+	if err != nil {
+		t.Fatalf("CreateForPR run B (concurrent same fork-PR must succeed): %v", err)
+	}
+	t.Cleanup(func() { _ = RemoveAt(wtB, "run-B") })
+
+	if wtA == wtB {
+		t.Fatalf("both runs landed at the same worktree dir %q", wtA)
+	}
+
+	// Run A pushes → the fork's contrib branch must advance (not upstream).
+	for _, c := range [][]string{
+		{"-C", wtA, "config", "user.email", "agent@example.com"},
+		{"-C", wtA, "config", "user.name", "Agent"},
+		{"-C", wtA, "commit", "--allow-empty", "-m", "agent fix"},
+		{"-C", wtA, "push"},
+	} {
+		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", c, err, out)
+		}
+	}
+	if got := coOut(t, fork, "rev-parse", "refs/heads/contrib"); got == originalForkTip {
+		t.Errorf("fork contrib did not advance after run A push (still %q) — push went elsewhere", got)
+	}
+	if out, err := exec.Command("git", "-C", upstream, "show-ref", "--verify", "refs/heads/contrib").CombinedOutput(); err == nil {
+		t.Errorf("upstream gained a stray refs/heads/contrib — fork push leaked: %s", out)
 	}
 }
 
@@ -1138,11 +1306,12 @@ func TestCreateForPR_SnapshotBundleIsBounded(t *testing.T) {
 	t.Cleanup(func() { _ = RemoveAt(wtPath, "bundle-test-run") })
 
 	// The mirror ref records GitHub's known tip in the namespace the
-	// snapshot's bundle excludes.
+	// snapshot's bundle excludes — under the per-run local branch path.
 	bareDir, _ := repoDir("owner-bundle-test", "repo-bundle-test")
-	out, err = exec.Command("git", "-C", bareDir, "rev-parse", "refs/remotes/origin/bundle-feature").Output()
+	mirrorRef := "refs/remotes/origin/triagefactory/bundle-test-run/pr-9"
+	out, err = exec.Command("git", "-C", bareDir, "rev-parse", mirrorRef).Output()
 	if err != nil {
-		t.Fatalf("mirror ref refs/remotes/origin/bundle-feature missing from bare: %v", err)
+		t.Fatalf("mirror ref %s missing from bare: %v", mirrorRef, err)
 	}
 	if got := strings.TrimSpace(string(out)); got != prTip {
 		t.Errorf("mirror ref = %q, want PR tip %q", got, prTip)

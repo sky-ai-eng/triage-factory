@@ -1510,7 +1510,7 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 		orgA, runID)
 	MustExec(t, h.AdminDB, `INSERT INTO run_memory (org_id, run_id, entity_id, agent_content) VALUES ($1, $2, $3, 'note')`,
 		orgA, runID, entityA)
-	MustExec(t, h.AdminDB, `INSERT INTO run_worktrees (org_id, run_id, repo_id, path, feature_branch) VALUES ($1, $2, 'octo/repo', '/tmp/x', 'feat/x')`,
+	MustExec(t, h.AdminDB, `INSERT INTO run_worktrees (org_id, run_id, repo_id, path, ref) VALUES ($1, $2, 'octo/repo', '/tmp/x', 'pr-1')`,
 		orgA, runID)
 
 	// Alice sees all her child rows.

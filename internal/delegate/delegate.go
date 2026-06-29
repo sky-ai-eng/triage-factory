@@ -44,8 +44,7 @@ type runConfig struct {
 	runRoot   string  // run-root path: GitHub PR runs == wtPath; Jira lazy runs == the throwaway parent of materialized worktrees. Always set so $TRIAGE_FACTORY_RUN_ROOT resolves uniformly for the memory-gate retry.
 	owner     string  // resolved GitHub owner (empty for Jira lazy runs)
 	repo      string  // resolved GitHub repo (empty for Jira lazy runs)
-	prNumber  int     // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-PR remote + branch tracking config the bare repo would otherwise accumulate
-	headRef   string  // PR head ref (empty for non-PR runs); passed to CleanupPRConfig so own-repo branch tracking (branch.<headRef>.*) gets reclaimed alongside fork-only artifacts
+	prNumber  int     // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-run branch + push remote the bare repo would otherwise accumulate
 	projectID *string // entity's project assignment (nil for un-assigned); SKY-219 uses this to copy the project's knowledge-base into ./_scratch/project-knowledge/
 
 	extraAllowedTools string // comma-separated extra tools from prompt.AllowedTools + agent scans; merged into --allowedTools at spawn time
@@ -459,16 +458,18 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 	// Record the eager worktree in run_worktrees so the least-privilege gates
 	// (git proxy + exec gh) treat the task repo uniformly with workspace-add'd
 	// repos: a run may touch a repo only if its team tracks it AND it appears in
-	// this ledger, and the allowed push ref is its FeatureBranch — here the PR
-	// head. Durable, so a resume re-derives authority with no head-ref
-	// threading. Log-and-continue like SetWorktreePathSystem above: a failure
-	// degrades to denied pushes (a clear 403), never a crash.
+	// this ledger. ref = pr-<N> is the materialization selector (the push gate
+	// reads the worktree's live current branch, not this row). Durable, so a
+	// resume re-derives authority with no head-ref threading, and the row is
+	// what the multi-PR review anchor (add-review-comment) resolves the PR's
+	// worktree HEAD through. Log-and-continue like SetWorktreePathSystem above:
+	// a failure degrades to denied pushes (a clear 403), never a crash.
 	if s.runWorktrees != nil {
 		if _, _, werr := s.runWorktrees.InsertSystem(context.Background(), orgID, domain.RunWorktree{
-			RunID:         runID,
-			RepoID:        owner + "/" + repo,
-			Path:          wtPath,
-			FeatureBranch: pr.HeadRef,
+			RunID:  runID,
+			RepoID: owner + "/" + repo,
+			Path:   wtPath,
+			Ref:    worktree.PRRefSlug(prNumber),
 		}); werr != nil {
 			delegateLog.Warn("record eager worktree in run_worktrees failed; pushes to this repo will be denied until retried", "run", runID, "repo", owner+"/"+repo, "error", werr)
 		}
@@ -490,7 +491,6 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 		owner:     owner,
 		repo:      repo,
 		prNumber:  prNumber,
-		headRef:   pr.HeadRef,
 		projectID: lookupEntityProjectID(s.entities, orgID, task.EntityID),
 	}, nil
 }

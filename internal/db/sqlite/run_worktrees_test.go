@@ -48,11 +48,11 @@ func TestRunWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 	const badOrg = "11111111-1111-1111-1111-111111111111"
 
-	if _, _, err := stores.RunWorktrees.Insert(ctx, badOrg, domain.RunWorktree{RunID: "r", RepoID: "owner/repo", Path: "/p"}); err == nil {
+	if _, _, err := stores.RunWorktrees.Insert(ctx, badOrg, domain.RunWorktree{RunID: "r", RepoID: "owner/repo", Path: "/p", Ref: "@default"}); err == nil {
 		t.Error("Insert(non-local org) should error")
 	}
-	if _, err := stores.RunWorktrees.GetByRepo(ctx, badOrg, "r", "owner/repo"); err == nil {
-		t.Error("GetByRepo(non-local org) should error")
+	if _, err := stores.RunWorktrees.GetByRepoRef(ctx, badOrg, "r", "owner/repo", "@default"); err == nil {
+		t.Error("GetByRepoRef(non-local org) should error")
 	}
 	if _, err := stores.RunWorktrees.List(ctx, badOrg, "r"); err == nil {
 		t.Error("List(non-local org) should error")
@@ -60,8 +60,8 @@ func TestRunWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.RunWorktrees.ListSystem(ctx, badOrg, "r"); err == nil {
 		t.Error("ListSystem(non-local org) should error")
 	}
-	if err := stores.RunWorktrees.DeleteByRepo(ctx, badOrg, "r", "owner/repo"); err == nil {
-		t.Error("DeleteByRepo(non-local org) should error")
+	if err := stores.RunWorktrees.DeleteByRepoRef(ctx, badOrg, "r", "owner/repo", "@default"); err == nil {
+		t.Error("DeleteByRepoRef(non-local org) should error")
 	}
 	if err := stores.RunWorktrees.DeleteByPathSystem(ctx, badOrg, "r", "/p"); err == nil {
 		t.Error("DeleteByPathSystem(non-local org) should error")

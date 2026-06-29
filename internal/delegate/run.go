@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -142,28 +143,30 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			if rmErr != nil {
 				delegateLog.Warn("worktree remove failed; skipping per-PR config cleanup", "run", runID, "error", rmErr)
 			}
-			// Drop the eager worktree's run_worktrees row (recorded at setup so
-			// the least-privilege gates could authorize the task repo) —
-			// regardless of the RemoveAt outcome, since the row is run-scoped
-			// metadata, not the worktree, and a lingering dir doesn't need its
-			// ledger entry. Past the parked/blueprint early-returns above, so a
-			// resume or chain step keeps the row; only a real terminal teardown
-			// removes it. Best-effort: a leaked row is harmless (run-scoped,
-			// never collides a future run).
-			if s.runWorktrees != nil && cfg.owner != "" && cfg.repo != "" {
-				if delErr := s.runWorktrees.DeleteByRepoSystem(context.Background(), orgID, runID, cfg.owner+"/"+cfg.repo); delErr != nil {
+			// Drop the eager worktree's run_worktrees row (recorded at setup with
+			// ref=pr-<N> so the least-privilege gates could authorize the task
+			// repo) — regardless of the RemoveAt outcome, since the row is
+			// run-scoped metadata, not the worktree, and a lingering dir doesn't
+			// need its ledger entry. Past the parked/blueprint early-returns
+			// above, so a resume or chain step keeps the row; only a real
+			// terminal teardown removes it. Best-effort: a leaked row is harmless
+			// (run-scoped, never collides a future run).
+			if s.runWorktrees != nil && cfg.owner != "" && cfg.repo != "" && cfg.prNumber > 0 {
+				if delErr := s.runWorktrees.DeleteByRepoRefSystem(context.Background(), orgID, runID, cfg.owner+"/"+cfg.repo, worktree.PRRefSlug(cfg.prNumber)); delErr != nil {
 					delegateLog.Warn("delete eager worktree run_worktrees row failed", "run", runID, "repo", cfg.owner+"/"+cfg.repo, "error", delErr)
 				}
 			}
 			// Per-PR config cleanup only when the worktree is actually gone (see
-			// above). CleanupPRConfig uses a detached internal context so
-			// cancellation of the agent's ctx (timeout, server shutdown) doesn't
-			// short-circuit it.
+			// above). Pass the creating run id (the worktree-dir basename, which
+			// CreateForPR set to runID) so CleanupPRConfig reclaims THIS run's
+			// per-run branch + push remote, never a sibling's. It uses a detached
+			// internal context so cancellation of the agent's ctx (timeout,
+			// server shutdown) doesn't short-circuit it.
 			if rmErr != nil {
 				return
 			}
 			if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
-				worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.headRef, cfg.prNumber)
+				worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.prNumber, filepath.Base(cfg.wtPath))
 			}
 		}()
 	} else if cfg.runRoot != "" {
@@ -191,6 +194,12 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 						delegateLog.Warn("remove worktree failed", "run", runID, "path", w.Path, "error", rmErr)
 						continue
 					}
+					// Inline per-PR config reclaim (Decision D): a finishing
+					// workspace-add'd PR run reclaims its own per-run branch +
+					// push remote here, so the bootstrap sweep stays a pure crash
+					// backstop. w.RunID == runID (created the worktree), so this
+					// targets this run's branch, never a concurrent run's.
+					reclaimWorkspaceAddPRConfig(w)
 					if delErr := s.runWorktrees.DeleteByPathSystem(cleanupCtx, orgID, runID, w.Path); delErr != nil {
 						delegateLog.Warn("delete run_worktrees row failed", "run", runID, "path", w.Path, "error", delErr)
 					}

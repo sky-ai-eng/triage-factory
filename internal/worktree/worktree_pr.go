@@ -25,25 +25,24 @@ import (
 // headCloneURL is the head.repo.clone_url — the fork's URL when the
 // PR is from a fork, equal to upstreamCloneURL otherwise.
 //
-// For own-repo PRs (head URL == upstream URL): local branch is named
-// <headBranch>; `git push origin <headBranch>` updates the right
-// place because origin IS the upstream and <headBranch> is the same
-// branch on both ends.
+// The bare-local branch is run-namespaced for EVERY PR checkout —
+// triagefactory/<runID>/pr-<n> (prLocalBranch) — so two concurrent runs
+// reviewing the same PR off one shared bare never collide on a branch ref
+// (the fetch and `worktree add` would otherwise be refused). This is one
+// uniform scheme for fork AND own-repo PRs; only the push target differs.
 //
-// For fork PRs: local branch is named triagefactory/pr-<n> (avoids
-// collisions with own-repo branches that might share the head ref
-// name across concurrent runs, AND with any literal contributor
-// branch named pr-<n> — the slash-prefix namespace is reserved for
-// triagefactory's synthetic refs). A bare-config remote `head-<n>`
-// pointing at the fork URL is added, and the local branch's
-// tracking is configured so `git push` (no remote argument) pushes
-// triagefactory/pr-<n> -> the fork's <headBranch>. Agents must use
-// `git push` without a remote arg for this to work; envelope.txt
-// has the corresponding guidance.
+// Push tracking (configurePRPushTracking) wires a per-run remote
+// tfpush-<runID>-<n> -> headCloneURL with an explicit push refspec
+// (the run-namespaced local branch -> the real head branch), so `git
+// push` (no remote argument) lands on the fork's contributor branch
+// (fork PR) or the upstream head (own-repo PR). Agents must use `git
+// push` without a remote arg for this to work; envelope.txt has the
+// corresponding guidance. A deleted-fork PR (head.repo == null) skips
+// push tracking and stays read-only.
 //
-// CleanupPRConfig should be called after the run terminates to
-// remove the per-PR remote and config — they live in the bare's
-// shared config and would otherwise accumulate forever.
+// CleanupPRConfig should be called after the run terminates (with the
+// SAME runID) to remove the per-run remote + branch config — they live
+// in the bare's shared config and would otherwise accumulate forever.
 func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID string, opts ...CloneOption) (string, error) {
 	auth := resolveCloneOptions(opts).auth
 	wtDir, err := makeWorktreeDir(runID)
@@ -54,21 +53,22 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 }
 
 // CreateForPRInRoot is the lazy-materialization variant of CreateForPR: the
-// PR-head worktree lands at filepath.Join(runRoot, owner, repo) so a single
-// run can host it as a sibling under the shared run-root (the `workspace add
-// --pr` path), rather than at the run-dir CreateForPR uses for the eager
-// one-repo GitHub PR delegation. Other than the path — and the absence of a
-// host clone credential, matching CreateForBranchInRoot — behavior is
-// identical: same fork / own-repo / deleted-fork handling, same push-tracking
-// config. The run-root must already exist (created by MakeRunRoot in the
-// spawner); the owner-level subdir is created here.
+// PR-head worktree lands at filepath.Join(runRoot, owner, repo, "pr-<n>") so a
+// single run can host SEVERAL per-repo / per-PR worktrees as siblings under the
+// shared run-root (the `workspace add --pr` path) — the ref-slug subdir is what
+// lets two PRs in one repo coexist (TFAC-502). The eager one-repo GitHub PR
+// delegation uses the run-dir CreateForPR instead. Other than the path — and
+// the absence of a host clone credential, matching CreateForBranchInRoot —
+// behavior is identical: same fork / own-repo / deleted-fork handling, same
+// per-run push-tracking config. The run-root must already exist (created by
+// MakeRunRoot in the spawner); the owner/repo subdirs are created here.
 func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID, runRoot string) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForPRInRoot: runRoot is required")
 	}
-	wtDir := filepath.Join(runRoot, owner, repo)
+	wtDir := filepath.Join(runRoot, owner, repo, PRRefSlug(prNumber))
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
-		return "", fmt.Errorf("mkdir owner subdir: %w", err)
+		return "", fmt.Errorf("mkdir repo subdir: %w", err)
 	}
 	// No CloneAuth: this is the in-sandbox `workspace add --pr` path, where
 	// in-sandbox git credentials are SKY-394's concern, not the host-side clone
@@ -98,16 +98,15 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 	hasHeadRepo := headCloneURL != ""
 
 	isFork := hasHeadRepo && headCloneURL != upstreamCloneURL
-	localBranch := headBranch
-	if isFork {
-		// triagefactory/pr-<n> is namespaced under a path-prefix that
-		// would only collide with a contributor's branch literally
-		// named "triagefactory/pr-<n>" (extremely unlikely). A bare
-		// "pr-<n>" name would have collided with any contributor
-		// using "pr-42" as a real branch name on an own-repo PR,
-		// silently overwriting their fetched tip and tracking config.
-		localBranch = forkPRLocalBranch(prNumber)
-	}
+	// Per-run-unique bare-local branch for EVERY PR checkout — fork, own-repo,
+	// and deleted-fork alike. The own-repo path used to attach the head branch
+	// name itself and the fork path a per-PR triagefactory/pr-<n>; both collided
+	// when two runs shared one bare (git refuses to fetch into / check out a
+	// local branch live in another worktree). prLocalBranch namespaces by run_id
+	// so concurrent same-PR runs never share a ref (TFAC-87/TFAC-502). The
+	// fetch refspecs below inherit that uniqueness, so the fetch no longer hits
+	// "refusing to fetch into branch ... checked out at ...".
+	localBranch := prLocalBranch(runID, prNumber)
 
 	branchRef := fmt.Sprintf("+refs/pull/%d/head:refs/heads/%s", prNumber, localBranch)
 	// Mirror the fetched tip into a remote-tracking ref alongside the local
@@ -154,27 +153,23 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 	}
 
 	switch {
-	case isFork:
-		if err := configureForkPRTracking(ctx, bareDir, prNumber, localBranch, headCloneURL, headBranch); err != nil {
-			// Fork tracking is part of the worktree's contract for fork
-			// PRs — without it, `git push` lands in the wrong place.
-			// Roll back both the worktree AND any partial shared-bare
-			// config so a half-configured state isn't left for later
-			// runs to inherit.
-			rollbackPRSetupLocked(ctx, bareDir, wtDir, runID, headBranch, prNumber)
-			return "", fmt.Errorf("configure fork PR tracking: %w", err)
-		}
 	case hasHeadRepo:
-		// Real own-repo PR (head URL == upstream URL). Configure
-		// tracking so `git push` (no remote argument) works, matching
-		// envelope guidance. With tracking unset, `git push` errors
-		// with "no upstream branch" and forces agents to fall back to
-		// `git push origin <branch>` — which is exactly the form we
-		// discourage because it's wrong for fork PRs and a bug magnet
-		// across the codebase.
-		if err := configureOwnRepoPRTracking(ctx, bareDir, localBranch, prNumber); err != nil {
-			rollbackPRSetupLocked(ctx, bareDir, wtDir, runID, headBranch, prNumber)
-			return "", fmt.Errorf("configure own-repo PR tracking: %w", err)
+		// Fork OR own-repo PR. One uniform per-run push remote whose URL is the
+		// head repo's: the fork for a fork PR, the upstream (== origin) for an
+		// own-repo PR. Because the bare-local branch is now run-namespaced and
+		// differs from the real head branch in both cases, an explicit push
+		// refspec (local -> real head) is what makes `git push` (no remote arg)
+		// land on the contributor's fork branch / the upstream head respectively.
+		// Without it `git push` errors with "no upstream branch" and forces the
+		// `git push origin <branch>` form we discourage (wrong for fork PRs, a
+		// bug magnet across the codebase).
+		if err := configurePRPushTracking(ctx, bareDir, runID, prNumber, localBranch, headCloneURL, headBranch); err != nil {
+			// Push tracking is part of the worktree's contract — without it
+			// `git push` lands in the wrong place. Roll back both the worktree
+			// AND any partial shared-bare config so a half-configured state
+			// isn't left for later runs to inherit.
+			rollbackPRSetupLocked(ctx, bareDir, wtDir, runID, prNumber)
+			return "", fmt.Errorf("configure PR push tracking: %w", err)
 		}
 	default:
 		// Deleted-fork PR (head.repo == null). The PR is reviewable
@@ -195,7 +190,7 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 		// here keeps the fork/own-repo cases consistent — earlier
 		// rollbacks already clean up shared config, so this one
 		// shouldn't be the odd path that leaves it behind.
-		rollbackPRSetupLocked(ctx, bareDir, wtDir, runID, headBranch, prNumber)
+		rollbackPRSetupLocked(ctx, bareDir, wtDir, runID, prNumber)
 		return "", fmt.Errorf("write local git excludes: %w", err)
 	}
 
@@ -206,19 +201,20 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 // rollbackPRSetupLocked undoes a partially-set-up PR worktree:
 // removes the worktree directory + bare's worktree registration,
 // then removes any shared-bare config that earlier steps already
-// wrote (head-<n> remote, branch.triagefactory/pr-<n>.* tracking,
-// branch.<headBranch>.* tracking, and the synthetic local branch).
+// wrote (the per-run tfpush-<runID>-<n> remote, the per-run
+// branch.triagefactory/<runID>/pr-<n>.* tracking, and the synthetic
+// local branch).
 //
 // Caller must hold the per-repo lock (CreateForPR's mu). Best-effort
 // — individual command failures are logged but don't propagate. The
 // caller still returns the original setup error.
 //
-// Without this, a fork-tracking failure mid-write would leave a
-// stray head-<n> remote and partial branch tracking in the bare;
+// Without this, a push-tracking failure mid-write would leave a
+// stray per-run remote and partial branch tracking in the bare;
 // SweepStaleForkPRConfig would eventually clean those up on next
 // bootstrap, but until then they'd sit in the config potentially
 // confusing later runs.
-func rollbackPRSetupLocked(ctx context.Context, bareDir, wtDir, runID, headBranch string, prNumber int) {
+func rollbackPRSetupLocked(ctx context.Context, bareDir, wtDir, runID string, prNumber int) {
 	if rmErr := RemoveAt(wtDir, runID); rmErr != nil {
 		worktreeLog.Warn("rollback PR setup: remove worktree failed", "error", rmErr)
 	}
@@ -226,22 +222,61 @@ func rollbackPRSetupLocked(ctx context.Context, bareDir, wtDir, runID, headBranc
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 
-	removePRConfigLocked(cleanupCtx, bareDir, headBranch, prNumber)
+	removePRConfigLocked(cleanupCtx, bareDir, prLocalBranch(runID, prNumber), prNumber)
 }
 
-// forkPRLocalBranch returns the bare-local branch name we use for a
-// fork PR's checkout. Centralized so CreateForPR and CleanupPRConfig
-// can't drift from each other on the naming convention.
-func forkPRLocalBranch(prNumber int) string {
-	return fmt.Sprintf("triagefactory/pr-%d", prNumber)
+// prLocalBranch returns the bare-local branch name a PR checkout attaches in
+// the shared bare. Namespaced by run_id so two concurrent runs reviewing the
+// SAME PR (sharing one bare) never share a branch ref — git refuses to fetch
+// into, or `worktree add`, a local branch already checked out in another live
+// worktree of the same bare, so a per-PR-only name (the old triagefactory/pr-N)
+// would make the second run's materialization fail (TFAC-87/TFAC-502). One
+// uniform scheme for fork AND own-repo PRs (own-repo used to reuse the head
+// branch name itself, which collided the same way). The triagefactory/ prefix
+// reserves the namespace from any literal contributor branch. Centralized so
+// CreateForPR, the push-tracking config, and the cleanup paths can't drift on
+// the convention.
+func prLocalBranch(runID string, prNumber int) string {
+	return fmt.Sprintf("triagefactory/%s/pr-%d", runID, prNumber)
 }
 
-// forkPRRemoteName returns the bare-config remote name we use for a
-// fork PR's contributor remote. Per-PR rather than per-fork-owner so
-// add/set-url is idempotent and stale URLs from one PR can't
-// contaminate another.
-func forkPRRemoteName(prNumber int) string {
-	return fmt.Sprintf("head-%d", prNumber)
+// parsePRLocalBranch reverses prLocalBranch, recovering the run id from a
+// per-run PR branch name (triagefactory/<runID>/pr-<N>). The sweep walks branch
+// markers — which carry the branch name, not the run id — so it needs this to
+// reconstruct the per-run push remote for reclamation. ok=false for any branch
+// that isn't one of ours (so the sweep skips it safely).
+func parsePRLocalBranch(branch string) (runID string, prNumber int, ok bool) {
+	rest, ok := strings.CutPrefix(branch, "triagefactory/")
+	if !ok {
+		return "", 0, false
+	}
+	cut := strings.LastIndex(rest, "/pr-")
+	if cut <= 0 {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(rest[cut+len("/pr-"):])
+	if err != nil || n <= 0 {
+		return "", 0, false
+	}
+	return rest[:cut], n, true
+}
+
+// prPushRemoteName returns the bare-config remote name a PR worktree pushes
+// through. Per (run, PR) — not per-PR — so two concurrent runs on the same PR
+// each own their own remote: inline cleanup of one run can then reclaim its
+// remote without yanking it out from under the other (a shared head-<N> remote
+// would break the surviving run). The runID/pr namespace is flattened (remote
+// names can't contain '/'). Derivable from the per-run branch alone via
+// parsePRLocalBranch, so the bootstrap sweep can reconstruct it for orphans.
+func prPushRemoteName(runID string, prNumber int) string {
+	return fmt.Sprintf("tfpush-%s-%d", runID, prNumber)
+}
+
+// PRRefSlug is the run_worktrees ref and worktree-subdir name for a PR-head
+// checkout: "pr-<N>". Exported so the workspace CLI reserves the row and
+// computes the worktree path with the same slug the InRoot create uses.
+func PRRefSlug(prNumber int) string {
+	return fmt.Sprintf("pr-%d", prNumber)
 }
 
 // trackedBranchMarkerKey is the per-branch config key that marks a
@@ -266,17 +301,18 @@ const trackedBranchMarkerKey = "tfprnumber"
 // block run finalization indefinitely.
 const cleanupTimeout = 30 * time.Second
 
-// CleanupPRConfig removes per-PR config blocks the bare repo
-// accumulated for a delegated PR run: the head-<n> remote and
-// triagefactory/pr-<n> branch tracking from fork-PR setup, and the
-// branch.<headBranch>.* tracking from own-repo PR setup. Idempotent
-// — anything already absent is a no-op.
+// CleanupPRConfig removes the per-PR config a bare repo accumulated for
+// one delegated PR run: the per-run tfpush-<runID>-<n> push remote, the
+// per-run branch.triagefactory/<runID>/pr-<n>.* tracking, the local
+// branch ref itself, and its remote-tracking mirror. Idempotent —
+// anything already absent is a no-op.
 //
-// headBranch is the PR's actual head ref (cfg.headRef in the
-// spawner's runConfig). For own-repo PRs it's the worktree's local
-// branch; for fork PRs it's the contributor's branch on the fork.
-// Pass it so we can also clean the own-repo branch.<headBranch>.*
-// tracking — without it, only fork-specific config gets reclaimed.
+// runID identifies the finishing run so it reclaims ITS OWN per-run
+// branch and remote, never a sibling's: a second concurrent run on the
+// same PR has a distinct run-namespaced branch/remote that this call
+// leaves untouched. No head branch is needed — every PR checkout (fork,
+// own-repo, deleted-fork) now lives under the run-namespaced local
+// branch, so there is no separate refs/heads/<headBranch> copy to clean.
 //
 // Uses a detached background context with a bounded timeout rather
 // than threading the caller's ctx through. Cleanup must still run
@@ -290,7 +326,7 @@ const cleanupTimeout = 30 * time.Second
 // individual git invocations are swallowed — cleanup is best-effort
 // and a partial failure shouldn't propagate up the run-finalization
 // path.
-func CleanupPRConfig(owner, repo, headBranch string, prNumber int) {
+func CleanupPRConfig(owner, repo string, prNumber int, runID string) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -305,50 +341,40 @@ func CleanupPRConfig(owner, repo, headBranch string, prNumber int) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	removePRConfigLocked(ctx, bareDir, headBranch, prNumber)
+	removePRConfigLocked(ctx, bareDir, prLocalBranch(runID, prNumber), prNumber)
 }
 
-// removePRConfigLocked is the config-removal sequence for a single
-// PR. Caller must hold the per-repo lock. Used by both the inline
-// CleanupPRConfig (run finalization) and SweepStaleForkPRConfig
-// (bootstrap-time backstop) so the cleanup steps stay in lockstep.
+// removePRConfigLocked is the config-removal sequence for a single PR
+// worktree, keyed on its per-run bare-local branch. Caller must hold the
+// per-repo lock. Used by both the inline CleanupPRConfig (run
+// finalization) and SweepStaleForkPRConfig (bootstrap-time backstop) so
+// the cleanup steps stay in lockstep.
 //
-// headBranch may be empty — pass "" when only fork-specific artifacts
-// are known (e.g. when discovering an orphan via the triagefactory/
-// pr-<n> branch alone). When set, both the branch tracking
-// (branch.<headBranch>.*) and the local branch ref (refs/heads/
-// <headBranch>) are reclaimed too — important for deleted-fork PRs
-// (where the only local ref is refs/heads/<headBranch>) and to
-// prevent CreateForBranch from picking up a stale tip on a future
-// Jira delegation that happens to use the same branch name.
+// localBranch is the run-namespaced branch (triagefactory/<runID>/pr-<n>):
+// the inline path computes it from (runID, prNumber); the sweep already
+// has it verbatim from the branch marker it walked. The per-run push
+// remote is reconstructed from it via parsePRLocalBranch.
 //
 // Branch deletion is safe because we always call this AFTER RemoveAt
 // has destroyed the worktree dir; git refuses `branch -D` for a
 // branch checked out by any live worktree, so a concurrent
-// delegation would force this to no-op rather than silently break a
-// live checkout.
+// delegation (a second run on the same PR has a DIFFERENT branch
+// anyway) would force this to no-op rather than break a live checkout.
 //
 // All commands tolerate "already absent": git remote remove errors
 // when the remote isn't there, --remove-section errors when the
-// section is absent, branch -D errors when the branch is gone.
-// Each error is a normal idempotent state.
-func removePRConfigLocked(ctx context.Context, bareDir, headBranch string, prNumber int) {
-	remoteName := forkPRRemoteName(prNumber)
-	syntheticBranch := forkPRLocalBranch(prNumber)
-	_ = gitRunCtx(ctx, bareDir, "remote", "remove", remoteName)
-	_ = gitRunCtx(ctx, bareDir, "config", "--remove-section", "branch."+syntheticBranch)
-	_ = gitRunCtx(ctx, bareDir, "branch", "-D", syntheticBranch)
-	if headBranch != "" && headBranch != syntheticBranch {
-		_ = gitRunCtx(ctx, bareDir, "config", "--remove-section", "branch."+headBranch)
-		// Delete the local copy of the head branch the fetch refspec
-		// created at refs/heads/<headBranch>. Required for deleted-fork
-		// PRs (their data lives there, not at the synthetic name) and
-		// for own-repo PRs to keep CreateForBranch's branchExists path
-		// from reusing a stale tip when a future Jira delegation
-		// happens to use the same branch name. Re-delegating the same
-		// PR re-fetches refs/pull/<n>/head, so deletion is reversible.
-		_ = gitRunCtx(ctx, bareDir, "branch", "-D", headBranch)
+// section is absent, branch -D / update-ref -d error when the ref is
+// gone. Each error is a normal idempotent state.
+func removePRConfigLocked(ctx context.Context, bareDir, localBranch string, prNumber int) {
+	if runID, _, ok := parsePRLocalBranch(localBranch); ok {
+		_ = gitRunCtx(ctx, bareDir, "remote", "remove", prPushRemoteName(runID, prNumber))
 	}
+	_ = gitRunCtx(ctx, bareDir, "config", "--remove-section", "branch."+localBranch)
+	_ = gitRunCtx(ctx, bareDir, "branch", "-D", localBranch)
+	// Drop the remote-tracking mirror the fetch refspec created alongside the
+	// local branch (refs/remotes/origin/<localBranch>) so a finishing run leaves
+	// no per-run ref behind. update-ref -d no-ops when it's already gone.
+	_ = gitRunCtx(ctx, bareDir, "update-ref", "-d", "refs/remotes/origin/"+localBranch)
 }
 
 // SweepStaleForkPRConfig walks every branch the bare has marked as
@@ -361,15 +387,17 @@ func removePRConfigLocked(ctx context.Context, bareDir, headBranch string, prNum
 //   - Run was cancelled at a layer above the runAgent defer (rare):
 //     inline cleanup never runs.
 //
-// Walking markers (rather than head-<n> remotes alone) is what makes
-// this cover own-repo PRs too — fork PRs have a head-<n> the old
-// approach could find, but own-repo PRs have only the branch config
-// block, which the marker exposes generically.
+// Walking markers (rather than per-run push remotes alone) is what
+// makes this cover every PR worktree uniformly: each marked branch is a
+// run-namespaced triagefactory/<runID>/pr-<n>, and removePRConfigLocked
+// reconstructs the matching per-run push remote from the branch name.
 //
 // Safe to call while runs are still in flight because `git worktree
 // list` reports their checkouts and we only reclaim branches with no
-// live checkout. Best-effort: orphan-detection failures or partial
-// removes correct themselves on the next bootstrap.
+// live checkout — and each run's branch/remote is run-namespaced, so a
+// reclaim of one orphan can never touch a concurrent run's config.
+// Best-effort: orphan-detection failures or partial removes correct
+// themselves on the next bootstrap.
 func SweepStaleForkPRConfig(owner, repo string) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
@@ -421,10 +449,10 @@ func SweepStaleForkPRConfig(owner, repo string) {
 		if inUse[branch] {
 			continue
 		}
-		// Pass the marked branch as headBranch so removePRConfigLocked
-		// also wipes refs/heads/<branch> and the branch.<branch>.*
-		// section. The synthetic triagefactory/pr-<n> branch (if any)
-		// gets cleaned by the same call's fork-specific path.
+		// The marked branch IS the per-run local branch
+		// (triagefactory/<runID>/pr-<n>); removePRConfigLocked reclaims its
+		// config section, the branch ref + mirror, and the per-run push
+		// remote it reconstructs from the branch name.
 		removePRConfigLocked(ctx, bareDir, branch, prNumber)
 		reclaimed++
 	}
@@ -436,9 +464,10 @@ func SweepStaleForkPRConfig(owner, repo string) {
 // liveWorktreeBranches returns the set of refs/heads/<name> that
 // `git worktree list --porcelain` reports as checked out somewhere
 // (the bare itself if it has a HEAD, plus every linked worktree).
-// The sweep uses this to decide whether a head-<n> remote is still
-// actively backing a checkout — if its triagefactory/pr-<n> branch
-// is in this set, removing the remote would break that worktree.
+// The sweep uses this to decide whether a per-run PR branch is still
+// actively backing a checkout — if its triagefactory/<runID>/pr-<n>
+// branch is in this set, reclaiming its config would break that
+// worktree, so the sweep leaves it for the run's own cleanup.
 func liveWorktreeBranches(ctx context.Context, bareDir string) map[string]bool {
 	branches := make(map[string]bool)
 	out, err := gitOutputCtx(ctx, bareDir, "worktree", "list", "--porcelain")
@@ -455,84 +484,57 @@ func liveWorktreeBranches(ctx context.Context, bareDir string) map[string]bool {
 	return branches
 }
 
-// configureForkPRTracking sets up the worktree's local branch so
-// `git push` (no remote argument) sends commits to the contributor's
-// fork at the right branch name. Configures four pieces:
+// configurePRPushTracking sets up the worktree's per-run bare-local branch so
+// `git push` (no remote argument) lands on the real PR head — the contributor's
+// fork branch for a fork PR, the upstream head for an own-repo PR. One uniform
+// scheme for both: the only difference is pushURL (the fork's clone URL vs the
+// upstream's, which the caller already resolved as headCloneURL). Configures:
 //
-//   - A bare-config remote head-<prNumber> -> forkCloneURL. Per-PR
-//     naming (vs per-fork-owner) keeps add/set-url idempotent and
-//     prevents stale URLs from one PR contaminating another.
-//   - branch.<localBranch>.remote / .merge so `git pull` treats
-//     the fork as the upstream and the agent can refresh.
-//   - branch.<localBranch>.pushRemote so push specifically targets
-//     the fork even if remote.pushDefault changes elsewhere.
+//   - A bare-config remote tfpush-<runID>-<n> -> pushURL. Per (run, PR), not
+//     per-PR: two concurrent runs on the same PR own separate remotes so one
+//     run's cleanup can reclaim its remote without breaking the other.
 //   - remote.<remoteName>.push as an explicit refspec mapping
-//     refs/heads/<localBranch> -> refs/heads/<forkBranch>. Without
-//     this, `git push` (no args) under the default push.default
-//     ("simple") errors with "names don't match" because local
-//     triagefactory/pr-<n> and remote <forkBranch> differ. The
-//     explicit refspec bypasses the name-match check and pushes to
-//     the right place.
+//     refs/heads/<localBranch> -> refs/heads/<headBranch>. Both the fork and
+//     own-repo paths now have local (triagefactory/<runID>/pr-<n>) differ from
+//     the remote head branch, so under the default push.default ("simple")
+//     `git push` (no args) would error "names don't match"; the explicit
+//     refspec bypasses the check and pushes to the right place. Living on the
+//     per-run remote (not a shared one) is what keeps two concurrent runs'
+//     push refspecs from clobbering each other.
+//   - branch.<localBranch>.remote / .merge so `git pull` treats the head repo
+//     as the upstream and the agent can refresh.
+//   - branch.<localBranch>.pushRemote so push targets the per-run remote even
+//     if remote.pushDefault changes elsewhere.
+//   - the trackedBranchMarkerKey (= the PR number) so SweepStaleForkPRConfig
+//     can reclaim the block generically when inline cleanup doesn't fire.
 //
-// Idempotent: re-running on an already-configured state updates URLs
-// and rewrites config keys to current values.
-func configureForkPRTracking(ctx context.Context, bareDir string, prNumber int, localBranch, forkCloneURL, forkBranch string) error {
-	remoteName := forkPRRemoteName(prNumber)
+// All keys are scoped to the run-namespaced branch / remote, so nothing here
+// leaks across a concurrent run's worktree on the same shared bare. A
+// deleted-fork PR (pushURL == "") never reaches this — its caller skips push
+// tracking so `git push` fails loudly (read-only, by design).
+//
+// Idempotent: re-running on an already-configured state updates the URL and
+// rewrites config keys to current values.
+func configurePRPushTracking(ctx context.Context, bareDir, runID string, prNumber int, localBranch, pushURL, headBranch string) error {
+	remoteName := prPushRemoteName(runID, prNumber)
 
-	// Add or update the fork remote. `git remote add` errors when the
-	// remote already exists; fall through to set-url in that case so
-	// repeat calls (re-delegation, retries) are no-ops on URL match
-	// and corrective on URL drift.
-	if err := gitRunCtx(ctx, bareDir, "remote", "add", remoteName, forkCloneURL); err != nil {
-		if err := gitRunCtx(ctx, bareDir, "remote", "set-url", remoteName, forkCloneURL); err != nil {
+	// Add or update the per-run push remote. `git remote add` errors when the
+	// remote already exists; fall through to set-url in that case so repeat
+	// calls (re-delegation, retries) are no-ops on URL match and corrective on
+	// URL drift.
+	if err := gitRunCtx(ctx, bareDir, "remote", "add", remoteName, pushURL); err != nil {
+		if err := gitRunCtx(ctx, bareDir, "remote", "set-url", remoteName, pushURL); err != nil {
 			return fmt.Errorf("add or set-url remote %s: %w", remoteName, err)
 		}
 	}
 
-	pushRefspec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", localBranch, forkBranch)
+	pushRefspec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", localBranch, headBranch)
 	prMarker := strconv.Itoa(prNumber)
 	cfgs := [][]string{
-		{"config", fmt.Sprintf("branch.%s.remote", localBranch), remoteName},
-		{"config", fmt.Sprintf("branch.%s.merge", localBranch), "refs/heads/" + forkBranch},
-		{"config", fmt.Sprintf("branch.%s.pushRemote", localBranch), remoteName},
 		{"config", fmt.Sprintf("remote.%s.push", remoteName), pushRefspec},
-		// Marker so SweepStaleForkPRConfig can find this branch
-		// generically (the head-<n> remote alone wouldn't cover
-		// own-repo PRs, but the marker covers both flows).
-		{"config", fmt.Sprintf("branch.%s.%s", localBranch, trackedBranchMarkerKey), prMarker},
-	}
-	for _, args := range cfgs {
-		if err := gitRunCtx(ctx, bareDir, args...); err != nil {
-			return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
-		}
-	}
-	return nil
-}
-
-// configureOwnRepoPRTracking sets per-branch tracking
-// (branch.<localBranch>.{remote,merge}) so `git push` (no remote
-// argument) resolves to origin/<localBranch> for this specific
-// branch. Since local and remote branch names match for own-repo
-// PRs, push.default=simple (the default) is happy without further
-// config.
-//
-// Per-branch rather than repo-wide intentionally. Repo-wide settings
-// like remote.pushDefault and push.default=current would leak across
-// every worktree off this bare: once any own-repo PR runs, a later
-// deleted-fork PR (which deliberately skips tracking so push fails
-// loudly) would silently resolve `git push` against the inherited
-// repo-wide settings and create a stray branch on upstream. Per-PR
-// config blocks accumulate, but bounded by unique head-ref names
-// across the repo's lifetime — a real concern only at repo scales
-// well beyond what this tool targets.
-//
-// Also writes the trackedBranchMarkerKey so the sweep can reclaim
-// this block when the spawner's inline cleanup doesn't fire.
-func configureOwnRepoPRTracking(ctx context.Context, bareDir, localBranch string, prNumber int) error {
-	prMarker := strconv.Itoa(prNumber)
-	cfgs := [][]string{
-		{"config", fmt.Sprintf("branch.%s.remote", localBranch), "origin"},
-		{"config", fmt.Sprintf("branch.%s.merge", localBranch), "refs/heads/" + localBranch},
+		{"config", fmt.Sprintf("branch.%s.remote", localBranch), remoteName},
+		{"config", fmt.Sprintf("branch.%s.merge", localBranch), "refs/heads/" + headBranch},
+		{"config", fmt.Sprintf("branch.%s.pushRemote", localBranch), remoteName},
 		{"config", fmt.Sprintf("branch.%s.%s", localBranch, trackedBranchMarkerKey), prMarker},
 	}
 	for _, args := range cfgs {

@@ -209,8 +209,8 @@ func (c *LocalClient) TeamTracksRepo(ctx context.Context, owner, repo string) (b
 	return c.stores.TeamGitHubRepos.TracksRepoSystem(ctx, c.info.TeamID, owner, repo)
 }
 
-func (c *LocalClient) GetRunWorktreeByRepo(ctx context.Context, repoID string) (*domain.RunWorktree, error) {
-	return c.stores.RunWorktrees.GetByRepoSystem(ctx, c.info.OrgID, c.info.RunID, repoID)
+func (c *LocalClient) GetRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.RunWorktree, error) {
+	return c.stores.RunWorktrees.GetByRepoRefSystem(ctx, c.info.OrgID, c.info.RunID, repoID, ref)
 }
 
 func (c *LocalClient) ListRunWorktrees(ctx context.Context) ([]domain.RunWorktree, error) {
@@ -234,13 +234,13 @@ func (c *LocalClient) InsertRunWorktree(ctx context.Context, row domain.RunWorkt
 	return inserted, winningPath, err
 }
 
-func (c *LocalClient) DeleteRunWorktreeByRepo(ctx context.Context, repoID string) error {
+func (c *LocalClient) DeleteRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
 	return c.withWrite(ctx,
 		func() error {
-			return c.stores.RunWorktrees.DeleteByRepoSystem(ctx, c.info.OrgID, c.info.RunID, repoID)
+			return c.stores.RunWorktrees.DeleteByRepoRefSystem(ctx, c.info.OrgID, c.info.RunID, repoID, ref)
 		},
 		func(ts db.TxStores) error {
-			return ts.RunWorktrees.DeleteByRepo(ctx, c.info.OrgID, c.info.RunID, repoID)
+			return ts.RunWorktrees.DeleteByRepoRef(ctx, c.info.OrgID, c.info.RunID, repoID, ref)
 		},
 	)
 }

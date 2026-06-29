@@ -210,9 +210,9 @@ func (c *IPCClient) TeamTracksRepo(ctx context.Context, owner, repo string) (boo
 	return res.Tracks, nil
 }
 
-func (c *IPCClient) GetRunWorktreeByRepo(ctx context.Context, repoID string) (*domain.RunWorktree, error) {
+func (c *IPCClient) GetRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.RunWorktree, error) {
 	var res runWorktreeResult
-	if err := c.call(ctx, methodGetRunWorktreeByRepo, runWorktreeByRepoArgs{RepoID: repoID}, &res); err != nil {
+	if err := c.call(ctx, methodGetRunWorktreeByRepoRef, runWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, &res); err != nil {
 		return nil, err
 	}
 	return res.Worktree, nil
@@ -234,8 +234,8 @@ func (c *IPCClient) InsertRunWorktree(ctx context.Context, row domain.RunWorktre
 	return res.Inserted, res.WinningPath, nil
 }
 
-func (c *IPCClient) DeleteRunWorktreeByRepo(ctx context.Context, repoID string) error {
-	return c.call(ctx, methodDeleteRunWorktreeByRepo, deleteRunWorktreeByRepoArgs{RepoID: repoID}, nil)
+func (c *IPCClient) DeleteRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
+	return c.call(ctx, methodDeleteRunWorktreeByRepoRef, deleteRunWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, nil)
 }
 
 func (c *IPCClient) BuildAgentRunFooter(ctx context.Context, kind string) (string, error) {

@@ -50,10 +50,10 @@ func coPushBranch(t *testing.T, upstream, branch string) string {
 }
 
 // TestCreateForCheckoutInRoot_DefaultBranchDetached pins the generalized default
-// `workspace add`: the worktree lands at {runRoot}/{owner}/{repo}, checked out
-// DETACHED at the repo's default-branch tip (no branch claimed), and the agent
-// can then create its own branch — which CurrentBranch (the push gate's source)
-// reports.
+// `workspace add`: the worktree lands at {runRoot}/{owner}/{repo}/@default,
+// checked out DETACHED at the repo's default-branch tip (no branch claimed), and
+// the agent can then create its own branch — which CurrentBranch (the push
+// gate's source) reports.
 func TestCreateForCheckoutInRoot_DefaultBranchDetached(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t) // default branch "main", one commit
@@ -65,7 +65,7 @@ func TestCreateForCheckoutInRoot_DefaultBranchDetached(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = RemoveAt(wt, "run-1") })
 
-	if want := filepath.Join(runRoot, "owner", "repo"); wt != want {
+	if want := filepath.Join(runRoot, "owner", "repo", "@default"); wt != want {
 		t.Errorf("path = %q, want %q", wt, want)
 	}
 	// HEAD is detached → no live branch → push gate authorizes nothing yet.
@@ -106,9 +106,9 @@ func TestCreateForCheckoutInRoot_Ref(t *testing.T) {
 }
 
 // TestCreateForPRInRoot_OwnRepoPR pins `workspace add --pr N` for an own-repo
-// PR: the worktree lands at the in-root path on the PR head (via the upstream's
-// refs/pull/<n>/head), checked out on the head branch so CurrentBranch reports
-// it (and the push gate authorizes it).
+// PR: the worktree lands at {runRoot}/{owner}/{repo}/pr-<N> on the PR head (via
+// the upstream's refs/pull/<n>/head), checked out on the per-run branch so
+// CurrentBranch reports it (and the push gate authorizes it).
 func TestCreateForPRInRoot_OwnRepoPR(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
@@ -131,16 +131,17 @@ func TestCreateForPRInRoot_OwnRepoPR(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = RemoveAt(wt, "run-3") })
 
-	if want := filepath.Join(runRoot, "owner", "repo"); wt != want {
+	if want := filepath.Join(runRoot, "owner", "repo", "pr-7"); wt != want {
 		t.Errorf("path = %q, want %q", wt, want)
 	}
 	if got := coOut(t, wt, "rev-parse", "HEAD"); got != prTip {
 		t.Errorf("worktree HEAD = %q, want PR head %q", got, prTip)
 	}
-	// Own-repo PR checks out the head ref as a real local branch → the push gate
-	// authorizes it.
-	if b := CurrentBranch(wt); b != "pr-head" {
-		t.Errorf("CurrentBranch = %q, want pr-head", b)
+	// The PR checks out on the run-namespaced local branch → the push gate
+	// authorizes it (and it's per-run-unique so concurrent same-PR runs don't
+	// collide).
+	if b := CurrentBranch(wt); b != "triagefactory/run-3/pr-7" {
+		t.Errorf("CurrentBranch = %q, want triagefactory/run-3/pr-7", b)
 	}
 }
 

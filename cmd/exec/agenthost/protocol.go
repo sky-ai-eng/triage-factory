@@ -209,8 +209,9 @@ type teamTracksRepoResult struct {
 	Tracks bool `json:"tracks"`
 }
 
-type runWorktreeByRepoArgs struct {
+type runWorktreeByRepoRefArgs struct {
 	RepoID string `json:"repo_id"`
+	Ref    string `json:"ref"`
 }
 
 type runWorktreeResult struct {
@@ -230,8 +231,9 @@ type insertRunWorktreeResult struct {
 	WinningPath string `json:"winning_path"`
 }
 
-type deleteRunWorktreeByRepoArgs struct {
+type deleteRunWorktreeByRepoRefArgs struct {
 	RepoID string `json:"repo_id"`
+	Ref    string `json:"ref"`
 }
 
 type buildAgentRunFooterArgs struct {
@@ -537,18 +539,18 @@ type emptyResult struct{}
 // methodCallNames are the wire-name constants. Used by both client
 // and server so a rename here is the only edit needed to propagate.
 const (
-	methodLookupRun               = "LookupRun"
-	methodFinalizeReviewDraft     = "FinalizeReviewDraft"
-	methodGetAgentRun             = "GetAgentRun"
-	methodGetTask                 = "GetTask"
-	methodListRepos               = "ListRepos"
-	methodGetRepo                 = "GetRepo"
-	methodTeamTracksRepo          = "TeamTracksRepo"
-	methodGetRunWorktreeByRepo    = "GetRunWorktreeByRepo"
-	methodListRunWorktrees        = "ListRunWorktrees"
-	methodInsertRunWorktree       = "InsertRunWorktree"
-	methodDeleteRunWorktreeByRepo = "DeleteRunWorktreeByRepo"
-	methodBuildAgentRunFooter     = "BuildAgentRunFooter"
+	methodLookupRun                  = "LookupRun"
+	methodFinalizeReviewDraft        = "FinalizeReviewDraft"
+	methodGetAgentRun                = "GetAgentRun"
+	methodGetTask                    = "GetTask"
+	methodListRepos                  = "ListRepos"
+	methodGetRepo                    = "GetRepo"
+	methodTeamTracksRepo             = "TeamTracksRepo"
+	methodGetRunWorktreeByRepoRef    = "GetRunWorktreeByRepoRef"
+	methodListRunWorktrees           = "ListRunWorktrees"
+	methodInsertRunWorktree          = "InsertRunWorktree"
+	methodDeleteRunWorktreeByRepoRef = "DeleteRunWorktreeByRepoRef"
+	methodBuildAgentRunFooter        = "BuildAgentRunFooter"
 
 	methodUpsertArtifact = "UpsertArtifact"
 

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -205,7 +207,10 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 			return
 		}
 		if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
-			worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.headRef, cfg.prNumber)
+			// The eager PR worktree's per-run branch is namespaced by the id
+			// that CreateForPR ran under — the worktree-dir basename (the first
+			// step's run id), NOT the blueprint_run id — so reclaim with that.
+			worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.prNumber, filepath.Base(cfg.wtPath))
 		}
 	} else if cfg.runRoot != "" {
 		// Jira blueprints materialize worktrees lazily via `workspace add`,
@@ -230,6 +235,11 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 				if err := worktree.RemoveAt(w.Path, sr.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
 					blueprintLog.Warn("remove worktree failed", "blueprint_run", blueprintRunID, "path", w.Path, "error", err)
 					// Still attempt the DB row deletion even if the worktree remove failed.
+				} else {
+					// Worktree gone — reclaim its per-run PR branch + push remote
+					// inline (Decision D), so the bootstrap sweep stays a pure
+					// crash backstop. w.RunID == sr.ID (created the worktree).
+					reclaimWorkspaceAddPRConfig(w)
 				}
 				if err := s.runWorktrees.DeleteByPathSystem(cleanupCtx, cfg.orgID, sr.ID, w.Path); err != nil {
 					blueprintLog.Warn("delete run_worktrees row failed", "blueprint_run", blueprintRunID, "path", w.Path, "error", err)
@@ -239,6 +249,40 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 		worktree.RemoveRunRoot(blueprintRunID)
 	}
 	worktree.RemoveClaudeProjectDir(cfg.wtPath)
+}
+
+// reclaimWorkspaceAddPRConfig reclaims the per-run PR branch + push remote a
+// `workspace add --pr N` worktree left in the shared bare, keyed off the
+// run_worktrees row's ref (pr-<N>) and run_id (the run that created it, so the
+// per-run branch namespace matches). A no-op for non-PR refs (@default, branch
+// slugs) — those leave detached checkouts with no per-PR config. Folds the
+// eager path's inline cleanup into the lazy teardown so the bootstrap sweep
+// stays a pure crash backstop (Decision D / TFAC-502). Shared by both lazy
+// teardown paths (runAgent's Jira defer and runBlueprintWorktreeCleanup).
+func reclaimWorkspaceAddPRConfig(w domain.RunWorktree) {
+	prNum, ok := prNumberFromRef(w.Ref)
+	if !ok {
+		return
+	}
+	owner, repo := parseOwnerRepo(w.RepoID)
+	if owner == "" || repo == "" {
+		return
+	}
+	worktree.CleanupPRConfig(owner, repo, prNum, w.RunID)
+}
+
+// prNumberFromRef extracts N from a "pr-<N>" run_worktrees ref. ok=false for any
+// non-PR ref ("@default", a branch slug), which carries no per-PR config.
+func prNumberFromRef(ref string) (int, bool) {
+	rest, ok := strings.CutPrefix(ref, "pr-")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // taskEntityID resolves the entity_id for a task. Used to drain the

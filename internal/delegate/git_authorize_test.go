@@ -53,11 +53,11 @@ func TestGitAuthorizeDecision(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed profile: %v", err)
 	}
-	// FeatureBranch on the rows is now informational only — the gate reads the
-	// live branch, stubbed below by worktree path.
+	// Ref on the rows is informational only — the gate reads the live branch,
+	// stubbed below by worktree path.
 	for _, w := range []domain.RunWorktree{
-		{RunID: "run-1", RepoID: "acme/api", Path: "/tmp/a", FeatureBranch: "ignored"},
-		{RunID: "run-1", RepoID: "acme/materialized-only", Path: "/tmp/m", FeatureBranch: "ignored"},
+		{RunID: "run-1", RepoID: "acme/api", Path: "/tmp/a", Ref: "@default"},
+		{RunID: "run-1", RepoID: "acme/materialized-only", Path: "/tmp/m", Ref: "@default"},
 	} {
 		if _, _, err := stores.RunWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, w); err != nil {
 			t.Fatalf("materialize %s: %v", w.RepoID, err)
@@ -129,7 +129,7 @@ func TestGitAuthorizeDecision_ProtectedAndDetached(t *testing.T) {
 		t.Fatalf("set base branch: %v", err)
 	}
 	if _, _, err := stores.RunWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.RunWorktree{
-		RunID: "run-2", RepoID: "acme/api", Path: "/tmp/api", FeatureBranch: "ignored",
+		RunID: "run-2", RepoID: "acme/api", Path: "/tmp/api", Ref: "@default",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestGitAuthorizeDecision_UniversalProtectionWithoutProfile(t *testing.T) {
 		t.Fatalf("track repo: %v", err)
 	}
 	if _, _, err := stores.RunWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.RunWorktree{
-		RunID: "run-3", RepoID: "acme/noprofile", Path: "/tmp/np", FeatureBranch: "ignored",
+		RunID: "run-3", RepoID: "acme/noprofile", Path: "/tmp/np", Ref: "@default",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestGitAuthorizeDecision_FailsClosedWithoutReposStore(t *testing.T) {
 		t.Fatalf("track repo: %v", err)
 	}
 	if _, _, err := full.RunWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.RunWorktree{
-		RunID: "run-4", RepoID: "acme/api", Path: "/tmp/api4", FeatureBranch: "ignored",
+		RunID: "run-4", RepoID: "acme/api", Path: "/tmp/api4", Ref: "@default",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}

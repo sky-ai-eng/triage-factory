@@ -27,9 +27,9 @@ func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.Ru
 		return false, "", err
 	}
 	res, err := s.q.ExecContext(ctx, `
-		INSERT OR IGNORE INTO run_worktrees (run_id, repo_id, path, feature_branch)
+		INSERT OR IGNORE INTO run_worktrees (run_id, repo_id, path, ref)
 		VALUES (?, ?, ?, ?)
-	`, w.RunID, w.RepoID, w.Path, w.FeatureBranch)
+	`, w.RunID, w.RepoID, w.Path, w.Ref)
 	if err != nil {
 		return false, "", fmt.Errorf("insert run_worktree: %w", err)
 	}
@@ -40,27 +40,27 @@ func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.Ru
 	if rows == 1 {
 		return true, w.Path, nil
 	}
-	existing, err := s.GetByRepo(ctx, orgID, w.RunID, w.RepoID)
+	existing, err := s.GetByRepoRef(ctx, orgID, w.RunID, w.RepoID, w.Ref)
 	if err != nil {
 		return false, "", fmt.Errorf("read existing run_worktree after conflict: %w", err)
 	}
 	if existing == nil {
-		return false, "", fmt.Errorf("run_worktree row vanished after INSERT OR IGNORE conflict (run_id=%s, repo_id=%s)", w.RunID, w.RepoID)
+		return false, "", fmt.Errorf("run_worktree row vanished after INSERT OR IGNORE conflict (run_id=%s, repo_id=%s, ref=%s)", w.RunID, w.RepoID, w.Ref)
 	}
 	return false, existing.Path, nil
 }
 
-func (s *runWorktreeStore) GetByRepo(ctx context.Context, orgID, runID, repoID string) (*domain.RunWorktree, error) {
+func (s *runWorktreeStore) GetByRepoRef(ctx context.Context, orgID, runID, repoID, ref string) (*domain.RunWorktree, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	row := s.q.QueryRowContext(ctx, `
-		SELECT run_id, repo_id, path, feature_branch, created_at
+		SELECT run_id, repo_id, path, ref, created_at
 		FROM run_worktrees
-		WHERE run_id = ? AND repo_id = ?
-	`, runID, repoID)
+		WHERE run_id = ? AND repo_id = ? AND ref = ?
+	`, runID, repoID, ref)
 	var w domain.RunWorktree
-	if err := row.Scan(&w.RunID, &w.RepoID, &w.Path, &w.FeatureBranch, &w.CreatedAt); err != nil {
+	if err := row.Scan(&w.RunID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -74,10 +74,10 @@ func (s *runWorktreeStore) List(ctx context.Context, orgID, runID string) ([]dom
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT run_id, repo_id, path, feature_branch, created_at
+		SELECT run_id, repo_id, path, ref, created_at
 		FROM run_worktrees
 		WHERE run_id = ?
-		ORDER BY created_at ASC, repo_id ASC
+		ORDER BY created_at ASC, repo_id ASC, ref ASC
 	`, runID)
 	if err != nil {
 		return nil, err
@@ -86,7 +86,7 @@ func (s *runWorktreeStore) List(ctx context.Context, orgID, runID string) ([]dom
 	out := []domain.RunWorktree{}
 	for rows.Next() {
 		var w domain.RunWorktree
-		if err := rows.Scan(&w.RunID, &w.RepoID, &w.Path, &w.FeatureBranch, &w.CreatedAt); err != nil {
+		if err := rows.Scan(&w.RunID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, w)
@@ -98,13 +98,13 @@ func (s *runWorktreeStore) ListSystem(ctx context.Context, orgID, runID string) 
 	return s.List(ctx, orgID, runID)
 }
 
-func (s *runWorktreeStore) DeleteByRepo(ctx context.Context, orgID, runID, repoID string) error {
+func (s *runWorktreeStore) DeleteByRepoRef(ctx context.Context, orgID, runID, repoID, ref string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
 	_, err := s.q.ExecContext(ctx, `
-		DELETE FROM run_worktrees WHERE run_id = ? AND repo_id = ?
-	`, runID, repoID)
+		DELETE FROM run_worktrees WHERE run_id = ? AND repo_id = ? AND ref = ?
+	`, runID, repoID, ref)
 	return err
 }
 
@@ -124,10 +124,10 @@ func (s *runWorktreeStore) InsertSystem(ctx context.Context, orgID string, w dom
 	return s.Insert(ctx, orgID, w)
 }
 
-func (s *runWorktreeStore) GetByRepoSystem(ctx context.Context, orgID, runID, repoID string) (*domain.RunWorktree, error) {
-	return s.GetByRepo(ctx, orgID, runID, repoID)
+func (s *runWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgID, runID, repoID, ref string) (*domain.RunWorktree, error) {
+	return s.GetByRepoRef(ctx, orgID, runID, repoID, ref)
 }
 
-func (s *runWorktreeStore) DeleteByRepoSystem(ctx context.Context, orgID, runID, repoID string) error {
-	return s.DeleteByRepo(ctx, orgID, runID, repoID)
+func (s *runWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, runID, repoID, ref string) error {
+	return s.DeleteByRepoRef(ctx, orgID, runID, repoID, ref)
 }

@@ -9,9 +9,12 @@ import (
 //go:generate go run github.com/vektra/mockery/v2 --name=RunWorktreeStore --output=./mocks --case=underscore --with-expecter
 
 // RunWorktreeStore owns the run_worktrees table — one row per
-// (run_id, repo_id) reservation tracking the lazy worktree
-// materializations a Jira-style run accumulates as the agent calls
-// `triagefactory exec workspace add` against each repo it needs.
+// (run_id, repo_id, ref) reservation tracking the lazy worktree
+// materializations a run accumulates as the agent calls
+// `triagefactory exec workspace add` against each repo it needs. The
+// ref discriminator (TFAC-502) lets a single run hold several worktrees
+// in one repo (e.g. two PRs reviewed in one interactive run): "@default",
+// "pr-<N>", or a slugified branch name.
 //
 // Lifted out of the pre-D2 package-level functions in
 // internal/db/run_worktrees.go so multi-mode Postgres callers route
@@ -21,7 +24,7 @@ import (
 // Method naming follows the dual-pool convention from
 // TaskMemoryStore / EventStore / UsersStore:
 //
-//   - Plain methods (Insert, GetByRepo, List, DeleteByRepo) run on
+//   - Plain methods (Insert, GetByRepoRef, List, DeleteByRepoRef) run on
 //     the app pool in Postgres (RLS-active). Callers are the agent
 //     CLI subcommand cmd/exec/workspace, which runs as a subprocess
 //     of the delegated agent. The CLI's pool routing is the
@@ -40,9 +43,10 @@ import (
 type RunWorktreeStore interface {
 	// Insert reserves a row for a worktree the caller is about to
 	// create on disk. Used as the cross-process serialization point:
-	// two concurrent `workspace add owner/repo` invocations that
-	// both passed the GetByRepo "not found" check race here, and
-	// the PK conflict deterministically picks one winner.
+	// two concurrent `workspace add owner/repo` invocations for the
+	// same (run, repo, ref) that both passed the GetByRepoRef "not
+	// found" check race here, and the PK conflict on (run_id, repo_id,
+	// ref) deterministically picks one winner.
 	//
 	// On PK conflict the winning row's path is returned with
 	// inserted=false so the caller skips its create step entirely.
@@ -50,12 +54,12 @@ type RunWorktreeStore interface {
 	// caller supplied.
 	Insert(ctx context.Context, orgID string, w domain.RunWorktree) (inserted bool, winningPath string, err error)
 
-	// GetByRepo fetches the worktree row for a (run_id, repo_id)
-	// pair, or (nil, nil) if none exists. Used by the workspace
+	// GetByRepoRef fetches the worktree row for a (run_id, repo_id,
+	// ref) triple, or (nil, nil) if none exists. Used by the workspace
 	// CLI to short-circuit the create+insert path when the agent
 	// re-invokes `workspace add` against an already-materialized
-	// repo.
-	GetByRepo(ctx context.Context, orgID, runID, repoID string) (*domain.RunWorktree, error)
+	// (repo, ref).
+	GetByRepoRef(ctx context.Context, orgID, runID, repoID, ref string) (*domain.RunWorktree, error)
 
 	// List returns every worktree materialized for a run, in
 	// insertion order. The spawner's cleanup defer iterates this
@@ -69,13 +73,13 @@ type RunWorktreeStore interface {
 	// — no JWT claims in scope.
 	ListSystem(ctx context.Context, orgID, runID string) ([]domain.RunWorktree, error)
 
-	// DeleteByRepo removes the row for a (run_id, repo_id) pair.
-	// Used by the workspace CLI to release a reservation after
+	// DeleteByRepoRef removes the row for a (run_id, repo_id, ref)
+	// triple. Used by the workspace CLI to release a reservation after
 	// createWorktree fails, or to clear a stale row whose on-disk
 	// path was reaped (e.g. startup orphan sweep) so a subsequent
 	// `workspace add` can re-reserve. Idempotent: deleting a row
 	// that doesn't exist is a no-op (no error).
-	DeleteByRepo(ctx context.Context, orgID, runID, repoID string) error
+	DeleteByRepoRef(ctx context.Context, orgID, runID, repoID, ref string) error
 
 	// DeleteByPathSystem removes the row for a (run_id, path)
 	// pair. Used by the spawner cleanup defer that iterates List
@@ -93,6 +97,6 @@ type RunWorktreeStore interface {
 	// here. Manual runs go through SyntheticClaimsWithTx + the
 	// non-System methods.
 	InsertSystem(ctx context.Context, orgID string, w domain.RunWorktree) (inserted bool, winningPath string, err error)
-	GetByRepoSystem(ctx context.Context, orgID, runID, repoID string) (*domain.RunWorktree, error)
-	DeleteByRepoSystem(ctx context.Context, orgID, runID, repoID string) error
+	GetByRepoRefSystem(ctx context.Context, orgID, runID, repoID, ref string) (*domain.RunWorktree, error)
+	DeleteByRepoRefSystem(ctx context.Context, orgID, runID, repoID, ref string) error
 }

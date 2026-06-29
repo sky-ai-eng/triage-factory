@@ -40,11 +40,11 @@ func newRunWorktreeStore(q, admin queryer) db.RunWorktreeStore {
 var _ db.RunWorktreeStore = (*runWorktreeStore)(nil)
 
 func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.RunWorktree) (bool, string, error) {
-	return insertRunWorktree(ctx, s.q, orgID, w, s.GetByRepo)
+	return insertRunWorktree(ctx, s.q, orgID, w, s.GetByRepoRef)
 }
 
 func (s *runWorktreeStore) InsertSystem(ctx context.Context, orgID string, w domain.RunWorktree) (bool, string, error) {
-	return insertRunWorktree(ctx, s.admin, orgID, w, s.GetByRepoSystem)
+	return insertRunWorktree(ctx, s.admin, orgID, w, s.GetByRepoRefSystem)
 }
 
 func insertRunWorktree(
@@ -52,11 +52,11 @@ func insertRunWorktree(
 	q queryer,
 	orgID string,
 	w domain.RunWorktree,
-	lookup func(context.Context, string, string, string) (*domain.RunWorktree, error),
+	lookup func(context.Context, string, string, string, string) (*domain.RunWorktree, error),
 ) (bool, string, error) {
 	// The path the caller passes is the deterministic target
-	// ({runRoot}/{owner}/{repo}) — `CreateForBranchInRoot` always
-	// lands there, so we can record the path BEFORE creating the
+	// ({runRoot}/{owner}/{repo}/{ref-slug}) — the InRoot create funcs
+	// always land there, so we can record the path BEFORE creating the
 	// worktree on disk. That ordering matters: if create runs
 	// before insert, both racing processes try `git worktree add`
 	// against the same target dir and the second fails on "dir
@@ -65,10 +65,10 @@ func insertRunWorktree(
 	// inserted=false and returns the winner's path without
 	// touching git.
 	res, err := q.ExecContext(ctx, `
-		INSERT INTO run_worktrees (run_id, org_id, repo_id, path, feature_branch)
+		INSERT INTO run_worktrees (run_id, org_id, repo_id, path, ref)
 		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (run_id, repo_id) DO NOTHING
-	`, w.RunID, orgID, w.RepoID, w.Path, w.FeatureBranch)
+		ON CONFLICT (run_id, repo_id, ref) DO NOTHING
+	`, w.RunID, orgID, w.RepoID, w.Path, w.Ref)
 	if err != nil {
 		return false, "", fmt.Errorf("insert run_worktree: %w", err)
 	}
@@ -79,32 +79,32 @@ func insertRunWorktree(
 	if rows == 1 {
 		return true, w.Path, nil
 	}
-	existing, err := lookup(ctx, orgID, w.RunID, w.RepoID)
+	existing, err := lookup(ctx, orgID, w.RunID, w.RepoID, w.Ref)
 	if err != nil {
 		return false, "", fmt.Errorf("read existing run_worktree after conflict: %w", err)
 	}
 	if existing == nil {
-		return false, "", fmt.Errorf("run_worktree row vanished after ON CONFLICT DO NOTHING (run_id=%s, repo_id=%s)", w.RunID, w.RepoID)
+		return false, "", fmt.Errorf("run_worktree row vanished after ON CONFLICT DO NOTHING (run_id=%s, repo_id=%s, ref=%s)", w.RunID, w.RepoID, w.Ref)
 	}
 	return false, existing.Path, nil
 }
 
-func (s *runWorktreeStore) GetByRepo(ctx context.Context, orgID, runID, repoID string) (*domain.RunWorktree, error) {
-	return getRunWorktreeByRepo(ctx, s.q, orgID, runID, repoID)
+func (s *runWorktreeStore) GetByRepoRef(ctx context.Context, orgID, runID, repoID, ref string) (*domain.RunWorktree, error) {
+	return getRunWorktreeByRepoRef(ctx, s.q, orgID, runID, repoID, ref)
 }
 
-func (s *runWorktreeStore) GetByRepoSystem(ctx context.Context, orgID, runID, repoID string) (*domain.RunWorktree, error) {
-	return getRunWorktreeByRepo(ctx, s.admin, orgID, runID, repoID)
+func (s *runWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgID, runID, repoID, ref string) (*domain.RunWorktree, error) {
+	return getRunWorktreeByRepoRef(ctx, s.admin, orgID, runID, repoID, ref)
 }
 
-func getRunWorktreeByRepo(ctx context.Context, q queryer, orgID, runID, repoID string) (*domain.RunWorktree, error) {
+func getRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, runID, repoID, ref string) (*domain.RunWorktree, error) {
 	row := q.QueryRowContext(ctx, `
-		SELECT run_id, repo_id, path, feature_branch, created_at
+		SELECT run_id, repo_id, path, ref, created_at
 		FROM run_worktrees
-		WHERE org_id = $1 AND run_id = $2 AND repo_id = $3
-	`, orgID, runID, repoID)
+		WHERE org_id = $1 AND run_id = $2 AND repo_id = $3 AND ref = $4
+	`, orgID, runID, repoID, ref)
 	var w domain.RunWorktree
-	if err := row.Scan(&w.RunID, &w.RepoID, &w.Path, &w.FeatureBranch, &w.CreatedAt); err != nil {
+	if err := row.Scan(&w.RunID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -123,10 +123,10 @@ func (s *runWorktreeStore) ListSystem(ctx context.Context, orgID, runID string) 
 
 func listRunWorktrees(ctx context.Context, q queryer, orgID, runID string) ([]domain.RunWorktree, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT run_id, repo_id, path, feature_branch, created_at
+		SELECT run_id, repo_id, path, ref, created_at
 		FROM run_worktrees
 		WHERE org_id = $1 AND run_id = $2
-		ORDER BY created_at ASC, repo_id ASC
+		ORDER BY created_at ASC, repo_id ASC, ref ASC
 	`, orgID, runID)
 	if err != nil {
 		return nil, err
@@ -135,7 +135,7 @@ func listRunWorktrees(ctx context.Context, q queryer, orgID, runID string) ([]do
 	out := []domain.RunWorktree{}
 	for rows.Next() {
 		var w domain.RunWorktree
-		if err := rows.Scan(&w.RunID, &w.RepoID, &w.Path, &w.FeatureBranch, &w.CreatedAt); err != nil {
+		if err := rows.Scan(&w.RunID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, w)
@@ -143,19 +143,19 @@ func listRunWorktrees(ctx context.Context, q queryer, orgID, runID string) ([]do
 	return out, rows.Err()
 }
 
-func (s *runWorktreeStore) DeleteByRepo(ctx context.Context, orgID, runID, repoID string) error {
-	return deleteRunWorktreeByRepo(ctx, s.q, orgID, runID, repoID)
+func (s *runWorktreeStore) DeleteByRepoRef(ctx context.Context, orgID, runID, repoID, ref string) error {
+	return deleteRunWorktreeByRepoRef(ctx, s.q, orgID, runID, repoID, ref)
 }
 
-func (s *runWorktreeStore) DeleteByRepoSystem(ctx context.Context, orgID, runID, repoID string) error {
-	return deleteRunWorktreeByRepo(ctx, s.admin, orgID, runID, repoID)
+func (s *runWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, runID, repoID, ref string) error {
+	return deleteRunWorktreeByRepoRef(ctx, s.admin, orgID, runID, repoID, ref)
 }
 
-func deleteRunWorktreeByRepo(ctx context.Context, q queryer, orgID, runID, repoID string) error {
+func deleteRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, runID, repoID, ref string) error {
 	_, err := q.ExecContext(ctx, `
 		DELETE FROM run_worktrees
-		WHERE org_id = $1 AND run_id = $2 AND repo_id = $3
-	`, orgID, runID, repoID)
+		WHERE org_id = $1 AND run_id = $2 AND repo_id = $3 AND ref = $4
+	`, orgID, runID, repoID, ref)
 	return err
 }
 

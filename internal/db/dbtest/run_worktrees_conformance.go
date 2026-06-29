@@ -46,7 +46,7 @@ func RunRunWorktreeStoreConformance(t *testing.T, mk RunWorktreeStoreFactory) {
 		store, orgID, seed := mk(t)
 		runID := seed.Run(t, "fresh")
 		inserted, winning, err := store.Insert(ctx, orgID, domain.RunWorktree{
-			RunID: runID, RepoID: "owner/repo", Path: "/tmp/wt/" + runID + "/owner/repo", FeatureBranch: "feature/SKY-1",
+			RunID: runID, RepoID: "owner/repo", Path: "/tmp/wt/" + runID + "/owner/repo/pr-1", Ref: "pr-1",
 		})
 		if err != nil {
 			t.Fatalf("insert: %v", err)
@@ -54,7 +54,7 @@ func RunRunWorktreeStoreConformance(t *testing.T, mk RunWorktreeStoreFactory) {
 		if !inserted {
 			t.Errorf("expected inserted=true on fresh row")
 		}
-		if winning != "/tmp/wt/"+runID+"/owner/repo" {
+		if winning != "/tmp/wt/"+runID+"/owner/repo/pr-1" {
 			t.Errorf("winningPath = %q, want fresh path", winning)
 		}
 	})
@@ -62,16 +62,16 @@ func RunRunWorktreeStoreConformance(t *testing.T, mk RunWorktreeStoreFactory) {
 	t.Run("Insert_idempotent_on_conflict_returns_winning_path", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		runID := seed.Run(t, "idem")
-		firstPath := "/tmp/wt/" + runID + "/owner/repo"
+		firstPath := "/tmp/wt/" + runID + "/owner/repo/pr-1"
 		if _, _, err := store.Insert(ctx, orgID, domain.RunWorktree{
-			RunID: runID, RepoID: "owner/repo", Path: firstPath, FeatureBranch: "feature/SKY-1",
+			RunID: runID, RepoID: "owner/repo", Path: firstPath, Ref: "pr-1",
 		}); err != nil {
 			t.Fatalf("first insert: %v", err)
 		}
 		// Pass a different path to confirm the conflict path reads
 		// the row, not echoes the input.
 		inserted, winning, err := store.Insert(ctx, orgID, domain.RunWorktree{
-			RunID: runID, RepoID: "owner/repo", Path: "/tmp/wt/DIFFERENT/owner/repo", FeatureBranch: "feature/SKY-1",
+			RunID: runID, RepoID: "owner/repo", Path: "/tmp/wt/DIFFERENT/owner/repo/pr-1", Ref: "pr-1",
 		})
 		if err != nil {
 			t.Fatalf("second insert: %v", err)
@@ -84,25 +84,60 @@ func RunRunWorktreeStoreConformance(t *testing.T, mk RunWorktreeStoreFactory) {
 		}
 	})
 
-	t.Run("GetByRepo_returns_row_or_nil", func(t *testing.T) {
+	t.Run("Insert_distinct_refs_same_repo_coexist", func(t *testing.T) {
+		// The (run, repo, ref) PK lets one run hold two worktrees in one
+		// repo (two PRs reviewed in one interactive run — TFAC-502). Both
+		// inserts must succeed and List must return both.
+		store, orgID, seed := mk(t)
+		runID := seed.Run(t, "tworef")
+		for _, w := range []domain.RunWorktree{
+			{RunID: runID, RepoID: "owner/repo", Path: "/p/pr-1", Ref: "pr-1"},
+			{RunID: runID, RepoID: "owner/repo", Path: "/p/pr-2", Ref: "pr-2"},
+		} {
+			inserted, _, err := store.Insert(ctx, orgID, w)
+			if err != nil {
+				t.Fatalf("insert ref %s: %v", w.Ref, err)
+			}
+			if !inserted {
+				t.Errorf("ref %s: expected inserted=true (distinct ref must not conflict)", w.Ref)
+			}
+		}
+		rows, err := store.List(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(rows) != 2 {
+			t.Fatalf("rows = %d, want 2 (one per ref)", len(rows))
+		}
+	})
+
+	t.Run("GetByRepoRef_returns_row_or_nil", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		runID := seed.Run(t, "getrepo")
 		if _, _, err := store.Insert(ctx, orgID, domain.RunWorktree{
-			RunID: runID, RepoID: "owner/repo", Path: "/p1", FeatureBranch: "feature/SKY-1",
+			RunID: runID, RepoID: "owner/repo", Path: "/p1", Ref: "pr-1",
 		}); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
-		got, err := store.GetByRepo(ctx, orgID, runID, "owner/repo")
+		got, err := store.GetByRepoRef(ctx, orgID, runID, "owner/repo", "pr-1")
 		if err != nil {
 			t.Fatalf("get: %v", err)
 		}
 		if got == nil {
 			t.Fatal("expected row, got nil")
 		}
-		if got.Path != "/p1" || got.FeatureBranch != "feature/SKY-1" {
+		if got.Path != "/p1" || got.Ref != "pr-1" {
 			t.Errorf("unexpected row: %+v", got)
 		}
-		missing, err := store.GetByRepo(ctx, orgID, runID, "other/repo")
+		// A different ref on the same repo is a distinct key → nil.
+		missingRef, err := store.GetByRepoRef(ctx, orgID, runID, "owner/repo", "pr-2")
+		if err != nil {
+			t.Fatalf("get missing ref: %v", err)
+		}
+		if missingRef != nil {
+			t.Errorf("expected nil for missing ref, got %+v", missingRef)
+		}
+		missing, err := store.GetByRepoRef(ctx, orgID, runID, "other/repo", "pr-1")
 		if err != nil {
 			t.Fatalf("get missing: %v", err)
 		}
@@ -116,9 +151,9 @@ func RunRunWorktreeStoreConformance(t *testing.T, mk RunWorktreeStoreFactory) {
 		r1 := seed.Run(t, "list-r1")
 		r2 := seed.Run(t, "list-r2")
 		for _, w := range []domain.RunWorktree{
-			{RunID: r1, RepoID: "owner/a", Path: "/p1", FeatureBranch: "feature/SKY-1"},
-			{RunID: r1, RepoID: "owner/b", Path: "/p2", FeatureBranch: "feature/SKY-1"},
-			{RunID: r2, RepoID: "owner/a", Path: "/p3", FeatureBranch: "feature/SKY-2"},
+			{RunID: r1, RepoID: "owner/a", Path: "/p1", Ref: "@default"},
+			{RunID: r1, RepoID: "owner/b", Path: "/p2", Ref: "@default"},
+			{RunID: r2, RepoID: "owner/a", Path: "/p3", Ref: "@default"},
 		} {
 			if _, _, err := store.Insert(ctx, orgID, w); err != nil {
 				t.Fatalf("insert %s/%s: %v", w.RunID, w.RepoID, err)
@@ -138,11 +173,34 @@ func RunRunWorktreeStoreConformance(t *testing.T, mk RunWorktreeStoreFactory) {
 		}
 	})
 
-	t.Run("DeleteByRepo_idempotent_on_missing_row", func(t *testing.T) {
+	t.Run("DeleteByRepoRef_idempotent_on_missing_row", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		runID := seed.Run(t, "del-repo")
-		if err := store.DeleteByRepo(ctx, orgID, runID, "no/such-repo"); err != nil {
-			t.Errorf("DeleteByRepo(missing) = %v, want nil", err)
+		if err := store.DeleteByRepoRef(ctx, orgID, runID, "no/such-repo", "pr-1"); err != nil {
+			t.Errorf("DeleteByRepoRef(missing) = %v, want nil", err)
+		}
+	})
+
+	t.Run("DeleteByRepoRef_targets_only_the_matching_ref", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		runID := seed.Run(t, "del-ref")
+		for _, w := range []domain.RunWorktree{
+			{RunID: runID, RepoID: "owner/repo", Path: "/p1", Ref: "pr-1"},
+			{RunID: runID, RepoID: "owner/repo", Path: "/p2", Ref: "pr-2"},
+		} {
+			if _, _, err := store.Insert(ctx, orgID, w); err != nil {
+				t.Fatalf("insert ref %s: %v", w.Ref, err)
+			}
+		}
+		if err := store.DeleteByRepoRef(ctx, orgID, runID, "owner/repo", "pr-1"); err != nil {
+			t.Fatalf("DeleteByRepoRef: %v", err)
+		}
+		rows, err := store.List(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("list after delete: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Ref != "pr-2" {
+			t.Errorf("after delete: %+v, want exactly [pr-2]", rows)
 		}
 	})
 
@@ -150,12 +208,12 @@ func RunRunWorktreeStoreConformance(t *testing.T, mk RunWorktreeStoreFactory) {
 		store, orgID, seed := mk(t)
 		runID := seed.Run(t, "del-path")
 		if _, _, err := store.Insert(ctx, orgID, domain.RunWorktree{
-			RunID: runID, RepoID: "owner/a", Path: "/p1", FeatureBranch: "feature/SKY-1",
+			RunID: runID, RepoID: "owner/a", Path: "/p1", Ref: "@default",
 		}); err != nil {
 			t.Fatalf("insert a: %v", err)
 		}
 		if _, _, err := store.Insert(ctx, orgID, domain.RunWorktree{
-			RunID: runID, RepoID: "owner/b", Path: "/p2", FeatureBranch: "feature/SKY-1",
+			RunID: runID, RepoID: "owner/b", Path: "/p2", Ref: "@default",
 		}); err != nil {
 			t.Fatalf("insert b: %v", err)
 		}
@@ -175,7 +233,7 @@ func RunRunWorktreeStoreConformance(t *testing.T, mk RunWorktreeStoreFactory) {
 		store, orgID, seed := mk(t)
 		runID := seed.Run(t, "cascade")
 		if _, _, err := store.Insert(ctx, orgID, domain.RunWorktree{
-			RunID: runID, RepoID: "owner/a", Path: "/p1", FeatureBranch: "feature/SKY-1",
+			RunID: runID, RepoID: "owner/a", Path: "/p1", Ref: "@default",
 		}); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
