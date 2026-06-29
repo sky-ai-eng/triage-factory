@@ -378,11 +378,10 @@ func removePRConfigLocked(ctx context.Context, bareDir, localBranch string, prNu
 }
 
 // SweepStaleForkPRConfig walks every branch the bare has marked as
-// triagefactory-managed (via the trackedBranchMarkerKey config we
-// write from configureForkPRTracking and configureOwnRepoPRTracking)
-// and removes any whose branch isn't currently checked out by a
-// live worktree. Backstop for the cases where inline CleanupPRConfig
-// in the runAgent defer doesn't fire:
+// triagefactory-managed (via the trackedBranchMarkerKey config
+// configurePRPushTracking writes) and removes any whose branch isn't
+// currently checked out by a live worktree. Backstop for the cases where
+// inline CleanupPRConfig in the runAgent defer doesn't fire:
 //
 //   - Run was cancelled at a layer above the runAgent defer (rare):
 //     inline cleanup never runs.
