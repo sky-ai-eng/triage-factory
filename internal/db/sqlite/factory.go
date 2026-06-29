@@ -156,9 +156,11 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
 			r.trigger_type, COALESCE(r.trigger_id, ''),
 			COALESCE(r.actor_agent_id, ''),
+			COALESCE(a.display_name, ''),
 			` + sqliteTaskColumnsWithEntity + `
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id
+		LEFT JOIN agents a ON a.id = r.actor_agent_id
 		JOIN tasks t ON r.task_id = t.id
 		JOIN entities e ON t.entity_id = e.id
 		WHERE r.status IN (` + placeholders + `)
@@ -186,7 +188,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			&r.StopReason, &r.WorktreePath,
 			&r.ResultSummary, &r.SessionID,
 			&r.MemoryMissing, &r.TriggerType, &r.TriggerID,
-			&r.ActorAgentID,
+			&r.ActorAgentID, &r.ActorAgentName,
 		}
 		var ts taskScanState
 		if err := rows.Scan(append(runTargets, ts.targets(&t)...)...); err != nil {

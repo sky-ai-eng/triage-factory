@@ -60,12 +60,13 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 		_, err := s.conn.ExecContext(ctx, `
 			INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
 			                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
-			                  blueprint_run_id, blueprint_step_index)
+			                  actor_agent_id, blueprint_run_id, blueprint_step_index)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, 'event', $8,
 			        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
-			        'team', NULL, $9, $10)
+			        'team', NULL, $9, $10, $11)
 		`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
-			nullIfEmpty(run.TriggerID), nullIfEmpty(run.BlueprintRunID), stepIdx)
+			nullIfEmpty(run.TriggerID), nullIfEmpty(run.ActorAgentID),
+			nullIfEmpty(run.BlueprintRunID), stepIdx)
 		return err
 	}
 	// Manual: the local sentinel user has no FK target in multi-mode; filter it
@@ -79,14 +80,15 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 	_, err := s.conn.ExecContext(ctx, `
 		INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
-		                  blueprint_run_id, blueprint_step_index)
+		                  actor_agent_id, blueprint_run_id, blueprint_step_index)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', $8,
 		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
 		        'team',
 		        COALESCE(NULLIF($9, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $2)),
-		        $10, $11)
+		        $10, $11, $12)
 	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
-		nullIfEmpty(run.TriggerID), creatorBind, nullIfEmpty(run.BlueprintRunID), stepIdx)
+		nullIfEmpty(run.TriggerID), creatorBind, nullIfEmpty(run.ActorAgentID),
+		nullIfEmpty(run.BlueprintRunID), stepIdx)
 	return err
 }
 

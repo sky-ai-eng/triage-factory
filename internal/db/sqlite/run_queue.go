@@ -62,11 +62,12 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 	_, err := s.conn.ExecContext(ctx, `
 		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility,
-		                  creator_user_id, blueprint_run_id, blueprint_step_index)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?)
+		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?)
 	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
 		triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID,
-		nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.BlueprintRunID), stepIdx)
+		nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.ActorAgentID),
+		nullIfEmpty(run.BlueprintRunID), stepIdx)
 	return err
 }
 

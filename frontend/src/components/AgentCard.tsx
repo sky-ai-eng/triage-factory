@@ -229,6 +229,9 @@ export default function AgentCard({
         {/* Footer */}
         <div className="flex items-center justify-between pb-3.5 pl-4 pr-4">
           <div className="flex items-center gap-3 font-mono text-[11px] tabular-nums tracking-wide text-text-tertiary/80">
+            {run.actor_agent_name && (
+              <span title="The bot that executed this run">Ran as {run.actor_agent_name}</span>
+            )}
             {stats.comments > 0 && <span>{stats.comments} comments</span>}
             {stats.tokens > 0 && <span>{compactNum(stats.tokens)} tokens</span>}
             {run.TotalCostUSD != null && run.TotalCostUSD > 0 && (

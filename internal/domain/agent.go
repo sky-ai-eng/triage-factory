@@ -100,6 +100,14 @@ type AgentRun struct {
 	// bootstrap completed, or after the agent was deleted).
 	ActorAgentID string
 
+	// ActorAgentName is the display name of the actor agent, denormalized
+	// from agents.display_name via a LEFT JOIN on the read projections (Get /
+	// ListForTask / factory ActiveRuns) so the UI can render "Ran as: {name}"
+	// without a second round-trip. Empty when actor_agent_id is NULL or the
+	// referenced agent row was deleted (LEFT JOIN → NULL name); not a stored
+	// column, so insert/scan paths that don't JOIN agents leave it "".
+	ActorAgentName string
+
 	// CreatorUserID is the users.id of the human who initiated this
 	// run (SKY-261 D-Claims). Set for manual runs (swipe-delegate /
 	// drag-to-Agent / factory drop); empty / NULL for trigger-

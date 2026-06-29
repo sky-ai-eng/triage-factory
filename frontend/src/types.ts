@@ -128,6 +128,13 @@ export interface AgentRun {
   // primary gating one included). The Board card shows it as a footer
   // affordance without a per-card fetch; 0 / undefined hides the affordance.
   artifact_count?: number
+  // actor_agent_id / actor_agent_name identify the bot that executed this run
+  // (runs.actor_agent_id, SKY-261 D-Claims), denormalized from agents.display_name
+  // via a JOIN on the run read projections. The card renders "Ran as: {name}" when
+  // a name is present; both are absent/empty for a run with no actor (spawned before
+  // agent bootstrap, or after the agent row was deleted).
+  actor_agent_id?: string
+  actor_agent_name?: string
   blueprint_run_id?: string
   blueprint_step_index?: number | null
 }

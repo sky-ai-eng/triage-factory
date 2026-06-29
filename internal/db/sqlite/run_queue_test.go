@@ -263,6 +263,77 @@ func TestRunQueueStore_SQLite_SetCurrentStep(t *testing.T) {
 	}
 }
 
+// TestRunQueueStore_SQLite_EnqueueStampsActorAgent pins the audit gap fix:
+// EnqueueRun (the live run-creation path) persists runs.actor_agent_id, and the
+// AgentRunStore.Get read projection JOINs agents to surface the bot's display
+// name as ActorAgentName for the "Ran as: {name}" UI. A run enqueued with no
+// actor reads back with both fields empty (the column's nullable contract).
+func TestRunQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	// One org agent backs runs.actor_agent_id (FK) and carries the display name
+	// the read JOIN denormalizes.
+	agentID, err := stores.Agents.Create(ctx, org, domain.Agent{DisplayName: "Triage Bot"})
+	if err != nil {
+		t.Fatalf("Agents.Create: %v", err)
+	}
+
+	task := seedEntityEventTask(t, conn, "rq-actor")
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqa-p0", Name: "Step 0", Body: "b", Source: "user"})
+	insertBlueprintForTest(t, conn, "rqa-bp", "RQ Actor Blueprint")
+	if err := stores.Blueprints.ReplaceSteps(ctx, org, "rqa-bp", []string{"rqa-p0"}, nil); err != nil {
+		t.Fatalf("ReplaceSteps: %v", err)
+	}
+	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "rqa-br", BlueprintID: "rqa-bp", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+		WorktreePath: "/tmp/wt-rqa",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	step0 := 0
+	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+		ID: "rqa-run-0", TaskID: task.ID, PromptID: "rqa-p0", Model: "m",
+		TriggerType: "manual", ActorAgentID: agentID,
+		BlueprintRunID: brID, BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("EnqueueRun: %v", err)
+	}
+
+	got, err := stores.AgentRuns.Get(ctx, org, "rqa-run-0")
+	if err != nil || got == nil {
+		t.Fatalf("AgentRuns.Get: (%v, %v)", got, err)
+	}
+	if got.ActorAgentID != agentID {
+		t.Errorf("ActorAgentID = %q, want %q (EnqueueRun must persist the actor)", got.ActorAgentID, agentID)
+	}
+	if got.ActorAgentName != "Triage Bot" {
+		t.Errorf("ActorAgentName = %q, want %q (read JOIN must denormalize agents.display_name)", got.ActorAgentName, "Triage Bot")
+	}
+
+	// A run with no actor reads back with both fields empty — the nullable
+	// column + LEFT JOIN degrade to "" rather than erroring.
+	step1 := 1
+	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+		ID: "rqa-run-1", TaskID: task.ID, PromptID: "rqa-p0", Model: "m",
+		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step1,
+	}); err != nil {
+		t.Fatalf("EnqueueRun (no actor): %v", err)
+	}
+	noActor, err := stores.AgentRuns.Get(ctx, org, "rqa-run-1")
+	if err != nil || noActor == nil {
+		t.Fatalf("AgentRuns.Get (no actor): (%v, %v)", noActor, err)
+	}
+	if noActor.ActorAgentID != "" || noActor.ActorAgentName != "" {
+		t.Errorf("no-actor run = (id %q, name %q), want both empty", noActor.ActorAgentID, noActor.ActorAgentName)
+	}
+}
+
 func TestRunQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)

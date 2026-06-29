@@ -360,7 +360,8 @@ const sqliteRunColumns = `
 	r.executor_id,
 	r.blueprint_run_id, r.blueprint_step_index,
 	r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens,
-	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
+	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
+	COALESCE(a.display_name, '') AS actor_agent_name
 `
 
 func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
@@ -371,6 +372,7 @@ func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.A
 		SELECT `+sqliteRunColumns+`
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id
+		LEFT JOIN agents a ON a.id = r.actor_agent_id
 		WHERE r.id = ?
 	`, runID)
 
@@ -392,6 +394,7 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 		SELECT `+sqliteRunColumns+`
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id
+		LEFT JOIN agents a ON a.id = r.actor_agent_id
 		WHERE r.task_id = ?
 		ORDER BY r.started_at DESC
 	`, taskID)
@@ -436,6 +439,7 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 			SELECT `+sqliteRunColumns+`
 			FROM runs r
 			LEFT JOIN run_memory rm ON rm.run_id = r.id
+			LEFT JOIN agents a ON a.id = r.actor_agent_id
 			WHERE r.task_id IN (`+strings.Join(placeholders, ", ")+`)
 			ORDER BY r.started_at DESC
 		`, args...)
@@ -988,7 +992,7 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
-		&r.MemoryMissing,
+		&r.MemoryMissing, &r.ActorAgentName,
 	); err != nil {
 		return err
 	}
@@ -1008,7 +1012,7 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
-		&r.MemoryMissing,
+		&r.MemoryMissing, &r.ActorAgentName,
 	); err != nil {
 		return err
 	}

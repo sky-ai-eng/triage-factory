@@ -60,42 +60,46 @@ type factoryRunJSON struct {
 // capitalized to match the struct-tag-free JSON the existing /api/agent/
 // runs handler emits for Status/StartedAt/etc.
 type factoryRunSummaryJSON struct {
-	ID            string     `json:"ID"`
-	TaskID        string     `json:"TaskID"`
-	PromptID      string     `json:"PromptID"`
-	Status        string     `json:"Status"`
-	Model         string     `json:"Model"`
-	StartedAt     time.Time  `json:"StartedAt"`
-	CompletedAt   *time.Time `json:"CompletedAt"`
-	TotalCostUSD  *float64   `json:"TotalCostUSD"`
-	DurationMs    *int       `json:"DurationMs"`
-	NumTurns      *int       `json:"NumTurns"`
-	StopReason    string     `json:"StopReason"`
-	ResultSummary string     `json:"ResultSummary"`
-	SessionID     string     `json:"SessionID"`
-	MemoryMissing bool       `json:"MemoryMissing"`
-	TriggerType   string     `json:"TriggerType"`
-	TriggerID     string     `json:"TriggerID"`
+	ID             string     `json:"ID"`
+	TaskID         string     `json:"TaskID"`
+	PromptID       string     `json:"PromptID"`
+	Status         string     `json:"Status"`
+	Model          string     `json:"Model"`
+	StartedAt      time.Time  `json:"StartedAt"`
+	CompletedAt    *time.Time `json:"CompletedAt"`
+	TotalCostUSD   *float64   `json:"TotalCostUSD"`
+	DurationMs     *int       `json:"DurationMs"`
+	NumTurns       *int       `json:"NumTurns"`
+	StopReason     string     `json:"StopReason"`
+	ResultSummary  string     `json:"ResultSummary"`
+	SessionID      string     `json:"SessionID"`
+	MemoryMissing  bool       `json:"MemoryMissing"`
+	TriggerType    string     `json:"TriggerType"`
+	TriggerID      string     `json:"TriggerID"`
+	ActorAgentID   string     `json:"actor_agent_id"`
+	ActorAgentName string     `json:"actor_agent_name"`
 }
 
 func toFactoryRunSummary(r domain.AgentRun) factoryRunSummaryJSON {
 	return factoryRunSummaryJSON{
-		ID:            r.ID,
-		TaskID:        r.TaskID,
-		PromptID:      r.PromptID,
-		Status:        r.Status,
-		Model:         r.Model,
-		StartedAt:     r.StartedAt,
-		CompletedAt:   r.CompletedAt,
-		TotalCostUSD:  r.TotalCostUSD,
-		DurationMs:    r.DurationMs,
-		NumTurns:      r.NumTurns,
-		StopReason:    r.StopReason,
-		ResultSummary: r.ResultSummary,
-		SessionID:     r.SessionID,
-		MemoryMissing: r.MemoryMissing,
-		TriggerType:   r.TriggerType,
-		TriggerID:     r.TriggerID,
+		ID:             r.ID,
+		TaskID:         r.TaskID,
+		PromptID:       r.PromptID,
+		Status:         r.Status,
+		Model:          r.Model,
+		StartedAt:      r.StartedAt,
+		CompletedAt:    r.CompletedAt,
+		TotalCostUSD:   r.TotalCostUSD,
+		DurationMs:     r.DurationMs,
+		NumTurns:       r.NumTurns,
+		StopReason:     r.StopReason,
+		ResultSummary:  r.ResultSummary,
+		SessionID:      r.SessionID,
+		MemoryMissing:  r.MemoryMissing,
+		TriggerType:    r.TriggerType,
+		TriggerID:      r.TriggerID,
+		ActorAgentID:   r.ActorAgentID,
+		ActorAgentName: r.ActorAgentName,
 	}
 }
 

@@ -234,6 +234,88 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	}
 }
 
+// TestRunQueueStore_Postgres_EnqueueStampsActorAgent is the Postgres parity of
+// the SQLite actor-stamp test: EnqueueRun (both the manual and event branches)
+// persists runs.actor_agent_id, and AgentRunStore.GetSystem JOINs agents to
+// surface the display name as ActorAgentName. A run with no actor reads back
+// with both fields empty.
+func TestRunQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+
+	// One org agent backs the composite FK (actor_agent_id, org_id) and carries
+	// the display name the read JOIN denormalizes.
+	agentID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO agents (id, org_id, display_name) VALUES ($1, $2, 'Triage Bot')`,
+		agentID, orgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+
+	// Manual branch stamps the actor.
+	manualID := uuid.New().String()
+	step0 := 0
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+		ID: manualID, TaskID: taskID, PromptID: promptID, Model: "m",
+		TriggerType: "manual", CreatorUserID: userID, ActorAgentID: agentID,
+		BlueprintRunID: brID, BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("EnqueueRun (manual): %v", err)
+	}
+	got, err := stores.AgentRuns.GetSystem(ctx, orgID, manualID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSystem (manual): (%v, %v)", got, err)
+	}
+	if got.ActorAgentID != agentID {
+		t.Errorf("manual ActorAgentID = %q, want %q", got.ActorAgentID, agentID)
+	}
+	if got.ActorAgentName != "Triage Bot" {
+		t.Errorf("manual ActorAgentName = %q, want %q (read JOIN)", got.ActorAgentName, "Triage Bot")
+	}
+
+	// Event branch (creator_user_id NULL per the schema CHECK) also stamps it.
+	eventID := uuid.New().String()
+	step1 := 1
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+		ID: eventID, TaskID: taskID, PromptID: promptID, Model: "m",
+		TriggerType: "event", ActorAgentID: agentID,
+		BlueprintRunID: brID, BlueprintStepIndex: &step1,
+	}); err != nil {
+		t.Fatalf("EnqueueRun (event): %v", err)
+	}
+	ev, err := stores.AgentRuns.GetSystem(ctx, orgID, eventID)
+	if err != nil || ev == nil {
+		t.Fatalf("GetSystem (event): (%v, %v)", ev, err)
+	}
+	if ev.ActorAgentID != agentID || ev.ActorAgentName != "Triage Bot" {
+		t.Errorf("event run actor = (%q, %q), want (%q, Triage Bot)", ev.ActorAgentID, ev.ActorAgentName, agentID)
+	}
+
+	// No actor → both fields empty (nullable column + LEFT JOIN).
+	bareID := uuid.New().String()
+	step2 := 2
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+		ID: bareID, TaskID: taskID, PromptID: promptID, Model: "m",
+		TriggerType: "manual", CreatorUserID: userID,
+		BlueprintRunID: brID, BlueprintStepIndex: &step2,
+	}); err != nil {
+		t.Fatalf("EnqueueRun (no actor): %v", err)
+	}
+	bare, err := stores.AgentRuns.GetSystem(ctx, orgID, bareID)
+	if err != nil || bare == nil {
+		t.Fatalf("GetSystem (no actor): (%v, %v)", bare, err)
+	}
+	if bare.ActorAgentID != "" || bare.ActorAgentName != "" {
+		t.Errorf("no-actor run = (%q, %q), want both empty", bare.ActorAgentID, bare.ActorAgentName)
+	}
+}
+
 // pgRunStatus reads a run's status and whether completed_at is stamped.
 func pgRunStatus(t *testing.T, h *pgtest.Harness, runID string) (status string, completed bool) {
 	t.Helper()

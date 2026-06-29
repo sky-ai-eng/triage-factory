@@ -526,7 +526,8 @@ const pgRunColumns = `
 	COALESCE(r.executor_id, ''),
 	r.blueprint_run_id, r.blueprint_step_index,
 	r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens,
-	(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing
+	(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing,
+	COALESCE(a.display_name, '') AS actor_agent_name
 `
 
 func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
@@ -551,6 +552,7 @@ func getRun(ctx context.Context, q queryer, orgID, runID string) (*domain.AgentR
 		SELECT `+pgRunColumns+`
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id AND rm.org_id = r.org_id
+		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		WHERE r.org_id = $1 AND r.id = $2
 	`, orgID, runID)
 
@@ -569,6 +571,7 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 		SELECT `+pgRunColumns+`
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id AND rm.org_id = r.org_id
+		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		WHERE r.org_id = $1 AND r.task_id = $2
 		ORDER BY r.started_at DESC
 	`, orgID, taskID)
@@ -606,6 +609,7 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 		SELECT `+pgRunColumns+`
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id AND rm.org_id = r.org_id
+		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		WHERE r.org_id = $1 AND r.task_id = ANY($2)
 		ORDER BY r.started_at DESC
 	`, orgID, pgUUIDArray(taskIDs))
@@ -1050,7 +1054,7 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
-		&r.MemoryMissing,
+		&r.MemoryMissing, &r.ActorAgentName,
 	); err != nil {
 		return err
 	}
@@ -1069,7 +1073,7 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
-		&r.MemoryMissing,
+		&r.MemoryMissing, &r.ActorAgentName,
 	); err != nil {
 		return err
 	}

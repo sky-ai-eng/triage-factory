@@ -149,9 +149,11 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing,
 			r.trigger_type, COALESCE(r.trigger_id::text, ''),
 			COALESCE(r.actor_agent_id::text, ''),
+			COALESCE(a.display_name, ''),
 			` + pgTaskColumnsWithEntity + `
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id AND rm.org_id = r.org_id
+		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		JOIN tasks t ON r.task_id = t.id AND t.org_id = r.org_id
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
 		WHERE r.org_id = $1 AND r.status = ANY($2)
@@ -179,7 +181,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			&r.StopReason, &r.WorktreePath,
 			&r.ResultSummary, &r.SessionID,
 			&r.MemoryMissing, &r.TriggerType, &r.TriggerID,
-			&r.ActorAgentID,
+			&r.ActorAgentID, &r.ActorAgentName,
 		}
 		var ts taskScanState
 		if err := rows.Scan(append(runTargets, ts.targets(&t)...)...); err != nil {

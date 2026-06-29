@@ -273,6 +273,8 @@ func runResponse(run *domain.AgentRun, artifactCount int, arts []domain.Artifact
 		"MemoryMissing":        run.MemoryMissing,
 		"TriggerType":          run.TriggerType,
 		"TriggerID":            run.TriggerID,
+		"actor_agent_id":       run.ActorAgentID,
+		"actor_agent_name":     run.ActorAgentName,
 		"blueprint_run_id":     run.BlueprintRunID,
 		"blueprint_step_index": run.BlueprintStepIndex,
 		"artifact_count":       artifactCount,
