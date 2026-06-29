@@ -85,9 +85,11 @@ func TestDiffHeaderNewPath(t *testing.T) {
 }
 
 // gitInit builds a tiny repo with a base branch and a feature branch checked
-// out, returning the worktree dir and the feature HEAD SHA. The feature branch
-// adds one line to f.go so base...HEAD is a real one-file diff.
-func gitInit(t *testing.T) (dir, headSHA string) {
+// out, returning the worktree dir, the feature HEAD SHA, and the base (main tip)
+// SHA. The feature branch adds one line to f.go so base...HEAD is a real
+// one-file diff. baseSHA is the recorded base.sha a real PR carries, so callers
+// can drive the worktree diff down its primary (recorded-base) path.
+func gitInit(t *testing.T) (dir, headSHA, baseSHA string) {
 	t.Helper()
 	dir = t.TempDir()
 	run := func(args ...string) string {
@@ -107,6 +109,7 @@ func gitInit(t *testing.T) (dir, headSHA string) {
 	}
 	run("add", ".")
 	run("commit", "-q", "-m", "base")
+	baseSHA = run("rev-parse", "HEAD")
 	run("checkout", "-q", "-b", "feature")
 	if err := os.WriteFile(filepath.Join(dir, "f.go"), []byte("line1\nline2\nline3\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -114,7 +117,7 @@ func gitInit(t *testing.T) (dir, headSHA string) {
 	run("add", ".")
 	run("commit", "-q", "-m", "feature change")
 	headSHA = run("rev-parse", "HEAD")
-	return dir, headSHA
+	return dir, headSHA, baseSHA
 }
 
 // TestPersistPRDiff_LocalCheckout pins the primary path: with a worktree the
@@ -122,10 +125,10 @@ func gitInit(t *testing.T) (dir, headSHA string) {
 // records source=local_checkout + head_sha=local HEAD, and the file rows come
 // from the local diff.
 func TestPersistPRDiff_LocalCheckout(t *testing.T) {
-	dir, headSHA := gitInit(t)
+	dir, headSHA, baseSHA := gitInit(t)
 
 	// The live PR head equals the local HEAD here (fresh checkout) → no staleness.
-	srv := newPRDiffServer(t, prDiffBackend{prJSON: prJSON(t, headSHA, "main", 1, 0, 1)})
+	srv := newPRDiffServer(t, prDiffBackend{prJSON: prJSON(t, headSHA, "main", baseSHA, 1, 0, 1)})
 	client := ghclient.NewClient(srv.URL, "test-token")
 
 	m, err := persistPRDiff(context.Background(), client, resolveLocalCheckout(dir), dir, "owner", "repo", 42)
@@ -137,6 +140,11 @@ func TestPersistPRDiff_LocalCheckout(t *testing.T) {
 	}
 	if m.HeadSHA != headSHA {
 		t.Errorf("HeadSHA = %q, want local HEAD %q", m.HeadSHA, headSHA)
+	}
+	// The manifest records the recorded base.sha it framed against (TFAC-505) —
+	// confirms the primary recorded-base path, not the stale-branch fallback.
+	if m.BaseSHA != baseSHA {
+		t.Errorf("BaseSHA = %q, want recorded base %q", m.BaseSHA, baseSHA)
 	}
 	if m.Stale {
 		t.Errorf("fresh checkout should not be stale: %+v", m)
@@ -157,7 +165,7 @@ func TestPersistPRDiff_LocalCheckout(t *testing.T) {
 // ahead of the local checkout, the manifest carries the behind-by count and a
 // git-pull warning while still diffing the local code.
 func TestPersistPRDiff_LocalCheckout_StaleWarns(t *testing.T) {
-	dir, headSHA := gitInit(t)
+	dir, headSHA, baseSHA := gitInit(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -165,7 +173,7 @@ func TestPersistPRDiff_LocalCheckout_StaleWarns(t *testing.T) {
 			_, _ = w.Write([]byte(`{"ahead_by":3}`))
 		default:
 			// live head is a different (newer) commit than the local checkout
-			_, _ = w.Write(prJSON(t, "live_newer_head", "main", 1, 0, 1))
+			_, _ = w.Write(prJSON(t, "live_newer_head", "main", baseSHA, 1, 0, 1))
 		}
 	}))
 	t.Cleanup(srv.Close)

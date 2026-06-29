@@ -286,8 +286,8 @@ type checkoutCall struct {
 }
 
 type prCheckoutCall struct {
-	owner, repo, upstream, head, headBranch, runID, runRoot string
-	prNumber                                                int
+	owner, repo, upstream, head, headBranch, runID, runRoot, baseBranch string
+	prNumber                                                            int
 }
 
 // fakeFileInfo is the minimal os.FileInfo the stat stub returns for a
@@ -323,11 +323,18 @@ func (s *stubCalls) deps() addDeps {
 			s.checkoutArgs = append(s.checkoutArgs, checkoutCall{owner, repo, cloneURL, ref, runID, runRoot})
 			return pathOrDefault(runRoot, owner, repo, worktree.CheckoutRefSlug(ref))
 		},
-		checkoutPR: func(_ context.Context, owner, repo, upstream, head, headBranch string, prNumber int, runID, runRoot string, _ ...worktree.CloneOption) (string, error) {
+		checkoutPR: func(_ context.Context, owner, repo, upstream, head, headBranch string, prNumber int, runID, runRoot string, opts ...worktree.CloneOption) (string, error) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			s.prCheckoutCalls++
-			s.prCheckoutArgs = append(s.prCheckoutArgs, prCheckoutCall{owner, repo, upstream, head, headBranch, runID, runRoot, prNumber})
+			// Capture the base branch the caller wired via WithBaseBranch so the
+			// test can assert the production createCheckout passes pr.BaseRef
+			// (TFAC-505) — the option is opaque across packages otherwise.
+			s.prCheckoutArgs = append(s.prCheckoutArgs, prCheckoutCall{
+				owner: owner, repo: repo, upstream: upstream, head: head, headBranch: headBranch,
+				runID: runID, runRoot: runRoot, prNumber: prNumber,
+				baseBranch: worktree.BaseBranchFromOptions(opts...),
+			})
 			return pathOrDefault(runRoot, owner, repo, worktree.PRRefSlug(prNumber))
 		},
 		fetchPR: func(_ context.Context, _, _ string, _ int) (*ghclient.PRView, error) {
@@ -574,6 +581,7 @@ func TestMaterializeWorkspace_PRCheckout(t *testing.T) {
 	stub := &stubCalls{
 		prView: &ghclient.PRView{
 			HeadRef:  "contrib-branch",
+			BaseRef:  "main",                             // the base branch createCheckout must wire via WithBaseBranch (TFAC-505)
 			CloneURL: "https://github.com/fork/core.git", // fork (HTTPS) head
 			SSHURL:   "git@github.com:fork/core.git",
 		},
@@ -599,6 +607,12 @@ func TestMaterializeWorkspace_PRCheckout(t *testing.T) {
 	}
 	if pc.headBranch != "contrib-branch" {
 		t.Errorf("headBranch = %q, want contrib-branch", pc.headBranch)
+	}
+	// createCheckout must wire the PR's base branch through WithBaseBranch so the
+	// worktree-local diff frames against a fresh base (TFAC-505). Dropping the
+	// option regresses this to "".
+	if pc.baseBranch != "main" {
+		t.Errorf("baseBranch = %q, want main (createCheckout should pass WithBaseBranch(pr.BaseRef))", pc.baseBranch)
 	}
 	// Upstream is the profile clone URL; head is the fork's URL in the matching
 	// (HTTPS) protocol.

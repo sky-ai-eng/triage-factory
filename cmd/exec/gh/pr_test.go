@@ -61,8 +61,16 @@ func newPRDiffServer(t *testing.T, b prDiffBackend) *httptest.Server {
 	return srv
 }
 
-// prJSON builds the GET /pulls/N body with the fields persistPRDiff reads.
-func prJSON(t *testing.T, sha, baseRef string, additions, deletions, changedFiles int) []byte {
+// fakeBaseSHA is a stand-in base.sha for the API-path tests, which don't have a
+// local checkout and never resolve the base commit. Distinct from any head sha
+// so it can't be confused with one. The local-checkout tests pass gitInit's real
+// base SHA instead, so resolveDiffBase takes its primary (recorded-base) path.
+const fakeBaseSHA = "ba5eba5eba5eba5eba5eba5eba5eba5eba5eba5e"
+
+// prJSON builds the GET /pulls/N body with the fields persistPRDiff reads. base
+// carries both ref and sha, mirroring a real GitHub PR object — the recorded
+// base.sha is the diff base the worktree path frames against.
+func prJSON(t *testing.T, sha, baseRef, baseSHA string, additions, deletions, changedFiles int) []byte {
 	t.Helper()
 	data, err := json.Marshal(map[string]any{
 		"number":        42,
@@ -70,7 +78,7 @@ func prJSON(t *testing.T, sha, baseRef string, additions, deletions, changedFile
 		"deletions":     deletions,
 		"changed_files": changedFiles,
 		"head":          map[string]any{"sha": sha, "ref": "feature"},
-		"base":          map[string]any{"ref": baseRef},
+		"base":          map[string]any{"ref": baseRef, "sha": baseSHA},
 	})
 	if err != nil {
 		t.Fatalf("marshal PR json: %v", err)
@@ -101,7 +109,7 @@ func TestPersistPRDiff_WritesFullDiffAndManifest(t *testing.T) {
 		{"filename": "foo.go", "status": "modified", "additions": 1, "deletions": 1, "patch": "@@ -1,2 +1,2 @@\n context\n-old\n+new\n"},
 	})
 	srv := newPRDiffServer(t, prDiffBackend{
-		prJSON:    prJSON(t, sha, "main", 1, 1, 1),
+		prJSON:    prJSON(t, sha, "main", fakeBaseSHA, 1, 1, 1),
 		diffBody:  diff,
 		filesBody: files,
 	})
@@ -147,7 +155,7 @@ func TestPersistPRDiff_406Reassembles(t *testing.T) {
 		{"filename": "foo.go", "status": "added", "additions": 2, "deletions": 0, "patch": "@@ -0,0 +1,2 @@\n+line1\n+line2"},
 	})
 	srv := newPRDiffServer(t, prDiffBackend{
-		prJSON:     prJSON(t, sha, "main", 2, 0, 1),
+		prJSON:     prJSON(t, sha, "main", fakeBaseSHA, 2, 0, 1),
 		diffBody:   `{"message":"diff too large"}`,
 		diffStatus: http.StatusNotAcceptable,
 		filesBody:  files,
@@ -184,7 +192,7 @@ func TestPersistPRDiff_BinaryAndRename(t *testing.T) {
 		{"filename": "main.go", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@ -1 +1,2 @@\n a\n+b"},
 	})
 	srv := newPRDiffServer(t, prDiffBackend{
-		prJSON:    prJSON(t, sha, "main", 1, 0, 4),
+		prJSON:    prJSON(t, sha, "main", fakeBaseSHA, 1, 0, 4),
 		diffBody:  "diff --git a/main.go b/main.go\n@@ -1 +1,2 @@\n a\n+b\n",
 		filesBody: files,
 	})
@@ -221,7 +229,7 @@ func TestPersistPRDiff_BinaryAndRename(t *testing.T) {
 // written and head_sha is simply empty in the manifest.
 func TestPersistPRDiff_MissingHeadSHATolerated(t *testing.T) {
 	srv := newPRDiffServer(t, prDiffBackend{
-		prJSON:    prJSON(t, "", "main", 0, 0, 0),
+		prJSON:    prJSON(t, "", "main", fakeBaseSHA, 0, 0, 0),
 		diffBody:  "diff --git a/foo.go b/foo.go\n@@ -1 +1,2 @@\n a\n+b\n",
 		filesBody: jsonPRFiles(t, []map[string]any{{"filename": "foo.go", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@ -1 +1,2 @@\n a\n+b"}}),
 	})
@@ -248,7 +256,7 @@ func TestPersistPRDiff_ReDiff(t *testing.T) {
 		{"filename": "foo.go", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@ -1 +1,2 @@\n a\n+b"},
 	})
 	srv1 := newPRDiffServer(t, prDiffBackend{
-		prJSON:    prJSON(t, "aaaaaaaaaaaa1111", "main", 1, 0, 1),
+		prJSON:    prJSON(t, "aaaaaaaaaaaa1111", "main", fakeBaseSHA, 1, 0, 1),
 		diffBody:  "diff --git a/foo.go b/foo.go\n@@ -1 +1,2 @@\n a\n+b\n",
 		filesBody: files,
 	})
@@ -264,7 +272,7 @@ func TestPersistPRDiff_ReDiff(t *testing.T) {
 
 	// Branch moved (new head SHA + new content). Same PR → same dir, overwritten.
 	srv2 := newPRDiffServer(t, prDiffBackend{
-		prJSON:    prJSON(t, "bbbbbbbbbbbb2222", "main", 1, 0, 1),
+		prJSON:    prJSON(t, "bbbbbbbbbbbb2222", "main", fakeBaseSHA, 1, 0, 1),
 		diffBody:  "diff --git a/foo.go b/foo.go\n@@ -1 +1,2 @@\n a\n+c\n",
 		filesBody: files,
 	})
@@ -299,7 +307,7 @@ func TestPersistPRDiff_RejectsSymlinkedScratch(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 	srv := newPRDiffServer(t, prDiffBackend{
-		prJSON:    prJSON(t, "abcdef0123456789", "main", 1, 0, 1),
+		prJSON:    prJSON(t, "abcdef0123456789", "main", fakeBaseSHA, 1, 0, 1),
 		diffBody:  "diff --git a/foo.go b/foo.go\n@@ -1 +1,2 @@\n a\n+b\n",
 		filesBody: jsonPRFiles(t, []map[string]any{{"filename": "foo.go", "status": "modified", "patch": "@@ -1 +1,2 @@\n a\n+b"}}),
 	})

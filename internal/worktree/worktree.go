@@ -276,6 +276,14 @@ func resolveCloneOptions(opts []CloneOption) cloneConfig {
 	return c
 }
 
+// BaseBranchFromOptions resolves the base branch carried by WithBaseBranch in a
+// CloneOption set, or "" when none was supplied. Exposed so callers and tests
+// can assert which base branch they wired without reaching into the unexported
+// cloneConfig — e.g. the workspace-add path verifying it passes WithBaseBranch(pr.BaseRef).
+func BaseBranchFromOptions(opts ...CloneOption) string {
+	return resolveCloneOptions(opts).baseBranch
+}
+
 func repoDir(owner, repo string) (string, error) {
 	// orgID is the local-default sentinel for now; SKY-406 threads the
 	// real orgID through as it makes this bare cache bounded + evictable.
