@@ -259,7 +259,10 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           fetch(`/api/agent/runs/${runID}`)
             .then((r) => (r.ok ? r.json() : null))
             .then((data: AgentRun | null) => {
-              if (data) setRun(data)
+              // Guard the async write against a navigation that landed while the
+              // fetch was in flight (same guard refetchArtifacts uses), so an
+              // old run's row can't clobber the new run's state.
+              if (data && runID === lastRunIDRef.current) setRun(data)
             })
             .catch(() => {})
           // A status flip can resolve the last artifact (terminal-on-last) or
@@ -275,7 +278,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           fetch(`/api/agent/runs/${runID}`)
             .then((r) => (r.ok ? r.json() : null))
             .then((data: AgentRun | null) => {
-              if (data) setRun(data)
+              if (data && runID === lastRunIDRef.current) setRun(data)
             })
             .catch(() => {})
           refetchArtifacts(runID)
