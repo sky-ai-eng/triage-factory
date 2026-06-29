@@ -96,15 +96,18 @@ func ArtifactLedgerBlock(arts []Artifact) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	body := "While you were not running, a human resolved artifacts you produced:\n" +
+	body := "While you were not running, a human resolved artifacts you produced:\n\n" +
 		strings.Join(lines, "\n") +
-		"\nThese are informational. A later step that relied on a dismissed artifact will simply fail and report it."
+		"\n\nThese are informational. A later step that relied on a dismissed artifact will simply fail and report it."
 	return WrapSystemNote(body)
 }
 
 // prResolutionRef is the PR reference the agent already knows — its
-// owner/repo#number Target. Falls back to ExternalID (the bare PR number) if the
-// Target is malformed/absent, so the note always carries some recognizable id.
+// owner/repo#number Target, which NewPullRequestArtifact always stamps. Falls
+// back to ExternalID (the bare PR number) if the Target is malformed, then to a
+// neutral placeholder, so the note never renders "pull request " with an empty
+// id (the placeholder reads grammatically; both fallbacks are unreachable for a
+// well-formed PR artifact).
 func prResolutionRef(a Artifact) string {
 	if a.Target != "" {
 		return a.Target
@@ -112,19 +115,16 @@ func prResolutionRef(a Artifact) string {
 	if a.ExternalID != "" {
 		return "#" + a.ExternalID
 	}
-	return "this PR"
+	return "(unknown)"
 }
 
-// reviewResolutionHandle is the review id the agent already knows — the artifact
-// id returned by start-review and spoken to add-review-comment/finalize-review
-// (gh's <review_id>). Falls back to the submitted GitHub review id, then to a
-// generic phrase, so the note never renders an empty handle.
+// reviewResolutionHandle is the review id the agent already knows — the artifact's
+// own id (its PK), returned by start-review and spoken to
+// add-review-comment/finalize-review (gh's <review_id>). It is deliberately NOT
+// the GitHub review id (ExternalID, stamped only at submit): the agent never saw
+// that, so surfacing it would name an id the agent can't recognize. The PK is
+// always set on a persisted review artifact, so there's no empty-handle case to
+// guard.
 func reviewResolutionHandle(a Artifact) string {
-	if a.ID != "" {
-		return a.ID
-	}
-	if a.ExternalID != "" {
-		return "#" + a.ExternalID
-	}
-	return "the draft"
+	return a.ID
 }

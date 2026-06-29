@@ -666,6 +666,11 @@ func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, m
 // the monotonic insertion order — rather than MAX(created_at), so the watermark
 // is the genuinely last-inserted agent row and never trips over mixed timestamp
 // text formats in a lexical MAX. ok=false when the run has no agent message yet.
+//
+// Scoped on run_id only, matching every sibling SQLite run_messages read
+// (Messages, MessagesForRuns, TokenTotals): assertLocalOrg above is SQLite's
+// org gate (single-tenant). The Postgres twin adds org_id to its WHERE for RLS
+// defense-in-depth; this stays consistent with its own dialect's convention.
 func (s *agentRunStore) LastAgentActivityAtSystem(ctx context.Context, orgID, runID string) (time.Time, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return time.Time{}, false, err

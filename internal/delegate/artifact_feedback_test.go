@@ -129,6 +129,40 @@ func waitSteerCalls(t *testing.T, fc *fakeController, want int) {
 	t.Fatalf("steerCalls did not reach %d in time", want)
 }
 
+// TestArtifactLedgerForResume_FallsBackToStartedAt: a run with NO agent messages
+// yet (LastAgentActivityAtSystem ok=false) uses run.StartedAt as the watermark,
+// so a resolution after the run started still lands in the ledger.
+func TestArtifactLedgerForResume_FallsBackToStartedAt(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-nomsg", "sess", "/tmp/wt")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+
+	// Pin started_at into the past so the artifact seeded "now" is unambiguously
+	// after it; insert NO run_messages, so the watermark must fall back to it.
+	if _, err := database.Exec(`UPDATE runs SET started_at = ? WHERE id = 'r-nomsg'`,
+		time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("set started_at: %v", err)
+	}
+
+	approvedPR := domain.NewPullRequestArtifact("o/r", 1, "node1", "h", "main",
+		"https://github.com/o/r/pull/1", "PR one", "", false)
+	seedResolvedArtifact(t, s, "r-nomsg", approvedPR)
+
+	run, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-nomsg")
+	if err != nil || run == nil {
+		t.Fatalf("GetSystem: err=%v run=%v", err, run)
+	}
+	// Sanity: this run genuinely has no agent message, so we exercise the fallback.
+	if _, ok, err := s.agentRuns.LastAgentActivityAtSystem(context.Background(), runmode.LocalDefaultOrgID, "r-nomsg"); err != nil || ok {
+		t.Fatalf("precondition: want no agent message (ok=false), got ok=%v err=%v", ok, err)
+	}
+
+	block := s.artifactLedgerForResume(context.Background(), runmode.LocalDefaultOrgID, run)
+	if block == "" || !strings.Contains(block, "o/r#1") {
+		t.Errorf("expected the resolution in the ledger via the StartedAt fallback, got %q", block)
+	}
+}
+
 // TestInjectArtifactNote_LiveSteersWrappedNote: resolving an artifact on a live
 // run steers a single <system-note>-wrapped, kind-specific note into the warm
 // process (on a detached goroutine) and reports dispatched=true.

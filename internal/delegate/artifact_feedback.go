@@ -99,9 +99,19 @@ func (s *Spawner) recordInjectedNote(orgID, runID, content string) {
 // agent message yet — and the entries are the run's artifacts whose updated_at is
 // strictly after it AND whose terminal state is a reported human resolution. User
 // messages are excluded from the watermark, so the resume message the server just
-// recorded can't suppress the ledger; the agent's own messages advance the
-// watermark past anything delivered live, so a live-injected note doesn't reappear
-// here. Any read error degrades to "" — feedback never blocks a resume.
+// recorded can't suppress the ledger.
+//
+// This watermark only ever OVER-includes, never misses — a deliberate trade
+// (a duplicate note is harmless; a missed resolution leaves the agent with a
+// stale picture). The common over-include: an artifact resolved while the run
+// was live got its note steered in (InjectArtifactNote), and normally the agent
+// then emits a turn whose messages advance the watermark past it, so it doesn't
+// reappear here. But if no non-user message lands after the steer — the textbook
+// case being a human approving the FINAL artifact of a fast-finishing run, whose
+// next turn is just the conclusion — the watermark stays put and the same note is
+// bundled again on the next resume. That second copy is expected, not a bug.
+//
+// Any read error degrades to "" — feedback never blocks a resume.
 func (s *Spawner) artifactLedgerForResume(ctx context.Context, orgID string, run *domain.AgentRun) string {
 	if s.artifacts == nil || s.agentRuns == nil || run == nil {
 		return ""
