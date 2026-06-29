@@ -28,6 +28,11 @@ type reviewArtifactJSON struct {
 	ReviewEvent string                      `json:"review_event"`
 	State       string                      `json:"state"`
 	Comments    []reviewArtifactCommentJSON `json:"comments"`
+	// CommitsSinceFinalize is how many commits the live PR head is ahead of the
+	// finalize-time head (TFAC-500) — the "N commits since this review was written"
+	// indicator. nil when it can't be computed (no finalize head stored, or the
+	// live head couldn't be fetched); a non-nil 0 means the PR hasn't advanced.
+	CommitsSinceFinalize *int `json:"commits_since_finalize"`
 }
 
 type reviewArtifactCommentJSON struct {
@@ -37,6 +42,14 @@ type reviewArtifactCommentJSON struct {
 	StartLine *int   `json:"start_line,omitempty"`
 	Body      string `json:"body"`
 	Severity  string `json:"severity,omitempty"`
+	// Freshness is the per-comment staleness vs. the live PR head (TFAC-500):
+	// "current", "moved", "outdated", or "unknown". See review_freshness.go.
+	Freshness string `json:"freshness"`
+	// MappedLine / MappedPath carry the comment's new-side position on the live
+	// head when Freshness is "moved" (the anchored code relocated). Zero/empty for
+	// every other verdict.
+	MappedLine int    `json:"mapped_line,omitempty"`
+	MappedPath string `json:"mapped_path,omitempty"`
 }
 
 // reviewGet returns the review artifact with its TF-side staged comments
@@ -79,8 +92,16 @@ func (ah *artifactsHandler) reviewGet(w http.ResponseWriter, r *http.Request, or
 			StartLine: c.StartLine,
 			Body:      clean,
 			Severity:  sev,
+			// Default to "unknown"; annotateReviewFreshness upgrades it per comment
+			// when the live head + compare resolve. Pre-seeding here means a GitHub
+			// failure simply leaves it at "unknown" with no extra branching.
+			Freshness: reviewFreshnessUnknown,
 		})
 	}
+	// Augment with per-comment freshness + commits-since-finalize against the live
+	// PR head (TFAC-500). Best-effort: never errors the overlay — on any GitHub
+	// failure the comments stay "unknown" and the count stays nil.
+	ah.annotateReviewFreshness(r.Context(), orgID, art, details, &out)
 	writeJSON(w, http.StatusOK, out)
 }
 

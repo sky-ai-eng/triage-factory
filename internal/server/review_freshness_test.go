@@ -1,0 +1,205 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"testing"
+
+	"github.com/zalando/go-keyring"
+
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// reviewFreshnessOut is the slice of reviewArtifactJSON the TFAC-500 freshness
+// tests assert on.
+type reviewFreshnessOut struct {
+	CommitsSinceFinalize *int `json:"commits_since_finalize"`
+	Comments             []struct {
+		ID         string `json:"id"`
+		Line       int    `json:"line"`
+		Freshness  string `json:"freshness"`
+		MappedLine int    `json:"mapped_line"`
+		MappedPath string `json:"mapped_path"`
+	} `json:"comments"`
+}
+
+// seedFinalizedReviewAt seeds a finalized review-draft artifact (TFAC-494) with a
+// stamped finalize-time head (TFAC-500) and one inline comment on a.go anchored to
+// that head at the given line. Returns the artifact id. The owner must be "acme"
+// so the App resolver (acmeInstall) matches.
+func seedFinalizedReviewAt(t *testing.T, s *Server, suffix string, number int, finalizeHead string, line int) string {
+	t.Helper()
+	artID, _, _ := seedReviewArtifactWithRun(t, s, suffix, "acme", "api", number, "COMMENT")
+	art := getArtifact(t, s, artID)
+	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	d.FinalizedHeadSHA = finalizeHead
+	l := line
+	d.StagedComments = []domain.ReviewArtifactComment{
+		{ID: "c_1", Path: "a.go", Line: &l, Body: domain.SeverityBadgeMarkdown(domain.SeverityMajor) + "nit: rename", CommitSHA: finalizeHead},
+	}
+	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
+	if _, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+		t.Fatalf("seed finalized review: %v", err)
+	}
+	return artID
+}
+
+// freshnessAppStub wires an App-backed GitHub stub that serves the PR head and,
+// optionally, a single compare diff range. The PR object reports head.sha =
+// liveHead; a compare request (the JSON form CompareCommits issues) returns
+// aheadBy + the supplied files JSON, or fails the test on an unregistered range.
+// compareFiles is the JSON for the response's "files" array; "" means no compare
+// is expected (the PR hasn't advanced) and any compare request fails the test.
+func freshnessAppStub(t *testing.T, s *Server, liveHead string, aheadBy int, compareRange, compareFiles string) {
+	t.Helper()
+	mux := newAppAPIMux()
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 7,
+			"base":   map[string]any{"ref": "main"},
+			"head":   map[string]any{"sha": liveHead},
+		})
+	})
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/compare/{rng}", func(w http.ResponseWriter, r *http.Request) {
+		rng := r.PathValue("rng")
+		if compareFiles == "" || rng != compareRange {
+			t.Errorf("unexpected compare request for range %q (want %q)", rng, compareRange)
+			http.Error(w, "no such compare", http.StatusNotFound)
+			return
+		}
+		_, _ = io.WriteString(w, `{"ahead_by":`+strconv.Itoa(aheadBy)+`,"files":`+compareFiles+`}`)
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, s, stub, acmeInstall())
+}
+
+// getReviewFreshness GETs the review artifact and decodes the freshness slice.
+func getReviewFreshness(t *testing.T, s *Server, artID string) reviewFreshnessOut {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodGet, "/api/artifacts/"+artID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var out reviewFreshnessOut
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return out
+}
+
+// TestReviewFreshness_Current pins the no-drift fast path: the live PR head equals
+// the finalize head, so the comment is "current", the count is a non-nil 0, and NO
+// compare call is made (the stub fails on any compare request).
+func TestReviewFreshness_Current(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	freshnessAppStub(t, srv, "headA", 0, "", "") // liveHead == finalizeHead; compare must not be hit
+	artID := seedFinalizedReviewAt(t, srv, "rfresh", 7, "headA", 3)
+
+	out := getReviewFreshness(t, srv, artID)
+	if out.CommitsSinceFinalize == nil || *out.CommitsSinceFinalize != 0 {
+		t.Errorf("commits_since_finalize = %v, want a non-nil 0 (PR not advanced)", out.CommitsSinceFinalize)
+	}
+	if len(out.Comments) != 1 || out.Comments[0].Freshness != "current" {
+		t.Fatalf("comment freshness = %+v, want one 'current'", out.Comments)
+	}
+}
+
+// TestReviewFreshness_Moved pins the shift path: the PR advanced (headA → headB)
+// inserting two lines above the comment, so the same code now sits two lines down.
+// The comment is "moved", carries its remapped line, and the count reflects the
+// commits ahead.
+func TestReviewFreshness_Moved(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	files := `[{"filename":"a.go","status":"modified","patch":"@@ -1,5 +1,7 @@\n+newtop1\n+newtop2\n line1\n added2\n added3\n line4\n line5"}]`
+	freshnessAppStub(t, srv, "headB", 2, "headA...headB", files)
+	artID := seedFinalizedReviewAt(t, srv, "rmoved", 7, "headA", 3)
+
+	out := getReviewFreshness(t, srv, artID)
+	if out.CommitsSinceFinalize == nil || *out.CommitsSinceFinalize != 2 {
+		t.Errorf("commits_since_finalize = %v, want 2", out.CommitsSinceFinalize)
+	}
+	if len(out.Comments) != 1 {
+		t.Fatalf("comments = %d, want 1", len(out.Comments))
+	}
+	c := out.Comments[0]
+	if c.Freshness != "moved" {
+		t.Errorf("freshness = %q, want moved", c.Freshness)
+	}
+	if c.MappedLine != 5 {
+		t.Errorf("mapped_line = %d, want 5 (shifted +2)", c.MappedLine)
+	}
+}
+
+// TestReviewFreshness_Outdated pins the outdated path: the anchored line was
+// deleted between headA and headB, so the comment no longer points at the same
+// code. Freshness is "outdated" with no remapped line; the count still resolves.
+func TestReviewFreshness_Outdated(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	files := `[{"filename":"a.go","status":"modified","patch":"@@ -1,5 +1,4 @@\n line1\n added2\n-added3\n line4\n line5"}]`
+	freshnessAppStub(t, srv, "headB", 1, "headA...headB", files)
+	artID := seedFinalizedReviewAt(t, srv, "rold", 7, "headA", 3)
+
+	out := getReviewFreshness(t, srv, artID)
+	if out.CommitsSinceFinalize == nil || *out.CommitsSinceFinalize != 1 {
+		t.Errorf("commits_since_finalize = %v, want 1", out.CommitsSinceFinalize)
+	}
+	if len(out.Comments) != 1 || out.Comments[0].Freshness != "outdated" {
+		t.Fatalf("comment freshness = %+v, want one 'outdated'", out.Comments)
+	}
+	if out.Comments[0].MappedLine != 0 {
+		t.Errorf("mapped_line = %d, want 0 for outdated", out.Comments[0].MappedLine)
+	}
+}
+
+// TestReviewFreshness_DegradesWhenHeadUnavailable pins the graceful-degradation
+// contract: when the live PR head can't be fetched (GitHub 500), the overlay still
+// returns 200 with the staged comment, freshness "unknown", and a nil count — the
+// human can still read and act on the review.
+func TestReviewFreshness_DegradesWhenHeadUnavailable(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	mux := newAppAPIMux()
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+	artID := seedFinalizedReviewAt(t, srv, "rdeg", 7, "headA", 3)
+
+	out := getReviewFreshness(t, srv, artID)
+	if out.CommitsSinceFinalize != nil {
+		t.Errorf("commits_since_finalize = %v, want nil when the live head is unavailable", *out.CommitsSinceFinalize)
+	}
+	if len(out.Comments) != 1 || out.Comments[0].Freshness != "unknown" {
+		t.Fatalf("comment freshness = %+v, want one 'unknown'", out.Comments)
+	}
+}
+
+// TestReviewFreshness_DegradesWhenGitHubUnconfigured pins that a review with no
+// GitHub credentials at all still renders: the overlay returns 200, freshness
+// "unknown", nil count — no 503.
+func TestReviewFreshness_DegradesWhenGitHubUnconfigured(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	// No seedApp: ClientForRepo returns ErrNoGitHubCredentials.
+	artID := seedFinalizedReviewAt(t, srv, "rnocreds", 7, "headA", 3)
+
+	out := getReviewFreshness(t, srv, artID)
+	if out.CommitsSinceFinalize != nil {
+		t.Errorf("commits_since_finalize = %v, want nil with no GitHub creds", *out.CommitsSinceFinalize)
+	}
+	if len(out.Comments) != 1 || out.Comments[0].Freshness != "unknown" {
+		t.Fatalf("comment freshness = %+v, want one 'unknown'", out.Comments)
+	}
+}

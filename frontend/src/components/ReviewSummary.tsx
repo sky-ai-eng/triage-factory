@@ -8,6 +8,11 @@ interface Props {
   reviewEvent: string
   reviewBody: string
   commentCount: number
+  // How many commits the live PR head is ahead of the head the review was
+  // finalized against (TFAC-500). null when it couldn't be computed; 0 means the
+  // PR hasn't advanced. >0 surfaces the "N commits since this review was written"
+  // staleness indicator.
+  commitsSinceFinalize: number | null
   // Pessimistic: these stage the body/event into the artifact and reject on
   // failure, so the editor can surface the error and stay in edit mode rather
   // than show a green "saved" over a write that didn't land.
@@ -98,6 +103,7 @@ export default function ReviewSummary({
   reviewEvent,
   reviewBody,
   commentCount,
+  commitsSinceFinalize,
   onUpdateBody,
   onUpdateEvent,
   onSubmit,
@@ -161,6 +167,29 @@ export default function ReviewSummary({
             <p className="text-[12px] text-text-tertiary mt-0.5">
               {owner}/{repo} #{prNumber}
             </p>
+            {commitsSinceFinalize != null && commitsSinceFinalize > 0 && (
+              <p
+                className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] font-medium text-amber-600 bg-amber-500/[0.10] border border-amber-500/25 rounded-md px-2 py-0.5"
+                title="The PR has advanced since the agent wrote this review. Check the per-comment badges before approving."
+              >
+                <svg
+                  width="11"
+                  height="11"
+                  viewBox="0 0 14 14"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <circle cx="7" cy="7" r="5.5" />
+                  <line x1="7" y1="4" x2="7" y2="7.5" />
+                  <line x1="7" y1="10" x2="7" y2="10" />
+                </svg>
+                {commitsSinceFinalize} commit{commitsSinceFinalize !== 1 ? 's' : ''} since this
+                review was written
+              </p>
+            )}
           </div>
 
           {/* Event type selector */}

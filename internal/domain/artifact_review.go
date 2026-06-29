@@ -60,6 +60,12 @@ type ReviewArtifactProposed struct {
 //     inline anchor); a review WITH comments pins commit_id to the commit those
 //     comments were validated against (each comment's CommitSHA), not this — the
 //     PR head can advance between start-review and the comments.
+//   - FinalizedHeadSHA: the PR head at finalize-review — the commit every staged
+//     comment was reconciled to (TFAC-499) and the baseline the human-facing
+//     freshness check (TFAC-500) measures drift from: reviewGet compares it to
+//     the live PR head for the "N commits since this review was written" count.
+//     Empty on a never-finalized draft and on rows finalized before TFAC-500
+//     (those fall back to HeadSHA for the count).
 //   - StagedComments: the mutable inline-comment set — appended at
 //     add-review-comment (each anchored to the PR head it was validated against,
 //     ReviewArtifactComment.CommitSHA), edited/deleted live by the human (local
@@ -80,13 +86,14 @@ type ReviewArtifactProposed struct {
 // local-staging rework; it is no longer populated (review reconciliation is moot
 // for a never-published draft, TFAC-494 §8).
 type ReviewArtifactDetails struct {
-	NodeID         string                  `json:"node_id,omitempty"`
-	Number         int                     `json:"number,omitempty"`
-	HeadSHA        string                  `json:"head_sha,omitempty"`
-	ReviewBody     string                  `json:"review_body"`
-	ReviewEvent    string                  `json:"review_event"`
-	StagedComments []ReviewArtifactComment `json:"staged_comments,omitempty"`
-	Proposed       ReviewArtifactProposed  `json:"proposed"`
+	NodeID           string                  `json:"node_id,omitempty"`
+	Number           int                     `json:"number,omitempty"`
+	HeadSHA          string                  `json:"head_sha,omitempty"`
+	FinalizedHeadSHA string                  `json:"finalized_head_sha,omitempty"`
+	ReviewBody       string                  `json:"review_body"`
+	ReviewEvent      string                  `json:"review_event"`
+	StagedComments   []ReviewArtifactComment `json:"staged_comments,omitempty"`
+	Proposed         ReviewArtifactProposed  `json:"proposed"`
 }
 
 // ReviewTarget is the artifact Target for a review: owner/repo#<number> — the PR

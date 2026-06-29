@@ -11,6 +11,10 @@ export interface FileComment {
   startLine?: number
   body: string
   severity?: string
+  // Per-comment freshness vs. the live PR head (TFAC-500): 'current' | 'moved' |
+  // 'outdated' | 'unknown'. mappedLine is the new-side line when 'moved'.
+  freshness?: string
+  mappedLine?: number
 }
 
 interface Props {
@@ -37,11 +41,16 @@ export default function DiffFile({
     const map: Record<string, React.ReactNode> = {}
 
     for (const comment of comments) {
-      // Find the change in any hunk that matches this comment's line number
+      // Anchor against the live diff: a "moved" comment's code now sits at its
+      // remapped (new-side) line, so match there; otherwise use the authored line
+      // (TFAC-500).
+      const anchorLine =
+        comment.freshness === 'moved' && comment.mappedLine ? comment.mappedLine : comment.line
+      // Find the change in any hunk that matches this comment's anchor line
       for (const hunk of file.hunks) {
         for (const change of hunk.changes) {
           const lineNum = getLineNumber(change)
-          if (lineNum === comment.line) {
+          if (lineNum === anchorLine) {
             const key = getChangeKey(change)
             // Stack multiple comments on the same line
             const existing = map[key]
@@ -52,9 +61,10 @@ export default function DiffFile({
                   key={comment.id}
                   id={comment.id}
                   path={comment.path}
-                  line={comment.line}
+                  line={anchorLine}
                   body={comment.body}
                   severity={comment.severity}
+                  freshness={comment.freshness}
                   onUpdate={onUpdateComment}
                   onDelete={onDeleteComment}
                 />

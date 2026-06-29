@@ -242,6 +242,65 @@ func TestLocalClient_FinalizeReview_Freshness_MixedMultiComment(t *testing.T) {
 	}
 }
 
+// TestLocalClient_FinalizeReview_StampsFinalizedHead pins TFAC-500's finalize-time
+// head capture: a review WITH comments stamps details.FinalizedHeadSHA with the
+// reconcile head (the commit every comment was mapped to), and a comment-less
+// review (pure approve) makes NO GitHub call and falls back to the start-review
+// head. The stamped head is the baseline the human-facing freshness check later
+// counts commits-since-finalize from.
+func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
+	t.Run("with comments uses the reconcile head", func(t *testing.T) {
+		shift := "diff --git a/a.go b/a.go\n" +
+			"--- a/a.go\n+++ b/a.go\n" +
+			"@@ -1,5 +1,7 @@\n+newtop1\n+newtop2\n line1\n added2\n added3\n line4\n line5\n"
+		srv := reviewFreshnessServer(t, "head2", map[string]string{
+			"main...head1":  validationDiffAGo,
+			"head1...head2": shift,
+		})
+		stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+		handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
+		if err != nil {
+			t.Fatalf("start review: %v", err)
+		}
+		if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit", 3, nil, "head1"); err != nil {
+			t.Fatalf("add comment: %v", err)
+		}
+		if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
+			t.Fatalf("finalize: %v", err)
+		}
+
+		d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+		if d.FinalizedHeadSHA != "head2" {
+			t.Errorf("FinalizedHeadSHA = %q, want head2 (the reconcile head)", d.FinalizedHeadSHA)
+		}
+	})
+
+	t.Run("comment-less falls back to the start head with no GitHub call", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("comment-less finalize must make NO GitHub call; got %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}))
+		t.Cleanup(srv.Close)
+		stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+		handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
+		if err != nil {
+			t.Fatalf("start review: %v", err)
+		}
+		// A pure approve carries no body and no inline comments — allowed, and it
+		// reconciles nothing, so finalize touches GitHub not at all.
+		if err := client.FinalizeReviewDraft(context.Background(), handle, "APPROVE", ""); err != nil {
+			t.Fatalf("finalize (comment-less approve): %v", err)
+		}
+
+		d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+		if d.FinalizedHeadSHA != "head1" {
+			t.Errorf("FinalizedHeadSHA = %q, want head1 (the start-review head fallback)", d.FinalizedHeadSHA)
+		}
+	})
+}
+
 // TestLocalClient_FinalizeReview_Freshness_HTTP406Fallback pins the reconcile's
 // large-diff path: when GitHub refuses the anchor→head compare diff media type
 // with HTTP 406, the gate falls back to the compare endpoint's per-file patches

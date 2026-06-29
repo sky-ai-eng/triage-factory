@@ -172,10 +172,22 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	// returns a per-comment error here, before anything is persisted, so the agent
 	// can still fix it. Skipped when there are no comments (a pure approve / body-
 	// only review has no inline anchor to reconcile).
+	//
+	// finalizeHead is the PR head this review is finalized against — the commit
+	// every comment was reconciled to. It's stamped onto details (TFAC-500) so the
+	// human-facing freshness check can later count commits-since-finalize against
+	// the live head. A review WITH comments learns it from the reconcile (which
+	// already fetched the head); a comment-less review (pure approve / body-only)
+	// makes no GitHub call here, so it falls back to the start-review head — the
+	// only anchor available without an extra fetch, and good enough for an
+	// advisory count on a review with no inline anchors.
+	finalizeHead := details.HeadSHA
 	if len(details.StagedComments) > 0 {
-		if err := c.reconcileStagedCommentsToHead(ctx, art, &details); err != nil {
+		head, err := c.reconcileStagedCommentsToHead(ctx, art, &details)
+		if err != nil {
 			return err
 		}
+		finalizeHead = head
 	}
 
 	// Snapshot the agent's draft as the write-once Proposed baseline — a copy of
@@ -186,6 +198,7 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	proposed.Comments = append(proposed.Comments, details.StagedComments...)
 	details.ReviewBody = body
 	details.ReviewEvent = event // the ready sentinel
+	details.FinalizedHeadSHA = finalizeHead
 	details.Proposed = proposed
 
 	updated := *art
@@ -210,22 +223,25 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 // per distinct anchor commit, so comments staged against the same checkout share
 // one GitHub read rather than fetching the same compare once per comment. A
 // comment already anchored at the current head needs no map (and no read).
-func (c *LocalClient) reconcileStagedCommentsToHead(ctx context.Context, art *domain.Artifact, details *domain.ReviewArtifactDetails) error {
+//
+// Returns the PR's current head — the commit every comment was reconciled to —
+// so the caller can stamp it onto details as the finalize-time head (TFAC-500).
+func (c *LocalClient) reconcileStagedCommentsToHead(ctx context.Context, art *domain.Artifact, details *domain.ReviewArtifactDetails) (string, error) {
 	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
-		return fmt.Errorf("review artifact has a malformed target %q", art.Target)
+		return "", fmt.Errorf("review artifact has a malformed target %q", art.Target)
 	}
 	client, err := c.githubClientForRepo(ctx, owner, repo)
 	if err != nil {
-		return err
+		return "", err
 	}
 	pr, err := client.GetPRBasic(ctx, owner, repo, number)
 	if err != nil {
-		return fmt.Errorf("fetch PR #%d to reconcile the review against its current head: %w", number, err)
+		return "", fmt.Errorf("fetch PR #%d to reconcile the review against its current head: %w", number, err)
 	}
 	head := pr.HeadSHA
 	if head == "" {
-		return fmt.Errorf("PR #%d has no head commit SHA; cannot reconcile the review's comments against the current head", number)
+		return "", fmt.Errorf("PR #%d has no head commit SHA; cannot reconcile the review's comments against the current head", number)
 	}
 
 	lineMaps := map[string]ghclient.LineMap{}
@@ -254,7 +270,7 @@ func (c *LocalClient) reconcileStagedCommentsToHead(ctx context.Context, art *do
 		if !ok {
 			lm, err = hostCompareLineMap(ctx, client, owner, repo, anchor, head)
 			if err != nil {
-				return fmt.Errorf("reconcile review comment on %s (commit %s → head %s): %w",
+				return "", fmt.Errorf("reconcile review comment on %s (commit %s → head %s): %w",
 					cmt.Path, shortCommit(anchor), shortCommit(head), err)
 			}
 			lineMaps[anchor] = lm
@@ -286,9 +302,9 @@ func (c *LocalClient) reconcileStagedCommentsToHead(ctx context.Context, art *do
 	}
 
 	if len(stale) > 0 {
-		return staleReviewCommentsError(number, head, stale)
+		return "", staleReviewCommentsError(number, head, stale)
 	}
-	return nil
+	return head, nil
 }
 
 // staleReviewComment is one outdated staged comment, captured for the finalize

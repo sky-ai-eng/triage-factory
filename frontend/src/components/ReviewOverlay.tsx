@@ -8,9 +8,11 @@ import ReviewSummary from './ReviewSummary'
 
 // ReviewArtifact mirrors internal/server/reviews_artifact_handler.go's
 // reviewArtifactJSON. review_body / review_event are the STAGED values (applied
-// to GitHub only on approval); comments are the LIVE GitHub pending-review
-// comments, each with its severity parsed back out of the comment body (chip) and
-// the clean body shown. The review is a real GitHub pending review now, edited 1:1.
+// to GitHub only on approval); the comments are staged TF-side (TFAC-494), each
+// with its severity parsed back out of the body (chip) and the clean body shown.
+// commits_since_finalize + per-comment freshness are computed against the live PR
+// head at GET time (TFAC-500) so the human sees how far the PR has drifted since
+// the agent wrote the review.
 interface ReviewArtifact {
   id: string
   run_id?: string
@@ -21,6 +23,9 @@ interface ReviewArtifact {
   review_body: string
   review_event: string
   state: string
+  // null when it couldn't be computed (live head unreachable); 0 means the PR
+  // hasn't advanced since finalize.
+  commits_since_finalize: number | null
   comments: {
     id: string
     path: string
@@ -28,6 +33,11 @@ interface ReviewArtifact {
     start_line?: number
     body: string
     severity?: string
+    // 'current' | 'moved' | 'outdated' | 'unknown' (TFAC-500).
+    freshness?: string
+    // New-side position on the live head when freshness is 'moved'.
+    mapped_line?: number
+    mapped_path?: string
   }[]
 }
 
@@ -226,16 +236,21 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     }
   }, [artifactId, onClose])
 
-  // Group comments by file path for the diff renderer.
+  // Group comments by file path for the diff renderer. A "moved" comment is keyed
+  // under its remapped (new-side) path so it lands on the file the code lives in on
+  // the live head, not the path it was authored against (TFAC-500).
   const commentsByFile = (review?.comments ?? []).reduce<Record<string, FileComment[]>>(
     (acc, c) => {
-      ;(acc[c.path] ??= []).push({
+      const path = c.freshness === 'moved' && c.mapped_path ? c.mapped_path : c.path
+      ;(acc[path] ??= []).push({
         id: c.id,
-        path: c.path,
+        path,
         line: c.line,
         startLine: c.start_line,
         body: c.body,
         severity: c.severity,
+        freshness: c.freshness,
+        mappedLine: c.mapped_line,
       })
       return acc
     },
@@ -326,6 +341,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
                     reviewEvent={review.review_event}
                     reviewBody={review.review_body}
                     commentCount={review.comments.length}
+                    commitsSinceFinalize={review.commits_since_finalize}
                     onUpdateBody={handleUpdateBody}
                     onUpdateEvent={handleUpdateEvent}
                     onSubmit={handleSubmit}

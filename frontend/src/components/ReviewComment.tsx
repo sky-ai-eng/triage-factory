@@ -6,6 +6,9 @@ interface Props {
   line: number
   body: string
   severity?: string
+  // Per-comment freshness vs. the live PR head (TFAC-500): 'current' | 'moved' |
+  // 'outdated' | 'unknown'. Drives the staleness badge; 'current' shows none.
+  freshness?: string
   // Pessimistic: edit/delete the comment on the live GitHub pending review and
   // reject on failure, so this component can surface the error and stay in edit
   // mode instead of optimistically dropping/changing the comment. void return is
@@ -39,12 +42,51 @@ function SeverityChip({ severity }: { severity?: string }) {
   )
 }
 
+// Per-comment freshness badge (TFAC-500). 'current' renders nothing — only drift
+// is worth flagging: 'moved' (same code, relocated — the comment was auto-anchored
+// to its new line), 'outdated' (the code changed/was deleted — review before
+// approving), and 'unknown' (freshness couldn't be checked against the live head).
+const FRESHNESS_BADGE: Record<string, { label: string; title: string; cls: string }> = {
+  moved: {
+    label: 'Moved',
+    title:
+      'The code this comment anchors to has shifted since the review was written; it now points at its new location.',
+    cls: 'bg-amber-500/[0.12] text-amber-600 border-amber-500/25',
+  },
+  outdated: {
+    label: 'Outdated',
+    title:
+      'The code this comment anchors to has changed or been deleted since the review was written — re-check it before approving.',
+    cls: 'bg-red-500/[0.10] text-red-600 border-red-500/20',
+  },
+  unknown: {
+    label: 'Unknown',
+    title: "Couldn't check this comment's freshness against the live PR head.",
+    cls: 'bg-black/[0.04] text-text-tertiary border-border-subtle',
+  },
+}
+
+function FreshnessBadge({ freshness }: { freshness?: string }) {
+  if (!freshness) return null
+  const badge = FRESHNESS_BADGE[freshness.toLowerCase()]
+  if (!badge) return null // 'current' (and anything unexpected) shows no badge
+  return (
+    <span
+      title={badge.title}
+      className={`inline-flex items-center rounded px-1.5 py-px text-[9px] font-semibold uppercase tracking-wider border ${badge.cls}`}
+    >
+      {badge.label}
+    </span>
+  )
+}
+
 export default function ReviewComment({
   id,
   path,
   line,
   body,
   severity,
+  freshness,
   onUpdate,
   onDelete,
 }: Props) {
@@ -138,6 +180,7 @@ export default function ReviewComment({
         <div className="flex items-center justify-between px-3 py-1.5 border-b border-border-subtle">
           <div className="flex items-center gap-2 min-w-0">
             <SeverityChip severity={severity} />
+            <FreshnessBadge freshness={freshness} />
             <span className="text-[10px] text-text-tertiary font-medium truncate">
               {path}:{line}
             </span>
