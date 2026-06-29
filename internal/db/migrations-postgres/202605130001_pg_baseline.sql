@@ -7431,5 +7431,60 @@ REVOKE ALL ON public.auth_events FROM PUBLIC;
 REVOKE ALL ON public.auth_events FROM anon, authenticated, service_role;
 
 
+-- staged_agent_injections (TFAC-501): the durable, producer-agnostic "stage for next
+-- resume" agent-injection queue — the generic terminal/parked half of the staged-injection
+-- delivery seam TFAC-493 shipped live-only. Rolled into the baseline (not a
+-- forward migration) because multi-mode / Postgres is net-new and unshipped; the
+-- SQLite tree, which HAS shipped, carries the equivalent forward migration
+-- 202606290001_staged_agent_injections.sql.
+--
+-- Run-scoped, modeled on run_messages: team-scoped RLS inherited via the runs FK,
+-- (run_id, org_id) FK ON DELETE CASCADE so a purged run takes its undelivered
+-- injections with it (the agent will never resume to read them), org_id bound as
+-- defense in depth. The store reads/writes on the admin pool (claims-less
+-- producer + consumer), but the policy + tf_app grants keep the run_messages
+-- shape so a future request-scoped read needs no migration. body is the bare,
+-- already-rendered injection line (the flush wraps + bundles); producer is a free-text
+-- origin tag (domain.StagedInjectionProducer*, no CHECK).
+CREATE TABLE public.staged_agent_injections (
+    id         uuid DEFAULT gen_random_uuid() NOT NULL,
+    run_id     uuid NOT NULL,
+    org_id     uuid NOT NULL,
+    producer   text NOT NULL,
+    body       text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.staged_agent_injections
+    ADD CONSTRAINT staged_agent_injections_pkey PRIMARY KEY (id);
+
+-- Flush reads/deletes by (org_id, run_id) ordered created_at; mirrors
+-- idx_run_messages_run plus the created_at the per-run claim sorts on.
+CREATE INDEX idx_staged_agent_injections_run ON public.staged_agent_injections USING btree (run_id, created_at);
+
+ALTER TABLE ONLY public.staged_agent_injections
+    ADD CONSTRAINT staged_agent_injections_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.staged_agent_injections
+    ADD CONSTRAINT staged_agent_injections_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
+
+-- Team-scoped exactly like run_messages: visible iff the run is (the runs_select
+-- RLS gates the EXISTS). The admin pool bypasses this; it's defense in depth for
+-- any future app-pool read.
+ALTER TABLE public.staged_agent_injections ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY staged_agent_injections_all ON public.staged_agent_injections USING ((EXISTS ( SELECT 1
+   FROM public.runs r
+  WHERE (r.id = staged_agent_injections.run_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM public.runs r
+  WHERE (r.id = staged_agent_injections.run_id))));
+
+GRANT ALL ON TABLE public.staged_agent_injections TO postgres;
+GRANT ALL ON TABLE public.staged_agent_injections TO anon;
+GRANT ALL ON TABLE public.staged_agent_injections TO authenticated;
+GRANT ALL ON TABLE public.staged_agent_injections TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.staged_agent_injections TO tf_app;
+
+
 -- +goose Down
 SELECT 'down not supported';

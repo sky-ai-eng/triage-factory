@@ -68,7 +68,14 @@ type Spawner struct {
 	agentRuns  db.AgentRunStore // run lifecycle + transcript
 	entities   db.EntityStore   // entity reads for project lookup + resume context
 	artifacts  db.ArtifactStore // review + draft-PR artifact lookup on processCompletion park check
-	events     db.EventStore    // admin-pool GetMetadataSystem for post-run prompt building
+	// stagedInjections is the durable, producer-agnostic "stage for next resume"
+	// agent-injection queue (TFAC-501). The generic staged-injection API (StageOrDeliverInjection
+	// / stagedInjectionsForResume) appends here when a target run has no warm process
+	// and flushes on the next resume. Admin-pool System methods only — both the
+	// producer (an eventbus subscriber) and the consumer (a resume goroutine) run
+	// without JWT claims. Nil-safe (tests passing a partial db.Stores{}).
+	stagedInjections db.StagedInjectionStore
+	events           db.EventStore // admin-pool GetMetadataSystem for post-run prompt building
 	// taskMemory routes the post-completion UpsertAgentMemorySystem
 	// and the run-start GetMemoriesForEntitySystem through the dual-
 	// pool store. Both fire inside the runAgent goroutine, which has
@@ -230,33 +237,34 @@ type Spawner struct {
 // partial db.Stores{} — every field is a nil-safe interface.
 func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	s := &Spawner{
-		database:        database,
-		prompts:         stores.Prompts,
-		agents:          stores.Agents,
-		blueprints:      stores.Blueprints,
-		runQueue:        stores.RunQueue,
-		tasks:           stores.Tasks,
-		agentRuns:       stores.AgentRuns,
-		entities:        stores.Entities,
-		artifacts:       stores.Artifacts,
-		events:          stores.Events,
-		taskMemory:      stores.TaskMemory,
-		runWorktrees:    stores.RunWorktrees,
-		orgs:            stores.Orgs,
-		spend:           stores.Spend,
-		jiraRules:       stores.JiraStatusRules,
-		externalActions: stores.ExternalActions,
-		teams:           stores.Teams,
-		tx:              stores.Tx,
-		ghClient:        ghClient,
-		wsHub:           wsHub,
-		model:           model,
-		cancels:         make(map[string]context.CancelFunc),
-		dispatchWake:    make(chan struct{}, 1),
-		procs:           make(map[string]*liveRunHandle),
-		permPending:     make(map[string]*pendingPermission),
-		executorID:      uuid.New().String(),
-		runSem:          make(chan struct{}, DefaultMaxConcurrentRuns),
+		database:         database,
+		prompts:          stores.Prompts,
+		agents:           stores.Agents,
+		blueprints:       stores.Blueprints,
+		runQueue:         stores.RunQueue,
+		tasks:            stores.Tasks,
+		agentRuns:        stores.AgentRuns,
+		entities:         stores.Entities,
+		artifacts:        stores.Artifacts,
+		stagedInjections: stores.StagedInjections,
+		events:           stores.Events,
+		taskMemory:       stores.TaskMemory,
+		runWorktrees:     stores.RunWorktrees,
+		orgs:             stores.Orgs,
+		spend:            stores.Spend,
+		jiraRules:        stores.JiraStatusRules,
+		externalActions:  stores.ExternalActions,
+		teams:            stores.Teams,
+		tx:               stores.Tx,
+		ghClient:         ghClient,
+		wsHub:            wsHub,
+		model:            model,
+		cancels:          make(map[string]context.CancelFunc),
+		dispatchWake:     make(chan struct{}, 1),
+		procs:            make(map[string]*liveRunHandle),
+		permPending:      make(map[string]*pendingPermission),
+		executorID:       uuid.New().String(),
+		runSem:           make(chan struct{}, DefaultMaxConcurrentRuns),
 	}
 	s.controller = inProcessController{s: s}
 	return s

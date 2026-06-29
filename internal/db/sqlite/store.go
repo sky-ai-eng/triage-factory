@@ -128,6 +128,10 @@ func New(conn *sql.DB) db.Stores {
 		// connection (N=1, no RLS). SOC2 authentication audit log; parity-only in
 		// local mode (no login flow). See TFAC-76.
 		AuthEvents: newAuthEventStore(conn),
+		// StagedInjections is admin-pool only in Postgres; SQLite collapses to the one
+		// connection (N=1, no RLS). Durable "stage for next resume"
+		// agent-injection queue. See TFAC-501.
+		StagedInjections: newStagedInjectionStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

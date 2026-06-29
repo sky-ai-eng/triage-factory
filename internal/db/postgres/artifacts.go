@@ -171,6 +171,25 @@ func (s *artifactStore) ListByRunSystem(ctx context.Context, orgID, runID string
 	return scanArtifactRows(rows)
 }
 
+// ListPendingReviewsByTargetSystem runs on the admin pool (BYPASSRLS) for the
+// new-commits notifier — a background eventbus subscriber with no JWT-claims
+// context that must see every team's pending review drafts anchored to the PR
+// (the head-SHA change is org-wide, not team-scoped). Filters to pending review
+// drafts on the given PR target. org_id stays in the WHERE clause as defense in
+// depth. See TFAC-501.
+func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, orgID, target string) ([]domain.Artifact, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+pgArtifactColumns+`
+		FROM artifacts
+		WHERE org_id = $1 AND kind = $2 AND state = $3 AND target = $4
+		ORDER BY created_at DESC, id DESC
+	`, orgID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, target)
+	if err != nil {
+		return nil, err
+	}
+	return scanArtifactRows(rows)
+}
+
 func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []string) (map[string]int, error) {
 	counts := make(map[string]int, len(runIDs))
 	if len(runIDs) == 0 {

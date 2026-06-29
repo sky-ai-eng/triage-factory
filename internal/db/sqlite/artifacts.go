@@ -154,6 +154,26 @@ func (s *artifactStore) ListByRunSystem(ctx context.Context, orgID, runID string
 	return s.ListByRun(ctx, orgID, runID)
 }
 
+// ListPendingReviewsByTargetSystem is identical to a plain org read in SQLite:
+// local mode is single-tenant (N=1) with no RLS, so there is no admin/app pool
+// split. Filters to pending review drafts anchored to the given PR target. See
+// TFAC-501.
+func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, orgID, target string) ([]domain.Artifact, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+artifactColumns+`
+		FROM artifacts
+		WHERE org_id = ? AND kind = ? AND state = ? AND target = ?
+		ORDER BY created_at DESC, id DESC
+	`, orgID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, target)
+	if err != nil {
+		return nil, err
+	}
+	return scanArtifactRows(rows)
+}
+
 func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []string) (map[string]int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

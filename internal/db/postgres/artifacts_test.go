@@ -886,6 +886,46 @@ func dedupKeys(arts []domain.Artifact) []string {
 	return out
 }
 
+// TestArtifactStore_Postgres_ListPendingReviewsByTarget pins the new-commits
+// notifier's lookup (TFAC-501): only PENDING review artifacts on the exact PR
+// target come back, org-scoped, on the admin pool.
+func TestArtifactStore_Postgres_ListPendingReviewsByTarget(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
+	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	mk := func(kind, state, target, dedup string) {
+		if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+			RunID: runID, OrgID: orgID, TeamID: teamID,
+			Provider: domain.ArtifactProviderGitHub, Kind: kind, State: state,
+			Target: target, DedupKey: dedup,
+		}); err != nil {
+			t.Fatalf("seed artifact %s/%s: %v", kind, state, err)
+		}
+	}
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", "rev-7-a")
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", "rev-7-b")
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewSubmitted, "octo/repo#7", "rev-7-submitted")
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#8", "rev-8")
+	mk(domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "octo/repo#7", "pr-7")
+
+	got, err := stores.Artifacts.ListPendingReviewsByTargetSystem(ctx, orgID, "octo/repo#7")
+	if err != nil {
+		t.Fatalf("ListPendingReviewsByTargetSystem: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 pending reviews on octo/repo#7, got %d: %+v", len(got), got)
+	}
+	for _, a := range got {
+		if a.Kind != domain.ArtifactKindReview || a.State != domain.ArtifactStateReviewPending || a.Target != "octo/repo#7" {
+			t.Errorf("unexpected artifact: kind=%s state=%s target=%s", a.Kind, a.State, a.Target)
+		}
+	}
+}
+
 // seedPgArtifactRun mints a minimal run the artifacts.run_id FK can point
 // at. origin is non-'blueprint' so runs_origin_requires_parents doesn't
 // demand a parent chain; trigger_type='manual' needs a non-NULL creator.

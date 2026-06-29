@@ -91,5 +91,16 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 	if block := s.artifactLedgerForResume(ctx, orgID, run); block != "" {
 		text = block + "\n\n" + text
 	}
+	// Then flush the durable staged-injection queue (TFAC-501) — every producer-
+	// agnostic injection staged while the run wasn't running (e.g. the new-commits
+	// freshness injection), bundled into its own <system-note> ahead of the user's
+	// message. Destructive flush: delivered exactly once. This prepend runs after
+	// the artifact-ledger prepend above but writes to the front of the string, so
+	// the staged-injection block lands first: the final order is
+	// [staged injections][artifact ledger][user text]. Both are out-of-band
+	// <system-note> blocks, so their order relative to each other is cosmetic.
+	if block := s.stagedInjectionsForResume(ctx, orgID, run.ID); block != "" {
+		text = block + "\n\n" + text
+	}
 	return s.ResumeOpenRun(orgID, runID, text, userID)
 }

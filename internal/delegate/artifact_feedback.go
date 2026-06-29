@@ -54,19 +54,30 @@ func (s *Spawner) InjectArtifactNote(orgID, runID string, a domain.Artifact) boo
 	if s.getProc(runID) == nil {
 		return false
 	}
-	wrapped := domain.WrapSystemNote(note)
-	// Detached so the caller (an HTTP resolve handler) returns immediately. Record
-	// + broadcast so the live transcript shows the human action as a user message
-	// (the shape the agent receives it as), then steer it into the warm process.
-	// All best-effort: a failed record must not stop the steer, and a steer that
-	// races the process closing just means the ledger picks it up on resume.
+	s.deliverInjectionLive(orgID, runID, domain.WrapSystemNote(note))
+	return true
+}
+
+// deliverInjectionLive records a wrapped <system-note> as a transcript row and steers
+// it into the run's warm process, on a DETACHED goroutine. The caller must have
+// already confirmed the run is live (getProc != nil) — this is the shared live-
+// delivery core of both the artifact-change note (InjectArtifactNote) and the
+// generic staged-injection queue (StageOrDeliverInjection).
+//
+// Detached so the caller (an HTTP resolve handler or an eventbus subscriber)
+// returns immediately. Record + broadcast first so the live transcript shows the
+// out-of-band action as a user message (the shape the agent receives it as), then
+// steer it into the process. All best-effort: a failed record must not stop the
+// steer, and a steer that races the process closing is tolerated — the artifact
+// note re-derives via the ledger on resume, the staged injection re-fires on the next
+// head change.
+func (s *Spawner) deliverInjectionLive(orgID, runID, wrapped string) {
 	go func() {
 		s.recordInjectedNote(orgID, runID, wrapped)
 		if err := s.Steer(context.Background(), runID, wrapped); err != nil {
-			delegateLog.Warn("inject artifact note: steer failed (will surface via the ledger on resume)", "run", runID, "error", err)
+			delegateLog.Warn("deliver injection live: steer failed", "run", runID, "error", err)
 		}
 	}()
-	return true
 }
 
 // recordInjectedNote persists a live-injected <system-note> as a user-role

@@ -1,0 +1,68 @@
+package sqlite_test
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// TestStagedInjectionStore_SQLite runs the shared conformance suite against the
+// SQLite StagedInjectionStore impl. Each subtest opens a fresh in-memory DB so queue
+// state doesn't leak between assertions.
+func TestStagedInjectionStore_SQLite(t *testing.T) {
+	dbtest.RunStagedInjectionStoreConformance(t, func(t *testing.T) (db.StagedInjectionStore, string, dbtest.StagedInjectionSeeder) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		seed := dbtest.StagedInjectionSeeder{
+			Run: func(t *testing.T, suffix string) string {
+				t.Helper()
+				return seedSQLiteRunForStagedInjection(t, conn, suffix)
+			},
+			DeleteRun: func(t *testing.T, runID string) {
+				t.Helper()
+				if _, err := conn.Exec(`DELETE FROM runs WHERE id = ?`, runID); err != nil {
+					t.Fatalf("delete run: %v", err)
+				}
+			},
+		}
+		return stores.StagedInjections, runmode.LocalDefaultOrgID, seed
+	})
+}
+
+// TestStagedInjectionStore_SQLite_RejectsNonLocalOrg pins assertLocalOrg.
+func TestStagedInjectionStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	const badOrg = "11111111-1111-1111-1111-111111111111"
+
+	if err := stores.StagedInjections.AppendSystem(ctx, badOrg, &domain.StagedInjection{RunID: "r", Producer: "p", Body: "b"}); err == nil {
+		t.Error("AppendSystem(non-local org) should error")
+	}
+	if _, err := stores.StagedInjections.FlushPendingSystem(ctx, badOrg, "r"); err == nil {
+		t.Error("FlushPendingSystem(non-local org) should error")
+	}
+}
+
+// seedSQLiteRunForStagedInjection inserts a bare run row (origin='interactive', so no
+// blueprint_run FK chain is required) the staged_agent_injections FK needs.
+func seedSQLiteRunForStagedInjection(t *testing.T, conn *sql.DB, suffix string) string {
+	t.Helper()
+	id := uuid.New().String()
+	if _, err := conn.Exec(
+		`INSERT INTO runs (id, origin, status) VALUES (?, 'interactive', 'running')`, id,
+	); err != nil {
+		t.Fatalf("seed run %s (%s): %v", id, fmt.Sprintf("staged-%s", suffix), err)
+	}
+	return id
+}

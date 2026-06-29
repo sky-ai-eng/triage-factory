@@ -61,6 +61,17 @@ func (a *App) registerSubscribers() {
 		Filter: []string{"system:poll:"},
 		Handle: a.handlePollCompleted,
 	})
+	// New-commits review-freshness injection (TFAC-501): when a reviewed PR's head
+	// advances, tell the run authoring the review — live if warm, else staged for
+	// next resume — to re-pull and reconcile. The spawner owns the lookup +
+	// deliver-or-stage; this just routes the event. The bus is the right (lossy)
+	// channel: the injection is an early-warning best-effort feed (the finalize gate
+	// reconciles regardless), the same delivery guarantee ws-broadcast has.
+	a.bus.Subscribe(eventbus.Subscriber{
+		Name:   "pr-new-commits-injection",
+		Filter: []string{domain.EventGitHubPRNewCommits},
+		Handle: a.spawner.HandlePRNewCommits,
+	})
 }
 
 // handleReconcilerPoll kicks the per-org artifact reconciler for the org whose

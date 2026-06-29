@@ -64,6 +64,23 @@ type ArtifactStore interface {
 	// Backs the run-detail surface (A·6).
 	ListByRun(ctx context.Context, orgID, runID string) ([]domain.Artifact, error)
 
+	// ListPendingReviewsByTargetSystem returns every PENDING review artifact
+	// (Kind=review, State=pending) whose Target is the given PR resource key
+	// (owner/repo#number), across every team in the org, newest first. It backs
+	// the new-commits notifier (TFAC-501): a PR head-SHA change finds the
+	// in-flight review drafts anchored to that PR so their runs can be told the
+	// PR advanced under them. "Pending" — not yet submitted or dismissed — is the
+	// only state with a live draft worth reconciling; a submitted/dismissed
+	// review is done.
+	//
+	// Admin-pool / org-wide in Postgres — the same BYPASSRLS, org-scoped shape
+	// ListNonTerminalBySystem uses: the notifier runs in an eventbus subscriber
+	// goroutine with no JWT-claims context and must see every team's drafts for
+	// the PR (the event is org-wide, not team-scoped). org_id stays bound in the
+	// WHERE clause as defense in depth. Identical to a plain org read in SQLite
+	// (single-tenant, no RLS).
+	ListPendingReviewsByTargetSystem(ctx context.Context, orgID, target string) ([]domain.Artifact, error)
+
 	// ListByRunSystem is the admin-pool (BYPASSRLS) variant of ListByRun for
 	// system-service readers that hold a real (org_id) identity but no
 	// JWT-claims context — chiefly the delegate spawner's post-completion park

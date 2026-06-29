@@ -137,6 +137,42 @@ func NewReviewArtifact(repoPath string, number int, headSHA, runID string) Artif
 	}
 }
 
+// ReviewAnchoredAtHead reports whether a review artifact is already anchored at
+// (or has reconciled to) headSHA — the freshness gate the new-commits notifier
+// uses to skip a note when the agent's checkout is not actually behind (TFAC-501).
+//
+// "Anchored at headSHA" means headSHA is among the SHAs the review has recorded
+// working against: the start-review head (details.HeadSHA) OR any staged comment's
+// CommitSHA. The comment SHAs matter because finalize-review reconciles every
+// comment forward to the PR's current head (TFAC-499) while details.HeadSHA stays
+// pinned to the start head — so a review whose comments already moved to headSHA
+// must read as current even though its start anchor didn't. This is the durable,
+// always-available stand-in for "the run's worktree HEAD": TF doesn't track the
+// worktree's git HEAD as a column (and it may live on another executor), so the
+// review's own recorded anchors are the observable frame.
+//
+// Returns false (treat as behind) for a non-review artifact, an empty headSHA, or
+// unparseable details — the caller then fires the note, the safe default (a
+// spurious "re-pull" is harmless; a missed advance leaves the agent stale).
+func ReviewAnchoredAtHead(a Artifact, headSHA string) bool {
+	if a.Kind != ArtifactKindReview || headSHA == "" {
+		return false
+	}
+	d, err := ParseReviewArtifactDetails(a.DetailsJSON)
+	if err != nil {
+		return false
+	}
+	if d.HeadSHA == headSHA {
+		return true
+	}
+	for i := range d.StagedComments {
+		if d.StagedComments[i].CommitSHA == headSHA {
+			return true
+		}
+	}
+	return false
+}
+
 // MarshalReviewArtifactDetails serializes details to a DetailsJSON string.
 // Returns "" on a marshal error — callers treat "" as empty details (→ SQL NULL).
 func MarshalReviewArtifactDetails(d ReviewArtifactDetails) string {

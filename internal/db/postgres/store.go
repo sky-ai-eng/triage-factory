@@ -316,6 +316,12 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// an app-pool statement would be rejected. Same admin-only shape as
 		// SystemLLMRuns. SOC2 authentication audit log of record. See TFAC-76.
 		AuthEvents: newAuthEventStore(admin),
+		// StagedInjections is admin-pool only: both the producer (an eventbus
+		// subscriber) and the consumer (a detached resume goroutine) run without
+		// JWT claims, so an app-pool/RLS statement would see nothing. The table
+		// still inherits runs' team-scoped RLS via its FK; org_id stays bound as
+		// defense in depth. Durable "stage for next resume" queue. See TFAC-501.
+		StagedInjections: newStagedInjectionStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),

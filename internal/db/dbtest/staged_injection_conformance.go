@@ -1,0 +1,139 @@
+package dbtest
+
+import (
+	"context"
+	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
+
+// StagedInjectionStoreFactory is what a per-backend test file hands to
+// RunStagedInjectionStoreConformance. Returns:
+//   - the wired StagedInjectionStore impl,
+//   - the orgID to pass to every call,
+//   - a StagedInjectionSeeder the harness uses to stage the run FK chain
+//     (staged_agent_injections FKs to runs; backends seed runs differently).
+type StagedInjectionStoreFactory func(t *testing.T) (store db.StagedInjectionStore, orgID string, seed StagedInjectionSeeder)
+
+// StagedInjectionSeeder is a bag of callbacks the conformance suite uses to stage
+// fixture rows the StagedInjectionStore doesn't own.
+type StagedInjectionSeeder struct {
+	// Run inserts a run row and returns its id. suffix discriminates per-subtest
+	// seeds so unique indexes don't collide.
+	Run func(t *testing.T, suffix string) (runID string)
+
+	// DeleteRun removes the run row so the FK ON DELETE CASCADE subtest can
+	// verify a purged run takes its undelivered injections with it.
+	DeleteRun func(t *testing.T, runID string)
+}
+
+// RunStagedInjectionStoreConformance covers the StagedInjectionStore contract every
+// backend impl must hold (TFAC-501): append, flush-once (destructive), per-run
+// isolation, and FK cascade.
+func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFactory) {
+	t.Helper()
+	ctx := context.Background()
+
+	t.Run("Append_then_Flush_returns_notes_sorted_and_drains", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		runID := seed.Run(t, "drain")
+
+		first := &domain.StagedInjection{RunID: runID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "first"}
+		if err := store.AppendSystem(ctx, orgID, first); err != nil {
+			t.Fatalf("append first: %v", err)
+		}
+		if first.ID == "" {
+			t.Error("AppendSystem must mint and write back an id")
+		}
+		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{RunID: runID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "second"}); err != nil {
+			t.Fatalf("append second: %v", err)
+		}
+
+		got, err := store.FlushPendingSystem(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("flush returned %d injections, want 2", len(got))
+		}
+		// Returned in non-decreasing created_at order (the sort the store applies).
+		if got[0].CreatedAt.After(got[1].CreatedAt) {
+			t.Errorf("flush not sorted oldest-first: %v then %v", got[0].CreatedAt, got[1].CreatedAt)
+		}
+		bodies := map[string]bool{got[0].Body: true, got[1].Body: true}
+		if !bodies["first"] || !bodies["second"] {
+			t.Errorf("flush missing a body: got %q and %q", got[0].Body, got[1].Body)
+		}
+		// Every row carries its run/org/producer back.
+		for _, n := range got {
+			if n.RunID != runID || n.OrgID != orgID || n.Producer != domain.StagedInjectionProducerPRNewCommits {
+				t.Errorf("row fields not preserved: %+v", n)
+			}
+		}
+
+		// Destructive: a second flush drains nothing.
+		again, err := store.FlushPendingSystem(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("second flush: %v", err)
+		}
+		if len(again) != 0 {
+			t.Errorf("second flush returned %d injections, want 0 (flush must drain)", len(again))
+		}
+	})
+
+	t.Run("Flush_empty_when_nothing_staged", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		runID := seed.Run(t, "empty")
+		got, err := store.FlushPendingSystem(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("flush of an unstaged run returned %d injections, want 0", len(got))
+		}
+	})
+
+	t.Run("Flush_is_per_run_isolated", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		runA := seed.Run(t, "iso-a")
+		runB := seed.Run(t, "iso-b")
+		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{RunID: runA, Producer: "p", Body: "for-A"}); err != nil {
+			t.Fatalf("append A: %v", err)
+		}
+		got, err := store.FlushPendingSystem(ctx, orgID, runB)
+		if err != nil {
+			t.Fatalf("flush B: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("run B flush leaked run A's injection: %+v", got)
+		}
+		// Run A's injection is still there (B's flush must not have drained it).
+		gotA, err := store.FlushPendingSystem(ctx, orgID, runA)
+		if err != nil {
+			t.Fatalf("flush A: %v", err)
+		}
+		if len(gotA) != 1 || gotA[0].Body != "for-A" {
+			t.Errorf("run A injection missing after B flush: %+v", gotA)
+		}
+	})
+
+	t.Run("Run_delete_cascades_pending_notes", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		runID := seed.Run(t, "cascade")
+		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{RunID: runID, Producer: "p", Body: "doomed"}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		seed.DeleteRun(t, runID)
+		// FlushPending filters only by (org_id, run_id), so a non-empty result here
+		// would mean the rows survived the run deletion — i.e. the cascade didn't
+		// fire. Empty proves the FK ON DELETE CASCADE took them.
+		got, err := store.FlushPendingSystem(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("flush after delete: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("staged injections survived run deletion (cascade did not fire): %+v", got)
+		}
+	})
+}
