@@ -57,10 +57,10 @@ func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID s
 	// the finalize head as its anchor), so the resolver below reuses it instead of
 	// re-fetching. A base equal to the live head means no drift — count 0, no fetch.
 	var baseCmp *ghclient.CommitComparison
-	switch {
-	case finalizeHead == "":
+	switch finalizeHead {
+	case "":
 		// no anchor to count from — leave CommitsSinceFinalize nil (unknown)
-	case finalizeHead == liveHead:
+	case liveHead:
 		zero := 0
 		out.CommitsSinceFinalize = &zero
 	default:
