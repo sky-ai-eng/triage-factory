@@ -1355,44 +1355,48 @@ func hostDiffHunks(ctx context.Context, client *ghclient.Client, owner, repo str
 	return ghclient.DiffHunks(diff), nil
 }
 
-// hostCompareDiffHunks returns the per-file hunk ranges for base...head — the
-// diff in a specific commit's frame, used to validate a review comment against
-// the agent's worktree HEAD rather than the live PR head. Mirrors hostDiffHunks'
-// HTTP-406 fallback: on "diff too large" it reassembles hunks from the compare
-// endpoint's per-file patches.
-func hostCompareDiffHunks(ctx context.Context, client *ghclient.Client, owner, repo, base, head string) (map[string][]ghclient.Hunk, error) {
+// compareOrFallback fetches the base...head compare diff and parses it with
+// fromDiff, falling back to the compare endpoint's per-file patches (parsed with
+// fromPatches) when GitHub refuses the diff media type with HTTP 406 ("diff too
+// large"). Any other error propagates. This is the shared diff-or-patches control
+// flow behind hostCompareDiffHunks (validation hunks) and hostCompareLineMap
+// (forward line-map) — the two differ only in how they parse the result, so the
+// 406-fallback logic lives in exactly one place.
+func compareOrFallback[T any](
+	ctx context.Context,
+	client *ghclient.Client,
+	owner, repo, base, head string,
+	fromDiff func(string) T,
+	fromPatches func([]ghclient.PRFile) T,
+) (T, error) {
 	diff, err := client.GetCompareDiff(ctx, owner, repo, base, head)
 	if err != nil {
+		var zero T
 		if ghclient.IsHTTP406(err) {
 			files, ferr := client.GetCompareFiles(ctx, owner, repo, base, head)
 			if ferr != nil {
-				return nil, ferr
+				return zero, ferr
 			}
-			return ghclient.DiffHunksFromPatches(files), nil
+			return fromPatches(files), nil
 		}
-		return nil, err
+		return zero, err
 	}
-	return ghclient.DiffHunks(diff), nil
+	return fromDiff(diff), nil
+}
+
+// hostCompareDiffHunks returns the per-file hunk ranges for base...head — the
+// diff in a specific commit's frame, used to validate a review comment against
+// the agent's worktree HEAD rather than the live PR head.
+func hostCompareDiffHunks(ctx context.Context, client *ghclient.Client, owner, repo, base, head string) (map[string][]ghclient.Hunk, error) {
+	return compareOrFallback(ctx, client, owner, repo, base, head, ghclient.DiffHunks, ghclient.DiffHunksFromPatches)
 }
 
 // hostCompareLineMap returns the forward line-map (TFAC-497) for base...head — the
 // diff in commit base's frame mapped onto commit head's — used by the finalize
 // freshness gate to translate a staged comment's anchored line forward to the
-// current head. Mirrors hostCompareDiffHunks' HTTP-406 fallback: on "diff too
-// large" it reassembles the map from the compare endpoint's per-file patches.
+// current head.
 func hostCompareLineMap(ctx context.Context, client *ghclient.Client, owner, repo, base, head string) (ghclient.LineMap, error) {
-	diff, err := client.GetCompareDiff(ctx, owner, repo, base, head)
-	if err != nil {
-		if ghclient.IsHTTP406(err) {
-			files, ferr := client.GetCompareFiles(ctx, owner, repo, base, head)
-			if ferr != nil {
-				return ghclient.LineMap{}, ferr
-			}
-			return ghclient.ParseLineMapFromPatches(files), nil
-		}
-		return ghclient.LineMap{}, err
-	}
-	return ghclient.ParseLineMap(diff), nil
+	return compareOrFallback(ctx, client, owner, repo, base, head, ghclient.ParseLineMap, ghclient.ParseLineMapFromPatches)
 }
 
 func (c *LocalClient) GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {

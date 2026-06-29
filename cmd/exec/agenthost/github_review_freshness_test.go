@@ -241,3 +241,60 @@ func TestLocalClient_FinalizeReview_Freshness_MixedMultiComment(t *testing.T) {
 		t.Errorf("b.go comment must be unchanged after the failed finalize, got line=%+v sha=%q", cb.Line, cb.CommitSHA)
 	}
 }
+
+// TestLocalClient_FinalizeReview_Freshness_HTTP406Fallback pins the reconcile's
+// large-diff path: when GitHub refuses the anchor→head compare diff media type
+// with HTTP 406, the gate falls back to the compare endpoint's per-file patches
+// (ParseLineMapFromPatches) and forward-maps from those. The patch shifts the
+// comment, so finalize still auto-remaps and passes — proving the fallback parse
+// drives the same reconcile as the verbatim-diff path.
+func TestLocalClient_FinalizeReview_Freshness_HTTP406Fallback(t *testing.T) {
+	// The fallback's per-file patch: same +2-at-top shift as the verbatim-diff
+	// shift test, so a.go line 3 maps to 5.
+	const fallbackFilesJSON = `{"files":[{"filename":"a.go","status":"modified",` +
+		`"patch":"@@ -1,5 +1,7 @@\n+newtop1\n+newtop2\n line1\n added2\n added3\n line4\n line5"}]}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isDiff := strings.Contains(r.Header.Get("Accept"), "diff")
+		path := r.URL.Path
+		switch {
+		case isDiff && strings.Contains(path, "/compare/head1...head2"):
+			// Refuse the reconcile diff media type → drives the 406 fallback.
+			http.Error(w, "diff too large", http.StatusNotAcceptable)
+		case isDiff && strings.Contains(path, "/compare/"):
+			// The add-review-comment validation diff (main...head1).
+			_, _ = io.WriteString(w, validationDiffAGo)
+		case strings.Contains(path, "/compare/"):
+			// The compare-files JSON fallback (GetCompareFiles, head1...head2).
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, fallbackFilesJSON)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"number":7,"base":{"ref":"main"},"head":{"sha":"head2"}}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
+	if err != nil {
+		t.Fatalf("start review: %v", err)
+	}
+	cid, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit", 3, nil, "head1")
+	if err != nil {
+		t.Fatalf("add comment: %v", err)
+	}
+
+	if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
+		t.Fatalf("finalize via the 406 patch fallback must pass: %v", err)
+	}
+
+	d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	c := byID(d.StagedComments, cid)
+	if c.Line == nil || *c.Line != 5 {
+		t.Errorf("406-fallback comment line = %+v, want auto-remapped 5", c.Line)
+	}
+	if c.CommitSHA != "head2" {
+		t.Errorf("406-fallback comment CommitSHA = %q, want re-anchored head2", c.CommitSHA)
+	}
+}
