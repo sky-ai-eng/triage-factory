@@ -189,17 +189,22 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				for _, w := range rows {
-					rmErr := worktree.RemoveAt(w.Path, runID)
-					if rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+					if rmErr := worktree.RemoveAt(w.Path, runID); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
 						delegateLog.Warn("remove worktree failed", "run", runID, "path", w.Path, "error", rmErr)
-						continue
+						// Fall through to drop the DB row anyway — it's ephemeral
+						// run-coordination state, and a lingering on-disk dir is
+						// reclaimed by the startup sweep regardless. Mirrors the
+						// blueprint teardown loop (runBlueprintWorktreeCleanup).
+					} else {
+						// Inline per-PR config reclaim (Decision D): a finishing
+						// workspace-add'd PR run reclaims its own per-run branch +
+						// push remote here, so the bootstrap sweep stays a pure crash
+						// backstop. Gated on the worktree being gone — `git branch -D`
+						// is refused while a checkout survives. w.RunID == runID
+						// (created the worktree), so this targets this run's branch,
+						// never a concurrent run's.
+						reclaimWorkspaceAddPRConfig(w)
 					}
-					// Inline per-PR config reclaim (Decision D): a finishing
-					// workspace-add'd PR run reclaims its own per-run branch +
-					// push remote here, so the bootstrap sweep stays a pure crash
-					// backstop. w.RunID == runID (created the worktree), so this
-					// targets this run's branch, never a concurrent run's.
-					reclaimWorkspaceAddPRConfig(w)
 					if delErr := s.runWorktrees.DeleteByPathSystem(cleanupCtx, orgID, runID, w.Path); delErr != nil {
 						delegateLog.Warn("delete run_worktrees row failed", "run", runID, "path", w.Path, "error", delErr)
 					}

@@ -30,7 +30,13 @@ func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, fea
 //
 // Other than the path, behavior matches CreateForBranch — same per-repo
 // lock, same bare-clone reuse, same branch-exists reattach, same excludes
-// rollback. The Jira `workspace add` CLI is the sole caller in production.
+// rollback.
+//
+// No live production caller: `workspace add` routes to CreateForCheckoutInRoot
+// (the detached default/--ref path, TFAC-498), not here. Retained as the
+// prescribed-feature-branch variant — exercised by curator_test — for a future
+// caller that needs a named branch checked out up front rather than a detached
+// checkout the agent branches from itself.
 func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID, runRoot string) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForBranchInRoot: runRoot is required")
