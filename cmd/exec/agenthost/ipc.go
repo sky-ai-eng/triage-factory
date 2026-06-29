@@ -170,12 +170,12 @@ func (c *IPCClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, bo
 	}, nil)
 }
 
-func (c *IPCClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (string, error) {
-	var res githubReviewIDResult
+func (c *IPCClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (string, string, error) {
+	var res resetReviewDraftResult
 	if err := c.call(ctx, methodResetReviewDraft, resetReviewDraftArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number}, &res); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return res.ReviewID, nil
+	return res.ReviewID, res.CommitSHA, nil
 }
 
 func (c *IPCClient) UpdateStagedReviewComment(ctx context.Context, commentID, body string) error {

@@ -456,11 +456,18 @@ type githubReviewIDResult struct {
 }
 
 // resetReviewDraftArgs carries the PR coordinates `start-review --fresh` resets
-// the run's local draft for. Reuses githubReviewIDResult (the reset draft's
-// handle, or "" when there was none to reset).
+// the run's local draft for.
 type resetReviewDraftArgs struct {
 	githubRepoRef
 	Number int `json:"number"`
+}
+
+// resetReviewDraftResult is the reset draft's handle plus its preserved head SHA
+// (both "" when there was no draft to reset), so the CLI echoes the same
+// commit_sha shape a normal start-review returns.
+type resetReviewDraftResult struct {
+	ReviewID  string `json:"review_id"`
+	CommitSHA string `json:"commit_sha"`
 }
 
 // updateStagedReviewCommentArgs / deleteStagedReviewCommentArgs address one

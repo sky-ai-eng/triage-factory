@@ -289,12 +289,17 @@ func TestLocalClient_ResetReviewDraft(t *testing.T) {
 	}
 
 	// Reset the draft for the same PR.
-	got, err := client.ResetReviewDraft(context.Background(), "octo", "repo", 7)
+	got, gotSHA, err := client.ResetReviewDraft(context.Background(), "octo", "repo", 7)
 	if err != nil {
 		t.Fatalf("ResetReviewDraft: %v", err)
 	}
 	if got != handle {
 		t.Errorf("reset handle = %q, want the same draft handle %q", got, handle)
+	}
+	// The preserved head SHA is returned so the CLI echoes the same commit_sha a
+	// normal start-review prints.
+	if gotSHA != "headsha7" {
+		t.Errorf("reset commit_sha = %q, want the preserved headsha7", gotSHA)
 	}
 
 	arts := listRunArtifacts(t, stores, info.RunID)
@@ -327,12 +332,12 @@ func TestLocalClient_ResetReviewDraft_NoDraft(t *testing.T) {
 	t.Cleanup(srv.Close)
 	_, _, client := newGithubRecordingClient(t, srv.URL, true)
 
-	got, err := client.ResetReviewDraft(context.Background(), "octo", "repo", 7)
+	got, gotSHA, err := client.ResetReviewDraft(context.Background(), "octo", "repo", 7)
 	if err != nil {
 		t.Fatalf("ResetReviewDraft (no draft): %v", err)
 	}
-	if got != "" {
-		t.Errorf("reset handle = %q, want \"\" when there's no draft to reset", got)
+	if got != "" || gotSHA != "" {
+		t.Errorf("reset = (%q, %q), want (\"\", \"\") when there's no draft to reset", got, gotSHA)
 	}
 }
 
@@ -389,6 +394,45 @@ func TestLocalClient_StagedReviewComment_UpdateDelete(t *testing.T) {
 	}
 	if err := client.DeleteStagedReviewComment(context.Background(), "nope"); err == nil {
 		t.Error("delete with an unknown staged id must error")
+	}
+}
+
+// TestLocalClient_StagedReviewComment_RejectedAfterFinalize pins that once a
+// review is finalized (ready sentinel set, Proposed snapshot frozen), an agent
+// looping after finalize-review can't mutate the staged set — update and delete
+// both reject, mirroring add-review-comment's guard, so the approve-time
+// proposed-vs-live diff isn't corrupted. The comment survives untouched.
+func TestLocalClient_StagedReviewComment_RejectedAfterFinalize(t *testing.T) {
+	head := "commit_v1"
+	srv := reviewDiffServer(t, &head)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	cid, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "first", 3, nil, "worktree_head")
+	if err != nil {
+		t.Fatalf("add comment: %v", err)
+	}
+	if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
+		t.Fatalf("FinalizeReviewDraft: %v", err)
+	}
+
+	if err := client.UpdateStagedReviewComment(context.Background(), cid, "sneaky post-finalize edit"); err == nil {
+		t.Error("update on a finalized review must be rejected")
+	}
+	if err := client.DeleteStagedReviewComment(context.Background(), cid); err == nil {
+		t.Error("delete on a finalized review must be rejected")
+	}
+
+	// The staged comment + frozen proposed snapshot are untouched.
+	d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	if len(d.StagedComments) != 1 || byID(d.StagedComments, cid).Body != "first" {
+		t.Errorf("a rejected mutation must leave the staged comment intact, got %+v", d.StagedComments)
+	}
+	if len(d.Proposed.Comments) != 1 || d.Proposed.Comments[0].Body != "first" {
+		t.Errorf("the frozen proposed snapshot must be intact, got %+v", d.Proposed)
 	}
 }
 

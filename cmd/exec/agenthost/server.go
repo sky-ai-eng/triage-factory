@@ -245,11 +245,11 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		reviewID, err := client.ResetReviewDraft(ctx, a.Owner, a.Repo, a.Number)
+		reviewID, commitSHA, err := client.ResetReviewDraft(ctx, a.Owner, a.Repo, a.Number)
 		if err != nil {
 			return nil, err
 		}
-		return githubReviewIDResult{ReviewID: reviewID}, nil
+		return resetReviewDraftResult{ReviewID: reviewID, CommitSHA: commitSHA}, nil
 
 	case methodUpdateStagedReviewComment:
 		var a updateStagedReviewCommentArgs

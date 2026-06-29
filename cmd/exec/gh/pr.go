@@ -571,15 +571,18 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 		// Pure-local reset of this run's existing draft for the PR — no GitHub
 		// call. An empty handle means there was no draft to reset, so we fall
 		// through to a normal start below (which reads the head SHA and creates
-		// one), keeping --fresh usable even as the first start-review.
-		handle, err := host.ResetReviewDraft(ctx, owner, repo, number)
+		// one), keeping --fresh usable even as the first start-review. commit_sha
+		// is the draft's preserved head SHA, echoed so the reset output matches the
+		// shape a normal start-review prints.
+		handle, commitSHA, err := host.ResetReviewDraft(ctx, owner, repo, number)
 		exitOnErr(err)
 		if handle != "" {
 			printJSON(map[string]any{
-				"review_id": handle,
-				"pr_number": number,
-				"status":    "pending",
-				"reset":     true,
+				"review_id":  handle,
+				"pr_number":  number,
+				"commit_sha": commitSHA,
+				"status":     "pending",
+				"reset":      true,
 			})
 			return
 		}

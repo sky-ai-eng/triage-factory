@@ -175,17 +175,30 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 // reset of this run's review draft for owner/repo#number, with zero GitHub calls.
 // It clears the staged comments, the body/event ready sentinel, and the
 // write-once Proposed snapshot back to an empty pending draft, keeping the
-// artifact row, its handle, and its pinned head SHA so the agent can restart the
-// review cleanly. Returns the draft's handle, or "" when the run has no draft for
-// that PR (the caller falls through to a normal start-review).
+// artifact row, its handle, and its pinned head SHA. Returns the draft's handle
+// and that pinned head SHA, or ("", "") when the run has no draft for that PR (the
+// caller falls through to a normal start-review).
 //
 // Post-494 the whole review lives in details_json, so the reset is a single
 // artifact rewrite — there is no GitHub pending review to delete and no identity
 // branch (the multi-tenant collision the GitHub-native model had is gone).
-func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (string, error) {
+//
+// NOTE: HeadSHA is deliberately PRESERVED, not refreshed — refreshing it would
+// require a GetPR read, and --fresh is contractually zero-GitHub-calls. This is
+// safe for the use case that motivates --fresh (you pulled new commits mid-review
+// and need to redo the inline comments): a review WITH comments pins the atomic
+// submit's commit_id to its comments' own CommitSHA anchors (set per comment at
+// add-review-comment, so the re-added comments anchor to the new HEAD), not to
+// this HeadSHA — HeadSHA is only the fallback commit_id for a comment-LESS review
+// (a pure approve / body-only request-changes). The one stale-SHA edge — pulling
+// past HeadSHA and then finalizing a comment-less review — can't arise from the
+// --fresh flow, since a comment-less review has no staged comments to clear in
+// the first place. If a future flow needs the head re-pinned, refresh it on the
+// normal (non-fresh) start-review path, which already reads the head.
+func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID, commitSHA string, err error) {
 	arts, err := c.listArtifactsByRun(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	target := domain.ReviewTarget(owner+"/"+repo, number)
 	var art *domain.Artifact
@@ -198,15 +211,16 @@ func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, 
 	if art == nil {
 		// No draft to reset — the caller starts a normal one. Not an error: --fresh
 		// as the first start-review is a valid (if degenerate) clean slate.
-		return "", nil
+		return "", "", nil
 	}
 
 	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
 	if err != nil {
-		return "", fmt.Errorf("parse review artifact details: %w", err)
+		return "", "", fmt.Errorf("parse review artifact details: %w", err)
 	}
 	// Clear the staged set + ready sentinel + frozen Proposed baseline, keeping
-	// Number/HeadSHA so the restarted review still pins to the same reviewed commit.
+	// Number/HeadSHA (see NOTE above) so the restarted review still pins to the
+	// same reviewed commit.
 	details.StagedComments = nil
 	details.ReviewBody = ""
 	details.ReviewEvent = ""
@@ -215,9 +229,9 @@ func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, 
 	updated := *art
 	updated.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
 	if _, err := c.UpsertArtifact(ctx, updated); err != nil {
-		return "", fmt.Errorf("reset review draft: %w", err)
+		return "", "", fmt.Errorf("reset review draft: %w", err)
 	}
-	return art.ID, nil
+	return art.ID, details.HeadSHA, nil
 }
 
 // listArtifactsByRun reads the calling run's artifacts respecting the pool split:
@@ -1068,6 +1082,9 @@ func (c *LocalClient) UpdateStagedReviewComment(ctx context.Context, commentID, 
 	if err != nil {
 		return err
 	}
+	if err := errIfFinalized(details); err != nil {
+		return err
+	}
 	details.StagedComments[idx].Body = body
 
 	updated := *art
@@ -1086,12 +1103,31 @@ func (c *LocalClient) DeleteStagedReviewComment(ctx context.Context, commentID s
 	if err != nil {
 		return err
 	}
+	if err := errIfFinalized(details); err != nil {
+		return err
+	}
 	details.StagedComments = append(details.StagedComments[:idx], details.StagedComments[idx+1:]...)
 
 	updated := *art
 	updated.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
 	if _, err := c.UpsertArtifact(ctx, updated); err != nil {
 		return fmt.Errorf("delete staged review comment: %w", err)
+	}
+	return nil
+}
+
+// errIfFinalized rejects a staged-comment mutation once the review has been
+// finalized (the ready sentinel details.ReviewEvent is set). After finalize the
+// Proposed snapshot is frozen and the review is awaiting human approval, where the
+// approval UI diffs Proposed against the live StagedComments to show the human's
+// edits — an agent (typically looping after finalize-review) mutating the staged
+// set here would corrupt that diff, masquerading as a human edit or masking a real
+// one. Mirrors the same guard GithubAddPendingReviewComment applies to staging.
+// `start-review --fresh` is the supported way to reopen a finalized draft for more
+// changes.
+func errIfFinalized(details domain.ReviewArtifactDetails) error {
+	if details.ReviewEvent != "" {
+		return fmt.Errorf("this review has already been finalized for approval; run `gh pr start-review --fresh` to reopen it before changing comments")
 	}
 	return nil
 }

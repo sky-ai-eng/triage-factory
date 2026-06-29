@@ -149,11 +149,13 @@ type Client interface {
 	// GitHub calls. It clears the staged comments and the body/event ready
 	// sentinel (and the write-once Proposed snapshot) back to an empty pending
 	// draft, keeping the artifact row, its handle, and its pinned head SHA so the
-	// agent can restart the review cleanly. Returns the draft's handle, or "" when
-	// the run has no draft for that PR (the caller falls through to a normal
-	// start-review). Post-494 there is no GitHub pending review to delete and no
-	// identity / anti-hijack logic — the draft lives entirely in the artifact.
-	ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID string, err error)
+	// agent can restart the review cleanly. Returns the draft's handle and that
+	// preserved head SHA (so the CLI can echo the same commit_sha a normal
+	// start-review prints), or ("", "") when the run has no draft for that PR (the
+	// caller falls through to a normal start-review). Post-494 there is no GitHub
+	// pending review to delete and no identity / anti-hijack logic — the draft
+	// lives entirely in the artifact.
+	ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID, commitSHA string, err error)
 
 	// --- workspace (workspace add + list) ---
 
