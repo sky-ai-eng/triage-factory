@@ -75,11 +75,17 @@ func (s *Spawner) InjectArtifactNote(orgID, runID string, a domain.Artifact) boo
 // best-effort: a failure is logged, never fatal — the steer above is what the
 // agent actually consumes. Recorded as role='user' (not agent activity), so it
 // never advances the artifact-change ledger watermark.
+//
+// Subtype is "system_note", not "text": the transcript renders user rows by Role
+// regardless of subtype today (so this shows as an operator line), but tagging it
+// distinctly from a human steer (server's message endpoint records those as
+// subtype="text") leaves the UI a handle to style it / drop the reply affordance
+// later without a schema change.
 func (s *Spawner) recordInjectedNote(orgID, runID, content string) {
 	if s.agentRuns == nil {
 		return
 	}
-	msg := &domain.AgentMessage{RunID: runID, Role: "user", Subtype: "text", Content: content}
+	msg := &domain.AgentMessage{RunID: runID, Role: "user", Subtype: "system_note", Content: content}
 	id, err := s.agentRuns.InsertMessageSystem(context.Background(), orgID, msg)
 	if err != nil {
 		delegateLog.Warn("record injected artifact note failed", "run", runID, "error", err)
@@ -101,15 +107,22 @@ func (s *Spawner) recordInjectedNote(orgID, runID, content string) {
 // messages are excluded from the watermark, so the resume message the server just
 // recorded can't suppress the ledger.
 //
-// This watermark only ever OVER-includes, never misses — a deliberate trade
-// (a duplicate note is harmless; a missed resolution leaves the agent with a
-// stale picture). The common over-include: an artifact resolved while the run
-// was live got its note steered in (InjectArtifactNote), and normally the agent
-// then emits a turn whose messages advance the watermark past it, so it doesn't
-// reappear here. But if no non-user message lands after the steer — the textbook
-// case being a human approving the FINAL artifact of a fast-finishing run, whose
-// next turn is just the conclusion — the watermark stays put and the same note is
-// bundled again on the next resume. That second copy is expected, not a bug.
+// Against the durable artifact state this watermark only ever OVER-includes,
+// never misses — a deliberate trade (a duplicate note is harmless; a missed
+// resolution leaves the agent with a stale picture). The common over-include: an
+// artifact resolved while the run was live got its note steered in
+// (InjectArtifactNote), and normally the agent then emits a turn whose messages
+// advance the watermark past it, so it doesn't reappear here. But if no non-user
+// message lands after the steer — the textbook case being a human approving the
+// FINAL artifact of a fast-finishing run, whose next turn is just the conclusion
+// — the watermark stays put and the same note is bundled again on the next
+// resume. That second copy is expected, not a bug.
+//
+// The "never miss" half is conditional on the resolution actually reaching the
+// artifact row: a resolve handler whose best-effort state flip failed leaves the
+// row in its pre-resolution state, so IsResolutionNoteState skips it and the
+// ledger can't re-derive it (see handleArtifactApprove step 4). That's the one
+// place a note can be dropped, and it's accepted there.
 //
 // Any read error degrades to "" — feedback never blocks a resume.
 func (s *Spawner) artifactLedgerForResume(ctx context.Context, orgID string, run *domain.AgentRun) string {

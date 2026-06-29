@@ -115,7 +115,7 @@ func prResolutionRef(a Artifact) string {
 	if a.ExternalID != "" {
 		return "#" + a.ExternalID
 	}
-	return "(unknown)"
+	return "(reference unavailable)"
 }
 
 // reviewResolutionHandle is the review id the agent already knows — the artifact's

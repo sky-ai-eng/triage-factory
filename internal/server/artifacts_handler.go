@@ -491,6 +491,13 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 
 	// Step 4: tell the drafting agent its PR was approved — live if the run is
 	// warm, else via its ledger on resume. Decoupled from the resolution above.
+	// Note the one carve-out to the ledger's "never miss" property: if the
+	// best-effort flip in step 1 failed (logged above), the artifact row stays at
+	// state=draft, so a terminal-run resume can't re-derive this note — the live
+	// steer is then the only delivery. That double-failure (flip failed AND no warm
+	// process) drops the note, which is acceptable here: the GitHub PR is already
+	// open (the authoritative fact), and the un-flipped draft has bigger problems
+	// than the note (it also blocks terminal-on-last closure until reconciliation).
 	ah.injectArtifactNote(orgID, openArt)
 
 	writeJSON(w, http.StatusOK, map[string]any{

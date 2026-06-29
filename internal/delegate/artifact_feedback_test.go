@@ -201,8 +201,9 @@ func TestInjectArtifactNote_TerminalNoOp(t *testing.T) {
 	if dispatched := s.InjectArtifactNote(runmode.LocalDefaultOrgID, "run-dead", art); dispatched {
 		t.Error("expected dispatched=false for a run with no live process")
 	}
-	// Give any (erroneously spawned) goroutine a chance to steer before asserting.
-	time.Sleep(20 * time.Millisecond)
+	// No sleep/poll needed: dispatched=false means InjectArtifactNote returned at
+	// the getProc gate BEFORE the `go func`, so no goroutine exists to race — the
+	// steer count is deterministically 0.
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	if fc.steerCalls != 0 {
@@ -222,7 +223,8 @@ func TestInjectArtifactNote_NonResolutionStateNoOp(t *testing.T) {
 	if dispatched := s.InjectArtifactNote(runmode.LocalDefaultOrgID, "run-live", art); dispatched {
 		t.Error("expected dispatched=false for a non-resolution state")
 	}
-	time.Sleep(20 * time.Millisecond)
+	// Deterministic: the empty-note guard returns before the `go func`, so no
+	// goroutine is spawned and steerCalls is 0 without any wait.
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	if fc.steerCalls != 0 {
