@@ -29,9 +29,9 @@ type artifactsHandler struct {
 	ws         *websocket.Hub
 	agentRuns  db.AgentRunStore
 	ghResolver ghclient.Resolver
-	// spawner is the lazy delegation-spawner accessor (set post-construction via
-	// SetSpawner, like the other handlers), used to feed the drafting agent a
-	// <system-note> when a human resolves one of its artifacts (TFAC-493).
+	// spawner is a lazy delegation-spawner accessor (wired by Server.routes via a
+	// closure over s.spawner) used to feed the drafting agent a <system-note> when
+	// a human resolves one of its artifacts (TFAC-493).
 	spawner func() *delegate.Spawner
 }
 
