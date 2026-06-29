@@ -264,9 +264,9 @@ func parsePRLocalBranch(branch string) (runID string, prNumber int, ok bool) {
 // prPushRemoteName returns the bare-config remote name a PR worktree pushes
 // through. Per (run, PR) — not per-PR — so two concurrent runs on the same PR
 // each own their own remote: inline cleanup of one run can then reclaim its
-// remote without yanking it out from under the other (a shared head-<N> remote
-// would break the surviving run). The runID/pr namespace is flattened (remote
-// names can't contain '/'). Derivable from the per-run branch alone via
+// remote without yanking it out from under the other (a single shared per-PR
+// remote would break the surviving run). The runID/pr namespace is flattened
+// (remote names can't contain '/'). Derivable from the per-run branch alone via
 // parsePRLocalBranch, so the bootstrap sweep can reconstruct it for orphans.
 func prPushRemoteName(runID string, prNumber int) string {
 	return fmt.Sprintf("tfpush-%s-%d", runID, prNumber)
