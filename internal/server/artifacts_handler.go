@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -28,6 +29,28 @@ type artifactsHandler struct {
 	ws         *websocket.Hub
 	agentRuns  db.AgentRunStore
 	ghResolver ghclient.Resolver
+	// spawner is the lazy delegation-spawner accessor (set post-construction via
+	// SetSpawner, like the other handlers), used to feed the drafting agent a
+	// <system-note> when a human resolves one of its artifacts (TFAC-493).
+	spawner func() *delegate.Spawner
+}
+
+// injectArtifactNote feeds the artifact's drafting run the agent-facing
+// <system-note> for a just-completed resolution. Fire-and-forget and fully
+// decoupled from the resolution itself: a live run is steered immediately; a
+// terminal/paused run gets nothing here and re-derives the same note from the
+// artifact row into its ledger on the next resume. Never blocks the response or
+// gates the blueprint (TFAC-379 #2). The artifact passed must carry its
+// post-resolution State so the right kind-specific copy is rendered.
+func (ah *artifactsHandler) injectArtifactNote(ctx context.Context, orgID string, a domain.Artifact) {
+	if a.RunID == "" || ah.spawner == nil {
+		return
+	}
+	sp := ah.spawner()
+	if sp == nil {
+		return
+	}
+	sp.InjectArtifactNote(ctx, orgID, a.RunID, a)
 }
 
 // prArtifactJSON is the wire shape the PR overlay consumes. Title/Body are the
@@ -465,6 +488,10 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// already-terminal blueprint (§3); otherwise a no-op.
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
 
+	// Step 4: tell the drafting agent its PR was approved — live if the run is
+	// warm, else via its ledger on resume. Decoupled from the resolution above.
+	ah.injectArtifactNote(cleanupCtx, orgID, openArt)
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"number":   number,
 		"html_url": art.URL,
@@ -533,6 +560,8 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	// GitHub hiccup leaves the PR for reconciliation to retire later. Branch kept.
 	closeDraftPRBestEffort(cleanupCtx, ah.ghResolver, orgID, art)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
+	// Tell the drafting agent its draft PR was dismissed (live or via the ledger).
+	ah.injectArtifactNote(cleanupCtx, orgID, closed)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"number":   artifactPRNumber(art),

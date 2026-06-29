@@ -1139,6 +1139,54 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("LastAgentActivityAtSystem_NewestNonUserMessage", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "open")
+
+		// No agent message yet → ok=false, the caller falls back to run start.
+		if _, ok, err := store.LastAgentActivityAtSystem(ctx, orgID, runID); err != nil || ok {
+			t.Fatalf("empty run: got ok=%v err=%v, want ok=false err=nil", ok, err)
+		}
+
+		// Insert in id order: an assistant turn, then a LATER user follow-up. The
+		// watermark must be the assistant row, NOT the user message — a resume's
+		// just-recorded user message must not poison the "agent last ran" mark.
+		// Explicit timestamps make the assertion exact; ordering is by id, so the
+		// user row (inserted last, newest id) would win a naive ORDER BY id query.
+		agentAt := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+		for _, m := range []*domain.AgentMessage{
+			{RunID: runID, Role: "assistant", Subtype: "text", Content: "agent turn", CreatedAt: agentAt},
+			{RunID: runID, Role: "user", Subtype: "text", Content: "resume message", CreatedAt: agentAt.Add(time.Hour)},
+		} {
+			if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
+				t.Fatalf("InsertMessage(%s): %v", m.Role, err)
+			}
+		}
+		at, ok, err := store.LastAgentActivityAtSystem(ctx, orgID, runID)
+		if err != nil || !ok {
+			t.Fatalf("after messages: got ok=%v err=%v, want ok=true err=nil", ok, err)
+		}
+		if !at.Equal(agentAt) {
+			t.Errorf("watermark = %v, want the assistant row %v (user message must be excluded)", at, agentAt)
+		}
+
+		// A newer agent (tool) message advances the watermark.
+		toolAt := agentAt.Add(2 * time.Hour)
+		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{
+			RunID: runID, Role: "tool", Subtype: "tool", Content: "tool result", CreatedAt: toolAt,
+		}); err != nil {
+			t.Fatalf("InsertMessage(tool): %v", err)
+		}
+		at2, ok, err := store.LastAgentActivityAtSystem(ctx, orgID, runID)
+		if err != nil || !ok {
+			t.Fatalf("after tool message: got ok=%v err=%v", ok, err)
+		}
+		if !at2.Equal(toolAt) {
+			t.Errorf("watermark = %v, want the newer tool row %v", at2, toolAt)
+		}
+	})
+
 	t.Run("BlueprintSiblingCostUSDSystem_SumsSettledExcludingSelf", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

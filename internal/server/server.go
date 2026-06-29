@@ -980,7 +980,7 @@ func (s *Server) routes() {
 	// edit/delete inline comments on the live pending review, approve submits it,
 	// and dismiss resolves a single artifact (per-item). The task-level
 	// resolve-all (drag-to-Done / Return-to-queue) flows through teardownTaskArtifacts.
-	ah := &artifactsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghResolver: s.ghResolver}
+	ah := &artifactsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
 	s.api("GET /api/artifacts/{id}", ah.handleArtifactGet)
 	s.apiMutating("PATCH /api/artifacts/{id}", ah.handleArtifactUpdate)
 	s.api("GET /api/artifacts/{id}/diff", ah.handleArtifactDiff)

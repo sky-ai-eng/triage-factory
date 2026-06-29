@@ -259,6 +259,11 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// already-terminal blueprint; otherwise a no-op.
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
 
+	// Tell the drafting agent its review was submitted (live or via the ledger).
+	// submitted keeps art.ID — the review handle the agent spoke to start-review —
+	// so the note references the id it already knows.
+	ah.injectArtifactNote(cleanupCtx, orgID, submitted)
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": submitted.ExternalID,
 		"url":       submitted.URL,
@@ -301,6 +306,8 @@ func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request
 	// strand it now that the artifact is resolved.
 	cleanupCtx := context.WithoutCancel(r.Context())
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
+	// Tell the drafting agent its review was dismissed (live or via the ledger).
+	ah.injectArtifactNote(cleanupCtx, orgID, dismissed)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": art.ExternalID,

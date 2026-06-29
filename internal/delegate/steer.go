@@ -83,5 +83,13 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 	if run == nil || !resumableState(run.Status, run.Outcome) {
 		return ErrRunNotSteerable
 	}
+	// Resuming a terminal/paused run: prepend the artifact-change ledger — every
+	// artifact this run produced that a human resolved while it wasn't running,
+	// bundled into one <system-note> ahead of the user's message (TFAC-493). The
+	// live branch above needs none: a live run was steered each resolution as it
+	// happened. Derived (no ledger table); a read failure degrades to no prepend.
+	if block := s.artifactLedgerForResume(ctx, orgID, run); block != "" {
+		text = block + "\n\n" + text
+	}
 	return s.ResumeOpenRun(orgID, runID, text, userID)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -658,6 +659,30 @@ func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, 
 
 func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error) {
 	return s.InsertMessage(ctx, orgID, msg)
+}
+
+// LastAgentActivityAtSystem returns the created_at of the run's newest non-user
+// message (the artifact-change ledger watermark, TFAC-493). Ordered by id DESC —
+// the monotonic insertion order — rather than MAX(created_at), so the watermark
+// is the genuinely last-inserted agent row and never trips over mixed timestamp
+// text formats in a lexical MAX. ok=false when the run has no agent message yet.
+func (s *agentRunStore) LastAgentActivityAtSystem(ctx context.Context, orgID, runID string) (time.Time, bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return time.Time{}, false, err
+	}
+	var at time.Time
+	err := s.q.QueryRowContext(ctx, `
+		SELECT created_at FROM run_messages
+		WHERE run_id = ? AND role <> 'user'
+		ORDER BY id DESC LIMIT 1
+	`, runID).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return at, true, nil
 }
 
 func (s *agentRunStore) ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {

@@ -337,6 +337,16 @@ type AgentRunStore interface {
 	HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
 
+	// LastAgentActivityAtSystem returns the created_at of the run's most
+	// recent non-user run_messages row (role <> 'user') — the "agent last
+	// ran" watermark the artifact-change feedback ledger (TFAC-493) derives
+	// against. ok=false (zero time) when the run has no agent messages yet,
+	// so the caller falls back to the run's start. User messages are excluded
+	// so a just-recorded resume message can't poison the watermark, and the
+	// agent's own messages advance it past anything injected live. Admin pool:
+	// the resume path runs on a detached goroutine with no JWT claims.
+	LastAgentActivityAtSystem(ctx context.Context, orgID, runID string) (at time.Time, ok bool, err error)
+
 	// ListReapableSnapshotKeysSystem returns the (org, blueprint_run_id) of
 	// every blueprint_run all of whose resumable-state runs (open /
 	// completed+abort) last parked before cutoff — the workspace snapshot keys the

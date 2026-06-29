@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -800,6 +801,27 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 
 func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error) {
 	return insertRunMessage(ctx, s.admin, orgID, msg)
+}
+
+// LastAgentActivityAtSystem returns the created_at of the run's newest non-user
+// message (the artifact-change ledger watermark, TFAC-493). Ordered by id DESC
+// (the monotonic sequence) so the watermark is the genuinely last-inserted agent
+// row. Admin pool: the resume path holds no JWT claims. ok=false when the run has
+// no agent message yet.
+func (s *agentRunStore) LastAgentActivityAtSystem(ctx context.Context, orgID, runID string) (time.Time, bool, error) {
+	var at time.Time
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT created_at FROM run_messages
+		WHERE org_id = $1 AND run_id = $2 AND role <> 'user'
+		ORDER BY id DESC LIMIT 1
+	`, orgID, runID).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return at, true, nil
 }
 
 func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.AgentMessage) (int64, error) {
