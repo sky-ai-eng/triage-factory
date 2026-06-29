@@ -244,8 +244,13 @@ export default function ReviewSummary({
                     <div className="flex items-center gap-2">
                       <button
                         onClick={async () => {
-                          await onRefresh()
-                          setConfirmingRefresh(false)
+                          try {
+                            await onRefresh()
+                            setConfirmingRefresh(false) // close only on success
+                          } catch {
+                            // refreshError already renders inside this panel; keep
+                            // it open so the user sees the failure and can retry.
+                          }
                         }}
                         disabled={refreshing}
                         className="text-[11px] font-medium text-white bg-accent hover:bg-accent/90 px-3 py-1 rounded-lg transition-colors disabled:opacity-60"

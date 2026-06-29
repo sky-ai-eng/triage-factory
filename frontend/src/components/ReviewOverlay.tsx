@@ -261,6 +261,9 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
       setReloadKey((k) => k + 1)
     } catch (err) {
       setRefreshError(err instanceof Error ? err.message : String(err))
+      // Re-throw so ReviewSummary keeps the confirm panel open — that panel is the
+      // only place refreshError renders, so closing it would hide the message.
+      throw err
     } finally {
       setRefreshing(false)
     }
