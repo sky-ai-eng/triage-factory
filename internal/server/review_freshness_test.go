@@ -161,6 +161,34 @@ func TestReviewFreshness_Outdated(t *testing.T) {
 	}
 }
 
+// TestReviewFreshness_NoAnchorComment pins that a staged comment with no line
+// anchor (line == nil) stays "unknown" with no remapped line — it can't be
+// forward-mapped. The PR hasn't advanced (live head == finalize head), so the
+// count is 0 and no compare is requested; the unknown verdict is purely the
+// missing-anchor branch, not a GitHub failure.
+func TestReviewFreshness_NoAnchorComment(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	freshnessAppStub(t, srv, "headA", 0, "", "") // no drift; compare must not be hit
+	artID := seedFinalizedReviewAt(t, srv, "rnoanchor", 7, "headA", 3)
+	// Null out the staged comment's line anchor.
+	art := getArtifact(t, srv, artID)
+	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	d.StagedComments[0].Line = nil
+	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+		t.Fatalf("null line: %v", err)
+	}
+
+	out := getReviewFreshness(t, srv, artID)
+	if len(out.Comments) != 1 || out.Comments[0].Freshness != "unknown" {
+		t.Fatalf("comment freshness = %+v, want one 'unknown' (no line anchor)", out.Comments)
+	}
+	if out.Comments[0].MappedLine != 0 {
+		t.Errorf("mapped_line = %d, want 0 for an unanchored comment", out.Comments[0].MappedLine)
+	}
+}
+
 // TestReviewFreshness_DegradesWhenHeadUnavailable pins the graceful-degradation
 // contract: when the live PR head can't be fetched (GitHub 500), the overlay still
 // returns 200 with the staged comment, freshness "unknown", and a nil count — the

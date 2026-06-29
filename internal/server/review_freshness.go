@@ -40,8 +40,11 @@ const (
 // "unknown" default whenever their anchor can't be mapped, so this never needs to
 // roll anything back on a partial failure.
 //
-// out.Comments is parallel to details.StagedComments (reviewGet builds one from
-// the other in order), so index i addresses the same comment in both.
+// Freshness lands on each out-comment by matching the staged comment's stable
+// TF-local id, not by slice position — out.Comments is built 1:1 from
+// StagedComments today, but joining on id keeps that from becoming a silent
+// correctness dependency on iteration order if either side is later filtered or
+// reordered.
 func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID string, art *domain.Artifact, details domain.ReviewArtifactDetails, out *reviewArtifactJSON) {
 	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
@@ -82,13 +85,22 @@ func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID s
 		out.CommitsSinceFinalize = &n
 	}
 
+	// Index the staged comments by their stable TF-local id so freshness joins the
+	// right out-comment without depending on slice order (see the doc comment).
+	staged := make(map[string]domain.ReviewArtifactComment, len(details.StagedComments))
+	for _, c := range details.StagedComments {
+		if c.ID != "" {
+			staged[c.ID] = c
+		}
+	}
+
 	// Per-comment freshness. Each comment maps from its own anchor (normally the
 	// shared finalize head, so the cache fetches one compare) forward to the live
 	// head.
 	for i := range out.Comments {
-		c := details.StagedComments[i]
-		if c.Line == nil {
-			continue // no anchor to forward-map — stays "unknown"
+		c, ok := staged[out.Comments[i].ID]
+		if !ok || c.Line == nil {
+			continue // no matching staged comment, or no line anchor — stays "unknown"
 		}
 		anchor := c.CommitSHA
 		if anchor == "" {
@@ -147,22 +159,24 @@ func (m *compareCache) from(base string) (cachedCompare, bool) {
 	if base == "" {
 		return cachedCompare{}, false
 	}
-	if base == m.liveHead {
-		// No drift from this base: an empty line-map maps every anchor unchanged.
-		return cachedCompare{lineMap: ghclient.ParseLineMap(""), ok: true}, true
-	}
 	if c, seen := m.byBase[base]; seen {
 		return c, c.ok
 	}
-	cc, err := m.gh.CompareCommits(m.ctx, m.owner, m.repo, base, m.liveHead)
-	if err != nil {
-		artifactsLog.Warn("review freshness: compare failed; serving unknown for this anchor",
-			"owner", m.owner, "repo", m.repo, "base", base, "head", m.liveHead, "error", err)
-		// Cache the miss so a shared anchor doesn't re-request.
-		m.byBase[base] = cachedCompare{}
-		return cachedCompare{}, false
+	var c cachedCompare
+	if base == m.liveHead {
+		// No drift from this base: an empty line-map maps every anchor unchanged.
+		c = cachedCompare{lineMap: ghclient.ParseLineMap(""), ok: true}
+	} else {
+		cc, err := m.gh.CompareCommits(m.ctx, m.owner, m.repo, base, m.liveHead)
+		if err != nil {
+			artifactsLog.Warn("review freshness: compare failed; serving unknown for this anchor",
+				"owner", m.owner, "repo", m.repo, "base", base, "head", m.liveHead, "error", err)
+			// Cache the miss so a shared anchor doesn't re-request.
+			m.byBase[base] = cachedCompare{}
+			return cachedCompare{}, false
+		}
+		c = cachedCompare{lineMap: ghclient.ParseLineMapFromPatches(cc.Files), aheadBy: cc.AheadBy, ok: true}
 	}
-	c := cachedCompare{lineMap: ghclient.ParseLineMapFromPatches(cc.Files), aheadBy: cc.AheadBy, ok: true}
 	m.byBase[base] = c
 	return c, true
 }

@@ -47,7 +47,9 @@ type reviewArtifactCommentJSON struct {
 	Freshness string `json:"freshness"`
 	// MappedLine / MappedPath carry the comment's new-side position on the live
 	// head when Freshness is "moved" (the anchored code relocated). Zero/empty for
-	// every other verdict.
+	// every other verdict. MappedPath is set ONLY for a rename — a "moved" comment
+	// with an absent MappedPath means "same file, line shifted to MappedLine"; the
+	// consumer falls back to the comment's original path in that case.
 	MappedLine int    `json:"mapped_line,omitempty"`
 	MappedPath string `json:"mapped_path,omitempty"`
 }
