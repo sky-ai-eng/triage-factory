@@ -36,13 +36,14 @@ type artifactsHandler struct {
 }
 
 // injectArtifactNote feeds the artifact's drafting run the agent-facing
-// <system-note> for a just-completed resolution. Fire-and-forget and fully
-// decoupled from the resolution itself: a live run is steered immediately; a
-// terminal/paused run gets nothing here and re-derives the same note from the
-// artifact row into its ledger on the next resume. Never blocks the response or
+// <system-note> for a just-completed resolution. Fully decoupled from the
+// resolution itself: a live run is steered (the actual delivery runs on a
+// detached goroutine inside the spawner, so this returns immediately and never
+// blocks the response); a terminal/paused run gets nothing here and re-derives
+// the same note from the artifact row into its ledger on the next resume. Never
 // gates the blueprint (TFAC-379 #2). The artifact passed must carry its
 // post-resolution State so the right kind-specific copy is rendered.
-func (ah *artifactsHandler) injectArtifactNote(ctx context.Context, orgID string, a domain.Artifact) {
+func (ah *artifactsHandler) injectArtifactNote(orgID string, a domain.Artifact) {
 	if a.RunID == "" || ah.spawner == nil {
 		return
 	}
@@ -50,7 +51,7 @@ func (ah *artifactsHandler) injectArtifactNote(ctx context.Context, orgID string
 	if sp == nil {
 		return
 	}
-	sp.InjectArtifactNote(ctx, orgID, a.RunID, a)
+	sp.InjectArtifactNote(orgID, a.RunID, a)
 }
 
 // prArtifactJSON is the wire shape the PR overlay consumes. Title/Body are the
@@ -490,7 +491,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 
 	// Step 4: tell the drafting agent its PR was approved — live if the run is
 	// warm, else via its ledger on resume. Decoupled from the resolution above.
-	ah.injectArtifactNote(cleanupCtx, orgID, openArt)
+	ah.injectArtifactNote(orgID, openArt)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"number":   number,
@@ -561,7 +562,7 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	closeDraftPRBestEffort(cleanupCtx, ah.ghResolver, orgID, art)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
 	// Tell the drafting agent its draft PR was dismissed (live or via the ledger).
-	ah.injectArtifactNote(cleanupCtx, orgID, closed)
+	ah.injectArtifactNote(orgID, closed)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"number":   artifactPRNumber(art),

@@ -262,7 +262,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// Tell the drafting agent its review was submitted (live or via the ledger).
 	// submitted keeps art.ID — the review handle the agent spoke to start-review —
 	// so the note references the id it already knows.
-	ah.injectArtifactNote(cleanupCtx, orgID, submitted)
+	ah.injectArtifactNote(orgID, submitted)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": submitted.ExternalID,
@@ -307,7 +307,7 @@ func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request
 	cleanupCtx := context.WithoutCancel(r.Context())
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
 	// Tell the drafting agent its review was dismissed (live or via the ledger).
-	ah.injectArtifactNote(cleanupCtx, orgID, dismissed)
+	ah.injectArtifactNote(orgID, dismissed)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": art.ExternalID,

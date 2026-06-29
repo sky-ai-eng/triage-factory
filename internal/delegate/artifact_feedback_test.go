@@ -110,9 +110,28 @@ func TestArtifactLedgerForResume_ExcludesPreWatermark(t *testing.T) {
 	}
 }
 
+// waitSteerCalls polls the fake controller until it has seen at least want steer
+// calls, or fails. Delivery runs on a detached goroutine (InjectArtifactNote is
+// fire-and-forget), so the side effect is asserted by polling rather than a
+// synchronous read.
+func waitSteerCalls(t *testing.T, fc *fakeController, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		fc.mu.Lock()
+		got := fc.steerCalls
+		fc.mu.Unlock()
+		if got >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("steerCalls did not reach %d in time", want)
+}
+
 // TestInjectArtifactNote_LiveSteersWrappedNote: resolving an artifact on a live
 // run steers a single <system-note>-wrapped, kind-specific note into the warm
-// process and reports delivered=true.
+// process (on a detached goroutine) and reports dispatched=true.
 func TestInjectArtifactNote_LiveSteersWrappedNote(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	fc := &fakeController{}
@@ -121,9 +140,12 @@ func TestInjectArtifactNote_LiveSteersWrappedNote(t *testing.T) {
 	s.registerProc(runmode.LocalDefaultOrgID, "run-live", &agentproc.LiveRun{})
 
 	art := domain.Artifact{Kind: domain.ArtifactKindPullRequest, State: domain.ArtifactStatePROpen, Target: "o/r#7"}
-	if delivered := s.InjectArtifactNote(context.Background(), runmode.LocalDefaultOrgID, "run-live", art); !delivered {
-		t.Fatal("expected delivered=true for a live run")
+	if dispatched := s.InjectArtifactNote(runmode.LocalDefaultOrgID, "run-live", art); !dispatched {
+		t.Fatal("expected dispatched=true for a live run")
 	}
+	waitSteerCalls(t, fc, 1)
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
 	if fc.steerCalls != 1 || fc.steerRunID != "run-live" {
 		t.Fatalf("steer = {calls:%d runID:%q}, want {1 run-live}", fc.steerCalls, fc.steerRunID)
 	}
@@ -133,17 +155,22 @@ func TestInjectArtifactNote_LiveSteersWrappedNote(t *testing.T) {
 }
 
 // TestInjectArtifactNote_TerminalNoOp: with no live process, InjectArtifactNote
-// does NOT steer (it must not restart the agent) and reports delivered=false —
-// the resolution surfaces via the derived ledger on the next resume instead.
+// dispatches nothing (it must not restart the agent) and reports dispatched=false
+// — the resolution surfaces via the derived ledger on the next resume instead.
+// dispatched=false means no goroutine was spawned, so steerCalls stays 0.
 func TestInjectArtifactNote_TerminalNoOp(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	fc := &fakeController{}
 	s.controller = fc
 
 	art := domain.Artifact{Kind: domain.ArtifactKindPullRequest, State: domain.ArtifactStatePRClosed, Target: "o/r#7"}
-	if delivered := s.InjectArtifactNote(context.Background(), runmode.LocalDefaultOrgID, "run-dead", art); delivered {
-		t.Error("expected delivered=false for a run with no live process")
+	if dispatched := s.InjectArtifactNote(runmode.LocalDefaultOrgID, "run-dead", art); dispatched {
+		t.Error("expected dispatched=false for a run with no live process")
 	}
+	// Give any (erroneously spawned) goroutine a chance to steer before asserting.
+	time.Sleep(20 * time.Millisecond)
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
 	if fc.steerCalls != 0 {
 		t.Errorf("steerCalls = %d, want 0 (terminal run must not be steered/restarted)", fc.steerCalls)
 	}
@@ -158,9 +185,12 @@ func TestInjectArtifactNote_NonResolutionStateNoOp(t *testing.T) {
 	s.registerProc(runmode.LocalDefaultOrgID, "run-live", &agentproc.LiveRun{})
 
 	art := domain.Artifact{Kind: domain.ArtifactKindPullRequest, State: domain.ArtifactStatePRDraft, Target: "o/r#7"}
-	if delivered := s.InjectArtifactNote(context.Background(), runmode.LocalDefaultOrgID, "run-live", art); delivered {
-		t.Error("expected delivered=false for a non-resolution state")
+	if dispatched := s.InjectArtifactNote(runmode.LocalDefaultOrgID, "run-live", art); dispatched {
+		t.Error("expected dispatched=false for a non-resolution state")
 	}
+	time.Sleep(20 * time.Millisecond)
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
 	if fc.steerCalls != 0 {
 		t.Errorf("steerCalls = %d, want 0", fc.steerCalls)
 	}

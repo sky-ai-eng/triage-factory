@@ -27,38 +27,45 @@ import (
 
 // InjectArtifactNote delivers a single fire-and-forget <system-note> describing a
 // just-resolved artifact to a run's LIVE process, if it has one. Returns true iff
-// the run was live and the note was handed to the process.
+// a warm process was found and delivery was dispatched.
+//
+// Truly non-blocking: the only synchronous work is the cheap getProc liveness
+// gate. The actual delivery — a DB insert (the transcript row) and a write into
+// the live process's stdin, either of which can block under contention — runs on
+// a detached goroutine off context.Background(), so an HTTP resolve handler never
+// waits on it and a request cancel never tears it down. It never flips run status
+// or gates the blueprint either — resolution is an async sidecar (TFAC-379 #2).
 //
 // A false return is NOT a lost note: a terminal/paused run has no warm process to
 // steer, and the same resolution is re-derived from the artifact row into the
-// ledger on the run's next resume (artifactLedgerForResume). It never blocks the
-// caller, flips run status, or gates the blueprint — resolution is an async
-// sidecar (TFAC-379 locked decision #2).
+// ledger on the run's next resume (artifactLedgerForResume). A true return is
+// optimistic — the process found here may close before the goroutine's steer
+// lands, in which case the resolution likewise resurfaces via that ledger. We
+// deliberately do NOT wake a terminal run here (TFAC-493: "do not restart the
+// agent").
 //
 // The artifact passed must carry its post-resolution State (the handlers hand us
 // the flipped copy), so domain.ArtifactResolutionNote renders the right shape.
-func (s *Spawner) InjectArtifactNote(ctx context.Context, orgID, runID string, a domain.Artifact) bool {
+func (s *Spawner) InjectArtifactNote(orgID, runID string, a domain.Artifact) bool {
 	note := domain.ArtifactResolutionNote(a)
 	if note == "" {
 		return false // not one of the four reported resolution states
 	}
-	// getProc is the liveness gate; nil means no warm process → defer to the
-	// derived ledger on the next resume. We deliberately do NOT wake a terminal
-	// run here (TFAC-493: "do not restart the agent").
 	if s.getProc(runID) == nil {
 		return false
 	}
 	wrapped := domain.WrapSystemNote(note)
-	// Record + broadcast so the live transcript shows the human action as a user
-	// message (the shape the agent receives it as), then steer it into the warm
-	// process. All best-effort: a failed record/broadcast must not stop delivery,
-	// and a steer that races the process closing just means the ledger picks it up
-	// on the next resume.
-	s.recordInjectedNote(orgID, runID, wrapped)
-	if err := s.Steer(ctx, runID, wrapped); err != nil {
-		delegateLog.Warn("inject artifact note: steer failed (will surface via the ledger on resume)", "run", runID, "error", err)
-		return false
-	}
+	// Detached so the caller (an HTTP resolve handler) returns immediately. Record
+	// + broadcast so the live transcript shows the human action as a user message
+	// (the shape the agent receives it as), then steer it into the warm process.
+	// All best-effort: a failed record must not stop the steer, and a steer that
+	// races the process closing just means the ledger picks it up on resume.
+	go func() {
+		s.recordInjectedNote(orgID, runID, wrapped)
+		if err := s.Steer(context.Background(), runID, wrapped); err != nil {
+			delegateLog.Warn("inject artifact note: steer failed (will surface via the ledger on resume)", "run", runID, "error", err)
+		}
+	}()
 	return true
 }
 
