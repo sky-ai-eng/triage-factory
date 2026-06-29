@@ -23,26 +23,35 @@ var (
 	sharedReaders   = map[string]int{}
 )
 
+// sharedReadersKey canonicalizes a worktree path so the refcount map agrees
+// with git's symlink-resolved recorded path — the one bareHasLiveWorktrees looks
+// the count up by. Resolved outside the lock (it stats the filesystem); on Linux
+// it's a no-op (see resolveSymlinksBestEffort).
+func sharedReadersKey(wtDir string) string { return resolveSymlinksBestEffort(wtDir) }
+
 func sharedReadersCount(wtDir string) int {
+	key := sharedReadersKey(wtDir)
 	sharedReadersMu.Lock()
 	defer sharedReadersMu.Unlock()
-	return sharedReaders[wtDir]
+	return sharedReaders[key]
 }
 
 func sharedReadersInc(wtDir string) {
+	key := sharedReadersKey(wtDir)
 	sharedReadersMu.Lock()
 	defer sharedReadersMu.Unlock()
-	sharedReaders[wtDir]++
+	sharedReaders[key]++
 }
 
 func sharedReadersDec(wtDir string) {
+	key := sharedReadersKey(wtDir)
 	sharedReadersMu.Lock()
 	defer sharedReadersMu.Unlock()
-	if sharedReaders[wtDir] <= 1 {
-		delete(sharedReaders, wtDir)
+	if sharedReaders[key] <= 1 {
+		delete(sharedReaders, key)
 		return
 	}
-	sharedReaders[wtDir]--
+	sharedReaders[key]--
 }
 
 // EnsureSharedCuratorWorktree materializes (or reuses) the single SHARED

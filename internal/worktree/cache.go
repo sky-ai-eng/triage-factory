@@ -373,15 +373,34 @@ func curatorSharedRoots() []string {
 	return roots
 }
 
+// resolveSymlinksBestEffort returns p with symlinks resolved, or p unchanged
+// when it can't be resolved (e.g. the path doesn't exist yet). git canonicalizes
+// a linked worktree's recorded gitdir to its real path, while paths TF derives
+// from the configured state root stay unresolved — and on macOS $TMPDIR is
+// /var/folders/... (a symlink to /private/var/folders/...), so the two forms
+// diverge. The curator liveness keys (the sharedReaders refcount map) and the
+// shared-root prefix check must agree on one canonical form, or a quiescent
+// shared worktree reads as live and defeats bare eviction. This is a macOS
+// dev/test-only divergence — Linux state roots have no such indirection, so
+// resolution is a no-op there.
+func resolveSymlinksBestEffort(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
+
 // isCuratorSharedWorktree reports whether wt is a shared curator worktree
 // checkout (strictly under a curator-shared-repos root). Such a checkout's
 // liveness is the sharedReaders refcount, not mere on-disk existence, so the
 // reaper can reclaim a quiescent one (TFAC-61) — unlike a per-project curator
 // worktree (under the project KB dir) or a delegation worktree, which stay
-// live by existence.
+// live by existence. Both sides are symlink-resolved so a git-canonicalized
+// worktree path matches a state-root-derived root (see resolveSymlinksBestEffort).
 func isCuratorSharedWorktree(wt string) bool {
+	wt = resolveSymlinksBestEffort(wt)
 	for _, root := range curatorSharedRoots() {
-		if strings.HasPrefix(wt, root+string(filepath.Separator)) {
+		if strings.HasPrefix(wt, resolveSymlinksBestEffort(root)+string(filepath.Separator)) {
 			return true
 		}
 	}
