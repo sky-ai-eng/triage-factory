@@ -26,12 +26,17 @@ export function approvalCounts(run: AgentRun): ApprovalCounts {
 }
 
 // hasUnresolvedArtifacts is the single predicate every approval surface keys off,
-// replacing `run.Status === 'pending_approval'`. It trusts the server's derived
-// flag, falling back to the id set / counts when the boolean is absent but the
-// set was read (older projections / defensive).
+// replacing `run.Status === 'pending_approval'`. The flag is three-valued: the
+// server emits an explicit true/false only when the answer is definitive (the
+// artifact set was read), and OMITS it (undefined) under its transient-failure
+// guard. So honor the authoritative boolean directly when present — a definitive
+// `false` means "none", full stop — and fall back to the id set / counts only
+// when it's undefined (older projections / the transient window).
 export function hasUnresolvedArtifacts(run: AgentRun | null | undefined): boolean {
   if (!run) return false
-  if (run.has_unresolved_artifacts) return true
+  if (run.has_unresolved_artifacts === false) return false
+  if (run.has_unresolved_artifacts === true) return true
+  // undefined → re-derive from whatever the projection did carry.
   if ((run.pending_artifact_ids?.length ?? 0) > 0) return true
   const { total } = approvalCounts(run)
   return total > 0

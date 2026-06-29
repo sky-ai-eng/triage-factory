@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useId, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { resolveAllSummary } from '../lib/approval'
 
@@ -40,6 +40,9 @@ export default function ResolveAllConfirm({
   onConfirm,
   onCancel,
 }: Props) {
+  const descId = useId()
+  const cancelRef = useRef<HTMLButtonElement>(null)
+
   // Esc cancels — but never while the request is in flight (a mid-teardown
   // dismiss would desync the UI from the half-applied backend state).
   useEffect(() => {
@@ -50,6 +53,13 @@ export default function ResolveAllConfirm({
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [open, busy, onCancel])
+
+  // Land focus on Cancel (the non-destructive default) when the dialog opens, so
+  // a keyboard user is inside it and doesn't fire the destructive confirm by
+  // reflex on the first Enter.
+  useEffect(() => {
+    if (open) cancelRef.current?.focus()
+  }, [open])
 
   return (
     <AnimatePresence>
@@ -66,6 +76,7 @@ export default function ResolveAllConfirm({
             role="alertdialog"
             aria-modal="true"
             aria-label="Resolve all artifacts"
+            aria-describedby={descId}
             className="fixed left-1/2 top-1/2 z-[60] w-[min(440px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border-glass bg-surface/95 p-5 shadow-2xl shadow-black/[0.12] backdrop-blur-2xl"
             initial={{ opacity: 0, scale: 0.96, y: 8 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -76,11 +87,12 @@ export default function ResolveAllConfirm({
             <h2 className="text-[14px] font-semibold tracking-tight text-text-primary">
               Resolve open artifacts?
             </h2>
-            <p className="mt-2 text-[12.5px] leading-relaxed text-text-secondary">
+            <p id={descId} className="mt-2 text-[12.5px] leading-relaxed text-text-secondary">
               {resolveAllSummary(prCount, reviewCount, isLive)}
             </p>
             <div className="mt-5 flex items-center justify-end gap-2">
               <button
+                ref={cancelRef}
                 type="button"
                 onClick={onCancel}
                 disabled={busy}

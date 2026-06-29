@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { ExternalLink, X } from 'lucide-react'
 import type { Artifact } from '../types'
@@ -49,6 +49,7 @@ export default function ApprovalList({
   // Per-id in-flight guard so a card's [x] disables only itself while its POST
   // is in flight (and rapid double-clicks can't fire two dismisses).
   const [dismissing, setDismissing] = useState<Record<string, boolean>>({})
+  const closeRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     if (!open) return
@@ -58,6 +59,12 @@ export default function ApprovalList({
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [open, onClose])
+
+  // Move keyboard focus into the dialog on open so a keyboard / screen-reader
+  // user lands inside it rather than on the now-inert board behind the scrim.
+  useEffect(() => {
+    if (open) closeRef.current?.focus()
+  }, [open])
 
   const dismissOne = async (a: Artifact) => {
     if (dismissing[a.id]) return
@@ -94,6 +101,9 @@ export default function ApprovalList({
             onClick={onClose}
           />
           <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Awaiting your approval"
             className="fixed inset-x-0 bottom-0 top-auto z-40 mx-auto flex max-h-[80vh] w-[min(680px,calc(100vw-1.5rem))] flex-col rounded-t-3xl border border-border-glass bg-surface/95 shadow-2xl shadow-black/[0.1] backdrop-blur-2xl sm:inset-y-12 sm:bottom-auto sm:top-1/2 sm:max-h-[76vh] sm:-translate-y-1/2 sm:rounded-3xl"
             initial={{ opacity: 0, y: 24 }}
             animate={{ opacity: 1, y: 0 }}
@@ -108,10 +118,15 @@ export default function ApprovalList({
                   Awaiting your approval
                 </h2>
                 <span className="font-mono text-[11px] tabular-nums text-text-tertiary">
-                  {items.length} {items.length === 1 ? 'item' : 'items'}
+                  {/* Stay in sync with the body: while the rows are still loading
+                      (pendingExpected, empty set) show "…" rather than "0 items". */}
+                  {pendingExpected && items.length === 0
+                    ? '…'
+                    : `${items.length} ${items.length === 1 ? 'item' : 'items'}`}
                 </span>
               </div>
               <button
+                ref={closeRef}
                 type="button"
                 onClick={onClose}
                 aria-label="Close"
