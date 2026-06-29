@@ -112,6 +112,21 @@ func TestGitBaseEnv_ForcesPromptDisabledOverInherited(t *testing.T) {
 	}
 }
 
+// TestGitBaseEnv_StripsInheritedAskpass guards the editor-terminal hang: an
+// inherited GIT_ASKPASS/SSH_ASKPASS (Cursor / VS Code export one) drives git to
+// a GUI credential prompt regardless of GIT_TERMINAL_PROMPT=0, so a failed-auth
+// fetch hangs instead of fast-failing. gitBaseEnv must drop them from the child
+// env so the fast-fail guarantee actually holds.
+func TestGitBaseEnv_StripsInheritedAskpass(t *testing.T) {
+	t.Setenv("GIT_ASKPASS", "/Applications/SomeEditor/askpass.sh")
+	t.Setenv("SSH_ASKPASS", "/usr/bin/ssh-askpass")
+	for _, kv := range gitBaseEnv() {
+		if strings.HasPrefix(kv, "GIT_ASKPASS=") || strings.HasPrefix(kv, "SSH_ASKPASS=") {
+			t.Errorf("gitBaseEnv leaked an askpass helper: %q (git would prompt and hang instead of fast-failing)", kv)
+		}
+	}
+}
+
 // TestCheckoutOpsNeverUseUnauthWrapper is the static regression guard for
 // TFAC-401: the blob-materializing host-side ops (`git worktree add`, `git reset
 // --hard`) must always route through gitRunCtxAuth so the blobless bare's lazy
