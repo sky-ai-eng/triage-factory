@@ -1348,3 +1348,62 @@ func TestCreateForPR_SnapshotBundleIsBounded(t *testing.T) {
 		t.Errorf("bundle verified in an empty repo — it is self-contained full history, not a bounded delta:\n%s", out)
 	}
 }
+
+// TestCreateForPR_RefreshesBaseBranchRef pins the TFAC-505 host-side fix: a
+// reused bare carries a clone-time origin/<base>, and the per-run PR fetch only
+// touches the head — so without an explicit base refresh the worktree-local diff
+// frames against a stale base. WithBaseBranch must re-fetch the base. Here main
+// advances A→B after the bare is seeded at A; the refresh must land B.
+func TestCreateForPR_RefreshesBaseBranchRef(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t) // main @ A
+
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	// Own-repo PR head on refs/pull/21/head, branched off main @ A.
+	work := filepath.Join(t.TempDir(), "work")
+	git("init", "-b", "main", work)
+	git("-C", work, "config", "user.email", "t@e")
+	git("-C", work, "config", "user.name", "T")
+	git("-C", work, "remote", "add", "up", upstream)
+	git("-C", work, "fetch", "-q", "up", "main")
+	git("-C", work, "checkout", "-q", "-b", "feature", "FETCH_HEAD")
+	git("-C", work, "commit", "-q", "--allow-empty", "-m", "PR head")
+	git("-C", work, "push", "-q", "up", "HEAD:refs/pull/21/head")
+
+	// Seed the bare while main is still at A → its base ref is clone-time A.
+	if _, err := EnsureBareClone(context.Background(), "owner-base", "repo-base", upstream); err != nil {
+		t.Fatalf("seed bare: %v", err)
+	}
+
+	// Advance the upstream base branch: main A → B.
+	git("-C", work, "checkout", "-q", "main")
+	git("-C", work, "commit", "-q", "--allow-empty", "-m", "base advances to B")
+	git("-C", work, "push", "-q", "up", "main")
+	wantBaseTip := git("-C", upstream, "rev-parse", "main") // B
+
+	// CreateForPR reuses the stale bare; WithBaseBranch must re-fetch main → B.
+	wtPath, err := CreateForPR(context.Background(), "owner-base", "repo-base", upstream, upstream, "feature", 21, "base-refresh-run", WithBaseBranch("main"))
+	if err != nil {
+		t.Fatalf("CreateForPR: %v", err)
+	}
+	t.Cleanup(func() { _ = RemoveAt(wtPath, "base-refresh-run") })
+
+	// origin/main is created ONLY by the base fetch (a --bare clone populates
+	// refs/heads/*, and the PR head mirror targets refs/remotes/origin/<localBranch>),
+	// so its presence at B proves the refresh ran against the current base.
+	bareDir, err := repoDir("owner-base", "repo-base")
+	if err != nil {
+		t.Fatalf("repoDir: %v", err)
+	}
+	if gotBaseTip := git("-C", bareDir, "rev-parse", "--verify", "refs/remotes/origin/main"); gotBaseTip != wantBaseTip {
+		t.Errorf("origin/main = %q, want refreshed upstream tip %q (WithBaseBranch must re-fetch the base)", gotBaseTip, wantBaseTip)
+	}
+}

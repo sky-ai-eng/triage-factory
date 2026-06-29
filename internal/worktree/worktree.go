@@ -227,8 +227,9 @@ func gitConfigCount(env []string) int {
 type CloneOption func(*cloneConfig)
 
 type cloneConfig struct {
-	auth    CloneAuth
-	seedURL string
+	auth       CloneAuth
+	seedURL    string
+	baseBranch string
 }
 
 // WithCloneAuth attaches an HTTPS credential to the host-side git clone +
@@ -252,6 +253,17 @@ func WithCloneAuth(auth CloneAuth) CloneOption {
 // silent no-op — use the positional argument there.
 func WithCloneURL(url string) CloneOption {
 	return func(c *cloneConfig) { c.seedURL = url }
+}
+
+// WithBaseBranch names the PR's base branch (e.g. "main") so CreateForPR /
+// CreateForPRInRoot refresh its remote-tracking ref (refs/remotes/origin/<base>)
+// alongside the PR head at materialization. Only those two honor it; the PR diff
+// (cmd/exec/gh) frames against this ref, and the per-run PR fetch otherwise only
+// touches the head, leaving a clone-time-frozen base ref that misframes the diff
+// (TFAC-505). Empty is a no-op — no base refresh, and the diff path falls back to
+// the recorded base.sha / API. Other entry points ignore it.
+func WithBaseBranch(branch string) CloneOption {
+	return func(c *cloneConfig) { c.baseBranch = branch }
 }
 
 func resolveCloneOptions(opts []CloneOption) cloneConfig {

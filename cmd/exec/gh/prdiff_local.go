@@ -77,11 +77,43 @@ func resolveBaseCommit(cwd, baseRef string) (string, bool) {
 	return "", false
 }
 
+// resolveDiffBase picks the commit the PR diff is framed against, the way GitHub
+// frames a PR diff: the PR's recorded base commit (base.sha). That commit is the
+// authoritative base — diffing it three-dot against HEAD reproduces GitHub's own
+// file set, and it's immune to a stale local base-branch tracking ref.
+//
+// Resolution order:
+//   - recorded baseSHA present in the local object store → use it.
+//   - recorded baseSHA recorded but NOT present locally (the base branch was
+//     never fetched into this worktree, or it advanced past what was fetched) →
+//     ok=false, so the caller uses the API diff. We deliberately do NOT fall
+//     back to resolving the base branch *name*: a clone-time-frozen
+//     origin/<base> that predates the PR's branch point is exactly what replayed
+//     an already-merged commit's changes as phantom hunks (TFAC-505). The API
+//     diff frames against the true base server-side.
+//   - no recorded baseSHA (host didn't populate base.sha) → best-effort resolve
+//     the base branch's tracking ref, which CreateForPR now refreshes at
+//     materialization (WithBaseBranch).
+func resolveDiffBase(cwd, baseSHA, baseRef string) (string, bool) {
+	if baseSHA != "" {
+		if sha, err := gitOutput(cwd, "rev-parse", "--verify", "--quiet", baseSHA+"^{commit}"); err == nil && sha != "" {
+			return sha, true
+		}
+		return "", false
+	}
+	return resolveBaseCommit(cwd, baseRef)
+}
+
 // localUnifiedDiff returns the worktree-HEAD-framed unified diff for the PR:
 // `git diff <base>...HEAD`, the three-dot (merge-base) form GitHub itself uses
-// for a PR diff. When file != "", scopes to that single path. The merge-base is
-// stable under the base branch advancing (it's the common ancestor), so a
-// slightly stale local base ref still yields the PR's own changes.
+// for a PR diff. When file != "", scopes to that single path.
+//
+// baseCommit MUST be the PR's true base (the recorded base.sha, via
+// resolveDiffBase) — not a base branch ref resolved by name. The three-dot
+// merge-base is only the PR's branch point when baseCommit is at or ahead of it;
+// a base ref that has fallen BEHIND the branch point (a clone-time-frozen
+// origin/<base>) collapses the merge-base to that stale ancestor and replays
+// every intervening already-merged commit as a phantom hunk (TFAC-505).
 func localUnifiedDiff(cwd, baseCommit, file string) (string, error) {
 	args := []string{"diff", "--no-color", "-M", baseCommit + "...HEAD"}
 	if file != "" {

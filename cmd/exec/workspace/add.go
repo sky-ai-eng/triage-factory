@@ -33,8 +33,10 @@ type addDeps struct {
 	// --ref paths.
 	checkout func(ctx context.Context, owner, repo, cloneURL, ref, runID, runRoot string) (string, error)
 	// checkoutPR materializes a worktree on a PR head (fork-aware, via the
-	// upstream's refs/pull/<n>/head). The --pr path.
-	checkoutPR func(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID, runRoot string) (string, error)
+	// upstream's refs/pull/<n>/head). The --pr path. opts carries the PR's base
+	// branch (WithBaseBranch) so the worktree-local diff frames against a current
+	// base (TFAC-505).
+	checkoutPR func(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID, runRoot string, opts ...worktree.CloneOption) (string, error)
 	// fetchPR resolves a PR's head ref + clone URLs (host-side) for the --pr
 	// path. Nil in defaultAddDeps; materializeWorkspace wires it to
 	// host.GithubGetPR when unset, so production routes through the agenthost
@@ -408,7 +410,9 @@ func createCheckout(ctx context.Context, deps addDeps, profile *domain.RepoProfi
 			return "", fmt.Errorf("PR #%d not found on %s", spec.pr, profile.ID)
 		}
 		upstream, head := prCloneURLs(profile.CloneURL, pr)
-		return deps.checkoutPR(ctx, profile.Owner, profile.Repo, upstream, head, pr.HeadRef, spec.pr, runID, runRoot)
+		// WithBaseBranch refreshes origin/<base> so the worktree-local `pr diff`
+		// frames against a current base, not a clone-time-frozen ref (TFAC-505).
+		return deps.checkoutPR(ctx, profile.Owner, profile.Repo, upstream, head, pr.HeadRef, spec.pr, runID, runRoot, worktree.WithBaseBranch(pr.BaseRef))
 	}
 	return deps.checkout(ctx, profile.Owner, profile.Repo, profile.CloneURL, spec.ref, runID, runRoot)
 }

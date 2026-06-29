@@ -446,7 +446,10 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 	// App installation token injected (per-invocation env, never persisted).
 	cloneToken := s.resolveCloneToken(ctx, orgID, owner)
 	wtPath, err := worktree.CreateForPR(ctx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, runID,
-		worktree.WithCloneAuth(worktree.CloneAuthFor(upstreamCloneURL, cloneToken)))
+		worktree.WithCloneAuth(worktree.CloneAuthFor(upstreamCloneURL, cloneToken)),
+		// Refresh origin/<base> at materialization so `pr diff` frames against a
+		// current base instead of a clone-time-frozen ref (TFAC-505).
+		worktree.WithBaseBranch(pr.BaseRef))
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
 	}

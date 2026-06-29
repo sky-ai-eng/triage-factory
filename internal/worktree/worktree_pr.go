@@ -44,12 +44,12 @@ import (
 // SAME runID) to remove the per-run remote + branch config — they live
 // in the bare's shared config and would otherwise accumulate forever.
 func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID string, opts ...CloneOption) (string, error) {
-	auth := resolveCloneOptions(opts).auth
+	cfg := resolveCloneOptions(opts)
 	wtDir, err := makeWorktreeDir(runID)
 	if err != nil {
 		return "", err
 	}
-	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, prNumber, runID, wtDir, auth)
+	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, runID, wtDir, cfg.auth)
 }
 
 // CreateForPRInRoot is the lazy-materialization variant of CreateForPR: the
@@ -62,7 +62,7 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 // behavior is identical: same fork / own-repo / deleted-fork handling, same
 // per-run push-tracking config. The run-root must already exist (created by
 // MakeRunRoot in the spawner); the owner/repo subdirs are created here.
-func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID, runRoot string) (string, error) {
+func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID, runRoot string, opts ...CloneOption) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForPRInRoot: runRoot is required")
 	}
@@ -70,10 +70,12 @@ func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headC
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
 		return "", fmt.Errorf("mkdir repo subdir: %w", err)
 	}
-	// No CloneAuth: this is the in-sandbox `workspace add --pr` path, where
-	// in-sandbox git credentials are SKY-394's concern, not the host-side clone
-	// path — the same rationale as CreateForBranchInRoot.
-	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, prNumber, runID, wtDir, CloneAuth{})
+	// Only WithBaseBranch is honored here (the `workspace add --pr` caller passes
+	// the PR's base so the worktree-local diff frames against a current base).
+	// No CloneAuth: this is the in-sandbox path, where in-sandbox git credentials
+	// are SKY-394's concern, not the host-side clone path — the same rationale as
+	// CreateForBranchInRoot, so auth stays zero regardless of opts.
+	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, resolveCloneOptions(opts).baseBranch, prNumber, runID, wtDir, CloneAuth{})
 }
 
 // createPRWorktreeAt is the shared body of CreateForPR / CreateForPRInRoot —
@@ -81,7 +83,7 @@ func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headC
 // own-repo / deleted-fork push-tracking config, and exclude-or-rollback. The
 // two public callers differ only in where wtDir lives on disk and whether a
 // host clone credential is threaded; wtDir's parent is created by the caller.
-func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID, wtDir string, auth CloneAuth) (string, error) {
+func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch, baseBranch string, prNumber int, runID, wtDir string, auth CloneAuth) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -127,6 +129,24 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 		return "", fmt.Errorf("fetch PR #%d head into %s: %w", prNumber, localBranch, err)
 	}
 	worktreeLog.Debug("fetch PR head completed", "number", prNumber, "branch", localBranch, "duration", time.Since(start).Round(time.Millisecond))
+
+	// Refresh the base branch's remote-tracking ref so the worktree-local PR diff
+	// (cmd/exec/gh) frames against a CURRENT base. The bare reuses a clone-time
+	// origin/<base> across runs and the fetch above only touches the head, so
+	// without this the three-dot merge-base can fall behind the PR's branch point
+	// and replay already-merged commits as phantom hunks (TFAC-505). The base
+	// lives on origin (the upstream) for fork and own-repo PRs alike.
+	//
+	// Best-effort: a deleted / renamed / unknown base branch must not fail the
+	// worktree the head fetch already established — log and proceed; the diff path
+	// falls back to the recorded base.sha (and then the API) when this ref is
+	// stale or absent. Empty baseBranch (caller didn't supply one) skips it.
+	if baseBranch != "" {
+		baseTrackingRef := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", baseBranch, baseBranch)
+		if err := gitRunCtxAuth(ctx, bareDir, auth, "fetch", "origin", baseTrackingRef); err != nil {
+			worktreeLog.Warn("refresh PR base branch failed; diff frames against recorded base / API instead", "number", prNumber, "base", baseBranch, "error", err)
+		}
+	}
 
 	// Pass the bare branch name (not refs/heads/<name>) so git
 	// attaches the worktree to the local branch instead of going

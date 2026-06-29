@@ -130,15 +130,18 @@ func prView(ctx context.Context, client ghAPI, args []string) {
 // produced from the run's worktree HEAD (the commit the agent is actually
 // looking at, and the commit add-review-comment anchors to), "github_api"
 // means the live-head diff from the API fallback. HeadSHA is the commit that
-// frame is against. When the local checkout has fallen behind the live PR head,
-// RemoteHeadSHA / BehindBy / Stale describe the gap and Warning tells the agent
-// to `git pull` for the current code.
+// frame is against; BaseSHA is the base it's diffed against — the PR's recorded
+// base.sha on the local_checkout path (TFAC-505), so a reader can confirm the
+// diff was framed against the true base and not a stale base ref. When the local
+// checkout has fallen behind the live PR head, RemoteHeadSHA / BehindBy / Stale
+// describe the gap and Warning tells the agent to `git pull` for the current code.
 type diffManifest struct {
 	Owner         string        `json:"owner"`
 	Repo          string        `json:"repo"`
 	Number        int           `json:"number"`
 	HeadSHA       string        `json:"head_sha"`
 	BaseRef       string        `json:"base_ref"`
+	BaseSHA       string        `json:"base_sha,omitempty"`
 	Source        string        `json:"source"`
 	RemoteHeadSHA string        `json:"remote_head_sha,omitempty"`
 	BehindBy      int           `json:"behind_by,omitempty"`
@@ -230,7 +233,7 @@ func prDiff(ctx context.Context, host agenthost.Client, args []string) {
 func inlineDiff(ctx context.Context, client ghAPI, checkout localCheckout, owner, repo string, number int, file string) string {
 	if checkout.ok {
 		if pr, err := client.GetPR(ctx, owner, repo, number, false); err == nil {
-			if base, ok := resolveBaseCommit(checkout.cwd, pr.BaseRef); ok {
+			if base, ok := resolveDiffBase(checkout.cwd, pr.BaseSHA, pr.BaseRef); ok {
 				if diff, err := localUnifiedDiff(checkout.cwd, base, file); err == nil {
 					if file != "" && strings.TrimSpace(diff) == "" {
 						exitErr(fmt.Sprintf("file %q is not part of PR #%d's diff", file, number))
@@ -340,7 +343,7 @@ func buildLocalDiffManifest(ctx context.Context, client ghAPI, checkout localChe
 	if !checkout.ok {
 		return "", false
 	}
-	base, ok := resolveBaseCommit(checkout.cwd, pr.BaseRef)
+	base, ok := resolveDiffBase(checkout.cwd, pr.BaseSHA, pr.BaseRef)
 	if !ok {
 		return "", false
 	}
@@ -351,6 +354,7 @@ func buildLocalDiffManifest(ctx context.Context, client ghAPI, checkout localChe
 
 	manifest.Source = diffSourceLocal
 	manifest.HeadSHA = checkout.headSHA
+	manifest.BaseSHA = base
 	manifest.Files = parseDiffSummaries(diff)
 	manifest.ChangedFiles = len(manifest.Files)
 	for _, f := range manifest.Files {

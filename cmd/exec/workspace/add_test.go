@@ -323,7 +323,7 @@ func (s *stubCalls) deps() addDeps {
 			s.checkoutArgs = append(s.checkoutArgs, checkoutCall{owner, repo, cloneURL, ref, runID, runRoot})
 			return pathOrDefault(runRoot, owner, repo, worktree.CheckoutRefSlug(ref))
 		},
-		checkoutPR: func(_ context.Context, owner, repo, upstream, head, headBranch string, prNumber int, runID, runRoot string) (string, error) {
+		checkoutPR: func(_ context.Context, owner, repo, upstream, head, headBranch string, prNumber int, runID, runRoot string, _ ...worktree.CloneOption) (string, error) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			s.prCheckoutCalls++
