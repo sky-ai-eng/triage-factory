@@ -437,6 +437,8 @@ export default function TaskRuleEditor({
                           >
                             This rule will create tasks for PRs and issues authored by anyone,
                             including people outside your team — expect significantly higher volume.
+                            If you also auto-delegate this event, the bot may act on PRs and issues
+                            no one on your team owns.
                           </motion.p>
                         )}
                       </AnimatePresence>

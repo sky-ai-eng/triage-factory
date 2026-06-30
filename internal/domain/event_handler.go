@@ -40,8 +40,14 @@ type EventHandler struct {
 	// column read in ownerLadderRouting (via explicitWatchTeams), NOT a
 	// matchPredicate predicate — "is the author a member of this team"
 	// needs an author→team DB resolution the metadata-only predicate
-	// can't do. It never confers firing rights or ownership (the TFAC-514
-	// invariant): a watcher team gets the card, never the auto-fire.
+	// can't do. A watcher never beats a MEMBER team to ownership (the
+	// TFAC-514 no-steal invariant); but on a truly unowned entity (an
+	// external author, no member owner at all) an opted-in watcher whose
+	// team also has a configured auto-delegation may fire and consolidate
+	// ownership onto itself — the eyes-open behavior. Firing rides the
+	// existing event→blueprint trigger config, not this flag (which is a
+	// task-rule reach concept); a watcher with only a rule surfaces the
+	// card NULL-owned and nothing fires.
 	AppliesToUnowned bool `json:"applies_to_unowned"`
 	// SystemSlug is the stable identifier for shipped handlers
 	// ("system-rule-ci-check-failed", "system-trigger-ci-fix") and for the

@@ -583,41 +583,84 @@ func TestOwnerLadderRouting_AmbiguousOwner_OrdersByPriorityThenID(t *testing.T) 
 	}
 }
 
-// TestAuthorCentric_ExternalAuthor_WatchTriggerDoesNotFire pins the firing
-// boundary for watcher teams: a team that surfaces an external/dependabot PR via
-// an explicit user watch rule gets visibility but NOT firing rights. Even with
-// an enabled ci-fix trigger and auto-delegation on, the bot must not auto-act on
-// a PR no member owns — the task stays NULL-owned for a human claim.
-func TestAuthorCentric_ExternalAuthor_WatchTriggerDoesNotFire(t *testing.T) {
+// TestOwnerLadderRouting_ExternalAuthor_WatchersFireRanked is the unit-level
+// guard for the TFAC-517 external branch: when no member owns the entity
+// (ownerSet empty — a truly external author), the opted-in watcher teams become
+// the firing candidates, ranked the same way (priority desc, then lowest team
+// id). The task is still created NULL-owned; the first watcher to win the claim
+// consolidates ownership. This is the branch that supersedes 514's "external
+// never fires."
+func TestOwnerLadderRouting_ExternalAuthor_WatchersFireRanked(t *testing.T) {
+	hi, lo := floatPtr(0.9), floatPtr(0.5)
+	// Two opted-in watcher teams, no member owner (ownerSet empty). team-w1
+	// carries the higher priority but the later-or-equal id, so priority orders.
+	watchers := []domain.EventHandler{
+		{TeamID: "team-w2", AppliesToUnowned: true, DefaultPriority: lo},
+		{TeamID: "team-w1", AppliesToUnowned: true, DefaultPriority: hi},
+	}
+	vis, owner, ordered, _, ok := ownerLadderRouting("", nil, watchers)
+	if !ok {
+		t.Fatal("ownerLadderRouting ok=false, want a routable task (the watchers surface it)")
+	}
+	if owner != "" {
+		t.Errorf("ownerTeam = %q, want \"\" (NULL at creation; the fire consolidates ownership)", owner)
+	}
+	if len(vis) != 2 {
+		t.Errorf("visibleTeams = %v, want both watcher teams", vis)
+	}
+	if len(ordered) != 2 || ordered[0] != "team-w1" || ordered[1] != "team-w2" {
+		t.Errorf("orderedTeams = %v, want [team-w1 team-w2] (watchers fire, ranked by priority desc)", ordered)
+	}
+
+	// A flag-off rule contributes neither visibility nor firing for an external
+	// author: ownerSet empty + no opted-in watcher → no task at all.
+	flagOff := []domain.EventHandler{{TeamID: "team-x", DefaultPriority: hi}}
+	if _, _, _, _, ok2 := ownerLadderRouting("", nil, flagOff); ok2 {
+		t.Error("ownerLadderRouting ok=true for an external author with only a flag-off rule; want no task")
+	}
+}
+
+// TestAuthorCentric_ExternalAuthor_WatchTriggerFires pins the TFAC-517 firing
+// behavior for an opted-in watcher: an external/dependabot PR is owned by no
+// member, so the team that explicitly opted into reaching unowned entities
+// (applies_to_unowned rule) AND has a configured, enabled auto-delegation may
+// now fire on it — the deliberate, eyes-open behavior that supersedes the
+// TFAC-514 blanket "external never fires." The fire consolidates ownership onto
+// the watcher (delegation.go SetOwnerTeamSystem). The no-steal invariant — a
+// watcher never beats a MEMBER team — is unaffected and covered by
+// TestAuthorCentric_TwoTeams_WatcherDoesNotStealOwnership.
+func TestAuthorCentric_ExternalAuthor_WatchTriggerFires(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
 	setReviewHost(t, database)
 
 	teamC := seedTeam(t, database, "watch-team")
-	seedMatchAllCIRule(t, database, teamC) // applies_to_unowned watch rule → visibility
+	seedMatchAllCIRule(t, database, teamC) // applies_to_unowned watch rule → reach
 	enableTeamAutoDelegate(t, database, teamC)
 	seedImmediateTrigger(t, database, teamC, domain.EventGitHubPRCICheckFailed, "ci-c")
 
 	entityID := reviewEntity(t, database, "owner/repo#extwatch")
 	stub := &stubDelegator{db: database}
 	router := firingRouter(database, stub)
-	emitCI(router, entityID, "dependabot[bot]") // external, not a TF user
+	emitCI(router, entityID, "dependabot[bot]") // external — no member owns it
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task from the watch rule, got %d (err=%v)", len(active), err)
 	}
-	if active[0].TeamID != nil {
-		t.Errorf("owner = %v, want nil (external author; watcher confers no ownership)", *active[0].TeamID)
+	// The opted-in watcher fired and consolidated ownership onto itself: nobody
+	// else owns the orphan PR and team C accepted the risk eyes-open.
+	if stub.calls != 1 {
+		t.Fatalf("expected exactly 1 fire (opted-in watcher acts on the orphan PR), got %d", stub.calls)
 	}
-	if stub.calls != 0 {
-		t.Errorf("Delegate called %d times; a watcher team must not auto-fire on a PR no member owns", stub.calls)
+	if teamIDValue(&active[0]) != teamC {
+		t.Errorf("owner = %q after fire, want the watcher team %q (the fire consolidates ownership)", teamIDValue(&active[0]), teamC)
 	}
-	if active[0].ClaimedByAgentID != "" {
-		t.Errorf("task was bot-claimed (%q); a watcher must not claim an unowned PR", active[0].ClaimedByAgentID)
+	if active[0].ClaimedByAgentID == "" {
+		t.Error("task should be bot-claimed by the firing watcher team")
 	}
 	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 1 || vis[0] != teamC {
-		t.Errorf("visibility = %v, want [%s] (the watching team still sees it)", vis, teamC)
+		t.Errorf("visibility = %v, want [%s] (the watching team)", vis, teamC)
 	}
 }
 
