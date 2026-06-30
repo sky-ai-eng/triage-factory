@@ -2867,6 +2867,23 @@ CREATE INDEX team_agents_team_idx ON public.team_agents USING btree (team_id);
 
 
 --
+-- Name: team_github_repos_lower_owner_repo_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+-- Functional index backing the factory belt's tracked-repo semi-join
+-- (TFAC-516, factoryGitHubRepoTrackedExists). The belt matches a GitHub
+-- entity's repo against the tracked set by lower(owner)/lower(repo) across
+-- *all* of the viewer's teams, not a single team_id, so the (team_id, owner,
+-- repo) primary key can't serve the lookup (team_id isn't pinned). Without
+-- this index that EXISTS scans the org's tracked repos per entity row — fine
+-- for the old ever-tasked population, but the belt is intentionally larger
+-- now. owner/repo lead (equality-filtered); team_id trails so the teams
+-- join + RLS membership check read it straight from the index. lower() on
+-- both axes mirrors TracksRepoSystem's case-insensitive match.
+CREATE INDEX team_github_repos_lower_owner_repo_idx ON public.team_github_repos USING btree (lower(owner), lower(repo), team_id);
+
+
+--
 -- Name: org_memberships org_memberships_keep_owner_on_delete; Type: TRIGGER; Schema: public; Owner: -
 --
 
