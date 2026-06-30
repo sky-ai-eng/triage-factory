@@ -27,7 +27,13 @@ type FactoryStoreFactory func(t *testing.T) (store db.FactoryReadStore, orgID st
 type FactorySeeder struct {
 	// Entity inserts an active GitHub PR entity and returns its ID.
 	// suffix is appended to source_id so multiple seeds per subtest
-	// don't collide on the (source, source_id) unique index.
+	// don't collide on the (source, source_id) unique index. The seeder
+	// also makes the entity *visible* on the factory belt for its
+	// backend: in multi-mode (Postgres) that means registering its repo
+	// in the team's tracked set; in local mode (SQLite) every entity is
+	// visible by construction, so it's a plain insert. The conformance
+	// suite asserts read behavior (windows, limits, ordering), not the
+	// visibility mechanism — that's pinned per-backend.
 	Entity func(t *testing.T, suffix string) string
 
 	// Event inserts an entity-attached event with the given
@@ -99,16 +105,14 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		ent := seed.Entity(t, "ec1")
 
 		// Inside the window.
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened, "", now.Add(-30*time.Minute), time.Time{})
+		seed.Event(t, ent, domain.EventGitHubPROpened, "", now.Add(-30*time.Minute), time.Time{})
 		seed.Event(t, ent, domain.EventGitHubPROpened, "", now.Add(-10*time.Minute), time.Time{})
 		// Outside the window — must not count.
 		seed.Event(t, ent, domain.EventGitHubPRMerged, "", now.Add(-3*time.Hour), time.Time{})
 
-		// Multi-mode scopes event counts to entities the viewer's team
-		// has tasked; give this entity a task so its events count. The
-		// task reuses an existing event as primary_event_id so it adds
-		// no event to the counts. No-op for SQLite (local, unscoped).
-		seed.Task(t, ent, domain.EventGitHubPROpened, "memb", ev, "queued", now)
+		// Multi-mode scopes event counts to entities in the viewer's
+		// tracked set; seed.Entity already registered this entity's repo
+		// so its events count. No-op for SQLite (local, unscoped).
 
 		counts, err := store.EventCountsSince(ctx, orgID, now.Add(-1*time.Hour))
 		if err != nil {
@@ -131,25 +135,21 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		b := seed.Entity(t, "dec-b")
 		c := seed.Entity(t, "dec-c")
 
-		evA := seed.Event(t, a, domain.EventGitHubPROpened, "", now, time.Time{})
+		seed.Event(t, a, domain.EventGitHubPROpened, "", now, time.Time{})
 		seed.Event(t, a, domain.EventGitHubPRCICheckPassed, "", now, time.Time{})
 		seed.Event(t, a, domain.EventGitHubPRMerged, "", now, time.Time{})
 
-		evB := seed.Event(t, b, domain.EventGitHubPROpened, "", now, time.Time{})
+		seed.Event(t, b, domain.EventGitHubPROpened, "", now, time.Time{})
 		seed.Event(t, b, domain.EventGitHubPRCICheckFailed, "", now, time.Time{})
 		// Re-entry — same entity, same type — must NOT double-count.
 		seed.Event(t, b, domain.EventGitHubPRCICheckFailed, "", now, time.Time{})
 
-		evC := seed.Event(t, c, domain.EventGitHubPROpened, "", now, time.Time{})
+		seed.Event(t, c, domain.EventGitHubPROpened, "", now, time.Time{})
 		seed.Event(t, c, domain.EventGitHubPRMerged, "", now, time.Time{})
 
-		// Membership: multi-mode scopes the lifetime count to tasked
-		// entities. Task each, reusing an existing event as
-		// primary_event_id so no event is added to the distinct counts.
-		// No-op for SQLite (local, unscoped).
-		seed.Task(t, a, domain.EventGitHubPROpened, "memb", evA, "queued", now)
-		seed.Task(t, b, domain.EventGitHubPROpened, "memb", evB, "queued", now)
-		seed.Task(t, c, domain.EventGitHubPROpened, "memb", evC, "queued", now)
+		// Multi-mode scopes the lifetime count to the viewer's tracked
+		// set; seed.Entity already registered each entity's repo so all
+		// three count. No-op for SQLite (local, unscoped).
 
 		counts, err := store.LifetimeDistinctByEventType(ctx, orgID)
 		if err != nil {
@@ -174,14 +174,13 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		now := time.Now().UTC()
 
 		a := seed.Entity(t, "sys-a")
-		evA := seed.Event(t, a, domain.EventGitHubPROpened, "", now, time.Time{})
+		seed.Event(t, a, domain.EventGitHubPROpened, "", now, time.Time{})
 		// entity_id IS NULL — system-tagged row, must not contribute.
 		seed.EventNullEntity(t, domain.EventGitHubPROpened, now)
-		// Membership: task the entity so its event counts in multi-mode
-		// (reuses evA as primary_event_id — adds no event). The system
-		// row has NULL entity_id and matches no task, so the membership
-		// semi-join excludes it just as the NOT-NULL guard does.
-		seed.Task(t, a, domain.EventGitHubPROpened, "memb", evA, "queued", now)
+		// seed.Entity already made `a` visible (tracked-set in multi-mode)
+		// so its event counts. The system row has NULL entity_id and joins
+		// to no entity, so the tracked-set semi-join excludes it just as
+		// the NOT-NULL guard does.
 
 		counts, err := store.LifetimeDistinctByEventType(ctx, orgID)
 		if err != nil {
@@ -329,22 +328,20 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		}
 	})
 
-	// tasked seeds an entity plus the event+task that earns it
-	// membership in the factory. Returns the entity ID. The window/
-	// limit subtests below care about close timing and budgets, not
-	// membership; routing entity creation through here keeps them green
-	// on both backends — Postgres applies the multi-mode membership
-	// semi-join (entities need a task to appear), SQLite ignores it
-	// (the extra task is harmless). The membership-exclusion contract
+	// visible seeds an entity plus an event so it has a station. Returns
+	// the entity ID. seed.Entity already makes the entity appear on the
+	// belt for its backend (Postgres: registered in the team's tracked
+	// set; SQLite: visible by construction), so the window/limit subtests
+	// below — which care about close timing and budgets, not membership —
+	// stay green on both backends. The membership-exclusion contract
 	// itself is Postgres-only and lives in the backend test file
-	// (TestFactoryReadStore_Postgres_ExcludesUntaskedEntity); SQLite is
+	// (TestFactoryReadStore_Postgres_ExcludesUntrackedEntity); SQLite is
 	// the local-mode backend and applies no membership filter.
-	tasked := func(t *testing.T, seed FactorySeeder, suffix string) string {
+	visible := func(t *testing.T, seed FactorySeeder, suffix string) string {
 		t.Helper()
 		now := time.Now().UTC()
 		ent := seed.Entity(t, suffix)
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened, "", now, time.Time{})
-		seed.Task(t, ent, domain.EventGitHubPROpened, "", ev, "queued", now)
+		seed.Event(t, ent, domain.EventGitHubPROpened, "", now, time.Time{})
 		return ent
 	}
 
@@ -352,9 +349,9 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		store, orgID, seed := mk(t)
 		ctx := context.Background()
 
-		active := tasked(t, seed, "ent-active")
-		fresh := tasked(t, seed, "ent-fresh")
-		stale := tasked(t, seed, "ent-stale")
+		active := visible(t, seed, "ent-active")
+		fresh := visible(t, seed, "ent-fresh")
+		stale := visible(t, seed, "ent-stale")
 
 		// Inside the grace window — should appear.
 		seed.CloseEntity(t, fresh, time.Now().Add(-10*time.Second))
@@ -384,8 +381,8 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		store, orgID, seed := mk(t)
 		ctx := context.Background()
 
-		a1 := tasked(t, seed, "iso-a1")
-		a2 := tasked(t, seed, "iso-a2")
+		a1 := visible(t, seed, "iso-a1")
+		a2 := visible(t, seed, "iso-a2")
 
 		// 10 freshly-closed entities, all inside the grace window.
 		// Far more than the active limit (2) but inside
@@ -393,7 +390,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		closedAt := time.Now().Add(-5 * time.Second)
 		closedSet := map[string]bool{}
 		for i := 0; i < 10; i++ {
-			e := tasked(t, seed, "iso-c-"+strconv.Itoa(i))
+			e := visible(t, seed, "iso-c-"+strconv.Itoa(i))
 			seed.CloseEntity(t, e, closedAt)
 			closedSet[e] = true
 		}
@@ -429,7 +426,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		closedAt := time.Now().Add(-5 * time.Second)
 		burst := db.FactoryClosedGraceLimit + 5
 		for i := 0; i < burst; i++ {
-			e := tasked(t, seed, "cap-"+strconv.Itoa(i))
+			e := visible(t, seed, "cap-"+strconv.Itoa(i))
 			seed.CloseEntity(t, e, closedAt)
 		}
 

@@ -43,20 +43,20 @@ var pgFactoryActiveRunStatuses = []string{
 }
 
 func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error) {
-	// Scoped to the viewer's teams by the same membership semi-join the
-	// entity belt uses (factoryEventMembershipExists). The station
-	// header's other counters — Triggered24h (tasks) and ActiveRuns
-	// (runs) — are already team-scoped because tasks/runs RLS is
-	// team-bound; events RLS is org-wide (events_all keys on org_id
-	// only), so without this an event on another team's untasked PR
-	// would inflate this team's "items at station" count even though
-	// that PR never appears on the belt. The semi-join keeps the four
-	// counters consistent with one another and with the entity set.
+	// Scoped to the viewer's teams by the same tracked-set semi-join the
+	// entity belt uses (factoryEventTrackedExists). The station header's
+	// other counters — Triggered24h (tasks) and ActiveRuns (runs) — are
+	// team-scoped because tasks/runs RLS is team-bound; events RLS is
+	// org-wide (events_all keys on org_id only), so without this an event
+	// on a PR outside the viewer's tracked set would inflate this team's
+	// "items at station" count even though that PR never appears on the
+	// belt. The semi-join keeps the counters consistent with the entity
+	// set the belt renders.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT ev.event_type, COUNT(*)
 		FROM events ev
 		WHERE ev.org_id = $1 AND ev.created_at > $2
-		  AND `+factoryEventMembershipExists+`
+		  AND `+factoryEventTrackedExists+`
 		GROUP BY ev.event_type
 	`, orgID, since)
 	if err != nil {
@@ -77,18 +77,18 @@ func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, s
 }
 
 func (s *factoryReadStore) LifetimeDistinctByEventType(ctx context.Context, orgID string) (map[string]int, error) {
-	// Team-scoped via the membership semi-join, same as EventCountsSince
+	// Team-scoped via the tracked-set semi-join, same as EventCountsSince
 	// and the entity belt — a lifetime distinct-entity count must not
-	// include entities no team of the viewer's ever tasked, or the
-	// station's lifetime readout reports cross-team PRs absent from the
-	// belt. The semi-join inherently drops system events too (NULL
-	// entity_id can't match a task), so the explicit entity_id IS NOT
-	// NULL guard is redundant but kept for clarity / plan stability.
+	// include entities outside the viewer's tracked set, or the station's
+	// lifetime readout reports PRs absent from the belt. The semi-join
+	// inherently drops system events too (a NULL entity_id joins to no
+	// entity), so the explicit entity_id IS NOT NULL guard is redundant
+	// but kept for clarity / plan stability.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT ev.event_type, COUNT(DISTINCT ev.entity_id)
 		FROM events ev
 		WHERE ev.org_id = $1 AND ev.entity_id IS NOT NULL
-		  AND `+factoryEventMembershipExists+`
+		  AND `+factoryEventTrackedExists+`
 		GROUP BY ev.event_type
 	`, orgID)
 	if err != nil {
@@ -109,11 +109,19 @@ func (s *factoryReadStore) LifetimeDistinctByEventType(ctx context.Context, orgI
 }
 
 func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error) {
+	// Re-scoped to the tracked set (factoryTaskTrackedExists), matching
+	// the belt and the event counters. Tasks RLS already bounds the count
+	// to the viewer's teams, but a task minted while a repo was tracked
+	// survives an untrack (tracking changes are forward-only), so without
+	// the semi-join the "Triggered24h" header would count a task whose
+	// entity no longer rides the belt. The entity join also drops the rare
+	// task with no surviving entity.
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT event_type, COUNT(*)
-		FROM tasks
-		WHERE org_id = $1 AND created_at > $2
-		GROUP BY event_type
+		SELECT t.event_type, COUNT(*)
+		FROM tasks t
+		WHERE t.org_id = $1 AND t.created_at > $2
+		  AND `+factoryTaskTrackedExists+`
+		GROUP BY t.event_type
 	`, orgID, since)
 	if err != nil {
 		return nil, err
@@ -270,64 +278,130 @@ const pgFactoryEntitySelectColumns = `
 	(SELECT created_at FROM events WHERE org_id = e.org_id AND entity_id = e.id ORDER BY created_at DESC LIMIT 1)
 `
 
-// factoryEntityMembershipExists is the semi-join that scopes the
-// factory to the viewer's teams. An entity belongs in a team's factory
-// iff a task for that team has *ever* existed on it (over all task
-// statuses — a long-closed task still counts). Repos are configured
-// org-wide, so polling produces org-wide entities + events; rather than
-// fork the shared entity per team (which would break the snapshot-diff
-// re-emit invariant and the append-only event log), the entity↔team
-// relationship is derived through tasks, which carry team_id.
+// --- Tracked-set membership (TFAC-516) --------------------------------
 //
-// The team scoping itself is free: the factory snapshot runs tx-bound
-// as tf_app with RLS active (TxStores.Factory), and tasks_select RLS
-// already constrains rows to the viewer's org + teams. So the EXISTS
-// auto-scopes to the viewer's teams with no explicit team_id in the
-// query — RLS does it. org_id is bound here too as defense-in-depth,
-// matching the convention every method in this file follows. Membership
-// is monotonic since tasks terminate to done/dismissed, never delete.
-const factoryEntityMembershipExists = `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = e.id AND t.org_id = e.org_id)`
+// The multi-mode factory belt sources entity visibility from each team's
+// *tracked set*, not from task existence. An entity belongs on a team's
+// factory iff it sits in that team's tracked set — a GitHub entity whose
+// owner/name is one of the team's tracked repos (team_github_repos), or a
+// Jira entity whose project key is attached to the team
+// (jira_project_status_rules). This decouples the belt from task
+// creation: an untasked PR on a tracked repo now appears, where the prior
+// task-existence semi-join hid it until a rule minted a task. SQLite/
+// local is N=1 and stays unscoped (sqlite/factory.go).
+//
+// The team scoping is free under the app pool (tf_app, RLS active): the
+// team_github_repos_select and jira_rules_select policies already
+// constrain visible rows to the viewer's team memberships, so each EXISTS
+// auto-scopes to the viewer's teams with no explicit team_id — the same
+// RLS-does-the-scoping pattern ListActiveJiraTeamScoped (SKY-366) uses
+// for the Jira discovery deck. The teams join binds org (via e.org_id) as
+// defense-in-depth so the filter still holds on the admin pool where RLS
+// is bypassed: team_github_repos and jira_project_status_rules carry no
+// org_id column, so org scope rides the teams FK.
+//
+// GitHub source_id is "owner/repo#N" (tracker.ghSourceID): split_part on
+// '/' yields the owner, split_part on '/' then '#' yields the repo.
+// Matching is case-insensitive on both axes, mirroring TracksRepoSystem
+// (GitHub identifiers are case-insensitive). Jira keys are hyphen-free,
+// so split_part(source_id, '-', 1) is the project key ("SKY" in
+// "SKY-123"), matching jiraTeamProjectMembershipExists.
 
-// factoryEntityMembershipForTeams is the team-narrowed variant of
-// factoryEntityMembershipExists used by the per-page read filter: the
-// correlated task must additionally be owned by one of the teams
-// (t.team_id) or make the entity visible to one while unclaimed (a
-// task_teams row). placeholders is the comma-joined placeholder list
-// (e.g. "$3, $4") bound to the team ids and referenced twice.
-//
-// The team test mirrors the tasks_select RLS policy (see
-// pgTaskTeamFilter for the full rationale): each branch is
-// tf.user_in_team-gated so a forged team id can't pull an entity in via
-// a team the caller isn't on, and the task_teams (visibility) branch is
-// limited to UNCLAIMED tasks because a claim consolidates to team_id
-// without draining the stale visibility rows. The correlated task t is
-// itself RLS-scoped to the viewer.
-func factoryEntityMembershipForTeams(placeholders string) string {
-	return `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = e.id AND t.org_id = e.org_id` +
-		` AND ((t.team_id IN (` + placeholders + `) AND tf.user_in_team(t.team_id))` +
-		` OR (t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL` +
-		` AND EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id` +
-		` AND tt.team_id IN (` + placeholders + `) AND tf.user_in_team(tt.team_id)))))`
+// factoryGitHubRepoTrackedExists scopes a github entities row (alias e)
+// to the tracked repos of the viewer's teams.
+const factoryGitHubRepoTrackedExists = `EXISTS (
+	SELECT 1 FROM team_github_repos g
+	JOIN teams tm ON tm.id = g.team_id
+	WHERE tm.org_id = e.org_id
+	  AND lower(g.owner) = lower(split_part(e.source_id, '/', 1))
+	  AND lower(g.repo) = lower(split_part(split_part(e.source_id, '/', 2), '#', 1))
+)`
+
+// factoryJiraProjectTrackedExists scopes a jira entities row (alias e) to
+// the projects attached to the viewer's teams. Mirrors
+// jiraTeamProjectMembershipExists (the Jira deck's semi-join).
+const factoryJiraProjectTrackedExists = `EXISTS (
+	SELECT 1 FROM jira_project_status_rules jr
+	JOIN teams tm ON tm.id = jr.team_id
+	WHERE tm.org_id = e.org_id
+	  AND jr.project_key = split_part(e.source_id, '-', 1)
+)`
+
+// factoryEntityTrackedExists is the combined tracked-set membership
+// predicate correlated against an entities row (alias e): a github entity
+// in a tracked repo, or a jira entity in a tracked project. Entities of
+// any other source (slack, linear) have no tracked-set notion and never
+// match — they are off the factory belt by construction.
+const factoryEntityTrackedExists = `(
+	(e.source = 'github' AND ` + factoryGitHubRepoTrackedExists + `)
+	OR (e.source = 'jira' AND ` + factoryJiraProjectTrackedExists + `)
+)`
+
+// factoryGitHubRepoTrackedForTeams / factoryJiraProjectTrackedForTeams
+// are the team-narrowed variants used by the per-page read filter: the
+// correlated tracked-set row must additionally belong to one of the teams
+// in placeholders (the comma-joined "$3, $4" list bound to team ids).
+// Each branch stays RLS-scoped to the viewer under tf_app (a forged team
+// id the caller isn't on is filtered by the SELECT policy) and org-bound
+// via the teams join for the admin pool — the same shape as
+// jiraTeamProjectMembershipForTeam, widened to an IN list.
+func factoryGitHubRepoTrackedForTeams(placeholders string) string {
+	return `EXISTS (
+		SELECT 1 FROM team_github_repos g
+		JOIN teams tm ON tm.id = g.team_id
+		WHERE tm.org_id = e.org_id
+		  AND g.team_id IN (` + placeholders + `)
+		  AND lower(g.owner) = lower(split_part(e.source_id, '/', 1))
+		  AND lower(g.repo) = lower(split_part(split_part(e.source_id, '/', 2), '#', 1))
+	)`
 }
 
-// factoryEventMembershipExists is the membership semi-join correlated
-// against an events row (alias ev) rather than an entities row. Same
-// shape and same RLS auto-scoping as factoryEntityMembershipExists —
-// used to scope the station-throughput aggregates (EventCountsSince,
-// LifetimeDistinctByEventType) to the viewer's teams so the header
-// counters match the team-scoped entity belt.
-const factoryEventMembershipExists = `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = ev.entity_id AND t.org_id = ev.org_id)`
+func factoryJiraProjectTrackedForTeams(placeholders string) string {
+	return `EXISTS (
+		SELECT 1 FROM jira_project_status_rules jr
+		JOIN teams tm ON tm.id = jr.team_id
+		WHERE tm.org_id = e.org_id
+		  AND jr.team_id IN (` + placeholders + `)
+		  AND jr.project_key = split_part(e.source_id, '-', 1)
+	)`
+}
+
+func factoryEntityTrackedForTeams(placeholders string) string {
+	return `(
+		(e.source = 'github' AND ` + factoryGitHubRepoTrackedForTeams(placeholders) + `)
+		OR (e.source = 'jira' AND ` + factoryJiraProjectTrackedForTeams(placeholders) + `)
+	)`
+}
+
+// factoryEventTrackedExists / factoryTaskTrackedExists lift the
+// entity-correlated predicate onto an events row (alias ev) / tasks row
+// (alias t) for the station-throughput aggregates, so the header counters
+// report the same tracked-set population the belt renders. A system event
+// (NULL entity_id) or a task whose entity falls outside the tracked set
+// joins to no qualifying entity and is excluded.
+const factoryEventTrackedExists = `EXISTS (
+	SELECT 1 FROM entities e
+	WHERE e.id = ev.entity_id AND e.org_id = ev.org_id
+	  AND ` + factoryEntityTrackedExists + `
+)`
+
+const factoryTaskTrackedExists = `EXISTS (
+	SELECT 1 FROM entities e
+	WHERE e.id = t.entity_id AND e.org_id = t.org_id
+	  AND ` + factoryEntityTrackedExists + `
+)`
 
 func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int, teamIDs []string) ([]domain.FactoryEntityRow, error) {
-	// The membership semi-join scopes the belt to the viewer's teams
-	// (via tasks RLS). The optional per-page filter narrows it further to
-	// a set of teams by tightening that same semi-join's correlated task
-	// to one any selected team owns or can see. The team placeholders
-	// appear before LIMIT in the text but bind by number, which Postgres
-	// resolves regardless of order — active args start the teams at $3
-	// (after orgID, limit), closed at $4 (after orgID, cutoff, limit).
-	activeMembership := factoryEntityMembershipExists
-	closedMembership := factoryEntityMembershipExists
+	// The tracked-set semi-join scopes the belt to the viewer's teams (via
+	// team_github_repos / jira_project_status_rules RLS). The optional
+	// per-page filter narrows it further to a set of teams by tightening
+	// that same semi-join's correlated tracked-set row to one any selected
+	// team tracks. The team placeholders appear before LIMIT in the text
+	// but bind by number, which Postgres resolves regardless of order —
+	// active args start the teams at $3 (after orgID, limit), closed at $4
+	// (after orgID, cutoff, graceLimit).
+	activeMembership := factoryEntityTrackedExists
+	closedMembership := factoryEntityTrackedExists
 	activeArgs := []any{orgID, limit}
 	closedArgs := []any{orgID, time.Now().Add(-db.FactoryClosedGracePeriod), db.FactoryClosedGraceLimit}
 	if len(teamIDs) > 0 {
@@ -336,13 +410,13 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 			activePH[i] = fmt.Sprintf("$%d", 3+i)
 			activeArgs = append(activeArgs, id)
 		}
-		activeMembership = factoryEntityMembershipForTeams(strings.Join(activePH, ", "))
+		activeMembership = factoryEntityTrackedForTeams(strings.Join(activePH, ", "))
 		closedPH := make([]string, len(teamIDs))
 		for i, id := range teamIDs {
 			closedPH[i] = fmt.Sprintf("$%d", 4+i)
 			closedArgs = append(closedArgs, id)
 		}
-		closedMembership = factoryEntityMembershipForTeams(strings.Join(closedPH, ", "))
+		closedMembership = factoryEntityTrackedForTeams(strings.Join(closedPH, ", "))
 	}
 
 	active, err := queryFactoryEntities(ctx, s.q, `

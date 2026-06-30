@@ -103,12 +103,27 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 		Entity: func(t *testing.T, suffix string) string {
 			t.Helper()
 			id := uuid.New().String()
-			sourceID := fmt.Sprintf("factory-%s-%s", suffix, id[:8])
+			// Multi-mode visibility is sourced from the team's tracked set
+			// (TFAC-516), not task existence, so the conformance entity needs
+			// a parseable "owner/repo#N" source_id AND a team_github_repos row
+			// registering its repo for the org's default team. Each entity
+			// gets its own repo (owner fixed, repo derived from suffix) so a
+			// per-entity INSERT can't collide on the (team, owner, repo) PK.
+			owner := "tf-test"
+			repo := fmt.Sprintf("%s-%s", suffix, id[:8])
+			sourceID := fmt.Sprintf("%s/%s#1", owner, repo)
 			if _, err := conn.Exec(`
 				INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
 				VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6)
 			`, id, orgID, sourceID, "Conformance "+suffix, "https://example/"+sourceID, time.Now().UTC()); err != nil {
 				t.Fatalf("seed entity %s: %v", suffix, err)
+			}
+			if _, err := conn.Exec(`
+				INSERT INTO team_github_repos (team_id, owner, repo)
+				VALUES ((SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $2, $3)
+				ON CONFLICT (team_id, owner, repo) DO NOTHING
+			`, orgID, owner, repo); err != nil {
+				t.Fatalf("track entity repo %s/%s: %v", owner, repo, err)
 			}
 			return id
 		},
@@ -214,31 +229,94 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 	}
 }
 
-// TestFactoryReadStore_Postgres_ExcludesUntaskedEntity pins the
-// multi-mode membership semi-join: an entity a team has tasked (over
-// any task status) rides the factory snapshot, while one no team ever
-// tasked is excluded — even when it has events (a station). This is
-// the Postgres-only contract; SQLite (local mode) applies no
-// membership filter. Runs under AdminDB, so the EXISTS reduces to the
-// org-scoped semi-join; the RLS team-scoping it inherits in production
-// is a property of tasks_select, exercised by the RLS suite.
-func TestFactoryReadStore_Postgres_ExcludesUntaskedEntity(t *testing.T) {
+// trackPgRepo registers (owner, repo) as a tracked repo for teamID via a
+// raw team_github_repos insert — the multi-mode factory belt's GitHub
+// visibility gate (TFAC-516). Idempotent on the (team, owner, repo) PK.
+func trackPgRepo(t *testing.T, h *pgtest.Harness, teamID, owner, repo string) {
+	t.Helper()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO team_github_repos (team_id, owner, repo)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (team_id, owner, repo) DO NOTHING
+	`, teamID, owner, repo); err != nil {
+		t.Fatalf("track repo %s/%s for team %s: %v", owner, repo, teamID, err)
+	}
+}
+
+// seedPgGitHubEntityRaw / seedPgJiraEntityRaw insert an active entity with
+// an explicit "owner/repo#N" / "KEY-N" source_id and return its ID,
+// WITHOUT touching the tracked set — the factory tests below control
+// tracking themselves to exercise the tracked-set semi-join's include/
+// exclude boundary. (newPgFactorySeeder.Entity auto-tracks; these don't.)
+func seedPgGitHubEntityRaw(t *testing.T, h *pgtest.Harness, orgID, owner, repo string, number int) string {
+	t.Helper()
+	id := uuid.New().String()
+	sourceID := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, '', '{}'::jsonb, $5)
+	`, id, orgID, sourceID, "PR "+sourceID, time.Now().UTC()); err != nil {
+		t.Fatalf("seed github entity %s: %v", sourceID, err)
+	}
+	return id
+}
+
+func seedPgJiraEntityRaw(t *testing.T, h *pgtest.Harness, orgID, projectKey string, number int) string {
+	t.Helper()
+	id := uuid.New().String()
+	sourceID := fmt.Sprintf("%s-%d", projectKey, number)
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES ($1, $2, 'jira', $3, 'issue', $4, '', '{}'::jsonb, $5)
+	`, id, orgID, sourceID, "Issue "+sourceID, time.Now().UTC()); err != nil {
+		t.Fatalf("seed jira entity %s: %v", sourceID, err)
+	}
+	return id
+}
+
+// seedPgFactoryEvent inserts an entity-attached event via the admin pool
+// for tests that need a station but not the full newPgFactorySeeder.
+func seedPgFactoryEvent(t *testing.T, h *pgtest.Harness, orgID, entityID, eventType string, createdAt time.Time) {
+	t.Helper()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, $4, '', '{}'::jsonb, $5)
+	`, uuid.New().String(), orgID, entityID, eventType, createdAt); err != nil {
+		t.Fatalf("seed event %s: %v", eventType, err)
+	}
+}
+
+// TestFactoryReadStore_Postgres_ExcludesUntrackedEntity pins the TFAC-516
+// tracked-set semi-join for GitHub: an entity whose repo is in the team's
+// tracked set rides the belt *with no task at all* (the whole point — belt
+// density is no longer a side effect of task creation), while an entity on
+// an untracked repo is excluded even when it has a station (event) and is
+// equally untasked. Matching is case-insensitive, mirroring
+// TracksRepoSystem. Runs under AdminDB, so the EXISTS reduces to the
+// org-scoped semi-join; the per-team RLS narrowing is exercised in
+// TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS.
+func TestFactoryReadStore_Postgres_ExcludesUntrackedEntity(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, userID := seedPgFactoryOrg(t, h)
-	promptID := seedPgFactoryPrompt(t, h, orgID, userID)
-	seed := newPgFactorySeeder(h.AdminDB, orgID, userID, promptID)
+	orgID, _ := seedPgFactoryOrg(t, h)
+	teamID := firstTeamForOrg(t, h, orgID)
 
 	now := time.Now().UTC()
-	// withTask: a rule cared about it — earns membership.
-	withTask := seed.Entity(t, "memb-tasked")
-	ev := seed.Event(t, withTask, "github:pr:opened", "", now, time.Time{})
-	seed.Task(t, withTask, "github:pr:opened", "", ev, "queued", now)
 
-	// noTask: never matched a rule. Give it an event so the only thing
-	// keeping it out is membership, not a missing station.
-	noTask := seed.Entity(t, "memb-untasked")
-	seed.Event(t, noTask, "github:pr:opened", "", now, time.Time{})
+	// onTracked: repo in the tracked set, NO task — under the old
+	// task-existence gate it would have been hidden; now it rides the belt.
+	trackPgRepo(t, h, teamID, "acme", "tracked")
+	onTracked := seedPgGitHubEntityRaw(t, h, orgID, "acme", "tracked", 1)
+
+	// mixedCase: tracked repo casing differs from the entity's source_id
+	// casing — the lower()/lower() match must still surface it.
+	trackPgRepo(t, h, teamID, "acme", "casefold")
+	mixedCase := seedPgGitHubEntityRaw(t, h, orgID, "ACME", "CaseFold", 7)
+
+	// onUntracked: no team tracks its repo. It has a station and, like the
+	// others, no task — so the tracked-set gate is the only thing on it.
+	onUntracked := seedPgGitHubEntityRaw(t, h, orgID, "acme", "untracked", 2)
+	seedPgFactoryEvent(t, h, orgID, onUntracked, "github:pr:opened", now)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	rows, err := stores.Factory.Entities(context.Background(), orgID, 100, nil)
@@ -249,57 +327,131 @@ func TestFactoryReadStore_Postgres_ExcludesUntaskedEntity(t *testing.T) {
 	for _, r := range rows {
 		got[r.Entity.ID] = true
 	}
-	if !got[withTask] {
-		t.Errorf("tasked entity %s missing — membership semi-join dropped a member", withTask)
+	if !got[onTracked] {
+		t.Errorf("entity on tracked repo %s missing — tracked-set semi-join must surface untasked entities", onTracked)
 	}
-	if got[noTask] {
-		t.Errorf("untasked entity %s leaked through — membership semi-join not applied", noTask)
+	if !got[mixedCase] {
+		t.Errorf("entity %s (mixed-case owner/repo) missing — tracked-repo match must be case-insensitive", mixedCase)
+	}
+	if got[onUntracked] {
+		t.Errorf("entity on untracked repo %s leaked through — tracked-set semi-join not applied", onUntracked)
 	}
 }
 
-// TestFactoryReadStore_Postgres_KeepsEntityAfterTaskTerminal pins that
-// membership spans all task statuses: an entity whose only task has
-// gone terminal (done) still rides the snapshot. "Has had a task but
-// has none active now" must stay in the factory — membership is
-// monotonic, orthogonal to task lifecycle.
-func TestFactoryReadStore_Postgres_KeepsEntityAfterTaskTerminal(t *testing.T) {
+// TestFactoryReadStore_Postgres_JiraScopedToTrackedProject is the Jira
+// mirror of the GitHub test: a Jira entity whose project key is attached
+// to one of the viewer's teams (a jira_project_status_rules row) rides the
+// belt; one whose project no team configured is excluded. Pins that the
+// belt's Jira side scopes by tracked project, not task existence.
+func TestFactoryReadStore_Postgres_JiraScopedToTrackedProject(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, userID := seedPgFactoryOrg(t, h)
-	promptID := seedPgFactoryPrompt(t, h, orgID, userID)
-	seed := newPgFactorySeeder(h.AdminDB, orgID, userID, promptID)
+	orgID, _ := seedPgFactoryOrg(t, h)
+	teamID := firstTeamForOrg(t, h, orgID)
 
-	now := time.Now().UTC()
-	ent := seed.Entity(t, "terminal-task")
-	ev := seed.Event(t, ent, "github:pr:opened", "", now, time.Time{})
-	seed.Task(t, ent, "github:pr:opened", "", ev, "done", now)
+	// teamID attaches project SKY; PROJ is attached by no team.
+	seedPgJiraRule(t, h, teamID, "SKY")
+	onAttached := seedPgJiraEntityRaw(t, h, orgID, "SKY", 1)
+	onUnattached := seedPgJiraEntityRaw(t, h, orgID, "PROJ", 2)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	rows, err := stores.Factory.Entities(context.Background(), orgID, 100, nil)
 	if err != nil {
 		t.Fatalf("Entities: %v", err)
 	}
-	found := false
+	got := map[string]bool{}
 	for _, r := range rows {
-		if r.Entity.ID == ent {
-			found = true
-		}
+		got[r.Entity.ID] = true
 	}
-	if !found {
-		t.Errorf("entity %s with a terminal (done) task dropped — membership must span all task statuses", ent)
+	if !got[onAttached] {
+		t.Errorf("Jira entity on attached project %s missing — tracked-project semi-join dropped a member", onAttached)
+	}
+	if got[onUnattached] {
+		t.Errorf("Jira entity on unattached project %s leaked through — tracked-project semi-join not applied", onUnattached)
 	}
 }
 
-// TestFactoryReadStore_Postgres_CountersScopedToMembership pins that
-// the station-throughput aggregates (EventCountsSince,
-// LifetimeDistinctByEventType) carry the same team-membership scope as
-// the entity belt. events RLS is org-wide, so without the semi-join an
-// event on a PR no team of the viewer's ever tasked would inflate the
-// station header even though that PR never appears on the belt. Runs
-// under AdminDB, so the semi-join reduces to the org-scoped task
-// existence check; the production team-scoping it inherits is a
-// property of tasks RLS.
-func TestFactoryReadStore_Postgres_CountersScopedToMembership(t *testing.T) {
+// TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS proves the per-team
+// narrowing the production app pool gets for free: driven through tf_app
+// with real JWT claims, a viewer only sees belt entities in their own
+// teams' tracked set. This is the one multi-tenant *leak* surface in the
+// cleanup (the net-new GitHub-by-repo query), held to the same standard as
+// the Jira deck. alice (teamA only) sees teamA's tracked GitHub + Jira
+// entities but not teamB's; bob (teamB only) sees the mirror.
+func TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	orgID, alice := seedPgFactoryOrg(t, h)
+	teamA := firstTeamForOrg(t, h, orgID)
+	bob := seedPgMember(t, h, orgID, "bob", "member")
+	teamB := seedPgDefaultTeam(t, h, orgID, bob)
+
+	// teamA tracks acme/a-repo (GitHub) + SKY (Jira); teamB tracks
+	// acme/b-repo + BOB. Same org, disjoint tracked sets.
+	trackPgRepo(t, h, teamA, "acme", "a-repo")
+	trackPgRepo(t, h, teamB, "acme", "b-repo")
+	seedPgJiraRule(t, h, teamA, "SKY")
+	seedPgJiraRule(t, h, teamB, "BOB")
+
+	ghA := seedPgGitHubEntityRaw(t, h, orgID, "acme", "a-repo", 1)
+	ghB := seedPgGitHubEntityRaw(t, h, orgID, "acme", "b-repo", 2)
+	jiraA := seedPgJiraEntityRaw(t, h, orgID, "SKY", 1)
+	jiraB := seedPgJiraEntityRaw(t, h, orgID, "BOB", 2)
+
+	beltFor := func(t *testing.T, userID string) map[string]bool {
+		t.Helper()
+		ids := map[string]bool{}
+		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			rows, e := pgstore.NewForTx(tx, pgtest.SecretKey).Factory.Entities(ctx, orgID, 100, nil)
+			if e != nil {
+				return e
+			}
+			for _, r := range rows {
+				ids[r.Entity.ID] = true
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("belt for %s: %v", userID, err)
+		}
+		return ids
+	}
+
+	aliceSees := beltFor(t, alice)
+	if !aliceSees[ghA] || !aliceSees[jiraA] {
+		t.Errorf("alice (teamA) can't see her team's tracked entities (gh=%v jira=%v)", aliceSees[ghA], aliceSees[jiraA])
+	}
+	if aliceSees[ghB] {
+		t.Errorf("alice (teamA) saw teamB's GitHub entity %s — tracked-repo scope leaked across the team boundary", ghB)
+	}
+	if aliceSees[jiraB] {
+		t.Errorf("alice (teamA) saw teamB's Jira entity %s — tracked-project scope leaked across the team boundary", jiraB)
+	}
+
+	bobSees := beltFor(t, bob)
+	if !bobSees[ghB] || !bobSees[jiraB] {
+		t.Errorf("bob (teamB) can't see his team's tracked entities (gh=%v jira=%v)", bobSees[ghB], bobSees[jiraB])
+	}
+	if bobSees[ghA] {
+		t.Errorf("bob (teamB) saw teamA's GitHub entity %s — leak", ghA)
+	}
+	if bobSees[jiraA] {
+		t.Errorf("bob (teamB) saw teamA's Jira entity %s — leak", jiraA)
+	}
+}
+
+// TestFactoryReadStore_Postgres_CountersScopedToTrackedSet pins that the
+// station-throughput aggregates (EventCountsSince, TaskCountsSince,
+// LifetimeDistinctByEventType) carry the same tracked-set scope as the
+// belt. events RLS is org-wide, so without the semi-join an event on a PR
+// outside the tracked set would inflate the station header even though
+// that PR never appears on the belt; TaskCountsSince re-scopes the same
+// way so a task on an untracked entity (e.g. minted before the repo was
+// untracked) doesn't inflate "Triggered24h". Runs under AdminDB, so the
+// semi-join reduces to the org-scoped tracked-set check.
+func TestFactoryReadStore_Postgres_CountersScopedToTrackedSet(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID := seedPgFactoryOrg(t, h)
@@ -308,15 +460,18 @@ func TestFactoryReadStore_Postgres_CountersScopedToMembership(t *testing.T) {
 
 	now := time.Now().UTC()
 
-	// Tasked entity: one opened event in-window — counts.
-	tasked := seed.Entity(t, "ctr-tasked")
-	evT := seed.Event(t, tasked, "github:pr:opened", "", now.Add(-10*time.Minute), time.Time{})
-	seed.Task(t, tasked, "github:pr:opened", "", evT, "queued", now)
+	// Tracked entity (seed.Entity auto-registers its repo): one opened
+	// event + a task, both in-window — both must count.
+	tracked := seed.Entity(t, "ctr-tracked")
+	evT := seed.Event(t, tracked, "github:pr:opened", "", now.Add(-10*time.Minute), time.Time{})
+	seed.Task(t, tracked, "github:pr:opened", "", evT, "queued", now.Add(-10*time.Minute))
 
-	// Untasked entity: its events must NOT contribute to either counter.
-	untasked := seed.Entity(t, "ctr-untasked")
-	seed.Event(t, untasked, "github:pr:opened", "", now.Add(-5*time.Minute), time.Time{})
-	seed.Event(t, untasked, "github:pr:merged", "", now.Add(-5*time.Minute), time.Time{})
+	// Untracked entity: its events AND its task must NOT contribute to any
+	// counter — it's off the belt.
+	untracked := seedPgGitHubEntityRaw(t, h, orgID, "acme", "untracked", 9)
+	evU := seed.Event(t, untracked, "github:pr:opened", "", now.Add(-5*time.Minute), time.Time{})
+	seed.Event(t, untracked, "github:pr:merged", "", now.Add(-5*time.Minute), time.Time{})
+	seed.Task(t, untracked, "github:pr:merged", "", evU, "queued", now.Add(-5*time.Minute))
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
@@ -326,10 +481,21 @@ func TestFactoryReadStore_Postgres_CountersScopedToMembership(t *testing.T) {
 		t.Fatalf("EventCountsSince: %v", err)
 	}
 	if since["github:pr:opened"] != 1 {
-		t.Errorf("EventCountsSince[opened] = %d, want 1 (only the tasked entity counts)", since["github:pr:opened"])
+		t.Errorf("EventCountsSince[opened] = %d, want 1 (only the tracked entity counts)", since["github:pr:opened"])
 	}
 	if since["github:pr:merged"] != 0 {
-		t.Errorf("EventCountsSince[merged] = %d, want 0 (untasked entity's event must not count)", since["github:pr:merged"])
+		t.Errorf("EventCountsSince[merged] = %d, want 0 (untracked entity's event must not count)", since["github:pr:merged"])
+	}
+
+	taskC, err := stores.Factory.TaskCountsSince(ctx, orgID, now.Add(-1*time.Hour))
+	if err != nil {
+		t.Fatalf("TaskCountsSince: %v", err)
+	}
+	if taskC["github:pr:opened"] != 1 {
+		t.Errorf("TaskCountsSince[opened] = %d, want 1 (tracked entity's task)", taskC["github:pr:opened"])
+	}
+	if taskC["github:pr:merged"] != 0 {
+		t.Errorf("TaskCountsSince[merged] = %d, want 0 (untracked entity's task must not count)", taskC["github:pr:merged"])
 	}
 
 	life, err := stores.Factory.LifetimeDistinctByEventType(ctx, orgID)
@@ -337,19 +503,20 @@ func TestFactoryReadStore_Postgres_CountersScopedToMembership(t *testing.T) {
 		t.Fatalf("LifetimeDistinctByEventType: %v", err)
 	}
 	if life["github:pr:opened"] != 1 {
-		t.Errorf("Lifetime[opened] = %d, want 1 (untasked entity excluded)", life["github:pr:opened"])
+		t.Errorf("Lifetime[opened] = %d, want 1 (untracked entity excluded)", life["github:pr:opened"])
 	}
 	if life["github:pr:merged"] != 0 {
-		t.Errorf("Lifetime[merged] = %d, want 0 (untasked entity excluded)", life["github:pr:merged"])
+		t.Errorf("Lifetime[merged] = %d, want 0 (untracked entity excluded)", life["github:pr:merged"])
 	}
 }
 
 // TestFactoryReadStore_Postgres_CrossOrgLeakage pins the defense-in-
-// depth guarantee: even with the org_id filter as the only line of
-// defense (AdminDB bypasses RLS), org A's queries can't see org B's
-// rows. In production the RLS policies add a second layer; this test
-// validates the WHERE-clause filter on its own so a regression there
-// can't silently rely on RLS to compensate.
+// depth guarantee: even with the org bind as the only line of defense
+// (AdminDB bypasses RLS), org A's queries can't see org B's rows. In
+// production the RLS policies add a second layer; this test validates the
+// org-bind on its own (the tracked-set semi-join binds org via e.org_id /
+// the teams join) so a regression there can't silently rely on RLS to
+// compensate. Each entity is auto-tracked by its own org's seeder.
 func TestFactoryReadStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -363,15 +530,13 @@ func TestFactoryReadStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	seedB := newPgFactorySeeder(h.AdminDB, orgB, userB, promptB)
 
 	now := time.Now().UTC()
+	// seed.Entity registers each entity's repo for its own org's default
+	// team, so both clear the tracked-set semi-join in their own org — this
+	// test isolates the org bind, not the tracked-set membership.
 	entA := seedA.Entity(t, "cross-A")
 	entB := seedB.Entity(t, "cross-B")
-	evA := seedA.Event(t, entA, "github:pr:opened", "", now, time.Time{})
-	evB := seedB.Event(t, entB, "github:pr:merged", "", now, time.Time{})
-	// Task each entity so the membership-scoped event aggregates count
-	// them — this test isolates the org_id filter, not membership, so
-	// both entities must clear the semi-join in their own org.
-	seedA.Task(t, entA, "github:pr:opened", "", evA, "queued", now)
-	seedB.Task(t, entB, "github:pr:merged", "", evB, "queued", now)
+	seedA.Event(t, entA, "github:pr:opened", "", now, time.Time{})
+	seedB.Event(t, entB, "github:pr:merged", "", now, time.Time{})
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()

@@ -28,16 +28,17 @@ type FactoryReadStore interface {
 	// counts are absent.
 	//
 	// In multi-mode (Postgres) the count is scoped to the viewer's
-	// teams by the same task-membership semi-join the entity belt
-	// uses, so the station header agrees with the belt and doesn't
-	// report another team's activity (events RLS is org-wide, unlike
-	// tasks/runs). Local mode (SQLite) is unscoped — see Entities.
+	// teams by the same tracked-set semi-join the entity belt uses, so
+	// the station header agrees with the belt and doesn't report
+	// activity on entities outside the team's tracked repos/projects
+	// (events RLS is org-wide, unlike tasks/runs). Local mode (SQLite)
+	// is unscoped — see Entities.
 	EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error)
 
 	// LifetimeDistinctByEventType counts the distinct entities that
 	// have ever produced an event of each event_type. In multi-mode
 	// (Postgres) it is additionally scoped to the viewer's teams via
-	// the task-membership semi-join, matching EventCountsSince and the
+	// the tracked-set semi-join, matching EventCountsSince and the
 	// entity belt; local mode (SQLite) is org-only. Read per snapshot
 	// request — the factory endpoint is
 	// not a hot path. In Postgres the partial index
@@ -53,7 +54,13 @@ type FactoryReadStore interface {
 
 	// TaskCountsSince counts tasks per event_type created after
 	// `since`. Combined with EventCountsSince to compute the
-	// "triggered / seen" ratio displayed in the station overlay.
+	// "triggered / seen" ratio displayed in the station overlay. In
+	// multi-mode (Postgres) it is scoped to the same tracked set as the
+	// belt and the event counters — tasks RLS bounds it to the viewer's
+	// teams, and the tracked-set semi-join additionally drops a task
+	// whose entity has since left the tracked set (tracking is
+	// forward-only), keeping the header population consistent with the
+	// belt. Local mode (SQLite) is unscoped.
 	TaskCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error)
 
 	// ActiveRuns returns every run currently in-flight (status in
@@ -80,24 +87,27 @@ type FactoryReadStore interface {
 	// FactoryClosedGraceLimit) so the chip can finish animating to
 	// its terminal station before disappearing.
 	//
-	// Multi-mode (Postgres) scopes to the viewer's teams by
-	// membership: an entity is included iff a task for one of the
-	// viewer's teams has ever existed on it (a semi-join through
-	// tasks, over all task statuses). The org-level GitHub App polls
-	// org-wide, so polling produces cross-team entities; rather than
-	// fork the shared entity per team, the entity↔team relationship is
-	// derived through tasks (which carry team_id). The semi-join
-	// auto-scopes via tasks RLS under tf_app — no explicit team_id
-	// needed. An entity no team ever tasked belongs to no team's
-	// factory and is excluded.
+	// Multi-mode (Postgres) scopes to the viewer's teams by the
+	// *tracked set*: a GitHub entity is included iff its owner/name is
+	// one of the viewer's teams' tracked repos (team_github_repos), a
+	// Jira entity iff its project key is attached to one of those teams
+	// (jira_project_status_rules). This is independent of whether any
+	// task was ever minted on the entity — an untasked PR on a tracked
+	// repo rides the belt. The org-level GitHub App polls org-wide, so
+	// polling produces org-wide entities; the entity↔team relationship
+	// is derived through the tracked set, which the SELECT-policy RLS on
+	// those tables auto-scopes to the viewer's teams under tf_app — no
+	// explicit team_id needed. An entity in no team's tracked set
+	// belongs to no team's factory and is excluded. (TFAC-516 replaced
+	// the prior task-existence semi-join, which coupled belt density to
+	// task creation.)
 	//
 	// Local mode (SQLite, N=1) applies NO membership filter: the local
 	// tracker already scopes discovery to the user's own involvement
 	// (author / review-requested / reviewed-by), so every entity is
-	// personally relevant by construction. Filtering by task existence
-	// there would hide relevant-but-untriaged PRs the user expects to
-	// see, so the SQLite impl returns the full active set as before —
-	// local mode is unaffected by this scoping.
+	// personally relevant by construction. The tracked-set scoping lives
+	// only in the Postgres impl; the SQLite impl returns the full active
+	// set as before — local mode is unaffected.
 	//
 	// The entity's station (latest-event derivation in the SELECT) is
 	// orthogonal to membership and computed from the shared event log,
@@ -110,11 +120,10 @@ type FactoryReadStore interface {
 	// should always get its full budget regardless of close pressure.
 	//
 	// teamIDs is the optional per-page read filter — a multi-team view
-	// scope. Empty/nil = the union of the viewer's teams (the existing
-	// membership-from-task semi-join). When non-empty, the belt narrows
-	// to entities some task of *any* of those teams owns or makes visible
-	// — "show A and B together, hide the rest" for the factory.
-	// Postgres-only effect; SQLite is N=1 and ignores it.
+	// scope. Empty/nil = the union of the viewer's teams (the tracked-set
+	// semi-join). When non-empty, the belt narrows to entities tracked by
+	// *any* of those teams — "show A and B together, hide the rest" for
+	// the factory. Postgres-only effect; SQLite is N=1 and ignores it.
 	Entities(ctx context.Context, orgID string, limit int, teamIDs []string) ([]domain.FactoryEntityRow, error)
 }
 
