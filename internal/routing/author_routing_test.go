@@ -502,6 +502,95 @@ func TestOwnerLadderRouting_AmbiguousOwner_OrdersByPriorityThenID(t *testing.T) 
 	}
 }
 
+// TestAuthorCentric_ExternalAuthor_WatchTriggerDoesNotFire pins the firing
+// boundary for watcher teams: a team that surfaces an external/dependabot PR via
+// an explicit user watch rule gets visibility but NOT firing rights. Even with
+// an enabled ci-fix trigger and auto-delegation on, the bot must not auto-act on
+// a PR no member owns — the task stays NULL-owned for a human claim.
+func TestAuthorCentric_ExternalAuthor_WatchTriggerDoesNotFire(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	setReviewHost(t, database)
+
+	teamC := seedTeam(t, database, "watch-team")
+	seedMatchAllCIRule(t, database, teamC) // user-authored watch rule → visibility
+	enableTeamAutoDelegate(t, database, teamC)
+	seedImmediateTrigger(t, database, teamC, domain.EventGitHubPRCICheckFailed, "ci-c")
+
+	entityID := reviewEntity(t, database, "owner/repo#extwatch")
+	stub := &stubDelegator{db: database}
+	router := firingRouter(database, stub)
+	emitCI(router, entityID, "dependabot[bot]") // external, not a TF user
+
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("expected 1 task from the watch rule, got %d (err=%v)", len(active), err)
+	}
+	if active[0].TeamID != nil {
+		t.Errorf("owner = %v, want nil (external author; watcher confers no ownership)", *active[0].TeamID)
+	}
+	if stub.calls != 0 {
+		t.Errorf("Delegate called %d times; a watcher team must not auto-fire on a PR no member owns", stub.calls)
+	}
+	if active[0].ClaimedByAgentID != "" {
+		t.Errorf("task was bot-claimed (%q); a watcher must not claim an unowned PR", active[0].ClaimedByAgentID)
+	}
+	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 1 || vis[0] != teamC {
+		t.Errorf("visibility = %v, want [%s] (the watching team still sees it)", vis, teamC)
+	}
+}
+
+// TestAuthorCentric_TwoTeams_WatcherDoesNotStealOwnership pins that firing in the
+// ambiguous (multi-team author) case is scoped to the IDENTITY's teams, never a
+// watcher. A pure watcher team with the highest-priority rule + an enabled
+// trigger must not win the exclusive claim and consolidate itself as owner of a
+// PR authored by a member of other teams.
+func TestAuthorCentric_TwoTeams_WatcherDoesNotStealOwnership(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	setReviewHost(t, database)
+
+	teamA := seedTeam(t, database, "team-a")
+	teamB := seedTeam(t, database, "team-b")
+	teamC := seedTeam(t, database, "watch-team")
+	seedUserOnTeam(t, database, teamA, "aidan")
+	seedUserOnTeam(t, database, teamB, "aidan") // author on A and B → ambiguous
+
+	// teamC is a pure watcher: a high-priority user rule (would sort FIRST if it
+	// were in the firing order) plus an enabled trigger.
+	seedMatchAllCIRule(t, database, teamC) // priority 0.7, source=user
+	enableTeamAutoDelegate(t, database, teamA, teamB, teamC)
+	seedImmediateTrigger(t, database, teamA, domain.EventGitHubPRCICheckFailed, "ci-a")
+	seedImmediateTrigger(t, database, teamB, domain.EventGitHubPRCICheckFailed, "ci-b")
+	seedImmediateTrigger(t, database, teamC, domain.EventGitHubPRCICheckFailed, "ci-c")
+
+	entityID := reviewEntity(t, database, "owner/repo#nosteal")
+	stub := &stubDelegator{db: database}
+	router := firingRouter(database, stub)
+	emitCI(router, entityID, "aidan")
+
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("expected exactly 1 fire, got %d", stub.calls)
+	}
+	// The winner is one of the author's teams (lowest team id), NOT the watcher,
+	// even though the watcher's rule outranks them on priority.
+	owner := teamIDValue(&active[0])
+	if owner == teamC {
+		t.Fatalf("watcher team C stole ownership; firing must be scoped to the author's teams")
+	}
+	if owner != minStr(teamA, teamB) {
+		t.Errorf("owner = %q, want the deterministic author team %q", owner, minStr(teamA, teamB))
+	}
+	// C still sees the card (visibility), it just can't fire on it.
+	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 3 {
+		t.Errorf("visibility = %v, want all three teams (A, B, watcher C)", vis)
+	}
+}
+
 // firingRouter wires a router with both the identity-routing stores (Users,
 // Teams, Orgs, TeamGitHubGroups) and the delegation stores (Agents, TeamAgents)
 // plus a stub delegator, for tests that exercise the auto-fire +
