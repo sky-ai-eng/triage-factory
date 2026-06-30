@@ -23,6 +23,8 @@ func TestOwnershipModelForEvent(t *testing.T) {
 		{domain.EventJiraIssueAssigned, modelOwned, "assignee-centric jira → owning-team ladder"},
 		{domain.EventJiraIssueCommented, modelOwned, "assignee-centric jira → owning-team ladder"},
 		{domain.EventJiraIssueAvailable, modelPool, "unassigned team-pool signal → handler-team grouping"},
+		{domain.EventGitHubPRMerged, modelPool, "entity-terminating: excluded from the owned set; never routes"},
+		{domain.EventGitHubPRClosed, modelPool, "entity-terminating: excluded from the owned set; never routes"},
 		{"some:unregistered:event", modelPool, "unclassified types fall to the pool default"},
 	}
 	for _, c := range cases {
@@ -33,10 +35,11 @@ func TestOwnershipModelForEvent(t *testing.T) {
 }
 
 // TestEventSupportsWatch pins the exported UI-facing classifier the
-// /api/event-types handler calls — the watch toggle shows only for these. It is
-// stricter than "modelOwned": review_requested (precedence over the author-
-// centric set) and the entity-terminating owned events (pr:merged / pr:closed,
-// which never create a task) must all be false.
+// /api/event-types handler calls — the watch toggle shows only for these. It
+// equals "modelOwned", so the precedence/exclusion cases must all be false:
+// review_requested (requested-party), the pool events, and the entity-terminating
+// events (pr:merged / pr:closed) that are deliberately kept out of the owned set
+// because they never create a task.
 func TestEventSupportsWatch(t *testing.T) {
 	cases := []struct {
 		eventType string
@@ -47,7 +50,7 @@ func TestEventSupportsWatch(t *testing.T) {
 		{domain.EventJiraIssueAssigned, true, "assignee-centric jira → watch flag is meaningful"},
 		{domain.EventGitHubPRReviewRequested, false, "requested-party routing, not owner-ladder"},
 		{domain.EventJiraIssueAvailable, false, "pool routing — everyone matched is already a participant"},
-		{domain.EventGitHubPRMerged, false, "entity-terminating: in the owned set for the ladder but never creates a task"},
+		{domain.EventGitHubPRMerged, false, "entity-terminating: excluded from the owned set; never creates a task"},
 		{domain.EventGitHubPRClosed, false, "entity-terminating: closes the entity before any task is created"},
 	}
 	for _, c := range cases {

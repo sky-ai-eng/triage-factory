@@ -21,17 +21,25 @@ var EntityTerminatingEvents = map[string]bool{
 	domain.EventJiraIssueCompleted: true,
 }
 
-// authorCentricGitHubEventTypes is every github:pr:* event type EXCEPT
-// review_requested. These concern whoever OWNS the PR — its CI, conflict,
-// review-feedback, and commit lifecycle — so they route to the entity's
-// owning team via the owning-team ladder, not to whichever team's rule
-// happened to match. review_requested is the lone exception: it is the
-// requested reviewer's personal obligation and routes to their team(s),
-// scoped at emit time. Enumerated (not a github: prefix test) so the set is
-// auditable against internal/domain/events/github.go and so the prior-task
-// ladder tier keys on exactly these types. merged/closed are included for
-// completeness but never reach routing (they close the entity first) and
-// never have tasks, so their presence in the prior-task lookup is a no-op.
+// authorCentricGitHubEventTypes is every github:pr:* event type that ROUTES via
+// the owning-team ladder — the events concerning whoever OWNS the PR (its CI,
+// conflict, review-feedback, and commit lifecycle), routed to the entity's
+// owning team rather than to whichever team's rule happened to match. Two kinds
+// of github:pr:* event are deliberately EXCLUDED:
+//
+//   - review_requested — the requested reviewer's personal obligation; routes to
+//     their team(s), scoped at emit time (modelRequestedParty).
+//   - merged / closed — entity-terminating (EntityTerminatingEvents). They close
+//     the entity before routing (routableEntity returns early), so they never
+//     reach the ladder and never create a task — neither the routing
+//     classification nor the prior-task ladder gets anything from them. Keeping
+//     them OUT also keeps ownershipModelForEvent honest now that it drives the
+//     UI's EventSupportsWatch (TFAC-519): an event that never routes must not
+//     report itself as owner-routed.
+//
+// Enumerated (not a github: prefix test) so the set is auditable against
+// internal/domain/events/github.go (= those events minus the three exclusions
+// above) and so the prior-task ladder tier keys on exactly these types.
 var authorCentricGitHubEventTypes = []string{
 	domain.EventGitHubPRCICheckFailed,
 	domain.EventGitHubPRCICheckPassed,
@@ -47,8 +55,6 @@ var authorCentricGitHubEventTypes = []string{
 	domain.EventGitHubPRNewCommits,
 	domain.EventGitHubPRConflicts,
 	domain.EventGitHubPRMentioned,
-	domain.EventGitHubPRMerged,
-	domain.EventGitHubPRClosed,
 }
 
 var authorCentricGitHubEventSet = func() map[string]bool {
@@ -149,21 +155,16 @@ func ownershipModelForEvent(eventType string) ownershipModel {
 }
 
 // EventSupportsWatch reports whether the applies_to_unowned ("watch") reach flag
-// is meaningful for an event type (TFAC-517/519). It is true ONLY for
-// owner-ladder events (modelOwned) that can actually create a task. For pool
-// events every matched team is already a participant, and for requested-party
-// events routing is identity-scoped — so the flag is inert there. The server's
-// /api/event-types handler surfaces this so the rule/trigger editors hide the
-// toggle for event types where it would do nothing. Exported because the
-// classification (ownershipModelForEvent) is routing's to own.
-//
-// Entity-terminating events (pr:merged / pr:closed) are members of
-// authorCentricGitHubEventSet — they belong there for the prior-task ladder —
-// so ownershipModelForEvent classifies them modelOwned. But they close the
-// entity before any task is created, so a rule for them can never fire and the
-// watch flag is doubly inert; exclude them here so the editors don't offer the
-// toggle on an event that can't create a task. (The routing set stays untouched:
-// this is a UI-facing distinction, not a routing one.)
+// is meaningful for an event type (TFAC-517/519) — true ONLY for owner-ladder
+// events (modelOwned), where a non-owner team can opt into reaching the entity.
+// Pool events already make every matched team a participant and requested-party
+// routing is identity-scoped, so the flag is inert there. Entity-terminating
+// events (pr:merged / pr:closed) are kept out of the owned set (they never
+// create a task — see authorCentricGitHubEventTypes), so they resolve to a
+// non-owned model and fall out here for free. The server's /api/event-types
+// handler surfaces this so the editors hide the toggle where it would do
+// nothing. Exported because the classification (ownershipModelForEvent) is
+// routing's to own.
 func EventSupportsWatch(eventType string) bool {
-	return ownershipModelForEvent(eventType) == modelOwned && !EntityTerminatingEvents[eventType]
+	return ownershipModelForEvent(eventType) == modelOwned
 }
