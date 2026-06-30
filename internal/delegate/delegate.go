@@ -135,6 +135,18 @@ type DelegateOpts struct {
 	// runmode.LocalDefaultUserID; in multi-mode the handler extracts
 	// it from JWT claims.
 	CreatorUserID string
+
+	// ActorAgentID is the agents.id of the bot that will execute this
+	// delegation — server-side provenance like TriggerID, resolved by the
+	// caller (the router resolves the org/team agent before firing; the manual
+	// handlers hold the agent they claimed the task with; the drain path passes
+	// the task's already-stamped claim). Delegate freezes it onto
+	// blueprint_runs.actor_agent_id at mint, and every step run inherits it onto
+	// runs.actor_agent_id. Empty is tolerated (→ NULL on the row, the honest
+	// "no actor" answer) but every production caller supplies it, so the run's
+	// execution attribution never depends on re-reading a task claim that may
+	// not be written yet at step 0.
+	ActorAgentID string
 }
 
 // Delegate kicks off an async agent run for any task type.
@@ -290,8 +302,13 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		TriggerType:       domain.BlueprintTriggerType(triggerType),
 		TriggerID:         triggerID,
 		TriggeringEventID: triggeringEventID,
-		Status:            domain.BlueprintRunStatusRunning,
-		StepPlan:          stepPlan,
+		// Freeze the executing bot at mint. Every step run inherits this onto
+		// runs.actor_agent_id, so execution attribution is resolved once here
+		// rather than re-derived from the task claim per step (which is empty at
+		// step 0 on the event path and cleared by a mid-blueprint takeover).
+		ActorAgentID: opts.ActorAgentID,
+		Status:       domain.BlueprintRunStatusRunning,
+		StepPlan:     stepPlan,
 	}
 	// Event-triggered firings go through the fenced insert: a replayed
 	// (triggering_event_id, trigger_id) under the at-least-once router queue
@@ -326,7 +343,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// does (current_step_index), so a crash mid-flight is recoverable. The
 	// blueprint_run was just committed (the replay fence point); if the enqueue
 	// fails, mark it failed so it doesn't strand non-terminal.
-	if err := s.enqueueBlueprintStep(bgCtx, orgID, blueprintRunID, task, steps[0], stepModelOrInherit(stepPlan[0].Model, model), triggerType, creatorUserID); err != nil {
+	if err := s.enqueueBlueprintStep(bgCtx, orgID, blueprintRunID, task, steps[0], stepModelOrInherit(stepPlan[0].Model, model), triggerType, creatorUserID, brRow.ActorAgentID); err != nil {
 		if _, mErr := s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, domain.BlueprintRunStatusFailed, "enqueue first step: "+err.Error(), nil); mErr != nil {
 			delegateLog.Warn("mark blueprint_run failed after enqueue error", "blueprint_run", blueprintRunID, "error", mErr)
 		}

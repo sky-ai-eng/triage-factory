@@ -62,8 +62,11 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 		TriggerType:       domain.BlueprintTriggerType(opts.TriggerType),
 		TriggerID:         opts.TriggerID,
 		TriggeringEventID: opts.TriggeringEventID,
-		Status:            domain.BlueprintRunStatusRunning,
-		WorktreePath:      "/tmp/wt-" + brID,
+		// Mirror production: freeze the caller-resolved actor onto the
+		// blueprint_run so a router test can assert it matches the task claim.
+		ActorAgentID: opts.ActorAgentID,
+		Status:       domain.BlueprintRunStatusRunning,
+		WorktreePath: "/tmp/wt-" + brID,
 	}
 	if opts.TriggerType == "event" {
 		inserted, err := store.Blueprints.CreateRunIfNotFiredSystem(context.Background(), runmode.LocalDefaultOrgID, br)

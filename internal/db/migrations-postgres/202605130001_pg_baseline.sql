@@ -5843,6 +5843,15 @@ CREATE TABLE public.blueprint_runs (
     -- fence (blueprint_runs_event_trigger_fence below) lives here, relocated off
     -- runs. Step runs are not separately fenced (orchestrator-internal).
     triggering_event_id uuid,
+    -- actor_agent_id is the bot that executes this blueprint run, resolved once
+    -- at the delegation entry point and frozen here at mint (alongside
+    -- creator_user_id / trigger_id — the "who/why" provenance axes). Every step
+    -- run inherits it onto runs.actor_agent_id, so the execution attribution is
+    -- stable across all steps and immune to a later task-claim change (a user
+    -- takeover clears tasks.claimed_by_agent_id but does not rewrite who ran the
+    -- bot's steps). Nullable: a run minted before the org agent bootstrapped, or
+    -- whose agent row was later deleted (ON DELETE SET NULL), carries no actor.
+    actor_agent_id uuid,
     status text DEFAULT 'running'::text NOT NULL,
     -- Durable sequencing for the queue-driven reactor: current_step_index is
     -- the 0-based step the blueprint is on, bumped as the reactor enqueues the
@@ -5893,6 +5902,7 @@ ALTER TABLE ONLY public.blueprint_runs
 CREATE INDEX idx_blueprint_steps_step_prompt ON public.blueprint_steps (step_prompt_id, org_id);
 CREATE INDEX idx_blueprint_runs_task   ON public.blueprint_runs (task_id, org_id);
 CREATE INDEX idx_blueprint_runs_status ON public.blueprint_runs (status) WHERE (status = 'running'::text);
+CREATE INDEX idx_blueprint_runs_actor_agent ON public.blueprint_runs (actor_agent_id) WHERE (actor_agent_id IS NOT NULL);
 CREATE INDEX idx_runs_blueprint        ON public.runs (blueprint_run_id, blueprint_step_index);
 -- Claim index for the run queue: the dispatcher claims the globally-oldest
 -- 'queued' run (FIFO by started_at, id) under FOR UPDATE SKIP LOCKED. Partial so
@@ -5934,6 +5944,11 @@ ALTER TABLE ONLY public.blueprint_runs
 -- event reference is impossible.
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
+-- Composite (id, org_id) FK like runs_actor_agent_fkey: the actor must belong to
+-- the run's own org. ON DELETE SET NULL keeps the audit row when the agent is
+-- deleted (the run still happened; the actor pointer just goes blank).
+ALTER TABLE ONLY public.blueprint_runs
+    ADD CONSTRAINT blueprint_runs_actor_agent_fkey FOREIGN KEY (actor_agent_id, org_id) REFERENCES public.agents(id, org_id) ON DELETE SET NULL;
 
 -- fired_run_id records the blueprint_run a firing produced (the firing unit is
 -- the blueprint_run now), so it references blueprint_runs, not runs — the

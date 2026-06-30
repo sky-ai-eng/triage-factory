@@ -247,6 +247,56 @@ func TestBlueprintStore_SQLite_StepPlanRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBlueprintStore_SQLite_ActorAgentRoundTrip pins that the executing-bot
+// actor freezes on the blueprint_run at CreateRun and reads back on GetRun (the
+// reactor relies on this to inherit it onto each step run). The fenced event
+// insert carries it too, and an empty actor round-trips as empty.
+func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	agentID, err := stores.Agents.Create(ctx, org, domain.Agent{DisplayName: "Bot"})
+	if err != nil {
+		t.Fatalf("Agents.Create: %v", err)
+	}
+	task := seedEntityEventTask(t, conn, "actor-rt")
+	insertBlueprintForTest(t, conn, "actor-bp", "Actor BP")
+
+	// Manual CreateRun freezes + reads back the actor.
+	if _, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "actor-bpr", BlueprintID: "actor-bp", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+		WorktreePath: "/tmp/wt-actor", ActorAgentID: agentID,
+	}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	got, err := stores.Blueprints.GetRun(ctx, org, "actor-bpr")
+	if err != nil || got == nil {
+		t.Fatalf("GetRun = (%v, %v)", got, err)
+	}
+	if got.ActorAgentID != agentID {
+		t.Errorf("manual actor round-trip = %q, want %q", got.ActorAgentID, agentID)
+	}
+
+	// No actor → empty, not an error.
+	if _, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "actor-bpr-none", BlueprintID: "actor-bp", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+		WorktreePath: "/tmp/wt-actor-none",
+	}); err != nil {
+		t.Fatalf("CreateRun (no actor): %v", err)
+	}
+	none, err := stores.Blueprints.GetRun(ctx, org, "actor-bpr-none")
+	if err != nil || none == nil {
+		t.Fatalf("GetRun (no actor) = (%v, %v)", none, err)
+	}
+	if none.ActorAgentID != "" {
+		t.Errorf("no-actor round-trip = %q, want empty", none.ActorAgentID)
+	}
+}
+
 // TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome pins the channel
 // that replaced the old per-step verdict: a step run's terminal runs.outcome
 // (and outcome_reason) round-trips through RunsForBlueprint, which is what the

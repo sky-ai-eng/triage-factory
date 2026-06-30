@@ -434,7 +434,7 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 		if err := s.blueprints.SetRunCurrentStepSystem(context.Background(), orgID, br.ID, next); err != nil {
 			dispatchLog.Warn("set current_step_index for blueprint_run failed", "blueprint_run", br.ID, "error", err)
 		}
-		if err := s.enqueueBlueprintStep(context.Background(), orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepModelOrInherit(plan[next].Model, stepRun.Model), triggerType, creatorUserID); err != nil {
+		if err := s.enqueueBlueprintStep(context.Background(), orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepModelOrInherit(plan[next].Model, stepRun.Model), triggerType, creatorUserID, br.ActorAgentID); err != nil {
 			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("enqueue step %d: %v", next, err), &stepIdx, false)
 			return
@@ -488,7 +488,11 @@ func stepModelOrInherit(stepModel, inherited string) string {
 
 // enqueueBlueprintStep mints a queued runs row for step stepIndex of a
 // blueprint_run. Shared by Delegate (step 0) and the reactor (every advance).
-func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunID string, task domain.Task, step domain.BlueprintStep, model, triggerType, creatorUserID string) error {
+// actorAgentID is the executing bot, frozen on the blueprint_run at mint and
+// passed through here so every step inherits the same runs.actor_agent_id —
+// resolved once at the delegation entry point, never re-derived from the task
+// claim (which is empty at step 0 on the event path and cleared by a takeover).
+func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunID string, task domain.Task, step domain.BlueprintStep, model, triggerType, creatorUserID, actorAgentID string) error {
 	stepIdx := step.StepIndex
 	return s.runQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
 		ID:                 uuid.New().String(),
@@ -498,46 +502,10 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 		Model:              model,
 		TriggerType:        triggerType,
 		CreatorUserID:      creatorUserID,
-		ActorAgentID:       s.resolveActorAgentID(ctx, orgID, task),
+		ActorAgentID:       actorAgentID,
 		BlueprintRunID:     blueprintRunID,
 		BlueprintStepIndex: &stepIdx,
 	})
-}
-
-// resolveActorAgentID resolves the agents.id to stamp on runs.actor_agent_id —
-// the immutable "which bot executed this run" audit pointer (SKY-261 D-Claims).
-// Prefers the task's live bot claim (tasks.claimed_by_agent_id — the per-team
-// agent that committed to the work); falls back to the org's agent when that
-// claim isn't on the in-memory task yet. The fallback is load-bearing, not a
-// guard: it covers auto-fire step 0 (the router stamps the claim only AFTER
-// fireDelegate returns), the swipe delegate paths (the task is read before the
-// claim is written), and every blueprint step after a user takeover (which
-// clears claimed_by_agent_id while the bot keeps executing the queued steps —
-// actor_agent_id is the execution story, which stays the bot even once the user
-// owns the responsibility claim).
-//
-// At N=1 there is exactly one agent per org, so the fallback resolves to the same
-// id the claim holds (or is about to); preferring the claim keeps the attribution
-// honest if an org ever grows a second agent. Nil-safe on s.agents (partial test
-// Stores) and on GetForOrgSystem returning (nil, nil); both yield "" → SQL NULL,
-// matching the column's nullable contract (a run spawned before agent bootstrap,
-// or after the agent was deleted, carries no actor).
-func (s *Spawner) resolveActorAgentID(ctx context.Context, orgID string, task domain.Task) string {
-	if task.ClaimedByAgentID != "" {
-		return task.ClaimedByAgentID
-	}
-	if s.agents == nil {
-		return ""
-	}
-	a, err := s.agents.GetForOrgSystem(ctx, orgID)
-	if err != nil {
-		dispatchLog.Warn("resolve actor agent for run failed; leaving actor_agent_id NULL", "org", orgID, "task", task.ID, "error", err)
-		return ""
-	}
-	if a == nil {
-		return ""
-	}
-	return a.ID
 }
 
 // buildStepConfig produces the runConfig for a claimed step. On the first claim

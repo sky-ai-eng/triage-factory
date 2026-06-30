@@ -734,6 +734,48 @@ func seedPgPromptInTeam(t *testing.T, h *pgtest.Harness, orgID, userID, teamID, 
 	}
 }
 
+// TestBlueprintStore_Postgres_ActorAgentRoundTrip is the Postgres parity of the
+// SQLite actor round-trip: CreateRun freezes blueprint_runs.actor_agent_id under
+// the composite (actor_agent_id, org_id) FK to agents, and GetRunSystem reads it
+// back. Validates the in-place baseline column + FK.
+func TestBlueprintStore_Postgres_ActorAgentRoundTrip(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	blueprintID := "blueprint-actor-" + orgID[:8]
+	stepPromptID := "step-actor-" + orgID[:8]
+	seedPgBlueprint(t, h, orgID, userID, blueprintID)
+	seedPgPrompt(t, h, orgID, userID, stepPromptID)
+	taskID := seedPgTask(t, h, orgID, userID)
+
+	agentID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO agents (id, org_id, display_name) VALUES ($1, $2, 'Bot')`, agentID, orgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+
+	brID, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
+		WorktreePath: "/tmp/wt-actor", ActorAgentID: agentID,
+		StepPlan: []domain.BlueprintPlanStep{{StepIndex: 0, PromptID: stepPromptID, PromptName: "S", PromptBody: "b", Source: "user"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	got, err := stores.Blueprints.GetRunSystem(ctx, orgID, brID)
+	if err != nil || got == nil {
+		t.Fatalf("GetRunSystem = (%v, %v)", got, err)
+	}
+	if got.ActorAgentID != agentID {
+		t.Errorf("actor round-trip = %q, want %q", got.ActorAgentID, agentID)
+	}
+}
+
 func seedPgBlueprintInTeam(t *testing.T, h *pgtest.Harness, orgID, userID, teamID, id string) {
 	t.Helper()
 	if _, err := h.AdminDB.Exec(`

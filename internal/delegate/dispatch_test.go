@@ -153,6 +153,49 @@ func TestReactor_AdvanceEnqueuesNextStep(t *testing.T) {
 	}
 }
 
+// TestReactor_AdvanceInheritsActorAgent pins the freeze-and-inherit design: the
+// next step the reactor enqueues carries the blueprint_run's frozen
+// actor_agent_id, NOT a value re-derived from the task claim. The task is left
+// UNCLAIMED (the simulated post-takeover state, where tasks.claimed_by_agent_id
+// was cleared), and the enqueued step must still attribute to the bot that has
+// been executing the blueprint — proving the actor is stable across steps and
+// immune to a mid-blueprint claim change.
+func TestReactor_AdvanceInheritsActorAgent(t *testing.T) {
+	s, database, brID, taskID, run0 := reactorFixture(t, "actor-inherit", 2, "completed", "continue")
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+
+	// Freeze an actor on the blueprint_run (as Delegate does at mint) while the
+	// task stays unclaimed — so the only place the actor can come from is the br.
+	agentID, err := sqlitestore.New(database).Agents.Create(ctx, org, domain.Agent{DisplayName: "Bot"})
+	if err != nil {
+		t.Fatalf("Agents.Create: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE blueprint_runs SET actor_agent_id = ? WHERE id = ?`, agentID, brID); err != nil {
+		t.Fatalf("freeze actor on blueprint_run: %v", err)
+	}
+	var claim string
+	if err := database.QueryRow(`SELECT COALESCE(claimed_by_agent_id, '') FROM tasks WHERE id = ?`, taskID).Scan(&claim); err != nil {
+		t.Fatalf("read task claim: %v", err)
+	}
+	if claim != "" {
+		t.Fatalf("precondition: task must be unclaimed to prove inheritance, got claim %q", claim)
+	}
+
+	stepRun, _ := s.agentRuns.GetSystem(ctx, org, run0)
+	stepRun.TriggerType = "manual"
+	stepRun.CreatorUserID = runmode.LocalDefaultUserID
+	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+
+	var actor string
+	if err := database.QueryRow(`SELECT COALESCE(actor_agent_id, '') FROM runs WHERE blueprint_run_id = ? AND blueprint_step_index = 1`, brID).Scan(&actor); err != nil {
+		t.Fatalf("read step-1 actor: %v", err)
+	}
+	if actor != agentID {
+		t.Errorf("step-1 run actor_agent_id = %q, want %q (inherited from blueprint_run, not the empty task claim)", actor, agentID)
+	}
+}
+
 // TestReactor_FinalStepFinishCompletes: the final step completing with 'finish'
 // terminates the blueprint completed and closes the task.
 func TestReactor_FinalStepFinishCompletes(t *testing.T) {

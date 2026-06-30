@@ -474,11 +474,15 @@ func (s *Server) swipeTriggerDelegation(r *http.Request, orgID, userID, id strin
 	if err != nil || task == nil {
 		return
 	}
+	// The actor is the agent this swipe just claimed the task with (swipeDelegate
+	// stamped claimed_by_agent_id before this re-read, and Tasks.Get hydrates it).
+	// Pass it so the run's frozen blueprint_run actor matches the task claim.
 	runID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: req.BlueprintID,
 		TriggerType:         "manual",
 		CreatorUserID:       userID,
+		ActorAgentID:        task.ClaimedByAgentID,
 	})
 	if err != nil {
 		response["delegate_error"] = err.Error()

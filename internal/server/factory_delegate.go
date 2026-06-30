@@ -342,14 +342,16 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// — the user's commitment is real, the run just didn't fire.
 	// The response carries delegate_error so the FE can render the
 	// "delegate failed — retry" affordance on the now-bot-claimed card.
-	// task.ClaimedByAgentID is set so spawner.Delegate's actor stamping
-	// reads it correctly.
+	// task.ClaimedByAgentID mirrors the just-stamped claim for the shared
+	// task object; the actor is passed explicitly so the run's frozen
+	// blueprint_run actor matches it.
 	task.ClaimedByAgentID = a.ID
 	runID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: req.BlueprintID,
 		TriggerType:         "manual",
 		CreatorUserID:       userID,
+		ActorAgentID:        a.ID,
 	})
 	if err != nil {
 		// Claim is already stamped (and broadcast), swipe audit

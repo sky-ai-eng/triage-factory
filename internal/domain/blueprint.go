@@ -164,8 +164,17 @@ type BlueprintRun struct {
 	// blueprint_run is the firing unit, so the fence lives here rather than on
 	// the per-step runs. Forward-only provenance — not read back into the run
 	// projection.
-	TriggeringEventID string             `json:"triggering_event_id,omitempty"`
-	Status            BlueprintRunStatus `json:"status"`
+	TriggeringEventID string `json:"triggering_event_id,omitempty"`
+	// ActorAgentID is the agents.id of the bot executing this blueprint run
+	// (blueprint_runs.actor_agent_id, SKY-261 D-Claims). Resolved once at the
+	// delegation entry point — from the task's bot claim, or the org agent the
+	// router/handler already holds — and frozen here at mint. Every step run
+	// inherits it onto runs.actor_agent_id, so execution attribution is stable
+	// across steps and survives a mid-blueprint user takeover (which clears the
+	// task claim but not who ran the bot's steps). Empty = NULL (no actor: minted
+	// before agent bootstrap, or the agent row was later deleted → SET NULL).
+	ActorAgentID string             `json:"actor_agent_id,omitempty"`
+	Status       BlueprintRunStatus `json:"status"`
 	// CurrentStepIndex is the 0-based step the blueprint is on — the durable
 	// sequencing the queue-driven reactor advances (replacing the goroutine
 	// stack's loop index). A mid-flight blueprint resumes by re-enqueuing this

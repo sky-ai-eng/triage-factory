@@ -39,53 +39,66 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			"task_id", task.ID, "claimed_team", teamIDValue(task), "acting_team", actingTeamID)
 		return
 	}
-	// SKY-261 bot-disabled-team gate. If the task's team has the bot
-	// turned off in team_agents.enabled, the auto-trigger is a no-op
-	// — the task is already in the team queue (created by HandleEvent
-	// upstream); a human will swipe-delegate later if they want a
-	// run. Skip silently rather than firing on a disabled team.
+	// Resolve the org's agent ONCE here. It's the single source for three
+	// consumers that must agree: the bot-disabled-team gate, the run's actor
+	// (frozen onto blueprint_runs.actor_agent_id via DelegateOpts), and the
+	// task's claim (stampAgentClaim). Resolving once — instead of re-deriving in
+	// stampAgentClaim as before — guarantees runs.actor_agent_id and
+	// tasks.claimed_by_agent_id are the same id with no second lookup to drift,
+	// and it's available at step-0 enqueue even though the claim isn't stamped
+	// until after fireDelegate returns.
 	//
-	// The gate requires BOTH stores (agents to resolve the org's
-	// agent, teamAgents to read the enabled flag). If either is nil
-	// — pre-D-Claims test wiring that didn't thread the new stores
-	// — the gate degrades to "bot enabled check unavailable, proceed
-	// with auto-fire," which preserves the pre-SKY-261 behavior.
-	// Production server.New / main.go always passes both.
-	if r.teamAgents != nil && r.agents != nil {
+	// Nil r.agents is pre-D-Claims test wiring: skip the gate, leave agentID
+	// empty (the run records no actor, stampAgentClaim no-ops) — preserving the
+	// "proceed with auto-fire" degrade. Production always wires it.
+	var agentID string
+	if r.agents != nil {
 		a, err := r.agents.GetForOrgSystem(context.Background(), orgID)
 		if err != nil {
 			routerLog.Warn("auto-trigger skipped: agent lookup failed", "error", err)
 			return
 		}
-		if a == nil {
-			// No bootstrapped agent — bootstrap is now fatal at
-			// startup, so this shouldn't reach us in practice.
-			// Log + bail rather than crashing the goroutine.
-			routerLog.Warn("auto-trigger skipped: no agent bootstrapped", "task_id", task.ID)
-			return
+		if a != nil {
+			agentID = a.ID
 		}
-		// Read the bot-enabled flag for the FIRING team — the team
-		// whose trigger routed the bot here — not the task's owner
-		// team. One task is now visible to many teams; the gate must
-		// read the acting team's own team_agents row so a two-team org
-		// where team B disabled the bot doesn't auto-fire on team B by
-		// reading team A's flag. Fall back to the task's owner team,
-		// then the local sentinel, when the caller didn't supply one.
-		teamID := actingTeamID
-		if teamID == "" {
-			teamID = teamIDValue(task)
-		}
-		if teamID == "" {
-			teamID = runmode.LocalDefaultTeamID
-		}
-		ta, err := r.teamAgents.GetForTeamSystem(context.Background(), orgID, teamID, a.ID)
-		if err != nil {
-			routerLog.Warn("auto-trigger skipped: team_agents lookup failed", "task_id", task.ID, "error", err)
-			return
-		}
-		if ta == nil || !ta.Enabled {
-			routerLog.Info("auto-trigger skipped: bot disabled for team", "task_id", task.ID, "team", teamID)
-			return
+
+		// SKY-261 bot-disabled-team gate. If the task's team has the bot
+		// turned off in team_agents.enabled, the auto-trigger is a no-op
+		// — the task is already in the team queue (created by HandleEvent
+		// upstream); a human will swipe-delegate later if they want a
+		// run. Skip silently rather than firing on a disabled team. Requires
+		// team_agents too; nil (older test wiring) degrades to "proceed".
+		if r.teamAgents != nil {
+			if a == nil {
+				// No bootstrapped agent — bootstrap is now fatal at
+				// startup, so this shouldn't reach us in practice.
+				// Log + bail rather than crashing the goroutine.
+				routerLog.Warn("auto-trigger skipped: no agent bootstrapped", "task_id", task.ID)
+				return
+			}
+			// Read the bot-enabled flag for the FIRING team — the team
+			// whose trigger routed the bot here — not the task's owner
+			// team. One task is now visible to many teams; the gate must
+			// read the acting team's own team_agents row so a two-team org
+			// where team B disabled the bot doesn't auto-fire on team B by
+			// reading team A's flag. Fall back to the task's owner team,
+			// then the local sentinel, when the caller didn't supply one.
+			teamID := actingTeamID
+			if teamID == "" {
+				teamID = teamIDValue(task)
+			}
+			if teamID == "" {
+				teamID = runmode.LocalDefaultTeamID
+			}
+			ta, err := r.teamAgents.GetForTeamSystem(context.Background(), orgID, teamID, a.ID)
+			if err != nil {
+				routerLog.Warn("auto-trigger skipped: team_agents lookup failed", "task_id", task.ID, "error", err)
+				return
+			}
+			if ta == nil || !ta.Enabled {
+				routerLog.Info("auto-trigger skipped: bot disabled for team", "task_id", task.ID, "team", teamID)
+				return
+			}
 		}
 	}
 	// Breaker gate. trigger.BreakerThreshold is *int because the column
@@ -159,7 +172,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			// task. !inserted means a duplicate firing already in the
 			// queue — the original enqueue already stamped, no re-
 			// stamp needed.
-			r.stampAgentClaim(orgID, task, actingTeamID)
+			r.stampAgentClaim(orgID, task, actingTeamID, agentID)
 		} else {
 			routerLog.Debug("firing collapsed, duplicate already queued",
 				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
@@ -185,7 +198,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			task.TeamID = teamIDPtr(actingTeamID)
 		}
 	}
-	if _, err := r.fireDelegate(orgID, task, trigger, triggeringEventID); err != nil {
+	if _, err := r.fireDelegate(orgID, task, trigger, triggeringEventID, agentID); err != nil {
 		// SKY-424: a replayed event (at-least-once queue) whose first run
 		// already committed hits the (event, trigger) fence and comes back
 		// as ErrAlreadyFired. Clean skip — the original run + its claim
@@ -203,18 +216,20 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	// so a fireDelegate that fails + reverts to status='queued'
 	// doesn't leave a phantom bot claim on a task that's back in the
 	// human-triage queue.
-	r.stampAgentClaim(orgID, task, actingTeamID)
+	r.stampAgentClaim(orgID, task, actingTeamID, agentID)
 }
 
-// stampAgentClaim writes claimed_by_agent_id on a task using the org's
-// agent row AND broadcasts the SKY-261 B+ task_claimed event so
-// listeners (Board) can re-render the per-claim lanes. Called from
-// the two commitment points in tryAutoDelegate (post-fireDelegate
-// success, post-EnqueuePendingFiring success). Both paths converge
-// on "the bot has committed to this task." Nil-safe on r.agents and
-// on GetForOrg returning (nil, nil) — both leave the claim
-// unstamped rather than crashing, which matches the "transient seam
-// between db init and agent bootstrap" case noted in §4 of the spec.
+// stampAgentClaim writes claimed_by_agent_id on a task AND broadcasts the
+// SKY-261 B+ task_claimed event so listeners (Board) can re-render the
+// per-claim lanes. Called from the two commitment points in tryAutoDelegate
+// (post-fireDelegate success, post-EnqueuePendingFiring success). Both paths
+// converge on "the bot has committed to this task."
+//
+// agentID is the org agent resolved ONCE by the caller (tryAutoDelegate) — the
+// same id frozen onto the run's blueprint_run actor — so the claim and the run's
+// execution attribution can't drift. Empty agentID (pre-bootstrap / test wiring
+// with no agents store) leaves the claim unstamped rather than crashing, matching
+// the "transient seam between db init and agent bootstrap" case in §4 of the spec.
 //
 // Uses StampAgentClaimIfUnclaimed (race-safe variant) instead of the
 // unconditional setter: if a user claims the same task while the
@@ -225,19 +240,11 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 // the human said "I'll handle this." Same-agent rewrites also
 // short-circuit here, avoiding redundant task_claimed broadcasts on
 // flows that call stampAgentClaim twice in quick succession.
-func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID string) {
-	if r.agents == nil {
+func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID, agentID string) {
+	if agentID == "" {
 		return
 	}
-	a, err := r.agents.GetForOrgSystem(context.Background(), orgID)
-	if err != nil {
-		routerLog.Error("agent lookup failed for claim stamp", "task_id", task.ID, "error", err)
-		return
-	}
-	if a == nil {
-		return
-	}
-	ok, err := r.tasks.StampAgentClaimIfUnclaimedSystem(context.Background(), orgID, task.ID, a.ID, actingTeamID)
+	ok, err := r.tasks.StampAgentClaimIfUnclaimedSystem(context.Background(), orgID, task.ID, agentID, actingTeamID)
 	if err != nil {
 		routerLog.Error("failed to stamp agent claim", "task_id", task.ID, "error", err)
 		return
@@ -257,7 +264,7 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID s
 		routerLog.Debug("agent claim stamp was a no-op (user owns it, bot already owns it, or task is terminal)", "task_id", task.ID)
 		return
 	}
-	task.ClaimedByAgentID = a.ID
+	task.ClaimedByAgentID = agentID
 	if actingTeamID != "" {
 		// Mirror the store's owner-consolidation so the shared task
 		// object reflects the new owning team for later iterations.
@@ -268,7 +275,7 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID s
 		OrgID: orgID,
 		Data: map[string]any{
 			"task_id":             task.ID,
-			"claimed_by_agent_id": a.ID,
+			"claimed_by_agent_id": agentID,
 			"claimed_by_user_id":  "",
 		},
 	})
@@ -284,7 +291,12 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID s
 // insert is fenced on (triggering_event_id, trigger_id); a replayed event
 // whose first run already committed surfaces as delegate.ErrAlreadyFired,
 // which both callers treat as a clean skip rather than a duplicate fire.
-func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string) (string, error) {
+//
+// actorAgentID is the executing bot, resolved once by the caller — the immediate
+// path passes the agent it resolved up front (and stamps the same id as the
+// claim); the drain path passes the firing's already-stamped task claim. It's
+// frozen onto blueprint_runs.actor_agent_id at mint and inherited by every step.
+func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID, actorAgentID string) (string, error) {
 	if r.spawner == nil {
 		return "", fmt.Errorf("spawner not configured")
 	}
@@ -316,6 +328,7 @@ func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.Ev
 		TriggerType:         "event",
 		TriggerID:           trigger.ID,
 		TriggeringEventID:   triggeringEventID,
+		ActorAgentID:        actorAgentID,
 	})
 	if err != nil {
 		// Post-B+: nothing to revert status-wise (status stayed 'queued').
@@ -551,7 +564,10 @@ func (r *Router) attemptDrainOne(orgID string, firing *domain.PendingFiring) (ru
 		return "", domain.PendingFiringSkipBreakerTripped, nil
 	}
 
-	id, err := r.fireDelegate(orgID, task, *trigger, firing.TriggeringEventID)
+	// The actor is the agent that already claimed this task (guaranteed non-empty
+	// by the claim guard above) — the drain re-fires the same bot's commitment, so
+	// the new blueprint_run's frozen actor matches the standing task claim.
+	id, err := r.fireDelegate(orgID, task, *trigger, firing.TriggeringEventID, task.ClaimedByAgentID)
 	if err != nil {
 		// SKY-424: the run for this (event, trigger) already exists — a
 		// prior drain attempt fired it (process died before MarkFired), or

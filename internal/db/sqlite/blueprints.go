@@ -710,9 +710,9 @@ func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.
 		creatorUserID = runmode.LocalDefaultUserID
 	}
 	if _, err := s.q.ExecContext(ctx, `
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, status, step_plan, worktree_path, abort_reason, completed_at, creator_user_id, started_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), br.Status, stepPlan, br.WorktreePath, abortReason, completedAt, creatorUserID); err != nil {
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, abort_reason, completed_at, creator_user_id, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath, abortReason, completedAt, creatorUserID); err != nil {
 		return "", fmt.Errorf("insert blueprint_run: %w", err)
 	}
 	return br.ID, nil
@@ -741,10 +741,10 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 		return false, fmt.Errorf("marshal step plan: %w", err)
 	}
 	res, err := s.q.ExecContext(ctx, `
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, status, step_plan, worktree_path, creator_user_id, started_at)
-		VALUES (?, ?, ?, 'event', ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
+		VALUES (?, ?, ?, 'event', ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
 		ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, br.Status, stepPlan, br.WorktreePath)
+	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, nullIfEmpty(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath)
 	if err != nil {
 		return false, fmt.Errorf("insert blueprint_run (fenced): %w", err)
 	}
@@ -789,6 +789,7 @@ func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.
 	var (
 		br              domain.BlueprintRun
 		triggerID       sql.NullString
+		actorAgentID    sql.NullString
 		abortReason     sql.NullString
 		abortedAtStep   sql.NullInt64
 		completedAt     sql.NullTime
@@ -796,11 +797,11 @@ func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.
 		stepPlanRaw     string
 	)
 	err := s.q.QueryRowContext(ctx, `
-		SELECT id, blueprint_id, task_id, trigger_type, trigger_id, status,
+		SELECT id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id, status,
 		       current_step_index, cancel_requested, step_plan,
 		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at
 		FROM blueprint_runs WHERE id = ?
-	`, id).Scan(&br.ID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &br.Status,
+	`, id).Scan(&br.ID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &actorAgentID, &br.Status,
 		&br.CurrentStepIndex, &cancelRequested, &stepPlanRaw,
 		&abortReason, &abortedAtStep, &br.WorktreePath, &br.StartedAt, &completedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -815,6 +816,9 @@ func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.
 	br.CancelRequested = cancelRequested != 0
 	if triggerID.Valid {
 		br.TriggerID = triggerID.String
+	}
+	if actorAgentID.Valid {
+		br.ActorAgentID = actorAgentID.String
 	}
 	if abortReason.Valid {
 		br.AbortReason = abortReason.String
