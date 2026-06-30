@@ -46,6 +46,9 @@ export default function TriggerConfigPanel({
   // trigger it grants orphan reach AND fires, so the whole orphan auto-delegation
   // can be configured here without a companion task rule.
   const [appliesToUnowned, setAppliesToUnowned] = useState(false)
+  // Whether this trigger's event supports the watch toggle (TFAC-519) — hidden
+  // when inert (pool / requested-party events). Resolved from /api/event-types.
+  const [supportsWatch, setSupportsWatch] = useState(false)
   const [promptName, setPromptName] = useState('')
   const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -62,6 +65,17 @@ export default function TriggerConfigPanel({
     setAppliesToUnowned(trigger.applies_to_unowned)
     setConfirmDelete(false)
     setPromptName('')
+    setSupportsWatch(false)
+
+    // Does this trigger's event support the applies_to_unowned toggle? Look it
+    // up in the catalog; the toggle is hidden when the flag would be inert.
+    fetch('/api/event-types')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list: Array<{ id: string; supports_watch: boolean }>) => {
+        if (cancelled || !Array.isArray(list)) return
+        setSupportsWatch(list.find((et) => et.id === trigger.event_type)?.supports_watch ?? false)
+      })
+      .catch(() => {})
 
     // Resolve the bound blueprint's name for the badge. Template scope has a
     // single-get on its blueprint family; team-scope blueprints expose only a
@@ -269,8 +283,9 @@ export default function TriggerConfigPanel({
                     the whole orphan auto-delegation is configured here. Off by
                     default; carries an eyes-open warning. Hidden in org-template
                     scope — the flag is a team-routing concept the template doesn't
-                    carry (mirrors TaskRuleEditor). */}
-                {!templateScope && (
+                    carry (mirrors TaskRuleEditor). Also hidden for events where the
+                    flag is inert (pool / requested-party — supports_watch=false). */}
+                {!templateScope && supportsWatch && (
                   <>
                     <div className="border-t border-border-subtle" />
                     <div>

@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
@@ -24,16 +25,29 @@ type promptsHandler struct {
 	az *authz.Checker
 }
 
+// eventTypeResponse is the /api/event-types wire shape: the catalog row plus a
+// derived supports_watch flag (TFAC-519). The flag tells the rule/trigger
+// editors whether the applies_to_unowned ("watch") toggle is meaningful for this
+// event — true only for owner-ladder events, where a non-owner team can opt into
+// reaching the entity; inert (and so hidden) for pool / requested-party events.
+// The embedded domain.EventType flattens its json fields, so the row shape is
+// unchanged and only supports_watch is added.
+type eventTypeResponse struct {
+	domain.EventType
+	SupportsWatch bool `json:"supports_watch"`
+}
+
 func (ph *promptsHandler) handleEventTypes(w http.ResponseWriter, r *http.Request) {
 	types, err := db.ListEventTypes(ph.db)
 	if err != nil {
 		internalError(w, "prompts", err)
 		return
 	}
-	if types == nil {
-		types = []domain.EventType{}
+	out := make([]eventTypeResponse, len(types))
+	for i, t := range types {
+		out[i] = eventTypeResponse{EventType: t, SupportsWatch: routing.EventSupportsWatch(t.ID)}
 	}
-	writeJSON(w, http.StatusOK, types)
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (ph *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Request) {

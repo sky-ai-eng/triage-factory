@@ -365,6 +365,10 @@ export interface EventType {
   category: string
   label: string
   description: string
+  // supports_watch: whether the applies_to_unowned ("watch") toggle is
+  // meaningful for this event (TFAC-519). True only for owner-ladder events;
+  // the rule/trigger editors hide the toggle when false (it would be inert).
+  supports_watch: boolean
 }
 
 // Event handlers (SKY-259) — unified successor to the former TaskRule

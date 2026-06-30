@@ -78,6 +78,12 @@ export default function TaskRuleEditor({
   // which point teams are loaded, so no cold-load gate is needed.
   const effectiveTeam = lockedTeamId || team
 
+  // Whether the selected event supports the applies_to_unowned ("watch") flag
+  // (TFAC-519). The toggle is hidden for events where it's inert (pool /
+  // requested-party). Derived from the fetched catalog.
+  const selectedEventSupportsWatch =
+    eventTypes.find((et) => et.id === eventType)?.supports_watch ?? false
+
   // Track original predicate JSON for PATCH diff.
   const [originalPredicateJSON, setOriginalPredicateJSON] = useState<string | null>(null)
 
@@ -333,6 +339,7 @@ export default function TaskRuleEditor({
                       onChange={(e) => {
                         setEventType(e.target.value)
                         setPredicate({}) // Reset predicate when switching event types in create mode.
+                        setAppliesToUnowned(false) // Reset watch flag — the new event may not support it.
                       }}
                       disabled={isEdit}
                       className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -408,8 +415,9 @@ export default function TaskRuleEditor({
                       entities outside the team (PRs/issues authored by anyone),
                       so it carries a deliberate eyes-open warning. Hidden in
                       org-template scope — the flag is a team-routing concept the
-                      template doesn't carry. */}
-                  {!templateScope && (
+                      template doesn't carry. Also hidden for event types where the
+                      flag is inert (pool / requested-party — supports_watch=false). */}
+                  {!templateScope && selectedEventSupportsWatch && (
                     <div>
                       <label className="flex items-start gap-2.5 cursor-pointer">
                         <input

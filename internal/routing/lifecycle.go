@@ -147,3 +147,15 @@ func ownershipModelForEvent(eventType string) ownershipModel {
 		return modelPool
 	}
 }
+
+// EventSupportsWatch reports whether the applies_to_unowned ("watch") reach flag
+// is meaningful for an event type (TFAC-517/519). It is true ONLY for
+// owner-ladder events (modelOwned), where a non-owner team can opt into reaching
+// the entity. For pool events every matched team is already a participant, and
+// for requested-party events routing is identity-scoped — so the flag is inert
+// there. The server's /api/event-types handler surfaces this so the rule/trigger
+// editors hide the toggle for event types where it would do nothing. Exported
+// because the classification (ownershipModelForEvent) is routing's to own.
+func EventSupportsWatch(eventType string) bool {
+	return ownershipModelForEvent(eventType) == modelOwned
+}
