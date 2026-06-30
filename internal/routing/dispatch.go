@@ -255,10 +255,11 @@ func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) (vi
 	for _, h := range matchedTriggers {
 		seen[handlerTeamID(h)] = struct{}{}
 	}
+	allTeams := sortedKeys(seen)
 	scores := teamRulePriorityScores(seen, matchedRules)
-	orderedTeams = orderTeamsByScores(sortedKeys(seen), scores)
+	orderedTeams = orderTeamsByScores(allTeams, scores)
 	ownerTeam = orderedTeams[0]
-	return sortedKeys(seen), ownerTeam, orderedTeams, scores[ownerTeam], true
+	return allTeams, ownerTeam, orderedTeams, scores[ownerTeam], true
 }
 
 // resolveOwnedRouting routes an owner-ladder event to the entity's owning team.

@@ -43,6 +43,9 @@ func (ph *promptsHandler) handleEventTypes(w http.ResponseWriter, r *http.Reques
 		internalError(w, "prompts", err)
 		return
 	}
+	// make(_, len(types)) yields a non-nil empty slice when the catalog read
+	// returns nil, so the response serializes as [] (not null) — preserving the
+	// prior explicit nil guard's contract.
 	out := make([]eventTypeResponse, len(types))
 	for i, t := range types {
 		out[i] = eventTypeResponse{EventType: t, SupportsWatch: routing.EventSupportsWatch(t.ID)}

@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'motion/react'
 import * as Switch from '@radix-ui/react-switch'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import { Info } from 'lucide-react'
-import type { TriggerHandler } from '../types'
+import type { TriggerHandler, EventType } from '../types'
 import EventBadge from './EventBadge'
 import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
@@ -46,14 +46,35 @@ export default function TriggerConfigPanel({
   // trigger it grants orphan reach AND fires, so the whole orphan auto-delegation
   // can be configured here without a companion task rule.
   const [appliesToUnowned, setAppliesToUnowned] = useState(false)
-  // Whether this trigger's event supports the watch toggle (TFAC-519) — hidden
-  // only when the catalog explicitly marks it inert (pool / requested-party).
-  // Defaults true (fail-open): a failed/slow /api/event-types fetch must not
-  // strand the user on a valid owner-ladder trigger.
-  const [supportsWatch, setSupportsWatch] = useState(true)
   const [promptName, setPromptName] = useState('')
   const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // Event-type catalog, fetched once per panel open (not per trigger). Used to
+  // decide whether the applies_to_unowned toggle is meaningful for this event.
+  const [eventTypes, setEventTypes] = useState<EventType[]>([])
+
+  // Fetch the catalog once when the panel opens — it's session-static, so there's
+  // no need to re-fetch on every trigger selection. Skipped in template scope
+  // (the toggle is hidden there regardless).
+  useEffect(() => {
+    if (!open || templateScope) return
+    let cancelled = false
+    fetch('/api/event-types')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => {
+        if (!cancelled && Array.isArray(data)) setEventTypes(data)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [open, templateScope])
+
+  // Hide the watch toggle only when the catalog EXPLICITLY marks this event inert
+  // (pool / requested-party). Fail-open: an unloaded/failed catalog leaves the
+  // lookup undefined, so the toggle stays available on a valid owner-ladder event.
+  const eventWatchInert =
+    eventTypes.find((et) => et.id === trigger?.event_type)?.supports_watch === false
 
   // Initialize state when trigger changes
   useEffect(() => {
@@ -67,21 +88,6 @@ export default function TriggerConfigPanel({
     setAppliesToUnowned(trigger.applies_to_unowned)
     setConfirmDelete(false)
     setPromptName('')
-    setSupportsWatch(true)
-
-    // Resolve whether this trigger's event supports the applies_to_unowned
-    // toggle. Skip entirely in template scope — the toggle is hidden there
-    // regardless. Fail-open: only an explicit supports_watch=false hides it; a
-    // not-found / failed fetch leaves the default (show).
-    if (!templateScope) {
-      fetch('/api/event-types')
-        .then((r) => (r.ok ? r.json() : []))
-        .then((list: Array<{ id: string; supports_watch: boolean }>) => {
-          if (cancelled || !Array.isArray(list)) return
-          setSupportsWatch(list.find((et) => et.id === trigger.event_type)?.supports_watch ?? true)
-        })
-        .catch(() => {})
-    }
 
     // Resolve the bound blueprint's name for the badge. Template scope has a
     // single-get on its blueprint family; team-scope blueprints expose only a
@@ -289,9 +295,9 @@ export default function TriggerConfigPanel({
                     the whole orphan auto-delegation is configured here. Off by
                     default; carries an eyes-open warning. Hidden in org-template
                     scope — the flag is a team-routing concept the template doesn't
-                    carry (mirrors TaskRuleEditor). Also hidden for events where the
-                    flag is inert (pool / requested-party — supports_watch=false). */}
-                {!templateScope && supportsWatch && (
+                    carry (mirrors TaskRuleEditor). Also hidden for events the catalog
+                    marks inert (pool / requested-party — supports_watch=false). */}
+                {!templateScope && !eventWatchInert && (
                   <>
                     <div className="border-t border-border-subtle" />
                     <div>
