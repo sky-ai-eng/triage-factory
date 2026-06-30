@@ -30,7 +30,7 @@ type Task struct {
 	// based on run state; user-claimed tasks transition manually.
 	Status         string     `json:"status"`           // queued | in_progress | in_review | done | dismissed | snoozed
 	CloseReason    string     `json:"close_reason"`     // run_completed | user_completed | user_dismissed | auto_closed_by_event | entity_closed
-	CloseEventType string     `json:"close_event_type"` // FK to events_catalog.id; set when close_reason=auto_closed_by_event
+	CloseEventType string     `json:"close_event_type"` // FK to events_catalog.id; the event type that triggered the close (event-driven closes: auto_closed_by_event + entity_closed). NULL for non-event closes (run_completed, user_*)
 	ClosedAt       *time.Time `json:"closed_at"`
 	SnoozeUntil    *time.Time `json:"snooze_until"`
 

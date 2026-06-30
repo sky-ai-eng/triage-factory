@@ -220,6 +220,12 @@ func (r *Router) runCloses(orgID string, evt domain.Event, entityID string) (clo
 		if reason == "" {
 			reason = "auto_closed_by_event"
 		}
+		// close_event_type records the events_catalog type that triggered the
+		// close. Every close here is event-driven (runCloses only runs from an
+		// event), so it is always set — for entity-wide "entity_closed" closes as
+		// well as typed "auto_closed_by_event" ones; the reason field, not the
+		// presence of this column, distinguishes the two. (Non-event closes —
+		// run_completed, user_* — leave it NULL, and those don't pass through here.)
 		for i := range targets {
 			t := targets[i]
 			if rel.keep != nil && !rel.keep(evt, cctx, t) {
