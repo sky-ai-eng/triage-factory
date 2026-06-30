@@ -115,6 +115,11 @@ type createEventHandlerRequest struct {
 	ScopePredicateJSON string `json:"scope_predicate_json"`
 	Enabled            *bool  `json:"enabled"`
 
+	// AppliesToUnowned opts the rule into reaching entities the team doesn't
+	// own (TFAC-517) — the explicit "watch" flag, default off. Visibility
+	// only; never confers firing rights (the TFAC-514 invariant).
+	AppliesToUnowned *bool `json:"applies_to_unowned"`
+
 	// Rule-only.
 	Name            *string  `json:"name"`
 	DefaultPriority *float64 `json:"default_priority"`
@@ -176,6 +181,10 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	}
 	if canonical != "" {
 		h.ScopePredicateJSON = &canonical
+	}
+	// applies_to_unowned is a routing-scope flag on both kinds; defaults off.
+	if req.AppliesToUnowned != nil {
+		h.AppliesToUnowned = *req.AppliesToUnowned
 	}
 
 	switch req.Kind {
@@ -337,6 +346,10 @@ type patchEventHandlerRequest struct {
 	ScopePredicateJSON json.RawMessage `json:"scope_predicate_json"`
 	Enabled            *bool           `json:"enabled"`
 
+	// AppliesToUnowned toggles the watch-scope flag (TFAC-517); absent leaves
+	// it unchanged.
+	AppliesToUnowned *bool `json:"applies_to_unowned"`
+
 	// Rule fields.
 	Name            *string  `json:"name"`
 	DefaultPriority *float64 `json:"default_priority"`
@@ -383,6 +396,9 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 
 	if req.Enabled != nil {
 		updated.Enabled = *req.Enabled
+	}
+	if req.AppliesToUnowned != nil {
+		updated.AppliesToUnowned = *req.AppliesToUnowned
 	}
 
 	// Predicate update — three distinguishable cases:

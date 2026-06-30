@@ -39,19 +39,21 @@ func seedGateTeam(t *testing.T, database *sql.DB, slug string) string {
 	return id
 }
 
-// seedMatchAllCIRule inserts a user-source match-all ci_check_failed rule
-// for the team (empty predicate = matches every CI failure regardless of
-// repo). Without the team↔repo gate this rule would fire on any repo's
-// CI failure — that's exactly the leak the gate closes.
+// seedMatchAllCIRule inserts an applies_to_unowned ("watch") match-all
+// ci_check_failed rule for the team (empty predicate = matches every CI
+// failure regardless of repo). The flag is what widens visibility beyond
+// ownership (TFAC-517) — so this rule surfaces a CI failure to its team even
+// for an external/ambiguous author. Without the team↔repo gate it would reach
+// any repo's CI failure — that's exactly the leak the gate closes.
 func seedMatchAllCIRule(t *testing.T, database *sql.DB, teamID string) {
 	t.Helper()
 	ruleID := uuid.New().String()
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
 			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source, name, default_priority, sort_order,
+			 scope_predicate_json, enabled, source, applies_to_unowned, name, default_priority, sort_order,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', ?, 0.7, 100, ?, ?)
+		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', 1, ?, 0.7, 100, ?, ?)
 	`, ruleID, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID,
 		domain.EventGitHubPRCICheckFailed, "CI rule "+teamID[:8], time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed rule for team %s: %v", teamID, err)
@@ -297,19 +299,20 @@ func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {
 	}
 }
 
-// seedMatchAllJiraAssignedRule inserts a user-source match-all
-// jira:issue:assigned rule for the team (empty predicate = matches every
-// assignment regardless of project). Without the team↔project gate this
-// would fire on any project's events — the leak the gate closes.
+// seedMatchAllJiraAssignedRule inserts an applies_to_unowned ("watch")
+// match-all jira:issue:assigned rule for the team (empty predicate = matches
+// every assignment regardless of project). The flag widens visibility beyond
+// ownership (TFAC-517). Without the team↔project gate it would reach any
+// project's events — the leak the gate closes.
 func seedMatchAllJiraAssignedRule(t *testing.T, database *sql.DB, teamID string) {
 	t.Helper()
 	ruleID := uuid.New().String()
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
 			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source, name, default_priority, sort_order,
+			 scope_predicate_json, enabled, source, applies_to_unowned, name, default_priority, sort_order,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', ?, 0.7, 100, ?, ?)
+		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', 1, ?, 0.7, 100, ?, ?)
 	`, ruleID, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID,
 		domain.EventJiraIssueAssigned, "Jira rule "+teamID[:8], time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed jira rule for team %s: %v", teamID, err)

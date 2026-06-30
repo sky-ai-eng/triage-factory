@@ -30,6 +30,19 @@ type EventHandler struct {
 	// team-owned). The router reads this to route tasks created off
 	// matched rules to the correct team's queue.
 	TeamID string `json:"team_id"`
+	// AppliesToUnowned is the explicit per-rule routing-scope flag
+	// (TFAC-517) that replaced the source-as-scope heuristic. When true,
+	// the rule's team is added to a matched task's visibility even for
+	// entities the team doesn't own (external/ambiguous authors) — the
+	// deliberate "watch" opt-in. When false (the default), visibility
+	// rides ownership only: the team sees a task off this rule only when
+	// the owning-team ladder resolves the team as owner. It is a routing
+	// column read in ownerLadderRouting (via explicitWatchTeams), NOT a
+	// matchPredicate predicate — "is the author a member of this team"
+	// needs an author→team DB resolution the metadata-only predicate
+	// can't do. It never confers firing rights or ownership (the TFAC-514
+	// invariant): a watcher team gets the card, never the auto-fire.
+	AppliesToUnowned bool `json:"applies_to_unowned"`
 	// SystemSlug is the stable identifier for shipped handlers
 	// ("system-rule-ci-check-failed", "system-trigger-ci-fix") and for the
 	// org-template handlers SKY-381 adds (a generated tmpl-<uuid> for

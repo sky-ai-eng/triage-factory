@@ -59,7 +59,7 @@ var _ db.EventHandlerStore = (*eventHandlerStore)(nil)
 // + breaker_threshold + min_autonomy_suitability for triggers) are
 // scanned via sql.Null* and mapped to the domain type's pointer fields.
 const pgEventHandlerColumns = `id, kind, event_type, scope_predicate_json::text, enabled, source,
-       team_id,
+       team_id, applies_to_unowned,
        name, default_priority, sort_order,
        blueprint_id, breaker_threshold, min_autonomy_suitability,
        created_at, updated_at`
@@ -254,7 +254,7 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 		_, err := s.app.ExecContext(ctx, `
 			INSERT INTO event_handlers
 				(id, org_id, creator_user_id, team_id, kind, event_type,
-				 scope_predicate_json, enabled, source,
+				 scope_predicate_json, enabled, source, applies_to_unowned,
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
 			VALUES (
@@ -262,11 +262,11 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
 				$3::uuid,
 				'rule', $4,
-				$5::jsonb, $6, 'user',
-				$7, $8, $9,
+				$5::jsonb, $6, 'user', $7,
+				$8, $9, $10,
 				now(), now()
 			)
-		`, h.ID, orgID, teamID, h.EventType, pred, h.Enabled,
+		`, h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
 			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder))
 		return err
 
@@ -274,7 +274,7 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 		_, err := s.app.ExecContext(ctx, `
 			INSERT INTO event_handlers
 				(id, org_id, creator_user_id, team_id, kind, event_type,
-				 scope_predicate_json, enabled, source,
+				 scope_predicate_json, enabled, source, applies_to_unowned,
 				 blueprint_id, breaker_threshold, min_autonomy_suitability,
 				 created_at, updated_at)
 			VALUES (
@@ -282,11 +282,11 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
 				$3::uuid,
 				'trigger', $4,
-				$5::jsonb, $6, 'user',
-				$7, $8, $9,
+				$5::jsonb, $6, 'user', $7,
+				$8, $9, $10,
 				now(), now()
 			)
-		`, h.ID, orgID, teamID, h.EventType, pred, h.Enabled,
+		`, h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
 			h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability))
 		return err
 	}
@@ -309,11 +309,11 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 	case domain.EventHandlerKindRule:
 		_, err := s.app.ExecContext(ctx, `
 			UPDATE event_handlers
-			SET scope_predicate_json = $1::jsonb, enabled = $2,
-			    name = $3, default_priority = $4, sort_order = $5,
+			SET scope_predicate_json = $1::jsonb, enabled = $2, applies_to_unowned = $3,
+			    name = $4, default_priority = $5, sort_order = $6,
 			    updated_at = now()
-			WHERE org_id = $6 AND id = $7 AND kind = 'rule'
-		`, pred, h.Enabled, h.Name,
+			WHERE org_id = $7 AND id = $8 AND kind = 'rule'
+		`, pred, h.Enabled, h.AppliesToUnowned, h.Name,
 			derefFloat(h.DefaultPriority), derefInt(h.SortOrder),
 			orgID, h.ID)
 		return err
@@ -323,11 +323,11 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 		// delete + recreate (handler enforces).
 		_, err := s.app.ExecContext(ctx, `
 			UPDATE event_handlers
-			SET scope_predicate_json = $1::jsonb, enabled = $2,
-			    breaker_threshold = $3, min_autonomy_suitability = $4,
+			SET scope_predicate_json = $1::jsonb, enabled = $2, applies_to_unowned = $3,
+			    breaker_threshold = $4, min_autonomy_suitability = $5,
 			    updated_at = now()
-			WHERE org_id = $5 AND id = $6 AND kind = 'trigger'
-		`, pred, h.Enabled,
+			WHERE org_id = $6 AND id = $7 AND kind = 'trigger'
+		`, pred, h.Enabled, h.AppliesToUnowned,
 			derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
 			orgID, h.ID)
 		return err
@@ -520,7 +520,7 @@ func scanEventHandlerFromAny(scanFn func(dst ...any) error) (domain.EventHandler
 	)
 	if err := scanFn(
 		&h.ID, &h.Kind, &h.EventType, &pred, &h.Enabled, &h.Source,
-		&teamID,
+		&teamID, &h.AppliesToUnowned,
 		&nameNS, &defPriority, &sortOrder,
 		&blueprintID, &breakerNS, &minAutonomyNS,
 		&h.CreatedAt, &h.UpdatedAt,

@@ -52,6 +52,8 @@ export default function TaskRuleEditor({
   const [priority, setPriority] = useState(0.5)
   const [sortOrder, setSortOrder] = useState(0)
   const [enabled, setEnabled] = useState(true)
+  // applies_to_unowned — the explicit "watch" scope opt-in (TFAC-517).
+  const [appliesToUnowned, setAppliesToUnowned] = useState(false)
 
   // UI state
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
@@ -104,6 +106,7 @@ export default function TaskRuleEditor({
       setPriority(rule.default_priority)
       setSortOrder(rule.sort_order)
       setEnabled(rule.enabled)
+      setAppliesToUnowned(rule.applies_to_unowned)
       setOriginalPredicateJSON(rule.scope_predicate_json)
       if (rule.scope_predicate_json) {
         try {
@@ -121,6 +124,7 @@ export default function TaskRuleEditor({
       setPriority(0.5)
       setSortOrder(0)
       setEnabled(true)
+      setAppliesToUnowned(false)
       setOriginalPredicateJSON(null)
       if (prefillPredicate) {
         try {
@@ -160,6 +164,7 @@ export default function TaskRuleEditor({
         if (priority !== rule.default_priority) body.default_priority = priority
         if (sortOrder !== rule.sort_order) body.sort_order = sortOrder
         if (enabled !== rule.enabled) body.enabled = enabled
+        if (appliesToUnowned !== rule.applies_to_unowned) body.applies_to_unowned = appliesToUnowned
 
         // Predicate: compare serialised forms.
         const currentJSON = predicateJSON
@@ -189,6 +194,7 @@ export default function TaskRuleEditor({
           default_priority: priority,
           sort_order: sortOrder,
           enabled,
+          applies_to_unowned: appliesToUnowned,
         }
         // Team scope stamps the acting team; template scope is org-scoped.
         if (!templateScope) {
@@ -225,6 +231,7 @@ export default function TaskRuleEditor({
     priority,
     sortOrder,
     enabled,
+    appliesToUnowned,
     effectiveTeam,
     templateScope,
     base,
@@ -395,6 +402,46 @@ export default function TaskRuleEditor({
                       <span>High</span>
                     </div>
                   </div>
+
+                  {/* Apply to unowned entities — the explicit "watch" scope
+                      opt-in (TFAC-517). Off by default; on it surfaces tasks for
+                      entities outside the team (PRs/issues authored by anyone),
+                      so it carries a deliberate eyes-open warning. Hidden in
+                      org-template scope — the flag is a team-routing concept the
+                      template doesn't carry. */}
+                  {!templateScope && (
+                    <div>
+                      <label className="flex items-start gap-2.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={appliesToUnowned}
+                          onChange={(e) => setAppliesToUnowned(e.target.checked)}
+                          className="mt-0.5 h-4 w-4 shrink-0 rounded border-border-subtle text-accent focus:ring-accent/30"
+                        />
+                        <span>
+                          <span className="block text-[12px] font-medium text-text-secondary">
+                            Apply to entities outside this team
+                          </span>
+                          <span className="block text-[11px] text-text-tertiary mt-0.5">
+                            Surface matching tasks even when no one on this team owns the entity.
+                          </span>
+                        </span>
+                      </label>
+                      <AnimatePresence>
+                        {appliesToUnowned && (
+                          <motion.p
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: 'auto' }}
+                            exit={{ opacity: 0, height: 0 }}
+                            className="overflow-hidden text-[11px] leading-relaxed text-amber-700 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 mt-2"
+                          >
+                            This rule will create tasks for PRs and issues authored by anyone,
+                            including people outside your team — expect significantly higher volume.
+                          </motion.p>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  )}
 
                   {/* Enabled toggle removed — use the inline toggle in the rules list instead */}
                 </div>

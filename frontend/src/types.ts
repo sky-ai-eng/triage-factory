@@ -380,6 +380,11 @@ interface EventHandlerBase {
   scope_predicate_json: string | null
   enabled: boolean
   source: 'system' | 'user'
+  // applies_to_unowned: the explicit "watch" scope flag (TFAC-517). When true,
+  // the rule reaches entities the team doesn't own (e.g. PRs/issues authored by
+  // anyone), surfacing them to the team's board. Default off — visibility
+  // otherwise rides ownership.
+  applies_to_unowned: boolean
   created_at: string
   updated_at: string
 }

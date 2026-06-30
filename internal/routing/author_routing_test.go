@@ -39,10 +39,11 @@ func emitCI(router *Router, entityID, author string) {
 }
 
 // seedSystemRule seeds a system-source (shipped-style) match-all rule for the
-// given event type on teamID. A system rule gates creation but — unlike a
-// user-authored rule — never grants visibility on its own, so on its own it
-// can't surface a task for a non-owner. The id/slug embed the event so several
-// types can be seeded per team.
+// given event type on teamID. It ships applies_to_unowned=false (the default),
+// so it gates creation but — unlike an applies_to_unowned ("watch") rule —
+// never grants visibility on its own, so on its own it can't surface a task for
+// a non-owner. The id/slug embed the event so several types can be seeded per
+// team.
 func seedSystemRule(t *testing.T, database *sql.DB, teamID, eventType string) {
 	t.Helper()
 	key := teamID[:8] + "-" + eventType[len(eventType)-6:]
@@ -323,17 +324,19 @@ func TestAuthorCentric_ReviewFirstTrap_CIFallsToAuthor(t *testing.T) {
 	}
 }
 
-// TestAuthorCentric_ExternalAuthor_WatchRuleSurfaces: an external/dependabot
-// author resolves to no team, but an explicit user-authored watch rule on team
-// C still surfaces the task (owner NULL, C in the visibility set) — the opt-in
-// that brings external CI onto a team's board.
+// TestAuthorCentric_ExternalAuthor_WatchRuleSurfaces is the flag-ON case
+// (TFAC-517): an external/dependabot author resolves to no team, but a rule with
+// applies_to_unowned=true on team C still surfaces the task (owner NULL, C in
+// the visibility set) — the explicit opt-in that brings external CI onto a
+// team's board. The flag-OFF mirror (no task) is
+// TestAuthorCentric_ExternalAuthor_FlagOff_NoTask.
 func TestAuthorCentric_ExternalAuthor_WatchRuleSurfaces(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
 	setReviewHost(t, database)
 
 	teamC := seedTeam(t, database, "watch-team")
-	seedMatchAllCIRule(t, database, teamC) // user-authored watch rule
+	seedMatchAllCIRule(t, database, teamC) // applies_to_unowned=true watch rule
 
 	entityID := reviewEntity(t, database, "owner/repo#dependabot")
 	emitCI(reviewRouter(database), entityID, "dependabot[bot]") // not a TF user
@@ -347,6 +350,84 @@ func TestAuthorCentric_ExternalAuthor_WatchRuleSurfaces(t *testing.T) {
 	}
 	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 1 || vis[0] != teamC {
 		t.Errorf("visibility = %v, want [%s] (the watching team)", vis, teamC)
+	}
+}
+
+// seedFlagOffCIRule inserts a user-source match-all ci_check_failed rule with
+// applies_to_unowned=false (the TFAC-517 default) on teamID. Unlike
+// seedMatchAllCIRule (flag on), it contributes visibility ONLY when the
+// owning-team ladder resolves teamID as owner — it never broadens to unowned
+// entities. The "user" source proves the broadening is gated on the flag, not
+// on provenance (the heuristic TFAC-517 removed).
+func seedFlagOffCIRule(t *testing.T, database *sql.DB, teamID string) {
+	t.Helper()
+	if _, err := database.Exec(`
+		INSERT INTO event_handlers
+			(id, org_id, team_id, creator_user_id, kind, event_type,
+			 scope_predicate_json, enabled, source, applies_to_unowned, name, default_priority, sort_order,
+			 created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', 0, ?, 0.7, 100, ?, ?)
+	`, "flagoff-"+teamID[:8], runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID,
+		domain.EventGitHubPRCICheckFailed, "flag-off CI rule "+teamID[:8], time.Now(), time.Now()); err != nil {
+		t.Fatalf("seed flag-off CI rule for team %s: %v", teamID, err)
+	}
+}
+
+// TestAuthorCentric_ExternalAuthor_FlagOff_NoTask is the headline default-flip
+// (TFAC-517): the SAME match-all user rule as the watch test, but with
+// applies_to_unowned=false (the new default). An external author resolves to no
+// team and a flag-off rule grants no visibility on its own, so the event is
+// recorded but mints NO task for the would-be watcher. This is the behavior the
+// flag restores: a rule no longer broadens by accident.
+func TestAuthorCentric_ExternalAuthor_FlagOff_NoTask(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	setReviewHost(t, database)
+
+	teamC := seedTeam(t, database, "watch-team")
+	seedFlagOffCIRule(t, database, teamC) // user rule, applies_to_unowned=false
+
+	entityID := reviewEntity(t, database, "owner/repo#dependabot-off")
+	emitCI(reviewRouter(database), entityID, "dependabot[bot]") // not a TF user
+
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("expected no task (flag off → no broadening), got %d", len(active))
+	}
+}
+
+// TestAuthorCentric_OwnedEntity_FlagOff_VisibleToTeam is the owned-entity half
+// of the default-flip (TFAC-517): with the flag OFF, a rule still surfaces a
+// task to its team when the team OWNS the entity — visibility rides ownership,
+// not the flag. The author is on teamA (the owner); a flag-off rule on teamA
+// surfaces the task, while a flag-off rule on the non-owning teamB does NOT pull
+// teamB into visibility (proving flag-off never broadens).
+func TestAuthorCentric_OwnedEntity_FlagOff_VisibleToTeam(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	setReviewHost(t, database)
+
+	teamA := seedTeam(t, database, "team-a")
+	teamB := seedTeam(t, database, "team-b")
+	seedUserOnTeam(t, database, teamA, "aidan") // author owns via teamA
+	seedFlagOffCIRule(t, database, teamA)       // owner's rule, flag off
+	seedFlagOffCIRule(t, database, teamB)       // non-owner's rule, flag off → no broadening
+
+	entityID := reviewEntity(t, database, "owner/repo#owned-flagoff")
+	emitCI(reviewRouter(database), entityID, "aidan")
+
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("expected 1 task on the owned entity, got %d (err=%v)", len(active), err)
+	}
+	if teamIDValue(&active[0]) != teamA {
+		t.Errorf("owner = %q, want teamA %q", teamIDValue(&active[0]), teamA)
+	}
+	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 1 || vis[0] != teamA {
+		t.Errorf("visibility = %v, want [%s] only (teamB's flag-off rule must not broaden)", vis, teamA)
 	}
 }
 
@@ -513,7 +594,7 @@ func TestAuthorCentric_ExternalAuthor_WatchTriggerDoesNotFire(t *testing.T) {
 	setReviewHost(t, database)
 
 	teamC := seedTeam(t, database, "watch-team")
-	seedMatchAllCIRule(t, database, teamC) // user-authored watch rule → visibility
+	seedMatchAllCIRule(t, database, teamC) // applies_to_unowned watch rule → visibility
 	enableTeamAutoDelegate(t, database, teamC)
 	seedImmediateTrigger(t, database, teamC, domain.EventGitHubPRCICheckFailed, "ci-c")
 
@@ -556,9 +637,9 @@ func TestAuthorCentric_TwoTeams_WatcherDoesNotStealOwnership(t *testing.T) {
 	seedUserOnTeam(t, database, teamA, "aidan")
 	seedUserOnTeam(t, database, teamB, "aidan") // author on A and B → ambiguous
 
-	// teamC is a pure watcher: a high-priority user rule (would sort FIRST if it
-	// were in the firing order) plus an enabled trigger.
-	seedMatchAllCIRule(t, database, teamC) // priority 0.7, source=user
+	// teamC is a pure watcher: a high-priority applies_to_unowned rule (would
+	// sort FIRST if it were in the firing order) plus an enabled trigger.
+	seedMatchAllCIRule(t, database, teamC) // priority 0.7, applies_to_unowned=true
 	enableTeamAutoDelegate(t, database, teamA, teamB, teamC)
 	seedImmediateTrigger(t, database, teamA, domain.EventGitHubPRCICheckFailed, "ci-a")
 	seedImmediateTrigger(t, database, teamB, domain.EventGitHubPRCICheckFailed, "ci-b")

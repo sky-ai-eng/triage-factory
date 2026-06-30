@@ -76,17 +76,17 @@ func seedSystemJiraRule(t *testing.T, database *sql.DB, teamID, eventType string
 	}
 }
 
-// seedUserJiraRule seeds a user-source (explicit watch) match-all rule for the
-// given jira event type on teamID. A user rule widens an assignee-centric
-// task's visibility to its team even when the team isn't the owner.
+// seedUserJiraRule seeds an applies_to_unowned ("watch") match-all rule for the
+// given jira event type on teamID. The flag widens an assignee-centric task's
+// visibility to its team even when the team isn't the owner (TFAC-517).
 func seedUserJiraRule(t *testing.T, database *sql.DB, teamID, eventType string) {
 	t.Helper()
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
 			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source, name, default_priority, sort_order,
+			 scope_predicate_json, enabled, source, applies_to_unowned, name, default_priority, sort_order,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'rule', ?, '{"assignee_in":[]}', 1, 'user', ?, 0.7, 100, ?, ?)
+		VALUES (?, ?, ?, ?, 'rule', ?, '{"assignee_in":[]}', 1, 'user', 1, ?, 0.7, 100, ?, ?)
 	`, uuid.New().String(), runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID,
 		eventType, "user jira rule "+teamID[:8], time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed user jira rule (%s) for team %s: %v", eventType, teamID, err)

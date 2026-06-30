@@ -38,7 +38,7 @@ var _ db.EventHandlerStore = (*eventHandlerStore)(nil)
 // helpers stay aligned. Per-kind nullable columns scan into sql.Null*
 // and map to the domain pointer fields.
 const sqliteEventHandlerColumns = `id, kind, event_type, scope_predicate_json, enabled, source,
-       team_id,
+       team_id, applies_to_unowned,
        name, default_priority, sort_order,
        blueprint_id, breaker_threshold, min_autonomy_suitability,
        created_at, updated_at`
@@ -235,15 +235,15 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 		_, err := s.q.ExecContext(ctx, `
 			INSERT INTO event_handlers
 				(id, org_id, team_id, creator_user_id, kind, event_type,
-				 scope_predicate_json, enabled, source,
+				 scope_predicate_json, enabled, source, applies_to_unowned,
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
 			VALUES (?, ?, ?, ?, 'rule', ?,
-			        ?, ?, 'user',
+			        ?, ?, 'user', ?,
 			        ?, ?, ?,
 			        ?, ?)
 		`, h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
-			pred, h.Enabled,
+			pred, h.Enabled, h.AppliesToUnowned,
 			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder),
 			now, now)
 		return err
@@ -252,15 +252,15 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 		_, err := s.q.ExecContext(ctx, `
 			INSERT INTO event_handlers
 				(id, org_id, team_id, creator_user_id, kind, event_type,
-				 scope_predicate_json, enabled, source,
+				 scope_predicate_json, enabled, source, applies_to_unowned,
 				 blueprint_id, breaker_threshold, min_autonomy_suitability,
 				 created_at, updated_at)
 			VALUES (?, ?, ?, ?, 'trigger', ?,
-			        ?, ?, 'user',
+			        ?, ?, 'user', ?,
 			        ?, ?, ?,
 			        ?, ?)
 		`, h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
-			pred, h.Enabled,
+			pred, h.Enabled, h.AppliesToUnowned,
 			h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
 			now, now)
 		return err
@@ -282,11 +282,11 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 	case domain.EventHandlerKindRule:
 		_, err := s.q.ExecContext(ctx, `
 			UPDATE event_handlers
-			SET scope_predicate_json = ?, enabled = ?,
+			SET scope_predicate_json = ?, enabled = ?, applies_to_unowned = ?,
 			    name = ?, default_priority = ?, sort_order = ?,
 			    updated_at = ?
 			WHERE org_id = ? AND id = ? AND kind = 'rule'
-		`, pred, h.Enabled,
+		`, pred, h.Enabled, h.AppliesToUnowned,
 			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder),
 			now, orgID, h.ID)
 		return err
@@ -294,11 +294,11 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 	case domain.EventHandlerKindTrigger:
 		_, err := s.q.ExecContext(ctx, `
 			UPDATE event_handlers
-			SET scope_predicate_json = ?, enabled = ?,
+			SET scope_predicate_json = ?, enabled = ?, applies_to_unowned = ?,
 			    breaker_threshold = ?, min_autonomy_suitability = ?,
 			    updated_at = ?
 			WHERE org_id = ? AND id = ? AND kind = 'trigger'
-		`, pred, h.Enabled,
+		`, pred, h.Enabled, h.AppliesToUnowned,
 			derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
 			now, orgID, h.ID)
 		return err
@@ -412,7 +412,7 @@ func scanEventHandlerFromAnySQLite(scanFn func(dst ...any) error) (domain.EventH
 	)
 	if err := scanFn(
 		&h.ID, &h.Kind, &h.EventType, &pred, &h.Enabled, &h.Source,
-		&teamID,
+		&teamID, &h.AppliesToUnowned,
 		&nameNS, &defPriority, &sortOrder,
 		&blueprintID, &breakerNS, &minAutonomyNS,
 		&h.CreatedAt, &h.UpdatedAt,

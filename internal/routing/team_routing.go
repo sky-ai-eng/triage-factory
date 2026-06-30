@@ -459,10 +459,11 @@ func (r *Router) assigneeTeams(orgID string, evt domain.Event) []string {
 // matched rules. Both provider branches share it so the NULL-owner and
 // visibility-union semantics stay identical:
 //
-//   - visibility = {owner set} ∪ {teams whose explicit user-authored rule
-//     matched}. System/default rules gate creation + the owner's automation but
-//     never grant visibility on their own; a team widens visibility beyond
-//     ownership only by opting in with its own rule (the deliberate watch);
+//   - visibility = {owner set} ∪ {teams whose matched handler set
+//     applies_to_unowned=true}. A flag-off handler gates creation + the owner's
+//     automation but never grants visibility on its own; a team widens
+//     visibility beyond ownership only by opting in with the explicit
+//     applies_to_unowned flag (TFAC-517 — the deliberate watch);
 //   - ownerTeam is "" when the identity maps to multiple teams (or to none with
 //     a watch rule): the owner is unresolved, stored as NULL — resolving on the
 //     fire or the first human claim;
@@ -482,7 +483,7 @@ func ownerLadderRouting(owner string, ownerSet []string, matchedRules []domain.E
 	for _, t := range ownerSet {
 		vis[t] = struct{}{}
 	}
-	for t := range explicitUserRuleTeams(matchedRules) {
+	for t := range explicitWatchTeams(matchedRules) {
 		vis[t] = struct{}{}
 	}
 	if len(vis) == 0 {
@@ -490,14 +491,14 @@ func ownerLadderRouting(owner string, ownerSet []string, matchedRules []domain.E
 	}
 	if owner != "" {
 		// Unambiguous owner: only the owner's automation fires. Watcher teams
-		// (in vis via an explicit user rule) see the card but don't fire.
+		// (in vis via an applies_to_unowned rule) see the card but don't fire.
 		orderedTeams = []string{owner}
 	} else {
 		// Ambiguous owner (identity maps to multiple teams): fire
 		// deterministically rather than not at all — but only among the
 		// IDENTITY's teams (ownerSet), NOT the full visibility set. Watcher teams
-		// (in vis via an explicit user rule, but not in ownerSet) keep visibility
-		// without firing rights, same as the resolved-owner branch — otherwise a
+		// (in vis via an applies_to_unowned rule, but not in ownerSet) keep
+		// visibility without firing rights, same as the resolved-owner branch — otherwise a
 		// pure watcher could win the claim and consolidate itself as owner of a
 		// PR it doesn't own. Order ownerSet by the same signal the handler-team
 		// path uses — max matched-rule DefaultPriority desc, then lowest team id —
@@ -584,15 +585,19 @@ func (r *Router) latestActiveOwnedTaskTeam(orgID, entityID string, types map[str
 	return best
 }
 
-// explicitUserRuleTeams returns the teams whose matched handler is a
-// user-authored rule — the only handlers that widen an author-centric task's
-// visibility beyond the entity owner. System/default rules gate creation and
-// the owner's automation but never grant visibility on their own, so the
-// scoping stays the owner unless a team deliberately opts in.
-func explicitUserRuleTeams(matchedRules []domain.EventHandler) map[string]struct{} {
+// explicitWatchTeams returns the teams whose matched handler opted into
+// reaching unowned entities (applies_to_unowned=true) — the only handlers that
+// widen an author-centric task's visibility beyond the entity owner. A flag-off
+// handler gates creation and the owner's automation but never grants visibility
+// on its own, so the scoping stays the owner unless a team deliberately opts in
+// with this explicit per-rule flag (TFAC-517 — replacing the prior
+// source==user heuristic). Visibility only: a watcher team gets the card, never
+// firing rights or ownership (the TFAC-514 invariant, enforced in
+// ownerLadderRouting where this set feeds vis but not orderedTeams).
+func explicitWatchTeams(matchedRules []domain.EventHandler) map[string]struct{} {
 	out := map[string]struct{}{}
 	for _, h := range matchedRules {
-		if h.Source == domain.EventHandlerSourceUser {
+		if h.AppliesToUnowned {
 			out[handlerTeamID(h)] = struct{}{}
 		}
 	}

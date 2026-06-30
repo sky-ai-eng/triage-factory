@@ -42,19 +42,20 @@ func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 
-	// Two user-source rules on the same event, one per team. Both
-	// match (empty predicate = match all), so the router records both
-	// teams in the visibility set of the single task.
+	// Two applies_to_unowned ("watch") rules on the same event, one per team.
+	// The author isn't a TF user, so visibility comes solely from the flag
+	// (TFAC-517) — both teams' watch rules surface the single task. Without the
+	// flag (the default) an external author would mint no task at all.
 	for _, teamID := range []string{teamA, teamB} {
 		ruleID := uuid.New().String()
 		if _, err := database.Exec(`
 			INSERT INTO event_handlers
 				(id, org_id, team_id, creator_user_id, kind, event_type,
-				 scope_predicate_json, enabled, source,
+				 scope_predicate_json, enabled, source, applies_to_unowned,
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
 			VALUES (?, ?, ?, ?, 'rule', ?,
-			        NULL, 1, 'user',
+			        NULL, 1, 'user', 1,
 			        ?, 0.7, 100,
 			        ?, ?)
 		`, ruleID, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, domain.EventGitHubPRCICheckFailed,
@@ -242,17 +243,21 @@ func TestHandleEvent_BecameAtomic_Suppressed(t *testing.T) {
 		t.Fatalf("create prior assigned task: %v", err)
 	}
 
-	// Both teams have a rule matching became_atomic.
+	// Both teams have an applies_to_unowned ("watch") rule matching became_atomic.
+	// The assignee isn't a TF user here, so without the flag the assignee-centric
+	// ladder would already mint no task — the flag makes routing surface a task so
+	// this test actually exercises the became_atomic suppression (not a no-owner
+	// early return).
 	for _, teamID := range []string{teamA, teamB} {
 		ruleID := uuid.New().String()
 		if _, err := database.Exec(`
 			INSERT INTO event_handlers
 				(id, org_id, team_id, creator_user_id, kind, event_type,
-				 scope_predicate_json, enabled, source,
+				 scope_predicate_json, enabled, source, applies_to_unowned,
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
 			VALUES (?, ?, ?, ?, 'rule', ?,
-			        NULL, 1, 'user',
+			        NULL, 1, 'user', 1,
 			        ?, 0.7, 100, ?, ?)
 		`, ruleID, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, domain.EventJiraIssueBecameAtomic,
 			"became_atomic "+teamID[:8], time.Now(), time.Now()); err != nil {

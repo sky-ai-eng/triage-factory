@@ -911,6 +911,14 @@ CREATE TABLE public.event_handlers (
     scope_predicate_json jsonb,
     enabled boolean DEFAULT true NOT NULL,
     source text DEFAULT 'user'::text NOT NULL,
+    -- applies_to_unowned: the explicit, per-rule routing-scope flag (TFAC-517)
+    -- that replaced the source-as-scope heuristic. TRUE adds the rule's team to a
+    -- task's visibility even for entities the team doesn't own (external/ambiguous
+    -- authors) — the deliberate "watch" opt-in; FALSE (default) keeps visibility
+    -- riding ownership only. Routing gates explicitWatchTeams on this column, not
+    -- on source. No multi-mode deployment exists yet, so this lands in the
+    -- baseline directly (the SQLite side gets a forward migration instead).
+    applies_to_unowned boolean DEFAULT false NOT NULL,
     system_slug text,
     name text,
     default_priority real,

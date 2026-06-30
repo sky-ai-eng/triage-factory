@@ -136,6 +136,78 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 	})
 
+	t.Run("AppliesToUnowned_RoundTripAndUpdate", func(t *testing.T) {
+		// The TFAC-517 routing-scope flag round-trips through Create + Get and
+		// flips through Update, on both backends. Default-false is asserted by
+		// the Create_Rule_RoundTrip row above (it never sets the field), so here
+		// we prove the true value persists and that Update can toggle it back.
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		priority := 0.5
+		sortOrder := 0
+		h := domain.EventHandler{
+			ID:               uuid.New().String(),
+			Kind:             domain.EventHandlerKindRule,
+			EventType:        domain.EventGitHubPRCICheckFailed,
+			Enabled:          true,
+			Name:             "watch-rule",
+			DefaultPriority:  &priority,
+			SortOrder:        &sortOrder,
+			AppliesToUnowned: true,
+		}
+		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+			t.Fatalf("Create rule: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, h.ID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: got=%v err=%v", got, err)
+		}
+		if !got.AppliesToUnowned {
+			t.Errorf("AppliesToUnowned=%v after Create(true), want true", got.AppliesToUnowned)
+		}
+
+		// Update flips it off; the round-trip must reflect the new value.
+		got.AppliesToUnowned = false
+		if err := store.Update(ctx, orgID, *got); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		got2, err := store.Get(ctx, orgID, h.ID)
+		if err != nil || got2 == nil {
+			t.Fatalf("Get after Update: got=%v err=%v", got2, err)
+		}
+		if got2.AppliesToUnowned {
+			t.Errorf("AppliesToUnowned=%v after Update(false), want false", got2.AppliesToUnowned)
+		}
+	})
+
+	t.Run("Create_RuleDefaultsAppliesToUnownedFalse", func(t *testing.T) {
+		// A rule created without setting the flag must read back false — the
+		// "blanket reset for everyone" IS the column default (TFAC-517).
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		priority := 0.5
+		sortOrder := 0
+		h := domain.EventHandler{
+			ID:              uuid.New().String(),
+			Kind:            domain.EventHandlerKindRule,
+			EventType:       domain.EventGitHubPRCICheckFailed,
+			Enabled:         true,
+			Name:            "default-rule",
+			DefaultPriority: &priority,
+			SortOrder:       &sortOrder,
+		}
+		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+			t.Fatalf("Create rule: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, h.ID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: got=%v err=%v", got, err)
+		}
+		if got.AppliesToUnowned {
+			t.Errorf("AppliesToUnowned=%v on a rule that never set it, want false (default)", got.AppliesToUnowned)
+		}
+	})
+
 	t.Run("Create_Trigger_RoundTrip", func(t *testing.T) {
 		store, orgID, teamID, seedBlueprints := factory(t)
 		ctx := context.Background()
