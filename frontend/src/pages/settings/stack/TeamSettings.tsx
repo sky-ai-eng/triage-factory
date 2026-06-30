@@ -22,6 +22,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Archive } from 'lucide-react'
 import { toast } from '../../../components/Toast/toastStore'
+import Slider from '../../../components/Slider'
 import ArchiveTeamModal from '../../../components/ArchiveTeamModal'
 import { useTeams } from '../../../hooks/useTeams'
 import RepoPickerModal from '../../../components/RepoPickerModal'
@@ -47,6 +48,15 @@ import {
 import SettingsSection from './SettingsSection'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
+
+// Fallback bounds for the grace-window slider when the backend doesn't advertise
+// them (an older server). The backend is authoritative when present — it derives
+// the ceiling from permTimeout() — these just keep the slider usable otherwise.
+const GRACE_MIN_FALLBACK = 1
+const GRACE_MAX_FALLBACK = 149
+
+const clampToRange = (v: number, min: number, max: number): number =>
+  Math.min(max, Math.max(min, v))
 
 const normProjects = (p: JiraProjectConfig[]): JiraProjectConfig[] =>
   p.map((x) => ({ ...x, key: x.key.trim() })).filter((x) => x.key !== '')
@@ -111,6 +121,10 @@ export default function TeamSettings({
   // Presence-gated absent auto-deny (TFAC-392).
   const [absentAutodeny, setAbsentAutodeny] = useState(true)
   const [absentGraceSeconds, setAbsentGraceSeconds] = useState(15)
+  // Honored grace bounds advertised by the backend (whole seconds), driving the
+  // slider's range so a user can never pick a value the backend would re-clamp.
+  const [graceMin, setGraceMin] = useState(GRACE_MIN_FALLBACK)
+  const [graceMax, setGraceMax] = useState(GRACE_MAX_FALLBACK)
 
   const [savingRepos, setSavingRepos] = useState(false)
   const [savingProjects, setSavingProjects] = useState(false)
@@ -142,17 +156,30 @@ export default function TeamSettings({
           return
         }
         const form = teamConfigFromSettings(settings)
+        // Resolve the honored grace band (backend-authoritative, with a fallback)
+        // and snap the seeded grace into it, so a previously-stored out-of-band
+        // value lands on a valid slider position instead of leaving baseline and
+        // the control disagreeing (which would read as spuriously dirty).
+        const gMin = settings.permission_absent_grace_min_seconds ?? GRACE_MIN_FALLBACK
+        const gMax = settings.permission_absent_grace_max_seconds ?? GRACE_MAX_FALLBACK
+        const seededGrace = clampToRange(form.permission_absent_grace_seconds, gMin, gMax)
+        setGraceMin(gMin)
+        setGraceMax(gMax)
         // Seed baseline.repos with the separately-loaded set (teamConfigFromSettings
         // leaves it undefined) so the collapsed summary shows the real count and the
         // section isn't spuriously dirty — otherwise collapsing fires the discard
         // guard, whose revert would wipe the selection to [].
-        setBaseline({ ...form, repos: teamRepos ?? undefined })
+        setBaseline({
+          ...form,
+          permission_absent_grace_seconds: seededGrace,
+          repos: teamRepos ?? undefined,
+        })
         setProjects(form.jira_projects)
         setDefaultModel(form.default_model)
         setAutoDelegate(form.auto_delegate_enabled)
         setBranchTemplate(form.branch_template)
         setAbsentAutodeny(form.permission_absent_autodeny_enabled)
-        setAbsentGraceSeconds(form.permission_absent_grace_seconds)
+        setAbsentGraceSeconds(seededGrace)
         setRepos(teamRepos ?? [])
         setReposLoaded(teamRepos !== null)
         setJiraConnected(!!integ?.jira && !!integ?.jira_url)
@@ -275,22 +302,24 @@ export default function TeamSettings({
   const promptsDirty =
     absentAutodeny !== baseline.permission_absent_autodeny_enabled ||
     absentGraceSeconds !== baseline.permission_absent_grace_seconds
-  // A 0/blank grace is invalid (the backend floors it at 1s, but block the save
-  // so the persisted value matches what the user sees).
+  // The slider keeps the grace inside [graceMin, graceMax]; this is a belt-and-
+  // braces guard so a value outside the honored band can never reach the save.
   const promptsBlocked =
-    absentAutodeny && (!Number.isFinite(absentGraceSeconds) || absentGraceSeconds < 1)
+    absentAutodeny &&
+    (!Number.isFinite(absentGraceSeconds) ||
+      absentGraceSeconds < graceMin ||
+      absentGraceSeconds > graceMax)
   const savePrompts = async (): Promise<boolean> => {
     setSavingPrompts(true)
     try {
-      // Coerce a cleared/NaN input to a finite value before it touches the
-      // wire or baseline. When fast-deny is off the grace input is hidden and
-      // promptsBlocked can't guard it, so a stale NaN would otherwise persist
-      // into baseline (and serialize as null). Fall back to the last-saved
-      // grace so baseline never goes invalid; also normalize the visible input.
-      const grace =
-        Number.isFinite(absentGraceSeconds) && absentGraceSeconds >= 1
-          ? absentGraceSeconds
-          : baseline.permission_absent_grace_seconds
+      // Snap the grace into the honored band before it touches the wire or
+      // baseline. The slider already constrains it, but this also covers a
+      // non-finite value (defensive) and keeps the persisted value in lockstep
+      // with what the backend would clamp to — never serializing an out-of-band
+      // grace (or a NaN, which would land as null).
+      const grace = Number.isFinite(absentGraceSeconds)
+        ? clampToRange(absentGraceSeconds, graceMin, graceMax)
+        : baseline.permission_absent_grace_seconds
       const res = await saveTeamSettings(endpointTeamId, {
         ...baseline,
         permission_absent_autodeny_enabled: absentAutodeny,
@@ -528,22 +557,25 @@ export default function TeamSettings({
           </button>
         </div>
         {absentAutodeny && (
-          <div className="flex items-center justify-between">
-            <div>
+          <div>
+            <div className="flex items-baseline justify-between gap-2">
               <p className="text-[13px] text-text-primary">Grace window</p>
-              <p className="mt-0.5 text-[11px] text-text-tertiary">
-                How long to wait for someone to appear before denying
-              </p>
+              <span className="text-[12px] text-text-tertiary tabular-nums">
+                {absentGraceSeconds}s
+              </span>
             </div>
-            <div className="flex items-center gap-1.5">
-              <input
-                type="number"
-                min={1}
-                value={Number.isFinite(absentGraceSeconds) ? absentGraceSeconds : ''}
-                onChange={(e) => setAbsentGraceSeconds(parseInt(e.target.value, 10))}
-                className="w-16 rounded-md border border-border-subtle bg-transparent px-2 py-1 text-right text-[13px] text-text-primary focus:border-accent focus:outline-none"
+            <p className="mt-0.5 text-[11px] text-text-tertiary">
+              How long to wait for someone to appear before denying (max {graceMax}s)
+            </p>
+            <div className="mt-3 flex items-center gap-3">
+              <Slider
+                value={absentGraceSeconds}
+                onChange={setAbsentGraceSeconds}
+                min={graceMin}
+                max={graceMax}
+                step={1}
+                label="Grace window in seconds"
               />
-              <span className="text-[12px] text-text-tertiary">seconds</span>
             </div>
           </div>
         )}

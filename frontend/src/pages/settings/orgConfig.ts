@@ -107,13 +107,31 @@ export async function fetchOrgSettings(): Promise<OrgSettingsData | null> {
   return res.ok ? ((await res.json()) as OrgSettingsData) : null
 }
 
+// dailyCapError is the frontend input-layer validation for the daily spend cap.
+// "No cap" is expressed by clearing the field (blank), so blank is always valid.
+// A typed value must parse to a positive, finite number — 0 and negatives are
+// rejected: a $0/day cap is meaningless (it reads as "no cap", which the blank
+// field already expresses) and a negative is nonsensical and would 400 at the
+// API anyway. Returns the user-facing message, or null when the input is
+// acceptable. Mirrors the backend's `>= 0` guard so the Save button blocks
+// before the round-trip instead of bouncing off a 400.
+export function dailyCapError(raw: string): string | null {
+  const trimmed = raw.trim()
+  if (trimmed === '') return null
+  const n = Number(trimmed)
+  if (!Number.isFinite(n)) return 'Enter a number, or leave blank for no cap.'
+  if (n <= 0) return 'Enter an amount above $0, or leave blank for no cap.'
+  return null
+}
+
 // dailyCapToWire converts the daily-cap text input to the wire value for
-// max_daily_cost_usd. The field is an <input type="number">, so in practice it
-// only yields an empty string or a valid numeric string:
+// max_daily_cost_usd. Validation happens upstream (dailyCapError gates the Save
+// button), so by the time this runs the input is either blank or a positive
+// number:
 //   - blank        → 0 (an explicit "no cap" clear)
-//   - valid number → passed straight through, fractions and all. A negative is
-//     left intact so the backend's `>= 0` check rejects it with a 400 the user
-//     sees (the input's min="0" is just the client-side first line of defense).
+//   - valid number → passed straight through, fractions and all. A stray
+//     non-positive value is still left intact so the backend's `>= 0` check is
+//     the backstop for a direct API call (the UI never reaches here with one).
 //   - unparseable  → undefined, which JSON.stringify drops, so the field is
 //     omitted and a previously-stored cap is left UNTOUCHED rather than silently
 //     cleared to 0. Effectively unreachable from a number input; the guard just

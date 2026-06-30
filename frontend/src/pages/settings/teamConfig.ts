@@ -86,6 +86,12 @@ export interface TeamSettingsData {
   jira_projects: JiraProjectConfig[]
   member_count: number
   role: string
+  // Honored bounds of the unattended-prompt grace window (whole seconds),
+  // surfaced by the backend so the slider's range tracks permTimeout() instead
+  // of hardcoding it. Optional for forward-compat with an older server that
+  // doesn't emit them — the UI falls back to its own GRACE_* defaults.
+  permission_absent_grace_min_seconds?: number
+  permission_absent_grace_max_seconds?: number
 }
 
 // TeamReposData mirrors GET /api/settings/team/{id}/repos.

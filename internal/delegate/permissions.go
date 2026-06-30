@@ -112,13 +112,27 @@ func (s *Spawner) resolveAbsentAutoDeny(ctx context.Context, teamID string) Abse
 	return AbsentAutoDeny{enabled: true, grace: clampGrace(grace, s.permTimeout())}
 }
 
+// AbsentGraceMinSeconds and AbsentGraceMaxSeconds bound the unattended-prompt
+// grace window the team setting exposes (the slider range in the UI and the
+// clamp the settings API applies). The floor mirrors clampGrace's 1s minimum;
+// the ceiling is the largest whole second strictly below the production
+// permTimeout() (DefaultIdleHibernateTimeout / 2), so any value a user can pick
+// round-trips through clampGrace unchanged under the default idle timeout. The
+// runtime clampGrace still re-clamps against the LIVE permTimeout() as defense
+// in depth (and to absorb a test-injected short idle), so these are the
+// advertised UI/HTTP bounds, not the only line of defense.
+const (
+	AbsentGraceMinSeconds = 1
+	AbsentGraceMaxSeconds = int(DefaultIdleHibernateTimeout/time.Second)/2 - 1
+)
+
 // clampGrace keeps the absent-deny grace in [1s, full) so it can neither
 // collapse to an instant deny on a bad value nor invert the load-bearing
 // "absent wait ≤ full ≤ permTimeout() < idleTimeout()" ordering. full is
 // permTimeout() (minutes in production), so the upper guard only ever bites a
 // misconfigured value; the lower floor of 1s mirrors the HTTP-layer floor.
 func clampGrace(grace, full time.Duration) time.Duration {
-	const minGrace = time.Second
+	const minGrace = AbsentGraceMinSeconds * time.Second
 	if grace < minGrace {
 		grace = minGrace
 	}

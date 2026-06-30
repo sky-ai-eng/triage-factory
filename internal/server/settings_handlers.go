@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -115,6 +116,13 @@ type teamSettingsResponse struct {
 	// gets the new team's count + the caller's role in it.
 	MemberCount int    `json:"member_count"`
 	Role        string `json:"role"`
+	// PermissionAbsentGraceMinSeconds / PermissionAbsentGraceMaxSeconds advertise
+	// the honored bounds of the unattended-prompt grace window so the team
+	// settings UI can render a slider whose range tracks the backend (the 1s
+	// floor clampGrace enforces and the ceiling just below permTimeout()) instead
+	// of hardcoding it.
+	PermissionAbsentGraceMinSeconds int `json:"permission_absent_grace_min_seconds"`
+	PermissionAbsentGraceMaxSeconds int `json:"permission_absent_grace_max_seconds"`
 }
 
 func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +172,8 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.MemberCount = count
 	resp.Role = role
+	resp.PermissionAbsentGraceMinSeconds = delegate.AbsentGraceMinSeconds
+	resp.PermissionAbsentGraceMaxSeconds = delegate.AbsentGraceMaxSeconds
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -266,13 +276,18 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 			teamSet.PermissionAbsentAutodenyEnabled = *req.PermissionAbsentAutodenyEnabled
 		}
 		if req.PermissionAbsentGraceSeconds != nil {
-			// Accept seconds from the UI; store ms. Floor at 1s so a 0/negative
-			// input can't disable the grace by collapsing it — the spawner also
-			// clamps to [1s, permTimeout()) at run time, but a sane floor here
-			// keeps the persisted value honest.
+			// Accept seconds from the UI; store ms. Clamp into the honored band
+			// [AbsentGraceMinSeconds, AbsentGraceMaxSeconds] so a 0/negative input
+			// can't disable the grace by collapsing it and an over-large one can't
+			// pretend to exceed permTimeout(). The spawner re-clamps against the
+			// live permTimeout() at run time, but a sane band here keeps the
+			// persisted value honest and matches the UI slider's range.
 			secs := *req.PermissionAbsentGraceSeconds
-			if secs < 1 {
-				secs = 1
+			if secs < delegate.AbsentGraceMinSeconds {
+				secs = delegate.AbsentGraceMinSeconds
+			}
+			if secs > delegate.AbsentGraceMaxSeconds {
+				secs = delegate.AbsentGraceMaxSeconds
 			}
 			teamSet.PermissionAbsentGraceMS = secs * 1000
 		}

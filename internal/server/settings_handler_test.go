@@ -12,6 +12,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -890,5 +891,75 @@ func TestOrgSettingsPost_DailyCostCap_NegativeRejected(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if !strings.Contains(resp["error"], "max_daily_cost_usd must be >= 0") {
 		t.Errorf("expected >= 0 validation message, got: %q", resp["error"])
+	}
+}
+
+// --- TFAC-392 unattended-prompt grace window bounds ------------------------
+
+// teamGrace reads the team settings GET and returns the stored grace (ms) plus
+// the advertised min/max second bounds that drive the UI slider's range.
+func teamGrace(t *testing.T, s *Server) (graceMS, minS, maxS int) {
+	t.Helper()
+	rec := doJSON(t, s, "GET", "/api/settings/team/default", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/settings/team/default: %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		TeamSettings struct {
+			PermissionAbsentGraceMS int `json:"PermissionAbsentGraceMS"`
+		} `json:"team_settings"`
+		Min int `json:"permission_absent_grace_min_seconds"`
+		Max int `json:"permission_absent_grace_max_seconds"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode team settings: %v", err)
+	}
+	return resp.TeamSettings.PermissionAbsentGraceMS, resp.Min, resp.Max
+}
+
+// TestTeamSettingsGet_GraceBoundsAdvertised pins that the GET surfaces the
+// backend-honored grace band so the slider can track it instead of hardcoding.
+func TestTeamSettingsGet_GraceBoundsAdvertised(t *testing.T) {
+	s := newTestServer(t)
+	_, minS, maxS := teamGrace(t, s)
+	if minS != delegate.AbsentGraceMinSeconds {
+		t.Errorf("grace min = %d, want %d", minS, delegate.AbsentGraceMinSeconds)
+	}
+	if maxS != delegate.AbsentGraceMaxSeconds {
+		t.Errorf("grace max = %d, want %d", maxS, delegate.AbsentGraceMaxSeconds)
+	}
+	if minS < 1 || maxS <= minS {
+		t.Errorf("nonsensical grace bounds [%d, %d]", minS, maxS)
+	}
+}
+
+// TestTeamSettingsPost_GraceClampedToBand pins the POST-side clamp: an
+// over-ceiling value snaps to the max, an under-floor value to the min, and an
+// in-band value round-trips verbatim — so the persisted ms always matches the
+// honored band (and what the slider can express).
+func TestTeamSettingsPost_GraceClampedToBand(t *testing.T) {
+	s := newTestServer(t)
+
+	postJSONResp(t, s, "/api/settings/team/default", map[string]any{
+		"permission_absent_grace_seconds": 99999,
+	})
+	if ms, _, _ := teamGrace(t, s); ms != delegate.AbsentGraceMaxSeconds*1000 {
+		t.Errorf("after POST 99999s, stored grace = %dms, want %dms (clamped to max)",
+			ms, delegate.AbsentGraceMaxSeconds*1000)
+	}
+
+	postJSONResp(t, s, "/api/settings/team/default", map[string]any{
+		"permission_absent_grace_seconds": 0,
+	})
+	if ms, _, _ := teamGrace(t, s); ms != delegate.AbsentGraceMinSeconds*1000 {
+		t.Errorf("after POST 0s, stored grace = %dms, want %dms (clamped to min)",
+			ms, delegate.AbsentGraceMinSeconds*1000)
+	}
+
+	postJSONResp(t, s, "/api/settings/team/default", map[string]any{
+		"permission_absent_grace_seconds": 20,
+	})
+	if ms, _, _ := teamGrace(t, s); ms != 20000 {
+		t.Errorf("after POST 20s, stored grace = %dms, want 20000ms (in-band, verbatim)", ms)
 	}
 }
