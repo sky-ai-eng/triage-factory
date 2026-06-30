@@ -108,3 +108,42 @@ var assigneeCentricJiraEventSet = func() map[string]bool {
 func isAssigneeCentricJiraEvent(eventType string) bool {
 	return assigneeCentricJiraEventSet[eventType]
 }
+
+// ownershipModel classifies how an event's routing participants + owner are
+// resolved (TFAC-519). It is the single, explicit dispatch key for
+// resolveTeamRouting — replacing the prior implicit "compute the handler-team
+// default, then overwrite it in three special-case branches" shape. Every event
+// type maps to exactly one model.
+type ownershipModel int
+
+const (
+	// modelPool — handler-team grouping: every team with a matched handler is a
+	// participant, the highest-priority team is the (eager) owner. For
+	// unassigned/team-pool work like jira:issue:available, and the default for
+	// any event not otherwise classified.
+	modelPool ownershipModel = iota
+	// modelOwned — the owning-team ladder: the entity's owner (author-centric
+	// github / assignee-centric jira). Non-owner teams reach it only via an
+	// applies_to_unowned watch handler. The reach flag is meaningful ONLY here.
+	modelOwned
+	// modelRequestedParty — review_requested: routes to the requested reviewer's
+	// team(s), scoped at emit time, with a handler-team fallback for legacy
+	// events / unwired stores.
+	modelRequestedParty
+)
+
+// ownershipModelForEvent classifies an event type into its ownership model.
+// This is the one place the owner-ladder / requested-party / pool distinction is
+// made; an unclassified event type falls to modelPool (the historical default).
+// review_requested is checked first because it is a github:pr:* type that is
+// deliberately NOT in authorCentricGitHubEventSet.
+func ownershipModelForEvent(eventType string) ownershipModel {
+	switch {
+	case eventType == domain.EventGitHubPRReviewRequested:
+		return modelRequestedParty
+	case isAuthorCentricGitHubEvent(eventType), isAssigneeCentricJiraEvent(eventType):
+		return modelOwned
+	default:
+		return modelPool
+	}
+}

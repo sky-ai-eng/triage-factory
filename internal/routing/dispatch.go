@@ -2,7 +2,6 @@ package routing
 
 import (
 	"context"
-	"sort"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -184,120 +183,52 @@ type eventRouting struct {
 
 // resolveTeamRouting computes the owner team, visibility set, firing order, and
 // seed priority for an event from its matched handlers. ok=false means the
-// event resolves to no team and should create no task (review_requested with
-// no mapped reviewer team; an author-centric event from an external author
-// with no team watching).
+// event resolves to no team and should create no task (review_requested with no
+// mapped reviewer team; an owner-ladder event from an external identity with no
+// team watching).
 //
-// Four routing axes override the default handler-team grouping:
-//   - review_requested → the requested reviewer's team(s), scoped at emit time;
-//   - author-centric github events → the entity's owning team via the
-//     owning-team ladder (the PR author's CI/conflict/feedback lifecycle);
-//   - assignee-centric jira events → the assignee's owning team via the same
-//     ladder (the issue assignee's assignment/status/comment lifecycle);
-//   - everything else (jira:issue:available, etc.) → the handler-team grouping.
+// It dispatches on the event's ownership model (ownershipModelForEvent), the one
+// explicit classification of every event type (TFAC-519). Each model resolves
+// its own (visibility, owner, firing order, priority); teamTriggers and the
+// final assembly are shared. There is no "compute the handler-team default then
+// overwrite it" — a model that doesn't apply is simply never invoked. The
+// models:
+//
+//   - modelOwned (author-centric github, assignee-centric jira) → the entity's
+//     owning team via the owning-team ladder; non-owner teams reach it only via
+//     an applies_to_unowned watch handler.
+//   - modelRequestedParty (review_requested) → the requested reviewer's team(s),
+//     scoped at emit time, with a handler-team fallback for legacy events.
+//   - modelPool (jira:issue:available, everything else) → handler-team grouping.
 //
 // The matched handlers still gate whether a task is created and supply the
-// priority; only the team set is overridden.
+// priority; the model only decides the team set + owner.
 func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) (eventRouting, bool) {
-	// Group matched handlers by team. Org-visibility handlers (team_id NULL)
-	// route to LocalDefaultTeamID via handlerTeamID; the Postgres store
-	// resolves that sentinel to the org's canonical team.
-	teamRules := map[string][]domain.EventHandler{}
+	// teamTriggers is model-independent: a team fires its matched triggers iff it
+	// lands in the model's orderedTeams. Grouped once, threaded through unchanged.
+	// Org-visibility handlers (team_id NULL) route to LocalDefaultTeamID via
+	// handlerTeamID; the Postgres store resolves that sentinel to the org's team.
 	teamTriggers := map[string][]domain.EventHandler{}
-	for _, h := range matchedRules {
-		teamRules[handlerTeamID(h)] = append(teamRules[handlerTeamID(h)], h)
-	}
 	for _, h := range matchedTriggers {
 		teamTriggers[handlerTeamID(h)] = append(teamTriggers[handlerTeamID(h)], h)
 	}
 
-	// The visibility set: every team that had any matching handler. Sorted so
-	// the task_teams writes are deterministic.
-	visibleTeams := make([]string, 0, len(teamRules)+len(teamTriggers))
-	seen := map[string]struct{}{}
-	for t := range teamRules {
-		if _, ok := seen[t]; !ok {
-			seen[t] = struct{}{}
-			visibleTeams = append(visibleTeams, t)
-		}
+	var (
+		visibleTeams, orderedTeams []string
+		ownerTeam                  string
+		taskPriority               float64
+		ok                         bool
+	)
+	switch ownershipModelForEvent(evt.EventType) {
+	case modelOwned:
+		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveOwnedRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
+	case modelRequestedParty:
+		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveRequestedPartyRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
+	default: // modelPool
+		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = resolvePoolRouting(matchedRules, matchedTriggers)
 	}
-	for t := range teamTriggers {
-		if _, ok := seen[t]; !ok {
-			seen[t] = struct{}{}
-			visibleTeams = append(visibleTeams, t)
-		}
-	}
-	sort.Strings(visibleTeams)
-
-	// orderedTeams ranks the matched teams by per-team rule priority (desc),
-	// ties broken by lowest team id. The owner is the first — the
-	// highest-priority matched team — and triggers fire in this order, so the
-	// team that wins the exclusive claim (and thus consolidates as owner) is
-	// deterministic and matches the creation-time owner pick. A team with only
-	// triggers contributes the 0.5 trigger-fallback priority. The score map is
-	// built once (handlerTeamID runs once per rule, not once per comparison) and
-	// reused for both the order and the owner's seed priority; the same helpers
-	// rank the ambiguous owner-ladder path (orderTeamsByRulePriority).
-	scores := teamRulePriorityScores(seen, matchedRules)
-	orderedTeams := orderTeamsByScores(sortedKeys(seen), scores)
-	ownerTeam := orderedTeams[0]
-	taskPriority := scores[ownerTeam]
-
-	switch {
-	case evt.EventType == domain.EventGitHubPRReviewRequested:
-		// Falls back to the handler-team visibility above for legacy events
-		// that carry no requested identity or when the mapping stores are
-		// unwired (scoped=false).
-		if reqTeams, scoped := r.reviewRequestVisibilityTeams(orgID, evt); scoped {
-			if len(reqTeams) == 0 {
-				routerLog.Warn("review_requested: requested identity maps to no tf team, recording event but no task", "entity_id", entityID)
-				return eventRouting{}, false
-			}
-			// NULL owner at creation, like the author-/assignee-centric ladders:
-			// the task is created unowned and visible to all the reviewer's
-			// teams. fireMatchedTriggers walks orderedTeams (every reviewer team,
-			// sorted by id) and the first team whose pr-review trigger wins the
-			// exclusive claim consolidates ownership onto itself (delegation.go
-			// SetOwnerTeamSystem before the fire); if no team auto-fires, the
-			// first human claim consolidates. No behavior change for the
-			// single-team reviewer (the fire resolves to their one team); the
-			// multi-team reviewer's task is no longer arbitrarily stamped to the
-			// lowest-id team before anything acts.
-			visibleTeams = reqTeams
-			orderedTeams = reqTeams // already sorted by team id in the helper
-			ownerTeam = ""          // NULL at creation; the fire (or first human claim) consolidates the owner
-			taskPriority = maxRuleDefaultPriority(matchedRules)
-		}
-
-	case isAuthorCentricGitHubEvent(evt.EventType):
-		// The PR author's CI/conflict/feedback lifecycle → the entity's owning
-		// team via the owning-team ladder.
-		owner, ownerSet := r.authorCentricOwner(orgID, evt, entityID)
-		vt, ot, ord, pri, ok := ownerLadderRouting(owner, ownerSet, matchedRules, matchedTriggers)
-		if !ok {
-			// External/non-TF author (dependabot, renovate, outside
-			// contributors) and no team opted in via an explicit handler → record
-			// the event + durable entity only, no task. Deliberately silent:
-			// this is the expected high-volume path with nothing actionable.
-			return eventRouting{}, false
-		}
-		visibleTeams, ownerTeam, orderedTeams, taskPriority = vt, ot, ord, pri
-
-	case isAssigneeCentricJiraEvent(evt.EventType):
-		// The issue assignee's assignment/status/comment lifecycle → the
-		// assignee's owning team via the same ladder (jira:issue:available is
-		// excluded — it's the unassigned team-pool signal and stays on
-		// handler-team routing above).
-		owner, ownerSet := r.assigneeCentricJiraOwner(orgID, evt, entityID)
-		vt, ot, ord, pri, ok := ownerLadderRouting(owner, ownerSet, matchedRules, matchedTriggers)
-		if !ok {
-			// External/unassigned account (not a TF member) and no team opted
-			// in via an explicit watch handler → record the event + durable entity
-			// only, no task. Deliberately silent: this is the high-volume
-			// external-assignee path, the local N=1 over-creation fix.
-			return eventRouting{}, false
-		}
-		visibleTeams, ownerTeam, orderedTeams, taskPriority = vt, ot, ord, pri
+	if !ok {
+		return eventRouting{}, false
 	}
 
 	return eventRouting{
@@ -307,6 +238,64 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 		teamTriggers: teamTriggers,
 		taskPriority: taskPriority,
 	}, true
+}
+
+// resolvePoolRouting is the handler-team grouping (modelPool): every team with a
+// matched handler is a participant, the highest-priority team is the eagerly-
+// stamped owner, and triggers fire in priority-desc / id-asc order. Used for
+// unassigned team-pool events (jira:issue:available) and as the
+// requested-party fallback. Always ok=true — resolveTeamRouting is only reached
+// with ≥1 matched handler, so the participant set is non-empty. A team with only
+// triggers contributes the 0.5 trigger-fallback priority via teamRulePriorityScores.
+func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) (visibleTeams []string, ownerTeam string, orderedTeams []string, taskPriority float64, ok bool) {
+	seen := map[string]struct{}{}
+	for _, h := range matchedRules {
+		seen[handlerTeamID(h)] = struct{}{}
+	}
+	for _, h := range matchedTriggers {
+		seen[handlerTeamID(h)] = struct{}{}
+	}
+	scores := teamRulePriorityScores(seen, matchedRules)
+	orderedTeams = orderTeamsByScores(sortedKeys(seen), scores)
+	ownerTeam = orderedTeams[0]
+	return sortedKeys(seen), ownerTeam, orderedTeams, scores[ownerTeam], true
+}
+
+// resolveOwnedRouting routes an owner-ladder event to the entity's owning team.
+// The owner resolver differs by provider (author login for github, assignee
+// account for jira); the shared tail — visibility = ownerSet ∪ watchers, firing
+// = members-then-watchers with the no-steal invariant — lives in
+// ownerLadderRouting. ok=false → external identity, no watching handler → no task.
+func (r *Router) resolveOwnedRouting(orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) ([]string, string, []string, float64, bool) {
+	var owner string
+	var ownerSet []string
+	if isAuthorCentricGitHubEvent(evt.EventType) {
+		owner, ownerSet = r.authorCentricOwner(orgID, evt, entityID)
+	} else {
+		owner, ownerSet = r.assigneeCentricJiraOwner(orgID, evt, entityID)
+	}
+	return ownerLadderRouting(owner, ownerSet, matchedRules, matchedTriggers)
+}
+
+// resolveRequestedPartyRouting routes review_requested to the requested
+// reviewer's team(s), resolved from the event's requested identity. scoped=false
+// (legacy event with no requested identity, or unwired mapping stores) falls back
+// to the handler-team grouping. scoped=true with no mapped team → no task (a
+// TF-known reviewer that maps to no team is a config gap, not a reason to
+// over-fan). On the scoped path the task is created NULL-owned and visible to
+// every reviewer team (already id-sorted by the helper); fireMatchedTriggers
+// walks them and the first whose pr-review trigger wins the exclusive claim
+// consolidates ownership onto itself, else the first human claim does.
+func (r *Router) resolveRequestedPartyRouting(orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) ([]string, string, []string, float64, bool) {
+	reqTeams, scoped := r.reviewRequestVisibilityTeams(orgID, evt)
+	if !scoped {
+		return resolvePoolRouting(matchedRules, matchedTriggers)
+	}
+	if len(reqTeams) == 0 {
+		routerLog.Warn("review_requested: requested identity maps to no tf team, recording event but no task", "entity_id", entityID)
+		return nil, "", nil, 0, false
+	}
+	return reqTeams, "", reqTeams, maxRuleDefaultPriority(matchedRules), true
 }
 
 // upsertTaskForEvent finds or creates the single task for this (entity,
