@@ -47,8 +47,10 @@ export default function TriggerConfigPanel({
   // can be configured here without a companion task rule.
   const [appliesToUnowned, setAppliesToUnowned] = useState(false)
   // Whether this trigger's event supports the watch toggle (TFAC-519) — hidden
-  // when inert (pool / requested-party events). Resolved from /api/event-types.
-  const [supportsWatch, setSupportsWatch] = useState(false)
+  // only when the catalog explicitly marks it inert (pool / requested-party).
+  // Defaults true (fail-open): a failed/slow /api/event-types fetch must not
+  // strand the user on a valid owner-ladder trigger.
+  const [supportsWatch, setSupportsWatch] = useState(true)
   const [promptName, setPromptName] = useState('')
   const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -65,17 +67,21 @@ export default function TriggerConfigPanel({
     setAppliesToUnowned(trigger.applies_to_unowned)
     setConfirmDelete(false)
     setPromptName('')
-    setSupportsWatch(false)
+    setSupportsWatch(true)
 
-    // Does this trigger's event support the applies_to_unowned toggle? Look it
-    // up in the catalog; the toggle is hidden when the flag would be inert.
-    fetch('/api/event-types')
-      .then((r) => (r.ok ? r.json() : []))
-      .then((list: Array<{ id: string; supports_watch: boolean }>) => {
-        if (cancelled || !Array.isArray(list)) return
-        setSupportsWatch(list.find((et) => et.id === trigger.event_type)?.supports_watch ?? false)
-      })
-      .catch(() => {})
+    // Resolve whether this trigger's event supports the applies_to_unowned
+    // toggle. Skip entirely in template scope — the toggle is hidden there
+    // regardless. Fail-open: only an explicit supports_watch=false hides it; a
+    // not-found / failed fetch leaves the default (show).
+    if (!templateScope) {
+      fetch('/api/event-types')
+        .then((r) => (r.ok ? r.json() : []))
+        .then((list: Array<{ id: string; supports_watch: boolean }>) => {
+          if (cancelled || !Array.isArray(list)) return
+          setSupportsWatch(list.find((et) => et.id === trigger.event_type)?.supports_watch ?? true)
+        })
+        .catch(() => {})
+    }
 
     // Resolve the bound blueprint's name for the badge. Template scope has a
     // single-get on its blueprint family; team-scope blueprints expose only a

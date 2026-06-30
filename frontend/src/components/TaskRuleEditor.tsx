@@ -78,11 +78,12 @@ export default function TaskRuleEditor({
   // which point teams are loaded, so no cold-load gate is needed.
   const effectiveTeam = lockedTeamId || team
 
-  // Whether the selected event supports the applies_to_unowned ("watch") flag
-  // (TFAC-519). The toggle is hidden for events where it's inert (pool /
-  // requested-party). Derived from the fetched catalog.
-  const selectedEventSupportsWatch =
-    eventTypes.find((et) => et.id === eventType)?.supports_watch ?? false
+  // Show the applies_to_unowned ("watch") toggle UNLESS the catalog explicitly
+  // marks this event inert (supports_watch === false — pool / requested-party).
+  // Fail-open: if the catalog hasn't loaded yet or the fetch failed, the lookup
+  // is undefined and we keep the toggle available rather than stranding the user
+  // on a valid owner-ladder event. (Also hidden in org-template scope below.)
+  const eventWatchInert = eventTypes.find((et) => et.id === eventType)?.supports_watch === false
 
   // Track original predicate JSON for PATCH diff.
   const [originalPredicateJSON, setOriginalPredicateJSON] = useState<string | null>(null)
@@ -415,9 +416,9 @@ export default function TaskRuleEditor({
                       entities outside the team (PRs/issues authored by anyone),
                       so it carries a deliberate eyes-open warning. Hidden in
                       org-template scope — the flag is a team-routing concept the
-                      template doesn't carry. Also hidden for event types where the
-                      flag is inert (pool / requested-party — supports_watch=false). */}
-                  {!templateScope && selectedEventSupportsWatch && (
+                      template doesn't carry. Also hidden for event types the catalog
+                      marks inert (pool / requested-party — supports_watch=false). */}
+                  {!templateScope && !eventWatchInert && (
                     <div>
                       <label className="flex items-start gap-2.5 cursor-pointer">
                         <input
