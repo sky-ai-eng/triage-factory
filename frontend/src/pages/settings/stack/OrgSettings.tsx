@@ -566,11 +566,15 @@ export default function OrgSettings({
               </span>
               <input
                 type="number"
-                min="0"
+                // Smallest valid positive cap (step is 0.01); aligns the native
+                // spinner/validity with dailyCapError so the arrows can't land on
+                // 0 — a value Save then rejects. Blank ("no cap") is still allowed.
+                min="0.01"
                 step="0.01"
                 inputMode="decimal"
                 placeholder="No cap"
                 aria-invalid={dailyCapErr !== null}
+                aria-describedby={dailyCapErr !== null ? 'daily-cap-error' : undefined}
                 value={draft.org.max_daily_cost_usd}
                 onChange={(e) =>
                   patch({ org: { ...draft.org, max_daily_cost_usd: e.target.value } })
@@ -581,7 +585,9 @@ export default function OrgSettings({
               />
             </div>
             {dailyCapErr !== null && (
-              <span className="mt-1.5 block text-[11px] text-dismiss">{dailyCapErr}</span>
+              <span id="daily-cap-error" className="mt-1.5 block text-[11px] text-dismiss">
+                {dailyCapErr}
+              </span>
             )}
           </label>
         </div>
