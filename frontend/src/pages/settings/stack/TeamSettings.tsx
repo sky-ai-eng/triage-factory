@@ -50,8 +50,12 @@ import SettingsSection from './SettingsSection'
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
 
 // Fallback bounds for the grace-window slider when the backend doesn't advertise
-// them (an older server). The backend is authoritative when present — it derives
-// the ceiling from permTimeout() — these just keep the slider usable otherwise.
+// them (an older server). The backend is authoritative when present — the
+// permission_absent_grace_{min,max}_seconds fields are preferred and these only
+// apply against a server too old to send them. Keep in sync with the source of
+// truth: delegate.AbsentGrace{Min,Max}Seconds in internal/delegate/permissions.go
+// (max = DefaultIdleHibernateTimeout/2 − 1s). If that constant changes, this stale
+// fallback only affects users on an older server that doesn't advertise bounds.
 const GRACE_MIN_FALLBACK = 1
 const GRACE_MAX_FALLBACK = 149
 
@@ -565,7 +569,7 @@ export default function TeamSettings({
               </span>
             </div>
             <p className="mt-0.5 text-[11px] text-text-tertiary">
-              How long to wait for someone to appear before denying (max {graceMax}s)
+              How long to wait for someone to appear before denying ({graceMin}s–{graceMax}s)
             </p>
             <div className="mt-3 flex items-center gap-3">
               <Slider
