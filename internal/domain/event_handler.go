@@ -44,10 +44,15 @@ type EventHandler struct {
 	// TFAC-514 no-steal invariant); but on a truly unowned entity (an
 	// external author, no member owner at all) an opted-in watcher whose
 	// team also has a configured auto-delegation may fire and consolidate
-	// ownership onto itself — the eyes-open behavior. Firing rides the
-	// existing event→blueprint trigger config, not this flag (which is a
-	// task-rule reach concept); a watcher with only a rule surfaces the
-	// card NULL-owned and nothing fires.
+	// ownership onto itself — the eyes-open behavior.
+	//
+	// It is a per-HANDLER flag, valid on both kinds: a rule grants
+	// visibility reach; a trigger grants the same reach AND (being a
+	// trigger) fires on the orphan, letting a team configure orphan
+	// auto-delegation entirely from the prompts page with no companion
+	// rule. The router reads it off both kinds via explicitWatchTeams. A
+	// watcher whose opt-in is only a rule (no trigger) surfaces the card
+	// NULL-owned and nothing fires.
 	AppliesToUnowned bool `json:"applies_to_unowned"`
 	// SystemSlug is the stable identifier for shipped handlers
 	// ("system-rule-ci-check-failed", "system-trigger-ci-fix") and for the

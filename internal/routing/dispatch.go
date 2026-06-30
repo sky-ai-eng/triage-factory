@@ -273,10 +273,10 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 		// The PR author's CI/conflict/feedback lifecycle → the entity's owning
 		// team via the owning-team ladder.
 		owner, ownerSet := r.authorCentricOwner(orgID, evt, entityID)
-		vt, ot, ord, pri, ok := ownerLadderRouting(owner, ownerSet, matchedRules)
+		vt, ot, ord, pri, ok := ownerLadderRouting(owner, ownerSet, matchedRules, matchedTriggers)
 		if !ok {
 			// External/non-TF author (dependabot, renovate, outside
-			// contributors) and no team opted in via an explicit rule → record
+			// contributors) and no team opted in via an explicit handler → record
 			// the event + durable entity only, no task. Deliberately silent:
 			// this is the expected high-volume path with nothing actionable.
 			return eventRouting{}, false
@@ -289,10 +289,10 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 		// excluded — it's the unassigned team-pool signal and stays on
 		// handler-team routing above).
 		owner, ownerSet := r.assigneeCentricJiraOwner(orgID, evt, entityID)
-		vt, ot, ord, pri, ok := ownerLadderRouting(owner, ownerSet, matchedRules)
+		vt, ot, ord, pri, ok := ownerLadderRouting(owner, ownerSet, matchedRules, matchedTriggers)
 		if !ok {
 			// External/unassigned account (not a TF member) and no team opted
-			// in via an explicit watch rule → record the event + durable entity
+			// in via an explicit watch handler → record the event + durable entity
 			// only, no task. Deliberately silent: this is the high-volume
 			// external-assignee path, the local N=1 over-creation fix.
 			return eventRouting{}, false

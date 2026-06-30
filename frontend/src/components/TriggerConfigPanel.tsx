@@ -42,6 +42,10 @@ export default function TriggerConfigPanel({
   const [minAutonomy, setMinAutonomy] = useState(0)
   const [breakerThreshold, setBreakerThreshold] = useState(4)
   const [enabled, setEnabled] = useState(true)
+  // applies_to_unowned — the explicit "watch" reach opt-in (TFAC-517). On a
+  // trigger it grants orphan reach AND fires, so the whole orphan auto-delegation
+  // can be configured here without a companion task rule.
+  const [appliesToUnowned, setAppliesToUnowned] = useState(false)
   const [promptName, setPromptName] = useState('')
   const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -55,6 +59,7 @@ export default function TriggerConfigPanel({
     setMinAutonomy(trigger.min_autonomy_suitability)
     setBreakerThreshold(trigger.breaker_threshold)
     setEnabled(trigger.enabled)
+    setAppliesToUnowned(trigger.applies_to_unowned)
     setConfirmDelete(false)
     setPromptName('')
 
@@ -114,6 +119,7 @@ export default function TriggerConfigPanel({
         scope_predicate_json: Object.keys(predicate).length > 0 ? JSON.stringify(predicate) : '',
         breaker_threshold: breakerThreshold,
         min_autonomy_suitability: minAutonomy,
+        applies_to_unowned: appliesToUnowned,
       }
       const res = await fetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, {
         method: 'PUT',
@@ -257,6 +263,46 @@ export default function TriggerConfigPanel({
                     className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
                   />
                 </Section>
+
+                <div className="border-t border-border-subtle" />
+
+                {/* Apply to unowned entities — the explicit "watch" reach opt-in
+                    (TFAC-517). On a trigger this grants orphan reach AND fires, so
+                    the whole orphan auto-delegation is configured here. Off by
+                    default; carries an eyes-open warning. */}
+                <div>
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={appliesToUnowned}
+                      onChange={(e) => setAppliesToUnowned(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 shrink-0 rounded border-border-subtle text-accent focus:ring-accent/30"
+                    />
+                    <span>
+                      <span className="block text-[12px] font-medium text-text-secondary">
+                        Apply to entities outside this team
+                      </span>
+                      <span className="block text-[11px] text-text-tertiary mt-0.5">
+                        Also auto-delegate on entities no one on this team owns.
+                      </span>
+                    </span>
+                  </label>
+                  <AnimatePresence>
+                    {appliesToUnowned && (
+                      <motion.p
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="overflow-hidden text-[11px] leading-relaxed text-amber-700 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 mt-2"
+                      >
+                        The bot will auto-delegate on matching PRs and issues that no one in your
+                        Triage Factory org owns (e.g. dependabot or outside contributors), not just
+                        your team&rsquo;s — expect more bot activity. It still won&rsquo;t act on a
+                        PR or issue another member owns.
+                      </motion.p>
+                    )}
+                  </AnimatePresence>
+                </div>
               </fieldset>
             </Tooltip.Provider>
 
