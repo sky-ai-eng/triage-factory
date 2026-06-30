@@ -217,6 +217,11 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		entity domain.Entity
 		snap   domain.PRSnapshot
 		nodeID string
+		// seed marks a snapshot-less stub being enriched this cycle. Phase 3
+		// populates it like the discovery create-branch (snapshot + title,
+		// close if terminal) WITHOUT diffing, so we don't synthesize events for
+		// state that predates our tracking. See resolveStubNodeID + TFAC-513 §3.
+		seed bool
 	}
 	var openItems, terminalItems []entityWithSnap
 	skippedOpen := 0
@@ -227,7 +232,25 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			_ = json.Unmarshal([]byte(e.SnapshotJSON), &snap)
 		}
 		if snap.NodeID == "" {
-			continue // can't refresh without a node ID
+			// Snapshot-less stub — created outside the poller (e.g. exec-touch
+			// FindOrCreate, TFAC-513 §2), so it never carried a node_id. Pre-fix
+			// this `continue` skipped it forever (discovery only seeds open PRs
+			// in configured repos). Resolve the node_id via a cheap REST read
+			// and route it into the refresh batch as a seed; Phase 3 enriches it
+			// quietly. Unresolvable this cycle (bad shape / unreachable PR) →
+			// skip and retry next cycle (one extra fetch per stub until it
+			// carries a node_id). TFAC-513 §3.
+			nodeID, terminal, ok := t.resolveStubNodeID(ctx, client, e)
+			if !ok {
+				continue
+			}
+			seedItem := entityWithSnap{entity: e, nodeID: nodeID, seed: true}
+			if terminal {
+				terminalItems = append(terminalItems, seedItem)
+			} else {
+				openItems = append(openItems, seedItem)
+			}
+			continue
 		}
 
 		item := entityWithSnap{entity: e, snap: snap, nodeID: snap.NodeID}
@@ -348,6 +371,28 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// but doesn't set snap.NodeID).
 		newSnap.NodeID = item.nodeID
 
+		if item.seed {
+			// Quiet-seed a snapshot-less stub (TFAC-513 §3): populate it like the
+			// discovery create-branch — snapshot + title, close if terminal — and
+			// emit NOTHING. DiffPRSnapshots already suppresses non-terminal first-
+			// discovery events, but seeding without diffing also keeps a terminal
+			// stub from emitting a merged/closed event for a PR that closed before
+			// we tracked it. The next cycle diffs against this seed normally.
+			snapJSON, _ := json.Marshal(newSnap)
+			if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, item.entity.ID, string(snapJSON)); err != nil {
+				trackerLog.Error("seed stub snapshot failed", "source_id", item.entity.SourceID, "error", err)
+			}
+			if item.entity.Title != newSnap.Title {
+				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
+			}
+			if newSnap.Merged || newSnap.State == "CLOSED" || newSnap.State == "MERGED" {
+				if err := t.entities.MarkClosedSystem(context.Background(), orgID, item.entity.ID); err != nil {
+					trackerLog.Error("mark stub closed failed", "source_id", item.entity.SourceID, "error", err)
+				}
+			}
+			continue
+		}
+
 		// Diff against previous snapshot.
 		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver)
 
@@ -374,6 +419,38 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 	}
 
 	return eventsEmitted, nil
+}
+
+// resolveStubNodeID resolves the GitHub GraphQL node_id for a snapshot-less stub
+// entity so the Phase-2 refresh can fetch its full snapshot. Stubs are created
+// outside the poller (exec-touch FindOrCreate, TFAC-513 §2) and carry no
+// node_id, so they can't ride the entity-based GraphQL refresh until we resolve
+// one. The source_id is "owner/repo#N"; a cheap REST read (GetPRBasic) returns
+// the node_id plus enough state to route the seed to the open (full fragment) or
+// terminal (discovery fragment) batch.
+//
+// Returns ok=false (with a logged reason) when source_id isn't a PR target or
+// the PR can't be read this cycle — the caller skips it and retries next cycle.
+// One extra fetch per stub, only until it carries a node_id.
+func (t *Tracker) resolveStubNodeID(ctx context.Context, client *ghclient.Client, e domain.Entity) (nodeID string, terminal, ok bool) {
+	owner, repo, number, parsed := domain.ParsePRTarget(e.SourceID)
+	if !parsed {
+		trackerLog.Warn("stub enrich: unparseable github source_id", "source_id", e.SourceID)
+		return "", false, false
+	}
+	pr, err := client.GetPRBasic(ctx, owner, repo, number)
+	if err != nil {
+		trackerLog.Warn("stub enrich: GetPRBasic failed", "source_id", e.SourceID, "error", err)
+		return "", false, false
+	}
+	if pr == nil || pr.NodeID == "" {
+		trackerLog.Warn("stub enrich: PR carries no node_id", "source_id", e.SourceID)
+		return "", false, false
+	}
+	// GetPRBasic is REST, so State is lowercase "open"/"closed"; guard the
+	// GraphQL forms too in case the client shape ever changes.
+	terminal = pr.Merged || pr.State == "closed" || pr.State == "CLOSED" || pr.State == "MERGED"
+	return pr.NodeID, terminal, true
 }
 
 // maxSearchQueryLen is GitHub's limit for the q= search parameter.
@@ -737,6 +814,32 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 			continue
 		}
 		newSnap := newState.Snap
+
+		if e.SnapshotJSON == "" || e.SnapshotJSON == "{}" {
+			// Quiet-seed a snapshot-less stub (TFAC-513 §3): created outside the
+			// poller (exec-touch FindOrCreate, §2), it has no prior snapshot.
+			// DiffJiraSnapshots' prev.Key=="" branch would synthesize an initial
+			// assigned/available/completed event for state that predates our
+			// tracking — spuriously minting a task. Seed it like the discovery
+			// create-branch (snapshot + title, close if terminal) WITHOUT
+			// diffing instead. Normal discovery seeds in Phase 1, so this only
+			// ever fires for stubs. Description isn't carried by batchFetchJira;
+			// a rediscovered stub picks it up from Phase 1's else-branch,
+			// otherwise it fills in on a later discovery pass.
+			snapJSON, _ := json.Marshal(newSnap)
+			if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, e.ID, string(snapJSON)); err != nil {
+				trackerLog.Error("seed jira stub snapshot failed", "source_id", e.SourceID, "error", err)
+			}
+			if e.Title != newSnap.Summary {
+				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
+			}
+			if terminal(newSnap) {
+				if err := t.entities.MarkClosedSystem(context.Background(), orgID, e.ID); err != nil {
+					trackerLog.Error("mark jira stub closed failed", "source_id", e.SourceID, "error", err)
+				}
+			}
+			continue
+		}
 
 		var prevSnap domain.JiraSnapshot
 		if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {

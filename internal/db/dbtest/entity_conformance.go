@@ -96,6 +96,43 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
+	t.Run("FindOrCreate_supports_slack_message_entities", func(t *testing.T) {
+		// TFAC-513: Slack threads resolve through the same canonical resolver
+		// (source='slack', kind='message', source_id='<channel>/<thread_ts>').
+		// There is no CHECK on source/kind in either dialect, so this needs no
+		// migration — pin that both backends round-trip it and the natural key
+		// dedups a re-resolved thread.
+		s, orgID, _ := mk(t)
+
+		const sid = "C0125/1700000000.000100"
+		ent, created, err := s.FindOrCreate(ctx, orgID, "slack", sid, "message",
+			"first message text", "https://slack.example/archives/C0125/p1700000000000100")
+		if err != nil {
+			t.Fatalf("FindOrCreate(slack): %v", err)
+		}
+		if !created {
+			t.Fatalf("expected created=true on first slack resolve")
+		}
+		if ent.Source != "slack" || ent.Kind != "message" || ent.SourceID != sid {
+			t.Errorf("unexpected slack entity: %+v", ent)
+		}
+		// Slack entities are complete-at-create — title + permalink, no snapshot.
+		if ent.Title != "first message text" {
+			t.Errorf("title = %q, want the first message text", ent.Title)
+		}
+
+		again, created2, err := s.FindOrCreate(ctx, orgID, "slack", sid, "message", "ignored", "")
+		if err != nil {
+			t.Fatalf("FindOrCreate(slack) re-resolve: %v", err)
+		}
+		if created2 {
+			t.Errorf("re-resolving the same thread must return created=false")
+		}
+		if again.ID != ent.ID {
+			t.Errorf("re-resolve id = %s, want %s", again.ID, ent.ID)
+		}
+	})
+
 	t.Run("Get_and_GetBySource_return_nil_on_miss", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 

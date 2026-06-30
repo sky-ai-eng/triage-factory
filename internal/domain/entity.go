@@ -2,6 +2,29 @@ package domain
 
 import "time"
 
+// SlackSourceID builds the entities.source_id for a Slack thread:
+// "<channel_id>/<thread_ts>". It is the Slack analogue of the tracker's
+// ghSourceID ("owner/repo#N") and Jira's raw issue key — the natural-key
+// vocabulary that maps a (source, source_id) pair onto exactly one entities
+// row (source='slack', kind='message').
+//
+// The thread root is the entity grain. Slack delivers most mentions inside a
+// thread (the webhook carries thread_ts); a mention on a *root* channel message
+// has no thread_ts, so the caller passes that message's own ts as threadTS —
+// "<channel>/<ts>" — making the root message the thread it anchors. Resolving
+// thread_ts-or-ts is the caller's job (it owns the webhook payload); this
+// helper just pins the format so the resolver (TFAC-513) and the Slack
+// thread-create caller (TFAC-510) can't drift on the separator or ordering.
+//
+// Exported and dependency-free (rather than living next to the unexported
+// tracker ghSourceID) precisely because the consumer lives outside the tracker
+// package — it sits beside the other entity-key builders the rest of the app
+// already shares. channel+ts is unique within a workspace; the org_id column on
+// entities (PG's UNIQUE(org_id, source, source_id)) separates workspaces.
+func SlackSourceID(channel, threadTS string) string {
+	return channel + "/" + threadTS
+}
+
 // Entity is a long-lived source object (PR, issue, epic, message). Lives from
 // first-poll until closed/merged. All events, tasks, and runs hang off it.
 // Mirrors the `entities` table in internal/db/db.go.
