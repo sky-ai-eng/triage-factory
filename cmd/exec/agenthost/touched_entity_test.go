@@ -37,12 +37,17 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 			wantEntity: true, wantSource: "jira", wantKind: "issue",
 		},
 		{
+			// A bare owner/repo target is repo-level — this is also a branch
+			// push's shape (branchPushAction stamps Provider="github" with a
+			// repo-level Target), so it covers that skip too.
 			name: "github repo-level target is skipped",
 			act:  &domain.ExternalAction{Provider: domain.ArtifactProviderGitHub, Target: "octo/repo"},
 		},
 		{
-			name: "branch-push provider (git) is skipped",
-			act:  &domain.ExternalAction{Provider: "git", Target: "octo/repo"},
+			// PR-shaped target that WOULD resolve under github — proves the skip
+			// is on the unmapped provider (the default arm), not the target shape.
+			name: "unknown provider is skipped",
+			act:  &domain.ExternalAction{Provider: "linear", Target: "octo/repo#9"},
 		},
 		{
 			name: "nil action is a no-op",

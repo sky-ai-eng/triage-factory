@@ -1789,8 +1789,10 @@ func (c *LocalClient) recordBotAction(ctx context.Context, act *domain.ExternalA
 // ExternalAction.Provider is already the entity source ("github"/"jira") and
 // ExternalAction.Target is already the entity source_id ("owner/repo#N" /
 // "SKY-123"). A bare "owner/repo" GitHub target (no '#') is a repo-level action,
-// not an entity — skipped. A non-PR/issue provider (a branch push rides "git")
-// has no entity grain here and resolves to nothing.
+// not an entity — skipped. That target-shape skip is also what drops a branch
+// push: branchPushAction stamps Provider="github" with a repo-level Target, so it
+// falls out here, not on the provider. Any provider we don't map to an entity
+// grain (the default arm below) likewise resolves to nothing.
 //
 // Writes route System (admin pool / BYPASSRLS), mirroring the tracker's entity
 // writes: the host records actions outside any user's RLS claims on the event
