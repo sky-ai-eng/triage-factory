@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -220,5 +221,85 @@ func TestRefreshJira_EnrichesSnapshotlessStub(t *testing.T) {
 				t.Errorf("quiet seed must emit no events, got %d: %v", len(evts), eventTypes(evts))
 			}
 		})
+	}
+}
+
+// TestRefreshGitHub_StubExitsSeedModeAndDiffsNextCycle closes the loop on the
+// quiet seed: once cycle 1 seeds the node_id, the entity is no longer a stub, so
+// cycle 2 takes the NORMAL diff path — GetPRBasic is not called again, and a real
+// state change (draft → ready) emits its event as usual. This proves the seed is
+// a one-time bootstrap, not a permanent "swallow all events" mode.
+func TestRefreshGitHub_StubExitsSeedModeAndDiffsNextCycle(t *testing.T) {
+	const basicResp = `{
+		"number": 7, "node_id": "PR_node7", "title": "Stub PR",
+		"state": "open", "merged": false,
+		"html_url": "https://github.com/octo/repo/pull/7",
+		"user": {"login": "bob"},
+		"head": {"sha": "sha7", "ref": "feat"}, "base": {"ref": "main"}
+	}`
+	// Cycle 1 seeds a draft snapshot; cycle 2 returns the same PR marked ready.
+	refreshResp := func(draft string) string {
+		return `{"data":{"nodes":[
+			{"id":"PR_node7","number":7,"title":"Stub PR","author":{"login":"bob"},
+			 "state":"OPEN","merged":false,"isDraft":` + draft + `,
+			 "url":"https://github.com/octo/repo/pull/7","repository":{"nameWithOwner":"octo/repo"},
+			 "createdAt":"2026-06-01T00:00:00Z","updatedAt":"2026-06-10T00:00:00Z"}
+		]}}`
+	}
+
+	var graphqlCalls, basicCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/graphql"):
+			// Call 1 (cycle-1 seed) → draft; call 2 (cycle-2 diff) → ready.
+			if atomic.AddInt32(&graphqlCalls, 1) == 1 {
+				_, _ = w.Write([]byte(refreshResp("true")))
+			} else {
+				_, _ = w.Write([]byte(refreshResp("false")))
+			}
+		case strings.Contains(r.URL.Path, "/pulls/7"):
+			atomic.AddInt32(&basicCalls, 1)
+			_, _ = w.Write([]byte(basicResp))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx := context.Background()
+	database := newMigratedSQLite(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+
+	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "octo/repo#7", "pr", "", ""); err != nil {
+		t.Fatalf("seed stub: %v", err)
+	}
+
+	pub := &recordingPublisher{}
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, org)
+	client := ghclient.NewClient(srv.URL, "tok")
+
+	// Cycle 1: quiet seed — no events, and the snapshot now carries the node_id.
+	if _, err := tr.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+		t.Fatalf("RefreshGitHub cycle 1: %v", err)
+	}
+	if evts := pub.nonSystemEvents(); len(evts) != 0 {
+		t.Fatalf("cycle 1 (seed) must emit no events, got %v", eventTypes(evts))
+	}
+	if seeded, _ := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#7"); seeded == nil || !strings.Contains(seeded.SnapshotJSON, "PR_node7") {
+		t.Fatalf("cycle 1 did not seed the node_id: %+v", seeded)
+	}
+
+	// Cycle 2: the entity has a node_id now, so it takes the normal diff path —
+	// no second GetPRBasic, and the draft→ready transition emits its event.
+	if _, err := tr.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+		t.Fatalf("RefreshGitHub cycle 2: %v", err)
+	}
+	if evts := pub.nonSystemEvents(); len(evts) != 1 || evts[0].EventType != domain.EventGitHubPRReadyForReview {
+		t.Errorf("cycle 2 should diff normally and emit [ready_for_review], got %v", eventTypes(evts))
+	}
+	if got := atomic.LoadInt32(&basicCalls); got != 1 {
+		t.Errorf("GetPRBasic calls = %d, want 1 (only the cycle-1 stub resolve; cycle 2 must not re-fetch)", got)
 	}
 }

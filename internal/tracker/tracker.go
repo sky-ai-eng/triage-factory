@@ -431,7 +431,12 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 //
 // Returns ok=false (with a logged reason) when source_id isn't a PR target or
 // the PR can't be read this cycle — the caller skips it and retries next cycle.
-// One extra fetch per stub, only until it carries a node_id.
+// One extra fetch per stub, only until it carries a node_id. Caveat: a PR that
+// is permanently unreadable (deleted, or org-private after the App loses access)
+// never gets a node_id, so ListActiveSystem keeps returning it and it costs one
+// GetPRBasic per cycle indefinitely. Acceptable bound until a stub-staleness /
+// dismiss affordance lands (separate ticket) — a 404 is deliberately NOT treated
+// as terminal here, since a transient permission blip must not close a live PR.
 func (t *Tracker) resolveStubNodeID(ctx context.Context, client *ghclient.Client, e domain.Entity) (nodeID string, terminal, ok bool) {
 	owner, repo, number, parsed := domain.ParsePRTarget(e.SourceID)
 	if !parsed {

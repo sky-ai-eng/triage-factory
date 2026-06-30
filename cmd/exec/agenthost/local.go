@@ -1808,6 +1808,11 @@ func (c *LocalClient) resolveTouchedEntity(ctx context.Context, act *domain.Exte
 	switch act.Provider {
 	case domain.ArtifactProviderGitHub:
 		// owner/repo#N is a PR entity; bare owner/repo is a repo-level action.
+		// NOTE: this assumes every github target is a PR (kind="pr"). Exec only
+		// writes PRs/reviews today, so that holds — but a GitHub *issue* shares
+		// the "owner/repo#N" shape, and the poller's resolveStubNodeID would then
+		// 404 against /pulls/{n} every cycle. GitHub issue support must branch on
+		// kind here (and give the poller an issue-aware enrichment path).
 		if _, _, _, ok := domain.ParsePRTarget(act.Target); !ok {
 			return "", nil
 		}
@@ -1842,7 +1847,7 @@ func (c *LocalClient) recordTouch(ctx context.Context, act *domain.ExternalActio
 	}
 	id, err := c.resolveTouchedEntity(ctx, act)
 	if err != nil {
-		agenthostLog.Warn("touched-entity resolve failed (action already applied)",
+		agenthostLog.Warn("touched-entity resolve failed (will retry on next poll)",
 			"run", c.info.RunID, "target", act.Target, "error", err)
 		return
 	}
