@@ -82,8 +82,9 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 
 	// Admin-pool variant must also honor the data-column filter even
 	// though it bypasses RLS — the impl binds org_id in every WHERE
-	// clause as defense in depth.
-	memsBSystem, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgB, entA)
+	// clause as defense in depth. teamID is orgB's team; the org_id
+	// filter excludes orgA's row before the team branch matters.
+	memsBSystem, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgB, entA, firstTeamForOrg(t, h, orgB))
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntitySystem orgB on orgA entity: %v", err)
 	}
@@ -236,6 +237,125 @@ func TestTaskMemoryStore_Postgres_BlueprintRunCrossOrgFKRejected(t *testing.T) {
 	if mem.BlueprintRunID != blueprintRunA {
 		t.Errorf("BlueprintRunID = %q, want %q", mem.BlueprintRunID, blueprintRunA)
 	}
+}
+
+// TestTaskMemoryStore_Postgres_SystemReadTeamScoped is the TFAC-506 pin:
+// the admin-pool (BYPASSRLS) System read must scope an entity's memory to
+// the materializing run's owning team, NOT return the whole org's memory
+// for that entity. Two teams in ONE org both run on a single SHARED entity
+// (entities are org-wide); each team's run authors its own memory. A System
+// read scoped to team T1 must see only T1's memory — never T2's — and vice
+// versa, matching what the app-pool RLS path (run_memory_all → runs_select)
+// shows a member of that team.
+func TestTaskMemoryStore_Postgres_SystemReadTeamScoped(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID := seedPgTaskMemoryOrg(t, h)
+	promptID := seedPgTaskMemoryPrompt(t, h, orgID, userID)
+
+	team1 := firstTeamForOrg(t, h, orgID)           // the org's default team
+	team2 := seedPgDefaultTeam(t, h, orgID, userID) // a second team in the same org
+
+	// One entity, shared by both teams (entities are org-wide).
+	entityID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Shared Entity', 'https://example/shared', '{}'::jsonb, now(), 'active')
+	`, entityID, orgID, "shared-"+entityID[:8]); err != nil {
+		t.Fatalf("seed shared entity: %v", err)
+	}
+
+	// Each team owns a run on the shared entity and authors its own memory.
+	run1 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team1, entityID, "t1")
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, run1, entityID, "", "team1 narrative"); err != nil {
+		t.Fatalf("UpsertAgentMemorySystem team1: %v", err)
+	}
+	run2 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team2, entityID, "t2")
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, run2, entityID, "", "team2 narrative"); err != nil {
+		t.Fatalf("UpsertAgentMemorySystem team2: %v", err)
+	}
+
+	// A run owned by team1 materializes only team1's memory — team2's is
+	// NOT bled in (the bug: pre-fix the System read returned both).
+	mems1, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, team1)
+	if err != nil {
+		t.Fatalf("GetMemoriesForEntitySystem team1: %v", err)
+	}
+	if len(mems1) != 1 {
+		t.Fatalf("team1 System read returned %d memories, want 1 (team2's must not bleed in): %+v", len(mems1), mems1)
+	}
+	if mems1[0].Content != "team1 narrative" {
+		t.Errorf("team1 System read Content = %q, want %q", mems1[0].Content, "team1 narrative")
+	}
+
+	// Symmetric: a run owned by team2 sees only team2's memory.
+	mems2, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, team2)
+	if err != nil {
+		t.Fatalf("GetMemoriesForEntitySystem team2: %v", err)
+	}
+	if len(mems2) != 1 {
+		t.Fatalf("team2 System read returned %d memories, want 1: %+v", len(mems2), mems2)
+	}
+	if mems2[0].Content != "team2 narrative" {
+		t.Errorf("team2 System read Content = %q, want %q", mems2[0].Content, "team2 narrative")
+	}
+}
+
+// seedPgTeamRunOnEntity seeds the event + task + blueprint + blueprint_run +
+// run FK chain for a run owned by teamID on a PRE-EXISTING entity, returning
+// the runID. Unlike seedPgRunForTaskMemory (which mints a fresh entity and
+// defaults to the org's first team), this takes the entity + team explicitly
+// so two teams can own runs on the same shared entity. suffix discriminates
+// the task's dedup_key so the active-task partial unique index never collides.
+func seedPgTeamRunOnEntity(t *testing.T, h *pgtest.Harness, orgID, userID, promptID, teamID, entityID, suffix string) string {
+	t.Helper()
+	conn := h.AdminDB
+	now := time.Now().UTC()
+
+	eventID := uuid.New().String()
+	const eventType = "github:pr:opened"
+	if _, err := conn.Exec(`
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, $4, '', '{}'::jsonb, $5)
+	`, eventID, orgID, entityID, eventType, now); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+
+	taskID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id,
+		                   status, scoring_status, priority_score, created_at)
+		VALUES ($1, $2, $3, $4, 'team', $5, $6, $7, $8, 'done', 'pending', 0.5, $9)
+	`, taskID, orgID, userID, teamID, entityID, eventType, suffix, eventID, now); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	bpID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, source, name, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'user', 'BP', now(), now())
+	`, bpID, orgID, userID, teamID); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	brID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now(), '[]')
+	`, brID, orgID, userID, bpID, taskID); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+
+	runID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id)
+		VALUES ($1, $2, $3, $4, 'team', $5, $6, 'manual', 'completed', $7)
+	`, runID, orgID, userID, teamID, taskID, promptID, brID); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	return runID
 }
 
 // seedPgTaskMemoryOrg builds the auth user + public user + org +

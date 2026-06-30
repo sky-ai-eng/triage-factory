@@ -41,7 +41,7 @@ func TestMaterializePriorMemories_CreatesDirEvenWithNoPriors(t *testing.T) {
 	}
 
 	const namespace = "run-noprior"
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, cwd, entity.ID, namespace)
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, namespace)
 
 	// The current run's namespace folder is created even with no priors.
 	nsDir := filepath.Join(cwd, "_scratch", "entity-memory", namespace)
@@ -110,7 +110,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 		t.Fatalf("upsert memory: %v", err)
 	}
 
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, cwd, entity.ID, "current-run")
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, "current-run")
 
 	// The prior's namespace is its blueprint_run_id — the file lands under
 	// <blueprint_run_id>/<run_id>.md, never at the top level.
@@ -178,7 +178,7 @@ func TestMaterializePriorMemories_BlueprintSiblingsShareFolder(t *testing.T) {
 
 	// Step 2 starts: materialize priors under step 2's own namespace (the same
 	// shared blueprint_run_id). Step 1's memory must land in that folder.
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, cwd, entity.ID, blueprintRunID)
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, blueprintRunID)
 
 	step1Path := filepath.Join(cwd, "_scratch", "entity-memory", blueprintRunID, "step1-run.md")
 	body, err := os.ReadFile(step1Path)

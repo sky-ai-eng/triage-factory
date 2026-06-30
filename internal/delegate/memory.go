@@ -111,7 +111,7 @@ func readAgentMemoryFile(cwd, namespace, runID string) (string, memoryFileState)
 // cross-run memory benefit. This "advisory" posture only holds for
 // the read side — the write-before-finish gate is enforced separately
 // for NEW memories produced during the run.
-func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, cwd, entityID, namespace string) {
+func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, cwd, entityID, namespace string) {
 	// Create the current run's namespace folder up front so the agent's
 	// pre-flight `ls` and its own memory write both have a parent dir, even
 	// when this entity has no prior memories.
@@ -121,7 +121,10 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, cwd, entityI
 		return
 	}
 
-	memories, err := taskMemory.GetMemoriesForEntitySystem(context.Background(), orgID, entityID)
+	// teamID is THIS run's owning team. The System read scopes the prior
+	// memory to what that team can see, so a run never materializes another
+	// team's run narratives on a shared entity (TFAC-506).
+	memories, err := taskMemory.GetMemoriesForEntitySystem(context.Background(), orgID, entityID, teamID)
 	if err != nil {
 		delegateLog.Warn("load prior memories for entity failed", "entity", entityID, "error", err)
 		return

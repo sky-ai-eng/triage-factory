@@ -61,7 +61,7 @@ func TestTaskMemoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.TaskMemory.GetMemoriesForEntity(ctx, badOrg, "e"); err == nil {
 		t.Error("GetMemoriesForEntity(non-local org) should error")
 	}
-	if _, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, badOrg, "e"); err == nil {
+	if _, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, badOrg, "e", runmode.LocalDefaultTeamID); err == nil {
 		t.Error("GetMemoriesForEntitySystem(non-local org) should error")
 	}
 	if _, err := stores.TaskMemory.GetRunMemory(ctx, badOrg, "r"); err == nil {

@@ -120,7 +120,20 @@ type TaskMemoryStore interface {
 	// spawner's run-start materializer (materializePriorMemories),
 	// which fires inside the runAgent goroutine with no JWT-claims
 	// context. org_id stays in the WHERE clause as defense in depth.
-	GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.TaskMemory, error)
+	//
+	// teamID is the materializing run's owning team (runs.team_id).
+	// The admin pool bypasses RLS, so the app-pool variant's team
+	// scoping (run_memory_all → runs_select) is hand-rolled here: the
+	// result is restricted to memory whose parent run that team can see
+	// — team-visible runs owned by teamID plus any org-visible run —
+	// matching what a member of that team sees in the UI (TFAC-506).
+	// Without this, the System path returned ALL of the org's memory
+	// for the entity, leaking other teams' run narratives into a run
+	// they don't own. Private-visibility runs are excluded: they're
+	// creator-scoped and the System path carries no user to match.
+	// SQLite (N=1, single team) ignores teamID — no cross-team bleed is
+	// possible locally.
+	GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error)
 
 	// GetRunMemory returns the single memory row for a run, or nil
 	// when no row exists. Same materialization contract as

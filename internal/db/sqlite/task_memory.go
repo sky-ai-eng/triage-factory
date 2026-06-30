@@ -114,7 +114,13 @@ func (s *taskMemoryStore) GetMemoriesForEntity(ctx context.Context, orgID, entit
 	return getMemoriesForEntity(ctx, s.q, entityID)
 }
 
-func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.TaskMemory, error) {
+// GetMemoriesForEntitySystem ignores teamID: local mode is single-tenant
+// (N=1, one team), so there is no cross-team memory to scope out — every
+// run on the entity belongs to the lone team. The param exists for parity
+// with the Postgres store, where the admin pool bypasses RLS and must
+// hand-roll the team filter off the materializing run's team_id (TFAC-506).
+func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
+	_ = teamID
 	return s.GetMemoriesForEntity(ctx, orgID, entityID)
 }
 

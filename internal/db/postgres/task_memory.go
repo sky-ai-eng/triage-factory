@@ -140,8 +140,12 @@ func (s *taskMemoryStore) GetMemoriesForEntity(ctx context.Context, orgID, entit
 	return getMemoriesForEntity(ctx, s.q, orgID, entityID)
 }
 
-func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.TaskMemory, error) {
-	return getMemoriesForEntity(ctx, s.admin, orgID, entityID)
+// GetMemoriesForEntitySystem reads on the admin pool (BYPASSRLS), so the
+// team scoping the app-pool variant inherits from RLS (run_memory_all
+// delegates to runs_select) is hand-rolled here off the materializing
+// run's owning team_id. See getMemoriesForEntityTeamScoped + TFAC-506.
+func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
+	return getMemoriesForEntityTeamScoped(ctx, s.admin, orgID, entityID, teamID)
 }
 
 func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string) ([]domain.TaskMemory, error) {
@@ -162,7 +166,48 @@ func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string
 		return nil, err
 	}
 	defer rows.Close()
+	return scanTaskMemories(rows)
+}
 
+// getMemoriesForEntityTeamScoped is the admin-pool (BYPASSRLS) read that
+// reproduces, without RLS, the team scoping the app-pool path gets for
+// free: a JOIN to the parent run plus the visibility branches of
+// runs_select. The materializing run has no JWT-claims context, so we
+// scope by its owning team_id directly — return the memory whose parent
+// run that team can see: any org-visible run, plus team-visible runs the
+// team owns. Private-visibility runs are excluded (creator-scoped, no
+// user to match here; every run is visibility='team' today, so the 'org'
+// arm is forward-compat). teamID binds through NULLIF(...)::uuid so an
+// (in practice impossible) empty team_id degrades to "org-visible only"
+// rather than a uuid cast error. org_id stays in the WHERE clause and on
+// the JOIN as defense in depth alongside the now-bypassed RLS policy.
+func getMemoriesForEntityTeamScoped(ctx context.Context, q queryer, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
+	rows, err := q.QueryContext(ctx, `
+		WITH related AS (
+			SELECT id FROM entities WHERE org_id = $1 AND id = $2
+			UNION
+			SELECT to_entity_id FROM entity_links WHERE org_id = $1 AND from_entity_id = $2
+			UNION
+			SELECT from_entity_id FROM entity_links WHERE org_id = $1 AND to_entity_id = $2
+		)
+		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
+		FROM run_memory rm
+		JOIN runs r ON r.id = rm.run_id AND r.org_id = rm.org_id
+		WHERE rm.org_id = $1
+		  AND rm.entity_id IN (SELECT id FROM related)
+		  AND (r.visibility = 'org' OR (r.visibility = 'team' AND r.team_id = NULLIF($3, '')::uuid))
+		ORDER BY rm.created_at ASC
+	`, orgID, entityID, teamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTaskMemories(rows)
+}
+
+// scanTaskMemories drains a run_memory result set (the column list the
+// two entity reads above share) into materialized TaskMemory rows.
+func scanTaskMemories(rows *sql.Rows) ([]domain.TaskMemory, error) {
 	var out []domain.TaskMemory
 	for rows.Next() {
 		var m domain.TaskMemory
