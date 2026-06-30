@@ -435,10 +435,11 @@ export default function TaskRuleEditor({
                             exit={{ opacity: 0, height: 0 }}
                             className="overflow-hidden text-[11px] leading-relaxed text-amber-700 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 mt-2"
                           >
-                            This rule will create tasks for PRs and issues authored by anyone,
-                            including people outside your team — expect significantly higher volume.
-                            If you also auto-delegate this event, the bot may act on PRs and issues
-                            no one on your team owns.
+                            This rule surfaces matching PRs and issues authored by anyone —
+                            including people on other teams and outside contributors — so expect
+                            significantly higher volume. If you also auto-delegate this event, the
+                            bot acts only on the ones no one in your Triage Factory org owns (e.g.
+                            dependabot or external contributors), never on a PR a member owns.
                           </motion.p>
                         )}
                       </AnimatePresence>
