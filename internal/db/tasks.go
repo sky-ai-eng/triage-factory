@@ -178,11 +178,6 @@ type TaskStore interface {
 	// "auto_closed_by_event"). No-op on terminal rows.
 	Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
 
-	// CloseAllForEntity closes every non-terminal task on an entity
-	// with the given close reason. Returns the number closed. Used
-	// by entity lifecycle (close_reason="entity_closed").
-	CloseAllForEntity(ctx context.Context, orgID, entityID, closeReason string) (int, error)
-
 	// SetStatus updates the lifecycle status only — claim cols are
 	// unaffected. Post-SKY-261 B+ the only production caller is
 	// revertTaskStatus in DrainEntity's mark-fired-failure rollback;
@@ -308,7 +303,6 @@ type TaskStore interface {
 	SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) error
 	BumpSystem(ctx context.Context, orgID, taskID, eventID string) error
 	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
-	CloseAllForEntitySystem(ctx context.Context, orgID, entityID, closeReason string) (int, error)
 	SetStatusSystem(ctx context.Context, orgID, taskID, status string) error
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
 	CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)

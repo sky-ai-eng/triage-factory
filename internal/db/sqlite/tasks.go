@@ -259,10 +259,6 @@ func (s *taskStore) CloseSystem(ctx context.Context, orgID, taskID, closeReason,
 	return s.Close(ctx, orgID, taskID, closeReason, closeEventType)
 }
 
-func (s *taskStore) CloseAllForEntitySystem(ctx context.Context, orgID, entityID, closeReason string) (int, error) {
-	return s.CloseAllForEntity(ctx, orgID, entityID, closeReason)
-}
-
 func (s *taskStore) SetStatusSystem(ctx context.Context, orgID, taskID, status string) error {
 	return s.SetStatus(ctx, orgID, taskID, status)
 }
@@ -511,22 +507,6 @@ func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, close
 		WHERE id = ? AND status NOT IN ('done', 'dismissed')
 	`, closeReason, cet, now, taskID)
 	return err
-}
-
-func (s *taskStore) CloseAllForEntity(ctx context.Context, orgID, entityID, closeReason string) (int, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return 0, err
-	}
-	now := time.Now()
-	result, err := s.q.ExecContext(ctx, `
-		UPDATE tasks SET status = 'done', close_reason = ?, closed_at = ?
-		WHERE entity_id = ? AND status NOT IN ('done', 'dismissed')
-	`, closeReason, now, entityID)
-	if err != nil {
-		return 0, err
-	}
-	n, _ := result.RowsAffected()
-	return int(n), nil
 }
 
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) error {

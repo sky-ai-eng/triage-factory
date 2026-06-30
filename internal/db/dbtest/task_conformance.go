@@ -386,22 +386,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	t.Run("CloseAllForEntity_counts_and_closes", func(t *testing.T) {
-		s, orgID, _, _, _, seed, _ := mk(t)
-		entityID, _, taskID := seed(t, "closeall")
-		closed, err := s.CloseAllForEntity(ctx, orgID, entityID, "entity_closed")
-		if err != nil {
-			t.Fatalf("CloseAllForEntity: %v", err)
-		}
-		if closed < 1 {
-			t.Errorf("closed count=%d, want >=1", closed)
-		}
-		got, _ := s.Get(ctx, orgID, taskID)
-		if got.Status != "done" {
-			t.Errorf("status=%q post-CloseAllForEntity, want done", got.Status)
-		}
-	})
-
 	t.Run("FindActiveByEntity_excludes_terminal", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		entityID, _, taskID := seed(t, "fab")

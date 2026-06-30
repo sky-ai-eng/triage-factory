@@ -48,18 +48,29 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		evt.ID = id
 	}
 
-	// Entity-lifecycle gates — terminating events close the entity,
-	// system events and closed entities create no task.
+	// Entity-lifecycle gate — system events and already-closed entities create
+	// nothing. A terminating event is gated here while its entity is STILL
+	// active (it is what closes the entity, in the close phase below), so it
+	// passes; only later stragglers on the now-closed entity drop.
 	entityID, ok := r.routableEntity(orgID, evt)
 	if !ok {
 		return
 	}
 
-	// Inline close checks run unconditionally — they are lifecycle signals that
-	// close stale tasks. They must fire even when no task_rules or triggers
-	// match, because close-signal events (ci_check_passed, a submitted review,
-	// review_request_removed) are not task-creating events.
-	if r.runInlineCloseChecks(orgID, evt, entityID) {
+	// Close phase — runs unconditionally, before routing, and independent of
+	// whether any handler matches. It closes the tasks this event resolves
+	// (typed siblings like ci_check_passed→ci_check_failed, and/or the
+	// entity-wide set for a terminating event) and reports whether the entity
+	// should flip closed. Closing and routing are orthogonal: the same event
+	// goes on to create/fire its own task below (the close runs first, so a
+	// terminating event clears prior work before minting its riding task).
+	closedAny, terminate := r.runCloses(orgID, evt, entityID)
+	if terminate {
+		if err := r.entities.CloseSystem(context.Background(), orgID, entityID); err != nil {
+			lifecycleLog.Error("entity close failed", "entity_id", entityID, "error", err)
+		}
+	}
+	if closedAny {
 		r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
 	}
 
@@ -88,26 +99,18 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	r.fireMatchedTriggers(orgID, evt, entityID, task, routing)
 }
 
-// routableEntity applies the entity-lifecycle gates that precede task
-// creation. It returns the active entity's id with ok=true when the event
-// should proceed to handler matching; ok=false (after performing any required
-// side effects) when it should not:
-//   - an entity-terminating event closes the entity + cascade-closes its tasks
-//     (and broadcasts), then stops — no task creation on a closing entity;
-//   - a system event (no entity context) creates no task;
-//   - a late event on an already-closed entity is recorded but spawns nothing.
+// routableEntity is the entity-lifecycle gate that precedes the close + route
+// phases. It returns the active entity's id with ok=true when the event should
+// proceed; ok=false when it should not:
+//   - a system event (no entity context) creates nothing;
+//   - an event on an already-closed entity is recorded but spawns nothing — a
+//     straggler that arrived after the PR/issue terminated.
+//
+// A terminating event is NOT special-cased here: it reaches this gate while its
+// entity is still active (the close it performs happens in the close phase that
+// follows), so it passes and goes on to close + route. Closing the entity is
+// the close phase's job, not the gate's.
 func (r *Router) routableEntity(orgID string, evt domain.Event) (string, bool) {
-	if evt.EntityID != nil && EntityTerminatingEvents[evt.EventType] {
-		closed, err := r.closeEntity(orgID, *evt.EntityID)
-		if err != nil {
-			routerLog.Error("entity lifecycle error", "entity_id", *evt.EntityID, "error", err)
-		}
-		if closed > 0 {
-			r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
-		}
-		return "", false
-	}
-
 	if evt.EntityID == nil {
 		return "", false
 	}
