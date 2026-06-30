@@ -500,41 +500,50 @@ func ownerLadderRouting(owner string, ownerSet []string, matchedRules []domain.E
 	return sortedKeys(vis), owner, orderedTeams, maxRuleDefaultPriority(matchedRules), true
 }
 
-// teamRulePriorityScore is the per-team ranking signal for the deterministic
-// firing order: the max DefaultPriority across teamID's matched rules, falling
-// back to the 0.5 trigger-default when the team contributed only triggers (no
-// rule carries a priority). Shared by the handler-team path (resolveTeamRouting)
-// and the ambiguous owner-ladder path (orderTeamsByRulePriority) so both rank
-// teams the same way.
-func teamRulePriorityScore(teamID string, matchedRules []domain.EventHandler) float64 {
-	s := 0.5
+// teamRulePriorityScores computes, for each team in vis, the per-team ranking
+// signal for the deterministic firing order: the max DefaultPriority across that
+// team's matched rules, falling back to the 0.5 trigger-default when the team
+// contributed only triggers (no rule carries a priority). Built in a SINGLE pass
+// over matchedRules so handlerTeamID — which logs a warning on a legacy/fixture
+// empty team_id — runs once per rule, never once per sort comparison (a
+// comparator calling it would log O(n log n) times per event). Shared by the
+// handler-team path (resolveTeamRouting) and the ambiguous owner-ladder path
+// (orderTeamsByRulePriority) so both rank teams the same way.
+func teamRulePriorityScores(vis map[string]struct{}, matchedRules []domain.EventHandler) map[string]float64 {
+	scores := make(map[string]float64, len(vis))
+	for t := range vis {
+		scores[t] = 0.5
+	}
 	for _, rule := range matchedRules {
-		if handlerTeamID(rule) != teamID {
-			continue
-		}
-		if rule.DefaultPriority != nil && *rule.DefaultPriority > s {
-			s = *rule.DefaultPriority
+		tid := handlerTeamID(rule)
+		if cur, ok := scores[tid]; ok && rule.DefaultPriority != nil && *rule.DefaultPriority > cur {
+			scores[tid] = *rule.DefaultPriority
 		}
 	}
-	return s
+	return scores
 }
 
-// orderTeamsByRulePriority orders a visibility set into the deterministic
-// firing order: max matched-rule DefaultPriority desc, ties broken by lowest
-// team id. It mirrors the handler-team path's ranking (resolveTeamRouting) so
-// an ambiguous owner-ladder task (NULL owner, multiple visible teams) fires in
-// the same order a multi-team handler-team task would — the first team wins the
-// exclusive claim and consolidates the owner via the fire.
-func orderTeamsByRulePriority(vis map[string]struct{}, matchedRules []domain.EventHandler) []string {
-	teams := sortedKeys(vis)
+// orderTeamsByScores sorts teams into the deterministic firing order from a
+// precomputed score map: priority desc, ties broken by lowest team id. The sort
+// reads only the map, so it does no per-comparison work beyond a lookup.
+func orderTeamsByScores(teams []string, scores map[string]float64) []string {
 	sort.SliceStable(teams, func(i, j int) bool {
-		si, sj := teamRulePriorityScore(teams[i], matchedRules), teamRulePriorityScore(teams[j], matchedRules)
-		if si != sj {
-			return si > sj
+		if scores[teams[i]] != scores[teams[j]] {
+			return scores[teams[i]] > scores[teams[j]]
 		}
 		return teams[i] < teams[j]
 	})
 	return teams
+}
+
+// orderTeamsByRulePriority orders a visibility set into the deterministic firing
+// order (max matched-rule DefaultPriority desc, ties broken by lowest team id).
+// It mirrors the handler-team path's ranking (resolveTeamRouting) so an
+// ambiguous owner-ladder task (NULL owner, multiple visible teams) fires in the
+// same order a multi-team handler-team task would — the first team wins the
+// exclusive claim and consolidates the owner via the fire.
+func orderTeamsByRulePriority(vis map[string]struct{}, matchedRules []domain.EventHandler) []string {
+	return orderTeamsByScores(sortedKeys(vis), teamRulePriorityScores(vis, matchedRules))
 }
 
 // latestActiveOwnedTaskTeam returns the owning team of the most recently

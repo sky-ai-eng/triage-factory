@@ -234,11 +234,14 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 	// highest-priority matched team — and triggers fire in this order, so the
 	// team that wins the exclusive claim (and thus consolidates as owner) is
 	// deterministic and matches the creation-time owner pick. A team with only
-	// triggers contributes the 0.5 trigger-fallback priority. The same ranking
-	// helper orders the ambiguous owner-ladder path (orderTeamsByRulePriority).
-	orderedTeams := orderTeamsByRulePriority(seen, matchedRules)
+	// triggers contributes the 0.5 trigger-fallback priority. The score map is
+	// built once (handlerTeamID runs once per rule, not once per comparison) and
+	// reused for both the order and the owner's seed priority; the same helpers
+	// rank the ambiguous owner-ladder path (orderTeamsByRulePriority).
+	scores := teamRulePriorityScores(seen, matchedRules)
+	orderedTeams := orderTeamsByScores(sortedKeys(seen), scores)
 	ownerTeam := orderedTeams[0]
-	taskPriority := teamRulePriorityScore(ownerTeam, matchedRules)
+	taskPriority := scores[ownerTeam]
 
 	switch {
 	case evt.EventType == domain.EventGitHubPRReviewRequested:
