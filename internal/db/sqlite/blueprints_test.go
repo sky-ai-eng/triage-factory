@@ -280,6 +280,34 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 		t.Errorf("manual actor round-trip = %q, want %q", got.ActorAgentID, agentID)
 	}
 
+	// Fenced event insert (CreateRunIfNotFiredSystem — the auto-fire hot path)
+	// carries the actor too. Needs a real triggering_event_id (the task's event)
+	// and trigger_id (an event_handler) for the fence FKs.
+	var eventID string
+	if err := conn.QueryRow(`SELECT primary_event_id FROM tasks WHERE id = ?`, task.ID).Scan(&eventID); err != nil {
+		t.Fatalf("read task event id: %v", err)
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO event_handlers (id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability, enabled, source, creator_user_id, team_id)
+		VALUES ('actor-trig', 'trigger', ?, 'actor-bp', 4, 0, 1, 'user', ?, ?)
+	`, domain.EventGitHubPRCICheckFailed, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("seed trigger: %v", err)
+	}
+	if inserted, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, org, domain.BlueprintRun{
+		ID: "actor-bpr-ev", BlueprintID: "actor-bp", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerEvent, TriggerID: "actor-trig", TriggeringEventID: eventID,
+		Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-actor-ev", ActorAgentID: agentID,
+	}); err != nil || !inserted {
+		t.Fatalf("CreateRunIfNotFiredSystem = (%v, %v), want (true, nil)", inserted, err)
+	}
+	ev, err := stores.Blueprints.GetRun(ctx, org, "actor-bpr-ev")
+	if err != nil || ev == nil {
+		t.Fatalf("GetRun (event) = (%v, %v)", ev, err)
+	}
+	if ev.ActorAgentID != agentID {
+		t.Errorf("event (fenced) actor round-trip = %q, want %q", ev.ActorAgentID, agentID)
+	}
+
 	// No actor → empty, not an error.
 	if _, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "actor-bpr-none", BlueprintID: "actor-bp", TaskID: task.ID,
