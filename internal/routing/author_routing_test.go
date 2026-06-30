@@ -350,51 +350,32 @@ func TestAuthorCentric_ExternalAuthor_WatchRuleSurfaces(t *testing.T) {
 	}
 }
 
-// TestAuthorCentric_NullOwner_NoAutoFire pins the auto-fire gate: an
-// unresolved-owner task (author on two teams) does not auto-delegate even with
-// an enabled trigger — the bot never claims an unowned task. Resolution waits
-// for a human claim.
-func TestAuthorCentric_NullOwner_NoAutoFire(t *testing.T) {
+// TestAuthorCentric_TwoTeams_FiresDeterministically is the TFAC-514 headline
+// repro: an author on two teams, each with an enabled ci-fix trigger, no prior
+// owner. The task is created NULL-owned but — unlike before — fires
+// deterministically rather than not at all: exactly one team's trigger runs
+// (the deterministic order winner: equal priority → lowest team id), and the
+// fire consolidates the NULL owner onto that team.
+func TestAuthorCentric_TwoTeams_FiresDeterministically(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
 	setReviewHost(t, database)
-	st := sqlitestore.New(database)
 
 	teamA := seedTeam(t, database, "team-a")
 	teamB := seedTeam(t, database, "team-b")
 	seedUserOnTeam(t, database, teamA, "aidan")
-	seedUserOnTeam(t, database, teamB, "aidan") // two teams → NULL owner
+	seedUserOnTeam(t, database, teamB, "aidan") // author on two teams → ambiguous owner
 
-	// Both teams fully opt into auto-delegation and have an immediate trigger.
-	if _, err := database.Exec(`INSERT INTO team_settings (team_id, auto_delegate_enabled) VALUES (?, 1), (?, 1)`, teamA, teamB); err != nil {
-		t.Fatalf("seed team settings: %v", err)
-	}
-	if _, err := database.Exec(`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Bot')`, runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID); err != nil {
-		t.Fatalf("seed agent: %v", err)
-	}
-	for _, tm := range []string{teamA, teamB} {
-		if err := st.TeamAgents.AddForTeam(context.Background(), runmode.LocalDefaultOrgID, tm, runmode.LocalDefaultAgentID); err != nil {
-			t.Fatalf("add agent to %s: %v", tm, err)
-		}
-		pid := "p-nf-" + tm[:8]
-		insertPromptForTeam(t, database, pid, tm)
-		bp := insertBlueprintForTeam(t, database, "bp-nf-"+tm[:8], pid, tm)
-		if _, err := database.Exec(`
-			INSERT INTO event_handlers
-				(id, org_id, team_id, creator_user_id, kind, event_type,
-				 scope_predicate_json, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
-			VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
-		`, "trig-nf-"+tm[:8], runmode.LocalDefaultOrgID, tm, runmode.LocalDefaultUserID,
-			domain.EventGitHubPRCICheckFailed, bp); err != nil {
-			t.Fatalf("seed trigger for %s: %v", tm, err)
-		}
-	}
+	// Both teams fully opt into auto-delegation and have an immediate ci-fix
+	// trigger. No rules → both tie at the 0.5 trigger-default priority, so the
+	// deterministic firing order falls to lowest team id.
+	enableTeamAutoDelegate(t, database, teamA, teamB)
+	seedImmediateTrigger(t, database, teamA, domain.EventGitHubPRCICheckFailed, "ci-a")
+	seedImmediateTrigger(t, database, teamB, domain.EventGitHubPRCICheckFailed, "ci-b")
 
-	entityID := reviewEntity(t, database, "owner/repo#nofire")
+	entityID := reviewEntity(t, database, "owner/repo#fires")
 	stub := &stubDelegator{db: database}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		st.Agents, st.TeamAgents, st.Users, testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
-		st.Orgs, st.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	router := firingRouter(database, stub)
 
 	emitCI(router, entityID, "aidan")
 
@@ -402,14 +383,171 @@ func TestAuthorCentric_NullOwner_NoAutoFire(t *testing.T) {
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
-	if active[0].TeamID != nil {
-		t.Errorf("owner = %v, want nil (unresolved)", *active[0].TeamID)
+	// Exactly one team's blueprint ran (the exclusive claim CAS serializes the
+	// two firing teams) and the owner consolidated to the deterministic winner.
+	if stub.calls != 1 {
+		t.Fatalf("expected exactly 1 fire (deterministic), got %d", stub.calls)
 	}
-	if active[0].ClaimedByAgentID != "" {
-		t.Errorf("task was bot-claimed (%q); an unowned task must not auto-fire", active[0].ClaimedByAgentID)
+	want := minStr(teamA, teamB)
+	if teamIDValue(&active[0]) != want {
+		t.Errorf("owner = %q after fire, want the deterministic winner %q (priority tie → lowest team id)", teamIDValue(&active[0]), want)
 	}
-	if stub.calls != 0 {
-		t.Errorf("Delegate called %d times; an unowned task must not auto-fire", stub.calls)
+	if active[0].ClaimedByAgentID == "" {
+		t.Error("task should be bot-claimed by the firing team")
+	}
+	// Still visible to both teams — the loser keeps its queue visibility.
+	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 2 {
+		t.Errorf("visibility = %v, want both teams", vis)
+	}
+}
+
+// TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent pins that tier-3 anchoring
+// still works after the TFAC-514 deterministic fire: a multi-team author's first
+// event consolidates the owner onto the firing team, and a second author-centric
+// event on the same entity resolves to that same team via tier 3 (the prior
+// owned author-centric task), not back to the ambiguous author tier.
+func TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	setReviewHost(t, database)
+
+	teamA := seedTeam(t, database, "team-a")
+	teamB := seedTeam(t, database, "team-b")
+	seedUserOnTeam(t, database, teamA, "aidan")
+	seedUserOnTeam(t, database, teamB, "aidan") // author on two teams → ambiguous owner
+	enableTeamAutoDelegate(t, database, teamA, teamB)
+	seedImmediateTrigger(t, database, teamA, domain.EventGitHubPRCICheckFailed, "ci-a")
+	seedImmediateTrigger(t, database, teamB, domain.EventGitHubPRCICheckFailed, "ci-b")
+	// A conflicts rule on each team gates creation of the second task (no
+	// trigger → it won't fire, we only assert its owner).
+	seedSystemRule(t, database, teamA, domain.EventGitHubPRConflicts)
+	seedSystemRule(t, database, teamB, domain.EventGitHubPRConflicts)
+
+	entityID := reviewEntity(t, database, "owner/repo#anchorfire")
+	stub := &stubDelegator{db: database}
+	router := firingRouter(database, stub)
+
+	// First CI failure: ambiguous owner → deterministic team fires and
+	// consolidates ownership onto itself.
+	emitCI(router, entityID, "aidan")
+	ci, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventGitHubPRCICheckFailed)
+	if err != nil || len(ci) != 1 {
+		t.Fatalf("expected 1 CI task, got %d (err=%v)", len(ci), err)
+	}
+	winner := teamIDValue(&ci[0])
+	if winner == "" {
+		t.Fatalf("owner not consolidated after fire")
+	}
+
+	// Second author-centric event (conflicts): tier 3 anchors it to the
+	// consolidated owner, even though the author still maps to both teams.
+	conflictMeta, _ := json.Marshal(events.GitHubPRConflictsMetadata{Author: "aidan", Repo: "owner/repo"})
+	router.HandleEvent(domain.Event{
+		EventType:    domain.EventGitHubPRConflicts,
+		EntityID:     &entityID,
+		MetadataJSON: string(conflictMeta),
+		OrgID:        runmode.LocalDefaultOrgID,
+	})
+	conflicts, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventGitHubPRConflicts)
+	if err != nil || len(conflicts) != 1 {
+		t.Fatalf("expected 1 conflicts task, got %d (err=%v)", len(conflicts), err)
+	}
+	if teamIDValue(&conflicts[0]) != winner {
+		t.Errorf("conflicts owner = %q, want the consolidated team %q (tier-3 anchor)", teamIDValue(&conflicts[0]), winner)
+	}
+}
+
+// TestOwnerLadderRouting_AmbiguousOwner_OrdersByPriorityThenID is the unit-level
+// guard for the TFAC-514 change: an ambiguous owner (identity on multiple teams)
+// yields a NULL ownerTeam at creation but a populated, deterministically-ordered
+// orderedTeams — max matched-rule DefaultPriority desc, then lowest team id —
+// so a multi-team-ambiguous event fires deterministically instead of not at all.
+func TestOwnerLadderRouting_AmbiguousOwner_OrdersByPriorityThenID(t *testing.T) {
+	hi, lo := floatPtr(0.9), floatPtr(0.5)
+	// team-z carries the higher-priority rule but the lexically later id;
+	// team-a the lower priority but earlier id. Priority must beat id order.
+	rules := []domain.EventHandler{
+		{TeamID: "team-z", Source: domain.EventHandlerSourceUser, DefaultPriority: hi},
+		{TeamID: "team-a", Source: domain.EventHandlerSourceUser, DefaultPriority: lo},
+	}
+	vis, owner, ordered, _, ok := ownerLadderRouting("", []string{"team-a", "team-z"}, rules)
+	if !ok {
+		t.Fatal("ownerLadderRouting ok=false, want a routable task")
+	}
+	if owner != "" {
+		t.Errorf("ownerTeam = %q, want \"\" (NULL at creation for an ambiguous owner)", owner)
+	}
+	if len(vis) != 2 {
+		t.Errorf("visibleTeams = %v, want both teams", vis)
+	}
+	if len(ordered) != 2 || ordered[0] != "team-z" || ordered[1] != "team-a" {
+		t.Errorf("orderedTeams = %v, want [team-z team-a] (priority desc beats team-id asc)", ordered)
+	}
+
+	// Priority tie → lowest team id first.
+	tie := []domain.EventHandler{
+		{TeamID: "team-z", Source: domain.EventHandlerSourceUser, DefaultPriority: lo},
+		{TeamID: "team-a", Source: domain.EventHandlerSourceUser, DefaultPriority: lo},
+	}
+	_, _, tieOrdered, _, _ := ownerLadderRouting("", []string{"team-a", "team-z"}, tie)
+	if len(tieOrdered) != 2 || tieOrdered[0] != "team-a" || tieOrdered[1] != "team-z" {
+		t.Errorf("tie orderedTeams = %v, want [team-a team-z] (equal priority → lowest team id)", tieOrdered)
+	}
+
+	// Resolved (unambiguous) owner: orderedTeams is exactly the owner — watcher
+	// teams get visibility but never firing rights.
+	_, _, resolvedOrdered, _, _ := ownerLadderRouting("team-a", []string{"team-a"}, rules)
+	if len(resolvedOrdered) != 1 || resolvedOrdered[0] != "team-a" {
+		t.Errorf("resolved-owner orderedTeams = %v, want [team-a] only", resolvedOrdered)
+	}
+}
+
+// firingRouter wires a router with both the identity-routing stores (Users,
+// Teams, Orgs, TeamGitHubGroups) and the delegation stores (Agents, TeamAgents)
+// plus a stub delegator, for tests that exercise the auto-fire +
+// owner-consolidation path end to end.
+func firingRouter(database *sql.DB, stub *stubDelegator) *Router {
+	st := sqlitestore.New(database)
+	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
+		st.Agents, st.TeamAgents, st.Users, testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
+		st.Orgs, st.Teams, nil, nil, st.TeamGitHubGroups, stub, noopScorer{}, websocket.NewHub())
+}
+
+// enableTeamAutoDelegate opts each team fully into auto-delegation: a
+// team_settings row with the flag on plus the local agent attached to the team.
+func enableTeamAutoDelegate(t *testing.T, database *sql.DB, teams ...string) {
+	t.Helper()
+	st := sqlitestore.New(database)
+	if _, err := database.Exec(`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	for _, tm := range teams {
+		if _, err := database.Exec(`INSERT OR IGNORE INTO team_settings (team_id, auto_delegate_enabled) VALUES (?, 1)`, tm); err != nil {
+			t.Fatalf("seed team settings %s: %v", tm, err)
+		}
+		if err := st.TeamAgents.AddForTeam(context.Background(), runmode.LocalDefaultOrgID, tm, runmode.LocalDefaultAgentID); err != nil {
+			t.Fatalf("add agent to %s: %v", tm, err)
+		}
+	}
+}
+
+// seedImmediateTrigger seeds an enabled event trigger (min_autonomy_suitability
+// 0 → fires immediately, no post-scoring deferral) for eventType on teamID,
+// backed by its own team-owned prompt+blueprint (the same-team FK). idSuffix
+// disambiguates several triggers within one test.
+func seedImmediateTrigger(t *testing.T, database *sql.DB, teamID, eventType, idSuffix string) {
+	t.Helper()
+	pid := "p-" + idSuffix
+	insertPromptForTeam(t, database, pid, teamID)
+	bp := insertBlueprintForTeam(t, database, "bp-"+idSuffix, pid, teamID)
+	if _, err := database.Exec(`
+		INSERT INTO event_handlers
+			(id, org_id, team_id, creator_user_id, kind, event_type,
+			 scope_predicate_json, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
+	`, "trig-"+idSuffix, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, eventType, bp); err != nil {
+		t.Fatalf("seed trigger %s for %s: %v", idSuffix, teamID, err)
 	}
 }
 

@@ -484,9 +484,57 @@ func ownerLadderRouting(owner string, ownerSet []string, matchedRules []domain.E
 		return nil, "", nil, 0, false
 	}
 	if owner != "" {
+		// Unambiguous owner: only the owner's automation fires. Watcher teams
+		// (in vis via an explicit user rule) see the card but don't fire.
 		orderedTeams = []string{owner}
+	} else {
+		// Ambiguous owner (identity maps to multiple teams): fire
+		// deterministically rather than not at all. Order the visible teams by
+		// the same signal the handler-team path uses — max matched-rule
+		// DefaultPriority desc, then lowest team id — so the first team to win
+		// the exclusive claim is deterministic, and the fire consolidates the
+		// NULL owner onto it (delegation.go SetOwnerTeamSystem). If no team
+		// auto-fires, the task stays NULL-owned for the first human claim.
+		orderedTeams = orderTeamsByRulePriority(vis, matchedRules)
 	}
 	return sortedKeys(vis), owner, orderedTeams, maxRuleDefaultPriority(matchedRules), true
+}
+
+// teamRulePriorityScore is the per-team ranking signal for the deterministic
+// firing order: the max DefaultPriority across teamID's matched rules, falling
+// back to the 0.5 trigger-default when the team contributed only triggers (no
+// rule carries a priority). Shared by the handler-team path (resolveTeamRouting)
+// and the ambiguous owner-ladder path (orderTeamsByRulePriority) so both rank
+// teams the same way.
+func teamRulePriorityScore(teamID string, matchedRules []domain.EventHandler) float64 {
+	s := 0.5
+	for _, rule := range matchedRules {
+		if handlerTeamID(rule) != teamID {
+			continue
+		}
+		if rule.DefaultPriority != nil && *rule.DefaultPriority > s {
+			s = *rule.DefaultPriority
+		}
+	}
+	return s
+}
+
+// orderTeamsByRulePriority orders a visibility set into the deterministic
+// firing order: max matched-rule DefaultPriority desc, ties broken by lowest
+// team id. It mirrors the handler-team path's ranking (resolveTeamRouting) so
+// an ambiguous owner-ladder task (NULL owner, multiple visible teams) fires in
+// the same order a multi-team handler-team task would — the first team wins the
+// exclusive claim and consolidates the owner via the fire.
+func orderTeamsByRulePriority(vis map[string]struct{}, matchedRules []domain.EventHandler) []string {
+	teams := sortedKeys(vis)
+	sort.SliceStable(teams, func(i, j int) bool {
+		si, sj := teamRulePriorityScore(teams[i], matchedRules), teamRulePriorityScore(teams[j], matchedRules)
+		if si != sj {
+			return si > sj
+		}
+		return teams[i] < teams[j]
+	})
+	return teams
 }
 
 // latestActiveOwnedTaskTeam returns the owning team of the most recently

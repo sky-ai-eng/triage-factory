@@ -234,27 +234,11 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 	// highest-priority matched team — and triggers fire in this order, so the
 	// team that wins the exclusive claim (and thus consolidates as owner) is
 	// deterministic and matches the creation-time owner pick. A team with only
-	// triggers contributes the 0.5 trigger-fallback priority.
-	orderedTeams := make([]string, len(visibleTeams))
-	copy(orderedTeams, visibleTeams)
-	teamScore := func(teamID string) float64 {
-		s := 0.5
-		for _, rule := range teamRules[teamID] {
-			if rule.DefaultPriority != nil && *rule.DefaultPriority > s {
-				s = *rule.DefaultPriority
-			}
-		}
-		return s
-	}
-	sort.SliceStable(orderedTeams, func(i, j int) bool {
-		si, sj := teamScore(orderedTeams[i]), teamScore(orderedTeams[j])
-		if si != sj {
-			return si > sj
-		}
-		return orderedTeams[i] < orderedTeams[j]
-	})
+	// triggers contributes the 0.5 trigger-fallback priority. The same ranking
+	// helper orders the ambiguous owner-ladder path (orderTeamsByRulePriority).
+	orderedTeams := orderTeamsByRulePriority(seen, matchedRules)
 	ownerTeam := orderedTeams[0]
-	taskPriority := teamScore(ownerTeam)
+	taskPriority := teamRulePriorityScore(ownerTeam, matchedRules)
 
 	switch {
 	case evt.EventType == domain.EventGitHubPRReviewRequested:
@@ -266,9 +250,19 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 				routerLog.Warn("review_requested: requested identity maps to no tf team, recording event but no task", "entity_id", entityID)
 				return eventRouting{}, false
 			}
+			// NULL owner at creation, like the author-/assignee-centric ladders:
+			// the task is created unowned and visible to all the reviewer's
+			// teams. fireMatchedTriggers walks orderedTeams (every reviewer team,
+			// sorted by id) and the first team whose pr-review trigger wins the
+			// exclusive claim consolidates ownership onto itself (delegation.go
+			// SetOwnerTeamSystem before the fire); if no team auto-fires, the
+			// first human claim consolidates. No behavior change for the
+			// single-team reviewer (the fire resolves to their one team); the
+			// multi-team reviewer's task is no longer arbitrarily stamped to the
+			// lowest-id team before anything acts.
 			visibleTeams = reqTeams
 			orderedTeams = reqTeams // already sorted by team id in the helper
-			ownerTeam = reqTeams[0]
+			ownerTeam = ""          // NULL at creation; the fire (or first human claim) consolidates the owner
 			taskPriority = maxRuleDefaultPriority(matchedRules)
 		}
 

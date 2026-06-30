@@ -127,7 +127,9 @@ func visTeamsOf(t *testing.T, database *sql.DB, taskID string) []string {
 // TestReviewRequested_UserRoutesToRequestedUsersTeams is the acceptance core
 // for individual requests: a review_requested for user A routes the task's
 // visibility to A's team(s) — resolved from the requested identity, NOT from
-// the matched rule's team.
+// the matched rule's team. Post-TFAC-514 the task is created NULL-owned (no
+// trigger here to fire and consolidate); the owner is no longer stamped at
+// creation.
 func TestReviewRequested_UserRoutesToRequestedUsersTeams(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
@@ -148,8 +150,8 @@ func TestReviewRequested_UserRoutesToRequestedUsersTeams(t *testing.T) {
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
-	if teamIDValue(&active[0]) != teamReviewer {
-		t.Errorf("owner team_id = %q, want reviewer's team %q (not the rule's team %q)", teamIDValue(&active[0]), teamReviewer, teamA)
+	if active[0].TeamID != nil {
+		t.Errorf("owner team_id = %v, want nil (NULL at creation; no trigger fired to consolidate)", *active[0].TeamID)
 	}
 	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 1 || vis[0] != teamReviewer {
 		t.Errorf("visibility = %v, want [%s] (the requested user's team only)", vis, teamReviewer)
@@ -287,18 +289,29 @@ func TestReviewRequested_PerReviewerDistinctTasks(t *testing.T) {
 	if len(active) != 3 {
 		t.Fatalf("expected 3 distinct per-reviewer tasks, got %d", len(active))
 	}
-	keys := map[string]string{} // dedup_key → owner team
+	// Post-TFAC-514 each per-reviewer task is NULL-owned at creation (no trigger
+	// here to fire and consolidate). Routing is asserted via the per-task
+	// visibility set — the reviewer's team(s) — keyed by dedup_key.
+	vis := map[string]string{} // dedup_key → sole visible team
 	for _, task := range active {
-		keys[task.DedupKey] = teamIDValue(&task)
+		if task.TeamID != nil {
+			t.Errorf("%s task owner = %v, want nil (NULL at creation)", task.DedupKey, *task.TeamID)
+		}
+		vt := visTeamsOf(t, database, task.ID)
+		if len(vt) != 1 {
+			t.Errorf("%s task visibility = %v, want exactly one team", task.DedupKey, vt)
+			continue
+		}
+		vis[task.DedupKey] = vt[0]
 	}
-	if keys["user:alice"] != teamAlice {
-		t.Errorf("alice task owner = %q, want %q", keys["user:alice"], teamAlice)
+	if vis["user:alice"] != teamAlice {
+		t.Errorf("alice task visible to %q, want %q", vis["user:alice"], teamAlice)
 	}
-	if keys["user:bob"] != teamBob {
-		t.Errorf("bob task owner = %q, want %q", keys["user:bob"], teamBob)
+	if vis["user:bob"] != teamBob {
+		t.Errorf("bob task visible to %q, want %q", vis["user:bob"], teamBob)
 	}
-	if keys["team:acme/backend"] != teamBackend {
-		t.Errorf("team task owner = %q, want %q", keys["team:acme/backend"], teamBackend)
+	if vis["team:acme/backend"] != teamBackend {
+		t.Errorf("team task visible to %q, want %q", vis["team:acme/backend"], teamBackend)
 	}
 }
 
@@ -413,5 +426,87 @@ func TestReviewRequestRemoved_ClosesOnlyMatchingReviewer(t *testing.T) {
 	}
 	if active[0].DedupKey != "user:bob" {
 		t.Errorf("surviving task dedup_key = %q, want user:bob (alice's was closed)", active[0].DedupKey)
+	}
+}
+
+// TestReviewRequested_MultiTeamReviewer_FiresDeterministically pins the
+// TFAC-514 review_requested change: a reviewer on two teams, each with an
+// enabled pr-review trigger, yields a NULL-owned task visible to both teams that
+// fires deterministically — exactly one team's trigger runs (orderedTeams is the
+// reviewer teams sorted by id, so the lowest-id team wins the exclusive claim)
+// and the fire consolidates ownership onto it.
+func TestReviewRequested_MultiTeamReviewer_FiresDeterministically(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	setReviewHost(t, database)
+
+	teamA := seedTeam(t, database, "rev-a")
+	teamB := seedTeam(t, database, "rev-b")
+	// One login bound to two TF users, one per team → reviewer maps to both.
+	seedUserOnTeam(t, database, teamA, "alice")
+	seedUserOnTeam(t, database, teamB, "alice")
+	enableTeamAutoDelegate(t, database, teamA, teamB)
+	seedImmediateTrigger(t, database, teamA, domain.EventGitHubPRReviewRequested, "rev-a")
+	seedImmediateTrigger(t, database, teamB, domain.EventGitHubPRReviewRequested, "rev-b")
+
+	entityID := reviewEntity(t, database, "owner/repo#multirev")
+	stub := &stubDelegator{db: database}
+	router := firingRouter(database, stub)
+	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
+		Author: "carol", Repo: "owner/repo", PRNumber: 1, RequestedLogin: "alice",
+	})
+
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("expected exactly 1 fire (deterministic), got %d", stub.calls)
+	}
+	want := minStr(teamA, teamB) // reqTeams sorted by id; lowest fires first and wins
+	if teamIDValue(&active[0]) != want {
+		t.Errorf("owner = %q after fire, want the deterministic team %q", teamIDValue(&active[0]), want)
+	}
+	if active[0].ClaimedByAgentID == "" {
+		t.Error("task should be bot-claimed by the firing team")
+	}
+	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 2 {
+		t.Errorf("visibility = %v, want both reviewer teams", vis)
+	}
+}
+
+// TestReviewRequested_SingleTeamReviewer_FiresAndOwns pins the unchanged end
+// state for the single-team reviewer post-TFAC-514: created NULL-owned, but the
+// pr-review trigger fires and consolidates the owner onto the reviewer's one
+// team — no observable change from the pre-change stamp-then-fire behavior.
+func TestReviewRequested_SingleTeamReviewer_FiresAndOwns(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	setReviewHost(t, database)
+
+	teamReviewer := seedTeam(t, database, "rev-solo")
+	seedUserOnTeam(t, database, teamReviewer, "alice")
+	enableTeamAutoDelegate(t, database, teamReviewer)
+	seedImmediateTrigger(t, database, teamReviewer, domain.EventGitHubPRReviewRequested, "rev-solo")
+
+	entityID := reviewEntity(t, database, "owner/repo#solorev")
+	stub := &stubDelegator{db: database}
+	router := firingRouter(database, stub)
+	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
+		Author: "carol", Repo: "owner/repo", PRNumber: 2, RequestedLogin: "alice",
+	})
+
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("expected exactly 1 fire, got %d", stub.calls)
+	}
+	if teamIDValue(&active[0]) != teamReviewer {
+		t.Errorf("owner = %q after fire, want the reviewer's one team %q (unchanged end state)", teamIDValue(&active[0]), teamReviewer)
+	}
+	if active[0].ClaimedByAgentID == "" {
+		t.Error("task should be bot-claimed after the reviewer's team fired")
 	}
 }
