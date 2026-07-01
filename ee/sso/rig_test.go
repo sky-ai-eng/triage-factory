@@ -18,9 +18,10 @@ package sso_test
 //
 // The SSO extension mounts itself: testing package sso links ee/sso, whose
 // init() registers the route/login extension + store factories; the entitlement
-// grant below licenses the `sso` feature for this test binary (mirroring a
+// provider below licenses the `sso` feature for this test binary (mirroring a
 // deployment with a valid TF_LICENSE). Both are process-global, set before any
-// server is built.
+// server is built. Individual tests that need an UNLICENSED org swap the
+// provider for the duration of the subtest via t.Cleanup to restore it.
 
 import (
 	"context"
@@ -52,11 +53,7 @@ import (
 
 // ---------- entitlement: license the SSO feature for this test binary ----------
 
-func init() { entitlements.Register(ssoLicensedGrant{}) }
-
-type ssoLicensedGrant struct{}
-
-func (ssoLicensedGrant) Has(f entitlements.Feature) bool { return f == entitlements.FeatureSSO }
+func init() { entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureSSO)) }
 
 // ---------- constants ----------
 

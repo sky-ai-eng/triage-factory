@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/ee/sso/dnsoverride"
 	ssostore "github.com/sky-ai-eng/triage-factory/ee/sso/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -63,6 +64,10 @@ func (h *ssoDomainsHandler) gate(w http.ResponseWriter, r *http.Request) (orgID,
 	}
 	orgID, ok = httpx.RequireOrg(w, r)
 	if !ok {
+		return "", "", false
+	}
+	if !entitlements.For(orgID).Has(entitlements.FeatureSSO) {
+		http.NotFound(w, r)
 		return "", "", false
 	}
 	userID = httpx.ClaimsFrom(r.Context()).Subject

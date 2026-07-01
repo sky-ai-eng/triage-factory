@@ -54,6 +54,7 @@ import { ChoiceCards } from '../../setup/parts'
 import GitHubAccessControl from './GitHubAccessControl'
 import SSOSettings from './SSOSettings'
 import SettingsSection from './SettingsSection'
+import { useEntitlements, FeatureSSO } from '../../../hooks/useEntitlements'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
 const intervalLabel = (d: string): string => d.replace(/m0s$/, 'm')
@@ -71,6 +72,11 @@ export default function OrgSettings({
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [urlError, setUrlError] = useState<string | null>(null)
+
+  // EE SSO entitlement — dark until the probe resolves, matching the backend's
+  // 404-and-hide at every /api/sso/* seam.
+  const { has, loaded: entLoaded } = useEntitlements()
+  const sso = entLoaded && has(FeatureSSO)
 
   // Per-section in-flight keys. A Set (not a single string) so two sections
   // saving in quick succession each keep their own saving state — otherwise the
@@ -680,11 +686,13 @@ export default function OrgSettings({
       )}
 
       {/* Single sign-on (TFAC-429) — multi-mode only: SAML/SSO lives in the
-          GoTrue stack, so every /api/sso/* route 404s in local. An action
-          section (no Save footer) — SSOSettings owns its own register / enable /
-          domain-claim / verify controls. The surface is admin-gated (the /org
-          Settings tab only renders for org admins). */}
-      {!isLocal && (
+          GoTrue stack, so every /api/sso/* route 404s in local. Also gated on
+          the `sso` entitlement — every /api/sso/* seam 404s an unlicensed org,
+          so the FE hides the surface rather than presenting a dead flow. An
+          action section (no Save footer) — SSOSettings owns its own
+          register / enable / domain-claim / verify controls. The surface is
+          admin-gated (the /org Settings tab only renders for org admins). */}
+      {!isLocal && sso && (
         <SettingsSection title="Single sign-on" summary="SAML via your identity provider">
           <SSOSettings />
         </SettingsSection>

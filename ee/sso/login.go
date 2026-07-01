@@ -11,6 +11,7 @@ import (
 
 	ssostore "github.com/sky-ai-eng/triage-factory/ee/sso/store"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -58,6 +59,10 @@ func (le *loginExt) StartSSO(w http.ResponseWriter, r *http.Request, provider, r
 		http.NotFound(w, r)
 		return true
 	}
+	if !entitlements.For(binding.OrgID).Has(entitlements.FeatureSSO) {
+		http.NotFound(w, r)
+		return true
+	}
 
 	codeVerifier, csrf, ok := le.api.IssueOAuthStateCookie(w, r, returnTo, providerID, false)
 	if !ok {
@@ -87,7 +92,7 @@ func (le *loginExt) OnLoginResolved(w http.ResponseWriter, r *http.Request, in s
 				httpx.InternalError(w, "sso", rerr)
 				return uuid.NullUUID{}, true, nil
 			}
-			if route != nil && route.Enabled && route.Enforced {
+			if route != nil && route.Enabled && route.Enforced && entitlements.For(route.OrgID).Has(entitlements.FeatureSSO) {
 				isBG, berr := le.stores().BreakGlass.IsBreakGlass(r.Context(), route.OrgID, in.UserID.String())
 				if berr != nil {
 					httpx.InternalError(w, "sso", berr)
@@ -148,6 +153,9 @@ func (le *loginExt) OnLoginResolved(w http.ResponseWriter, r *http.Request, in s
 			if perr != nil {
 				ssoLog.Error("jit: bad org id in binding", "org", binding.OrgID, "error", perr)
 				return uuid.NullUUID{}, false, perr
+			}
+			if !entitlements.For(binding.OrgID).Has(entitlements.FeatureSSO) {
+				return uuid.NullUUID{}, false, nil
 			}
 			// teamID NULL → "org member, zero teams". Idempotent (ON CONFLICT DO
 			// NOTHING): a returning member's row already exists, so this grants but
@@ -224,6 +232,10 @@ func (le *loginExt) handleDiscover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if route == nil || !route.Enabled {
+		httpx.WriteJSON(w, http.StatusOK, ssoDiscoverResponse{SSO: false})
+		return
+	}
+	if !entitlements.For(route.OrgID).Has(entitlements.FeatureSSO) {
 		httpx.WriteJSON(w, http.StatusOK, ssoDiscoverResponse{SSO: false})
 		return
 	}

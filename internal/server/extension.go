@@ -103,8 +103,10 @@ type ExtensionAPI interface {
 	RecordAuthEvent(ctx context.Context, r *http.Request, e domain.AuthEvent)
 }
 
-// extensionInstaller is one registered extension: a name (diagnostics), a
-// gating feature, and the install closure that mounts its routes.
+// extensionInstaller is one registered extension: a name (diagnostics), its
+// nominal gating feature (kept for signature stability / diagnostics — always
+// mounted regardless of licensing, see installExtensions), and the install
+// closure that mounts its routes.
 type extensionInstaller struct {
 	name    string
 	feature entitlements.Feature
@@ -116,24 +118,21 @@ type extensionInstaller struct {
 // the server is constructed. Invoked once, in routes().
 var registeredExtensions []extensionInstaller
 
-// RegisterExtension registers an installer to be invoked during routes()
-// iff its feature is licensed (entitlements.Active().Has(feature)). A zero
-// feature means "always install". Called from an ee package's init().
+// RegisterExtension registers an installer to be invoked during routes().
+// Every registered extension always mounts; the extension itself gates its
+// handlers per-request on entitlements.For(orgID) at its own resolution
+// seams. Called from an ee package's init().
 func RegisterExtension(name string, feature entitlements.Feature, install func(ExtensionAPI)) {
 	registeredExtensions = append(registeredExtensions, extensionInstaller{name: name, feature: feature, install: install})
 }
 
-// installExtensions runs every registered installer whose feature is
-// licensed, passing each the live ExtensionAPI. Called at the end of
-// routes(). Entitlements have already been resolved at startup
-// (ee.Install runs before app.New), so the gate reflects the active
-// license. Nothing registered / nothing licensed → no-op.
+// installExtensions runs every registered installer, passing each the live
+// ExtensionAPI. Called at the end of routes(). Extensions always mount —
+// licensing is enforced per-request inside the extension (org resolved at
+// each seam), not by skipping the mount at boot. Nothing registered → no-op.
 func (s *Server) installExtensions() {
 	api := serverExtensionAPI{s}
 	for _, ext := range registeredExtensions {
-		if ext.feature != "" && !entitlements.Active().Has(ext.feature) {
-			continue
-		}
 		ext.install(api)
 	}
 }

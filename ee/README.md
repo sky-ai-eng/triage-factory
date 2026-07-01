@@ -22,13 +22,13 @@ imports).
 
 Core exposes neutral **seams**; `ee/` registers implementations into them at
 startup (via a blank import from `package main`). Core asks
-`entitlements.Active().Has(<feature>)` and never names an enterprise type.
+`entitlements.For(orgID).Has(<feature>)` and never names an enterprise type.
 
 | Seam (core) | Purpose | ee/ side |
 | --- | --- | --- |
-| `internal/entitlements` | "is feature X licensed?" | `ee.Install()` registers a license-backed checker |
+| `internal/entitlements` | "is feature X licensed for this org?" | `ee.Install()` registers a license-backed per-org provider |
 | `db` tx-store extension slot | let ee build tx-bound stores inside core transactions without core knowing their types | ee registers per-dialect store factories |
-| `server` route extension | mount enterprise HTTP routes | ee registers route installers, gated on entitlements |
+| `server` route extension | mount enterprise HTTP routes | ee registers route installers; routes always mount, gated per-request on entitlements inside the handler |
 | `server` login hooks | SSO enforcement / JIT / test-callback inside the core login path | ee implements opaque hook interfaces |
 
 ## What lives here
@@ -38,9 +38,10 @@ startup (via a blank import from `package main`). Core asks
   enforcement, break-glass, domains, the verify-before-enforce test flow.
 - `ee/sso/store` — the SQLite + Postgres `sso_*` store implementations and
   domain types.
-- Frontend SSO surface is gated at render time on an entitlement flag served
-  by `/api/me` (a single SPA bundle can't be split per-license, so the UI is
-  present but inert without the feature).
+- Frontend SSO surface is gated at render time on the `sso` entitlement served
+  by `/api/entitlements` (the `useEntitlements` hook — a single SPA bundle
+  can't be split per-license, so the UI is present but inert without the
+  feature).
 
 ## Licensing a build
 

@@ -96,12 +96,11 @@ export function invalidateEntitlements(): void {
 
 // Feature ids gated by entitlements — mirrors the wire values of
 // internal/entitlements Feature (they must match the strings the probe returns).
-// EE surfaces gate with has(FeatureGovernance) rather than a bare 'governance'
-// literal, so a typo is a compile/lint error and every gate is grep-able. Only
-// governance is here: SSO has no FE entitlement consumer (its absence is a route
-// 404 via runmode, not a has() gate), so a constant for it would imply a
-// consumer that doesn't exist.
+// EE surfaces gate with has(FeatureGovernance) / has(FeatureSSO) rather than a
+// bare string literal, so a typo is a compile/lint error and every gate is
+// grep-able.
 export const FeatureGovernance = 'governance' as const
+export const FeatureSSO = 'sso' as const
 
 export interface Entitlements {
   /** Whether `feature` is licensed for the viewer. False until the probe

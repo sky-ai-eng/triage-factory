@@ -6,7 +6,7 @@
 // package main blank-imports ee/sso, whose init() side effects register the
 // SSO store factories, route installers, and login hooks into the core
 // seams. This package's Install() handles the licensing half: verify the
-// token, register the entitlements checker.
+// token, register the per-org entitlements provider.
 package ee
 
 import (
@@ -33,12 +33,13 @@ import (
 //	-ldflags "-X github.com/sky-ai-eng/triage-factory/ee.publicKeyB64=<b64>"
 var publicKeyB64 = ""
 
-// Install verifies TF_LICENSE (if set) and registers the resulting
-// entitlements checker so enterprise features light up. Called once from
+// Install verifies TF_LICENSE (if set) and registers the resulting per-org
+// entitlements provider so enterprise features light up. Called once from
 // package main. Absent / invalid / expired license, or a build with no
-// baked-in public key → no registration, so entitlements.Active() stays
-// the community default and every enterprise feature is off. Never fatal:
-// a bad license degrades to community, it does not crash the binary.
+// baked-in public key → no registration, so entitlements.For(orgID) stays
+// the Static (everything off) default and every enterprise feature is off.
+// Never fatal: a bad license degrades to community, it does not crash the
+// binary.
 func Install() {
 	token := os.Getenv("TF_LICENSE")
 	if token == "" {
@@ -54,7 +55,6 @@ func Install() {
 		fmt.Fprintf(os.Stderr, "triagefactory: enterprise license rejected: %v\n", err)
 		return
 	}
-	entitlements.Register(grant{claims})
 	feats := make([]entitlements.Feature, len(claims.Features))
 	for i, f := range claims.Features {
 		feats[i] = entitlements.Feature(f)
@@ -94,20 +94,11 @@ func loadPublicKey() *ecdsa.PublicKey {
 	return ec
 }
 
-// grant adapts verified license claims to the entitlements.Checker the
-// core seam consults. Fails closed: if the clock advances past exp after
-// load, Has answers false for every feature.
-type grant struct{ claims license.Claims }
-
-func (g grant) Has(f entitlements.Feature) bool {
-	return g.claims.Valid(time.Now()) && g.claims.Has(string(f))
-}
-
 // licenseProvider adapts verified license claims to the per-org
 // entitlements.Provider seam: self-host licensing is "auto-all" — one
 // license grants its features to every org in the deployment. Fails closed:
-// once the clock passes exp, For returns the zero-value Entitlements (denies
-// everything), mirroring grant.Has's live degradation.
+// once the clock passes exp, For returns the zero-value Entitlements
+// (denies everything).
 type licenseProvider struct {
 	claims license.Claims
 	ent    entitlements.Entitlements
