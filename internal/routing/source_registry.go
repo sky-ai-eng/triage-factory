@@ -70,8 +70,11 @@ func builtinRoutedPrefixes() map[string]bool {
 // RegisterSource registers hooks for an event-source prefix — the segment
 // before the first ':' in an event type (e.g. "slack" for "slack:mention").
 // Registration also marks the prefix router-bound (see RouterBound). Panics
-// on an empty or reserved source, or nil required hooks (wiring bug, fail
-// at boot).
+// on an empty, reserved, or already-registered source, or nil required
+// hooks (wiring bug, fail at boot). The duplicate check mirrors
+// events.Register: registrations are compile-time config, so a second
+// registration for the same prefix (double-install, two sources colliding
+// on a name) must fail loudly, never silently swap hooks.
 func RegisterSource(source string, hooks SourceHooks) {
 	if source == "" {
 		panic("routing.RegisterSource: source must not be empty")
@@ -81,6 +84,9 @@ func RegisterSource(source string, hooks SourceHooks) {
 	}
 	if hooks.Ownership == nil || hooks.ResolveOwner == nil || hooks.TracksScope == nil {
 		panic("routing.RegisterSource: Ownership, ResolveOwner, and TracksScope hooks are required")
+	}
+	if _, exists := sourceRegistry[source]; exists {
+		panic("routing.RegisterSource: " + source + " is already registered")
 	}
 	sourceRegistry[source] = hooks
 	routedPrefixes[source] = true

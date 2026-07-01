@@ -286,3 +286,19 @@ func TestRegisterSource_PanicsOnBuiltinSource(t *testing.T) {
 	}()
 	RegisterSource("github", fakeSourceHooks("team-x", true))
 }
+
+// TestRegisterSource_PanicsOnDuplicate pins that a second registration for
+// the same prefix fails at boot instead of silently swapping hooks — a
+// double-install (build-tag mistake, two ee/ sources colliding on a prefix)
+// must be as loud as every other wiring bug this function guards. Mirrors
+// events.Register's duplicate panic: registrations are compile-time config.
+func TestRegisterSource_PanicsOnDuplicate(t *testing.T) {
+	t.Cleanup(ResetSources)
+	RegisterSource("fake-dup", fakeSourceHooks("team-x", true))
+	defer func() {
+		if recover() == nil {
+			t.Error("expected panic on duplicate registration")
+		}
+	}()
+	RegisterSource("fake-dup", fakeSourceHooks("team-x", true))
+}
