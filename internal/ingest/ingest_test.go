@@ -291,7 +291,7 @@ func TestIngestor_RegisteredSource_DurablyEnqueued(t *testing.T) {
 
 // TestIngestor_UnregisteredSource_BusOnly pins the negative: an event whose
 // source prefix has no registration (no ee/ package installed) stays
-// bus-only, same as a system event — routing.SourceRegistered must gate the
+// bus-only, same as a system event — routing.RouterBound must gate the
 // enqueue, not just "any non-github/jira prefix."
 func TestIngestor_UnregisteredSource_BusOnly(t *testing.T) {
 	routing.ResetSources() // defensive: this test's assertion depends on nothing being registered

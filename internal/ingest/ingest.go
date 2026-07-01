@@ -6,7 +6,6 @@ package ingest
 
 import (
 	"context"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -16,11 +15,13 @@ import (
 
 // Ingestor routes an emitted event two ways:
 //
-//   - Router-bound events (github:/jira:) are durably enqueued — the
-//     events audit row and a queue row, written atomically — then a
-//     best-effort wake nudges the router's drain worker. This is the
-//     path that must never drop: losing one of these loses an event row
-//     and its task, which is exactly the data loss this seam prevents.
+//   - Router-bound events — those whose source the router consumes
+//     (routing.RouterBound: github:/jira: plus any ee/-registered source)
+//     — are durably enqueued: the events audit row and a queue row,
+//     written atomically, then a best-effort wake nudges the router's
+//     drain worker. This is the path that must never drop: losing one of
+//     these loses an event row and its task, which is exactly the data
+//     loss this seam prevents.
 //   - Every event (the durable ones included) is also published to the
 //     in-memory bus for loss-tolerant subscribers: ws-broadcast's
 //     cosmetic UI feed and the scorer's idempotent poll-complete kick.
@@ -49,7 +50,7 @@ func New(bus *eventbus.Bus, queue db.EventQueueStore, wake func()) *Ingestor {
 // then forwards every event to the ephemeral bus. evt.OrgID must already
 // be stamped by the caller (the tracker does this in its publish()).
 func (i *Ingestor) Publish(evt domain.Event) {
-	if i.queue != nil && routerBound(evt.EventType) {
+	if i.queue != nil && routing.RouterBound(evt.EventType) {
 		id, err := i.queue.Enqueue(context.Background(), evt.OrgID, evt)
 		if err != nil {
 			// The durability boundary failed — this event will not route
@@ -71,15 +72,4 @@ func (i *Ingestor) Publish(evt domain.Event) {
 		}
 	}
 	i.bus.Publish(evt)
-}
-
-// routerBound reports whether the router consumes this event type — the
-// same github:/jira: prefix set the router's old bus subscription
-// filtered on, plus any event source an ee/ package has registered with
-// internal/routing (e.g. ee/slack's "slack:" prefix) — those must also get
-// the durable-outbox enqueue, or they'd go bus-only and never reach the
-// router via the drain worker. System events (system:poll:*) and raw
-// webhook deliveries (webhook:github:*) are bus-only.
-func routerBound(eventType string) bool {
-	return strings.HasPrefix(eventType, "github:") || strings.HasPrefix(eventType, "jira:") || routing.SourceRegistered(eventType)
 }

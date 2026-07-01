@@ -203,20 +203,34 @@ func TestSourceRegistry_RequestedPartyDowngradedToPool(t *testing.T) {
 	}
 }
 
-// TestSourceRegistered pins SourceRegistered — the predicate internal/ingest's
-// routerBound consumes (Part 2) — for both a registered and an unregistered
-// prefix.
-func TestSourceRegistered(t *testing.T) {
+// TestRouterBound pins the durability predicate internal/ingest gates its
+// outbox enqueue on: the built-in github:/jira: sources are always
+// router-bound, system events never are, and a registered source's prefix
+// joins the set (and leaves it again on ResetSources).
+func TestRouterBound(t *testing.T) {
 	t.Cleanup(ResetSources)
-	if SourceRegistered(fakeEventType) {
-		t.Error("SourceRegistered should be false before any registration")
+	if !RouterBound("github:pr:opened") {
+		t.Error("github: must be router-bound (built-in)")
+	}
+	if !RouterBound("jira:issue:assigned") {
+		t.Error("jira: must be router-bound (built-in)")
+	}
+	if RouterBound(domain.EventSystemPollCompleted) {
+		t.Error("system: must never be router-bound (bus-only)")
+	}
+	if RouterBound(fakeEventType) {
+		t.Error("an unregistered source must not be router-bound")
 	}
 	RegisterSource("fake", fakeSourceHooks("team-x", true))
-	if !SourceRegistered(fakeEventType) {
-		t.Error("SourceRegistered should be true for a registered source's event type")
+	if !RouterBound(fakeEventType) {
+		t.Error("a registered source's event type must be router-bound")
 	}
-	if SourceRegistered("github:pr:opened") {
-		t.Error("SourceRegistered should be false for a built-in source (never migrated into the registry)")
+	ResetSources()
+	if RouterBound(fakeEventType) {
+		t.Error("ResetSources must drop registered prefixes from the routed set")
+	}
+	if !RouterBound("github:pr:opened") {
+		t.Error("ResetSources must preserve the built-in routed prefixes")
 	}
 }
 
@@ -240,4 +254,17 @@ func TestRegisterSource_PanicsOnMissingHooks(t *testing.T) {
 		}
 	}()
 	RegisterSource("fake-missing-hooks", SourceHooks{})
+}
+
+// TestRegisterSource_PanicsOnBuiltinSource pins the shadow guard: hooks are
+// consulted before the native github/jira paths at every wire point, so
+// registering a built-in prefix would silently replace heavily-tested
+// resolver behavior — refused at boot instead.
+func TestRegisterSource_PanicsOnBuiltinSource(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("expected panic when registering a built-in source prefix")
+		}
+	}()
+	RegisterSource("github", fakeSourceHooks("team-x", true))
 }
