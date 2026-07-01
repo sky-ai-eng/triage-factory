@@ -25,7 +25,12 @@ type SourceHooks struct {
 	// ResolveOwner resolves (owner, ownerSet) for an Owned event — the
 	// analogue of authorCentricOwner's return contract (see its doc,
 	// team_routing.go:236): owner=="" + ownerSet==nil means nothing resolved.
-	// Required if Ownership ever returns OwnershipOwned.
+	// Required unconditionally, even for a source whose Ownership never
+	// returns OwnershipOwned: registration can't see what a classifier
+	// function will return, and dispatch calls this hook whenever the
+	// classification says Owned — a nil here would be a drain-goroutine
+	// panic on the first Owned event instead of a boot failure. A pool-only
+	// source supplies a stub returning ("", nil).
 	ResolveOwner func(ctx context.Context, orgID string, evt domain.Event, entityID string) (owner string, ownerSet []string)
 	// TracksScope reports whether teamID tracks the event's scope (the
 	// stage-1 team↔resource gate). Required.
@@ -74,8 +79,8 @@ func RegisterSource(source string, hooks SourceHooks) {
 	if reservedSourcePrefixes[source] {
 		panic("routing.RegisterSource: " + source + " is a built-in source and cannot be re-registered")
 	}
-	if hooks.Ownership == nil || hooks.TracksScope == nil {
-		panic("routing.RegisterSource: Ownership and TracksScope hooks are required")
+	if hooks.Ownership == nil || hooks.ResolveOwner == nil || hooks.TracksScope == nil {
+		panic("routing.RegisterSource: Ownership, ResolveOwner, and TracksScope hooks are required")
 	}
 	sourceRegistry[source] = hooks
 	routedPrefixes[source] = true

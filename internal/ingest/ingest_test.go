@@ -254,7 +254,10 @@ func TestIngestor_EnqueueFailure_DropsNoBusPhantom(t *testing.T) {
 func TestIngestor_RegisteredSource_DurablyEnqueued(t *testing.T) {
 	t.Cleanup(routing.ResetSources)
 	routing.RegisterSource("fake", routing.SourceHooks{
-		Ownership:   func(string) routing.OwnershipModel { return routing.OwnershipPool },
+		Ownership: func(string) routing.OwnershipModel { return routing.OwnershipPool },
+		ResolveOwner: func(context.Context, string, domain.Event, string) (string, []string) {
+			return "", nil // pool-only source; never consulted
+		},
 		TracksScope: func(context.Context, domain.Event, string) bool { return true },
 	})
 

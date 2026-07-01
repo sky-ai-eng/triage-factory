@@ -256,6 +256,24 @@ func TestRegisterSource_PanicsOnMissingHooks(t *testing.T) {
 	RegisterSource("fake-missing-hooks", SourceHooks{})
 }
 
+// TestRegisterSource_PanicsOnNilResolveOwner pins that ResolveOwner is
+// required unconditionally, not just "when Ownership returns Owned":
+// registration can't see what a classifier function will return, and
+// resolveOwnedRouting calls the hook whenever the classification says Owned
+// — a nil ResolveOwner would otherwise be a drain-goroutine panic on the
+// first Owned event instead of a boot failure.
+func TestRegisterSource_PanicsOnNilResolveOwner(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("expected panic for a nil ResolveOwner hook")
+		}
+	}()
+	RegisterSource("fake-nil-resolve", SourceHooks{
+		Ownership:   func(string) OwnershipModel { return OwnershipPool },
+		TracksScope: func(context.Context, domain.Event, string) bool { return true },
+	})
+}
+
 // TestRegisterSource_PanicsOnBuiltinSource pins the shadow guard: hooks are
 // consulted before the native github/jira paths at every wire point, so
 // registering a built-in prefix would silently replace heavily-tested
