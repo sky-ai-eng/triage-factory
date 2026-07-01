@@ -52,6 +52,25 @@ func TestEntitlementsNew_LimitAbsent(t *testing.T) {
 	}
 }
 
+// TestEntitlementsNew_CopiesLimitsMap pins the immutable-snapshot contract:
+// New must copy the caller's limits map rather than store it by reference, so
+// a caller that mutates its own map after the call (or a Provider that reuses
+// one map across multiple For(orgID) results) can never reach back into an
+// already-issued Entitlements. Sharing the backing map would also make
+// concurrent Limit() reads race with that mutation.
+func TestEntitlementsNew_CopiesLimitsMap(t *testing.T) {
+	src := map[Limit]int{"seats": 10}
+	e := New([]Feature{FeatureGovernance}, src)
+	src["seats"] = 999
+	src["new_key"] = 1
+	if v, ok := e.Limit("seats"); !ok || v != 10 {
+		t.Fatalf("Limit(seats) = (%d, %v), want (10, true); mutating the caller's map leaked into the snapshot", v, ok)
+	}
+	if _, ok := e.Limit("new_key"); ok {
+		t.Fatal("a key added to the caller's map after New must not appear in the snapshot")
+	}
+}
+
 func TestEntitlements_ZeroValueDeniesEverything(t *testing.T) {
 	var e Entitlements
 	if e.Has(FeatureSSO) || e.Has(FeatureGovernance) {

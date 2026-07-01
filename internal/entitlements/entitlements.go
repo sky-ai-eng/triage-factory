@@ -103,14 +103,24 @@ func (e Entitlements) Has(f Feature) bool { _, ok := e.features[f]; return ok }
 func (e Entitlements) Limit(l Limit) (int, bool) { v, ok := e.limits[l]; return v, ok }
 
 // New builds an Entitlements snapshot from a feature list and a limits map.
-// Exported so ee/ providers can construct one — the struct's fields stay
-// unexported so only this package can shape the invariants.
+// Both are copied into fresh maps so the returned value is a true immutable
+// snapshot — a caller that mutates (or keeps mutating) the slice/map it
+// passed in, or reuses one map across multiple For(orgID) results, can never
+// reach back into a live Entitlements. That copy is also what makes
+// concurrent Has/Limit reads across goroutines safe: nothing outside this
+// package ever holds a reference to the backing maps. Exported so ee/
+// providers can construct one — the struct's fields stay unexported so only
+// this package can shape the invariants.
 func New(features []Feature, limits map[Limit]int) Entitlements {
 	fs := make(map[Feature]struct{}, len(features))
 	for _, f := range features {
 		fs[f] = struct{}{}
 	}
-	return Entitlements{features: fs, limits: limits}
+	ls := make(map[Limit]int, len(limits))
+	for k, v := range limits {
+		ls[k] = v
+	}
+	return Entitlements{features: fs, limits: ls}
 }
 
 // Provider resolves the Entitlements snapshot for one org. Implementations
