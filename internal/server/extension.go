@@ -11,7 +11,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 )
 
@@ -103,13 +102,10 @@ type ExtensionAPI interface {
 	RecordAuthEvent(ctx context.Context, r *http.Request, e domain.AuthEvent)
 }
 
-// extensionInstaller is one registered extension: a name (diagnostics), its
-// nominal gating feature (kept for signature stability / diagnostics — always
-// mounted regardless of licensing, see installExtensions), and the install
-// closure that mounts its routes.
+// extensionInstaller is one registered extension: a name (diagnostics) and
+// the install closure that mounts its routes.
 type extensionInstaller struct {
 	name    string
-	feature entitlements.Feature
 	install func(ExtensionAPI)
 }
 
@@ -122,8 +118,8 @@ var registeredExtensions []extensionInstaller
 // Every registered extension always mounts; the extension itself gates its
 // handlers per-request on entitlements.For(orgID) at its own resolution
 // seams. Called from an ee package's init().
-func RegisterExtension(name string, feature entitlements.Feature, install func(ExtensionAPI)) {
-	registeredExtensions = append(registeredExtensions, extensionInstaller{name: name, feature: feature, install: install})
+func RegisterExtension(name string, install func(ExtensionAPI)) {
+	registeredExtensions = append(registeredExtensions, extensionInstaller{name: name, install: install})
 }
 
 // installExtensions runs every registered installer, passing each the live

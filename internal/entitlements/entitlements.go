@@ -129,7 +129,9 @@ var (
 
 // RegisterProvider installs the process-wide per-org Provider. Called once,
 // from package main via ee.Install, after a license token has been verified.
-// A nil provider is ignored, mirroring Register's nil-guard.
+// A nil provider is ignored, so a wiring bug can never blank out For into a
+// nil-deref; the worst case is the Static (everything off) default stays in
+// place.
 func RegisterProvider(p Provider) {
 	if p == nil {
 		return

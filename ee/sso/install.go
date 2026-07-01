@@ -3,7 +3,6 @@ package sso
 import (
 	"net/http"
 
-	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 
 	// Link the SSO store factories (postgres + sqlite) so the SSO bundle is
@@ -12,11 +11,13 @@ import (
 	_ "github.com/sky-ai-eng/triage-factory/ee/sso/store/pg"
 )
 
-// init registers the SSO route installer, gated on the `sso` entitlement.
-// It runs when package main blank-imports ee/sso; installExtensions() then
-// invokes install during routes() iff the deployment is licensed for SSO.
+// init registers the SSO route installer. It runs when package main
+// blank-imports ee/sso; installExtensions() invokes install during routes()
+// unconditionally — install's own handlers gate per-request on the `sso`
+// entitlement at their own org-resolution seams (see login.go, connection.go,
+// domains.go).
 func init() {
-	server.RegisterExtension("sso", entitlements.FeatureSSO, install)
+	server.RegisterExtension("sso", install)
 }
 
 // install mounts the org-admin SSO surface (connection, break-glass,
