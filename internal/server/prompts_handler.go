@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
@@ -38,17 +39,25 @@ type eventTypeResponse struct {
 }
 
 func (ph *promptsHandler) handleEventTypes(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
 	types, err := db.ListEventTypes(ph.db)
 	if err != nil {
 		internalError(w, "prompts", err)
 		return
 	}
-	// make(_, len(types)) yields a non-nil empty slice when the catalog read
-	// returns nil, so the response serializes as [] (not null) — preserving the
-	// prior explicit nil guard's contract.
-	out := make([]eventTypeResponse, len(types))
-	for i, t := range types {
-		out[i] = eventTypeResponse{EventType: t, SupportsWatch: routing.EventSupportsWatch(t.ID)}
+	// make(_, 0, len(types)) + append yields a non-nil empty slice when the
+	// catalog read returns nil (or every row is gated off), so the response
+	// serializes as [] (not null) — preserving the prior explicit nil guard's
+	// contract while dropping gated-off rows (TFAC-524).
+	out := make([]eventTypeResponse, 0, len(types))
+	for _, t := range types {
+		if !entitlements.EventTypeAllowed(orgID, t.ID) {
+			continue
+		}
+		out = append(out, eventTypeResponse{EventType: t, SupportsWatch: routing.EventSupportsWatch(t.ID)})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

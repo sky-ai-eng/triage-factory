@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
@@ -89,10 +90,22 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 		internalError(w, "event_handlers", err)
 		return
 	}
-	if handlers == nil {
-		handlers = []domain.EventHandler{}
+	writeJSON(w, http.StatusOK, filterEventHandlersByGate(orgID, handlers))
+}
+
+// filterEventHandlersByGate drops handlers bound to a gated-off event type
+// (TFAC-524). Rows persist regardless of entitlement state — this is
+// visibility only. Shared by the team-scoped and org-template list
+// endpoints. Always returns a non-nil slice so callers get a clean []
+// on the wire rather than null.
+func filterEventHandlersByGate(orgID string, handlers []domain.EventHandler) []domain.EventHandler {
+	visible := make([]domain.EventHandler, 0, len(handlers))
+	for _, h := range handlers {
+		if entitlements.EventTypeAllowed(orgID, h.EventType) {
+			visible = append(visible, h)
+		}
 	}
-	writeJSON(w, http.StatusOK, handlers)
+	return visible
 }
 
 // POST /api/event-handlers
@@ -158,6 +171,14 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	}
 	if _, ok := events.Get(req.EventType); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown event_type: " + req.EventType})
+		return
+	}
+	// TFAC-524: a gated-off event source can't be handed a new handler. Only
+	// create needs this — event_type is immutable on update, and toggle/
+	// promote/retarget can't change it either (the router freeze in Part 6
+	// makes an enabled-but-gated handler inert regardless).
+	if !entitlements.EventTypeAllowed(orgID, req.EventType) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "event source not enabled for this organization"})
 		return
 	}
 	canonical, err := events.ValidatePredicateJSON(req.EventType, req.ScopePredicateJSON)

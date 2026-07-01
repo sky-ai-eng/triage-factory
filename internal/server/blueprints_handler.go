@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
@@ -65,9 +66,28 @@ func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http
 	teamID := teamscope.SingleParam(r)
 	var blueprints []domain.Blueprint
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		blueprints, e = tx.Blueprints.List(r.Context(), orgID, teamID)
-		return e
+		listed, e := tx.Blueprints.List(r.Context(), orgID, teamID)
+		if e != nil {
+			return e
+		}
+		// Hide a blueprint iff it has ≥1 attached trigger AND every one of its
+		// triggers' EventType fails EventTypeAllowed (TFAC-524). A blueprint
+		// with at least one allowed trigger stays (it has live non-gated
+		// behavior); a trigger-less blueprint stays (unrelated to gating).
+		// Rows persist — visibility only.
+		visible := make([]domain.Blueprint, 0, len(listed))
+		for _, bp := range listed {
+			triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, bp.ID)
+			if e != nil {
+				return e
+			}
+			if blueprintGatedOff(orgID, triggers) {
+				continue
+			}
+			visible = append(visible, bp)
+		}
+		blueprints = visible
+		return nil
 	}); err != nil {
 		internalError(w, "blueprints", err)
 		return
@@ -76,6 +96,22 @@ func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http
 		blueprints = []domain.Blueprint{}
 	}
 	writeJSON(w, http.StatusOK, blueprints)
+}
+
+// blueprintGatedOff reports whether every one of triggers' event types fails
+// EventTypeAllowed for orgID. A trigger-less blueprint (len(triggers) == 0)
+// is never gated off by this check — that's the pre-existing orphaned/
+// trigger-less state, unrelated to entitlement gating.
+func blueprintGatedOff(orgID string, triggers []domain.EventHandler) bool {
+	if len(triggers) == 0 {
+		return false
+	}
+	for _, tr := range triggers {
+		if entitlements.EventTypeAllowed(orgID, tr.EventType) {
+			return false
+		}
+	}
+	return true
 }
 
 // firstPromptInput is the optional inline prompt the canvas's "New Prompt"

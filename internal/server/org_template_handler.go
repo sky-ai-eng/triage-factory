@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 )
@@ -1006,10 +1007,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateHandlersList(w http.ResponseWrite
 		internalError(w, "org_template", err)
 		return
 	}
-	if handlers == nil {
-		handlers = []domain.EventHandler{}
-	}
-	writeJSON(w, http.StatusOK, handlers)
+	writeJSON(w, http.StatusOK, filterEventHandlersByGate(orgID, handlers))
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateHandlerCreate(w http.ResponseWriter, r *http.Request) {
@@ -1031,6 +1029,12 @@ func (ot *orgTemplateHandler) handleOrgTemplateHandlerCreate(w http.ResponseWrit
 	}
 	if _, ok := events.Get(req.EventType); !ok {
 		badRequest(w, "unknown event_type: "+req.EventType)
+		return
+	}
+	// TFAC-524: mirrors the team-scoped create gate — a gated-off event
+	// source can't be handed a new template handler either.
+	if !entitlements.EventTypeAllowed(orgID, req.EventType) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "event source not enabled for this organization"})
 		return
 	}
 	canonical, err := events.ValidatePredicateJSON(req.EventType, req.ScopePredicateJSON)

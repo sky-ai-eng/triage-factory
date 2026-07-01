@@ -152,11 +152,13 @@ func For(orgID string) Entitlements {
 	return p.For(orgID)
 }
 
-// Reset restores the Static (everything off) default provider. Intended for
-// tests that register a stub provider and need to avoid leaking it into
-// sibling tests.
+// Reset restores the Static (everything off) default provider and clears
+// every registered event-source gate. Intended for tests that register a stub
+// provider and/or a synthetic GateEventSource and need to avoid leaking
+// either into sibling tests.
 func Reset() {
 	mu.Lock()
 	defer mu.Unlock()
 	provider = Static()
+	eventSourceGates = map[string]Feature{}
 }

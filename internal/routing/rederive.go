@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
 // ReDeriveAfterScoring re-checks deferred triggers for tasks that just
@@ -22,6 +23,13 @@ func (r *Router) ReDeriveAfterScoring(orgID string, taskIDs []string) {
 func (r *Router) reDeriveTask(orgID, taskID string) {
 	task, err := r.tasks.GetSystem(context.Background(), orgID, taskID)
 	if err != nil || task == nil {
+		return
+	}
+
+	// Entitlement gate (TFAC-524) — a task on a now-gated-off event type
+	// fires nothing during the post-scoring deferred-trigger pass, mirroring
+	// HandleEvent's freeze.
+	if !entitlements.EventTypeAllowed(orgID, task.EventType) {
 		return
 	}
 

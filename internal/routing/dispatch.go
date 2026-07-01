@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -46,6 +47,18 @@ func (r *Router) HandleEvent(evt domain.Event) {
 			return
 		}
 		evt.ID = id
+	}
+
+	// Entitlement gate (TFAC-524) — a gated-off event source (never entitled,
+	// or entitled and lapsed; deliberately identical) is frozen: the event
+	// stays recorded above (the append-only log is an honest record of what
+	// happened) but everything downstream — close phase, task creation,
+	// trigger firing — is skipped. This is belt-and-suspenders: the primary
+	// enforcement is the gated feature's own ingest self-gating and not
+	// producing events at all; this covers lapse races, drained-outbox
+	// stragglers, and any future emitter that forgets to gate.
+	if !entitlements.EventTypeAllowed(orgID, evt.EventType) {
+		return
 	}
 
 	// Entity-lifecycle gate — system events and already-closed entities create
