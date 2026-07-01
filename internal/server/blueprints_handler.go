@@ -70,6 +70,22 @@ func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http
 		if e != nil {
 			return e
 		}
+		// One query for every trigger visible at this scope, grouped by
+		// blueprint_id, instead of a per-blueprint ListForBlueprint call
+		// (TFAC-524 code review: avoids N+1 / a longer-held tx as the
+		// blueprint count grows). Safe to scope by the same teamID as the
+		// blueprint list: a trigger's team_id is pinned to its blueprint's
+		// team_id by the (blueprint_id, team_id) composite FK, so this set
+		// is exactly what per-blueprint ListForBlueprint calls would have
+		// returned.
+		triggers, e := tx.EventHandlers.List(r.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
+		if e != nil {
+			return e
+		}
+		triggersByBlueprint := make(map[string][]domain.EventHandler, len(triggers))
+		for _, tr := range triggers {
+			triggersByBlueprint[tr.BlueprintID] = append(triggersByBlueprint[tr.BlueprintID], tr)
+		}
 		// Hide a blueprint iff it has ≥1 attached trigger AND every one of its
 		// triggers' EventType fails EventTypeAllowed (TFAC-524). A blueprint
 		// with at least one allowed trigger stays (it has live non-gated
@@ -77,11 +93,7 @@ func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http
 		// Rows persist — visibility only.
 		visible := make([]domain.Blueprint, 0, len(listed))
 		for _, bp := range listed {
-			triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, bp.ID)
-			if e != nil {
-				return e
-			}
-			if blueprintGatedOff(orgID, triggers) {
+			if blueprintGatedOff(orgID, triggersByBlueprint[bp.ID]) {
 				continue
 			}
 			visible = append(visible, bp)

@@ -73,6 +73,12 @@ func TestEventTypeAllowed_GatedRequiresFeature(t *testing.T) {
 }
 
 func TestReset_ClearsEventSourceGates(t *testing.T) {
+	// Belt-and-suspenders: Reset() is also called explicitly below as the
+	// behavior under test, but that call is skipped if the sanity Fatal
+	// fires first — t.Cleanup guarantees the gate/provider registered here
+	// don't leak into sibling tests either way.
+	t.Cleanup(Reset)
+
 	GateEventSource("jira", Feature("test-gate"))
 	RegisterProvider(Static(Feature("test-gate")))
 	if !EventTypeAllowed("any-org", "jira:issue:assigned") {
