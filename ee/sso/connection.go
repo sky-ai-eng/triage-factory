@@ -143,8 +143,8 @@ func (h *ssoConnectionHandler) currentConnection(ctx context.Context, orgID, use
 }
 
 // adminGate resolves the active org + caller and confirms org-admin. On any
-// failure it has already written the response (404 for local/non-admin,
-// etc.). The shared preamble for all three handlers.
+// failure it has already written the response (404 for local/unlicensed-org/
+// non-admin, etc.). The shared preamble for all three handlers.
 func (h *ssoConnectionHandler) adminGate(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	if runmode.Current() == runmode.ModeLocal {
 		http.NotFound(w, r)

@@ -38,8 +38,8 @@ var publicKeyB64 = ""
 // package main. Absent / invalid / expired license, or a build with no
 // baked-in public key → no registration, so entitlements.For(orgID) stays
 // the Static (everything off) default and every enterprise feature is off.
-// Never fatal: a bad license degrades to community, it does not crash the
-// binary.
+// Never fatal: a bad license degrades to the Static (everything off)
+// default, it does not crash the binary.
 func Install() {
 	token := os.Getenv("TF_LICENSE")
 	if token == "" {
