@@ -14,12 +14,12 @@ import (
 )
 
 // fakeEventType is the out-of-core event type these tests route through the
-// TFAC-523 source registry — standing in for an ee/ package (e.g. Slack)
-// registering "slack:" the same way. Registered here (not in a shipped
-// events package file) because the registry seam is orthogonal to the
-// predicate-schema seam: matchPredicate still requires a registered schema
-// to evaluate a rule's predicate, so this test package registers its own
-// match-all schema purely to exercise HandleEvent end to end.
+// source registry — standing in for an ee/ package (e.g. Slack) registering
+// "slack:" the same way. Registered here (not in a shipped events package
+// file) because the registry seam is orthogonal to the predicate-schema
+// seam: matchPredicate still requires a registered schema to evaluate a
+// rule's predicate, so this test package registers its own match-all schema
+// purely to exercise HandleEvent end to end.
 const fakeEventType = "fake:thing:happened"
 
 func init() {
@@ -39,7 +39,7 @@ func seedFakeEventCatalog(t *testing.T, database *sql.DB) {
 	t.Helper()
 	if _, err := database.Exec(`
 		INSERT OR IGNORE INTO events_catalog (id, source, category, label, description)
-		VALUES (?, 'fake', 'thing', 'Fake Thing Happened', 'TFAC-523 fake-source test fixture')
+		VALUES (?, 'fake', 'thing', 'Fake Thing Happened', 'fake-source test fixture')
 	`, fakeEventType); err != nil {
 		t.Fatalf("seed events_catalog for %s: %v", fakeEventType, err)
 	}

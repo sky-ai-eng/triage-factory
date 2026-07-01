@@ -266,12 +266,12 @@ func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) (vi
 }
 
 // resolveOwnedRouting routes an owner-ladder event to the entity's owning team.
-// A registered event source (TFAC-523) resolves its own owner first — if
-// hooks exist for evt's source, hooks.ResolveOwner supplies (owner, ownerSet)
-// in place of the built-in provider branch. Built-in providers differ by
-// provider (author login for github, assignee account for jira); the shared
-// tail — visibility = ownerSet ∪ watchers, firing = members-then-watchers with
-// the no-steal invariant — lives in ownerLadderRouting, and registered sources
+// A registered event source resolves its own owner first — if hooks exist
+// for evt's source, hooks.ResolveOwner supplies (owner, ownerSet) in place of
+// the built-in provider branch. Built-in providers differ by provider
+// (author login for github, assignee account for jira); the shared tail —
+// visibility = ownerSet ∪ watchers, firing = members-then-watchers with the
+// no-steal invariant — lives in ownerLadderRouting, and registered sources
 // inherit all of it unchanged (do NOT reimplement it here). ok=false →
 // external identity, no watching handler → no task.
 func (r *Router) resolveOwnedRouting(orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) ([]string, string, []string, float64, bool) {

@@ -76,9 +76,9 @@ func (i *Ingestor) Publish(evt domain.Event) {
 // routerBound reports whether the router consumes this event type — the
 // same github:/jira: prefix set the router's old bus subscription
 // filtered on, plus any event source an ee/ package has registered with
-// internal/routing (TFAC-523, e.g. ee/slack's "slack:" prefix) — those must
-// also get the durable-outbox enqueue, or they'd go bus-only and never reach
-// the router via the drain worker. System events (system:poll:*) and raw
+// internal/routing (e.g. ee/slack's "slack:" prefix) — those must also get
+// the durable-outbox enqueue, or they'd go bus-only and never reach the
+// router via the drain worker. System events (system:poll:*) and raw
 // webhook deliveries (webhook:github:*) are bus-only.
 func routerBound(eventType string) bool {
 	return strings.HasPrefix(eventType, "github:") || strings.HasPrefix(eventType, "jira:") || routing.SourceRegistered(eventType)

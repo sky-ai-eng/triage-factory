@@ -88,7 +88,7 @@ func seedEventCatalogRow(t *testing.T, conn *sql.DB, eventType string) {
 	t.Helper()
 	if _, err := conn.Exec(`
 		INSERT OR IGNORE INTO events_catalog (id, source, category, label, description)
-		VALUES (?, 'fake', 'thing', 'Fake', 'TFAC-523 fake-source test fixture')
+		VALUES (?, 'fake', 'thing', 'Fake', 'fake-source test fixture')
 	`, eventType); err != nil {
 		t.Fatalf("seed events_catalog for %s: %v", eventType, err)
 	}
@@ -246,12 +246,11 @@ func TestIngestor_EnqueueFailure_DropsNoBusPhantom(t *testing.T) {
 	}
 }
 
-// TestIngestor_RegisteredSource_DurablyEnqueued pins the TFAC-523 routerBound
-// seam: an event from a source registered with internal/routing (standing in
-// for an ee/ package's "slack:" prefix) gets the same durable-outbox
-// treatment as a built-in github:/jira: event — without this, a registered
-// source's events would go bus-only and never reach the router via the drain
-// worker.
+// TestIngestor_RegisteredSource_DurablyEnqueued pins the routerBound seam: an
+// event from a source registered with internal/routing (standing in for an
+// ee/ package's "slack:" prefix) gets the same durable-outbox treatment as a
+// built-in github:/jira: event — without this, a registered source's events
+// would go bus-only and never reach the router via the drain worker.
 func TestIngestor_RegisteredSource_DurablyEnqueued(t *testing.T) {
 	t.Cleanup(routing.ResetSources)
 	routing.RegisterSource("fake", routing.SourceHooks{

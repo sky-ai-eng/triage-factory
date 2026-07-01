@@ -128,9 +128,9 @@ const (
 // ownershipModelForEvent classifies an event type into its ownership model.
 // This is the one place the owner-ladder / requested-party / pool distinction is
 // made; an unclassified event type falls to OwnershipPool (the historical default).
-// A registered event source (TFAC-523, e.g. ee/slack) is consulted before the
-// built-in switch — built-in github:/jira:/system: sources are never migrated
-// into the registry (see source_registry.go), so this only ever fires for an
+// A registered event source (e.g. ee/slack) is consulted before the built-in
+// switch — built-in github:/jira:/system: sources are never migrated into the
+// registry (see source_registry.go), so this only ever fires for an
 // out-of-core source. OwnershipRequestedParty is unsupported for registered
 // sources (the requested-party resolver is GitHub-specific): logged as an
 // error and downgraded to OwnershipPool. review_requested is checked first in

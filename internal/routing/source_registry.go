@@ -7,11 +7,11 @@ import (
 )
 
 // SourceHooks is the routing behavior a registered event source (an ee/
-// package, e.g. Slack) plugs into core's routing chokepoints (TFAC-523). Core
-// never imports ee/ (lint-enforced boundary), so this registry is the
-// inversion seam: an ee package registers hooks once at install time, and
-// dispatch-time code (lifecycle.go, dispatch.go, team_routing.go) reads them
-// back without knowing the concrete source.
+// package, e.g. Slack) plugs into core's routing chokepoints. Core never
+// imports ee/ (lint-enforced boundary), so this registry is the inversion
+// seam: an ee package registers hooks once at install time, and dispatch-time
+// code (lifecycle.go, dispatch.go, team_routing.go) reads them back without
+// knowing the concrete source.
 //
 // Hooks must fail OPEN on store errors (return the permissive result + log),
 // mirroring teamTracksEventRepo (team_routing.go:77): dropping legitimate

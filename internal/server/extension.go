@@ -70,10 +70,10 @@ type ExtensionAPI interface {
 	// install closure runs before ingestor is wired, so an extension must
 	// NOT call this from its install closure.
 	PublishEvent(evt domain.Event)
-	// Bus returns the in-process event bus, for subscribe-side consumers
-	// (TFAC-511). Read-through to the live server; nil until app wiring
-	// completes. Same install-closure caveat as PublishEvent — only safe at
-	// request time / from a goroutine started after startup.
+	// Bus returns the in-process event bus, for subscribe-side consumers.
+	// Read-through to the live server; nil until app wiring completes. Same
+	// install-closure caveat as PublishEvent — only safe at request time /
+	// from a goroutine started after startup.
 	Bus() *eventbus.Bus
 
 	// --- login seam (see login_ext.go) ---

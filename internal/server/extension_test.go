@@ -15,8 +15,8 @@ import (
 // TestExtensionAPI_PublishEvent_DelegatesToIngestor pins that
 // ExtensionAPI.PublishEvent forwards through the wired Ingestor (durable
 // enqueue + bus fan-out) rather than touching the bus directly — the ee/
-// ingest surface TFAC-523 adds. queue=nil degrades Publish to bus-only,
-// which is enough to prove the delegation without a DB.
+// ingest surface this adds. queue=nil degrades Publish to bus-only, which is
+// enough to prove the delegation without a DB.
 func TestExtensionAPI_PublishEvent_DelegatesToIngestor(t *testing.T) {
 	bus := eventbus.New()
 	got := make(chan domain.Event, 1)
