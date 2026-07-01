@@ -15,19 +15,19 @@ import (
 func TestOwnershipModelForEvent(t *testing.T) {
 	cases := []struct {
 		eventType string
-		want      ownershipModel
+		want      OwnershipModel
 		why       string
 	}{
-		{domain.EventGitHubPRReviewRequested, modelRequestedParty, "review_requested routes to the requested reviewer"},
-		{domain.EventGitHubPRCICheckFailed, modelOwned, "author-centric github → owning-team ladder"},
-		{domain.EventGitHubPRConflicts, modelOwned, "author-centric github → owning-team ladder"},
-		{domain.EventJiraIssueAssigned, modelOwned, "assignee-centric jira → owning-team ladder"},
-		{domain.EventJiraIssueCommented, modelOwned, "assignee-centric jira → owning-team ladder"},
-		{domain.EventJiraIssueAvailable, modelPool, "unassigned team-pool signal → handler-team grouping"},
-		{domain.EventGitHubPRMerged, modelOwned, "entity-terminating but routes (TFAC-520): owning-team ladder"},
-		{domain.EventGitHubPRClosed, modelOwned, "entity-terminating but routes (TFAC-520): owning-team ladder"},
-		{domain.EventJiraIssueCompleted, modelOwned, "entity-terminating but routes (TFAC-520): assignee owning-team ladder"},
-		{"some:unregistered:event", modelPool, "unclassified types fall to the pool default"},
+		{domain.EventGitHubPRReviewRequested, OwnershipRequestedParty, "review_requested routes to the requested reviewer"},
+		{domain.EventGitHubPRCICheckFailed, OwnershipOwned, "author-centric github → owning-team ladder"},
+		{domain.EventGitHubPRConflicts, OwnershipOwned, "author-centric github → owning-team ladder"},
+		{domain.EventJiraIssueAssigned, OwnershipOwned, "assignee-centric jira → owning-team ladder"},
+		{domain.EventJiraIssueCommented, OwnershipOwned, "assignee-centric jira → owning-team ladder"},
+		{domain.EventJiraIssueAvailable, OwnershipPool, "unassigned team-pool signal → handler-team grouping"},
+		{domain.EventGitHubPRMerged, OwnershipOwned, "entity-terminating but routes (TFAC-520): owning-team ladder"},
+		{domain.EventGitHubPRClosed, OwnershipOwned, "entity-terminating but routes (TFAC-520): owning-team ladder"},
+		{domain.EventJiraIssueCompleted, OwnershipOwned, "entity-terminating but routes (TFAC-520): assignee owning-team ladder"},
+		{"some:unregistered:event", OwnershipPool, "unclassified types fall to the pool default"},
 	}
 	for _, c := range cases {
 		if got := ownershipModelForEvent(c.eventType); got != c.want {
@@ -38,7 +38,7 @@ func TestOwnershipModelForEvent(t *testing.T) {
 
 // TestEventSupportsWatch pins the exported UI-facing classifier the
 // /api/event-types handler calls — the watch toggle shows only for these. It
-// equals "modelOwned": review_requested (requested-party) and the pool events
+// equals "OwnershipOwned": review_requested (requested-party) and the pool events
 // are false, while the entity-terminating events (merged/closed/completed) are
 // TRUE now that they route via the owning-team ladder (TFAC-520) — a non-owner
 // team can watch "PR merged in a tracked repo → run my blueprint".

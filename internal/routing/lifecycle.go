@@ -21,7 +21,7 @@ import (
 //
 // Only review_requested is EXCLUDED: the requested reviewer's personal
 // obligation, routed to their team(s) and scoped at emit time
-// (modelRequestedParty), not the owning-team ladder.
+// (OwnershipRequestedParty), not the owning-team ladder.
 //
 // Enumerated (not a github: prefix test) so the set is auditable against
 // internal/domain/events/github.go (= those events minus review_requested) and
@@ -102,48 +102,62 @@ func isAssigneeCentricJiraEvent(eventType string) bool {
 	return assigneeCentricJiraEventSet[eventType]
 }
 
-// ownershipModel classifies how an event's routing participants + owner are
+// OwnershipModel classifies how an event's routing participants + owner are
 // resolved (TFAC-519). It is the single, explicit dispatch key for
 // resolveTeamRouting — replacing the prior implicit "compute the handler-team
 // default, then overwrite it in three special-case branches" shape. Every event
 // type maps to exactly one model.
-type ownershipModel int
+type OwnershipModel int
 
 const (
-	// modelPool — handler-team grouping: every team with a matched handler is a
+	// OwnershipPool — handler-team grouping: every team with a matched handler is a
 	// participant, the highest-priority team is the (eager) owner. For
 	// unassigned/team-pool work like jira:issue:available, and the default for
 	// any event not otherwise classified.
-	modelPool ownershipModel = iota
-	// modelOwned — the owning-team ladder: the entity's owner (author-centric
+	OwnershipPool OwnershipModel = iota
+	// OwnershipOwned — the owning-team ladder: the entity's owner (author-centric
 	// github / assignee-centric jira). Non-owner teams reach it only via an
 	// applies_to_unowned watch handler. The reach flag is meaningful ONLY here.
-	modelOwned
-	// modelRequestedParty — review_requested: routes to the requested reviewer's
+	OwnershipOwned
+	// OwnershipRequestedParty — review_requested: routes to the requested reviewer's
 	// team(s), scoped at emit time, with a handler-team fallback for legacy
 	// events / unwired stores.
-	modelRequestedParty
+	OwnershipRequestedParty
 )
 
 // ownershipModelForEvent classifies an event type into its ownership model.
 // This is the one place the owner-ladder / requested-party / pool distinction is
-// made; an unclassified event type falls to modelPool (the historical default).
-// review_requested is checked first because it is a github:pr:* type that is
-// deliberately NOT in authorCentricGitHubEventSet.
-func ownershipModelForEvent(eventType string) ownershipModel {
+// made; an unclassified event type falls to OwnershipPool (the historical default).
+// A registered event source (TFAC-523, e.g. ee/slack) is consulted before the
+// built-in switch — built-in github:/jira:/system: sources are never migrated
+// into the registry (see source_registry.go), so this only ever fires for an
+// out-of-core source. OwnershipRequestedParty is unsupported for registered
+// sources (the requested-party resolver is GitHub-specific): logged as an
+// error and downgraded to OwnershipPool. review_requested is checked first in
+// the built-in switch because it is a github:pr:* type that is deliberately
+// NOT in authorCentricGitHubEventSet.
+func ownershipModelForEvent(eventType string) OwnershipModel {
+	if hooks, ok := sourceHooksFor(eventType); ok {
+		model := hooks.Ownership(eventType)
+		if model == OwnershipRequestedParty {
+			routerLog.Error("registered source returned OwnershipRequestedParty, unsupported; treating as OwnershipPool", "event_type", eventType)
+			return OwnershipPool
+		}
+		return model
+	}
 	switch {
 	case eventType == domain.EventGitHubPRReviewRequested:
-		return modelRequestedParty
+		return OwnershipRequestedParty
 	case isAuthorCentricGitHubEvent(eventType), isAssigneeCentricJiraEvent(eventType):
-		return modelOwned
+		return OwnershipOwned
 	default:
-		return modelPool
+		return OwnershipPool
 	}
 }
 
 // EventSupportsWatch reports whether the applies_to_unowned ("watch") reach flag
 // is meaningful for an event type (TFAC-517/519) — true ONLY for owner-ladder
-// events (modelOwned), where a non-owner team can opt into reaching the entity.
+// events (OwnershipOwned), where a non-owner team can opt into reaching the entity.
 // Pool events already make every matched team a participant and requested-party
 // routing is identity-scoped, so the flag is inert there. Entity-terminating
 // events (pr:merged / pr:closed / issue:completed) are owner-ladder events now
@@ -153,5 +167,5 @@ func ownershipModelForEvent(eventType string) ownershipModel {
 // where it does something. Exported because the classification
 // (ownershipModelForEvent) is routing's to own.
 func EventSupportsWatch(eventType string) bool {
-	return ownershipModelForEvent(eventType) == modelOwned
+	return ownershipModelForEvent(eventType) == OwnershipOwned
 }

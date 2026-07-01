@@ -197,12 +197,12 @@ type eventRouting struct {
 // overwrite it" — a model that doesn't apply is simply never invoked. The
 // models:
 //
-//   - modelOwned (author-centric github, assignee-centric jira) → the entity's
+//   - OwnershipOwned (author-centric github, assignee-centric jira) → the entity's
 //     owning team via the owning-team ladder; non-owner teams reach it only via
 //     an applies_to_unowned watch handler.
-//   - modelRequestedParty (review_requested) → the requested reviewer's team(s),
+//   - OwnershipRequestedParty (review_requested) → the requested reviewer's team(s),
 //     scoped at emit time, with a handler-team fallback for legacy events.
-//   - modelPool (jira:issue:available, everything else) → handler-team grouping.
+//   - OwnershipPool (jira:issue:available, everything else) → handler-team grouping.
 //
 // The matched handlers still gate whether a task is created and supply the
 // priority; the model only decides the team set + owner.
@@ -223,11 +223,11 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 		ok                         bool
 	)
 	switch ownershipModelForEvent(evt.EventType) {
-	case modelOwned:
+	case OwnershipOwned:
 		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveOwnedRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
-	case modelRequestedParty:
+	case OwnershipRequestedParty:
 		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveRequestedPartyRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
-	default: // modelPool
+	default: // OwnershipPool
 		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = resolvePoolRouting(matchedRules, matchedTriggers)
 	}
 	if !ok {
@@ -243,7 +243,7 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 	}, true
 }
 
-// resolvePoolRouting is the handler-team grouping (modelPool): every team with a
+// resolvePoolRouting is the handler-team grouping (OwnershipPool): every team with a
 // matched handler is a participant, the highest-priority team is the eagerly-
 // stamped owner, and triggers fire in priority-desc / id-asc order. Used for
 // unassigned team-pool events (jira:issue:available) and as the
@@ -266,14 +266,20 @@ func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) (vi
 }
 
 // resolveOwnedRouting routes an owner-ladder event to the entity's owning team.
-// The owner resolver differs by provider (author login for github, assignee
-// account for jira); the shared tail — visibility = ownerSet ∪ watchers, firing
-// = members-then-watchers with the no-steal invariant — lives in
-// ownerLadderRouting. ok=false → external identity, no watching handler → no task.
+// A registered event source (TFAC-523) resolves its own owner first — if
+// hooks exist for evt's source, hooks.ResolveOwner supplies (owner, ownerSet)
+// in place of the built-in provider branch. Built-in providers differ by
+// provider (author login for github, assignee account for jira); the shared
+// tail — visibility = ownerSet ∪ watchers, firing = members-then-watchers with
+// the no-steal invariant — lives in ownerLadderRouting, and registered sources
+// inherit all of it unchanged (do NOT reimplement it here). ok=false →
+// external identity, no watching handler → no task.
 func (r *Router) resolveOwnedRouting(orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) ([]string, string, []string, float64, bool) {
 	var owner string
 	var ownerSet []string
-	if isAuthorCentricGitHubEvent(evt.EventType) {
+	if hooks, ok := sourceHooksFor(evt.EventType); ok {
+		owner, ownerSet = hooks.ResolveOwner(context.Background(), orgID, evt, entityID)
+	} else if isAuthorCentricGitHubEvent(evt.EventType) {
 		owner, ownerSet = r.authorCentricOwner(orgID, evt, entityID)
 	} else {
 		owner, ownerSet = r.assigneeCentricJiraOwner(orgID, evt, entityID)

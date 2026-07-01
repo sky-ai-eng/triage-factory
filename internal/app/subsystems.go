@@ -208,6 +208,7 @@ func (a *App) buildRouting() {
 		}
 	}
 	a.ingestor = ingest.New(a.bus, a.stores.EventQueue, wake)
+	a.srv.SetIngestor(a.ingestor)
 
 	a.pollerMgr = poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.ghResolver)
 	a.pollerMgr.OnError = func(source, orgID string, err error) {

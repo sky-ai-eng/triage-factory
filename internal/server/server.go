@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
@@ -147,6 +148,12 @@ type Server struct {
 	// (the receiver no-ops the publish if so). Content-event processing
 	// is a downstream subscriber's concern.
 	bus *eventbus.Bus
+	// ingestor is the durable emit seam (events audit row + queue row,
+	// then bus fan-out). nil until SetIngestor runs (wired in
+	// internal/app/subsystems.go immediately after ingest.New). Backs
+	// ExtensionAPI.PublishEvent — ee/ ingest must publish through here,
+	// never through the raw bus, or events lose the durable outbox.
+	ingestor *ingest.Ingestor
 
 	// onInstallationRemoved, when set, fires on a verified
 	// installation.deleted webhook so the credential resolver's
@@ -1336,6 +1343,15 @@ func (s *Server) kickDashboardBackfill(orgID, userID, login, host string) {
 // main.go after the bus is created.
 func (s *Server) SetEventBus(bus *eventbus.Bus) {
 	s.bus = bus
+}
+
+// SetIngestor wires the durable ingest seam so ExtensionAPI.PublishEvent can
+// delegate to it. Wired in internal/app/subsystems.go immediately after
+// ingest.New — before that point (and in any test wiring that skips it),
+// ingestor is nil and PublishEvent drops loudly rather than falling back to
+// a bare bus publish (which would silently skip the durable outbox).
+func (s *Server) SetIngestor(i *ingest.Ingestor) {
+	s.ingestor = i
 }
 
 // SetInstallationRemovedHook registers a callback fired on a verified

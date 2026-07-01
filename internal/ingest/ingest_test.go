@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -77,6 +78,20 @@ func countEventQueue(t *testing.T, conn *sql.DB) int {
 		t.Fatalf("count event_queue: %v", err)
 	}
 	return n
+}
+
+// seedEventCatalogRow inserts the events_catalog row eventType needs to
+// satisfy the events.event_type FK the durable enqueue's recordEvent write
+// hits. Production registers out-of-core event types via the gated
+// catalog-upsert (a sibling ticket); this test seeds it directly.
+func seedEventCatalogRow(t *testing.T, conn *sql.DB, eventType string) {
+	t.Helper()
+	if _, err := conn.Exec(`
+		INSERT OR IGNORE INTO events_catalog (id, source, category, label, description)
+		VALUES (?, 'fake', 'thing', 'Fake', 'TFAC-523 fake-source test fixture')
+	`, eventType); err != nil {
+		t.Fatalf("seed events_catalog for %s: %v", eventType, err)
+	}
 }
 
 // TestIngestor_RouterBoundEvent_DurablyEnqueuedAndPublished pins the core
@@ -228,5 +243,74 @@ func TestIngestor_EnqueueFailure_DropsNoBusPhantom(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&wakes); n != 0 {
 		t.Errorf("wake called %d times on enqueue failure, want 0", n)
+	}
+}
+
+// TestIngestor_RegisteredSource_DurablyEnqueued pins the TFAC-523 routerBound
+// seam: an event from a source registered with internal/routing (standing in
+// for an ee/ package's "slack:" prefix) gets the same durable-outbox
+// treatment as a built-in github:/jira: event — without this, a registered
+// source's events would go bus-only and never reach the router via the drain
+// worker.
+func TestIngestor_RegisteredSource_DurablyEnqueued(t *testing.T) {
+	t.Cleanup(routing.ResetSources)
+	routing.RegisterSource("fake", routing.SourceHooks{
+		Ownership:   func(string) routing.OwnershipModel { return routing.OwnershipPool },
+		TracksScope: func(context.Context, domain.Event, string) bool { return true },
+	})
+
+	conn := newIngestTestDB(t)
+	entityID := seedIngestEntity(t, conn)
+	seedEventCatalogRow(t, conn, "fake:x")
+	queue := sqlitestore.New(conn).EventQueue
+	bus, got := captureBus(t)
+
+	var wakes int32
+	ing := ingest.New(bus, queue, func() { atomic.AddInt32(&wakes, 1) })
+
+	eid := entityID
+	ing.Publish(domain.Event{
+		OrgID:     runmode.LocalDefaultOrgID,
+		EntityID:  &eid,
+		EventType: "fake:x",
+	})
+
+	rows, err := queue.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil {
+		t.Fatalf("ListForEntity: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 queue row for a registered source's event, got %d", len(rows))
+	}
+	if n := atomic.LoadInt32(&wakes); n != 1 {
+		t.Errorf("wake called %d times, want 1", n)
+	}
+	if e := awaitEvent(t, got); e.EventType != "fake:x" {
+		t.Errorf("bus event type = %q, want fake:x", e.EventType)
+	}
+}
+
+// TestIngestor_UnregisteredSource_BusOnly pins the negative: an event whose
+// source prefix has no registration (no ee/ package installed) stays
+// bus-only, same as a system event — routing.SourceRegistered must gate the
+// enqueue, not just "any non-github/jira prefix."
+func TestIngestor_UnregisteredSource_BusOnly(t *testing.T) {
+	routing.ResetSources() // defensive: this test's assertion depends on nothing being registered
+
+	conn := newIngestTestDB(t)
+	queue := sqlitestore.New(conn).EventQueue
+	bus, got := captureBus(t)
+
+	ing := ingest.New(bus, queue, nil)
+	ing.Publish(domain.Event{
+		OrgID:     runmode.LocalDefaultOrgID,
+		EventType: "unregistered-fake:x",
+	})
+
+	if n := countEventQueue(t, conn); n != 0 {
+		t.Errorf("event_queue has %d rows, want 0 (unregistered source stays bus-only)", n)
+	}
+	if e := awaitEvent(t, got); e.EventType != "unregistered-fake:x" {
+		t.Errorf("bus event type = %q, want unregistered-fake:x", e.EventType)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 )
 
@@ -57,6 +58,23 @@ type ExtensionAPI interface {
 	PublicURL() string
 	// GotrueAdminBaseURL is the in-network GoTrue base URL for admin calls.
 	GotrueAdminBaseURL() string
+
+	// PublishEvent publishes evt through the durable Ingestor (durable
+	// outbox enqueue + bus fan-out) — the ONLY correct way for ee/ ingest to
+	// emit an event into the pipeline. Never falls back to a bare bus
+	// publish: if the ingestor isn't wired yet (nil), it logs at ERROR and
+	// drops the event, matching ingest's own drop-loudly convention, rather
+	// than silently skipping durability. Read-through to the live server;
+	// nil until app wiring completes (internal/app/subsystems.go). Safe for
+	// request-time use only — extension handlers run post-startup, but the
+	// install closure runs before ingestor is wired, so an extension must
+	// NOT call this from its install closure.
+	PublishEvent(evt domain.Event)
+	// Bus returns the in-process event bus, for subscribe-side consumers
+	// (TFAC-511). Read-through to the live server; nil until app wiring
+	// completes. Same install-closure caveat as PublishEvent — only safe at
+	// request time / from a goroutine started after startup.
+	Bus() *eventbus.Bus
 
 	// --- login seam (see login_ext.go) ---
 
@@ -150,6 +168,19 @@ func (a serverExtensionAPI) Authz() *authz.Checker      { return a.s.az }
 func (a serverExtensionAPI) Stores() db.Stores          { return a.s.allStores }
 func (a serverExtensionAPI) DB() *sql.DB                { return a.s.db }
 func (a serverExtensionAPI) GotrueAdminBaseURL() string { return a.s.gotrueAdminBaseURL() }
+func (a serverExtensionAPI) Bus() *eventbus.Bus         { return a.s.bus }
+
+// PublishEvent delegates to the wired Ingestor. Deliberately does NOT fall
+// back to a.s.bus.Publish when unwired — that would silently skip the
+// durable outbox, exactly the loss internal/ingest exists to prevent (see
+// ingest.go's own drop-loudly convention on an enqueue failure).
+func (a serverExtensionAPI) PublishEvent(evt domain.Event) {
+	if a.s.ingestor == nil {
+		serverLog.Error("ExtensionAPI.PublishEvent: ingestor not wired, dropping event", "event_type", evt.EventType)
+		return
+	}
+	a.s.ingestor.Publish(evt)
+}
 
 func (a serverExtensionAPI) PublicURL() string {
 	if a.s.deployCfg == nil {
