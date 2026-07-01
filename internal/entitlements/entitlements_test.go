@@ -34,3 +34,39 @@ func TestRegisterNilIgnored(t *testing.T) {
 		t.Fatal("nil register must not blank out the active checker")
 	}
 }
+
+func TestFor_PerOrgAutoAll(t *testing.T) {
+	t.Cleanup(Reset)
+	RegisterProvider(Static(FeatureGovernance))
+	for _, org := range []string{"orgA", "orgB"} {
+		if !For(org).Has(FeatureGovernance) {
+			t.Fatalf("For(%q) should grant governance (auto-all Static provider)", org)
+		}
+	}
+}
+
+func TestEntitlementsNew_LimitAbsent(t *testing.T) {
+	e := New([]Feature{FeatureGovernance}, nil)
+	if _, ok := e.Limit("anyKey"); ok {
+		t.Fatal("Limit should report (0, false) when no limits were set")
+	}
+}
+
+func TestEntitlements_ZeroValueDeniesEverything(t *testing.T) {
+	var e Entitlements
+	if e.Has(FeatureSSO) || e.Has(FeatureGovernance) {
+		t.Fatal("zero-value Entitlements must deny every feature")
+	}
+	if _, ok := e.Limit("anyKey"); ok {
+		t.Fatal("zero-value Entitlements must report every limit as unset")
+	}
+}
+
+func TestRegisterProviderNilIgnored(t *testing.T) {
+	t.Cleanup(Reset)
+	RegisterProvider(Static(FeatureGovernance))
+	RegisterProvider(nil)
+	if !For("any-org").Has(FeatureGovernance) {
+		t.Fatal("nil RegisterProvider must not blank out the registered provider")
+	}
+}

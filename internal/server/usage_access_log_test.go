@@ -177,7 +177,7 @@ func TestParseAccessLogPaging(t *testing.T) {
 // (Postgres rig); the unlicensed 404 is its own test below.
 func TestUsageAccessLog_Local(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
-	entitlements.Register(governanceGrant{})
+	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 	t.Cleanup(entitlements.Reset)
 
 	s := newUsageTestServer(t)
@@ -321,7 +321,7 @@ func TestUsageAccessLog_Unlicensed404(t *testing.T) {
 // page (the label, parsed leniently, still renders).
 func TestUsageAccessLog_MalformedDetailDoesNotBreakResponse(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
-	entitlements.Register(governanceGrant{})
+	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 	t.Cleanup(entitlements.Reset)
 
 	s := newUsageTestServer(t)

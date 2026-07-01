@@ -87,7 +87,7 @@ func (h *usageHandler) handleUsageTeamActivity(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	if !requireGovernance(w, r) {
+	if !requireGovernance(w, r, orgID) {
 		return
 	}
 	teamID := r.PathValue("team_id")
@@ -149,7 +149,7 @@ func (h *usageHandler) handleUsageOrgActivity(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	if !requireGovernance(w, r) {
+	if !requireGovernance(w, r, orgID) {
 		return
 	}
 	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
@@ -197,16 +197,16 @@ func (h *usageHandler) handleUsageOrgActivity(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, out)
 }
 
-// requireGovernance gates a handler on the FeatureGovernance entitlement,
-// writing a 404 (not 403) and returning false when it's unlicensed. The 404
-// matches the FE useEntitlements gate, which hides the surface entirely in an
-// unlicensed build — so the route reads as "not here", not "forbidden". The
-// check is mode-agnostic (entitlements never carve out by runmode): a community
-// / unlicensed build — local mode included — answers false and 404s, which is
-// why the role checks that follow are only ever reached in a licensed multi
-// deploy.
-func requireGovernance(w http.ResponseWriter, r *http.Request) bool {
-	if !entitlements.Active().Has(entitlements.FeatureGovernance) {
+// requireGovernance gates a handler on the FeatureGovernance entitlement for
+// orgID, writing a 404 (not 403) and returning false when it's unlicensed.
+// The 404 matches the FE useEntitlements gate, which hides the surface
+// entirely in an unlicensed build — so the route reads as "not here", not
+// "forbidden". The check is mode-agnostic (entitlements never carve out by
+// runmode): a community / unlicensed build — local mode included — answers
+// false and 404s, which is why the role checks that follow are only ever
+// reached in a licensed multi deploy.
+func requireGovernance(w http.ResponseWriter, r *http.Request, orgID string) bool {
+	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
 		http.NotFound(w, r)
 		return false
 	}

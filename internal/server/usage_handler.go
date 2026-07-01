@@ -376,7 +376,7 @@ func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request
 	// EE gate first: hide the route (404) when governance isn't licensed, before
 	// any role-based disclosure. Mode-agnostic — local is unlicensed, so the
 	// route 404s there too (per-team caps are a multi-tenant EE concept).
-	if !entitlements.Active().Has(entitlements.FeatureGovernance) {
+	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
 		http.NotFound(w, r)
 		return
 	}
@@ -470,7 +470,7 @@ func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// EE gate first (404 unlicensed), then org admin (403) — mirrors the PUT.
-	if !entitlements.Active().Has(entitlements.FeatureGovernance) {
+	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
 		http.NotFound(w, r)
 		return
 	}

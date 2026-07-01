@@ -281,7 +281,7 @@ func TestUsageAccessLog_GatesAndEntitlement_Postgres(t *testing.T) {
 	})
 
 	// License governance for the remaining cases.
-	entitlements.Register(governanceGrant{})
+	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 
 	t.Run("org_member_403", func(t *testing.T) {
 		rec := httptest.NewRecorder()

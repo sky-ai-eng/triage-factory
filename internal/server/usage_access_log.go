@@ -82,7 +82,7 @@ func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Reque
 	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
-	if !entitlements.Active().Has(entitlements.FeatureGovernance) {
+	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
 		http.NotFound(w, r)
 		return
 	}

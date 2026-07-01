@@ -45,6 +45,13 @@ type Claims struct {
 	Expires  int64 `json:"exp"`
 	// Issuer optionally names who minted the token.
 	Issuer string `json:"iss,omitempty"`
+	// Limits carries deployment-wide quota values (e.g. seats), keyed by the
+	// same string values as internal/entitlements.Limit. Absent from the
+	// signed payload → nil map → no limits. Not surfaced as a per-org
+	// entitlement (see ee.licenseProvider) — a deployment-wide cap is a
+	// license property, read straight off the license when self-host seat
+	// enforcement lands.
+	Limits map[string]int `json:"limits,omitempty"`
 }
 
 // Has reports whether the license lists the given feature key. Matching is

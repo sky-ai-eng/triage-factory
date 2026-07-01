@@ -98,7 +98,7 @@ func (s *Spawner) checkDailyCostCap(ctx context.Context, orgID string) error {
 // unowned task (teamID == ""), which is uncappable by construction.
 func (s *Spawner) checkTeamDailyCostCap(ctx context.Context, orgID, teamID string) error {
 	// EE gate first: dormant unless governance is licensed.
-	if !entitlements.Active().Has(entitlements.FeatureGovernance) {
+	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
 		return nil
 	}
 	if s.teams == nil || s.spend == nil {

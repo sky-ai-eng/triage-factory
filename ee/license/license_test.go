@@ -39,13 +39,31 @@ func signTest(t *testing.T, priv *ecdsa.PrivateKey, c Claims) string {
 
 func TestSignVerifyRoundTrip(t *testing.T) {
 	pub, priv := mustKey(t)
-	tok := signTest(t, priv, Claims{Org: "acme", Features: []string{"sso", "scim"}, Expires: time.Now().Add(time.Hour).Unix()})
+	tok := signTest(t, priv, Claims{
+		Org: "acme", Features: []string{"sso", "scim"}, Expires: time.Now().Add(time.Hour).Unix(),
+		Limits: map[string]int{"seats": 25},
+	})
 	got, err := NewVerifier(pub).Verify(tok)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
 	if !got.Has("sso") || !got.Has("scim") || got.Has("sandbox_fleet") {
 		t.Fatalf("features wrong: %v", got.Features)
+	}
+	if got.Limits["seats"] != 25 {
+		t.Fatalf("limits wrong: %v, want seats=25", got.Limits)
+	}
+}
+
+func TestSignVerifyRoundTrip_NoLimits(t *testing.T) {
+	pub, priv := mustKey(t)
+	tok := signTest(t, priv, Claims{Org: "acme", Features: []string{"sso"}, Expires: time.Now().Add(time.Hour).Unix()})
+	got, err := NewVerifier(pub).Verify(tok)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if got.Limits != nil {
+		t.Fatalf("limits = %v, want nil when absent from the signed payload", got.Limits)
 	}
 }
 

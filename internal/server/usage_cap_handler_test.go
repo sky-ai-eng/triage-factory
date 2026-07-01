@@ -49,7 +49,7 @@ func TestUsageTeamCap_GovernanceAndRoleGates_Postgres(t *testing.T) {
 	})
 
 	t.Run("org_admin_with_governance_sets_cap_and_it_shows_on_rollup", func(t *testing.T) {
-		entitlements.Register(governanceGrant{})
+		entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 		t.Cleanup(entitlements.Reset)
 
 		// orgAdmin is an org admin but NOT a member of teamA — proving the
@@ -90,7 +90,7 @@ func TestUsageTeamCap_GovernanceAndRoleGates_Postgres(t *testing.T) {
 	})
 
 	t.Run("team_admin_403", func(t *testing.T) {
-		entitlements.Register(governanceGrant{})
+		entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 		t.Cleanup(entitlements.Reset)
 		// A teamA admin is still only an org *member* — per-team cap config is
 		// org-admin-only (a team admin cannot set their own team's cap).
@@ -102,7 +102,7 @@ func TestUsageTeamCap_GovernanceAndRoleGates_Postgres(t *testing.T) {
 	})
 
 	t.Run("plain_member_403", func(t *testing.T) {
-		entitlements.Register(governanceGrant{})
+		entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 		t.Cleanup(entitlements.Reset)
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageTeamCap(rec, r.putCapReq(r.member, r.teamA, `{"max_daily_cost_usd": 10}`))
@@ -112,7 +112,7 @@ func TestUsageTeamCap_GovernanceAndRoleGates_Postgres(t *testing.T) {
 	})
 
 	t.Run("clear_with_null_stores_no_cap", func(t *testing.T) {
-		entitlements.Register(governanceGrant{})
+		entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 		t.Cleanup(entitlements.Reset)
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageTeamCap(rec, r.putCapReq(r.orgAdmin, r.teamB, `{"max_daily_cost_usd": null}`))
@@ -127,7 +127,7 @@ func TestUsageTeamCap_GovernanceAndRoleGates_Postgres(t *testing.T) {
 	})
 
 	t.Run("negative_400", func(t *testing.T) {
-		entitlements.Register(governanceGrant{})
+		entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 		t.Cleanup(entitlements.Reset)
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageTeamCap(rec, r.putCapReq(r.orgAdmin, r.teamA, `{"max_daily_cost_usd": -5}`))
@@ -157,7 +157,7 @@ func TestUsageTeamCaps_ListsEveryActiveTeam_Postgres(t *testing.T) {
 	})
 
 	t.Run("team_admin_403", func(t *testing.T) {
-		entitlements.Register(governanceGrant{})
+		entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 		t.Cleanup(entitlements.Reset)
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageTeamCaps(rec, r.req(r.teamAdmin, ""))
@@ -167,7 +167,7 @@ func TestUsageTeamCaps_ListsEveryActiveTeam_Postgres(t *testing.T) {
 	})
 
 	t.Run("org_admin_lists_all_active_including_idle", func(t *testing.T) {
-		entitlements.Register(governanceGrant{})
+		entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 		t.Cleanup(entitlements.Reset)
 
 		// Pre-cap the idle teamC, to prove the just-set value round-trips on the list.

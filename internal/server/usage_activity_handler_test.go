@@ -177,7 +177,7 @@ func TestUsageActivityHandler_GatesAndScope_Postgres(t *testing.T) {
 	})
 
 	// Everything below runs with governance licensed.
-	license := func() { entitlements.Register(governanceGrant{}) }
+	license := func() { entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance)) }
 
 	t.Run("team_plain_member_403", func(t *testing.T) {
 		license()
@@ -325,7 +325,7 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 		}
 	})
 
-	license := func() { entitlements.Register(governanceGrant{}) }
+	license := func() { entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance)) }
 
 	t.Run("team_admin_200_scoped", func(t *testing.T) {
 		license()

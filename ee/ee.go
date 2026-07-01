@@ -55,6 +55,14 @@ func Install() {
 		return
 	}
 	entitlements.Register(grant{claims})
+	feats := make([]entitlements.Feature, len(claims.Features))
+	for i, f := range claims.Features {
+		feats[i] = entitlements.Feature(f)
+	}
+	entitlements.RegisterProvider(licenseProvider{
+		claims: claims,
+		ent:    entitlements.New(feats, nil), // features auto-all; the license's deployment-wide Limits are NOT per-org
+	})
 	// Startup diagnostic → stderr (like the failure paths above), so it doesn't
 	// land in the stdout log stream or leak the org/feature list into structured
 	// stdout logging.
@@ -93,4 +101,21 @@ type grant struct{ claims license.Claims }
 
 func (g grant) Has(f entitlements.Feature) bool {
 	return g.claims.Valid(time.Now()) && g.claims.Has(string(f))
+}
+
+// licenseProvider adapts verified license claims to the per-org
+// entitlements.Provider seam: self-host licensing is "auto-all" — one
+// license grants its features to every org in the deployment. Fails closed:
+// once the clock passes exp, For returns the zero-value Entitlements (denies
+// everything), mirroring grant.Has's live degradation.
+type licenseProvider struct {
+	claims license.Claims
+	ent    entitlements.Entitlements
+}
+
+func (p licenseProvider) For(string) entitlements.Entitlements {
+	if !p.claims.Valid(time.Now()) {
+		return entitlements.Entitlements{}
+	}
+	return p.ent
 }

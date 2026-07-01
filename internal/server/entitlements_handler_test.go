@@ -12,20 +12,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// governanceGrant licenses ONLY the governance feature — the grant-pattern
-// mirror of ee/sso/rig_test.go's ssoLicensedGrant, used to prove the probe
-// reports a feature once a checker registers it.
-type governanceGrant struct{}
-
-func (governanceGrant) Has(f entitlements.Feature) bool { return f == entitlements.FeatureGovernance }
+// testEntitlementsOrgID is the org seeded into authedReq's context so
+// handleEntitlements' For(orgID) lookup resolves an org — RegisterProvider's
+// Static provider grants the same features to every org, so the specific
+// value is arbitrary but must be present for the resolve to succeed.
+const testEntitlementsOrgID = "11111111-1111-1111-1111-111111111111"
 
 // authedReq builds a GET /api/entitlements request carrying a verified-session
-// claim in context, the way withSession would seed it before the handler runs.
-// The handler reads no Server fields, so a bare &Server{} drives it without the
-// auth/pg stack — the entitlements seam is process-global, not request-scoped.
+// claim and an active org in context, the way withSession would seed it before
+// the handler runs. The handler reads no Server fields, so a bare &Server{}
+// drives it without the auth/pg stack — the entitlements provider is
+// process-global, not request-scoped.
 func authedReq() *http.Request {
 	req := httptest.NewRequest(http.MethodGet, "/api/entitlements", nil)
 	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: "test-user"})
+	ctx = httpx.WithOrgID(ctx, testEntitlementsOrgID)
 	return req.WithContext(ctx)
 }
 
@@ -74,7 +75,7 @@ func TestEntitlements_GatingIsModeAgnostic(t *testing.T) {
 
 		t.Run(string(mode)+"/governance_granted", func(t *testing.T) {
 			runmode.SetForTest(t, mode)
-			entitlements.Register(governanceGrant{})
+			entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 			t.Cleanup(entitlements.Reset)
 
 			got := decodeFeatures(t, recordEntitlements())
@@ -89,7 +90,7 @@ func TestEntitlements_GatingIsModeAgnostic(t *testing.T) {
 // 200 that would leak the deployment's feature state to an anonymous caller.
 func TestEntitlements_RequiresSession(t *testing.T) {
 	entitlements.Reset() // start from a known baseline, independent of test order
-	entitlements.Register(governanceGrant{})
+	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 	t.Cleanup(entitlements.Reset)
 
 	rec := httptest.NewRecorder()

@@ -344,15 +344,12 @@ func TestDelegate_NoCap_Proceeds(t *testing.T) {
 
 // --- per-team daily cost cap (TFAC-482) ----------------------------------
 
-// govGrant licenses ONLY FeatureGovernance — the EE entitlement the per-team cap
-// gates on. licenseGovernance registers it process-wide and resets on cleanup.
-type govGrant struct{}
-
-func (govGrant) Has(f entitlements.Feature) bool { return f == entitlements.FeatureGovernance }
-
+// licenseGovernance registers a per-org provider granting ONLY
+// FeatureGovernance — the EE entitlement the per-team cap gates on — for
+// every org, and resets on cleanup.
 func licenseGovernance(t *testing.T) {
 	t.Helper()
-	entitlements.Register(govGrant{})
+	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 	t.Cleanup(entitlements.Reset)
 }
 
