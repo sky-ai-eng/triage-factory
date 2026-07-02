@@ -1,6 +1,9 @@
 package entitlements
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // eventSourceGates maps an event source prefix (the segment before the first
 // ':' in an event_type, e.g. "slack" in "slack:mention") to the Feature that
@@ -43,4 +46,27 @@ func EventTypeAllowed(orgID, eventType string) bool {
 		return true
 	}
 	return For(orgID).Has(f)
+}
+
+// RegisteredEventGateFeatures returns the distinct features referenced by
+// event-source gates, sorted. It exists for the composition-root parity test
+// (feature_parity_test.go at the repo root): a feature wired into a seam but
+// missing from AllFeatures() gates correctly (Has is a plain map lookup) yet
+// never surfaces on the /api/entitlements probe, leaving every render-gated
+// surface dark for licensed orgs. Registration-time validation can't do this
+// job — seam tests deliberately register synthetic features, and only the
+// composition root sees exactly the real registrations.
+func RegisteredEventGateFeatures() []Feature {
+	mu.RLock()
+	defer mu.RUnlock()
+	seen := map[Feature]struct{}{}
+	for _, f := range eventSourceGates {
+		seen[f] = struct{}{}
+	}
+	out := make([]Feature, 0, len(seen))
+	for f := range seen {
+		out = append(out, f)
+	}
+	slices.Sort(out)
+	return out
 }

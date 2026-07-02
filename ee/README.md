@@ -30,6 +30,11 @@ startup (via a blank import from `package main`). Core asks
 | `db` tx-store extension slot | let ee build tx-bound stores inside core transactions without core knowing their types | ee registers per-dialect store factories |
 | `server` route extension | mount enterprise HTTP routes | ee registers route installers; routes always mount, gated per-request on entitlements inside the handler |
 | `server` login hooks | SSO enforcement / JIT / test-callback inside the core login path | ee implements opaque hook interfaces |
+| event-source seams | let an ee feature ship its own event types: schema + ownership registration, routing hooks, durable publish, entitlement dormancy | ee registers types, source hooks, and a source→feature gate at install |
+
+The full recipe — placement rubric, seam catalog, install anatomy, and the
+dormancy contract — is in
+[`docs/ee-feature-packaging.md`](../docs/ee-feature-packaging.md).
 
 ## What lives here
 

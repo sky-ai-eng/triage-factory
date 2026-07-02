@@ -1,0 +1,234 @@
+# How to build a feature that lives in `ee/` (Enterprise Edition)
+
+Where code goes, which seams core exposes, and the behavioral contract
+(entitlement gating, dormancy) every EE feature follows.
+
+## The placement rubric
+
+**Core (`internal/*`, `cmd/*`) never imports `ee/`; only `package main`
+does**. Dependencies point inward, so:
+
+- **`ee/` calling core is free.** An EE package imports `internal/*` like any
+  other consumer: stores, the event bus, domain types, `ExtensionAPI`. No seam
+  needed in that direction.
+- **Core calling into EE logic needs a seam.** If core
+  would have to import your code, you've put it in the wrong place — register
+  an implementation into a core-owned registry instead.
+
+What belongs in **`ee/<feature>/`**: the feature's actual substance — API
+clients, ingest handlers, resolvers, enforcement logic, its own store
+implementations, domain behavior.
+
+What's admissible in **core** (exactly three kinds of things):
+
+1. **Generic seams** — registries any source could plug into (the table
+   below). A seam names no enterprise type and does nothing until something
+   registers.
+2. **Inert declarations** — event-type ID constants, predicate/metadata
+   schema shapes, SQL migrations and RLS policies. Schema is shared and
+   present for every install (`events.event_type` has an FK into
+   `events_catalog`, so catalog rows must exist universally regardless of
+   entitlement); gating happens at access time, never in DDL.
+3. **Thin proxies** — agent-facing CLI verbs (`triagefactory exec ...`): a
+   registered subcommand whose body is arg parsing around one host-side call.
+   Feature logic never runs in the agent's process — see "Agent-facing CLI
+   verbs" below.
+
+## The seams
+
+| Seam (core)                      | Registration call                                                        | What plugs in                                                                                                                                                          |
+| -------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `internal/entitlements` provider | `entitlements.RegisterProvider` (done once by `ee.Install()`)            | the license-backed per-org provider behind `entitlements.For(orgID)`                                                                                                   |
+| Server routes                    | `server.RegisterExtension(name, install)`                                | HTTP routes mounted through the same session/CSRF wrap as core routes; `install` receives `ExtensionAPI`                                                               |
+| Tx-bound stores                  | `db.RegisterStoreExtension(dialect, key, factory)`                       | per-dialect store bundles built inside core transactions, retrieved by a typed accessor on the EE side                                                                 |
+| Login hooks                      | `ExtensionAPI.SetLoginExtension`                                         | decision hooks inside the core OAuth login path (SSO enforcement / JIT)                                                                                                |
+| Event-type schemas               | `events.Register(EventSchema{...})` in `internal/domain/events`          | the feature's event types: metadata + predicate shape, matcher, and the per-type `Ownership` declaration                                                               |
+| Routing behavior                 | `routing.RegisterSource(prefix, SourceHooks{ResolveOwner, TracksScope})` | how an _Owned_ event of this source resolves its owning team, and whether a team tracks the event's scope. Registration also marks the prefix router-bound (see below) |
+| Entitlement gate                 | `entitlements.GateEventSource(prefix, feature)`                          | the dormancy contract for every event type of this source                                                                                                              |
+| Event publish                    | `ExtensionAPI.PublishEvent(evt)`                                         | ingest → durable outbox → router, without touching the bus directly                                                                                                    |
+| Event subscribe                  | `ExtensionAPI.Bus()`                                                     | bus subscriptions (live-update consumers)                                                                                                                              |
+| Agent CLI verbs                  | `exec.RegisterSubcommand` + `agenthost.RegisterExtension`                | an exec subcommand (arg parsing, ee-side) and its host-side logic, entitlement-gated at the `CallExtension` dispatch                                                   |
+
+The first four apply to any feature. The next five are for a **feature with
+its own event source** — one that ingests external signals and mints
+entities/events/tasks. The last is for a feature that gives delegated agents
+CLI verbs.
+
+## Anatomy of a feature with events
+
+Everything registers from one install path: an `init()` in the EE package
+(reached by a blank import in `package main`) plus the `RegisterExtension`
+install closure. Using a hypothetical `chat` source:
+
+```go
+package chat // ee/chat
+
+func init() {
+    // 1. Event types — classification is DATA, declared per type.
+    events.Register(events.EventSchema{
+        EventType: "chat:mention",
+        Ownership: events.OwnershipOwned,
+        // Metadata/Predicate shapes, Fields, Match — see internal/domain/events.
+        // The typed constructor (newSchema) is package-internal today; exporting
+        // it is the expected first step for the first out-of-core source.
+    })
+
+    // 2. Routing behavior — resolution is BEHAVIOR, registered per source.
+    //    Also marks "chat:" router-bound: internal/ingest enqueues its events
+    //    into the durable outbox instead of leaving them bus-only.
+    routing.RegisterSource("chat", routing.SourceHooks{
+        ResolveOwner: resolveChannelOwner, // e.g. a channel→team lookup
+        TracksScope:  teamTracksChannel,   // the stage-1 team↔resource gate
+    })
+
+    // 3. Dormancy — every chat:* type now requires the feature, org by org.
+    entitlements.GateEventSource("chat", entitlements.FeatureChat)
+
+    // 4. Routes — webhook ingest + settings API.
+    server.RegisterExtension("chat", install)
+}
+
+func install(api server.ExtensionAPI) {
+    h := &handler{tx: api.Tx(), az: api.Authz(), publish: api.PublishEvent}
+    // Signed-webhook ingest is pre-auth: Raw + PreAuthRateLimit, handler
+    // verifies the signature itself, then gates on the entitlement before
+    // doing anything: if !entitlements.For(orgID).Has(FeatureChat) { drop }.
+    api.Raw("POST /api/chat/events", api.PreAuthRateLimit(http.HandlerFunc(h.ingest)))
+    // Session-gated surfaces go through API/APIMutating like any core route.
+    api.API("GET /api/chat/channels", h.channelsList)
+}
+```
+
+Rules the registries enforce (all panic at boot, never degrade at dispatch):
+
+- `events.Register` — no duplicate types; `OwnershipRequestedParty` is
+  github-only (its resolver is native to the GitHub review-request path).
+- `routing.RegisterSource` — no empty/duplicate prefix; both hooks required
+  (a pool-only source supplies a `("", nil)` stub for `ResolveOwner`); the
+  built-in prefixes `github`, `jira`, `system`, `webhook` are reserved and
+  cannot be shadowed.
+
+Ordering is structural, not fragile: a source's events can only originate from
+its own registered ingest route, so its hooks are always in place before its
+first event exists. Registries are written during single-threaded startup and
+read from steady-state goroutines — same contract as `registeredExtensions`.
+
+What a registered _Owned_ source inherits for free from the router: the full
+owner-ladder semantics — visibility unions, `applies_to_unowned` watch
+handlers, the member-over-watcher no-steal invariant, deterministic firing
+order. `SourceHooks.ResolveOwner` only answers "who owns this occurrence";
+everything downstream is shared machinery. Do not reimplement it.
+
+`ExtensionAPI.PublishEvent` and `Bus()` are read-through and nil until app
+wiring completes: use them at request time (any mounted handler is safe),
+never inside the install closure itself.
+
+## Entitlement gating: two shapes, one contract
+
+**Out-of-core module (the default).** Routes always mount; each handler
+gates per-request on `entitlements.For(orgID).Has(feature)` at its own
+org-resolution seam. There is no boot-time feature gate — the same binary
+serves entitled and unentitled orgs, and a lapsed org's requests fail closed
+at the handler.
+
+**In-core gated code (the exception).** Small amounts of core code may
+check `For(orgID).Has(feature)` directly when the functionality can't cleanly
+extract (cost caps inside the delegation path, audit surfaces inside core
+handlers). Use sparingly; prefer the module shape for anything substantial.
+
+**The dormancy contract** (what `GateEventSource` buys, enforced centrally —
+a gated feature does not implement this itself):
+
+- An org without the feature — never had it, or had it and lapsed; the two are
+  deliberately identical — sees none of the source's event types in
+  `/api/event-types` or `/api/event-schemas`, none of its handlers in the
+  handler lists, and no blueprint whose _every_ trigger is gated (a blueprint
+  with at least one ungated trigger stays visible).
+- Creating a handler on a gated-off type is rejected; toggling/promoting an
+  existing one is not (the firing gate makes it inert anyway).
+- The router records gated events (the append-only log stays honest) but
+  derives nothing: no close phase, no tasks, no trigger fires — including the
+  post-scoring re-derive pass.
+- **Nothing is deleted or rewritten.** Rows persist untouched; regaining the
+  entitlement restores every surface exactly as configured. Existing tasks
+  from a previously-entitled period are durable work and are never purged.
+
+The in-`ee/` half of dormancy is just: gate ingest. When the entitlement is
+absent the source stops producing events at all; the router-side freeze is
+belt-and-suspenders for lapse races and stragglers.
+
+## Agent-facing CLI verbs
+
+Delegated agents act on TF state through `triagefactory exec ...` subcommands
+rather than calling external APIs directly. Every verb routes through the
+`cmd/exec/agenthost` seam: one `Client` interface with a host-local
+implementation (local mode — the exec process is already on the host) and a
+sandbox implementation that RPCs over a per-run unix socket to a daemon in
+the server process. The socket is simultaneously the transport, the
+credential (one socket per run, fs permissions), and the identity (the daemon
+maps socket → run). The jail never holds a token; credentials, state access,
+and audit writes all happen host-side.
+
+An EE feature adds verbs with two registrations from its `init()`:
+
+```go
+// The verb: arg parsing lives in the ee package. Core's dispatch is a map
+// lookup after the built-in switch — core never knows the feature's flags.
+exec.RegisterSubcommand("chat", cli.Run)
+
+// The logic: runs host-side, keyed by namespace, gated by feature.
+agenthost.RegisterExtension("chat", entitlements.FeatureChat, hostHandler)
+```
+
+The runner parses its flags and makes one call —
+`host.CallExtension("chat", "post", argsJSON)`. Both transports funnel into a
+single dispatch point that resolves the namespace, checks
+`entitlements.For(<run's org>).Has(feature)`, and only then invokes the
+handler. The gate lives in the seam, not in the verb, so a verb author
+cannot forget it.
+
+Two consequences worth knowing:
+
+- **EE verbs are structurally inert in a locally-invoked CLI, server running
+  or not.** CLI dispatch short-circuits before `ee.Install()` runs, so a CLI
+  process never has an entitlement provider — every gated verb refuses
+  there. Entitled execution happens only where identity and entitlements are
+  real: the daemon inside the server process.
+- **`exec --help` lists built-ins only.** Registered verbs are documented by
+  the feature that ships them (and surfaced to agents via their briefing) —
+  help has no org context to filter on.
+
+Payloads are one JSON frame in, one out (no streaming), within the IPC frame
+cap — size verb responses accordingly.
+
+## Frontend
+
+The SPA is a single bundle — it cannot be split per license. EE surfaces are
+gated at render time on `/api/entitlements` (the `useEntitlements` hook): the
+UI code is present but inert without the feature. Server-side list filtering
+(the dormancy contract above) does the real hiding; the FE simply renders
+what the API returns, so gated features generally need **no** FE gating logic
+beyond their own settings/landing surfaces.
+
+## Checklist for a new EE feature
+
+1. Code in `ee/<feature>/`; stores under `ee/<feature>/store/{lite,pg}` if
+   dialect-split (register via `db.RegisterStoreExtension`).
+2. Feature constant in `internal/entitlements` (+ `allFeatures`), mirrored in
+   the frontend `useEntitlements` hook. Both edges are CI-guarded: the
+   composition-root parity test (`feature_parity_test.go`) fails if a
+   registered feature is missing from `allFeatures` or from the hook.
+3. Migrations in the shared trees (`internal/db/migrations-*`) — schema is
+   universal, access is gated.
+4. If it has events: `events.Register` (with `Ownership`),
+   `routing.RegisterSource`, `entitlements.GateEventSource`, publish via
+   `ExtensionAPI.PublishEvent`.
+5. Routes via `server.RegisterExtension`; per-request entitlement gating in
+   every handler; pre-auth ingest through `Raw` + `PreAuthRateLimit` with its
+   own signature verification.
+6. If it gives agents CLI verbs: `exec.RegisterSubcommand` +
+   `agenthost.RegisterExtension` — logic and audit writes in the host-side
+   handler, never in the verb.
+7. Blank import in `package main` (alongside the existing EE package imports).
+8. Nothing in `internal/*`/`cmd/*` imports the package — the lint boundary
+   guard is the backstop, not the check.

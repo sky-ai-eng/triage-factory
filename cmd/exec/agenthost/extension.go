@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
@@ -60,6 +61,23 @@ func RegisterExtension(namespace string, feature entitlements.Feature, h Extensi
 // ResetExtensions clears the registry (tests only).
 func ResetExtensions() {
 	extensionRegistry = map[string]extensionRegistration{}
+}
+
+// RegisteredExtensionFeatures returns the distinct features referenced by
+// registered extension namespaces, sorted. Exists for the composition-root
+// parity test (feature_parity_test.go at the repo root) — see
+// entitlements.RegisteredEventGateFeatures for the rationale.
+func RegisteredExtensionFeatures() []entitlements.Feature {
+	seen := map[entitlements.Feature]struct{}{}
+	for _, reg := range extensionRegistry {
+		seen[reg.feature] = struct{}{}
+	}
+	out := make([]entitlements.Feature, 0, len(seen))
+	for f := range seen {
+		out = append(out, f)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // callExtension is the shared implementation behind LocalClient.CallExtension
