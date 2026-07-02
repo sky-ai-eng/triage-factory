@@ -203,6 +203,24 @@ type UsersStore interface {
 	// is needed today. SQLite collapses to one connection.
 	UserIDsForJiraAccountSystem(ctx context.Context, jiraBaseURL, accountID string) ([]string, error)
 
+	// UserIDsForVerifiedEmailSystem returns the principal user id(s) holding a
+	// VERIFIED login-identity email equal to email (case-insensitive), on the
+	// admin pool — the set-valued formalization of the inline auto-link query the
+	// login path uses (internal/server/auth_handlers.go's resolveOrCreatePrincipal).
+	// Set-valued because one verified email can appear on identities of more than
+	// one principal; the caller decides what ambiguity means (the Slack identity
+	// resolver, TFAC-531, treats it as unresolved and never guesses). Empty slice,
+	// not error, on no match. email is lowercased/trimmed here so callers pass it
+	// as captured.
+	//
+	// Admin pool / claims-free: the only caller (today) is the Slack identity
+	// resolver, which runs detached from any request with no JWT-claims context.
+	// Postgres reads public.user_identities directly (the auth-principal bridge;
+	// it is NOT part of this store's own tables). SQLite has no auth-principal
+	// bridge — local mode is N=1 with no login concept — so it always returns
+	// (nil, nil); best-effort callers already treat an empty result as no-match.
+	UserIDsForVerifiedEmailSystem(ctx context.Context, email string) ([]string, error)
+
 	// GetLastActingTeam returns users.last_acting_team_id — the user's
 	// sticky default team — or "" if unset (NULL) or the row is missing.
 	// The acting-team resolver consults it (after an explicit pick,

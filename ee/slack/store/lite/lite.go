@@ -21,6 +21,7 @@ func init() {
 	db.RegisterStoreExtension("sqlite", slackstore.ExtKey, func(app, admin db.Execer) any {
 		return &slackstore.Bundle{
 			Workspaces: newWorkspaceStore(app, admin),
+			Identities: newIdentityStore(admin),
 		}
 	})
 }

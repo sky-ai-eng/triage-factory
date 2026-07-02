@@ -36,6 +36,16 @@ func (s *usersStore) GetGitHubLogin(ctx context.Context, userID, githubBaseURL s
 	return login, nil
 }
 
+// UserIDsForVerifiedEmailSystem always returns (nil, nil): user_identities is
+// a multi-mode-only auth table (the GoTrue login-identity bridge) and is
+// deliberately absent from the SQLite schema — local mode has no login
+// concept, so there is nothing to resolve against. Resolution is a
+// multi-mode concept; best-effort callers (the Slack identity resolver)
+// already treat an empty result as "no match".
+func (s *usersStore) UserIDsForVerifiedEmailSystem(context.Context, string) ([]string, error) {
+	return nil, nil
+}
+
 func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, source string) error {
 	// FK on user_id enforces the row-exists contract: a missing user
 	// surfaces as a FOREIGN KEY constraint error, matching the old

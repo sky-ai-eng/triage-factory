@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -110,6 +111,31 @@ func (s *usersStore) UserIDsForGitHubLoginSystem(ctx context.Context, githubBase
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("scan user_github_identities.user_id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (s *usersStore) UserIDsForVerifiedEmailSystem(ctx context.Context, email string) ([]string, error) {
+	// Mirrors auth_handlers.go's inline auto-link lookup: lowercase/trim
+	// before matching against public.user_identities' lower(email) index.
+	email = strings.ToLower(strings.TrimSpace(email))
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT DISTINCT user_id::text
+		FROM public.user_identities
+		WHERE lower(email) = $1 AND email_verified
+		ORDER BY user_id ASC
+	`, email)
+	if err != nil {
+		return nil, fmt.Errorf("read user_identities by verified email: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan user_identities.user_id: %w", err)
 		}
 		out = append(out, id)
 	}

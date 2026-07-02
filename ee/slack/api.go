@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -94,6 +95,61 @@ func slackOpenConnection(ctx context.Context, client *http.Client, appToken stri
 		return fmt.Errorf("slack apps.connections.open: %s", nonEmpty(out.Error, "not ok"))
 	}
 	return nil
+}
+
+// usersInfoResult is the subset of Slack's users.info response the identity
+// resolver (TFAC-531) needs: the profile email (the verified-email match
+// key), a display name for the audit-rendering column, and the
+// is_bot/deleted flags that short-circuit resolution for senders that can
+// never map to a human TF user.
+type usersInfoResult struct {
+	RealName    string
+	DisplayName string
+	Email       string
+	IsBot       bool
+	Deleted     bool
+}
+
+// slackUsersInfo looks up a Slack user's profile via users.info — the
+// identity resolver's only network call. Requires the users:read.email
+// scope (already in the shipped manifest, TFAC-529). A non-2xx HTTP
+// response or a Slack-level {"ok":false} both surface as an error; the
+// resolver treats any error here as transient (it writes nothing, so the
+// next mention retries — see ee/slack/identity.go).
+func slackUsersInfo(ctx context.Context, client *http.Client, botToken, slackUserID string) (*usersInfoResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		slackAPIBase+"/users.info?user="+url.QueryEscape(slackUserID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		User  struct {
+			IsBot   bool `json:"is_bot"`
+			Deleted bool `json:"deleted"`
+			Profile struct {
+				Email       string `json:"email"`
+				RealName    string `json:"real_name"`
+				DisplayName string `json:"display_name"`
+			} `json:"profile"`
+		} `json:"user"`
+	}
+	if err := doSlackJSON(ctx, client, req, &out); err != nil {
+		return nil, err
+	}
+	if !out.OK {
+		return nil, fmt.Errorf("slack users.info: %s", nonEmpty(out.Error, "not ok"))
+	}
+	return &usersInfoResult{
+		RealName:    out.User.Profile.RealName,
+		DisplayName: out.User.Profile.DisplayName,
+		Email:       out.User.Profile.Email,
+		IsBot:       out.User.IsBot,
+		Deleted:     out.User.Deleted,
+	}, nil
 }
 
 // doSlackJSON executes req and decodes the JSON body into out. Slack

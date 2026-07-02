@@ -7610,5 +7610,80 @@ REVOKE ALL ON public.org_slack_workspaces FROM anon, authenticated, service_role
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_slack_workspaces TO tf_app;
 
 
+-- Slack identity capture (TFAC-531): user_slack_identities auto-resolves the
+-- human who @mentioned the bot to a TF user, so a later leave can grant that
+-- user run-visibility (deep-link into the run) and audit rendering can
+-- attribute the message. Capture infrastructure only — sender never affects
+-- routing or ownership (the settled 3-axis model: visibility is
+-- channel/team, acting identity is the bot, audit is per-message).
+--
+-- The mapping is the key, not the user. user_github_identities /
+-- user_jira_identities are PK(user_id, host) because capture there is
+-- self-initiated (a user binds their own PAT). Slack capture is inbound and
+-- system-initiated (a mention arrives from an unknown sender), so the
+-- natural key is (workspace_id, slack_user_id) with a NULLABLE user_id —
+-- which doubles as the negative cache: an unmatched sender gets a NULL-user
+-- row (source of last_attempt_at) so a repeat mention within the resolver's
+-- retry TTL doesn't cost a users.info API call.
+--
+-- Resolution is a verified-email match against the auth-principal bridge
+-- (public.user_identities), NOT a users.email column — none exists,
+-- deliberately (see that table's doc above: email is per-login-identity and
+-- multiplicity is load-bearing for account-linking). No email is stored
+-- here either — the bridge already holds it; this table stores only the
+-- Slack display name (audit rendering needs a name, not an email).
+--
+-- source records HOW the row was populated: 'auto_email' is this leaf's only
+-- writer; 'oidc' is reserved for the future Sign-in-with-Slack follow-on (a
+-- self-service bind).
+--
+-- Postgres-only, same posture as org_slack_workspaces: local mode is N=1
+-- with no multi-workspace concept, so the SQLite store is a stub returning
+-- ErrNotApplicableInLocal.
+CREATE TABLE public.user_slack_identities (
+    workspace_id text NOT NULL,
+    slack_user_id text NOT NULL,
+    user_id uuid REFERENCES public.users(id) ON DELETE CASCADE,
+    slack_display_name text,
+    source text NOT NULL DEFAULT 'auto_email',
+    last_attempt_at timestamptz NOT NULL DEFAULT now(),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, slack_user_id),
+    CONSTRAINT user_slack_identities_source_check CHECK (source IN ('auto_email', 'oidc'))
+);
+
+-- Serves the future run-visibility grant's reverse lookup (which Slack
+-- identities map to this TF user). Partial on NOT NULL: a NULL-user
+-- negative-cache row is never looked up by user_id, and there are far more
+-- of those than resolved rows in steady state.
+CREATE INDEX user_slack_identities_user_idx ON public.user_slack_identities (user_id) WHERE user_id IS NOT NULL;
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.user_slack_identities
+    FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+ALTER TABLE public.user_slack_identities ENABLE ROW LEVEL SECURITY;
+
+-- Self-only read/write, mirroring user_github_identities_modify /
+-- user_jira_identities_modify verbatim. Consequence (intentional): a
+-- NULL-user negative-cache row matches no current_user_id(), so it is
+-- invisible and unwritable on the app pool — correct, since negative-cache
+-- rows are system-only. All resolution writes (UpsertResolvedSystem,
+-- MarkAttemptSystem) go through the admin pool for the same reason: capture
+-- is system-initiated, with no claims context. The future Sign-in-with-Slack
+-- OIDC leaf can write its own self-row through this app-pool policy.
+CREATE POLICY user_slack_identities_modify ON public.user_slack_identities USING ((user_id = tf.current_user_id())) WITH CHECK ((user_id = tf.current_user_id()));
+
+CREATE POLICY user_slack_identities_select ON public.user_slack_identities FOR SELECT USING ((user_id = tf.current_user_id()));
+
+-- supabase_admin's ALTER DEFAULT PRIVILEGES auto-grants public-schema tables
+-- to anon/authenticated/service_role at CREATE time. Strip them so the table
+-- is reachable only by tf_app (under RLS) and the admin pool (which bypasses
+-- RLS for the System writes) — same posture as org_slack_workspaces.
+REVOKE ALL ON public.user_slack_identities FROM PUBLIC;
+REVOKE ALL ON public.user_slack_identities FROM anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.user_slack_identities TO tf_app;
+
+
 -- +goose Down
 SELECT 'down not supported';
