@@ -109,9 +109,7 @@ func (r *IdentityResolver) resolveSender(ctx context.Context, ws slackstore.Work
 	displayName := nonEmpty(info.DisplayName, info.RealName)
 	email := strings.ToLower(strings.TrimSpace(info.Email))
 	if info.IsBot || info.Deleted || email == "" {
-		if err := r.identities.MarkAttemptSystem(ctx, ws.WorkspaceID, slackUserID, displayName); err != nil {
-			slackLog.Warn("identity: mark attempt failed", "workspace", ws.WorkspaceID, "slack_user", slackUserID, "error", err)
-		}
+		r.markUnresolved(ctx, ws, slackUserID, displayName)
 		return
 	}
 
@@ -128,16 +126,22 @@ func (r *IdentityResolver) resolveSender(ctx context.Context, ws slackstore.Work
 			slackLog.Warn("identity: upsert resolved failed", "workspace", ws.WorkspaceID, "slack_user", slackUserID, "error", err)
 		}
 	case 0:
-		if err := r.identities.MarkAttemptSystem(ctx, ws.WorkspaceID, slackUserID, displayName); err != nil {
-			slackLog.Warn("identity: mark attempt failed", "workspace", ws.WorkspaceID, "slack_user", slackUserID, "error", err)
-		}
+		r.markUnresolved(ctx, ws, slackUserID, displayName)
 	default:
 		// Never guess on ambiguity: leave unresolved, and never log the email
 		// itself — only enough to locate the row for manual investigation.
 		slackLog.Warn("identity: verified email matched multiple principals, leaving unresolved",
 			"workspace", ws.WorkspaceID, "slack_user", slackUserID, "matches", len(userIDs))
-		if err := r.identities.MarkAttemptSystem(ctx, ws.WorkspaceID, slackUserID, displayName); err != nil {
-			slackLog.Warn("identity: mark attempt failed", "workspace", ws.WorkspaceID, "slack_user", slackUserID, "error", err)
-		}
+		r.markUnresolved(ctx, ws, slackUserID, displayName)
+	}
+}
+
+// markUnresolved writes the negative-cache row for a sender that was looked
+// up and definitively did not resolve. Shared by every non-match branch in
+// resolveSender above (bot/deleted/no-email, zero matches, ambiguous
+// matches) so the write + failure-log shape stays in one place.
+func (r *IdentityResolver) markUnresolved(ctx context.Context, ws slackstore.Workspace, slackUserID, displayName string) {
+	if err := r.identities.MarkAttemptSystem(ctx, ws.WorkspaceID, slackUserID, displayName); err != nil {
+		slackLog.Warn("identity: mark attempt failed", "workspace", ws.WorkspaceID, "slack_user", slackUserID, "error", err)
 	}
 }
