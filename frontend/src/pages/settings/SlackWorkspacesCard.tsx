@@ -22,6 +22,19 @@ import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
 import { toast } from '../../components/Toast/toastStore'
 import { glassInputClass } from './primitives'
 
+// SlackConnectionStatus is one app's live Socket Mode connection status
+// (TFAC-534) — present only when the backend's socket manager has a
+// connection running for this row's api_app_id (rows sharing an app share
+// the same connection). Absent for a webhook-only app, an unentitled org,
+// or before the reconciler's first pass — rendered as "n/a".
+interface SlackConnectionStatus {
+  state: 'dialing' | 'open' | 'draining' | 'backing_off' | 'auth_failed'
+  connected_at?: string
+  last_event_at?: string
+  consecutive_failures: number
+  last_error?: string
+}
+
 interface SlackWorkspace {
   workspace_id: string
   api_app_id: string
@@ -32,6 +45,7 @@ interface SlackWorkspace {
   registered_by_user_id?: string
   created_at: string
   updated_at: string
+  connection?: SlackConnectionStatus
 }
 
 // rowKey is the composite (workspace, app) identity a row is now keyed on —
@@ -139,6 +153,7 @@ function WorkspaceRow({
             {workspace.workspace_name || workspace.workspace_id}
           </span>
           <TransportChip transport={workspace.transport} />
+          <ConnectionStatusChip workspace={workspace} />
         </div>
         <p className="mt-0.5 truncate text-[11px] text-text-tertiary">
           {workspace.workspace_id}
@@ -158,6 +173,51 @@ function WorkspaceRow({
         <Trash2 size={14} />
       </button>
     </li>
+  )
+}
+
+// CONNECTION_STATUS_DISPLAY maps the backend's connection.state (TFAC-534)
+// to the chip's label/dot color. "draining" (the brief moment between a
+// disconnect frame and redialing) folds into "Reconnecting…" — it's not
+// worth a distinct label for something that resolves in milliseconds.
+const CONNECTION_STATUS_DISPLAY: Record<
+  SlackConnectionStatus['state'],
+  { label: string; dot: string; text: string }
+> = {
+  open: { label: 'Connected', dot: 'bg-emerald-500', text: 'text-emerald-700' },
+  dialing: { label: 'Connecting…', dot: 'bg-amber-500', text: 'text-amber-700' },
+  draining: { label: 'Reconnecting…', dot: 'bg-amber-500', text: 'text-amber-700' },
+  backing_off: { label: 'Reconnecting…', dot: 'bg-amber-500', text: 'text-amber-700' },
+  auth_failed: { label: 'Auth failed', dot: 'bg-rose-500', text: 'text-rose-700' },
+}
+
+// ConnectionStatusChip is the Socket Mode connection status indicator
+// (TFAC-534) — minimal by design: a colored dot plus a short label, with
+// the last error (if any) available on hover via title. Rows sharing an
+// app report the same connection object; a webhook-only row (no socket
+// connection exists for its app) renders the muted "n/a" chip instead.
+function ConnectionStatusChip({ workspace }: { workspace: SlackWorkspace }) {
+  const status = workspace.connection
+  if (!status) {
+    if (workspace.transport !== 'socket') return null
+    return <StatusDot label="n/a" dot="bg-text-tertiary/40" text="text-text-tertiary" />
+  }
+  const display = CONNECTION_STATUS_DISPLAY[status.state] ?? CONNECTION_STATUS_DISPLAY.dialing
+  return (
+    <span title={status.last_error || undefined}>
+      <StatusDot label={display.label} dot={display.dot} text={display.text} />
+    </span>
+  )
+}
+
+function StatusDot({ label, dot, text }: { label: string; dot: string; text: string }) {
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center gap-1 rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] font-medium ${text}`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+      {label}
+    </span>
   )
 }
 

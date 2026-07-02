@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -125,14 +126,50 @@ func slackBotsInfo(ctx context.Context, client *http.Client, botToken, botID str
 }
 
 // slackOpenConnection validates appToken (an app-level xapp- token) via
-// apps.connections.open — the Socket Mode handshake's first call. It exists
-// here purely as a credential check: a successful call returns a wss:// URL
-// good for one connection, which this leaf discards (the socket connection
-// manager that actually dials it is a later leaf).
+// apps.connections.open — used at connect time purely as a credential
+// check: a successful call returns a wss:// URL good for one connection,
+// which this leaf discards (the socket connection manager that actually
+// dials one, socket_conn.go, calls slackConnectionsOpen directly instead).
 func slackOpenConnection(ctx context.Context, client *http.Client, appToken string) error {
+	_, err := slackConnectionsOpen(ctx, client, appToken)
+	return err
+}
+
+// slackAuthErrorCodes is the set of apps.connections.open error codes that
+// mean the app token itself is bad (revoked, wrong scope, disabled
+// workspace) rather than a transient upstream issue — retrying on the
+// normal backoff schedule would just hammer Slack with a token that will
+// never succeed. Sourced from Slack's documented auth-related error codes.
+var slackAuthErrorCodes = map[string]bool{
+	"invalid_auth":     true,
+	"not_authed":       true,
+	"account_inactive": true,
+	"token_revoked":    true,
+	"missing_scope":    true,
+}
+
+// slackAuthError wraps an apps.connections.open failure whose error code is
+// in slackAuthErrorCodes — the signal the socket connection loop's backoff
+// (socket_conn.go's run) uses to jump straight to the cap and report
+// stateAuthFailed instead of the ordinary backing-off status.
+type slackAuthError struct{ code string }
+
+func (e *slackAuthError) Error() string { return "slack: " + e.code }
+
+// isSlackAuthError reports whether err wraps a slackAuthError.
+func isSlackAuthError(err error) bool {
+	var authErr *slackAuthError
+	return errors.As(err, &authErr)
+}
+
+// slackConnectionsOpen calls apps.connections.open and returns the
+// short-lived, single-use wss:// URL it mints for one connection — the
+// Socket Mode handshake's first call. A fresh call is required per
+// (re)connect; the returned URL is never reused.
+func slackConnectionsOpen(ctx context.Context, client *http.Client, appToken string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/apps.connections.open", nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+appToken)
 
@@ -142,12 +179,18 @@ func slackOpenConnection(ctx context.Context, client *http.Client, appToken stri
 		URL   string `json:"url"`
 	}
 	if err := doSlackJSON(ctx, client, req, &out); err != nil {
-		return err
+		return "", err
 	}
 	if !out.OK {
-		return fmt.Errorf("slack apps.connections.open: %s", nonEmpty(out.Error, "not ok"))
+		if slackAuthErrorCodes[out.Error] {
+			return "", &slackAuthError{code: nonEmpty(out.Error, "not ok")}
+		}
+		return "", fmt.Errorf("slack apps.connections.open: %s", nonEmpty(out.Error, "not ok"))
 	}
-	return nil
+	if out.URL == "" {
+		return "", fmt.Errorf("slack apps.connections.open: response carried no url")
+	}
+	return out.URL, nil
 }
 
 // usersInfoResult is the subset of Slack's users.info response the identity

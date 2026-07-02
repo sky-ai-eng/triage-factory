@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,12 +24,45 @@ import (
 
 // fakeWorkspaceStore is a minimal slackstore.WorkspaceStore fake, keyed on
 // (workspace_id, api_app_id) — GetByWorkspaceAppSystem is the only method
-// the webhook handler actually calls.
+// the webhook handler actually calls. The socket manager's reconciler also
+// calls ListAllSystem and (in the reconciler tests) mutates the row set
+// concurrently with a running reconcile loop, so every method is guarded by
+// mu — a no-op for callers that only ever read this fake before starting
+// any goroutine, and required for the ones that don't.
 type fakeWorkspaceStore struct {
+	mu             sync.Mutex
 	byWorkspaceApp map[string]*slackstore.Workspace // "workspace_id/api_app_id" -> row
 }
 
 var _ slackstore.WorkspaceStore = (*fakeWorkspaceStore)(nil)
+
+// newFakeWorkspaceStore builds a fake seeded with rows, keyed by
+// (workspace_id, api_app_id).
+func newFakeWorkspaceStore(rows ...*slackstore.Workspace) *fakeWorkspaceStore {
+	f := &fakeWorkspaceStore{byWorkspaceApp: map[string]*slackstore.Workspace{}}
+	for _, r := range rows {
+		f.setRow(r)
+	}
+	return f
+}
+
+// setRow inserts or replaces a row — the reconciler tests use this to
+// simulate a connect/disconnect happening while the manager is running.
+func (f *fakeWorkspaceStore) setRow(r *slackstore.Workspace) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.byWorkspaceApp == nil {
+		f.byWorkspaceApp = map[string]*slackstore.Workspace{}
+	}
+	f.byWorkspaceApp[r.WorkspaceID+"/"+r.APIAppID] = r
+}
+
+// deleteRow removes a row — simulates the disconnect handler's DELETE.
+func (f *fakeWorkspaceStore) deleteRow(workspaceID, apiAppID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.byWorkspaceApp, workspaceID+"/"+apiAppID)
+}
 
 func (f *fakeWorkspaceStore) Upsert(context.Context, slackstore.Workspace) error { return nil }
 func (f *fakeWorkspaceStore) ListForOrg(context.Context, string) ([]slackstore.Workspace, error) {
@@ -39,9 +73,17 @@ func (f *fakeWorkspaceStore) Get(context.Context, string, string, string) (*slac
 }
 func (f *fakeWorkspaceStore) Delete(context.Context, string, string, string) error { return nil }
 func (f *fakeWorkspaceStore) ListAllSystem(context.Context) ([]slackstore.Workspace, error) {
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]slackstore.Workspace, 0, len(f.byWorkspaceApp))
+	for _, r := range f.byWorkspaceApp {
+		out = append(out, *r)
+	}
+	return out, nil
 }
 func (f *fakeWorkspaceStore) GetByWorkspaceAppSystem(_ context.Context, workspaceID, apiAppID string) (*slackstore.Workspace, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.byWorkspaceApp[workspaceID+"/"+apiAppID], nil
 }
 func (f *fakeWorkspaceStore) LockApp(context.Context, string) error { return nil }

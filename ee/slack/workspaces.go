@@ -33,6 +33,10 @@ type workspacesHandler struct {
 	// publicURL returns the deployment's externally-visible base, used to
 	// build the events_api manifest's request_url.
 	publicURL func() string
+	// sockets reports live Socket Mode connection status for handleList's
+	// response. nil in tests that don't exercise it (TestHandlers_LocalMode404
+	// constructs a zero-value handler) — toWorkspaceView is nil-safe.
+	sockets *socketManager
 }
 
 type workspaceView struct {
@@ -45,10 +49,15 @@ type workspaceView struct {
 	RegisteredByUserID string    `json:"registered_by_user_id,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
+	// Connection is the app's live Socket Mode status, when one exists —
+	// omitted for a webhook-only app, an unentitled org, or before the
+	// reconciler's first pass. Rows sharing an app report the same
+	// connection (socket_conn.go's connections are per-app, not per-row).
+	Connection *connStatus `json:"connection,omitempty"`
 }
 
-func toWorkspaceView(w *slackstore.Workspace) workspaceView {
-	return workspaceView{
+func toWorkspaceView(w *slackstore.Workspace, sockets *socketManager) workspaceView {
+	v := workspaceView{
 		WorkspaceID:        w.WorkspaceID,
 		APIAppID:           w.APIAppID,
 		WorkspaceName:      w.WorkspaceName,
@@ -59,6 +68,12 @@ func toWorkspaceView(w *slackstore.Workspace) workspaceView {
 		CreatedAt:          w.CreatedAt,
 		UpdatedAt:          w.UpdatedAt,
 	}
+	if sockets != nil {
+		if status, ok := sockets.StatusFor(w.APIAppID); ok {
+			v.Connection = &status
+		}
+	}
+	return v
 }
 
 // memberGate resolves the active org and confirms the `slack` entitlement.
@@ -126,7 +141,7 @@ func (h *workspacesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]workspaceView, len(list))
 	for i := range list {
-		out[i] = toWorkspaceView(&list[i])
+		out[i] = toWorkspaceView(&list[i], h.sockets)
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
@@ -335,7 +350,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	if existing != nil {
 		status = http.StatusOK
 	}
-	httpx.WriteJSON(w, status, toWorkspaceView(persisted))
+	httpx.WriteJSON(w, status, toWorkspaceView(persisted, h.sockets))
 }
 
 // DELETE /api/slack/workspaces/{workspace_id}/{api_app_id}
@@ -425,11 +440,20 @@ func (h *workspacesHandler) handleManifest(w http.ResponseWriter, r *http.Reques
 	httpx.WriteJSON(w, http.StatusOK, buildSlackManifest(orgName, transport, publicURL, orgID))
 }
 
-// notifyConfigChanged is the in-package seam the (future) socket connection
-// manager leaf replaces with a real signal — a no-op today. Deliberately NOT
-// core reloader plumbing (SetOnGitHubChanged-style hooks are for core
-// subsystems): both the producer (here) and the eventual consumer live
-// entirely inside ee/slack.
+// notifyConfigChanged signals the socket connection manager to reconcile
+// now (a row was connected or disconnected) rather than waiting for its
+// next socketReconcileInterval tick. Deliberately NOT core reloader
+// plumbing (SetOnGitHubChanged-style hooks are for core subsystems): both
+// the producer (here) and the consumer (socket.go's socketManager.run) live
+// entirely inside ee/slack. orgID is unused — reconcile always recomputes
+// the full desired set (one ListAllSystem scan) rather than an org-scoped
+// delta, so there's nothing org-specific to signal; kept as a parameter so
+// call sites read as "this org's config changed" without every caller
+// needing to know that reconcile happens to be global.
 func notifyConfigChanged(orgID string) {
 	_ = orgID
+	select {
+	case socketConfigChanged <- struct{}{}:
+	default:
+	}
 }
