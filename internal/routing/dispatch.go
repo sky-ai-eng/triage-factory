@@ -204,9 +204,9 @@ type eventRouting struct {
 // mapped reviewer team; an owner-ladder event from an external identity with no
 // team watching).
 //
-// It dispatches on the event's ownership model (ownershipModelForEvent), the one
-// explicit classification of every event type (TFAC-519). Each model resolves
-// its own (visibility, owner, firing order, priority); teamTriggers and the
+// It dispatches on the event's ownership model (ownershipModelForEvent), the
+// one explicit classification of every event type. Each model resolves its
+// own (visibility, owner, firing order, priority); teamTriggers and the
 // final assembly are shared. There is no "compute the handler-team default then
 // overwrite it" — a model that doesn't apply is simply never invoked. The
 // models:
@@ -217,6 +217,10 @@ type eventRouting struct {
 //   - OwnershipRequestedParty (review_requested) → the requested reviewer's team(s),
 //     scoped at emit time, with a handler-team fallback for legacy events.
 //   - OwnershipPool (jira:issue:available, everything else) → handler-team grouping.
+//   - OwnershipUnrouted (system:* sentinels) → never reached here at all; a
+//     system event carries no EntityID, so routableEntity drops it before
+//     HandleEvent gets this far. Falls into the same default branch as Pool
+//     purely as a defensive fallback, never exercised in practice.
 //
 // The matched handlers still gate whether a task is created and supply the
 // priority; the model only decides the team set + owner.
@@ -241,7 +245,7 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveOwnedRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
 	case events.OwnershipRequestedParty:
 		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveRequestedPartyRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
-	default: // events.OwnershipPool
+	default: // events.OwnershipPool, events.OwnershipUnrouted
 		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = resolvePoolRouting(matchedRules, matchedTriggers)
 	}
 	if !ok {

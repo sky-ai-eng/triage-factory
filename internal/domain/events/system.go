@@ -126,14 +126,15 @@ func (p SystemTaskDelegationBlockedSubtasksPredicate) Matches(m SystemTaskDelega
 // Registration.
 // -----------------------------------------------------------------------------
 
-// System events are all OwnershipPool (the default classification) — none of
-// them route via the owning-team ladder or the requested-party path; they're
-// bus-only sentinels, never router-bound (see RouterBound).
+// System events are all OwnershipUnrouted — none of them route via the
+// owning-team ladder, the requested-party path, or handler-team pooling;
+// they're bus-only sentinels, never router-bound (see RouterBound) and
+// never entity-scoped, so they never reach resolveTeamRouting at all.
 func init() {
-	Register(newSchema[SystemPollCompletedMetadata, SystemPollCompletedPredicate](domain.EventSystemPollCompleted, OwnershipPool))
-	Register(newSchema[SystemScoringCompletedMetadata, SystemScoringCompletedPredicate](domain.EventSystemScoringCompleted, OwnershipPool))
-	Register(newSchema[SystemDelegationCompletedMetadata, SystemDelegationCompletedPredicate](domain.EventSystemDelegationCompleted, OwnershipPool))
-	Register(newSchema[SystemDelegationFailedMetadata, SystemDelegationFailedPredicate](domain.EventSystemDelegationFailed, OwnershipPool))
-	Register(newSchema[SystemPromptAutoSuspendedMetadata, SystemPromptAutoSuspendedPredicate](domain.EventSystemPromptAutoSuspended, OwnershipPool))
-	Register(newSchema[SystemTaskDelegationBlockedSubtasksMetadata, SystemTaskDelegationBlockedSubtasksPredicate](domain.EventSystemTaskDelegationBlockedSubtasks, OwnershipPool))
+	Register(newSchema[SystemPollCompletedMetadata, SystemPollCompletedPredicate](domain.EventSystemPollCompleted, OwnershipUnrouted))
+	Register(newSchema[SystemScoringCompletedMetadata, SystemScoringCompletedPredicate](domain.EventSystemScoringCompleted, OwnershipUnrouted))
+	Register(newSchema[SystemDelegationCompletedMetadata, SystemDelegationCompletedPredicate](domain.EventSystemDelegationCompleted, OwnershipUnrouted))
+	Register(newSchema[SystemDelegationFailedMetadata, SystemDelegationFailedPredicate](domain.EventSystemDelegationFailed, OwnershipUnrouted))
+	Register(newSchema[SystemPromptAutoSuspendedMetadata, SystemPromptAutoSuspendedPredicate](domain.EventSystemPromptAutoSuspended, OwnershipUnrouted))
+	Register(newSchema[SystemTaskDelegationBlockedSubtasksMetadata, SystemTaskDelegationBlockedSubtasksPredicate](domain.EventSystemTaskDelegationBlockedSubtasks, OwnershipUnrouted))
 }

@@ -28,6 +28,7 @@ func TestOwnershipModelForEvent(t *testing.T) {
 		{domain.EventGitHubPRMerged, events.OwnershipOwned, "entity-terminating but routes: owning-team ladder"},
 		{domain.EventGitHubPRClosed, events.OwnershipOwned, "entity-terminating but routes: owning-team ladder"},
 		{domain.EventJiraIssueCompleted, events.OwnershipOwned, "entity-terminating but routes: assignee owning-team ladder"},
+		{domain.EventSystemPollCompleted, events.OwnershipUnrouted, "system events never reach routing at all — distinct from Pool's real handler-team grouping"},
 		{"some:unregistered:event", events.OwnershipPool, "unclassified types fall to the pool default"},
 	}
 	for _, c := range cases {
@@ -56,6 +57,7 @@ func TestEventSupportsWatch(t *testing.T) {
 		{domain.EventGitHubPRMerged, true, "entity-terminating but routes via the owning-team ladder"},
 		{domain.EventGitHubPRClosed, true, "entity-terminating but routes via the owning-team ladder"},
 		{domain.EventJiraIssueCompleted, true, "entity-terminating but routes via the owning-team ladder"},
+		{domain.EventSystemPollCompleted, false, "unrouted, not owner-ladder"},
 	}
 	for _, c := range cases {
 		if got := EventSupportsWatch(c.eventType); got != c.want {

@@ -18,7 +18,8 @@ const (
 	// participant, the highest-priority team is the (eager) owner. For
 	// unassigned/team-pool work like jira:issue:available, and the default for
 	// any event type not otherwise classified (including one with no
-	// registered schema at all).
+	// registered schema at all — the permissive fallback a type would get if
+	// it somehow reached resolveTeamRouting unclassified).
 	OwnershipPool OwnershipModel = iota
 	// OwnershipOwned — the owning-team ladder: the entity's owner (author-centric
 	// github / assignee-centric jira). Non-owner teams reach it only via an
@@ -29,6 +30,16 @@ const (
 	// events. Only github's native resolver supports this model — Register
 	// panics if a non-github: event type declares it.
 	OwnershipRequestedParty
+	// OwnershipUnrouted — for a cataloged event type that never reaches
+	// resolveTeamRouting at all (system:* sentinels: they carry no EntityID,
+	// so routableEntity drops them before dispatch ever classifies them, and
+	// RouterBound keeps them out of the durable queue in the first place).
+	// Distinct from OwnershipPool, which is a real routing behavior
+	// (handler-team grouping) — a system event doesn't participate in that,
+	// it just doesn't route. dispatch's switch treats it the same as Pool if
+	// it were ever reached (it structurally isn't), so this carries no
+	// behavior, only an honest label.
+	OwnershipUnrouted
 )
 
 // OwnershipModelFor returns eventType's declared ownership model, or
