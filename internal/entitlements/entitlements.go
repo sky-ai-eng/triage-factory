@@ -51,12 +51,19 @@ const (
 	// /api/entitlements probe and the useEntitlements FE hook the governance
 	// surfaces gate on.
 	FeatureGovernance Feature = "governance"
+
+	// FeatureSlack gates the Slack workspace-connect surface: the
+	// org_slack_workspaces store, the connect/disconnect/manifest routes in
+	// ee/slack, and (in follow-on leaves) event ingest. Every ee/slack route
+	// gates on this per-request — there is no runmode carve-out the way SSO
+	// has one, since a licensed local install is not structurally excluded.
+	FeatureSlack Feature = "slack"
 )
 
 // allFeatures is the registry of every gated feature. Unexported + returned by
 // value through AllFeatures so a caller can't append to or blank out the
 // registry and corrupt the probe.
-var allFeatures = []Feature{FeatureSSO, FeatureGovernance}
+var allFeatures = []Feature{FeatureSSO, FeatureGovernance, FeatureSlack}
 
 // AllFeatures returns every gated feature, for the /api/entitlements probe to
 // iterate and report the subset the active provider licenses. It returns a

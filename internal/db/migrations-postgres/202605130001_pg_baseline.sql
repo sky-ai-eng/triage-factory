@@ -7528,5 +7528,87 @@ GRANT ALL ON TABLE public.staged_agent_injections TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.staged_agent_injections TO tf_app;
 
 
+-- Slack workspace connect (TFAC-529): org_slack_workspaces — the org<->Slack-
+-- workspace bind. Cardinality: an org may connect N workspaces, but each
+-- workspace binds to exactly ONE org — enforced globally by making
+-- workspace_id (Slack's own team ID) the PRIMARY KEY rather than a surrogate
+-- id plus a separate unique index. There is no "workspace" identity
+-- independent of the Slack team ID, so the natural key IS the bind. A second
+-- org's INSERT for an already-bound workspace_id hits this PK violation
+-- directly — RLS never even sees it (constraints are not subject to RLS) —
+-- so the handler maps the generic unique-violation to a 409 WITHOUT naming
+-- the owning org: a workspace admin may learn "already connected", never to
+-- whom.
+--
+-- transport is inferred at connect time from which credentials were
+-- supplied (app-level token -> socket; signing secret -> events_api; both ->
+-- the request must say which explicitly) and persisted here rather than
+-- re-derived from the ref columns on every read. Exactly one of
+-- signing_secret_ref/app_token_ref is expected to be NULL for the stored
+-- transport, but that pairing is an application invariant enforced by
+-- ee/slack, not a CHECK — a row may carry both refs (both credentials were
+-- pasted) even though only one is the active transport.
+--
+-- bot_token_ref/signing_secret_ref/app_token_ref are org_secrets KEY NAMES
+-- (see internal/integrations.SlackWorkspaceKeysFor), never the credential
+-- values themselves — same discipline as org_github_apps/org_jira_apps. No
+-- rotation machinery yet (TFAC-527, parked): re-submitting the connect form
+-- upserts this row and overwrites the referenced secrets in place.
+--
+-- Postgres-only, same posture as sso_connections: local mode is N=1 with no
+-- multi-workspace concept, so the SQLite store is a stub returning
+-- ErrNotApplicableInLocal.
+
+CREATE TABLE public.org_slack_workspaces (
+    workspace_id text PRIMARY KEY,
+    org_id uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
+    workspace_name text NOT NULL DEFAULT '',
+    enterprise_id text,
+    transport text NOT NULL CHECK (transport IN ('socket', 'events_api')),
+    bot_user_id text NOT NULL DEFAULT '',
+    bot_token_ref text NOT NULL,
+    signing_secret_ref text,
+    app_token_ref text,
+    registered_by_user_id uuid REFERENCES public.users(id) ON DELETE SET NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Serves the per-org list/count reads (ListForOrg) and the FK's referencing
+-- column, mirroring the index-the-FK-column convention used throughout.
+CREATE INDEX org_slack_workspaces_org_idx ON public.org_slack_workspaces (org_id);
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.org_slack_workspaces
+    FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+ALTER TABLE public.org_slack_workspaces ENABLE ROW LEVEL SECURITY;
+
+-- SELECT is member-visible (mirrors org_jira_apps: any org member can see
+-- what's connected, useful signal even for non-admins); writes are
+-- org-admin-only (mirrors sso_connections/org_github_apps — connecting a
+-- workspace is a sensitive workspace-wide credential gesture).
+CREATE POLICY org_slack_workspaces_select ON public.org_slack_workspaces FOR SELECT TO tf_app
+  USING ((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id));
+
+CREATE POLICY org_slack_workspaces_insert ON public.org_slack_workspaces FOR INSERT TO tf_app
+  WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY org_slack_workspaces_update ON public.org_slack_workspaces FOR UPDATE TO tf_app
+  USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))
+  WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY org_slack_workspaces_delete ON public.org_slack_workspaces FOR DELETE TO tf_app
+  USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+-- supabase_admin's ALTER DEFAULT PRIVILEGES auto-grants public-schema tables
+-- to anon/authenticated/service_role at CREATE time. Strip them so the table
+-- is reachable only by tf_app (under RLS) and the admin pool (which owns it
+-- as superuser and bypasses RLS for ListAllSystem) — same posture as
+-- sso_connections/sso_domains.
+REVOKE ALL ON public.org_slack_workspaces FROM PUBLIC;
+REVOKE ALL ON public.org_slack_workspaces FROM anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_slack_workspaces TO tf_app;
+
+
 -- +goose Down
 SELECT 'down not supported';

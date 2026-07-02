@@ -150,6 +150,39 @@ func (k GitHubAppKeyset) All() []string {
 	return []string{k.PEM, k.ClientSecret, k.WebhookSecret}
 }
 
+// SlackWorkspaceKeyset is the trio of org_secrets key names one connected
+// Slack workspace custodies its credentials under: the bot token (always
+// present — every transport needs it to call the Slack API), the signing
+// secret (events_api transport), and the app-level token (socket
+// transport). Composed per workspace id (Slack's team ID), the
+// dynamic-keyset analog of GitHubAppKeyset.
+type SlackWorkspaceKeyset struct {
+	BotToken      string
+	SigningSecret string
+	AppToken      string
+}
+
+// SlackWorkspaceKeysFor composes a connected Slack workspace's secret-key
+// names from its workspace id. This is the single source of truth for the
+// slack_ws_<id>_* shape: ee/slack's connect handler (which writes these
+// secrets) and its delete handler (which sweeps them) both compose through
+// here, so the names written and the names later removed can't drift —
+// mirrors GitHubAppKeysFor.
+func SlackWorkspaceKeysFor(workspaceID string) SlackWorkspaceKeyset {
+	return SlackWorkspaceKeyset{
+		BotToken:      "slack_ws_" + workspaceID + "_bot_token",
+		SigningSecret: "slack_ws_" + workspaceID + "_signing_secret",
+		AppToken:      "slack_ws_" + workspaceID + "_app_token",
+	}
+}
+
+// All returns the keyset as a slice (bot token, signing secret, app token)
+// for the disconnect sweep, which deletes all three regardless of which the
+// workspace actually populated — a Delete of an absent key is a no-op.
+func (k SlackWorkspaceKeyset) All() []string {
+	return []string{k.BotToken, k.SigningSecret, k.AppToken}
+}
+
 // Load reads the four well-known integration secrets for orgID via
 // the SecretStore and returns them in the auth.Credentials transport
 // shape. The bundle exists because every downstream consumer

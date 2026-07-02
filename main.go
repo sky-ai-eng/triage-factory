@@ -15,6 +15,11 @@ import (
 	// and LoginExtension via init(). Gated at runtime on the `sso` entitlement.
 	_ "github.com/sky-ai-eng/triage-factory/ee/sso"
 
+	// Enterprise Edition Slack workspace connect: registers its store
+	// factories and route installer via init(). Gated at runtime on the
+	// `slack` entitlement.
+	_ "github.com/sky-ai-eng/triage-factory/ee/slack"
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 

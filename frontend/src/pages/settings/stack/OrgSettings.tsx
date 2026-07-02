@@ -45,6 +45,7 @@ import PollerTimingGroup from '../PollerTimingGroup'
 import { inputClass } from '../primitives'
 import JiraAccessGroup from '../JiraAccessGroup'
 import AtlassianOAuthAppCard from '../AtlassianOAuthAppCard'
+import SlackWorkspacesCard from '../SlackWorkspacesCard'
 import TeamManagementSection from '../../../components/TeamManagementSection'
 import { dailyCapError, saveOrgConfig, type OrgConfigForm } from '../orgConfig'
 import { connectJira, JIRA_DEPLOYMENT_OPTIONS } from '../jiraConnect'
@@ -54,7 +55,7 @@ import { ChoiceCards } from '../../setup/parts'
 import GitHubAccessControl from './GitHubAccessControl'
 import SSOSettings from './SSOSettings'
 import SettingsSection from './SettingsSection'
-import { useEntitlements, FeatureSSO } from '../../../hooks/useEntitlements'
+import { useEntitlements, FeatureSSO, FeatureSlack } from '../../../hooks/useEntitlements'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
 const intervalLabel = (d: string): string => d.replace(/m0s$/, 'm')
@@ -73,10 +74,11 @@ export default function OrgSettings({
   const [loadError, setLoadError] = useState<string | null>(null)
   const [urlError, setUrlError] = useState<string | null>(null)
 
-  // EE SSO entitlement — dark until the probe resolves, matching the backend's
-  // 404-and-hide at every /api/sso/* seam.
+  // EE SSO / Slack entitlements — dark until the probe resolves, matching the
+  // backend's 404-and-hide at every /api/sso/* and /api/slack/* seam.
   const { has, loaded: entLoaded } = useEntitlements()
   const sso = entLoaded && has(FeatureSSO)
+  const slackEnt = entLoaded && has(FeatureSlack)
 
   // Per-section in-flight keys. A Set (not a single string) so two sections
   // saving in quick succession each keep their own saving state — otherwise the
@@ -477,6 +479,17 @@ export default function OrgSettings({
       {orgId && draft.jiraConnected && draft.jiraDeployment === 'cloud' && (
         <SettingsSection title="Atlassian OAuth app" summary="One-click Connect for Jira">
           <AtlassianOAuthAppCard orgId={orgId} />
+        </SettingsSection>
+      )}
+
+      {/* ── Slack (TFAC-529) ── EE, multi-mode only: every /api/slack/* seam
+          404s an unlicensed org, so the FE hides the surface rather than
+          presenting a dead flow — same gating shape as SSO below. An action
+          section (no Save footer): the card owns its own connect/disconnect
+          controls and list fetch. */}
+      {orgId && !isLocal && slackEnt && (
+        <SettingsSection title="Slack" summary="Connect a workspace">
+          <SlackWorkspacesCard orgId={orgId} />
         </SettingsSection>
       )}
 

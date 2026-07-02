@@ -101,6 +101,7 @@ export function invalidateEntitlements(): void {
 // grep-able.
 export const FeatureGovernance = 'governance' as const
 export const FeatureSSO = 'sso' as const
+export const FeatureSlack = 'slack' as const
 
 export interface Entitlements {
   /** Whether `feature` is licensed for the viewer. False until the probe
