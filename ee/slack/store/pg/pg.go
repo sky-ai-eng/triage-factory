@@ -210,8 +210,20 @@ func (s *workspaceStore) GetByWorkspaceAppSystem(ctx context.Context, workspaceI
 // writer actually calls it first. pg_advisory_xact_lock ties the lock's
 // lifetime to the current transaction, so it needs no paired unlock: it
 // releases automatically on commit or rollback.
+//
+// hashtextextended (64-bit), not hashtext (32-bit): every other advisory
+// lock in this codebase uses the 64-bit form — team_github_repos.go's
+// per-org repo-reconcile lock, auth_handlers.go's per-identity/per-email
+// login locks — precisely so distinct keys don't collide onto the same
+// lock, whether from a birthday-paradox clash within one domain or a
+// coincidental clash across two unrelated ones. Salt 2: distinct from
+// auth_handlers.go's 0 (email) and 1 (auth_user_id), and from
+// team_github_repos.go's 0 (org_id) — this app-id lock domain shares the
+// same global pg_advisory_xact_lock(bigint) keyspace as all of them, so a
+// distinct salt keeps a Slack api_app_id from ever landing on the same key
+// as an unrelated org id or email hashed under a reused salt.
 func (s *workspaceStore) LockApp(ctx context.Context, apiAppID string) error {
-	if _, err := s.app.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, apiAppID); err != nil {
+	if _, err := s.app.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 2))`, apiAppID); err != nil {
 		return fmt.Errorf("lock app invariant: %w", err)
 	}
 	return nil
