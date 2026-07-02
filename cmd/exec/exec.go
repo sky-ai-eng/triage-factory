@@ -132,13 +132,17 @@ func Handle(args []string) {
 	default:
 		// EE-registered verbs (agenthost.RegisterExtension's exec-side
 		// counterpart, e.g. "slack") land here — the switch's fallthrough
-		// path. A registered runner gets the same buildAgentHost() +
-		// deferred Close() the built-in cases use; the runner's own
-		// entitlement check happens inside host.CallExtension, not here.
+		// path. A registered runner gets the same buildAgentHost() the
+		// built-in cases use; the runner's own entitlement check happens
+		// inside host.CallExtension, not here. host.Close() is called
+		// explicitly (not deferred) because os.Exit below terminates the
+		// process immediately without running any deferred call on the
+		// stack — a deferred Close() here would silently never run.
 		if run, ok := subcommandRegistry[cmd]; ok {
 			host := buildAgentHost()
-			defer func() { _ = host.Close() }()
-			os.Exit(run(context.Background(), cmdArgs, host))
+			code := run(context.Background(), cmdArgs, host)
+			_ = host.Close()
+			os.Exit(code)
 		}
 		fmt.Fprintf(os.Stderr, "unknown exec command: %s\nRun 'triagefactory exec --help' for usage.\n", cmd)
 		os.Exit(1)
