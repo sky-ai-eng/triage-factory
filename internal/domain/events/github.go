@@ -611,25 +611,25 @@ func (p GitHubPRMentionedPredicate) Matches(m GitHubPRMentionedMetadata) bool {
 // declaration (events.TypesWithOwnership(OwnershipOwned, "github:")) rather
 // than a parallel hand-maintained list.
 func init() {
-	Register(newSchema[GitHubPRReviewRequestedMetadata, GitHubPRReviewRequestedPredicate](domain.EventGitHubPRReviewRequested, OwnershipRequestedParty))
-	Register(newSchema[GitHubPRReviewRequestRemovedMetadata, GitHubPRReviewRequestRemovedPredicate](domain.EventGitHubPRReviewRequestRemoved, OwnershipOwned))
+	Register(NewSchema[GitHubPRReviewRequestedMetadata, GitHubPRReviewRequestedPredicate](domain.EventGitHubPRReviewRequested, OwnershipRequestedParty))
+	Register(NewSchema[GitHubPRReviewRequestRemovedMetadata, GitHubPRReviewRequestRemovedPredicate](domain.EventGitHubPRReviewRequestRemoved, OwnershipOwned))
 
-	Register(newSchema[GitHubPRReviewChangesRequestedMetadata, GitHubPRReviewChangesRequestedPredicate](domain.EventGitHubPRReviewChangesRequested, OwnershipOwned))
-	Register(newSchema[GitHubPRReviewApprovedMetadata, GitHubPRReviewApprovedPredicate](domain.EventGitHubPRReviewApproved, OwnershipOwned))
-	Register(newSchema[GitHubPRReviewCommentedMetadata, GitHubPRReviewCommentedPredicate](domain.EventGitHubPRReviewCommented, OwnershipOwned))
-	Register(newSchema[GitHubPRReviewDismissedMetadata, GitHubPRReviewDismissedPredicate](domain.EventGitHubPRReviewDismissed, OwnershipOwned))
+	Register(NewSchema[GitHubPRReviewChangesRequestedMetadata, GitHubPRReviewChangesRequestedPredicate](domain.EventGitHubPRReviewChangesRequested, OwnershipOwned))
+	Register(NewSchema[GitHubPRReviewApprovedMetadata, GitHubPRReviewApprovedPredicate](domain.EventGitHubPRReviewApproved, OwnershipOwned))
+	Register(NewSchema[GitHubPRReviewCommentedMetadata, GitHubPRReviewCommentedPredicate](domain.EventGitHubPRReviewCommented, OwnershipOwned))
+	Register(NewSchema[GitHubPRReviewDismissedMetadata, GitHubPRReviewDismissedPredicate](domain.EventGitHubPRReviewDismissed, OwnershipOwned))
 
-	Register(newSchema[GitHubPRCICheckFailedMetadata, GitHubPRCICheckFailedPredicate](domain.EventGitHubPRCICheckFailed, OwnershipOwned))
-	Register(newSchema[GitHubPRCICheckPassedMetadata, GitHubPRCICheckPassedPredicate](domain.EventGitHubPRCICheckPassed, OwnershipOwned))
+	Register(NewSchema[GitHubPRCICheckFailedMetadata, GitHubPRCICheckFailedPredicate](domain.EventGitHubPRCICheckFailed, OwnershipOwned))
+	Register(NewSchema[GitHubPRCICheckPassedMetadata, GitHubPRCICheckPassedPredicate](domain.EventGitHubPRCICheckPassed, OwnershipOwned))
 
-	Register(newSchema[GitHubPRLabelAddedMetadata, GitHubPRLabelAddedPredicate](domain.EventGitHubPRLabelAdded, OwnershipOwned))
-	Register(newSchema[GitHubPRLabelRemovedMetadata, GitHubPRLabelRemovedPredicate](domain.EventGitHubPRLabelRemoved, OwnershipOwned))
+	Register(NewSchema[GitHubPRLabelAddedMetadata, GitHubPRLabelAddedPredicate](domain.EventGitHubPRLabelAdded, OwnershipOwned))
+	Register(NewSchema[GitHubPRLabelRemovedMetadata, GitHubPRLabelRemovedPredicate](domain.EventGitHubPRLabelRemoved, OwnershipOwned))
 
-	Register(newSchema[GitHubPRNewCommitsMetadata, GitHubPRNewCommitsPredicate](domain.EventGitHubPRNewCommits, OwnershipOwned))
-	Register(newSchema[GitHubPRConflictsMetadata, GitHubPRConflictsPredicate](domain.EventGitHubPRConflicts, OwnershipOwned))
-	Register(newSchema[GitHubPRReadyForReviewMetadata, GitHubPRReadyForReviewPredicate](domain.EventGitHubPRReadyForReview, OwnershipOwned))
-	Register(newSchema[GitHubPROpenedMetadata, GitHubPROpenedPredicate](domain.EventGitHubPROpened, OwnershipOwned))
-	Register(newSchema[GitHubPRMergedMetadata, GitHubPRMergedPredicate](domain.EventGitHubPRMerged, OwnershipOwned))
-	Register(newSchema[GitHubPRClosedMetadata, GitHubPRClosedPredicate](domain.EventGitHubPRClosed, OwnershipOwned))
-	Register(newSchema[GitHubPRMentionedMetadata, GitHubPRMentionedPredicate](domain.EventGitHubPRMentioned, OwnershipOwned))
+	Register(NewSchema[GitHubPRNewCommitsMetadata, GitHubPRNewCommitsPredicate](domain.EventGitHubPRNewCommits, OwnershipOwned))
+	Register(NewSchema[GitHubPRConflictsMetadata, GitHubPRConflictsPredicate](domain.EventGitHubPRConflicts, OwnershipOwned))
+	Register(NewSchema[GitHubPRReadyForReviewMetadata, GitHubPRReadyForReviewPredicate](domain.EventGitHubPRReadyForReview, OwnershipOwned))
+	Register(NewSchema[GitHubPROpenedMetadata, GitHubPROpenedPredicate](domain.EventGitHubPROpened, OwnershipOwned))
+	Register(NewSchema[GitHubPRMergedMetadata, GitHubPRMergedPredicate](domain.EventGitHubPRMerged, OwnershipOwned))
+	Register(NewSchema[GitHubPRClosedMetadata, GitHubPRClosedPredicate](domain.EventGitHubPRClosed, OwnershipOwned))
+	Register(NewSchema[GitHubPRMentionedMetadata, GitHubPRMentionedPredicate](domain.EventGitHubPRMentioned, OwnershipOwned))
 }

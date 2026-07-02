@@ -268,6 +268,12 @@ var orgScopedTables = []string{
 	"project_knowledge", "projects",
 	"repo_profiles", "poller_state",
 	"prompts",
+	// slack_event_deliveries carries no org_id column and no FK (keyed on
+	// workspace_id text alone; see the migration), so unlike
+	// org_slack_workspaces (which cascades transitively via its org_id FK
+	// into orgs), it must be listed explicitly or Reset would leak
+	// delivery-dedup rows across tests sharing this container.
+	"slack_event_deliveries",
 	// users last — most other tables FK into it.
 	"users",
 	// NOT INCLUDED explicitly: system_prompt_versions, events_catalog.

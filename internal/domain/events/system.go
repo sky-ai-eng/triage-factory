@@ -131,10 +131,10 @@ func (p SystemTaskDelegationBlockedSubtasksPredicate) Matches(m SystemTaskDelega
 // they're bus-only sentinels, never router-bound (see RouterBound) and
 // never entity-scoped, so they never reach resolveTeamRouting at all.
 func init() {
-	Register(newSchema[SystemPollCompletedMetadata, SystemPollCompletedPredicate](domain.EventSystemPollCompleted, OwnershipUnrouted))
-	Register(newSchema[SystemScoringCompletedMetadata, SystemScoringCompletedPredicate](domain.EventSystemScoringCompleted, OwnershipUnrouted))
-	Register(newSchema[SystemDelegationCompletedMetadata, SystemDelegationCompletedPredicate](domain.EventSystemDelegationCompleted, OwnershipUnrouted))
-	Register(newSchema[SystemDelegationFailedMetadata, SystemDelegationFailedPredicate](domain.EventSystemDelegationFailed, OwnershipUnrouted))
-	Register(newSchema[SystemPromptAutoSuspendedMetadata, SystemPromptAutoSuspendedPredicate](domain.EventSystemPromptAutoSuspended, OwnershipUnrouted))
-	Register(newSchema[SystemTaskDelegationBlockedSubtasksMetadata, SystemTaskDelegationBlockedSubtasksPredicate](domain.EventSystemTaskDelegationBlockedSubtasks, OwnershipUnrouted))
+	Register(NewSchema[SystemPollCompletedMetadata, SystemPollCompletedPredicate](domain.EventSystemPollCompleted, OwnershipUnrouted))
+	Register(NewSchema[SystemScoringCompletedMetadata, SystemScoringCompletedPredicate](domain.EventSystemScoringCompleted, OwnershipUnrouted))
+	Register(NewSchema[SystemDelegationCompletedMetadata, SystemDelegationCompletedPredicate](domain.EventSystemDelegationCompleted, OwnershipUnrouted))
+	Register(NewSchema[SystemDelegationFailedMetadata, SystemDelegationFailedPredicate](domain.EventSystemDelegationFailed, OwnershipUnrouted))
+	Register(NewSchema[SystemPromptAutoSuspendedMetadata, SystemPromptAutoSuspendedPredicate](domain.EventSystemPromptAutoSuspended, OwnershipUnrouted))
+	Register(NewSchema[SystemTaskDelegationBlockedSubtasksMetadata, SystemTaskDelegationBlockedSubtasksPredicate](domain.EventSystemTaskDelegationBlockedSubtasks, OwnershipUnrouted))
 }

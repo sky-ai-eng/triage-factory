@@ -6,8 +6,26 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
+
+// TestAllDomainEventTypesRegistered_CompositionRoot is the out-of-core
+// counterpart to internal/domain/events' own TestAllDomainEventTypesRegistered,
+// which can only verify core-sourced types (github/jira/system) — it must
+// never import ee/. This process (package main, which blank-imports ee/slack
+// and friends) is the one place that sees every real init()-time schema
+// registration, core and ee alike, so it's the one place that can catch a new
+// domain.AllEventTypes() entry (e.g. an ee package's own event source) that
+// forgot to register a matching events.Schema.
+func TestAllDomainEventTypesRegistered_CompositionRoot(t *testing.T) {
+	for _, et := range domain.AllEventTypes() {
+		if _, ok := events.Get(et.ID); !ok {
+			t.Errorf("event type %q is in domain.AllEventTypes() but not registered in the events package", et.ID)
+		}
+	}
+}
 
 // TestRegisteredFeaturesAreDeclared asserts that every feature referenced by
 // a registration seam (event-source gates, agenthost extension namespaces) is

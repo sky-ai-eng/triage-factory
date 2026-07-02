@@ -7610,5 +7610,42 @@ REVOKE ALL ON public.org_slack_workspaces FROM anon, authenticated, service_role
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_slack_workspaces TO tf_app;
 
 
+-- Slack event dedup (TFAC-530): slack_event_deliveries — the cross-transport
+-- delivery dedup table. Slack retries deliveries (webhook X-Slack-Retry-Num;
+-- Socket Mode redelivers unacked envelopes), and the two transports (this
+-- leaf's Events API receiver, the next leaf's Socket Mode client) can only
+-- share dedup state through storage — an in-process map wouldn't survive a
+-- restart or span two transports.
+--
+-- Keyed (workspace_id, event_id), not org_id: the pre-auth webhook receiver
+-- resolves org_id from org_slack_workspaces (the workspace_id -> org bind),
+-- and the entity key (domain.SlackSourceID) deliberately excludes workspace
+-- context too — dedup mirrors that, staying keyed on the same natural
+-- identifiers Slack itself hands the receiver.
+--
+-- Admin-pool-only / system table, same posture as auth_events / user_identities
+-- (the established system-only-table pattern): RLS enabled with NO policy
+-- (deny-by-default to non-BYPASSRLS roles) + REVOKE ALL from PUBLIC + the app
+-- roles. The superuser/admin pool bypasses RLS and does all I/O
+-- (ee/slack/store's Deliveries.MarkDeliveredSystem) — the receiver has no
+-- request claims to gate an org-scoped policy against, and there is no
+-- app-pool caller.
+--
+-- No index beyond the primary key: mention volume is low, and the
+-- opportunistic prune (received_at < now() - 72h, piggybacked on every
+-- insert) keeps the table small enough that a sequential scan is cheap.
+CREATE TABLE public.slack_event_deliveries (
+    workspace_id text NOT NULL,
+    event_id text NOT NULL,
+    received_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, event_id)
+);
+
+ALTER TABLE public.slack_event_deliveries ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.slack_event_deliveries FROM PUBLIC;
+REVOKE ALL ON public.slack_event_deliveries FROM anon, authenticated, service_role;
+
+
 -- +goose Down
 SELECT 'down not supported';
