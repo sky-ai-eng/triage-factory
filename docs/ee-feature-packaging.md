@@ -210,7 +210,7 @@ cap — size verb responses accordingly.
 ## Frontend
 
 There is no `frontend/ee`, deliberately. The SPA is a single bundle embedded
-in every binary (`go:embed`), exactly as `ee/` Go code compiles into every
+in every binary (`//go:embed`), exactly as `ee/` Go code compiles into every
 community binary: no shipped artifact excludes EE code, so a frontend
 directory boundary would have nothing to enforce. The Go-side `ee/` split
 earns its keep by keeping core structurally independent of EE code — the
@@ -219,9 +219,11 @@ inside shared pages (a settings card, a nav item, a status chip), which a
 hard boundary would turn into a plugin-registry exercise for no payoff.
 
 The invariant is the gate, not the location: **every EE surface renders
-behind `loaded && has('<feature>')`** (the `useEntitlements` hook over
-`/api/entitlements`) **and degrades to absence** — no upsell stubs or
-disabled placeholders — matching the backend's 404-and-hide non-disclosure
+behind `loaded && has(FeatureSSO)`** (a `Feature*` constant from the
+`useEntitlements` hook over `/api/entitlements`, never a bare string —
+mirrors the backend's typed `Feature` enum so a typo fails at compile/lint
+time instead of silently gating nothing) **and degrades to absence** — no
+upsell stubs or disabled placeholders — matching the backend's 404-and-hide non-disclosure
 posture. The `loaded` half keeps gated surfaces from flashing before the
 probe resolves. Server-side list filtering (the dormancy contract above)
 does the real hiding; the FE simply renders what the API returns, so gated
