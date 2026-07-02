@@ -65,10 +65,19 @@ const (
 // connStatus is the observable state of one per-app connection — held by
 // its appConnection (mutex-guarded there) and returned as a value snapshot
 // by StatusFor / appConnection.snapshot for GET /api/slack/workspaces.
+// ConnectedAt / LastEventAt are *time.Time, not time.Time: encoding/json's
+// omitempty is a no-op on a plain struct field (time.Time is a struct) — it
+// only elides false/0/nil-pointer/empty-string/empty-slice-or-map, so a
+// zero-value time.Time here would serialize as
+// "connected_at":"0001-01-01T00:00:00Z" instead of being omitted, for every
+// connection that hasn't reached open or hasn't seen an event yet. A nil
+// pointer, by contrast, omitempty genuinely elides — the convention every
+// other optional timestamp in this codebase already follows (ee/sso's
+// domains, invites_handler, event_queue, curator, ...).
 type connStatus struct {
 	State               string         `json:"state"`
-	ConnectedAt         time.Time      `json:"connected_at,omitempty"`
-	LastEventAt         time.Time      `json:"last_event_at,omitempty"`
+	ConnectedAt         *time.Time     `json:"connected_at,omitempty"`
+	LastEventAt         *time.Time     `json:"last_event_at,omitempty"`
 	ConsecutiveFailures int            `json:"consecutive_failures"`
 	LastError           string         `json:"last_error,omitempty"`
 	Sightings           []sightingView `json:"sightings,omitempty"`

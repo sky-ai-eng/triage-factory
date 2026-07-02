@@ -297,6 +297,48 @@ func TestBackoffDuration_CapsAtHighAttempts(t *testing.T) {
 	}
 }
 
+// ---------- connStatus JSON contract ----------
+
+// TestConnStatus_JSON_OmitsZeroTimestamps pins that connected_at/last_event_at
+// are genuinely omitted (not serialized as the zero-value
+// "0001-01-01T00:00:00Z") when unset, and present when set. Both fields are
+// *time.Time specifically because encoding/json's omitempty is a no-op on a
+// plain time.Time (a struct) — this test is the regression guard for that.
+func TestConnStatus_JSON_OmitsZeroTimestamps(t *testing.T) {
+	fresh := connStatus{State: stateDialing}
+	raw, err := json.Marshal(fresh)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var freshFields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &freshFields); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := freshFields["connected_at"]; ok {
+		t.Errorf("fresh connStatus JSON = %s; want connected_at omitted", raw)
+	}
+	if _, ok := freshFields["last_event_at"]; ok {
+		t.Errorf("fresh connStatus JSON = %s; want last_event_at omitted", raw)
+	}
+
+	now := time.Now()
+	withTimes := connStatus{State: stateOpen, ConnectedAt: &now, LastEventAt: &now}
+	raw, err = json.Marshal(withTimes)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var setFields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &setFields); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := setFields["connected_at"]; !ok {
+		t.Errorf("connStatus JSON with ConnectedAt set = %s; want connected_at present", raw)
+	}
+	if _, ok := setFields["last_event_at"]; !ok {
+		t.Errorf("connStatus JSON with LastEventAt set = %s; want last_event_at present", raw)
+	}
+}
+
 // ---------- desiredApps ----------
 
 func TestDesiredApps_TwoRowsSameApp_OneEntry(t *testing.T) {

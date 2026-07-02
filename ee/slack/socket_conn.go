@@ -74,7 +74,7 @@ func (c *appConnection) setState(state string) {
 func (c *appConnection) setConnected(t time.Time) {
 	c.mu.Lock()
 	c.status.State = stateOpen
-	c.status.ConnectedAt = t
+	c.status.ConnectedAt = &t
 	c.status.ConsecutiveFailures = 0
 	c.status.LastError = ""
 	c.mu.Unlock()
@@ -82,7 +82,7 @@ func (c *appConnection) setConnected(t time.Time) {
 
 func (c *appConnection) setLastEvent(t time.Time) {
 	c.mu.Lock()
-	c.status.LastEventAt = t
+	c.status.LastEventAt = &t
 	c.mu.Unlock()
 }
 
