@@ -37,6 +37,14 @@ func ListEventTypes(db *sql.DB) ([]domain.EventType, error) {
 // events_catalog is an FK target for historical events/tasks, so retiring
 // an event type is out of scope here.
 //
+// The DO UPDATE is WHERE-guarded to a no-op when the incoming values match
+// what's already stored: this runs on every Migrate() call (every server
+// boot, every test bootstrap), and without the guard an unconditional
+// UPDATE would write a new row version (Postgres: WAL + a dead tuple for
+// autovacuum) for all ~30 rows every single time even though almost none
+// of them ever change. IS DISTINCT FROM is null-safe, though these columns
+// are all NOT NULL today.
+//
 // Safe to call repeatedly, including concurrently across replicas: each
 // row's upsert is atomic under the dialect's own MVCC, so there's no
 // cross-row transaction to race.
@@ -50,7 +58,11 @@ func SeedEventTypes(db *sql.DB, dialect string) error {
 				source = EXCLUDED.source,
 				category = EXCLUDED.category,
 				label = EXCLUDED.label,
-				description = EXCLUDED.description`
+				description = EXCLUDED.description
+			WHERE events_catalog.source IS DISTINCT FROM EXCLUDED.source
+			   OR events_catalog.category IS DISTINCT FROM EXCLUDED.category
+			   OR events_catalog.label IS DISTINCT FROM EXCLUDED.label
+			   OR events_catalog.description IS DISTINCT FROM EXCLUDED.description`
 	case "sqlite3":
 		query = `INSERT INTO events_catalog (id, source, category, label, description)
 			VALUES (?, ?, ?, ?, ?)
@@ -58,7 +70,11 @@ func SeedEventTypes(db *sql.DB, dialect string) error {
 				source = excluded.source,
 				category = excluded.category,
 				label = excluded.label,
-				description = excluded.description`
+				description = excluded.description
+			WHERE events_catalog.source IS DISTINCT FROM excluded.source
+			   OR events_catalog.category IS DISTINCT FROM excluded.category
+			   OR events_catalog.label IS DISTINCT FROM excluded.label
+			   OR events_catalog.description IS DISTINCT FROM excluded.description`
 	default:
 		return fmt.Errorf("seed event types: unsupported dialect %q", dialect)
 	}

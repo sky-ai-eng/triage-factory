@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -107,5 +108,64 @@ func TestSeedEventTypes_NeverDeletes(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("synthetic row count = %d after SeedEventTypes, want 1 (must never delete)", n)
+	}
+}
+
+// TestSeedEventTypes_UnchangedRowsSkipWrite pins the WHERE guard on the
+// DO UPDATE: reseeding with values that already match must not touch any
+// row. An AFTER UPDATE trigger makes "was a write attempted" directly
+// observable — row content alone can't distinguish a no-op UPDATE from
+// one that wrote the same values back.
+func TestSeedEventTypes_UnchangedRowsSkipWrite(t *testing.T) {
+	database := openMigrationsTestDB(t)
+	if err := Migrate(database, "sqlite3"); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	if _, err := database.Exec(`
+		CREATE TABLE test_update_counter (n INTEGER NOT NULL);
+		INSERT INTO test_update_counter (n) VALUES (0);
+		CREATE TRIGGER test_count_ec_updates AFTER UPDATE ON events_catalog
+		BEGIN
+			UPDATE test_update_counter SET n = n + 1;
+		END;
+	`); err != nil {
+		t.Fatalf("install update counter: %v", err)
+	}
+
+	// Reseeding with unchanged values must not fire the trigger at all —
+	// the WHERE guard should make every conflicting row a no-op.
+	if err := SeedEventTypes(database, "sqlite3"); err != nil {
+		t.Fatalf("SeedEventTypes (unchanged): %v", err)
+	}
+	assertUpdateCounter(t, database, 0)
+
+	// Mutating exactly one row and reseeding must fire the trigger exactly
+	// once — proves the guard isn't accidentally suppressing real changes.
+	if _, err := database.Exec(
+		`UPDATE events_catalog SET label = 'DRIFTED LABEL' WHERE id = 'github:pr:opened'`,
+	); err != nil {
+		t.Fatalf("mutate label: %v", err)
+	}
+	// The mutation itself fires the trigger once; reset before the real
+	// assertion so the counter isolates SeedEventTypes's own writes.
+	if _, err := database.Exec(`UPDATE test_update_counter SET n = 0`); err != nil {
+		t.Fatalf("reset counter: %v", err)
+	}
+
+	if err := SeedEventTypes(database, "sqlite3"); err != nil {
+		t.Fatalf("SeedEventTypes (one drifted row): %v", err)
+	}
+	assertUpdateCounter(t, database, 1)
+}
+
+func assertUpdateCounter(t *testing.T, database *sql.DB, want int) {
+	t.Helper()
+	var n int
+	if err := database.QueryRow(`SELECT n FROM test_update_counter`).Scan(&n); err != nil {
+		t.Fatalf("read update counter: %v", err)
+	}
+	if n != want {
+		t.Errorf("events_catalog UPDATE trigger fired %d times, want %d", n, want)
 	}
 }

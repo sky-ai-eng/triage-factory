@@ -210,6 +210,82 @@ func TestSeedEventTypes_OverwritesDrift(t *testing.T) {
 	}
 }
 
+// TestSeedEventTypes_UnchangedRowsSkipWrite is the Postgres-side
+// counterpart to the SQLite test of the same name
+// (internal/db/event_types_test.go): the WHERE guard on DO UPDATE must
+// make reseeding with unchanged values a true no-op (no new tuple
+// version), which matters most on Postgres where every attempted UPDATE
+// costs a WAL entry and a dead tuple for autovacuum regardless of whether
+// any column value actually changed. An AFTER UPDATE trigger makes "was a
+// write attempted" observable, since row content alone can't distinguish
+// a no-op from an update that wrote the same values back.
+func TestSeedEventTypes_UnchangedRowsSkipWrite(t *testing.T) {
+	h := Shared(t)
+
+	if _, err := h.AdminDB.Exec(`
+		CREATE TABLE test_ec_update_counter (n INT NOT NULL DEFAULT 0);
+		INSERT INTO test_ec_update_counter (n) VALUES (0);
+		CREATE OR REPLACE FUNCTION test_count_ec_updates() RETURNS trigger AS $$
+		BEGIN
+			UPDATE test_ec_update_counter SET n = n + 1;
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql;
+		CREATE TRIGGER test_ec_update_trigger AFTER UPDATE ON events_catalog
+			FOR EACH ROW EXECUTE FUNCTION test_count_ec_updates();
+	`); err != nil {
+		t.Fatalf("install update counter: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := h.AdminDB.Exec(`
+			DROP TRIGGER IF EXISTS test_ec_update_trigger ON events_catalog;
+			DROP FUNCTION IF EXISTS test_count_ec_updates();
+			DROP TABLE IF EXISTS test_ec_update_counter;
+		`); err != nil {
+			t.Fatalf("cleanup update counter: %v", err)
+		}
+		if err := db.SeedEventTypes(h.AdminDB, "postgres"); err != nil {
+			t.Fatalf("cleanup reseed: %v", err)
+		}
+	})
+
+	// Reseeding with unchanged values must not fire the trigger at all.
+	if err := db.SeedEventTypes(h.AdminDB, "postgres"); err != nil {
+		t.Fatalf("SeedEventTypes (unchanged): %v", err)
+	}
+	assertPGUpdateCounter(t, h, 0)
+
+	// Mutating exactly one row and reseeding must fire the trigger exactly
+	// once — proves the guard isn't accidentally suppressing real changes.
+	const id = "github:pr:opened"
+	if _, err := h.AdminDB.Exec(
+		`UPDATE events_catalog SET label = 'DRIFTED LABEL' WHERE id = $1`, id,
+	); err != nil {
+		t.Fatalf("mutate label: %v", err)
+	}
+	// The mutation itself fires the trigger once; reset before the real
+	// assertion so the counter isolates SeedEventTypes's own writes.
+	if _, err := h.AdminDB.Exec(`UPDATE test_ec_update_counter SET n = 0`); err != nil {
+		t.Fatalf("reset counter: %v", err)
+	}
+
+	if err := db.SeedEventTypes(h.AdminDB, "postgres"); err != nil {
+		t.Fatalf("SeedEventTypes (one drifted row): %v", err)
+	}
+	assertPGUpdateCounter(t, h, 1)
+}
+
+func assertPGUpdateCounter(t *testing.T, h *Harness, want int) {
+	t.Helper()
+	var n int
+	if err := h.AdminDB.QueryRow(`SELECT n FROM test_ec_update_counter`).Scan(&n); err != nil {
+		t.Fatalf("read update counter: %v", err)
+	}
+	if n != want {
+		t.Errorf("events_catalog UPDATE trigger fired %d times, want %d", n, want)
+	}
+}
+
 // TestBaseline_JiraStatusRulesPopulated_CHECKsFire pins the three
 // jpsr_*_populated CHECK constraints. The HTTP handler's
 // validateProjectRules is the user-facing gate; these CHECKs are
