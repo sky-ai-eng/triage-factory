@@ -94,7 +94,7 @@ func (s *workspaceStore) Upsert(ctx context.Context, ws slackstore.Workspace) er
 	`, ws.WorkspaceID, ws.OrgID, ws.WorkspaceName, ws.EnterpriseID, ws.Transport,
 		ws.BotUserID, ws.BotTokenRef, ws.SigningSecretRef, ws.AppTokenRef, ws.RegisteredByUserID)
 	if err != nil {
-		return fmt.Errorf("update org_slack_workspace: %w", err)
+		return fmt.Errorf("update org_slack_workspaces: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n > 0 {
 		return nil
@@ -106,7 +106,7 @@ func (s *workspaceStore) Upsert(ctx context.Context, ws slackstore.Workspace) er
 		) VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, '')::uuid)
 	`, ws.WorkspaceID, ws.OrgID, ws.WorkspaceName, ws.EnterpriseID, ws.Transport,
 		ws.BotUserID, ws.BotTokenRef, ws.SigningSecretRef, ws.AppTokenRef, ws.RegisteredByUserID); err != nil {
-		return fmt.Errorf("insert org_slack_workspace: %w", err)
+		return fmt.Errorf("insert org_slack_workspaces: %w", err)
 	}
 	return nil
 }
@@ -127,7 +127,7 @@ func (s *workspaceStore) ListForOrg(ctx context.Context, orgID string) ([]slacks
 	for rows.Next() {
 		w, err := scanWorkspace(rows)
 		if err != nil {
-			return nil, fmt.Errorf("scan org_slack_workspace: %w", err)
+			return nil, fmt.Errorf("scan org_slack_workspaces: %w", err)
 		}
 		out = append(out, w)
 	}
@@ -144,7 +144,7 @@ func (s *workspaceStore) Get(ctx context.Context, orgID, workspaceID string) (*s
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get org_slack_workspace: %w", err)
+		return nil, fmt.Errorf("get org_slack_workspaces: %w", err)
 	}
 	return &w, nil
 }
@@ -153,7 +153,7 @@ func (s *workspaceStore) Delete(ctx context.Context, orgID, workspaceID string) 
 	if _, err := s.app.ExecContext(ctx, `
 		DELETE FROM org_slack_workspaces WHERE workspace_id = $1 AND org_id = $2
 	`, workspaceID, orgID); err != nil {
-		return fmt.Errorf("delete org_slack_workspace: %w", err)
+		return fmt.Errorf("delete org_slack_workspaces: %w", err)
 	}
 	return nil
 }
@@ -173,7 +173,7 @@ func (s *workspaceStore) ListAllSystem(ctx context.Context) ([]slackstore.Worksp
 	for rows.Next() {
 		w, err := scanWorkspace(rows)
 		if err != nil {
-			return nil, fmt.Errorf("scan org_slack_workspace: %w", err)
+			return nil, fmt.Errorf("scan org_slack_workspaces: %w", err)
 		}
 		out = append(out, w)
 	}

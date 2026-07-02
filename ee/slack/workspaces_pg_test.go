@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -112,6 +113,12 @@ type slackWorkspaceRig struct {
 
 func newSlackWorkspaceRig(t *testing.T, publicURL string) *slackWorkspaceRig {
 	t.Helper()
+	// memberGate 404s unconditionally in local mode (before it even reads
+	// the entitlement) — the rig always runs the multi-mode path so its
+	// tests actually reach the gate's entitlement/admin logic under test.
+	// The local-mode 404 itself is covered separately (no DB needed) in
+	// TestHandlers_LocalMode404.
+	runmode.SetForTest(t, runmode.ModeMulti)
 	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureSlack))
 	t.Cleanup(entitlements.Reset)
 

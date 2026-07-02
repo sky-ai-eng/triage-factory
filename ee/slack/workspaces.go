@@ -11,16 +11,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // workspacesHandler serves /api/slack/workspaces* and /api/slack/manifest —
 // the org-admin Slack workspace connect/disconnect lifecycle plus the
-// member-visible list. No runmode branching anywhere here (unlike SSO):
-// every route gates purely on the `slack` entitlement, since a licensed
-// local install is not structurally excluded the way SSO's GoTrue
-// dependency excludes it.
+// member-visible list. Gates on the `slack` entitlement per-request, plus a
+// local-mode 404 (see memberGate) — narrower than SSO's runmode gate (which
+// exists because SSO structurally can't work without GoTrue), ours exists
+// because the Slack store is Postgres-only: local mode's org-context shim
+// would otherwise let a locally-licensed request past the entitlement check
+// only to hit db.ErrNotApplicableInLocal as a 500. Revisit if/when local
+// mode gets a real Slack story.
 type workspacesHandler struct {
 	tx     db.TxRunner
 	az     *authz.Checker
@@ -56,8 +60,17 @@ func toWorkspaceView(w *slackstore.Workspace) workspaceView {
 
 // memberGate resolves the active org and confirms the `slack` entitlement.
 // Any org member may reach a member-gated route once past this — used by
-// the read-only list.
+// the read-only list. Local mode 404s unconditionally, before even looking
+// at the entitlement: local's org-context shim always supplies an org (see
+// httpx.RequireOrg), so a locally-licensed request would otherwise sail
+// through the entitlement check and reach the Postgres-only Slack store,
+// whose SQLite stub returns db.ErrNotApplicableInLocal — an internal-error
+// 500, not the clean 404 a gated-off feature should produce.
 func (h *workspacesHandler) memberGate(w http.ResponseWriter, r *http.Request) (orgID string, ok bool) {
+	if runmode.Current() == runmode.ModeLocal {
+		http.NotFound(w, r)
+		return "", false
+	}
 	orgID, ok = httpx.RequireOrg(w, r)
 	if !ok {
 		return "", false

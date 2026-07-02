@@ -55,8 +55,11 @@ const (
 	// FeatureSlack gates the Slack workspace-connect surface: the
 	// org_slack_workspaces store, the connect/disconnect/manifest routes in
 	// ee/slack, and (in follow-on leaves) event ingest. Every ee/slack route
-	// gates on this per-request — there is no runmode carve-out the way SSO
-	// has one, since a licensed local install is not structurally excluded.
+	// also 404s in local mode for now — the Slack store is Postgres-only (no
+	// SQLite backend), and local mode's org-context shim would otherwise let
+	// a locally-licensed request past this gate only to hit
+	// db.ErrNotApplicableInLocal as a 500. Revisit if/when local-mode Slack
+	// support is actually built.
 	FeatureSlack Feature = "slack"
 )
 
