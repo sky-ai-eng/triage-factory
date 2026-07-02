@@ -26,10 +26,12 @@ import (
 // Derived from the events registry's per-type OwnershipModel declarations
 // instead of hand-enumerated — the set is exactly "every github:pr:* type
 // registered OwnershipOwned" (see internal/domain/events/github.go),
-// auditable there rather than against a parallel list here. Sorted for
-// determinism; the prior-task ladder tier and the terminal-close set
-// (close_relations.go) key on membership, not order.
-var authorCentricGitHubEventTypes = events.TypesWithOwnership(events.OwnershipOwned, "github:")
+// auditable there rather than against a parallel list here. The prefix is
+// "github:pr:", not just "github:", so a future non-PR github: event type
+// (registered Owned) doesn't silently join this PR-specific anchor set.
+// Sorted for determinism; the prior-task ladder tier and the terminal-close
+// set (close_relations.go) key on membership, not order.
+var authorCentricGitHubEventTypes = events.TypesWithOwnership(events.OwnershipOwned, "github:pr:")
 
 var authorCentricGitHubEventSet = func() map[string]bool {
 	m := make(map[string]bool, len(authorCentricGitHubEventTypes))
@@ -64,8 +66,10 @@ func isAuthorCentricGitHubEvent(eventType string) bool {
 // Derived the same way as authorCentricGitHubEventTypes: every jira:issue:*
 // type registered OwnershipOwned (see internal/domain/events/jira.go) —
 // issue:available is declared OwnershipPool there, so it falls out of this
-// set for free instead of needing an explicit exclusion.
-var assigneeCentricJiraEventTypes = events.TypesWithOwnership(events.OwnershipOwned, "jira:")
+// set for free instead of needing an explicit exclusion. The prefix is
+// "jira:issue:", not just "jira:", so a future non-issue jira: event type
+// (registered Owned) doesn't silently join this issue-specific anchor set.
+var assigneeCentricJiraEventTypes = events.TypesWithOwnership(events.OwnershipOwned, "jira:issue:")
 
 var assigneeCentricJiraEventSet = func() map[string]bool {
 	m := make(map[string]bool, len(assigneeCentricJiraEventTypes))
@@ -74,13 +78,6 @@ var assigneeCentricJiraEventSet = func() map[string]bool {
 	}
 	return m
 }()
-
-// isAssigneeCentricJiraEvent reports whether an event routes via the
-// owning-team ladder keyed on the issue's assignee (true) rather than the
-// default handler-team grouping (jira:issue:available, etc.).
-func isAssigneeCentricJiraEvent(eventType string) bool {
-	return assigneeCentricJiraEventSet[eventType]
-}
 
 // ownershipModelForEvent classifies an event type into its ownership model —
 // a lookup, not a decision. Every event type declares its model at
