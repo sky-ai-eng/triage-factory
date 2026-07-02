@@ -7,12 +7,27 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestAllDomainEventTypesRegistered asserts every event type seeded into
-// events_catalog has a matching schema registered. Catches the footgun of
-// adding a new event ID in domain/event.go without the matching Go struct.
+// coreRegisteredSources are the event sources whose schemas register from
+// this package's own init()s (github.go, jira.go, system.go) — the only
+// ones TestAllDomainEventTypesRegistered can verify. An out-of-core source
+// (an ee package's own init(), e.g. ee/slack for "slack") registers its
+// schema only when ee/ is actually linked in, which this package must never
+// do (core never imports ee/). The equivalent completeness check for those
+// lives at the composition root (package main, which does link ee/ via
+// blank imports) — same precedent as feature_parity_test.go's
+// TestRegisteredFeaturesAreDeclared.
+var coreRegisteredSources = map[string]bool{"github": true, "jira": true, "system": true}
+
+// TestAllDomainEventTypesRegistered asserts every core-sourced event type
+// seeded into events_catalog has a matching schema registered. Catches the
+// footgun of adding a new event ID in domain/event.go without the matching
+// Go struct.
 func TestAllDomainEventTypesRegistered(t *testing.T) {
 	all := All()
 	for _, et := range domain.AllEventTypes() {
+		if !coreRegisteredSources[et.Source] {
+			continue
+		}
 		if _, ok := all[et.ID]; !ok {
 			t.Errorf("event type %q is in domain.AllEventTypes() but not registered in events package", et.ID)
 		}

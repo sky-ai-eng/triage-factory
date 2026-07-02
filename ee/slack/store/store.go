@@ -30,6 +30,10 @@ const ExtKey = "slack"
 type Bundle struct {
 	Workspaces WorkspaceStore
 	Identities SlackIdentityStore
+	// Deliveries owns slack_event_deliveries — the cross-transport ingest
+	// dedup table. Admin-pool only (see DeliveryStore); read through
+	// FromStores, never FromTx (the pre-auth webhook receiver has no tx).
+	Deliveries DeliveryStore
 }
 
 // FromTx returns the tx-bound Slack bundle, or nil if no Slack extension is
@@ -95,6 +99,32 @@ type WorkspaceStore interface {
 	// ListAllSystem returns every connected workspace across every org, on
 	// the admin pool (bypasses RLS). System-code-only — see the type doc.
 	ListAllSystem(ctx context.Context) ([]Workspace, error)
+
+	// GetByWorkspaceIDSystem looks up a workspace by its Slack team ID alone
+	// (no org_id to scope by), on the admin pool. The pre-auth webhook
+	// receiver's only trusted input is the payload's team_id — this is how
+	// it resolves which org (and which signing secret) a delivery belongs
+	// to, before it has any other context to filter on. Returns (nil, nil)
+	// when no workspace is connected under that id — an unknown team_id is
+	// not an error, it just means the caller ack-and-drops.
+	GetByWorkspaceIDSystem(ctx context.Context, workspaceID string) (*Workspace, error)
+}
+
+// DeliveryStore owns slack_event_deliveries — the cross-transport ingest
+// dedup table (see the migration's comment for the full rationale). Postgres
+// admin-pool only: the pre-auth webhook receiver has no request claims, and
+// the future Socket Mode client is similarly claims-free. The SQLite impl is
+// a stub returning db.ErrNotApplicableInLocal, same posture as
+// WorkspaceStore.
+type DeliveryStore interface {
+	// MarkDeliveredSystem records one (workspaceID, eventID) delivery via an
+	// insert-on-conflict, and opportunistically prunes deliveries older than
+	// 72 hours in the same call. fresh=true means this delivery was not
+	// previously recorded — the caller should process it; fresh=false means
+	// a duplicate (a Slack retry) — the caller drops it silently. The prune
+	// is best-effort: a failure there does not affect fresh's correctness
+	// and is never surfaced as an error.
+	MarkDeliveredSystem(ctx context.Context, workspaceID, eventID string) (fresh bool, err error)
 }
 
 // SlackIdentity is one row of user_slack_identities — the mapping from a

@@ -171,12 +171,16 @@ func predicateFieldKind(t reflect.Type) string {
 	return ""
 }
 
-// newSchema is the internal constructor used by source-specific files. It
-// reflects over the predicate type to derive Fields and stitches a type-
-// erased matcher on top of the caller-supplied typed matcher. ownership is
-// required (not defaulted) so every call site makes an explicit per-type
-// declaration instead of silently inheriting the zero value.
-func newSchema[Meta any, Pred interface{ Matches(Meta) bool }](eventType string, ownership OwnershipModel) EventSchema {
+// NewSchema is the typed constructor used by source-specific files,
+// in-core (github.go, jira.go, system.go) and out-of-core alike (an ee
+// package's own init(), e.g. ee/slack for "slack:mention" — TFAC-530 was
+// the first out-of-core registrant, which is why this is exported rather
+// than package-internal). It reflects over the predicate type to derive
+// Fields and stitches a type-erased matcher on top of the caller-supplied
+// typed matcher. ownership is required (not defaulted) so every call site
+// makes an explicit per-type declaration instead of silently inheriting the
+// zero value.
+func NewSchema[Meta any, Pred interface{ Matches(Meta) bool }](eventType string, ownership OwnershipModel) EventSchema {
 	var m Meta
 	var p Pred
 	metaT := reflect.TypeOf(m)

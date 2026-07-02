@@ -103,6 +103,15 @@ const (
 	EventJiraIssueBecameAtomic    = "jira:issue:became_atomic"
 )
 
+// Slack events. Registered from ee/slack (an out-of-core source; see
+// internal/domain/events.NewSchema) — the ID constant and catalog entry
+// still live here, universal-seed like every other event type (TFAC-524's
+// seed-universally-gate-at-access design), but the schema + ownership
+// declaration are ee/slack's own.
+const (
+	EventSlackMention = "slack:mention"
+)
+
 // System events
 const (
 	EventSystemPollCompleted                 = "system:poll:completed"
@@ -155,6 +164,9 @@ func AllEventTypes() []EventType {
 		{ID: EventJiraIssueCommented, Source: "jira", Category: "issue", Label: "New Comment", Description: "A new comment was added to an issue"},
 		{ID: EventJiraIssueCompleted, Source: "jira", Category: "issue", Label: "Issue Completed", Description: "Issue was marked as done"},
 		{ID: EventJiraIssueBecameAtomic, Source: "jira", Category: "issue", Label: "Issue Became Atomic", Description: "Last open subtask closed — parent is now an atomic work unit"},
+
+		// --- Slack (schema + ownership registered by ee/slack) ---
+		{ID: EventSlackMention, Source: "slack", Category: "message", Label: "Bot Mentioned", Description: "The TF bot was @mentioned in a Slack channel"},
 
 		// --- System events (never user-visible) ---
 		{ID: EventSystemPollCompleted, Source: "system", Category: "poll", Label: "Poll Complete", Description: "A poller finished a cycle"},

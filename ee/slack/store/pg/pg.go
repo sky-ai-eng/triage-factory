@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -21,6 +22,7 @@ func init() {
 		return &slackstore.Bundle{
 			Workspaces: newWorkspaceStore(app, admin),
 			Identities: newIdentityStore(admin),
+			Deliveries: newDeliveryStore(admin),
 		}
 	})
 }
@@ -179,4 +181,65 @@ func (s *workspaceStore) ListAllSystem(ctx context.Context) ([]slackstore.Worksp
 		out = append(out, w)
 	}
 	return out, rows.Err()
+}
+
+func (s *workspaceStore) GetByWorkspaceIDSystem(ctx context.Context, workspaceID string) (*slackstore.Workspace, error) {
+	w, err := scanWorkspace(s.admin.QueryRowContext(ctx, `
+		SELECT `+workspaceColumns+`
+		FROM org_slack_workspaces
+		WHERE workspace_id = $1
+	`, workspaceID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get org_slack_workspaces by workspace id: %w", err)
+	}
+	return &w, nil
+}
+
+// deliveryStore is the Postgres impl of slackstore.DeliveryStore. Admin pool
+// only: the pre-auth webhook receiver (and the future Socket Mode client)
+// have no request claims for RLS to gate on.
+type deliveryStore struct {
+	admin db.Execer
+}
+
+func newDeliveryStore(admin db.Execer) slackstore.DeliveryStore {
+	return &deliveryStore{admin: admin}
+}
+
+var _ slackstore.DeliveryStore = (*deliveryStore)(nil)
+
+// deliveryPruneAge is how long a delivery row is retained before the
+// opportunistic prune sweeps it — comfortably past Slack's own retry
+// window, with margin for a slow/backed-up receiver.
+const deliveryPruneAge = 72 * time.Hour
+
+// MarkDeliveredSystem inserts (workspaceID, eventID) with ON CONFLICT DO
+// NOTHING; fresh reports whether the row was newly inserted (RowsAffected
+// > 0) versus an already-seen duplicate. The prune runs after, best-effort:
+// its error (if any) is swallowed rather than returned — a missed prune
+// just means the table grows a little until the next successful call, never
+// a reason to fail the delivery this call is trying to dedup.
+func (s *deliveryStore) MarkDeliveredSystem(ctx context.Context, workspaceID, eventID string) (bool, error) {
+	res, err := s.admin.ExecContext(ctx, `
+		INSERT INTO slack_event_deliveries (workspace_id, event_id)
+		VALUES ($1, $2)
+		ON CONFLICT DO NOTHING
+	`, workspaceID, eventID)
+	if err != nil {
+		return false, fmt.Errorf("insert slack_event_deliveries: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rows affected slack_event_deliveries: %w", err)
+	}
+	fresh := n > 0
+
+	_, _ = s.admin.ExecContext(ctx, `
+		DELETE FROM slack_event_deliveries WHERE received_at < $1
+	`, time.Now().Add(-deliveryPruneAge))
+
+	return fresh, nil
 }

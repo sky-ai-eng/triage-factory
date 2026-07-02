@@ -22,6 +22,7 @@ func init() {
 		return &slackstore.Bundle{
 			Workspaces: newWorkspaceStore(app, admin),
 			Identities: newIdentityStore(admin),
+			Deliveries: newDeliveryStore(),
 		}
 	})
 }
@@ -52,4 +53,18 @@ func (s *workspaceStore) Delete(context.Context, string, string) error {
 
 func (s *workspaceStore) ListAllSystem(context.Context) ([]slackstore.Workspace, error) {
 	return nil, db.ErrNotApplicableInLocal
+}
+
+func (s *workspaceStore) GetByWorkspaceIDSystem(context.Context, string) (*slackstore.Workspace, error) {
+	return nil, db.ErrNotApplicableInLocal
+}
+
+type deliveryStore struct{}
+
+func newDeliveryStore() slackstore.DeliveryStore { return &deliveryStore{} }
+
+var _ slackstore.DeliveryStore = (*deliveryStore)(nil)
+
+func (s *deliveryStore) MarkDeliveredSystem(context.Context, string, string) (bool, error) {
+	return false, db.ErrNotApplicableInLocal
 }

@@ -65,14 +65,11 @@ install closure. Using a hypothetical `chat` source:
 package chat // ee/chat
 
 func init() {
-    // 1. Event types — classification is DATA, declared per type.
-    events.Register(events.EventSchema{
-        EventType: "chat:mention",
-        Ownership: events.OwnershipOwned,
-        // Metadata/Predicate shapes, Fields, Match — see internal/domain/events.
-        // The typed constructor (newSchema) is package-internal today; exporting
-        // it is the expected first step for the first out-of-core source.
-    })
+    // 1. Event types — classification is DATA, declared per type. Build the
+    //    schema with events.NewSchema[Meta, Pred](eventType, ownership) —
+    //    see internal/domain/events for the Metadata/Predicate shapes.
+    events.Register(events.NewSchema[ChatMentionMetadata, ChatMentionPredicate](
+        "chat:mention", events.OwnershipOwned))
 
     // 2. Routing behavior — resolution is BEHAVIOR, registered per source.
     //    Also marks "chat:" router-bound: internal/ingest enqueues its events

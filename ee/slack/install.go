@@ -5,17 +5,21 @@
 // ee/slack/store's typed view of core's opaque extension slot, and HTTP
 // helpers come from the shared httpx package — mirrors ee/sso.
 //
-// This leaf covers connect only: schema, AEAD credential storage, transport
-// selection, the app-manifest connect UX, and the settings card. No event
-// ingest yet (no webhook receiver, no socket connection, no slack:* event
-// types) — those are follow-on leaves that build on the workspace rows this
-// one creates.
+// This leaf adds event ingest: the transport-neutral pipeline (ingest.go)
+// and the Events API (webhook) receiver (webhook.go), publishing slack:*
+// events onto the bus. Until TFAC-510 registers routing.RegisterSource,
+// published events reach the in-memory bus only — routing.RouterBound
+// stays false for "slack:", so nothing is durably enqueued or routed yet.
+// The Socket Mode transport (feeding the same pipeline) is the next leaf.
 //
 // Licensed under the Enterprise Edition License (see ee/LICENSE), not the
 // repository-root BSL.
 package slack
 
 import (
+	"net/http"
+
+	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 
 	// Link the Slack store factories (postgres + sqlite) so the Slack
@@ -29,14 +33,17 @@ import (
 // blank-imports ee/slack; installExtensions() invokes install during
 // routes() unconditionally — install's own handlers gate per-request on the
 // `slack` entitlement at their own org-resolution seam (see
-// workspacesHandler.memberGate / adminGate).
+// workspacesHandler.memberGate / adminGate, webhookHandler.handleWebhook).
 func init() {
 	server.RegisterExtension("slack", install)
 }
 
-// install mounts the org-admin Slack workspace surface on the core server
-// through the extension API, with the same withSession/CSRF discipline and
-// authorization as core's own routes.
+// install mounts the org-admin Slack workspace surface plus the Events API
+// ingest receiver on the core server through the extension API. The
+// workspace routes go through API/APIMutating (session + CSRF, like core's
+// own routes); the webhook is pre-auth (Slack has no session) so it mounts
+// through Raw + PreAuthRateLimit and authorizes itself per-request via the
+// workspace's signing secret.
 func install(api server.ExtensionAPI) {
 	h := &workspacesHandler{
 		tx:        api.Tx(),
@@ -48,4 +55,15 @@ func install(api server.ExtensionAPI) {
 	api.APIMutating("POST /api/slack/workspaces", h.handleConnect)
 	api.APIMutating("DELETE /api/slack/workspaces/{workspace_id}", h.handleDelete)
 	api.API("GET /api/slack/manifest", h.handleManifest)
+
+	stores := api.Stores()
+	wh := &webhookHandler{
+		stores: stores,
+		pipeline: &ingestPipeline{
+			entities:   stores.Entities,
+			deliveries: slackstore.FromStores(stores).Deliveries,
+			publish:    api.PublishEvent,
+		},
+	}
+	api.Raw("POST /api/webhooks/slack/{org_id}", api.PreAuthRateLimit(http.HandlerFunc(wh.handleWebhook)))
 }
