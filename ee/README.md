@@ -1,11 +1,12 @@
 # Triage Factory — Enterprise Edition (`ee/`)
 
-This subtree holds the **commercially-licensed** Enterprise Edition. It is
-source-available for transparency and audit, but enabling its features
-requires a valid license key. The entire repository — this subtree
-included — is governed by the repository-root [`LICENSE`](../LICENSE)
-(Triage Factory License 1.0); enterprise features are protected by the
-license-key / entitlement gate rather than by a separate license.
+This subtree holds the Enterprise Edition. It is source-available for
+transparency and audit, but enabling its features requires a valid license
+key issued under a commercial subscription. The entire repository — this
+subtree included — is governed by the repository-root
+[`LICENSE`](../LICENSE) (Triage Factory License 1.0); enterprise features
+are protected by the license-key / entitlement gate rather than by a
+separate license.
 
 ## The one rule
 

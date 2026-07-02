@@ -42,7 +42,8 @@ DISALLOWED_TYPES=forbidden,restricted
 # justify every entry — each one is a hole in the gate.
 IGNORE=(
   # First-party code: our own packages have no per-package LICENSE file; the
-  # repo root is BSL-licensed and isn't a third-party redistribution concern.
+  # repo root is licensed under the Triage Factory License (see LICENSE) and
+  # isn't a third-party redistribution concern.
   github.com/sky-ai-eng/triage-factory
   # BSD-3-Clause, verified by reading modernc.org/mathutil@v1.7.1/LICENSE (the
   # canonical 3-clause text). go-licenses v1.6.0's classifier can't match its
