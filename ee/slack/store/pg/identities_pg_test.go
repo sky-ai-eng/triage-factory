@@ -12,6 +12,19 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
+// seedWorkspaceRow inserts a minimal org_slack_workspaces row for
+// workspaceID via the admin pool, satisfying user_slack_identities'
+// workspace_id FK. The identity-store tests don't exercise org scoping, so
+// a fresh throwaway org per call is fine.
+func seedWorkspaceRow(t *testing.T, h *pgtest.Harness, workspaceID string) {
+	t.Helper()
+	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "slack-ident-org-"+workspaceID)
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO org_slack_workspaces (workspace_id, org_id, transport, bot_token_ref)
+		VALUES ($1, $2, 'socket', $3)
+	`, workspaceID, orgID, "slack_ws_"+workspaceID+"_bot_token")
+}
+
 // TestSlackIdentityStore_Postgres_LookupSystem_NoRow: a sender never
 // looked up yet returns (nil, nil), not an error — the "never attempted"
 // state the resolver treats as "go ahead and call users.info".
@@ -39,6 +52,7 @@ func TestSlackIdentityStore_Postgres_UpsertResolvedSystem_RoundTrip(t *testing.T
 	ctx := context.Background()
 	identities := slackstore.FromStores(stores).Identities
 
+	seedWorkspaceRow(t, h, "T0RESOLV1")
 	userID := pgtest.SeedUser(t, h, "slack-ident-resolved")
 	if err := identities.UpsertResolvedSystem(ctx, "T0RESOLV1", "U0RESOLV1", userID, "Ada Lovelace"); err != nil {
 		t.Fatalf("UpsertResolvedSystem: %v", err)
@@ -72,6 +86,7 @@ func TestSlackIdentityStore_Postgres_MarkAttemptSystem_CreatesNegativeCache(t *t
 	ctx := context.Background()
 	identities := slackstore.FromStores(stores).Identities
 
+	seedWorkspaceRow(t, h, "T0NEGATV1")
 	if err := identities.MarkAttemptSystem(ctx, "T0NEGATV1", "U0NEGATV1", "Grace Hopper"); err != nil {
 		t.Fatalf("MarkAttemptSystem: %v", err)
 	}
@@ -104,6 +119,7 @@ func TestSlackIdentityStore_Postgres_MarkAttemptSystem_BumpsUnresolvedRow(t *tes
 	ctx := context.Background()
 	identities := slackstore.FromStores(stores).Identities
 
+	seedWorkspaceRow(t, h, "T0BUMP0001")
 	if err := identities.MarkAttemptSystem(ctx, "T0BUMP0001", "U0BUMP0001", "Old Name"); err != nil {
 		t.Fatalf("first MarkAttemptSystem: %v", err)
 	}
@@ -112,12 +128,11 @@ func TestSlackIdentityStore_Postgres_MarkAttemptSystem_BumpsUnresolvedRow(t *tes
 		t.Fatalf("LookupSystem: %v", err)
 	}
 
-	// Force last_attempt_at into the past so a second call has room to
-	// visibly bump it (a same-instant re-run could tie under low
-	// timestamp resolution).
-	pgtest.MustExec(t, h.AdminDB,
-		`UPDATE user_slack_identities SET last_attempt_at = now() - interval '25 hours' WHERE workspace_id = $1 AND slack_user_id = $2`,
-		"T0BUMP0001", "U0BUMP0001")
+	// A short sleep guarantees the second call's now() is strictly later
+	// than first's, regardless of the underlying timestamp resolution —
+	// deterministic, unlike relying on incidental round-trip latency
+	// between the two calls to provide separation.
+	time.Sleep(5 * time.Millisecond)
 
 	if err := identities.MarkAttemptSystem(ctx, "T0BUMP0001", "U0BUMP0001", "New Name"); err != nil {
 		t.Fatalf("second MarkAttemptSystem: %v", err)
@@ -150,6 +165,7 @@ func TestSlackIdentityStore_Postgres_MarkAttemptSystem_NeverClobbersResolved(t *
 	ctx := context.Background()
 	identities := slackstore.FromStores(stores).Identities
 
+	seedWorkspaceRow(t, h, "T0GUARD001")
 	userID := pgtest.SeedUser(t, h, "slack-ident-guarded")
 	if err := identities.UpsertResolvedSystem(ctx, "T0GUARD001", "U0GUARD001", userID, "Resolved Name"); err != nil {
 		t.Fatalf("UpsertResolvedSystem: %v", err)
@@ -189,6 +205,7 @@ func TestSlackIdentityStore_Postgres_UpsertResolvedSystem_OverwritesNegativeCach
 	ctx := context.Background()
 	identities := slackstore.FromStores(stores).Identities
 
+	seedWorkspaceRow(t, h, "T0FLIP0001")
 	if err := identities.MarkAttemptSystem(ctx, "T0FLIP0001", "U0FLIP0001", "Unresolved Name"); err != nil {
 		t.Fatalf("MarkAttemptSystem: %v", err)
 	}
@@ -224,6 +241,10 @@ func TestRLS_UserSlackIdentitiesSelfAccess(t *testing.T) {
 
 	ownerUserID := pgtest.SeedUser(t, h, "slack-rls-owner")
 	otherUserID := pgtest.SeedUser(t, h, "slack-rls-other")
+
+	for _, ws := range []string{"T0RLSOWNR1", "T0RLSOTHR1", "T0RLSNULL1", "T0RLSSPOOF1"} {
+		seedWorkspaceRow(t, h, ws)
+	}
 
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO user_slack_identities (workspace_id, slack_user_id, user_id, slack_display_name)

@@ -7640,8 +7640,16 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_slack_workspaces TO tf_app;
 -- Postgres-only, same posture as org_slack_workspaces: local mode is N=1
 -- with no multi-workspace concept, so the SQLite store is a stub returning
 -- ErrNotApplicableInLocal.
+-- workspace_id FKs to org_slack_workspaces (ON DELETE CASCADE), not just
+-- user_id: workspace_id is Slack's own team ID, externally assigned and
+-- reusable — org_slack_workspaces' own doc notes a freed workspace_id can be
+-- reconnected by a DIFFERENT org once the original disconnects. Without this
+-- FK a disconnect would leave orphaned rows that a later org reusing the
+-- same workspace_id would inherit as already-resolved, misattributing that
+-- org's senders to the prior org's principals. The FK makes disconnect the
+-- authoritative cleanup instead of relying on a future consumer to notice.
 CREATE TABLE public.user_slack_identities (
-    workspace_id text NOT NULL,
+    workspace_id text NOT NULL REFERENCES public.org_slack_workspaces(workspace_id) ON DELETE CASCADE,
     slack_user_id text NOT NULL,
     user_id uuid REFERENCES public.users(id) ON DELETE CASCADE,
     slack_display_name text,

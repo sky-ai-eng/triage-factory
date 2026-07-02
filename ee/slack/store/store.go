@@ -138,6 +138,17 @@ type SlackIdentityStore interface {
 	// including a previously resolved DIFFERENT user (a re-resolve always
 	// wins — there is no ambiguity to preserve once a single match is
 	// found).
+	//
+	// NOT an org/team membership check: userID is resolved by
+	// db.UsersStore.UserIDsForVerifiedEmailSystem, which matches globally
+	// across the deployment (principals are deliberately cross-org
+	// identities here, same as the login-time auto-link it mirrors — see
+	// that method's doc). This mapping alone does not establish that userID
+	// belongs to the org that owns workspaceID. Future consumers (run-
+	// visibility grants, audit rendering — TFAC-510/511) MUST check org/team
+	// membership at the point of granting access, the same way every other
+	// visibility surface in this codebase does; they must never treat a row
+	// here as membership proof on its own.
 	UpsertResolvedSystem(ctx context.Context, workspaceID, slackUserID, userID, displayName string) error
 
 	// MarkAttemptSystem upserts the negative-cache row: user_id NULL,
