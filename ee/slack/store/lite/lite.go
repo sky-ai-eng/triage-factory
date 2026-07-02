@@ -7,7 +7,8 @@
 // routes gate on the `slack` entitlement, which a community/unlicensed
 // local build never carries). Mirrors ee/sso/store/lite.
 //
-// Licensed under the Enterprise Edition License (see ee/LICENSE).
+// Enterprise Edition — governed by the repository-root LICENSE (Triage Factory
+// License 1.0); enabling its features requires a valid license key.
 package lite
 
 import (

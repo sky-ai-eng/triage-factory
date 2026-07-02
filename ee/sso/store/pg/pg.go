@@ -4,7 +4,8 @@
 // rest of the Postgres data layer, reading core's transaction handle as a
 // db.Execer and the domain/interface types from ssostore.
 //
-// Licensed under the Enterprise Edition License (see ee/LICENSE).
+// Enterprise Edition — governed by the repository-root LICENSE (Triage Factory
+// License 1.0); enabling its features requires a valid license key.
 package pg
 
 import (
