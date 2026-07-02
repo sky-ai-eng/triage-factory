@@ -59,7 +59,7 @@ var _ slackstore.DeliveryStore = (*fakeDeliveries)(nil)
 
 // testWorkspaceRow is a small helper for a slackstore.Workspace fixture.
 func testWorkspaceRow(orgID string) slackstore.Workspace {
-	return slackstore.Workspace{WorkspaceID: "T0PIPE001", OrgID: orgID, BotUserID: "U0BOT"}
+	return slackstore.Workspace{WorkspaceID: "T0PIPE001", APIAppID: "A0PIPE001", OrgID: orgID, BotUserID: "U0BOT"}
 }
 
 func newTestPipeline() (*ingestPipeline, *fakeEntities, *fakeDeliveries, *[]domain.Event) {

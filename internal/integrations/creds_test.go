@@ -543,22 +543,26 @@ func TestGitHubAppKeysFor_Format(t *testing.T) {
 	}
 }
 
-// TestSlackWorkspaceKeysFor_Format pins the per-workspace key shape
-// (slack_ws_<id>_{bot_token,signing_secret,app_token}) — the single source
-// ee/slack's connect and delete handlers compose through, so the names
-// written and the names later removed can't drift.
+// TestSlackWorkspaceKeysFor_Format pins the per-(workspace, app) key shape
+// (slack_ws_<ws>_<app>_{bot_token,signing_secret,app_token}) — the single
+// source ee/slack's connect and delete handlers compose through, so the
+// names written and the names later removed can't drift.
 func TestSlackWorkspaceKeysFor_Format(t *testing.T) {
-	ks := integrations.SlackWorkspaceKeysFor("T0123ABCD")
-	if ks.BotToken != "slack_ws_T0123ABCD_bot_token" {
-		t.Errorf("BotToken = %q, want slack_ws_T0123ABCD_bot_token", ks.BotToken)
+	ks := integrations.SlackWorkspaceKeysFor("T0123ABCD", "A0987ZYXW")
+	if ks.BotToken != "slack_ws_T0123ABCD_A0987ZYXW_bot_token" {
+		t.Errorf("BotToken = %q, want slack_ws_T0123ABCD_A0987ZYXW_bot_token", ks.BotToken)
 	}
-	if ks.SigningSecret != "slack_ws_T0123ABCD_signing_secret" {
-		t.Errorf("SigningSecret = %q, want slack_ws_T0123ABCD_signing_secret", ks.SigningSecret)
+	if ks.SigningSecret != "slack_ws_T0123ABCD_A0987ZYXW_signing_secret" {
+		t.Errorf("SigningSecret = %q, want slack_ws_T0123ABCD_A0987ZYXW_signing_secret", ks.SigningSecret)
 	}
-	if ks.AppToken != "slack_ws_T0123ABCD_app_token" {
-		t.Errorf("AppToken = %q, want slack_ws_T0123ABCD_app_token", ks.AppToken)
+	if ks.AppToken != "slack_ws_T0123ABCD_A0987ZYXW_app_token" {
+		t.Errorf("AppToken = %q, want slack_ws_T0123ABCD_A0987ZYXW_app_token", ks.AppToken)
 	}
-	want := []string{"slack_ws_T0123ABCD_bot_token", "slack_ws_T0123ABCD_signing_secret", "slack_ws_T0123ABCD_app_token"}
+	want := []string{
+		"slack_ws_T0123ABCD_A0987ZYXW_bot_token",
+		"slack_ws_T0123ABCD_A0987ZYXW_signing_secret",
+		"slack_ws_T0123ABCD_A0987ZYXW_app_token",
+	}
 	if got := ks.All(); !slices.Equal(got, want) {
 		t.Errorf("All() = %v, want %v", got, want)
 	}

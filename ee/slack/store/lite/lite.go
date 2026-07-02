@@ -43,11 +43,11 @@ func (s *workspaceStore) ListForOrg(context.Context, string) ([]slackstore.Works
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (s *workspaceStore) Get(context.Context, string, string) (*slackstore.Workspace, error) {
+func (s *workspaceStore) Get(context.Context, string, string, string) (*slackstore.Workspace, error) {
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (s *workspaceStore) Delete(context.Context, string, string) error {
+func (s *workspaceStore) Delete(context.Context, string, string, string) error {
 	return db.ErrNotApplicableInLocal
 }
 
@@ -55,8 +55,16 @@ func (s *workspaceStore) ListAllSystem(context.Context) ([]slackstore.Workspace,
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (s *workspaceStore) GetByWorkspaceIDSystem(context.Context, string) (*slackstore.Workspace, error) {
+func (s *workspaceStore) GetByWorkspaceAppSystem(context.Context, string, string) (*slackstore.Workspace, error) {
 	return nil, db.ErrNotApplicableInLocal
+}
+
+func (s *workspaceStore) LockApp(context.Context, string) error {
+	return db.ErrNotApplicableInLocal
+}
+
+func (s *workspaceStore) AppBoundToOtherOrgSystem(context.Context, string, string) (bool, error) {
+	return false, db.ErrNotApplicableInLocal
 }
 
 type deliveryStore struct{}

@@ -96,7 +96,7 @@ func (r *IdentityResolver) resolveSender(ctx context.Context, ws slackstore.Work
 		}
 	}
 
-	keys := integrations.SlackWorkspaceKeysFor(ws.WorkspaceID)
+	keys := integrations.SlackWorkspaceKeysFor(ws.WorkspaceID, ws.APIAppID)
 	botToken, err := r.secrets.GetSystem(ctx, ws.OrgID, keys.BotToken)
 	if err != nil {
 		// Transient: no write, so the next mention retries.

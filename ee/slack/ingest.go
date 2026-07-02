@@ -83,12 +83,12 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 		return nil
 	}
 
-	fresh, err := p.deliveries.MarkDeliveredSystem(ctx, ws.WorkspaceID, ev.EventID)
+	fresh, err := p.deliveries.MarkDeliveredSystem(ctx, ws.APIAppID, ev.EventID)
 	if err != nil {
 		return fmt.Errorf("mark slack delivery: %w", err)
 	}
 	if !fresh {
-		slackLog.Debug("dropping duplicate slack delivery", "workspace", ws.WorkspaceID, "event_id", ev.EventID)
+		slackLog.Debug("dropping duplicate slack delivery", "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_id", ev.EventID)
 		return nil
 	}
 
