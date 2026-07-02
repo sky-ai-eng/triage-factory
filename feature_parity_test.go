@@ -52,9 +52,10 @@ func TestFrontendMirrorsAllFeatures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read useEntitlements.ts: %v", err)
 	}
+	content := string(src)
 	for _, f := range entitlements.AllFeatures() {
 		needle := "'" + string(f) + "' as const"
-		if !strings.Contains(string(src), needle) {
+		if !strings.Contains(content, needle) {
 			t.Errorf("feature %q is not mirrored in useEntitlements.ts — expected a `export const Feature<X> = %s` declaration", f, needle)
 		}
 	}
