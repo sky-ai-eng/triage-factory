@@ -9,8 +9,8 @@
 // their factories with core's store-extension registry (see store/pg,
 // store/lite) — mirrors ee/sso/store exactly.
 //
-// Licensed under the Enterprise Edition License (see ee/LICENSE), not the
-// repository-root BSL.
+// Enterprise Edition — governed by the repository-root LICENSE (Triage Factory
+// License 1.0); enabling its features requires a valid license key.
 package slackstore
 
 import (

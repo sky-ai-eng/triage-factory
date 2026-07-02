@@ -1,10 +1,11 @@
 # Triage Factory — Enterprise Edition (`ee/`)
 
 This subtree holds the **commercially-licensed** Enterprise Edition. It is
-source-available for transparency and audit, but production use requires a
-subscription. See [`ee/LICENSE`](./LICENSE). The rest of the repository is
-BSL-1.1 (repository-root `LICENSE`); `ee/` is **not** under that grant and
-does **not** convert to open source on the BSL Change Date.
+source-available for transparency and audit, but enabling its features
+requires a valid license key. The entire repository — this subtree
+included — is governed by the repository-root [`LICENSE`](../LICENSE)
+(Triage Factory License 1.0); enterprise features are protected by the
+license-key / entitlement gate rather than by a separate license.
 
 ## The one rule
 

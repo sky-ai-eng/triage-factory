@@ -57,7 +57,7 @@ For direct downloads, building from source, and platform notes, see [docs/INSTAL
 
 ## License
 
-The repository is [Business Source License 1.1](LICENSE) — free for internal use, converts to Apache 2.0 on 2030-03-31 — **except** the [`ee/`](ee/) subtree (Enterprise Edition), which is source-available under a separate [commercial license](ee/LICENSE) and does **not** convert. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution terms.
+The repository is source-available under the [Triage Factory License 1.0](LICENSE) — free to use, copy, and modify for your own internal business purposes, but not to redistribute or offer as a hosted service. The [`ee/`](ee/) subtree (Enterprise Edition) is covered by the same license; its features are gated behind a license key and require a commercial subscription to enable. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution terms.
 
 ## Disclaimer
 

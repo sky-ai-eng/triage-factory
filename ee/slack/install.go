@@ -14,8 +14,8 @@
 // The pipeline also dispatches best-effort sender identity capture
 // (identity.go, TFAC-531) after each publish — detached, never gating.
 //
-// Licensed under the Enterprise Edition License (see ee/LICENSE), not the
-// repository-root BSL.
+// Enterprise Edition — governed by the repository-root LICENSE (Triage Factory
+// License 1.0); enabling its features requires a valid license key.
 package slack
 
 import (

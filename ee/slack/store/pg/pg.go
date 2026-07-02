@@ -3,7 +3,8 @@
 // registry for the "postgres" dialect — same app/admin pool split and RLS
 // posture as the rest of the Postgres data layer, mirroring ee/sso/store/pg.
 //
-// Licensed under the Enterprise Edition License (see ee/LICENSE).
+// Enterprise Edition — governed by the repository-root LICENSE (Triage Factory
+// License 1.0); enabling its features requires a valid license key.
 package pg
 
 import (

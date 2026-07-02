@@ -1,7 +1,7 @@
 // Package ee wires the commercially-licensed Enterprise Edition into the
-// binary. It is the boundary the ee/LICENSE governs, and the only ee/
-// package that package main imports for enterprise wiring. Core
-// (internal/*, cmd/*) never imports ee — dependencies point inward.
+// binary. It is the only ee/ package that package main imports for
+// enterprise wiring. Core (internal/*, cmd/*) never imports ee —
+// dependencies point inward.
 //
 // package main blank-imports ee/sso, whose init() side effects register the
 // SSO store factories, route installers, and login hooks into the core
