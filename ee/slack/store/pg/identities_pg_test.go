@@ -13,16 +13,21 @@ import (
 )
 
 // seedWorkspaceRow inserts a minimal org_slack_workspaces row for
-// workspaceID via the admin pool, satisfying user_slack_identities'
-// workspace_id FK. The identity-store tests don't exercise org scoping, so
-// a fresh throwaway org per call is fine.
+// workspaceID via the admin pool. user_slack_identities carries no FK to
+// this table (TFAC-533 — workspace_id alone is no longer unique there once
+// a workspace can host several apps), so this is purely a realistic
+// fixture, not a constraint requirement; kept anyway so identity-store
+// tests read like production data. The identity-store tests don't exercise
+// org scoping, so a fresh throwaway org and an arbitrary app id per call
+// are both fine.
 func seedWorkspaceRow(t *testing.T, h *pgtest.Harness, workspaceID string) {
 	t.Helper()
 	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "slack-ident-org-"+workspaceID)
+	apiAppID := "A0" + workspaceID
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO org_slack_workspaces (workspace_id, org_id, transport, bot_token_ref)
-		VALUES ($1, $2, 'socket', $3)
-	`, workspaceID, orgID, "slack_ws_"+workspaceID+"_bot_token")
+		INSERT INTO org_slack_workspaces (workspace_id, api_app_id, org_id, transport, bot_token_ref)
+		VALUES ($1, $2, $3, 'socket', $4)
+	`, workspaceID, apiAppID, orgID, "slack_ws_"+workspaceID+"_"+apiAppID+"_bot_token")
 }
 
 // TestSlackIdentityStore_Postgres_LookupSystem_NoRow: a sender never

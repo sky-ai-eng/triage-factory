@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -36,6 +37,7 @@ type workspacesHandler struct {
 
 type workspaceView struct {
 	WorkspaceID        string    `json:"workspace_id"`
+	APIAppID           string    `json:"api_app_id"`
 	WorkspaceName      string    `json:"workspace_name"`
 	EnterpriseID       string    `json:"enterprise_id,omitempty"`
 	Transport          string    `json:"transport"`
@@ -48,6 +50,7 @@ type workspaceView struct {
 func toWorkspaceView(w *slackstore.Workspace) workspaceView {
 	return workspaceView{
 		WorkspaceID:        w.WorkspaceID,
+		APIAppID:           w.APIAppID,
 		WorkspaceName:      w.WorkspaceName,
 		EnterpriseID:       w.EnterpriseID,
 		Transport:          w.Transport,
@@ -128,15 +131,16 @@ func (h *workspacesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
-// getExisting reads the org's current row for workspaceID, or (nil, nil)
-// when none exists in THIS org (a workspace_id owned by a different org is
-// invisible here — RLS plus the explicit org_id filter — which is exactly
-// right: the merge logic below must never see another org's stored refs).
-func (h *workspacesHandler) getExisting(ctx context.Context, orgID, userID, workspaceID string) (*slackstore.Workspace, error) {
+// getExisting reads the org's current row for (workspaceID, apiAppID), or
+// (nil, nil) when none exists in THIS org (a (workspace, app) pair owned by
+// a different org is invisible here — RLS plus the explicit org_id filter —
+// which is exactly right: the merge logic below must never see another
+// org's stored refs).
+func (h *workspacesHandler) getExisting(ctx context.Context, orgID, userID, workspaceID, apiAppID string) (*slackstore.Workspace, error) {
 	var ws *slackstore.Workspace
 	if err := h.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		ws, e = slackstore.FromTx(tx).Workspaces.Get(ctx, orgID, workspaceID)
+		ws, e = slackstore.FromTx(tx).Workspaces.Get(ctx, orgID, workspaceID, apiAppID)
 		return e
 	}); err != nil {
 		return nil, err
@@ -162,6 +166,12 @@ func refFor(has bool, ref string) string {
 	}
 	return ""
 }
+
+// errAppBoundToOtherOrg is the sentinel the connect handler's tx closure
+// returns when AppBoundToOtherOrgSystem finds the derived api_app_id
+// already owned by a different org — mapped to a generic 409 below, never
+// naming the owning org (TFAC-533's app-single-org invariant).
+var errAppBoundToOtherOrg = errors.New("slack app already connected to a different org")
 
 // POST /api/slack/workspaces  body: {bot_token, signing_secret?, app_token?, transport?}
 func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -196,7 +206,18 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	existing, err := h.getExisting(r.Context(), orgID, userID, result.TeamID)
+	// The app id is likewise never typed by the admin — derived from the
+	// same bot token via auth.test's bot_id -> bots.info's app_id
+	// (TFAC-533). It's now key material (the app-single-org invariant),
+	// so a failure here is fatal: no fallback, connect refused.
+	botsInfo, err := slackBotsInfo(r.Context(), h.client, botToken, result.BotID)
+	if err != nil {
+		httpx.BadRequest(w, "could not resolve the app id for this bot token: "+err.Error())
+		return
+	}
+	apiAppID := botsInfo.AppID
+
+	existing, err := h.getExisting(r.Context(), orgID, userID, result.TeamID, apiAppID)
 	if err != nil {
 		httpx.InternalError(w, "slack", err)
 		return
@@ -222,9 +243,10 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	keys := integrations.SlackWorkspaceKeysFor(result.TeamID)
+	keys := integrations.SlackWorkspaceKeysFor(result.TeamID, apiAppID)
 	ws := slackstore.Workspace{
 		WorkspaceID:        result.TeamID,
+		APIAppID:           apiAppID,
 		OrgID:              orgID,
 		WorkspaceName:      result.Team,
 		EnterpriseID:       result.EnterpriseID,
@@ -238,6 +260,20 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 
 	var persisted *slackstore.Workspace
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		bundle := slackstore.FromTx(tx)
+		// The app-single-org invariant has no SQL constraint behind it
+		// (api_app_id is only unique in combination with workspace_id), so
+		// it's enforced here, before any write — see
+		// AppBoundToOtherOrgSystem's doc and the migration's invariant
+		// table (TFAC-533).
+		boundElsewhere, e := bundle.Workspaces.AppBoundToOtherOrgSystem(r.Context(), apiAppID, orgID)
+		if e != nil {
+			return e
+		}
+		if boundElsewhere {
+			return errAppBoundToOtherOrg
+		}
+
 		if err := tx.Secrets.Put(r.Context(), orgID, keys.BotToken, botToken, "Slack bot token"); err != nil {
 			return fmt.Errorf("put bot token: %w", err)
 		}
@@ -251,19 +287,27 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 				return fmt.Errorf("put app token: %w", err)
 			}
 		}
-		bundle := slackstore.FromTx(tx)
 		if err := bundle.Workspaces.Upsert(r.Context(), ws); err != nil {
 			return err
 		}
-		var e error
-		persisted, e = bundle.Workspaces.Get(r.Context(), orgID, result.TeamID)
+		persisted, e = bundle.Workspaces.Get(r.Context(), orgID, result.TeamID, apiAppID)
 		return e
 	}); err != nil {
-		if httpx.IsUniqueViolation(err) {
+		if errors.Is(err, errAppBoundToOtherOrg) {
 			// Deliberately generic: a workspace admin may learn "already
-			// connected", never which org holds it (TFAC-529 Part 2).
+			// connected", never which org holds it (TFAC-533's
+			// app-single-org invariant).
 			httpx.WriteJSON(w, http.StatusConflict, map[string]string{
-				"error": "this workspace is already connected",
+				"error": "this app is already connected",
+			})
+			return
+		}
+		if httpx.IsUniqueViolation(err) {
+			// The (workspace, app) composite PK's backstop — see Upsert's
+			// doc. Same non-disclosure posture as the app-single-org 409
+			// above, distinct wording since it's the narrower conflict.
+			httpx.WriteJSON(w, http.StatusConflict, map[string]string{
+				"error": "this workspace+app is already connected",
 			})
 			return
 		}
@@ -276,7 +320,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	}
 
 	notifyConfigChanged(orgID)
-	slackLog.Info("slack workspace connected", "org", orgID, "workspace", result.TeamID, "transport", transport)
+	slackLog.Info("slack workspace connected", "org", orgID, "workspace", result.TeamID, "app", apiAppID, "transport", transport)
 
 	status := http.StatusCreated
 	if existing != nil {
@@ -285,14 +329,15 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	httpx.WriteJSON(w, status, toWorkspaceView(persisted))
 }
 
-// DELETE /api/slack/workspaces/{workspace_id}
+// DELETE /api/slack/workspaces/{workspace_id}/{api_app_id}
 func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.adminGate(w, r)
 	if !ok {
 		return
 	}
 	workspaceID := r.PathValue("workspace_id")
-	if workspaceID == "" {
+	apiAppID := r.PathValue("api_app_id")
+	if workspaceID == "" || apiAppID == "" {
 		http.NotFound(w, r)
 		return
 	}
@@ -300,7 +345,7 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 	var existed bool
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		bundle := slackstore.FromTx(tx)
-		ws, e := bundle.Workspaces.Get(r.Context(), orgID, workspaceID)
+		ws, e := bundle.Workspaces.Get(r.Context(), orgID, workspaceID, apiAppID)
 		if e != nil {
 			return e
 		}
@@ -308,13 +353,13 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 			return nil
 		}
 		existed = true
-		if e := bundle.Workspaces.Delete(r.Context(), orgID, workspaceID); e != nil {
+		if e := bundle.Workspaces.Delete(r.Context(), orgID, workspaceID, apiAppID); e != nil {
 			return fmt.Errorf("delete workspace row: %w", e)
 		}
-		// Sweep the full keyset regardless of which refs this workspace
-		// actually populated — deleting an absent key is a no-op, mirrors
-		// teardownAppSecrets for GitHub Apps.
-		for _, k := range integrations.SlackWorkspaceKeysFor(workspaceID).All() {
+		// Sweep the full keyset regardless of which refs this (workspace,
+		// app) pair actually populated — deleting an absent key is a
+		// no-op, mirrors teardownAppSecrets for GitHub Apps.
+		for _, k := range integrations.SlackWorkspaceKeysFor(workspaceID, apiAppID).All() {
 			if _, e := tx.Secrets.Delete(r.Context(), orgID, k); e != nil {
 				return fmt.Errorf("delete slack secret %s: %w", k, e)
 			}
@@ -330,7 +375,7 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 	}
 
 	notifyConfigChanged(orgID)
-	slackLog.Info("slack workspace disconnected", "org", orgID, "workspace", workspaceID)
+	slackLog.Info("slack workspace disconnected", "org", orgID, "workspace", workspaceID, "app", apiAppID)
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 

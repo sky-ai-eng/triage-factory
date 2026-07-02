@@ -151,28 +151,32 @@ func (k GitHubAppKeyset) All() []string {
 }
 
 // SlackWorkspaceKeyset is the trio of org_secrets key names one connected
-// Slack workspace custodies its credentials under: the bot token (always
-// present — every transport needs it to call the Slack API), the signing
-// secret (events_api transport), and the app-level token (socket
-// transport). Composed per workspace id (Slack's team ID), the
-// dynamic-keyset analog of GitHubAppKeyset.
+// (Slack workspace, Slack app) pair custodies its credentials under: the bot
+// token (always present — every transport needs it to call the Slack API),
+// the signing secret (events_api transport), and the app-level token
+// (socket transport). Composed per (workspace id, app id) — Slack's team ID
+// and app ID — the dynamic-keyset analog of GitHubAppKeyset. Keyed on the
+// pair, not the workspace id alone, because TFAC-533 made the binding
+// (workspace, app): two different apps installed in the same workspace (one
+// per TF org, say) must never share a credential slot.
 type SlackWorkspaceKeyset struct {
 	BotToken      string
 	SigningSecret string
 	AppToken      string
 }
 
-// SlackWorkspaceKeysFor composes a connected Slack workspace's secret-key
-// names from its workspace id. This is the single source of truth for the
-// slack_ws_<id>_* shape: ee/slack's connect handler (which writes these
-// secrets) and its delete handler (which sweeps them) both compose through
-// here, so the names written and the names later removed can't drift —
-// mirrors GitHubAppKeysFor.
-func SlackWorkspaceKeysFor(workspaceID string) SlackWorkspaceKeyset {
+// SlackWorkspaceKeysFor composes a connected (workspace, app) pair's
+// secret-key names from its workspace id and app id. This is the single
+// source of truth for the slack_ws_<ws>_<app>_* shape: ee/slack's connect
+// handler (which writes these secrets) and its delete handler (which sweeps
+// them) both compose through here, so the names written and the names later
+// removed can't drift — mirrors GitHubAppKeysFor.
+func SlackWorkspaceKeysFor(workspaceID, apiAppID string) SlackWorkspaceKeyset {
+	prefix := "slack_ws_" + workspaceID + "_" + apiAppID + "_"
 	return SlackWorkspaceKeyset{
-		BotToken:      "slack_ws_" + workspaceID + "_bot_token",
-		SigningSecret: "slack_ws_" + workspaceID + "_signing_secret",
-		AppToken:      "slack_ws_" + workspaceID + "_app_token",
+		BotToken:      prefix + "bot_token",
+		SigningSecret: prefix + "signing_secret",
+		AppToken:      prefix + "app_token",
 	}
 }
 

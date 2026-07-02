@@ -18,15 +18,26 @@ func mustWithUser(t *testing.T, stores db.Stores, ctx context.Context, orgID, us
 	}
 }
 
+// defaultAppID derives a deterministic api_app_id for callers that don't
+// care which app id they get, only that Upsert/Get/etc agree on one — kept
+// out of testWorkspace's signature so every pre-TFAC-533 single-workspace
+// call site in this package (and delivery_pg_test.go) needs no change.
+func defaultAppID(workspaceID string) string { return "A0" + workspaceID }
+
 func testWorkspace(orgID, workspaceID string) slackstore.Workspace {
+	return testWorkspaceApp(orgID, workspaceID, defaultAppID(workspaceID))
+}
+
+func testWorkspaceApp(orgID, workspaceID, apiAppID string) slackstore.Workspace {
 	return slackstore.Workspace{
 		WorkspaceID:      workspaceID,
+		APIAppID:         apiAppID,
 		OrgID:            orgID,
 		WorkspaceName:    "Acme Corp",
 		Transport:        "socket",
 		BotUserID:        "U0BOT123",
-		BotTokenRef:      "slack_ws_" + workspaceID + "_bot_token",
-		AppTokenRef:      "slack_ws_" + workspaceID + "_app_token",
+		BotTokenRef:      "slack_ws_" + workspaceID + "_" + apiAppID + "_bot_token",
+		AppTokenRef:      "slack_ws_" + workspaceID + "_" + apiAppID + "_app_token",
 		SigningSecretRef: "",
 	}
 }
@@ -49,7 +60,7 @@ func TestWorkspaceStore_Postgres_UpsertCreatesAndReads(t *testing.T) {
 	var got *slackstore.Workspace
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		got, e = slackstore.FromTx(tx).Workspaces.Get(ctx, orgID, "T0CRUD001")
+		got, e = slackstore.FromTx(tx).Workspaces.Get(ctx, orgID, "T0CRUD001", defaultAppID("T0CRUD001"))
 		return e
 	})
 	if got == nil {
@@ -57,6 +68,9 @@ func TestWorkspaceStore_Postgres_UpsertCreatesAndReads(t *testing.T) {
 	}
 	if got.WorkspaceName != "Acme Corp" || got.Transport != "socket" || got.BotUserID != "U0BOT123" {
 		t.Errorf("got = %+v; want name/transport/bot_user_id from the upsert", got)
+	}
+	if got.APIAppID != defaultAppID("T0CRUD001") {
+		t.Errorf("api_app_id = %q; want %q", got.APIAppID, defaultAppID("T0CRUD001"))
 	}
 	if got.SigningSecretRef != "" {
 		t.Errorf("signing_secret_ref = %q; want \"\" (never supplied -> NULL)", got.SigningSecretRef)
@@ -98,7 +112,7 @@ func TestWorkspaceStore_Postgres_UpsertUpdatesInPlace(t *testing.T) {
 	second.WorkspaceName = "Acme Corp (renamed)"
 	second.Transport = "events_api"
 	second.AppTokenRef = ""
-	second.SigningSecretRef = "slack_ws_T0UPSERT1_signing_secret"
+	second.SigningSecretRef = "slack_ws_T0UPSERT1_" + defaultAppID("T0UPSERT1") + "_signing_secret"
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, second)
 	})
@@ -135,13 +149,13 @@ func TestWorkspaceStore_Postgres_Delete(t *testing.T) {
 		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspace(orgID, "T0DEL0001"))
 	})
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).Workspaces.Delete(ctx, orgID, "T0DEL0001")
+		return slackstore.FromTx(tx).Workspaces.Delete(ctx, orgID, "T0DEL0001", defaultAppID("T0DEL0001"))
 	})
 
 	var got *slackstore.Workspace
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		got, e = slackstore.FromTx(tx).Workspaces.Get(ctx, orgID, "T0DEL0001")
+		got, e = slackstore.FromTx(tx).Workspaces.Get(ctx, orgID, "T0DEL0001", defaultAppID("T0DEL0001"))
 		return e
 	})
 	if got != nil {
@@ -149,10 +163,15 @@ func TestWorkspaceStore_Postgres_Delete(t *testing.T) {
 	}
 }
 
-// TestWorkspaceStore_Postgres_CrossOrgConflict: the workspace_id PRIMARY KEY
-// binds a workspace to exactly one org, deployment-wide — a second org's
-// Upsert for an already-bound workspace_id fails with a real constraint
-// violation (not a silent steal, not a silent no-op).
+// TestWorkspaceStore_Postgres_CrossOrgConflict: the (workspace_id,
+// api_app_id) composite PRIMARY KEY binds a (workspace, app) pair to
+// exactly one org, deployment-wide — a second org's Upsert for an
+// already-bound (workspace_id, api_app_id) pair fails with a real
+// constraint violation (not a silent steal, not a silent no-op). This is
+// the SQL-level backstop; the app-single-org invariant itself (same
+// api_app_id, any workspace_id) is enforced by the connect handler, not
+// this constraint — see TestWorkspaceStore_Postgres_AppBoundToOtherOrgSystem
+// and the handler acceptance tests.
 func TestWorkspaceStore_Postgres_CrossOrgConflict(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -169,7 +188,7 @@ func TestWorkspaceStore_Postgres_CrossOrgConflict(t *testing.T) {
 		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspace(orgB, "T0SHARED1"))
 	})
 	if err == nil {
-		t.Fatal("org B upserted a workspace_id already bound to org A; want a constraint violation")
+		t.Fatal("org B upserted a (workspace_id, api_app_id) pair already bound to org A; want a constraint violation")
 	}
 
 	// Org A's row is untouched; org B still has none.
@@ -231,6 +250,91 @@ func keysOf(m map[string]bool) []string {
 	return out
 }
 
+// TestWorkspaceStore_Postgres_TwoAppsSameWorkspaceDifferentOrgs: the schema
+// itself imposes no workspace<->org cardinality limit — two different apps
+// (distinct api_app_id) can both be bound to the same workspace_id under
+// two different orgs (e.g. a prod TF org and an eval TF org each running
+// their own bot in the same workspace, TFAC-533). The app-single-org
+// invariant that would forbid two ORGS sharing one APP lives one layer up,
+// at the connect handler (AppBoundToOtherOrgSystem) — not enforced here.
+func TestWorkspaceStore_Postgres_TwoAppsSameWorkspaceDifferentOrgs(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, userA, _ := pgtest.SeedOrgWithUser(t, h, "slack-2apps-a")
+	orgB, userB, _ := pgtest.SeedOrgWithUser(t, h, "slack-2apps-b")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	mustWithUser(t, stores, ctx, orgA, userA, func(tx db.TxStores) error {
+		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspaceApp(orgA, "T0SHARED2", "A0FIRST001"))
+	})
+	mustWithUser(t, stores, ctx, orgB, userB, func(tx db.TxStores) error {
+		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspaceApp(orgB, "T0SHARED2", "A0SECOND01"))
+	})
+
+	var listA, listB []slackstore.Workspace
+	mustWithUser(t, stores, ctx, orgA, userA, func(tx db.TxStores) error {
+		var e error
+		listA, e = slackstore.FromTx(tx).Workspaces.ListForOrg(ctx, orgA)
+		return e
+	})
+	mustWithUser(t, stores, ctx, orgB, userB, func(tx db.TxStores) error {
+		var e error
+		listB, e = slackstore.FromTx(tx).Workspaces.ListForOrg(ctx, orgB)
+		return e
+	})
+	if len(listA) != 1 || listA[0].APIAppID != "A0FIRST001" || listA[0].WorkspaceID != "T0SHARED2" {
+		t.Errorf("org A rows = %+v; want its own app row in the shared workspace", listA)
+	}
+	if len(listB) != 1 || listB[0].APIAppID != "A0SECOND01" || listB[0].WorkspaceID != "T0SHARED2" {
+		t.Errorf("org B rows = %+v; want its own app row in the shared workspace", listB)
+	}
+}
+
+// TestWorkspaceStore_Postgres_AppBoundToOtherOrgSystem: the app-single-org
+// invariant's check primitive — true only when some row (ANY workspace_id)
+// carries apiAppID under a DIFFERENT org; the owning org and unrelated app
+// ids both report false.
+func TestWorkspaceStore_Postgres_AppBoundToOtherOrgSystem(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, userA, _ := pgtest.SeedOrgWithUser(t, h, "slack-appinv-a")
+	orgB, _, _ := pgtest.SeedOrgWithUser(t, h, "slack-appinv-b")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	mustWithUser(t, stores, ctx, orgA, userA, func(tx db.TxStores) error {
+		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspaceApp(orgA, "T0INVA0001", "A0SHARED01"))
+	})
+
+	bound, err := slackstore.FromStores(stores).Workspaces.AppBoundToOtherOrgSystem(ctx, "A0SHARED01", orgA)
+	if err != nil {
+		t.Fatalf("AppBoundToOtherOrgSystem (owning org): %v", err)
+	}
+	if bound {
+		t.Error("AppBoundToOtherOrgSystem = true for the owning org; want false")
+	}
+
+	// A DIFFERENT workspace_id carrying the same api_app_id under org B
+	// would also report bound — the invariant spans every workspace an app
+	// is installed in, not just the one it was first seen on.
+	bound, err = slackstore.FromStores(stores).Workspaces.AppBoundToOtherOrgSystem(ctx, "A0SHARED01", orgB)
+	if err != nil {
+		t.Fatalf("AppBoundToOtherOrgSystem (other org): %v", err)
+	}
+	if !bound {
+		t.Error("AppBoundToOtherOrgSystem = false for a different org; want true (app-single-org invariant)")
+	}
+
+	bound, err = slackstore.FromStores(stores).Workspaces.AppBoundToOtherOrgSystem(ctx, "A0NEVERSEEN", orgB)
+	if err != nil {
+		t.Fatalf("AppBoundToOtherOrgSystem (unrelated app): %v", err)
+	}
+	if bound {
+		t.Error("AppBoundToOtherOrgSystem = true for an unconnected app id; want false")
+	}
+}
+
 // TestWorkspaceStore_Postgres_RLS_MemberReadsAdminWrites: any org member can
 // SELECT (org_slack_workspaces_select mirrors org_jira_apps's member-visible
 // read), but only an org admin can INSERT/UPDATE/DELETE.
@@ -242,8 +346,8 @@ func TestWorkspaceStore_Postgres_RLS_MemberReadsAdminWrites(t *testing.T) {
 	pgtest.AddOrgMember(t, h, memberID, orgID, teamID, "member", "member")
 
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO org_slack_workspaces (workspace_id, org_id, transport, bot_token_ref)
-		VALUES ('T0RLS0001', $1, 'socket', 'slack_ws_T0RLS0001_bot_token')
+		INSERT INTO org_slack_workspaces (workspace_id, api_app_id, org_id, transport, bot_token_ref)
+		VALUES ('T0RLS0001', 'A0RLS0001', $1, 'socket', 'slack_ws_T0RLS0001_A0RLS0001_bot_token')
 	`, orgID); err != nil {
 		t.Fatalf("seed org_slack_workspaces: %v", err)
 	}
@@ -265,8 +369,8 @@ func TestWorkspaceStore_Postgres_RLS_MemberReadsAdminWrites(t *testing.T) {
 	// Member: INSERT/UPDATE/DELETE are all rejected/no-op.
 	if err := h.WithUser(t, memberID, orgID, func(tx *sql.Tx) error {
 		_, e := tx.Exec(`
-			INSERT INTO org_slack_workspaces (workspace_id, org_id, transport, bot_token_ref)
-			VALUES ('T0RLS0002', $1, 'socket', 'x')
+			INSERT INTO org_slack_workspaces (workspace_id, api_app_id, org_id, transport, bot_token_ref)
+			VALUES ('T0RLS0002', 'A0RLS0002', $1, 'socket', 'x')
 		`, orgID)
 		return e
 	}); err == nil {

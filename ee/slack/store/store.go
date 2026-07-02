@@ -52,17 +52,23 @@ func FromStores(s db.Stores) *Bundle {
 	return b
 }
 
-// Workspace is one row of org_slack_workspaces — a connected Slack
-// workspace bound to exactly one org (workspace_id, Slack's own team ID, is
-// the global PRIMARY KEY that enforces the bind — see the baseline
-// migration). EnterpriseID is "" for a standalone workspace (NULL column);
-// SigningSecretRef / AppTokenRef are "" when that credential was never
-// supplied (NULL column) — exactly one is expected to be set for Socket
-// Mode, the other for Events API, per Transport, though the schema does not
-// enforce that pairing. RegisteredByUserID is "" when the registering user
-// was later removed (ON DELETE SET NULL).
+// Workspace is one row of org_slack_workspaces — a connected (Slack
+// workspace, Slack app) pair bound to exactly one org. (WorkspaceID,
+// APIAppID) — Slack's own team ID and app ID — is the global composite
+// PRIMARY KEY that enforces the workspace+app bind (see the baseline
+// migration); the stronger "this app belongs to exactly one org, across
+// every workspace" invariant has no SQL constraint to lean on (APIAppID
+// alone isn't unique) and is enforced by the connect handler instead (see
+// WorkspaceStore.AppBoundToOtherOrgSystem). EnterpriseID is "" for a
+// standalone workspace (NULL column); SigningSecretRef / AppTokenRef are ""
+// when that credential was never supplied (NULL column) — exactly one is
+// expected to be set for Socket Mode, the other for Events API, per
+// Transport, though the schema does not enforce that pairing.
+// RegisteredByUserID is "" when the registering user was later removed (ON
+// DELETE SET NULL).
 type Workspace struct {
 	WorkspaceID        string
+	APIAppID           string
 	OrgID              string
 	WorkspaceName      string
 	EnterpriseID       string
@@ -80,51 +86,74 @@ type Workspace struct {
 // SQLite impl is a stub returning db.ErrNotApplicableInLocal (SSO posture:
 // local mode is N=1, no multi-workspace concept). App pool for the
 // org-admin-gated CRUD (RLS gates SELECT on org membership, writes on
-// org-admin); admin pool for ListAllSystem, the org-wide system read the
-// future socket connection manager uses to enumerate every configured
-// workspace at boot — annotated org-wide-system-job like
-// EntityStore.ListUnclassified, not a per-request read.
+// org-admin); admin pool for ListAllSystem/GetByWorkspaceAppSystem/
+// AppBoundToOtherOrgSystem, the org-wide system reads a claims-free caller
+// (the pre-auth webhook receiver, the future socket connection manager, the
+// connect handler's own cross-org invariant check) needs — annotated
+// org-wide-system-job like EntityStore.ListUnclassified, not a per-request
+// read.
 type WorkspaceStore interface {
 	// Upsert writes ws as the full desired end-state for its
-	// (WorkspaceID, OrgID) pair: an existing same-org row is updated in
-	// place, a wholly new workspace_id is inserted. A workspace_id already
-	// bound to a DIFFERENT org surfaces the table's PRIMARY KEY violation
-	// verbatim (a real unique-violation error, not a silent no-op) — the
-	// caller maps that via httpx.IsUniqueViolation to a generic 409 that
-	// never names the owning org.
+	// (WorkspaceID, APIAppID, OrgID) triple: an existing same-org row for
+	// that (workspace, app) pair is updated in place, a wholly new
+	// (workspace_id, api_app_id) pair is inserted. A (workspace_id,
+	// api_app_id) pair already bound to a DIFFERENT org surfaces the
+	// table's PRIMARY KEY violation verbatim (a real unique-violation
+	// error, not a silent no-op) — the caller maps that via
+	// httpx.IsUniqueViolation to a generic 409 that never names the owning
+	// org. Callers MUST check AppBoundToOtherOrgSystem before calling
+	// Upsert — the PK violation alone does not catch a different
+	// workspace_id already carrying this org's api_app_id under another
+	// org, since api_app_id isn't unique on its own.
 	Upsert(ctx context.Context, ws Workspace) error
 	ListForOrg(ctx context.Context, orgID string) ([]Workspace, error)
-	Get(ctx context.Context, orgID, workspaceID string) (*Workspace, error)
-	Delete(ctx context.Context, orgID, workspaceID string) error
+	Get(ctx context.Context, orgID, workspaceID, apiAppID string) (*Workspace, error)
+	Delete(ctx context.Context, orgID, workspaceID, apiAppID string) error
 	// ListAllSystem returns every connected workspace across every org, on
 	// the admin pool (bypasses RLS). System-code-only — see the type doc.
 	ListAllSystem(ctx context.Context) ([]Workspace, error)
 
-	// GetByWorkspaceIDSystem looks up a workspace by its Slack team ID alone
-	// (no org_id to scope by), on the admin pool. The pre-auth webhook
-	// receiver's only trusted input is the payload's team_id — this is how
-	// it resolves which org (and which signing secret) a delivery belongs
-	// to, before it has any other context to filter on. Returns (nil, nil)
-	// when no workspace is connected under that id — an unknown team_id is
-	// not an error, it just means the caller ack-and-drops.
-	GetByWorkspaceIDSystem(ctx context.Context, workspaceID string) (*Workspace, error)
+	// GetByWorkspaceAppSystem looks up a workspace by its (Slack team ID,
+	// Slack app ID) pair alone (no org_id to scope by), on the admin pool.
+	// The pre-auth webhook receiver's only trusted input is the payload's
+	// team_id + api_app_id — this is how it resolves which org (and which
+	// signing secret) a delivery belongs to, before it has any other
+	// context to filter on. Returns (nil, nil) when no workspace is
+	// connected under that pair — an unknown (team_id, api_app_id) is not
+	// an error, it just means the caller ack-and-drops.
+	GetByWorkspaceAppSystem(ctx context.Context, workspaceID, apiAppID string) (*Workspace, error)
+
+	// AppBoundToOtherOrgSystem reports whether apiAppID is already bound to
+	// a TF org other than orgID, on the admin pool (bypasses RLS — the
+	// app-single-org invariant spans every org, not just the caller's, so
+	// an RLS-scoped read that only sees the caller's own rows could never
+	// answer this). The connect handler calls this INSIDE its transaction,
+	// before Upsert, to enforce "a Slack app belongs to exactly one TF org"
+	// (TFAC-533) — a rule with no SQL constraint behind it, since api_app_id
+	// is only ever unique in combination with workspace_id. A true=false
+	// generic 409 that never names the owning org.
+	AppBoundToOtherOrgSystem(ctx context.Context, apiAppID, orgID string) (bool, error)
 }
 
 // DeliveryStore owns slack_event_deliveries — the cross-transport ingest
-// dedup table (see the migration's comment for the full rationale). Postgres
-// admin-pool only: the pre-auth webhook receiver has no request claims, and
-// the future Socket Mode client is similarly claims-free. The SQLite impl is
-// a stub returning db.ErrNotApplicableInLocal, same posture as
-// WorkspaceStore.
+// dedup table (see the migration's comment for the full rationale). Keyed on
+// api_app_id, not workspace_id: delivery streams are honestly per-app (a
+// Socket Mode connection belongs to the app, and Slack load-balances an
+// app's envelopes across all of that app's open sockets regardless of which
+// workspace(s) it's installed in), so two apps sharing a workspace must not
+// share a dedup key. Postgres admin-pool only: the pre-auth webhook receiver
+// has no request claims, and the future Socket Mode client is similarly
+// claims-free. The SQLite impl is a stub returning
+// db.ErrNotApplicableInLocal, same posture as WorkspaceStore.
 type DeliveryStore interface {
-	// MarkDeliveredSystem records one (workspaceID, eventID) delivery via an
+	// MarkDeliveredSystem records one (apiAppID, eventID) delivery via an
 	// insert-on-conflict, and opportunistically prunes deliveries older than
 	// 72 hours in the same call. fresh=true means this delivery was not
 	// previously recorded — the caller should process it; fresh=false means
 	// a duplicate (a Slack retry) — the caller drops it silently. The prune
 	// is best-effort: a failure there does not affect fresh's correctness
 	// and is never surfaced as an error.
-	MarkDeliveredSystem(ctx context.Context, workspaceID, eventID string) (fresh bool, err error)
+	MarkDeliveredSystem(ctx context.Context, apiAppID, eventID string) (fresh bool, err error)
 }
 
 // SlackIdentity is one row of user_slack_identities — the mapping from a

@@ -24,6 +24,7 @@ import { glassInputClass } from './primitives'
 
 interface SlackWorkspace {
   workspace_id: string
+  api_app_id: string
   workspace_name: string
   enterprise_id?: string
   transport: 'socket' | 'events_api'
@@ -32,6 +33,12 @@ interface SlackWorkspace {
   created_at: string
   updated_at: string
 }
+
+// rowKey is the composite (workspace, app) identity a row is now keyed on
+// (TFAC-533) — a workspace may host several connected apps, so workspace_id
+// alone can no longer disambiguate list/upsert/remove operations.
+const rowKey = (ws: Pick<SlackWorkspace, 'workspace_id' | 'api_app_id'>) =>
+  `${ws.workspace_id}:${ws.api_app_id}`
 
 const SLACK_APP_CREATE_URL = 'https://api.slack.com/apps?new_app=1'
 
@@ -54,11 +61,11 @@ export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
     }
   }, [orgId])
 
-  const removeFromList = (workspaceID: string) =>
-    setWorkspaces((ws) => (ws ?? []).filter((w) => w.workspace_id !== workspaceID))
+  const removeFromList = (key: string) =>
+    setWorkspaces((ws) => (ws ?? []).filter((w) => rowKey(w) !== key))
 
   const upsertInList = (ws: SlackWorkspace) =>
-    setWorkspaces((list) => [...(list ?? []).filter((w) => w.workspace_id !== ws.workspace_id), ws])
+    setWorkspaces((list) => [...(list ?? []).filter((w) => rowKey(w) !== rowKey(ws)), ws])
 
   return (
     <div className="space-y-5">
@@ -78,9 +85,9 @@ export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
         <ul className="space-y-2">
           {workspaces.map((ws) => (
             <WorkspaceRow
-              key={ws.workspace_id}
+              key={rowKey(ws)}
               workspace={ws}
-              onRemoved={() => removeFromList(ws.workspace_id)}
+              onRemoved={() => removeFromList(rowKey(ws))}
             />
           ))}
         </ul>
@@ -112,9 +119,10 @@ function WorkspaceRow({
     }
     setBusy(true)
     try {
-      await apiFetch(`/api/slack/workspaces/${encodeURIComponent(workspace.workspace_id)}`, {
-        method: 'DELETE',
-      })
+      await apiFetch(
+        `/api/slack/workspaces/${encodeURIComponent(workspace.workspace_id)}/${encodeURIComponent(workspace.api_app_id)}`,
+        { method: 'DELETE' },
+      )
       toast.success(`${label} disconnected`)
       onRemoved()
     } catch (e) {
@@ -135,6 +143,9 @@ function WorkspaceRow({
         <p className="mt-0.5 truncate text-[11px] text-text-tertiary">
           {workspace.workspace_id}
           {workspace.enterprise_id ? ' · Enterprise Grid' : ''}
+          <span className="ml-1.5 rounded bg-black/[0.05] px-1 py-px font-mono text-[10px] text-text-tertiary">
+            {workspace.api_app_id}
+          </span>
         </p>
       </div>
       <button

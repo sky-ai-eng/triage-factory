@@ -29,21 +29,27 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// ---------- fake Slack API (auth.test + apps.connections.open) ----------
+// ---------- fake Slack API (auth.test + bots.info + apps.connections.open) ----------
 
 type fakeSlackServer struct {
 	srv *httptest.Server
 
 	mu           sync.Mutex
 	authTest     map[string]map[string]any // bot token -> {"ok":true, "team_id":...} or {"ok":false,"error":...}
+	botsInfo     map[string]map[string]any // bot id -> {"ok":true,"bot":{"app_id":...}} or {"ok":false,"error":...}
 	openConn     map[string]map[string]any // app token -> {"ok":true} or {"ok":false,"error":...}
 	authTestHits int
+	botsInfoHits int
 	openConnHits int
 }
 
 func newFakeSlackServer(t *testing.T) *fakeSlackServer {
 	t.Helper()
-	f := &fakeSlackServer{authTest: map[string]map[string]any{}, openConn: map[string]map[string]any{}}
+	f := &fakeSlackServer{
+		authTest: map[string]map[string]any{},
+		botsInfo: map[string]map[string]any{},
+		openConn: map[string]map[string]any{},
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth.test", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -52,6 +58,16 @@ func newFakeSlackServer(t *testing.T) *fakeSlackServer {
 		f.mu.Unlock()
 		if !ok {
 			resp = map[string]any{"ok": false, "error": "invalid_auth"}
+		}
+		writeSlackFakeJSON(w, resp)
+	})
+	mux.HandleFunc("/bots.info", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.botsInfoHits++
+		resp, ok := f.botsInfo[r.URL.Query().Get("bot")]
+		f.mu.Unlock()
+		if !ok {
+			resp = map[string]any{"ok": false, "error": "bot_not_found"}
 		}
 		writeSlackFakeJSON(w, resp)
 	})
@@ -83,15 +99,48 @@ func writeSlackFakeJSON(w http.ResponseWriter, v map[string]any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// stageAuthTestOK stages a successful auth.test response for token.
+// botIDForToken derives a deterministic bot_id for token — the fake never
+// needs a real one, only one that's stable across the auth.test and
+// bots.info stages within a test.
+func botIDForToken(token string) string { return "B0" + token }
+
+// stageAuthTestOK stages a successful auth.test response for token,
+// including a deterministic bot_id (see botIDForToken) — the first leg of
+// the connect handler's app-id derivation chain. Does NOT stage bots.info;
+// callers that need the full chain to succeed should use stageConnectOK, or
+// stage bots.info themselves via stageBotsInfoOK/stageBotsInfoFail for a
+// test that specifically exercises that second leg.
 func (f *fakeSlackServer) stageAuthTestOK(token, teamID, teamName, botUserID, enterpriseID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	resp := map[string]any{"ok": true, "team_id": teamID, "team": teamName, "user_id": botUserID}
+	resp := map[string]any{"ok": true, "team_id": teamID, "team": teamName, "user_id": botUserID, "bot_id": botIDForToken(token)}
 	if enterpriseID != "" {
 		resp["enterprise_id"] = enterpriseID
 	}
 	f.authTest[token] = resp
+}
+
+// stageBotsInfoOK stages a successful bots.info response for botID, resolving
+// to appID.
+func (f *fakeSlackServer) stageBotsInfoOK(botID, appID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.botsInfo[botID] = map[string]any{"ok": true, "bot": map[string]any{"id": botID, "app_id": appID}}
+}
+
+// stageBotsInfoFail stages a failing bots.info response for botID.
+func (f *fakeSlackServer) stageBotsInfoFail(botID, reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.botsInfo[botID] = map[string]any{"ok": false, "error": reason}
+}
+
+// stageConnectOK stages the full app-id derivation chain (auth.test then
+// bots.info) for a bot token that should connect successfully, resolving to
+// appID.
+func (f *fakeSlackServer) stageConnectOK(token, teamID, teamName, botUserID, appID, enterpriseID string) {
+	f.stageAuthTestOK(token, teamID, teamName, botUserID, enterpriseID)
+	f.stageBotsInfoOK(botIDForToken(token), appID)
 }
 
 // stageOpenConnFail stages a failing apps.connections.open response for token.
@@ -154,6 +203,20 @@ func (r *slackWorkspaceRig) req(method, path, callerID, orgID, workspaceID strin
 	if workspaceID != "" {
 		req.SetPathValue("workspace_id", workspaceID)
 	}
+	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: callerID})
+	ctx = httpx.WithOrgID(ctx, orgID)
+	return req.WithContext(ctx)
+}
+
+// reqDelete builds a DELETE request for the composite
+// /api/slack/workspaces/{workspace_id}/{api_app_id} route (TFAC-533 — the
+// row key is no longer workspace_id alone).
+func (r *slackWorkspaceRig) reqDelete(callerID, orgID, workspaceID, apiAppID string) *http.Request {
+	r.t.Helper()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/slack/workspaces/"+workspaceID+"/"+apiAppID, http.NoBody)
+	req.SetPathValue("workspace_id", workspaceID)
+	req.SetPathValue("api_app_id", apiAppID)
 	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: callerID})
 	ctx = httpx.WithOrgID(ctx, orgID)
 	return req.WithContext(ctx)
@@ -227,11 +290,12 @@ func TestHandleConnect_NonAdmin_404(t *testing.T) {
 
 // TestHandleConnect_AppTokenOnly_Socket: the happy path for Socket Mode —
 // app.token supplied, no signing secret, transport inferred as socket,
-// apps.connections.open validated, secrets + row persisted.
+// apps.connections.open validated, secrets + row persisted. Also pins the
+// derived app id landing on the row (TFAC-533).
 func TestHandleConnect_AppTokenOnly_Socket(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-socket")
-	r.fake.stageAuthTestOK("xoxb-socket", "T0SOCKET1", "Acme", "U0BOT1", "")
+	r.fake.stageConnectOK("xoxb-socket", "T0SOCKET1", "Acme", "U0BOT1", "A0SOCKET01", "")
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-socket", "app_token": "xapp-socket-1"}
@@ -243,13 +307,19 @@ func TestHandleConnect_AppTokenOnly_Socket(t *testing.T) {
 	if view.WorkspaceID != "T0SOCKET1" || view.Transport != transportSocket || view.BotUserID != "U0BOT1" {
 		t.Errorf("view = %+v; want workspace_id/transport/bot_user_id from auth.test", view)
 	}
+	if view.APIAppID != "A0SOCKET01" {
+		t.Errorf("api_app_id = %q; want A0SOCKET01 (derived via bots.info)", view.APIAppID)
+	}
+	if r.fake.botsInfoHits != 1 {
+		t.Errorf("bots.info called %d times; want 1 (app id derivation)", r.fake.botsInfoHits)
+	}
 	if r.fake.openConnHits != 1 {
 		t.Errorf("apps.connections.open called %d times; want 1 (socket transport validates the app token)", r.fake.openConnHits)
 	}
-	if got := r.secretValue(orgID, "slack_ws_T0SOCKET1_bot_token"); got != "xoxb-socket" {
+	if got := r.secretValue(orgID, "slack_ws_T0SOCKET1_A0SOCKET01_bot_token"); got != "xoxb-socket" {
 		t.Errorf("stored bot token = %q; want xoxb-socket", got)
 	}
-	if got := r.secretValue(orgID, "slack_ws_T0SOCKET1_app_token"); got != "xapp-socket-1" {
+	if got := r.secretValue(orgID, "slack_ws_T0SOCKET1_A0SOCKET01_app_token"); got != "xapp-socket-1" {
 		t.Errorf("stored app token = %q; want xapp-socket-1", got)
 	}
 }
@@ -260,7 +330,7 @@ func TestHandleConnect_AppTokenOnly_Socket(t *testing.T) {
 func TestHandleConnect_SigningSecretOnly_EventsAPI(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-events")
-	r.fake.stageAuthTestOK("xoxb-events", "T0EVENTS1", "Acme", "U0BOT2", "")
+	r.fake.stageConnectOK("xoxb-events", "T0EVENTS1", "Acme", "U0BOT2", "A0EVENTS01", "")
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-events", "signing_secret": "shh-secret"}
@@ -284,7 +354,7 @@ func TestHandleConnect_SigningSecretOnly_EventsAPI(t *testing.T) {
 func TestHandleConnect_BothCredentials_NoExplicitTransport_400(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-ambiguous")
-	r.fake.stageAuthTestOK("xoxb-ambiguous", "T0AMBIG01", "Acme", "U0BOT3", "")
+	r.fake.stageConnectOK("xoxb-ambiguous", "T0AMBIG01", "Acme", "U0BOT3", "A0AMBIG001", "")
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-ambiguous", "signing_secret": "shh", "app_token": "xapp-1"}
@@ -297,7 +367,7 @@ func TestHandleConnect_BothCredentials_NoExplicitTransport_400(t *testing.T) {
 func TestHandleConnect_NeitherCredential_400(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-neither")
-	r.fake.stageAuthTestOK("xoxb-neither", "T0NEITHER", "Acme", "U0BOT4", "")
+	r.fake.stageConnectOK("xoxb-neither", "T0NEITHER", "Acme", "U0BOT4", "A0NEITHER1", "")
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-neither"}
@@ -312,7 +382,7 @@ func TestHandleConnect_NeitherCredential_400(t *testing.T) {
 func TestHandleConnect_BothCredentials_ExplicitChoiceWins(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-explicit")
-	r.fake.stageAuthTestOK("xoxb-explicit", "T0EXPLICIT", "Acme", "U0BOT5", "")
+	r.fake.stageConnectOK("xoxb-explicit", "T0EXPLICIT", "Acme", "U0BOT5", "A0EXPLICIT", "")
 
 	rec := httptest.NewRecorder()
 	body := map[string]string{
@@ -356,7 +426,7 @@ func TestHandleConnect_AuthTestFailure_400(t *testing.T) {
 func TestHandleConnect_AppTokenValidationFailure_400(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-badapp")
-	r.fake.stageAuthTestOK("xoxb-badapp", "T0BADAPP1", "Acme", "U0BOT6", "")
+	r.fake.stageConnectOK("xoxb-badapp", "T0BADAPP1", "Acme", "U0BOT6", "A0BADAPP01", "")
 	r.fake.stageOpenConnFail("xapp-badapp", "invalid_auth")
 
 	rec := httptest.NewRecorder()
@@ -367,17 +437,46 @@ func TestHandleConnect_AppTokenValidationFailure_400(t *testing.T) {
 	}
 }
 
-// TestHandleConnect_CrossOrgConflict_409Generic: a second org connecting a
-// workspace_id already bound to the first org gets a generic 409 that never
-// names the owning org.
-func TestHandleConnect_CrossOrgConflict_409Generic(t *testing.T) {
+// TestHandleConnect_BotsInfoFailure_400: Slack rejecting/failing bots.info
+// (the second leg of app-id derivation, after a SUCCESSFUL auth.test)
+// surfaces as a 400, and nothing is persisted — the app id is key material
+// now, so there's no fallback (TFAC-533).
+func TestHandleConnect_BotsInfoFailure_400(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
-	orgA, ownerA, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-xorg-a")
-	orgB, ownerB, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-xorg-b")
-	// Two different bot tokens (plausible: two different Slack apps
-	// installed to the same workspace) resolving to the SAME team_id.
-	r.fake.stageAuthTestOK("xoxb-a", "T0SHARED9", "Acme", "U0BOTA", "")
-	r.fake.stageAuthTestOK("xoxb-b", "T0SHARED9", "Acme", "U0BOTB", "")
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-badbotsinfo")
+	r.fake.stageAuthTestOK("xoxb-badbotsinfo", "T0BADBOTS1", "Acme", "U0BOT9", "")
+	r.fake.stageBotsInfoFail(botIDForToken("xoxb-badbotsinfo"), "bot_not_found")
+
+	rec := httptest.NewRecorder()
+	body := map[string]string{"bot_token": "xoxb-badbotsinfo", "app_token": "xapp-1"}
+	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "", body))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	list := httptest.NewRecorder()
+	r.hdl.handleList(list, r.req(http.MethodGet, "/api/slack/workspaces", owner, orgID, "", nil))
+	var got []workspaceView
+	_ = json.Unmarshal(list.Body.Bytes(), &got)
+	if len(got) != 0 {
+		t.Errorf("workspaces after a failed bots.info = %v; want none persisted", got)
+	}
+}
+
+// ---------- app-single-org invariant + two-apps-one-workspace (TFAC-533) ----------
+
+// TestHandleConnect_AppBoundToOtherOrg_SameWorkspace_409Generic: org B
+// connecting the exact same (workspace, app) pair org A already holds gets
+// a generic 409 that never names the owning org.
+func TestHandleConnect_AppBoundToOtherOrg_SameWorkspace_409Generic(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	orgA, ownerA, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-appinv-a")
+	orgB, ownerB, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-appinv-b")
+	// Two different bot tokens (plausible: org B pasted org A's app's bot
+	// token, or a shared/leaked credential) resolving to the SAME team_id
+	// AND the same api_app_id.
+	r.fake.stageConnectOK("xoxb-a", "T0SHARED9", "Acme", "U0BOTA", "A0SHARED09", "")
+	r.fake.stageConnectOK("xoxb-b", "T0SHARED9", "Acme", "U0BOTB", "A0SHARED09", "")
 
 	recA := httptest.NewRecorder()
 	r.hdl.handleConnect(recA, r.req(http.MethodPost, "/api/slack/workspaces", ownerA, orgA, "",
@@ -392,8 +491,93 @@ func TestHandleConnect_CrossOrgConflict_409Generic(t *testing.T) {
 	if recB.Code != http.StatusConflict {
 		t.Fatalf("org B connect status = %d, want 409 (body=%s)", recB.Code, recB.Body.String())
 	}
-	if strings.Contains(strings.ToLower(recB.Body.String()), "slack-xorg-a") {
+	if strings.Contains(strings.ToLower(recB.Body.String()), "slack-appinv-a") {
 		t.Errorf("409 body leaks the owning org: %s", recB.Body.String())
+	}
+}
+
+// TestHandleConnect_AppBoundToOtherOrg_DifferentWorkspace_409Generic proves
+// the app-single-org invariant spans every workspace an app is installed
+// in, not just the one it was first connected on — a DIFFERENT workspace_id
+// carrying the same api_app_id under a different org still 409s, even
+// though the composite (workspace_id, api_app_id) PK alone wouldn't catch
+// it (the pair is entirely distinct from org A's row).
+func TestHandleConnect_AppBoundToOtherOrg_DifferentWorkspace_409Generic(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	orgA, ownerA, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-appinv2-a")
+	orgB, ownerB, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-appinv2-b")
+	r.fake.stageConnectOK("xoxb-c", "T0WORKSPCA", "Acme", "U0BOTC", "A0CROSSWS1", "")
+	r.fake.stageConnectOK("xoxb-d", "T0WORKSPCB", "Beta", "U0BOTD", "A0CROSSWS1", "")
+
+	recA := httptest.NewRecorder()
+	r.hdl.handleConnect(recA, r.req(http.MethodPost, "/api/slack/workspaces", ownerA, orgA, "",
+		map[string]string{"bot_token": "xoxb-c", "app_token": "xapp-c"}))
+	if recA.Code != http.StatusCreated {
+		t.Fatalf("org A connect status = %d, want 201 (body=%s)", recA.Code, recA.Body.String())
+	}
+
+	recB := httptest.NewRecorder()
+	r.hdl.handleConnect(recB, r.req(http.MethodPost, "/api/slack/workspaces", ownerB, orgB, "",
+		map[string]string{"bot_token": "xoxb-d", "app_token": "xapp-d"}))
+	if recB.Code != http.StatusConflict {
+		t.Fatalf("org B connect status = %d, want 409 (different workspace, same app id; body=%s)", recB.Code, recB.Body.String())
+	}
+	if strings.Contains(strings.ToLower(recB.Body.String()), "slack-appinv2-a") {
+		t.Errorf("409 body leaks the owning org: %s", recB.Body.String())
+	}
+}
+
+// TestHandleConnect_TwoAppsOneWorkspace_HappyPath is the feature's
+// acceptance test: two different TF orgs, each with their own Slack app,
+// both installed to the SAME workspace — a prod org and an eval org running
+// their own bot in one workspace, the motivating scenario from TFAC-533.
+// Both connects succeed, both rows are live under the same workspace_id
+// with distinct api_app_id, and each org sees only its own row.
+func TestHandleConnect_TwoAppsOneWorkspace_HappyPath(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	orgProd, ownerProd, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-2apps-prod")
+	orgEval, ownerEval, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-2apps-eval")
+	r.fake.stageConnectOK("xoxb-prod", "T0SHAREDWS", "Acme", "U0BOTPROD", "A0PRODAPP1", "")
+	r.fake.stageConnectOK("xoxb-eval", "T0SHAREDWS", "Acme", "U0BOTEVAL", "A0EVALAPP1", "")
+
+	recProd := httptest.NewRecorder()
+	r.hdl.handleConnect(recProd, r.req(http.MethodPost, "/api/slack/workspaces", ownerProd, orgProd, "",
+		map[string]string{"bot_token": "xoxb-prod", "app_token": "xapp-prod"}))
+	if recProd.Code != http.StatusCreated {
+		t.Fatalf("prod org connect status = %d, want 201 (body=%s)", recProd.Code, recProd.Body.String())
+	}
+
+	recEval := httptest.NewRecorder()
+	r.hdl.handleConnect(recEval, r.req(http.MethodPost, "/api/slack/workspaces", ownerEval, orgEval, "",
+		map[string]string{"bot_token": "xoxb-eval", "app_token": "xapp-eval"}))
+	if recEval.Code != http.StatusCreated {
+		t.Fatalf("eval org connect status = %d, want 201 — a different app in the same workspace must NOT conflict (body=%s)",
+			recEval.Code, recEval.Body.String())
+	}
+
+	prodView := decodeBody[workspaceView](t, recProd)
+	evalView := decodeBody[workspaceView](t, recEval)
+	if prodView.WorkspaceID != evalView.WorkspaceID {
+		t.Fatalf("workspace ids differ: prod=%q eval=%q; want both T0SHAREDWS", prodView.WorkspaceID, evalView.WorkspaceID)
+	}
+	if prodView.APIAppID == evalView.APIAppID {
+		t.Fatalf("both rows carry api_app_id %q; want distinct app ids", prodView.APIAppID)
+	}
+
+	listProd := httptest.NewRecorder()
+	r.hdl.handleList(listProd, r.req(http.MethodGet, "/api/slack/workspaces", ownerProd, orgProd, "", nil))
+	var gotProd []workspaceView
+	_ = json.Unmarshal(listProd.Body.Bytes(), &gotProd)
+	if len(gotProd) != 1 || gotProd[0].APIAppID != "A0PRODAPP1" {
+		t.Errorf("prod org list = %+v; want exactly its own app row", gotProd)
+	}
+
+	listEval := httptest.NewRecorder()
+	r.hdl.handleList(listEval, r.req(http.MethodGet, "/api/slack/workspaces", ownerEval, orgEval, "", nil))
+	var gotEval []workspaceView
+	_ = json.Unmarshal(listEval.Body.Bytes(), &gotEval)
+	if len(gotEval) != 1 || gotEval[0].APIAppID != "A0EVALAPP1" {
+		t.Errorf("eval org list = %+v; want exactly its own app row", gotEval)
 	}
 }
 
@@ -403,7 +587,7 @@ func TestHandleConnect_CrossOrgConflict_409Generic(t *testing.T) {
 func TestHandleConnect_LeaveBlankKeepsExisting(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-keepblank")
-	r.fake.stageAuthTestOK("xoxb-keep", "T0KEEPBLANK", "Acme", "U0BOT7", "")
+	r.fake.stageConnectOK("xoxb-keep", "T0KEEPBLANK", "Acme", "U0BOT7", "A0KEEPBLNK", "")
 
 	first := httptest.NewRecorder()
 	r.hdl.handleConnect(first, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
@@ -423,19 +607,20 @@ func TestHandleConnect_LeaveBlankKeepsExisting(t *testing.T) {
 	if view.Transport != transportEventsAPI {
 		t.Errorf("transport after blank re-submit = %q; want events_api (kept)", view.Transport)
 	}
-	if got := r.secretValue(orgID, "slack_ws_T0KEEPBLANK_signing_secret"); got != "first-secret" {
+	if got := r.secretValue(orgID, "slack_ws_T0KEEPBLANK_A0KEEPBLNK_signing_secret"); got != "first-secret" {
 		t.Errorf("signing secret after blank re-submit = %q; want first-secret (kept, unchanged)", got)
 	}
 }
 
 // ---------- delete ----------
 
-// TestHandleDelete_RemovesRowAndSecretKeyset: disconnecting a workspace
-// deletes the row and sweeps every secret in its keyset, present or not.
+// TestHandleDelete_RemovesRowAndSecretKeyset: disconnecting a (workspace,
+// app) pair deletes the row and sweeps every secret in its keyset, present
+// or not.
 func TestHandleDelete_RemovesRowAndSecretKeyset(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-delete")
-	r.fake.stageAuthTestOK("xoxb-delete", "T0DELETE1", "Acme", "U0BOT8", "")
+	r.fake.stageConnectOK("xoxb-delete", "T0DELETE1", "Acme", "U0BOT8", "A0DELETE01", "")
 
 	connect := httptest.NewRecorder()
 	r.hdl.handleConnect(connect, r.req(http.MethodPost, "/api/slack/workspaces", owner, orgID, "",
@@ -445,12 +630,16 @@ func TestHandleDelete_RemovesRowAndSecretKeyset(t *testing.T) {
 	}
 
 	del := httptest.NewRecorder()
-	r.hdl.handleDelete(del, r.req(http.MethodDelete, "/api/slack/workspaces/T0DELETE1", owner, orgID, "T0DELETE1", nil))
+	r.hdl.handleDelete(del, r.reqDelete(owner, orgID, "T0DELETE1", "A0DELETE01"))
 	if del.Code != http.StatusOK {
 		t.Fatalf("delete status = %d, want 200 (body=%s)", del.Code, del.Body.String())
 	}
 
-	for _, key := range []string{"slack_ws_T0DELETE1_bot_token", "slack_ws_T0DELETE1_app_token", "slack_ws_T0DELETE1_signing_secret"} {
+	for _, key := range []string{
+		"slack_ws_T0DELETE1_A0DELETE01_bot_token",
+		"slack_ws_T0DELETE1_A0DELETE01_app_token",
+		"slack_ws_T0DELETE1_A0DELETE01_signing_secret",
+	} {
 		if got := r.secretValue(orgID, key); got != "" {
 			t.Errorf("secret %s = %q after delete; want swept (\"\")", key, got)
 		}
@@ -465,16 +654,56 @@ func TestHandleDelete_RemovesRowAndSecretKeyset(t *testing.T) {
 	}
 }
 
-// TestHandleDelete_Missing_404: deleting a workspace_id the org never
-// connected is a 404.
+// TestHandleDelete_Missing_404: deleting a (workspace, app) pair the org
+// never connected is a 404.
 func TestHandleDelete_Missing_404(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-delete-missing")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleDelete(rec, r.req(http.MethodDelete, "/api/slack/workspaces/T0NOTHERE", owner, orgID, "T0NOTHERE", nil))
+	r.hdl.handleDelete(rec, r.reqDelete(owner, orgID, "T0NOTHERE", "A0NOTHERE1"))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestHandleDelete_OtherAppInSameWorkspace_Untouched: disconnecting one app
+// in a shared workspace must not touch a different app's row (or secrets)
+// in that same workspace — the composite key is the isolation boundary.
+func TestHandleDelete_OtherAppInSameWorkspace_Untouched(t *testing.T) {
+	r := newSlackWorkspaceRig(t, "https://tf.example")
+	orgProd, ownerProd, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-delisolate-prod")
+	orgEval, ownerEval, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-delisolate-eval")
+	r.fake.stageConnectOK("xoxb-iso-prod", "T0ISOSHARE", "Acme", "U0BOTP", "A0ISOPROD1", "")
+	r.fake.stageConnectOK("xoxb-iso-eval", "T0ISOSHARE", "Acme", "U0BOTE", "A0ISOEVAL1", "")
+
+	for _, c := range []struct{ ownerID, orgID, token, appToken string }{
+		{ownerProd, orgProd, "xoxb-iso-prod", "xapp-iso-prod"},
+		{ownerEval, orgEval, "xoxb-iso-eval", "xapp-iso-eval"},
+	} {
+		rec := httptest.NewRecorder()
+		r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", c.ownerID, c.orgID, "",
+			map[string]string{"bot_token": c.token, "app_token": c.appToken}))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("connect(%s) status = %d, want 201 (body=%s)", c.orgID, rec.Code, rec.Body.String())
+		}
+	}
+
+	del := httptest.NewRecorder()
+	r.hdl.handleDelete(del, r.reqDelete(ownerProd, orgProd, "T0ISOSHARE", "A0ISOPROD1"))
+	if del.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200 (body=%s)", del.Code, del.Body.String())
+	}
+
+	listEval := httptest.NewRecorder()
+	r.hdl.handleList(listEval, r.req(http.MethodGet, "/api/slack/workspaces", ownerEval, orgEval, "", nil))
+	var gotEval []workspaceView
+	_ = json.Unmarshal(listEval.Body.Bytes(), &gotEval)
+	if len(gotEval) != 1 || gotEval[0].APIAppID != "A0ISOEVAL1" {
+		t.Errorf("eval org's row after deleting prod's app = %+v; want untouched", gotEval)
+	}
+	if got := r.secretValue(orgEval, "slack_ws_T0ISOSHARE_A0ISOEVAL1_bot_token"); got != "xoxb-iso-eval" {
+		t.Errorf("eval org's bot token after deleting prod's app = %q; want untouched", got)
 	}
 }
 

@@ -55,7 +55,7 @@ func install(api server.ExtensionAPI) {
 	}
 	api.API("GET /api/slack/workspaces", h.handleList)
 	api.APIMutating("POST /api/slack/workspaces", h.handleConnect)
-	api.APIMutating("DELETE /api/slack/workspaces/{workspace_id}", h.handleDelete)
+	api.APIMutating("DELETE /api/slack/workspaces/{workspace_id}/{api_app_id}", h.handleDelete)
 	api.API("GET /api/slack/manifest", h.handleManifest)
 
 	stores := api.Stores()

@@ -26,7 +26,7 @@ func TestHandlers_LocalMode404(t *testing.T) {
 	}{
 		{"list", http.MethodGet, "/api/slack/workspaces", h.handleList},
 		{"connect", http.MethodPost, "/api/slack/workspaces", h.handleConnect},
-		{"delete", http.MethodDelete, "/api/slack/workspaces/T123", h.handleDelete},
+		{"delete", http.MethodDelete, "/api/slack/workspaces/T123/A123", h.handleDelete},
 		{"manifest", http.MethodGet, "/api/slack/manifest?transport=socket", h.handleManifest},
 	}
 	for _, tc := range cases {
@@ -34,6 +34,7 @@ func TestHandlers_LocalMode404(t *testing.T) {
 			req := httptest.NewRequest(tc.method, tc.path, nil)
 			if tc.name == "delete" {
 				req.SetPathValue("workspace_id", "T123")
+				req.SetPathValue("api_app_id", "A123")
 			}
 			rec := httptest.NewRecorder()
 			tc.fn(rec, req)

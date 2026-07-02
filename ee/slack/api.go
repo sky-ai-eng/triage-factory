@@ -25,12 +25,14 @@ var slackHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 // authTestResult is the subset of Slack's auth.test response the connect
 // handler needs: the workspace identity (team_id/team), the bot's own user
-// id (so ingest can later detect its own mentions), and the Enterprise Grid
-// id when present.
+// id (so ingest can later detect its own mentions), the bot's own bot id
+// (the first leg of the api_app_id derivation chain — see slackBotsInfo),
+// and the Enterprise Grid id when present.
 type authTestResult struct {
 	TeamID       string
 	Team         string
 	UserID       string
+	BotID        string
 	EnterpriseID string
 }
 
@@ -52,6 +54,7 @@ func slackAuthTest(ctx context.Context, client *http.Client, botToken string) (*
 		TeamID       string `json:"team_id"`
 		Team         string `json:"team"`
 		UserID       string `json:"user_id"`
+		BotID        string `json:"bot_id"`
 		EnterpriseID string `json:"enterprise_id"`
 	}
 	if err := doSlackJSON(ctx, client, req, &out); err != nil {
@@ -67,8 +70,51 @@ func slackAuthTest(ctx context.Context, client *http.Client, botToken string) (*
 		TeamID:       out.TeamID,
 		Team:         out.Team,
 		UserID:       out.UserID,
+		BotID:        out.BotID,
 		EnterpriseID: out.EnterpriseID,
 	}, nil
+}
+
+// botsInfoResult is the subset of Slack's bots.info response the connect
+// handler needs: the app id that owns this bot — the key material for the
+// app-single-org invariant (TFAC-533).
+type botsInfoResult struct {
+	AppID string
+}
+
+// slackBotsInfo looks up a bot's owning app id via bots.info — the second
+// leg of the connect handler's app-id derivation chain (auth.test -> bot_id
+// -> slackBotsInfo -> app_id). Runs under the users:read scope already in
+// the shipped manifest (confirmed against Slack's current docs: bots.info
+// is users:read-scoped despite the "bots" name). A non-2xx HTTP response or
+// a Slack-level {"ok":false} both surface as an error; the connect handler
+// treats any error here as fatal (400, connect refused) — the app id is now
+// key material, not an optional enrichment, so there is no fallback.
+func slackBotsInfo(ctx context.Context, client *http.Client, botToken, botID string) (*botsInfoResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		slackAPIBase+"/bots.info?bot="+url.QueryEscape(botID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		Bot   struct {
+			AppID string `json:"app_id"`
+		} `json:"bot"`
+	}
+	if err := doSlackJSON(ctx, client, req, &out); err != nil {
+		return nil, err
+	}
+	if !out.OK {
+		return nil, fmt.Errorf("slack bots.info: %s", nonEmpty(out.Error, "not ok"))
+	}
+	if out.Bot.AppID == "" {
+		return nil, fmt.Errorf("slack bots.info: response carried no app_id")
+	}
+	return &botsInfoResult{AppID: out.Bot.AppID}, nil
 }
 
 // slackOpenConnection validates appToken (an app-level xapp- token) via

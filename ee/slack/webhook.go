@@ -29,10 +29,13 @@ const slackReplayWindow = 5 * time.Minute
 
 // slackEventEnvelope is the outer shape of every Events API delivery:
 // url_verification carries token/challenge; event_callback carries
-// event_id (the dedup key) plus the inner Event payload.
+// event_id (the dedup key) plus the inner Event payload. APIAppID is
+// present at the top level of every delivery (TFAC-533) — together with
+// TeamID it resolves the exact (workspace, app) row a delivery belongs to.
 type slackEventEnvelope struct {
 	Type      string          `json:"type"`
 	TeamID    string          `json:"team_id"`
+	APIAppID  string          `json:"api_app_id"`
 	Challenge string          `json:"challenge"`
 	EventID   string          `json:"event_id"`
 	Event     json.RawMessage `json:"event"`
@@ -63,13 +66,14 @@ type webhookHandler struct {
 
 // handleWebhook mirrors the GitHub receiver's discipline
 // (internal/server/github_webhooks.go): body cap, generic responses that
-// never disclose whether a team_id/org pairing exists, and a real
-// signature check before anything else runs.
+// never disclose whether a team_id/api_app_id/org pairing exists, and a
+// real signature check before anything else runs.
 //
 // Order matters and is deliberate:
-//  1. Resolve the workspace from the payload's team_id, cross-checked
-//     against the org_id path param — unknown or mismatched is a generic
-//     200-empty (never discloses which org owns a workspace).
+//  1. Resolve the workspace from the payload's (team_id, api_app_id) pair
+//     — TFAC-533's composite key — cross-checked against the org_id path
+//     param — unknown, missing api_app_id, or mismatched is a generic
+//     200-empty (never discloses which org owns a workspace/app).
 //  2. Signature — verified against the workspace's stored signing secret;
 //     a workspace with no signing secret (a socket-transport connection)
 //     is rejected the same as a bad signature: this endpoint isn't for it.
@@ -106,12 +110,16 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ws, err := slackstore.FromStores(h.stores).Workspaces.GetByWorkspaceIDSystem(r.Context(), envelope.TeamID)
+	ws, err := slackstore.FromStores(h.stores).Workspaces.GetByWorkspaceAppSystem(r.Context(), envelope.TeamID, envelope.APIAppID)
 	if err != nil {
 		httpx.InternalError(w, "slack-webhook", err)
 		return
 	}
 	if ws == nil || ws.OrgID != pathOrgID {
+		// Covers an unknown (team_id, api_app_id) pair AND a payload
+		// missing api_app_id entirely (envelope.APIAppID == "" never
+		// matches a row — api_app_id is NOT NULL) with the identical
+		// response as any other unrecognized delivery.
 		ackEmpty(w)
 		return
 	}
