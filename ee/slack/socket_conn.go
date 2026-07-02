@@ -206,8 +206,14 @@ func (c *appConnection) serveOnce(ctx context.Context, stores db.Stores, pipelin
 	if err != nil {
 		return time.Time{}, fmt.Errorf("read hello: %w", err)
 	}
+	if typ != slackws.MessageText {
+		return time.Time{}, fmt.Errorf("expected a text hello frame, got message type %v", typ)
+	}
 	var hello socketEnvelope
-	if typ != slackws.MessageText || json.Unmarshal(data, &hello) != nil || hello.Type != "hello" {
+	if err := json.Unmarshal(data, &hello); err != nil {
+		return time.Time{}, fmt.Errorf("unmarshal hello envelope: %w", err)
+	}
+	if hello.Type != "hello" {
 		return time.Time{}, fmt.Errorf("expected hello envelope, got %q", hello.Type)
 	}
 
@@ -224,8 +230,8 @@ func (c *appConnection) serveOnce(ctx context.Context, stores db.Stores, pipelin
 			continue
 		}
 		var env socketEnvelope
-		if json.Unmarshal(data, &env) != nil {
-			slackLog.Warn("slack socket mode: malformed envelope, dropping", "app", c.appID)
+		if err := json.Unmarshal(data, &env); err != nil {
+			slackLog.Warn("slack socket mode: malformed envelope, dropping", "app", c.appID, "error", err)
 			continue
 		}
 
@@ -248,7 +254,17 @@ func (c *appConnection) serveOnce(ctx context.Context, stores db.Stores, pipelin
 			// ack, so Slack redelivers (at-least-once); never ack-then-process.
 		default:
 			// Envelope types this leaf doesn't subscribe to (slash_commands,
-			// interactive, ...) — no ack, no error; forward-compatible no-op.
+			// interactive, ...) never arrive today — the manifest requests
+			// none of them — but Slack's protocol acks by envelope_id alone,
+			// not by type: any envelope carrying one must still be acked or
+			// Slack redelivers it indefinitely. Ack blindly and drop the
+			// payload; a bare `hello`/heartbeat-style envelope carries no
+			// envelope_id and is correctly skipped.
+			if env.EnvelopeID != "" {
+				if err := ackEnvelope(ctx, conn, env.EnvelopeID); err != nil {
+					return connectedAt, fmt.Errorf("ack: %w", err)
+				}
+			}
 		}
 	}
 }

@@ -12,6 +12,7 @@ package slack
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -170,8 +171,12 @@ type desiredApp struct {
 // so entitlement and the app-token secret ref are well-defined regardless
 // of which matching row supplies them — "credentials come off any of its
 // rows, same secret set" (see the ticket's architecture note). A nil Slack
-// store bundle (extension not linked) and Postgres-only ErrNotApplicableInLocal
-// both yield an empty desired set via the error return.
+// store bundle (extension not linked) and the Postgres-only store's
+// ErrNotApplicableInLocal both yield an empty desired set with a nil error —
+// run() already gates the reconciler out of local mode entirely, so this is
+// a defensive backstop, not a path exercised in production; the point is a
+// misconfigured/direct call here logs nothing instead of an ERROR line every
+// tick.
 func (m *socketManager) desiredApps(ctx context.Context) (map[string]desiredApp, error) {
 	bundle := slackstore.FromStores(m.stores)
 	if bundle == nil {
@@ -179,6 +184,9 @@ func (m *socketManager) desiredApps(ctx context.Context) (map[string]desiredApp,
 	}
 	rows, err := bundle.Workspaces.ListAllSystem(ctx)
 	if err != nil {
+		if errors.Is(err, db.ErrNotApplicableInLocal) {
+			return nil, nil
+		}
 		return nil, err
 	}
 

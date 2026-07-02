@@ -135,6 +135,18 @@ func sendDisconnect(t *testing.T, conn *slackws.Conn, reason string) {
 	}
 }
 
+// sendEnvelopeType writes an envelope of an arbitrary type/envelope_id —
+// used to exercise envelope types this leaf doesn't subscribe to
+// (slash_commands, interactive, ...), which Slack's protocol still expects
+// acked whenever they carry an envelope_id.
+func sendEnvelopeType(t *testing.T, conn *slackws.Conn, typ, envelopeID string) {
+	t.Helper()
+	env, _ := json.Marshal(map[string]any{"type": typ, "envelope_id": envelopeID})
+	if err := conn.Write(context.Background(), slackws.MessageText, env); err != nil {
+		t.Fatalf("write %s envelope: %v", typ, err)
+	}
+}
+
 func expectAck(t *testing.T, conn *slackws.Conn, envelopeID string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -360,6 +372,28 @@ func TestSocketManager_HappyPath_PublishesAndAcks(t *testing.T) {
 	if !ok || status.State != stateOpen {
 		t.Errorf("StatusFor = %+v, ok=%v; want state=open", status, ok)
 	}
+}
+
+// TestSocketManager_UnsubscribedEnvelopeType_StillAcked covers an envelope
+// type this leaf never subscribes to (the manifest requests no
+// slash_commands/interactive scopes) — Slack's protocol acks by
+// envelope_id alone, not by type, so failing to ack one would leave Slack
+// redelivering it indefinitely even though nothing here will ever consume
+// it. A subsequent events_api envelope on the same connection proves the
+// loop kept serving normally afterward.
+func TestSocketManager_UnsubscribedEnvelopeType_StillAcked(t *testing.T) {
+	withFastSocketTimings(t)
+	fake := newFakeSlackSocket(t)
+	rig := newSocketTestRig(t, socketTestRow(socketTestOrgID))
+	runManager(t, rig.mgr)
+
+	conn := fake.nextConn(t)
+	sendEnvelopeType(t, conn, "interactive", "Env-interactive")
+	expectAck(t, conn, "Env-interactive")
+
+	payload := eventCallbackPayload(socketTestWorkspace, socketTestAppID, "Ev-after-1", mentionInner("C1", "U1", "1.0"))
+	sendEventsAPI(t, conn, "Env-after", payload)
+	expectAck(t, conn, "Env-after")
 }
 
 // TestSocketManager_LoadBalancing_TwoWorkspacesOneApp is the regression test

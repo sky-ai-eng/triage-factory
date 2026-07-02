@@ -194,12 +194,17 @@ const CONNECTION_STATUS_DISPLAY: Record<
 // ConnectionStatusChip is the Socket Mode connection status indicator
 // (TFAC-534) — minimal by design: a colored dot plus a short label, with
 // the last error (if any) available on hover via title. Rows sharing an
-// app report the same connection object; a webhook-only row (no socket
-// connection exists for its app) renders the muted "n/a" chip instead.
+// app report the same connection object. No connection object means one of
+// two things: a webhook-only row (this app never gets a socket — renders
+// the muted "n/a" chip), or a socket-transport row the reconciler hasn't
+// started yet (a brief window right after connect, or before the first
+// tick — renders "Connecting…", same as an in-progress dial).
 function ConnectionStatusChip({ workspace }: { workspace: SlackWorkspace }) {
   const status = workspace.connection
   if (!status) {
-    if (workspace.transport !== 'socket') return null
+    if (workspace.transport === 'socket') {
+      return <StatusDot label="Connecting…" dot="bg-amber-500" text="text-amber-700" />
+    }
     return <StatusDot label="n/a" dot="bg-text-tertiary/40" text="text-text-tertiary" />
   }
   const display = CONNECTION_STATUS_DISPLAY[status.state] ?? CONNECTION_STATUS_DISPLAY.dialing
