@@ -311,10 +311,15 @@ func TestMarketplacePublish_NonWriterIs403(t *testing.T) {
 	}
 }
 
-// TestMarketplacePublish_CrossTeamIs403: a write-role member of a *different*
-// team cannot publish someone else's team object — the gate keys on the
-// source object's own team, not just "any write role somewhere".
-func TestMarketplacePublish_CrossTeamIs403(t *testing.T) {
+// TestMarketplacePublish_CrossTeamIs404: a write-role member of a *different*
+// team can't publish someone else's team object. Unlike the same-team-viewer
+// case (403 — visible but not writable), a member of teamB has no
+// prompts_select visibility into teamID's prompt at all (RLS: creator-or-
+// same-team), so buildListingSnapshot's Get returns nil and the response is
+// 404 — the same "invisible → 404, visible-but-blocked → 403" convention
+// authz.RequireTaskWrite documents elsewhere, so a prober on another team
+// never learns the prompt exists.
+func TestMarketplacePublish_CrossTeamIs404(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "not-yours", "mission", "", "")
 
@@ -322,8 +327,8 @@ func TestMarketplacePublish_CrossTeamIs403(t *testing.T) {
 		r.req(http.MethodPost, "/api/marketplace/listings", r.member, map[string]any{
 			"kind": "prompt", "source_id": promptID, "name": "n",
 		}))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("cross-team publish: status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-team publish: status = %d, want 404 (invisible under RLS, not merely unwritable); body=%s", rec.Code, rec.Body.String())
 	}
 }
 
