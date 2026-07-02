@@ -237,12 +237,18 @@ func (p JiraIssueBecameAtomicPredicate) Matches(m JiraIssueBecameAtomicMetadata)
 // Registration.
 // -----------------------------------------------------------------------------
 
+// Ownership declarations: every jira:issue:* type is OwnershipOwned — routed
+// via the owning-team ladder to whoever is assigned the issue — EXCEPT
+// issue:available, which is OwnershipPool (unassigned by definition; see its
+// metadata doc above). internal/routing derives its assignee-centric anchor
+// set from exactly this declaration (events.TypesWithOwnership(OwnershipOwned,
+// "jira:")) rather than a parallel hand-maintained list.
 func init() {
-	Register(newSchema[JiraIssueAssignedMetadata, JiraIssueAssignedPredicate](domain.EventJiraIssueAssigned))
-	Register(newSchema[JiraIssueAvailableMetadata, JiraIssueAvailablePredicate](domain.EventJiraIssueAvailable))
-	Register(newSchema[JiraIssueStatusChangedMetadata, JiraIssueStatusChangedPredicate](domain.EventJiraIssueStatusChanged))
-	Register(newSchema[JiraIssuePriorityChangedMetadata, JiraIssuePriorityChangedPredicate](domain.EventJiraIssuePriorityChanged))
-	Register(newSchema[JiraIssueCommentedMetadata, JiraIssueCommentedPredicate](domain.EventJiraIssueCommented))
-	Register(newSchema[JiraIssueCompletedMetadata, JiraIssueCompletedPredicate](domain.EventJiraIssueCompleted))
-	Register(newSchema[JiraIssueBecameAtomicMetadata, JiraIssueBecameAtomicPredicate](domain.EventJiraIssueBecameAtomic))
+	Register(newSchema[JiraIssueAssignedMetadata, JiraIssueAssignedPredicate](domain.EventJiraIssueAssigned, OwnershipOwned))
+	Register(newSchema[JiraIssueAvailableMetadata, JiraIssueAvailablePredicate](domain.EventJiraIssueAvailable, OwnershipPool))
+	Register(newSchema[JiraIssueStatusChangedMetadata, JiraIssueStatusChangedPredicate](domain.EventJiraIssueStatusChanged, OwnershipOwned))
+	Register(newSchema[JiraIssuePriorityChangedMetadata, JiraIssuePriorityChangedPredicate](domain.EventJiraIssuePriorityChanged, OwnershipOwned))
+	Register(newSchema[JiraIssueCommentedMetadata, JiraIssueCommentedPredicate](domain.EventJiraIssueCommented, OwnershipOwned))
+	Register(newSchema[JiraIssueCompletedMetadata, JiraIssueCompletedPredicate](domain.EventJiraIssueCompleted, OwnershipOwned))
+	Register(newSchema[JiraIssueBecameAtomicMetadata, JiraIssueBecameAtomicPredicate](domain.EventJiraIssueBecameAtomic, OwnershipOwned))
 }

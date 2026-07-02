@@ -126,11 +126,14 @@ func (p SystemTaskDelegationBlockedSubtasksPredicate) Matches(m SystemTaskDelega
 // Registration.
 // -----------------------------------------------------------------------------
 
+// System events are all OwnershipPool (the default classification) — none of
+// them route via the owning-team ladder or the requested-party path; they're
+// bus-only sentinels, never router-bound (see RouterBound).
 func init() {
-	Register(newSchema[SystemPollCompletedMetadata, SystemPollCompletedPredicate](domain.EventSystemPollCompleted))
-	Register(newSchema[SystemScoringCompletedMetadata, SystemScoringCompletedPredicate](domain.EventSystemScoringCompleted))
-	Register(newSchema[SystemDelegationCompletedMetadata, SystemDelegationCompletedPredicate](domain.EventSystemDelegationCompleted))
-	Register(newSchema[SystemDelegationFailedMetadata, SystemDelegationFailedPredicate](domain.EventSystemDelegationFailed))
-	Register(newSchema[SystemPromptAutoSuspendedMetadata, SystemPromptAutoSuspendedPredicate](domain.EventSystemPromptAutoSuspended))
-	Register(newSchema[SystemTaskDelegationBlockedSubtasksMetadata, SystemTaskDelegationBlockedSubtasksPredicate](domain.EventSystemTaskDelegationBlockedSubtasks))
+	Register(newSchema[SystemPollCompletedMetadata, SystemPollCompletedPredicate](domain.EventSystemPollCompleted, OwnershipPool))
+	Register(newSchema[SystemScoringCompletedMetadata, SystemScoringCompletedPredicate](domain.EventSystemScoringCompleted, OwnershipPool))
+	Register(newSchema[SystemDelegationCompletedMetadata, SystemDelegationCompletedPredicate](domain.EventSystemDelegationCompleted, OwnershipPool))
+	Register(newSchema[SystemDelegationFailedMetadata, SystemDelegationFailedPredicate](domain.EventSystemDelegationFailed, OwnershipPool))
+	Register(newSchema[SystemPromptAutoSuspendedMetadata, SystemPromptAutoSuspendedPredicate](domain.EventSystemPromptAutoSuspended, OwnershipPool))
+	Register(newSchema[SystemTaskDelegationBlockedSubtasksMetadata, SystemTaskDelegationBlockedSubtasksPredicate](domain.EventSystemTaskDelegationBlockedSubtasks, OwnershipPool))
 }

@@ -35,6 +35,12 @@ type EventSchema struct {
 	// Match evaluates a predicate JSON blob against a metadata JSON blob.
 	// Empty predJSON means "no filter" — always matches.
 	Match Matcher `json:"-"`
+	// Ownership classifies how this event type's routing participants + owner
+	// are resolved — the single per-type declaration internal/routing's
+	// resolveTeamRouting dispatches on. Zero value is OwnershipPool, so a
+	// schema built without setting it explicitly falls to the
+	// handler-team-grouping default.
+	Ownership OwnershipModel `json:"-"`
 }
 
 // FieldSchema describes one predicate field for the frontend editor.
@@ -54,7 +60,12 @@ var (
 )
 
 // Register adds an EventSchema. Call from each source file's init(). Panics
-// on duplicate registration — schemas are compile-time config.
+// on duplicate registration — schemas are compile-time config. Also panics if
+// s declares OwnershipRequestedParty for a non-github: event type: the
+// requested-party resolver (internal/routing's resolveRequestedPartyRouting)
+// is github-specific, so a source other than github's native review-request
+// handling that tries to claim this model is a wiring bug — better to fail
+// loudly at boot than silently downgrade at dispatch time.
 func Register(s EventSchema) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -63,6 +74,9 @@ func Register(s EventSchema) {
 	}
 	if _, dup := registry[s.EventType]; dup {
 		panic(fmt.Sprintf("events.Register: duplicate registration for %q", s.EventType))
+	}
+	if s.Ownership == OwnershipRequestedParty && !strings.HasPrefix(s.EventType, "github:") {
+		panic(fmt.Sprintf("events.Register: %q declares OwnershipRequestedParty, which only github's native review-request resolver supports", s.EventType))
 	}
 	registry[s.EventType] = s
 }
@@ -159,8 +173,10 @@ func predicateFieldKind(t reflect.Type) string {
 
 // newSchema is the internal constructor used by source-specific files. It
 // reflects over the predicate type to derive Fields and stitches a type-
-// erased matcher on top of the caller-supplied typed matcher.
-func newSchema[Meta any, Pred interface{ Matches(Meta) bool }](eventType string) EventSchema {
+// erased matcher on top of the caller-supplied typed matcher. ownership is
+// required (not defaulted) so every call site makes an explicit per-type
+// declaration instead of silently inheriting the zero value.
+func newSchema[Meta any, Pred interface{ Matches(Meta) bool }](eventType string, ownership OwnershipModel) EventSchema {
 	var m Meta
 	var p Pred
 	metaT := reflect.TypeOf(m)
@@ -190,5 +206,6 @@ func newSchema[Meta any, Pred interface{ Matches(Meta) bool }](eventType string)
 		PredicateType: predT,
 		Fields:        fieldsFromPredicate(predT),
 		Match:         matcher,
+		Ownership:     ownership,
 	}
 }

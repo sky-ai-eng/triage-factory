@@ -94,6 +94,23 @@ func TestMatcherAppliesPredicate(t *testing.T) {
 	}
 }
 
+// TestRegister_PanicsOnNonGithubRequestedParty pins the boot-time guard: only
+// github's native review-request resolver supports OwnershipRequestedParty,
+// so a schema for a different source declaring it must fail loudly at
+// registration rather than silently downgrading at dispatch time.
+func TestRegister_PanicsOnNonGithubRequestedParty(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("expected panic for a non-github event type declaring OwnershipRequestedParty")
+		}
+	}()
+	Register(EventSchema{
+		EventType: "fake:requested_party_bad",
+		Ownership: OwnershipRequestedParty,
+		Match:     func(string, string) (bool, error) { return true, nil },
+	})
+}
+
 // TestValidatePredicateJSON covers the happy path, unknown-field rejection,
 // and the empty / {} / null → match-all normalization.
 func TestValidatePredicateJSON(t *testing.T) {

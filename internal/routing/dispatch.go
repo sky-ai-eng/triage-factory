@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -236,11 +237,11 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 		ok                         bool
 	)
 	switch ownershipModelForEvent(evt.EventType) {
-	case OwnershipOwned:
+	case events.OwnershipOwned:
 		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveOwnedRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
-	case OwnershipRequestedParty:
+	case events.OwnershipRequestedParty:
 		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveRequestedPartyRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
-	default: // OwnershipPool
+	default: // events.OwnershipPool
 		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = resolvePoolRouting(matchedRules, matchedTriggers)
 	}
 	if !ok {

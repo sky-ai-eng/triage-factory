@@ -13,22 +13,24 @@ import (
 // code (lifecycle.go, dispatch.go, team_routing.go) reads them back without
 // knowing the concrete source.
 //
+// Ownership classification is NOT a hook here — a registered source declares
+// each event type's OwnershipModel the same way core does, via
+// internal/domain/events.Register at its own init()/install time. SourceHooks
+// is purely resolution BEHAVIOR for the Owned model: which team owns a given
+// occurrence (ResolveOwner) and whether a team tracks the event's scope
+// (TracksScope).
+//
 // Hooks must fail OPEN on store errors (return the permissive result + log),
 // mirroring teamTracksEventRepo (team_routing.go:77): dropping legitimate
 // work on a transient DB blip is worse than a briefly-wide gate.
 type SourceHooks struct {
-	// Ownership classifies an event type from this source. Required.
-	// Returning OwnershipRequestedParty is unsupported for registered sources
-	// (the requested-party resolver is GitHub-specific): dispatch logs an
-	// error and treats it as OwnershipPool.
-	Ownership func(eventType string) OwnershipModel
 	// ResolveOwner resolves (owner, ownerSet) for an Owned event — the
 	// analogue of authorCentricOwner's return contract (see its doc,
 	// team_routing.go:236): owner=="" + ownerSet==nil means nothing resolved.
-	// Required unconditionally, even for a source whose Ownership never
-	// returns OwnershipOwned: registration can't see what a classifier
-	// function will return, and dispatch calls this hook whenever the
-	// classification says Owned — a nil here would be a drain-goroutine
+	// Required unconditionally, even for a source whose event types never
+	// declare OwnershipOwned: registration can't see what event types this
+	// source will add in the future, and dispatch calls this hook whenever a
+	// type's declared model is Owned — a nil here would be a drain-goroutine
 	// panic on the first Owned event instead of a boot failure. A pool-only
 	// source supplies a stub returning ("", nil).
 	ResolveOwner func(ctx context.Context, orgID string, evt domain.Event, entityID string) (owner string, ownerSet []string)
@@ -82,8 +84,8 @@ func RegisterSource(source string, hooks SourceHooks) {
 	if reservedSourcePrefixes[source] {
 		panic("routing.RegisterSource: " + source + " is a built-in source and cannot be re-registered")
 	}
-	if hooks.Ownership == nil || hooks.ResolveOwner == nil || hooks.TracksScope == nil {
-		panic("routing.RegisterSource: Ownership, ResolveOwner, and TracksScope hooks are required")
+	if hooks.ResolveOwner == nil || hooks.TracksScope == nil {
+		panic("routing.RegisterSource: ResolveOwner and TracksScope hooks are required")
 	}
 	if _, exists := sourceRegistry[source]; exists {
 		panic("routing.RegisterSource: " + source + " is already registered")

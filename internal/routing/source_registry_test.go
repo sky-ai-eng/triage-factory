@@ -19,12 +19,16 @@ import (
 // file) because the registry seam is orthogonal to the predicate-schema
 // seam: matchPredicate still requires a registered schema to evaluate a
 // rule's predicate, so this test package registers its own match-all schema
-// purely to exercise HandleEvent end to end.
+// purely to exercise HandleEvent end to end. Ownership is declared here too
+// (OwnershipOwned) — a registered source's event types classify their
+// ownership model the same way core's do, via events.Register, not a
+// per-source hook.
 const fakeEventType = "fake:thing:happened"
 
 func init() {
 	events.Register(events.EventSchema{
 		EventType: fakeEventType,
+		Ownership: events.OwnershipOwned,
 		Match: func(predJSON, metaJSON string) (bool, error) {
 			return true, nil // match-all; these tests don't exercise predicate filtering
 		},
@@ -92,12 +96,12 @@ func fakeSourceRouter(database *sql.DB) *Router {
 		st.Orgs, st.Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 }
 
-// fakeSourceHooks builds SourceHooks for teamID: Ownership always Owned,
-// ResolveOwner always resolves to teamID, TracksScope controlled by
-// tracksScope so tests can flip the stage-1 gate.
+// fakeSourceHooks builds SourceHooks for teamID: ResolveOwner always
+// resolves to teamID, TracksScope controlled by tracksScope so tests can
+// flip the stage-1 gate. Ownership isn't part of SourceHooks — fakeEventType
+// declares OwnershipOwned once, in this file's init(), via events.Register.
 func fakeSourceHooks(teamID string, tracksScope bool) SourceHooks {
 	return SourceHooks{
-		Ownership: func(eventType string) OwnershipModel { return OwnershipOwned },
 		ResolveOwner: func(ctx context.Context, orgID string, evt domain.Event, entityID string) (string, []string) {
 			return teamID, []string{teamID}
 		},
@@ -106,14 +110,15 @@ func fakeSourceHooks(teamID string, tracksScope bool) SourceHooks {
 }
 
 // TestSourceRegistry_OwnershipModelForEvent pins wire point 1
-// (ownershipModelForEvent, lifecycle.go): a registered Owned source classifies
-// its event type as Owned, and EventSupportsWatch (which derives from the
-// same classifier) reports true for it.
+// (ownershipModelForEvent, lifecycle.go): a registered source's event type
+// classifies per its events.Register declaration (OwnershipOwned here), and
+// EventSupportsWatch (which derives from the same classifier) reports true
+// for it.
 func TestSourceRegistry_OwnershipModelForEvent(t *testing.T) {
 	t.Cleanup(ResetSources)
 	RegisterSource("fake", fakeSourceHooks("team-x", true))
 
-	if got := ownershipModelForEvent(fakeEventType); got != OwnershipOwned {
+	if got := ownershipModelForEvent(fakeEventType); got != events.OwnershipOwned {
 		t.Errorf("ownershipModelForEvent(%q) = %v, want OwnershipOwned", fakeEventType, got)
 	}
 	if !EventSupportsWatch(fakeEventType) {
@@ -184,25 +189,6 @@ func TestSourceRegistry_HandleEvent_TracksScopeFalse_DropsHandler(t *testing.T) 
 	}
 }
 
-// TestSourceRegistry_RequestedPartyDowngradedToPool pins the documented
-// behavior for an unsupported Ownership return: registered sources can't use
-// OwnershipRequestedParty (the requested-party resolver is GitHub-specific),
-// so ownershipModelForEvent downgrades it to OwnershipPool.
-func TestSourceRegistry_RequestedPartyDowngradedToPool(t *testing.T) {
-	t.Cleanup(ResetSources)
-	RegisterSource("fake", SourceHooks{
-		Ownership: func(eventType string) OwnershipModel { return OwnershipRequestedParty },
-		ResolveOwner: func(ctx context.Context, orgID string, evt domain.Event, entityID string) (string, []string) {
-			return "", nil
-		},
-		TracksScope: func(ctx context.Context, evt domain.Event, teamID string) bool { return true },
-	})
-
-	if got := ownershipModelForEvent(fakeEventType); got != OwnershipPool {
-		t.Errorf("ownershipModelForEvent(%q) = %v, want OwnershipPool (RequestedParty is unsupported for registered sources)", fakeEventType, got)
-	}
-}
-
 // TestRouterBound pins the durability predicate internal/ingest gates its
 // outbox enqueue on: the built-in github:/jira: sources are always
 // router-bound, system events never are, and a registered source's prefix
@@ -257,11 +243,11 @@ func TestRegisterSource_PanicsOnMissingHooks(t *testing.T) {
 }
 
 // TestRegisterSource_PanicsOnNilResolveOwner pins that ResolveOwner is
-// required unconditionally, not just "when Ownership returns Owned":
-// registration can't see what a classifier function will return, and
-// resolveOwnedRouting calls the hook whenever the classification says Owned
-// — a nil ResolveOwner would otherwise be a drain-goroutine panic on the
-// first Owned event instead of a boot failure.
+// required unconditionally, not just "for a source with an Owned event type":
+// registration can't see what event types this source will add in the
+// future, and resolveOwnedRouting calls the hook whenever a type's declared
+// model is Owned — a nil ResolveOwner would otherwise be a drain-goroutine
+// panic on the first Owned event instead of a boot failure.
 func TestRegisterSource_PanicsOnNilResolveOwner(t *testing.T) {
 	defer func() {
 		if recover() == nil {
@@ -269,7 +255,6 @@ func TestRegisterSource_PanicsOnNilResolveOwner(t *testing.T) {
 		}
 	}()
 	RegisterSource("fake-nil-resolve", SourceHooks{
-		Ownership:   func(string) OwnershipModel { return OwnershipPool },
 		TracksScope: func(context.Context, domain.Event, string) bool { return true },
 	})
 }
