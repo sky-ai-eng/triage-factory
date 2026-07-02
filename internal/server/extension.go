@@ -85,7 +85,8 @@ type ExtensionAPI interface {
 	// process lifetime (run the worker loop directly); respect ctx.Done()
 	// for graceful stop. Hooks are fired in registration order but run
 	// concurrently; there is no join on shutdown — a worker needing drain
-	// time handles it inside the hook before returning.
+	// time handles it inside the hook before returning. Panics at
+	// registration time if hook is nil.
 	OnReady(hook func(ctx context.Context))
 
 	// --- login seam (see login_ext.go) ---
@@ -210,8 +211,15 @@ func (a serverExtensionAPI) PublishEvent(evt domain.Event) {
 // OnReady collects the hook onto the server's readyHooks slice. Called
 // during routes() install, single-threaded, same no-lock startup-write
 // contract as registeredExtensions — StartExtensionWorkers is the only
-// reader, and it never runs concurrently with install.
+// reader, and it never runs concurrently with install. Panics at boot on a
+// nil hook — same fail-fast-at-registration convention as the other core
+// registries (routing.RegisterSource, events.Register) — rather than
+// deferring the failure to a nil-func panic inside a goroutine when
+// StartExtensionWorkers fires it later.
 func (a serverExtensionAPI) OnReady(hook func(ctx context.Context)) {
+	if hook == nil {
+		panic("ExtensionAPI.OnReady: hook must not be nil")
+	}
 	a.s.readyHooks = append(a.s.readyHooks, hook)
 }
 

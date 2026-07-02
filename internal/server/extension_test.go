@@ -75,6 +75,26 @@ func TestExtensionAPI_Bus_ReadsThroughToSetEventBus(t *testing.T) {
 	}
 }
 
+// TestExtensionAPI_OnReady_NilHookPanics pins the fail-fast-at-registration
+// contract shared with the other core registries (routing.RegisterSource,
+// events.Register): a nil hook panics immediately during install, rather
+// than being silently collected and later crashing a goroutine — with a much
+// less useful stack trace — when StartExtensionWorkers calls it.
+func TestExtensionAPI_OnReady_NilHookPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("OnReady(nil) did not panic")
+		}
+		if msg, ok := r.(string); !ok || !strings.Contains(msg, "OnReady") {
+			t.Errorf("panic value = %v, want a message naming OnReady", r)
+		}
+	}()
+
+	api := serverExtensionAPI{&Server{}}
+	api.OnReady(nil)
+}
+
 // TestExtensionAPI_OnReady_DoesNotFireUntilStarted pins that registering a
 // hook (the install-time action) is inert on its own — it must not run until
 // StartExtensionWorkers fires it, mirroring the real boot order where
