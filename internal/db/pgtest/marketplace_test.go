@@ -298,6 +298,12 @@ func TestMarketplaceRLS_InstallRequiresInstallingTeamWrite(t *testing.T) {
 	teamB := SeedTeam(t, h, orgA, "teamB")
 	erin := SeedUser(t, h, "erin")
 	AddOrgMember(t, h, erin, orgA, teamB, "member", "viewer")
+	// teamB needs its own admin (tf.guard_team_admins, TFAC-444): erin's role
+	// gets mutated below, and a team with zero admins trips "each team must
+	// retain at least one admin role" on that write regardless of whether
+	// the write itself removed the last admin.
+	teamBAdmin := SeedUser(t, h, "teamBAdmin")
+	AddOrgMember(t, h, teamBAdmin, orgA, teamB, "member", "admin")
 
 	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Installable", "")
 
