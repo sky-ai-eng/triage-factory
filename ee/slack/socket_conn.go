@@ -197,7 +197,10 @@ func (c *appConnection) serveOnce(ctx context.Context, stores db.Stores, pipelin
 	if err != nil {
 		return time.Time{}, fmt.Errorf("websocket dial: %w", err)
 	}
-	defer conn.CloseNow()
+	// Best-effort: this connection is being torn down regardless (returning
+	// from serveOnce always means dialing fresh next), so a close failure
+	// here (already-dead socket, peer gone) is not actionable.
+	defer func() { _ = conn.CloseNow() }()
 
 	typ, data, err := readEnvelopeFrame(ctx, conn, socketHelloTimeout)
 	if err != nil {
