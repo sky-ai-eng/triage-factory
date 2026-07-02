@@ -406,6 +406,26 @@ func (s *marketplaceStore) GetActiveBySource(ctx context.Context, orgID, sourceI
 	return &l, nil
 }
 
+// GetBySource mirrors GetActiveBySource but drops the status filter — it
+// resolves a listing for source_id regardless of published/delisted state.
+// sourceID == "" short-circuits for the same reason GetActiveBySource does.
+func (s *marketplaceStore) GetBySource(ctx context.Context, orgID, sourceID string) (*domain.MarketplaceListing, error) {
+	if sourceID == "" {
+		return nil, nil
+	}
+	l, err := scanListingRowPG(s.q.QueryRowContext(ctx, `
+		SELECT `+listingColumnsPG+`
+		FROM marketplace_listings WHERE org_id = $1 AND source_id = $2::uuid
+	`, orgID, sourceID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &l, nil
+}
+
 func (s *marketplaceStore) Vote(ctx context.Context, orgID, listingID, userID string) error {
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO marketplace_votes (listing_id, org_id, user_id, created_at) VALUES ($1::uuid, $2, $3::uuid, now())

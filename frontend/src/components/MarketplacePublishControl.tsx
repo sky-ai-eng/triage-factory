@@ -269,6 +269,9 @@ function PublishDialog({
             transition={{ duration: 0.15 }}
           >
             <div
+              role="dialog"
+              aria-modal="true"
+              aria-label={isRepublish ? 'Publish update' : 'Publish to marketplace'}
               className="pointer-events-auto bg-surface-raised/95 backdrop-blur-2xl border border-border-glass rounded-2xl shadow-2xl shadow-black/10 w-[480px] max-h-[85vh] flex flex-col overflow-hidden"
               onClick={(e) => e.stopPropagation()}
             >
@@ -278,7 +281,9 @@ function PublishDialog({
                   {isRepublish ? 'Publish update' : 'Publish to marketplace'}
                 </h2>
                 <button
+                  type="button"
                   onClick={onClose}
+                  aria-label="Close"
                   className="text-text-tertiary hover:text-text-secondary transition-colors"
                 >
                   <X size={18} />

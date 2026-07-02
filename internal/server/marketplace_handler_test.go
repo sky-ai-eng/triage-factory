@@ -546,6 +546,90 @@ func TestMarketplaceDelistRelist_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestMarketplacePublish_DuplicateDelistedSourceIs409: publishing a source
+// whose prior listing was delisted must not mint a second listing for the
+// same source_id (GetActiveBySource's published-only filter would miss
+// this — see GetBySource) — it 409s and steers the caller to relist.
+func TestMarketplacePublish_DuplicateDelistedSourceIs409(t *testing.T) {
+	r := newMarketplaceRig(t)
+	promptID := r.seedPrompt(t, r.teamID, "dup-delisted", "mission", "", "")
+
+	firstRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
+		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
+			"kind": "prompt", "source_id": promptID, "name": "n",
+		}))
+	if firstRec.Code != http.StatusCreated {
+		t.Fatalf("first publish: status = %d, want 201; body=%s", firstRec.Code, firstRec.Body.String())
+	}
+	var firstResp struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(firstRec.Body.Bytes(), &firstResp)
+
+	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+firstResp.ID+"/delist", r.admin, nil)
+	delistReq.SetPathValue("id", firstResp.ID)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq); rec.Code != http.StatusNoContent {
+		t.Fatalf("delist: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+
+	secondRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
+		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
+			"kind": "prompt", "source_id": promptID, "name": "n again",
+		}))
+	if secondRec.Code != http.StatusConflict {
+		t.Fatalf("publish over a delisted source: status = %d, want 409; body=%s", secondRec.Code, secondRec.Body.String())
+	}
+
+	var count int
+	if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_listings WHERE source_id = $1`, promptID).Scan(&count); err != nil {
+		t.Fatalf("count listings: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("listing count for source = %d after blocked second publish, want 1 (no duplicate)", count)
+	}
+}
+
+// TestMarketplaceListingBySource_ShowsDelisted: the by-source lookup must
+// keep resolving a delisted listing (not revert to null) so the editor can
+// show "Delisted" + Relist instead of "never published" — a null response
+// here would let the frontend offer Publish again and mint a duplicate.
+func TestMarketplaceListingBySource_ShowsDelisted(t *testing.T) {
+	r := newMarketplaceRig(t)
+	promptID := r.seedPrompt(t, r.teamID, "delisted-lookup", "mission", "", "")
+
+	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
+		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
+			"kind": "prompt", "source_id": promptID, "name": "n",
+		}))
+	var pubResp struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(publishRec.Body.Bytes(), &pubResp)
+
+	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+pubResp.ID+"/delist", r.admin, nil)
+	delistReq.SetPathValue("id", pubResp.ID)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq); rec.Code != http.StatusNoContent {
+		t.Fatalf("delist: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+
+	afterReq := r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil)
+	afterReq.SetPathValue("source_id", promptID)
+	afterRec := doMarketplaceJSON(r.mh.handleMarketplaceListingBySource, afterReq)
+	if afterRec.Code != http.StatusOK {
+		t.Fatalf("by-source after delist: status = %d, want 200; body=%s", afterRec.Code, afterRec.Body.String())
+	}
+	var listing domain.MarketplaceListing
+	if err := json.Unmarshal(afterRec.Body.Bytes(), &listing); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if listing.ID != pubResp.ID {
+		t.Fatalf("by-source id after delist = %q, want %q (not null)", listing.ID, pubResp.ID)
+	}
+	if listing.Status != domain.ListingStatusDelisted {
+		t.Errorf("by-source status after delist = %q, want delisted", listing.Status)
+	}
+}
+
 // TestMarketplaceListingBySource_RoundTrip: the by-source lookup is null
 // before publish and resolves the active listing after.
 func TestMarketplaceListingBySource_RoundTrip(t *testing.T) {

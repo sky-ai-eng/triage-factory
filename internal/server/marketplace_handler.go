@@ -81,6 +81,16 @@ func (mh *marketplaceHandler) gateMarketplace(w http.ResponseWriter, r *http.Req
 	return orgID, userID, true
 }
 
+// duplicateSourceMessage renders the 409 body for a source that already has
+// a listing — phrased differently for a delisted listing (relist, don't
+// publish a duplicate) vs. a published one (republish to push an update).
+func duplicateSourceMessage(kind, status string) string {
+	if status == domain.ListingStatusDelisted {
+		return "this " + kind + " was previously published and is currently delisted — use the relist endpoint instead of publishing a duplicate"
+	}
+	return "this " + kind + " is already published — use the republish endpoint to push an update"
+}
+
 // validateMarketplaceEventTypes rejects any event type not present in the
 // events_catalog registry — the same check event_handlers_handler's create
 // path runs, reused here so a listing's facets can never reference an id the
@@ -214,13 +224,16 @@ func (mh *marketplaceHandler) handleMarketplacePublish(w http.ResponseWriter, r 
 	}
 
 	// Resolve the source object + its owning team, and check for an existing
-	// active listing, all under one read tx — a duplicate active source means
-	// the client should have offered republish instead (409).
+	// listing for this source — published OR delisted (GetBySource, not
+	// GetActiveBySource: a delisted listing must route the caller to relist,
+	// not let them mint a second listing for the same source_id — the
+	// published-only partial unique index wouldn't catch that at the DB
+	// layer) — all under one read tx.
 	var (
-		snap           domain.ListingSnapshot
-		teamID         string
-		sourceNotFound bool
-		activeExisting bool
+		snap            domain.ListingSnapshot
+		teamID          string
+		sourceNotFound  bool
+		existingListing *domain.MarketplaceListing
 	)
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -232,12 +245,8 @@ func (mh *marketplaceHandler) handleMarketplacePublish(w http.ResponseWriter, r 
 		if e != nil {
 			return e
 		}
-		existing, e := tx.Marketplace.GetActiveBySource(r.Context(), orgID, req.SourceID)
-		if e != nil {
-			return e
-		}
-		activeExisting = existing != nil
-		return nil
+		existingListing, e = tx.Marketplace.GetBySource(r.Context(), orgID, req.SourceID)
+		return e
 	}); err != nil {
 		internalError(w, "marketplace", err)
 		return
@@ -246,10 +255,8 @@ func (mh *marketplaceHandler) handleMarketplacePublish(w http.ResponseWriter, r 
 		notFound(w, req.Kind)
 		return
 	}
-	if activeExisting {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "this " + req.Kind + " is already published — use the republish endpoint to push an update",
-		})
+	if existingListing != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": duplicateSourceMessage(req.Kind, existingListing.Status)})
 		return
 	}
 
@@ -477,10 +484,16 @@ func (mh *marketplaceHandler) handleMarketplaceListingRelist(w http.ResponseWrit
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleMarketplaceListingBySource resolves the org's currently-published
-// listing for a team-side source object, or null when none — the badge /
-// republish-affordance lookup the editor drives from a blueprint or prompt's
-// id. Any org member may read (no team-write gate — this is display-only).
+// handleMarketplaceListingBySource resolves the org's listing for a
+// team-side source object — published OR delisted — or null when none. The
+// badge/publish-affordance lookup the editor drives from a blueprint or
+// prompt's id: GetBySource (not GetActiveBySource) so a delisted object
+// still reports its listing and the editor can offer Relist instead of
+// reverting to "never published" (which would let a client mint a
+// duplicate listing for the same source on the next publish). RLS scopes a
+// delisted row to the publisher team — a non-publisher caller sees null,
+// same as before. Any org member may read (no team-write gate — this is
+// display-only).
 //
 // GET /api/marketplace/listings/by-source/{source_id}
 func (mh *marketplaceHandler) handleMarketplaceListingBySource(w http.ResponseWriter, r *http.Request) {
@@ -493,7 +506,7 @@ func (mh *marketplaceHandler) handleMarketplaceListingBySource(w http.ResponseWr
 	var listing *domain.MarketplaceListing
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		listing, e = tx.Marketplace.GetActiveBySource(r.Context(), orgID, sourceID)
+		listing, e = tx.Marketplace.GetBySource(r.Context(), orgID, sourceID)
 		return e
 	}); err != nil {
 		internalError(w, "marketplace", err)

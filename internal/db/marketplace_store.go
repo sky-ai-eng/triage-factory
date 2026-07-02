@@ -74,12 +74,24 @@ type MarketplaceStore interface {
 	// (no viewer context).
 	Get(ctx context.Context, orgID, listingID, viewerUserID string) (domain.ListingDetail, error)
 
-	// GetActiveBySource resolves the org's currently-published listing for a
-	// team-side source object (source_id), or (nil, nil) if none — the
-	// republish/"already published" badge lookup the publish flow uses
-	// before deciding whether to Publish or PublishVersion. Mirrors the
-	// marketplace_listings_source_active partial unique index.
+	// GetActiveBySource resolves the org's currently-*published* listing for
+	// a team-side source object (source_id), or (nil, nil) if none. Mirrors
+	// the marketplace_listings_source_active partial unique index (which is
+	// itself published-only — a delisted row doesn't count against it, so
+	// this method must not be used as "does this source have a listing at
+	// all" — see GetBySource for that).
 	GetActiveBySource(ctx context.Context, orgID, sourceID string) (*domain.MarketplaceListing, error)
+
+	// GetBySource resolves the org's listing for a team-side source object
+	// regardless of status (published OR delisted), or (nil, nil) if none —
+	// the publish flow's duplicate-source check (a delisted listing must
+	// route the caller to relist, not let them mint a second listing for the
+	// same source) and the editor's by-source badge lookup (so a delisted
+	// object still shows "Delisted" + Relist instead of reverting to "never
+	// published"). RLS scopes a delisted row to the publisher team the same
+	// way Get does — a non-publisher caller simply sees nothing, same as
+	// GetActiveBySource.
+	GetBySource(ctx context.Context, orgID, sourceID string) (*domain.MarketplaceListing, error)
 
 	// Vote records userID's 'recommend' vote on listingID. Idempotent — a
 	// repeat vote from the same user is a no-op (PK on (listing_id,
