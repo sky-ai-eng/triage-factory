@@ -56,6 +56,13 @@ type fakeIdentityStore struct {
 
 	markAttemptCalls int
 	upsertCalls      int
+
+	// done, if non-nil, receives a value whenever UpsertResolvedSystem or
+	// MarkAttemptSystem completes — the deterministic "the detached
+	// resolveSender goroutine finished" signal a caller-side test waits on
+	// instead of sleeping/polling. Buffered so a write never blocks a
+	// caller that isn't listening.
+	done chan struct{}
 }
 
 func newFakeIdentityStore() *fakeIdentityStore {
@@ -80,6 +87,7 @@ func (f *fakeIdentityStore) LookupSystem(_ context.Context, ws, su string) (*sla
 
 func (f *fakeIdentityStore) UpsertResolvedSystem(_ context.Context, ws, su, userID, displayName string) error {
 	f.mu.Lock()
+	defer f.signalDone()
 	defer f.mu.Unlock()
 	f.upsertCalls++
 	if f.upsertErr != nil {
@@ -93,10 +101,24 @@ func (f *fakeIdentityStore) UpsertResolvedSystem(_ context.Context, ws, su, user
 	return nil
 }
 
+// signalDone is a non-blocking notify: it never blocks a caller that
+// isn't listening on f.done, and is safe to call whether or not a test
+// configured a done channel.
+func (f *fakeIdentityStore) signalDone() {
+	if f.done == nil {
+		return
+	}
+	select {
+	case f.done <- struct{}{}:
+	default:
+	}
+}
+
 // MarkAttemptSystem mirrors the real store's ON CONFLICT ... WHERE user_id
 // IS NULL guard: a resolved row is left completely untouched.
 func (f *fakeIdentityStore) MarkAttemptSystem(_ context.Context, ws, su, displayName string) error {
 	f.mu.Lock()
+	defer f.signalDone()
 	defer f.mu.Unlock()
 	f.markAttemptCalls++
 	if f.markErr != nil {

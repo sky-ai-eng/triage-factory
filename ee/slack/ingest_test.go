@@ -242,6 +242,61 @@ func TestHandleEventCallback_DeliveryStoreError(t *testing.T) {
 	}
 }
 
+// TestHandleEventCallback_DispatchesIdentityResolution is the TFAC-531 call-
+// site wiring test: a fresh app_mention both publishes its event AND
+// dispatches resolveSender for ev.User (the mentioning human's Slack user
+// id) against ws — the one line deferred from TFAC-531 until this ticket
+// (TFAC-530) merged. Runs the real IdentityResolver against fakes rather
+// than a nil identity (every other test in this file), so this is an
+// end-to-end check of the wiring itself; resolveSender's own branch logic
+// is covered exhaustively in identity_test.go.
+func TestHandleEventCallback_DispatchesIdentityResolution(t *testing.T) {
+	client, hits := newUsersInfoServer(t, map[string]any{
+		"ok": true,
+		"user": map[string]any{
+			"is_bot": false, "deleted": false,
+			"profile": map[string]any{"email": "ada@example.com", "real_name": "Ada Lovelace"},
+		},
+	})
+	identities := newFakeIdentityStore()
+	identities.done = make(chan struct{}, 1)
+	resolver := &IdentityResolver{
+		secrets:    &fakeSecrets{token: "xoxb-test"},
+		users:      &fakeUsers{ids: []string{"user-1"}},
+		identities: identities,
+		client:     client,
+	}
+	p := &ingestPipeline{
+		entities:   newFakeEntities(),
+		deliveries: newFakeDeliveries(),
+		publish:    func(domain.Event) {},
+		identity:   resolver,
+	}
+	ws := testWorkspaceRow("org-1")
+	ev := inboundMention{
+		Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U0SENDER1",
+		Text: "hey <@BOT>", TS: "1600000000.000100",
+	}
+
+	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+
+	select {
+	case <-identities.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolveSender never completed — handleEventCallback did not dispatch it")
+	}
+
+	if *hits != 1 {
+		t.Errorf("users.info hits = %d; want 1 (resolveSender should have called it)", *hits)
+	}
+	row := identities.rows[identityKey(ws.WorkspaceID, "U0SENDER1")]
+	if row == nil || row.UserID == nil || *row.UserID != "user-1" {
+		t.Fatalf("row = %+v; want resolved to user-1", row)
+	}
+}
+
 // TestParseSlackTS covers the fractional-second parsing, including the
 // unparseable-input "unknown" contract.
 func TestParseSlackTS(t *testing.T) {

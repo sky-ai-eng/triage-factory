@@ -6,14 +6,13 @@
 // model: visibility is channel/team, acting identity is the bot, audit is
 // per-message).
 //
-// Best-effort, never gating: resolution is meant to run in a detached
-// goroutine started AFTER the triggering event has already published, off
+// Best-effort, never gating: resolution runs in a detached goroutine
+// started AFTER the triggering event has already published, off
 // context.Background() plus a short timeout — never the request context.
 // Every failure here is logged and swallowed; nothing blocks or fails the
 // ingest path, and the Events API's 3-second ack budget never touches a
-// users.info round-trip. The one call-site TFAC-530 owns
-// (handleEventCallback) is not wired here — see TFAC-531's ticket note on
-// building ahead of that dependency.
+// users.info round-trip. Wired at ingest.go's handleEventCallback (the
+// TFAC-530 call site) and constructed once at install (install.go).
 package slack
 
 import (

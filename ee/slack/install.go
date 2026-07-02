@@ -11,6 +11,8 @@
 // published events reach the in-memory bus only — routing.RouterBound
 // stays false for "slack:", so nothing is durably enqueued or routed yet.
 // The Socket Mode transport (feeding the same pipeline) is the next leaf.
+// The pipeline also dispatches best-effort sender identity capture
+// (identity.go, TFAC-531) after each publish — detached, never gating.
 //
 // Licensed under the Enterprise Edition License (see ee/LICENSE), not the
 // repository-root BSL.
@@ -63,6 +65,7 @@ func install(api server.ExtensionAPI) {
 			entities:   stores.Entities,
 			deliveries: slackstore.FromStores(stores).Deliveries,
 			publish:    api.PublishEvent,
+			identity:   NewIdentityResolver(stores),
 		},
 	}
 	api.Raw("POST /api/webhooks/slack/{org_id}", api.PreAuthRateLimit(http.HandlerFunc(wh.handleWebhook)))

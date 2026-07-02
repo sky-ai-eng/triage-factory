@@ -50,6 +50,11 @@ type ingestPipeline struct {
 	entities   entityFinder
 	deliveries slackstore.DeliveryStore
 	publish    func(domain.Event)
+	// identity resolves the mention's sender to a TF user (TFAC-531),
+	// best-effort and detached — see resolveSender's doc. nil-safe: tests
+	// and any future caller that doesn't need identity capture simply
+	// construct ingestPipeline without it.
+	identity *IdentityResolver
 }
 
 // handleEventCallback is the one function both transports call for an
@@ -118,6 +123,15 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 		MetadataJSON: string(metaJSON),
 		OccurredAt:   parseSlackTS(ev.TS),
 	})
+
+	// Best-effort sender identity capture (TFAC-531), detached from the
+	// publish above: it must never make a real Slack mention wait on a
+	// users.info round-trip, and its own internal timeout bounds the whole
+	// chain regardless of this context.Background() being long-lived.
+	if p.identity != nil {
+		go p.identity.resolveSender(context.Background(), ws, ev.User)
+	}
+
 	return nil
 }
 
