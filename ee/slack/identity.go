@@ -34,6 +34,14 @@ import (
 // nothing at all, so the very next mention retries immediately.
 const slackIdentityRetryTTL = 24 * time.Hour
 
+// slackIdentityResolveTimeout bounds the whole resolveSender chain
+// (lookup, secret read, users.info, verified-email lookup) regardless of
+// what ctx a caller passes in. Callers are expected to already pass a
+// short-lived detached context (see resolveSender's doc), but this makes
+// the "never touches the ingest request's ack budget" guarantee structural
+// rather than only a calling convention.
+const slackIdentityResolveTimeout = 10 * time.Second
+
 // IdentityResolver resolves the Slack sender of an @mention to a TF user,
 // writing the outcome (positive or negative) into user_slack_identities.
 type IdentityResolver struct {
@@ -72,6 +80,8 @@ func (r *IdentityResolver) resolveSender(ctx context.Context, ws slackstore.Work
 	if slackUserID == "" {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, slackIdentityResolveTimeout)
+	defer cancel()
 
 	existing, err := r.identities.LookupSystem(ctx, ws.WorkspaceID, slackUserID)
 	if err != nil {
@@ -107,7 +117,10 @@ func (r *IdentityResolver) resolveSender(ctx context.Context, ws slackstore.Work
 	}
 
 	displayName := nonEmpty(info.DisplayName, info.RealName)
-	email := strings.ToLower(strings.TrimSpace(info.Email))
+	// UserIDsForVerifiedEmailSystem lowercases/trims internally, so this only
+	// trims far enough to detect "no email on the profile" — no need to
+	// duplicate the case-folding the store already does.
+	email := strings.TrimSpace(info.Email)
 	if info.IsBot || info.Deleted || email == "" {
 		r.markUnresolved(ctx, ws, slackUserID, displayName)
 		return

@@ -105,16 +105,7 @@ func (s *usersStore) UserIDsForGitHubLoginSystem(ctx context.Context, githubBase
 	if err != nil {
 		return nil, fmt.Errorf("read user_github_identities by login: %w", err)
 	}
-	defer rows.Close()
-	out := []string{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan user_github_identities.user_id: %w", err)
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
+	return scanIDs(rows, "user_github_identities.user_id")
 }
 
 func (s *usersStore) UserIDsForVerifiedEmailSystem(ctx context.Context, email string) ([]string, error) {
@@ -130,12 +121,20 @@ func (s *usersStore) UserIDsForVerifiedEmailSystem(ctx context.Context, email st
 	if err != nil {
 		return nil, fmt.Errorf("read user_identities by verified email: %w", err)
 	}
+	return scanIDs(rows, "user_identities.user_id")
+}
+
+// scanIDs drains rows of a single user_id::text column into a []string,
+// closing rows and wrapping any scan error with errContext. Shared by the
+// UserIDsFor*System reverse lookups above and below, which differ only in
+// their query and error context.
+func scanIDs(rows *sql.Rows, errContext string) ([]string, error) {
 	defer rows.Close()
 	out := []string{}
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan user_identities.user_id: %w", err)
+			return nil, fmt.Errorf("scan %s: %w", errContext, err)
 		}
 		out = append(out, id)
 	}
@@ -233,16 +232,7 @@ func (s *usersStore) UserIDsForJiraAccountSystem(ctx context.Context, jiraBaseUR
 	if err != nil {
 		return nil, fmt.Errorf("read user_jira_identities by account: %w", err)
 	}
-	defer rows.Close()
-	out := []string{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan user_jira_identities.user_id: %w", err)
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
+	return scanIDs(rows, "user_jira_identities.user_id")
 }
 
 func getJiraIdentity(ctx context.Context, q queryer, userID, jiraBaseURL string) (string, string, error) {

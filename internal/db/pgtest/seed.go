@@ -76,6 +76,29 @@ func SeedOrgWithUser(t *testing.T, h *Harness, displayName string) (orgID, userI
 	return
 }
 
+// SeedIdentity inserts a public.user_identities row linking a fresh
+// auth.users login identity to principalID, carrying email with the given
+// verified flag. principalID must already exist in users (see SeedUser) —
+// a principal can hold more than one login identity (auth_user_id is the
+// table's PK, so each call mints its own fresh auth.users row), which is
+// how a test pins a specific email/verified combination against an
+// existing user (e.g. an unverified address, or a second verified email
+// shared with another principal to exercise ambiguous-match handling).
+// provider is always "github"; callers that need a different provider
+// value seed the row directly.
+func SeedIdentity(t *testing.T, h *Harness, principalID, email string, verified bool) (authUserID string) {
+	t.Helper()
+	if err := h.AdminDB.QueryRow(`SELECT gen_random_uuid()`).Scan(&authUserID); err != nil {
+		t.Fatalf("gen auth_user_id: %v", err)
+	}
+	h.SeedAuthUser(t, authUserID, authUserID+"@auth.test")
+	MustExec(t, h.AdminDB, `
+		INSERT INTO user_identities (auth_user_id, user_id, provider, email, email_verified)
+		VALUES ($1, $2, 'github', $3, $4)
+	`, authUserID, principalID, email, verified)
+	return authUserID
+}
+
 // AddOrgMember adds an existing user to an existing org with the given
 // org_role and the given team_role on the named team. Models the
 // production "admin invites a user" flow which materializes both rows.

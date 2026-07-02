@@ -9,24 +9,6 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
-// seedIdentity inserts a public.user_identities row linking a fresh
-// auth.users identity to principalID, mirroring the seeding pattern used by
-// internal/server's auth_handlers_test.go (there is no pgtest helper for
-// this multi-mode-only auth table, so tests write it directly via the
-// admin pool like the login path itself would).
-func seedIdentity(t *testing.T, h *pgtest.Harness, principalID, email string, verified bool) {
-	t.Helper()
-	var authUserID string
-	if err := h.AdminDB.QueryRow(`SELECT gen_random_uuid()`).Scan(&authUserID); err != nil {
-		t.Fatalf("gen auth_user_id: %v", err)
-	}
-	h.SeedAuthUser(t, authUserID, authUserID+"@auth.test")
-	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO user_identities (auth_user_id, user_id, provider, email, email_verified)
-		VALUES ($1, $2, 'github', $3, $4)
-	`, authUserID, principalID, email, verified)
-}
-
 // TestUsersStore_Postgres_UserIDsForVerifiedEmailSystem exercises the
 // set-valued verified-email lookup backing TFAC-531's Slack identity
 // resolver: a verified match is returned, an unverified one is excluded,
@@ -45,10 +27,10 @@ func TestUsersStore_Postgres_UserIDsForVerifiedEmailSystem(t *testing.T) {
 	dupUserA := pgtest.SeedUser(t, h, "dup-a")
 	dupUserB := pgtest.SeedUser(t, h, "dup-b")
 
-	seedIdentity(t, h, verifiedUser, "match@example.com", true)
-	seedIdentity(t, h, unverifiedUser, "unverified@example.com", false)
-	seedIdentity(t, h, dupUserA, "dup@example.com", true)
-	seedIdentity(t, h, dupUserB, "dup@example.com", true)
+	pgtest.SeedIdentity(t, h, verifiedUser, "match@example.com", true)
+	pgtest.SeedIdentity(t, h, unverifiedUser, "unverified@example.com", false)
+	pgtest.SeedIdentity(t, h, dupUserA, "dup@example.com", true)
+	pgtest.SeedIdentity(t, h, dupUserB, "dup@example.com", true)
 
 	t.Run("verified match, case-insensitive", func(t *testing.T) {
 		got, err := stores.Users.UserIDsForVerifiedEmailSystem(ctx, "MATCH@Example.com")
