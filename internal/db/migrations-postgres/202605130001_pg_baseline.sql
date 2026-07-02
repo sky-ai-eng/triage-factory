@@ -5738,6 +5738,7 @@ INSERT INTO events_catalog (id, source, category, label, description) VALUES
   ('jira:issue:commented',               'jira',   'issue', 'New Comment',     'A new comment was added to an issue'),
   ('jira:issue:completed',               'jira',   'issue', 'Issue Completed', 'Issue was marked as done'),
   ('jira:issue:became_atomic',           'jira',   'issue', 'Issue Became Atomic', 'Last open subtask closed — parent is now an atomic work unit'),
+  ('slack:mention',                      'slack',  'message', 'Bot Mentioned',  'The TF bot was @mentioned in a Slack channel'),
   ('system:poll:completed',              'system', 'poll', 'Poll Complete',    'A poller finished a cycle'),
   ('system:scoring:completed',           'system', 'scoring', 'Scoring Complete', 'AI scoring finished for a task'),
   ('system:delegation:completed',        'system', 'delegation', 'Delegation Complete', 'Agent delegation run completed'),
