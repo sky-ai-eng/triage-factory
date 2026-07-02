@@ -15,6 +15,9 @@ import "fmt"
 //	users:read.email    - resolve a Slack user's verified email (TF-user auto-match, later leaf)
 //	channels:history    - read public-channel message history (thread context for a mention)
 //	groups:history      - read private-channel ("group") message history, same reason
+//	channels:read       - list public channels + resolve channel id -> name + bot-membership checks (channel tracking UX)
+//	groups:read         - same, for private channels the bot is a member of
+//	channels:join       - bot self-joins a public channel when a team tracks it (private channels always need a human /invite)
 //	files:read          - read files shared in a thread (attachments as agent context)
 //	files:write         - upload files (agent-produced artifacts back into the thread)
 var slackBotScopes = []string{
@@ -25,6 +28,9 @@ var slackBotScopes = []string{
 	"users:read.email",
 	"channels:history",
 	"groups:history",
+	"channels:read",
+	"groups:read",
+	"channels:join",
 	"files:read",
 	"files:write",
 }
