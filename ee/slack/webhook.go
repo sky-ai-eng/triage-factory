@@ -70,14 +70,23 @@ type webhookHandler struct {
 //  1. Resolve the workspace from the payload's team_id, cross-checked
 //     against the org_id path param — unknown or mismatched is a generic
 //     200-empty (never discloses which org owns a workspace).
-//  2. Entitlement gate — a lapsed org also gets 200-empty (TFAC-524's
-//     ack-and-drop dormancy contract: Slack deactivates event
-//     subscriptions for endpoints that persistently fail, so a lapsed org
-//     must not get its Slack app broken).
-//  3. Signature — verified against the workspace's stored signing secret;
+//  2. Signature — verified against the workspace's stored signing secret;
 //     a workspace with no signing secret (a socket-transport connection)
 //     is rejected the same as a bad signature: this endpoint isn't for it.
-//  4. Only past all three does the payload's type get dispatched.
+//     Deliberately BEFORE the entitlement check: only a caller already
+//     holding the workspace's signing secret (i.e. Slack itself) can ever
+//     reach past this point, so a 401-vs-200 split here can't be used as
+//     an entitlement oracle — an unsigned/forged request always gets 401
+//     regardless of whether the org's Slack feature happens to be
+//     licensed.
+//  3. Only past a verified signature does the payload's type get
+//     dispatched. The entitlement gate (TFAC-524's ack-and-drop dormancy
+//     contract) applies only to event_callback, not to url_verification —
+//     the handshake is proving the endpoint is live and correctly
+//     configured, not processing work, so a lapsed org can still complete
+//     it; a lapsed org's real (validly-signed) event deliveries get
+//     200-empty so Slack doesn't deactivate the subscription for
+//     persistent failures.
 func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	pathOrgID := r.PathValue("org_id")
 
@@ -107,11 +116,6 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !entitlements.For(ws.OrgID).Has(entitlements.FeatureSlack) {
-		ackEmpty(w)
-		return
-	}
-
 	if ws.SigningSecretRef == "" {
 		// A socket-transport workspace has no signing secret — this
 		// endpoint is not for it.
@@ -132,6 +136,10 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	case "url_verification":
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"challenge": envelope.Challenge})
 	case "event_callback":
+		if !entitlements.For(ws.OrgID).Has(entitlements.FeatureSlack) {
+			ackEmpty(w)
+			return
+		}
 		h.handleEventCallback(w, r, *ws, envelope)
 	default:
 		// Slack documents other envelope types (app_rate_limited, …) this

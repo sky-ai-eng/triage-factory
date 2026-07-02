@@ -197,6 +197,49 @@ func TestHandleWebhook_LapsedEntitlement_AckEmptyNoPublish(t *testing.T) {
 	}
 }
 
+// TestHandleWebhook_URLVerification_SucceedsRegardlessOfEntitlement: the
+// handshake proves the endpoint is live and correctly signed, not that an
+// event was processed — a lapsed org must still be able to complete it
+// (Slack's app-config UI shouldn't error just because a license lapsed),
+// same as a licensed org.
+func TestHandleWebhook_URLVerification_SucceedsRegardlessOfEntitlement(t *testing.T) {
+	r := newWebhookRig(t, webhookTestSigningRef, false) // NOT licensed
+	body := []byte(`{"type":"url_verification","team_id":"` + webhookTestWorkspaceID + `","challenge":"lapsed-org-challenge"}`)
+	ts := nowTimestamp()
+	rec := postSlackWebhook(t, r.h, webhookTestOrgID, body, ts, sign(webhookTestSecret, ts, body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (handshake succeeds even for a lapsed org); body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Challenge string `json:"challenge"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out.Challenge != "lapsed-org-challenge" {
+		t.Errorf("challenge = %q; want lapsed-org-challenge", out.Challenge)
+	}
+}
+
+// TestHandleWebhook_BadSignature_NoEntitlementOracle: a bad/missing
+// signature must get the identical 401 whether the target org's Slack
+// feature is licensed or lapsed — otherwise a caller who merely knows a
+// team_id (not itself secret) could infer the org's entitlement state
+// without ever forging a valid signature, since only a genuine signature
+// holder (Slack) can reach the entitlement check at all.
+func TestHandleWebhook_BadSignature_NoEntitlementOracle(t *testing.T) {
+	body := []byte(`{"type":"event_callback","team_id":"` + webhookTestWorkspaceID + `","event_id":"Ev1","event":{"type":"app_mention","channel":"C1","user":"U1","ts":"1.0"}}`)
+	badSig := "v0=" + hex.EncodeToString(make([]byte, 32))
+
+	for _, licensed := range []bool{true, false} {
+		r := newWebhookRig(t, webhookTestSigningRef, licensed)
+		rec := postSlackWebhook(t, r.h, webhookTestOrgID, body, nowTimestamp(), badSig)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("licensed=%v: status = %d, want 401 regardless of entitlement", licensed, rec.Code)
+		}
+	}
+}
+
 // ---------- signature ----------
 
 func TestHandleWebhook_SocketOnlyWorkspace_401(t *testing.T) {
