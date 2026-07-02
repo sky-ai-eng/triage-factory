@@ -413,7 +413,7 @@ func TestWorkspaceStore_Postgres_LockApp_DoesNotSerializeDifferentAppIDs(t *test
 
 	aHolding := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 
 	go func() {
 		defer wg.Done()
