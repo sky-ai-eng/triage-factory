@@ -82,8 +82,11 @@ func OpenAt(dbPath string) (*sql.DB, error) {
 
 // Migrate brings the schema to head by applying any pending forward
 // migrations from the embedded tree matching `dialect` (sqlite3 or
-// postgres). Idempotent. Existing SQLite installs that predate the
-// migration runner are stamped at the baseline on first run.
+// postgres), then reconciles events_catalog against
+// domain.AllEventTypes() (see SeedEventTypes). Idempotent — both the
+// migration run and the catalog reconciliation are safe to repeat.
+// Existing SQLite installs that predate the migration runner are
+// stamped at the baseline on first run.
 //
 // The dialect is caller-provided rather than auto-detected: the caller
 // opened the connection and knows which driver it used, and threading
@@ -91,5 +94,8 @@ func OpenAt(dbPath string) (*sql.DB, error) {
 // runner. SQLite callers pass "sqlite3"; Postgres callers pass
 // "postgres". See migrations.go for the runner.
 func Migrate(db *sql.DB, dialect string) error {
-	return runMigrations(db, dialect)
+	if err := runMigrations(db, dialect); err != nil {
+		return err
+	}
+	return SeedEventTypes(db, dialect)
 }

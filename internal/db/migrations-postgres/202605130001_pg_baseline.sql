@@ -5711,41 +5711,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON T
 --
 
 
-
--- events_catalog seed (system-managed event type registry).
-INSERT INTO events_catalog (id, source, category, label, description) VALUES
-  ('github:pr:review_changes_requested', 'github', 'pr', 'Changes Requested',  'A reviewer requested changes on a PR'),
-  ('github:pr:review_approved',          'github', 'pr', 'Review: Approved',   'A reviewer approved a PR'),
-  ('github:pr:review_commented',         'github', 'pr', 'Review: Commented',  'A reviewer left non-blocking comments on a PR'),
-  ('github:pr:review_dismissed',         'github', 'pr', 'Review: Dismissed',  'A reviewer dismissed their previous review on a PR'),
-  ('github:pr:review_requested',         'github', 'pr', 'Review Requested',   'Someone requested your review on a PR'),
-  ('github:pr:review_request_removed',   'github', 'pr', 'Review Request Removed', 'Your review request was removed from a PR (review completed or request rescinded)'),
-  ('github:pr:ci_check_failed',          'github', 'pr', 'CI Check Failed',    'A CI check failed on a PR'),
-  ('github:pr:ci_check_passed',          'github', 'pr', 'CI Check Passed',    'A CI check passed on a PR'),
-  ('github:pr:label_added',              'github', 'pr', 'Label Added',        'A label was added to a PR'),
-  ('github:pr:label_removed',            'github', 'pr', 'Label Removed',      'A label was removed from a PR'),
-  ('github:pr:new_commits',              'github', 'pr', 'New Commits',        'A tracked PR has new commits since the last poll'),
-  ('github:pr:conflicts',                'github', 'pr', 'Merge Conflicts',    'A PR has merge conflicts'),
-  ('github:pr:ready_for_review',         'github', 'pr', 'Ready for Review',   'A draft PR was marked ready for review'),
-  ('github:pr:mentioned',                'github', 'pr', 'Mentioned',          'You were @mentioned in a PR'),
-  ('github:pr:opened',                   'github', 'pr', 'PR Opened',          'A pull request was opened'),
-  ('github:pr:merged',                   'github', 'pr', 'PR Merged',          'A pull request was merged'),
-  ('github:pr:closed',                   'github', 'pr', 'PR Closed',          'A pull request was closed without merging'),
-  ('jira:issue:assigned',                'jira',   'issue', 'Issue Assigned',  'Issue was assigned to you'),
-  ('jira:issue:available',               'jira',   'issue', 'Issue Available', 'New unassigned issue in pickup queue'),
-  ('jira:issue:status_changed',          'jira',   'issue', 'Status Changed',  'Issue status changed (uses dedup_key=new_status)'),
-  ('jira:issue:priority_changed',        'jira',   'issue', 'Priority Changed','Issue priority was changed (uses dedup_key=new_priority)'),
-  ('jira:issue:commented',               'jira',   'issue', 'New Comment',     'A new comment was added to an issue'),
-  ('jira:issue:completed',               'jira',   'issue', 'Issue Completed', 'Issue was marked as done'),
-  ('jira:issue:became_atomic',           'jira',   'issue', 'Issue Became Atomic', 'Last open subtask closed — parent is now an atomic work unit'),
-  ('slack:mention',                      'slack',  'message', 'Bot Mentioned',  'The TF bot was @mentioned in a Slack channel'),
-  ('system:poll:completed',              'system', 'poll', 'Poll Complete',    'A poller finished a cycle'),
-  ('system:scoring:completed',           'system', 'scoring', 'Scoring Complete', 'AI scoring finished for a task'),
-  ('system:delegation:completed',        'system', 'delegation', 'Delegation Complete', 'Agent delegation run completed'),
-  ('system:delegation:failed',           'system', 'delegation', 'Delegation Failed',   'Agent delegation run failed'),
-  ('system:prompt:auto_suspended',       'system', 'delegation', 'Prompt Auto-suspended', 'Per-(entity, prompt) breaker tripped after repeated failures'),
-  ('system:task:delegation_blocked_by_subtasks', 'system', 'delegation', 'Delegation Blocked: Subtasks', 'Auto-delegation skipped because parent has open subtasks');
-
+-- events_catalog is seeded dynamically at runtime by db.SeedEventTypes
+-- (called from db.Migrate after migrations apply), reconciled from
+-- domain.AllEventTypes() — not by a static INSERT block here. See
+-- internal/db/event_types.go.
 
 --
 -- Blueprints

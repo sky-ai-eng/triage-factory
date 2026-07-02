@@ -1522,10 +1522,13 @@ CREATE UNIQUE INDEX curator_requests_id_org_unique ON curator_requests (id, org_
 -- server_port.
 INSERT OR IGNORE INTO instance_config (id) VALUES (1);
 
--- events_catalog seed (system-managed event type registry). Mirrors the
--- equivalent INSERT block in the Postgres baseline; both must stay in
--- sync with domain.AllEventTypes(). New event types ship as a new
--- forward migration, never an in-place baseline edit.
+-- events_catalog seed (system-managed event type registry). This baseline
+-- row set is immutable, already-applied history for real installs — do
+-- not edit it in place. db.SeedEventTypes (internal/db/event_types.go)
+-- reconciles events_catalog against domain.AllEventTypes() on every
+-- db.Migrate call, so a new event type needs no migration at all now; a
+-- migration here is only needed for an actual schema change (e.g. a new
+-- events_catalog column).
 INSERT OR IGNORE INTO events_catalog (id, source, category, label, description) VALUES
   ('github:pr:review_changes_requested', 'github', 'pr', 'Changes Requested',  'A reviewer requested changes on a PR'),
   ('github:pr:review_approved',          'github', 'pr', 'Review: Approved',   'A reviewer approved a PR'),

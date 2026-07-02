@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -172,6 +173,40 @@ func TestSeedData(t *testing.T) {
 	}
 	if label != "PR Opened" {
 		t.Errorf("label = %q, want 'PR Opened'", label)
+	}
+}
+
+// TestSeedEventTypes_OverwritesDrift is the Postgres-side counterpart to
+// the SQLite test of the same name (internal/db/event_types_test.go) —
+// the ON CONFLICT DO UPDATE SQL text differs by dialect, so it needs its
+// own coverage. A row hand-mutated via raw SQL is overwritten back to
+// what domain.AllEventTypes() declares when db.SeedEventTypes runs
+// again, proving UPSERT semantics rather than insert-only.
+func TestSeedEventTypes_OverwritesDrift(t *testing.T) {
+	h := Shared(t)
+
+	const id = "github:pr:opened"
+	if _, err := h.AdminDB.Exec(
+		`UPDATE events_catalog SET label = 'DRIFTED LABEL' WHERE id = $1`, id,
+	); err != nil {
+		t.Fatalf("mutate label: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.SeedEventTypes(h.AdminDB, "postgres"); err != nil {
+			t.Fatalf("cleanup reseed: %v", err)
+		}
+	})
+
+	if err := db.SeedEventTypes(h.AdminDB, "postgres"); err != nil {
+		t.Fatalf("SeedEventTypes: %v", err)
+	}
+
+	var label string
+	if err := h.AdminDB.QueryRow(`SELECT label FROM events_catalog WHERE id = $1`, id).Scan(&label); err != nil {
+		t.Fatalf("read label: %v", err)
+	}
+	if label != "PR Opened" {
+		t.Errorf("label = %q after SeedEventTypes, want 'PR Opened' (drift not overwritten)", label)
 	}
 }
 
