@@ -5,12 +5,12 @@
 // ee/slack/store's typed view of core's opaque extension slot, and HTTP
 // helpers come from the shared httpx package — mirrors ee/sso.
 //
-// This leaf adds event ingest: the transport-neutral pipeline (ingest.go)
-// and the Events API (webhook) receiver (webhook.go), publishing slack:*
+// This leaf adds event ingest: the transport-neutral pipeline (ingest.go),
+// the Events API (webhook) receiver (webhook.go), and the Socket Mode
+// receiver (socket.go/socket_conn.go) — both transports publish slack:*
 // events onto the bus. Until TFAC-510 registers routing.RegisterSource,
 // published events reach the in-memory bus only — routing.RouterBound
 // stays false for "slack:", so nothing is durably enqueued or routed yet.
-// The Socket Mode transport (feeding the same pipeline) is the next leaf.
 // The pipeline also dispatches best-effort sender identity capture
 // (identity.go, TFAC-531) after each publish — detached, never gating.
 //
@@ -40,33 +40,38 @@ func init() {
 	server.RegisterExtension("slack", install)
 }
 
-// install mounts the org-admin Slack workspace surface plus the Events API
-// ingest receiver on the core server through the extension API. The
-// workspace routes go through API/APIMutating (session + CSRF, like core's
-// own routes); the webhook is pre-auth (Slack has no session) so it mounts
+// install mounts the org-admin Slack workspace surface plus both ingest
+// transports on the core server through the extension API. The workspace
+// routes go through API/APIMutating (session + CSRF, like core's own
+// routes); the webhook is pre-auth (Slack has no session) so it mounts
 // through Raw + PreAuthRateLimit and authorizes itself per-request via the
-// workspace's signing secret.
+// workspace's signing secret. The Socket Mode connection manager has no
+// HTTP surface of its own — it starts via api.OnReady once app wiring is
+// complete and its status is read out through workspacesHandler.sockets.
 func install(api server.ExtensionAPI) {
+	stores := api.Stores()
+	pipeline := &ingestPipeline{
+		entities:   stores.Entities,
+		deliveries: slackstore.FromStores(stores).Deliveries,
+		publish:    api.PublishEvent,
+		identity:   NewIdentityResolver(stores),
+	}
+	sockets := newSocketManager(stores, pipeline, slackHTTPClient, socketConfigChanged)
+
 	h := &workspacesHandler{
 		tx:        api.Tx(),
 		az:        api.Authz(),
 		client:    slackHTTPClient,
 		publicURL: api.PublicURL,
+		sockets:   sockets,
 	}
 	api.API("GET /api/slack/workspaces", h.handleList)
 	api.APIMutating("POST /api/slack/workspaces", h.handleConnect)
 	api.APIMutating("DELETE /api/slack/workspaces/{workspace_id}/{api_app_id}", h.handleDelete)
 	api.API("GET /api/slack/manifest", h.handleManifest)
 
-	stores := api.Stores()
-	wh := &webhookHandler{
-		stores: stores,
-		pipeline: &ingestPipeline{
-			entities:   stores.Entities,
-			deliveries: slackstore.FromStores(stores).Deliveries,
-			publish:    api.PublishEvent,
-			identity:   NewIdentityResolver(stores),
-		},
-	}
+	wh := &webhookHandler{stores: stores, pipeline: pipeline}
 	api.Raw("POST /api/webhooks/slack/{org_id}", api.PreAuthRateLimit(http.HandlerFunc(wh.handleWebhook)))
+
+	api.OnReady(sockets.run)
 }
