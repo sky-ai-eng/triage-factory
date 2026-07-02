@@ -44,6 +44,7 @@ func (f *fakeWorkspaceStore) ListAllSystem(context.Context) ([]slackstore.Worksp
 func (f *fakeWorkspaceStore) GetByWorkspaceAppSystem(_ context.Context, workspaceID, apiAppID string) (*slackstore.Workspace, error) {
 	return f.byWorkspaceApp[workspaceID+"/"+apiAppID], nil
 }
+func (f *fakeWorkspaceStore) LockApp(context.Context, string) error { return nil }
 func (f *fakeWorkspaceStore) AppBoundToOtherOrgSystem(context.Context, string, string) (bool, error) {
 	return false, nil
 }
@@ -189,7 +190,7 @@ func TestHandleWebhook_CrossOrgTeamID_AckEmpty(t *testing.T) {
 // TestHandleWebhook_UnknownAPIAppID_AckEmpty: a known team_id paired with an
 // unrecognized (or missing) api_app_id acks empty, same as any other
 // unresolvable delivery — the composite key means a correct workspace alone
-// is no longer enough to resolve a row (TFAC-533).
+// is no longer enough to resolve a row.
 func TestHandleWebhook_UnknownAPIAppID_AckEmpty(t *testing.T) {
 	r := newWebhookRig(t, webhookTestSigningRef, true)
 	body := []byte(`{"type":"event_callback","team_id":"` + webhookTestWorkspaceID + `","api_app_id":"A0NOTREAL1","event_id":"Ev1","event":{"type":"app_mention"}}`)
@@ -388,8 +389,8 @@ func TestHandleWebhook_EventCallback_PublishesAndAcks(t *testing.T) {
 }
 
 // TestHandleWebhook_TwoAppsOneWorkspace_SignatureSelectionFollowsRow is the
-// two-apps-one-workspace acceptance test at the webhook layer (TFAC-533):
-// two connected apps share a workspace_id but carry distinct api_app_id,
+// two-apps-one-workspace acceptance test at the webhook layer: two connected
+// apps share a workspace_id but carry distinct api_app_id,
 // org, and signing secret. A delivery for app 1 must verify (and route)
 // against app 1's row only — app 2's signing secret must not validate it,
 // even though both rows share the workspace_id the payload also carries.

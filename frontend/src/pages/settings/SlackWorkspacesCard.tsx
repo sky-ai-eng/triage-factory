@@ -34,9 +34,9 @@ interface SlackWorkspace {
   updated_at: string
 }
 
-// rowKey is the composite (workspace, app) identity a row is now keyed on
-// (TFAC-533) — a workspace may host several connected apps, so workspace_id
-// alone can no longer disambiguate list/upsert/remove operations.
+// rowKey is the composite (workspace, app) identity a row is now keyed on —
+// a workspace may host several connected apps, so workspace_id alone can no
+// longer disambiguate list/upsert/remove operations.
 const rowKey = (ws: Pick<SlackWorkspace, 'workspace_id' | 'api_app_id'>) =>
   `${ws.workspace_id}:${ws.api_app_id}`
 

@@ -170,7 +170,7 @@ func refFor(has bool, ref string) string {
 // errAppBoundToOtherOrg is the sentinel the connect handler's tx closure
 // returns when AppBoundToOtherOrgSystem finds the derived api_app_id
 // already owned by a different org — mapped to a generic 409 below, never
-// naming the owning org (TFAC-533's app-single-org invariant).
+// naming the owning org (the app-single-org invariant).
 var errAppBoundToOtherOrg = errors.New("slack app already connected to a different org")
 
 // POST /api/slack/workspaces  body: {bot_token, signing_secret?, app_token?, transport?}
@@ -198,8 +198,8 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	}
 
 	// The bot token is the ONLY way the handler learns the workspace id —
-	// the admin never types it (TFAC-529 decision). Always re-validated:
-	// there's no "keep the current bot token" path.
+	// the admin never types it. Always re-validated: there's no "keep the
+	// current bot token" path.
 	result, err := slackAuthTest(r.Context(), h.client, botToken)
 	if err != nil {
 		httpx.BadRequest(w, "could not validate the bot token with Slack: "+err.Error())
@@ -207,9 +207,9 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	}
 
 	// The app id is likewise never typed by the admin — derived from the
-	// same bot token via auth.test's bot_id -> bots.info's app_id
-	// (TFAC-533). It's now key material (the app-single-org invariant),
-	// so a failure here is fatal: no fallback, connect refused.
+	// same bot token via auth.test's bot_id -> bots.info's app_id. It's key
+	// material (the app-single-org invariant), so a failure here is fatal:
+	// no fallback, connect refused.
 	botsInfo, err := slackBotsInfo(r.Context(), h.client, botToken, result.BotID)
 	if err != nil {
 		httpx.BadRequest(w, "could not resolve the app id for this bot token: "+err.Error())
@@ -261,11 +261,20 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	var persisted *slackstore.Workspace
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		bundle := slackstore.FromTx(tx)
+		// LockApp MUST run before the AppBoundToOtherOrgSystem check below
+		// — on its own, that check-then-Upsert sequence is a race: two
+		// concurrent connects for the same api_app_id under different orgs
+		// write different workspace_id rows, so they never collide on a
+		// unique index, and each could observe "not bound" before either
+		// commits. The advisory lock serializes every connect attempt for
+		// this api_app_id so that can't happen — see LockApp's doc.
+		if e := bundle.Workspaces.LockApp(r.Context(), apiAppID); e != nil {
+			return e
+		}
 		// The app-single-org invariant has no SQL constraint behind it
 		// (api_app_id is only unique in combination with workspace_id), so
 		// it's enforced here, before any write — see
-		// AppBoundToOtherOrgSystem's doc and the migration's invariant
-		// table (TFAC-533).
+		// AppBoundToOtherOrgSystem's doc.
 		boundElsewhere, e := bundle.Workspaces.AppBoundToOtherOrgSystem(r.Context(), apiAppID, orgID)
 		if e != nil {
 			return e
@@ -295,8 +304,8 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	}); err != nil {
 		if errors.Is(err, errAppBoundToOtherOrg) {
 			// Deliberately generic: a workspace admin may learn "already
-			// connected", never which org holds it (TFAC-533's
-			// app-single-org invariant).
+			// connected", never which org holds it (the app-single-org
+			// invariant).
 			httpx.WriteJSON(w, http.StatusConflict, map[string]string{
 				"error": "this app is already connected",
 			})

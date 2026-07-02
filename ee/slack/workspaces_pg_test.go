@@ -209,8 +209,8 @@ func (r *slackWorkspaceRig) req(method, path, callerID, orgID, workspaceID strin
 }
 
 // reqDelete builds a DELETE request for the composite
-// /api/slack/workspaces/{workspace_id}/{api_app_id} route (TFAC-533 — the
-// row key is no longer workspace_id alone).
+// /api/slack/workspaces/{workspace_id}/{api_app_id} route — the row key is
+// no longer workspace_id alone.
 func (r *slackWorkspaceRig) reqDelete(callerID, orgID, workspaceID, apiAppID string) *http.Request {
 	r.t.Helper()
 	req := httptest.NewRequest(http.MethodDelete,
@@ -291,7 +291,7 @@ func TestHandleConnect_NonAdmin_404(t *testing.T) {
 // TestHandleConnect_AppTokenOnly_Socket: the happy path for Socket Mode —
 // app.token supplied, no signing secret, transport inferred as socket,
 // apps.connections.open validated, secrets + row persisted. Also pins the
-// derived app id landing on the row (TFAC-533).
+// derived app id landing on the row.
 func TestHandleConnect_AppTokenOnly_Socket(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-socket")
@@ -439,8 +439,8 @@ func TestHandleConnect_AppTokenValidationFailure_400(t *testing.T) {
 
 // TestHandleConnect_BotsInfoFailure_400: Slack rejecting/failing bots.info
 // (the second leg of app-id derivation, after a SUCCESSFUL auth.test)
-// surfaces as a 400, and nothing is persisted — the app id is key material
-// now, so there's no fallback (TFAC-533).
+// surfaces as a 400, and nothing is persisted — the app id is key material,
+// so there's no fallback.
 func TestHandleConnect_BotsInfoFailure_400(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, owner, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-badbotsinfo")
@@ -463,7 +463,7 @@ func TestHandleConnect_BotsInfoFailure_400(t *testing.T) {
 	}
 }
 
-// ---------- app-single-org invariant + two-apps-one-workspace (TFAC-533) ----------
+// ---------- app-single-org invariant + two-apps-one-workspace ----------
 
 // TestHandleConnect_AppBoundToOtherOrg_SameWorkspace_409Generic: org B
 // connecting the exact same (workspace, app) pair org A already holds gets
@@ -530,9 +530,10 @@ func TestHandleConnect_AppBoundToOtherOrg_DifferentWorkspace_409Generic(t *testi
 // TestHandleConnect_TwoAppsOneWorkspace_HappyPath is the feature's
 // acceptance test: two different TF orgs, each with their own Slack app,
 // both installed to the SAME workspace — a prod org and an eval org running
-// their own bot in one workspace, the motivating scenario from TFAC-533.
-// Both connects succeed, both rows are live under the same workspace_id
-// with distinct api_app_id, and each org sees only its own row.
+// their own bot in one workspace, the motivating scenario for the (workspace,
+// app) composite bind. Both connects succeed, both rows are live under the
+// same workspace_id with distinct api_app_id, and each org sees only its own
+// row.
 func TestHandleConnect_TwoAppsOneWorkspace_HappyPath(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgProd, ownerProd, _ := pgtest.SeedOrgWithUser(t, r.h, "slack-2apps-prod")

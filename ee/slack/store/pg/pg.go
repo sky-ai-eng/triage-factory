@@ -79,10 +79,10 @@ func scanWorkspace(sc rowScanner) (slackstore.Workspace, error) {
 // head-on and returns a real unique-violation error — no pre-check race
 // window, matching the sso_domains claim pattern (the constraint is the
 // authority, the handler translates the error). Callers MUST have already
-// checked AppBoundToOtherOrgSystem before calling Upsert — this PK alone
-// does not catch a DIFFERENT workspace_id already carrying ws.APIAppID
-// under another org, since api_app_id isn't unique on its own (see the
-// interface doc and TFAC-533's invariant table).
+// called LockApp and checked AppBoundToOtherOrgSystem before calling
+// Upsert — this PK alone does not catch a DIFFERENT workspace_id already
+// carrying ws.APIAppID under another org, since api_app_id isn't unique on
+// its own (see the interface doc).
 //
 // Nullable columns (enterprise_id, signing_secret_ref, app_token_ref,
 // registered_by_user_id) are written NULL when ws carries "" — NULLIF turns
@@ -201,6 +201,20 @@ func (s *workspaceStore) GetByWorkspaceAppSystem(ctx context.Context, workspaceI
 		return nil, fmt.Errorf("get org_slack_workspaces by workspace+app id: %w", err)
 	}
 	return &w, nil
+}
+
+// LockApp runs on the app pool — the SAME connection/transaction the caller
+// will go on to call AppBoundToOtherOrgSystem and Upsert against — because a
+// Postgres advisory lock's blocking behavior only coordinates callers that
+// contend for the identical key; it does nothing on its own unless every
+// writer actually calls it first. pg_advisory_xact_lock ties the lock's
+// lifetime to the current transaction, so it needs no paired unlock: it
+// releases automatically on commit or rollback.
+func (s *workspaceStore) LockApp(ctx context.Context, apiAppID string) error {
+	if _, err := s.app.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, apiAppID); err != nil {
+		return fmt.Errorf("lock app invariant: %w", err)
+	}
+	return nil
 }
 
 // AppBoundToOtherOrgSystem runs on the admin pool (bypasses RLS) since the

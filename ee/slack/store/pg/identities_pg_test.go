@@ -14,12 +14,12 @@ import (
 
 // seedWorkspaceRow inserts a minimal org_slack_workspaces row for
 // workspaceID via the admin pool. user_slack_identities carries no FK to
-// this table (TFAC-533 — workspace_id alone is no longer unique there once
-// a workspace can host several apps), so this is purely a realistic
-// fixture, not a constraint requirement; kept anyway so identity-store
-// tests read like production data. The identity-store tests don't exercise
-// org scoping, so a fresh throwaway org and an arbitrary app id per call
-// are both fine.
+// this table (workspace_id alone is no longer unique there once a
+// workspace can host several apps), so this is purely a realistic fixture,
+// not a constraint requirement; kept anyway so identity-store tests read
+// like production data. The identity-store tests don't exercise org
+// scoping, so a fresh throwaway org and an arbitrary app id per call are
+// both fine.
 func seedWorkspaceRow(t *testing.T, h *pgtest.Harness, workspaceID string) {
 	t.Helper()
 	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "slack-ident-org-"+workspaceID)

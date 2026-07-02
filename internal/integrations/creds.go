@@ -156,9 +156,9 @@ func (k GitHubAppKeyset) All() []string {
 // the signing secret (events_api transport), and the app-level token
 // (socket transport). Composed per (workspace id, app id) — Slack's team ID
 // and app ID — the dynamic-keyset analog of GitHubAppKeyset. Keyed on the
-// pair, not the workspace id alone, because TFAC-533 made the binding
-// (workspace, app): two different apps installed in the same workspace (one
-// per TF org, say) must never share a credential slot.
+// pair, not the workspace id alone, because the binding is (workspace,
+// app): two different apps installed in the same workspace (one per TF org,
+// say) must never share a credential slot.
 type SlackWorkspaceKeyset struct {
 	BotToken      string
 	SigningSecret string

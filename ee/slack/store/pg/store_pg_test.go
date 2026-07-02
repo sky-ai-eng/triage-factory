@@ -3,7 +3,9 @@ package pg_test
 import (
 	"context"
 	"database/sql"
+	"sync"
 	"testing"
+	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -20,8 +22,8 @@ func mustWithUser(t *testing.T, stores db.Stores, ctx context.Context, orgID, us
 
 // defaultAppID derives a deterministic api_app_id for callers that don't
 // care which app id they get, only that Upsert/Get/etc agree on one — kept
-// out of testWorkspace's signature so every pre-TFAC-533 single-workspace
-// call site in this package (and delivery_pg_test.go) needs no change.
+// out of testWorkspace's signature so every single-workspace call site in
+// this package (and delivery_pg_test.go) needs no change.
 func defaultAppID(workspaceID string) string { return "A0" + workspaceID }
 
 func testWorkspace(orgID, workspaceID string) slackstore.Workspace {
@@ -254,9 +256,9 @@ func keysOf(m map[string]bool) []string {
 // itself imposes no workspace<->org cardinality limit — two different apps
 // (distinct api_app_id) can both be bound to the same workspace_id under
 // two different orgs (e.g. a prod TF org and an eval TF org each running
-// their own bot in the same workspace, TFAC-533). The app-single-org
-// invariant that would forbid two ORGS sharing one APP lives one layer up,
-// at the connect handler (AppBoundToOtherOrgSystem) — not enforced here.
+// their own bot in the same workspace). The app-single-org invariant that
+// would forbid two ORGS sharing one APP lives one layer up, at the connect
+// handler (LockApp + AppBoundToOtherOrgSystem) — not enforced here.
 func TestWorkspaceStore_Postgres_TwoAppsSameWorkspaceDifferentOrgs(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -333,6 +335,111 @@ func TestWorkspaceStore_Postgres_AppBoundToOtherOrgSystem(t *testing.T) {
 	if bound {
 		t.Error("AppBoundToOtherOrgSystem = true for an unconnected app id; want false")
 	}
+}
+
+// TestWorkspaceStore_Postgres_LockApp_SerializesSameAppID is the regression
+// test for the app-single-org invariant's actual concurrency-safety
+// mechanism: without a real lock, two concurrent connect transactions for
+// the same api_app_id under different orgs could each run
+// AppBoundToOtherOrgSystem before either commits its Upsert, both observe
+// "not bound", and both succeed — since they write different workspace_id
+// rows, nothing collides on a unique index to stop them. LockApp closes
+// that gap with a transaction-scoped Postgres advisory lock keyed on
+// api_app_id. This test proves the lock actually blocks: transaction A
+// holds it across a deliberate delay; transaction B's LockApp call for the
+// SAME api_app_id must not return until A commits (releasing the lock).
+func TestWorkspaceStore_Postgres_LockApp_SerializesSameAppID(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, userA, _ := pgtest.SeedOrgWithUser(t, h, "slack-lockapp-a")
+	orgB, userB, _ := pgtest.SeedOrgWithUser(t, h, "slack-lockapp-b")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+	const apiAppID = "A0LOCKTEST"
+	const holdFor = 300 * time.Millisecond
+
+	aHolding := make(chan struct{})
+	var aReleasedAt, bAcquiredAt time.Time
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		if err := stores.Tx.WithTx(ctx, orgA, userA, func(tx db.TxStores) error {
+			if err := slackstore.FromTx(tx).Workspaces.LockApp(ctx, apiAppID); err != nil {
+				return err
+			}
+			close(aHolding)
+			time.Sleep(holdFor)
+			aReleasedAt = time.Now()
+			return nil
+		}); err != nil {
+			t.Errorf("transaction A: %v", err)
+		}
+	}()
+
+	<-aHolding
+	go func() {
+		defer wg.Done()
+		if err := stores.Tx.WithTx(ctx, orgB, userB, func(tx db.TxStores) error {
+			if err := slackstore.FromTx(tx).Workspaces.LockApp(ctx, apiAppID); err != nil {
+				return err
+			}
+			bAcquiredAt = time.Now()
+			return nil
+		}); err != nil {
+			t.Errorf("transaction B: %v", err)
+		}
+	}()
+
+	wg.Wait()
+	if bAcquiredAt.Before(aReleasedAt) {
+		t.Fatalf("B acquired LockApp at %v, before A released it at %v (held until commit) — LockApp did not serialize", bAcquiredAt, aReleasedAt)
+	}
+}
+
+// TestWorkspaceStore_Postgres_LockApp_DoesNotSerializeDifferentAppIDs proves
+// LockApp's key is actually api_app_id-scoped, not a single global lock: two
+// concurrent transactions locking DIFFERENT api_app_id values must not block
+// each other.
+func TestWorkspaceStore_Postgres_LockApp_DoesNotSerializeDifferentAppIDs(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, userA, _ := pgtest.SeedOrgWithUser(t, h, "slack-lockapp-diff-a")
+	orgB, userB, _ := pgtest.SeedOrgWithUser(t, h, "slack-lockapp-diff-b")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+	const holdFor = 300 * time.Millisecond
+
+	aHolding := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		if err := stores.Tx.WithTx(ctx, orgA, userA, func(tx db.TxStores) error {
+			if err := slackstore.FromTx(tx).Workspaces.LockApp(ctx, "A0DIFFERENTA"); err != nil {
+				return err
+			}
+			close(aHolding)
+			time.Sleep(holdFor)
+			return nil
+		}); err != nil {
+			t.Errorf("transaction A: %v", err)
+		}
+	}()
+
+	<-aHolding
+	bStart := time.Now()
+	if err := stores.Tx.WithTx(ctx, orgB, userB, func(tx db.TxStores) error {
+		return slackstore.FromTx(tx).Workspaces.LockApp(ctx, "A0DIFFERENTB")
+	}); err != nil {
+		t.Fatalf("transaction B: %v", err)
+	}
+	if elapsed := time.Since(bStart); elapsed >= holdFor {
+		t.Errorf("B's LockApp for a different api_app_id took %v; want well under %v (must not block on A's key)", elapsed, holdFor)
+	}
+	wg.Wait()
 }
 
 // TestWorkspaceStore_Postgres_RLS_MemberReadsAdminWrites: any org member can

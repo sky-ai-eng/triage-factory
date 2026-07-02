@@ -30,8 +30,8 @@ const slackReplayWindow = 5 * time.Minute
 // slackEventEnvelope is the outer shape of every Events API delivery:
 // url_verification carries token/challenge; event_callback carries
 // event_id (the dedup key) plus the inner Event payload. APIAppID is
-// present at the top level of every delivery (TFAC-533) — together with
-// TeamID it resolves the exact (workspace, app) row a delivery belongs to.
+// present at the top level of every delivery — together with TeamID it
+// resolves the exact (workspace, app) row a delivery belongs to.
 type slackEventEnvelope struct {
 	Type      string          `json:"type"`
 	TeamID    string          `json:"team_id"`
@@ -70,10 +70,10 @@ type webhookHandler struct {
 // real signature check before anything else runs.
 //
 // Order matters and is deliberate:
-//  1. Resolve the workspace from the payload's (team_id, api_app_id) pair
-//     — TFAC-533's composite key — cross-checked against the org_id path
-//     param — unknown, missing api_app_id, or mismatched is a generic
-//     200-empty (never discloses which org owns a workspace/app).
+//  1. Resolve the workspace from the payload's (team_id, api_app_id)
+//     composite key, cross-checked against the org_id path param — unknown,
+//     missing api_app_id, or mismatched is a generic 200-empty (never
+//     discloses which org owns a workspace/app).
 //  2. Signature — verified against the workspace's stored signing secret;
 //     a workspace with no signing secret (a socket-transport connection)
 //     is rejected the same as a bad signature: this endpoint isn't for it.

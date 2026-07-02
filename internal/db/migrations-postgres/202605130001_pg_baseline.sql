@@ -7498,16 +7498,16 @@ GRANT ALL ON TABLE public.staged_agent_injections TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.staged_agent_injections TO tf_app;
 
 
--- Slack workspace connect (TFAC-529, re-keyed TFAC-533): org_slack_workspaces
--- — the (Slack workspace, Slack app) <-> org bind. What TF actually holds is
--- "an app installed in a workspace", not a workspace in the abstract:
--- team_id (Slack's ID for the workspace, legacy naming, no relation to TF
--- teams) and api_app_id (Slack's ID for the app, present in every event
--- delivery) together are the natural key — PRIMARY KEY (workspace_id,
--- api_app_id) rather than a surrogate id plus a separate unique index.
+-- Slack workspace connect: org_slack_workspaces — the (Slack workspace,
+-- Slack app) <-> org bind. What TF actually holds is "an app installed in a
+-- workspace", not a workspace in the abstract: team_id (Slack's ID for the
+-- workspace, legacy naming, no relation to TF teams) and api_app_id (Slack's
+-- ID for the app, present in every event delivery) together are the natural
+-- key — PRIMARY KEY (workspace_id, api_app_id) rather than a surrogate id
+-- plus a separate unique index.
 --
--- Two invariants, both load-bearing for the Socket Mode boundary rule
--- (next leaf: Socket Mode connections belong to the app, and Slack
+-- Two invariants, both load-bearing for the Socket Mode boundary rule (a
+-- later leaf: Socket Mode connections belong to the app, and Slack
 -- load-balances an app's event envelopes across all its open sockets, so any
 -- rule letting one app's stream span TF-org boundaries drops legitimate
 -- events nondeterministically):
@@ -7516,24 +7516,31 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.staged_agent_injections TO tf_
 --      each running their own bot in the same workspace) — falls out of the
 --      composite PK, no extra enforcement needed.
 --   2. A Slack app belongs to exactly ONE TF org, across every workspace it's
---      installed in — NOT expressible as a SQL constraint here (api_app_id is
---      one half of the composite PK, not unique on its own; two different
---      workspace_id rows could otherwise carry the same api_app_id under
---      different orgs). The connect handler enforces this itself, inside the
---      same transaction as the upsert: any existing row with the submitted
---      api_app_id must carry the caller's org, else a generic 409. A
---      single-replica deployment makes this handler-level check sufficient —
---      there's no concurrent-writer window a DB constraint would need to
---      close that the handler doesn't already close by running first.
+--      installed in — NOT expressible as a SQL constraint on THIS table
+--      (api_app_id is one half of the composite PK, not unique on its own;
+--      two different workspace_id rows could otherwise carry the same
+--      api_app_id under different orgs, and no constraint would notice). The
+--      connect handler enforces it inside its transaction instead: it takes
+--      a Postgres advisory lock keyed on api_app_id (ee/slack's
+--      WorkspaceStore.LockApp) before checking whether any existing row
+--      already carries that api_app_id under a different org. The lock is
+--      the load-bearing part — without it, "check, then write" is a race:
+--      two concurrent connects for the same api_app_id under different orgs
+--      write different workspace_id rows, so they never collide on a unique
+--      index, and each could observe "not bound yet" before either commits.
+--      The advisory lock serializes every connect attempt for a given
+--      api_app_id onto one transaction at a time, so the check a transaction
+--      performs is guaranteed still true when it writes.
 --
 -- A second org's INSERT for an already-bound (workspace_id, api_app_id) pair
--- still hits the PK violation directly as a safety net — RLS never even sees
+-- still hits the PK violation directly as a backstop — RLS never even sees
 -- it (constraints are not subject to RLS) — so the handler maps the generic
 -- unique-violation to a 409 WITHOUT naming the owning org: a workspace admin
--- may learn "already connected", never to whom. In practice the app-level
--- check above fires first for any cross-org attempt; the PK is the backstop
--- for the narrow same-request race the single-replica assumption doesn't
--- otherwise need to cover.
+-- may learn "already connected", never to whom. In practice the advisory-lock
+-- protected check above fires first for any cross-org attempt; the PK only
+-- matters for the same (workspace_id, api_app_id) pair racing itself, which
+-- the lock already prevents from being a problem — it's defense in depth,
+-- not the primary mechanism.
 --
 -- api_app_id is derived server-side at connect time (auth.test -> bot_id ->
 -- bots.info -> app_id) — the admin never types it, same discipline as
@@ -7643,9 +7650,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_slack_workspaces TO tf_app;
 -- ErrNotApplicableInLocal.
 --
 -- Deliberately keyed (workspace_id, slack_user_id) — NOT (workspace_id,
--- api_app_id, slack_user_id) — even after TFAC-533 re-keyed
--- org_slack_workspaces to the (workspace, app) composite bind. Identity is a
--- fact about a human in a workspace, not about an app: two apps installed in
+-- api_app_id, slack_user_id) — even though org_slack_workspaces itself is
+-- keyed on the (workspace, app) composite bind. Identity is a fact about a
+-- human in a workspace, not about an app: two apps installed in
 -- the same workspace (e.g. a prod TF org and an eval TF org each running
 -- their own bot there) see the same humans, so sharing the mapping rows
 -- across both is correct and halves users.info traffic rather than
@@ -7708,8 +7715,8 @@ REVOKE ALL ON public.user_slack_identities FROM anon, authenticated, service_rol
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.user_slack_identities TO tf_app;
 
 
--- Slack event dedup (TFAC-530, re-keyed TFAC-533): slack_event_deliveries —
--- the cross-transport delivery dedup table. Slack retries deliveries
+-- Slack event dedup: slack_event_deliveries — the cross-transport delivery
+-- dedup table. Slack retries deliveries
 -- (webhook X-Slack-Retry-Num; Socket Mode redelivers unacked envelopes), and
 -- the two transports (this leaf's Events API receiver, the next leaf's
 -- Socket Mode client) can only share dedup state through storage — an
@@ -7719,8 +7726,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.user_slack_identities TO tf_app;
 -- are honestly per-app, not per-workspace — a Socket Mode connection belongs
 -- to an app, and Slack load-balances an app's event envelopes across all of
 -- that app's open sockets regardless of which workspace(s) it's installed
--- in. Keying dedup on workspace_id (the pre-TFAC-533 shape) would have let
--- two different apps sharing a workspace collide on the same event_id. The
+-- in. Keying dedup on workspace_id alone would let two different apps
+-- sharing a workspace collide on the same event_id. The
 -- pre-auth webhook receiver resolves org_id from org_slack_workspaces (the
 -- (workspace_id, api_app_id) -> org bind), and the entity key
 -- (domain.SlackSourceID) deliberately excludes workspace/app context too —

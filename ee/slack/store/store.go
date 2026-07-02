@@ -101,10 +101,10 @@ type WorkspaceStore interface {
 	// table's PRIMARY KEY violation verbatim (a real unique-violation
 	// error, not a silent no-op) — the caller maps that via
 	// httpx.IsUniqueViolation to a generic 409 that never names the owning
-	// org. Callers MUST check AppBoundToOtherOrgSystem before calling
-	// Upsert — the PK violation alone does not catch a different
-	// workspace_id already carrying this org's api_app_id under another
-	// org, since api_app_id isn't unique on its own.
+	// org. Callers MUST call LockApp and check AppBoundToOtherOrgSystem
+	// before calling Upsert — the PK violation alone does not catch a
+	// different workspace_id already carrying this org's api_app_id under
+	// another org, since api_app_id isn't unique on its own.
 	Upsert(ctx context.Context, ws Workspace) error
 	ListForOrg(ctx context.Context, orgID string) ([]Workspace, error)
 	Get(ctx context.Context, orgID, workspaceID, apiAppID string) (*Workspace, error)
@@ -123,15 +123,33 @@ type WorkspaceStore interface {
 	// an error, it just means the caller ack-and-drops.
 	GetByWorkspaceAppSystem(ctx context.Context, workspaceID, apiAppID string) (*Workspace, error)
 
+	// LockApp acquires a transaction-scoped Postgres advisory lock keyed on
+	// apiAppID, on the app pool (it must run in the SAME transaction as the
+	// AppBoundToOtherOrgSystem check and the Upsert that follow it, so its
+	// lifetime is tied to that transaction's commit/rollback). The connect
+	// handler calls this FIRST, before anything else in its transaction.
+	//
+	// Without it, "read AppBoundToOtherOrgSystem, then Upsert" is a
+	// check-then-act race: two concurrent connects for the same api_app_id
+	// under different orgs write different workspace_id rows, so they never
+	// collide on a unique index, and each can observe "not bound" before
+	// either commits. LockApp closes that gap — every connect for a given
+	// api_app_id serializes on this call. A concurrent transaction blocks
+	// here until the current holder commits or rolls back, so by the time
+	// it proceeds, the invariant it's about to check and enforce is
+	// already consistent. Releases automatically at transaction end; there
+	// is no corresponding unlock call.
+	LockApp(ctx context.Context, apiAppID string) error
+
 	// AppBoundToOtherOrgSystem reports whether apiAppID is already bound to
 	// a TF org other than orgID, on the admin pool (bypasses RLS — the
 	// app-single-org invariant spans every org, not just the caller's, so
 	// an RLS-scoped read that only sees the caller's own rows could never
 	// answer this). The connect handler calls this INSIDE its transaction,
-	// before Upsert, to enforce "a Slack app belongs to exactly one TF org"
-	// (TFAC-533) — a rule with no SQL constraint behind it, since api_app_id
-	// is only ever unique in combination with workspace_id. A true=false
-	// generic 409 that never names the owning org.
+	// after LockApp and before Upsert, to enforce "a Slack app belongs to
+	// exactly one TF org" — a rule with no SQL constraint behind it, since
+	// api_app_id is only ever unique in combination with workspace_id.
+	// Mapped to a generic 409 that never names the owning org.
 	AppBoundToOtherOrgSystem(ctx context.Context, apiAppID, orgID string) (bool, error)
 }
 

@@ -59,6 +59,10 @@ func (s *workspaceStore) GetByWorkspaceAppSystem(context.Context, string, string
 	return nil, db.ErrNotApplicableInLocal
 }
 
+func (s *workspaceStore) LockApp(context.Context, string) error {
+	return db.ErrNotApplicableInLocal
+}
+
 func (s *workspaceStore) AppBoundToOtherOrgSystem(context.Context, string, string) (bool, error) {
 	return false, db.ErrNotApplicableInLocal
 }

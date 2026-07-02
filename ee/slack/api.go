@@ -40,7 +40,11 @@ type authTestResult struct {
 // the workspace identity it resolves to. This is the ONLY way the connect
 // handler learns a workspace's id — the admin never types it. A non-2xx
 // HTTP response or a Slack-level {"ok":false} both surface as an error
-// carrying Slack's own message where available.
+// carrying Slack's own message where available; an "ok":true response
+// missing team_id or bot_id also errors rather than returning a
+// partially-populated result — bot_id in particular feeds straight into
+// slackBotsInfo, so a silently-empty value here would surface later as a
+// confusing bots.info failure instead of a clear one at its actual source.
 func slackAuthTest(ctx context.Context, client *http.Client, botToken string) (*authTestResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/auth.test", nil)
 	if err != nil {
@@ -66,6 +70,9 @@ func slackAuthTest(ctx context.Context, client *http.Client, botToken string) (*
 	if out.TeamID == "" {
 		return nil, fmt.Errorf("slack auth.test: response carried no team_id")
 	}
+	if out.BotID == "" {
+		return nil, fmt.Errorf("slack auth.test: response carried no bot_id")
+	}
 	return &authTestResult{
 		TeamID:       out.TeamID,
 		Team:         out.Team,
@@ -77,7 +84,7 @@ func slackAuthTest(ctx context.Context, client *http.Client, botToken string) (*
 
 // botsInfoResult is the subset of Slack's bots.info response the connect
 // handler needs: the app id that owns this bot — the key material for the
-// app-single-org invariant (TFAC-533).
+// app-single-org invariant.
 type botsInfoResult struct {
 	AppID string
 }
