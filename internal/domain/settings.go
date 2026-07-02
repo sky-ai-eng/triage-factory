@@ -53,6 +53,13 @@ type OrgSettings struct {
 	// summed across every category) is >= this value, the delegation choke
 	// point refuses all new agent runs. A runaway-spend fuse.
 	MaxDailyCostUSD float64
+
+	// MarketplaceEnabled is the ship-dark org toggle for the within-org
+	// prompt marketplace (TFAC-535 / TFAC-92 scoping decision 4). NOT NULL
+	// DEFAULT false on both backends — no NULL-round-trip subtlety like the
+	// fields above. UI/enforcement of this flag land in TFAC-539; this
+	// ticket only carries the column.
+	MarketplaceEnabled bool
 }
 
 // DefaultOrgSettings returns the NOT NULL DEFAULT values from the
