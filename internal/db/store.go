@@ -330,6 +330,13 @@ type Stores struct {
 	// spawner's staged-injection API.
 	StagedInjections StagedInjectionStore
 
+	// Marketplace owns the within-org prompt marketplace tables
+	// (marketplace_listings + _versions + _events, marketplace_votes,
+	// marketplace_installs — TFAC-535). App pool only in Postgres: every
+	// method is request-facing (browse/publish/vote/install as the acting
+	// user), gated end to end by RLS. No "...System" variant.
+	Marketplace MarketplaceStore
+
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
 	// core holds no SSO symbols.
@@ -394,6 +401,7 @@ type TxStores struct {
 	Spend            SpendStore
 	AuthEvents       AuthEventStore
 	StagedInjections StagedInjectionStore
+	Marketplace      MarketplaceStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same

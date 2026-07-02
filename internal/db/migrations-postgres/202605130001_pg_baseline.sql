@@ -1110,6 +1110,11 @@ CREATE TABLE public.org_settings (
     -- the nullable max_llm_model_tier shape above; in-flight runs are unaffected
     -- and the read fails open on error so a transient failure can't wedge delegation.
     max_daily_cost_usd double precision,
+    -- Ship-dark org toggle for the within-org prompt marketplace (TFAC-535 /
+    -- TFAC-92 scoping decision 4). Default false: rendered grayed out with
+    -- "coming soon" in org settings until the TFAC-539 launch flip; UI +
+    -- enforcement of this column are that ticket's concern, not this one's.
+    marketplace_enabled boolean DEFAULT false NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT org_settings_github_clone_protocol_check CHECK ((github_clone_protocol = ANY (ARRAY['https'::text, 'ssh'::text])))
 );
@@ -7756,6 +7761,253 @@ ALTER TABLE public.slack_event_deliveries ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON public.slack_event_deliveries FROM PUBLIC;
 REVOKE ALL ON public.slack_event_deliveries FROM anon, authenticated, service_role;
+
+
+-- === Marketplace V1 (TFAC-535) ===========================================
+-- Within-org publish/copy for prompts + blueprints. Foundation schema only —
+-- publish/browse/install flows land in TFAC-536/537/538. Copy-on-publish
+-- throughout: a listing holds an immutable, self-contained snapshot
+-- (marketplace_listing_versions.snapshot); nothing here FKs into
+-- prompts/blueprints, and nothing a consumer copies FKs back to a listing.
+-- That self-containment is deliberate cross-org insurance per the TFAC-92
+-- epic's scoping decision 5. Self-contained block appended at the end of Up,
+-- mirroring the org_template_* block: every FK target (orgs, teams, users,
+-- events_catalog) already exists.
+--
+-- Multi-mode only (house pattern — see the Slack tables / org_invites
+-- precedent): every marketplace table lives here, in the Postgres baseline,
+-- only. There is no SQLite counterpart; the SQLite store wires a stub
+-- (internal/db/sqlite/marketplace_store.go) returning ErrNotApplicableInLocal
+-- from every method, matching internal/db/sqlite/invites.go. prompts and
+-- blueprints stay untouched in both dialects — provenance rides on
+-- marketplace_installs.root_object_id (listing → copy linkage), not a
+-- column on the copy itself.
+--
+-- This is the first org-wide read path for prompt-shaped content: unlike
+-- prompts/blueprints (SELECT stays creator-or-same-team), marketplace_listings
+-- SELECT is every org member for published rows — the whole point of a
+-- within-org marketplace. Plain uuid PK on marketplace_listings (no
+-- composite org_id key): child tables FK directly to marketplace_listings(id)
+-- and additionally carry a denormalized org_id column (house pattern, cf.
+-- blueprint_steps.team_id) so their own RLS policies stay a cheap column
+-- comparison instead of a join into the parent for the org check.
+--
+-- No denormalized counters: install_count / vote_count are COUNT(*) joins at
+-- read time (org-scale N is small) — see idx_marketplace_installs_listing /
+-- the votes PK below for the indexes that join backs. This avoids the RLS
+-- trap where a consumer (who can't UPDATE another team's listing row) would
+-- need a system-context write just to bump a counter — installs/votes are
+-- plain INSERTs into tables the consumer is allowed to write.
+
+CREATE TABLE public.marketplace_listings (
+    id                uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id            uuid NOT NULL,
+    -- scope/status/kind are app-validated open sets, NO CHECK constraints —
+    -- same reasoning as prompts.source: 'global' scope and moderation
+    -- statuses (e.g. 'pending_review') must be addable later with zero DDL.
+    scope             text DEFAULT 'org'::text NOT NULL,        -- 'org' now; 'global' in cross-org phase
+    kind              text NOT NULL,                             -- 'prompt' | 'blueprint'
+    status            text DEFAULT 'published'::text NOT NULL,   -- 'published' | 'delisted'
+    name              text NOT NULL,
+    description       text DEFAULT ''::text NOT NULL,
+    publisher_team_id uuid,             -- listing outlives its publishing team (ON DELETE SET NULL below)
+    creator_user_id   uuid,             -- listing outlives its creator (ON DELETE SET NULL below)
+    -- team-side blueprint/prompt id; NO FK (listing survives source
+    -- deletion; used for republish lookup via GetActiveBySource).
+    source_id         uuid,
+    current_version   integer DEFAULT 1 NOT NULL,
+    created_at        timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at        timestamp with time zone DEFAULT now() NOT NULL,
+    delisted_at       timestamp with time zone
+);
+
+CREATE TABLE public.marketplace_listing_versions (
+    listing_id      uuid NOT NULL REFERENCES public.marketplace_listings(id) ON DELETE CASCADE,
+    org_id          uuid NOT NULL,      -- denormalized for RLS, house pattern (cf. blueprint_steps.team_id)
+    version         integer NOT NULL,
+    snapshot        jsonb NOT NULL,     -- domain.ListingSnapshot, immutable once written
+    creator_user_id uuid,
+    created_at      timestamp with time zone DEFAULT now() NOT NULL
+);
+
+-- Faceting: which event types this listing targets. Current/mutable browse
+-- metadata (auto-suggested at publish time from the attached trigger's event
+-- type, editable on republish) — distinct from the frozen
+-- ListingSnapshot.EventTypes carried inside a specific version's snapshot.
+CREATE TABLE public.marketplace_listing_events (
+    listing_id uuid NOT NULL REFERENCES public.marketplace_listings(id) ON DELETE CASCADE,
+    org_id     uuid NOT NULL,
+    event_type text NOT NULL
+);
+
+-- One 'recommend' vote per user per listing (TFAC-92 scoping decision 2: no
+-- 5-star, votes + installs only).
+CREATE TABLE public.marketplace_votes (
+    listing_id uuid NOT NULL REFERENCES public.marketplace_listings(id) ON DELETE CASCADE,
+    org_id     uuid NOT NULL,
+    user_id    uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+-- Audit + install counts + provenance + substrate for the run-derived stats
+-- fast-follow (TFAC-540). Plain PK(id) like artifacts/system_llm_runs — no
+-- child table needs a composite FK into this one. root_object_id (the
+-- created copy — a blueprint id for kind=blueprint, a prompt id for
+-- kind=prompt) is deliberately NOT an FK: install history must survive the
+-- copy's later deletion, exactly like source_id survives the source's.
+CREATE TABLE public.marketplace_installs (
+    id             uuid DEFAULT gen_random_uuid() NOT NULL,
+    listing_id     uuid NOT NULL REFERENCES public.marketplace_listings(id) ON DELETE CASCADE,
+    org_id         uuid NOT NULL,
+    version        integer NOT NULL,
+    team_id        uuid NOT NULL,           -- installing team
+    user_id        uuid,
+    root_object_id uuid,
+    created_at     timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.marketplace_listings
+    ADD CONSTRAINT marketplace_listings_pkey PRIMARY KEY (id);
+
+-- One active listing per source object: a team republishing the same
+-- prompt/blueprint reuses its existing listing rather than minting a
+-- duplicate (GetActiveBySource resolves this for the publish flow).
+CREATE UNIQUE INDEX marketplace_listings_source_active ON public.marketplace_listings USING btree (org_id, source_id) WHERE ((status = 'published'::text) AND (source_id IS NOT NULL));
+
+ALTER TABLE ONLY public.marketplace_listing_versions
+    ADD CONSTRAINT marketplace_listing_versions_pkey PRIMARY KEY (listing_id, version);
+
+ALTER TABLE ONLY public.marketplace_listing_events
+    ADD CONSTRAINT marketplace_listing_events_pkey PRIMARY KEY (listing_id, event_type);
+
+ALTER TABLE ONLY public.marketplace_votes
+    ADD CONSTRAINT marketplace_votes_pkey PRIMARY KEY (listing_id, user_id);
+
+ALTER TABLE ONLY public.marketplace_installs
+    ADD CONSTRAINT marketplace_installs_pkey PRIMARY KEY (id);
+
+CREATE INDEX idx_marketplace_installs_listing ON public.marketplace_installs USING btree (listing_id, org_id);
+
+ALTER TABLE ONLY public.marketplace_listings
+    ADD CONSTRAINT marketplace_listings_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.marketplace_listings
+    ADD CONSTRAINT marketplace_listings_publisher_team_id_fkey FOREIGN KEY (publisher_team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
+ALTER TABLE ONLY public.marketplace_listings
+    ADD CONSTRAINT marketplace_listings_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.marketplace_listing_versions
+    ADD CONSTRAINT marketplace_listing_versions_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.marketplace_listing_events
+    ADD CONSTRAINT marketplace_listing_events_event_type_fkey FOREIGN KEY (event_type) REFERENCES public.events_catalog(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.marketplace_votes
+    ADD CONSTRAINT marketplace_votes_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.marketplace_installs
+    ADD CONSTRAINT marketplace_installs_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.marketplace_installs
+    ADD CONSTRAINT marketplace_installs_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.marketplace_listings FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+ALTER TABLE public.marketplace_listings ENABLE ROW LEVEL SECURITY;
+
+-- Every org member browses published listings; the publisher team also sees
+-- its own delisted ones (to relist/manage).
+CREATE POLICY marketplace_listings_select ON public.marketplace_listings FOR SELECT
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)
+            AND ((status = 'published'::text) OR tf.user_can_write_team(publisher_team_id))));
+CREATE POLICY marketplace_listings_insert ON public.marketplace_listings FOR INSERT
+    WITH CHECK (((org_id = tf.current_org_id()) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(publisher_team_id)));
+CREATE POLICY marketplace_listings_update ON public.marketplace_listings FOR UPDATE
+    USING (((org_id = tf.current_org_id()) AND tf.user_can_write_team(publisher_team_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_can_write_team(publisher_team_id)));
+CREATE POLICY marketplace_listings_delete ON public.marketplace_listings FOR DELETE
+    USING (((org_id = tf.current_org_id()) AND tf.user_can_write_team(publisher_team_id)));
+
+ALTER TABLE public.marketplace_listing_versions ENABLE ROW LEVEL SECURITY;
+
+-- SELECT mirrors listings (org member + published-or-publisher, via EXISTS on
+-- the parent listing since this child table carries no status of its own);
+-- INSERT gated by publisher-team write via the same EXISTS.
+CREATE POLICY marketplace_listing_versions_select ON public.marketplace_listing_versions FOR SELECT
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)
+            AND (EXISTS ( SELECT 1 FROM public.marketplace_listings l
+                          WHERE (l.id = marketplace_listing_versions.listing_id) AND (l.org_id = marketplace_listing_versions.org_id)
+                            AND ((l.status = 'published'::text) OR tf.user_can_write_team(l.publisher_team_id))))));
+CREATE POLICY marketplace_listing_versions_insert ON public.marketplace_listing_versions FOR INSERT
+    WITH CHECK (((org_id = tf.current_org_id())
+                 AND (EXISTS ( SELECT 1 FROM public.marketplace_listings l
+                              WHERE (l.id = marketplace_listing_versions.listing_id) AND (l.org_id = marketplace_listing_versions.org_id)
+                                AND tf.user_can_write_team(l.publisher_team_id)))));
+
+ALTER TABLE public.marketplace_listing_events ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY marketplace_listing_events_select ON public.marketplace_listing_events FOR SELECT
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)
+            AND (EXISTS ( SELECT 1 FROM public.marketplace_listings l
+                          WHERE (l.id = marketplace_listing_events.listing_id) AND (l.org_id = marketplace_listing_events.org_id)
+                            AND ((l.status = 'published'::text) OR tf.user_can_write_team(l.publisher_team_id))))));
+CREATE POLICY marketplace_listing_events_insert ON public.marketplace_listing_events FOR INSERT
+    WITH CHECK (((org_id = tf.current_org_id())
+                 AND (EXISTS ( SELECT 1 FROM public.marketplace_listings l
+                              WHERE (l.id = marketplace_listing_events.listing_id) AND (l.org_id = marketplace_listing_events.org_id)
+                                AND tf.user_can_write_team(l.publisher_team_id)))));
+-- DELETE mirrors INSERT: PublishVersion replaces the facet set under the
+-- same publisher-team write gate.
+CREATE POLICY marketplace_listing_events_delete ON public.marketplace_listing_events FOR DELETE
+    USING (((org_id = tf.current_org_id())
+            AND (EXISTS ( SELECT 1 FROM public.marketplace_listings l
+                         WHERE (l.id = marketplace_listing_events.listing_id) AND (l.org_id = marketplace_listing_events.org_id)
+                           AND tf.user_can_write_team(l.publisher_team_id)))));
+
+ALTER TABLE public.marketplace_votes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY marketplace_votes_select ON public.marketplace_votes FOR SELECT
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+CREATE POLICY marketplace_votes_insert ON public.marketplace_votes FOR INSERT
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (user_id = tf.current_user_id())));
+CREATE POLICY marketplace_votes_delete ON public.marketplace_votes FOR DELETE
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (user_id = tf.current_user_id())));
+
+ALTER TABLE public.marketplace_installs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY marketplace_installs_select ON public.marketplace_installs FOR SELECT
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+-- Write role on the *installing* team, not the publishing team.
+CREATE POLICY marketplace_installs_insert ON public.marketplace_installs FOR INSERT
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_can_write_team(team_id)));
+
+GRANT ALL ON TABLE public.marketplace_listings TO postgres;
+GRANT ALL ON TABLE public.marketplace_listings TO anon;
+GRANT ALL ON TABLE public.marketplace_listings TO authenticated;
+GRANT ALL ON TABLE public.marketplace_listings TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.marketplace_listings TO tf_app;
+
+GRANT ALL ON TABLE public.marketplace_listing_versions TO postgres;
+GRANT ALL ON TABLE public.marketplace_listing_versions TO anon;
+GRANT ALL ON TABLE public.marketplace_listing_versions TO authenticated;
+GRANT ALL ON TABLE public.marketplace_listing_versions TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.marketplace_listing_versions TO tf_app;
+
+GRANT ALL ON TABLE public.marketplace_listing_events TO postgres;
+GRANT ALL ON TABLE public.marketplace_listing_events TO anon;
+GRANT ALL ON TABLE public.marketplace_listing_events TO authenticated;
+GRANT ALL ON TABLE public.marketplace_listing_events TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.marketplace_listing_events TO tf_app;
+
+GRANT ALL ON TABLE public.marketplace_votes TO postgres;
+GRANT ALL ON TABLE public.marketplace_votes TO anon;
+GRANT ALL ON TABLE public.marketplace_votes TO authenticated;
+GRANT ALL ON TABLE public.marketplace_votes TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.marketplace_votes TO tf_app;
+
+GRANT ALL ON TABLE public.marketplace_installs TO postgres;
+GRANT ALL ON TABLE public.marketplace_installs TO anon;
+GRANT ALL ON TABLE public.marketplace_installs TO authenticated;
+GRANT ALL ON TABLE public.marketplace_installs TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.marketplace_installs TO tf_app;
 
 
 -- +goose Down

@@ -268,6 +268,10 @@ var orgScopedTables = []string{
 	"project_knowledge", "projects",
 	"repo_profiles", "poller_state",
 	"prompts",
+	// marketplace_listings cascades into its version/event/vote/install
+	// children via their own org_id-CASCADE FKs, same as prompts →
+	// system_prompt_versions below — only the parent needs listing here.
+	"marketplace_listings",
 	// slack_event_deliveries carries no org_id column and no FK (keyed on
 	// workspace_id text alone; see the migration), so unlike
 	// org_slack_workspaces (which cascades transitively via its org_id FK

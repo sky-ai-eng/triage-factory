@@ -132,6 +132,11 @@ func New(conn *sql.DB) db.Stores {
 		// connection (N=1, no RLS). Durable "stage for next resume"
 		// agent-injection queue. See TFAC-501.
 		StagedInjections: newStagedInjectionStore(conn),
+		// Marketplace is multi-mode only (TFAC-535): every marketplace_* table
+		// lives in the Postgres baseline only. This is a stub returning
+		// ErrNotApplicableInLocal from every method — wired so the bundle is
+		// complete in both modes; local never mounts the marketplace routes.
+		Marketplace: newMarketplaceStore(conn, conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

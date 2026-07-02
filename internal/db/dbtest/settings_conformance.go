@@ -64,6 +64,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			BedrockCredentialsRef: "vault://orgs/A/bedrock",
 			MaxLLMModelTier:       "sonnet",
 			MaxDailyCostUSD:       12.50,
+			MarketplaceEnabled:    true,
 		}
 		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
@@ -74,6 +75,41 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("OrgSettings round-trip mismatch\n got: %+v\nwant: %+v", got, want)
+		}
+	})
+
+	// TFAC-535: marketplace_enabled is a plain NOT NULL DEFAULT false column
+	// (no NULL-round-trip subtlety like the nullable fields above) — pin the
+	// explicit true→false toggle since RoundTripsEveryField only exercises
+	// true once.
+	t.Run("OrgSettings_MarketplaceEnabled_Toggles", func(t *testing.T) {
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+		on := base
+		on.MarketplaceEnabled = true
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, on); err != nil {
+			t.Fatalf("UpdateSettings (on): %v", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (on): %v", err)
+		}
+		if !got.MarketplaceEnabled {
+			t.Errorf("MarketplaceEnabled = false after enabling, want true")
+		}
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+			t.Fatalf("UpdateSettings (off): %v", err)
+		}
+		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (off): %v", err)
+		}
+		if got.MarketplaceEnabled {
+			t.Errorf("MarketplaceEnabled = true after disabling, want false")
 		}
 	})
 

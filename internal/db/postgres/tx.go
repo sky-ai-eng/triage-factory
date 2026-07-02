@@ -261,6 +261,10 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// s.admin so SpendByCategorySystem routes outside the tx and reads org-wide
 		// (the TFAC-477 cap is claims-less by design). Read-only. See TFAC-472.
 		Spend: newSpendStore(tx, s.admin),
+		// Marketplace: no admin-pool half — every method is request-facing and
+		// RLS-gated (no "...System" variant), so it's tx-bound like Prompts/
+		// Blueprints' app half rather than split.
+		Marketplace: newMarketplaceStore(tx),
 		// Opaque extension bundles (the Enterprise Edition SSO stores) built
 		// from the same (app=tx, admin=s.admin) handles, so their app/admin
 		// pool split is identical to core's own stores — the login-time reads
