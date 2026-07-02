@@ -554,6 +554,23 @@ type githubDownloadArtifactResult struct {
 	Data []byte `json:"data"`
 }
 
+// --- extensions (ee-registered agent-facing CLI verbs) ---
+//
+// callExtensionArgs/Result are opaque envelopes: Args/Result carry whatever
+// JSON shape the registering ee package's handler and CLI runner agree on.
+// The daemon never inspects the payload — it just routes (namespace, method,
+// args) to callExtension and ships back whatever the handler returns.
+
+type callExtensionArgs struct {
+	Namespace string          `json:"namespace"`
+	Method    string          `json:"method"`
+	Args      json.RawMessage `json:"args,omitempty"`
+}
+
+type callExtensionResult struct {
+	Result json.RawMessage `json:"result,omitempty"`
+}
+
 // emptyArgs is the args type for methods that take no parameters
 // (LookupRun, GetAgentRun, ListRunWorktrees, ListRepos). Using an empty
 // struct rather than json.RawMessage(nil)
@@ -617,4 +634,6 @@ const (
 
 	methodGithubCreatePendingReview     = "GithubCreatePendingReview"
 	methodGithubAddPendingReviewComment = "GithubAddPendingReviewComment"
+
+	methodCallExtension = "CallExtension"
 )

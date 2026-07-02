@@ -496,6 +496,21 @@ func (c *IPCClient) GithubAPIGet(ctx context.Context, owner, repo, path string) 
 	return res.Data, nil
 }
 
+// --- extensions ---
+
+// CallExtension ships (namespace, method, args) to the daemon, which
+// resolves the registered handler, checks entitlement, and invokes it (see
+// LocalClient.CallExtension / callExtension). An older daemon that predates
+// this RPC answers with the dispatch default case's "unknown method" error,
+// which surfaces here verbatim — no hang, no panic.
+func (c *IPCClient) CallExtension(ctx context.Context, namespace, method string, args json.RawMessage) (json.RawMessage, error) {
+	var res callExtensionResult
+	if err := c.call(ctx, methodCallExtension, callExtensionArgs{Namespace: namespace, Method: method, Args: args}, &res); err != nil {
+		return nil, err
+	}
+	return res.Result, nil
+}
+
 // GithubDownloadArtifact buffers the daemon's reply and copies it into dst.
 // The blob can't stream over the one-shot RPC frame, so the host returns the
 // full (capped) body and the sandbox writes it into its own worktree. The

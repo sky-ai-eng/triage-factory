@@ -1937,3 +1937,14 @@ func (c *LocalClient) branchPushAction(a domain.Artifact) *domain.ExternalAction
 	c.stampActionIdentity(act)
 	return act
 }
+
+// --- extensions ---
+
+// CallExtension is the entitlement-gated dispatch point for ee-registered
+// agent-facing CLI verbs (see extension.go). Both LocalClient (local mode,
+// and the daemon's per-request NewLocal in server.go) and IPCClient (the
+// sandbox transport) route through this one check, so a verb author cannot
+// forget it.
+func (c *LocalClient) CallExtension(ctx context.Context, namespace, method string, args json.RawMessage) (json.RawMessage, error) {
+	return callExtension(ctx, c.info, namespace, method, args)
+}

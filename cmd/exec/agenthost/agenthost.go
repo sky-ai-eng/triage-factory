@@ -36,6 +36,7 @@ package agenthost
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 
@@ -307,6 +308,15 @@ type Client interface {
 	// (run still in progress) comes back as a reconstructable github.HTTPError
 	// so the per-job fallback fires.
 	GithubDownloadArtifact(ctx context.Context, owner, repo, path string, dst io.Writer, maxBytes int64) (int64, error)
+
+	// --- extensions (ee-registered agent-facing CLI verbs) ---
+
+	// CallExtension invokes a registered extension method host-side. The
+	// entitlement gate lives in the LocalClient implementation — the single
+	// dispatch point both transports route through — so a verb author cannot
+	// forget it: unknown namespace → error; feature not held by the run's org
+	// → error; otherwise the handler runs with the run's identity.
+	CallExtension(ctx context.Context, namespace, method string, args json.RawMessage) (json.RawMessage, error)
 
 	// Close releases any resources held by the client. LocalClient is
 	// a no-op (it doesn't own the DB conn — that's exec.Handle's

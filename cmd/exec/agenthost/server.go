@@ -683,6 +683,21 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return githubDownloadArtifactResult{Data: buf.Bytes()}, nil
 
+	// --- extensions: route to the same entitlement-gated CallExtension the
+	// LocalClient exposes in-process, so a verb author never has to duplicate
+	// the gate for the sandbox transport. ---
+
+	case methodCallExtension:
+		var a callExtensionArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		result, err := client.CallExtension(ctx, a.Namespace, a.Method, a.Args)
+		if err != nil {
+			return nil, err
+		}
+		return callExtensionResult{Result: result}, nil
+
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownMethod, method)
 	}
