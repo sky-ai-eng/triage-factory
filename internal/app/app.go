@@ -132,6 +132,7 @@ func New(ctx context.Context, cfg Config, static fs.FS) (*App, error) {
 func (a *App) Run(ctx context.Context) error {
 	a.runStartupTasks(ctx)
 	a.startWorkers(ctx)
+	a.srv.StartExtensionWorkers(ctx)
 	a.startPolling()
 	return a.srv.ListenAndServeContext(ctx, a.cfg.Addr)
 }

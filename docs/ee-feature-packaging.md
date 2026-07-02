@@ -47,6 +47,7 @@ What's admissible in **core** (exactly three kinds of things):
 | Entitlement gate                 | `entitlements.GateEventSource(prefix, feature)`                          | the dormancy contract for every event type of this source                                                                                                              |
 | Event publish                    | `ExtensionAPI.PublishEvent(evt)`                                         | ingest → durable outbox → router, without touching the bus directly                                                                                                    |
 | Event subscribe                  | `ExtensionAPI.Bus()`                                                     | bus subscriptions (live-update consumers)                                                                                                                              |
+| Background workers               | `ExtensionAPI.OnReady`                                                   | a long-lived worker goroutine (connection manager, poller) started post-wiring with a shutdown-cancelling context                                                      |
 | Agent CLI verbs                  | `exec.RegisterSubcommand` + `agenthost.RegisterExtension`                | an exec subcommand (arg parsing, ee-side) and its host-side logic, entitlement-gated at the `CallExtension` dispatch                                                   |
 
 The first four apply to any feature. The next five are for a **feature with
@@ -122,6 +123,14 @@ everything downstream is shared machinery. Do not reimplement it.
 `ExtensionAPI.PublishEvent` and `Bus()` are read-through and nil until app
 wiring completes: use them at request time (any mounted handler is safe),
 never inside the install closure itself.
+
+A feature that needs a long-lived background worker (a connection manager, a
+poller) registers it via `ExtensionAPI.OnReady` during install; core fires the
+hook once wiring is complete, in its own goroutine, with a context that
+cancels at process shutdown — by then `Bus()` and `PublishEvent` are safe to
+use. The worker is not exempt from the dormancy contract: it must gate its
+per-org work on `entitlements.For(orgID).Has(feature)` just like any handler,
+since `OnReady` fires unconditionally for every install.
 
 ## Entitlement gating: two shapes, one contract
 

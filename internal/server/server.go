@@ -237,6 +237,15 @@ type Server struct {
 	// flood (e.g. SSO-discovery domain enumeration). Constructed in New so
 	// it's never nil; the wrapper no-ops in local mode. See ratelimit.go.
 	preAuthLimiter *ipRateLimiter
+
+	// readyHooks are OnReady hooks registered by extensions during
+	// installExtensions (routes()). Collected single-threaded at startup —
+	// same no-lock contract as registeredExtensions — then fired by
+	// StartExtensionWorkers once app wiring is complete.
+	readyHooks []func(context.Context)
+	// workersStarted guards StartExtensionWorkers so a double call (e.g. a
+	// test double-invoking Run) can't fire readyHooks twice.
+	workersStarted sync.Once
 }
 
 // reachableRepoEntry is one cached picker enumeration: the lowercased

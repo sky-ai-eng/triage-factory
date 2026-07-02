@@ -66,15 +66,27 @@ type ExtensionAPI interface {
 	// drops the event, matching ingest's own drop-loudly convention, rather
 	// than silently skipping durability. Read-through to the live server;
 	// nil until app wiring completes (internal/app/subsystems.go). Safe for
-	// request-time use only — extension handlers run post-startup, but the
-	// install closure runs before ingestor is wired, so an extension must
-	// NOT call this from its install closure.
+	// request-time use and inside OnReady hooks (which fire post-wiring) —
+	// the install closure runs before the ingestor is wired, so an
+	// extension must NOT call this from its install closure.
 	PublishEvent(evt domain.Event)
 	// Bus returns the in-process event bus, for subscribe-side consumers.
-	// Read-through to the live server; nil until app wiring completes. Same
-	// install-closure caveat as PublishEvent — only safe at request time /
-	// from a goroutine started after startup.
+	// Read-through to the live server; nil until app wiring completes. Safe
+	// for request-time use and inside OnReady hooks (which fire post-wiring)
+	// — same install-closure caveat as PublishEvent.
 	Bus() *eventbus.Bus
+
+	// OnReady registers a hook to run once app wiring is complete — the seam
+	// for an extension's long-lived background workers (connection
+	// managers, pollers). Called during install; the hook fires later, in
+	// its own goroutine, with a context that cancels at process shutdown.
+	// By hook time every read-through accessor on this API (Bus,
+	// PublishEvent, ...) is wired and non-nil. The hook MAY block for the
+	// process lifetime (run the worker loop directly); respect ctx.Done()
+	// for graceful stop. Hooks are fired in registration order but run
+	// concurrently; there is no join on shutdown — a worker needing drain
+	// time handles it inside the hook before returning.
+	OnReady(hook func(ctx context.Context))
 
 	// --- login seam (see login_ext.go) ---
 
@@ -151,6 +163,19 @@ func (s *Server) installExtensions() {
 	}
 }
 
+// StartExtensionWorkers fires every OnReady hook registered during
+// installExtensions, each in its own goroutine with ctx. Called once by
+// app.Run after wiring completes and before the HTTP listener starts.
+// Idempotent: a second call is a no-op, so a caller that double-invokes Run
+// can't double-start workers.
+func (s *Server) StartExtensionWorkers(ctx context.Context) {
+	s.workersStarted.Do(func() {
+		for _, hook := range s.readyHooks {
+			go hook(ctx)
+		}
+	})
+}
+
 // serverExtensionAPI adapts *Server to ExtensionAPI. A thin value wrapper
 // so the methods read through to the live server.
 type serverExtensionAPI struct{ s *Server }
@@ -180,6 +205,14 @@ func (a serverExtensionAPI) PublishEvent(evt domain.Event) {
 		return
 	}
 	a.s.ingestor.Publish(evt)
+}
+
+// OnReady collects the hook onto the server's readyHooks slice. Called
+// during routes() install, single-threaded, same no-lock startup-write
+// contract as registeredExtensions — StartExtensionWorkers is the only
+// reader, and it never runs concurrently with install.
+func (a serverExtensionAPI) OnReady(hook func(ctx context.Context)) {
+	a.s.readyHooks = append(a.s.readyHooks, hook)
 }
 
 func (a serverExtensionAPI) PublicURL() string {
