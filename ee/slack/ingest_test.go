@@ -192,6 +192,40 @@ func TestHandleEventCallback_DuplicateEventIDPublishedOnce(t *testing.T) {
 	}
 }
 
+// TestHandleEventCallback_MalformedFieldsDropped: an app_mention missing
+// event_id, channel, or ts is dropped rather than flowing an empty string
+// into the dedup key or the entity source_id — an empty event_id would
+// dedup every malformed delivery from a workspace together, and an empty
+// channel/ts would collide entities across otherwise-unrelated mentions.
+func TestHandleEventCallback_MalformedFieldsDropped(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   inboundMention
+	}{
+		{"missing event_id", inboundMention{Type: "app_mention", Channel: "C1", User: "U1", TS: "1.0"}},
+		{"missing channel", inboundMention{Type: "app_mention", EventID: "Ev1", User: "U1", TS: "1.0"}},
+		{"missing ts", inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, entities, deliveries, published := newTestPipeline()
+			ws := testWorkspaceRow("org-1")
+			if err := p.handleEventCallback(context.Background(), ws, tc.ev); err != nil {
+				t.Fatalf("handleEventCallback: %v", err)
+			}
+			if len(*published) != 0 {
+				t.Errorf("published %d events for a malformed mention; want 0", len(*published))
+			}
+			if len(entities.byKey) != 0 {
+				t.Errorf("created %d entities for a malformed mention; want 0", len(entities.byKey))
+			}
+			if len(deliveries.seen) != 0 {
+				t.Errorf("recorded %d deliveries for a malformed mention; want 0 (dropped before dedup)", len(deliveries.seen))
+			}
+		})
+	}
+}
+
 // TestHandleEventCallback_DeliveryStoreError propagates a dedup-store
 // failure rather than silently dropping (which would look identical to a
 // legitimate duplicate).
@@ -220,6 +254,7 @@ func TestParseSlackTS(t *testing.T) {
 		{"microsecond fraction", "1600000000.000100", time.Unix(1600000000, 100000).UTC()},
 		{"empty is unknown", "", time.Time{}},
 		{"garbage is unknown", "not-a-ts", time.Time{}},
+		{"garbage fraction is unknown", "1600000000.not-a-fraction", time.Time{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

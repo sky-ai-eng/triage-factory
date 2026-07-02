@@ -64,6 +64,15 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 		slackLog.Debug("dropping non-app_mention slack event", "type", ev.Type, "workspace", ws.WorkspaceID)
 		return nil
 	}
+	// EventID feeds the dedup key and Channel/TS feed the entity source_id
+	// (domain.SlackSourceID) — an empty value in any of them (a malformed
+	// or unexpectedly-shaped payload) would dedup unrelated deliveries
+	// together or collide entities across channels, so treat it as
+	// malformed and drop rather than deriving a garbage key from it.
+	if ev.EventID == "" || ev.Channel == "" || ev.TS == "" {
+		slackLog.Debug("dropping malformed app_mention: missing event_id/channel/ts", "workspace", ws.WorkspaceID)
+		return nil
+	}
 	if ev.BotID != "" || (ws.BotUserID != "" && ev.User == ws.BotUserID) {
 		slackLog.Debug("dropping self/bot-authored slack mention", "workspace", ws.WorkspaceID)
 		return nil
@@ -146,7 +155,10 @@ func parseSlackTS(ts string) time.Time {
 		for len(fracStr) < 9 {
 			fracStr += "0"
 		}
-		nsec, _ = strconv.ParseInt(fracStr[:9], 10, 64)
+		nsec, err = strconv.ParseInt(fracStr[:9], 10, 64)
+		if err != nil {
+			return time.Time{}
+		}
 	}
 	return time.Unix(sec, nsec).UTC()
 }

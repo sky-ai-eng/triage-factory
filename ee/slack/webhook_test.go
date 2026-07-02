@@ -252,7 +252,8 @@ func TestHandleWebhook_GoldenSignature_ValidatesCorrectly(t *testing.T) {
 	if got := sign(secret, timestamp, body); got != want {
 		t.Fatalf("sign() = %q; want %q (helper/vector mismatch)", got, want)
 	}
-	if !validSlackSignature(secret, body, strconv.FormatInt(time.Now().Unix(), 10), sign(secret, strconv.FormatInt(time.Now().Unix(), 10), body)) {
+	freshTS := strconv.FormatInt(time.Now().Unix(), 10)
+	if !validSlackSignature(secret, body, freshTS, sign(secret, freshTS, body)) {
 		t.Error("validSlackSignature rejected a freshly-signed request")
 	}
 	if validSlackSignature(secret, body, timestamp, want) {
