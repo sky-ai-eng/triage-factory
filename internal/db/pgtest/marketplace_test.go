@@ -259,7 +259,7 @@ func TestMarketplaceRLS_CrossOrgIsolation(t *testing.T) {
 	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
 	orgB, dave, _ := SeedOrgWithUser(t, h, "dave")
 
-	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "OrgA Only", "orga-source")
+	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "OrgA Only", "00000000-0000-0000-0000-0000000000cc")
 
 	if err := h.WithUser(t, dave, orgB, func(tx *sql.Tx) error {
 		m := pgstore.NewForTx(tx, SecretKey).Marketplace
@@ -273,7 +273,7 @@ func TestMarketplaceRLS_CrossOrgIsolation(t *testing.T) {
 		if len(listed) != 0 {
 			t.Errorf("dave's cross-org List = %+v, want empty", listed)
 		}
-		active, err := m.GetActiveBySource(t.Context(), orgA, "orga-source")
+		active, err := m.GetActiveBySource(t.Context(), orgA, "00000000-0000-0000-0000-0000000000cc")
 		if err != nil {
 			return err
 		}

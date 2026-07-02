@@ -232,8 +232,8 @@ func fetchEventTypesForListingsPG(ctx context.Context, q queryer, orgID string, 
 	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT listing_id, event_type FROM marketplace_listing_events
-		WHERE org_id = $1 AND listing_id = ANY($2::uuid[]) ORDER BY event_type
-	`, orgID, listingIDs)
+		WHERE org_id = $1 AND listing_id = ANY($2) ORDER BY event_type
+	`, orgID, pgUUIDArray(listingIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -338,11 +338,20 @@ func (s *marketplaceStore) Get(ctx context.Context, orgID, listingID, viewerUser
 		return domain.ListingDetail{}, err
 	}
 	var current domain.ListingSnapshot
+	var foundCurrent bool
 	for _, v := range versions {
 		if v.Version == summary.CurrentVersion {
 			current = v.Snapshot
+			foundCurrent = true
 			break
 		}
+	}
+	if !foundCurrent {
+		// Data-integrity guard: current_version is written by PublishVersion
+		// in the same tx as the version row, so this should be unreachable —
+		// surface it loudly rather than silently handing back a zero-value
+		// snapshot that reads as "empty listing" to the caller.
+		return domain.ListingDetail{}, fmt.Errorf("marketplace listing %s: current_version %d has no matching version row", listingID, summary.CurrentVersion)
 	}
 	return domain.ListingDetail{ListingSummary: summary, CurrentSnapshot: current, Versions: versions}, nil
 }

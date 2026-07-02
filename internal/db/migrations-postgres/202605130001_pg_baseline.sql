@@ -7821,6 +7821,14 @@ CREATE TABLE public.marketplace_listings (
     delisted_at       timestamp with time zone
 );
 
+-- PK must land before the child CREATE TABLEs below: their inline
+-- REFERENCES public.marketplace_listings(id) clauses need a unique
+-- constraint on the target column to already exist when each CREATE TABLE
+-- statement runs (goose replays this file top-to-bottom as a single
+-- transaction, one statement at a time).
+ALTER TABLE ONLY public.marketplace_listings
+    ADD CONSTRAINT marketplace_listings_pkey PRIMARY KEY (id);
+
 CREATE TABLE public.marketplace_listing_versions (
     listing_id      uuid NOT NULL REFERENCES public.marketplace_listings(id) ON DELETE CASCADE,
     org_id          uuid NOT NULL,      -- denormalized for RLS, house pattern (cf. blueprint_steps.team_id)
@@ -7865,9 +7873,6 @@ CREATE TABLE public.marketplace_installs (
     root_object_id uuid,
     created_at     timestamp with time zone DEFAULT now() NOT NULL
 );
-
-ALTER TABLE ONLY public.marketplace_listings
-    ADD CONSTRAINT marketplace_listings_pkey PRIMARY KEY (id);
 
 -- One active listing per source object: a team republishing the same
 -- prompt/blueprint reuses its existing listing rather than minting a
