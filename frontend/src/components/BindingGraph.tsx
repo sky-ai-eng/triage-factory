@@ -19,6 +19,7 @@ import { Copy, FileText, Layers, MoreVertical, Trash2 } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
+import MarketplacePublishControl from './MarketplacePublishControl'
 import {
   type BindingScope,
   isTemplateScope,
@@ -1961,6 +1962,23 @@ function BindingGraphInner({
               <p className="text-[11px] text-text-tertiary leading-snug">
                 No trigger yet — wire an event to this blueprint’s first step to fire it.
               </p>
+            )}
+
+            {/* Marketplace publish/republish/delist (TFAC-536) — blueprints
+                publish whole. Multi-mode only (renders nothing in local
+                mode); the org template has no owning team, so this is
+                withheld there. Event-type suggestion comes from the
+                blueprint's own trigger, already loaded for the canvas. */}
+            {!isTemplateScope(scope) && (
+              <div className="mt-2.5 pt-2.5 border-t border-border-subtle">
+                <MarketplacePublishControl
+                  kind="blueprint"
+                  sourceId={boxMenu.blueprintId}
+                  defaultName={blueprintNames[boxMenu.blueprintId] ?? ''}
+                  suggestedEventTypes={boxMenuTrigger ? [boxMenuTrigger.event_type] : undefined}
+                  compact
+                />
+              </div>
             )}
             {/* Delete the whole blueprint — soft-deletes the box + its step
                 prompts and detaches the trigger server-side; the canvas refetch

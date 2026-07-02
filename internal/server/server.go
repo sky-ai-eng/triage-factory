@@ -1048,6 +1048,16 @@ func (s *Server) routes() {
 	s.api("GET /api/blueprint-runs/{id}", bh.handleBlueprintRunGet)
 	s.apiMutating("POST /api/blueprint-runs/{id}/cancel", bh.handleBlueprintRunCancel)
 
+	// Within-org prompt marketplace (TFAC-536) — multi-mode only, plus the
+	// org's ship-dark marketplace_enabled toggle; every handler opens with
+	// gateMarketplace and 404s on either axis (see marketplace_handler.go).
+	mh := &marketplaceHandler{tx: s.tx, az: s.az}
+	s.apiMutating("POST /api/marketplace/listings", mh.handleMarketplacePublish)
+	s.apiMutating("POST /api/marketplace/listings/{id}/versions", mh.handleMarketplaceListingVersionCreate)
+	s.apiMutating("POST /api/marketplace/listings/{id}/delist", mh.handleMarketplaceListingDelist)
+	s.apiMutating("POST /api/marketplace/listings/{id}/relist", mh.handleMarketplaceListingRelist)
+	s.api("GET /api/marketplace/listings/by-source/{source_id}", mh.handleMarketplaceListingBySource)
+
 	// Org template editor (SKY-381) — org-admin-gated, multi-mode only.
 	// Mirrors the /api/prompts + /api/event-handlers families at org-template
 	// scope (no team_id); each handler gates via requireOrgTemplate.

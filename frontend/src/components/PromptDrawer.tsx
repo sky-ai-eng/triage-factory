@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
 import TeamPicker from './TeamPicker'
+import MarketplacePublishControl from './MarketplacePublishControl'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
 import { promptsBase, blueprintsBase } from '../lib/scope'
 
@@ -602,6 +603,24 @@ export default function PromptDrawer({
                   >
                     {source}
                   </span>
+                </div>
+              )}
+
+              {/* Marketplace publish/republish/delist (TFAC-536) — standalone
+                  prompts are kind=prompt listings. Multi-mode only (the
+                  control renders nothing in local mode); org-template prompts
+                  have no owning team, so this is withheld there too. */}
+              {!isNew && !templateScope && promptId && (
+                <div>
+                  <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                    Marketplace
+                  </label>
+                  <MarketplacePublishControl
+                    kind="prompt"
+                    sourceId={promptId}
+                    defaultName={name}
+                    readOnly={readOnly}
+                  />
                 </div>
               )}
             </div>
