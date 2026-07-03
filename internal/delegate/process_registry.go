@@ -15,6 +15,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -23,8 +25,36 @@ import (
 // DefaultMaxConcurrentRuns is the conservative process-wide cap on how
 // many runs execute off the dispatcher at once, so a burst of queued steps
 // doesn't fan into an unbounded number of agent subprocesses. Tunable via
-// SetMaxConcurrentRuns before the dispatcher starts.
+// SetMaxConcurrentRuns before the dispatcher starts; deployments set it
+// with the TF_MAX_CONCURRENT_RUNS env var (see ParseMaxConcurrentRuns).
 const DefaultMaxConcurrentRuns = 4
+
+// MaxConcurrentRunsCeiling is the largest value the concurrency cap may
+// take. It mirrors the sandbox subnet allocator's structural limit: each
+// run owns a /24 out of one /16, so at most 256 sandboxes can exist on a
+// host and a higher dispatcher cap could never be honored.
+const MaxConcurrentRunsCeiling = 256
+
+// ParseMaxConcurrentRuns interprets the TF_MAX_CONCURRENT_RUNS env value.
+// Empty → the default. Non-numeric or < 1 → the default plus an error the
+// caller logs (a bad value must not brick boot). Values above the sandbox
+// ceiling clamp to it.
+func ParseMaxConcurrentRuns(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return DefaultMaxConcurrentRuns, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return DefaultMaxConcurrentRuns, fmt.Errorf(
+			"invalid TF_MAX_CONCURRENT_RUNS %q (want an integer in [1,%d]); using default %d",
+			raw, MaxConcurrentRunsCeiling, DefaultMaxConcurrentRuns)
+	}
+	if n > MaxConcurrentRunsCeiling {
+		return MaxConcurrentRunsCeiling, nil
+	}
+	return n, nil
+}
 
 // DefaultIdleHibernateTimeout is how long a live run may go quiet (no
 // stream activity) before it hibernates to a durable resume. Capacity-

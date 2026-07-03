@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -139,6 +140,16 @@ func (a *App) buildExecution() error {
 	// Per-run credentials resolve through the run-credential seam, not a
 	// process-global hot-swap.
 	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "")
+	// Dispatcher concurrency is a deployment decision: the default of 4 is
+	// conservative for a laptop, while a provisioned multi-mode host handles
+	// far more (memory-bound; see docs/sandbox-bench.md). Resolved before
+	// RunDispatcher starts — resizing later would strand semaphore tokens.
+	if n, err := delegate.ParseMaxConcurrentRuns(os.Getenv("TF_MAX_CONCURRENT_RUNS")); err != nil {
+		appLog.Warn("max concurrent runs", "error", err)
+	} else if n != delegate.DefaultMaxConcurrentRuns {
+		a.spawner.SetMaxConcurrentRuns(n)
+		appLog.Info("max concurrent runs configured", "cap", n)
+	}
 	a.spawner.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
 	// TFAC-300: the board→Jira lifecycle mirror resolves the org's system/bot
 	// Jira credential per write through this resolver (same construction the
