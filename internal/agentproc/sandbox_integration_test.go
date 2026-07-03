@@ -28,6 +28,31 @@ func TestBuildSandboxEnv_NoGitConfig(t *testing.T) {
 	}
 }
 
+// TestBuildSandboxEnv_JSCJITDefaultOff pins the engine runtime tuning:
+// the sandbox base env carries BUN_JSC_useJIT=0 by default (the memory
+// win) and drops it when the operator opts back into the JIT.
+func TestBuildSandboxEnv_JSCJITDefaultOff(t *testing.T) {
+	contains := func(env []string, kv string) bool {
+		for _, e := range env {
+			if e == kv {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !contains(buildSandboxEnv(nil), "BUN_JSC_useJIT=0") {
+		t.Error("sandbox env missing BUN_JSC_useJIT=0; the JIT should be off by default")
+	}
+
+	t.Setenv("TF_AGENT_JSC_JIT", "1")
+	for _, kv := range buildSandboxEnv(nil) {
+		if strings.HasPrefix(kv, "BUN_JSC_") {
+			t.Errorf("sandbox env carries %q despite TF_AGENT_JSC_JIT=1; the opt-out must restore the JIT", kv)
+		}
+	}
+}
+
 // TestAgentVisibleHelpers_LocalPassthrough exercises the un-sandboxed path
 // (tests run in local mode, so shouldSandbox() is false): both helpers must
 // return the host value unchanged. The sandbox branch ("/work" / the

@@ -702,6 +702,9 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// identity → IdentityConfigPairs returns nil → block carries hooks alone
 	// (unchanged behavior). TFAC-452.
 	identityPairs := githooks.IdentityConfigPairs(opts.GitUserName, opts.GitUserEmail)
+	// Engine runtime tuning rides ExtraEnv's lane: appended after the
+	// inherited env so it wins over a stale shell export of the same key.
+	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
 	cmd.Env = githooks.DirectAgentEnv(mergeEnv(os.Environ(), hookEnv, creds), identityPairs...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
