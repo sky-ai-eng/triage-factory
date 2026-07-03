@@ -816,7 +816,7 @@ function BindingGraphInner({
             return
           }
           setBoxMenu(null)
-          fetchAll()
+          await fetchAll()
         } catch (err) {
           toast.error(
             `Failed to rename blueprint: ${err instanceof Error ? err.message : String(err)}`,
@@ -885,7 +885,7 @@ function BindingGraphInner({
         if (!(await deleteBlueprintCore(blueprintId))) return
         setBoxMenu(null)
         setBoxDeleteConfirm(false)
-        fetchAll()
+        await fetchAll()
       })
     },
     [deleteBlueprintCore, fetchAll, deleteBlueprintGuard],
@@ -1315,7 +1315,7 @@ function BindingGraphInner({
             toast.error(await readError(res, 'Failed to merge blueprints'))
             return
           }
-          fetchAll()
+          await fetchAll()
         } catch (err) {
           toast.error(
             `Failed to merge blueprints: ${err instanceof Error ? err.message : String(err)}`,
@@ -1538,7 +1538,7 @@ function BindingGraphInner({
             toast.error(await readError(res, 'Failed to split blueprint'))
             return
           }
-          fetchAll()
+          await fetchAll()
         } catch (err) {
           toast.error(
             `Failed to split blueprint: ${err instanceof Error ? err.message : String(err)}`,
