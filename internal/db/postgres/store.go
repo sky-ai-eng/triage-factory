@@ -322,9 +322,12 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// still inherits runs' team-scoped RLS via its FK; org_id stays bound as
 		// defense in depth. Durable "stage for next resume" queue. See TFAC-501.
 		StagedInjections: newStagedInjectionStore(admin),
-		// Marketplace is app-pool-only (no "...System" variant — every method
-		// is request-facing and RLS-gated). See TFAC-535.
-		Marketplace: newMarketplaceStore(app),
+		// Marketplace wires both pools (TFAC-540): app for every
+		// request-facing method (RLS-gated), admin for RecomputeStatsSystem —
+		// the cross-team run-aggregation system job has no per-user identity
+		// and its read spans every team's runs in the org, so it can't run
+		// under any single caller's RLS view. See TFAC-535 / TFAC-540.
+		Marketplace: newMarketplaceStore(app, admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),
@@ -407,7 +410,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		ExternalActions: newExternalActionStore(tx, tx),
 		Spend:           newSpendStore(tx, tx),
 		AuthEvents:      newAuthEventStore(tx),
-		Marketplace:     newMarketplaceStore(tx),
+		Marketplace:     newMarketplaceStore(tx, tx),
 		Ext:             db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

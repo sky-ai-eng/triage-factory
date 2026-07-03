@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
@@ -68,13 +69,18 @@ type App struct {
 	profiler   *repoprofile.Manager
 	classifier *projectclassify.Manager
 	reconciler *reconcile.Manager
-	ingestor   *ingest.Ingestor
-	eventWake  chan struct{}
-	pollerMgr  *poller.Manager
-	spawner    *delegate.Spawner
-	curator    *curator.Curator
-	router     *routing.Router
-	srv        *server.Server
+	// marketplaceStats is nil in local mode (TFAC-540): the marketplace is
+	// multi-mode only, so there's nothing to aggregate — see buildAI and
+	// registerSubscribers, which both branch on this being nil rather than
+	// re-checking runmode.Current() a second time.
+	marketplaceStats *marketplacestats.Manager
+	ingestor         *ingest.Ingestor
+	eventWake        chan struct{}
+	pollerMgr        *poller.Manager
+	spawner          *delegate.Spawner
+	curator          *curator.Curator
+	router           *routing.Router
+	srv              *server.Server
 
 	// Runtime helpers.
 	reloader *reloader

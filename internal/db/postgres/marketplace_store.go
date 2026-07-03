@@ -12,12 +12,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// marketplaceStore is the Postgres impl of db.MarketplaceStore. Single app
-// pool — every method is request-facing (an org member browsing, publishing
-// to their own team, or voting/installing as themselves) and RLS gates
-// every write; there is no admin-pool split like PromptStore.SeedOrUpdate
-// needs. Multi-mode only — the SQLite impl is a stub (see
-// internal/db/sqlite/marketplace_store.go).
+// marketplaceStore is the Postgres impl of db.MarketplaceStore. Every
+// request-facing method runs on the app pool (RLS gates the write); q is
+// that pool (or a tx bound to it). RecomputeStatsSystem is the one
+// `...System` method (TFAC-540) and runs on admin instead — see the
+// interface doc comment.
 //
 // snapshot is stored as jsonb; every read casts it to ::text so it scans
 // cleanly into a Go string (mirrors event_handlers.scope_predicate_json),
@@ -27,11 +26,12 @@ import (
 // cast (mirrors secrets.go / staged_injections.go) rather than relying on
 // implicit inference.
 type marketplaceStore struct {
-	q queryer
+	q     queryer
+	admin queryer
 }
 
-func newMarketplaceStore(q queryer) db.MarketplaceStore {
-	return &marketplaceStore{q: q}
+func newMarketplaceStore(q, admin queryer) db.MarketplaceStore {
+	return &marketplaceStore{q: q, admin: admin}
 }
 
 var _ db.MarketplaceStore = (*marketplaceStore)(nil)
@@ -188,19 +188,24 @@ func scanListingRowPG(scanFn func(dst ...any) error) (domain.MarketplaceListing,
 	return l, nil
 }
 
-// scanListingSummaryRowPG scans a listingColumnsLPG row plus the four
-// trailing computed columns (vote_count, install_count, viewer_voted,
-// publisher_team_name) that List/Get append. EventTypes is left nil —
-// callers attach it via fetchEventTypesForListingsPG.
+// scanListingSummaryRowPG scans a listingColumnsLPG row plus the trailing
+// computed columns (vote_count, install_count, viewer_voted,
+// publisher_team_name, and the TFAC-540 stats columns) that List/Get
+// append. EventTypes is left nil — callers attach it via
+// fetchEventTypesForListingsPG.
 func scanListingSummaryRowPG(scanFn func(dst ...any) error) (domain.ListingSummary, error) {
 	var sum domain.ListingSummary
 	var publisherTeamID, creatorUserID, sourceID, publisherTeamName sql.NullString
 	var delistedAt sql.NullTime
 	var voteCount, installCount, viewerVoted int
+	var teamsUsing, totalRuns sql.NullInt64
+	var successRate sql.NullFloat64
+	var lastRunAt, computedAt sql.NullTime
 	if err := scanFn(
 		&sum.ID, &sum.OrgID, &sum.Scope, &sum.Kind, &sum.Status, &sum.Name, &sum.Description,
 		&publisherTeamID, &creatorUserID, &sourceID, &sum.CurrentVersion, &sum.CreatedAt, &sum.UpdatedAt, &delistedAt,
 		&voteCount, &installCount, &viewerVoted, &publisherTeamName,
+		&teamsUsing, &totalRuns, &successRate, &lastRunAt, &computedAt,
 	); err != nil {
 		return sum, err
 	}
@@ -221,6 +226,26 @@ func scanListingSummaryRowPG(scanFn func(dst ...any) error) (domain.ListingSumma
 	sum.ViewerVoted = viewerVoted != 0
 	if publisherTeamName.Valid {
 		sum.PublisherTeamName = publisherTeamName.String
+	}
+	// teamsUsing is the sentinel: RecomputeStatsSystem has never run for this
+	// listing (no marketplace_listing_stats row to join) iff it's NULL — Stats
+	// stays nil rather than a synthesized zero-value block (no wrong
+	// fallbacks).
+	if teamsUsing.Valid {
+		stats := &domain.ListingStats{
+			TeamsUsing: int(teamsUsing.Int64),
+			TotalRuns:  int(totalRuns.Int64),
+		}
+		if successRate.Valid {
+			stats.SuccessRate = &successRate.Float64
+		}
+		if lastRunAt.Valid {
+			stats.LastRunAt = &lastRunAt.Time
+		}
+		if computedAt.Valid {
+			stats.ComputedAt = computedAt.Time
+		}
+		sum.Stats = stats
 	}
 	return sum, nil
 }
@@ -253,20 +278,24 @@ func fetchEventTypesForListingsPG(ctx context.Context, q queryer, orgID string, 
 }
 
 // listingSummaryQueryPG is the shared List/Get header query: listing
-// columns plus the computed vote/install counts and the requesting
-// viewer's vote state, joined so a single round trip covers all three.
-// $1 is the viewer user id (NULL when no viewer context — e.g. a
-// background caller). Callers append their own WHERE/ORDER BY.
+// columns plus the computed vote/install counts, the requesting viewer's
+// vote state, and the TFAC-540 run-derived stats (a plain LEFT JOIN — the
+// row is pre-computed by RecomputeStatsSystem, never derived here, so
+// there's no RLS-crossing read at browse/detail time). $1 is the viewer
+// user id (NULL when no viewer context — e.g. a background caller).
+// Callers append their own WHERE/ORDER BY.
 const listingSummaryQueryPG = `
 	SELECT ` + listingColumnsLPG + `,
 		COALESCE(v.vote_count, 0), COALESCE(i.install_count, 0),
 		CASE WHEN mv.user_id IS NOT NULL THEN 1 ELSE 0 END,
-		pt.name
+		pt.name,
+		ms.teams_using, ms.total_runs, ms.success_rate, ms.last_run_at, ms.computed_at
 	FROM marketplace_listings l
 	LEFT JOIN (SELECT listing_id, COUNT(*) AS vote_count FROM marketplace_votes GROUP BY listing_id) v ON v.listing_id = l.id
 	LEFT JOIN (SELECT listing_id, COUNT(*) AS install_count FROM marketplace_installs GROUP BY listing_id) i ON i.listing_id = l.id
 	LEFT JOIN marketplace_votes mv ON mv.listing_id = l.id AND mv.user_id = $1::uuid
 	LEFT JOIN teams pt ON pt.id = l.publisher_team_id
+	LEFT JOIN marketplace_listing_stats ms ON ms.listing_id = l.id
 `
 
 func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID string, f domain.ListingFilter) ([]domain.ListingSummary, error) {
@@ -289,6 +318,8 @@ func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID 
 		q += ` ORDER BY COALESCE(i.install_count, 0) DESC, l.updated_at DESC`
 	case domain.ListingSortVotes:
 		q += ` ORDER BY COALESCE(v.vote_count, 0) DESC, l.updated_at DESC`
+	case domain.ListingSortMostUsed:
+		q += ` ORDER BY COALESCE(ms.total_runs, 0) DESC, l.updated_at DESC`
 	default:
 		q += ` ORDER BY l.updated_at DESC`
 	}
@@ -536,4 +567,133 @@ func (s *marketplaceStore) MaterializeListing(ctx context.Context, orgID, teamID
 		return "", nil, err
 	}
 	return rootObjectID, promptIDs, nil
+}
+
+// blueprintRunTerminalStatusesSQL is the blueprint_runs.status counterpart
+// to runTerminalStatusesSQL (run_queue.go) — the terminal set per
+// domain.BlueprintRunStatus.Terminal(). No shared constant exists for this
+// table today; defined here since this is the first blueprint_runs query
+// that needs to distinguish terminal from in-flight.
+const blueprintRunTerminalStatusesSQL = `'completed','aborted','failed','cancelled'`
+
+// recomputePromptListingStatsPG upserts marketplace_listing_stats for every
+// kind=prompt listing in $1. teams distinct-counts installing teams whose
+// copy (a prompts row) still exists and isn't soft-deleted.
+//
+// runs_agg counts only TERMINAL runs (runTerminalStatusesSQL, run_queue.go)
+// against any copy this listing has ever produced — a queued/cloning/running
+// run hasn't resolved yet, so it must count toward neither total_runs nor
+// success_rate until it does. Counting it as a not-yet-completed run would
+// silently score it as a failure (dragging success_rate toward 0% for a run
+// that hasn't actually failed) and inflate total_runs — and therefore
+// sort=used — for listings with nothing but a burst of just-triggered,
+// unresolved runs. Filtering the population once and deriving all three
+// metrics (total_runs, success_rate, last_run_at) from it keeps them
+// mutually consistent: a UI showing "N runs · X% success" is always X% of
+// exactly N, never X% of some other, unfiltered N.
+//
+// Deliberately excludes copy existence from this count — root_object_id
+// survives the copy's deletion on the install row (TFAC-535), so a
+// listing's lifetime usage doesn't drop when a consumer cleans up their
+// copy. Every prompt listing in the org gets a row, even one with zero
+// installs (LEFT JOINs default to 0/NULL) — Get/List's Stats field then
+// distinguishes "computed, zero activity" from "never computed" purely by
+// row presence.
+const recomputePromptListingStatsPG = `
+	INSERT INTO marketplace_listing_stats (listing_id, org_id, teams_using, total_runs, success_rate, last_run_at, computed_at)
+	SELECT
+		l.id, l.org_id,
+		COALESCE(teams.teams_using, 0),
+		COALESCE(runs_agg.total_runs, 0),
+		CASE WHEN COALESCE(runs_agg.total_runs, 0) > 0
+			THEN runs_agg.completed_runs::double precision / runs_agg.total_runs
+			ELSE NULL END,
+		runs_agg.last_run_at,
+		now()
+	FROM marketplace_listings l
+	LEFT JOIN (
+		SELECT mi.listing_id, COUNT(DISTINCT mi.team_id) AS teams_using
+		FROM marketplace_installs mi
+		JOIN prompts p ON p.id = mi.root_object_id::text AND p.org_id = mi.org_id AND p.deleted_at IS NULL
+		WHERE mi.org_id = $1
+		GROUP BY mi.listing_id
+	) teams ON teams.listing_id = l.id
+	LEFT JOIN (
+		SELECT mi.listing_id,
+			COUNT(r.id) AS total_runs,
+			SUM(CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END) AS completed_runs,
+			MAX(r.started_at) AS last_run_at
+		FROM (SELECT DISTINCT listing_id, root_object_id FROM marketplace_installs WHERE org_id = $1 AND root_object_id IS NOT NULL) mi
+		JOIN runs r ON r.prompt_id = mi.root_object_id::text AND r.org_id = $1
+		WHERE r.status IN (` + runTerminalStatusesSQL + `)
+		GROUP BY mi.listing_id
+	) runs_agg ON runs_agg.listing_id = l.id
+	WHERE l.org_id = $1 AND l.kind = 'prompt'
+	ON CONFLICT (listing_id) DO UPDATE SET
+		org_id = EXCLUDED.org_id,
+		teams_using = EXCLUDED.teams_using,
+		total_runs = EXCLUDED.total_runs,
+		success_rate = EXCLUDED.success_rate,
+		last_run_at = EXCLUDED.last_run_at,
+		computed_at = EXCLUDED.computed_at
+`
+
+// recomputeBlueprintListingStatsPG mirrors recomputePromptListingStatsPG for
+// kind=blueprint listings: copies live in blueprints (not prompts), runs
+// live in blueprint_runs.blueprint_id (not runs.prompt_id) filtered to
+// blueprintRunTerminalStatusesSQL instead of runTerminalStatusesSQL —
+// everything else, including the terminal-only rationale, is identical.
+const recomputeBlueprintListingStatsPG = `
+	INSERT INTO marketplace_listing_stats (listing_id, org_id, teams_using, total_runs, success_rate, last_run_at, computed_at)
+	SELECT
+		l.id, l.org_id,
+		COALESCE(teams.teams_using, 0),
+		COALESCE(runs_agg.total_runs, 0),
+		CASE WHEN COALESCE(runs_agg.total_runs, 0) > 0
+			THEN runs_agg.completed_runs::double precision / runs_agg.total_runs
+			ELSE NULL END,
+		runs_agg.last_run_at,
+		now()
+	FROM marketplace_listings l
+	LEFT JOIN (
+		SELECT mi.listing_id, COUNT(DISTINCT mi.team_id) AS teams_using
+		FROM marketplace_installs mi
+		JOIN blueprints b ON b.id = mi.root_object_id::text AND b.org_id = mi.org_id AND b.deleted_at IS NULL
+		WHERE mi.org_id = $1
+		GROUP BY mi.listing_id
+	) teams ON teams.listing_id = l.id
+	LEFT JOIN (
+		SELECT mi.listing_id,
+			COUNT(br.id) AS total_runs,
+			SUM(CASE WHEN br.status = 'completed' THEN 1 ELSE 0 END) AS completed_runs,
+			MAX(br.started_at) AS last_run_at
+		FROM (SELECT DISTINCT listing_id, root_object_id FROM marketplace_installs WHERE org_id = $1 AND root_object_id IS NOT NULL) mi
+		JOIN blueprint_runs br ON br.blueprint_id = mi.root_object_id::text AND br.org_id = $1
+		WHERE br.status IN (` + blueprintRunTerminalStatusesSQL + `)
+		GROUP BY mi.listing_id
+	) runs_agg ON runs_agg.listing_id = l.id
+	WHERE l.org_id = $1 AND l.kind = 'blueprint'
+	ON CONFLICT (listing_id) DO UPDATE SET
+		org_id = EXCLUDED.org_id,
+		teams_using = EXCLUDED.teams_using,
+		total_runs = EXCLUDED.total_runs,
+		success_rate = EXCLUDED.success_rate,
+		last_run_at = EXCLUDED.last_run_at,
+		computed_at = EXCLUDED.computed_at
+`
+
+// RecomputeStatsSystem recomputes every listing's stats in orgID in one
+// transaction (prompt listings, then blueprint listings) — see the
+// db.MarketplaceStore interface doc comment for why this runs on the admin
+// pool rather than the app pool every other method here uses.
+func (s *marketplaceStore) RecomputeStatsSystem(ctx context.Context, orgID string) error {
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if _, err := q.ExecContext(ctx, recomputePromptListingStatsPG, orgID); err != nil {
+			return fmt.Errorf("recompute prompt listing stats: %w", err)
+		}
+		if _, err := q.ExecContext(ctx, recomputeBlueprintListingStatsPG, orgID); err != nil {
+			return fmt.Errorf("recompute blueprint listing stats: %w", err)
+		}
+		return nil
+	})
 }

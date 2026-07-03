@@ -31,6 +31,14 @@ const EVENT_TYPES: EventType[] = [
   },
 ]
 
+interface ListingStatsFixture {
+  teams_using: number
+  total_runs: number
+  success_rate?: number
+  last_run_at?: string
+  computed_at: string
+}
+
 interface ListingFixture {
   id: string
   kind: 'prompt' | 'blueprint'
@@ -44,6 +52,7 @@ interface ListingFixture {
   vote_count: number
   install_count: number
   viewer_voted: boolean
+  stats?: ListingStatsFixture
 }
 
 function listing(over: Partial<ListingFixture>): ListingFixture {
@@ -133,6 +142,81 @@ describe('Marketplace', () => {
     expect(screen.getAllByText('CI Check Failed')).toHaveLength(2)
     expect(screen.getByText('5 installs')).toBeInTheDocument()
     expect(screen.getByText('0 installs')).toBeInTheDocument()
+  })
+
+  describe('run-derived stats (TFAC-540)', () => {
+    it('shows the stats line on a card when stats exist with run history', async () => {
+      mockFetchRouter({
+        listings: [
+          listing({
+            id: 'l1',
+            stats: {
+              teams_using: 3,
+              total_runs: 42,
+              success_rate: 0.75,
+              computed_at: '2026-07-01T00:00:00Z',
+            },
+          }),
+        ],
+      })
+      renderPage()
+
+      expect(await screen.findByText('Triage Helper')).toBeInTheDocument()
+      expect(screen.getByText('3 teams · 42 runs · 75% success')).toBeInTheDocument()
+    })
+
+    it('shows nothing when stats are absent (job has never run for this listing)', async () => {
+      mockFetchRouter({ listings: [listing({ id: 'l1', stats: undefined })] })
+      renderPage()
+
+      expect(await screen.findByText('Triage Helper')).toBeInTheDocument()
+      expect(screen.queryByText(/success/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/runs?$/)).not.toBeInTheDocument()
+    })
+
+    it('shows nothing when stats exist but total_runs is 0 (no fake 0% success)', async () => {
+      mockFetchRouter({
+        listings: [
+          listing({
+            id: 'l1',
+            stats: { teams_using: 2, total_runs: 0, computed_at: '2026-07-01T00:00:00Z' },
+          }),
+        ],
+      })
+      renderPage()
+
+      expect(await screen.findByText('Triage Helper')).toBeInTheDocument()
+      expect(screen.queryByText(/0%/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/0 runs/)).not.toBeInTheDocument()
+    })
+
+    it('omits the success-rate segment when success_rate is absent but runs exist', async () => {
+      mockFetchRouter({
+        listings: [
+          listing({
+            id: 'l1',
+            stats: { teams_using: 1, total_runs: 5, computed_at: '2026-07-01T00:00:00Z' },
+          }),
+        ],
+      })
+      renderPage()
+
+      expect(await screen.findByText('1 team · 5 runs')).toBeInTheDocument()
+    })
+
+    it('offers "Most used" as a sort option and re-fetches with sort=used', async () => {
+      const fetchMock = mockFetchRouter({ listings: [listing({})] })
+      renderPage()
+      await screen.findByText('Triage Helper')
+
+      fetchMock.mockClear()
+      fireEvent.change(screen.getByLabelText('Sort listings'), { target: { value: 'used' } })
+
+      await waitFor(() => {
+        const calledUrls = fetchMock.mock.calls.map((c) => String(c[0]))
+        expect(calledUrls.some((u) => u.includes('sort=used'))).toBe(true)
+      })
+    })
   })
 
   it('shows the org-empty state (with a link to the team prompts workspace) when there are zero listings and no filters', async () => {

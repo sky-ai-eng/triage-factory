@@ -8014,6 +8014,58 @@ GRANT ALL ON TABLE public.marketplace_installs TO authenticated;
 GRANT ALL ON TABLE public.marketplace_installs TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.marketplace_installs TO tf_app;
 
+-- === Run-derived listing stats (TFAC-540 fast-follow) ====================
+-- Denormalized, system-computed aggregates across every copy of a listing —
+-- the objective social-proof metric votes/installs can't fake: how much real
+-- work listings' copies have actually done, and how well. Copy linkage is
+-- marketplace_installs.root_object_id (TFAC-535: no provenance columns on
+-- prompts/blueprints), joined to runs.prompt_id for kind=prompt listings and
+-- blueprint_runs.blueprint_id for kind=blueprint listings.
+--
+-- Written exclusively by MarketplaceStore.RecomputeStatsSystem (admin pool,
+-- bypasses RLS) — a cross-team, cross-run aggregate can't be computed at
+-- request/read time without an RLS-crossing query, which the CLAUDE.md
+-- multi-mode read-scoping standing rule forbids. Browse/detail reads join
+-- this table like any other listing column, under ordinary RLS. No
+-- INSERT/UPDATE/DELETE policy is declared below: only the admin pool ever
+-- writes here (same shape as system_prompt_versions / events_catalog).
+--
+-- root_object_id persists on marketplace_installs after a copy is deleted
+-- (TFAC-535), so total_runs counts historical runs from deleted copies too —
+-- teams_using does not, since it additionally requires the copy to still
+-- exist (prompts.deleted_at / blueprints.deleted_at IS NULL). This asymmetry
+-- is deliberate: "how much work has this listing's lineage done, ever" vs.
+-- "how many teams are using it right now."
+CREATE TABLE public.marketplace_listing_stats (
+    listing_id   uuid NOT NULL REFERENCES public.marketplace_listings(id) ON DELETE CASCADE,
+    org_id       uuid NOT NULL,   -- denormalized for RLS, house pattern (cf. marketplace_listing_versions.org_id)
+    teams_using  integer NOT NULL DEFAULT 0,
+    total_runs   integer NOT NULL DEFAULT 0,
+    -- NULL until total_runs > 0 — no wrong fallbacks (never a fake "0%
+    -- success" for a listing with no run history yet).
+    success_rate double precision,
+    last_run_at  timestamp with time zone,
+    computed_at  timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.marketplace_listing_stats
+    ADD CONSTRAINT marketplace_listing_stats_pkey PRIMARY KEY (listing_id);
+
+ALTER TABLE public.marketplace_listing_stats ENABLE ROW LEVEL SECURITY;
+
+-- SELECT-only, mirroring marketplace_listings' org-member visibility (any
+-- org member reads any listing's stats — the row itself carries no
+-- publisher-team distinction to gate on; browse/detail already scope which
+-- listings are visible before this table is ever joined).
+CREATE POLICY marketplace_listing_stats_select ON public.marketplace_listing_stats FOR SELECT
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+GRANT ALL ON TABLE public.marketplace_listing_stats TO postgres;
+GRANT ALL ON TABLE public.marketplace_listing_stats TO anon;
+GRANT ALL ON TABLE public.marketplace_listing_stats TO authenticated;
+GRANT ALL ON TABLE public.marketplace_listing_stats TO service_role;
+GRANT SELECT ON TABLE public.marketplace_listing_stats TO tf_app;
+
 
 -- +goose Down
 SELECT 'down not supported';
