@@ -226,3 +226,26 @@ func TestDispatchMemGated(t *testing.T) {
 		t.Error("gated at exactly the floor; boundary is strict-below")
 	}
 }
+
+func TestDerivedRunCapacity(t *testing.T) {
+	tests := []struct {
+		name    string
+		totalMB int
+		want    int
+	}{
+		{"below reserve is zero", 8 * 1024, 0},
+		{"exactly reserve is zero", DefaultPlatformReserveMB, 0},
+		{"16GB host", 16 * 1024, 16},
+		{"32GB host", 32 * 1024, 80},
+		{"64GB host", 64 * 1024, 208},
+		{"96GB hits the ceiling", 96 * 1024, MaxConcurrentRunsCeiling},
+		{"huge host stays at ceiling", 512 * 1024, MaxConcurrentRunsCeiling},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DerivedRunCapacity(tt.totalMB); got != tt.want {
+				t.Errorf("DerivedRunCapacity(%d) = %d, want %d", tt.totalMB, got, tt.want)
+			}
+		})
+	}
+}
