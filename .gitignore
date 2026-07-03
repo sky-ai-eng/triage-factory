@@ -21,3 +21,4 @@ docs/triagefactory-spec.md
 docs/oauth-smoke.html
 .env
 triage-factory
+bench-results/
