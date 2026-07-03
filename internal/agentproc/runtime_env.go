@@ -2,6 +2,12 @@ package agentproc
 
 import "os"
 
+// jscJITEnvKey is the engine-side env var agentRuntimeEnv sets to
+// disable JSC's JIT. Pulled out as a const (rather than inlined at each
+// call site) so the direct-path spawn can filter any inherited copy
+// by the same name before appending ours — see newDirectCommand.
+const jscJITEnvKey = "BUN_JSC_useJIT"
+
 // agentRuntimeEnv returns runtime-tuning env entries for the agent
 // engine process. The vendored engine is a Bun-compiled binary running
 // on JavaScriptCore, and with the JIT disabled its resident set shrinks
@@ -17,5 +23,5 @@ func agentRuntimeEnv() []string {
 	if os.Getenv("TF_AGENT_JSC_JIT") == "1" {
 		return nil
 	}
-	return []string{"BUN_JSC_useJIT=0"}
+	return []string{jscJITEnvKey + "=0"}
 }

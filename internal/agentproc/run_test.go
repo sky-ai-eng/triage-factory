@@ -2,6 +2,7 @@ package agentproc
 
 import (
 	"bufio"
+	"context"
 	"strings"
 	"testing"
 
@@ -225,5 +226,34 @@ func TestConsumeStream_TrailingLineWithoutNewline(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected terminal Result on EOF-terminated final line")
+	}
+}
+
+// TestNewDirectCommand_FiltersInheritedJSCJITKey pins the fix for a
+// duplicate-key ambiguity: a pre-existing BUN_JSC_useJIT in the
+// inherited env used to ride into cmd.Env alongside the one
+// agentRuntimeEnv appends, and which one "wins" is platform/libc
+// dependent. newDirectCommand must strip the inherited copy so the
+// entry is unambiguous in both directions — default-off, and the
+// TF_AGENT_JSC_JIT=1 opt-in.
+func TestNewDirectCommand_FiltersInheritedJSCJITKey(t *testing.T) {
+	t.Setenv("BUN_JSC_useJIT", "1")
+
+	cmd, err := newDirectCommand(context.Background(), RunOptions{}, []string{"wrapper.mjs"})
+	if err != nil {
+		t.Fatalf("newDirectCommand: %v", err)
+	}
+
+	var matches []string
+	for _, kv := range cmd.Env {
+		if strings.HasPrefix(kv, "BUN_JSC_useJIT=") {
+			matches = append(matches, kv)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one BUN_JSC_useJIT entry in cmd.Env, got %v", matches)
+	}
+	if matches[0] != "BUN_JSC_useJIT=0" {
+		t.Errorf("got %q, want BUN_JSC_useJIT=0 (the inherited BUN_JSC_useJIT=1 must be filtered, not left to race the appended default)", matches[0])
 	}
 }
