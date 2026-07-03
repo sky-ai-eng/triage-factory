@@ -194,6 +194,11 @@ func TestMarketplace_LocalIs404(t *testing.T) {
 // endpoint in the family still works normally in multi mode regardless.
 func TestMarketplace_NoToggleGate(t *testing.T) {
 	r := newMarketplaceRig(t)
+	// newMarketplaceRig seeds the org via the raw pgtest fixture helpers,
+	// which (unlike real signup provisioning) don't materialize an
+	// org_settings row — insert one here so the DEFAULT false clause on
+	// marketplace_enabled actually gets exercised.
+	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO org_settings (org_id) VALUES ($1)`, r.orgID)
 	var enabled bool
 	if err := r.h.AdminDB.QueryRow(`SELECT marketplace_enabled FROM org_settings WHERE org_id = $1`, r.orgID).Scan(&enabled); err != nil {
 		t.Fatalf("read marketplace_enabled: %v", err)

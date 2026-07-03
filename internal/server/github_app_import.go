@@ -95,8 +95,8 @@ type importRequiredPermission struct {
 // importRequiredPermissions is the bar an imported App is preflighted against —
 // the exact set buildManifestAndState requests (github_app_register.go).
 //
-//   - Hard (block): issues:write, pull_requests:write, contents:read,
-//     metadata:read — core function (open PRs, comment, read code) breaks
+//   - Hard (block): issues:write, pull_requests:write, contents:write,
+//     metadata:read — core function (open PRs, comment, push branches) breaks
 //     without them.
 //   - Soft (warn): checks:read / actions:read (CI check + workflow events),
 //     statuses:read (the open-PR statusCheckRollup CI query — its contexts union
@@ -106,7 +106,7 @@ type importRequiredPermission struct {
 var importRequiredPermissions = []importRequiredPermission{
 	{name: "issues", level: "write", hard: true},
 	{name: "pull_requests", level: "write", hard: true},
-	{name: "contents", level: "read", hard: true},
+	{name: "contents", level: "write", hard: true},
 	{name: "metadata", level: "read", hard: true},
 	{name: "checks", level: "read", feature: "CI check status events"},
 	{name: "actions", level: "read", feature: "workflow run events"},
