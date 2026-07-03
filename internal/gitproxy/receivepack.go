@@ -78,9 +78,16 @@ func (s *Server) serveReceivePack(w http.ResponseWriter, r *http.Request) {
 
 // recordReceivePack parses the captured command block and invokes RecordPush
 // once per non-delete ref (stamping the upstream's final status on each), under
-// a context whose deadline mirrors the pre-push hook's cap. RecordPush is
-// guaranteed non-nil here (both callers check before dispatching).
+// a context whose deadline mirrors the pre-push hook's cap. Self-guarding on a
+// nil RecordPush (no-op) so the safety is local rather than an invariant every
+// caller must uphold — the Handler does route pushes here only when RecordPush
+// is wired (a nil-RecordPush observe push takes the plain proxy path, skipping
+// the tee entirely), but that routing lives a file away and shouldn't be the
+// only thing standing between a future caller and a panic.
 func (s *Server) recordReceivePack(repoPath string, body []byte, status int) {
+	if s.cfg.RecordPush == nil {
+		return
+	}
 	cmds := parseReceivePackCommands(body)
 	if len(cmds) == 0 {
 		return
@@ -312,10 +319,10 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 	// Outcome record (success artifact / failure audit — the wiring branches
 	// on the status), same contract as the observe path. The command block is
 	// already in hand, so re-parse the non-delete refs from it rather than
-	// re-reading the (consumed) body.
-	if s.cfg.RecordPush != nil {
-		s.recordReceivePack(repoPath, block, sr.status)
-	}
+	// re-reading the (consumed) body. recordReceivePack no-ops on a nil
+	// RecordPush (the gated path runs regardless, since the ref gate is
+	// enforcement, not recording).
+	s.recordReceivePack(repoPath, block, sr.status)
 }
 
 // readCommandBlock reads the leading pkt-line command block of a receive-pack
