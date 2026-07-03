@@ -177,6 +177,9 @@ func buildSandboxEnv(extraEnv []string) []string {
 		"HOME=/work",
 		"TERM=xterm",
 	}
+	// Engine runtime tuning (JSC JIT off by default). Non-credential by
+	// construction, so it belongs in the Property B-safe base set.
+	base = append(base, agentRuntimeEnv()...)
 	out := make([]string, 0, len(base)+len(extraEnv))
 	out = append(out, base...)
 	// ExtraEnv carries non-credential run-scoped metadata

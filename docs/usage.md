@@ -169,6 +169,16 @@ export TF_CLAUDE_BINARY=/path/to/claude
 
 The path is validated at spawn (it must exist and be executable), so a wrong path fails the run with a clear error rather than falling back silently. **Local mode only** — the sandboxed multi-tenant path runs the image-baked binary and ignores this variable.
 
+### Agent engine JIT
+
+The vendored agent engine is a Bun-compiled binary running on JavaScriptCore. By default Triage Factory disables its JIT (`BUN_JSC_useJIT=0`), which cuts peak RSS per agent process by roughly a fifth with no measurable startup cost — agent workloads are I/O-bound enough that interpreter-only execution is noise. Set `TF_AGENT_JSC_JIT=1` to restore the JIT if a compute-heavy workload regresses under the interpreter:
+
+```bash
+export TF_AGENT_JSC_JIT=1
+```
+
+Applies on both the sandbox and direct/local spawn paths.
+
 ## GitHub polling
 
 The poller tracks PRs across several categories:

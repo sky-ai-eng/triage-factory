@@ -702,7 +702,16 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// identity → IdentityConfigPairs returns nil → block carries hooks alone
 	// (unchanged behavior). TFAC-452.
 	identityPairs := githooks.IdentityConfigPairs(opts.GitUserName, opts.GitUserEmail)
-	cmd.Env = githooks.DirectAgentEnv(mergeEnv(os.Environ(), hookEnv, creds), identityPairs...)
+	// Engine runtime tuning rides ExtraEnv's lane. Strip any inherited
+	// jscJITEnvKey from the parent env first rather than relying on
+	// duplicate-key precedence — that resolution order is
+	// platform/libc dependent (the same rationale mergeEnv already
+	// documents for credentialEnvKeys), so a stale shell export could
+	// otherwise defeat either the default-off behavior or the
+	// TF_AGENT_JSC_JIT=1 opt-in, depending on direction and platform.
+	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey})
+	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
+	cmd.Env = githooks.DirectAgentEnv(mergeEnv(parentEnv, hookEnv, creds), identityPairs...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		// Process is non-nil here because the watcher only fires after
