@@ -63,15 +63,11 @@ func doSetupRunCgroups() error {
 		return fmt.Errorf("cgroup: memory controller not available")
 	}
 
-	// Remount rw if needed. Probe with the mkdir we need anyway.
+	if err := ensureCgroupRootWritable(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(cgroupRunsDir, 0o755); err != nil {
-		if remountErr := syscall.Mount("cgroup", cgroupRoot, "cgroup2",
-			syscall.MS_REMOUNT|syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC, ""); remountErr != nil {
-			return fmt.Errorf("cgroup: fs read-only and remount failed: %w", remountErr)
-		}
-		if err := os.MkdirAll(cgroupRunsDir, 0o755); err != nil {
-			return fmt.Errorf("cgroup: create %s: %w", cgroupRunsDir, err)
-		}
+		return fmt.Errorf("cgroup: create %s: %w", cgroupRunsDir, err)
 	}
 
 	// no-internal-processes: park the container's root procs in init/
@@ -97,6 +93,34 @@ func doSetupRunCgroups() error {
 	}
 	if err := os.WriteFile(cgroupRunsDir+"/cgroup.subtree_control", []byte("+memory"), 0o644); err != nil {
 		return fmt.Errorf("cgroup: enable memory on tf-runs subtree: %w", err)
+	}
+	return nil
+}
+
+// statReadOnly is ST_RDONLY per statfs(2) — package syscall doesn't
+// export it, but the kernel fills Statfs_t.Flags from the same bit as
+// MS_RDONLY.
+const statReadOnly = 0x1
+
+// ensureCgroupRootWritable remounts /sys/fs/cgroup read-write if the
+// current mount is read-only. runc mounts it ro even under a private
+// cgroup namespace. Writability is checked directly via statfs rather
+// than inferred from a mkdir outcome: on a restart, tf-runs/ can
+// already exist from a prior run, and MkdirAll succeeds for an
+// existing directory without ever touching the mount — that left the
+// remount unfired and made setup fail open even when a remount would
+// have fixed it.
+func ensureCgroupRootWritable() error {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(cgroupRoot, &stat); err != nil {
+		return fmt.Errorf("cgroup: statfs %s: %w", cgroupRoot, err)
+	}
+	if stat.Flags&statReadOnly == 0 {
+		return nil
+	}
+	if err := syscall.Mount("cgroup", cgroupRoot, "cgroup2",
+		syscall.MS_REMOUNT|syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC, ""); err != nil {
+		return fmt.Errorf("cgroup: fs read-only and remount failed: %w", err)
 	}
 	return nil
 }
