@@ -86,12 +86,15 @@ type MarketplaceStore interface {
 	// regardless of status (published OR delisted), or (nil, nil) if none —
 	// the publish flow's duplicate-source check (a delisted listing must
 	// route the caller to relist, not let them mint a second listing for the
-	// same source) and the editor's by-source badge lookup (so a delisted
-	// object still shows "Delisted" + Relist instead of reverting to "never
-	// published"). RLS scopes a delisted row to the publisher team the same
-	// way Get does — a non-publisher caller simply sees nothing, same as
-	// GetActiveBySource.
-	GetBySource(ctx context.Context, orgID, sourceID string) (*domain.MarketplaceListing, error)
+	// same source) and the editor's by-source badge lookup. Returns the full
+	// ListingSummary (not just the header) — EventTypes in particular, since
+	// the editor's republish dialog seeds its event-type multi-select from
+	// this response; returning the bare header would silently drop that
+	// seed and a submit would blow away every facet not in the small
+	// trigger-derived suggestion set. RLS scopes a delisted row to the
+	// publisher team the same way Get does — a non-publisher caller simply
+	// sees nothing, same as GetActiveBySource.
+	GetBySource(ctx context.Context, orgID, sourceID string) (*domain.ListingSummary, error)
 
 	// Vote records userID's 'recommend' vote on listingID. Idempotent — a
 	// repeat vote from the same user is a no-op (PK on (listing_id,

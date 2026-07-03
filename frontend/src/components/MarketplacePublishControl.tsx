@@ -6,8 +6,13 @@ import { readError } from '../lib/api'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import type { EventType } from '../types'
 
-// MarketplaceListing mirrors the wire shape of domain.MarketplaceListing
-// (internal/domain/marketplace.go) — only the fields this control reads.
+// MarketplaceListing mirrors the wire shape of domain.ListingSummary
+// (internal/domain/marketplace.go) as returned by the by-source lookup —
+// only the fields this control reads. event_types is load-bearing: the
+// republish dialog seeds its multi-select from it, and a missing/stale
+// value here would silently drop facets on the next "Publish update"
+// (PublishVersion replaces the full event-type set from whatever the
+// client submits).
 interface MarketplaceListing {
   id: string
   kind: 'prompt' | 'blueprint'
@@ -15,6 +20,7 @@ interface MarketplaceListing {
   name: string
   description: string
   current_version: number
+  event_types: string[]
 }
 
 interface MarketplacePublishControlProps {
@@ -188,7 +194,10 @@ function PublishDialog({
   }, [open])
 
   // Seed the form fresh each time the dialog opens — republish prefills from
-  // the existing listing; a first publish prefills name from the object and
+  // the existing listing's *current* facets (event_types included — a
+  // republish submit replaces the listing's full event-type set, so seeding
+  // from anything less than the real current value would silently drop
+  // facets on save); a first publish prefills name from the object and
   // event types from the suggestion (the attached trigger's event_type).
   useEffect(() => {
     if (!open) return
@@ -196,6 +205,7 @@ function PublishDialog({
     if (existingListing) {
       setName(existingListing.name)
       setDescription(existingListing.description)
+      setEventTypes(existingListing.event_types ?? [])
     } else {
       setName(defaultName)
       setDescription('')

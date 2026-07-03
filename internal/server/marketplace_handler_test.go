@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 
@@ -672,5 +673,49 @@ func TestMarketplaceListingBySource_RoundTrip(t *testing.T) {
 	}
 	if listing.ID != pubResp.ID {
 		t.Errorf("by-source id = %q, want %q", listing.ID, pubResp.ID)
+	}
+}
+
+// TestMarketplaceListingBySource_IncludesEventTypes pins that the by-source
+// response carries the listing's full event-type facet set, not just the
+// header — the editor's republish dialog seeds its multi-select from this
+// response, and PublishVersion replaces the whole facet set from whatever
+// the client submits. Publishing with two event types and getting back
+// only one (or none) here would silently narrow the listing's browse
+// facets on the very next "Publish update" a user clicks.
+func TestMarketplaceListingBySource_IncludesEventTypes(t *testing.T) {
+	r := newMarketplaceRig(t)
+	promptID := r.seedPrompt(t, r.teamID, "multi-facet", "mission", "", "")
+	const secondEventType = "github:pr:ci_check_failed"
+
+	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
+		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
+			"kind": "prompt", "source_id": promptID, "name": "n",
+			"event_types": []string{eventTypeFixture, secondEventType},
+		}))
+	if publishRec.Code != http.StatusCreated {
+		t.Fatalf("publish: status = %d, want 201; body=%s", publishRec.Code, publishRec.Body.String())
+	}
+	var pubResp struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(publishRec.Body.Bytes(), &pubResp)
+
+	afterReq := r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil)
+	afterReq.SetPathValue("source_id", promptID)
+	afterRec := doMarketplaceJSON(r.mh.handleMarketplaceListingBySource, afterReq)
+	if afterRec.Code != http.StatusOK {
+		t.Fatalf("by-source: status = %d, want 200; body=%s", afterRec.Code, afterRec.Body.String())
+	}
+	var summary domain.ListingSummary
+	if err := json.Unmarshal(afterRec.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := append([]string(nil), summary.EventTypes...)
+	sort.Strings(got)
+	want := []string{eventTypeFixture, secondEventType}
+	sort.Strings(want)
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("by-source event_types = %v, want %v (client seeds the republish dialog from exactly this)", got, want)
 	}
 }

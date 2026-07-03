@@ -233,7 +233,7 @@ func (mh *marketplaceHandler) handleMarketplacePublish(w http.ResponseWriter, r 
 		snap            domain.ListingSnapshot
 		teamID          string
 		sourceNotFound  bool
-		existingListing *domain.MarketplaceListing
+		existingListing *domain.ListingSummary
 	)
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -490,10 +490,15 @@ func (mh *marketplaceHandler) handleMarketplaceListingRelist(w http.ResponseWrit
 // prompt's id: GetBySource (not GetActiveBySource) so a delisted object
 // still reports its listing and the editor can offer Relist instead of
 // reverting to "never published" (which would let a client mint a
-// duplicate listing for the same source on the next publish). RLS scopes a
-// delisted row to the publisher team — a non-publisher caller sees null,
-// same as before. Any org member may read (no team-write gate — this is
-// display-only).
+// duplicate listing for the same source on the next publish). Returns the
+// full ListingSummary, not just the header — the editor's republish dialog
+// seeds its event-type multi-select from this response's EventTypes; a
+// bare header would silently drop it and a submit would delete-and-reinsert
+// marketplace_listing_events from whatever the client had in memory,
+// wiping any facet outside the small trigger-derived suggestion set. RLS
+// scopes a delisted row to the publisher team — a non-publisher caller sees
+// null, same as before. Any org member may read (no team-write gate — this
+// is display-only).
 //
 // GET /api/marketplace/listings/by-source/{source_id}
 func (mh *marketplaceHandler) handleMarketplaceListingBySource(w http.ResponseWriter, r *http.Request) {
@@ -503,7 +508,7 @@ func (mh *marketplaceHandler) handleMarketplaceListingBySource(w http.ResponseWr
 	}
 	sourceID := r.PathValue("source_id")
 
-	var listing *domain.MarketplaceListing
+	var listing *domain.ListingSummary
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		listing, e = tx.Marketplace.GetBySource(r.Context(), orgID, sourceID)
