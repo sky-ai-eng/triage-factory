@@ -159,11 +159,15 @@ type MarketplaceStore interface {
 	// installing teams whose copy still exists), total_runs, success_rate,
 	// and last_run_at, joined via marketplace_installs.root_object_id into
 	// runs.prompt_id (kind=prompt) or blueprint_runs.blueprint_id
-	// (kind=blueprint). Deterministic and idempotent: a re-run with
-	// unchanged underlying data overwrites each row with the same computed
-	// values (ON CONFLICT (listing_id) DO UPDATE), so overlapping or
-	// repeated cycles converge rather than drift. Admin pool — see the
-	// interface doc comment. Called by the multi-mode-only
+	// (kind=blueprint). total_runs/success_rate/last_run_at count only
+	// TERMINAL runs — a still-in-flight run hasn't resolved either way, so
+	// it must not count as evidence of usage or (worse) silently score as a
+	// failure against success_rate before it has actually failed; see
+	// domain.ListingStats' doc comment. Deterministic and idempotent: a
+	// re-run with unchanged underlying data overwrites each row with the
+	// same computed values (ON CONFLICT (listing_id) DO UPDATE), so
+	// overlapping or repeated cycles converge rather than drift. Admin
+	// pool — see the interface doc comment. Called by the multi-mode-only
 	// marketplacestats.Manager off the system:poll: sentinel, never from a
 	// request handler.
 	RecomputeStatsSystem(ctx context.Context, orgID string) error

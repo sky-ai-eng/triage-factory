@@ -161,14 +161,19 @@ type ListingSummary struct {
 // ListingStats is the marketplace_listing_stats row for one listing —
 // aggregated run activity across every copy installed from it (TFAC-540).
 // TeamsUsing counts only installing teams whose copy still exists
-// (prompts/blueprints.deleted_at IS NULL); TotalRuns/SuccessRate/LastRunAt
-// count every run ever recorded against any copy, including ones whose copy
-// was later deleted (root_object_id survives deletion on the install row —
-// see MarketplaceStore.RecordInstall) — so a listing's lifetime usage never
-// drops just because a consumer cleaned up their copy.
+// (prompts/blueprints.deleted_at IS NULL). TotalRuns/SuccessRate/LastRunAt
+// count only TERMINAL runs (completed/failed/cancelled/task_unsolvable for
+// prompts, +aborted for blueprints) — a still-running run hasn't resolved
+// either way, so it counts toward neither "how much work got done" nor "how
+// well," and must not silently score as a failure just because it isn't
+// 'completed' yet. This holds across copy deletion too: root_object_id
+// survives deletion on the install row (see MarketplaceStore.RecordInstall),
+// so a listing's lifetime usage never drops just because a consumer cleaned
+// up their copy — but it's still only *resolved* lifetime usage.
 type ListingStats struct {
 	TeamsUsing int `json:"teams_using"`
-	TotalRuns  int `json:"total_runs"`
+	// TotalRuns counts only runs that reached a terminal outcome.
+	TotalRuns int `json:"total_runs"`
 	// SuccessRate is nil when TotalRuns is 0 — never a fake 0%.
 	SuccessRate *float64   `json:"success_rate,omitempty"`
 	LastRunAt   *time.Time `json:"last_run_at,omitempty"`

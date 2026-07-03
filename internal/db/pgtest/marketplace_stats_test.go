@@ -99,11 +99,13 @@ func seedMarketplaceBlueprintRun(t *testing.T, h *Harness, orgID, userID, taskID
 // TestMarketplaceStats_PromptAggregation_TwoTeamsAndDeletedCopy pins the
 // core TFAC-540 aggregation contract for a kind=prompt listing: runs on two
 // different teams' copies each count once toward total_runs/success_rate,
-// teams_using counts both while both copies exist, and once one copy is
+// teams_using counts both while both copies exist, once one copy is
 // soft-deleted its team drops out of teams_using while its historical runs
-// still count toward total_runs — the documented asymmetry (root_object_id
-// survives copy deletion on the install row, so lifetime usage doesn't
-// regress just because a consumer cleaned up).
+// still count toward total_runs (root_object_id survives copy deletion on
+// the install row, so lifetime usage doesn't regress just because a
+// consumer cleaned up), and a still-in-flight (non-terminal) run counts
+// toward neither total_runs, success_rate, nor last_run_at until it
+// resolves.
 func TestMarketplaceStats_PromptAggregation_TwoTeamsAndDeletedCopy(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -146,6 +148,12 @@ func TestMarketplaceStats_PromptAggregation_TwoTeamsAndDeletedCopy(t *testing.T)
 	seedPromptRun(t, h, orgA, bob, teamB, taskB, teamBPromptID, "failed", base.Add(time.Hour))
 	latestRunAt := base.Add(2 * time.Hour)
 	seedPromptRun(t, h, orgA, carol, teamC, taskC, teamCPromptID, "completed", latestRunAt)
+	// A still-in-flight run, started AFTER every terminal run above. It must
+	// count toward neither total_runs nor success_rate (it hasn't resolved
+	// either way) nor last_run_at — if it leaked into the aggregate, both
+	// total_runs (4, not 3) and last_run_at (this run's time, not
+	// latestRunAt) would drift from the assertions below.
+	seedPromptRun(t, h, orgA, carol, teamC, taskC, teamCPromptID, "running", latestRunAt.Add(time.Hour))
 
 	if err := stores.Marketplace.RecomputeStatsSystem(t.Context(), orgA); err != nil {
 		t.Fatalf("RecomputeStatsSystem: %v", err)
@@ -163,13 +171,13 @@ func TestMarketplaceStats_PromptAggregation_TwoTeamsAndDeletedCopy(t *testing.T)
 		t.Errorf("teams_using = %d, want 2 (both copies still exist)", teamsUsing)
 	}
 	if totalRuns != 3 {
-		t.Errorf("total_runs = %d, want 3", totalRuns)
+		t.Errorf("total_runs = %d, want 3 (the still-running 4th run must not count)", totalRuns)
 	}
 	if !successRate.Valid || successRate.Float64 < 0.665 || successRate.Float64 > 0.667 {
-		t.Errorf("success_rate = %v, want ~0.6667 (2 of 3 completed)", successRate)
+		t.Errorf("success_rate = %v, want ~0.6667 (2 of 3 terminal runs completed; the in-flight run must not dilute this)", successRate)
 	}
 	if !lastRunAt.Valid || !lastRunAt.Time.Equal(latestRunAt) {
-		t.Errorf("last_run_at = %v, want %v", lastRunAt.Time, latestRunAt)
+		t.Errorf("last_run_at = %v, want %v (the later in-flight run must not move this)", lastRunAt.Time, latestRunAt)
 	}
 
 	// Soft-delete teamC's copy — mirrors PromptStore.Delete (UPDATE ...
@@ -194,7 +202,8 @@ func TestMarketplaceStats_PromptAggregation_TwoTeamsAndDeletedCopy(t *testing.T)
 
 // TestMarketplaceStats_BlueprintAggregation pins that the kind=blueprint
 // path aggregates through blueprint_runs.blueprint_id rather than
-// runs.prompt_id.
+// runs.prompt_id, and that it applies the same terminal-only filter (a
+// still-running blueprint_run must not count).
 func TestMarketplaceStats_BlueprintAggregation(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -221,6 +230,8 @@ func TestMarketplaceStats_BlueprintAggregation(t *testing.T) {
 	now := time.Now().UTC()
 	seedMarketplaceBlueprintRun(t, h, orgA, bob, taskB, rootBlueprintID, "completed", now)
 	seedMarketplaceBlueprintRun(t, h, orgA, bob, taskB, rootBlueprintID, "aborted", now.Add(time.Hour))
+	// Still-running — must not count toward total_runs or success_rate.
+	seedMarketplaceBlueprintRun(t, h, orgA, bob, taskB, rootBlueprintID, "running", now.Add(2*time.Hour))
 
 	if err := stores.Marketplace.RecomputeStatsSystem(t.Context(), orgA); err != nil {
 		t.Fatalf("RecomputeStatsSystem: %v", err)
@@ -234,10 +245,10 @@ func TestMarketplaceStats_BlueprintAggregation(t *testing.T) {
 		t.Fatalf("read stats row: %v", err)
 	}
 	if teamsUsing != 1 || totalRuns != 2 {
-		t.Errorf("teams_using/total_runs = %d/%d, want 1/2", teamsUsing, totalRuns)
+		t.Errorf("teams_using/total_runs = %d/%d, want 1/2 (the still-running 3rd run must not count)", teamsUsing, totalRuns)
 	}
 	if !successRate.Valid || successRate.Float64 != 0.5 {
-		t.Errorf("success_rate = %v, want 0.5 (1 of 2 completed)", successRate)
+		t.Errorf("success_rate = %v, want 0.5 (1 of 2 terminal runs completed; the in-flight run must not dilute this)", successRate)
 	}
 }
 

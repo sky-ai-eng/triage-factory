@@ -569,11 +569,30 @@ func (s *marketplaceStore) MaterializeListing(ctx context.Context, orgID, teamID
 	return rootObjectID, promptIDs, nil
 }
 
+// blueprintRunTerminalStatusesSQL is the blueprint_runs.status counterpart
+// to runTerminalStatusesSQL (run_queue.go) — the terminal set per
+// domain.BlueprintRunStatus.Terminal(). No shared constant exists for this
+// table today; defined here since this is the first blueprint_runs query
+// that needs to distinguish terminal from in-flight.
+const blueprintRunTerminalStatusesSQL = `'completed','aborted','failed','cancelled'`
+
 // recomputePromptListingStatsPG upserts marketplace_listing_stats for every
 // kind=prompt listing in $1. teams distinct-counts installing teams whose
-// copy (a prompts row) still exists and isn't soft-deleted; runs_agg counts
-// every runs row ever recorded against any copy this listing has ever
-// produced, regardless of whether that copy still exists — root_object_id
+// copy (a prompts row) still exists and isn't soft-deleted.
+//
+// runs_agg counts only TERMINAL runs (runTerminalStatusesSQL, run_queue.go)
+// against any copy this listing has ever produced — a queued/cloning/running
+// run hasn't resolved yet, so it must count toward neither total_runs nor
+// success_rate until it does. Counting it as a not-yet-completed run would
+// silently score it as a failure (dragging success_rate toward 0% for a run
+// that hasn't actually failed) and inflate total_runs — and therefore
+// sort=used — for listings with nothing but a burst of just-triggered,
+// unresolved runs. Filtering the population once and deriving all three
+// metrics (total_runs, success_rate, last_run_at) from it keeps them
+// mutually consistent: a UI showing "N runs · X% success" is always X% of
+// exactly N, never X% of some other, unfiltered N.
+//
+// Deliberately excludes copy existence from this count — root_object_id
 // survives the copy's deletion on the install row (TFAC-535), so a
 // listing's lifetime usage doesn't drop when a consumer cleans up their
 // copy. Every prompt listing in the org gets a row, even one with zero
@@ -606,6 +625,7 @@ const recomputePromptListingStatsPG = `
 			MAX(r.started_at) AS last_run_at
 		FROM (SELECT DISTINCT listing_id, root_object_id FROM marketplace_installs WHERE org_id = $1 AND root_object_id IS NOT NULL) mi
 		JOIN runs r ON r.prompt_id = mi.root_object_id::text AND r.org_id = $1
+		WHERE r.status IN (` + runTerminalStatusesSQL + `)
 		GROUP BY mi.listing_id
 	) runs_agg ON runs_agg.listing_id = l.id
 	WHERE l.org_id = $1 AND l.kind = 'prompt'
@@ -619,9 +639,10 @@ const recomputePromptListingStatsPG = `
 `
 
 // recomputeBlueprintListingStatsPG mirrors recomputePromptListingStatsPG for
-// kind=blueprint listings: copies live in blueprints (not prompts) and runs
-// live in blueprint_runs.blueprint_id (not runs.prompt_id), everything else
-// is identical.
+// kind=blueprint listings: copies live in blueprints (not prompts), runs
+// live in blueprint_runs.blueprint_id (not runs.prompt_id) filtered to
+// blueprintRunTerminalStatusesSQL instead of runTerminalStatusesSQL —
+// everything else, including the terminal-only rationale, is identical.
 const recomputeBlueprintListingStatsPG = `
 	INSERT INTO marketplace_listing_stats (listing_id, org_id, teams_using, total_runs, success_rate, last_run_at, computed_at)
 	SELECT
@@ -648,6 +669,7 @@ const recomputeBlueprintListingStatsPG = `
 			MAX(br.started_at) AS last_run_at
 		FROM (SELECT DISTINCT listing_id, root_object_id FROM marketplace_installs WHERE org_id = $1 AND root_object_id IS NOT NULL) mi
 		JOIN blueprint_runs br ON br.blueprint_id = mi.root_object_id::text AND br.org_id = $1
+		WHERE br.status IN (` + blueprintRunTerminalStatusesSQL + `)
 		GROUP BY mi.listing_id
 	) runs_agg ON runs_agg.listing_id = l.id
 	WHERE l.org_id = $1 AND l.kind = 'blueprint'

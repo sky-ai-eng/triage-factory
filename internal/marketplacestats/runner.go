@@ -66,6 +66,11 @@ func (r *Runner) Stop() { r.stopOnce.Do(func() { close(r.stop) }) }
 
 func (r *Runner) run(ctx context.Context) {
 	r.mu.Lock()
+	// Defence-in-depth single-flight guard, mirroring reconcile.Runner /
+	// repoprofile.Runner. The Start loop calls run() synchronously and the
+	// trigger channel is buffered to 1, so the loop can never re-enter run()
+	// concurrently — this is always false from that loop. Kept so an
+	// accidental direct caller (e.g. a future test) can't overlap two cycles.
 	if r.running {
 		r.mu.Unlock()
 		return
