@@ -129,19 +129,21 @@ func TestReceivePackBackstop_RecordsNonDeleteRefs(t *testing.T) {
 	}
 
 	want := []gitproxy.PushedRef{
-		{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "aaaa1111", Created: true},
-		{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "cccc3333", Created: false},
-		{Repo: "octo/repo", Ref: "refs/tags/v1.0", NewSHA: "ffff6666", Created: false},
+		{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "aaaa1111", Created: true, Status: http.StatusOK},
+		{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "cccc3333", Created: false, Status: http.StatusOK},
+		{Repo: "octo/repo", Ref: "refs/tags/v1.0", NewSHA: "ffff6666", Created: false, Status: http.StatusOK},
 	}
 	if !equalPushes(res.pushes, want) {
 		t.Errorf("recorded pushes =\n  %+v\nwant\n  %+v", res.pushes, want)
 	}
 }
 
-// TestReceivePackBackstop_GatesOnSuccess proves a push the upstream refused
-// (here 403 — nothing landed) records nothing, while the body still reaches the
-// upstream untouched.
-func TestReceivePackBackstop_GatesOnSuccess(t *testing.T) {
+// TestReceivePackBackstop_ReportsRefusedPushWithStatus proves a push the
+// upstream refused (here 403 — nothing landed) is still reported to
+// RecordPush, carrying the failure status (Succeeded()==false) so the wiring
+// records an audit failure row and skips the artifact. The body still reaches
+// the upstream untouched.
+func TestReceivePackBackstop_ReportsRefusedPushWithStatus(t *testing.T) {
 	body := pkt(zeroOID+" aaaa refs/heads/main\n") + "0000" + "PACKDATA"
 	res := runReceivePack(t, http.StatusForbidden, http.MethodPost, "/octo/repo/git-receive-pack", body)
 
@@ -151,8 +153,12 @@ func TestReceivePackBackstop_GatesOnSuccess(t *testing.T) {
 	if res.upstreamBody != body {
 		t.Errorf("upstream body altered: got %q want %q", res.upstreamBody, body)
 	}
-	if len(res.pushes) != 0 {
-		t.Errorf("recorded %d pushes on a 403, want 0", len(res.pushes))
+	want := []gitproxy.PushedRef{{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "aaaa", Created: true, Status: http.StatusForbidden}}
+	if !equalPushes(res.pushes, want) {
+		t.Errorf("recorded pushes = %+v, want %+v (a refused push is audit material, never dropped)", res.pushes, want)
+	}
+	if len(res.pushes) == 1 && res.pushes[0].Succeeded() {
+		t.Error("Succeeded() = true for a 403, want false")
 	}
 }
 
@@ -182,7 +188,7 @@ func TestReceivePackBackstop_LargePackForwardedIntact(t *testing.T) {
 	if res.upstreamBody != body {
 		t.Errorf("large body truncated/altered by the tee: got %d bytes, want %d", len(res.upstreamBody), len(body))
 	}
-	want := []gitproxy.PushedRef{{Repo: "octo/repo", Ref: "refs/heads/big", NewSHA: "aaaabbbb", Created: true}}
+	want := []gitproxy.PushedRef{{Repo: "octo/repo", Ref: "refs/heads/big", NewSHA: "aaaabbbb", Created: true, Status: http.StatusOK}}
 	if !equalPushes(res.pushes, want) {
 		t.Errorf("recorded pushes = %+v, want %+v", res.pushes, want)
 	}
@@ -244,9 +250,9 @@ func TestReceivePackBackstop_InterimResponseStillRecords(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	want := []gitproxy.PushedRef{{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "aaaa", Created: true}}
+	want := []gitproxy.PushedRef{{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "aaaa", Created: true, Status: http.StatusOK}}
 	if !equalPushes(pushes, want) {
-		t.Errorf("recorded pushes = %+v, want %+v (a 1xx interim must not drop the record)", pushes, want)
+		t.Errorf("recorded pushes = %+v, want %+v (a 1xx interim must not latch the recorded status)", pushes, want)
 	}
 }
 

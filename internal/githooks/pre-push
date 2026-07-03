@@ -17,6 +17,14 @@
 # the hook always exits 0, so a record failure never aborts the agent's push.
 # The binary is resolved from $TRIAGE_FACTORY_BIN (set by the spawner in both
 # run modes), falling back to PATH.
+#
+# When TF_GIT_PUSH_CAPTURE=proxy (the sandbox env, set whenever the per-run
+# git proxy is wired), this hook stands down entirely: every push transits the
+# proxy, whose receive-pack capture sees the upstream's ACTUAL outcome — it
+# records the branch only when the push landed (2xx) and an audit failure row
+# when it was refused. This hook fires before the transfer and cannot know the
+# outcome, so recording here would mint artifacts for pushes GitHub rejected.
+[ "${TF_GIT_PUSH_CAPTURE:-}" = "proxy" ] && exit 0
 
 remote_url="$2"
 bin="${TRIAGE_FACTORY_BIN:-triagefactory}"

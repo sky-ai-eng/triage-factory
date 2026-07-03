@@ -281,6 +281,11 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 		}
 		bundle.git = gitSrv
 		gitPairs = append(gitPairs, proxyPairs...)
+		// The proxy owns push capture for this run: it observes each push's
+		// actual upstream outcome (artifact on 2xx, audit failure row
+		// otherwise), so the pre-push hook — which fires before the transfer
+		// and can't know the outcome — stands down.
+		env = append(env, githooks.PushCaptureEnvVar+"="+githooks.PushCaptureProxy)
 	}
 
 	env = append(env, encodeGitConfigEnv(gitPairs)...)

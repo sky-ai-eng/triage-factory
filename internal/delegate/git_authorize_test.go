@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"os/exec"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -11,21 +12,26 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// stubLiveBranch installs a deterministic path→live-branch mapping for the push
-// gate's worktreeCurrentBranch seam and restores the real (git-backed) reader on
-// cleanup. Lets the table tests authorize against a known "current branch"
-// without standing up real worktrees on disk.
+// stubLiveBranch installs a deterministic path→push-target mapping for the push
+// gate's worktreePushTargetBranch seam and restores the real (git-backed)
+// reader on cleanup. The value is the RESOLVED remote target — the live branch
+// mapped through any configured push refspec (worktree.PushTargetBranch owns
+// that resolution and has its own git-backed tests); with no refspec it is the
+// live branch itself, which is what these table tests model. Lets the tests
+// authorize against a known target without standing up real worktrees on disk.
 func stubLiveBranch(t *testing.T, m map[string]string) {
 	t.Helper()
-	orig := worktreeCurrentBranch
-	t.Cleanup(func() { worktreeCurrentBranch = orig })
-	worktreeCurrentBranch = func(path string) string { return m[path] }
+	orig := worktreePushTargetBranch
+	t.Cleanup(func() { worktreePushTargetBranch = orig })
+	worktreePushTargetBranch = func(path string) string { return m[path] }
 }
 
 // TestGitAuthorizeDecision is the proxy gate's brain: a run may touch a repo
 // only if its team tracks it AND it appears in the run's run_worktrees ledger,
-// and the allowed push ref is the worktree's LIVE current branch (TFAC-498). It
-// fails closed when the backing stores are absent.
+// and the allowed push ref is the worktree's live checkout's PUSH TARGET —
+// the current branch mapped through its configured push refspec (TFAC-498,
+// refspec-aware; identity when no refspec, as stubbed here). It fails closed
+// when the backing stores are absent.
 func TestGitAuthorizeDecision(t *testing.T) {
 	database := newDelegateTestDB(t)
 	stores := sqlitestore.New(database)
@@ -156,6 +162,76 @@ func TestGitAuthorizeDecision_ProtectedAndDetached(t *testing.T) {
 	stubLiveBranch(t, map[string]string{"/tmp/api": "tfac/SKY-1"})
 	if d, err := gitAuthorizeDecision(ctx, stores, info, "acme", "api"); err != nil || !d.Allowed || !equalRefs(d.AllowedRefs, []string{"refs/heads/tfac/SKY-1"}) {
 		t.Errorf("on feature branch: decision=%+v err=%v; want Allowed with refs/heads/tfac/SKY-1", d, err)
+	}
+}
+
+// TestGitAuthorizeDecision_PRWorktreeRefspecMapping is the regression test for
+// the multi-mode PR push 403 (ref-not-allowed): against a REAL git checkout
+// shaped exactly like a PR run clone — checked out on the run-namespaced
+// triagefactory/<runID>/pr-<n> branch with configurePRPushTracking's per-run
+// remote + explicit refspec to the PR's real head — the gate (through the real
+// worktree.PushTargetBranch, no stub) must authorize the REMOTE head branch,
+// which is what the receive-pack command block carries. Authorizing the local
+// name instead is exactly what rejected every PR push. A refspec that maps to
+// a protected branch is still refused.
+func TestGitAuthorizeDecision_PRWorktreeRefspecMapping(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := sqlitestore.New(database)
+	ctx := context.Background()
+	seedRun(t, database, "run-pr", "sess", "/tmp/wt")
+	info := agenthost.RunInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, RunID: "run-pr"}
+
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+		{Owner: "acme", Repo: "api"},
+	}); err != nil {
+		t.Fatalf("track repo: %v", err)
+	}
+	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.RepoProfile{
+		ID: "acme/api", Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
+	}); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+
+	// A real repo shaped like the multi-mode PR run clone.
+	wt := t.TempDir()
+	gitAt := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", append([]string{"-C", wt}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	gitAt("init", "-b", "triagefactory/run-pr/pr-58")
+	gitAt("config", "user.email", "t@example.com")
+	gitAt("config", "user.name", "T")
+	gitAt("commit", "--allow-empty", "-m", "seed")
+	gitAt("remote", "add", "tfpush-run-pr-58", "https://github.com/acme/api.git")
+	gitAt("config", "remote.tfpush-run-pr-58.push", "refs/heads/triagefactory/run-pr/pr-58:refs/heads/aa/SKY-101")
+	gitAt("config", "branch.triagefactory/run-pr/pr-58.pushRemote", "tfpush-run-pr-58")
+
+	if _, _, err := stores.RunWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.RunWorktree{
+		RunID: "run-pr", RepoID: "acme/api", Path: wt, Ref: "pr-58",
+	}); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+
+	d, err := gitAuthorizeDecision(ctx, stores, info, "acme", "api")
+	if err != nil {
+		t.Fatalf("gitAuthorizeDecision: %v", err)
+	}
+	if !d.Allowed || !equalRefs(d.AllowedRefs, []string{"refs/heads/aa/SKY-101"}) {
+		t.Errorf("decision = %+v, want Allowed with refs/heads/aa/SKY-101 (the refspec's remote head, not the local triagefactory/... name)", d)
+	}
+
+	// The same shape mapped at a protected branch must contribute no ref: the
+	// protected check applies to the RESOLVED target.
+	gitAt("config", "remote.tfpush-run-pr-58.push", "refs/heads/triagefactory/run-pr/pr-58:refs/heads/main")
+	d, err = gitAuthorizeDecision(ctx, stores, info, "acme", "api")
+	if err != nil {
+		t.Fatalf("gitAuthorizeDecision (protected target): %v", err)
+	}
+	if !d.Allowed || len(d.AllowedRefs) != 0 {
+		t.Errorf("decision with a protected-mapped refspec = %+v, want Allowed=true with no refs", d)
 	}
 }
 

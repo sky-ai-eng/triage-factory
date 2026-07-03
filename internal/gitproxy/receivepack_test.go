@@ -167,7 +167,7 @@ func TestDispatchPushes_StopsWhenContextDone(t *testing.T) {
 		{ref: "refs/heads/a", newSHA: "1"},
 		{ref: "refs/heads/b", newSHA: "2"},
 		{ref: "refs/heads/c", newSHA: "3"},
-	})
+	}, 200)
 
 	if calls != 1 {
 		t.Fatalf("RecordPush called %d times, want 1 (loop must stop once ctx is done)", calls)

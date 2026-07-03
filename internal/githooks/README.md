@@ -55,3 +55,12 @@ process in both modes:
   feeds it the pushed refs on stdin; it skips deletes, marks new branches,
   and always exits `0`. Rewritten by `Ensure` on every startup so an
   upgraded binary refreshes a stale on-disk copy.
+
+  **Stands down when `TF_GIT_PUSH_CAPTURE=proxy`** (the sandbox env, set
+  whenever the per-run git proxy is wired): pre-push fires *before* the
+  transfer, so it cannot know whether the push will land — recording there
+  would mint artifacts for pushes GitHub refuses. Under a proxy, the
+  proxy's receive-pack capture owns the record instead: artifact +
+  `branch_pushed` audit row on a 2xx, a `branch_push_failed` audit row on
+  anything else. Local mode has no proxy, so the hook keeps its
+  record-at-pre-push role there (outcome unobservable — accepted).

@@ -220,6 +220,27 @@ func TestPrePushHook_SkipsDeletes(t *testing.T) {
 	}
 }
 
+// TestPrePushHook_StandsDownUnderProxyCapture pins the capture handoff: with
+// TF_GIT_PUSH_CAPTURE=proxy in the run env (the sandbox case — a git proxy is
+// wired and observes every push's actual outcome), the pre-push hook records
+// NOTHING and the push proceeds. The hook fires before the transfer and cannot
+// know whether the push will land; recording under a proxy would mint branch
+// artifacts for pushes the upstream refuses.
+func TestPrePushHook_StandsDownUnderProxyCapture(t *testing.T) {
+	requireGit(t)
+	env, recLog := setupEmbeddedHook(t, 0)
+	env = append(env, PushCaptureEnvVar+"="+PushCaptureProxy)
+	work := newRepoWithRemote(t, env)
+
+	mustGit(t, env, work, "push", "-u", "origin", "main")
+
+	// The recorder never ran, so its log should not even exist (it appends on
+	// first invocation); tolerate an empty file, fail on any recorded call.
+	if got, err := os.ReadFile(recLog); err == nil && strings.Contains(string(got), "record-push") {
+		t.Errorf("hook recorded %q under proxy capture; want nothing (the proxy owns capture)", got)
+	}
+}
+
 // TestPrePushHook_RecordFailureDoesNotFailPush pins the best-effort
 // contract end-to-end through the real hook: the record-push verb exiting
 // non-zero must not abort the push.

@@ -54,14 +54,17 @@ func receivePackRepoPath(p string) string {
 	return p
 }
 
-// serveReceivePack proxies a push while teeing its body, then records a branch
-// artifact for each non-delete ref it pushed. The recording runs only after
-// ServeHTTP returns — the upstream response is fully written to the client by
-// then — so it can neither block, alter, nor fail the push or its response. The
-// handler goroutine does stay alive until recording finishes, so a graceful
-// Shutdown waits for it (bounded by recordPushTimeout); the integration test
-// relies on exactly that to synchronize. It is gated on a 2xx upstream status
-// so a push the upstream refused (401/403/5xx — nothing landed) is not recorded.
+// serveReceivePack proxies a push while teeing its body, then reports each
+// non-delete ref it carried — together with the upstream's final status — to
+// RecordPush. The recording runs only after ServeHTTP returns — the upstream
+// response is fully written to the client by then — so it can neither block,
+// alter, nor fail the push or its response. The handler goroutine does stay
+// alive until recording finishes, so a graceful Shutdown waits for it (bounded
+// by recordPushTimeout); the integration test relies on exactly that to
+// synchronize. Every final status is reported, success and failure alike: the
+// wiring gates artifact creation on 2xx and records the refused attempt
+// (401/403/5xx — nothing landed) as an audit-only failure row, so the external
+// action log never silently omits a push attempt.
 func (s *Server) serveReceivePack(w http.ResponseWriter, r *http.Request) {
 	tee := &receivePackCapture{rc: r.Body, max: maxReceivePackCapture}
 	r.Body = tee
@@ -70,23 +73,21 @@ func (s *Server) serveReceivePack(w http.ResponseWriter, r *http.Request) {
 	sr := &statusRecorder{ResponseWriter: w}
 	s.proxy.ServeHTTP(sr, r)
 
-	if sr.status >= 200 && sr.status < 300 {
-		s.recordReceivePack(repoPath, tee.buf)
-	}
+	s.recordReceivePack(repoPath, tee.buf, sr.status)
 }
 
 // recordReceivePack parses the captured command block and invokes RecordPush
-// once per non-delete ref, under a context whose deadline mirrors the pre-push
-// hook's cap. RecordPush is guaranteed non-nil here (Handler only routes pushes
-// through serveReceivePack when it is set).
-func (s *Server) recordReceivePack(repoPath string, body []byte) {
+// once per non-delete ref (stamping the upstream's final status on each), under
+// a context whose deadline mirrors the pre-push hook's cap. RecordPush is
+// guaranteed non-nil here (both callers check before dispatching).
+func (s *Server) recordReceivePack(repoPath string, body []byte, status int) {
 	cmds := parseReceivePackCommands(body)
 	if len(cmds) == 0 {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), recordPushTimeout)
 	defer cancel()
-	s.dispatchPushes(ctx, repoPath, cmds)
+	s.dispatchPushes(ctx, repoPath, cmds, status)
 }
 
 // dispatchPushes invokes RecordPush once per ref, stopping as soon as ctx is
@@ -94,7 +95,7 @@ func (s *Server) recordReceivePack(repoPath string, body []byte) {
 // bounded window would have every remaining call observe ctx.Err() and fail — a
 // burst of guaranteed-failing work and logs. Stopping instead records fewer
 // refs for that (pathological) push, which is the best-effort contract.
-func (s *Server) dispatchPushes(ctx context.Context, repoPath string, cmds []refUpdate) {
+func (s *Server) dispatchPushes(ctx context.Context, repoPath string, cmds []refUpdate, status int) {
 	for _, c := range cmds {
 		if ctx.Err() != nil {
 			break
@@ -104,6 +105,7 @@ func (s *Server) dispatchPushes(ctx context.Context, repoPath string, cmds []ref
 			Ref:     c.ref,
 			NewSHA:  c.newSHA,
 			Created: c.created,
+			Status:  status,
 		})
 	}
 }
@@ -262,8 +264,9 @@ func isZeroOID(s string) bool {
 // (single stream — can't partially forward) with a 403 and no upstream call.
 // A command block that overflows the capture cap before its flush-pkt fails
 // closed. On success it reconstructs the body (buffered block + the still-
-// unread packfile) and proxies it, then runs the RecordPush backstop on a 2xx
-// exactly like the observe path.
+// unread packfile) and proxies it, then reports each ref + the upstream's
+// final status to RecordPush exactly like the observe path (the wiring gates
+// artifacts on 2xx and records a refused push as an audit failure row).
 func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, owner, repo string, allowedRefs []string) {
 	block, sawFlush, err := readCommandBlock(r.Body, maxReceivePackCapture)
 	if err != nil {
@@ -306,11 +309,12 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 	sr := &statusRecorder{ResponseWriter: w}
 	s.proxy.ServeHTTP(sr, r)
 
-	// Backstop record (--no-verify capture) on a 2xx, same contract as the
-	// observe path. The command block is already in hand, so re-parse the
-	// non-delete refs from it rather than re-reading the (consumed) body.
-	if s.cfg.RecordPush != nil && sr.status >= 200 && sr.status < 300 {
-		s.recordReceivePack(repoPath, block)
+	// Outcome record (success artifact / failure audit — the wiring branches
+	// on the status), same contract as the observe path. The command block is
+	// already in hand, so re-parse the non-delete refs from it rather than
+	// re-reading the (consumed) body.
+	if s.cfg.RecordPush != nil {
+		s.recordReceivePack(repoPath, block, sr.status)
 	}
 }
 
