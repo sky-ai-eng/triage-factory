@@ -397,6 +397,57 @@ func TestAuthFlow_LoginToMe(t *testing.T) {
 	}
 }
 
+// TestAuthFlow_Me_OrgsCarryMarketplaceEnabled pins that each org row in
+// /api/me's orgs list surfaces org_settings.marketplace_enabled (TFAC-537) —
+// the signal Shell.tsx's nav gates the Marketplace link on. Defaults to
+// false (the ship-dark default) and flips to true once the column is set.
+func TestAuthFlow_Me_OrgsCarryMarketplaceEnabled(t *testing.T) {
+	r := newAuthRig(t)
+
+	userID := r.seedUser()
+	orgID, _ := r.seedOrg(userID, "dark-org")
+
+	resp, _ := r.driveCallback(userID)
+	sid := r.sidFromResp(resp)
+
+	decode := func() bool {
+		meResp := r.requestWithSid("GET", "/api/me", sid)
+		if meResp.StatusCode != http.StatusOK {
+			t.Fatalf("/api/me status=%d, want 200", meResp.StatusCode)
+		}
+		var me struct {
+			Orgs []struct {
+				ID                 string `json:"id"`
+				MarketplaceEnabled bool   `json:"marketplace_enabled"`
+			} `json:"orgs"`
+		}
+		if err := json.NewDecoder(meResp.Body).Decode(&me); err != nil {
+			t.Fatalf("decode /api/me: %v", err)
+		}
+		for _, o := range me.Orgs {
+			if o.ID == orgID.String() {
+				return o.MarketplaceEnabled
+			}
+		}
+		t.Fatalf("org %s not in /api/me's orgs list", orgID)
+		return false
+	}
+
+	if got := decode(); got {
+		t.Errorf("marketplace_enabled = true before the toggle is set, want false (ship-dark default)")
+	}
+
+	if _, err := r.h.AdminDB.Exec(
+		`UPDATE org_settings SET marketplace_enabled = true WHERE org_id = $1`, orgID,
+	); err != nil {
+		t.Fatalf("flip marketplace_enabled: %v", err)
+	}
+
+	if got := decode(); !got {
+		t.Errorf("marketplace_enabled = false after flipping the column, want true")
+	}
+}
+
 // TestAuthFlow_Me_NoMemberships_OmitsActiveOrgID covers the multi-mode
 // edge case: a freshly-logged-in user with zero org_memberships rows
 // gets a session whose active_org_id is NULL. /api/me must omit the

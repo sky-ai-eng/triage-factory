@@ -33,7 +33,7 @@ export default function Shell() {
   // but it doesn't earn a nav slot for them. False in local mode (no auth).
   // The org template (low-frequency admin config) is reached via the Org pill →
   // Template tab, not a standalone nav entry (TFAC-436).
-  const { isAdmin: orgAdmin } = useOrgRole()
+  const { isAdmin: orgAdmin, marketplaceEnabled } = useOrgRole()
 
   // Full-bleed routes (the agent run station) drop the app nav + main padding so
   // the page owns the whole viewport — it's a focused, open-in-new-tab surface.
@@ -103,12 +103,13 @@ export default function Shell() {
               </NavLink>
             )}
             {/* Marketplace — within-org prompt/blueprint browse (TFAC-537),
-                multi-mode only (no local route exists). The org's ship-dark
-                marketplace_enabled toggle isn't yet frontend-exposed
-                (TFAC-539 owns that); until then every /api/marketplace/*
-                call 404s server-side for a disabled org, so the page itself
-                degrades gracefully if reached before launch. */}
-            {isMulti && (
+                multi-mode only (no local route exists) AND gated on the
+                org's ship-dark marketplace_enabled toggle (surfaced via
+                /api/me's per-org row — useOrgRole). There's no admin UI to
+                flip the toggle yet (TFAC-539 owns that), so today this stays
+                hidden for every org until an operator sets the column
+                directly. */}
+            {isMulti && marketplaceEnabled && (
               <NavLink to={orgHref('/marketplace')} className={({ isActive }) => pill(isActive)}>
                 Marketplace
               </NavLink>

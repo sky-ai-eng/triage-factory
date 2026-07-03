@@ -15,6 +15,11 @@ export interface OrgRoleState {
   // True while multi-mode auth is still resolving — callers that redirect or
   // hide on non-admin should wait this out so an admin isn't bounced mid-load.
   loading: boolean
+  // The active org's ship-dark marketplace toggle (org_settings.marketplace_
+  // enabled, TFAC-535/537/539) — false in local mode, while loading, or with
+  // no resolvable active org. Gates the Marketplace nav entry so a member
+  // never lands on a page whose every request 404s.
+  marketplaceEnabled: boolean
 }
 
 // useOrgRole reports the viewer's role in the active org. Safe in both modes:
@@ -27,7 +32,7 @@ export function useOrgRole(): OrgRoleState {
   const activeOrgId = useActiveOrgId()
 
   if (!auth) {
-    return { role: null, isAdmin: false, loading: false }
+    return { role: null, isAdmin: false, loading: false, marketplaceEnabled: false }
   }
   const activeOrg = activeOrgId
     ? auth.orgs.find((o) => o.id === activeOrgId)
@@ -39,5 +44,6 @@ export function useOrgRole(): OrgRoleState {
     role,
     isAdmin: !!role && ORG_ADMIN_ROLES.has(role),
     loading: auth.status === 'loading',
+    marketplaceEnabled: !!activeOrg?.marketplace_enabled,
   }
 }

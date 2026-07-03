@@ -666,6 +666,26 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 		Role string `json:"role"`
+		// MarketplaceEnabled mirrors org_settings.marketplace_enabled — the
+		// same ship-dark toggle gateMarketplace checks server-side (TFAC-535/
+		// 537). Surfaced per-org (not a top-level response field) because it's
+		// per-membership like Role, not per-user: the caller may belong to
+		// several orgs with different toggle states. The Shell nav gates the
+		// Marketplace link on this for the active org so a member never lands
+		// on a page that 404s every request — there's no admin-facing control
+		// to flip it yet (that's TFAC-539), so today this is false for every
+		// org until an operator flips the column directly.
+		//
+		// Caveat: the org list query below runs under a single claims context
+		// scoped to the session's ACTIVE org (tfdb.Claims{OrgID: resp.ActiveOrgID}),
+		// and org_settings_select's RLS policy requires org_id = current_org_id().
+		// So this field resolves accurately only for the row where ID ==
+		// ActiveOrgID; every other org in the list reads false via the
+		// COALESCE regardless of its real value. Harmless for the Shell nav
+		// (which only reads the active org's row) — a future consumer that
+		// needs this for non-active orgs (e.g. a per-org badge in OrgPicker)
+		// would need a per-org claims switch, not a single joined query.
+		MarketplaceEnabled bool `json:"marketplace_enabled"`
 	}
 	type response struct {
 		ID              string   `json:"id"`
@@ -806,9 +826,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			}
 
 			rows, err := tx.QueryContext(r.Context(), `
-				SELECT o.id::text, o.name, om.role
+				SELECT o.id::text, o.name, om.role, COALESCE(os.marketplace_enabled, false)
 				  FROM org_memberships om
 				  JOIN orgs o ON o.id = om.org_id
+				  LEFT JOIN org_settings os ON os.org_id = o.id
 				 WHERE om.user_id = tf.current_user_id()
 				 ORDER BY o.name
 			`)
@@ -818,7 +839,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			defer rows.Close()
 			for rows.Next() {
 				var o orgRow
-				if err := rows.Scan(&o.ID, &o.Name, &o.Role); err != nil {
+				if err := rows.Scan(&o.ID, &o.Name, &o.Role, &o.MarketplaceEnabled); err != nil {
 					return fmt.Errorf("org scan: %w", err)
 				}
 				resp.Orgs = append(resp.Orgs, o)

@@ -444,6 +444,15 @@ export interface AuthOrg {
   id: string
   name: string
   role: string
+  /** Ship-dark org toggle for the within-org prompt marketplace
+   *  (org_settings.marketplace_enabled, TFAC-535/537). Shell.tsx gates the
+   *  Marketplace nav entry on this for the active org — there's no
+   *  admin-facing control to flip it yet (TFAC-539), so this is false for
+   *  every org until an operator sets the column directly. Accurate only
+   *  for the session's active org; see handleMe's orgRow comment
+   *  (internal/server/auth_handlers.go) for why non-active orgs read false
+   *  regardless of their real value. */
+  marketplace_enabled: boolean
 }
 
 /** GET /api/me response — the canonical "current user" shape, served in
