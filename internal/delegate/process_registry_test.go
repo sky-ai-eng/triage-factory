@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -198,7 +199,7 @@ func TestDispatchMemGated(t *testing.T) {
 
 	// Unknown probe → fails open.
 	s.SetDispatchMemFloor(4096)
-	s.memAvailMB = func() int { return -1 }
+	s.memAvailMB = func() int { return hostmem.Unknown }
 	if s.dispatchMemGated() {
 		t.Error("gated on an Unknown probe; guardrail must fail open")
 	}
