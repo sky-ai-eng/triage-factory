@@ -1,20 +1,26 @@
-// The within-org prompt marketplace's publish/republish/delist surface
-// (TFAC-536). Multi-mode only: every handler opens with gateMarketplace,
-// which 404s in local mode (the marketplace is a multi-mode concept,
-// db.MarketplaceStore's SQLite impl is a stub) — never 403, mirroring the
-// invites/org-members precedent that a mode mismatch isn't a role failure,
-// it's "this surface doesn't exist for you". The within-org marketplace
-// itself has no admin toggle — it's always on for every multi-mode org.
-// org_settings.marketplace_enabled exists (TFAC-535) but is NOT read here;
-// it's reserved for gating the future cross-org marketplace (TFAC-92 phase
-// 2 / TFAC-539), a different, still-unbuilt surface.
+// The within-org prompt marketplace's publish/republish/delist/install
+// surface (TFAC-536 publish, TFAC-538 install). Multi-mode only: every
+// handler opens with gateMarketplace, which 404s in local mode (the
+// marketplace is a multi-mode concept, db.MarketplaceStore's SQLite impl is
+// a stub) — never 403, mirroring the invites/org-members precedent that a
+// mode mismatch isn't a role failure, it's "this surface doesn't exist for
+// you". The within-org marketplace itself has no admin toggle — it's always
+// on for every multi-mode org. org_settings.marketplace_enabled exists
+// (TFAC-535) but is NOT read here; it's reserved for gating the future
+// cross-org marketplace (TFAC-92 phase 2 / TFAC-539), a different, still-
+// unbuilt surface.
 //
 // Every listing snapshot is minted server-side from the caller's own team
 // object (buildListingSnapshot) — the client posts a kind + source_id and
 // gets back whatever the team object currently contains. This is the
 // TFAC-535 copy-on-publish invariant enforced at the write boundary: a
 // client can't inject arbitrary snapshot content, and a listing never
-// live-references the object it was published from.
+// live-references the object it was published from. Install
+// (handleMarketplaceInstall) is the mirror invariant on the consume side:
+// it materializes detail.CurrentSnapshot — the already-frozen version
+// document — into the installing team, never buildListingSnapshot / the
+// publisher team's live rows, so a copy survives the publisher team or its
+// source object being deleted.
 
 package server
 
@@ -32,6 +38,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
 // marketplaceHandler serves the /api/marketplace/listings publish/republish/
@@ -114,7 +121,7 @@ func buildListingSnapshot(ctx context.Context, tx db.TxStores, orgID, kind, sour
 			return domain.ListingSnapshot{}, "", errMarketplaceSourceNotFound
 		}
 		return domain.ListingSnapshot{
-			SchemaVersion: 1,
+			SchemaVersion: domain.ListingSnapshotSchemaVersion,
 			Kind:          domain.ListingKindPrompt,
 			Steps: []domain.SnapshotStep{{
 				StepIndex:    0,
@@ -159,7 +166,7 @@ func buildListingSnapshot(ctx context.Context, tx db.TxStores, orgID, kind, sour
 			}
 		}
 		return domain.ListingSnapshot{
-			SchemaVersion: 1,
+			SchemaVersion: domain.ListingSnapshotSchemaVersion,
 			Kind:          domain.ListingKindBlueprint,
 			Steps:         snapSteps,
 		}, bp.TeamID, nil
@@ -677,4 +684,121 @@ func (mh *marketplaceHandler) handleMarketplaceUnvote(w http.ResponseWriter, r *
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// installListingRequest is the POST /api/marketplace/listings/{id}/install
+// body. TeamID is the acting team the write picker supplied — optional; a
+// solo/single-team caller omits it and teamscope resolves their sole team
+// (see gateActingTeamWrite / teamscope.ResolveActing).
+type installListingRequest struct {
+	TeamID string `json:"team_id"`
+}
+
+// installListingResponse returns the id(s) of everything the install
+// created. ID is the root object — a blueprint id for kind=blueprint, the
+// prompt id for kind=prompt — the same value recorded as the install's
+// root_object_id. PromptIDs is every prompt row created (the step copies
+// for kind=blueprint, the single prompt for kind=prompt).
+type installListingResponse struct {
+	Kind      string   `json:"kind"`
+	ID        string   `json:"id"`
+	PromptIDs []string `json:"prompt_ids"`
+}
+
+// handleMarketplaceInstall is "copy to my team" (TFAC-538): it materializes
+// the listing's current-version snapshot into the caller's chosen team as
+// brand-new team-owned object(s) — a fork, not a live reference; it never
+// updates when the listing republishes and surviving the listing being
+// delisted/deleted later. Write role on the *installing* team (not the
+// publisher's) is required: gateActingTeamWrite gives a clean 403 for a
+// viewer before anything is read; RLS enforces the same gate on the
+// marketplace_installs INSERT (marketplace_installs_insert) as defense in
+// depth. Repeat installs by the same team are allowed — each is a fresh
+// fork, recorded as its own marketplace_installs row (TFAC-538: "forks are
+// cheap").
+//
+// POST /api/marketplace/listings/{id}/install
+func (mh *marketplaceHandler) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := mh.gateMarketplace(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		notFound(w, "listing")
+		return
+	}
+
+	var req installListingRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+
+	// Reject a viewer on the target team before touching the listing
+	// (TFAC-447 shape) — this gates the *installing* team, independent of
+	// the listing/publisher, so it can run before any listing lookup.
+	if !gateActingTeamWrite(w, r, mh.tx, mh.az, orgID, userID, req.TeamID, "marketplace") {
+		return
+	}
+
+	var (
+		listingNotFound bool
+		delisted        bool
+		resp            installListingResponse
+	)
+	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		if e != nil {
+			return e
+		}
+
+		// Load the listing + its current-version snapshot. Get's RLS
+		// visibility (published OR own-team-write) means a delisted listing
+		// invisible to this caller already resolves to sql.ErrNoRows here —
+		// the explicit Status check below only fires for the publisher's
+		// own team, who can still see (but must not install) their own
+		// delisted listing.
+		detail, e := tx.Marketplace.Get(r.Context(), orgID, id, userID)
+		if errors.Is(e, sql.ErrNoRows) {
+			listingNotFound = true
+			return nil
+		}
+		if e != nil {
+			return e
+		}
+		if detail.Status == domain.ListingStatusDelisted {
+			delisted = true
+			return nil
+		}
+
+		// buildListingSnapshot is deliberately NOT called here: the
+		// installer consumes detail.CurrentSnapshot (the already-frozen
+		// version document), never the publisher team's live prompt/
+		// blueprint rows — the TFAC-535 design constraint that makes this
+		// path survive the source object (or its whole team) being deleted.
+		rootObjectID, promptIDs, e := tx.Marketplace.MaterializeListing(
+			r.Context(), orgID, teamID, detail.CurrentSnapshot, id, detail.CurrentVersion, userID,
+		)
+		if e != nil {
+			return e
+		}
+		resp = installListingResponse{Kind: detail.Kind, ID: rootObjectID, PromptIDs: promptIDs}
+		return nil
+	}); err != nil {
+		if teamscope.WriteIfSelectionError(w, err) {
+			return
+		}
+		internalError(w, "marketplace", err)
+		return
+	}
+	if listingNotFound {
+		notFound(w, "listing")
+		return
+	}
+	if delisted {
+		writeJSON(w, http.StatusGone, map[string]string{"error": "this listing has been delisted and can no longer be installed"})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, resp)
 }

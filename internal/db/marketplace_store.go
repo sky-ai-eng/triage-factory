@@ -116,4 +116,38 @@ type MarketplaceStore interface {
 	// pinned an older snapshot). userID may be "" (system-initiated install
 	// has no human actor); teamID is the installing team and is required.
 	RecordInstall(ctx context.Context, orgID, listingID string, version int, teamID, userID, rootObjectID string) error
+
+	// MaterializeListing is the "copy to my team" install (TFAC-538): it
+	// deep-copies snap into teamID as brand-new, team-owned prompt(s) —
+	// kind=prompt mints one; kind=blueprint mints one fresh prompt per step
+	// (never shared — every step gets its own row, satisfying the copy-only
+	// invariant trivially) plus the blueprint header and its blueprint_steps
+	// in snapshot order with briefs — then records the install, all in one
+	// transaction. Every copy is source='marketplace' (an app-validated
+	// open-set value alongside 'system'/'user'/'imported'; TFAC-535 decided
+	// no new columns on prompts/blueprints, not no new source value).
+	//
+	// Consumes only snap — never listingID/version to look up the listing's
+	// source, and never anything from the publisher team — so this method
+	// makes no reads of the publisher team's prompts/blueprints. That's the
+	// TFAC-535 cross-org insurance in action: the installer consumes a
+	// snapshot document, never source rows, so an install still succeeds
+	// after the publisher team or its source object is deleted. listingID +
+	// version are threaded through only to stamp the install record
+	// (RecordInstall's audit row) — its FK to marketplace_listings is the
+	// only thing here that depends on the listing still existing.
+	//
+	// Returns the created root object id (a blueprint id for kind=blueprint,
+	// the prompt id for kind=prompt — the same value written to the
+	// install's root_object_id) plus every prompt id created (the step
+	// copies for kind=blueprint, the single prompt for kind=prompt) so the
+	// caller can render/link every row this install created. userID may be
+	// "" (system-initiated install has no human actor, mirrors
+	// RecordInstall); teamID is the installing team and is required.
+	//
+	// Rejects snap.SchemaVersion != domain.ListingSnapshotSchemaVersion
+	// before writing anything — a snapshot format this method doesn't
+	// understand must fail loudly rather than silently materialize rows
+	// from a document it can't fully interpret.
+	MaterializeListing(ctx context.Context, orgID, teamID string, snap domain.ListingSnapshot, listingID string, version int, userID string) (rootObjectID string, promptIDs []string, err error)
 }

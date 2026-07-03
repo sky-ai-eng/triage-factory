@@ -174,6 +174,8 @@ func TestMarketplace_LocalIs404(t *testing.T) {
 		{"get", r.req(http.MethodGet, "/api/marketplace/listings/x", r.admin, nil), r.mh.handleMarketplaceGet},
 		{"vote", r.req(http.MethodPut, "/api/marketplace/listings/x/vote", r.admin, nil), r.mh.handleMarketplaceVote},
 		{"unvote", r.req(http.MethodDelete, "/api/marketplace/listings/x/vote", r.admin, nil), r.mh.handleMarketplaceUnvote},
+		{"install", r.req(http.MethodPost, "/api/marketplace/listings/x/install", r.admin,
+			map[string]any{"team_id": ""}), r.mh.handleMarketplaceInstall},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.req.SetPathValue("id", "x")
@@ -1180,4 +1182,320 @@ func decodeListingDetail(t *testing.T, rec *httptest.ResponseRecorder) domain.Li
 		t.Fatalf("decode: %v", err)
 	}
 	return detail
+}
+
+// installResponse mirrors installListingResponse — the wire shape the
+// install tests below decode.
+type installResponse struct {
+	Kind      string   `json:"kind"`
+	ID        string   `json:"id"`
+	PromptIDs []string `json:"prompt_ids"`
+}
+
+// publishPrompt publishes name/body/model/tools as a prompt-kind listing
+// (via the real handler, admin as publisher) and returns the listing id —
+// shared setup for the install tests below.
+func (r *marketplaceRig) publishPrompt(t *testing.T, name, body, model, tools, listingName string) string {
+	t.Helper()
+	promptID := r.seedPrompt(t, r.teamID, name, body, model, tools)
+	rec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
+		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
+			"kind": "prompt", "source_id": promptID, "name": listingName,
+		}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("publish setup: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode publish response: %v", err)
+	}
+	return resp.ID
+}
+
+// installAs POSTs .../install as callerID with the given team_id and
+// returns the recorder.
+func (r *marketplaceRig) installAs(callerID, listingID, teamID string) *httptest.ResponseRecorder {
+	req := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/install", callerID, map[string]any{
+		"team_id": teamID,
+	})
+	req.SetPathValue("id", listingID)
+	return doMarketplaceJSON(r.mh.handleMarketplaceInstall, req)
+}
+
+// TestMarketplaceInstall_Prompt_HappyPath: installing a prompt-kind listing
+// creates one team prompt (source='marketplace', content copied verbatim)
+// in the target team and records the install with the right root_object_id.
+func TestMarketplaceInstall_Prompt_HappyPath(t *testing.T) {
+	r := newMarketplaceRig(t)
+	listingID := r.publishPrompt(t, "Great Prompt", "do the thing", "opus", "Bash,Read", "Great Prompt Listing")
+
+	rec := r.installAs(r.member, listingID, r.teamB)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("install: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp installResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Kind != domain.ListingKindPrompt || resp.ID == "" || len(resp.PromptIDs) != 1 || resp.PromptIDs[0] != resp.ID {
+		t.Fatalf("install response = %+v, want kind=prompt with a single prompt id equal to the root id", resp)
+	}
+
+	var name, body, model, tools, source, teamID string
+	if err := r.h.AdminDB.QueryRow(`SELECT name, body, model, allowed_tools, source, team_id FROM prompts WHERE id = $1`, resp.ID).
+		Scan(&name, &body, &model, &tools, &source, &teamID); err != nil {
+		t.Fatalf("read installed prompt: %v", err)
+	}
+	if name != "Great Prompt" || body != "do the thing" || model != "opus" || tools != "Bash,Read" || source != "marketplace" || teamID != r.teamB {
+		t.Errorf("installed prompt = (%q,%q,%q,%q,%q,%q), want the source content copied verbatim into teamB with source=marketplace",
+			name, body, model, tools, source, teamID)
+	}
+
+	var installCount int
+	var rootObjectID string
+	if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*), COALESCE(MAX(root_object_id::text), '') FROM marketplace_installs WHERE listing_id = $1`, listingID).
+		Scan(&installCount, &rootObjectID); err != nil {
+		t.Fatalf("count installs: %v", err)
+	}
+	if installCount != 1 || rootObjectID != resp.ID {
+		t.Errorf("install record = count=%d root=%q, want count=1 root=%q", installCount, rootObjectID, resp.ID)
+	}
+}
+
+// TestMarketplaceInstall_Blueprint_HappyPath: installing a blueprint-kind
+// listing creates one fresh prompt per step (never the source ids — every
+// step gets its own row) plus the blueprint, step order + briefs preserved,
+// everything source='marketplace' and owned by the target team.
+func TestMarketplaceInstall_Blueprint_HappyPath(t *testing.T) {
+	r := newMarketplaceRig(t)
+	p1 := r.seedPrompt(t, r.teamID, "Step One", "first mission", "sonnet", "")
+	p2 := r.seedPrompt(t, r.teamID, "Step Two", "second mission", "opus", "Grep")
+	bp := r.seedBlueprint(t, r.teamID, "Two-Step Chain")
+	r.seedBlueprintStep(t, r.teamID, bp, 0, p1, "do step one first")
+	r.seedBlueprintStep(t, r.teamID, bp, 1, p2, "")
+
+	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
+		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
+			"kind": "blueprint", "source_id": bp, "name": "Chain Listing",
+		}))
+	if publishRec.Code != http.StatusCreated {
+		t.Fatalf("publish setup: status = %d, want 201; body=%s", publishRec.Code, publishRec.Body.String())
+	}
+	var pubResp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(publishRec.Body.Bytes(), &pubResp); err != nil {
+		t.Fatalf("decode publish response: %v", err)
+	}
+
+	rec := r.installAs(r.member, pubResp.ID, r.teamB)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("install: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp installResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Kind != domain.ListingKindBlueprint || resp.ID == "" || len(resp.PromptIDs) != 2 {
+		t.Fatalf("install response = %+v, want kind=blueprint with 2 fresh prompt ids", resp)
+	}
+	if resp.PromptIDs[0] == p1 || resp.PromptIDs[1] == p2 {
+		t.Errorf("install response reused the source prompt ids %v — every step must get a fresh prompt row", resp.PromptIDs)
+	}
+
+	var bpName, bpSource, bpTeam string
+	if err := r.h.AdminDB.QueryRow(`SELECT name, source, team_id FROM blueprints WHERE id = $1`, resp.ID).Scan(&bpName, &bpSource, &bpTeam); err != nil {
+		t.Fatalf("read installed blueprint: %v", err)
+	}
+	if bpName != "Chain Listing" || bpSource != "marketplace" || bpTeam != r.teamB {
+		t.Errorf("installed blueprint = (%q,%q,%q), want (Chain Listing, marketplace, teamB)", bpName, bpSource, bpTeam)
+	}
+
+	rows, err := r.h.AdminDB.Query(`
+		SELECT bs.step_index, bs.brief, p.name, p.body, p.model, p.allowed_tools
+		FROM blueprint_steps bs JOIN prompts p ON p.id = bs.step_prompt_id
+		WHERE bs.blueprint_id = $1 ORDER BY bs.step_index
+	`, resp.ID)
+	if err != nil {
+		t.Fatalf("query steps: %v", err)
+	}
+	defer rows.Close()
+	type stepRow struct {
+		idx                             int
+		brief, name, body, model, tools string
+	}
+	var steps []stepRow
+	for rows.Next() {
+		var s stepRow
+		if err := rows.Scan(&s.idx, &s.brief, &s.name, &s.body, &s.model, &s.tools); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		steps = append(steps, s)
+	}
+	if len(steps) != 2 {
+		t.Fatalf("step count = %d, want 2", len(steps))
+	}
+	if steps[0].name != "Step One" || steps[0].body != "first mission" || steps[0].model != "sonnet" || steps[0].brief != "do step one first" {
+		t.Errorf("step 0 = %+v, want the source step's content verbatim", steps[0])
+	}
+	if steps[1].name != "Step Two" || steps[1].body != "second mission" || steps[1].tools != "Grep" {
+		t.Errorf("step 1 = %+v, want the source step's content verbatim", steps[1])
+	}
+}
+
+// TestMarketplaceInstall_NonWriterOnTargetTeamIs403: write role is checked
+// on the *installing* team, not the publisher's — a viewer on the target
+// team is blocked even though they can freely browse/read the listing.
+func TestMarketplaceInstall_NonWriterOnTargetTeamIs403(t *testing.T) {
+	r := newMarketplaceRig(t)
+	listingID := r.publishPrompt(t, "guarded", "mission", "", "", "n")
+
+	viewerB := pgtest.SeedUser(t, r.h, "viewerB")
+	pgtest.AddOrgMember(t, r.h, viewerB, r.orgID, r.teamB, "member", "viewer")
+
+	rec := r.installAs(viewerB, listingID, r.teamB)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer install: status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var count int
+	if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_installs WHERE listing_id = $1`, listingID).Scan(&count); err != nil {
+		t.Fatalf("count installs: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("install count = %d after blocked viewer install, want 0", count)
+	}
+}
+
+// TestMarketplaceInstall_UnknownListingIs404: a well-formed but nonexistent
+// listing id 404s rather than 500ing.
+func TestMarketplaceInstall_UnknownListingIs404(t *testing.T) {
+	r := newMarketplaceRig(t)
+	const unknownID = "00000000-0000-0000-0000-000000000000"
+	rec := r.installAs(r.admin, unknownID, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown listing install: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMarketplaceInstall_DelistedByPublisherIsGone: the publisher can still
+// see (Get) their own delisted listing (RLS: published OR own-team-write),
+// but installing it is refused with 410 — delisting must actually block new
+// forks, not just hide from browse.
+func TestMarketplaceInstall_DelistedByPublisherIsGone(t *testing.T) {
+	r := newMarketplaceRig(t)
+	listingID := r.publishPrompt(t, "delist-me", "mission", "", "", "n")
+
+	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/delist", r.admin, nil)
+	delistReq.SetPathValue("id", listingID)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq); rec.Code != http.StatusNoContent {
+		t.Fatalf("delist setup: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := r.installAs(r.admin, listingID, "")
+	if rec.Code != http.StatusGone {
+		t.Fatalf("delisted install (publisher, visible): status = %d, want 410; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMarketplaceInstall_DelistedInvisibleToNonPublisherIs404: a
+// non-publisher can't see a delisted listing at all (RLS), so their install
+// attempt 404s the same as any other unknown id — it never learns the
+// listing existed.
+func TestMarketplaceInstall_DelistedInvisibleToNonPublisherIs404(t *testing.T) {
+	r := newMarketplaceRig(t)
+	listingID := r.publishPrompt(t, "delist-me-2", "mission", "", "", "n")
+
+	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/delist", r.admin, nil)
+	delistReq.SetPathValue("id", listingID)
+	doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq)
+
+	rec := r.installAs(r.member, listingID, r.teamB)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delisted install (non-publisher, invisible): status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMarketplaceInstall_RepeatInstallCreatesSecondCopy: forks are cheap —
+// the same team installing the same listing twice gets two independent
+// copies and two marketplace_installs rows, not a dedupe/no-op.
+func TestMarketplaceInstall_RepeatInstallCreatesSecondCopy(t *testing.T) {
+	r := newMarketplaceRig(t)
+	listingID := r.publishPrompt(t, "repeatable", "mission", "", "", "n")
+
+	install := func() string {
+		rec := r.installAs(r.member, listingID, r.teamB)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("install: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp installResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp.ID
+	}
+
+	first := install()
+	second := install()
+	if first == second {
+		t.Fatalf("repeat install produced the same root object id %q twice, want two distinct copies", first)
+	}
+
+	var count int
+	if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_installs WHERE listing_id = $1`, listingID).Scan(&count); err != nil {
+		t.Fatalf("count installs: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("install count = %d after two installs by the same team, want 2", count)
+	}
+	var promptCount int
+	if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*) FROM prompts WHERE id IN ($1, $2)`, first, second).Scan(&promptCount); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if promptCount != 2 {
+		t.Errorf("prompt count = %d, want 2 distinct copies", promptCount)
+	}
+}
+
+// TestMarketplaceInstall_SucceedsAfterSourceDeleted: install materializes
+// the frozen listing snapshot, never the publisher team's live source
+// object — so a hard-deleted source prompt does not break a later install
+// (TFAC-535's cross-org insurance: the installer consumes a snapshot
+// document, never source rows).
+func TestMarketplaceInstall_SucceedsAfterSourceDeleted(t *testing.T) {
+	r := newMarketplaceRig(t)
+	promptID := r.seedPrompt(t, r.teamID, "vanishing", "mission before deletion", "", "")
+	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
+		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
+			"kind": "prompt", "source_id": promptID, "name": "Vanishing Prompt",
+		}))
+	if publishRec.Code != http.StatusCreated {
+		t.Fatalf("publish setup: status = %d, want 201; body=%s", publishRec.Code, publishRec.Body.String())
+	}
+	var pubResp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(publishRec.Body.Bytes(), &pubResp); err != nil {
+		t.Fatalf("decode publish response: %v", err)
+	}
+
+	pgtest.MustExec(t, r.h.AdminDB, `DELETE FROM prompts WHERE id = $1`, promptID)
+
+	rec := r.installAs(r.member, pubResp.ID, r.teamB)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("install after source deleted: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp installResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var body string
+	if err := r.h.AdminDB.QueryRow(`SELECT body FROM prompts WHERE id = $1`, resp.ID).Scan(&body); err != nil {
+		t.Fatalf("read installed prompt: %v", err)
+	}
+	if body != "mission before deletion" {
+		t.Errorf("installed prompt body = %q, want the frozen snapshot content", body)
+	}
 }

@@ -13,13 +13,29 @@ import (
 // tests below — content doesn't matter, only that it round-trips.
 func marketplaceSnapshot(name string) domain.ListingSnapshot {
 	return domain.ListingSnapshot{
-		SchemaVersion: 1,
+		SchemaVersion: domain.ListingSnapshotSchemaVersion,
 		Kind:          domain.ListingKindPrompt,
 		Name:          name,
 		Description:   "rls fixture",
 		EventTypes:    []string{"github:pr:opened"},
 		Steps: []domain.SnapshotStep{
 			{StepIndex: 0, Name: name, Body: "mission body"},
+		},
+	}
+}
+
+// marketplaceBlueprintSnapshot is a minimal valid two-step blueprint
+// domain.ListingSnapshot for the MaterializeListing (install) tests below.
+func marketplaceBlueprintSnapshot(name string) domain.ListingSnapshot {
+	return domain.ListingSnapshot{
+		SchemaVersion: domain.ListingSnapshotSchemaVersion,
+		Kind:          domain.ListingKindBlueprint,
+		Name:          name,
+		Description:   "install fixture",
+		EventTypes:    []string{"github:pr:opened"},
+		Steps: []domain.SnapshotStep{
+			{StepIndex: 0, Name: "Step One", Body: "first mission", Model: "sonnet", Brief: "do step one first"},
+			{StepIndex: 1, Name: "Step Two", Body: "second mission", AllowedTools: "Grep"},
 		},
 	}
 }
@@ -339,5 +355,236 @@ func TestMarketplaceRLS_InstallRequiresInstallingTeamWrite(t *testing.T) {
 	}
 	if rootObjectID != fakeRootObjectID {
 		t.Errorf("root_object_id = %q, want %q (provenance survives the install write)", rootObjectID, fakeRootObjectID)
+	}
+}
+
+// TestMarketplaceRLS_MaterializeListingRequiresInstallingTeamWrite pins that
+// MaterializeListing (TFAC-538's real copy-to-team primitive, as opposed to
+// RecordInstall's bare audit row above) also gates on write role on the
+// *installing* team. Unlike RecordInstall, the block here fires on the
+// prompts INSERT (prompts_insert requires tf.user_can_write_team(team_id)
+// too) before MaterializeListing ever reaches the marketplace_installs
+// write — either way the whole transaction rolls back, so nothing is
+// created.
+func TestMarketplaceRLS_MaterializeListingRequiresInstallingTeamWrite(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
+	teamB := SeedTeam(t, h, orgA, "teamB")
+	erin := SeedUser(t, h, "erin")
+	AddOrgMember(t, h, erin, orgA, teamB, "member", "viewer")
+	teamBAdmin := SeedUser(t, h, "teamBAdmin")
+	AddOrgMember(t, h, teamBAdmin, orgA, teamB, "member", "admin")
+
+	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Installable Prompt", "")
+	snap := marketplaceSnapshot("Installable Prompt")
+
+	installErr := h.WithUser(t, erin, orgA, func(tx *sql.Tx) error {
+		_, _, err := pgstore.NewForTx(tx, SecretKey).Marketplace.MaterializeListing(t.Context(), orgA, teamB, snap, listingID, 1, erin)
+		return err
+	})
+	AssertRLSViolation(t, installErr)
+
+	var promptCount, installCount int
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM prompts WHERE team_id = $1 AND source = 'marketplace'`, teamB).Scan(&promptCount); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if promptCount != 0 {
+		t.Fatalf("prompt count = %d after erin's blocked install, want 0", promptCount)
+	}
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_installs WHERE listing_id = $1`, listingID).Scan(&installCount); err != nil {
+		t.Fatalf("count installs: %v", err)
+	}
+	if installCount != 0 {
+		t.Fatalf("install count = %d after erin's blocked install, want 0", installCount)
+	}
+
+	// Promote erin to a write role; the same install now succeeds.
+	MustExec(t, h.AdminDB, `UPDATE memberships SET role = 'member' WHERE user_id = $1 AND team_id = $2`, erin, teamB)
+	var rootObjectID string
+	var promptIDs []string
+	if err := h.WithUser(t, erin, orgA, func(tx *sql.Tx) error {
+		var e error
+		rootObjectID, promptIDs, e = pgstore.NewForTx(tx, SecretKey).Marketplace.MaterializeListing(t.Context(), orgA, teamB, snap, listingID, 1, erin)
+		return e
+	}); err != nil {
+		t.Fatalf("erin's install after promotion: %v", err)
+	}
+	if rootObjectID == "" || len(promptIDs) != 1 || promptIDs[0] != rootObjectID {
+		t.Fatalf("materialize result = root=%q prompts=%v, want a single prompt whose id is also the root object (kind=prompt)", rootObjectID, promptIDs)
+	}
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_installs WHERE listing_id = $1 AND root_object_id = $2::uuid`, listingID, rootObjectID).Scan(&installCount); err != nil {
+		t.Fatalf("count installs: %v", err)
+	}
+	if installCount != 1 {
+		t.Fatalf("install count = %d after erin's promoted install, want 1", installCount)
+	}
+}
+
+// TestMarketplaceRLS_MaterializeListing_RejectsUnsupportedSchemaVersion pins
+// that a snapshot carrying a schema_version MaterializeListing doesn't
+// understand fails loudly before writing anything, rather than silently
+// materializing rows from a document it can't fully interpret. The check
+// runs before any query, so no rows land on either side of the failed call.
+func TestMarketplaceRLS_MaterializeListing_RejectsUnsupportedSchemaVersion(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
+	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Versioned", "")
+	snap := marketplaceSnapshot("Versioned")
+	snap.SchemaVersion = domain.ListingSnapshotSchemaVersion + 1
+
+	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, _, e := pgstore.NewForTx(tx, SecretKey).Marketplace.MaterializeListing(t.Context(), orgA, teamA, snap, listingID, 1, alice)
+		return e
+	})
+	if err == nil {
+		t.Fatal("MaterializeListing with an unsupported schema_version = nil error, want a rejection")
+	}
+
+	var promptCount, installCount int
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM prompts WHERE team_id = $1 AND source = 'marketplace'`, teamA).Scan(&promptCount); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if promptCount != 0 {
+		t.Errorf("prompt count = %d after a rejected schema_version, want 0", promptCount)
+	}
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_installs WHERE listing_id = $1`, listingID).Scan(&installCount); err != nil {
+		t.Fatalf("count installs: %v", err)
+	}
+	if installCount != 0 {
+		t.Errorf("install count = %d after a rejected schema_version, want 0", installCount)
+	}
+}
+
+// TestMarketplaceRLS_MaterializeListing_PromptSurvivesSourceDeletion pins
+// TFAC-535's cross-org insurance in the one place it matters most: install
+// consumes the frozen listing_versions snapshot alone, never the publisher
+// team's live prompt row — so deleting the source prompt after publish does
+// not break a later install (the design point of storing a self-contained
+// snapshot document in the first place).
+func TestMarketplaceRLS_MaterializeListing_PromptSurvivesSourceDeletion(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
+	var sourcePromptID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO prompts (org_id, creator_user_id, team_id, name, body, source)
+		VALUES ($1, $2, $3, 'Original', 'original mission', 'user') RETURNING id
+	`, orgA, alice, teamA).Scan(&sourcePromptID); err != nil {
+		t.Fatalf("seed source prompt: %v", err)
+	}
+
+	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Deletable Source", sourcePromptID)
+	snap := marketplaceSnapshot("Deletable Source")
+
+	// The source prompt — and, for good measure, its whole owning team — no
+	// longer exist by the time the install happens.
+	MustExec(t, h.AdminDB, `DELETE FROM prompts WHERE id = $1`, sourcePromptID)
+
+	teamB := SeedTeam(t, h, orgA, "teamB")
+	bob := SeedUser(t, h, "bob")
+	AddOrgMember(t, h, bob, orgA, teamB, "member", "admin")
+
+	var rootObjectID string
+	if err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		var e error
+		rootObjectID, _, e = pgstore.NewForTx(tx, SecretKey).Marketplace.MaterializeListing(t.Context(), orgA, teamB, snap, listingID, 1, bob)
+		return e
+	}); err != nil {
+		t.Fatalf("install after source prompt deleted: %v", err)
+	}
+
+	var name, body, source string
+	if err := h.AdminDB.QueryRow(`SELECT name, body, source FROM prompts WHERE id = $1`, rootObjectID).Scan(&name, &body, &source); err != nil {
+		t.Fatalf("read installed prompt: %v", err)
+	}
+	if name != "Deletable Source" || body != "mission body" || source != "marketplace" {
+		t.Errorf("installed prompt = (%q, %q, %q), want (Deletable Source, mission body, marketplace)", name, body, source)
+	}
+}
+
+// TestMarketplaceRLS_MaterializeListing_BlueprintKind pins the blueprint
+// materialize path: one fresh prompt per snapshot step (never shared —
+// trivially satisfies the copy-only invariant), step order + briefs +
+// body/model/allowed_tools carried verbatim, every copy source='marketplace',
+// and the install record's root_object_id pointing at the new blueprint.
+func TestMarketplaceRLS_MaterializeListing_BlueprintKind(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
+	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Chain Listing", "")
+	snap := marketplaceBlueprintSnapshot("Chain Listing")
+
+	teamB := SeedTeam(t, h, orgA, "teamB")
+	bob := SeedUser(t, h, "bob")
+	AddOrgMember(t, h, bob, orgA, teamB, "member", "admin")
+
+	var rootObjectID string
+	var promptIDs []string
+	if err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		var e error
+		rootObjectID, promptIDs, e = pgstore.NewForTx(tx, SecretKey).Marketplace.MaterializeListing(t.Context(), orgA, teamB, snap, listingID, 1, bob)
+		return e
+	}); err != nil {
+		t.Fatalf("install blueprint: %v", err)
+	}
+	if len(promptIDs) != 2 || promptIDs[0] == promptIDs[1] {
+		t.Fatalf("promptIDs = %v, want 2 distinct fresh prompts", promptIDs)
+	}
+
+	var bpName, bpSource string
+	if err := h.AdminDB.QueryRow(`SELECT name, source FROM blueprints WHERE id = $1`, rootObjectID).Scan(&bpName, &bpSource); err != nil {
+		t.Fatalf("read installed blueprint: %v", err)
+	}
+	if bpName != "Chain Listing" || bpSource != "marketplace" {
+		t.Errorf("blueprint = (%q, %q), want (Chain Listing, marketplace)", bpName, bpSource)
+	}
+
+	type stepRow struct {
+		idx                                               int
+		promptID, brief, name, body, model, tools, source string
+	}
+	rows, err := h.AdminDB.Query(`
+		SELECT bs.step_index, bs.step_prompt_id, bs.brief, p.name, p.body, p.model, p.allowed_tools, p.source
+		FROM blueprint_steps bs JOIN prompts p ON p.id = bs.step_prompt_id
+		WHERE bs.blueprint_id = $1 ORDER BY bs.step_index
+	`, rootObjectID)
+	if err != nil {
+		t.Fatalf("query steps: %v", err)
+	}
+	defer rows.Close()
+	var got []stepRow
+	for rows.Next() {
+		var r stepRow
+		if err := rows.Scan(&r.idx, &r.promptID, &r.brief, &r.name, &r.body, &r.model, &r.tools, &r.source); err != nil {
+			t.Fatalf("scan step: %v", err)
+		}
+		got = append(got, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate steps: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("step count = %d, want 2", len(got))
+	}
+	if got[0].idx != 0 || got[0].name != "Step One" || got[0].body != "first mission" || got[0].model != "sonnet" || got[0].brief != "do step one first" || got[0].source != "marketplace" || got[0].promptID != promptIDs[0] {
+		t.Errorf("step 0 = %+v, want source snapshot step 0 verbatim as a fresh marketplace-sourced prompt", got[0])
+	}
+	if got[1].idx != 1 || got[1].name != "Step Two" || got[1].body != "second mission" || got[1].tools != "Grep" || got[1].promptID != promptIDs[1] {
+		t.Errorf("step 1 = %+v, want source snapshot step 1 verbatim", got[1])
+	}
+
+	var installCount int
+	var recordedRoot string
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*), COALESCE(MAX(root_object_id::text), '') FROM marketplace_installs WHERE listing_id = $1`, listingID).Scan(&installCount, &recordedRoot); err != nil {
+		t.Fatalf("count installs: %v", err)
+	}
+	if installCount != 1 || recordedRoot != rootObjectID {
+		t.Errorf("install record = count=%d root=%q, want count=1 root=%q", installCount, recordedRoot, rootObjectID)
 	}
 }

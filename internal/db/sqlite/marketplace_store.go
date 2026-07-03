@@ -63,3 +63,7 @@ func (s *marketplaceStore) Unvote(context.Context, string, string, string) error
 func (s *marketplaceStore) RecordInstall(context.Context, string, string, int, string, string, string) error {
 	return db.ErrNotApplicableInLocal
 }
+
+func (s *marketplaceStore) MaterializeListing(context.Context, string, string, domain.ListingSnapshot, string, int, string) (string, []string, error) {
+	return "", nil, db.ErrNotApplicableInLocal
+}

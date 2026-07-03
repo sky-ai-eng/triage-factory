@@ -1061,6 +1061,9 @@ func (s *Server) routes() {
 	s.apiMutating("PUT /api/marketplace/listings/{id}/vote", mh.handleMarketplaceVote)
 	s.apiMutating("DELETE /api/marketplace/listings/{id}/vote", mh.handleMarketplaceUnvote)
 	s.api("GET /api/marketplace/listings/by-source/{source_id}", mh.handleMarketplaceListingBySource)
+	// Install/"copy to my team" (TFAC-538) — materializes the listing's
+	// current snapshot into the caller's team as a brand-new fork.
+	s.apiMutating("POST /api/marketplace/listings/{id}/install", mh.handleMarketplaceInstall)
 
 	// Org template editor (SKY-381) — org-admin-gated, multi-mode only.
 	// Mirrors the /api/prompts + /api/event-handlers families at org-template

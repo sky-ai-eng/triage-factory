@@ -3,9 +3,11 @@ import { Link } from 'react-router-dom'
 import { AnimatePresence, motion } from 'motion/react'
 import { Store, ThumbsUp, X } from 'lucide-react'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { useTeams, useWriteTeam, noteWrittenTeam } from '../hooks/useTeams'
 import { readError } from '../lib/api'
 import { toast } from '../components/Toast/toastStore'
 import SearchField from '../components/SearchField'
+import TeamPicker from '../components/TeamPicker'
 import type { EventType } from '../types'
 
 // Within-org prompt marketplace browse page (TFAC-537). Flat searchable list
@@ -202,6 +204,19 @@ export default function Marketplace() {
     [refresh],
   )
 
+  // Bumps the install count locally (grid row + open drawer) after a
+  // successful "copy to my team" — mirrors toggleVote's optimistic-update
+  // shape, but there's nothing to reconcile on failure since the count only
+  // moves after the POST already succeeded.
+  const handleInstalled = useCallback((listingId: string) => {
+    setListings((prev) =>
+      prev.map((l) => (l.id === listingId ? { ...l, install_count: l.install_count + 1 } : l)),
+    )
+    setDetail((prev) =>
+      prev && prev.id === listingId ? { ...prev, install_count: prev.install_count + 1 } : prev,
+    )
+  }, [])
+
   const filtersActive = debouncedQuery !== '' || eventType !== '' || kind !== ''
   const clearFilters = () => {
     setQuery('')
@@ -303,6 +318,7 @@ export default function Marketplace() {
         catalogById={catalogById}
         onClose={closeDetail}
         onToggleVote={toggleVote}
+        onInstalled={handleInstalled}
       />
     </div>
   )
@@ -457,6 +473,7 @@ function ListingDrawer({
   catalogById,
   onClose,
   onToggleVote,
+  onInstalled,
 }: {
   open: boolean
   detail: ListingDetail | null
@@ -464,6 +481,7 @@ function ListingDrawer({
   catalogById: Map<string, EventType>
   onClose: () => void
   onToggleVote: (listing: ListingSummary) => void
+  onInstalled: (listingId: string) => void
 }) {
   return (
     <AnimatePresence>
@@ -555,15 +573,9 @@ function ListingDrawer({
                     <span className="text-[11px] text-text-tertiary tabular-nums">
                       {detail.install_count} install{detail.install_count === 1 ? '' : 's'}
                     </span>
-                    <button
-                      type="button"
-                      disabled
-                      title="Copy-to-team install lands in a follow-up ticket (TFAC-538)"
-                      className="ml-auto text-[12px] font-medium text-text-tertiary bg-black/[0.03] px-3 py-1.5 rounded-full cursor-not-allowed"
-                    >
-                      Copy to my team
-                    </button>
                   </div>
+
+                  <InstallControl listing={detail} onInstalled={onInstalled} />
 
                   <div>
                     <h3 className="text-[11px] font-semibold text-text-secondary mb-2 uppercase tracking-wide">
@@ -629,6 +641,110 @@ function ListingDrawer({
         </>
       )}
     </AnimatePresence>
+  )
+}
+
+// InstallControl is the "copy to my team" action (TFAC-538): a single-team
+// caller installs directly on click; a multi-team caller expands an inline
+// <TeamPicker> + confirm step first (useWriteTeam seeds it from their
+// last-written team, TeamPicker itself renders nothing below 2 teams). On
+// success it replaces the control with a link to the target team's prompts
+// workspace plus the advisory next step — attaching a trigger stays an
+// explicit action in the trigger editor, never auto-created here.
+function InstallControl({
+  listing,
+  onInstalled,
+}: {
+  listing: ListingDetail
+  onInstalled: (listingId: string) => void
+}) {
+  const orgHref = useOrgHref()
+  const { teams } = useTeams()
+  const { team, setTeam, multi, ready } = useWriteTeam()
+  const [expanded, setExpanded] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [installedTeamId, setInstalledTeamId] = useState<string | null>(null)
+
+  const install = useCallback(
+    async (teamId: string) => {
+      setSubmitting(true)
+      try {
+        const res = await fetch(
+          `/api/marketplace/listings/${encodeURIComponent(listing.id)}/install`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ team_id: teamId }),
+          },
+        )
+        if (!res.ok) {
+          toast.error(await readError(res, 'Failed to copy to your team'))
+          return
+        }
+        if (teamId) noteWrittenTeam(teamId)
+        setInstalledTeamId(teamId)
+        onInstalled(listing.id)
+      } catch (err) {
+        toast.error(
+          `Failed to copy to your team: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      } finally {
+        setSubmitting(false)
+      }
+    },
+    [listing.id, onInstalled],
+  )
+
+  if (installedTeamId !== null) {
+    const teamName = teams.find((t) => t.id === installedTeamId)?.name
+    return (
+      <div className="rounded-lg border border-border-subtle bg-black/[0.02] px-3 py-2.5">
+        <p className="text-[12px] text-text-secondary">
+          Copied{teamName ? ` to ${teamName}` : ''} ·{' '}
+          <Link
+            // team=<installedTeamId> is TeamPage's one-shot override — without
+            // it a multi-team viewer whose device has a different sticky team
+            // (localStorage `tf.activeTeam.team`, which otherwise wins over
+            // the server's last-acting default) would land on the wrong
+            // team's prompts, not the one this install just landed on.
+            to={orgHref('/team') + `?tab=prompts&team=${encodeURIComponent(installedTeamId)}`}
+            className="text-accent font-medium hover:opacity-80"
+          >
+            Open prompts workspace
+          </Link>
+        </p>
+        <p className="text-[11px] text-text-tertiary mt-0.5">
+          Next: attach it to a trigger from your team&rsquo;s editor.
+        </p>
+      </div>
+    )
+  }
+
+  if (expanded && multi) {
+    return (
+      <div className="flex items-center gap-2">
+        <TeamPicker value={team} onChange={setTeam} label="Team" className="flex-1 max-w-[200px]" />
+        <button
+          type="button"
+          onClick={() => install(team)}
+          disabled={submitting || !ready || !team}
+          className="text-[12px] font-medium text-white bg-accent px-3 py-1.5 rounded-full disabled:opacity-50 hover:opacity-90 transition-all"
+        >
+          {submitting ? 'Copying…' : 'Confirm copy'}
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => (multi ? setExpanded(true) : install(team))}
+      disabled={submitting || !ready}
+      className="text-[12px] font-medium text-accent bg-accent-soft px-3 py-1.5 rounded-full hover:opacity-90 transition-all disabled:opacity-50"
+    >
+      {submitting ? 'Copying…' : 'Copy to my team'}
+    </button>
   )
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Users } from 'lucide-react'
 import { useActiveOrgId } from '../contexts/OrgContext'
@@ -82,7 +82,27 @@ function TeamPageBody({
   orgId: string
   orgIsAdmin: boolean
 }) {
-  const [picked, setPicked] = useState(() => readStoredTeam())
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  // ?team=<id> is a one-shot override — e.g. the marketplace install
+  // success link, so "Open prompts workspace" reliably lands on the team
+  // that was just installed into rather than whatever this device's sticky
+  // pick (below) still points at. Wins over the sticky pick by seeding it
+  // directly and persisting to the same localStorage slot, so a reload
+  // keeps landing here too. The effect further down strips the param once
+  // consumed so it can't re-win over a later manual switch on refresh.
+  const [picked, setPicked] = useState(() => {
+    const fromParam = searchParams.get('team')
+    if (fromParam && teams.some((t) => t.id === fromParam)) {
+      try {
+        localStorage.setItem(ACTIVE_TEAM_KEY, fromParam)
+      } catch {
+        // localStorage unavailable — the override still applies this session.
+      }
+      return fromParam
+    }
+    return readStoredTeam()
+  })
   // Tracks whether the Settings tab has unsaved edits, so a team switch can
   // confirm-before-discard (the switch fires from the page header, outside the
   // tab body). Reset by TeamSettings on unmount.
@@ -116,7 +136,19 @@ function TeamPageBody({
     [teamId, settingsDirty],
   )
 
-  const [searchParams, setSearchParams] = useSearchParams()
+  // Consumes the one-shot ?team= override: strips it from the URL once
+  // applied above so it can't linger and re-win over a subsequent manual
+  // switch if the user refreshes later in the same session. Runs once per
+  // mount — searchParams is deliberately excluded from the deps so this
+  // doesn't re-fire as other params (?tab=) change.
+  useEffect(() => {
+    if (!searchParams.has('team')) return
+    const next = new URLSearchParams(searchParams)
+    next.delete('team')
+    setSearchParams(next, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const tab = resolveTab(searchParams.get('tab'), canManage)
   // Members owns the bare URL (drop the param); the others carry an explicit
   // ?tab=. replace so flipping tabs doesn't pile up history entries.

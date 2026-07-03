@@ -26,6 +26,14 @@ const (
 	ListingSortRecent   = "recent"
 )
 
+// ListingSnapshotSchemaVersion is the only ListingSnapshot.SchemaVersion V1
+// ever writes or reads — the single source of truth so the write side
+// (buildListingSnapshot) and the install-time validation
+// (MaterializeListing) can't drift apart. A future incompatible snapshot
+// format bumps this and teaches the read/install paths to branch on it;
+// nothing does today.
+const ListingSnapshotSchemaVersion = 1
+
 // MarketplaceListing is one published entry in the within-org prompt
 // marketplace — a durable pointer at a versioned, self-contained snapshot of
 // a team's prompt or blueprint (TFAC-535). Copy-on-publish throughout:
@@ -74,7 +82,7 @@ type MarketplaceListing struct {
 // once the cross-org marketplace (phase 2) lands. The installer consumes
 // this document, never source rows.
 type ListingSnapshot struct {
-	SchemaVersion int            `json:"schema_version"` // 1
+	SchemaVersion int            `json:"schema_version"` // ListingSnapshotSchemaVersion
 	Kind          string         `json:"kind"`           // ListingKind*
 	Name          string         `json:"name"`
 	Description   string         `json:"description"`

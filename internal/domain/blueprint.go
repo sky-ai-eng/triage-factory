@@ -52,7 +52,7 @@ const (
 type Blueprint struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
-	Source string `json:"source"` // "system", "user", "imported"
+	Source string `json:"source"` // "system", "user", "imported", "marketplace" (TFAC-538 install copy)
 	// TeamID is the owning team — NOT NULL, the sole scoping signal. A
 	// trigger may only fire a blueprint its own team owns. Stores populate it
 	// on read; Create stamps it from the resolved acting team.
