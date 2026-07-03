@@ -13,7 +13,7 @@ import (
 // tests below — content doesn't matter, only that it round-trips.
 func marketplaceSnapshot(name string) domain.ListingSnapshot {
 	return domain.ListingSnapshot{
-		SchemaVersion: 1,
+		SchemaVersion: domain.ListingSnapshotSchemaVersion,
 		Kind:          domain.ListingKindPrompt,
 		Name:          name,
 		Description:   "rls fixture",
@@ -28,7 +28,7 @@ func marketplaceSnapshot(name string) domain.ListingSnapshot {
 // domain.ListingSnapshot for the MaterializeListing (install) tests below.
 func marketplaceBlueprintSnapshot(name string) domain.ListingSnapshot {
 	return domain.ListingSnapshot{
-		SchemaVersion: 1,
+		SchemaVersion: domain.ListingSnapshotSchemaVersion,
 		Kind:          domain.ListingKindBlueprint,
 		Name:          name,
 		Description:   "install fixture",
@@ -419,6 +419,43 @@ func TestMarketplaceRLS_MaterializeListingRequiresInstallingTeamWrite(t *testing
 	}
 	if installCount != 1 {
 		t.Fatalf("install count = %d after erin's promoted install, want 1", installCount)
+	}
+}
+
+// TestMarketplaceRLS_MaterializeListing_RejectsUnsupportedSchemaVersion pins
+// that a snapshot carrying a schema_version MaterializeListing doesn't
+// understand fails loudly before writing anything, rather than silently
+// materializing rows from a document it can't fully interpret. The check
+// runs before any query, so no rows land on either side of the failed call.
+func TestMarketplaceRLS_MaterializeListing_RejectsUnsupportedSchemaVersion(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
+	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Versioned", "")
+	snap := marketplaceSnapshot("Versioned")
+	snap.SchemaVersion = domain.ListingSnapshotSchemaVersion + 1
+
+	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, _, e := pgstore.NewForTx(tx, SecretKey).Marketplace.MaterializeListing(t.Context(), orgA, teamA, snap, listingID, 1, alice)
+		return e
+	})
+	if err == nil {
+		t.Fatal("MaterializeListing with an unsupported schema_version = nil error, want a rejection")
+	}
+
+	var promptCount, installCount int
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM prompts WHERE team_id = $1 AND source = 'marketplace'`, teamA).Scan(&promptCount); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if promptCount != 0 {
+		t.Errorf("prompt count = %d after a rejected schema_version, want 0", promptCount)
+	}
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_installs WHERE listing_id = $1`, listingID).Scan(&installCount); err != nil {
+		t.Fatalf("count installs: %v", err)
+	}
+	if installCount != 0 {
+		t.Errorf("install count = %d after a rejected schema_version, want 0", installCount)
 	}
 }
 

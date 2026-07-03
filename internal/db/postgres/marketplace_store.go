@@ -473,6 +473,9 @@ func (s *marketplaceStore) MaterializeListing(ctx context.Context, orgID, teamID
 	if teamID == "" {
 		return "", nil, errors.New("postgres marketplace: MaterializeListing requires team_id")
 	}
+	if snap.SchemaVersion != domain.ListingSnapshotSchemaVersion {
+		return "", nil, fmt.Errorf("postgres marketplace: MaterializeListing unsupported snapshot schema_version %d (want %d)", snap.SchemaVersion, domain.ListingSnapshotSchemaVersion)
+	}
 	if len(snap.Steps) == 0 {
 		return "", nil, errors.New("postgres marketplace: MaterializeListing requires at least one snapshot step")
 	}

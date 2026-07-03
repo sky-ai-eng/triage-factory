@@ -702,7 +702,12 @@ function InstallControl({
         <p className="text-[12px] text-text-secondary">
           Copied{teamName ? ` to ${teamName}` : ''} ·{' '}
           <Link
-            to={orgHref('/team') + '?tab=prompts'}
+            // team=<installedTeamId> is TeamPage's one-shot override — without
+            // it a multi-team viewer whose device has a different sticky team
+            // (localStorage `tf.activeTeam.team`, which otherwise wins over
+            // the server's last-acting default) would land on the wrong
+            // team's prompts, not the one this install just landed on.
+            to={orgHref('/team') + `?tab=prompts&team=${encodeURIComponent(installedTeamId)}`}
             className="text-accent font-medium hover:opacity-80"
           >
             Open prompts workspace

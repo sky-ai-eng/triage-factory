@@ -1286,7 +1286,9 @@ func TestMarketplaceInstall_Blueprint_HappyPath(t *testing.T) {
 	var pubResp struct {
 		ID string `json:"id"`
 	}
-	_ = json.Unmarshal(publishRec.Body.Bytes(), &pubResp)
+	if err := json.Unmarshal(publishRec.Body.Bytes(), &pubResp); err != nil {
+		t.Fatalf("decode publish response: %v", err)
+	}
 
 	rec := r.installAs(r.member, pubResp.ID, r.teamB)
 	if rec.Code != http.StatusCreated {
@@ -1475,7 +1477,9 @@ func TestMarketplaceInstall_SucceedsAfterSourceDeleted(t *testing.T) {
 	var pubResp struct {
 		ID string `json:"id"`
 	}
-	_ = json.Unmarshal(publishRec.Body.Bytes(), &pubResp)
+	if err := json.Unmarshal(publishRec.Body.Bytes(), &pubResp); err != nil {
+		t.Fatalf("decode publish response: %v", err)
+	}
 
 	pgtest.MustExec(t, r.h.AdminDB, `DELETE FROM prompts WHERE id = $1`, promptID)
 

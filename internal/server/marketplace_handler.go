@@ -121,7 +121,7 @@ func buildListingSnapshot(ctx context.Context, tx db.TxStores, orgID, kind, sour
 			return domain.ListingSnapshot{}, "", errMarketplaceSourceNotFound
 		}
 		return domain.ListingSnapshot{
-			SchemaVersion: 1,
+			SchemaVersion: domain.ListingSnapshotSchemaVersion,
 			Kind:          domain.ListingKindPrompt,
 			Steps: []domain.SnapshotStep{{
 				StepIndex:    0,
@@ -166,7 +166,7 @@ func buildListingSnapshot(ctx context.Context, tx db.TxStores, orgID, kind, sour
 			}
 		}
 		return domain.ListingSnapshot{
-			SchemaVersion: 1,
+			SchemaVersion: domain.ListingSnapshotSchemaVersion,
 			Kind:          domain.ListingKindBlueprint,
 			Steps:         snapSteps,
 		}, bp.TeamID, nil

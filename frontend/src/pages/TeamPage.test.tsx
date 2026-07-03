@@ -173,6 +173,19 @@ describe('TeamPage — shared switcher', () => {
     renderAt()
     expect(screen.getByTestId('members')).toHaveAttribute('data-team', 't-b')
   })
+
+  it('a ?team= override (e.g. the marketplace install success link) wins over the sticky pick and persists it', () => {
+    localStorage.setItem('tf.activeTeam.team', 't-a')
+    renderAt('/team?tab=prompts&team=t-b')
+    expect(screen.getByTestId('prompts')).toHaveAttribute('data-team', 't-b')
+    expect(localStorage.getItem('tf.activeTeam.team')).toBe('t-b')
+  })
+
+  it('ignores a ?team= override that is not one of the caller’s teams', () => {
+    localStorage.setItem('tf.activeTeam.team', 't-a')
+    renderAt('/team?team=not-a-real-team')
+    expect(screen.getByTestId('members')).toHaveAttribute('data-team', 't-a')
+  })
 })
 
 describe('TeamPage — zero-team safe landing', () => {

@@ -144,5 +144,10 @@ type MarketplaceStore interface {
 	// caller can render/link every row this install created. userID may be
 	// "" (system-initiated install has no human actor, mirrors
 	// RecordInstall); teamID is the installing team and is required.
+	//
+	// Rejects snap.SchemaVersion != domain.ListingSnapshotSchemaVersion
+	// before writing anything — a snapshot format this method doesn't
+	// understand must fail loudly rather than silently materialize rows
+	// from a document it can't fully interpret.
 	MaterializeListing(ctx context.Context, orgID, teamID string, snap domain.ListingSnapshot, listingID string, version int, userID string) (rootObjectID string, promptIDs []string, err error)
 }
