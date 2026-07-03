@@ -275,7 +275,7 @@ func spawnDelta(ctx context.Context, cfg benchConfig, nextID *int, delta int) (a
 	var wg sync.WaitGroup
 	for i := 0; i < delta; i++ {
 		id := *nextID
-		*nextID++
+		*nextID = id + 1
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -499,7 +499,7 @@ func runOneShot(ctx context.Context, cfg benchConfig, name string, argv []string
 	if err != nil {
 		return err
 	}
-	defer sb.Close()
+	defer func() { _ = sb.Close() }()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w (output: %s)", err, bytes.TrimSpace(out))

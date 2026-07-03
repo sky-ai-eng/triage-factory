@@ -63,7 +63,7 @@ func main() {
 	flag.DurationVar(&cfg.hold, "hold", 45*time.Second,
 		"how long to hold each plateau before measuring")
 	flag.StringVar(&cfg.profile, "profile", "agent",
-		"workload inside each sandbox: agent | idle | cpu | pageshare")
+		"workload inside each sandbox: agent | idle | cpu | pageshare | claude")
 	flag.IntVar(&cfg.blobMB, "blob-mb", 512,
 		"size of the shared read-only blob for the pageshare profile (MB)")
 	flag.StringVar(&cfg.sdkDir, "sdk-dir", "/opt/triagefactory/sdk",
@@ -100,6 +100,10 @@ func main() {
 	case "agent", "idle", "cpu", "pageshare", "claude":
 	default:
 		fmt.Fprintf(os.Stderr, "sandbox-bench: unknown -profile %q\n", cfg.profile)
+		os.Exit(2)
+	}
+	if cfg.dutyPct < 0 || cfg.dutyPct > 100 {
+		fmt.Fprintf(os.Stderr, "sandbox-bench: -duty-pct must be between 0 and 100, got %d\n", cfg.dutyPct)
 		os.Exit(2)
 	}
 
