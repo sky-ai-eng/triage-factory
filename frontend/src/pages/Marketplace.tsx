@@ -419,6 +419,7 @@ function ListingCard({
 }) {
   const shownEventTypes = listing.event_types.slice(0, 3)
   const extraEventTypes = listing.event_types.length - shownEventTypes.length
+  const statsLine = formatStatsLine(listing.stats)
 
   return (
     <article
@@ -492,7 +493,7 @@ function ListingCard({
           <div>
             {listing.install_count} install{listing.install_count === 1 ? '' : 's'}
           </div>
-          {formatStatsLine(listing.stats) && <div>{formatStatsLine(listing.stats)}</div>}
+          {statsLine && <div>{statsLine}</div>}
         </div>
       </div>
     </article>
