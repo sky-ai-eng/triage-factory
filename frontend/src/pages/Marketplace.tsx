@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { AnimatePresence, motion } from 'motion/react'
 import { Store, ThumbsUp, X } from 'lucide-react'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useTeams, useWriteTeam, noteWrittenTeam } from '../hooks/useTeams'
 import { readError } from '../lib/api'
 import { toast } from '../components/Toast/toastStore'
@@ -517,6 +518,12 @@ function ListingDrawer({
   onToggleVote: (listing: ListingSummary) => void
   onInstalled: (listingId: string) => void
 }) {
+  // Trap keyboard focus inside the drawer while open and restore it to the
+  // trigger on close (WCAG 2.1.2); initial focus lands on the close button.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  useFocusTrap(dialogRef, { active: open, initialFocus: closeRef })
+
   return (
     <AnimatePresence>
       {open && (
@@ -529,6 +536,8 @@ function ListingDrawer({
             onClick={onClose}
           />
           <motion.div
+            ref={dialogRef}
+            tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-label={detail ? detail.name : 'Listing detail'}
@@ -544,6 +553,7 @@ function ListingDrawer({
                 <span className="truncate">{detail?.name ?? 'Loading…'}</span>
               </h2>
               <button
+                ref={closeRef}
                 type="button"
                 onClick={onClose}
                 aria-label="Close"

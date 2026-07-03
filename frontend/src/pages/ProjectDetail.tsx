@@ -17,6 +17,7 @@ import {
 import Markdown from 'react-markdown'
 import type { Project, KnowledgeFile, KnowledgeUploadResult, ProjectExportPreview } from '../types'
 import { readError } from '../lib/api'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
 import CuratorChat from '../components/CuratorChat'
@@ -1185,6 +1186,11 @@ function ProjectExportModal({
   const [error, setError] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
 
+  // Trap keyboard focus inside the dialog and restore it to the trigger on
+  // close (WCAG 2.1.2).
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useFocusTrap(dialogRef)
+
   useEffect(() => {
     let cancelled = false
     setLoading(true)
@@ -1256,6 +1262,8 @@ function ProjectExportModal({
           shadow-xl shadow-black/[0.08] backdrop-blur-xl
           p-6
         "
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby="project-export-title"

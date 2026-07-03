@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { X } from 'lucide-react'
 import type { Project } from '../types'
 import { readError } from '../lib/api'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from './Toast/toastStore'
 import RepoMultiSelect from './RepoMultiSelect'
 import TrackerProjectPickers from './TrackerProjectPickers'
@@ -37,6 +38,12 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
   // would 400 when the team resolves to a different one. Disabled until the
   // team is known (solo → '' is already resolved → ready immediately).
   const repoPickerReady = teamReady && (!multi || team !== '')
+
+  // Trap keyboard focus inside the dialog and restore it to the trigger on
+  // close (WCAG 2.1.2). Initial focus lands on the name field.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const nameRef = useRef<HTMLInputElement>(null)
+  useFocusTrap(dialogRef, { initialFocus: nameRef })
 
   // Repos AND the Jira project are team-scoped (the create POST validates
   // both against the acting team — pinned repos via validatePinnedRepos,
@@ -140,6 +147,8 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
       onClick={handleBackdropClick}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="
           relative w-full max-w-lg max-h-[90vh] overflow-y-auto
           rounded-2xl border border-border-glass
@@ -186,10 +195,10 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
 
           <Field label="Name" required>
             <input
+              ref={nameRef}
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              autoFocus
               required
               className="
                 w-full rounded-lg border border-border-subtle

@@ -19,6 +19,7 @@ import { Copy, FileText, Layers, MoreVertical, Trash2 } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import MarketplacePublishControl from './MarketplacePublishControl'
 import {
   type BindingScope,
@@ -1738,6 +1739,13 @@ function BindingGraphInner({
     return () => window.removeEventListener('keydown', onKey)
   }, [deleteConfirm])
 
+  // Trap keyboard focus inside the confirm dialog and restore it to the
+  // trigger on close (WCAG 2.1.2). Initial focus lands on Cancel — the
+  // non-destructive default for a destructive confirm.
+  const deleteDialogRef = useRef<HTMLDivElement>(null)
+  const deleteCancelRef = useRef<HTMLButtonElement>(null)
+  useFocusTrap(deleteDialogRef, { active: !!deleteConfirm, initialFocus: deleteCancelRef })
+
   // Handle drop from sidebar
   const onDragOver = useCallback((e: DragEvent) => {
     e.preventDefault()
@@ -2037,6 +2045,8 @@ function BindingGraphInner({
             }}
           />
           <div
+            ref={deleteDialogRef}
+            tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-label={`Delete ${deleteSummary}?`}
@@ -2076,7 +2086,7 @@ function BindingGraphInner({
             </p>
             <div className="flex items-center justify-end gap-1.5">
               <button
-                autoFocus
+                ref={deleteCancelRef}
                 onClick={() => setDeleteConfirm(null)}
                 disabled={isDeleting}
                 className="text-[11px] font-medium text-text-secondary hover:text-text-primary disabled:opacity-50 px-3 py-1.5 rounded-md border border-border-subtle transition-colors"

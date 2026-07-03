@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useId, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import TeamPicker from './TeamPicker'
 import MarketplacePublishControl from './MarketplacePublishControl'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
@@ -175,6 +176,15 @@ export default function PromptDrawer({
   const startWidth = useRef(0)
 
   const open = promptId !== null || isNew
+
+  // Trap keyboard focus inside the drawer while open and restore it to the
+  // trigger on close (WCAG 2.1.2). Initial focus lands on the name field,
+  // except read-only mode, where it's disabled — the default (first
+  // focusable) applies there instead.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const nameRef = useRef<HTMLInputElement>(null)
+  const titleId = useId()
+  useFocusTrap(dialogRef, { active: open, initialFocus: readOnly ? undefined : nameRef })
 
   // Refreshes when the drawer (re)opens so a Settings change is
   // reflected in the "Default" option's label without a page reload.
@@ -394,6 +404,11 @@ export default function PromptDrawer({
 
           {/* Drawer */}
           <motion.div
+            ref={dialogRef}
+            tabIndex={-1}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
             className="fixed top-0 right-0 bottom-0 z-50 bg-surface-raised border-l border-border-glass shadow-2xl shadow-black/10 flex flex-col"
             style={{ width: Math.min(width, window.innerWidth * 0.9) }}
             initial={{ x: '100%' }}
@@ -410,7 +425,7 @@ export default function PromptDrawer({
             {/* Header */}
             <div className="px-6 py-5 border-b border-border-subtle flex items-center justify-between shrink-0">
               <div className="flex items-center gap-3">
-                <h2 className="text-[15px] font-semibold text-text-primary">
+                <h2 id={titleId} className="text-[15px] font-semibold text-text-primary">
                   {isNew ? 'New Prompt' : 'Edit Prompt'}
                 </h2>
               </div>
@@ -451,6 +466,7 @@ export default function PromptDrawer({
                   Name
                 </label>
                 <input
+                  ref={nameRef}
                   type="text"
                   value={name}
                   onChange={(e) => setName(e.target.value)}

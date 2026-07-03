@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Plus, UserPlus } from 'lucide-react'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 
 // TeamMemberPicker is the team roster's "add member" affordance (TFAC-444): a
 // button that opens a modal listing the org's members who AREN'T already on the
@@ -68,6 +69,11 @@ function PickerModal({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Trap keyboard focus inside the dialog and restore it to the trigger on
+  // close (WCAG 2.1.2).
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useFocusTrap(dialogRef)
+
   // Compute "org members not on the team" from the two rosters: the org roster
   // (the source set) minus everyone already on the team.
   useEffect(() => {
@@ -130,6 +136,8 @@ function PickerModal({
       }}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="flex max-h-[85vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-border-glass bg-surface-raised shadow-lg shadow-black/[0.04] backdrop-blur-xl"
         role="dialog"
         aria-modal="true"

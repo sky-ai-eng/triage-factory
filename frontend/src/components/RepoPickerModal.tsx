@@ -1,9 +1,10 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useState, useEffect, useId, useMemo, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { RotateCw, ExternalLink } from 'lucide-react'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID, getGitHubAppStatus, getGitHubAppInstallURL } from '../lib/githubApp'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import SearchField from './SearchField'
 
 interface GitHubRepo {
@@ -74,6 +75,15 @@ export default function RepoPickerModal({
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [checked, setChecked] = useState<Set<string>>(new Set(selected))
+
+  // Trap keyboard focus inside the dialog while it's the floating overlay
+  // (never in `inline` mode, which is embedded page content, not a modal)
+  // and restore it to the trigger on close (WCAG 2.1.2); initial focus lands
+  // on the search field.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const titleId = useId()
+  useFocusTrap(dialogRef, { active: !inline, initialFocus: searchRef })
 
   // Report the live selection up to a footer-less host (the setup wizard) so it
   // can mirror the picks into its own state and persist them on its own
@@ -187,7 +197,7 @@ export default function RepoPickerModal({
     <div className={`flex flex-col ${inline ? '' : 'h-full max-h-[80vh]'}`}>
       {/* Header */}
       <div className={inline ? 'pb-4' : 'px-6 pt-6 pb-4'}>
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 id={titleId} className="text-[19px] font-medium tracking-tight text-text-primary">
           Select repositories
         </h2>
         <p className="text-[13px] text-text-tertiary mt-1 leading-relaxed">
@@ -219,6 +229,7 @@ export default function RepoPickerModal({
           />
         ) : (
           <input
+            ref={searchRef}
             type="text"
             placeholder="Search repos..."
             value={search}
@@ -411,6 +422,11 @@ export default function RepoPickerModal({
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         className="w-full max-w-xl backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl shadow-lg shadow-black/[0.06] overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
