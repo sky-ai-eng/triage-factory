@@ -87,7 +87,23 @@ export async function apiFetch(path: string, options: ApiFetchOptions = {}): Pro
 
 export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
   const resp = await apiFetch(path, options)
-  return (await resp.json()) as T
+  // apiFetch guarantees a 2xx here, but a 2xx body isn't guaranteed to be JSON:
+  // the Vite dev server answers an unproxied /api path with a 200 index.html, and
+  // a misconfigured proxy / gateway can do the same. A bare resp.json() there
+  // throws a native SyntaxError ("Unexpected token '<'…") that bypasses
+  // httpErrorMessage's HttpError sanitizing and leaks the parser message to the
+  // UI. Re-cast a non-JSON body as an HttpError so callers land on the same clean
+  // fallback path as any other failed request.
+  const text = await resp.text()
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new HttpError(
+      resp.status,
+      text,
+      `Expected JSON from ${resolveUrl(path, options.org)} but received a non-JSON response`,
+    )
+  }
 }
 
 /** httpErrorMessage extracts a user-facing string from a caught error,
