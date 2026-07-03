@@ -188,21 +188,21 @@ func (s *agentRunStore) CreateIfNotFiredSystem(ctx context.Context, orgID string
 	return n > 0, nil
 }
 
-func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error {
-	return completeRun(ctx, s.q, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason)
+func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	return completeRun(ctx, s.q, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind)
 }
 
-func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error {
-	return completeRun(ctx, s.admin, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason)
+func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	return completeRun(ctx, s.admin, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind)
 }
 
-func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error {
+func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
 	// Token columns are SET to the absolute SUM over run_messages (the
 	// streaming sink wrote every session's rows before this terminal
 	// write), NOT accumulated like total_cost_usd — the SUM is already the
 	// full total, so re-running Complete on a resume re-sets the same
 	// correct value rather than doubling. The subqueries reuse the org/run
-	// binds ($10/$11); org_id scopes run_messages for defense-in-depth
+	// binds ($11/$12); org_id scopes run_messages for defense-in-depth
 	// (and so the admin-pool BYPASSRLS path stays tenant-correct). TFAC-473.
 	_, err := q.ExecContext(ctx, `
 		UPDATE runs
@@ -215,12 +215,13 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 		    result_summary = $7,
 		    outcome = NULLIF($8, ''),
 		    outcome_reason = NULLIF($9, ''),
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE org_id = $10 AND run_id = $11),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE org_id = $10 AND run_id = $11),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE org_id = $10 AND run_id = $11),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE org_id = $10 AND run_id = $11)
-		WHERE org_id = $10 AND id = $11
-	`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, orgID, runID)
+		    failure_kind = NULLIF($10, ''),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE org_id = $11 AND run_id = $12),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE org_id = $11 AND run_id = $12),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE org_id = $11 AND run_id = $12),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE org_id = $11 AND run_id = $12)
+		WHERE org_id = $11 AND id = $12
+	`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind, orgID, runID)
 	return err
 }
 
@@ -386,15 +387,15 @@ func (s *agentRunStore) HasOtherActiveRunForTaskSystem(ctx context.Context, orgI
 	return hasOtherActiveRunForTask(ctx, s.admin, orgID, taskID, excludeRunID)
 }
 
-func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID string) (bool, error) {
-	return markFailedIfActive(ctx, s.q, orgID, runID)
+func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, failureKind string) (bool, error) {
+	return markFailedIfActive(ctx, s.q, orgID, runID, failureKind)
 }
 
-func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, runID string) (bool, error) {
-	return markFailedIfActive(ctx, s.admin, orgID, runID)
+func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error) {
+	return markFailedIfActive(ctx, s.admin, orgID, runID, failureKind)
 }
 
-func markFailedIfActive(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKind string) (bool, error) {
 	// 'open' is deliberately failable here (unlike 'pending_approval') — see
 	// AgentRunStore.MarkFailedIfActive: a warm 'open' run has no durable
 	// snapshot yet, so an infra error reaching failRun must terminate it.
@@ -402,19 +403,20 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, runID string) (bo
 	// Refresh the denormalized token columns from the run_messages SUM, same as
 	// completeRun — an infra-failed run still streamed (and paid for) messages,
 	// so the cache must reflect them rather than strand at 0. The subqueries
-	// reuse the org/run binds ($2/$3); org_id scopes run_messages for
+	// reuse the org/run binds ($3/$4); org_id scopes run_messages for
 	// defense-in-depth (and so the admin-pool BYPASSRLS path stays
 	// tenant-correct). TFAC-473.
 	res, err := q.ExecContext(ctx, `
 		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, $1),
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE org_id = $2 AND run_id = $3),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE org_id = $2 AND run_id = $3),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE org_id = $2 AND run_id = $3),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE org_id = $2 AND run_id = $3)
-		WHERE org_id = $2 AND id = $3
+		    failure_kind = NULLIF($2, ''),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE org_id = $3 AND run_id = $4),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE org_id = $3 AND run_id = $4),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE org_id = $3 AND run_id = $4),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE org_id = $3 AND run_id = $4)
+		WHERE org_id = $3 AND id = $4
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
 		                     'pending_approval')
-	`, time.Now().UTC(), orgID, runID)
+	`, time.Now().UTC(), failureKind, orgID, runID)
 	if err != nil {
 		return false, err
 	}
@@ -518,6 +520,7 @@ const pgRunColumns = `
 	COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
 	COALESCE(r.result_summary, ''),
 	COALESCE(r.outcome, ''), COALESCE(r.outcome_reason, ''),
+	COALESCE(r.failure_kind, ''),
 	COALESCE(r.session_id, ''),
 	COALESCE(r.actor_agent_id::text, ''),
 	COALESCE(r.trigger_type, ''),
@@ -1048,16 +1051,18 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var blueprintRunID sql.NullString
+	var failureKind string
 
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
+		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
 	); err != nil {
 		return err
 	}
+	r.FailureKind = domain.RunFailureKind(failureKind)
 	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
 	return nil
 }
@@ -1067,16 +1072,18 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var blueprintRunID sql.NullString
+	var failureKind string
 
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
+		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
 	); err != nil {
 		return err
 	}
+	r.FailureKind = domain.RunFailureKind(failureKind)
 	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
 	return nil
 }

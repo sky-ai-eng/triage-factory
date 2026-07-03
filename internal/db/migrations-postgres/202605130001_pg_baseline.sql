@@ -1427,6 +1427,13 @@ CREATE TABLE public.runs (
     result_summary text,
     outcome text,
     outcome_reason text,
+    -- failure_kind is the machine-readable discriminator for WHY a run
+    -- reached status='failed' (domain.RunFailureKind: memory_limit / crash /
+    -- no_result / agent_error), written by markFailedIfActive / completeRun
+    -- alongside the status flip. App-validated (no CHECK, same as
+    -- repo_profiles.clone_error_kind); NULL === no specific classification
+    -- (non-failed runs, legacy failed rows). See the SQLite twin.
+    failure_kind text,
     stop_reason text,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,

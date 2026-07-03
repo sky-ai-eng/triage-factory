@@ -314,7 +314,7 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 		// persistent bare, which needs no seeding.
 		resumeCwd, werr := s.ensureWorkspace(ctx, orgID, run, owner, repo, "")
 		if werr != nil {
-			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "ensure workspace before resume failed: "+werr.Error())
+			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "ensure workspace before resume failed: "+werr.Error(), domain.RunFailureUnclassified)
 			return
 		}
 		cwd = resumeCwd
@@ -344,14 +344,14 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 			return
 		}
 		if err != nil {
-			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "resume failed: "+err.Error())
+			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "resume failed: "+err.Error(), classifyFailureKind(err))
 			return
 		}
 		// ResumeWithMessage always returns a non-nil outcome (it returns the same
 		// &ResumeOutcome on every path); Completion is the field that's nil when
 		// the resume produced no terminal result.
 		if outcome.Completion == nil {
-			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "resume produced no completion")
+			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "resume produced no completion", domain.RunFailureNoResult)
 			return
 		}
 

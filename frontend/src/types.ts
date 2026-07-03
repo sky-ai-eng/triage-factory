@@ -96,6 +96,14 @@ export interface AgentRun {
   Outcome?: string
   // OutcomeReason is the "why I stopped" populated only on an abort outcome.
   OutcomeReason?: string
+  // FailureKind is the machine-readable failure discriminator for a
+  // status='failed' run ('memory_limit' | 'crash' | 'no_result' |
+  // 'agent_error'), classified backend-side via errors.Is — never derived
+  // from message text. Empty/absent for non-failed runs, legacy failed rows,
+  // and failures nothing classified; only 'memory_limit' currently gets
+  // distinct rendering (the "Killed: memory limit" badge + the
+  // TF_RUN_MEMORY_LIMIT_MB pointer).
+  FailureKind?: string
   SessionID?: string
   WorktreePath?: string
   // Derived approval signal (TFAC-382/TFAC-492). Runs no longer park in a
@@ -863,7 +871,11 @@ export interface FactorySnapshot {
 }
 
 export type WSEvent =
-  | { type: 'agent_run_update'; run_id: string; data: { status: string } }
+  // failure_kind rides along only when status === 'failed' AND the backend
+  // classified the cause (domain.RunFailureKind: 'memory_limit' | 'crash' |
+  // 'no_result' | 'agent_error'). Absent === generic failure — render as
+  // before, so old events and unclassified failures degrade cleanly.
+  | { type: 'agent_run_update'; run_id: string; data: { status: string; failure_kind?: string } }
   // Artifact reconciliation (TFAC-464): an artifact a run produced changed
   // state on GitHub (PR merged/closed, branch deleted, review submitted). The
   // run's own status is unchanged — consumers refetch the run to pick up its

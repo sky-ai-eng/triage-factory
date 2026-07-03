@@ -983,6 +983,28 @@ func (s *Spawner) broadcastRunUpdate(orgID, runID, status string) {
 	})
 }
 
+// broadcastRunFailed is broadcastRunUpdate's failure arm: the same
+// agent_run_update event with the machine-readable failure kind
+// alongside the status flip, so the frontend can render kind-specific
+// failure copy without a refetch. The key is omitted (not sent empty)
+// for an unclassified failure — consumers treat absence as "generic
+// failed", which keeps the payload backward compatible.
+func (s *Spawner) broadcastRunFailed(orgID, runID string, kind domain.RunFailureKind) {
+	if s.wsHub == nil {
+		return
+	}
+	data := map[string]string{"status": "failed"}
+	if kind != domain.RunFailureUnclassified {
+		data["failure_kind"] = string(kind)
+	}
+	s.wsHub.Broadcast(websocket.Event{
+		Type:  "agent_run_update",
+		OrgID: orgID,
+		RunID: runID,
+		Data:  data,
+	})
+}
+
 func (s *Spawner) broadcastMessage(orgID, runID string, msg *domain.AgentMessage) {
 	if s.wsHub == nil {
 		return

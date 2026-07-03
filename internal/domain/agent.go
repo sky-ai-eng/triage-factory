@@ -36,6 +36,44 @@ func (o RunOutcome) Valid() bool {
 	return false
 }
 
+// RunFailureKind is the machine-readable discriminator for WHY a run
+// reached status='failed' — the same pattern as
+// repo_profiles.clone_error_kind. It exists so the UI can render
+// specific failures specifically (a memory-limit kill points at the
+// knob to turn) without anything in the chain matching on message
+// text: the backend classifies with errors.Is, the enum rides the
+// wire, and free text stays where it always was (run_messages /
+// result_summary).
+//
+// Persisted to runs.failure_kind (NULL === RunFailureUnclassified).
+// Closed set — extend it here when a new failure genuinely needs
+// distinct rendering; an unrecognized value renders as a generic
+// failure, so additions are backward compatible.
+type RunFailureKind string
+
+const (
+	// RunFailureUnclassified is the zero value: a failure with no
+	// specific classification (infra/setup errors, legacy rows).
+	// Stored as NULL; renders as today's generic failed state.
+	RunFailureUnclassified RunFailureKind = ""
+	// RunFailureMemoryLimit — the sandbox's per-run memory ceiling
+	// killed the agent process (agentproc.ErrRunMemoryLimit in the
+	// error chain). The UI pairs this with TF_RUN_MEMORY_LIMIT_MB
+	// guidance.
+	RunFailureMemoryLimit RunFailureKind = "memory_limit"
+	// RunFailureCrash — the agent runtime process errored out
+	// (nonzero exit, stream failure) for any reason other than the
+	// memory ceiling.
+	RunFailureCrash RunFailureKind = "crash"
+	// RunFailureNoResult — the agent ended without a usable result:
+	// a clean exit that never produced a result event, or an
+	// envelope attempt that exhausted validation.
+	RunFailureNoResult RunFailureKind = "no_result"
+	// RunFailureAgentError — the agent itself reported an error
+	// result (IsError terminal).
+	RunFailureAgentError RunFailureKind = "agent_error"
+)
+
 // AgentRun represents a delegated agent execution.
 type AgentRun struct {
 	ID           string
@@ -78,6 +116,11 @@ type AgentRun struct {
 	// needs to do" populated only on an abort outcome. Distinct from
 	// ResultSummary (the always-present "what I did"). Empty === NULL.
 	OutcomeReason string
+	// FailureKind is the machine-readable failure discriminator
+	// (RunFailureKind vocabulary) for a status='failed' run — see the
+	// type's doc. Empty string === SQL NULL: non-failed runs, legacy
+	// failed rows, and failures nothing classified.
+	FailureKind   RunFailureKind
 	SessionID     string // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
 	MemoryMissing bool   // true if the pre-complete memory-file gate was exhausted without the agent writing a memory file
 	TriggerType   string // "manual" | "event" (matches prompt_triggers.trigger_type vocabulary)

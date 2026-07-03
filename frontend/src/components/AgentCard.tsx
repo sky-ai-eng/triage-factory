@@ -192,9 +192,15 @@ export default function AgentCard({
 
         {/* Activity — a terminal run shows its outcome; a live run shows a
             flush, borderless feed of one-liners (no window-into-the-agent; the
-            expanded view is for that). */}
-        {isTerminal && run.ResultSummary ? (
-          <ResultBlock status={run.Status} summary={run.ResultSummary} />
+            expanded view is for that). A memory-limit kill has no
+            ResultSummary (infra failures write run_messages, not a summary)
+            but still gets the ResultBlock — its kind carries the copy. */}
+        {isTerminal && (run.ResultSummary || run.FailureKind === 'memory_limit') ? (
+          <ResultBlock
+            status={run.Status}
+            summary={run.ResultSummary}
+            failureKind={run.FailureKind}
+          />
         ) : (
           <LiveFeed messages={messages} isActive={isActive} />
         )}
@@ -419,8 +425,20 @@ function LiveFeed({ messages, isActive }: { messages: AgentMessage[]; isActive: 
 }
 
 // ResultBlock is the settled-run outcome: a toned uppercase verdict + the
-// agent's summary, flush in the card (no box).
-function ResultBlock({ status, summary }: { status: string; summary: string }) {
+// agent's summary, flush in the card (no box). A classified memory-limit
+// kill swaps the generic Failed verdict for a specific one and, when the run
+// has no summary (infra failures don't write one), explanatory copy naming
+// the knob to turn.
+function ResultBlock({
+  status,
+  summary,
+  failureKind,
+}: {
+  status: string
+  summary: string
+  failureKind?: string
+}) {
+  const memoryKilled = status === 'failed' && failureKind === 'memory_limit'
   const tone =
     status === 'failed' || status === 'cancelled'
       ? 'problem'
@@ -431,16 +449,29 @@ function ResultBlock({ status, summary }: { status: string; summary: string }) {
     status === 'cancelled'
       ? 'Cancelled'
       : status === 'failed'
-        ? 'Failed'
+        ? memoryKilled
+          ? 'Killed: memory limit'
+          : 'Failed'
         : status === 'task_unsolvable'
           ? 'Unsolvable'
           : 'Done'
+  const body =
+    memoryKilled && !summary
+      ? 'The agent process exceeded its per-run memory limit and was stopped. Raise TF_RUN_MEMORY_LIMIT_MB if this run legitimately needs more.'
+      : summary
   return (
     <div className="px-4 pb-1 pt-0.5">
-      <div className={`mb-1 text-[10px] font-semibold uppercase tracking-wider ${TONE_TEXT[tone]}`}>
+      <div
+        className={`mb-1 text-[10px] font-semibold uppercase tracking-wider ${TONE_TEXT[tone]}`}
+        title={
+          memoryKilled
+            ? 'The sandbox enforces a per-run memory ceiling (TF_RUN_MEMORY_LIMIT_MB, default 4096 MB). This run exceeded it and was killed to protect the host.'
+            : undefined
+        }
+      >
         {heading}
       </div>
-      <p className="line-clamp-3 text-[12px] leading-relaxed text-text-secondary">{summary}</p>
+      <p className="line-clamp-3 text-[12px] leading-relaxed text-text-secondary">{body}</p>
     </div>
   )
 }

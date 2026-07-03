@@ -112,7 +112,7 @@ func (s *agentRunStore) CreateIfNotFiredSystem(ctx context.Context, orgID string
 	return n > 0, nil
 }
 
-func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error {
+func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -132,13 +132,15 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 		    result_summary = ?,
 		    outcome = ?,
 		    outcome_reason = ?,
+		    failure_kind = ?,
 		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = ?),
 		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = ?),
 		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = ?),
 		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE run_id = ?)
 		WHERE id = ?
 	`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary,
-		nullIfEmpty(outcome), nullIfEmpty(outcomeReason), runID, runID, runID, runID, runID)
+		nullIfEmpty(outcome), nullIfEmpty(outcomeReason), nullIfEmpty(failureKind),
+		runID, runID, runID, runID, runID)
 	return err
 }
 
@@ -232,7 +234,7 @@ func (s *agentRunStore) SetExecutorSystem(ctx context.Context, orgID, runID, exe
 	return err
 }
 
-func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID string) (bool, error) {
+func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, failureKind string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
@@ -245,6 +247,7 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID str
 	// the cache must reflect them rather than strand at 0 (TFAC-473).
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, ?),
+		    failure_kind = ?,
 		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = ?),
 		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = ?),
 		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = ?),
@@ -252,7 +255,7 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID str
 		WHERE id = ?
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
 		                     'pending_approval')
-	`, time.Now().UTC(), runID, runID, runID, runID, runID)
+	`, time.Now().UTC(), nullIfEmpty(failureKind), runID, runID, runID, runID, runID)
 	if err != nil {
 		return false, err
 	}
@@ -353,7 +356,7 @@ func (s *agentRunStore) MarkDiscarded(ctx context.Context, orgID, runID, stopRea
 const sqliteRunColumns = `
 	r.id, r.task_id, r.status, r.model, r.started_at, r.completed_at,
 	r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
-	r.result_summary, r.outcome, r.outcome_reason, r.session_id, r.actor_agent_id,
+	r.result_summary, r.outcome, r.outcome_reason, r.failure_kind, r.session_id, r.actor_agent_id,
 	COALESCE(r.trigger_type, ''),
 	r.creator_user_id,
 	r.team_id,
@@ -588,8 +591,8 @@ func (s *agentRunStore) LookupOrgForRunSystem(ctx context.Context, runID string)
 	return orgID, err
 }
 
-func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error {
-	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason)
+func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind)
 }
 
 func (s *agentRunStore) AddPartialTotalsSystem(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error {
@@ -653,8 +656,8 @@ func (s *agentRunStore) HasOtherActiveRunForTaskSystem(ctx context.Context, orgI
 	return s.HasOtherActiveRunForTask(ctx, orgID, taskID, excludeRunID)
 }
 
-func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, runID string) (bool, error) {
-	return s.MarkFailedIfActive(ctx, orgID, runID)
+func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error) {
+	return s.MarkFailedIfActive(ctx, orgID, runID, failureKind)
 }
 
 func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
@@ -985,19 +988,19 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	var completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
-	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
+	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
+		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
 	); err != nil {
 		return err
 	}
 	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, blueprintStep,
-		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
+		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
 	return nil
 }
 
@@ -1005,31 +1008,32 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	var completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
-	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
+	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
+		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
 	); err != nil {
 		return err
 	}
 	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, blueprintStep,
-		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
+		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
 	return nil
 }
 
 func finalizeAgentRun(r *domain.AgentRun, completedAt sql.NullTime, costUSD sql.NullFloat64,
 	durationMs, numTurns, blueprintStep sql.NullInt64,
-	model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID sql.NullString) {
+	model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID sql.NullString) {
 	r.Model = model.String
 	r.StopReason = stopReason.String
 	r.WorktreePath = worktreePath.String
 	r.ResultSummary = resultSummary.String
 	r.Outcome = outcome.String
 	r.OutcomeReason = outcomeReason.String
+	r.FailureKind = domain.RunFailureKind(failureKind.String)
 	r.SessionID = sessionID.String
 	r.ActorAgentID = actorAgentID.String
 	r.CreatorUserID = creatorUserID.String

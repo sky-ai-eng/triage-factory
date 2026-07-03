@@ -255,7 +255,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	selfBin, err := os.Executable()
 	if err != nil {
-		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "failed to resolve own binary path: "+err.Error())
+		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "failed to resolve own binary path: "+err.Error(), domain.RunFailureUnclassified)
 		return
 	}
 
@@ -459,11 +459,11 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
 			return
 		}
-		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, fmt.Sprintf("%v\nstderr: %s", out.err, out.stderr))
+		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, fmt.Sprintf("%v\nstderr: %s", out.err, out.stderr), classifyFailureKind(out.err))
 		return
 	}
 
-	s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "agent runtime exited cleanly without producing a result event")
+	s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "agent runtime exited cleanly without producing a result event", domain.RunFailureNoResult)
 }
 
 // processCompletion is the single disposition authority for a result, whatever
@@ -556,10 +556,12 @@ func (s *Spawner) processCompletion(
 	resultSummary := ""
 	status := "completed"
 	var outcome, outcomeReason string
+	failureKind := domain.RunFailureUnclassified
 	switch {
 	case completion.IsError:
 		// Process crash / runtime error — an always-knowable terminal.
 		status = "failed"
+		failureKind = domain.RunFailureAgentError
 	case class == turnValid:
 		resultSummary = parsed.Summary
 		outcome = parsed.Outcome
@@ -571,8 +573,10 @@ func (s *Spawner) processCompletion(
 		// this in place; a backend that can't (one-shot) or that exhausted the
 		// bound lands here, where it's a knowable error → failed, recorded with
 		// the totals folded onto the result. NOT a NULL-outcome completion, which
-		// the orchestrator would read as a clean finish on a final step.
+		// the orchestrator would read as a clean finish on a final step. Same
+		// no-usable-result kind as the never-produced-a-result-event failure.
 		status = "failed"
+		failureKind = domain.RunFailureNoResult
 		resultSummary = "agent did not return a valid completion envelope"
 	}
 
@@ -593,11 +597,11 @@ func (s *Spawner) processCompletion(
 
 	if triggerType == "manual" {
 		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.AgentRuns.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason)
+			return ts.AgentRuns.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind))
 		}); err != nil {
 			delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
 		}
-	} else if err := s.agentRuns.CompleteSystem(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason); err != nil {
+	} else if err := s.agentRuns.CompleteSystem(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind)); err != nil {
 		delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
 	}
 
@@ -624,7 +628,11 @@ func (s *Spawner) processCompletion(
 	// terminal runs.outcome and routes through terminateBlueprint, which owns the
 	// terminal column. A step completion must never close the task here — the
 	// next step may be about to run.
-	s.broadcastRunUpdate(orgID, runID, status)
+	if status == "failed" {
+		s.broadcastRunFailed(orgID, runID, failureKind)
+	} else {
+		s.broadcastRunUpdate(orgID, runID, status)
+	}
 	// Recompute the aggregate board column. A completed step that left an
 	// unresolved artifact (draft PR / ready review) lands the task in_review (the
 	// derived approval column); otherwise it stays in_progress until the

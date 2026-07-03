@@ -535,7 +535,14 @@ export default function Board() {
             for (const [taskId, run] of Object.entries(updated)) {
               if (run.ID === event.run_id) {
                 matched = true
-                updated[taskId] = { ...run, Status: event.data.status }
+                // failure_kind rides the failed-status event so the card's
+                // kind-specific copy lands with the flip, not only after the
+                // full-run refetch below settles.
+                updated[taskId] = {
+                  ...run,
+                  Status: event.data.status,
+                  ...(event.data.failure_kind ? { FailureKind: event.data.failure_kind } : {}),
+                }
                 break
               }
             }

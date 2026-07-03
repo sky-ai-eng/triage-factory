@@ -6,9 +6,11 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -144,10 +146,10 @@ func (s *Spawner) handleCancelled(orgID, runID string, startTime time.Time, wtPa
 	var completeErr error
 	if triggerType == "manual" {
 		completeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.AgentRuns.Complete(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "")
+			return ts.AgentRuns.Complete(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "", "")
 		})
 	} else {
-		completeErr = s.agentRuns.CompleteSystem(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "")
+		completeErr = s.agentRuns.CompleteSystem(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "", "")
 	}
 	if completeErr != nil {
 		delegateLog.Warn("failed to record cancellation", "run_id", runID, "error", completeErr)
@@ -159,8 +161,19 @@ func (s *Spawner) handleCancelled(orgID, runID string, startTime time.Time, wtPa
 	}
 }
 
-func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errMsg string) {
-	delegateLog.Error("run failed", "run_id", runID, "error", errMsg)
+// classifyFailureKind maps a runtime error from the agent process to
+// its machine-readable failure kind, via errors.Is on the chain —
+// never message text. Anything that isn't the recognized memory-limit
+// kill is a generic runtime crash.
+func classifyFailureKind(err error) domain.RunFailureKind {
+	if errors.Is(err, agentproc.ErrRunMemoryLimit) {
+		return domain.RunFailureMemoryLimit
+	}
+	return domain.RunFailureCrash
+}
+
+func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errMsg string, kind domain.RunFailureKind) {
+	delegateLog.Error("run failed", "run_id", runID, "error", errMsg, "failure_kind", string(kind))
 
 	bgCtx := context.Background()
 
@@ -170,11 +183,11 @@ func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errM
 	var markErr error
 	if triggerType == "manual" {
 		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			_, mErr := ts.AgentRuns.MarkFailedIfActive(bgCtx, orgID, runID)
+			_, mErr := ts.AgentRuns.MarkFailedIfActive(bgCtx, orgID, runID, string(kind))
 			return mErr
 		})
 	} else {
-		_, markErr = s.agentRuns.MarkFailedIfActiveSystem(bgCtx, orgID, runID)
+		_, markErr = s.agentRuns.MarkFailedIfActiveSystem(bgCtx, orgID, runID, string(kind))
 	}
 	if markErr != nil {
 		delegateLog.Warn("failed to mark run as failed", "run_id", runID, "error", markErr)
@@ -201,7 +214,7 @@ func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errM
 	}
 
 	s.updateBreakerCounter(taskID, triggerType, "failed")
-	s.broadcastRunUpdate(orgID, runID, "failed")
+	s.broadcastRunFailed(orgID, runID, kind)
 
 	// A failed run won't resume, so drop the workspace snapshot it may have
 	// written when it parked (e.g. an idle hibernation that later failed
@@ -213,9 +226,17 @@ func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errM
 	s.discardWorkspaceSnapshot(bgCtx, orgID, runID)
 
 	// Surface as a sticky error toast so the user sees the failure even when
-	// they're not watching the runs page. Truncate the message — full stderr
-	// dumps don't fit in a toast card.
-	toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s failed: %s", shortRunID(runID), truncateToastMsg(errMsg, 160)))
+	// they're not watching the runs page. A memory-limit kill gets copy that
+	// says what happened and which knob to turn instead of echoing the raw
+	// error prefix; everything else truncates the message — full stderr dumps
+	// don't fit in a toast card.
+	if kind == domain.RunFailureMemoryLimit {
+		toast.Error(s.wsHub, orgID, fmt.Sprintf(
+			"Run %s was stopped: it exceeded its memory limit. Raise TF_RUN_MEMORY_LIMIT_MB if it legitimately needs more.",
+			shortRunID(runID)))
+	} else {
+		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s failed: %s", shortRunID(runID), truncateToastMsg(errMsg, 160)))
+	}
 }
 
 // truncateToastMsg caps an error message at maxLen runes with an ellipsis.

@@ -614,7 +614,7 @@ func (s *Spawner) handleStepSetupError(orgID string, br *domain.BlueprintRun, ru
 // vanished, so there is nothing to drive). Best-effort.
 func (s *Spawner) failClaimedRun(orgID string, run *domain.AgentRun, reason string) {
 	dispatchLog.Error("marking run failed", "run", run.ID, "reason", reason)
-	if _, err := s.agentRuns.MarkFailedIfActiveSystem(context.Background(), orgID, run.ID); err != nil {
+	if _, err := s.agentRuns.MarkFailedIfActiveSystem(context.Background(), orgID, run.ID, ""); err != nil {
 		dispatchLog.Warn("mark orphaned run failed", "run", run.ID, "error", err)
 	}
 }
