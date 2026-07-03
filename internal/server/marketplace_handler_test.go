@@ -19,10 +19,9 @@ import (
 )
 
 // marketplaceRig is the multi-mode fixture for the publish/republish/delist
-// handler family (TFAC-536): a real Postgres-backed Server (RLS + the
-// marketplace_enabled toggle live) with one org carrying a founder (write
-// role on the default team), a plain member on a second team, and a viewer
-// on the founder's team.
+// handler family (TFAC-536): a real Postgres-backed Server (RLS enforced)
+// with one org carrying a founder (write role on the default team), a plain
+// member on a second team, and a viewer on the founder's team.
 type marketplaceRig struct {
 	h      *pgtest.Harness
 	mh     *marketplaceHandler
@@ -50,9 +49,6 @@ func newMarketplaceRig(t *testing.T) *marketplaceRig {
 	teamB := pgtest.SeedTeam(t, h, orgID, "teamB")
 	member := pgtest.SeedUser(t, h, "member")
 	pgtest.AddOrgMember(t, h, member, orgID, teamB, "member", "member")
-
-	pgtest.MustExec(t, h.AdminDB,
-		`INSERT INTO org_settings (org_id, marketplace_enabled) VALUES ($1, true)`, orgID)
 
 	return &marketplaceRig{
 		h:      h,
@@ -118,6 +114,17 @@ func (r *marketplaceRig) seedBlueprintStep(t *testing.T, teamID, blueprintID str
 	`, r.orgID, teamID, blueprintID, stepIndex, promptID, brief)
 }
 
+// seedInstall inserts a marketplace_installs audit row directly (TFAC-538's
+// install/copy endpoint hasn't landed yet — this fixture only needs the
+// install count List.Sort=installs reads, not the real copy-to-team flow).
+func (r *marketplaceRig) seedInstall(t *testing.T, listingID, teamID, userID string) {
+	t.Helper()
+	pgtest.MustExec(t, r.h.AdminDB, `
+		INSERT INTO marketplace_installs (listing_id, org_id, version, team_id, user_id, created_at)
+		VALUES ($1, $2, 1, $3, $4, now())
+	`, listingID, r.orgID, teamID, userID)
+}
+
 // getListingDetail reads a listing back through the store as callerID — used
 // by the happy-path tests to assert on the built snapshot without duplicating
 // the store's own scan logic.
@@ -145,7 +152,7 @@ func doMarketplaceJSON(fn func(http.ResponseWriter, *http.Request), req *http.Re
 }
 
 // TestMarketplace_LocalIs404: every endpoint in the family 404s in local
-// mode, regardless of caller identity or org toggle state.
+// mode, regardless of caller identity.
 func TestMarketplace_LocalIs404(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "local-gate", "mission", "", "")
@@ -163,6 +170,10 @@ func TestMarketplace_LocalIs404(t *testing.T) {
 		{"delist", r.req(http.MethodPost, "/api/marketplace/listings/x/delist", r.admin, nil), r.mh.handleMarketplaceListingDelist},
 		{"relist", r.req(http.MethodPost, "/api/marketplace/listings/x/relist", r.admin, nil), r.mh.handleMarketplaceListingRelist},
 		{"by-source", r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil), r.mh.handleMarketplaceListingBySource},
+		{"list", r.req(http.MethodGet, "/api/marketplace/listings", r.admin, nil), r.mh.handleMarketplaceList},
+		{"get", r.req(http.MethodGet, "/api/marketplace/listings/x", r.admin, nil), r.mh.handleMarketplaceGet},
+		{"vote", r.req(http.MethodPut, "/api/marketplace/listings/x/vote", r.admin, nil), r.mh.handleMarketplaceVote},
+		{"unvote", r.req(http.MethodDelete, "/api/marketplace/listings/x/vote", r.admin, nil), r.mh.handleMarketplaceUnvote},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.req.SetPathValue("id", "x")
@@ -175,25 +186,31 @@ func TestMarketplace_LocalIs404(t *testing.T) {
 	}
 }
 
-// TestMarketplace_ToggleOffIs404: multi-mode but org_settings.marketplace_enabled
-// is off (the default, ship-dark) — the whole surface 404s.
-func TestMarketplace_ToggleOffIs404(t *testing.T) {
+// TestMarketplace_NoToggleGate: the within-org marketplace has no admin
+// toggle — org_settings.marketplace_enabled defaults false (TFAC-535's
+// ship-dark column, reserved for the future cross-org gate) and every
+// endpoint in the family still works normally in multi mode regardless.
+func TestMarketplace_NoToggleGate(t *testing.T) {
 	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "toggle-gate", "mission", "", "")
-	pgtest.MustExec(t, r.h.AdminDB, `UPDATE org_settings SET marketplace_enabled = false WHERE org_id = $1`, r.orgID)
+	var enabled bool
+	if err := r.h.AdminDB.QueryRow(`SELECT marketplace_enabled FROM org_settings WHERE org_id = $1`, r.orgID).Scan(&enabled); err != nil {
+		t.Fatalf("read marketplace_enabled: %v", err)
+	}
+	if enabled {
+		t.Fatalf("marketplace_enabled = true by default, want false (ship-dark default, unrelated to this surface)")
+	}
 
+	promptID := r.seedPrompt(t, r.teamID, "no-gate", "mission", "", "")
 	rec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
 		r.req(http.MethodPost, "/api/marketplace/listings", r.admin,
 			map[string]any{"kind": "prompt", "source_id": promptID, "name": "n"}))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("publish with toggle off: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("publish with marketplace_enabled=false: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 
-	getReq := r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil)
-	getReq.SetPathValue("source_id", promptID)
-	rec = doMarketplaceJSON(r.mh.handleMarketplaceListingBySource, getReq)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("by-source with toggle off: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	listReq := r.req(http.MethodGet, "/api/marketplace/listings", r.admin, nil)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, listReq); rec.Code != http.StatusOK {
+		t.Fatalf("list with marketplace_enabled=false: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -718,4 +735,444 @@ func TestMarketplaceListingBySource_IncludesEventTypes(t *testing.T) {
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("by-source event_types = %v, want %v (client seeds the republish dialog from exactly this)", got, want)
 	}
+}
+
+// publishListing is a small helper wrapping handleMarketplacePublish for the
+// browse-page tests below, which publish several listings and mostly care
+// about the resulting id.
+func (r *marketplaceRig) publishListing(t *testing.T, callerID string, body map[string]any) string {
+	t.Helper()
+	rec := doMarketplaceJSON(r.mh.handleMarketplacePublish, r.req(http.MethodPost, "/api/marketplace/listings", callerID, body))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("publish %v: status = %d, want 201; body=%s", body, rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode publish response: %v", err)
+	}
+	return resp.ID
+}
+
+func (r *marketplaceRig) list(t *testing.T, callerID, query string) []domain.ListingSummary {
+	t.Helper()
+	rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodGet, "/api/marketplace/listings?"+query, callerID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list %q: status = %d, want 200; body=%s", query, rec.Code, rec.Body.String())
+	}
+	var out []domain.ListingSummary
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	return out
+}
+
+func listingIDs(summaries []domain.ListingSummary) []string {
+	ids := make([]string, len(summaries))
+	for i, s := range summaries {
+		ids[i] = s.ID
+	}
+	return ids
+}
+
+// TestMarketplaceList_QueryFilter narrows to name/description substring
+// matches, case-insensitively (ILIKE).
+func TestMarketplaceList_QueryFilter(t *testing.T) {
+	r := newMarketplaceRig(t)
+	p1 := r.seedPrompt(t, r.teamID, "Triage Helper", "m", "", "")
+	p2 := r.seedPrompt(t, r.teamID, "Deploy Bot", "m", "", "")
+	id1 := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": p1, "name": "Triage Helper", "description": "helps triage"})
+	r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": p2, "name": "Deploy Bot", "description": "deploys things"})
+
+	got := r.list(t, r.admin, "query=triage")
+	if ids := listingIDs(got); len(ids) != 1 || ids[0] != id1 {
+		t.Fatalf("query=triage: ids = %v, want [%s]", ids, id1)
+	}
+}
+
+// TestMarketplaceList_IncludesPublisherTeamName: the browse card needs a
+// human-readable publisher label, not just publisher_team_id — resolved via
+// a join into teams (any org member can read any team's name under RLS,
+// unlike the caller-scoped /api/teams list).
+func TestMarketplaceList_IncludesPublisherTeamName(t *testing.T) {
+	r := newMarketplaceRig(t)
+	promptID := r.seedPrompt(t, r.teamID, "named", "m", "", "")
+	id := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "named"})
+
+	got := r.list(t, r.member, "")
+	if len(got) != 1 || got[0].ID != id {
+		t.Fatalf("list = %+v, want the one listing", got)
+	}
+	if got[0].PublisherTeamName != "default" {
+		t.Errorf("publisher_team_name = %q, want %q (the seeded team's name)", got[0].PublisherTeamName, "default")
+	}
+}
+
+// TestMarketplaceList_EventTypeFilter narrows to listings faceted on the
+// given event type — a listing with a different (or no) facet is excluded.
+func TestMarketplaceList_EventTypeFilter(t *testing.T) {
+	r := newMarketplaceRig(t)
+	const otherEventType = "github:pr:ci_check_failed"
+	p1 := r.seedPrompt(t, r.teamID, "Faceted", "m", "", "")
+	p2 := r.seedPrompt(t, r.teamID, "Other Facet", "m", "", "")
+	id1 := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": p1, "name": "Faceted", "event_types": []string{eventTypeFixture}})
+	r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": p2, "name": "Other Facet", "event_types": []string{otherEventType}})
+
+	got := r.list(t, r.admin, "event_type="+eventTypeFixture)
+	if ids := listingIDs(got); len(ids) != 1 || ids[0] != id1 {
+		t.Fatalf("event_type filter: ids = %v, want [%s]", ids, id1)
+	}
+}
+
+// TestMarketplaceList_KindFilter narrows to prompt-only or blueprint-only
+// listings.
+func TestMarketplaceList_KindFilter(t *testing.T) {
+	r := newMarketplaceRig(t)
+	p1 := r.seedPrompt(t, r.teamID, "Standalone", "m", "", "")
+	promptListing := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": p1, "name": "Standalone"})
+	bp := r.seedBlueprint(t, r.teamID, "Chain")
+	step := r.seedPrompt(t, r.teamID, "Chain Step", "m", "", "")
+	r.seedBlueprintStep(t, r.teamID, bp, 0, step, "")
+	blueprintListing := r.publishListing(t, r.admin, map[string]any{"kind": "blueprint", "source_id": bp, "name": "Chain"})
+
+	if ids := listingIDs(r.list(t, r.admin, "kind=prompt")); len(ids) != 1 || ids[0] != promptListing {
+		t.Fatalf("kind=prompt: ids = %v, want [%s]", ids, promptListing)
+	}
+	if ids := listingIDs(r.list(t, r.admin, "kind=blueprint")); len(ids) != 1 || ids[0] != blueprintListing {
+		t.Fatalf("kind=blueprint: ids = %v, want [%s]", ids, blueprintListing)
+	}
+}
+
+// TestMarketplaceList_InvalidKindOrSortIs400 rejects an unrecognized kind or
+// sort value before ever reaching the store.
+func TestMarketplaceList_InvalidKindOrSortIs400(t *testing.T) {
+	r := newMarketplaceRig(t)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodGet, "/api/marketplace/listings?kind=widget", r.admin, nil)); rec.Code != http.StatusBadRequest {
+		t.Errorf("bad kind: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodGet, "/api/marketplace/listings?sort=popularity", r.admin, nil)); rec.Code != http.StatusBadRequest {
+		t.Errorf("bad sort: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMarketplaceList_SortOrders pins each of the three accepted sort orders
+// against listings with distinguishable install counts, vote counts, and
+// publish recency.
+func TestMarketplaceList_SortOrders(t *testing.T) {
+	r := newMarketplaceRig(t)
+	pOld := r.seedPrompt(t, r.teamID, "Old One", "m", "", "")
+	pMid := r.seedPrompt(t, r.teamID, "Mid One", "m", "", "")
+	pNew := r.seedPrompt(t, r.teamID, "New One", "m", "", "")
+	old := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": pOld, "name": "Old One"})
+	mid := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": pMid, "name": "Mid One"})
+	fresh := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": pNew, "name": "New One"})
+
+	// Recency: bump updated_at on each in publish order so fresh > mid > old.
+	pgtest.MustExec(t, r.h.AdminDB, `UPDATE marketplace_listings SET updated_at = now() - interval '2 hours' WHERE id = $1`, old)
+	pgtest.MustExec(t, r.h.AdminDB, `UPDATE marketplace_listings SET updated_at = now() - interval '1 hour' WHERE id = $1`, mid)
+	pgtest.MustExec(t, r.h.AdminDB, `UPDATE marketplace_listings SET updated_at = now() WHERE id = $1`, fresh)
+
+	// Installs: old has the most, fresh has none.
+	r.seedInstall(t, old, r.teamB, r.member)
+	r.seedInstall(t, old, r.teamID, r.admin)
+	r.seedInstall(t, mid, r.teamB, r.member)
+
+	// Votes: mid has the most, old has none.
+	voteReq := func(listingID, userID string) *http.Request {
+		req := r.req(http.MethodPut, "/api/marketplace/listings/"+listingID+"/vote", userID, nil)
+		req.SetPathValue("id", listingID)
+		return req
+	}
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, voteReq(mid, r.admin)); rec.Code != http.StatusNoContent {
+		t.Fatalf("vote mid/admin: status = %d, want 204", rec.Code)
+	}
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, voteReq(mid, r.viewer)); rec.Code != http.StatusNoContent {
+		t.Fatalf("vote mid/viewer: status = %d, want 204", rec.Code)
+	}
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, voteReq(fresh, r.admin)); rec.Code != http.StatusNoContent {
+		t.Fatalf("vote fresh/admin: status = %d, want 204", rec.Code)
+	}
+
+	if ids := listingIDs(r.list(t, r.admin, "sort=installs")); len(ids) != 3 || ids[0] != old || ids[1] != mid || ids[2] != fresh {
+		t.Fatalf("sort=installs: ids = %v, want [%s %s %s] (2, 1, 0 installs)", ids, old, mid, fresh)
+	}
+	if ids := listingIDs(r.list(t, r.admin, "sort=votes")); len(ids) != 3 || ids[0] != mid || ids[1] != fresh || ids[2] != old {
+		t.Fatalf("sort=votes: ids = %v, want [%s %s %s] (2, 1, 0 votes)", ids, mid, fresh, old)
+	}
+	if ids := listingIDs(r.list(t, r.admin, "sort=recent")); len(ids) != 3 || ids[0] != fresh || ids[1] != mid || ids[2] != old {
+		t.Fatalf("sort=recent: ids = %v, want [%s %s %s] (newest updated_at first)", ids, fresh, mid, old)
+	}
+	// Default (sort omitted) matches "installs" — the handler pins this
+	// explicitly rather than falling through to the store's own internal
+	// default (recent), so the HTTP contract doesn't depend on the store.
+	if ids := listingIDs(r.list(t, r.admin, "")); len(ids) != 3 || ids[0] != old || ids[1] != mid || ids[2] != fresh {
+		t.Fatalf("default sort: ids = %v, want [%s %s %s] (installs)", ids, old, mid, fresh)
+	}
+}
+
+// TestMarketplaceList_ExcludesDelisted: a delisted listing drops out of
+// browse for every member — including the publisher team's own member —
+// since browse is "what's currently on offer", distinct from the by-source
+// manage lookup which deliberately keeps resolving it.
+func TestMarketplaceList_ExcludesDelisted(t *testing.T) {
+	r := newMarketplaceRig(t)
+	promptID := r.seedPrompt(t, r.teamID, "soon-gone", "m", "", "")
+	id := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "soon-gone"})
+
+	if got := r.list(t, r.member, ""); len(got) != 1 {
+		t.Fatalf("list before delist = %+v, want 1 listing visible", got)
+	}
+
+	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+id+"/delist", r.admin, nil)
+	delistReq.SetPathValue("id", id)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq); rec.Code != http.StatusNoContent {
+		t.Fatalf("delist: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+
+	if got := r.list(t, r.member, ""); len(got) != 0 {
+		t.Fatalf("cross-team member's list after delist = %+v, want empty", got)
+	}
+	if got := r.list(t, r.admin, ""); len(got) != 0 {
+		t.Fatalf("publisher's own list after delist = %+v, want empty (browse ≠ manage)", got)
+	}
+}
+
+// TestMarketplaceGet_DelistedVisibleToPublisherOnly: the detail endpoint
+// (unlike List) still resolves a delisted listing for the publisher team —
+// via RLS, not a status filter — so the manage/relist flow keeps working;
+// a non-publisher member gets 404, same as any other invisible row.
+func TestMarketplaceGet_DelistedVisibleToPublisherOnly(t *testing.T) {
+	r := newMarketplaceRig(t)
+	promptID := r.seedPrompt(t, r.teamID, "manage-me", "m", "", "")
+	id := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "manage-me"})
+
+	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+id+"/delist", r.admin, nil)
+	delistReq.SetPathValue("id", id)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq); rec.Code != http.StatusNoContent {
+		t.Fatalf("delist: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+
+	getReq := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.admin, nil)
+	getReq.SetPathValue("id", id)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq); rec.Code != http.StatusOK {
+		t.Fatalf("publisher's get(delisted): status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	memberReq := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.member, nil)
+	memberReq.SetPathValue("id", id)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceGet, memberReq); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-team member's get(delisted): status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMarketplaceGet_UnknownIdIs404: a well-formed but nonexistent listing id
+// 404s rather than 500ing.
+func TestMarketplaceGet_UnknownIdIs404(t *testing.T) {
+	r := newMarketplaceRig(t)
+	getReq := r.req(http.MethodGet, "/api/marketplace/listings/00000000-0000-0000-0000-000000000000", r.admin, nil)
+	getReq.SetPathValue("id", "00000000-0000-0000-0000-000000000000")
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq); rec.Code != http.StatusNotFound {
+		t.Fatalf("get unknown id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMarketplaceGet_MalformedIdIs404: id is a uuid column on Postgres — a
+// non-UUID path value must 404 cleanly rather than 500 on the store's
+// SQLSTATE 22P02 cast error.
+func TestMarketplaceGet_MalformedIdIs404(t *testing.T) {
+	r := newMarketplaceRig(t)
+	getReq := r.req(http.MethodGet, "/api/marketplace/listings/not-a-uuid", r.admin, nil)
+	getReq.SetPathValue("id", "not-a-uuid")
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq); rec.Code != http.StatusNotFound {
+		t.Fatalf("get malformed id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMarketplaceGet_IncludesSnapshotAndVersions: the detail response carries
+// the full current snapshot (for the read-only step preview) and the
+// version history, not just the header — republishing must show up as a
+// second version entry alongside the untouched v1.
+func TestMarketplaceGet_IncludesSnapshotAndVersions(t *testing.T) {
+	r := newMarketplaceRig(t)
+	promptID := r.seedPrompt(t, r.teamID, "v1", "v1 body", "sonnet", "Bash")
+	id := r.publishListing(t, r.admin, map[string]any{
+		"kind": "prompt", "source_id": promptID, "name": "Detail Listing", "description": "d1",
+		"event_types": []string{eventTypeFixture},
+	})
+
+	repubReq := r.req(http.MethodPost, "/api/marketplace/listings/"+id+"/versions", r.admin, map[string]any{
+		"name": "Detail Listing v2", "description": "d2", "event_types": []string{eventTypeFixture},
+	})
+	repubReq.SetPathValue("id", id)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingVersionCreate, repubReq); rec.Code != http.StatusOK {
+		t.Fatalf("republish: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	getReq := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.member, nil)
+	getReq.SetPathValue("id", id)
+	rec := doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var detail domain.ListingDetail
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if detail.Name != "Detail Listing v2" {
+		t.Errorf("name = %q, want the republished v2 name", detail.Name)
+	}
+	if len(detail.CurrentSnapshot.Steps) != 1 || detail.CurrentSnapshot.Steps[0].Body != "v1 body" {
+		t.Errorf("current_snapshot = %+v, want the (unchanged) source prompt body", detail.CurrentSnapshot)
+	}
+	if len(detail.Versions) != 2 || detail.Versions[0].Version != 1 || detail.Versions[1].Version != 2 {
+		t.Fatalf("versions = %+v, want v1 and v2", detail.Versions)
+	}
+}
+
+// TestMarketplaceVote_Idempotent: voting twice from the same user leaves
+// vote_count at 1 and viewer_voted true; a third-party's own viewer_voted
+// stays false.
+func TestMarketplaceVote_Idempotent(t *testing.T) {
+	r := newMarketplaceRig(t)
+	promptID := r.seedPrompt(t, r.teamID, "votable", "m", "", "")
+	id := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "votable"})
+
+	voteReq := func() *http.Request {
+		req := r.req(http.MethodPut, "/api/marketplace/listings/"+id+"/vote", r.member, nil)
+		req.SetPathValue("id", id)
+		return req
+	}
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, voteReq()); rec.Code != http.StatusNoContent {
+		t.Fatalf("first vote: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, voteReq()); rec.Code != http.StatusNoContent {
+		t.Fatalf("second (repeat) vote: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+
+	memberGetReq := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.member, nil)
+	memberGetReq.SetPathValue("id", id)
+	memberDetail := decodeListingDetail(t, doMarketplaceJSON(r.mh.handleMarketplaceGet, memberGetReq))
+	if memberDetail.VoteCount != 1 {
+		t.Errorf("vote_count after repeat vote = %d, want 1", memberDetail.VoteCount)
+	}
+	if !memberDetail.ViewerVoted {
+		t.Errorf("member's viewer_voted = false, want true")
+	}
+
+	adminGetReq := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.admin, nil)
+	adminGetReq.SetPathValue("id", id)
+	adminDetail := decodeListingDetail(t, doMarketplaceJSON(r.mh.handleMarketplaceGet, adminGetReq))
+	if adminDetail.ViewerVoted {
+		t.Errorf("admin's viewer_voted = true, want false (admin never voted)")
+	}
+	if adminDetail.VoteCount != 1 {
+		t.Errorf("admin's view of vote_count = %d, want 1 (shared count)", adminDetail.VoteCount)
+	}
+}
+
+// TestMarketplaceUnvote_Idempotent: unvoting when no vote exists is a no-op
+// (still 204), and unvoting an existing vote drops the count and clears
+// viewer_voted.
+func TestMarketplaceUnvote_Idempotent(t *testing.T) {
+	r := newMarketplaceRig(t)
+	promptID := r.seedPrompt(t, r.teamID, "unvotable", "m", "", "")
+	id := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "unvotable"})
+
+	unvoteReq := func() *http.Request {
+		req := r.req(http.MethodDelete, "/api/marketplace/listings/"+id+"/vote", r.member, nil)
+		req.SetPathValue("id", id)
+		return req
+	}
+	// No prior vote — still a no-op 204.
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, unvoteReq()); rec.Code != http.StatusNoContent {
+		t.Fatalf("unvote with no prior vote: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+
+	voteReq := r.req(http.MethodPut, "/api/marketplace/listings/"+id+"/vote", r.member, nil)
+	voteReq.SetPathValue("id", id)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, voteReq); rec.Code != http.StatusNoContent {
+		t.Fatalf("vote: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, unvoteReq()); rec.Code != http.StatusNoContent {
+		t.Fatalf("unvote: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+
+	getReq := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.member, nil)
+	getReq.SetPathValue("id", id)
+	detail := decodeListingDetail(t, doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq))
+	if detail.VoteCount != 0 {
+		t.Errorf("vote_count after unvote = %d, want 0", detail.VoteCount)
+	}
+	if detail.ViewerVoted {
+		t.Errorf("viewer_voted after unvote = true, want false")
+	}
+}
+
+// TestMarketplaceVote_MalformedIdIs404: a non-UUID path value 404s cleanly —
+// same reasoning as TestMarketplaceGet_MalformedIdIs404 — rather than 500ing
+// on the store's cast error.
+func TestMarketplaceVote_MalformedIdIs404(t *testing.T) {
+	r := newMarketplaceRig(t)
+	req := r.req(http.MethodPut, "/api/marketplace/listings/not-a-uuid/vote", r.admin, nil)
+	req.SetPathValue("id", "not-a-uuid")
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, req); rec.Code != http.StatusNotFound {
+		t.Fatalf("vote malformed id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMarketplaceUnvote_MalformedIdIs404 mirrors the vote-side case.
+func TestMarketplaceUnvote_MalformedIdIs404(t *testing.T) {
+	r := newMarketplaceRig(t)
+	req := r.req(http.MethodDelete, "/api/marketplace/listings/not-a-uuid/vote", r.admin, nil)
+	req.SetPathValue("id", "not-a-uuid")
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, req); rec.Code != http.StatusNotFound {
+		t.Fatalf("unvote malformed id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMarketplaceVote_UnknownIdIs404: a well-formed but nonexistent listing
+// id 404s rather than 500ing on marketplace_votes' FK-to-marketplace_listings
+// violation — the pre-check in handleMarketplaceVote must catch this before
+// the INSERT ever runs.
+func TestMarketplaceVote_UnknownIdIs404(t *testing.T) {
+	r := newMarketplaceRig(t)
+	const unknownID = "00000000-0000-0000-0000-000000000000"
+	req := r.req(http.MethodPut, "/api/marketplace/listings/"+unknownID+"/vote", r.admin, nil)
+	req.SetPathValue("id", unknownID)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, req); rec.Code != http.StatusNotFound {
+		t.Fatalf("vote unknown id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	var count int
+	if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_votes WHERE listing_id = $1`, unknownID).Scan(&count); err != nil {
+		t.Fatalf("count votes: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("vote count for unknown listing = %d, want 0 (nothing written)", count)
+	}
+}
+
+// TestMarketplaceUnvote_UnknownIdIsNoOp: unlike Vote, Unvote's DELETE carries
+// no FK — a well-formed but nonexistent listing id is just a zero-row no-op,
+// consistent with "removing a vote that doesn't exist" already being a no-op.
+func TestMarketplaceUnvote_UnknownIdIsNoOp(t *testing.T) {
+	r := newMarketplaceRig(t)
+	const unknownID = "00000000-0000-0000-0000-000000000000"
+	req := r.req(http.MethodDelete, "/api/marketplace/listings/"+unknownID+"/vote", r.admin, nil)
+	req.SetPathValue("id", unknownID)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, req); rec.Code != http.StatusNoContent {
+		t.Fatalf("unvote unknown id: status = %d, want 204 (idempotent no-op); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func decodeListingDetail(t *testing.T, rec *httptest.ResponseRecorder) domain.ListingDetail {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var detail domain.ListingDetail
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return detail
 }

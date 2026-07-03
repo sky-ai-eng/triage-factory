@@ -131,6 +131,13 @@ type ListingSummary struct {
 	VoteCount    int      `json:"vote_count"`
 	InstallCount int      `json:"install_count"`
 	ViewerVoted  bool     `json:"viewer_voted"`
+	// PublisherTeamName is a joined display label for MarketplaceListing's
+	// PublisherTeamID — the browse card and detail view show "who published
+	// this" and the org-wide teams RLS policy (org_id + user_has_org_access,
+	// no per-team membership check) lets any org member resolve any team's
+	// name, unlike the caller-scoped /api/teams list. Empty when
+	// PublisherTeamID is "" (the publishing team was later deleted).
+	PublisherTeamName string `json:"publisher_team_name,omitempty"`
 }
 
 // ListingDetail is the full single-listing view: the summary (header +

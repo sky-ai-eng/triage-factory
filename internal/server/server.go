@@ -1048,14 +1048,18 @@ func (s *Server) routes() {
 	s.api("GET /api/blueprint-runs/{id}", bh.handleBlueprintRunGet)
 	s.apiMutating("POST /api/blueprint-runs/{id}/cancel", bh.handleBlueprintRunCancel)
 
-	// Within-org prompt marketplace (TFAC-536) — multi-mode only, plus the
-	// org's ship-dark marketplace_enabled toggle; every handler opens with
-	// gateMarketplace and 404s on either axis (see marketplace_handler.go).
+	// Within-org prompt marketplace (TFAC-536) — multi-mode only; every
+	// handler opens with gateMarketplace, which 404s in local mode (see
+	// marketplace_handler.go).
 	mh := &marketplaceHandler{tx: s.tx, az: s.az}
+	s.api("GET /api/marketplace/listings", mh.handleMarketplaceList)
 	s.apiMutating("POST /api/marketplace/listings", mh.handleMarketplacePublish)
+	s.api("GET /api/marketplace/listings/{id}", mh.handleMarketplaceGet)
 	s.apiMutating("POST /api/marketplace/listings/{id}/versions", mh.handleMarketplaceListingVersionCreate)
 	s.apiMutating("POST /api/marketplace/listings/{id}/delist", mh.handleMarketplaceListingDelist)
 	s.apiMutating("POST /api/marketplace/listings/{id}/relist", mh.handleMarketplaceListingRelist)
+	s.apiMutating("PUT /api/marketplace/listings/{id}/vote", mh.handleMarketplaceVote)
+	s.apiMutating("DELETE /api/marketplace/listings/{id}/vote", mh.handleMarketplaceUnvote)
 	s.api("GET /api/marketplace/listings/by-source/{source_id}", mh.handleMarketplaceListingBySource)
 
 	// Org template editor (SKY-381) — org-admin-gated, multi-mode only.

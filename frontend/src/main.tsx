@@ -21,6 +21,7 @@ import Settings from './pages/Settings'
 import Prompts from './pages/Prompts'
 import OrgPage from './pages/OrgPage'
 import TeamPage from './pages/TeamPage'
+import Marketplace from './pages/Marketplace'
 import Repos from './pages/Repos'
 import Factory from './pages/Factory'
 import Projects from './pages/Projects'
@@ -259,6 +260,10 @@ function MultiRoutes() {
                 tabs + a shared team-switcher, plus the zero-team safe landing.
                 Multi-mode only. */}
             <Route path="team" element={<TeamPage />} />
+            {/* Within-org prompt marketplace browse page (TFAC-537). Multi-mode
+                only — nothing in LocalRoutes; absence from that table is the
+                mode gate, mirroring org/team above. */}
+            <Route path="marketplace" element={<Marketplace />} />
             <Route path="settings" element={<Settings />} />
           </Route>
           <Route

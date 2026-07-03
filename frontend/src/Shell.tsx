@@ -102,6 +102,17 @@ export default function Shell() {
                 Prompts
               </NavLink>
             )}
+            {/* Marketplace — within-org prompt/blueprint browse (TFAC-537),
+                multi-mode only (no local route exists). No org-level toggle
+                gates this: the within-org marketplace is always on for
+                every multi-mode org (org_settings.marketplace_enabled is
+                reserved for the future cross-org gate, TFAC-92 phase 2 /
+                TFAC-539, and is unrelated to this surface). */}
+            {isMulti && (
+              <NavLink to={orgHref('/marketplace')} className={({ isActive }) => pill(isActive)}>
+                Marketplace
+              </NavLink>
+            )}
             {orgAdmin && (
               <NavLink to={orgHref('/org')} className={({ isActive }) => pill(isActive)}>
                 Org
