@@ -136,6 +136,15 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// Memory guardrail: when host MemAvailable is below the floor,
+		// stop claiming — runs stay queued and the next scan tick (or a
+		// wake) re-checks. Checked per iteration, not per drain, because
+		// each claimed run consumes memory as it spawns. Deliberately
+		// BEFORE the semaphore acquire so a gated host parks with no
+		// slot held.
+		if s.dispatchMemGated() {
+			return
+		}
 		// Acquire a concurrency slot BEFORE claiming, so we never flip a run to
 		// 'running' that then sits idle waiting for a slot. Blocks at capacity
 		// until a finishing run releases its slot; a shutdown breaks the wait

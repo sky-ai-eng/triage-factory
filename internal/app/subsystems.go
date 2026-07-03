@@ -172,6 +172,19 @@ func (a *App) buildExecution() error {
 		a.spawner.SetMaxConcurrentRuns(n)
 		appLog.Info("max concurrent runs configured", "cap", n)
 	}
+	// Memory guardrail companion to the cap above: the cap bounds how many
+	// runs may execute, the floor stops new claims when the host is out of
+	// headroom regardless of the cap. Fails open off-Linux and when the
+	// probe can't read /proc/meminfo.
+	floor, err := delegate.ParseDispatchMemFloorMB(os.Getenv("TF_DISPATCH_MEM_FLOOR_MB"))
+	a.spawner.SetDispatchMemFloor(floor)
+	if err != nil {
+		appLog.Warn("dispatch memory floor", "error", err)
+	} else if floor == 0 {
+		appLog.Info("dispatch memory guardrail disabled (TF_DISPATCH_MEM_FLOOR_MB=0)")
+	} else if floor != delegate.DefaultDispatchMemFloorMB {
+		appLog.Info("dispatch memory floor configured", "floor_mb", floor)
+	}
 	a.spawner.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
 	// TFAC-300: the board→Jira lifecycle mirror resolves the org's system/bot
 	// Jira credential per write through this resolver (same construction the

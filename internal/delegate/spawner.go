@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
@@ -212,6 +214,18 @@ type Spawner struct {
 	// means use DefaultSnapshotRetentionTTL; tests inject a short value via
 	// SetSnapshotRetentionTTL. Read through snapshotRetention().
 	snapshotRetentionTTL time.Duration
+	// memFloorMB is the dispatch memory guardrail: when host MemAvailable
+	// drops below this, drainRunQueue defers claims (runs stay queued)
+	// until memory recovers. Zero disables. Set once at startup via
+	// SetDispatchMemFloor; the probe is injectable for tests.
+	memFloorMB int
+	// memAvailMB probes host available memory (MiB). Defaults to
+	// hostmem.AvailableMB in NewSpawner; tests swap in a fake.
+	memAvailMB func() int
+	// memGated tracks the guardrail's last observed state so the
+	// transition (and only the transition) is logged — a gated host
+	// would otherwise emit a line every scan tick.
+	memGated atomic.Bool
 
 	agentToolsOnce  sync.Once
 	agentToolsCache string
@@ -266,6 +280,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		permPending:      make(map[string]*pendingPermission),
 		executorID:       uuid.New().String(),
 		runSem:           make(chan struct{}, DefaultMaxConcurrentRuns),
+		memAvailMB:       hostmem.AvailableMB,
 	}
 	s.controller = inProcessController{s: s}
 	return s
