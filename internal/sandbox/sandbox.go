@@ -52,6 +52,16 @@ type Config struct {
 	// cmd/exec IPC).
 	ExtraMounts []Mount
 
+	// MemoryLimitMB, when > 0, runs the sandbox inside a cgroup v2
+	// group with memory.max set to this many MiB (swap pinned to 0),
+	// so one pathological run OOM-kills alone instead of degrading
+	// the host. Fail-open: a host where the cgroup setup can't
+	// complete (read-only cgroupfs that won't remount, no memory
+	// controller, non-Linux) runs without a ceiling and logs once.
+	// Zero disables. Check Sandbox.OOMKilled() before Close to
+	// attribute a killed run to the limit.
+	MemoryLimitMB int
+
 	// ConfigureProxies, if non-nil, is invoked after the network is
 	// set up (subnet allocated, netns + veth created, MASQUERADE
 	// applied) but before the OCI bundle is built. The caller

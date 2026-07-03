@@ -48,6 +48,7 @@ type benchConfig struct {
 	turns       int
 	jscJIT      bool
 	debugStream bool
+	memLimitMB  int
 	burst       int
 	csvPath     string
 	memFloorMB  int
@@ -72,6 +73,8 @@ func main() {
 		"tool-use turns the mock endpoint drives per run in the claude profile")
 	flag.BoolVar(&cfg.jscJIT, "jsc-jit", false,
 		"leave the engine's JSC JIT enabled in the claude profile (default off, matching production)")
+	flag.IntVar(&cfg.memLimitMB, "mem-limit-mb", 0,
+		"per-sandbox cgroup memory ceiling in MiB (0 = no limit), for validating TF_RUN_MEMORY_LIMIT_MB behavior")
 	flag.BoolVar(&cfg.debugStream, "debug-stream", false,
 		"echo each workload stdout line and mock-endpoint hit (diagnosing the claude profile)")
 	flag.IntVar(&cfg.rssMB, "rss-mb", 400,

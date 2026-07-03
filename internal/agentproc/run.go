@@ -351,13 +351,15 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	// dir, proxies); deferring it here fires it on every exit, including the
 	// StdoutPipe / Start error returns in the shared tail below.
 	var cmd *exec.Cmd
+	var oomKilled func() bool
 	if shouldSandbox() {
-		sandboxCmd, cleanup, serr := newSandboxCommand(runCtx, opts, wrapperPath)
+		sandboxCmd, cleanup, oom, serr := newSandboxCommand(runCtx, opts, wrapperPath)
 		if serr != nil {
 			return nil, serr
 		}
 		defer cleanup()
 		cmd = sandboxCmd
+		oomKilled = oom
 	} else {
 		nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
 		// Local-mode TF_CLAUDE_BINARY override (non-sandbox path only): point the
@@ -416,10 +418,16 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	}
 
 	// Wait without a captured result is involuntary failure; let the
-	// caller distinguish cancel from crash via ctx.Err().
+	// caller distinguish cancel from crash via ctx.Err(). Checked before
+	// the deferred cleanup tears the cgroup down, so the OOM attribution
+	// reads live state.
 	if waitErr != nil && result == nil {
 		if ctx.Err() != nil {
 			return outcome, ctx.Err()
+		}
+		if oomKilled != nil && oomKilled() {
+			return outcome, fmt.Errorf("agent runtime killed: run exceeded its memory limit (%d MB; tune TF_RUN_MEMORY_LIMIT_MB): %w",
+				runMemoryLimitMB(), waitErr)
 		}
 		return outcome, fmt.Errorf("agent runtime exited with error: %w", waitErr)
 	}
@@ -451,7 +459,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 // URL + a per-run placeholder credential; the real key lives in the proxy
 // process on the host and is injected into the upstream HTTP request right
 // before it leaves the box.
-func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath string) (*exec.Cmd, func(), error) {
+func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath string) (*exec.Cmd, func(), func() bool, error) {
 	// Teardown state, accumulated as each setup step below succeeds. cleanup
 	// runs the undos in LIFO order and is single-shot via once, so the error
 	// paths can invoke it eagerly and the caller can still defer it safely.
@@ -491,7 +499,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID)
 	if err != nil {
 		cleanup()
-		return nil, cleanup, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
+		return nil, cleanup, nil, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
 	}
 
 	// Some callers (scorer, classifier stage1, profiler) are prompt-only —
@@ -504,7 +512,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		scratch, mkErr := os.MkdirTemp("", "agentproc-scratch-")
 		if mkErr != nil {
 			cleanup()
-			return nil, cleanup, fmt.Errorf("sandbox: scratch cwd: %w", mkErr)
+			return nil, cleanup, nil, fmt.Errorf("sandbox: scratch cwd: %w", mkErr)
 		}
 		scratchCwd = scratch
 		workCwd = scratch
@@ -517,11 +525,11 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	// whole point — TFAC-61).
 	if err := ensureRepoMountPoints(workCwd, opts.ReadOnlyRepoMounts); err != nil {
 		cleanup()
-		return nil, cleanup, fmt.Errorf("sandbox: %w", err)
+		return nil, cleanup, nil, fmt.Errorf("sandbox: %w", err)
 	}
 	if err := chownWorktreeForSandbox(workCwd); err != nil {
 		cleanup()
-		return nil, cleanup, fmt.Errorf("sandbox: chown worktree: %w", err)
+		return nil, cleanup, nil, fmt.Errorf("sandbox: chown worktree: %w", err)
 	}
 
 	// Translate any host-path env values (e.g. TRIAGE_FACTORY_RUN_ROOT) to
@@ -596,7 +604,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		mount, closer, ahErr := opts.StartAgentHost()
 		if ahErr != nil {
 			cleanup()
-			return nil, cleanup, fmt.Errorf("sandbox: start agenthost daemon: %w", ahErr)
+			return nil, cleanup, nil, fmt.Errorf("sandbox: start agenthost daemon: %w", ahErr)
 		}
 		extraMounts = append(extraMounts, mount)
 		ahCloser = closer
@@ -647,17 +655,18 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		Env:              sbEnv,
 		ExtraMounts:      extraMounts,
 		ConfigureProxies: configureProxies,
+		MemoryLimitMB:    runMemoryLimitMB(),
 	})
 	if err != nil {
 		// Wrap cleaned up its own partial state, but configureProxies may
 		// have started the proxies before a later Wrap step failed — cleanup
 		// shuts them down (plus the agenthost daemon + scratch dir).
 		cleanup()
-		return nil, cleanup, fmt.Errorf("sandbox: %w", err)
+		return nil, cleanup, nil, fmt.Errorf("sandbox: %w", err)
 	}
 	sb = sboxObj
 
-	return sandboxCmd, cleanup, nil
+	return sandboxCmd, cleanup, func() bool { return sboxObj.OOMKilled() }, nil
 }
 
 // newDirectCommand builds the direct (non-sandbox) `node wrapper.mjs`

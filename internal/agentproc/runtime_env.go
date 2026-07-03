@@ -1,6 +1,11 @@
 package agentproc
 
-import "os"
+import (
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+)
 
 // jscJITEnvKey is the engine-side env var agentRuntimeEnv sets to
 // disable JSC's JIT. Pulled out as a const (rather than inlined at each
@@ -25,3 +30,32 @@ func agentRuntimeEnv() []string {
 	}
 	return []string{jscJITEnvKey + "=0"}
 }
+
+// DefaultRunMemoryLimitMB is the per-run memory ceiling handed to the
+// sandbox when TF_RUN_MEMORY_LIMIT_MB is unset. Deliberately generous —
+// ~16x the fleet-measured per-run budget — because in-sandbox builds
+// legitimately spike (go build, dependency installs); the ceiling is
+// host protection against a pathological run, not budget enforcement.
+const DefaultRunMemoryLimitMB = 4096
+
+// runMemoryLimitMB resolves the per-run sandbox memory ceiling from
+// TF_RUN_MEMORY_LIMIT_MB. Empty → the default; 0 → disabled; invalid →
+// the default with one warning per process (a bad value must not brick
+// spawning). Read per spawn like the other agent runtime knobs.
+func runMemoryLimitMB() int {
+	raw := strings.TrimSpace(os.Getenv("TF_RUN_MEMORY_LIMIT_MB"))
+	if raw == "" {
+		return DefaultRunMemoryLimitMB
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		warnBadRunMemoryLimitOnce.Do(func() {
+			agentprocLog.Warn("invalid TF_RUN_MEMORY_LIMIT_MB; using default",
+				"raw", raw, "default_mb", DefaultRunMemoryLimitMB)
+		})
+		return DefaultRunMemoryLimitMB
+	}
+	return n
+}
+
+var warnBadRunMemoryLimitOnce sync.Once

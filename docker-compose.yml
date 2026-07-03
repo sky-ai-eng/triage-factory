@@ -371,6 +371,14 @@ services:
     security_opt:
       - apparmor=unconfined
       - seccomp=unconfined
+    # Private cgroup namespace so per-run memory ceilings
+    # (TF_RUN_MEMORY_LIMIT_MB) manage this container's own delegated
+    # cgroup subtree. TF remounts its namespace's view of
+    # /sys/fs/cgroup read-write at first use (runc mounts it ro); with
+    # a private namespace that can never reach host cgroups. Without
+    # this the ceiling feature fails open: runs work, just without a
+    # per-run memory limit.
+    cgroup: private
     volumes:
       # Host-global toolchain cache: the runtime-extracted sandbox rootfs
       # (~hundreds of MB). Kept warm across `docker compose down/up` so a

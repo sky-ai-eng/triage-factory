@@ -171,17 +171,19 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 	// byte-identical. cmd.StdinPipe / cmd.StdoutPipe below are wired
 	// identically for both — the reader loop is transport-agnostic.
 	var (
-		cmd     *exec.Cmd
-		cleanup = func() {}
+		cmd       *exec.Cmd
+		cleanup   = func() {}
+		oomKilled func() bool
 	)
 	if shouldSandbox() {
-		sandboxCmd, sandboxCleanup, serr := newSandboxCommand(runCtx, opts, wrapperPath)
+		sandboxCmd, sandboxCleanup, oom, serr := newSandboxCommand(runCtx, opts, wrapperPath)
 		if serr != nil {
 			cancel()
 			return nil, serr
 		}
 		cmd = sandboxCmd
 		cleanup = sandboxCleanup
+		oomKilled = oom
 	} else {
 		nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
 		directCmd, derr := newDirectCommand(runCtx, opts, nodeArgs)
@@ -235,7 +237,7 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		ready:   make(chan struct{}),
 	}
 
-	go l.readLoop(runCtx, cmd, stdout, stderr, sink, perms, opts.OnResult, opts.TraceID)
+	go l.readLoop(runCtx, cmd, stdout, stderr, sink, perms, opts.OnResult, opts.TraceID, oomKilled)
 
 	// Send the initial prompt once the wrapper is ready. Done in its own
 	// goroutine so RunInteractive returns immediately; Send blocks on the
@@ -387,7 +389,7 @@ func (l *LiveRun) writeControl(v map[string]any) error {
 // readLoop is the single goroutine that owns the sink and the
 // subprocess lifecycle: it consumes the stream until EOF/ctx, waits on
 // the process, and records the terminal state.
-func (l *LiveRun) readLoop(runCtx context.Context, cmd *exec.Cmd, stdout io.Reader, stderr *syncBuffer, sink Sink, perms PermissionHandler, onResult func(*Result), traceID string) {
+func (l *LiveRun) readLoop(runCtx context.Context, cmd *exec.Cmd, stdout io.Reader, stderr *syncBuffer, sink Sink, perms PermissionHandler, onResult func(*Result), traceID string, oomKilled func() bool) {
 	defer close(l.done)
 
 	stream := NewStreamState()
@@ -412,6 +414,11 @@ func (l *LiveRun) readLoop(runCtx context.Context, cmd *exec.Cmd, stdout io.Read
 	case waitErr != nil && result == nil:
 		if runCtx.Err() != nil {
 			l.termErr = runCtx.Err()
+		} else if oomKilled != nil && oomKilled() {
+			// Read before the cleanup below removes the cgroup, so the
+			// attribution reads live memory.events state.
+			l.termErr = fmt.Errorf("agent runtime killed: run exceeded its memory limit (%d MB; tune TF_RUN_MEMORY_LIMIT_MB): %w",
+				runMemoryLimitMB(), waitErr)
 		} else {
 			l.termErr = fmt.Errorf("agent runtime exited with error: %w", waitErr)
 		}

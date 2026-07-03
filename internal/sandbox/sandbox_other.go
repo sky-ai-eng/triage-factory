@@ -22,3 +22,8 @@ func wrap(_ context.Context, _ Config) (*exec.Cmd, *Sandbox, error) {
 func (s *Sandbox) Close() error {
 	return nil
 }
+
+// OOMKilled on non-Linux is always false — no sandbox, no cgroup.
+func (s *Sandbox) OOMKilled() bool {
+	return false
+}

@@ -48,6 +48,7 @@ CSV="bench-$STAMP.csv"
 echo "==> running bench (csv: bench-results/$CSV)"
 docker run --rm --init \
     --name tf-sandbox-bench \
+    --cgroupns=private \
     --cap-add SYS_ADMIN --cap-add NET_ADMIN \
     --security-opt apparmor=unconfined --security-opt seccomp=unconfined \
     -v "$ROOTFS_VOL":/opt/triagefactory/sandbox \
