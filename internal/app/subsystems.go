@@ -145,8 +145,17 @@ func (a *App) buildExecution() error {
 	// far more (memory-bound; see the TF_MAX_CONCURRENT_RUNS guidance in
 	// .env.example for the sizing numbers). Resolved before RunDispatcher
 	// starts — resizing later would strand semaphore tokens.
-	if n, err := delegate.ParseMaxConcurrentRuns(os.Getenv("TF_MAX_CONCURRENT_RUNS")); err != nil {
+	rawMaxConcurrentRuns := os.Getenv("TF_MAX_CONCURRENT_RUNS")
+	if n, clamped, err := delegate.ParseMaxConcurrentRuns(rawMaxConcurrentRuns); err != nil {
 		appLog.Warn("max concurrent runs", "error", err)
+	} else if clamped {
+		// Distinct from the "configured" log below: an operator asked for more
+		// than the sandbox subnet allocator can ever honor, not just a value
+		// above the default. Without this, a requested 1000 and an explicitly
+		// set 256 would log identically and the operator sizing for a bigger
+		// host would never see their setting got capped.
+		a.spawner.SetMaxConcurrentRuns(n)
+		appLog.Warn("max concurrent runs requested above sandbox ceiling; clamped", "requested", rawMaxConcurrentRuns, "cap", n)
 	} else if n != delegate.DefaultMaxConcurrentRuns {
 		a.spawner.SetMaxConcurrentRuns(n)
 		appLog.Info("max concurrent runs configured", "cap", n)

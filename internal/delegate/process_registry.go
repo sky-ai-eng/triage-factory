@@ -39,22 +39,25 @@ const MaxConcurrentRunsCeiling = sandbox.MaxSandboxes
 // ParseMaxConcurrentRuns interprets the TF_MAX_CONCURRENT_RUNS env value.
 // Empty → the default. Non-numeric or < 1 → the default plus an error the
 // caller logs (a bad value must not brick boot). Values above the sandbox
-// ceiling clamp to it.
-func ParseMaxConcurrentRuns(raw string) (int, error) {
+// ceiling clamp to it; clamped reports whether that happened, so the caller
+// can log a distinct signal for "you asked for more than the sandbox
+// allocator can honor" instead of it reading identically to an operator who
+// set the ceiling value directly.
+func ParseMaxConcurrentRuns(raw string) (n int, clamped bool, err error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return DefaultMaxConcurrentRuns, nil
+		return DefaultMaxConcurrentRuns, false, nil
 	}
-	n, err := strconv.Atoi(raw)
+	n, err = strconv.Atoi(raw)
 	if err != nil || n < 1 {
-		return DefaultMaxConcurrentRuns, fmt.Errorf(
+		return DefaultMaxConcurrentRuns, false, fmt.Errorf(
 			"invalid TF_MAX_CONCURRENT_RUNS %q (want an integer in [1,%d]); using default %d",
 			raw, MaxConcurrentRunsCeiling, DefaultMaxConcurrentRuns)
 	}
 	if n > MaxConcurrentRunsCeiling {
-		return MaxConcurrentRunsCeiling, nil
+		return MaxConcurrentRunsCeiling, true, nil
 	}
-	return n, nil
+	return n, false, nil
 }
 
 // DefaultIdleHibernateTimeout is how long a live run may go quiet (no

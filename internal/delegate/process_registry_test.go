@@ -121,28 +121,32 @@ func TestCancel_ActiveRun_RoutesThroughController(t *testing.T) {
 
 func TestParseMaxConcurrentRuns(t *testing.T) {
 	tests := []struct {
-		name    string
-		raw     string
-		want    int
-		wantErr bool
+		name        string
+		raw         string
+		want        int
+		wantClamped bool
+		wantErr     bool
 	}{
-		{"empty uses default", "", DefaultMaxConcurrentRuns, false},
-		{"whitespace uses default", "  ", DefaultMaxConcurrentRuns, false},
-		{"plain value", "32", 32, false},
-		{"trims whitespace", " 8 ", 8, false},
-		{"one is legal", "1", 1, false},
-		{"ceiling exactly", "256", 256, false},
-		{"above ceiling clamps", "1000", MaxConcurrentRunsCeiling, false},
-		{"zero is invalid", "0", DefaultMaxConcurrentRuns, true},
-		{"negative is invalid", "-3", DefaultMaxConcurrentRuns, true},
-		{"garbage is invalid", "lots", DefaultMaxConcurrentRuns, true},
-		{"float is invalid", "4.5", DefaultMaxConcurrentRuns, true},
+		{"empty uses default", "", DefaultMaxConcurrentRuns, false, false},
+		{"whitespace uses default", "  ", DefaultMaxConcurrentRuns, false, false},
+		{"plain value", "32", 32, false, false},
+		{"trims whitespace", " 8 ", 8, false, false},
+		{"one is legal", "1", 1, false, false},
+		{"ceiling exactly", "256", 256, false, false},
+		{"above ceiling clamps", "1000", MaxConcurrentRunsCeiling, true, false},
+		{"zero is invalid", "0", DefaultMaxConcurrentRuns, false, true},
+		{"negative is invalid", "-3", DefaultMaxConcurrentRuns, false, true},
+		{"garbage is invalid", "lots", DefaultMaxConcurrentRuns, false, true},
+		{"float is invalid", "4.5", DefaultMaxConcurrentRuns, false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseMaxConcurrentRuns(tt.raw)
+			got, clamped, err := ParseMaxConcurrentRuns(tt.raw)
 			if got != tt.want {
 				t.Errorf("ParseMaxConcurrentRuns(%q) = %d, want %d", tt.raw, got, tt.want)
+			}
+			if clamped != tt.wantClamped {
+				t.Errorf("ParseMaxConcurrentRuns(%q) clamped = %v, want %v", tt.raw, clamped, tt.wantClamped)
 			}
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ParseMaxConcurrentRuns(%q) err = %v, wantErr %v", tt.raw, err, tt.wantErr)
