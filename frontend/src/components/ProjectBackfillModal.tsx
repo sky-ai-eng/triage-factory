@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ExternalLink } from 'lucide-react'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 
 interface BackfillCandidate {
   id: string
@@ -37,6 +38,10 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
   const [failures, setFailures] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
   const mountedRef = useRef(true)
+  // Trap keyboard focus inside the dialog and restore it to the trigger on
+  // close (WCAG 2.1.2).
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useFocusTrap(dialogRef)
 
   useEffect(() => {
     mountedRef.current = true
@@ -181,6 +186,8 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
       onClick={handleBackdropClick}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="w-full max-w-2xl backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl shadow-lg shadow-black/[0.04] overflow-hidden flex flex-col max-h-[85vh]"
         role="dialog"
         aria-modal="true"

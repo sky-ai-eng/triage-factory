@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Crown } from 'lucide-react'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import { messageFrom, type RosterMember } from '../hooks/useMemberRoster'
 
 interface TransferOwnershipModalProps {
@@ -32,6 +33,13 @@ export default function TransferOwnershipModal({
   const [selected, setSelected] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Trap keyboard focus inside the dialog and restore it to the trigger on
+  // close (WCAG 2.1.2). Initial focus lands on Cancel — the non-destructive
+  // default.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  useFocusTrap(dialogRef, { initialFocus: cancelRef })
 
   // Escape closes unless a transfer is in flight — mirrors the other modals'
   // contract so a mid-request dismiss can't strand the user.
@@ -67,6 +75,8 @@ export default function TransferOwnershipModal({
       }}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="flex max-h-[85vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-border-glass bg-surface-raised shadow-lg shadow-black/[0.04] backdrop-blur-xl"
         role="dialog"
         aria-modal="true"
@@ -129,6 +139,7 @@ export default function TransferOwnershipModal({
 
         <div className="flex items-center justify-end gap-3 border-t border-border-subtle px-6 py-4">
           <button
+            ref={cancelRef}
             type="button"
             onClick={onClose}
             disabled={submitting}

@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useId, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { Layers } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt } from '../types'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import TeamPicker from './TeamPicker'
 
 interface Props {
@@ -114,6 +115,12 @@ export default function PromptPicker({
   const rowRefs = useRef(new Map<string, HTMLButtonElement>())
   const listboxId = useId()
   const optionId = (id: string) => `${listboxId}-opt-${id}`
+
+  // Trap keyboard focus inside the dialog while open and restore it to the
+  // trigger on close (WCAG 2.1.2); initial focus lands on the filter input.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const filterRef = useRef<HTMLInputElement>(null)
+  useFocusTrap(dialogRef, { active: open, initialFocus: filterRef })
 
   // Derived: "loading" means open, no items cached yet, AND the last fetch
   // hasn't failed. The fetchFailed flag is what breaks us out of the skeleton
@@ -309,6 +316,8 @@ export default function PromptPicker({
             transition={{ duration: 0.15 }}
           >
             <div
+              ref={dialogRef}
+              tabIndex={-1}
               role="dialog"
               aria-modal="true"
               aria-label={title}
@@ -346,11 +355,11 @@ export default function PromptPicker({
                 <div className="flex w-[244px] shrink-0 flex-col border-r border-border-subtle">
                   <div className="shrink-0 px-3 py-2.5 border-b border-border-subtle">
                     <input
+                      ref={filterRef}
                       type="text"
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
                       placeholder="Filter…"
-                      autoFocus
                       // Combobox over the listbox below: the input keeps focus
                       // while ↑/↓ moves the active option (aria-activedescendant),
                       // so AT announces the highlighted row without focus leaving

@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useId, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { parseDiff } from 'react-diff-view'
 import type { FileData } from 'react-diff-view'
 import DiffFile from './DiffFile'
 import PendingPRSummary from './PendingPRSummary'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 
 // PRArtifact mirrors the JSON shape internal/server/artifacts_handler.go returns
 // for a pull_request artifact. title/body are the LIVE PR values (fetched from
@@ -62,6 +63,13 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   // draft and approve re-strips/re-appends the footer — so we keep the editor
   // visible instead of forcing a close-and-reopen.
   const [submitError, setSubmitError] = useState<string | null>(null)
+
+  // Trap keyboard focus inside the overlay while open and restore it to the
+  // trigger on close (WCAG 2.1.2); initial focus lands on the close button.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const titleId = useId()
+  useFocusTrap(dialogRef, { active: open, initialFocus: closeRef })
 
   // Fetch the PR artifact, then the diff. Reset stale state from any prior PR
   // before the new fetch lands so the user doesn't see leftover values briefly.
@@ -230,6 +238,11 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
 
           {/* Panel */}
           <motion.div
+            ref={dialogRef}
+            tabIndex={-1}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
             className="fixed inset-6 z-50 flex flex-col bg-surface/95 backdrop-blur-2xl border border-border-glass rounded-3xl shadow-2xl shadow-black/[0.08] overflow-hidden"
             initial={{ opacity: 0, scale: 0.97, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -241,7 +254,10 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
             <div className="shrink-0 flex items-center justify-between px-6 py-4 border-b border-border-subtle">
               <div className="flex items-center gap-3">
                 <div className="w-2 h-2 rounded-full bg-snooze animate-pulse" />
-                <h1 className="text-[15px] font-semibold text-text-primary tracking-tight">
+                <h1
+                  id={titleId}
+                  className="text-[15px] font-semibold text-text-primary tracking-tight"
+                >
                   Draft PR
                 </h1>
                 {pr && (
@@ -251,6 +267,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
                 )}
               </div>
               <button
+                ref={closeRef}
                 onClick={onClose}
                 className="text-text-tertiary hover:text-text-secondary transition-colors text-lg leading-none px-2 py-1 rounded-lg hover:bg-black/[0.03]"
               >

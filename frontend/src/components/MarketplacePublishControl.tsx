@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { Store, X } from 'lucide-react'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import type { EventType } from '../types'
 
@@ -178,6 +179,12 @@ function PublishDialog({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
+  // Trap keyboard focus inside the dialog while open and restore it to the
+  // trigger on close (WCAG 2.1.2); initial focus lands on the name field.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const nameRef = useRef<HTMLInputElement>(null)
+  useFocusTrap(dialogRef, { active: open, initialFocus: nameRef })
+
   // Fetch the event-type catalog once per dialog open.
   useEffect(() => {
     if (!open) return
@@ -279,6 +286,8 @@ function PublishDialog({
             transition={{ duration: 0.15 }}
           >
             <div
+              ref={dialogRef}
+              tabIndex={-1}
               role="dialog"
               aria-modal="true"
               aria-label={isRepublish ? 'Publish update' : 'Publish to marketplace'}
@@ -314,6 +323,7 @@ function PublishDialog({
                     Name
                   </label>
                   <input
+                    ref={nameRef}
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}

@@ -4,6 +4,7 @@ import { Plus, Trash2, Upload } from 'lucide-react'
 import { useOrgHref } from '../hooks/useOrgHref'
 import type { Project, ProjectImportError, ProjectImportResult } from '../types'
 import { readError } from '../lib/api'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import ProjectCreateModal from '../components/ProjectCreateModal'
 import ProjectBackfillModal from '../components/ProjectBackfillModal'
@@ -328,6 +329,14 @@ function ProjectImportModal({
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const dragDepth = useRef(0)
 
+  // Trap keyboard focus inside the dialog and restore it to the trigger on
+  // close (WCAG 2.1.2). Initial focus lands on "Choose file" — the sr-only
+  // file input that precedes it in the DOM would otherwise take focus with
+  // no visible indicator.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const chooseFileRef = useRef<HTMLButtonElement>(null)
+  useFocusTrap(dialogRef, { initialFocus: chooseFileRef })
+
   const clearSelectedFile = () => {
     setFile(null)
     if (fileInputRef.current) {
@@ -418,6 +427,8 @@ function ProjectImportModal({
           shadow-xl shadow-black/[0.08] backdrop-blur-xl
           p-6
         "
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby="project-import-title"
@@ -495,6 +506,7 @@ function ProjectImportModal({
             `}
           >
             <button
+              ref={chooseFileRef}
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={submitting}

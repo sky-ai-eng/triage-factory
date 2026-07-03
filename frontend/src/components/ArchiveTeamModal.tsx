@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Archive, AlertTriangle } from 'lucide-react'
 import { archiveTeam, fetchArchivePreview, type ArchivePreview } from '../lib/teamLifecycle'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 
 interface ArchiveTeamModalProps {
   teamId: string
@@ -26,6 +27,13 @@ export default function ArchiveTeamModal({
   const [loadError, setLoadError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Trap keyboard focus inside the dialog and restore it to the trigger on
+  // close (WCAG 2.1.2). Initial focus lands on Cancel — the non-destructive
+  // default for a destructive confirm.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  useFocusTrap(dialogRef, { initialFocus: cancelRef })
 
   useEffect(() => {
     let cancelled = false
@@ -75,6 +83,8 @@ export default function ArchiveTeamModal({
       }}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="flex max-h-[85vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-border-glass bg-surface-raised shadow-lg shadow-black/[0.04] backdrop-blur-xl"
         role="dialog"
         aria-modal="true"
@@ -127,6 +137,7 @@ export default function ArchiveTeamModal({
 
         <div className="flex items-center justify-end gap-3 border-t border-border-subtle px-6 py-4">
           <button
+            ref={cancelRef}
             type="button"
             onClick={onClose}
             disabled={submitting}
