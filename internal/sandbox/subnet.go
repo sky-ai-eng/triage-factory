@@ -21,11 +21,19 @@ import (
 //	10.42.<N>.3+ = reserved for additional host-side bindings (multi-proxy)
 const subnetBase = "10.42"
 
+// MaxSandboxes is the structural ceiling on concurrent sandboxes per
+// process: one /24 out of the 10.42.0.0/16 pool per sandbox, so at most
+// this many can exist on a host at once. Exported so callers that need to
+// clamp a concurrency knob to what the allocator can actually honor
+// (internal/delegate's dispatcher cap) reference this instead of a second
+// hardcoded 256 that could drift from the allocator's real limit.
+const MaxSandboxes = 256
+
 // allocator manages a process-wide free list of subnet indices in
-// [0, 256). Each index N maps to the /24 10.42.<N>.0/24.
+// [0, MaxSandboxes). Each index N maps to the /24 10.42.<N>.0/24.
 type allocator struct {
 	mu   sync.Mutex
-	free [256]bool // true = free; initialized via newAllocator
+	free [MaxSandboxes]bool // true = free; initialized via newAllocator
 }
 
 func newAllocator() *allocator {
@@ -41,7 +49,7 @@ func newAllocator() *allocator {
 func (a *allocator) Allocate() (uint8, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for i := 0; i < 256; i++ {
+	for i := 0; i < MaxSandboxes; i++ {
 		if a.free[i] {
 			a.free[i] = false
 			return uint8(i), nil

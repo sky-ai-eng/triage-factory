@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // DefaultMaxConcurrentRuns is the conservative process-wide cap on how
@@ -30,10 +31,10 @@ import (
 const DefaultMaxConcurrentRuns = 4
 
 // MaxConcurrentRunsCeiling is the largest value the concurrency cap may
-// take. It mirrors the sandbox subnet allocator's structural limit: each
-// run owns a /24 out of one /16, so at most 256 sandboxes can exist on a
-// host and a higher dispatcher cap could never be honored.
-const MaxConcurrentRunsCeiling = 256
+// take. It mirrors sandbox.MaxSandboxes, the sandbox subnet allocator's
+// structural limit — each run owns a /24 out of one /16, so a higher
+// dispatcher cap could never be honored.
+const MaxConcurrentRunsCeiling = sandbox.MaxSandboxes
 
 // ParseMaxConcurrentRuns interprets the TF_MAX_CONCURRENT_RUNS env value.
 // Empty → the default. Non-numeric or < 1 → the default plus an error the

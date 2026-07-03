@@ -142,8 +142,9 @@ func (a *App) buildExecution() error {
 	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "")
 	// Dispatcher concurrency is a deployment decision: the default of 4 is
 	// conservative for a laptop, while a provisioned multi-mode host handles
-	// far more (memory-bound; see docs/sandbox-bench.md). Resolved before
-	// RunDispatcher starts — resizing later would strand semaphore tokens.
+	// far more (memory-bound; see the TF_MAX_CONCURRENT_RUNS guidance in
+	// .env.example for the sizing numbers). Resolved before RunDispatcher
+	// starts — resizing later would strand semaphore tokens.
 	if n, err := delegate.ParseMaxConcurrentRuns(os.Getenv("TF_MAX_CONCURRENT_RUNS")); err != nil {
 		appLog.Warn("max concurrent runs", "error", err)
 	} else if n != delegate.DefaultMaxConcurrentRuns {
