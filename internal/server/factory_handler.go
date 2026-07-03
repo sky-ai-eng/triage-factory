@@ -78,6 +78,7 @@ type factoryRunSummaryJSON struct {
 	TriggerID      string     `json:"TriggerID"`
 	ActorAgentID   string     `json:"actor_agent_id"`
 	ActorAgentName string     `json:"actor_agent_name"`
+	FailureKind    string     `json:"FailureKind"`
 }
 
 func toFactoryRunSummary(r domain.AgentRun) factoryRunSummaryJSON {
@@ -100,6 +101,7 @@ func toFactoryRunSummary(r domain.AgentRun) factoryRunSummaryJSON {
 		TriggerID:      r.TriggerID,
 		ActorAgentID:   r.ActorAgentID,
 		ActorAgentName: r.ActorAgentName,
+		FailureKind:    string(r.FailureKind),
 	}
 }
 

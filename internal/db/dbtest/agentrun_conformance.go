@@ -515,6 +515,40 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("Complete_PersistsFailureKind", func(t *testing.T) {
+		// processCompletion writes failed-status kinds (agent_error,
+		// no_result) via Complete rather than MarkFailedIfActive — this
+		// pins that write path independently so a placeholder/order
+		// regression in either dialect's UPDATE can't silently drop the
+		// column on the more common failure route.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, "", "", "", "", string(domain.RunFailureAgentError)); err != nil {
+			t.Fatalf("Complete with kind: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: run=%v err=%v", got, err)
+		}
+		if got.Status != "failed" {
+			t.Errorf("status = %q, want failed", got.Status)
+		}
+		if got.FailureKind != domain.RunFailureAgentError {
+			t.Errorf("FailureKind = %q, want %q", got.FailureKind, domain.RunFailureAgentError)
+		}
+
+		// Empty kind on a failed Complete → NULL → unclassified zero value.
+		plainID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, plainID, "failed", 0, 0, 0, "", "", "", "", ""); err != nil {
+			t.Fatalf("Complete without kind: %v", err)
+		}
+		if got, _ := store.Get(ctx, orgID, plainID); got == nil || got.FailureKind != domain.RunFailureUnclassified {
+			t.Errorf("FailureKind on unclassified Complete failure = %q, want empty", got.FailureKind)
+		}
+	})
+
 	t.Run("SetSession_PersistsSessionID", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
