@@ -178,7 +178,11 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 		"default_permissions": map[string]string{
 			"issues":        "write",
 			"pull_requests": "write",
-			"contents":      "read",
+			// contents:write — delegated agents push branches, and on a blobless
+			// clone their lazy blob fetches ride the same App token, so read alone
+			// can't mint the push credential a run needs (the gitproxy mints
+			// contents:write; GitHub refuses to escalate past what's granted).
+			"contents":      "write",
 			"metadata":      "read",
 			"checks":        "read",
 			"actions":       "read",
