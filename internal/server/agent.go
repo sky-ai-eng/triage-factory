@@ -269,6 +269,7 @@ func runResponse(run *domain.AgentRun, artifactCount int, arts []domain.Artifact
 		"StopReason":           run.StopReason,
 		"WorktreePath":         run.WorktreePath,
 		"ResultSummary":        run.ResultSummary,
+		"FailureKind":          string(run.FailureKind),
 		"SessionID":            run.SessionID,
 		"MemoryMissing":        run.MemoryMissing,
 		"TriggerType":          run.TriggerType,

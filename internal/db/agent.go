@@ -81,7 +81,11 @@ type AgentRunStore interface {
 	// outcome / outcomeReason persist the parsed terminal-envelope
 	// outcome and (abort-only) reason; pass "" for both on runs that
 	// have no agent outcome (cancellation, infra failure).
-	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error
+	//
+	// failureKind is the machine-readable failure discriminator
+	// (domain.RunFailureKind vocabulary) — non-empty only when status
+	// is 'failed' and the caller classified the cause; "" → NULL.
+	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
 
 	// AddPartialTotals folds an invocation's cost/duration/turns
 	// into the running totals without flipping status or
@@ -158,7 +162,10 @@ type AgentRunStore interface {
 	// worktree kept) is only ever woken via ResumeOpenRun, which flips it to
 	// `running` before any failRun could see it, so this never clobbers a
 	// resumable run.
-	MarkFailedIfActive(ctx context.Context, orgID, runID string) (bool, error)
+	//
+	// failureKind is the machine-readable failure discriminator
+	// (domain.RunFailureKind vocabulary); "" → NULL (unclassified).
+	MarkFailedIfActive(ctx context.Context, orgID, runID, failureKind string) (bool, error)
 
 	// MarkCompletedIfPendingApproval flips a legacy 'pending_approval' run back
 	// to 'completed' iff the row is currently 'pending_approval'. Runs never park
@@ -325,7 +332,7 @@ type AgentRunStore interface {
 	// has been passed in. Routes through the admin pool because the
 	// agent subprocess has no JWT-claims context yet.
 	LookupOrgForRunSystem(ctx context.Context, runID string) (string, error)
-	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error
+	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
 	AddPartialTotalsSystem(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error
 	MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error)
 	MarkResumingSystem(ctx context.Context, orgID, runID string) (bool, error)
@@ -333,7 +340,7 @@ type AgentRunStore interface {
 	SetStatusSystem(ctx context.Context, orgID, runID, status string) error
 	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error
 	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
-	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID string) (bool, error)
+	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error)
 	HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
 

@@ -350,7 +350,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if err := store.AddPartialTotals(ctx, orgID, runID, 1.25, 4000, 3); err != nil {
 			t.Fatalf("AddPartialTotals: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 2000, 5, "ok", "all done", "abort", "needs human"); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 2000, 5, "ok", "all done", "abort", "needs human", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
@@ -403,7 +403,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			}
 		}
 
-		if err := store.Complete(ctx, orgID, runID, "completed", 0.1, 1000, 2, "ok", "done", "finish", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.1, 1000, 2, "ok", "done", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
@@ -419,7 +419,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// SET to the absolute run_messages SUM (not added like cost), so a
 		// second Complete with no new messages re-sets the same value — they
 		// must stay (150,25,1500,10), NOT double.
-		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "ok", "done", "finish", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "ok", "done", "finish", "", ""); err != nil {
 			t.Fatalf("re-Complete: %v", err)
 		}
 		got2, err := store.Get(ctx, orgID, runID)
@@ -479,12 +479,74 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		t.Run("MarkFailedIfActive", func(t *testing.T) {
 			store, orgID, _, seed := mk(t)
 			runID := seedRunningWithTokens(t, store, orgID, seed)
-			ok, err := store.MarkFailedIfActive(context.Background(), orgID, runID)
+			ok, err := store.MarkFailedIfActive(context.Background(), orgID, runID, "")
 			if err != nil || !ok {
 				t.Fatalf("MarkFailedIfActive: ok=%v err=%v", ok, err)
 			}
 			assertRolledUp(t, store, orgID, runID)
 		})
+	})
+
+	t.Run("MarkFailedIfActive_PersistsFailureKind", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		// Kind supplied → hydrated back typed on Get.
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		ok, err := store.MarkFailedIfActive(ctx, orgID, runID, string(domain.RunFailureMemoryLimit))
+		if err != nil || !ok {
+			t.Fatalf("MarkFailedIfActive with kind: ok=%v err=%v", ok, err)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: run=%v err=%v", got, err)
+		}
+		if got.FailureKind != domain.RunFailureMemoryLimit {
+			t.Errorf("FailureKind = %q, want %q", got.FailureKind, domain.RunFailureMemoryLimit)
+		}
+
+		// Empty kind → NULL → hydrates as the unclassified zero value.
+		plainID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if ok, err := store.MarkFailedIfActive(ctx, orgID, plainID, ""); err != nil || !ok {
+			t.Fatalf("MarkFailedIfActive without kind: ok=%v err=%v", ok, err)
+		}
+		if got, _ := store.Get(ctx, orgID, plainID); got == nil || got.FailureKind != domain.RunFailureUnclassified {
+			t.Errorf("FailureKind on unclassified failure = %q, want empty", got.FailureKind)
+		}
+	})
+
+	t.Run("Complete_PersistsFailureKind", func(t *testing.T) {
+		// processCompletion writes failed-status kinds (agent_error,
+		// no_result) via Complete rather than MarkFailedIfActive — this
+		// pins that write path independently so a placeholder/order
+		// regression in either dialect's UPDATE can't silently drop the
+		// column on the more common failure route.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, "", "", "", "", string(domain.RunFailureAgentError)); err != nil {
+			t.Fatalf("Complete with kind: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: run=%v err=%v", got, err)
+		}
+		if got.Status != "failed" {
+			t.Errorf("status = %q, want failed", got.Status)
+		}
+		if got.FailureKind != domain.RunFailureAgentError {
+			t.Errorf("FailureKind = %q, want %q", got.FailureKind, domain.RunFailureAgentError)
+		}
+
+		// Empty kind on a failed Complete → NULL → unclassified zero value.
+		plainID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, plainID, "failed", 0, 0, 0, "", "", "", "", ""); err != nil {
+			t.Fatalf("Complete without kind: %v", err)
+		}
+		if got, _ := store.Get(ctx, orgID, plainID); got == nil || got.FailureKind != domain.RunFailureUnclassified {
+			t.Errorf("FailureKind on unclassified Complete failure = %q, want empty", got.FailureKind)
+		}
 	})
 
 	t.Run("SetSession_PersistsSessionID", func(t *testing.T) {
@@ -549,7 +611,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 		// completed + outcome=abort → ok (an aborted run is message-resumable).
 		abortRun := seedAgentRunForTest(t, store, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human"); err != nil {
+		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human", ""); err != nil {
 			t.Fatalf("complete+abort: %v", err)
 		}
 		if ok, err := store.MarkResuming(ctx, orgID, abortRun); err != nil || !ok {
@@ -559,7 +621,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// completed + outcome=finish → refused (finish runs are deliberately
 		// excluded from the resumable set).
 		finishRun := seedAgentRunForTest(t, store, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "", "shipped", "finish", ""); err != nil {
+		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "", "shipped", "finish", "", ""); err != nil {
 			t.Fatalf("complete+finish: %v", err)
 		}
 		if ok, _ := store.MarkResuming(ctx, orgID, finishRun); ok {
@@ -576,7 +638,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if _, err := store.MarkOpen(ctx, orgID, openRun); err != nil {
 			t.Fatalf("open: %v", err)
 		}
-		ok, err := store.MarkFailedIfActive(ctx, orgID, openRun)
+		ok, err := store.MarkFailedIfActive(ctx, orgID, openRun, "")
 		if err != nil || !ok {
 			t.Fatalf("MarkFailedIfActive on open: ok=%v err=%v, want true (open is failable)", ok, err)
 		}
@@ -585,12 +647,12 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 		// pending_approval is protected (it has a durable snapshot) → refused.
 		paRun := seedAgentRunForTest(t, store, orgID, seed, "pending_approval")
-		if ok, _ := store.MarkFailedIfActive(ctx, orgID, paRun); ok {
+		if ok, _ := store.MarkFailedIfActive(ctx, orgID, paRun, ""); ok {
 			t.Errorf("MarkFailedIfActive flipped a pending_approval run; want refused")
 		}
 		// Already terminal → refused.
 		doneRun := seedAgentRunForTest(t, store, orgID, seed, "completed")
-		if ok, _ := store.MarkFailedIfActive(ctx, orgID, doneRun); ok {
+		if ok, _ := store.MarkFailedIfActive(ctx, orgID, doneRun, ""); ok {
 			t.Errorf("MarkFailedIfActive flipped a completed run; want refused")
 		}
 	})
@@ -834,7 +896,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// Terminate the event run; only terminal event-trigger rows
 		// remain plus the still-running manual — gate flips back to
 		// false.
-		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", ""); err != nil {
+		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); has {
@@ -1207,10 +1269,10 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 				t.Fatalf("Create %s: %v", id, err)
 			}
 		}
-		if err := store.Complete(ctx, orgID, step1, "completed", 0.01, 1000, 1, "ok", "", "finish", ""); err != nil {
+		if err := store.Complete(ctx, orgID, step1, "completed", 0.01, 1000, 1, "ok", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete step1: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, step2, "completed", 0.02, 1000, 1, "ok", "", "finish", ""); err != nil {
+		if err := store.Complete(ctx, orgID, step2, "completed", 0.02, 1000, 1, "ok", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete step2: %v", err)
 		}
 
@@ -1281,10 +1343,10 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			}
 		}
 		// Complete's 6th/7th args are durationMs / numTurns.
-		if err := store.Complete(ctx, orgID, step1, "completed", 0.01, 1000, 1, "ok", "", "finish", ""); err != nil {
+		if err := store.Complete(ctx, orgID, step1, "completed", 0.01, 1000, 1, "ok", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete step1: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, step2, "completed", 0.02, 2000, 1, "ok", "", "finish", ""); err != nil {
+		if err := store.Complete(ctx, orgID, step2, "completed", 0.02, 2000, 1, "ok", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete step2: %v", err)
 		}
 

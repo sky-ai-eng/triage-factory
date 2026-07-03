@@ -158,6 +158,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			r.trigger_type, COALESCE(r.trigger_id::text, ''),
 			COALESCE(r.actor_agent_id::text, ''),
 			COALESCE(a.display_name, ''),
+			COALESCE(r.failure_kind, ''),
 			` + pgTaskColumnsWithEntity + `
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id AND rm.org_id = r.org_id
@@ -181,6 +182,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 		var completedAt sql.NullTime
 		var costUSD sql.NullFloat64
 		var durationMs, numTurns sql.NullInt64
+		var failureKind string
 
 		runTargets := []any{
 			&r.ID, &r.TaskID, &r.PromptID,
@@ -190,6 +192,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			&r.ResultSummary, &r.SessionID,
 			&r.MemoryMissing, &r.TriggerType, &r.TriggerID,
 			&r.ActorAgentID, &r.ActorAgentName,
+			&failureKind,
 		}
 		var ts taskScanState
 		if err := rows.Scan(append(runTargets, ts.targets(&t)...)...); err != nil {
@@ -210,6 +213,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			v := int(numTurns.Int64)
 			r.NumTurns = &v
 		}
+		r.FailureKind = domain.RunFailureKind(failureKind)
 		out = append(out, domain.FactoryActiveRun{Run: r, Task: t, EntityEventTyp: t.EventType})
 	}
 	return out, rows.Err()

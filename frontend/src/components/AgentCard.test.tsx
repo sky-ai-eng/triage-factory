@@ -123,3 +123,21 @@ describe('AgentCard artifacts affordance', () => {
     expect(screen.getByRole('button', { name: /1 artifact\b/ })).toBeInTheDocument()
   })
 })
+
+describe('AgentCard failure-kind rendering', () => {
+  it('renders the memory-limit verdict + knob copy for a summaryless killed run', () => {
+    // failRun writes no ResultSummary — the kind alone must surface the block.
+    renderCard({ Status: 'failed', ResultSummary: '', FailureKind: 'memory_limit' })
+    expect(screen.getByText('Killed: memory limit')).toBeInTheDocument()
+    expect(screen.getByText(/TF_RUN_MEMORY_LIMIT_MB/)).toBeInTheDocument()
+  })
+
+  it('keeps the generic Failed verdict for an unclassified failure with a summary', () => {
+    renderCard({
+      Status: 'failed',
+      ResultSummary: 'agent did not return a valid completion envelope',
+    })
+    expect(screen.getByText('Failed')).toBeInTheDocument()
+    expect(screen.queryByText(/memory limit/i)).not.toBeInTheDocument()
+  })
+})

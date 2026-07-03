@@ -628,7 +628,7 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	// Complete (terminal write — the largest of processCompletion's
 	// routed writes).
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.AgentRuns.Complete(ctx, orgID, runID, "completed", 0.25, 500, 2, "end_turn", "ok", "finish", "")
+		return tx.AgentRuns.Complete(ctx, orgID, runID, "completed", 0.25, 500, 2, "end_turn", "ok", "finish", "", "")
 	}); err != nil {
 		t.Fatalf("Complete under synth claims: %v", err)
 	}
@@ -673,7 +673,7 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	// transition). Verifies the System variant's guard fires even
 	// though we never wrapped in claims for this call (spawner uses
 	// it goroutine-internally with no user identity).
-	failed, err := stores.AgentRuns.MarkFailedIfActiveSystem(ctx, orgID, runID)
+	failed, err := stores.AgentRuns.MarkFailedIfActiveSystem(ctx, orgID, runID, "")
 	if err != nil {
 		t.Fatalf("MarkFailedIfActiveSystem: %v", err)
 	}
