@@ -1,6 +1,7 @@
 package agentproc
 
 import (
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -30,6 +31,12 @@ func agentRuntimeEnv() []string {
 	}
 	return []string{jscJITEnvKey + "=0"}
 }
+
+// ErrRunMemoryLimit marks an agent process killed by its per-run
+// memory ceiling. It rides inside the returned error chain so callers
+// classify with errors.Is — never by matching message text — when
+// recording a machine-readable failure kind for the UI.
+var ErrRunMemoryLimit = errors.New("run exceeded its memory limit")
 
 // DefaultRunMemoryLimitMB is the per-run memory ceiling handed to the
 // sandbox when TF_RUN_MEMORY_LIMIT_MB is unset. Deliberately generous —

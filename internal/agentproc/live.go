@@ -417,8 +417,8 @@ func (l *LiveRun) readLoop(runCtx context.Context, cmd *exec.Cmd, stdout io.Read
 		} else if oomKilled != nil && oomKilled() {
 			// Read before the cleanup below removes the cgroup, so the
 			// attribution reads live memory.events state.
-			l.termErr = fmt.Errorf("agent runtime killed: run exceeded its memory limit (%d MB; tune TF_RUN_MEMORY_LIMIT_MB): %w",
-				runMemoryLimitMB(), waitErr)
+			l.termErr = fmt.Errorf("agent runtime killed: %w (%d MB; tune TF_RUN_MEMORY_LIMIT_MB): %v",
+				ErrRunMemoryLimit, runMemoryLimitMB(), waitErr)
 		} else {
 			l.termErr = fmt.Errorf("agent runtime exited with error: %w", waitErr)
 		}

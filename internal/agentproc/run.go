@@ -426,8 +426,8 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 			return outcome, ctx.Err()
 		}
 		if oomKilled != nil && oomKilled() {
-			return outcome, fmt.Errorf("agent runtime killed: run exceeded its memory limit (%d MB; tune TF_RUN_MEMORY_LIMIT_MB): %w",
-				runMemoryLimitMB(), waitErr)
+			return outcome, fmt.Errorf("agent runtime killed: %w (%d MB; tune TF_RUN_MEMORY_LIMIT_MB): %v",
+				ErrRunMemoryLimit, runMemoryLimitMB(), waitErr)
 		}
 		return outcome, fmt.Errorf("agent runtime exited with error: %w", waitErr)
 	}
