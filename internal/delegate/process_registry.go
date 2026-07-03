@@ -15,16 +15,50 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // DefaultMaxConcurrentRuns is the conservative process-wide cap on how
 // many runs execute off the dispatcher at once, so a burst of queued steps
 // doesn't fan into an unbounded number of agent subprocesses. Tunable via
-// SetMaxConcurrentRuns before the dispatcher starts.
+// SetMaxConcurrentRuns before the dispatcher starts; deployments set it
+// with the TF_MAX_CONCURRENT_RUNS env var (see ParseMaxConcurrentRuns).
 const DefaultMaxConcurrentRuns = 4
+
+// MaxConcurrentRunsCeiling is the largest value the concurrency cap may
+// take. It mirrors sandbox.MaxSandboxes, the sandbox subnet allocator's
+// structural limit — each run owns a /24 out of one /16, so a higher
+// dispatcher cap could never be honored.
+const MaxConcurrentRunsCeiling = sandbox.MaxSandboxes
+
+// ParseMaxConcurrentRuns interprets the TF_MAX_CONCURRENT_RUNS env value.
+// Empty → the default. Non-numeric or < 1 → the default plus an error the
+// caller logs (a bad value must not brick boot). Values above the sandbox
+// ceiling clamp to it; clamped reports whether that happened, so the caller
+// can log a distinct signal for "you asked for more than the sandbox
+// allocator can honor" instead of it reading identically to an operator who
+// set the ceiling value directly.
+func ParseMaxConcurrentRuns(raw string) (n int, clamped bool, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return DefaultMaxConcurrentRuns, false, nil
+	}
+	n, err = strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return DefaultMaxConcurrentRuns, false, fmt.Errorf(
+			"invalid TF_MAX_CONCURRENT_RUNS %q (want an integer in [1,%d]); using default %d",
+			raw, MaxConcurrentRunsCeiling, DefaultMaxConcurrentRuns)
+	}
+	if n > MaxConcurrentRunsCeiling {
+		return MaxConcurrentRunsCeiling, true, nil
+	}
+	return n, false, nil
+}
 
 // DefaultIdleHibernateTimeout is how long a live run may go quiet (no
 // stream activity) before it hibernates to a durable resume. Capacity-

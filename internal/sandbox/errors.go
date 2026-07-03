@@ -1,6 +1,9 @@
 package sandbox
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrUnsupportedPlatform is returned by Wrap when running on an OS
 // that doesn't support gVisor (i.e. anything other than Linux).
@@ -16,9 +19,9 @@ var ErrUnsupportedPlatform = errors.New("sandbox: gVisor sandboxing requires Lin
 // customers install via the gVisor release bundle.
 var ErrRunscMissing = errors.New("sandbox: runsc binary not found on PATH — install gVisor from gvisor.dev/releases")
 
-// ErrSubnetsExhausted is returned when the 256-slot per-process
+// ErrSubnetsExhausted is returned when the MaxSandboxes-slot per-process
 // subnet allocator is full. Each active sandbox holds one /24 from
 // 10.42.0.0/16. The default per-replica concurrency cap is well
-// below 256; hitting this means either a runaway spawn loop or
+// below MaxSandboxes; hitting this means either a runaway spawn loop or
 // missing Close() calls leaking netns + bundle dirs.
-var ErrSubnetsExhausted = errors.New("sandbox: subnet allocator exhausted (256 concurrent runs is the per-process cap)")
+var ErrSubnetsExhausted = fmt.Errorf("sandbox: subnet allocator exhausted (%d concurrent runs is the per-process cap)", MaxSandboxes)
