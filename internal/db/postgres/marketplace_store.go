@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -459,4 +460,77 @@ func (s *marketplaceStore) RecordInstall(ctx context.Context, orgID, listingID s
 		VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6::uuid, now())
 	`, listingID, orgID, version, teamID, nullIfEmpty(userID), nullIfEmpty(rootObjectID))
 	return err
+}
+
+// MaterializeListing deep-copies snap into teamID and records the install,
+// atomically. Mirrors BlueprintStore.DuplicatePrompts' deep-copy mechanics
+// (fresh uuid.New() ids, creator_user_id = COALESCE(current_user_id, org
+// owner)) but every copy is source='marketplace' rather than 'user' — see
+// the interface doc comment. Consumes only snap/teamID/orgID: no query here
+// ever references the listing's source_id or the publisher team, so a
+// deleted source object or publisher team can't break an install.
+func (s *marketplaceStore) MaterializeListing(ctx context.Context, orgID, teamID string, snap domain.ListingSnapshot, listingID string, version int, userID string) (string, []string, error) {
+	if teamID == "" {
+		return "", nil, errors.New("postgres marketplace: MaterializeListing requires team_id")
+	}
+	if len(snap.Steps) == 0 {
+		return "", nil, errors.New("postgres marketplace: MaterializeListing requires at least one snapshot step")
+	}
+	if snap.Kind == domain.ListingKindPrompt && len(snap.Steps) != 1 {
+		return "", nil, fmt.Errorf("postgres marketplace: MaterializeListing kind=prompt requires exactly one snapshot step, got %d", len(snap.Steps))
+	}
+
+	var rootObjectID string
+	var promptIDs []string
+	err := inTx(ctx, s.q, func(q queryer) error {
+		promptIDs = make([]string, len(snap.Steps))
+		for i, step := range snap.Steps {
+			pid := uuid.New().String()
+			if _, err := q.ExecContext(ctx, `
+				INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at)
+				VALUES ($1, $2,
+					COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+					$3::uuid, $4, $5, 'marketplace', $6, $7, 0, now(), now())
+			`, pid, orgID, teamID, step.Name, step.Body, step.AllowedTools, step.Model); err != nil {
+				return fmt.Errorf("copy snapshot step %d: %w", i, err)
+			}
+			promptIDs[i] = pid
+		}
+
+		switch snap.Kind {
+		case domain.ListingKindPrompt:
+			rootObjectID = promptIDs[0]
+		case domain.ListingKindBlueprint:
+			bpID := uuid.New().String()
+			if _, err := q.ExecContext(ctx, `
+				INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, usage_count, created_at, updated_at)
+				VALUES ($1, $2,
+					COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+					$3::uuid, $4, 'marketplace', 0, now(), now())
+			`, bpID, orgID, teamID, snap.Name); err != nil {
+				return fmt.Errorf("create blueprint from snapshot: %w", err)
+			}
+			for i, step := range snap.Steps {
+				if _, err := q.ExecContext(ctx, `
+					INSERT INTO blueprint_steps (org_id, team_id, blueprint_id, step_index, step_prompt_id, brief, created_at)
+					VALUES ($1, $2::uuid, $3, $4, $5, $6, now())
+				`, orgID, teamID, bpID, i, promptIDs[i], step.Brief); err != nil {
+					return fmt.Errorf("insert blueprint step %d: %w", i, err)
+				}
+			}
+			rootObjectID = bpID
+		default:
+			return fmt.Errorf("postgres marketplace: MaterializeListing unknown snapshot kind %q", snap.Kind)
+		}
+
+		_, err := q.ExecContext(ctx, `
+			INSERT INTO marketplace_installs (listing_id, org_id, version, team_id, user_id, root_object_id, created_at)
+			VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6::uuid, now())
+		`, listingID, orgID, version, teamID, nullIfEmpty(userID), rootObjectID)
+		return err
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	return rootObjectID, promptIDs, nil
 }
