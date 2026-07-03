@@ -273,9 +273,6 @@ type stubCalls struct {
 	createPath string
 	createErr  error
 
-	removeCalls int
-	removePaths []string
-
 	liveDirs map[string]struct{}
 	fixedNow time.Time
 }
@@ -318,13 +315,6 @@ func (s *stubCalls) deps() addDeps {
 				runID = "r1"
 			}
 			return expectedPath(runID, owner, repo, refForSpec(spec)), nil
-		},
-		removeWorktree: func(path, _ string) error {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			s.removeCalls++
-			s.removePaths = append(s.removePaths, path)
-			return nil
 		},
 		statPath: func(path string) (os.FileInfo, error) {
 			s.mu.Lock()
@@ -508,9 +498,6 @@ func TestMaterializeWorkspace_DefaultBranchCheckout(t *testing.T) {
 	if args.spec != (checkoutSpec{}) {
 		t.Errorf("spec = %+v, want zero (default-branch checkout)", args.spec)
 	}
-	if stub.removeCalls != 0 {
-		t.Errorf("removeWorktree called %d times on success path", stub.removeCalls)
-	}
 
 	// The row records the deterministic path and ref "@default" — a detached
 	// default checkout claims no working branch (the push gate reads the
@@ -664,9 +651,6 @@ func TestMaterializeWorkspace_IdempotentSecondAdd(t *testing.T) {
 	if stub.createCalls != 1 {
 		t.Errorf("checkout called %d times across two adds; second add should short-circuit on the precheck", stub.createCalls)
 	}
-	if stub.removeCalls != 0 {
-		t.Errorf("removeWorktree called on idempotent re-add")
-	}
 }
 
 func TestMaterializeWorkspace_RaceLossAtReservation(t *testing.T) {
@@ -693,9 +677,6 @@ func TestMaterializeWorkspace_RaceLossAtReservation(t *testing.T) {
 	}
 	if stub.createCalls != 0 {
 		t.Errorf("createCalls = %d, want 0; loser must NOT touch git", stub.createCalls)
-	}
-	if stub.removeCalls != 0 {
-		t.Errorf("removeCalls = %d, want 0; loser has nothing to remove", stub.removeCalls)
 	}
 }
 

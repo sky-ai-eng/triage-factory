@@ -83,6 +83,19 @@ func (c *LocalClient) WorkspaceRoots(ctx context.Context) (hostRoot, agentRoot s
 // like the eager PR path); local mode stays uninjected — the operator's own
 // git credentials, byte-for-byte the pre-TFAC-546 behavior.
 func (c *LocalClient) CreateWorkspaceCheckout(ctx context.Context, owner, repo, ref string, prNumber int) (string, error) {
+	hostRoot, _, err := c.WorkspaceRoots(ctx)
+	if err != nil {
+		return "", fmt.Errorf("create workspace checkout: %w", err)
+	}
+	return c.createWorkspaceCheckoutIn(ctx, hostRoot, owner, repo, ref, prNumber)
+}
+
+// createWorkspaceCheckoutIn is CreateWorkspaceCheckout with the host run root
+// pre-resolved. The daemon dispatch calls this variant so ONE WorkspaceRoots
+// read serves the create AND the post-create chown/cleanup containment gate —
+// evaluating both against the same root, rather than two point-in-time reads
+// that could in principle disagree.
+func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, owner, repo, ref string, prNumber int) (string, error) {
 	if ref != "" && prNumber > 0 {
 		return "", fmt.Errorf("create workspace checkout: ref and pr are mutually exclusive")
 	}
@@ -110,11 +123,6 @@ func (c *LocalClient) CreateWorkspaceCheckout(ctx context.Context, owner, repo, 
 	}
 	if profile.CloneURL == "" {
 		return "", fmt.Errorf("create workspace checkout: repo %s has no clone URL on its profile", repoID)
-	}
-
-	hostRoot, _, err := c.WorkspaceRoots(ctx)
-	if err != nil {
-		return "", fmt.Errorf("create workspace checkout: %w", err)
 	}
 
 	if prNumber > 0 {

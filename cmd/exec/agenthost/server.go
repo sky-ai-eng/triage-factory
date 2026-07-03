@@ -396,7 +396,14 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		path, err := client.CreateWorkspaceCheckout(ctx, a.Owner, a.Repo, a.Ref, a.PR)
+		// Resolve the run root ONCE: the create builds under it, and the
+		// post-create chown + cleanup containment gate below are judged
+		// against the very same value — no second read that could disagree.
+		hostRoot, _, err := client.WorkspaceRoots(ctx)
+		if err != nil {
+			return nil, err
+		}
+		path, err := client.createWorkspaceCheckoutIn(ctx, hostRoot, a.Owner, a.Repo, a.Ref, a.PR)
 		if err != nil {
 			return nil, err
 		}
@@ -408,17 +415,13 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		// failure mode is precisely "this path is not inside the run root"
 		// (a regressed create contract), and RemoveAll on an unverified path
 		// would turn that bug into deleting an arbitrary host directory.
-		hostRoot, _, rerr := client.WorkspaceRoots(ctx)
-		if rerr == nil {
-			rerr = agentproc.ChownWorkspaceCheckoutForSandbox(hostRoot, path)
-		}
-		if rerr != nil {
+		if cerr := agentproc.ChownWorkspaceCheckoutForSandbox(hostRoot, path); cerr != nil {
 			if strictlyWithin(hostRoot, path) {
 				_ = os.RemoveAll(path)
 			} else {
 				agenthostLog.Warn("leaving un-chowned checkout in place; path is not verifiably inside the run root", "path", path, "host_root", hostRoot)
 			}
-			return nil, fmt.Errorf("hand checkout to sandbox user: %w", rerr)
+			return nil, fmt.Errorf("hand checkout to sandbox user: %w", cerr)
 		}
 		return createWorkspaceCheckoutResult{Path: path}, nil
 

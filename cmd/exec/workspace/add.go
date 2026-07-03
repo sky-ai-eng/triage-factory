@@ -31,17 +31,15 @@ type addDeps struct {
 	// (TFAC-546: the git work runs host-side in both transports — the daemon
 	// in sandbox mode, in-process in local mode), so tests stub the git
 	// mutation while production routes through the agenthost seam.
-	create         func(ctx context.Context, owner, repo string, spec checkoutSpec) (string, error)
-	removeWorktree func(path, runID string) error
-	statPath       func(path string) (os.FileInfo, error)
-	now            func() time.Time
+	create   func(ctx context.Context, owner, repo string, spec checkoutSpec) (string, error)
+	statPath func(path string) (os.FileInfo, error)
+	now      func() time.Time
 }
 
 func defaultAddDeps() addDeps {
 	return addDeps{
-		removeWorktree: worktree.RemoveAt,
-		statPath:       os.Stat,
-		now:            time.Now,
+		statPath: os.Stat,
+		now:      time.Now,
 	}
 }
 
