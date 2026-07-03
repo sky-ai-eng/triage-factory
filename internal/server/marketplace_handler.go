@@ -1,10 +1,13 @@
 // The within-org prompt marketplace's publish/republish/delist surface
 // (TFAC-536). Multi-mode only: every handler opens with gateMarketplace,
-// which 404s on two independent axes — local mode (the marketplace is a
-// multi-mode concept, db.MarketplaceStore's SQLite impl is a stub) and the
-// org's ship-dark marketplace_enabled toggle (off by default until TFAC-539
-// flips it visible). Both conditions render 404, never 403 — the mode/toggle
-// axis isn't a role failure, it's "this surface doesn't exist for you".
+// which 404s in local mode (the marketplace is a multi-mode concept,
+// db.MarketplaceStore's SQLite impl is a stub) — never 403, mirroring the
+// invites/org-members precedent that a mode mismatch isn't a role failure,
+// it's "this surface doesn't exist for you". The within-org marketplace
+// itself has no admin toggle — it's always on for every multi-mode org.
+// org_settings.marketplace_enabled exists (TFAC-535) but is NOT read here;
+// it's reserved for gating the future cross-org marketplace (TFAC-92 phase
+// 2 / TFAC-539), a different, still-unbuilt surface.
 //
 // Every listing snapshot is minted server-side from the caller's own team
 // object (buildListingSnapshot) — the client posts a kind + source_id and
@@ -45,12 +48,11 @@ type marketplaceHandler struct {
 var errMarketplaceSourceNotFound = errors.New("marketplace: source object not found")
 
 // gateMarketplace is the shared front gate every handler in this file opens
-// with: local mode 404s (the marketplace is multi-mode only), then the org's
-// marketplace_enabled toggle 404s when off (ship-dark until TFAC-539's launch
-// flip). Both conditions are deliberately 404, not 403 — mirrors the
-// invites/org-members precedent for the mode axis, and extends the same
-// posture to the feature toggle so a org that hasn't opted in doesn't even
-// learn the surface exists. Returns (orgID, userID, true) on success.
+// with: local mode 404s (the marketplace is multi-mode only) — 404, not 403,
+// mirroring the invites/org-members precedent that a mode mismatch isn't a
+// role failure, it's "this surface doesn't exist for you". Returns (orgID,
+// userID, true) on success. No org-settings toggle check — the within-org
+// marketplace has none; see the file doc comment.
 func (mh *marketplaceHandler) gateMarketplace(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	if runmode.Current() == runmode.ModeLocal {
 		http.NotFound(w, r)
@@ -61,23 +63,6 @@ func (mh *marketplaceHandler) gateMarketplace(w http.ResponseWriter, r *http.Req
 		return "", "", false
 	}
 	userID = ClaimsFrom(r.Context()).Subject
-
-	var enabled bool
-	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		set, e := tx.Orgs.GetSettings(r.Context(), orgID)
-		if e != nil {
-			return e
-		}
-		enabled = set.MarketplaceEnabled
-		return nil
-	}); err != nil {
-		internalError(w, "marketplace", err)
-		return "", "", false
-	}
-	if !enabled {
-		http.NotFound(w, r)
-		return "", "", false
-	}
 	return orgID, userID, true
 }
 

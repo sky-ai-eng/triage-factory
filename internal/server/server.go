@@ -1048,9 +1048,9 @@ func (s *Server) routes() {
 	s.api("GET /api/blueprint-runs/{id}", bh.handleBlueprintRunGet)
 	s.apiMutating("POST /api/blueprint-runs/{id}/cancel", bh.handleBlueprintRunCancel)
 
-	// Within-org prompt marketplace (TFAC-536) — multi-mode only, plus the
-	// org's ship-dark marketplace_enabled toggle; every handler opens with
-	// gateMarketplace and 404s on either axis (see marketplace_handler.go).
+	// Within-org prompt marketplace (TFAC-536) — multi-mode only; every
+	// handler opens with gateMarketplace, which 404s in local mode (see
+	// marketplace_handler.go).
 	mh := &marketplaceHandler{tx: s.tx, az: s.az}
 	s.api("GET /api/marketplace/listings", mh.handleMarketplaceList)
 	s.apiMutating("POST /api/marketplace/listings", mh.handleMarketplacePublish)

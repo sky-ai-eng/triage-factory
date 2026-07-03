@@ -19,10 +19,9 @@ import (
 )
 
 // marketplaceRig is the multi-mode fixture for the publish/republish/delist
-// handler family (TFAC-536): a real Postgres-backed Server (RLS + the
-// marketplace_enabled toggle live) with one org carrying a founder (write
-// role on the default team), a plain member on a second team, and a viewer
-// on the founder's team.
+// handler family (TFAC-536): a real Postgres-backed Server (RLS enforced)
+// with one org carrying a founder (write role on the default team), a plain
+// member on a second team, and a viewer on the founder's team.
 type marketplaceRig struct {
 	h      *pgtest.Harness
 	mh     *marketplaceHandler
@@ -50,9 +49,6 @@ func newMarketplaceRig(t *testing.T) *marketplaceRig {
 	teamB := pgtest.SeedTeam(t, h, orgID, "teamB")
 	member := pgtest.SeedUser(t, h, "member")
 	pgtest.AddOrgMember(t, h, member, orgID, teamB, "member", "member")
-
-	pgtest.MustExec(t, h.AdminDB,
-		`INSERT INTO org_settings (org_id, marketplace_enabled) VALUES ($1, true)`, orgID)
 
 	return &marketplaceRig{
 		h:      h,
@@ -156,7 +152,7 @@ func doMarketplaceJSON(fn func(http.ResponseWriter, *http.Request), req *http.Re
 }
 
 // TestMarketplace_LocalIs404: every endpoint in the family 404s in local
-// mode, regardless of caller identity or org toggle state.
+// mode, regardless of caller identity.
 func TestMarketplace_LocalIs404(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "local-gate", "mission", "", "")
@@ -190,36 +186,31 @@ func TestMarketplace_LocalIs404(t *testing.T) {
 	}
 }
 
-// TestMarketplace_ToggleOffIs404: multi-mode but org_settings.marketplace_enabled
-// is off (the default, ship-dark) — the whole surface 404s.
-func TestMarketplace_ToggleOffIs404(t *testing.T) {
+// TestMarketplace_NoToggleGate: the within-org marketplace has no admin
+// toggle — org_settings.marketplace_enabled defaults false (TFAC-535's
+// ship-dark column, reserved for the future cross-org gate) and every
+// endpoint in the family still works normally in multi mode regardless.
+func TestMarketplace_NoToggleGate(t *testing.T) {
 	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "toggle-gate", "mission", "", "")
-	pgtest.MustExec(t, r.h.AdminDB, `UPDATE org_settings SET marketplace_enabled = false WHERE org_id = $1`, r.orgID)
+	var enabled bool
+	if err := r.h.AdminDB.QueryRow(`SELECT marketplace_enabled FROM org_settings WHERE org_id = $1`, r.orgID).Scan(&enabled); err != nil {
+		t.Fatalf("read marketplace_enabled: %v", err)
+	}
+	if enabled {
+		t.Fatalf("marketplace_enabled = true by default, want false (ship-dark default, unrelated to this surface)")
+	}
 
+	promptID := r.seedPrompt(t, r.teamID, "no-gate", "mission", "", "")
 	rec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
 		r.req(http.MethodPost, "/api/marketplace/listings", r.admin,
 			map[string]any{"kind": "prompt", "source_id": promptID, "name": "n"}))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("publish with toggle off: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-
-	getReq := r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil)
-	getReq.SetPathValue("source_id", promptID)
-	rec = doMarketplaceJSON(r.mh.handleMarketplaceListingBySource, getReq)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("by-source with toggle off: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("publish with marketplace_enabled=false: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 
 	listReq := r.req(http.MethodGet, "/api/marketplace/listings", r.admin, nil)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, listReq); rec.Code != http.StatusNotFound {
-		t.Fatalf("list with toggle off: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-
-	voteReq := r.req(http.MethodPut, "/api/marketplace/listings/x/vote", r.admin, nil)
-	voteReq.SetPathValue("id", "x")
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, voteReq); rec.Code != http.StatusNotFound {
-		t.Fatalf("vote with toggle off: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, listReq); rec.Code != http.StatusOK {
+		t.Fatalf("list with marketplace_enabled=false: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

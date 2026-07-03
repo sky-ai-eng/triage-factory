@@ -54,11 +54,14 @@ type OrgSettings struct {
 	// point refuses all new agent runs. A runaway-spend fuse.
 	MaxDailyCostUSD float64
 
-	// MarketplaceEnabled is the ship-dark org toggle for the within-org
-	// prompt marketplace (TFAC-535 / TFAC-92 scoping decision 4). NOT NULL
-	// DEFAULT false on both backends — no NULL-round-trip subtlety like the
-	// fields above. UI/enforcement of this flag land in TFAC-539; this
-	// ticket only carries the column.
+	// MarketplaceEnabled was originally scoped as a ship-dark toggle for the
+	// within-org prompt marketplace (TFAC-535); that turned out to be the
+	// wrong surface to gate — the within-org marketplace has no toggle and
+	// is always on for every multi-mode org (internal/server/
+	// marketplace_handler.go's gateMarketplace doesn't read this field).
+	// This column is reserved for the future cross-org marketplace gate
+	// instead (TFAC-92 phase 2 / TFAC-539). NOT NULL DEFAULT false on both
+	// backends — no NULL-round-trip subtlety like the fields above.
 	MarketplaceEnabled bool
 }
 
