@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -532,6 +533,17 @@ func (mh *marketplaceHandler) handleMarketplaceList(w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sort must be 'installs', 'votes', or 'recent'"})
 		return
 	}
+	if f.Sort == "" {
+		// The HTTP contract (this handler's doc comment, the API description
+		// in the ticket) says installs is the default — pin it here rather
+		// than leaving f.Sort empty and letting MarketplaceStore.List's own
+		// internal default (currently "recent", documented on
+		// domain.ListingFilter for callers that don't care) decide. Two
+		// different defaults for two different reasons: the store's is a
+		// safe fallback for any caller; this one is the browse page's
+		// product default.
+		f.Sort = domain.ListingSortInstalls
+	}
 
 	var listings []domain.ListingSummary
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -560,6 +572,14 @@ func (mh *marketplaceHandler) handleMarketplaceGet(w http.ResponseWriter, r *htt
 		return
 	}
 	id := r.PathValue("id")
+	// Validate up front: id is a uuid column on Postgres, so a malformed
+	// value surfaces as a SQLSTATE 22P02 cast error from the store call
+	// (→ 500) rather than a clean miss. Treating malformed ids as "not
+	// found" mirrors the house pattern (see tasks.go's SKY-330 comment).
+	if _, err := uuid.Parse(id); err != nil {
+		notFound(w, "listing")
+		return
+	}
 
 	var (
 		detail  domain.ListingDetail
@@ -596,6 +616,34 @@ func (mh *marketplaceHandler) handleMarketplaceVote(w http.ResponseWriter, r *ht
 		return
 	}
 	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		notFound(w, "listing")
+		return
+	}
+
+	// Vote's INSERT carries an FK to marketplace_listings(id) — a
+	// well-formed but nonexistent id would otherwise trip that constraint
+	// and surface as a 500. Pre-check existence (same RLS visibility Get
+	// already applies) and 404 before writing, rather than translating a
+	// caught FK-violation error after the fact.
+	var missing bool
+	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if _, e := tx.Marketplace.Get(r.Context(), orgID, id, userID); errors.Is(e, sql.ErrNoRows) {
+			missing = true
+			return nil
+		} else if e != nil {
+			return e
+		}
+		return nil
+	}); err != nil {
+		internalError(w, "marketplace", err)
+		return
+	}
+	if missing {
+		notFound(w, "listing")
+		return
+	}
+
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Marketplace.Vote(r.Context(), orgID, id, userID)
 	}); err != nil {
@@ -606,7 +654,10 @@ func (mh *marketplaceHandler) handleMarketplaceVote(w http.ResponseWriter, r *ht
 }
 
 // handleMarketplaceUnvote removes the caller's vote on a listing, if any.
-// Idempotent: removing a vote that doesn't exist is a no-op, still 204.
+// Idempotent: removing a vote that doesn't exist is a no-op, still 204 —
+// including when the listing itself doesn't exist (Unvote's DELETE carries
+// no FK, so a nonexistent well-formed id is just a zero-row no-op; no
+// existence pre-check needed here unlike handleMarketplaceVote).
 //
 // DELETE /api/marketplace/listings/{id}/vote
 func (mh *marketplaceHandler) handleMarketplaceUnvote(w http.ResponseWriter, r *http.Request) {
@@ -615,6 +666,10 @@ func (mh *marketplaceHandler) handleMarketplaceUnvote(w http.ResponseWriter, r *
 		return
 	}
 	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		notFound(w, "listing")
+		return
+	}
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Marketplace.Unvote(r.Context(), orgID, id, userID)
 	}); err != nil {

@@ -903,9 +903,11 @@ func TestMarketplaceList_SortOrders(t *testing.T) {
 	if ids := listingIDs(r.list(t, r.admin, "sort=recent")); len(ids) != 3 || ids[0] != fresh || ids[1] != mid || ids[2] != old {
 		t.Fatalf("sort=recent: ids = %v, want [%s %s %s] (newest updated_at first)", ids, fresh, mid, old)
 	}
-	// Default (sort omitted) matches "recent".
-	if ids := listingIDs(r.list(t, r.admin, "")); len(ids) != 3 || ids[0] != fresh || ids[1] != mid || ids[2] != old {
-		t.Fatalf("default sort: ids = %v, want [%s %s %s] (recent)", ids, fresh, mid, old)
+	// Default (sort omitted) matches "installs" — the handler pins this
+	// explicitly rather than falling through to the store's own internal
+	// default (recent), so the HTTP contract doesn't depend on the store.
+	if ids := listingIDs(r.list(t, r.admin, "")); len(ids) != 3 || ids[0] != old || ids[1] != mid || ids[2] != fresh {
+		t.Fatalf("default sort: ids = %v, want [%s %s %s] (installs)", ids, old, mid, fresh)
 	}
 }
 
@@ -972,6 +974,18 @@ func TestMarketplaceGet_UnknownIdIs404(t *testing.T) {
 	getReq.SetPathValue("id", "00000000-0000-0000-0000-000000000000")
 	if rec := doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq); rec.Code != http.StatusNotFound {
 		t.Fatalf("get unknown id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMarketplaceGet_MalformedIdIs404: id is a uuid column on Postgres — a
+// non-UUID path value must 404 cleanly rather than 500 on the store's
+// SQLSTATE 22P02 cast error.
+func TestMarketplaceGet_MalformedIdIs404(t *testing.T) {
+	r := newMarketplaceRig(t)
+	getReq := r.req(http.MethodGet, "/api/marketplace/listings/not-a-uuid", r.admin, nil)
+	getReq.SetPathValue("id", "not-a-uuid")
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq); rec.Code != http.StatusNotFound {
+		t.Fatalf("get malformed id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1092,6 +1106,62 @@ func TestMarketplaceUnvote_Idempotent(t *testing.T) {
 	}
 	if detail.ViewerVoted {
 		t.Errorf("viewer_voted after unvote = true, want false")
+	}
+}
+
+// TestMarketplaceVote_MalformedIdIs404: a non-UUID path value 404s cleanly —
+// same reasoning as TestMarketplaceGet_MalformedIdIs404 — rather than 500ing
+// on the store's cast error.
+func TestMarketplaceVote_MalformedIdIs404(t *testing.T) {
+	r := newMarketplaceRig(t)
+	req := r.req(http.MethodPut, "/api/marketplace/listings/not-a-uuid/vote", r.admin, nil)
+	req.SetPathValue("id", "not-a-uuid")
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, req); rec.Code != http.StatusNotFound {
+		t.Fatalf("vote malformed id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMarketplaceUnvote_MalformedIdIs404 mirrors the vote-side case.
+func TestMarketplaceUnvote_MalformedIdIs404(t *testing.T) {
+	r := newMarketplaceRig(t)
+	req := r.req(http.MethodDelete, "/api/marketplace/listings/not-a-uuid/vote", r.admin, nil)
+	req.SetPathValue("id", "not-a-uuid")
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, req); rec.Code != http.StatusNotFound {
+		t.Fatalf("unvote malformed id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMarketplaceVote_UnknownIdIs404: a well-formed but nonexistent listing
+// id 404s rather than 500ing on marketplace_votes' FK-to-marketplace_listings
+// violation — the pre-check in handleMarketplaceVote must catch this before
+// the INSERT ever runs.
+func TestMarketplaceVote_UnknownIdIs404(t *testing.T) {
+	r := newMarketplaceRig(t)
+	const unknownID = "00000000-0000-0000-0000-000000000000"
+	req := r.req(http.MethodPut, "/api/marketplace/listings/"+unknownID+"/vote", r.admin, nil)
+	req.SetPathValue("id", unknownID)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, req); rec.Code != http.StatusNotFound {
+		t.Fatalf("vote unknown id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	var count int
+	if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_votes WHERE listing_id = $1`, unknownID).Scan(&count); err != nil {
+		t.Fatalf("count votes: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("vote count for unknown listing = %d, want 0 (nothing written)", count)
+	}
+}
+
+// TestMarketplaceUnvote_UnknownIdIsNoOp: unlike Vote, Unvote's DELETE carries
+// no FK — a well-formed but nonexistent listing id is just a zero-row no-op,
+// consistent with "removing a vote that doesn't exist" already being a no-op.
+func TestMarketplaceUnvote_UnknownIdIsNoOp(t *testing.T) {
+	r := newMarketplaceRig(t)
+	const unknownID = "00000000-0000-0000-0000-000000000000"
+	req := r.req(http.MethodDelete, "/api/marketplace/listings/"+unknownID+"/vote", r.admin, nil)
+	req.SetPathValue("id", unknownID)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, req); rec.Code != http.StatusNoContent {
+		t.Fatalf("unvote unknown id: status = %d, want 204 (idempotent no-op); body=%s", rec.Code, rec.Body.String())
 	}
 }
 
