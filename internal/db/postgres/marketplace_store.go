@@ -187,19 +187,19 @@ func scanListingRowPG(scanFn func(dst ...any) error) (domain.MarketplaceListing,
 	return l, nil
 }
 
-// scanListingSummaryRowPG scans a listingColumnsLPG row plus the three
-// trailing computed columns (vote_count, install_count, viewer_voted) that
-// List/Get append. EventTypes is left nil — callers attach it via
-// fetchEventTypesForListingsPG.
+// scanListingSummaryRowPG scans a listingColumnsLPG row plus the four
+// trailing computed columns (vote_count, install_count, viewer_voted,
+// publisher_team_name) that List/Get append. EventTypes is left nil —
+// callers attach it via fetchEventTypesForListingsPG.
 func scanListingSummaryRowPG(scanFn func(dst ...any) error) (domain.ListingSummary, error) {
 	var sum domain.ListingSummary
-	var publisherTeamID, creatorUserID, sourceID sql.NullString
+	var publisherTeamID, creatorUserID, sourceID, publisherTeamName sql.NullString
 	var delistedAt sql.NullTime
 	var voteCount, installCount, viewerVoted int
 	if err := scanFn(
 		&sum.ID, &sum.OrgID, &sum.Scope, &sum.Kind, &sum.Status, &sum.Name, &sum.Description,
 		&publisherTeamID, &creatorUserID, &sourceID, &sum.CurrentVersion, &sum.CreatedAt, &sum.UpdatedAt, &delistedAt,
-		&voteCount, &installCount, &viewerVoted,
+		&voteCount, &installCount, &viewerVoted, &publisherTeamName,
 	); err != nil {
 		return sum, err
 	}
@@ -218,6 +218,9 @@ func scanListingSummaryRowPG(scanFn func(dst ...any) error) (domain.ListingSumma
 	sum.VoteCount = voteCount
 	sum.InstallCount = installCount
 	sum.ViewerVoted = viewerVoted != 0
+	if publisherTeamName.Valid {
+		sum.PublisherTeamName = publisherTeamName.String
+	}
 	return sum, nil
 }
 
@@ -256,11 +259,13 @@ func fetchEventTypesForListingsPG(ctx context.Context, q queryer, orgID string, 
 const listingSummaryQueryPG = `
 	SELECT ` + listingColumnsLPG + `,
 		COALESCE(v.vote_count, 0), COALESCE(i.install_count, 0),
-		CASE WHEN mv.user_id IS NOT NULL THEN 1 ELSE 0 END
+		CASE WHEN mv.user_id IS NOT NULL THEN 1 ELSE 0 END,
+		pt.name
 	FROM marketplace_listings l
 	LEFT JOIN (SELECT listing_id, COUNT(*) AS vote_count FROM marketplace_votes GROUP BY listing_id) v ON v.listing_id = l.id
 	LEFT JOIN (SELECT listing_id, COUNT(*) AS install_count FROM marketplace_installs GROUP BY listing_id) i ON i.listing_id = l.id
 	LEFT JOIN marketplace_votes mv ON mv.listing_id = l.id AND mv.user_id = $1::uuid
+	LEFT JOIN teams pt ON pt.id = l.publisher_team_id
 `
 
 func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID string, f domain.ListingFilter) ([]domain.ListingSummary, error) {

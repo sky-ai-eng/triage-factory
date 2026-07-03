@@ -102,6 +102,17 @@ export default function Shell() {
                 Prompts
               </NavLink>
             )}
+            {/* Marketplace — within-org prompt/blueprint browse (TFAC-537),
+                multi-mode only (no local route exists). The org's ship-dark
+                marketplace_enabled toggle isn't yet frontend-exposed
+                (TFAC-539 owns that); until then every /api/marketplace/*
+                call 404s server-side for a disabled org, so the page itself
+                degrades gracefully if reached before launch. */}
+            {isMulti && (
+              <NavLink to={orgHref('/marketplace')} className={({ isActive }) => pill(isActive)}>
+                Marketplace
+              </NavLink>
+            )}
             {orgAdmin && (
               <NavLink to={orgHref('/org')} className={({ isActive }) => pill(isActive)}>
                 Org

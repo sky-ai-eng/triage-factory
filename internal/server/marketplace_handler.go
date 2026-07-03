@@ -519,3 +519,122 @@ func (mh *marketplaceHandler) handleMarketplaceListingBySource(w http.ResponseWr
 	}
 	writeJSON(w, http.StatusOK, listing)
 }
+
+// handleMarketplaceList serves the browse page: search + event-type/kind
+// facets, sorted by installs (default) | votes | recent. Any org member may
+// read — RLS on marketplace_listings (published OR own-team-write) scopes
+// what List sees without any additional filtering here; a non-publisher
+// simply never sees another team's delisted listing.
+//
+// GET /api/marketplace/listings?query=&event_type=&kind=&sort=
+func (mh *marketplaceHandler) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := mh.gateMarketplace(w, r)
+	if !ok {
+		return
+	}
+
+	f := domain.ListingFilter{
+		Query:     strings.TrimSpace(r.URL.Query().Get("query")),
+		EventType: strings.TrimSpace(r.URL.Query().Get("event_type")),
+		Kind:      strings.TrimSpace(r.URL.Query().Get("kind")),
+		Sort:      strings.TrimSpace(r.URL.Query().Get("sort")),
+	}
+	if f.Kind != "" && f.Kind != domain.ListingKindPrompt && f.Kind != domain.ListingKindBlueprint {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be 'prompt' or 'blueprint'"})
+		return
+	}
+	if f.Sort != "" && f.Sort != domain.ListingSortInstalls && f.Sort != domain.ListingSortVotes && f.Sort != domain.ListingSortRecent {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sort must be 'installs', 'votes', or 'recent'"})
+		return
+	}
+
+	var listings []domain.ListingSummary
+	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		listings, e = tx.Marketplace.List(r.Context(), orgID, userID, f)
+		return e
+	}); err != nil {
+		internalError(w, "marketplace", err)
+		return
+	}
+	if listings == nil {
+		listings = []domain.ListingSummary{}
+	}
+	writeJSON(w, http.StatusOK, listings)
+}
+
+// handleMarketplaceGet serves the listing detail view: header + counts, the
+// current snapshot (full step/prompt bodies for preview), and version
+// history. Any org member may read, same RLS visibility as List — a listing
+// delisted by another team resolves to 404, not just absent from browse.
+//
+// GET /api/marketplace/listings/{id}
+func (mh *marketplaceHandler) handleMarketplaceGet(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := mh.gateMarketplace(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+
+	var (
+		detail  domain.ListingDetail
+		missing bool
+	)
+	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		detail, e = tx.Marketplace.Get(r.Context(), orgID, id, userID)
+		if errors.Is(e, sql.ErrNoRows) {
+			missing = true
+			return nil
+		}
+		return e
+	}); err != nil {
+		internalError(w, "marketplace", err)
+		return
+	}
+	if missing {
+		notFound(w, "listing")
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// handleMarketplaceVote records the caller's "recommend" vote on a listing.
+// Any org member — no team-write gate, this is a read-adjacent social action,
+// not a publisher-team operation. Idempotent: a repeat vote is a no-op, still
+// 204.
+//
+// PUT /api/marketplace/listings/{id}/vote
+func (mh *marketplaceHandler) handleMarketplaceVote(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := mh.gateMarketplace(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		return tx.Marketplace.Vote(r.Context(), orgID, id, userID)
+	}); err != nil {
+		internalError(w, "marketplace", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleMarketplaceUnvote removes the caller's vote on a listing, if any.
+// Idempotent: removing a vote that doesn't exist is a no-op, still 204.
+//
+// DELETE /api/marketplace/listings/{id}/vote
+func (mh *marketplaceHandler) handleMarketplaceUnvote(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := mh.gateMarketplace(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		return tx.Marketplace.Unvote(r.Context(), orgID, id, userID)
+	}); err != nil {
+		internalError(w, "marketplace", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
