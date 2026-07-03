@@ -324,13 +324,20 @@ func materializeSelfContainedClone(ctx context.Context, bareDir, wtDir, branch, 
 		return fmt.Errorf("checkout %s in run clone: %w", branch, err)
 	}
 
-	// Refresh the base branch's remote-tracking ref in the clone so a
-	// worktree-local diff frames against a current base. Best-effort: a missing
-	// or renamed base must not fail a checkout the head already established.
+	// Bring the base branch's tracking ref into the clone for diff framing.
+	// createPRWorktreeAt refreshed the bare's refs/remotes/origin/<base> from
+	// upstream just before the clone, and the local clone copied the bare's whole
+	// object store — so base's objects are already here and only the ref is
+	// missing (a --single-branch clone doesn't carry the source's remote-tracking
+	// refs). Copy it in locally rather than paying a second network fetch for a
+	// tip the bare already has. Best-effort: if the bare fetch didn't land the
+	// ref, the diff path falls back to the recorded base sha / API.
 	if baseBranch != "" {
-		spec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", baseBranch, baseBranch)
-		if err := gitRunCtxAuth(ctx, wtDir, auth, "fetch", "origin", spec); err != nil {
-			worktreeLog.Warn("refresh base branch in run clone failed; diff frames against recorded base / API", "base", baseBranch, "error", err)
+		baseRef := "refs/remotes/origin/" + baseBranch
+		if sha, err := gitOutputCtx(ctx, bareDir, "rev-parse", "--verify", baseRef); err == nil {
+			if err := gitRunCtx(ctx, wtDir, "update-ref", baseRef, strings.TrimSpace(sha)); err != nil {
+				worktreeLog.Warn("copy base branch ref into run clone failed; diff frames against recorded base / API", "base", baseBranch, "error", err)
+			}
 		}
 	}
 	return nil
@@ -636,7 +643,7 @@ func liveWorktreeBranches(ctx context.Context, bareDir string) map[string]bool {
 // scheme for both: the only difference is pushURL (the fork's clone URL vs the
 // upstream's, which the caller already resolved as headCloneURL). Configures:
 //
-//   - A bare-config remote tfpush-<runID>-<n> -> pushURL. Per (run, PR), not
+//   - A remote tfpush-<runID>-<n> -> pushURL (in gitDir). Per (run, PR), not
 //     per-PR: two concurrent runs on the same PR own separate remotes so one
 //     run's cleanup can reclaim its remote without breaking the other.
 //   - remote.<remoteName>.push as an explicit refspec mapping
@@ -661,15 +668,20 @@ func liveWorktreeBranches(ctx context.Context, bareDir string) map[string]bool {
 //
 // Idempotent: re-running on an already-configured state updates the URL and
 // rewrites config keys to current values.
-func configurePRPushTracking(ctx context.Context, bareDir, runID string, prNumber int, localBranch, pushURL, headBranch string) error {
+//
+// gitDir is where the config is written: the shared bare for the linked-worktree
+// path, or the run's own self-contained clone for the sandboxed multi-mode path
+// (finishSelfContainedPRClone). The per-run namespacing of the remote/branch is
+// load-bearing only for the shared bare — harmless but redundant in a per-run clone.
+func configurePRPushTracking(ctx context.Context, gitDir, runID string, prNumber int, localBranch, pushURL, headBranch string) error {
 	remoteName := prPushRemoteName(runID, prNumber)
 
 	// Add or update the per-run push remote. `git remote add` errors when the
 	// remote already exists; fall through to set-url in that case so repeat
 	// calls (re-delegation, retries) are no-ops on URL match and corrective on
 	// URL drift.
-	if err := gitRunCtx(ctx, bareDir, "remote", "add", remoteName, pushURL); err != nil {
-		if err := gitRunCtx(ctx, bareDir, "remote", "set-url", remoteName, pushURL); err != nil {
+	if err := gitRunCtx(ctx, gitDir, "remote", "add", remoteName, pushURL); err != nil {
+		if err := gitRunCtx(ctx, gitDir, "remote", "set-url", remoteName, pushURL); err != nil {
 			return fmt.Errorf("add or set-url remote %s: %w", remoteName, err)
 		}
 	}
@@ -684,7 +696,7 @@ func configurePRPushTracking(ctx context.Context, bareDir, runID string, prNumbe
 		{"config", fmt.Sprintf("branch.%s.%s", localBranch, trackedBranchMarkerKey), prMarker},
 	}
 	for _, args := range cfgs {
-		if err := gitRunCtx(ctx, bareDir, args...); err != nil {
+		if err := gitRunCtx(ctx, gitDir, args...); err != nil {
 			return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 		}
 	}
