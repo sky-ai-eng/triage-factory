@@ -11,10 +11,12 @@ import type { EventType } from '../types'
 // Within-org prompt marketplace browse page (TFAC-537). Flat searchable list
 // + event-type facets — no folder tree, no free-form tags (TFAC-92's V1
 // scoping decision). Multi-mode only: this page is reachable only via the
-// MultiRoutes route table (nothing in LocalRoutes) and the backend gates
-// every /api/marketplace/* call behind runmode + the org's ship-dark
-// marketplace_enabled toggle, so a disabled org simply 404s the list fetch
-// below rather than needing a client-side flag check.
+// MultiRoutes route table (nothing in LocalRoutes), and the backend's
+// gateMarketplace 404s in local mode only — there is no org-level admin
+// toggle for the within-org marketplace (it's always on for every
+// multi-mode org). org_settings.marketplace_enabled exists but is reserved
+// for the future cross-org marketplace gate (TFAC-92 phase 2 / TFAC-539);
+// it has nothing to do with this page's access.
 
 // Wire shapes mirror domain.ListingSummary / domain.ListingDetail
 // (internal/domain/marketplace.go) — only the fields this page reads.
