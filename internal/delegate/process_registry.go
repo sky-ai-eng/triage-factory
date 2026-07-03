@@ -61,6 +61,34 @@ func ParseMaxConcurrentRuns(raw string) (n int, clamped bool, err error) {
 	return n, false, nil
 }
 
+// DefaultRunMemoryBudgetMB is the planning budget for one concurrent
+// run: the fleet-measured ~155MB marginal cost of the agent engine
+// (read-only engine pages are shared across sandboxes and amortize
+// per-host) plus the node supervisor and transcript-growth headroom.
+// See docs/sandbox-bench.md for the measurements behind it.
+const DefaultRunMemoryBudgetMB = 256
+
+// DefaultPlatformReserveMB is the host memory the capacity rule sets
+// aside for everything that isn't a run: the TF binary, Postgres,
+// GoTrue, the object store, and safety headroom the dispatcher's
+// memory floor defends at runtime.
+const DefaultPlatformReserveMB = 12288
+
+// DerivedRunCapacity applies the sizing rule to a host's MemTotal:
+// runs ≈ (RAM − reserve) ÷ budget, clamped to [0, ceiling]. This is
+// advisory (boot log + over-provision warning) — the runtime
+// protections are the concurrency cap and the dispatch memory floor.
+func DerivedRunCapacity(totalMB int) int {
+	if totalMB <= DefaultPlatformReserveMB {
+		return 0
+	}
+	n := (totalMB - DefaultPlatformReserveMB) / DefaultRunMemoryBudgetMB
+	if n > MaxConcurrentRunsCeiling {
+		return MaxConcurrentRunsCeiling
+	}
+	return n
+}
+
 // DefaultDispatchMemFloorMB is the default MemAvailable floor below
 // which the dispatcher defers claiming queued runs. Sized to the
 // platform reserve the capacity sizing rule assumes (see

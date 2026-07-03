@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
@@ -158,6 +159,7 @@ func (a *App) buildExecution() error {
 	// .env.example for the sizing numbers). Resolved before RunDispatcher
 	// starts — resizing later would strand semaphore tokens.
 	rawMaxConcurrentRuns := os.Getenv("TF_MAX_CONCURRENT_RUNS")
+	capRuns := delegate.DefaultMaxConcurrentRuns
 	if n, clamped, err := delegate.ParseMaxConcurrentRuns(rawMaxConcurrentRuns); err != nil {
 		appLog.Warn("max concurrent runs", "error", err)
 	} else if clamped {
@@ -166,16 +168,21 @@ func (a *App) buildExecution() error {
 		// above the default. Without this, a requested 1000 and an explicitly
 		// set 256 would log identically and the operator sizing for a bigger
 		// host would never see their setting got capped.
+		capRuns = n
 		a.spawner.SetMaxConcurrentRuns(n)
 		appLog.Warn("max concurrent runs requested above sandbox ceiling; clamped", "requested", rawMaxConcurrentRuns, "cap", n)
 	} else if n != delegate.DefaultMaxConcurrentRuns {
+		capRuns = n
 		a.spawner.SetMaxConcurrentRuns(n)
 		appLog.Info("max concurrent runs configured", "cap", n)
 	}
 	// Memory guardrail companion to the cap above: the cap bounds how many
 	// runs may execute, the floor stops new claims when the host is out of
 	// headroom regardless of the cap. Fails open off-Linux and when the
-	// probe can't read /proc/meminfo.
+	// probe can't read /proc/meminfo. Resolved before the capacity warning
+	// below so that warning can say whether the floor is actually armed,
+	// rather than asserting a guardrail that TF_DISPATCH_MEM_FLOOR_MB=0
+	// may have disabled.
 	floor, err := delegate.ParseDispatchMemFloorMB(os.Getenv("TF_DISPATCH_MEM_FLOOR_MB"))
 	a.spawner.SetDispatchMemFloor(floor)
 	if err != nil {
@@ -184,6 +191,30 @@ func (a *App) buildExecution() error {
 		appLog.Info("dispatch memory guardrail disabled (TF_DISPATCH_MEM_FLOOR_MB=0)")
 	} else if floor != delegate.DefaultDispatchMemFloorMB {
 		appLog.Info("dispatch memory floor configured", "floor_mb", floor)
+	}
+	// Advertise what this host's memory supports and flag an over-
+	// provisioned cap at boot, when the operator is watching — a cap the
+	// hardware can never honor deserves a loud line now, not a mystery
+	// throttle under load. Multi mode only: capacity planning is a
+	// deployment concern, and a laptop's numbers are just noise.
+	if runmode.Current() == runmode.ModeMulti {
+		if total := hostmem.TotalMB(); total != hostmem.Unknown {
+			derived := delegate.DerivedRunCapacity(total)
+			appLog.Info("host run capacity",
+				"mem_total_mb", total,
+				"budget_per_run_mb", delegate.DefaultRunMemoryBudgetMB,
+				"platform_reserve_mb", delegate.DefaultPlatformReserveMB,
+				"derived_capacity", derived)
+			if capRuns > derived {
+				msg := "max concurrent runs exceeds derived host capacity; the host may not have enough RAM to run the cap concurrently"
+				if floor > 0 {
+					msg += " (the dispatch memory floor may throttle before the cap is reached, but is not guaranteed to be the first limiter)"
+				} else {
+					msg += " (TF_DISPATCH_MEM_FLOOR_MB=0 — the dispatch memory floor guardrail is disabled)"
+				}
+				appLog.Warn(msg, "cap", capRuns, "derived_capacity", derived, "mem_total_mb", total)
+			}
+		}
 	}
 	a.spawner.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
 	// TFAC-300: the board→Jira lifecycle mirror resolves the org's system/bot
