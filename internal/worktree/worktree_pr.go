@@ -62,28 +62,27 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 // single run can host SEVERAL per-repo / per-PR worktrees as siblings under the
 // shared run-root (the `workspace add --pr` path) — the ref-slug subdir is what
 // lets two PRs in one repo coexist (TFAC-502). The eager one-repo GitHub PR
-// delegation uses the run-dir CreateForPR instead. Other than the path — and
-// the absence of a host clone credential, matching CreateForBranchInRoot —
+// delegation uses the run-dir CreateForPR instead. Other than the path,
 // behavior is identical: same fork / own-repo / deleted-fork handling, same
-// per-run push-tracking config. The run-root must already exist (created by
-// MakeRunRoot in the spawner); the owner/repo subdirs are created here.
+// per-run push-tracking config, same runmode split (local → zero-copy linked
+// worktree; multi → self-contained clone, since the sandbox the run root is
+// mounted into can't see the shared bare). The run-root must already exist
+// (created by MakeRunRoot in the spawner); the owner/repo subdirs are created
+// here.
+//
+// Since TFAC-546 this runs HOST-SIDE in both modes (the agenthost daemon calls
+// it on the sandbox's behalf in multi), so WithCloneAuth is honored exactly as
+// in CreateForPR.
 func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID, runRoot string, opts ...CloneOption) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForPRInRoot: runRoot is required")
 	}
+	cfg := resolveCloneOptions(opts)
 	wtDir := filepath.Join(runRoot, owner, repo, PRRefSlug(prNumber))
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
 		return "", fmt.Errorf("mkdir repo subdir: %w", err)
 	}
-	// Only WithBaseBranch is honored here (the `workspace add --pr` caller passes
-	// the PR's base so the worktree-local diff frames against a current base).
-	// No CloneAuth: this is the in-sandbox path, where in-sandbox git credentials
-	// are SKY-394's concern, not the host-side clone path — the same rationale as
-	// CreateForBranchInRoot, so auth stays zero regardless of opts.
-	// selfContained=false: this is the in-sandbox `workspace add` path, which
-	// can't reach the host bare to clone from it anyway — making in-jail git work
-	// there is a separate workstream. It keeps the worktree, unchanged.
-	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, resolveCloneOptions(opts).baseBranch, prNumber, runID, wtDir, CloneAuth{}, false)
+	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, runID, wtDir, cfg.auth, runmode.Current() == runmode.ModeMulti)
 }
 
 // createPRWorktreeAt is the shared body of CreateForPR / CreateForPRInRoot —

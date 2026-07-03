@@ -8,12 +8,21 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
+
+// sandboxAgentRoot is the sandbox's view of the run root — the bind-mount
+// destination agentproc's sandbox spec puts the run's Cwd at. Mirrors
+// agentproc's sandboxWorkRoot (which itself mirrors sandbox/spec.go). The
+// daemon only ever serves sandboxed callers, so this is unconditionally the
+// agent view its WorkspaceRoots dispatch reports.
+const sandboxAgentRoot = "/work"
 
 // Server is the daemon-side counterpart to IPCClient. One Server per
 // per-run unix socket: the spawner constructs a Server with the run
@@ -163,9 +172,15 @@ func (s *Server) handleConn(conn net.Conn) {
 
 	// The download method streams a log archive and gets a longer budget so a
 	// slow transfer isn't cancelled at callTimeout — mirrors the client cap.
+	// The workspace create runs real git (a first-touch bare clone can take a
+	// couple of minutes on a big repo) and gets its own budget, also mirrored
+	// client-side.
 	dispatchTimeout := callTimeout
-	if req.Method == methodGithubDownloadArtifact {
+	switch req.Method {
+	case methodGithubDownloadArtifact:
 		dispatchTimeout = downloadCallTimeout
+	case methodCreateWorkspaceCheckout:
+		dispatchTimeout = checkoutCallTimeout
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), dispatchTimeout)
 	defer cancel()
@@ -347,6 +362,40 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 			return nil, err
 		}
 		return emptyResult{}, client.DeleteRunWorktreeByRepoRef(ctx, a.RepoID, a.Ref)
+
+	case methodWorkspaceRoots:
+		// The transport IS the namespace boundary: an RPC arriving here came
+		// from inside the sandbox, whose view of the host run root is always
+		// the /work bind mount — so the daemon substitutes that as the agent
+		// view rather than the LocalClient's same-namespace answer.
+		host, _, err := client.WorkspaceRoots(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return workspaceRootsResult{Host: host, Agent: sandboxAgentRoot}, nil
+
+	case methodCreateWorkspaceCheckout:
+		var a createWorkspaceCheckoutArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		path, err := client.CreateWorkspaceCheckout(ctx, a.Owner, a.Repo, a.Ref, a.PR)
+		if err != nil {
+			return nil, err
+		}
+		// The create ran as the host process; hand the subtree to the sandbox
+		// UID or the jailed agent can't write its own checkout. On failure,
+		// remove the checkout so a released reservation can retry the create
+		// cleanly (git clone refuses a non-empty target).
+		hostRoot, _, rerr := client.WorkspaceRoots(ctx)
+		if rerr == nil {
+			rerr = agentproc.ChownWorkspaceCheckoutForSandbox(hostRoot, path)
+		}
+		if rerr != nil {
+			_ = os.RemoveAll(path)
+			return nil, fmt.Errorf("hand checkout to sandbox user: %w", rerr)
+		}
+		return createWorkspaceCheckoutResult{Path: path}, nil
 
 	case methodBuildAgentRunFooter:
 		var a buildAgentRunFooterArgs

@@ -92,13 +92,22 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		return listOutput{}, fmt.Errorf("workspace list: load materialized worktrees: %w", err)
 	}
 
+	// run_worktrees paths are recorded in HOST view (the push gate and the
+	// workspace snapshot read them host-side); the agent needs cd-able paths in
+	// ITS namespace, so translate through the run-root pair (identity in local
+	// mode, /work-prefixed in the sandbox). TFAC-546.
+	hostRoot, agentRoot, err := host.WorkspaceRoots(ctx)
+	if err != nil {
+		return listOutput{}, fmt.Errorf("workspace list: resolve run root: %w", err)
+	}
+
 	materializedSet := make(map[string]struct{}, len(rows))
 	materialized := make([]listMaterialized, 0, len(rows))
 	for _, r := range rows {
 		materializedSet[r.RepoID] = struct{}{}
 		materialized = append(materialized, listMaterialized{
 			Repo: r.RepoID,
-			Path: r.Path,
+			Path: agentViewPath(hostRoot, agentRoot, r.Path),
 			Ref:  r.Ref,
 		})
 	}

@@ -221,6 +221,39 @@ func chownWorktreeForSandbox(worktree string) error {
 	})
 }
 
+// ChownWorkspaceCheckoutForSandbox chowns a checkout materialized into the run
+// root MID-RUN (the agenthost daemon's host-side `workspace add` create,
+// TFAC-546) to the sandbox UID. The run-start chown above already covered the
+// run root, but a later create runs as the host process and would otherwise
+// leave the new subtree unwritable to the jailed agent (EACCES on its own
+// checkout). Covers the checkout recursively plus the owner/repo intermediate
+// directories the create minted between runRoot and it — those must at least
+// be traversable-and-ours so the agent can later add sibling checkouts' mount
+// paths, remove its tree, etc.
+//
+// Same contract as chownWorktreeForSandbox: no-op off Linux, Lchown throughout
+// so a symlinked repo entry can't redirect the chown outside the run root.
+// wtDir outside runRoot is a caller bug and is rejected rather than walked.
+func ChownWorkspaceCheckoutForSandbox(runRoot, wtDir string) error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	rel, err := filepath.Rel(runRoot, wtDir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("checkout %q is not inside run root %q", wtDir, runRoot)
+	}
+	// Intermediate directories, shallow: runRoot/<owner>, runRoot/<owner>/<repo>, ...
+	dir := runRoot
+	segs := strings.Split(rel, string(filepath.Separator))
+	for _, seg := range segs[:len(segs)-1] {
+		dir = filepath.Join(dir, seg)
+		if err := os.Lchown(dir, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
+			return fmt.Errorf("lchown %s: %w", dir, err)
+		}
+	}
+	return chownWorktreeForSandbox(wtDir)
+}
+
 // translateEnvForSandbox rewrites absolute host paths embedded in env
 // var values to their /work-relative sandbox equivalents. The shape
 // matches translateAddDirsForSandbox: same workCwd, same drop-on-

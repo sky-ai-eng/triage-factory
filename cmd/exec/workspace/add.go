@@ -6,42 +6,32 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // addDeps abstracts the side-effecting collaborators of materializeWorkspace
-// so tests can stub the worktree mutations without invoking real git or
-// touching the filesystem. Production wiring uses defaultAddDeps which
-// delegates to the worktree package.
+// so tests can stub the git mutation without invoking real git or touching
+// the filesystem. Production wiring uses defaultAddDeps.
 //
-// Only the worktree-mutating surface is injectable. The agenthost calls
+// Only the checkout-creating surface is injectable. The agenthost calls
 // go through the supplied Client directly because tests construct a
 // LocalClient over an in-memory SQLite db.Stores; mocking the IPC
 // layer would test less of the actual code than exercising LocalClient
 // end-to-end.
 type addDeps struct {
-	// checkout materializes a detached worktree at the fresh tip of an
-	// existing branch (ref==""→the repo's default branch). The default and
-	// --ref paths.
-	checkout func(ctx context.Context, owner, repo, cloneURL, ref, runID, runRoot string) (string, error)
-	// checkoutPR materializes a worktree on a PR head (fork-aware, via the
-	// upstream's refs/pull/<n>/head). The --pr path. opts carries the PR's base
-	// branch (WithBaseBranch) so the worktree-local diff frames against a current
-	// base (TFAC-505).
-	checkoutPR func(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID, runRoot string, opts ...worktree.CloneOption) (string, error)
-	// fetchPR resolves a PR's head ref + clone URLs (host-side) for the --pr
-	// path. Nil in defaultAddDeps; materializeWorkspace wires it to
-	// host.GithubGetPR when unset, so production routes through the agenthost
-	// seam while tests stub a canned PRView without standing up GitHub.
-	fetchPR        func(ctx context.Context, owner, repo string, number int) (*ghclient.PRView, error)
+	// create materializes the checkout for spec into the run's HOST run root
+	// and returns the created path in host view. Nil in defaultAddDeps;
+	// materializeWorkspace wires it to host.CreateWorkspaceCheckout when unset
+	// (TFAC-546: the git work runs host-side in both transports — the daemon
+	// in sandbox mode, in-process in local mode), so tests stub the git
+	// mutation while production routes through the agenthost seam.
+	create         func(ctx context.Context, owner, repo string, spec checkoutSpec) (string, error)
 	removeWorktree func(path, runID string) error
 	statPath       func(path string) (os.FileInfo, error)
 	now            func() time.Time
@@ -49,8 +39,6 @@ type addDeps struct {
 
 func defaultAddDeps() addDeps {
 	return addDeps{
-		checkout:       worktree.CreateForCheckoutInRoot,
-		checkoutPR:     worktree.CreateForPRInRoot,
 		removeWorktree: worktree.RemoveAt,
 		statPath:       os.Stat,
 		now:            time.Now,
@@ -97,33 +85,13 @@ var (
 	errMissingOwnerRepo    = errors.New("workspace add: missing argument; expected owner/repo")
 )
 
-// gitRefPattern restricts a user-supplied --ref to a conservative refname
-// alphabet before it's interpolated into a fetch refspec and passed to git.
-// Uppercase is permitted (branch names routinely carry ticket keys like
-// SKY-220).
-//
-// Blocks: leading dash (interpreted as a git CLI flag), whitespace, shell
-// metacharacters (`;`, `|`, backticks, `$`), refname-illegal characters
-// (`:`, `?`, `*`, `[`, `~`, `^`, `\`, control bytes). The `..` substring is
-// rejected separately — it's lexically allowed by the char class but git
-// refnames forbid it (and it enables path traversal in the worktree dir).
-var gitRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,128}$`)
-
-// validateGitRef rejects a --ref value that the character class lets through but
-// git would refuse at fetch time with an opaque error. Beyond the `..` substring:
-//   - a "refs/" prefix (e.g. "refs/heads/main"), which we'd double up into
-//     "+refs/heads/refs/heads/main:..." → git "couldn't find remote ref";
-//   - a trailing slash (e.g. "feature/"), which git refuses as an illegal
-//     refname.
-//
-// Surfacing these here turns them into a clear "invalid ref" message rather
-// than a confusing fetch failure. Neither is a security concern (git blocks
-// both) — this is purely UX.
+// validateGitRef rejects a --ref value git would refuse (or misparse) at fetch
+// time with an opaque error. The rule itself lives in the worktree package
+// (ValidateCheckoutRef) — the interpolation point, shared with the agenthost
+// RPC surface — this wrapper just maps a violation onto errInvalidRef so the
+// CLI's error identity stays errors.Is-able.
 func validateGitRef(ref string) error {
-	if !gitRefPattern.MatchString(ref) ||
-		strings.Contains(ref, "..") ||
-		strings.HasSuffix(ref, "/") ||
-		strings.HasPrefix(ref, "refs/") {
+	if err := worktree.ValidateCheckoutRef(ref); err != nil {
 		return fmt.Errorf("%w: %q", errInvalidRef, ref)
 	}
 	return nil
@@ -191,6 +159,15 @@ func parseAddArgs(args []string) (ownerRepo string, spec checkoutSpec, err error
 // default branch (detached); --ref checks out a named branch; --pr checks out a
 // PR head (fork-aware). The agent then drives git itself (`git checkout -b ...`)
 // and the push gate authorizes whatever branch the worktree lands on.
+//
+// Two path namespaces (TFAC-546): the git materialization runs HOST-SIDE via
+// host.CreateWorkspaceCheckout — in the sandbox that's the agenthost daemon
+// building into the real host run root, which this process sees bind-mounted
+// at /work. Every durable path (the run_worktrees reservation, the row the
+// push gate and snapshot read) is therefore recorded in HOST view, while every
+// path this process touches (the liveness stat) or returns (the `cd` target on
+// stdout) is the AGENT view. host.WorkspaceRoots supplies both roots; in local
+// mode they're the same string and the translation is the identity.
 //
 // Concurrency: the cross-process serialization point is the
 // run_worktrees PK insert (`InsertRunWorktree`'s INSERT OR IGNORE),
@@ -280,19 +257,26 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	if err != nil {
 		return "", fmt.Errorf("workspace add: lookup existing worktree: %w", err)
 	}
+	// Roots for the dual-view translation below. run_worktrees rows carry the
+	// HOST view; everything this process stats or returns is the AGENT view.
+	hostRoot, agentRoot, err := host.WorkspaceRoots(ctx)
+	if err != nil {
+		return "", fmt.Errorf("workspace add: resolve run root: %w", err)
+	}
+
 	if existing != nil {
-		_, statErr := deps.statPath(existing.Path)
+		_, statErr := deps.statPath(agentViewPath(hostRoot, agentRoot, existing.Path))
 		switch {
 		case statErr == nil:
 			// Path exists on disk — live worktree, return it.
-			return existing.Path, nil
+			return agentViewPath(hostRoot, agentRoot, existing.Path), nil
 		case errors.Is(statErr, os.ErrNotExist):
 			age := deps.now().Sub(existing.CreatedAt)
 			if age < staleReservationAge {
 				// In-flight winner: another invocation reserved the row
 				// and is currently creating the worktree. Return its
 				// path; agent's cd succeeds once the create lands.
-				return existing.Path, nil
+				return agentViewPath(hostRoot, agentRoot, existing.Path), nil
 			}
 			// Stale: reservation outlived its creator without a
 			// completed worktree. Drop and fall through to re-reserve.
@@ -329,20 +313,18 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		return "", fmt.Errorf("%w: %s", errRepoMissingCloneURL, repoID)
 	}
 
-	runRoot := worktree.RunRoot(info.RunID)
-	// Path is deterministic from the InRoot create contract:
-	// filepath.Join(runRoot, owner, repo, ref-slug). The ref-slug subdir is
-	// what lets two PRs (or a PR + a branch) coexist in one repo for one run.
+	// Reserved path is deterministic from the InRoot create contract, in HOST
+	// view: filepath.Join(hostRoot, owner, repo, ref-slug). The ref-slug subdir
+	// is what lets two PRs (or a PR + a branch) coexist in one repo for one run.
 	// Compute it here so we can reserve the row BEFORE the create runs.
 	//
-	// INVARIANT: this must equal the path CreateForCheckoutInRoot /
-	// CreateForPRInRoot will land at — filepath.Join(runRoot, owner, repo,
-	// {worktree.CheckoutRefSlug(spec.ref) | worktree.PRRefSlug(spec.pr)}). It
-	// holds because `ref` here is refForSpec(spec), which calls those same slug
-	// helpers, and createCheckout below passes the RAW spec to the create funcs,
-	// which re-derive the identical slug internally. The divergence check after
-	// the create (gotPath != wtPath) is the backstop if this ever drifts.
-	wtPath := filepath.Join(runRoot, profile.Owner, profile.Repo, ref)
+	// INVARIANT: this must equal the path host.CreateWorkspaceCheckout will
+	// land at — the create derives the same hostRoot via WorkspaceRoots and the
+	// same slug via {worktree.CheckoutRefSlug(spec.ref) | worktree.PRRefSlug(spec.pr)},
+	// which is exactly what refForSpec(spec) produced for `ref` here. The
+	// divergence check after the create (gotPath != wtPath) is the backstop if
+	// this ever drifts.
+	wtPath := filepath.Join(hostRoot, profile.Owner, profile.Repo, ref)
 
 	// Reserve. Two concurrent processes that both reach this point with the
 	// SAME (run, repo, ref) race at the PK; the loser short-circuits before
@@ -361,18 +343,21 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	}
 	if !inserted {
 		// Lost the reservation race. Return the winner's path.
-		return winningPath, nil
+		return agentViewPath(hostRoot, agentRoot, winningPath), nil
 	}
 
-	// Wire the host-side PR fetch for the --pr path unless a test stubbed it.
-	if deps.fetchPR == nil {
-		deps.fetchPR = func(ctx context.Context, owner, repo string, number int) (*ghclient.PRView, error) {
-			return host.GithubGetPR(ctx, owner, repo, number, false)
+	// Wire the host-side create unless a test stubbed it. Production routes
+	// through the agenthost seam: the daemon in sandbox mode (the git work must
+	// run where the shared bare and the real run root live), in-process in
+	// local mode.
+	if deps.create == nil {
+		deps.create = func(ctx context.Context, owner, repo string, spec checkoutSpec) (string, error) {
+			return host.CreateWorkspaceCheckout(ctx, owner, repo, spec.ref, spec.pr)
 		}
 	}
 
-	// We won. Materialize the checkout.
-	gotPath, err := createCheckout(ctx, deps, profile, spec, info.RunID, runRoot)
+	// We won. Materialize the checkout (host-side; returns the HOST view).
+	gotPath, err := deps.create(ctx, profile.Owner, profile.Repo, spec)
 	if err != nil {
 		// Release the reservation so the next attempt can retry.
 		// Delete failures are logged but don't shadow the create error
@@ -383,55 +368,32 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		return "", fmt.Errorf("workspace add: create worktree: %w", err)
 	}
 	if gotPath != wtPath {
-		// The InRoot create contract is to land at
-		// filepath.Join(runRoot, owner, repo, ref-slug); a divergence means the
-		// worktree library changed and our reservation path no longer
-		// matches reality. Surface loudly rather than silently storing
-		// the wrong path.
+		// The create contract is to land at filepath.Join(hostRoot, owner,
+		// repo, ref-slug); a divergence means the create's derivation and our
+		// reservation no longer match. Surface loudly rather than silently
+		// storing the wrong path.
 		workspaceLog.Warn("created path diverges from reserved; investigate", "got_path", gotPath, "reserved_path", wtPath, "run_id", info.RunID, "repo", repoID, "ref", ref)
 	}
 
-	return wtPath, nil
+	return agentViewPath(hostRoot, agentRoot, wtPath), nil
 }
 
-// createCheckout dispatches to the right worktree-materialization path for the
-// spec. For --pr it fetches the PR (host-side) to learn the head branch + fork
-// URL, then routes to the fork-aware CreateForPRInRoot; otherwise it checks out
-// the named ref (or the default branch) detached. Returns raw errors; the
-// caller wraps them with the "create worktree" context and releases the
-// reservation.
-func createCheckout(ctx context.Context, deps addDeps, profile *domain.RepoProfile, spec checkoutSpec, runID, runRoot string) (string, error) {
-	if spec.pr > 0 {
-		pr, err := deps.fetchPR(ctx, profile.Owner, profile.Repo, spec.pr)
-		if err != nil {
-			return "", fmt.Errorf("fetch PR #%d on %s: %w", spec.pr, profile.ID, err)
-		}
-		if pr == nil {
-			return "", fmt.Errorf("PR #%d not found on %s", spec.pr, profile.ID)
-		}
-		upstream, head := prCloneURLs(profile.CloneURL, pr)
-		// WithBaseBranch refreshes origin/<base> so the worktree-local `pr diff`
-		// frames against a current base, not a clone-time-frozen ref (TFAC-505).
-		return deps.checkoutPR(ctx, profile.Owner, profile.Repo, upstream, head, pr.HeadRef, spec.pr, runID, runRoot, worktree.WithBaseBranch(pr.BaseRef))
+// agentViewPath translates a HOST-view path under hostRoot into the calling
+// process's view of the same directory (TFAC-546). In local mode both roots
+// are the same string and this is the identity; in the sandbox the host run
+// root is bind-mounted at agentRoot (/work), so the host prefix is swapped. A
+// path outside hostRoot passes through unchanged — there is nothing to
+// translate it against, and returning it verbatim keeps the failure legible
+// (a stat/cd on it fails loudly rather than pointing somewhere wrong).
+func agentViewPath(hostRoot, agentRoot, p string) string {
+	if hostRoot == agentRoot || p == "" {
+		return p
 	}
-	return deps.checkout(ctx, profile.Owner, profile.Repo, profile.CloneURL, spec.ref, runID, runRoot)
-}
-
-// prCloneURLs derives the (upstream, head) clone URLs to hand CreateForPRInRoot,
-// keeping both in the SAME protocol as the bare's origin (profile.CloneURL) so
-// CreateForPR's own-repo-vs-fork comparison (head != upstream) stays honest and
-// repairOriginURL never flips the bare between SSH and HTTPS. The upstream is
-// always the configured repo's own clone URL — the PR's base is owner/repo by
-// construction. The head is the fork's URL in the matching protocol, or "" for
-// a deleted-fork PR (head.repo == null), which CreateForPR materializes
-// read-only (still reviewable via the upstream's refs/pull/<n>/head).
-func prCloneURLs(originURL string, pr *ghclient.PRView) (upstream, head string) {
-	upstream = originURL
-	if strings.HasPrefix(originURL, "https://") {
-		return upstream, pr.CloneURL
+	rel, err := filepath.Rel(hostRoot, p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return p
 	}
-	// SSH (or any non-HTTPS) origin: match with the SSH head form.
-	return upstream, pr.SSHURL
+	return filepath.Join(agentRoot, rel)
 }
 
 // refForSpec computes the run_worktrees ref for a checkout spec — the

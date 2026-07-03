@@ -284,6 +284,15 @@ func BaseBranchFromOptions(opts ...CloneOption) string {
 	return resolveCloneOptions(opts).baseBranch
 }
 
+// CloneAuthFromOptions resolves the CloneAuth carried by WithCloneAuth in a
+// CloneOption set (the zero CloneAuth when none was supplied). Same rationale
+// as BaseBranchFromOptions: callers' tests assert which credential they wired
+// by comparing against CloneAuthFor's output — CloneAuth is a comparable value
+// — without reaching into the unexported cloneConfig.
+func CloneAuthFromOptions(opts ...CloneOption) CloneAuth {
+	return resolveCloneOptions(opts).auth
+}
+
 func repoDir(owner, repo string) (string, error) {
 	// orgID is the local-default sentinel for now; SKY-406 threads the
 	// real orgID through as it makes this bare cache bounded + evictable.

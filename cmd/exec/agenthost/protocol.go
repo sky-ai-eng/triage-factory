@@ -236,6 +236,31 @@ type deleteRunWorktreeByRepoRefArgs struct {
 	Ref    string `json:"ref"`
 }
 
+// workspaceRootsResult carries the run root's two path-namespace views. The
+// daemon substitutes the sandbox mount point (/work) as Agent; Host is what
+// the host filesystem — and every host-side reader of run_worktrees paths —
+// knows the same directory as. See Client.WorkspaceRoots.
+type workspaceRootsResult struct {
+	Host  string `json:"host"`
+	Agent string `json:"agent"`
+}
+
+// createWorkspaceCheckoutArgs deliberately carries NO clone URLs — the daemon
+// re-derives them from the stored repo profile / its own PR fetch so a
+// sandboxed caller can't steer the host's credential at an arbitrary repo.
+type createWorkspaceCheckoutArgs struct {
+	Owner string `json:"owner"`
+	Repo  string `json:"repo"`
+	Ref   string `json:"ref,omitempty"`
+	PR    int    `json:"pr,omitempty"`
+}
+
+// createWorkspaceCheckoutResult is the created checkout's path in HOST view;
+// the workspace CLI translates it to the agent view for the `cd` it prints.
+type createWorkspaceCheckoutResult struct {
+	Path string `json:"path"`
+}
+
 type buildAgentRunFooterArgs struct {
 	Kind string `json:"kind"`
 }
@@ -597,6 +622,8 @@ const (
 	methodListRunWorktrees           = "ListRunWorktrees"
 	methodInsertRunWorktree          = "InsertRunWorktree"
 	methodDeleteRunWorktreeByRepoRef = "DeleteRunWorktreeByRepoRef"
+	methodWorkspaceRoots             = "WorkspaceRoots"
+	methodCreateWorkspaceCheckout    = "CreateWorkspaceCheckout"
 	methodBuildAgentRunFooter        = "BuildAgentRunFooter"
 
 	methodUpsertArtifact = "UpsertArtifact"
