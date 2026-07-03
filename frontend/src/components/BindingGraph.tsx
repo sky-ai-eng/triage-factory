@@ -472,6 +472,37 @@ function summarizeDeletePlan(plan: DeletePlan): string {
   return parts.join(' and ')
 }
 
+// --- In-flight guard ---
+// Shared reentrancy guard for a mutating canvas gesture. `run` no-ops a second
+// invocation while a prior one from the same hook instance hasn't settled —
+// closing the double-click/double-Enter gap without copy-pasting a ref +
+// try/finally per handler — and `pending` drives the triggering control's
+// disabled + "…ing" affordance. `isPending` is a synchronous read for call
+// sites that reach the same gesture through more than one entry point (e.g.
+// duplicate via Cmd+D, paste, and the box-menu button) and need to bail (with
+// their own feedback, like a toast) before calling `run`.
+function useInFlight() {
+  const inFlightRef = useRef(false)
+  const [pending, setPending] = useState(false)
+  const isPending = useCallback(() => inFlightRef.current, [])
+  const run = useCallback(async (fn: () => Promise<void>) => {
+    if (inFlightRef.current) return
+    inFlightRef.current = true
+    setPending(true)
+    try {
+      await fn()
+    } finally {
+      inFlightRef.current = false
+      setPending(false)
+    }
+  }, [])
+  // Memoized so the returned object's identity only changes when `pending`
+  // itself flips — callbacks that depend on it (and effects downstream of
+  // those callbacks) don't get recreated on every unrelated re-render (a node
+  // drag, a fetch elsewhere on the canvas, ...).
+  return useMemo(() => ({ pending, isPending, run }), [pending, isPending, run])
+}
+
 // --- Inner Graph ---
 
 function BindingGraphInner({
@@ -524,9 +555,6 @@ function BindingGraphInner({
   // when the Delete-key target needs a confirm (any blueprint, or >1 element);
   // the dialog names what's affected and runs executeDeletePlan on confirm.
   const [deleteConfirm, setDeleteConfirm] = useState<DeletePlan | null>(null)
-  // Drives the confirm dialog's in-flight UI (disabled buttons + "Deleting…").
-  // deletingRef is the synchronous re-entrancy guard; this is the render signal.
-  const [isDeleting, setIsDeleting] = useState(false)
   // Persisted layout, keyed per scope (team vs template, and per team) so the
   // canvases don't overwrite each other's node positions. storageKeyRef keeps
   // the key fresh for the save callbacks (which have empty/narrow dep arrays),
@@ -591,12 +619,16 @@ function BindingGraphInner({
   // duplicate so the freshly-pasted copies come back selected and immediately
   // wireable. Read + cleared in the node-build effect.
   const pendingSelectRef = useRef<Set<string>>(new Set())
-  // True while a duplicate request is in flight, so a rapid second gesture (Cmd+D
-  // held, double paste) doesn't race two refetches/selections.
-  const duplicatingRef = useRef(false)
-  // True while a delete batch is in flight, so a held/double Delete (or a
-  // double-click of the confirm dialog's Delete) doesn't dispatch twice.
-  const deletingRef = useRef(false)
+  // In-flight guards for the canvas's mutating gestures. Each gesture gets its
+  // own instance so, e.g., renaming one blueprint doesn't block deleting
+  // another — only repeat invocations of the *same* gesture are coalesced.
+  const duplicateGuard = useInFlight()
+  const renameGuard = useInFlight()
+  const splitGuard = useInFlight()
+  const mergeGuard = useInFlight()
+  const deleteBlueprintGuard = useInFlight()
+  const removeTriggerGuard = useInFlight()
+  const bulkDeleteGuard = useInFlight()
   // Edge reconnection (rule 4): tracks whether a reconnect drag landed on a
   // valid handle. onReconnectStart clears it; onReconnect sets it. If it's still
   // false in onReconnectEnd, the edge was dropped on empty space → detach it.
@@ -769,25 +801,30 @@ function BindingGraphInner({
     async (blueprintId: string, rawName: string) => {
       const name = rawName.trim()
       if (!name) return
-      try {
-        const res = await fetch(`${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name }),
-        })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to rename blueprint'))
-          return
+      await renameGuard.run(async () => {
+        try {
+          const res = await fetch(
+            `${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}`,
+            {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name }),
+            },
+          )
+          if (!res.ok) {
+            toast.error(await readError(res, 'Failed to rename blueprint'))
+            return
+          }
+          setBoxMenu(null)
+          fetchAll()
+        } catch (err) {
+          toast.error(
+            `Failed to rename blueprint: ${err instanceof Error ? err.message : String(err)}`,
+          )
         }
-        setBoxMenu(null)
-        fetchAll()
-      } catch (err) {
-        toast.error(
-          `Failed to rename blueprint: ${err instanceof Error ? err.message : String(err)}`,
-        )
-      }
+      })
     },
-    [template, fetchAll],
+    [template, fetchAll, renameGuard],
   )
 
   // Delete a whole blueprint (server soft-deletes the box + its copy-only step
@@ -844,12 +881,14 @@ function BindingGraphInner({
   // with the popup's inline two-stage confirm). Refetches on success.
   const deleteBlueprint = useCallback(
     async (blueprintId: string) => {
-      if (!(await deleteBlueprintCore(blueprintId))) return
-      setBoxMenu(null)
-      setBoxDeleteConfirm(false)
-      fetchAll()
+      await deleteBlueprintGuard.run(async () => {
+        if (!(await deleteBlueprintCore(blueprintId))) return
+        setBoxMenu(null)
+        setBoxDeleteConfirm(false)
+        fetchAll()
+      })
     },
-    [deleteBlueprintCore, fetchAll],
+    [deleteBlueprintCore, fetchAll, deleteBlueprintGuard],
   )
 
   // Run a resolved deletion plan: blueprints first (their cascade removes member
@@ -860,37 +899,34 @@ function BindingGraphInner({
   // One refetch at the end reconciles the canvas with server state.
   const executeDeletePlan = useCallback(
     async (plan: DeletePlan) => {
-      if (deletingRef.current) return
-      deletingRef.current = true
-      setIsDeleting(true)
-      try {
-        for (const bp of plan.blueprints) {
-          await deleteBlueprintCore(bp.id)
-        }
-        const byBlueprint = new Map<string, DeletePlan['prompts']>()
-        for (const p of plan.prompts) {
-          const arr = byBlueprint.get(p.blueprintId)
-          if (arr) arr.push(p)
-          else byBlueprint.set(p.blueprintId, [p])
-        }
-        let orphaned = false
-        for (const group of byBlueprint.values()) {
-          for (const p of [...group].sort((a, b) => b.stepIndex - a.stepIndex)) {
-            const r = await deletePromptCore(p.id)
-            if (r.orphaned) orphaned = true
+      await bulkDeleteGuard.run(async () => {
+        try {
+          for (const bp of plan.blueprints) {
+            await deleteBlueprintCore(bp.id)
           }
+          const byBlueprint = new Map<string, DeletePlan['prompts']>()
+          for (const p of plan.prompts) {
+            const arr = byBlueprint.get(p.blueprintId)
+            if (arr) arr.push(p)
+            else byBlueprint.set(p.blueprintId, [p])
+          }
+          let orphaned = false
+          for (const group of byBlueprint.values()) {
+            for (const p of [...group].sort((a, b) => b.stepIndex - a.stepIndex)) {
+              const r = await deletePromptCore(p.id)
+              if (r.orphaned) orphaned = true
+            }
+          }
+          if (orphaned) {
+            toast.info('Steps after a deleted prompt are now an untriggered blueprint.')
+          }
+        } finally {
+          setDeleteConfirm(null)
+          await fetchAll()
         }
-        if (orphaned) {
-          toast.info('Steps after a deleted prompt are now an untriggered blueprint.')
-        }
-      } finally {
-        deletingRef.current = false
-        setIsDeleting(false)
-        setDeleteConfirm(null)
-        await fetchAll()
-      }
+      })
     },
-    [deleteBlueprintCore, deletePromptCore, fetchAll],
+    [deleteBlueprintCore, deletePromptCore, fetchAll, bulkDeleteGuard],
   )
 
   // Recompute the procedural boxes from the current member node geometry. A box
@@ -1265,27 +1301,29 @@ function BindingGraphInner({
       // Merge the trigger-less downstream chain onto this tail. The atomic
       // endpoint exists at both scopes (team + org template), so the URL is
       // scope-derived like every other call.
-      try {
-        const res = await fetch(
-          `${blueprintsBase(template)}/${encodeURIComponent(plan.host)}/merge`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ source_blueprint_id: plan.source }),
-          },
-        )
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to merge blueprints'))
-          return
+      await mergeGuard.run(async () => {
+        try {
+          const res = await fetch(
+            `${blueprintsBase(template)}/${encodeURIComponent(plan.host)}/merge`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ source_blueprint_id: plan.source }),
+            },
+          )
+          if (!res.ok) {
+            toast.error(await readError(res, 'Failed to merge blueprints'))
+            return
+          }
+          fetchAll()
+        } catch (err) {
+          toast.error(
+            `Failed to merge blueprints: ${err instanceof Error ? err.message : String(err)}`,
+          )
         }
-        fetchAll()
-      } catch (err) {
-        toast.error(
-          `Failed to merge blueprints: ${err instanceof Error ? err.message : String(err)}`,
-        )
-      }
+      })
     },
-    [scopeReady, template, teamId, fetchAll],
+    [scopeReady, template, teamId, fetchAll, mergeGuard],
   )
 
   // Deep-copy a flat set of prompt ids into new trigger-less blueprint(s) via the
@@ -1302,7 +1340,7 @@ function BindingGraphInner({
       // Serialize duplications: a second Cmd+D / paste before the first fetchAll
       // resolves would race two refetches + pendingSelect writes (last-resolved
       // wins the selection). The guard makes the gesture a no-op while in flight.
-      if (duplicatingRef.current) {
+      if (duplicateGuard.isPending()) {
         toast.info('Duplication in progress…')
         return
       }
@@ -1312,66 +1350,65 @@ function BindingGraphInner({
         promptToBlueprintRef.current,
       )
       if (origOrdered.length === 0) return
-      duplicatingRef.current = true
-      // Team scope stamps the acting team; template scope is org-scoped.
-      const body: Record<string, unknown> = { prompt_ids: origOrdered }
-      if (!template) body.team_id = teamId
-      try {
-        const res = await fetch(`${blueprintsBase(template)}/duplicate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to duplicate'))
-          return
-        }
-        const created = (await res.json()) as { blueprint: Blueprint; steps: BlueprintStep[] }[]
-        // Flatten the returned steps in the endpoint's order (blueprints as
-        // returned, steps by step_index); this aligns 1:1 with origOrdered.
-        const newOrdered: string[] = []
-        for (const bp of created) {
-          for (const s of [...bp.steps].sort((a, b) => a.step_index - b.step_index)) {
-            newOrdered.push(s.step_prompt_id)
+      await duplicateGuard.run(async () => {
+        // Team scope stamps the acting team; template scope is org-scoped.
+        const body: Record<string, unknown> = { prompt_ids: origOrdered }
+        if (!template) body.team_id = teamId
+        try {
+          const res = await fetch(`${blueprintsBase(template)}/duplicate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          })
+          if (!res.ok) {
+            toast.error(await readError(res, 'Failed to duplicate'))
+            return
           }
-        }
-        // The position map relies on origOrdered[k] ↔ newOrdered[k]. A length
-        // mismatch (e.g. a prompt deleted between copy and paste, so the endpoint
-        // partitions a smaller set) means the tail copies fall back to the default
-        // grid; warn rather than seed positions against misaligned indices.
-        if (newOrdered.length !== origOrdered.length) {
-          console.warn(
-            `BindingGraph duplicate: expected ${origOrdered.length} copies, got ${newOrdered.length} — placement seeded only for the aligned prefix`,
-          )
-        }
-        // Pre-seed each copy's layout position at its original + offset so it
-        // renders offset (and distinct) on the refetch rather than at the default
-        // grid spot. Original position comes from the live node (most current,
-        // including unsaved drags), falling back to the persisted layout.
-        const layout = layoutRef.current
-        const n = Math.min(origOrdered.length, newOrdered.length)
-        for (let k = 0; k < n; k++) {
-          const origNode = nodesRef.current.find((nd) => nd.id === `p:${origOrdered[k]}`)
-          const origPos = origNode?.position ?? layout.promptPositions[origOrdered[k]]
-          if (origPos) {
-            layout.promptPositions[newOrdered[k]] = {
-              x: origPos.x + DUP_OFFSET,
-              y: origPos.y + DUP_OFFSET,
+          const created = (await res.json()) as { blueprint: Blueprint; steps: BlueprintStep[] }[]
+          // Flatten the returned steps in the endpoint's order (blueprints as
+          // returned, steps by step_index); this aligns 1:1 with origOrdered.
+          const newOrdered: string[] = []
+          for (const bp of created) {
+            for (const s of [...bp.steps].sort((a, b) => a.step_index - b.step_index)) {
+              newOrdered.push(s.step_prompt_id)
             }
           }
+          // The position map relies on origOrdered[k] ↔ newOrdered[k]. A length
+          // mismatch (e.g. a prompt deleted between copy and paste, so the endpoint
+          // partitions a smaller set) means the tail copies fall back to the default
+          // grid; warn rather than seed positions against misaligned indices.
+          if (newOrdered.length !== origOrdered.length) {
+            console.warn(
+              `BindingGraph duplicate: expected ${origOrdered.length} copies, got ${newOrdered.length} — placement seeded only for the aligned prefix`,
+            )
+          }
+          // Pre-seed each copy's layout position at its original + offset so it
+          // renders offset (and distinct) on the refetch rather than at the default
+          // grid spot. Original position comes from the live node (most current,
+          // including unsaved drags), falling back to the persisted layout.
+          const layout = layoutRef.current
+          const n = Math.min(origOrdered.length, newOrdered.length)
+          for (let k = 0; k < n; k++) {
+            const origNode = nodesRef.current.find((nd) => nd.id === `p:${origOrdered[k]}`)
+            const origPos = origNode?.position ?? layout.promptPositions[origOrdered[k]]
+            if (origPos) {
+              layout.promptPositions[newOrdered[k]] = {
+                x: origPos.x + DUP_OFFSET,
+                y: origPos.y + DUP_OFFSET,
+              }
+            }
+          }
+          saveLayout(storageKeyRef.current, layout)
+          pendingSelectRef.current = new Set(newOrdered)
+          await fetchAll()
+          const count = newOrdered.length
+          toast.success(`Duplicated ${count} prompt${count === 1 ? '' : 's'}`)
+        } catch (err) {
+          toast.error(`Failed to duplicate: ${err instanceof Error ? err.message : String(err)}`)
         }
-        saveLayout(storageKeyRef.current, layout)
-        pendingSelectRef.current = new Set(newOrdered)
-        await fetchAll()
-        const count = newOrdered.length
-        toast.success(`Duplicated ${count} prompt${count === 1 ? '' : 's'}`)
-      } catch (err) {
-        toast.error(`Failed to duplicate: ${err instanceof Error ? err.message : String(err)}`)
-      } finally {
-        duplicatingRef.current = false
-      }
+      })
     },
-    [scopeReady, template, teamId, fetchAll],
+    [scopeReady, template, teamId, fetchAll, duplicateGuard],
   )
 
   // The currently-selected prompt nodes' prompt ids (event nodes are
@@ -1408,10 +1445,10 @@ function BindingGraphInner({
     const clip = clipboardRef.current
     if (!clip || clip.promptIds.length === 0) return false
     if (clip.scopeKey !== storageKeyRef.current) return false
-    if (duplicatingRef.current) return false
+    if (duplicateGuard.isPending()) return false
     void duplicatePromptIds(clip.promptIds)
     return true
-  }, [duplicatePromptIds])
+  }, [duplicatePromptIds, duplicateGuard])
 
   // Keyboard duplication gestures. Window-level (the canvas has no single focus
   // target), guarded so typing Cmd+C/D/V in an input/textarea/contenteditable —
@@ -1458,52 +1495,58 @@ function BindingGraphInner({
 
   const doDeleteTrigger = useCallback(
     async (triggerId: string) => {
-      // Capture trigger info before deletion for the forgiving banner callback.
-      const deleted = triggersRef.current.find((t) => t.id === triggerId)
-      try {
-        const res = await fetch(`${handlersBase(template)}/${encodeURIComponent(triggerId)}`, {
-          method: 'DELETE',
-        })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to remove trigger'))
-          return
+      await removeTriggerGuard.run(async () => {
+        // Capture trigger info before deletion for the forgiving banner callback.
+        const deleted = triggersRef.current.find((t) => t.id === triggerId)
+        try {
+          const res = await fetch(`${handlersBase(template)}/${encodeURIComponent(triggerId)}`, {
+            method: 'DELETE',
+          })
+          if (!res.ok) {
+            toast.error(await readError(res, 'Failed to remove trigger'))
+            return
+          }
+          await fetchAll()
+          // Notify parent so it can check coverage and show the forgiving banner.
+          if (deleted) {
+            onTriggerDeletedRef.current?.(deleted.event_type)
+          }
+        } catch (err) {
+          toast.error(
+            `Failed to remove trigger: ${err instanceof Error ? err.message : String(err)}`,
+          )
         }
-        await fetchAll()
-        // Notify parent so it can check coverage and show the forgiving banner.
-        if (deleted) {
-          onTriggerDeletedRef.current?.(deleted.event_type)
-        }
-      } catch (err) {
-        toast.error(`Failed to remove trigger: ${err instanceof Error ? err.message : String(err)}`)
-      }
+      })
     },
-    [fetchAll, template],
+    [fetchAll, template, removeTriggerGuard],
   )
 
   // Split the blueprint before the given step index. Available at both scopes.
   const doSplit = useCallback(
     async (blueprintId: string, atStepIndex: number) => {
-      try {
-        const res = await fetch(
-          `${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}/split`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ at_step_index: atStepIndex }),
-          },
-        )
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to split blueprint'))
-          return
+      await splitGuard.run(async () => {
+        try {
+          const res = await fetch(
+            `${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}/split`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ at_step_index: atStepIndex }),
+            },
+          )
+          if (!res.ok) {
+            toast.error(await readError(res, 'Failed to split blueprint'))
+            return
+          }
+          fetchAll()
+        } catch (err) {
+          toast.error(
+            `Failed to split blueprint: ${err instanceof Error ? err.message : String(err)}`,
+          )
         }
-        fetchAll()
-      } catch (err) {
-        toast.error(
-          `Failed to split blueprint: ${err instanceof Error ? err.message : String(err)}`,
-        )
-      }
+      })
     },
-    [template, fetchAll],
+    [template, fetchAll, splitGuard],
   )
 
   // --- Edge reconnection (rule 4: drag an arrow's head onto a new target) ---
@@ -1685,7 +1728,7 @@ function BindingGraphInner({
     async ({ nodes }: { nodes: Node[]; edges: Edge[] }): Promise<boolean> => {
       // A delete is mid-run, or the confirm dialog is already open for a prior
       // press (the focused buttons don't filter Delete/Backspace) — ignore.
-      if (deletingRef.current || deleteConfirmRef.current) return false
+      if (bulkDeleteGuard.isPending() || deleteConfirmRef.current) return false
       const blueprintIds = new Set<string>()
       const blueprints: DeletePlan['blueprints'] = []
       for (const n of nodes) {
@@ -1724,7 +1767,7 @@ function BindingGraphInner({
       }
       return false
     },
-    [executeDeletePlan],
+    [executeDeletePlan, bulkDeleteGuard],
   )
 
   // Escape cancels the confirm dialog (modal convention), unless a delete is
@@ -1733,11 +1776,11 @@ function BindingGraphInner({
   useEffect(() => {
     if (!deleteConfirm) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !deletingRef.current) setDeleteConfirm(null)
+      if (e.key === 'Escape' && !bulkDeleteGuard.isPending()) setDeleteConfirm(null)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [deleteConfirm])
+  }, [deleteConfirm, bulkDeleteGuard])
 
   // Trap keyboard focus inside the confirm dialog and restore it to the
   // trigger on close (WCAG 2.1.2). Initial focus lands on Cancel — the
@@ -1865,13 +1908,14 @@ function BindingGraphInner({
                   Edit trigger config
                 </button>
                 <button
-                  onClick={() => {
-                    doDeleteTrigger(edgeMenu.trigger.id)
+                  onClick={async () => {
+                    await doDeleteTrigger(edgeMenu.trigger.id)
                     setEdgeMenu(null)
                   }}
-                  className="w-full text-left text-[12px] text-red-500 hover:bg-red-50 font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+                  disabled={removeTriggerGuard.pending}
+                  className="w-full text-left text-[12px] text-red-500 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-medium px-2.5 py-1.5 rounded-lg transition-colors"
                 >
-                  Remove trigger
+                  {removeTriggerGuard.pending ? 'Removing…' : 'Remove trigger'}
                 </button>
               </>
             ) : (
@@ -1880,13 +1924,14 @@ function BindingGraphInner({
                   Split into two blueprints at this boundary.
                 </div>
                 <button
-                  onClick={() => {
-                    doSplit(edgeMenu.blueprintId, edgeMenu.atStepIndex)
+                  onClick={async () => {
+                    await doSplit(edgeMenu.blueprintId, edgeMenu.atStepIndex)
                     setEdgeMenu(null)
                   }}
-                  className="w-full text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-black/[0.04] font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+                  disabled={splitGuard.pending}
+                  className="w-full text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-black/[0.04] disabled:opacity-40 disabled:cursor-not-allowed font-medium px-2.5 py-1.5 rounded-lg transition-colors"
                 >
-                  Split here
+                  {splitGuard.pending ? 'Splitting…' : 'Split here'}
                 </button>
               </>
             )}
@@ -1924,17 +1969,19 @@ function BindingGraphInner({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') saveBoxName(boxMenu.blueprintId, boxNameDraft)
                 }}
-                className="flex-1 min-w-0 px-2 py-1 rounded-md border border-border-subtle bg-white/60 text-[12px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+                disabled={renameGuard.pending}
+                className="flex-1 min-w-0 px-2 py-1 rounded-md border border-border-subtle bg-white/60 text-[12px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 disabled:opacity-60 transition-colors"
               />
               <button
                 onClick={() => saveBoxName(boxMenu.blueprintId, boxNameDraft)}
                 disabled={
+                  renameGuard.pending ||
                   !boxNameDraft.trim() ||
                   boxNameDraft.trim() === (blueprintNames[boxMenu.blueprintId] ?? '')
                 }
                 className="text-[11px] font-semibold text-white bg-accent hover:bg-accent/90 disabled:opacity-40 px-2.5 py-1 rounded-md transition-colors"
               >
-                Save
+                {renameGuard.pending ? 'Saving…' : 'Save'}
               </button>
             </div>
             <div className="text-[11px] text-text-tertiary mb-2.5">
@@ -2008,15 +2055,17 @@ function BindingGraphInner({
                   <div className="flex items-center gap-1.5">
                     <button
                       onClick={() => setBoxDeleteConfirm(false)}
-                      className="flex-1 text-[11px] font-medium text-text-secondary hover:text-text-primary px-2.5 py-1 rounded-md border border-border-subtle transition-colors"
+                      disabled={deleteBlueprintGuard.pending}
+                      className="flex-1 text-[11px] font-medium text-text-secondary hover:text-text-primary disabled:opacity-50 px-2.5 py-1 rounded-md border border-border-subtle transition-colors"
                     >
                       Cancel
                     </button>
                     <button
                       onClick={() => void deleteBlueprint(boxMenu.blueprintId)}
-                      className="flex-1 text-[11px] font-semibold text-white bg-red-500 hover:bg-red-600 px-2.5 py-1 rounded-md transition-colors"
+                      disabled={deleteBlueprintGuard.pending}
+                      className="flex-1 text-[11px] font-semibold text-white bg-red-500 hover:bg-red-600 disabled:opacity-60 px-2.5 py-1 rounded-md transition-colors"
                     >
-                      Delete
+                      {deleteBlueprintGuard.pending ? 'Deleting…' : 'Delete'}
                     </button>
                   </div>
                 </div>
@@ -2041,7 +2090,7 @@ function BindingGraphInner({
           <div
             className="fixed inset-0 z-[60] bg-black/20"
             onClick={() => {
-              if (!isDeleting) setDeleteConfirm(null)
+              if (!bulkDeleteGuard.pending) setDeleteConfirm(null)
             }}
           />
           <div
@@ -2088,17 +2137,17 @@ function BindingGraphInner({
               <button
                 ref={deleteCancelRef}
                 onClick={() => setDeleteConfirm(null)}
-                disabled={isDeleting}
+                disabled={bulkDeleteGuard.pending}
                 className="text-[11px] font-medium text-text-secondary hover:text-text-primary disabled:opacity-50 px-3 py-1.5 rounded-md border border-border-subtle transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={() => void executeDeletePlan(deleteConfirm)}
-                disabled={isDeleting}
+                disabled={bulkDeleteGuard.pending}
                 className="text-[11px] font-semibold text-white bg-red-500 hover:bg-red-600 disabled:opacity-60 px-3 py-1.5 rounded-md transition-colors"
               >
-                {isDeleting ? 'Deleting…' : 'Delete'}
+                {bulkDeleteGuard.pending ? 'Deleting…' : 'Delete'}
               </button>
             </div>
           </div>
