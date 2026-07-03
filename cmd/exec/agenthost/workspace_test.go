@@ -326,6 +326,33 @@ func TestLocalClient_CreateWorkspaceCheckout_PRPath(t *testing.T) {
 	}
 }
 
+// TestStrictlyWithin pins the guard on the daemon's create-cleanup RemoveAll:
+// destructive recovery after a chown failure must be provably scoped to a
+// strict descendant of the run root. One chown failure mode is exactly "this
+// path is outside the run root" (a regressed create contract) — an unguarded
+// RemoveAll there would delete an arbitrary host path.
+func TestStrictlyWithin(t *testing.T) {
+	cases := []struct {
+		root, path string
+		want       bool
+	}{
+		{"/tmp/runs/r1", "/tmp/runs/r1/o/r/@default", true},
+		{"/tmp/runs/r1", "/tmp/runs/r1/x", true},
+
+		{"/tmp/runs/r1", "/tmp/runs/r1", false},         // the root itself is never removable
+		{"/tmp/runs/r1", "/tmp/runs/r2/o", false},       // sibling
+		{"/tmp/runs/r1", "/etc/passwd", false},          // arbitrary host path
+		{"/tmp/runs/r1", "/tmp/runs/r1/../r2/o", false}, // lexical escape
+		{"", "/tmp/runs/r1/o", false},                   // unknown root → never remove
+		{"/tmp/runs/r1", "", false},
+	}
+	for _, c := range cases {
+		if got := strictlyWithin(c.root, c.path); got != c.want {
+			t.Errorf("strictlyWithin(%q, %q) = %v, want %v", c.root, c.path, got, c.want)
+		}
+	}
+}
+
 // TestLocalClient_CreateWorkspaceCheckout_CreateErrorPropagates pins that a
 // create failure surfaces to the caller (which releases its reservation).
 func TestLocalClient_CreateWorkspaceCheckout_CreateErrorPropagates(t *testing.T) {

@@ -154,8 +154,10 @@ var checkoutRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,128}$
 
 // ValidateCheckoutRef rejects a branch ref that a checkout entry point would
 // otherwise interpolate into a fetch refspec: anything outside the conservative
-// alphabet above, the `..` substring, a trailing slash (git refuses it as an
-// illegal refname), and a "refs/" prefix (we'd double it up into
+// alphabet above, plus the shapes the alphabet admits but git-check-ref-format
+// still refuses — the `..` substring, a trailing slash or dot, an empty
+// component (consecutive slashes), a component starting with "." or ending in
+// ".lock" — and a "refs/" prefix (we'd double it up into
 // "+refs/heads/refs/heads/..." → an opaque "couldn't find remote ref").
 //
 // Lives here — rather than only in the workspace CLI's argv parsing — because
@@ -166,8 +168,14 @@ func ValidateCheckoutRef(ref string) error {
 	if !checkoutRefPattern.MatchString(ref) ||
 		strings.Contains(ref, "..") ||
 		strings.HasSuffix(ref, "/") ||
+		strings.HasSuffix(ref, ".") ||
 		strings.HasPrefix(ref, "refs/") {
 		return fmt.Errorf("invalid git ref %q", ref)
+	}
+	for _, comp := range strings.Split(ref, "/") {
+		if comp == "" || strings.HasPrefix(comp, ".") || strings.HasSuffix(comp, ".lock") {
+			return fmt.Errorf("invalid git ref %q", ref)
+		}
 	}
 	return nil
 }

@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +18,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
+
+// strictlyWithin reports whether path is a strict descendant of root — not
+// root itself, not a sibling, not an escape via "..", and not anything when
+// root is empty. Gate for the create-cleanup RemoveAll above: destructive
+// recovery must be provably scoped to the run root.
+func strictlyWithin(root, path string) bool {
+	if root == "" || path == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
 
 // sandboxAgentRoot is the sandbox's view of the run root — the bind-mount
 // destination agentproc's sandbox spec puts the run's Cwd at. Mirrors
@@ -386,13 +403,21 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		// The create ran as the host process; hand the subtree to the sandbox
 		// UID or the jailed agent can't write its own checkout. On failure,
 		// remove the checkout so a released reservation can retry the create
-		// cleanly (git clone refuses a non-empty target).
+		// cleanly (git clone refuses a non-empty target) — but ONLY when the
+		// path is provably a strict descendant of the run root. One chown
+		// failure mode is precisely "this path is not inside the run root"
+		// (a regressed create contract), and RemoveAll on an unverified path
+		// would turn that bug into deleting an arbitrary host directory.
 		hostRoot, _, rerr := client.WorkspaceRoots(ctx)
 		if rerr == nil {
 			rerr = agentproc.ChownWorkspaceCheckoutForSandbox(hostRoot, path)
 		}
 		if rerr != nil {
-			_ = os.RemoveAll(path)
+			if strictlyWithin(hostRoot, path) {
+				_ = os.RemoveAll(path)
+			} else {
+				agenthostLog.Warn("leaving un-chowned checkout in place; path is not verifiably inside the run root", "path", path, "host_root", hostRoot)
+			}
 			return nil, fmt.Errorf("hand checkout to sandbox user: %w", rerr)
 		}
 		return createWorkspaceCheckoutResult{Path: path}, nil
