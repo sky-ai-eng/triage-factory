@@ -8,7 +8,33 @@ import (
 
 	"github.com/google/uuid"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// publishBlueprintAsTeamWriter mirrors publishAsTeamWriter (marketplace_test.go)
+// but publishes a kind=blueprint listing with a blueprint snapshot —
+// publishAsTeamWriter hardcodes Kind: domain.ListingKindPrompt and a prompt
+// snapshot, which would leave the listing's own kind column mismatched
+// against a later kind=blueprint MaterializeListing call (the aggregation
+// query's WHERE l.kind = 'blueprint' would then never match the listing at
+// all).
+func publishBlueprintAsTeamWriter(t *testing.T, h *Harness, orgID, userID, teamID, name string) string {
+	t.Helper()
+	var id string
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		got, err := pgstore.NewForTx(tx, SecretKey).Marketplace.Publish(t.Context(), orgID, domain.MarketplaceListing{
+			Kind: domain.ListingKindBlueprint, Name: name, Description: "stats fixture", PublisherTeamID: teamID,
+		}, marketplaceBlueprintSnapshot(name))
+		if err != nil {
+			return err
+		}
+		id = got
+		return nil
+	}); err != nil {
+		t.Fatalf("publish blueprint %q as %s on team %s: %v", name, userID, teamID, err)
+	}
+	return id
+}
 
 // seedMarketplaceStatsTask inserts the minimal entity+event+task chain a
 // runs/blueprint_runs row needs (both carry a NOT NULL task_id, and
@@ -112,7 +138,10 @@ func TestMarketplaceStats_PromptAggregation_TwoTeamsAndDeletedCopy(t *testing.T)
 
 	taskB := seedMarketplaceStatsTask(t, h, orgA, bob, teamB)
 	taskC := seedMarketplaceStatsTask(t, h, orgA, carol, teamC)
-	base := time.Now().UTC().Add(-24 * time.Hour)
+	// Truncated to microsecond precision: Postgres timestamptz has no finer
+	// resolution, so a nanosecond-precision time.Now() would never compare
+	// equal after the round trip through the stats row.
+	base := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Microsecond)
 	seedPromptRun(t, h, orgA, bob, teamB, taskB, teamBPromptID, "completed", base)
 	seedPromptRun(t, h, orgA, bob, teamB, taskB, teamBPromptID, "failed", base.Add(time.Hour))
 	latestRunAt := base.Add(2 * time.Hour)
@@ -176,7 +205,7 @@ func TestMarketplaceStats_BlueprintAggregation(t *testing.T) {
 	bob := SeedUser(t, h, "bob")
 	AddOrgMember(t, h, bob, orgA, teamB, "member", "admin")
 
-	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Stats Blueprint", "")
+	listingID := publishBlueprintAsTeamWriter(t, h, orgA, alice, teamA, "Stats Blueprint")
 	snap := marketplaceBlueprintSnapshot("Stats Blueprint")
 
 	var rootBlueprintID string
