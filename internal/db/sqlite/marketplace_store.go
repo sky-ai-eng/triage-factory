@@ -67,3 +67,7 @@ func (s *marketplaceStore) RecordInstall(context.Context, string, string, int, s
 func (s *marketplaceStore) MaterializeListing(context.Context, string, string, domain.ListingSnapshot, string, int, string) (string, []string, error) {
 	return "", nil, db.ErrNotApplicableInLocal
 }
+
+func (s *marketplaceStore) RecomputeStatsSystem(context.Context, string) error {
+	return db.ErrNotApplicableInLocal
+}

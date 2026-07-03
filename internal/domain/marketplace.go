@@ -24,6 +24,9 @@ const (
 	ListingSortInstalls = "installs"
 	ListingSortVotes    = "votes"
 	ListingSortRecent   = "recent"
+	// ListingSortMostUsed sorts by ListingStats.TotalRuns — the run-derived
+	// usage signal (TFAC-540), alongside installs/votes/recent.
+	ListingSortMostUsed = "used"
 )
 
 // ListingSnapshotSchemaVersion is the only ListingSnapshot.SchemaVersion V1
@@ -146,6 +149,30 @@ type ListingSummary struct {
 	// name, unlike the caller-scoped /api/teams list. Empty when
 	// PublisherTeamID is "" (the publishing team was later deleted).
 	PublisherTeamName string `json:"publisher_team_name,omitempty"`
+	// Stats is the TFAC-540 run-derived aggregate, nil until
+	// MarketplaceStore.RecomputeStatsSystem has computed it at least once for
+	// this listing (a freshly published listing has no row yet). Per the
+	// no-wrong-fallbacks rule, callers must not synthesize a zero-value
+	// block when this is nil — a listing with no stats yet shows nothing,
+	// not "0 teams · 0 runs".
+	Stats *ListingStats `json:"stats,omitempty"`
+}
+
+// ListingStats is the marketplace_listing_stats row for one listing —
+// aggregated run activity across every copy installed from it (TFAC-540).
+// TeamsUsing counts only installing teams whose copy still exists
+// (prompts/blueprints.deleted_at IS NULL); TotalRuns/SuccessRate/LastRunAt
+// count every run ever recorded against any copy, including ones whose copy
+// was later deleted (root_object_id survives deletion on the install row —
+// see MarketplaceStore.RecordInstall) — so a listing's lifetime usage never
+// drops just because a consumer cleaned up their copy.
+type ListingStats struct {
+	TeamsUsing int `json:"teams_using"`
+	TotalRuns  int `json:"total_runs"`
+	// SuccessRate is nil when TotalRuns is 0 — never a fake 0%.
+	SuccessRate *float64   `json:"success_rate,omitempty"`
+	LastRunAt   *time.Time `json:"last_run_at,omitempty"`
+	ComputedAt  time.Time  `json:"computed_at"`
 }
 
 // ListingDetail is the full single-listing view: the summary (header +

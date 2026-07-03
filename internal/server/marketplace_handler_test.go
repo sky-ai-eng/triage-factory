@@ -125,6 +125,18 @@ func (r *marketplaceRig) seedInstall(t *testing.T, listingID, teamID, userID str
 	`, listingID, r.orgID, teamID, userID)
 }
 
+// seedStats writes a marketplace_listing_stats row directly (bypassing
+// RecomputeStatsSystem — that aggregation is pinned at the pgtest layer,
+// internal/db/pgtest/marketplace_stats_test.go; here the handler only needs
+// a row to exist so List/Get's join and sort=used have something to read).
+func (r *marketplaceRig) seedStats(t *testing.T, listingID string, teamsUsing, totalRuns int) {
+	t.Helper()
+	pgtest.MustExec(t, r.h.AdminDB, `
+		INSERT INTO marketplace_listing_stats (listing_id, org_id, teams_using, total_runs, computed_at)
+		VALUES ($1, $2, $3, $4, now())
+	`, listingID, r.orgID, teamsUsing, totalRuns)
+}
+
 // getListingDetail reads a listing back through the store as callerID — used
 // by the happy-path tests to assert on the built snapshot without duplicating
 // the store's own scan logic.
@@ -910,6 +922,16 @@ func TestMarketplaceList_SortOrders(t *testing.T) {
 	if ids := listingIDs(r.list(t, r.admin, "sort=recent")); len(ids) != 3 || ids[0] != fresh || ids[1] != mid || ids[2] != old {
 		t.Fatalf("sort=recent: ids = %v, want [%s %s %s] (newest updated_at first)", ids, fresh, mid, old)
 	}
+
+	// Run-derived usage (TFAC-540): fresh has the most total_runs despite
+	// having zero installs/votes, old has none — sort=used must order purely
+	// on total_runs, independent of the other two signals.
+	r.seedStats(t, old, 2, 0)
+	r.seedStats(t, mid, 1, 3)
+	r.seedStats(t, fresh, 1, 7)
+	if ids := listingIDs(r.list(t, r.admin, "sort=used")); len(ids) != 3 || ids[0] != fresh || ids[1] != mid || ids[2] != old {
+		t.Fatalf("sort=used: ids = %v, want [%s %s %s] (7, 3, 0 total_runs)", ids, fresh, mid, old)
+	}
 	// Default (sort omitted) matches "installs" — the handler pins this
 	// explicitly rather than falling through to the store's own internal
 	// default (recent), so the HTTP contract doesn't depend on the store.
@@ -1034,6 +1056,57 @@ func TestMarketplaceGet_IncludesSnapshotAndVersions(t *testing.T) {
 	}
 	if len(detail.Versions) != 2 || detail.Versions[0].Version != 1 || detail.Versions[1].Version != 2 {
 		t.Fatalf("versions = %+v, want v1 and v2", detail.Versions)
+	}
+}
+
+// TestMarketplaceGet_Stats pins the TFAC-540 HTTP contract: Stats is nil
+// (omitted from the JSON body) until the aggregation job has computed a row
+// for this listing, and populated once it has — including the no-wrong-
+// fallbacks case where success_rate is absent because total_runs is 0.
+func TestMarketplaceGet_Stats(t *testing.T) {
+	r := newMarketplaceRig(t)
+	promptID := r.seedPrompt(t, r.teamID, "stats-listing", "m", "", "")
+	id := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "stats-listing"})
+
+	getReq := func() *http.Request {
+		req := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.member, nil)
+		req.SetPathValue("id", id)
+		return req
+	}
+
+	rec := doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get before stats computed: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var before domain.ListingDetail
+	if err := json.Unmarshal(rec.Body.Bytes(), &before); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if before.Stats != nil {
+		t.Errorf("Stats before the job has run = %+v, want nil", before.Stats)
+	}
+
+	r.seedStats(t, id, 2, 0)
+	rec = doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq())
+	var zeroRuns domain.ListingDetail
+	if err := json.Unmarshal(rec.Body.Bytes(), &zeroRuns); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if zeroRuns.Stats == nil || zeroRuns.Stats.TeamsUsing != 2 || zeroRuns.Stats.TotalRuns != 0 {
+		t.Fatalf("Stats with zero runs = %+v, want teams_using=2 total_runs=0", zeroRuns.Stats)
+	}
+	if zeroRuns.Stats.SuccessRate != nil {
+		t.Errorf("SuccessRate with zero runs = %v, want nil (no wrong fallbacks)", *zeroRuns.Stats.SuccessRate)
+	}
+
+	pgtest.MustExec(t, r.h.AdminDB, `UPDATE marketplace_listing_stats SET total_runs = 4, success_rate = 0.5 WHERE listing_id = $1`, id)
+	rec = doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq())
+	var withRuns domain.ListingDetail
+	if err := json.Unmarshal(rec.Body.Bytes(), &withRuns); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if withRuns.Stats == nil || withRuns.Stats.TotalRuns != 4 || withRuns.Stats.SuccessRate == nil || *withRuns.Stats.SuccessRate != 0.5 {
+		t.Fatalf("Stats with runs = %+v, want total_runs=4 success_rate=0.5", withRuns.Stats)
 	}
 }
 

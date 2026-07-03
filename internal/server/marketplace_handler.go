@@ -514,10 +514,11 @@ func (mh *marketplaceHandler) handleMarketplaceListingBySource(w http.ResponseWr
 }
 
 // handleMarketplaceList serves the browse page: search + event-type/kind
-// facets, sorted by installs (default) | votes | recent. Any org member may
-// read — RLS on marketplace_listings (published OR own-team-write) scopes
-// what List sees without any additional filtering here; a non-publisher
-// simply never sees another team's delisted listing.
+// facets, sorted by installs (default) | votes | recent | used (TFAC-540's
+// total_runs). Any org member may read — RLS on marketplace_listings
+// (published OR own-team-write) scopes what List sees without any
+// additional filtering here; a non-publisher simply never sees another
+// team's delisted listing.
 //
 // GET /api/marketplace/listings?query=&event_type=&kind=&sort=
 func (mh *marketplaceHandler) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
@@ -536,8 +537,9 @@ func (mh *marketplaceHandler) handleMarketplaceList(w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be 'prompt' or 'blueprint'"})
 		return
 	}
-	if f.Sort != "" && f.Sort != domain.ListingSortInstalls && f.Sort != domain.ListingSortVotes && f.Sort != domain.ListingSortRecent {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sort must be 'installs', 'votes', or 'recent'"})
+	if f.Sort != "" && f.Sort != domain.ListingSortInstalls && f.Sort != domain.ListingSortVotes &&
+		f.Sort != domain.ListingSortRecent && f.Sort != domain.ListingSortMostUsed {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sort must be 'installs', 'votes', 'recent', or 'used'"})
 		return
 	}
 	if f.Sort == "" {

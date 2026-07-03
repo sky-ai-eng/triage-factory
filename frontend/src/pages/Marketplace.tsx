@@ -22,6 +22,14 @@ import type { EventType } from '../types'
 
 // Wire shapes mirror domain.ListingSummary / domain.ListingDetail
 // (internal/domain/marketplace.go) — only the fields this page reads.
+interface ListingStats {
+  teams_using: number
+  total_runs: number
+  success_rate?: number
+  last_run_at?: string
+  computed_at: string
+}
+
 interface ListingSummary {
   id: string
   kind: 'prompt' | 'blueprint'
@@ -36,6 +44,11 @@ interface ListingSummary {
   vote_count: number
   install_count: number
   viewer_voted: boolean
+  // Run-derived usage stats (TFAC-540), absent until the system aggregation
+  // job has computed at least one cycle for this listing. Per the
+  // no-wrong-fallbacks rule, absence must render nothing — never a
+  // synthesized "0 teams · 0 runs" line.
+  stats?: ListingStats
 }
 
 interface SnapshotStep {
@@ -61,12 +74,28 @@ interface ListingDetail extends ListingSummary {
   versions: ListingVersionWire[]
 }
 
-type SortOrder = 'installs' | 'votes' | 'recent'
+type SortOrder = 'installs' | 'votes' | 'recent' | 'used'
 type KindFilter = '' | 'prompt' | 'blueprint'
 
 const kindLabel = (kind: string) => (kind === 'blueprint' ? 'Blueprint' : 'Prompt')
 const kindBadgeClass = (kind: string) =>
   kind === 'blueprint' ? 'bg-accent/10 text-accent' : 'bg-black/[0.04] text-text-tertiary'
+
+// formatStatsLine renders the TFAC-540 "N teams · M runs · X% success" line,
+// or null when there's nothing worth showing — the no-wrong-fallbacks rule:
+// a listing with no run history yet (stats absent, or a computed row with
+// total_runs === 0) shows nothing rather than a synthesized "0 runs · 0%".
+function formatStatsLine(stats: ListingStats | undefined): string | null {
+  if (!stats || stats.total_runs === 0) return null
+  const parts = [
+    `${stats.teams_using} team${stats.teams_using === 1 ? '' : 's'}`,
+    `${stats.total_runs} run${stats.total_runs === 1 ? '' : 's'}`,
+  ]
+  if (stats.success_rate != null) {
+    parts.push(`${Math.round(stats.success_rate * 100)}% success`)
+  }
+  return parts.join(' · ')
+}
 
 export default function Marketplace() {
   const orgHref = useOrgHref()
@@ -286,6 +315,7 @@ export default function Marketplace() {
             >
               <option value="installs">Most installed</option>
               <option value="votes">Most recommended</option>
+              <option value="used">Most used</option>
               <option value="recent">Recently updated</option>
             </select>
           </div>
@@ -458,8 +488,11 @@ function ListingCard({
           )}
         </div>
 
-        <div className="mt-auto pt-3 text-[11px] text-text-tertiary tabular-nums">
-          {listing.install_count} install{listing.install_count === 1 ? '' : 's'}
+        <div className="mt-auto pt-3 text-[11px] text-text-tertiary tabular-nums space-y-0.5">
+          <div>
+            {listing.install_count} install{listing.install_count === 1 ? '' : 's'}
+          </div>
+          {formatStatsLine(listing.stats) && <div>{formatStatsLine(listing.stats)}</div>}
         </div>
       </div>
     </article>
@@ -574,6 +607,8 @@ function ListingDrawer({
                       {detail.install_count} install{detail.install_count === 1 ? '' : 's'}
                     </span>
                   </div>
+
+                  <ListingStatsBlock stats={detail.stats} />
 
                   <InstallControl listing={detail} onInstalled={onInstalled} />
 
@@ -745,6 +780,32 @@ function InstallControl({
     >
       {submitting ? 'Copying…' : 'Copy to my team'}
     </button>
+  )
+}
+
+// formatFreshness renders a coarse "how long ago" hint for computed_at — a
+// day-granularity readout matches the aggregation job's own daily-ish TTL,
+// so a finer-grained "3 minutes ago" would overstate the freshness.
+function formatFreshness(computedAt: string): string {
+  const ms = Date.now() - new Date(computedAt).getTime()
+  const hours = Math.floor(ms / (1000 * 60 * 60))
+  if (hours < 1) return 'updated just now'
+  if (hours < 24) return `updated ${hours}h ago`
+  const days = Math.floor(hours / 24)
+  return `updated ${days}d ago`
+}
+
+// ListingStatsBlock renders the detail-view run-derived stats block, or
+// nothing when there's no run history yet — the same no-wrong-fallbacks
+// rule the browse card's stats line follows.
+function ListingStatsBlock({ stats }: { stats: ListingStats | undefined }) {
+  const line = formatStatsLine(stats)
+  if (!line || !stats) return null
+  return (
+    <div className="rounded-lg border border-border-subtle bg-black/[0.02] px-3 py-2 text-[12px] text-text-secondary">
+      <span className="tabular-nums">{line}</span>
+      <span className="text-text-tertiary"> · {formatFreshness(stats.computed_at)}</span>
+    </div>
   )
 }
 

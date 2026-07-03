@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
@@ -128,6 +129,17 @@ func (a *App) buildAI() {
 	a.reconciler = reconcile.NewManager(reconciler)
 	a.srv.SetReconciler(reconciler)
 	reconcileLog.Info("artifact reconciler ready (per-org runners)")
+
+	// Marketplace run-derived listing stats (TFAC-540): multi-mode only —
+	// the marketplace itself doesn't exist in local mode (db.Stores.Marketplace
+	// is a stub there), so there is nothing to aggregate. a.marketplaceStats
+	// stays nil in local mode; registerSubscribers checks that before wiring
+	// the bus subscriber, matching the ticket's "gate its trigger on
+	// runmode.Current()" instruction.
+	if runmode.Current() == runmode.ModeMulti {
+		a.marketplaceStats = marketplacestats.NewManager(marketplacestats.NewAggregator(a.stores.Marketplace))
+		aiLog.Info("marketplace stats manager ready (per-org runners)")
+	}
 }
 
 // buildExecution constructs the delegation spawner and the curator runtime,

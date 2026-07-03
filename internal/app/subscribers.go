@@ -61,6 +61,19 @@ func (a *App) registerSubscribers() {
 		Filter: []string{"system:poll:"},
 		Handle: a.handlePollCompleted,
 	})
+	// Kick the per-org marketplace listing-stats aggregator on poll-complete
+	// sentinels (TFAC-540). Multi-mode only: a.marketplaceStats is nil in
+	// local mode (buildAI), so the subscriber is never registered there — no
+	// bus overhead for a job local mode can't run anyway. The cycle is itself
+	// TTL-gated (marketplacestats.Aggregator), so steady state is ~one no-op
+	// check per org per poll cycle regardless of source.
+	if a.marketplaceStats != nil {
+		a.bus.Subscribe(eventbus.Subscriber{
+			Name:   "marketplace-stats",
+			Filter: []string{"system:poll:"},
+			Handle: func(evt domain.Event) { a.marketplaceStats.Trigger(evt.OrgID) },
+		})
+	}
 	// New-commits review-freshness injection (TFAC-501): when a reviewed PR's head
 	// advances, tell the run authoring the review — live if warm, else staged for
 	// next resume — to re-pull and reconcile. The spawner owns the lookup +
