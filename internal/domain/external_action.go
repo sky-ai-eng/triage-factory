@@ -100,6 +100,17 @@ const (
 	// Git branch push (the one double-capture case — see BranchPushDedupKey).
 	ActionBranchPushed = "branch_pushed"
 
+	// Git branch push the upstream REFUSED (a non-2xx on the receive-pack
+	// POST — auth, protection, or outage; nothing landed). Recorded by the
+	// git proxy's outcome capture so the audit log never omits an attempted
+	// external write, while the branch artifact is deliberately NOT written
+	// (artifacts track only work that exists). detail_json carries
+	// {sha, new, http_status}. Appended unconditionally (no dedup key): each
+	// failed attempt is its own audit event, and sharing branch_pushed's
+	// deterministic key would let a failed attempt swallow the later
+	// successful push of the same (run, ref, sha).
+	ActionBranchPushFailed = "branch_push_failed"
+
 	// Git operation denied by the per-run least-privilege gate — the git proxy
 	// (off-repo / off-ref / non-git path) or the exec-gh channel (off-repo).
 	// A security signal, recorded even for a denied read. detail_json carries

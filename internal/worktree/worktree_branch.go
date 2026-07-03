@@ -186,6 +186,95 @@ func CurrentBranch(path string) string {
 	return strings.TrimSpace(out)
 }
 
+// PushTargetBranch returns the REMOTE branch a bare `git push` from the
+// worktree's current checkout would update, or "" when HEAD is detached (no
+// push possible) or the configured push refspec targets a non-branch namespace
+// (refs/for/..., refs/tags/... — nothing the branch gate can authorize).
+//
+// It resolves the mapping exactly the way git does for an argument-less push:
+// the push remote is branch.<b>.pushRemote, then remote.pushDefault, then
+// branch.<b>.remote, then "origin"; if that remote carries an explicit
+// remote.<r>.push refspec whose source is the current branch, the refspec's
+// destination is the target. With no matching refspec the target is the branch
+// itself (push.default "simple" — same name upstream).
+//
+// This is what the push-authorization gate (internal/delegate) must compare
+// receive-pack commands against: the command block carries the REMOTE ref, and
+// for a PR worktree that differs from the local checkout by construction — the
+// checkout is the run-namespaced triagefactory/<runID>/pr-<n> while
+// configurePRPushTracking maps it to the PR's real head branch. Authorizing the
+// local name (the old CurrentBranch rule) both broke every PR push (the pushed
+// head ref was never in the allowlist) and authorized a stray run-namespaced
+// branch upstream instead.
+//
+// The config this reads lives in the run root, which a sandboxed agent can
+// edit — but that grants no authority the live-branch rule didn't already
+// concede (the agent can equally `git checkout -b <any-name>`); the caller
+// still refuses base/protected branches on the RESOLVED target, so the
+// protected floor holds regardless of what the config maps to.
+func PushTargetBranch(path string) string {
+	branch := CurrentBranch(path)
+	if branch == "" {
+		return ""
+	}
+	remote := gitConfigFirst(path,
+		"branch."+branch+".pushRemote",
+		"remote.pushDefault",
+		"branch."+branch+".remote",
+	)
+	if remote == "" {
+		remote = "origin"
+	}
+	for _, spec := range gitConfigAll(path, "remote."+remote+".push") {
+		src, dst, ok := strings.Cut(strings.TrimPrefix(spec, "+"), ":")
+		if !ok {
+			continue
+		}
+		if src != branch && src != "refs/heads/"+branch {
+			continue
+		}
+		if target, ok := strings.CutPrefix(dst, "refs/heads/"); ok {
+			return target
+		}
+		if strings.HasPrefix(dst, "refs/") {
+			return "" // non-branch destination namespace: nothing to authorize
+		}
+		return dst
+	}
+	return branch
+}
+
+// gitConfigFirst returns the first non-empty single-valued git config entry
+// among keys, read from the repo at path ("" when none is set).
+func gitConfigFirst(path string, keys ...string) string {
+	for _, key := range keys {
+		out, err := gitOutputCtx(context.Background(), path, "config", "--get", key)
+		if err != nil {
+			continue // unset key exits non-zero — a normal absent state
+		}
+		if v := strings.TrimSpace(out); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// gitConfigAll returns every value of a multi-valued git config key, read from
+// the repo at path (nil when unset).
+func gitConfigAll(path, key string) []string {
+	out, err := gitOutputCtx(context.Background(), path, "config", "--get-all", key)
+	if err != nil {
+		return nil
+	}
+	var vals []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			vals = append(vals, line)
+		}
+	}
+	return vals
+}
+
 // createBranchWorktreeAt is the shared body of the two CreateForBranch
 // variants — bare-clone setup, base-branch fetch, `git worktree add`
 // (with branchExists reattach), and exclude-or-rollback. The two

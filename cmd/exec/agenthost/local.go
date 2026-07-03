@@ -1879,6 +1879,33 @@ func (c *LocalClient) RecordGitDenied(ctx context.Context, owner, repo, ref, op,
 	})
 }
 
+// RecordGitPushFailed records one `branch_push_failed` external-action audit
+// row for a branch push the upstream refused (a non-2xx receive-pack response —
+// observed by the git proxy's outcome capture). The audit log records every
+// attempted external write, success or failure; the branch ARTIFACT is
+// deliberately not written here — artifacts track only work that landed, and
+// the proxy wiring only upserts one on a 2xx. Host-side only (not on the
+// Client interface): like RecordGitDenied, the observer runs on the host, never
+// in the sandbox. No dedup key (recordBotAction's store fills a uuid), so
+// repeated failed attempts each leave their own row and a later successful push
+// of the same (run, ref, sha) can never be swallowed by a prior failure. No URL
+// either — nothing landed, so a github.com branch link would dangle.
+// Best-effort: a recording failure is logged and swallowed.
+func (c *LocalClient) RecordGitPushFailed(ctx context.Context, repoPath, ref, sha string, created bool, httpStatus int) {
+	if c.stores.ExternalActions == nil {
+		return
+	}
+	detail, _ := json.Marshal(map[string]any{"sha": sha, "new": created, "http_status": httpStatus})
+	c.recordBotAction(ctx, &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderGitHub,
+		Action:     domain.ActionBranchPushFailed,
+		Target:     repoPath,
+		ExternalID: ref,
+		Credential: domain.CredentialGitHubApp,
+		DetailJSON: string(detail),
+	})
+}
+
 // githubAction builds the external-action row for a GitHub write from the
 // artifact's coordinates. detail_json is left empty — the rich payload (PR body,
 // review draft) lives on the artifact; the audit row carries who/what/when/from→to.

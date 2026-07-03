@@ -86,6 +86,13 @@ func TestCreateForPR_SelfContainedClone_MultiMode(t *testing.T) {
 	if u := gitCfgValue(t, wtPath, "remote."+remote+".url"); u != cloneURL {
 		t.Errorf("clone push remote %s url = %q, want %q", remote, u, cloneURL)
 	}
+	// The push gate's view of this clone: a bare `git push` lands on the PR's
+	// real head branch (the refspec maps the run-namespaced local branch to it),
+	// so THAT — not the local triagefactory/<run>/pr-<n> name — is what the
+	// proxy's ref allowlist must authorize.
+	if target := PushTargetBranch(wtPath); target != "feature-branch" {
+		t.Errorf("PushTargetBranch = %q, want feature-branch (the PR head the push refspec targets)", target)
+	}
 
 	// The shared bare is left with no per-run ref (dropBareRunRefs ran after the
 	// clone copied its objects).

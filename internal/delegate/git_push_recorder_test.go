@@ -56,6 +56,7 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 		Ref:     "refs/heads/feature/x",
 		NewSHA:  "abc123",
 		Created: true,
+		Status:  200,
 	})
 
 	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
@@ -96,8 +97,8 @@ func TestGitPushRecorder_SkipsNonBranchAndMalformed(t *testing.T) {
 
 	// A tag isn't a branch; a 3-segment repo path isn't owner/repo. Both make
 	// NewBranchArtifact return ok=false, so the recorder skips them silently.
-	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/tags/v1", NewSHA: "abc", Created: false})
-	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo/extra", Ref: "refs/heads/main", NewSHA: "abc", Created: false})
+	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/tags/v1", NewSHA: "abc", Created: false, Status: 200})
+	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo/extra", Ref: "refs/heads/main", NewSHA: "abc", Created: false, Status: 200})
 
 	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
 	if err != nil {
@@ -105,6 +106,69 @@ func TestGitPushRecorder_SkipsNonBranchAndMalformed(t *testing.T) {
 	}
 	if len(arts) != 0 {
 		t.Fatalf("got %d artifacts, want 0 (tag + malformed repo are skipped)", len(arts))
+	}
+}
+
+// TestGitPushRecorder_RefusedPushRecordsAuditOnly pins the outcome split: a
+// push the upstream refused (non-2xx) must NOT mint a branch artifact —
+// artifacts track only work that landed — but must leave a branch_push_failed
+// external-action audit row carrying the attempt's sha and HTTP status, so the
+// audit log never omits an attempted external write. A subsequent successful
+// push of the same ref then lands the artifact and the branch_pushed row as
+// usual (the failure row, having no dedup key, can't swallow it).
+func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
+	stores, runID := newRecorderStores(t)
+	rec := gitPushRecorder(stores, recorderInfo(runID))
+	ctx := context.Background()
+
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 403})
+
+	arts, err := stores.Artifacts.ListByRun(ctx, runmode.LocalDefaultOrgID, runID)
+	if err != nil {
+		t.Fatalf("ListByRun: %v", err)
+	}
+	if len(arts) != 0 {
+		t.Fatalf("got %d artifacts for a refused push, want 0", len(arts))
+	}
+	acts, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushFailed})
+	if err != nil {
+		t.Fatalf("ListByOrgSystem: %v", err)
+	}
+	if len(acts) != 1 {
+		t.Fatalf("got %d branch_push_failed actions, want 1", len(acts))
+	}
+	a := acts[0]
+	if a.Target != "octo/repo" || a.ExternalID != "refs/heads/feature/x" || a.RunID != runID {
+		t.Errorf("failure row = target %q external_id %q run %q; want octo/repo, refs/heads/feature/x, %s", a.Target, a.ExternalID, a.RunID, runID)
+	}
+	var d struct {
+		SHA        string `json:"sha"`
+		New        bool   `json:"new"`
+		HTTPStatus int    `json:"http_status"`
+	}
+	if err := json.Unmarshal([]byte(a.DetailJSON), &d); err != nil {
+		t.Fatalf("detail_json %q: %v", a.DetailJSON, err)
+	}
+	if d.SHA != "abc123" || !d.New || d.HTTPStatus != 403 {
+		t.Errorf("detail = %+v, want sha=abc123 new=true http_status=403", d)
+	}
+
+	// The retry that lands: same (run, ref, sha), now a 2xx — the artifact and
+	// the success audit row both appear despite the earlier failure.
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 200})
+	arts, err = stores.Artifacts.ListByRun(ctx, runmode.LocalDefaultOrgID, runID)
+	if err != nil {
+		t.Fatalf("ListByRun after retry: %v", err)
+	}
+	if len(arts) != 1 {
+		t.Fatalf("got %d artifacts after the successful retry, want 1", len(arts))
+	}
+	pushed, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushed})
+	if err != nil {
+		t.Fatalf("ListByOrgSystem (branch_pushed): %v", err)
+	}
+	if len(pushed) != 1 {
+		t.Fatalf("got %d branch_pushed actions after the retry, want 1 (the failure row must not swallow it)", len(pushed))
 	}
 }
 
@@ -116,8 +180,8 @@ func TestGitPushRecorder_DedupConvergesWithHook(t *testing.T) {
 	stores, runID := newRecorderStores(t)
 	rec := gitPushRecorder(stores, recorderInfo(runID))
 
-	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "aaa", Created: true})
-	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "bbb", Created: false})
+	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "aaa", Created: true, Status: 200})
+	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "bbb", Created: false, Status: 200})
 
 	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
 	if err != nil {

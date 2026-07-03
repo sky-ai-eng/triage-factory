@@ -201,20 +201,23 @@ type Config struct {
 	// direct paths where the local hop is already trusted).
 	IncomingToken string
 
-	// RecordPush, when non-nil, makes the proxy a best-effort capture
-	// backstop for branch pushes. On each git-receive-pack POST it transits,
-	// the proxy tees the request body, parses the pkt-line ref-update commands
-	// (the block that precedes the packfile), and invokes RecordPush once per
-	// non-delete ref after the push completes — gated on a 2xx upstream
-	// response. The wiring maps each PushedRef to the same branch artifact the
-	// pre-push hook records, deduped on the same key, so a normal hook+push is
-	// not double-recorded: the proxy only adds rows the hook missed.
+	// RecordPush, when non-nil, makes the proxy the capture point for branch
+	// pushes. On each git-receive-pack POST it transits, the proxy tees the
+	// request body, parses the pkt-line ref-update commands (the block that
+	// precedes the packfile), and invokes RecordPush once per non-delete ref
+	// after the upstream responds — for EVERY final status, with that status
+	// on the PushedRef. The wiring is what branches on the outcome: a 2xx
+	// (PushedRef.Succeeded) upserts the branch artifact (same constructor +
+	// dedup key as the pre-push hook, so a normal hook+push never
+	// double-records), while a refused push (403/404/422/5xx — nothing
+	// landed) must record only an audit-log failure row, never an artifact.
 	//
-	// The thing it catches is `git push --no-verify`, which skips client-side
-	// hooks (the pre-push hook among them) but cannot skip this network-layer
-	// proxy — every push transits it. So in multi mode this is the
-	// unbypassable backstop for branch-artifact capture; local mode has no
-	// proxy, so that --no-verify gap is accepted (nil here).
+	// Because every push transits this proxy — `git push --no-verify` skips
+	// client-side hooks but not the network layer — this is multi mode's
+	// authoritative push-outcome observer; the pre-push hook (which fires
+	// BEFORE the transfer and cannot know the outcome) stands down there.
+	// Local mode has no proxy, so its hook-based capture (pre-push timing,
+	// --no-verify gap) is accepted (nil here).
 	//
 	// Contract: the proxy never blocks, alters, or fails a push on account of
 	// this callback. It runs after the response is back to the client, under a
@@ -247,15 +250,25 @@ type Config struct {
 // PushedRef is one non-delete ref update the backstop parsed from a
 // git-receive-pack request body, handed to Config.RecordPush. Repo is the
 // "owner/repo" from the request path; Ref is the full remote ref
-// (refs/heads/...); NewSHA is the commit it now points to; Created is true when
-// the push created the ref (the remote held no prior value). It is pure data —
-// no domain dependency — so the proxy stays free of the artifact model; the
-// wiring layer maps it to a branch artifact.
+// (refs/heads/...); NewSHA is the commit the push carried for it; Created is
+// true when the push would create the ref (the remote held no prior value);
+// Status is the upstream's final HTTP status for the receive-pack POST — the
+// outcome discriminator the wiring branches on (see Succeeded). It is pure
+// data — no domain dependency — so the proxy stays free of the artifact model;
+// the wiring layer maps it to a branch artifact / audit row.
 type PushedRef struct {
 	Repo    string
 	Ref     string
 	NewSHA  string
 	Created bool
+	Status  int
+}
+
+// Succeeded reports whether the upstream accepted the push's transport (a 2xx
+// final status). Only a succeeded push may become an artifact; a refused one
+// is audit-log material only.
+func (p PushedRef) Succeeded() bool {
+	return p.Status >= 200 && p.Status < 300
 }
 
 // Server is a single per-run proxy instance with a cached installation
@@ -441,13 +454,13 @@ func (s *Server) Handler() http.Handler {
 			if s.cfg.Authorize != nil {
 				// Gated path: buffer the ref-update command block, enforce the
 				// per-ref allowlist (reject deletes / foreign refs) BEFORE
-				// forwarding, then proxy the reconstructed stream and run the
-				// RecordPush backstop on a 2xx.
+				// forwarding, then proxy the reconstructed stream and report
+				// each ref + the upstream's final status to RecordPush.
 				s.serveReceivePackGated(w, r, owner, repo, decision.AllowedRefs)
 				return
 			}
-			// Non-gated (loopback/test): the legacy observe-only backstop
-			// (TFAC-467) — tee the body and record after a 2xx, never block.
+			// Non-gated (loopback/test): the observe-only backstop (TFAC-467)
+			// — tee the body, report refs + outcome status, never block.
 			if s.cfg.RecordPush != nil {
 				s.serveReceivePack(w, r)
 				return

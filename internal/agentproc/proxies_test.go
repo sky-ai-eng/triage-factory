@@ -298,6 +298,52 @@ func TestStartProxiesForSandbox_AnthropicEndToEnd(t *testing.T) {
 	}
 }
 
+// TestStartProxiesForSandbox_GitProxyStandsDownPrePushHook pins the push-capture
+// handoff env: when the git proxy is wired, the sandbox env carries
+// TF_GIT_PUSH_CAPTURE=proxy so the pre-push hook records nothing — the proxy's
+// receive-pack capture (which sees the upstream's actual outcome) owns branch
+// capture. Without a git proxy the entry is absent and the hook keeps its
+// local-mode capture role.
+func TestStartProxiesForSandbox_GitProxyStandsDownPrePushHook(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	creds := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-x", "ANTHROPIC_BASE_URL": upstream.URL}
+
+	git := &GitProxyConfig{
+		TokenSource: func(context.Context, string, string) (gitproxy.Token, error) {
+			return gitproxy.Token{Value: "ghs"}, nil
+		},
+		Upstream: upstream.URL,
+	}
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, git)
+	if err != nil {
+		t.Fatalf("startProxiesForSandbox (with git): %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = bundle.Shutdown(ctx)
+	})
+	if got := envValue(env, githooks.PushCaptureEnvVar); got != githooks.PushCaptureProxy {
+		t.Errorf("%s = %q with a git proxy wired, want %q", githooks.PushCaptureEnvVar, got, githooks.PushCaptureProxy)
+	}
+
+	bundleNoGit, envNoGit, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil)
+	if err != nil {
+		t.Fatalf("startProxiesForSandbox (no git): %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = bundleNoGit.Shutdown(ctx)
+	})
+	if got := envValue(envNoGit, githooks.PushCaptureEnvVar); got != "" {
+		t.Errorf("%s = %q with no git proxy, want absent (the hook keeps capture)", githooks.PushCaptureEnvVar, got)
+	}
+}
+
 // TestStartProxiesForSandbox_TokenAuthEnforced pins SKY-395 Part A from
 // agentproc's perspective: the proxy started for a run rejects a request
 // bearing some *other* value (what a sibling run, or the old constant

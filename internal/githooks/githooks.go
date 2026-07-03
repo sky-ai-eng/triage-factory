@@ -52,6 +52,23 @@ const ConfigKey = "core.hooksPath"
 // convention, alongside TRIAGE_FACTORY_RUN_ID and the agenthost socket.
 const BinEnvVar = "TRIAGE_FACTORY_BIN"
 
+// PushCaptureEnvVar names the env entry that tells the pre-push hook who owns
+// branch-push capture for this run. When set to PushCaptureProxy (the sandbox
+// env, written whenever the per-run git proxy is wired), the hook records
+// nothing and exits: every push transits the proxy, whose receive-pack capture
+// observes the upstream's actual outcome — so artifacts are written only for
+// pushes that landed, and refused pushes leave an audit failure row instead.
+// The hook fires BEFORE the transfer and cannot know the outcome; letting it
+// record under a proxy would mint branch artifacts for pushes GitHub refused.
+// Unset (local mode — no proxy exists), the hook remains the only capture
+// point and records at pre-push time, accepting that it cannot observe the
+// outcome.
+const PushCaptureEnvVar = "TF_GIT_PUSH_CAPTURE"
+
+// PushCaptureProxy is the PushCaptureEnvVar value that stands the pre-push
+// hook down in favor of the git proxy's outcome capture.
+const PushCaptureProxy = "proxy"
+
 //go:embed README.md
 var readmeContent []byte
 

@@ -30,11 +30,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// worktreeCurrentBranch reads a worktree's live checked-out branch (the short
-// symbolic ref of HEAD, or "" when detached / unreadable). A package var so the
-// push-authorization tests can inject a deterministic path→branch mapping
+// worktreePushTargetBranch reads the REMOTE branch a bare `git push` from a
+// worktree's live checkout would update — the current branch mapped through its
+// configured push refspec ("" when detached / unreadable). A package var so the
+// push-authorization tests can inject a deterministic path→target mapping
 // without standing up real git worktrees on disk.
-var worktreeCurrentBranch = worktree.CurrentBranch
+var worktreePushTargetBranch = worktree.PushTargetBranch
 
 // shortRunID truncates a run UUID to 8 chars for toast messages — full UUIDs
 // are noisy in a notification. Kept consistent so users can cross-reference
@@ -616,17 +617,23 @@ func (s *Spawner) gitProxyConfigFor(ctx context.Context, info agenthost.RunInfo,
 // Layer-3 ref allowlist): the run may touch a repo only if its team tracks it
 // AND it appears in the run's run_worktrees ledger (the eagerly-cloned task
 // repo — recorded at setup — or a workspace-add'd one). The allowed push ref is
-// the worktree's LIVE current branch — "you may push whatever branch your
-// checkout is on" (TFAC-498) — read fresh from disk per call rather than a
-// prescribed run_worktrees.FeatureBranch. A detached HEAD (the state a fresh
-// default / --ref `workspace add` lands in) authorizes nothing until the agent
-// creates its own branch; the repo's base / default branch is never authorized
-// even when the checkout sits on it. Reads live each call, so untracking a
-// repo, removing a worktree, or switching branches propagates to the next
-// request with no re-mint. Fails closed (deny) when a store it needs is absent
-// or a lookup it depends on errors — a misconfigured or degraded gate must
-// never allow-all, and in particular must never authorize a base/protected ref
-// just because the profile that names them couldn't be read.
+// the worktree's LIVE current branch mapped through its configured push
+// refspec — "you may push where a bare `git push` from your checkout lands"
+// (TFAC-498, refspec-aware) — read fresh from disk per call rather than a
+// prescribed run_worktrees.FeatureBranch. The refspec mapping matters for PR
+// worktrees: the checkout is the run-namespaced triagefactory/<runID>/pr-<n>
+// while push tracking maps it to the PR's real head branch, and the
+// receive-pack command block the ref gate inspects carries that REMOTE ref —
+// comparing against the local name rejected every PR push with a 403
+// (ref-not-allowed). A detached HEAD (the state a fresh default / --ref
+// `workspace add` lands in) authorizes nothing until the agent creates its own
+// branch; the repo's base / default branch is never authorized even when the
+// mapping resolves to it. Reads live each call, so untracking a repo, removing
+// a worktree, or switching branches propagates to the next request with no
+// re-mint. Fails closed (deny) when a store it needs is absent or a lookup it
+// depends on errors — a misconfigured or degraded gate must never allow-all,
+// and in particular must never authorize a base/protected ref just because the
+// profile that names them couldn't be read.
 func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.RunInfo, owner, repo string) (gitproxy.Decision, error) {
 	// Repos is required: it names the repo's protected refs. Without it we can't
 	// honor the "base/protected refs are refused" guarantee, so a wiring missing
@@ -665,11 +672,11 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 			continue
 		}
 		found = true
-		// One `git symbolic-ref` subprocess per matching row. Bounded to one
-		// today by the (run_id, repo_id) uniqueness of run_worktrees; if
-		// TFAC-502 re-keys to (run_id, repo_id, ref) this should pre-read all
-		// matching rows' branches once rather than spawning per row in-loop.
-		branch := worktreeCurrentBranch(w.Path)
+		// A few git subprocesses per matching row (symbolic-ref + config
+		// reads). run_worktrees is keyed (run_id, repo_id, ref), so several
+		// rows can match; git ops per run are few enough that per-row spawning
+		// stays fine.
+		branch := worktreePushTargetBranch(w.Path)
 		if branch == "" || protected[branch] {
 			continue
 		}
@@ -710,15 +717,24 @@ func protectedBranches(ctx context.Context, stores db.Stores, orgID, repoID stri
 }
 
 // gitPushRecorder builds the git proxy's RecordPush callback for one run. The
-// proxy parses each non-delete ref out of a receive-pack body and hands it
-// here; we shape it into a branch artifact and upsert it through the same
-// host-side path the pre-push hook uses — agenthost.NewLocal → UpsertArtifact —
-// so the write routes to the right pool (admin for an event-triggered run,
-// the kicking-off user's synthetic claims for a manual one) exactly as the
-// hook's record-push does. Both writers build the artifact via
-// domain.NewBranchArtifact, so they share a dedup_key: a normal hook+push lands
-// one row, and this only adds rows the hook missed — a `git push --no-verify`,
-// which skips client hooks but not the network-layer proxy.
+// proxy parses each non-delete ref out of a receive-pack body and hands it here
+// with the upstream's final status; this is where the outcome splits:
+//
+//   - 2xx (the push landed): shape it into a branch artifact and upsert it
+//     through the same host-side path the pre-push hook uses —
+//     agenthost.NewLocal → UpsertArtifact — so the write routes to the right
+//     pool (admin for an event-triggered run, the kicking-off user's synthetic
+//     claims for a manual one) and lands the ActionBranchPushed audit row in
+//     the same write. Same domain.NewBranchArtifact dedup_key as the hook, so
+//     an (out-of-mode) hook twin still converges on one row.
+//   - non-2xx (the upstream refused it — nothing landed): record ONLY the
+//     branch_push_failed audit row. The audit log never omits an attempt;
+//     the artifact ledger never gains a branch that doesn't exist.
+//
+// In multi mode this observer is authoritative for push capture — every push
+// transits the proxy (even `git push --no-verify`, which skips client hooks),
+// and the pre-push hook stands down there (githooks.PushCaptureEnvVar) because
+// it fires before the transfer and would record failed pushes as artifacts.
 //
 // Best-effort: a non-branch ref or a record failure is dropped (logged), never
 // surfaced. By the time this runs the push has already completed upstream, so
@@ -730,8 +746,12 @@ func gitPushRecorder(stores db.Stores, info agenthost.RunInfo) func(context.Cont
 		if !ok {
 			return // not a branch ref (tag/other) or an unparseable repo path
 		}
+		if !push.Succeeded() {
+			host.RecordGitPushFailed(ctx, push.Repo, push.Ref, push.NewSHA, push.Created, push.Status)
+			return
+		}
 		if _, err := host.UpsertArtifact(ctx, art); err != nil {
-			delegateLog.Warn("git-proxy push backstop: record branch artifact failed",
+			delegateLog.Warn("git-proxy push capture: record branch artifact failed",
 				"run", info.RunID, "repo", push.Repo, "ref", push.Ref, "error", err)
 		}
 	}
