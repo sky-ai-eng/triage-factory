@@ -406,6 +406,32 @@ func (s *marketplaceStore) GetActiveBySource(ctx context.Context, orgID, sourceI
 	return &l, nil
 }
 
+// GetBySource mirrors GetActiveBySource but drops the status filter — it
+// resolves a listing for source_id regardless of published/delisted state —
+// and returns the full ListingSummary (event types + counts), reusing the
+// same listingSummaryQueryPG join List/Get use. No viewer context (this is
+// not a per-user browse read), so ViewerVoted is always false here.
+// sourceID == "" short-circuits for the same reason GetActiveBySource does.
+func (s *marketplaceStore) GetBySource(ctx context.Context, orgID, sourceID string) (*domain.ListingSummary, error) {
+	if sourceID == "" {
+		return nil, nil
+	}
+	q := listingSummaryQueryPG + ` WHERE l.org_id = $2 AND l.source_id = $3::uuid`
+	summary, err := scanListingSummaryRowPG(s.q.QueryRowContext(ctx, q, nullIfEmpty(""), orgID, sourceID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	eventTypes, err := fetchEventTypesForListingsPG(ctx, s.q, orgID, []string{summary.ID})
+	if err != nil {
+		return nil, err
+	}
+	summary.EventTypes = eventTypes[summary.ID]
+	return &summary, nil
+}
+
 func (s *marketplaceStore) Vote(ctx context.Context, orgID, listingID, userID string) error {
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO marketplace_votes (listing_id, org_id, user_id, created_at) VALUES ($1::uuid, $2, $3::uuid, now())
