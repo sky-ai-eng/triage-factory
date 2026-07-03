@@ -154,3 +154,74 @@ func TestParseMaxConcurrentRuns(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDispatchMemFloorMB(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    int
+		wantErr bool
+	}{
+		{"empty uses default", "", DefaultDispatchMemFloorMB, false},
+		{"whitespace uses default", " ", DefaultDispatchMemFloorMB, false},
+		{"zero disables", "0", 0, false},
+		{"plain value", "8192", 8192, false},
+		{"trims whitespace", " 2048 ", 2048, false},
+		{"negative is invalid", "-1", DefaultDispatchMemFloorMB, true},
+		{"garbage is invalid", "much", DefaultDispatchMemFloorMB, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseDispatchMemFloorMB(tt.raw)
+			if got != tt.want {
+				t.Errorf("ParseDispatchMemFloorMB(%q) = %d, want %d", tt.raw, got, tt.want)
+			}
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseDispatchMemFloorMB(%q) err = %v, wantErr %v", tt.raw, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestDispatchMemGated pins the guardrail's decision table: disabled
+// floor and unknown probe fail open; a probe below the floor gates;
+// recovery ungates. The fake probe swaps values without sleeping so
+// the transition logging path is exercised in both directions.
+func TestDispatchMemGated(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+
+	// Floor unset (zero) → never gates, regardless of probe.
+	s.memAvailMB = func() int { return 1 }
+	if s.dispatchMemGated() {
+		t.Error("gated with no floor configured")
+	}
+
+	// Unknown probe → fails open.
+	s.SetDispatchMemFloor(4096)
+	s.memAvailMB = func() int { return -1 }
+	if s.dispatchMemGated() {
+		t.Error("gated on an Unknown probe; guardrail must fail open")
+	}
+
+	// Below floor → gates.
+	s.memAvailMB = func() int { return 1024 }
+	if !s.dispatchMemGated() {
+		t.Error("not gated with available below floor")
+	}
+	// Still below → stays gated (idempotent re-check).
+	if !s.dispatchMemGated() {
+		t.Error("gate did not hold on re-check")
+	}
+
+	// Recovery → ungates.
+	s.memAvailMB = func() int { return 60000 }
+	if s.dispatchMemGated() {
+		t.Error("still gated after memory recovered above floor")
+	}
+
+	// Exactly at the floor is NOT gated (floor is "defer when below").
+	s.memAvailMB = func() int { return 4096 }
+	if s.dispatchMemGated() {
+		t.Error("gated at exactly the floor; boundary is strict-below")
+	}
+}

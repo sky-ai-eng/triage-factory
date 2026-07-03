@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
@@ -58,6 +59,70 @@ func ParseMaxConcurrentRuns(raw string) (n int, clamped bool, err error) {
 		return MaxConcurrentRunsCeiling, true, nil
 	}
 	return n, false, nil
+}
+
+// DefaultDispatchMemFloorMB is the default MemAvailable floor below
+// which the dispatcher defers claiming queued runs. Sized to the
+// platform reserve the capacity sizing rule assumes (see
+// docs/sandbox-bench.md): enough headroom that in-flight runs finish
+// and the host never swaps, small enough not to strand capacity on
+// modest hosts.
+const DefaultDispatchMemFloorMB = 4096
+
+// ParseDispatchMemFloorMB interprets the TF_DISPATCH_MEM_FLOOR_MB env
+// value. Empty → the default. 0 → disabled (no gating). Negative or
+// non-numeric → the default plus an error the caller logs; a bad value
+// must not brick boot.
+func ParseDispatchMemFloorMB(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return DefaultDispatchMemFloorMB, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return DefaultDispatchMemFloorMB, fmt.Errorf(
+			"invalid TF_DISPATCH_MEM_FLOOR_MB %q (want an integer >= 0; 0 disables); using default %d",
+			raw, DefaultDispatchMemFloorMB)
+	}
+	return n, nil
+}
+
+// SetDispatchMemFloor sets the dispatch memory guardrail (MiB of host
+// MemAvailable below which claims are deferred). Call once at startup
+// before RunDispatcher runs; 0 disables.
+func (s *Spawner) SetDispatchMemFloor(mb int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.memFloorMB = mb
+}
+
+// dispatchMemGated reports whether the memory guardrail should defer
+// claiming right now, logging only on state transitions so a gated
+// host doesn't emit a line per scan tick. Fails open: a disabled
+// floor or an unreadable probe never gates.
+func (s *Spawner) dispatchMemGated() bool {
+	s.mu.Lock()
+	floor := s.memFloorMB
+	probe := s.memAvailMB
+	s.mu.Unlock()
+	if floor <= 0 || probe == nil {
+		return false
+	}
+	avail := probe()
+	if avail == hostmem.Unknown {
+		return false
+	}
+	gated := avail < floor
+	if s.memGated.CompareAndSwap(!gated, gated) {
+		if gated {
+			dispatchLog.Warn("dispatch paused: host memory below floor; queued runs deferred until it recovers",
+				"available_mb", avail, "floor_mb", floor)
+		} else {
+			dispatchLog.Info("dispatch resumed: host memory recovered above floor",
+				"available_mb", avail, "floor_mb", floor)
+		}
+	}
+	return gated
 }
 
 // DefaultIdleHibernateTimeout is how long a live run may go quiet (no
