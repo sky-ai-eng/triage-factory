@@ -182,10 +182,10 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 			// clone their lazy blob fetches ride the same App token, so read alone
 			// can't mint the push credential a run needs (the gitproxy mints
 			// contents:write; GitHub refuses to escalate past what's granted).
-			"contents":      "write",
-			"metadata":      "read",
-			"checks":        "read",
-			"actions":       "read",
+			"contents": "write",
+			"metadata": "read",
+			"checks":   "read",
+			"actions":  "read",
 			// statuses:read is required for the open-PR CI query to resolve.
 			// We read CI off the head commit's statusCheckRollup, whose
 			// contexts connection is a CheckRun | StatusContext union —

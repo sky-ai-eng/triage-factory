@@ -87,10 +87,13 @@ func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headC
 }
 
 // createPRWorktreeAt is the shared body of CreateForPR / CreateForPRInRoot —
-// bare-clone setup, refs/pull/<n>/head fetch, `git worktree add`, the fork /
-// own-repo / deleted-fork push-tracking config, and exclude-or-rollback. The
-// two public callers differ only in where wtDir lives on disk and whether a
-// host clone credential is threaded; wtDir's parent is created by the caller.
+// bare-clone setup, refs/pull/<n>/head fetch, base-branch refresh, and the fork
+// / own-repo / deleted-fork push-tracking config. The run root is materialized
+// either as a linked `git worktree` (selfContained=false) or, for a sandboxed
+// multi-mode run, as a self-contained clone (selfContained=true — see
+// finishSelfContainedPRClone). The public callers differ in where wtDir lives on
+// disk, whether a host clone credential is threaded, and that selfContained
+// choice; wtDir's parent is created by the caller.
 func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch, baseBranch string, prNumber int, runID, wtDir string, auth CloneAuth, selfContained bool) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
