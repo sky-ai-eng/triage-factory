@@ -17,7 +17,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	_ "modernc.org/sqlite"
@@ -248,46 +247,39 @@ func expectedPath(runID, owner, repo, ref string) string {
 	return filepath.Join(worktree.RunRoot(runID), owner, repo, ref)
 }
 
-// stubCalls records checkout / PR-checkout / fetchPR / remove / stat
-// invocations and returns canned responses. Defaults are tuned for "happy
-// first add against an empty run":
-//   - createPath="" → checkout/checkoutPR return the deterministic production
-//     path so most tests don't need to set it.
+// stubCalls records create / remove / stat invocations and returns canned
+// responses. Defaults are tuned for "happy first add against an empty run":
+//   - createPath="" → create returns the deterministic production path
+//     (expectedPath keyed on runID) so most tests don't need to set it.
 //   - statPath defaults to ErrNotExist (no path is "live" until a test puts
 //     something in liveDirs).
 //   - now defaults to time.Now (real clock); tests that exercise the
 //     stale-reservation gate override fixedNow.
+//
+// The create seam is (owner, repo, spec) — the clone-URL / PR-head derivation
+// moved host-side behind Client.CreateWorkspaceCheckout (TFAC-546), so its
+// argument assertions live in the agenthost package's tests now.
 type stubCalls struct {
 	mu sync.Mutex
 
-	checkoutCalls int
-	checkoutArgs  []checkoutCall
+	// runID keys the deterministic default create path (the production create
+	// derives the same root host-side). Defaults to "r1", the id most tests
+	// seed.
+	runID string
 
-	prCheckoutCalls int
-	prCheckoutArgs  []prCheckoutCall
+	createCalls int
+	createArgs  []createCall
 
-	// createPath / createErr drive BOTH checkout and checkoutPR returns.
 	createPath string
 	createErr  error
-
-	fetchPRCalls int
-	prView       *ghclient.PRView
-	prErr        error
-
-	removeCalls int
-	removePaths []string
 
 	liveDirs map[string]struct{}
 	fixedNow time.Time
 }
 
-type checkoutCall struct {
-	owner, repo, cloneURL, ref, runID, runRoot string
-}
-
-type prCheckoutCall struct {
-	owner, repo, upstream, head, headBranch, runID, runRoot, baseBranch string
-	prNumber                                                            int
+type createCall struct {
+	owner, repo string
+	spec        checkoutSpec
 }
 
 // fakeFileInfo is the minimal os.FileInfo the stat stub returns for a
@@ -302,53 +294,27 @@ func (f fakeFileInfo) IsDir() bool        { return true }
 func (f fakeFileInfo) Sys() any           { return nil }
 
 func (s *stubCalls) deps() addDeps {
-	// pathOrDefault mirrors the InRoot create contract: land at
-	// {runRoot}/{owner}/{repo}/{ref-slug}. The slug is computed from the same
-	// helpers production uses so the stub's returned path matches the path
-	// materializeWorkspace reserved (no spurious divergence warning).
-	pathOrDefault := func(runRoot, owner, repo, slug string) (string, error) {
-		if s.createErr != nil {
-			return "", s.createErr
-		}
-		if s.createPath != "" {
-			return s.createPath, nil
-		}
-		return filepath.Join(runRoot, owner, repo, slug), nil
-	}
 	return addDeps{
-		checkout: func(_ context.Context, owner, repo, cloneURL, ref, runID, runRoot string) (string, error) {
+		create: func(_ context.Context, owner, repo string, spec checkoutSpec) (string, error) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			s.checkoutCalls++
-			s.checkoutArgs = append(s.checkoutArgs, checkoutCall{owner, repo, cloneURL, ref, runID, runRoot})
-			return pathOrDefault(runRoot, owner, repo, worktree.CheckoutRefSlug(ref))
-		},
-		checkoutPR: func(_ context.Context, owner, repo, upstream, head, headBranch string, prNumber int, runID, runRoot string, opts ...worktree.CloneOption) (string, error) {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			s.prCheckoutCalls++
-			// Capture the base branch the caller wired via WithBaseBranch so the
-			// test can assert the production createCheckout passes pr.BaseRef
-			// (TFAC-505) — the option is opaque across packages otherwise.
-			s.prCheckoutArgs = append(s.prCheckoutArgs, prCheckoutCall{
-				owner: owner, repo: repo, upstream: upstream, head: head, headBranch: headBranch,
-				runID: runID, runRoot: runRoot, prNumber: prNumber,
-				baseBranch: worktree.BaseBranchFromOptions(opts...),
-			})
-			return pathOrDefault(runRoot, owner, repo, worktree.PRRefSlug(prNumber))
-		},
-		fetchPR: func(_ context.Context, _, _ string, _ int) (*ghclient.PRView, error) {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			s.fetchPRCalls++
-			return s.prView, s.prErr
-		},
-		removeWorktree: func(path, _ string) error {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			s.removeCalls++
-			s.removePaths = append(s.removePaths, path)
-			return nil
+			s.createCalls++
+			s.createArgs = append(s.createArgs, createCall{owner: owner, repo: repo, spec: spec})
+			if s.createErr != nil {
+				return "", s.createErr
+			}
+			if s.createPath != "" {
+				return s.createPath, nil
+			}
+			// Mirror the host-side create contract: land at
+			// {hostRoot}/{owner}/{repo}/{ref-slug}, with the slug computed from
+			// the same helpers production uses so the stub's returned path
+			// matches the reserved path (no spurious divergence warning).
+			runID := s.runID
+			if runID == "" {
+				runID = "r1"
+			}
+			return expectedPath(runID, owner, repo, refForSpec(spec)), nil
 		},
 		statPath: func(path string) (os.FileInfo, error) {
 			s.mu.Lock()
@@ -374,8 +340,8 @@ func TestMaterializeWorkspace_MissingRunID(t *testing.T) {
 	if !errors.Is(err, errMissingRunID) {
 		t.Errorf("err = %v, want errMissingRunID", err)
 	}
-	if stub.checkoutCalls != 0 {
-		t.Errorf("checkout called %d times on missing run id; should not be invoked before validation", stub.checkoutCalls)
+	if stub.createCalls != 0 {
+		t.Errorf("checkout called %d times on missing run id; should not be invoked before validation", stub.createCalls)
 	}
 }
 
@@ -386,8 +352,8 @@ func TestMaterializeWorkspace_InvalidOwnerRepo(t *testing.T) {
 	if !errors.Is(err, errInvalidOwnerRepo) {
 		t.Errorf("err = %v, want errInvalidOwnerRepo", err)
 	}
-	if stub.checkoutCalls != 0 {
-		t.Errorf("checkout called %d times on invalid owner/repo", stub.checkoutCalls)
+	if stub.createCalls != 0 {
+		t.Errorf("checkout called %d times on invalid owner/repo", stub.createCalls)
 	}
 }
 
@@ -398,7 +364,7 @@ func TestMaterializeWorkspace_RunNotFound(t *testing.T) {
 	if !errors.Is(err, errRunNotFound) {
 		t.Errorf("err = %v, want errRunNotFound", err)
 	}
-	if stub.checkoutCalls != 0 {
+	if stub.createCalls != 0 {
 		t.Errorf("checkout called for missing run")
 	}
 }
@@ -409,7 +375,7 @@ func TestMaterializeWorkspace_GitHubRunCanAdd(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedGitHubRun(t, database, "gh-run")
 	seedRepoProfile(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
-	stub := &stubCalls{}
+	stub := &stubCalls{runID: "gh-run"}
 
 	path, err := materializeWorkspace(hostFor(stores, "gh-run"), "sky/core", checkoutSpec{}, stub.deps())
 	if err != nil {
@@ -418,8 +384,8 @@ func TestMaterializeWorkspace_GitHubRunCanAdd(t *testing.T) {
 	if path != expectedPath("gh-run", "sky", "core", "@default") {
 		t.Errorf("path = %q", path)
 	}
-	if stub.checkoutCalls != 1 {
-		t.Errorf("checkoutCalls = %d, want 1", stub.checkoutCalls)
+	if stub.createCalls != 1 {
+		t.Errorf("createCalls = %d, want 1", stub.createCalls)
 	}
 }
 
@@ -445,6 +411,10 @@ func TestValidateGitRef(t *testing.T) {
 		{"refs/heads/main", false}, // would double up into +refs/heads/refs/heads/main:...
 		{"refs/tags/v1", false},
 		{"feature/", false},               // trailing slash → git refuses the refname
+		{"foo//bar", false},               // empty component → git refuses the refname
+		{"a/.b", false},                   // dot-leading component → git refuses the refname
+		{"a/b.lock", false},               // ".lock" component suffix → git refuses the refname
+		{"foo.", false},                   // trailing dot → git refuses the refname
 		{strings.Repeat("a", 200), false}, // length cap
 	}
 	for _, c := range cases {
@@ -470,7 +440,7 @@ func TestMaterializeWorkspace_RejectsInjectionRef(t *testing.T) {
 	if !errors.Is(err, errInvalidRef) {
 		t.Errorf("err = %v, want errInvalidRef", err)
 	}
-	if stub.checkoutCalls != 0 {
+	if stub.createCalls != 0 {
 		t.Errorf("checkout called with injection-shaped ref")
 	}
 }
@@ -484,7 +454,7 @@ func TestMaterializeWorkspace_RepoNotConfigured(t *testing.T) {
 	if !errors.Is(err, errRepoNotConfigured) {
 		t.Errorf("err = %v, want errRepoNotConfigured", err)
 	}
-	if stub.checkoutCalls != 0 {
+	if stub.createCalls != 0 {
 		t.Errorf("checkout called for unconfigured repo")
 	}
 }
@@ -499,7 +469,7 @@ func TestMaterializeWorkspace_RepoMissingCloneURL(t *testing.T) {
 	if !errors.Is(err, errRepoMissingCloneURL) {
 		t.Errorf("err = %v, want errRepoMissingCloneURL", err)
 	}
-	if stub.checkoutCalls != 0 {
+	if stub.createCalls != 0 {
 		t.Errorf("checkout called for profile with empty clone URL")
 	}
 }
@@ -518,21 +488,15 @@ func TestMaterializeWorkspace_DefaultBranchCheckout(t *testing.T) {
 	if path != wantPath {
 		t.Errorf("path = %q, want %q", path, wantPath)
 	}
-	if stub.checkoutCalls != 1 || stub.prCheckoutCalls != 0 {
-		t.Fatalf("checkoutCalls=%d prCheckoutCalls=%d, want 1/0", stub.checkoutCalls, stub.prCheckoutCalls)
+	if stub.createCalls != 1 {
+		t.Fatalf("createCalls = %d, want 1", stub.createCalls)
 	}
-	args := stub.checkoutArgs[0]
+	args := stub.createArgs[0]
 	if args.owner != "sky" || args.repo != "core" {
-		t.Errorf("checkout owner/repo = %s/%s, want sky/core", args.owner, args.repo)
+		t.Errorf("create owner/repo = %s/%s, want sky/core", args.owner, args.repo)
 	}
-	if args.cloneURL != "https://github.com/sky/core.git" {
-		t.Errorf("cloneURL = %q", args.cloneURL)
-	}
-	if args.ref != "" {
-		t.Errorf("ref = %q, want empty (default branch)", args.ref)
-	}
-	if stub.removeCalls != 0 {
-		t.Errorf("removeWorktree called %d times on success path", stub.removeCalls)
+	if args.spec != (checkoutSpec{}) {
+		t.Errorf("spec = %+v, want zero (default-branch checkout)", args.spec)
 	}
 
 	// The row records the deterministic path and ref "@default" — a detached
@@ -560,13 +524,13 @@ func TestMaterializeWorkspace_RefCheckout(t *testing.T) {
 	if _, err := materializeWorkspace(hostFor(stores, "r1"), "sky/core", checkoutSpec{ref: "feature-x"}, stub.deps()); err != nil {
 		t.Fatalf("materializeWorkspace: %v", err)
 	}
-	if stub.checkoutCalls != 1 {
-		t.Fatalf("checkoutCalls = %d, want 1", stub.checkoutCalls)
+	if stub.createCalls != 1 {
+		t.Fatalf("createCalls = %d, want 1", stub.createCalls)
 	}
-	// The git fetch ref is the RAW branch (feature-x); the stored run_worktrees
+	// The create receives the RAW branch (feature-x); the stored run_worktrees
 	// ref is the namespaced slug (ref-feature-x).
-	if got := stub.checkoutArgs[0].ref; got != "feature-x" {
-		t.Errorf("ref = %q, want feature-x", got)
+	if got := stub.createArgs[0].spec.ref; got != "feature-x" {
+		t.Errorf("spec.ref = %q, want feature-x", got)
 	}
 	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "ref-feature-x")
 	if row == nil || row.Ref != "ref-feature-x" {
@@ -578,14 +542,7 @@ func TestMaterializeWorkspace_PRCheckout(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedRepoProfile(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
-	stub := &stubCalls{
-		prView: &ghclient.PRView{
-			HeadRef:  "contrib-branch",
-			BaseRef:  "main",                             // the base branch createCheckout must wire via WithBaseBranch (TFAC-505)
-			CloneURL: "https://github.com/fork/core.git", // fork (HTTPS) head
-			SSHURL:   "git@github.com:fork/core.git",
-		},
-	}
+	stub := &stubCalls{}
 
 	wantPath := expectedPath("r1", "sky", "core", "pr-42")
 	path, err := materializeWorkspace(hostFor(stores, "r1"), "sky/core", checkoutSpec{pr: 42}, stub.deps())
@@ -595,32 +552,15 @@ func TestMaterializeWorkspace_PRCheckout(t *testing.T) {
 	if path != wantPath {
 		t.Errorf("path = %q, want %q", path, wantPath)
 	}
-	if stub.fetchPRCalls != 1 {
-		t.Errorf("fetchPRCalls = %d, want 1", stub.fetchPRCalls)
+	if stub.createCalls != 1 {
+		t.Fatalf("createCalls = %d, want 1", stub.createCalls)
 	}
-	if stub.prCheckoutCalls != 1 || stub.checkoutCalls != 0 {
-		t.Fatalf("prCheckoutCalls=%d checkoutCalls=%d, want 1/0", stub.prCheckoutCalls, stub.checkoutCalls)
-	}
-	pc := stub.prCheckoutArgs[0]
-	if pc.prNumber != 42 {
-		t.Errorf("prNumber = %d, want 42", pc.prNumber)
-	}
-	if pc.headBranch != "contrib-branch" {
-		t.Errorf("headBranch = %q, want contrib-branch", pc.headBranch)
-	}
-	// createCheckout must wire the PR's base branch through WithBaseBranch so the
-	// worktree-local diff frames against a fresh base (TFAC-505). Dropping the
-	// option regresses this to "".
-	if pc.baseBranch != "main" {
-		t.Errorf("baseBranch = %q, want main (createCheckout should pass WithBaseBranch(pr.BaseRef))", pc.baseBranch)
-	}
-	// Upstream is the profile clone URL; head is the fork's URL in the matching
-	// (HTTPS) protocol.
-	if pc.upstream != "https://github.com/sky/core.git" {
-		t.Errorf("upstream = %q", pc.upstream)
-	}
-	if pc.head != "https://github.com/fork/core.git" {
-		t.Errorf("head = %q", pc.head)
+	// The PR fetch / fork-URL derivation / WithBaseBranch wiring live inside
+	// Client.CreateWorkspaceCheckout now (TFAC-546) and are asserted in the
+	// agenthost package's tests; the orchestration's job is to route the raw
+	// spec through the seam.
+	if got := stub.createArgs[0].spec.pr; got != 42 {
+		t.Errorf("spec.pr = %d, want 42", got)
 	}
 	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "pr-42")
 	if row == nil || row.Ref != "pr-42" {
@@ -628,44 +568,40 @@ func TestMaterializeWorkspace_PRCheckout(t *testing.T) {
 	}
 }
 
-func TestMaterializeWorkspace_PRFetchFailureReleasesReservation(t *testing.T) {
+func TestMaterializeWorkspace_PRCreateFailureReleasesReservation(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedRepoProfile(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
-	stub := &stubCalls{prErr: errors.New("github said no")}
+	stub := &stubCalls{createErr: errors.New("github said no")}
 
 	_, err := materializeWorkspace(hostFor(stores, "r1"), "sky/core", checkoutSpec{pr: 7}, stub.deps())
 	if err == nil || !strings.Contains(err.Error(), "github said no") {
 		t.Fatalf("err = %v, want it to wrap 'github said no'", err)
 	}
-	if stub.prCheckoutCalls != 0 {
-		t.Errorf("prCheckoutCalls = %d, want 0 (fetch failed before create)", stub.prCheckoutCalls)
-	}
 	// Reservation released so a retry can re-reserve.
 	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "pr-7")
 	if row != nil {
-		t.Errorf("expected reservation released after PR-fetch failure, found %+v", row)
+		t.Errorf("expected reservation released after PR-create failure, found %+v", row)
 	}
 }
 
-// TestMaterializeWorkspace_PRFetchWiredFromHost leaves deps.fetchPR nil so the
-// orchestration wires it to host.GithubGetPR. With no GitHub credentials the
-// host returns an error, which must propagate (and release the reservation) —
-// proving the host seam is the production PR-fetch path.
-func TestMaterializeWorkspace_PRFetchWiredFromHost(t *testing.T) {
+// TestMaterializeWorkspace_CreateWiredFromHost leaves deps.create nil so the
+// orchestration wires it to host.CreateWorkspaceCheckout. The --pr path then
+// makes a host-side PR fetch, which errors with no GitHub credentials
+// configured; the error must propagate (and release the reservation) — proving
+// the host seam is the production create path.
+func TestMaterializeWorkspace_CreateWiredFromHost(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedRepoProfile(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
-	stub := &stubCalls{}
-	d := stub.deps()
-	d.fetchPR = nil // force the host wiring
+	d := defaultAddDeps() // create left nil → host wiring
 
 	if _, err := materializeWorkspace(hostFor(stores, "r1"), "sky/core", checkoutSpec{pr: 1}, d); err == nil {
-		t.Fatal("expected an error from the host PR fetch (no GitHub credentials configured)")
+		t.Fatal("expected an error from the host-side create (no GitHub credentials configured)")
 	}
 	row, _ := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "pr-1")
 	if row != nil {
-		t.Errorf("expected reservation released after host PR-fetch failure, found %+v", row)
+		t.Errorf("expected reservation released after host create failure, found %+v", row)
 	}
 }
 
@@ -685,7 +621,7 @@ func TestMaterializeWorkspace_RejectsUntrackedRepo(t *testing.T) {
 	if _, err := materializeWorkspace(hostFor(stores, "r1"), "sky/untracked", checkoutSpec{}, stub.deps()); !errors.Is(err, errRepoNotTracked) {
 		t.Fatalf("err = %v, want errRepoNotTracked", err)
 	}
-	if stub.checkoutCalls != 0 {
+	if stub.createCalls != 0 {
 		t.Errorf("checkout called for an untracked repo; want the gate to reject before create")
 	}
 }
@@ -701,8 +637,8 @@ func TestMaterializeWorkspace_IdempotentSecondAdd(t *testing.T) {
 	if _, err := materializeWorkspace(hostFor(stores, "r1"), "sky/core", checkoutSpec{}, stub.deps()); err != nil {
 		t.Fatalf("first add: %v", err)
 	}
-	if stub.checkoutCalls != 1 {
-		t.Fatalf("first add checkoutCalls = %d, want 1", stub.checkoutCalls)
+	if stub.createCalls != 1 {
+		t.Fatalf("first add createCalls = %d, want 1", stub.createCalls)
 	}
 
 	path2, err := materializeWorkspace(hostFor(stores, "r1"), "sky/core", checkoutSpec{}, stub.deps())
@@ -712,11 +648,8 @@ func TestMaterializeWorkspace_IdempotentSecondAdd(t *testing.T) {
 	if path2 != wantPath {
 		t.Errorf("idempotent path = %q, want %q", path2, wantPath)
 	}
-	if stub.checkoutCalls != 1 {
-		t.Errorf("checkout called %d times across two adds; second add should short-circuit on the precheck", stub.checkoutCalls)
-	}
-	if stub.removeCalls != 0 {
-		t.Errorf("removeWorktree called on idempotent re-add")
+	if stub.createCalls != 1 {
+		t.Errorf("checkout called %d times across two adds; second add should short-circuit on the precheck", stub.createCalls)
 	}
 }
 
@@ -742,11 +675,8 @@ func TestMaterializeWorkspace_RaceLossAtReservation(t *testing.T) {
 	if path != winnerPath {
 		t.Errorf("path = %q, want %q (winner's path)", path, winnerPath)
 	}
-	if stub.checkoutCalls != 0 {
-		t.Errorf("checkoutCalls = %d, want 0; loser must NOT touch git", stub.checkoutCalls)
-	}
-	if stub.removeCalls != 0 {
-		t.Errorf("removeCalls = %d, want 0; loser has nothing to remove", stub.removeCalls)
+	if stub.createCalls != 0 {
+		t.Errorf("createCalls = %d, want 0; loser must NOT touch git", stub.createCalls)
 	}
 }
 
@@ -771,8 +701,8 @@ func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) 
 	if path != winnerPath {
 		t.Errorf("path = %q, want %q (winner's path returned even though dir missing)", path, winnerPath)
 	}
-	if stub.checkoutCalls != 0 {
-		t.Errorf("checkoutCalls = %d, want 0; loser must not create when a reservation already exists", stub.checkoutCalls)
+	if stub.createCalls != 0 {
+		t.Errorf("createCalls = %d, want 0; loser must not create when a reservation already exists", stub.createCalls)
 	}
 	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
 	if err != nil {
@@ -808,8 +738,8 @@ func TestMaterializeWorkspace_LiveDirShortCircuitsAgeCheck(t *testing.T) {
 	if path != wantPath {
 		t.Errorf("path = %q, want %q", path, wantPath)
 	}
-	if stub.checkoutCalls != 0 {
-		t.Errorf("checkoutCalls = %d, want 0; live row should short-circuit", stub.checkoutCalls)
+	if stub.createCalls != 0 {
+		t.Errorf("createCalls = %d, want 0; live row should short-circuit", stub.createCalls)
 	}
 }
 
@@ -837,8 +767,8 @@ func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
 	if path != wantPath {
 		t.Errorf("path = %q, want %q", path, wantPath)
 	}
-	if stub.checkoutCalls != 1 {
-		t.Errorf("checkoutCalls = %d, want 1; stale reservation should not block recreate", stub.checkoutCalls)
+	if stub.createCalls != 1 {
+		t.Errorf("createCalls = %d, want 1; stale reservation should not block recreate", stub.createCalls)
 	}
 	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
 	if err != nil || row == nil {
@@ -874,8 +804,8 @@ func TestMaterializeWorkspace_FreshRowMissingDirIsInFlight(t *testing.T) {
 	if path != wantPath {
 		t.Errorf("path = %q, want %q (fresh row honored even with missing dir)", path, wantPath)
 	}
-	if stub.checkoutCalls != 0 {
-		t.Errorf("checkoutCalls = %d, want 0; fresh row must not be reclaimed", stub.checkoutCalls)
+	if stub.createCalls != 0 {
+		t.Errorf("createCalls = %d, want 0; fresh row must not be reclaimed", stub.createCalls)
 	}
 }
 
@@ -893,8 +823,8 @@ func TestMaterializeWorkspace_CreateFailureReleasesReservation(t *testing.T) {
 	if !strings.Contains(err.Error(), "simulated git failure") {
 		t.Errorf("err = %v, expected to wrap 'simulated git failure'", err)
 	}
-	if stub.checkoutCalls != 1 {
-		t.Errorf("checkoutCalls = %d, want 1", stub.checkoutCalls)
+	if stub.createCalls != 1 {
+		t.Errorf("createCalls = %d, want 1", stub.createCalls)
 	}
 
 	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
@@ -925,8 +855,8 @@ func TestMaterializeWorkspace_CreateFailureRetryable(t *testing.T) {
 	if path != wantPath {
 		t.Errorf("retry path = %q, want %q", path, wantPath)
 	}
-	if stub2.checkoutCalls != 1 {
-		t.Errorf("retry checkoutCalls = %d, want 1", stub2.checkoutCalls)
+	if stub2.createCalls != 1 {
+		t.Errorf("retry createCalls = %d, want 1", stub2.createCalls)
 	}
 }
 
@@ -939,53 +869,91 @@ func TestMaterializeWorkspace_TooManySlashesRejected(t *testing.T) {
 	if !errors.Is(err, errInvalidOwnerRepo) {
 		t.Errorf("err = %v, want errInvalidOwnerRepo", err)
 	}
-	if stub.checkoutCalls != 0 {
+	if stub.createCalls != 0 {
 		t.Errorf("checkout called for malformed input")
 	}
 }
 
-func TestPRCloneURLs(t *testing.T) {
+// dualViewHost overrides WorkspaceRoots on a real LocalClient to simulate the
+// sandbox transport, where the daemon reports distinct host/agent views of the
+// run root. Everything else routes through the embedded client, so the
+// reservation SQL under test is real.
+type dualViewHost struct {
+	agenthost.Client
+	hostRoot, agentRoot string
+}
+
+func (d dualViewHost) WorkspaceRoots(context.Context) (string, string, error) {
+	return d.hostRoot, d.agentRoot, nil
+}
+
+// TestMaterializeWorkspace_DualView is the TFAC-546 namespace-split test: with
+// sandbox-shaped roots (host ≠ agent), the run_worktrees row must record the
+// HOST path (what the push gate and workspace snapshot read host-side) while
+// the returned `cd` target — and the liveness stat on a re-add — use the
+// AGENT (/work) view. Recording the agent-invisible jail path was exactly the
+// bug: the host could never resolve it, so every push 403'd and the snapshot
+// captured nothing.
+func TestMaterializeWorkspace_DualView(t *testing.T) {
+	stores, database := newTestDB(t)
+	seedJiraRun(t, database, "r1", "SKY-546")
+	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
+
+	const hostRoot = "/data/runs/r1"
+	const agentRoot = "/work"
+	hostPath := filepath.Join(hostRoot, "sky", "core", "@default")
+	agentPath := filepath.Join(agentRoot, "sky", "core", "@default")
+
+	host := dualViewHost{Client: hostFor(stores, "r1"), hostRoot: hostRoot, agentRoot: agentRoot}
+	stub := &stubCalls{createPath: hostPath} // the host-side create returns the HOST view
+
+	path, err := materializeWorkspace(host, "sky/core", checkoutSpec{}, stub.deps())
+	if err != nil {
+		t.Fatalf("materializeWorkspace: %v", err)
+	}
+	if path != agentPath {
+		t.Errorf("returned path = %q, want the agent view %q", path, agentPath)
+	}
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
+	if err != nil || row == nil {
+		t.Fatalf("GetByRepoRef: row=%v err=%v", row, err)
+	}
+	if row.Path != hostPath {
+		t.Errorf("row.Path = %q, want the HOST view %q — host-side readers resolve this", row.Path, hostPath)
+	}
+
+	// Idempotent re-add: the row carries the host path, but this process can
+	// only stat the agent view — the precheck must translate before the stat
+	// and hand back a cd-able agent path.
+	stub2 := &stubCalls{liveDirs: map[string]struct{}{agentPath: {}}}
+	path2, err := materializeWorkspace(host, "sky/core", checkoutSpec{}, stub2.deps())
+	if err != nil {
+		t.Fatalf("second add: %v", err)
+	}
+	if path2 != agentPath {
+		t.Errorf("re-add path = %q, want the agent view %q", path2, agentPath)
+	}
+	if stub2.createCalls != 0 {
+		t.Errorf("re-add invoked create %d times; the translated stat should have short-circuited", stub2.createCalls)
+	}
+}
+
+func TestAgentViewPath(t *testing.T) {
 	cases := []struct {
-		name         string
-		origin       string
-		pr           *ghclient.PRView
-		wantUpstream string
-		wantHead     string
+		name                string
+		hostRoot, agentRoot string
+		in, want            string
 	}{
-		{
-			name:         "https own-repo",
-			origin:       "https://github.com/sky/core.git",
-			pr:           &ghclient.PRView{CloneURL: "https://github.com/sky/core.git", SSHURL: "git@github.com:sky/core.git"},
-			wantUpstream: "https://github.com/sky/core.git",
-			wantHead:     "https://github.com/sky/core.git",
-		},
-		{
-			name:         "https fork",
-			origin:       "https://github.com/sky/core.git",
-			pr:           &ghclient.PRView{CloneURL: "https://github.com/fork/core.git", SSHURL: "git@github.com:fork/core.git"},
-			wantUpstream: "https://github.com/sky/core.git",
-			wantHead:     "https://github.com/fork/core.git",
-		},
-		{
-			name:         "ssh fork uses ssh head form",
-			origin:       "git@github.com:sky/core.git",
-			pr:           &ghclient.PRView{CloneURL: "https://github.com/fork/core.git", SSHURL: "git@github.com:fork/core.git"},
-			wantUpstream: "git@github.com:sky/core.git",
-			wantHead:     "git@github.com:fork/core.git",
-		},
-		{
-			name:         "deleted fork (no head urls) → empty head, read-only",
-			origin:       "https://github.com/sky/core.git",
-			pr:           &ghclient.PRView{CloneURL: "", SSHURL: ""},
-			wantUpstream: "https://github.com/sky/core.git",
-			wantHead:     "",
-		},
+		{"identity when roots equal", "/tmp/runs/r1", "/tmp/runs/r1", "/tmp/runs/r1/o/r/@default", "/tmp/runs/r1/o/r/@default"},
+		{"prefix swap", "/tmp/runs/r1", "/work", "/tmp/runs/r1/o/r/pr-7", "/work/o/r/pr-7"},
+		{"root itself", "/tmp/runs/r1", "/work", "/tmp/runs/r1", "/work"},
+		{"outside host root passes through", "/tmp/runs/r1", "/work", "/somewhere/else", "/somewhere/else"},
+		{"empty passes through", "/tmp/runs/r1", "/work", "", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			up, head := prCloneURLs(c.origin, c.pr)
-			if up != c.wantUpstream || head != c.wantHead {
-				t.Errorf("prCloneURLs(%q) = (%q, %q); want (%q, %q)", c.origin, up, head, c.wantUpstream, c.wantHead)
+			if got := agentViewPath(c.hostRoot, c.agentRoot, c.in); got != c.want {
+				t.Errorf("agentViewPath(%q, %q, %q) = %q, want %q", c.hostRoot, c.agentRoot, c.in, got, c.want)
 			}
 		})
 	}
@@ -1069,8 +1037,8 @@ func TestMaterializeWorkspace_EventTriggeredRunRouting(t *testing.T) {
 	if path == "" {
 		t.Error("expected non-empty path returned for event-triggered run")
 	}
-	if stub.checkoutCalls != 1 {
-		t.Errorf("checkoutCalls = %d, want 1; event-triggered path should reserve + create", stub.checkoutCalls)
+	if stub.createCalls != 1 {
+		t.Errorf("createCalls = %d, want 1; event-triggered path should reserve + create", stub.createCalls)
 	}
 	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "e1", "sky/core", "@default")
 	if err != nil || row == nil {

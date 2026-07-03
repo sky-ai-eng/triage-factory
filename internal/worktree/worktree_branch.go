@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // CreateForBranch sets up a worktree on a new feature branch based off
@@ -107,18 +110,74 @@ func CheckoutRefSlug(ref string) string {
 // The ref-slug subdir lets one run hold several checkouts in one repo (TFAC-502).
 // The run-root must already exist (created by MakeRunRoot in the spawner); the
 // owner/repo subdirs are created here.
-func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, runID, runRoot string) (string, error) {
+//
+// Since TFAC-546 this runs HOST-SIDE in both modes (the agenthost daemon calls
+// it on the sandbox's behalf in multi), so WithCloneAuth is honored for the
+// clone/fetch. Local mode routes to the zero-copy linked worktree as before;
+// multi mode materializes a SELF-CONTAINED clone — the run root is bind-mounted
+// into a sandbox that can't see the shared bare, so a worktree's .git pointer
+// would dangle there (mirrors CreateForPR's mode split).
+func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, runID, runRoot string, opts ...CloneOption) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForCheckoutInRoot: runRoot is required")
+	}
+	// Guard at the interpolation point: ref lands in a fetch refspec below, and
+	// callers now include the agenthost RPC surface, which must not rely on the
+	// workspace CLI's argv validation having run in front of it.
+	if ref != "" {
+		if err := ValidateCheckoutRef(ref); err != nil {
+			return "", err
+		}
 	}
 	wtDir := filepath.Join(runRoot, owner, repo, CheckoutRefSlug(ref))
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
 		return "", fmt.Errorf("mkdir repo subdir: %w", err)
 	}
-	// No CloneAuth here for the same reason as CreateForBranchInRoot: this is
-	// the in-sandbox `workspace add` path; in-sandbox git credentials are
-	// SKY-394's concern, not the host-side clone path.
-	return createCheckoutWorktreeAt(ctx, owner, repo, cloneURL, ref, runID, wtDir, CloneAuth{})
+	auth := resolveCloneOptions(opts).auth
+	if runmode.Current() == runmode.ModeMulti {
+		return createCheckoutCloneAt(ctx, owner, repo, cloneURL, ref, runID, wtDir, auth)
+	}
+	return createCheckoutWorktreeAt(ctx, owner, repo, cloneURL, ref, runID, wtDir, auth)
+}
+
+// checkoutRefPattern restricts a checkout ref to a conservative refname
+// alphabet before it's interpolated into a fetch refspec and passed to git.
+// Uppercase is permitted (branch names routinely carry ticket keys like
+// SKY-220).
+//
+// Blocks: leading dash (interpreted as a git CLI flag), whitespace, shell
+// metacharacters (`;`, `|`, backticks, `$`), refname-illegal characters
+// (`:`, `?`, `*`, `[`, `~`, `^`, `\`, control bytes). The `..` substring is
+// rejected separately — it's lexically allowed by the char class but git
+// refnames forbid it (and it enables path traversal in the worktree dir).
+var checkoutRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,128}$`)
+
+// ValidateCheckoutRef rejects a branch ref that a checkout entry point would
+// otherwise interpolate into a fetch refspec: anything outside the conservative
+// alphabet above, plus the shapes the alphabet admits but git-check-ref-format
+// still refuses — the `..` substring, a trailing slash or dot, an empty
+// component (consecutive slashes), a component starting with "." or ending in
+// ".lock" — and a "refs/" prefix (we'd double it up into
+// "+refs/heads/refs/heads/..." → an opaque "couldn't find remote ref").
+//
+// Lives here — rather than only in the workspace CLI's argv parsing — because
+// the checkout creates are now reachable from the agenthost RPC surface too
+// (TFAC-546), and the guard belongs at the interpolation point. Exported so
+// both front doors (`workspace add --ref` and the RPC) share one rule.
+func ValidateCheckoutRef(ref string) error {
+	if !checkoutRefPattern.MatchString(ref) ||
+		strings.Contains(ref, "..") ||
+		strings.HasSuffix(ref, "/") ||
+		strings.HasSuffix(ref, ".") ||
+		strings.HasPrefix(ref, "refs/") {
+		return fmt.Errorf("invalid git ref %q", ref)
+	}
+	for _, comp := range strings.Split(ref, "/") {
+		if comp == "" || strings.HasPrefix(comp, ".") || strings.HasSuffix(comp, ".lock") {
+			return fmt.Errorf("invalid git ref %q", ref)
+		}
+	}
+	return nil
 }
 
 // createCheckoutWorktreeAt fetches ref fresh from origin and adds a detached
@@ -168,6 +227,91 @@ func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, r
 	}
 
 	worktreeLog.Debug("checkout worktree at", "dir", wtDir, "ref", ref, "detached", true)
+	return wtDir, nil
+}
+
+// createCheckoutCloneAt is the multi-mode counterpart of
+// createCheckoutWorktreeAt: same fetch-fresh-from-origin semantics, but the
+// checkout is materialized as a SELF-CONTAINED clone (its own .git directory)
+// instead of a linked worktree, because the run root is bind-mounted into a
+// sandbox that can't see the shared bare (TFAC-546, mirroring TFAC-545's
+// finishSelfContainedPRClone). The bare stays the object source — one remote
+// fetch, reused across runs — and only this per-run copy is new.
+//
+// The clone ends DETACHED at the fetched tip, preserving the checkout-path
+// invariant: no live branch → the push gate authorizes nothing until the agent
+// creates its own branch. git can only clone a local branch, so a transient
+// run-namespaced branch (triagefactory/<runID>/checkout) carries the tip
+// through the clone and is deleted from both the clone and the bare afterwards.
+func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, runID, wtDir string, auth CloneAuth) (string, error) {
+	mu := lockRepo(owner, repo)
+	mu.Lock()
+	defer mu.Unlock()
+
+	bareDir, err := ensureBareCloneLocked(ctx, owner, repo, cloneURL, auth)
+	if err != nil {
+		return "", err
+	}
+
+	if ref == "" {
+		ref = detectDefaultBranch(ctx, bareDir)
+	}
+
+	// Fetch the ref fresh into its remote-tracking ref — identical to the
+	// worktree path, and materializeSelfContainedClone copies this ref into the
+	// clone (its baseBranch parameter) so the agent has an origin/<ref> to diff
+	// and branch against.
+	remoteRef := "refs/remotes/origin/" + ref
+	fetchSpec := fmt.Sprintf("+refs/heads/%s:%s", ref, remoteRef)
+	start := time.Now()
+	if err := gitRunCtxAuth(ctx, bareDir, auth, "fetch", "origin", fetchSpec); err != nil {
+		return "", fmt.Errorf("fetch ref %s: %w", ref, err)
+	}
+	worktreeLog.Debug("fetch completed", "ref", ref, "duration", time.Since(start).Round(time.Millisecond))
+
+	// Transient bare-local branch at the fetched tip, run-namespaced so
+	// concurrent runs sharing this bare never collide on it. -f overwrites a
+	// stray leftover from a crashed prior create (nothing checks it out — the
+	// clone below copies it and both copies are deleted before the lock drops).
+	tmpBranch := fmt.Sprintf("triagefactory/%s/checkout", runID)
+	if err := gitRunCtx(ctx, bareDir, "branch", "-f", tmpBranch, remoteRef); err != nil {
+		return "", fmt.Errorf("stage checkout branch %s: %w", tmpBranch, err)
+	}
+
+	if err := materializeSelfContainedClone(ctx, bareDir, wtDir, tmpBranch, ref, cloneURL, auth); err != nil {
+		_ = os.RemoveAll(wtDir)
+		dropBareRunRefs(ctx, bareDir, tmpBranch)
+		return "", err
+	}
+	dropBareRunRefs(ctx, bareDir, tmpBranch)
+
+	// Detach at the tip, then remove every trace of the transient branch from
+	// the clone: the branch ref itself, its config section, the clone-time
+	// remote-tracking mirror, and the --single-branch fetch refspec (repointed
+	// at the real ref so an in-sandbox `git fetch` refreshes origin/<ref>
+	// instead of failing on a branch that never existed upstream).
+	if err := gitRunCtx(ctx, wtDir, "checkout", "--detach"); err != nil {
+		_ = os.RemoveAll(wtDir)
+		return "", fmt.Errorf("detach run clone: %w", err)
+	}
+	if err := gitRunCtx(ctx, wtDir, "branch", "-D", tmpBranch); err != nil {
+		_ = os.RemoveAll(wtDir)
+		return "", fmt.Errorf("drop staging branch from run clone: %w", err)
+	}
+	_ = gitRunCtx(ctx, wtDir, "config", "--remove-section", "branch."+tmpBranch)
+	_ = gitRunCtx(ctx, wtDir, "update-ref", "-d", "refs/remotes/origin/"+tmpBranch)
+	if err := gitRunCtx(ctx, wtDir, "config", "remote.origin.fetch",
+		fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", ref, ref)); err != nil {
+		_ = os.RemoveAll(wtDir)
+		return "", fmt.Errorf("repoint clone fetch refspec: %w", err)
+	}
+
+	if err := writeLocalExcludes(wtDir); err != nil {
+		_ = os.RemoveAll(wtDir)
+		return "", fmt.Errorf("write local git excludes: %w", err)
+	}
+
+	worktreeLog.Info("checkout run clone created (self-contained)", "dir", wtDir, "ref", ref, "detached", true)
 	return wtDir, nil
 }
 

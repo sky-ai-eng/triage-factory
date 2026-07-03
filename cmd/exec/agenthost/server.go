@@ -8,12 +8,38 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
+
+// strictlyWithin reports whether path is a strict descendant of root — not
+// root itself, not a sibling, not an escape via "..", and not anything when
+// root is empty. Gate for the create-cleanup RemoveAll above: destructive
+// recovery must be provably scoped to the run root.
+func strictlyWithin(root, path string) bool {
+	if root == "" || path == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// sandboxAgentRoot is the sandbox's view of the run root — the bind-mount
+// destination agentproc's sandbox spec puts the run's Cwd at. Mirrors
+// agentproc's sandboxWorkRoot (which itself mirrors sandbox/spec.go). The
+// daemon only ever serves sandboxed callers, so this is unconditionally the
+// agent view its WorkspaceRoots dispatch reports.
+const sandboxAgentRoot = "/work"
 
 // Server is the daemon-side counterpart to IPCClient. One Server per
 // per-run unix socket: the spawner constructs a Server with the run
@@ -163,9 +189,15 @@ func (s *Server) handleConn(conn net.Conn) {
 
 	// The download method streams a log archive and gets a longer budget so a
 	// slow transfer isn't cancelled at callTimeout — mirrors the client cap.
+	// The workspace create runs real git (a first-touch bare clone can take a
+	// couple of minutes on a big repo) and gets its own budget, also mirrored
+	// client-side.
 	dispatchTimeout := callTimeout
-	if req.Method == methodGithubDownloadArtifact {
+	switch req.Method {
+	case methodGithubDownloadArtifact:
 		dispatchTimeout = downloadCallTimeout
+	case methodCreateWorkspaceCheckout:
+		dispatchTimeout = checkoutCallTimeout
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), dispatchTimeout)
 	defer cancel()
@@ -347,6 +379,51 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 			return nil, err
 		}
 		return emptyResult{}, client.DeleteRunWorktreeByRepoRef(ctx, a.RepoID, a.Ref)
+
+	case methodWorkspaceRoots:
+		// The transport IS the namespace boundary: an RPC arriving here came
+		// from inside the sandbox, whose view of the host run root is always
+		// the /work bind mount — so the daemon substitutes that as the agent
+		// view rather than the LocalClient's same-namespace answer.
+		host, _, err := client.WorkspaceRoots(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return workspaceRootsResult{Host: host, Agent: sandboxAgentRoot}, nil
+
+	case methodCreateWorkspaceCheckout:
+		var a createWorkspaceCheckoutArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		// Resolve the run root ONCE: the create builds under it, and the
+		// post-create chown + cleanup containment gate below are judged
+		// against the very same value — no second read that could disagree.
+		hostRoot, _, err := client.WorkspaceRoots(ctx)
+		if err != nil {
+			return nil, err
+		}
+		path, err := client.createWorkspaceCheckoutIn(ctx, hostRoot, a.Owner, a.Repo, a.Ref, a.PR)
+		if err != nil {
+			return nil, err
+		}
+		// The create ran as the host process; hand the subtree to the sandbox
+		// UID or the jailed agent can't write its own checkout. On failure,
+		// remove the checkout so a released reservation can retry the create
+		// cleanly (git clone refuses a non-empty target) — but ONLY when the
+		// path is provably a strict descendant of the run root. One chown
+		// failure mode is precisely "this path is not inside the run root"
+		// (a regressed create contract), and RemoveAll on an unverified path
+		// would turn that bug into deleting an arbitrary host directory.
+		if cerr := agentproc.ChownWorkspaceCheckoutForSandbox(hostRoot, path); cerr != nil {
+			if strictlyWithin(hostRoot, path) {
+				_ = os.RemoveAll(path)
+			} else {
+				agenthostLog.Warn("leaving un-chowned checkout in place; path is not verifiably inside the run root", "path", path, "host_root", hostRoot)
+			}
+			return nil, fmt.Errorf("hand checkout to sandbox user: %w", cerr)
+		}
+		return createWorkspaceCheckoutResult{Path: path}, nil
 
 	case methodBuildAgentRunFooter:
 		var a buildAgentRunFooterArgs

@@ -35,6 +35,14 @@ const callTimeout = 30 * time.Second
 // own longer budget on both the client deadline and the daemon dispatch ctx.
 const downloadCallTimeout = 15 * time.Minute
 
+// checkoutCallTimeout is the cap for CreateWorkspaceCheckout, which runs real
+// git host-side — a first-touch bare clone of a large repo legitimately takes
+// a couple of minutes. Deliberately held UNDER the workspace CLI's 5-minute
+// stale-reservation window (cmd/exec/workspace staleReservationAge): a create
+// that times out here is dead before its run_worktrees reservation becomes
+// reclaimable, so a reclaimed slot never races a still-running create.
+const checkoutCallTimeout = 4 * time.Minute
+
 // IPCClient is the unix-socket implementation of Client. Each call
 // opens its own connection and closes it on return — the daemon's
 // handleConn is one-shot (read one frame, write one frame, hang up),
@@ -252,6 +260,31 @@ func (c *IPCClient) InsertRunWorktree(ctx context.Context, row domain.RunWorktre
 
 func (c *IPCClient) DeleteRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
 	return c.call(ctx, methodDeleteRunWorktreeByRepoRef, deleteRunWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, nil)
+}
+
+// WorkspaceRoots asks the daemon for the run root's two views. This transport
+// IS the sandbox boundary, so the agent view comes back as the /work mount
+// (the daemon substitutes it) while the host view is what run_worktrees rows
+// must record. See Client.WorkspaceRoots.
+func (c *IPCClient) WorkspaceRoots(ctx context.Context) (string, string, error) {
+	var res workspaceRootsResult
+	if err := c.call(ctx, methodWorkspaceRoots, emptyArgs{}, &res); err != nil {
+		return "", "", err
+	}
+	return res.Host, res.Agent, nil
+}
+
+// CreateWorkspaceCheckout routes the git materialization host-side: the daemon
+// builds the checkout into the real host run root (visible in the sandbox
+// under /work) and returns its host-view path. Uses the checkout call budget —
+// a first-touch clone legitimately outlives the generic 30s cap.
+func (c *IPCClient) CreateWorkspaceCheckout(ctx context.Context, owner, repo, ref string, prNumber int) (string, error) {
+	var res createWorkspaceCheckoutResult
+	if err := c.callWithin(ctx, checkoutCallTimeout, methodCreateWorkspaceCheckout,
+		createWorkspaceCheckoutArgs{Owner: owner, Repo: repo, Ref: ref, PR: prNumber}, &res); err != nil {
+		return "", err
+	}
+	return res.Path, nil
 }
 
 func (c *IPCClient) BuildAgentRunFooter(ctx context.Context, kind string) (string, error) {
