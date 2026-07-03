@@ -369,6 +369,7 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int) (*handle, time.D
 		Env:              env,
 		ExtraMounts:      extraMounts,
 		ConfigureProxies: configureProxies,
+		MemoryLimitMB:    cfg.memLimitMB,
 	})
 	if err != nil {
 		cancel()
@@ -459,6 +460,10 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int) (*handle, time.D
 	case <-ready:
 		return h, spawnDur, time.Since(start), nil
 	case <-time.After(readyTimeout):
+		// Reap first so ProcessState reflects reality — an OOM-killed
+		// sandbox otherwise reads as "still running".
+		h.cancel()
+		_ = h.wait()
 		waitErr := "still running"
 		if cmd.ProcessState != nil {
 			waitErr = cmd.ProcessState.String()

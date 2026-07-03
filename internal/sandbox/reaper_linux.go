@@ -74,5 +74,10 @@ func reapOrphansImpl(ctx context.Context) error {
 		defaultAllocator().Release(idx)
 	}
 
+	// Leftover per-run memory-ceiling cgroups from a crashed process.
+	// Empty groups rmdir; one still holding a live orphan runsc stays
+	// for the next sweep.
+	reapOrphanRunCgroups()
+
 	return reapBundleOrphans(ctx)
 }

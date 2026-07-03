@@ -75,7 +75,7 @@ func TestLiveRun_CleanupRunsOncePerExitPath(t *testing.T) {
 			if err := cmd.Start(); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
-			go l.readLoop(runCtx, cmd, stdout, stderr, NoopSink{}, nil, nil, "t")
+			go l.readLoop(runCtx, cmd, stdout, stderr, NoopSink{}, nil, nil, "t", nil)
 
 			if c.cancel {
 				// Let the reader settle into its blocking read, then cancel:

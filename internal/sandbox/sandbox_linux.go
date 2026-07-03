@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"syscall"
 )
 
 // teardownState collects everything Close needs to undo. Populated
@@ -26,6 +28,12 @@ type teardownState struct {
 	// tracked here.
 	egressRules []iptablesRule
 	bundleDir   string
+	// cgroupDir / cgroupFD hold the per-run memory-ceiling cgroup
+	// (empty/nil when no limit was configured or setup failed open).
+	// The fd must outlive cmd.Start (clone3 reads it); Close closes
+	// the handle and removes the group.
+	cgroupDir string
+	cgroupFD  *os.File
 }
 
 // iptablesRule names a single MASQUERADE rule so teardown can
@@ -160,8 +168,56 @@ func wrap(ctx context.Context, cfg Config) (*exec.Cmd, *Sandbox, error) {
 	containerID := fmt.Sprintf("tf-%s-%d", truncate(cfg.RunID, 11), idx)
 	cmd := newRunscCommand(ctx, bundleDir, containerID)
 
+	// Step 12: per-run memory ceiling. runsc keeps --ignore-cgroups;
+	// TF owns the group and clone3s runsc directly into it, so the
+	// whole sandbox tree (sentry + gofer + app memfd) is under the
+	// limit from the first instruction. Fail-open by design: a host
+	// that can't complete the cgroup setup runs without ceilings and
+	// says so once, because "no limit" degrades gracefully while
+	// "no runs" is an outage.
+	if cfg.MemoryLimitMB > 0 {
+		if err := setupRunCgroups(); err != nil {
+			logCgroupFailOpenOnce(err)
+		} else if dir, f, cgErr := newRunCgroup(containerID, cfg.MemoryLimitMB); cgErr != nil {
+			logCgroupFailOpenOnce(cgErr)
+		} else {
+			td.cgroupDir = dir
+			td.cgroupFD = f
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				UseCgroupFD: true,
+				CgroupFD:    int(f.Fd()),
+			}
+		}
+	}
+
 	releaseOnError = false
 	return cmd, sb, nil
+}
+
+// logCgroupFailOpenOnce warns exactly once per process that memory
+// ceilings are unavailable — every subsequent run would repeat the
+// same environmental failure.
+var cgroupFailOpenOnce sync.Once
+
+func logCgroupFailOpenOnce(err error) {
+	cgroupFailOpenOnce.Do(func() {
+		sandboxLog.Warn("per-run memory ceiling unavailable; runs continue without limits", "error", err)
+	})
+}
+
+// OOMKilled reports whether this run's memory-ceiling cgroup recorded
+// an OOM kill. Callers check it after the runsc process exits and
+// BEFORE Close (teardown removes the group). Always false when no
+// limit was configured.
+func (s *Sandbox) OOMKilled() bool {
+	if s == nil || s.teardown == nil {
+		return false
+	}
+	t, ok := s.teardown.(*teardownState)
+	if !ok || t == nil {
+		return false
+	}
+	return cgroupOOMKilled(t.cgroupDir)
 }
 
 // truncate cuts s to maxLen chars. Used for container IDs that
@@ -217,6 +273,14 @@ func (s *Sandbox) Close() error {
 	}
 	if err := cleanupBundle(t.bundleDir); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: cleanup bundle: %v\n", err)
+	}
+	if t.cgroupFD != nil {
+		_ = t.cgroupFD.Close()
+		t.cgroupFD = nil
+	}
+	if err := removeRunCgroup(t.cgroupDir); err != nil {
+		// Non-fatal: the boot-time reaper sweeps stragglers.
+		fmt.Fprintf(os.Stderr, "sandbox: %v\n", err)
 	}
 	defaultAllocator().Release(t.subnetIdx)
 	s.teardown = nil // mark closed so re-Close is a no-op
