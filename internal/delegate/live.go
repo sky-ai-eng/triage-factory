@@ -6,10 +6,12 @@
 // exactly as the one-shot path did.
 //
 // Two execution backends share one disposition shape (liveOutcome): the
-// LiveRun driver (local, the warm/steerable path) and the one-shot fallback
-// (multi-mode sandbox, where streaming-input isn't wired through gVisor yet).
-// runAgent and ResumeWithMessage pick the backend via
-// agentproc.InteractiveSupported() and branch only on the shared outcome.
+// LiveRun driver (both local direct runs and multi-mode gVisor-sandboxed runs
+// drive through it — the sandbox's bidirectional stdio channel is validated
+// end-to-end) and the one-shot fallback, which runAgent and ResumeWithMessage
+// select via agentproc.InteractiveSupported(). That's unconditionally true
+// today, so the one-shot path is a vestigial seam kept for a future host that
+// can't support streaming input, not a live sandbox behavior.
 
 package delegate
 

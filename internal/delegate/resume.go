@@ -586,13 +586,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
 
-	// Off-allowlist tool calls route the same way the initial run does
-	// (TFAC-557): gVisor-sandboxed delegated runs auto-approve (the sandbox +
-	// the static allowlist + the enumerated agenthost RPC surface are the
-	// actual boundary, not a prompt nobody is there to answer);
-	// local-mode resumes keep the presence-gated browser round-trip
-	// (TFAC-392) since the allowlist is their only boundary. opts.TeamID
-	// falls back to defaults when empty.
+	// Off-allowlist tool calls route the same way the initial run does:
+	// gVisor-sandboxed delegated runs auto-approve (the sandbox + the static
+	// allowlist + the enumerated agenthost RPC surface are the actual
+	// boundary, not a prompt nobody is there to answer); local-mode resumes
+	// keep the presence-gated browser round-trip since the allowlist is
+	// their only boundary. opts.TeamID falls back to defaults when empty.
 	var perms agentproc.PermissionHandler
 	if agentproc.WillSandbox() {
 		perms = s.AutoApprovePermissionHandler(runID)

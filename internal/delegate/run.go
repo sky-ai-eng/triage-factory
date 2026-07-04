@@ -409,7 +409,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	// Off-allowlist tool calls route to one of two dispositions, chosen once
-	// per run (TFAC-557):
+	// per run:
 	//
 	//   - gVisor-sandboxed (multi mode + Linux): auto-approve. Delegated runs
 	//     are unattended by design, so the presence-gated round-trip below
@@ -418,8 +418,8 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	//     surface are the actual boundary, not a prompt nobody is there to
 	//     answer.
 	//   - Otherwise (local mode, no gVisor): the presence-gated browser
-	//     round-trip (TFAC-392) — the allowlist is the only boundary there,
-	//     so an off-allowlist call still needs a live decision or the
+	//     round-trip — the allowlist is the only boundary there, so an
+	//     off-allowlist call still needs a live decision or the
 	//     absent-grace/timeout deny.
 	var perms agentproc.PermissionHandler
 	if agentproc.WillSandbox() {
@@ -429,8 +429,8 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	// Execute as a long-lived LiveRun — both local direct runs and multi-mode
-	// gVisor-sandboxed runs drive through the streaming-input path (TFAC-322
-	// validated the sandbox's bidirectional stdio channel end-to-end).
+	// gVisor-sandboxed runs drive through the streaming-input path (the
+	// sandbox's bidirectional stdio channel is validated end-to-end).
 	// runOneShot is retained only as the seam InteractiveSupported forks on,
 	// for a future host that can't support the streaming path.
 	var out liveOutcome

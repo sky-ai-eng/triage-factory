@@ -8,13 +8,13 @@
 //
 // Both runLiveAndDrive call sites (the initial run and the resume) drive
 // through this same streaming-input path — local direct runs and multi-mode
-// gVisor-sandboxed runs alike (TFAC-322 validated the sandbox's bidirectional
-// stdio channel end-to-end, so runOneShot is a vestigial fallback, not the
+// gVisor-sandboxed runs alike (the sandbox's bidirectional stdio channel is
+// validated end-to-end, so runOneShot is a vestigial fallback, not the
 // production sandbox path). What differs by call site is which permission
 // handler answers the prompt: local-mode runs get this file's
 // BrowserPermissionHandler; gVisor-sandboxed delegated runs get
-// AutoApprovePermissionHandler instead (TFAC-557) — see run.go/resume.go for
-// the agentproc.WillSandbox() branch.
+// AutoApprovePermissionHandler instead — see run.go/resume.go for the
+// agentproc.WillSandbox() branch.
 
 package delegate
 
@@ -365,12 +365,12 @@ func (s *Spawner) broadcastPermissionResolved(orgID, runID, requestID string) {
 
 // AutoApprovePermissionHandler returns a PermissionHandler for gVisor-sandboxed
 // delegated runs that allows every canUseTool prompt immediately instead of
-// routing it through BrowserPermissionHandler's presence-gated wait (TFAC-557).
+// routing it through BrowserPermissionHandler's presence-gated wait.
 //
 // Delegated runs are unattended by design — a task-triggered run fires with no
 // operator expected at the console — so that presence-gated wait almost always
-// resolves via its own absent-grace deny (TFAC-392) anyway; it was friction
-// without a live decision behind it. What actually bounds an off-allowlist tool
+// resolves via its own absent-grace deny anyway; it was friction without a
+// live decision behind it. What actually bounds an off-allowlist tool
 // call's blast radius in the sandboxed case is structural, not the prompt: the
 // gVisor sandbox (netns egress lockdown + Property B credential-free env), the
 // static --allowedTools allowlist (unchanged by this handler), and the

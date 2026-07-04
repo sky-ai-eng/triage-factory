@@ -68,10 +68,10 @@ func waitForPendingOrDone(t *testing.T, s *Spawner, runID, requestID string, got
 }
 
 // TestAutoApprovePermissionHandler_AlwaysAllows pins the sandboxed-run
-// disposition (TFAC-557): every prompt allows immediately, with no broker
-// registration and no presence/timeout wait. A regression here — an empty
-// Behavior, or later branching that sometimes denies — would silently
-// reintroduce the friction this handler exists to remove.
+// disposition: every prompt allows immediately, with no broker registration
+// and no presence/timeout wait. A regression here — an empty Behavior, or
+// later branching that sometimes denies — would silently reintroduce the
+// friction this handler exists to remove.
 func TestAutoApprovePermissionHandler_AlwaysAllows(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	h := s.AutoApprovePermissionHandler("run-1")
