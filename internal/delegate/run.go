@@ -401,20 +401,38 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
 
-	// Resolve the presence-gated absent-auto-deny policy once for this run's
-	// team (TFAC-392) and capture it in the permission handler closure — no
-	// per-prompt DB read. teamID nil-derefs to "" (resolveAbsentAutoDeny then
-	// falls back to defaults); task.TeamID is set for any task that reaches a run.
+	// teamID nil-derefs to "" (resolveAbsentAutoDeny then falls back to
+	// defaults); task.TeamID is set for any task that reaches a run.
 	teamID := ""
 	if task.TeamID != nil {
 		teamID = *task.TeamID
 	}
-	absentDeny := s.resolveAbsentAutoDeny(ctx, teamID)
 
-	// Execute as a long-lived LiveRun off the dispatcher where supported
-	// (local), falling back to the one-shot sandbox path otherwise (multi —
-	// streaming-input isn't wired through gVisor yet). Both produce the same
-	// liveOutcome shape for the shared branching below.
+	// Off-allowlist tool calls route to one of two dispositions, chosen once
+	// per run:
+	//
+	//   - gVisor-sandboxed (multi mode + Linux): auto-approve. Delegated runs
+	//     are unattended by design, so the presence-gated round-trip below
+	//     almost always resolves via its own absent-grace deny anyway — the
+	//     sandbox + the static allowlist + the enumerated agenthost RPC
+	//     surface are the actual boundary, not a prompt nobody is there to
+	//     answer.
+	//   - Otherwise (local mode, no gVisor): the presence-gated browser
+	//     round-trip — the allowlist is the only boundary there, so an
+	//     off-allowlist call still needs a live decision or the
+	//     absent-grace/timeout deny.
+	var perms agentproc.PermissionHandler
+	if agentproc.WillSandbox() {
+		perms = s.AutoApprovePermissionHandler(runID)
+	} else {
+		perms = s.BrowserPermissionHandler(orgID, runID, s.resolveAbsentAutoDeny(ctx, teamID))
+	}
+
+	// Execute as a long-lived LiveRun — both local direct runs and multi-mode
+	// gVisor-sandboxed runs drive through the streaming-input path (the
+	// sandbox's bidirectional stdio channel is validated end-to-end).
+	// runOneShot is retained only as the seam InteractiveSupported forks on,
+	// for a future host that can't support the streaming path.
 	var out liveOutcome
 	if agentproc.InteractiveSupported() {
 		out = s.runLiveAndDrive(ctx, liveRunSpec{
@@ -427,14 +445,8 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				triggerType:   triggerType,
 				creatorUserID: creatorUserID,
 			},
-			opts: baseOpts,
-			// Interactive runs surface off-allowlist tools to the browser as a
-			// permission_request and park the turn until the user answers (Allow/Deny)
-			// or permTimeout() denies it — kept below idleTimeout so an unwatched run
-			// degrades to a bounded deny, never a hang. With absent-auto-deny on, an
-			// unattended prompt denies after the team's grace instead. A generous
-			// allowlist keeps prompts rare.
-			perms:       s.BrowserPermissionHandler(orgID, runID, absentDeny),
+			opts:        baseOpts,
+			perms:       perms,
 			sink:        sink,
 			idleTimeout: s.idleTimeout(),
 		})

@@ -67,6 +67,31 @@ func waitForPendingOrDone(t *testing.T, s *Spawner, runID, requestID string, got
 	return false
 }
 
+// TestAutoApprovePermissionHandler_AlwaysAllows pins the sandboxed-run
+// disposition: every prompt allows immediately, with no broker registration
+// and no presence/timeout wait. A regression here — an empty Behavior, or
+// later branching that sometimes denies — would silently reintroduce the
+// friction this handler exists to remove.
+func TestAutoApprovePermissionHandler_AlwaysAllows(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	h := s.AutoApprovePermissionHandler("run-1")
+
+	d := h(agentproc.PermissionRequest{RequestID: "req-1", ToolName: "Bash", Input: map[string]any{"command": "curl example.com"}})
+	if d.Behavior != "allow" {
+		t.Errorf("behavior = %q, want allow", d.Behavior)
+	}
+	if d.Message != "" {
+		t.Errorf("message = %q, want empty", d.Message)
+	}
+
+	s.mu.Lock()
+	_, pending := s.permPending[permKey("run-1", "req-1")]
+	s.mu.Unlock()
+	if pending {
+		t.Error("AutoApprovePermissionHandler must not register a pending broker entry")
+	}
+}
+
 // TestBrowserPermissionHandler_ResolveAllow: a prompt answered via
 // ResolvePermission returns the user's decision to the parked handler.
 func TestBrowserPermissionHandler_ResolveAllow(t *testing.T) {
