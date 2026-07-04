@@ -415,7 +415,9 @@ function VentHeat({ heat, light, live }: { heat: number; light: string; live: bo
 // steering surface. Three stacked regions: a permission prompt (priority, when
 // the turn is parked on a tool approval), the honest run status + contextual
 // actions, and the steering composer (for a live or `open` run). The composer is
-// suppressed while a prompt is up — you answer the prompt first.
+// suppressed while a prompt is up — you answer the prompt first. It stays
+// mounted throughout (just visually/functionally hidden) so an in-progress
+// draft survives a prompt appearing and resolving.
 function IntakeDock({
   run,
   state,
@@ -537,12 +539,14 @@ function IntakeDock({
         </div>
       </div>
 
-      {/* Steering composer — live + `open` runs, hidden behind a pending prompt. */}
-      {steerable && !hasPrompt && actions.onMessage && (
+      {/* Steering composer — live + `open` runs, hidden (not unmounted) behind a
+          pending prompt so a draft in progress isn't lost. */}
+      {steerable && actions.onMessage && (
         <DockComposer
           state={state}
           placeholder={active ? 'Steer the agent…' : 'Message to resume…'}
           onSend={actions.onMessage}
+          hidden={hasPrompt}
         />
       )}
     </div>
@@ -552,15 +556,19 @@ function IntakeDock({
 // DockComposer — the steering input. An auto-resizing textarea (Enter sends,
 // Shift+Enter inserts a newline), with a send key lit in the run's state tone.
 // State is local; the sent text round-trips back as an agent_message, so there's
-// no optimistic insert here.
+// no optimistic insert here. `hidden` collapses it out of view and disables
+// interaction (e.g. while a permission prompt is up) without unmounting it —
+// unmounting would drop whatever the user had drafted.
 function DockComposer({
   state,
   placeholder,
   onSend,
+  hidden = false,
 }: {
   state: ReturnType<typeof stationState>
   placeholder: string
   onSend: (text: string) => void
+  hidden?: boolean
 }) {
   const [draft, setDraft] = useState('')
   const ref = useRef<HTMLTextAreaElement>(null)
@@ -575,6 +583,7 @@ function DockComposer({
   }, [draft])
 
   const submit = () => {
+    if (hidden) return
     const text = draft.trim()
     if (!text) return
     onSend(text)
@@ -590,13 +599,18 @@ function DockComposer({
   }
 
   return (
-    <div className="mt-2.5 flex items-end gap-2 rounded-[5px] border border-border-subtle bg-black/[0.02] px-2.5 py-1.5 transition-colors focus-within:border-[color:var(--hmi-cyan)]">
+    <div
+      aria-hidden={hidden}
+      className={`mt-2.5 flex items-end gap-2 rounded-[5px] border border-border-subtle bg-black/[0.02] px-2.5 py-1.5 transition-colors focus-within:border-[color:var(--hmi-cyan)] ${hidden ? 'hidden' : ''}`}
+    >
       <textarea
         ref={ref}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={onKeyDown}
         rows={1}
+        disabled={hidden}
+        tabIndex={hidden ? -1 : undefined}
         placeholder={placeholder}
         aria-label={placeholder.replace(/…$/, '')}
         className="flex-1 resize-none bg-transparent py-1 text-[13px] leading-relaxed text-text-primary placeholder:text-text-tertiary/70 focus:outline-none"
@@ -604,7 +618,8 @@ function DockComposer({
       <button
         type="button"
         onClick={submit}
-        disabled={!draft.trim()}
+        disabled={hidden || !draft.trim()}
+        tabIndex={hidden ? -1 : undefined}
         aria-label="Send message"
         className="mb-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[4px] transition-opacity disabled:opacity-30"
         style={{
