@@ -6,12 +6,15 @@
 // broker (s.permPending) is in-memory only and keyed by the SDK-generated
 // request id.
 //
-// Both runLiveAndDrive call sites (the initial run and the resume) pass this
-// handler, so every interactive run surfaces off-allowlist tools to the
-// browser; the RunStation dock renders the prompt and posts the answer back
-// through ResolvePermission. The one-shot fallback (multi-mode sandbox, where
-// streaming-input isn't wired yet) takes no handler — off-allowlist tools
-// auto-deny there, same as before P3.
+// Both runLiveAndDrive call sites (the initial run and the resume) drive
+// through this same streaming-input path — local direct runs and multi-mode
+// gVisor-sandboxed runs alike (TFAC-322 validated the sandbox's bidirectional
+// stdio channel end-to-end, so runOneShot is a vestigial fallback, not the
+// production sandbox path). What differs by call site is which permission
+// handler answers the prompt: local-mode runs get this file's
+// BrowserPermissionHandler; gVisor-sandboxed delegated runs get
+// AutoApprovePermissionHandler instead (TFAC-557) — see run.go/resume.go for
+// the agentproc.WillSandbox() branch.
 
 package delegate
 
@@ -358,6 +361,28 @@ func (s *Spawner) broadcastPermissionResolved(orgID, runID, requestID string) {
 			"request_id": requestID,
 		},
 	})
+}
+
+// AutoApprovePermissionHandler returns a PermissionHandler for gVisor-sandboxed
+// delegated runs that allows every canUseTool prompt immediately instead of
+// routing it through BrowserPermissionHandler's presence-gated wait (TFAC-557).
+//
+// Delegated runs are unattended by design — a task-triggered run fires with no
+// operator expected at the console — so that presence-gated wait almost always
+// resolves via its own absent-grace deny (TFAC-392) anyway; it was friction
+// without a live decision behind it. What actually bounds an off-allowlist tool
+// call's blast radius in the sandboxed case is structural, not the prompt: the
+// gVisor sandbox (netns egress lockdown + Property B credential-free env), the
+// static --allowedTools allowlist (unchanged by this handler), and the
+// enumerated agenthost RPC surface (no merge/delete/dispatch method exists to
+// unlock). Local-mode runs have no gVisor boundary, so they keep routing
+// through BrowserPermissionHandler — see the agentproc.WillSandbox() branch in
+// run.go/resume.go.
+func (s *Spawner) AutoApprovePermissionHandler(runID string) agentproc.PermissionHandler {
+	return func(req agentproc.PermissionRequest) agentproc.PermissionDecision {
+		delegateLog.Info("off-allowlist tool auto-approved in sandboxed run", "run", runID, "tool", req.ToolName)
+		return agentproc.PermissionDecision{Behavior: "allow"}
+	}
 }
 
 // ResolvePermission delivers a decision to a pending permission request,

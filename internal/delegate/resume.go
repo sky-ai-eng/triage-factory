@@ -586,19 +586,25 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
 
-	// Resolve the presence-gated absent-auto-deny policy for the run's team
-	// (TFAC-392), matching the initial run; opts.TeamID falls back to defaults
-	// when empty.
-	absentDeny := s.resolveAbsentAutoDeny(ctx, opts.TeamID)
+	// Off-allowlist tool calls route the same way the initial run does
+	// (TFAC-557): gVisor-sandboxed delegated runs auto-approve (the sandbox +
+	// the static allowlist + the enumerated agenthost RPC surface are the
+	// actual boundary, not a prompt nobody unattended is there to answer);
+	// local-mode resumes keep the presence-gated browser round-trip
+	// (TFAC-392) since the allowlist is their only boundary. opts.TeamID
+	// falls back to defaults when empty.
+	var perms agentproc.PermissionHandler
+	if agentproc.WillSandbox() {
+		perms = s.AutoApprovePermissionHandler(runID)
+	} else {
+		perms = s.BrowserPermissionHandler(orgID, runID, s.resolveAbsentAutoDeny(ctx, opts.TeamID))
+	}
 
 	// Resume executes as a LiveRun (re-registered in procs, so a resumed run
 	// is interruptible/steerable), falling back to the one-shot sandbox path
 	// in multi mode. idleTimeout 0 disables hibernation AND the driver's
 	// multi-turn loop: a resume is a bounded re-invoke that drives to one
-	// terminal result, not a fresh long-lived autonomous run. The browser
-	// permission handler matches the initial run: an off-allowlist tool
-	// surfaces a permission_request to watchers, denied at permTimeout (or the
-	// absent grace) if unanswered.
+	// terminal result, not a fresh long-lived autonomous run.
 	var out liveOutcome
 	if agentproc.InteractiveSupported() {
 		out = s.runLiveAndDrive(ctx, liveRunSpec{
@@ -615,7 +621,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 				creatorUserID: creatorUserID,
 			},
 			opts:        baseOpts,
-			perms:       s.BrowserPermissionHandler(orgID, runID, absentDeny),
+			perms:       perms,
 			sink:        sink,
 			idleTimeout: 0,
 		})
