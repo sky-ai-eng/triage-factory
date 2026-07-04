@@ -589,7 +589,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// Off-allowlist tool calls route the same way the initial run does
 	// (TFAC-557): gVisor-sandboxed delegated runs auto-approve (the sandbox +
 	// the static allowlist + the enumerated agenthost RPC surface are the
-	// actual boundary, not a prompt nobody unattended is there to answer);
+	// actual boundary, not a prompt nobody is there to answer);
 	// local-mode resumes keep the presence-gated browser round-trip
 	// (TFAC-392) since the allowlist is their only boundary. opts.TeamID
 	// falls back to defaults when empty.
