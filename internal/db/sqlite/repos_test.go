@@ -52,6 +52,37 @@ func TestRepoStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	}
 }
 
+// TestRepoStore_SQLite_ListTeamScoped_MirrorsList pins the local-mode
+// asymmetry (TFAC-559): N=1 has no other team to scope away, so
+// ListTeamScoped returns the identical set List does — unlike the
+// Postgres impl, which semi-joins through team_github_repos under RLS.
+func TestRepoStore_SQLite_ListTeamScoped_MirrorsList(t *testing.T) {
+	conn := newSQLiteForRepoTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := t.Context()
+
+	if err := stores.Repos.SetConfigured(ctx, runmode.LocalDefaultOrgID, []string{"a/one", "b/two"}); err != nil {
+		t.Fatalf("SetConfigured: %v", err)
+	}
+
+	all, err := stores.Repos.List(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	scoped, err := stores.Repos.ListTeamScoped(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("ListTeamScoped: %v", err)
+	}
+	if len(scoped) != len(all) {
+		t.Fatalf("ListTeamScoped returned %d rows, want %d (unscoped local mode)", len(scoped), len(all))
+	}
+	for i := range all {
+		if all[i].ID != scoped[i].ID {
+			t.Errorf("row %d: List=%s ListTeamScoped=%s", i, all[i].ID, scoped[i].ID)
+		}
+	}
+}
+
 func newSQLiteForRepoTest(t *testing.T) *sql.DB {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")

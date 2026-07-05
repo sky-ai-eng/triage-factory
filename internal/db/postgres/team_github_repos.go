@@ -258,6 +258,28 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, own
 	return true, nil
 }
 
+func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID, owner, repo string) (bool, error) {
+	// Runs on the app pool so team_github_repos_select RLS auto-scopes the
+	// EXISTS to the caller's own team memberships — no team_id needed, same
+	// RLS-does-the-scoping trick as factoryGitHubRepoTrackedExists /
+	// jiraTeamProjectMembershipExists. The teams join binds org as
+	// defense-in-depth.
+	var ok bool
+	err := s.app.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM team_github_repos g
+			JOIN teams tm ON tm.id = g.team_id
+			WHERE tm.org_id = $1
+			  AND lower(g.owner) = lower($2)
+			  AND lower(g.repo) = lower($3)
+		)
+	`, orgID, owner, repo).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("tracks repo viewer scoped: %w", err)
+	}
+	return ok, nil
+}
+
 // splitRepoColumns transposes a repo slice into parallel owner + repo
 // slices for unnest()-based array binding. Returns empty (non-nil)
 // slices for an empty input so unnest yields zero rows.

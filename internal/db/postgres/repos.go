@@ -127,6 +127,49 @@ func listRepoProfiles(ctx context.Context, q queryer, orgID string) ([]domain.Re
 	return out, rows.Err()
 }
 
+// repoProfileTrackedByViewerTeams scopes a repo_profiles row (alias rp) to
+// the tracked repos of the viewer's teams — the RLS-does-the-scoping
+// semi-join pattern factory.go's factoryGitHubRepoTrackedExists and
+// entities.go's jiraTeamProjectMembershipExists use for the same class of
+// org-wide-entity-list leak (TFAC-559). Under the app pool (tf_app, RLS
+// active) team_github_repos_select already constrains visible rows to the
+// caller's memberships, so the EXISTS auto-scopes with no explicit team_id.
+// The teams join binds org (rp.org_id) as defense-in-depth for the admin
+// pool, where team_github_repos carries no org_id column of its own.
+const repoProfileTrackedByViewerTeams = `EXISTS (
+	SELECT 1 FROM team_github_repos g
+	JOIN teams tm ON tm.id = g.team_id
+	WHERE tm.org_id = rp.org_id
+	  AND lower(g.owner) = lower(rp.owner)
+	  AND lower(g.repo) = lower(rp.repo)
+)`
+
+func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT rp.owner, rp.repo, rp.description, rp.has_readme, rp.has_claude_md, rp.has_agents_md,
+		       rp.profile_text, rp.clone_url, rp.default_branch, rp.base_branch, rp.profiled_at,
+		       rp.clone_status, rp.clone_error, rp.clone_error_kind
+		FROM repo_profiles rp
+		WHERE rp.org_id = $1
+		  AND `+repoProfileTrackedByViewerTeams+`
+		ORDER BY rp.owner, rp.repo
+	`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []domain.RepoProfile{}
+	for rows.Next() {
+		p, err := pgScanRepoProfileFull(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 func (s *repoStore) ListWithContent(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT owner, repo, description, has_readme, has_claude_md, has_agents_md,

@@ -83,6 +83,13 @@ func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.RepoProfil
 	return out, rows.Err()
 }
 
+// ListTeamScoped mirrors List in local mode — N=1, so there is no other
+// team to scope away (matches the ListActiveJiraTeamScoped /
+// FactoryReadStore.Entities local-mode asymmetry, TFAC-559).
+func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
+	return s.List(ctx, orgID)
+}
+
 func (s *repoStore) ListWithContent(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

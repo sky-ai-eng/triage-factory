@@ -42,6 +42,25 @@ type RepoStore interface {
 	// profile text. Ordered by repoID for stable display.
 	List(ctx context.Context, orgID string) ([]domain.RepoProfile, error)
 
+	// ListTeamScoped is the non-admin discovery read (TFAC-559): it
+	// returns only the configured repos tracked by at least one of the
+	// caller's teams, semi-joined through team_github_repos. Mirrors the
+	// read-scoping seam entities.ListActiveJiraTeamScoped and
+	// FactoryReadStore.Entities use for the same org-wide-entity-list
+	// leak class (CLAUDE.md's multi-mode read-scoping standing rule).
+	//
+	// Multi-mode (Postgres): under the app pool (tf_app, RLS active) the
+	// team_github_repos_select policy already scopes the semi-join to the
+	// viewer's own team memberships, so this auto-scopes with no explicit
+	// team_id. A teamless caller gets zero rows. Callers gate org admins
+	// around this method instead — an admin calls List (the org-wide
+	// view), never this one.
+	//
+	// Local mode (SQLite, N=1): returns the same set as List — there is
+	// no other team to scope away, mirroring the local-mode asymmetry of
+	// ListActiveJiraTeamScoped / FactoryReadStore.Entities.
+	ListTeamScoped(ctx context.Context, orgID string) ([]domain.RepoProfile, error)
+
 	// ListWithContent returns only repos that have a non-empty
 	// profile_text — the subset the curator + delegate context
 	// loaders care about. Subset of List by predicate; safe to call
