@@ -871,6 +871,38 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 	return n > 0, nil
 }
 
+func (s *taskStore) ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error) {
+	if fromUserID == "" {
+		return false, errors.New("ReassignClaimToUser: empty fromUserID")
+	}
+	if toUserID == "" {
+		return false, errors.New("ReassignClaimToUser: empty toUserID")
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET claimed_by_user_id = $1,
+		       team_id = COALESCE(
+		           (SELECT tt.team_id FROM task_teams tt
+		              JOIN memberships m ON m.team_id = tt.team_id
+		             WHERE tt.task_id = $3 AND m.user_id = $1
+		             ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC LIMIT 1),
+		           team_id),
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		 WHERE org_id = $2 AND id = $3
+		   AND claimed_by_user_id = $4
+		   AND status NOT IN ('done', 'dismissed')
+	`, toUserID, orgID, taskID, fromUserID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // --- Breaker ---
 
 func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error) {

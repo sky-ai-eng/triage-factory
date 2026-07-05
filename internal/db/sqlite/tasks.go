@@ -830,6 +830,36 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 	return n > 0, nil
 }
 
+func (s *taskStore) ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	if fromUserID == "" {
+		return false, fmt.Errorf("ReassignClaimToUser: empty fromUserID")
+	}
+	if toUserID == "" {
+		return false, fmt.Errorf("ReassignClaimToUser: empty toUserID")
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET claimed_by_user_id = ?,
+		       team_id = `+sqliteActingTeamExpr+`,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		 WHERE id = ?
+		   AND claimed_by_user_id = ?
+		   AND status NOT IN ('done', 'dismissed')
+	`, toUserID, taskID, toUserID, taskID, fromUserID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // --- Breaker ---
 
 func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error) {

@@ -5,9 +5,8 @@ import type { Task, TeamMember, TeamBot } from '../../types'
 // AssigneePicker is SKY-330's per-card assignee selector. Replaces
 // the drag-to-Agent gesture that broke when the Agent column was
 // removed. Order is fixed: Me, Bot (when enabled), [teammates...].
-// v1 only supports self-assign, self-unassign, and delegate-to-bot;
-// teammate rows render for awareness (whoever currently holds the
-// claim) but are not interactive.
+// Supports self-assign, self-unassign, delegate-to-bot, and (TFAC-561)
+// user↔user reassignment via the teammate rows.
 //
 // State semantics (toggle behavior):
 //   - unclaimed + click Me           → claim self
@@ -22,9 +21,20 @@ import type { Task, TeamMember, TeamBot } from '../../types'
 //                                      the existing /swipe delegate path)
 //   - claimed by bot + click Bot     → no-op (already there; would just
 //                                      prompt for a duplicate run)
+//   - claimed by a user (me or someone else) + click a teammate row →
+//                                      reassign (TFAC-561; the existing
+//                                      claimant hands off, or a team
+//                                      admin overrides — the server is
+//                                      the enforcement boundary, see
+//                                      onReassign)
+//   - unclaimed or bot-claimed + teammate row →
+//                                      disabled; the row explains why
+//                                      (claim it, or take it over from
+//                                      the bot, first) rather than
+//                                      rendering as a dead control
 //
-// Errors: the onClaim / onUnclaim / onDelegate callbacks own
-// failure handling. The picker collapses immediately on action
+// Errors: the onClaim / onUnclaim / onDelegate / onReassign callbacks
+// own failure handling. The picker collapses immediately on action
 // without waiting for the promise to resolve — if the caller
 // surfaces failures via toasts or refetch reconciliation, that's
 // where the user sees them. (Pre-merge the docstring referenced
@@ -38,6 +48,7 @@ interface Props {
   onClaim: (task: Task) => Promise<void>
   onUnclaim: (task: Task) => Promise<void>
   onDelegate: (task: Task) => void
+  onReassign: (task: Task, targetUserID: string) => Promise<void>
   // SKY-330: terminal tasks (done/dismissed) skip the toggle UI —
   // the picker still renders the avatar showing who finished it for
   // audit/history but ignores clicks. Caller passes true for tasks
@@ -53,6 +64,7 @@ export default function AssigneePicker({
   onClaim,
   onUnclaim,
   onDelegate,
+  onReassign,
   readOnly = false,
 }: Props) {
   const [open, setOpen] = useState(false)
@@ -96,6 +108,11 @@ export default function AssigneePicker({
     setOpen(false)
     if (claimedByBot) return // already there; click is a no-op
     onDelegate(task) // parent opens the prompt picker
+  }
+
+  const handleReassign = async (targetUserID: string) => {
+    setOpen(false)
+    await onReassign(task, targetUserID)
   }
 
   // SKY-330 chip styling: keeps the picker chrome small so it doesn't
@@ -159,37 +176,49 @@ export default function AssigneePicker({
             />
           )}
 
-          {/* Teammates: display-only in v1. The full roster is
-              rendered (matching the design's "me, bot, teammates..."
-              order) so users can see who else is on the team without
-              the picker actually permitting cross-user assignment.
-              The current claimant (if it's a teammate) is marked
-              selected; non-claimant teammates render with a "(v1)
-              reassignment not supported" sublabel to set expectations.
-              Skip the current user — already rendered as "Me". */}
+          {/* Teammates (TFAC-561): the full roster is rendered (matching
+              the design's "me, bot, teammates..." order). A row is only
+              clickable — reassign — while the task is currently held by
+              a user (self or someone else); an unclaimed or bot-claimed
+              task can't reassign directly to a teammate (that's what
+              claim / takeover are for), so those rows stay disabled but
+              explain why rather than rendering as dead controls. The
+              current claimant (if it's a teammate) is marked selected.
+              Skip the current user — already rendered as "Me". Server
+              is the permission boundary (claimant or team admin only —
+              see swipeReassign); a caller without either surfaces a 403
+              the same way an unauthorized takeover would. */}
           {(() => {
             const teammates = members.filter(
               (m) => !m.is_current_user && m.user_id !== currentUserID,
             )
             if (teammates.length === 0) return null
+            const taskHeldByUser = claimedByMe || claimedByOtherUser
             return (
               <>
                 <div className="my-1 border-t border-border-subtle" />
                 {teammates.map((m) => {
                   const label = m.display_name || m.github_username || m.user_id
                   const isClaimant = task.claimed_by_user_id === m.user_id
+                  const clickable = !isClaimant && taskHeldByUser
+                  const sublabel = isClaimant
+                    ? 'Currently assigned'
+                    : !taskHeldByUser
+                      ? claimedByBot
+                        ? 'Take over from the bot first to hand off'
+                        : 'Claim it yourself first to hand off'
+                      : claimedByMe
+                        ? 'Click to reassign (transfers from you)'
+                        : 'Click to reassign'
                   return (
                     <PickerRow
                       key={m.user_id}
                       avatar={<AvatarCircle initials={initialsFor(label)} tone="user" />}
                       label={label}
-                      sublabel={
-                        isClaimant
-                          ? 'Currently claimed (reassignment not supported in v1)'
-                          : 'Reassignment not supported in v1'
-                      }
+                      sublabel={sublabel}
+                      onClick={clickable ? () => handleReassign(m.user_id) : undefined}
                       selected={isClaimant}
-                      disabled
+                      disabled={!clickable}
                     />
                   )
                 })}

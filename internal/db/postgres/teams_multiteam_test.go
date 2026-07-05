@@ -482,6 +482,59 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			t.Fatalf("resolve claim team: %v", err)
 		}
 	})
+
+	t.Run("reassign_consolidates_to_new_claimants_team", func(t *testing.T) {
+		// A task owned by team A, claimed by the founder (member of A+B).
+		// Reassigning the claim (TFAC-561) to a second user who belongs
+		// ONLY to team B must re-home team_id to B — the same task_teams-
+		// visibility-set derivation ClaimQueuedForUser/TakeoverClaimFromAgent
+		// already apply on their own claim arms.
+		userB := pgtest.SeedUser(t, h, "reassign-teamb")
+		pgtest.MustExec(t, h.AdminDB,
+			`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`, userB, orgID)
+		pgtest.MustExec(t, h.AdminDB,
+			`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, userB, teamB)
+
+		task := seedMultiTeamTask(t, h, orgID, userID, teamA, "reassign-cross-team")
+		pgtest.MustExec(t, h.AdminDB,
+			`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, task, teamB)
+		pgtest.MustExec(t, h.AdminDB,
+			`UPDATE tasks SET claimed_by_user_id = $2 WHERE id = $1`, task, userID)
+
+		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ReassignClaimToUser(ctx, orgID, task, userID, userB)
+			if e != nil {
+				return e
+			}
+			if !ok {
+				t.Fatal("ReassignClaimToUser returned ok=false reassigning a valid user-claimed task")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("reassign: %v", err)
+		}
+
+		err = h.WithUser(t, userB, orgID, func(tx *sql.Tx) error {
+			got, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.Get(ctx, orgID, task)
+			if e != nil {
+				return e
+			}
+			if got == nil {
+				t.Fatal("userB can't see the task they were just reassigned to")
+			}
+			if got.TeamID == nil || *got.TeamID != teamB {
+				t.Errorf("team_id after reassign = %v, want teamB %q (userB's own team)", got.TeamID, teamB)
+			}
+			if got.ClaimedByUserID != userB {
+				t.Errorf("ClaimedByUserID = %q, want %q", got.ClaimedByUserID, userB)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("post-reassign read as userB: %v", err)
+		}
+	})
 }
 
 func containsTask(tasks []domain.Task, id string) bool {

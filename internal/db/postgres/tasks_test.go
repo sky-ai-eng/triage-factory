@@ -313,6 +313,105 @@ func TestTaskStore_Postgres_OrgHandlerSentinel(t *testing.T) {
 	}
 }
 
+// TestTaskStore_Postgres_ReassignClaimToUser covers the TFAC-561 user↔user
+// handoff arm: a CAS that only lands when the task is presently claimed by
+// the expected "from" user, moves the claim to a second seeded user, and
+// refuses on a stale expectation, an unclaimed/bot-claimed task, or a
+// terminal row. Cross-team consolidation is covered separately in
+// teams_multiteam_test.go, where the multi-team fixtures already live.
+func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userA, agentID := seedPgOrgUserAgent(t, h)
+	userB := pgtest.SeedUser(t, h, "reassign-target")
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	t.Run("lands_then_refuses_stale_expectation", func(t *testing.T) {
+		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-happy")
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA); err != nil || !ok {
+			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
+		}
+		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB)
+		if err != nil {
+			t.Fatalf("reassign: %v", err)
+		}
+		if !ok {
+			t.Fatal("reassign returned ok=false on a valid user-claimed task")
+		}
+		got, err := stores.Tasks.Get(ctx, orgID, taskID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.ClaimedByUserID != userB {
+			t.Errorf("ClaimedByUserID=%q, want %q", got.ClaimedByUserID, userB)
+		}
+		if got.ClaimedByAgentID != "" {
+			t.Errorf("ClaimedByAgentID=%q, want empty after reassign", got.ClaimedByAgentID)
+		}
+		// The claim already moved to userB — a second reassign expecting
+		// userA as the "from" claimant must now be refused (stale CAS
+		// expectation), and the successful reassign above must survive.
+		ok, err = stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB)
+		if err != nil {
+			t.Fatalf("stale reassign: %v", err)
+		}
+		if ok {
+			t.Error("reassign returned ok=true against a stale expected-claimant; CAS guard broken")
+		}
+		got, err = stores.Tasks.Get(ctx, orgID, taskID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.ClaimedByUserID != userB {
+			t.Errorf("claim was disturbed by the refused CAS: got %q want %q", got.ClaimedByUserID, userB)
+		}
+	})
+
+	t.Run("refuses_unclaimed_task", func(t *testing.T) {
+		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-unclaimed")
+		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB)
+		if err != nil {
+			t.Fatalf("reassign on unclaimed: %v", err)
+		}
+		if ok {
+			t.Error("ok=true reassigning an unclaimed task; guard broken")
+		}
+	})
+
+	t.Run("refuses_bot_claimed_task", func(t *testing.T) {
+		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-bot")
+		if _, err := stores.Tasks.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, ""); err != nil {
+			t.Fatalf("stamp bot claim: %v", err)
+		}
+		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB)
+		if err != nil {
+			t.Fatalf("reassign on bot-claimed: %v", err)
+		}
+		if ok {
+			t.Error("ok=true reassigning a bot-claimed task; the from-user CAS should never match a NULL claimed_by_user_id")
+		}
+	})
+
+	t.Run("refuses_terminal_task", func(t *testing.T) {
+		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-term")
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA); err != nil || !ok {
+			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
+		}
+		if err := stores.Tasks.Close(ctx, orgID, taskID, "test", ""); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB)
+		if err != nil {
+			t.Fatalf("reassign on terminal: %v", err)
+		}
+		if ok {
+			t.Error("ok=true reassigning a closed task; status guard broken")
+		}
+	})
+}
+
 // seedPgEntityEvent inserts a bare entity + event (no task) and
 // returns their IDs. Used by tests that call FindOrCreate themselves.
 func seedPgEntityEvent(t *testing.T, conn *sql.DB, orgID, suffix string) (entityID, eventID string) {

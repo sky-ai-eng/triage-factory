@@ -1097,6 +1097,25 @@ export default function Board() {
     setShowPromptPicker(true)
   }, [])
 
+  const handlePickerReassign = useCallback(
+    async (task: Task, targetUserID: string) => {
+      const res = await fetch(`/api/tasks/${task.id}/swipe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'reassign',
+          hesitation_ms: 0,
+          target_user_id: targetUserID,
+        }),
+      })
+      if (!res.ok) {
+        toast.error(await readError(res, 'Reassign failed'))
+      }
+      fetchTasks()
+    },
+    [fetchTasks],
+  )
+
   const handlePromptSelected = useCallback(
     async (promptId: string) => {
       setShowPromptPicker(false)
@@ -1266,6 +1285,7 @@ export default function Board() {
                     onPickerClaim={handlePickerClaim}
                     onPickerUnclaim={handlePickerUnclaim}
                     onPickerDelegate={handlePickerDelegate}
+                    onPickerReassign={handlePickerReassign}
                     onReview={(runID, kind, artifactId) =>
                       setApprovalCtx({ runID, kind, artifactId })
                     }
@@ -1370,6 +1390,7 @@ function ColumnContents({
   onPickerClaim,
   onPickerUnclaim,
   onPickerDelegate,
+  onPickerReassign,
   onReview,
   onRetry,
 }: {
@@ -1392,6 +1413,7 @@ function ColumnContents({
   onPickerClaim: (task: Task) => Promise<void>
   onPickerUnclaim: (task: Task) => Promise<void>
   onPickerDelegate: (task: Task) => void
+  onPickerReassign: (task: Task, targetUserID: string) => Promise<void>
   onReview: (runID: string, kind: 'review' | 'pr', artifactId?: string) => void
   onRetry: (task: Task) => void
 }) {
@@ -1419,6 +1441,7 @@ function ColumnContents({
             onClaim={onPickerClaim}
             onUnclaim={onPickerUnclaim}
             onDelegate={onPickerDelegate}
+            onReassign={onPickerReassign}
             readOnly={colId === 'done'}
           />
         )

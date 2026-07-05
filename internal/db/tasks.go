@@ -270,6 +270,27 @@ type TaskStore interface {
 	// the claimer is a member of, which the RLS update check requires.
 	ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string) (bool, error)
 
+	// ReassignClaimToUser (TFAC-561) is the user↔user handoff arm the
+	// other claim mutations don't cover: an atomic CAS that requires the
+	// task to be presently claimed by fromUserID, moving the claim to
+	// toUserID. Returns ok=true when the claim moved; false means the
+	// race was lost (someone else changed the claim between the
+	// caller's read and this call — caller surfaces 409). It does NOT
+	// accept an unclaimed or bot-claimed task as a valid "from" state —
+	// those go through ClaimQueuedForUser / TakeoverClaimFromAgent
+	// instead, so the caller pre-checks task.ClaimedByUserID != "" before
+	// calling this.
+	//
+	// On success the owning team_id consolidates to the acting team
+	// derived from toUserID — the same task_teams-visibility-set
+	// derivation ClaimQueuedForUser applies — so reassigning across teams
+	// re-homes the card to the new claimant's team when they belong to
+	// one in the task's visibility set, otherwise the existing owner is
+	// kept. Run ownership is per-run, not per-claim: this method never
+	// touches runs — an active delegated run keeps executing regardless
+	// of who now holds the task's claim.
+	ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error)
+
 	// --- Breaker ---
 
 	// CountConsecutiveFailedRuns counts consecutive non-success
