@@ -1,6 +1,11 @@
 import { useCallback, useMemo, useState } from 'react'
 import { ArrowLeftRight, Check, LogOut, Trash2 } from 'lucide-react'
-import { useMemberRoster, type MemberRosterAdapter } from '../hooks/useMemberRoster'
+import {
+  useMemberRoster,
+  displayNameFor,
+  initialFor,
+  type MemberRosterAdapter,
+} from '../hooks/useMemberRoster'
 import TransferOwnershipModal from './TransferOwnershipModal'
 
 interface MemberRosterProps {
@@ -185,19 +190,17 @@ function MemberRow({
   // own row, the protected last holder, any non-admin, and while any mutation
   // is in flight (busy) — one change at a time.
   const roleLocked = !canManage || member.isCurrentUser || isLastProtected || busy
-  const initial = (member.displayName.trim()[0] ?? '?').toUpperCase()
 
   return (
     <li className="flex items-center gap-4 px-4 py-3">
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[13px] font-semibold text-accent">
-        {initial}
+        {initialFor(member)}
       </span>
 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-[13px] font-medium text-text-primary">
-            {member.displayName ||
-              (member.githubUsername ? `@${member.githubUsername}` : 'Unnamed user')}
+            {displayNameFor(member)}
           </span>
           {member.isCurrentUser && (
             <span className="rounded-full bg-black/[0.04] px-2 py-0.5 text-[10px] font-medium text-text-tertiary">

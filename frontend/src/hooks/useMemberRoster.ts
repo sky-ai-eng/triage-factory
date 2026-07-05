@@ -153,6 +153,25 @@ export function useMemberRoster(adapter: MemberRosterAdapter): MemberRosterState
   }
 }
 
+// displayNameFor renders a roster row's name: the captured display_name, else
+// "@<githubUsername>" when a GitHub login was captured but the profile had no
+// "Name" set (TFAC-560), else the literal "no identity at all" fallback.
+export function displayNameFor(
+  member: Pick<RosterMember, 'displayName' | 'githubUsername'>,
+): string {
+  if (member.displayName) return member.displayName
+  return member.githubUsername ? `@${member.githubUsername}` : 'Unnamed user'
+}
+
+// initialFor derives the avatar-badge letter from the SAME source
+// displayNameFor renders, so the initial never shows "?" while the name next
+// to it reads "@octocat" (TFAC-560) — it reads the raw githubUsername (not
+// the "@"-prefixed display text) so the initial is a letter, not "@".
+export function initialFor(member: Pick<RosterMember, 'displayName' | 'githubUsername'>): string {
+  const source = member.displayName || member.githubUsername || 'Unnamed user'
+  return (source.trim()[0] ?? '?').toUpperCase()
+}
+
 // messageFrom prefers the server's JSON { error } message (so the last-owner
 // 409's friendly text reaches the user verbatim) and falls back to the error's
 // own message, then a generic line. Exported so the transfer-ownership picker

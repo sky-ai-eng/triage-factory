@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Crown } from 'lucide-react'
 import { useFocusTrap } from '../hooks/useFocusTrap'
-import { messageFrom, type RosterMember } from '../hooks/useMemberRoster'
+import {
+  messageFrom,
+  displayNameFor,
+  initialFor,
+  type RosterMember,
+} from '../hooks/useMemberRoster'
 
 interface TransferOwnershipModalProps {
   // Eligible new owners — every member except the current owner. The caller
@@ -121,12 +126,11 @@ export default function TransferOwnershipModal({
                     className="h-4 w-4 accent-accent"
                   />
                   <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[12px] font-semibold text-accent">
-                    {(m.displayName.trim()[0] ?? '?').toUpperCase()}
+                    {initialFor(m)}
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[13px] font-medium text-text-primary">
-                      {m.displayName ||
-                        (m.githubUsername ? `@${m.githubUsername}` : 'Unnamed user')}
+                      {displayNameFor(m)}
                     </div>
                     <div className="text-[11px] capitalize text-text-tertiary">{m.role}</div>
                   </div>

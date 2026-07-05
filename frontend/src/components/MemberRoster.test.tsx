@@ -36,6 +36,8 @@ describe('MemberRoster — display name fallback', () => {
 
     expect(await screen.findByText('@octocat')).toBeInTheDocument()
     expect(screen.queryByText('Unnamed user')).not.toBeInTheDocument()
+    // The avatar initial should match the visible "@octocat" handle, not '?'.
+    expect(screen.getByText('O')).toBeInTheDocument()
   })
 
   it('still falls back to "Unnamed user" with no display name and no GitHub login', async () => {
@@ -56,5 +58,6 @@ describe('MemberRoster — display name fallback', () => {
     )
 
     expect(await screen.findByText('Unnamed user')).toBeInTheDocument()
+    expect(screen.getByText('U')).toBeInTheDocument()
   })
 })
