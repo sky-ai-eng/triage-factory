@@ -1014,6 +1014,15 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 		if displayName == "" {
 			displayName, _ = claims.UserMetadata["name"].(string)
 		}
+		// A GitHub account with no profile "Name" set yields an empty
+		// full_name/name — fall back to the login handle so the roster never
+		// renders "Unnamed user" for someone we actually have an identity for
+		// (TFAC-560). user_name specifically (not the broader ghUsername
+		// fallback below, which also takes preferred_username) since a SAML
+		// preferred_username can be a UPN/email rather than a handle.
+		if displayName == "" {
+			displayName, _ = claims.UserMetadata["user_name"].(string)
+		}
 		avatarURL, _ = claims.UserMetadata["avatar_url"].(string)
 		ghUsername, _ = claims.UserMetadata["user_name"].(string)
 		if ghUsername == "" {

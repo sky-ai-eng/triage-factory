@@ -196,7 +196,8 @@ function MemberRow({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-[13px] font-medium text-text-primary">
-            {member.displayName || 'Unnamed user'}
+            {member.displayName ||
+              (member.githubUsername ? `@${member.githubUsername}` : 'Unnamed user')}
           </span>
           {member.isCurrentUser && (
             <span className="rounded-full bg-black/[0.04] px-2 py-0.5 text-[10px] font-medium text-text-tertiary">

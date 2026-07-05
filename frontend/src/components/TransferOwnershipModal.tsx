@@ -125,7 +125,8 @@ export default function TransferOwnershipModal({
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[13px] font-medium text-text-primary">
-                      {m.displayName || 'Unnamed user'}
+                      {m.displayName ||
+                        (m.githubUsername ? `@${m.githubUsername}` : 'Unnamed user')}
                     </div>
                     <div className="text-[11px] capitalize text-text-tertiary">{m.role}</div>
                   </div>

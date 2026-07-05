@@ -397,6 +397,66 @@ func TestAuthFlow_LoginToMe(t *testing.T) {
 	}
 }
 
+// TestAuthFlow_LoginToMe_DisplayNameFallsBackToGitHubLogin covers TFAC-560: a
+// brand-new GitHub login whose profile has no "Name" set (full_name and name
+// both empty in user_metadata — the common case for a just-accepted invite)
+// must not persist a NULL display_name. resolveOrCreatePrincipal falls back
+// to the captured login handle so the org roster never renders "Unnamed
+// user" for someone whose identity we actually have. Deliberately skips
+// seedUser/seedOrg's pre-linked user_identities row so this exercises the
+// brand-new-principal INSERT path, not the returning-identity refresh.
+func TestAuthFlow_LoginToMe_DisplayNameFallsBackToGitHubLogin(t *testing.T) {
+	r := newAuthRig(t)
+
+	var idStr string
+	if err := r.h.AdminDB.QueryRow(`SELECT gen_random_uuid()`).Scan(&idStr); err != nil {
+		t.Fatalf("gen uuid: %v", err)
+	}
+	r.h.SeedAuthUser(t, idStr, idStr+"@test")
+
+	login := "octocat-" + idStr[:8]
+	claims := jwt.MapClaims{
+		"sub":   idStr,
+		"email": idStr + "@test",
+		"iss":   testIssuer,
+		"aud":   testAudience,
+		"exp":   time.Now().Add(1 * time.Hour).Unix(),
+		"iat":   time.Now().Unix(),
+		"app_metadata": map[string]any{
+			"provider":  "github",
+			"providers": []any{"github"},
+		},
+		"user_metadata": map[string]any{
+			"user_name":  login,
+			"avatar_url": "https://avatar.example/" + idStr[:8],
+		},
+	}
+
+	resp, _ := r.driveCallbackClaims(claims)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
+	}
+	sid := r.sidFromResp(resp)
+
+	meResp := r.requestWithSid("GET", "/api/me", sid)
+	if meResp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/me status=%d, want 200", meResp.StatusCode)
+	}
+	var me struct {
+		DisplayName    string `json:"display_name"`
+		GitHubUsername string `json:"github_username"`
+	}
+	if err := json.NewDecoder(meResp.Body).Decode(&me); err != nil {
+		t.Fatalf("decode /api/me: %v", err)
+	}
+	if me.DisplayName != login {
+		t.Errorf("me.display_name = %q, want %q (fallback to GitHub login)", me.DisplayName, login)
+	}
+	if me.GitHubUsername != login {
+		t.Errorf("me.github_username = %q, want %q", me.GitHubUsername, login)
+	}
+}
+
 // TestAuthFlow_Me_NoMemberships_OmitsActiveOrgID covers the multi-mode
 // edge case: a freshly-logged-in user with zero org_memberships rows
 // gets a session whose active_org_id is NULL. /api/me must omit the
