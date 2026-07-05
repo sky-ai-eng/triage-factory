@@ -336,9 +336,23 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 	return nil
 }
 
+// devFrontendOrigin is the Vite dev server's origin (frontend/vite.config.ts
+// pins server.port 5173 with strictPort so this stays valid). Trusted by
+// withCSRFOriginCheck only when deployCfg.trustDevFrontendOrigin is set
+// (local mode only, via AllowDevFrontendOrigin) — never in multi mode.
+//
+// This doesn't weaken the check: Origin isn't attacker-settable, the browser
+// stamps it from the page's true origin, so the only way a request ever
+// carries this exact value is if something is genuinely listening and
+// serving on :5173 — which, by this repo's convention, is only ever the
+// first-party dev server hot-reloading this same frontend. A malicious
+// site's Origin is its own domain and never matches this literal.
+const devFrontendOrigin = "http://localhost:5173"
+
 // withCSRFOriginCheck rejects mutating requests (POST/PUT/PATCH/DELETE)
-// whose Origin header doesn't match the configured publicURL. Browsers
-// always send Origin on cross-origin requests, so this catches the
+// whose Origin header doesn't match the configured publicURL (or, in local
+// mode with the dev frontend running, devFrontendOrigin — see above).
+// Browsers always send Origin on cross-origin requests, so this catches the
 // gap that SameSite=Lax leaves (which permits top-level cross-site
 // POSTs to the request URL).
 //
@@ -364,8 +378,10 @@ func (s *Server) withCSRFOriginCheck(next http.Handler) http.Handler {
 			return
 		}
 		if origin != s.deployCfg.publicURL {
-			http.Error(w, "cross-origin request rejected", http.StatusForbidden)
-			return
+			if !s.deployCfg.trustDevFrontendOrigin || origin != devFrontendOrigin {
+				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
