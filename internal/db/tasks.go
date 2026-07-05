@@ -272,23 +272,40 @@ type TaskStore interface {
 
 	// ReassignClaimToUser (TFAC-561) is the user↔user handoff arm the
 	// other claim mutations don't cover: an atomic CAS that requires the
-	// task to be presently claimed by fromUserID, moving the claim to
-	// toUserID. Returns ok=true when the claim moved; false means the
-	// race was lost (someone else changed the claim between the
-	// caller's read and this call — caller surfaces 409). It does NOT
-	// accept an unclaimed or bot-claimed task as a valid "from" state —
+	// task to be presently claimed by fromUserID AND toUserID to belong to
+	// a team associated with the task (its task_teams visibility set or its
+	// current team_id), moving the claim to toUserID. Returns ok=true when
+	// the claim moved; false means either guard tripped — a genuine race
+	// (someone else changed the claim/status between the caller's read and
+	// this call) or toUserID sharing no team with the task — and the
+	// caller re-reads to tell the two apart before surfacing 409. It does
+	// NOT accept an unclaimed or bot-claimed task as a valid "from" state —
 	// those go through ClaimQueuedForUser / TakeoverClaimFromAgent
 	// instead, so the caller pre-checks task.ClaimedByUserID != "" before
 	// calling this.
 	//
+	// The target-team guard exists because a claimed task's visibility is
+	// governed solely by team_id (tasks_select RLS's task_teams branch only
+	// ever applies to an unclaimed row) — reassigning to someone with no
+	// relationship to the task's team(s) would silently hand them a claim
+	// they can't even see afterward.
+	//
 	// On success the owning team_id consolidates to the acting team
 	// derived from toUserID — the same task_teams-visibility-set
 	// derivation ClaimQueuedForUser applies — so reassigning across teams
-	// re-homes the card to the new claimant's team when they belong to
-	// one in the task's visibility set, otherwise the existing owner is
-	// kept. Run ownership is per-run, not per-claim: this method never
-	// touches runs — an active delegated run keeps executing regardless
-	// of who now holds the task's claim.
+	// re-homes the card to the new claimant's team. Run ownership is
+	// per-run, not per-claim: this method never touches runs — an active
+	// delegated run keeps executing regardless of who now holds the
+	// task's claim.
+	//
+	// Callers should use the admin-pool ReassignClaimToUserSystem variant
+	// below rather than this one: unlike every other claim mutation, the
+	// acting caller and the new claimant (toUserID) are different people,
+	// so Postgres's tasks_update RLS — which requires the ACTING session to
+	// hold write access to the resulting team_id — can reject a legitimate
+	// cross-team handoff/override even though both guards above already
+	// authorized it in Go. This method stays on the interface for
+	// conformance testing and same-team callers where RLS naturally holds.
 	ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error)
 
 	// --- Breaker ---
@@ -328,6 +345,12 @@ type TaskStore interface {
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
 	CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
 	StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error)
+
+	// ReassignClaimToUserSystem is ReassignClaimToUser routed through the
+	// admin pool (BYPASSRLS) in Postgres — see the doc comment on
+	// ReassignClaimToUser for why the reassign handler needs this instead
+	// of the app-pool variant every other request-path caller uses.
+	ReassignClaimToUserSystem(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error)
 
 	// OwnerTeamForLatestTaskInTypesSystem returns the team_id of the most
 	// recent task on the entity whose event_type is in eventTypes AND whose

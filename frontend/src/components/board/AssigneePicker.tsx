@@ -193,7 +193,13 @@ export default function AssigneePicker({
               (m) => !m.is_current_user && m.user_id !== currentUserID,
             )
             if (teammates.length === 0) return null
-            const taskHeldByUser = claimedByMe || claimedByOtherUser
+            // currentUserID !== '' guards the brief window before /api/me
+            // resolves: until then claimedByOtherUser reads true for ANY
+            // claimed task (including one the viewer actually holds, since
+            // '' !== a real id) — harmless for the read-only avatar label,
+            // but this flag now gates a real write action, so don't let it
+            // render clickable before identity is known.
+            const taskHeldByUser = currentUserID !== '' && (claimedByMe || claimedByOtherUser)
             return (
               <>
                 <div className="my-1 border-t border-border-subtle" />

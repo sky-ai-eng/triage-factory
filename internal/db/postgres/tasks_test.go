@@ -315,15 +315,23 @@ func TestTaskStore_Postgres_OrgHandlerSentinel(t *testing.T) {
 
 // TestTaskStore_Postgres_ReassignClaimToUser covers the TFAC-561 user↔user
 // handoff arm: a CAS that only lands when the task is presently claimed by
-// the expected "from" user, moves the claim to a second seeded user, and
-// refuses on a stale expectation, an unclaimed/bot-claimed task, or a
+// the expected "from" user AND the target shares a team with the task,
+// moves the claim to a second seeded user, and refuses on a stale
+// expectation, an unrelated target, an unclaimed/bot-claimed task, or a
 // terminal row. Cross-team consolidation is covered separately in
 // teams_multiteam_test.go, where the multi-team fixtures already live.
 func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userA, agentID := seedPgOrgUserAgent(t, h)
+	teamID := firstTeamForOrg(t, h, orgID)
+	// userB shares teamID with the seeded task chain (every seedPgTaskChain
+	// task's team_id) — a legitimate reassign target. userC has no team
+	// membership at all — the target-relevance guard's negative case.
 	userB := pgtest.SeedUser(t, h, "reassign-target")
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, userB, teamID)
+	userC := pgtest.SeedUser(t, h, "reassign-unrelated")
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
@@ -408,6 +416,56 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 		}
 		if ok {
 			t.Error("ok=true reassigning a closed task; status guard broken")
+		}
+	})
+
+	// TFAC-561 review fix: a target with zero relationship to the task's
+	// team must be refused — landing the claim anyway would leave userC
+	// unable to even see the row afterward (tasks_select RLS requires team
+	// membership on a claimed task).
+	t.Run("refuses_target_with_no_team_membership", func(t *testing.T) {
+		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-no-team")
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA); err != nil || !ok {
+			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
+		}
+		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userC)
+		if err != nil {
+			t.Fatalf("reassign to unrelated target: %v", err)
+		}
+		if ok {
+			t.Error("ok=true reassigning to a user with no team membership; target-relevance guard broken")
+		}
+		got, err := stores.Tasks.Get(ctx, orgID, taskID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.ClaimedByUserID != userA {
+			t.Errorf("claim was disturbed by the refused reassign: got %q want %q", got.ClaimedByUserID, userA)
+		}
+	})
+
+	// ReassignClaimToUserSystem is the admin-pool sibling the reassign
+	// handler actually calls — pin that it behaves identically to
+	// ReassignClaimToUser (same guards, same success shape) rather than
+	// silently diverging.
+	t.Run("system_variant_matches_plain", func(t *testing.T) {
+		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-system")
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA); err != nil || !ok {
+			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
+		}
+		ok, err := stores.Tasks.ReassignClaimToUserSystem(ctx, orgID, taskID, userA, userB)
+		if err != nil {
+			t.Fatalf("ReassignClaimToUserSystem: %v", err)
+		}
+		if !ok {
+			t.Fatal("ReassignClaimToUserSystem returned ok=false on a valid user-claimed task")
+		}
+		got, err := stores.Tasks.Get(ctx, orgID, taskID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.ClaimedByUserID != userB {
+			t.Errorf("ClaimedByUserID=%q, want %q", got.ClaimedByUserID, userB)
 		}
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
@@ -24,6 +25,16 @@ func TestHandleSwipe_ReassignHappyPath(t *testing.T) {
 			t.Fatalf("seed user %s: %v", u, err)
 		}
 	}
+	// toUser needs a membership on the task's team — the target-relevance
+	// guard requires it (a claimed task's visibility is governed solely by
+	// team_id; a target with no relationship to it would be unable to even
+	// see the row afterward).
+	if _, err := s.db.Exec(
+		`INSERT INTO memberships (user_id, team_id, role) VALUES (?, ?, 'member')`,
+		toUser, runmode.LocalDefaultTeamID,
+	); err != nil {
+		t.Fatalf("seed toUser membership: %v", err)
+	}
 	if _, err := s.db.Exec(
 		`INSERT INTO entities (id, source, source_id, kind, state)
 		 VALUES ('e_re', 'github', 'sky/repo#re', 'pr', 'active')`,
@@ -37,9 +48,9 @@ func TestHandleSwipe_ReassignHappyPath(t *testing.T) {
 		t.Fatalf("seed event: %v", err)
 	}
 	if _, err := s.db.Exec(
-		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_re', 'e_re', ?, 'ev_re', 'in_progress', ?)`,
-		eventType, fromUser,
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id, team_id)
+		 VALUES ('t_re', 'e_re', ?, 'ev_re', 'in_progress', ?, ?)`,
+		eventType, fromUser, runmode.LocalDefaultTeamID,
 	); err != nil {
 		t.Fatalf("seed claimed task: %v", err)
 	}
@@ -230,11 +241,11 @@ func TestHandleSwipe_ReassignIdempotentToCurrentClaimant(t *testing.T) {
 
 // TestSwipeReassign_PermissionModel pins TFAC-561's "claimant + team admin"
 // permission rule against real Postgres RLS (local mode has no admin concept
-// to test against — callerIsAdminOfTaskTeam short-circuits true there by
-// design). A plain team member who is neither the current claimant nor a team
-// admin gets swipeReassign's own 403 (distinct from the broader view-only
-// 403 RequireTaskWrite already covers for non-members); the team-admin
-// override and the current claimant's own handoff both succeed.
+// to test against — the check short-circuits true there by design). A plain
+// team member who is neither the current claimant nor an admin of the task's
+// owning team gets swipeReassign's own 403 (distinct from the broader
+// view-only 403 RequireTaskWrite already covers for non-members); the
+// team-admin override and the current claimant's own handoff both succeed.
 func TestSwipeReassign_PermissionModel(t *testing.T) {
 	r := newViewerRig(t)
 	bystander := pgtest.SeedUser(t, r.h, "bystander")
@@ -293,6 +304,70 @@ func TestSwipeReassign_PermissionModel(t *testing.T) {
 		r.s.handleSwipe(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("claimant handoff: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	// Regression pin: the reassign write must not depend on the acting
+	// admin sharing a team with the target. r.admin admins r.teamID (the
+	// task's owning team, so the permission arm passes) but is NOT a
+	// member of teamB at all; crossTarget is only a member of teamB. Post-
+	// reassign, team_id consolidates to teamB (crossTarget's own team) —
+	// exactly the case where Postgres's tasks_update RLS WITH CHECK would
+	// reject the write if it ran on the acting admin's own RLS session
+	// (they can't write a team they're not in), which is why the mutation
+	// must run through the admin pool (ReassignClaimToUserSystem) once
+	// both permission arms are validated in Go.
+	t.Run("cross_team_admin_override_succeeds", func(t *testing.T) {
+		teamB := pgtest.SeedTeam(t, r.h, r.orgID, "teamb-cross")
+		crossTarget := pgtest.SeedUser(t, r.h, "cross-target")
+		pgtest.AddOrgMember(t, r.h, crossTarget, r.orgID, teamB, "member", "member")
+
+		taskID := seedClaimedTask(t, r.member)
+		// Widen the task's visibility to teamB (the historical "who can see
+		// this" set a multi-team router would have recorded) so crossTarget
+		// is a legitimate reassign target despite the task's OWNING team
+		// being r.teamID.
+		pgtest.MustExec(t, r.h.AdminDB,
+			`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, taskID, teamB)
+
+		body := map[string]any{"action": "reassign", "target_user_id": crossTarget}
+		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/swipe", r.admin, body)
+		req.SetPathValue("id", taskID)
+		rec := httptest.NewRecorder()
+		r.s.handleSwipe(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("cross-team admin override: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var claimed, gotTeam sql.NullString
+		if err := r.h.AdminDB.QueryRow(
+			`SELECT claimed_by_user_id, team_id FROM tasks WHERE id = $1`, taskID,
+		).Scan(&claimed, &gotTeam); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !claimed.Valid || claimed.String != crossTarget {
+			t.Errorf("claimed_by_user_id = %v, want %q", claimed, crossTarget)
+		}
+		if !gotTeam.Valid || gotTeam.String != teamB {
+			t.Errorf("team_id after cross-team reassign = %v, want %q (target's own team)", gotTeam, teamB)
+		}
+	})
+
+	// Regression pin: a target with zero relationship to the task's team(s)
+	// is refused with the target-relevance message, not the generic
+	// race-lost message (retrying would never succeed).
+	t.Run("target_with_no_relevant_team_refused", func(t *testing.T) {
+		unrelated := pgtest.SeedUser(t, r.h, "unrelated-target")
+		taskID := seedClaimedTask(t, r.member)
+		body := map[string]any{"action": "reassign", "target_user_id": unrelated}
+		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/swipe", r.member, body)
+		req.SetPathValue("id", taskID)
+		rec := httptest.NewRecorder()
+		r.s.handleSwipe(rec, req)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "isn't on a team") {
+			t.Errorf("body=%s; want the target-relevance message, not the generic race message", rec.Body.String())
 		}
 	})
 }

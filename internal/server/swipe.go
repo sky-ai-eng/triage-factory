@@ -355,17 +355,38 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 
 // swipeReassign handles the reassign action (TFAC-561): the user↔user
 // handoff arm the claim model didn't previously support. It's a race-safe CAS
-// on the *expected* current claimant — ReassignClaimToUser refuses unless the
-// task is presently claimed by exactly that user — so two concurrent
-// reassigns (or a reassign racing a takeover) can't clobber each other.
+// on the *expected* current claimant — ReassignClaimToUserSystem refuses
+// unless the task is presently claimed by exactly that user AND the target is
+// a member of a team associated with the task — so two concurrent reassigns
+// (or a reassign racing a takeover) can't clobber each other, and a claim can
+// never land on someone who'd then be unable to even see the row (tasks_select
+// RLS requires team membership on a claimed task).
 //
 // Refuses (in order): missing target_user_id (400), missing/closed task
 // (404/409), a task that isn't currently held by a user — unclaimed or
 // bot-claimed tasks aren't a reassign target; use claim/takeover instead
-// (409), the caller being neither the current claimant nor a team admin of
-// one of the task's teams (403), and a lost CAS race (409). Reassigning to
-// the current claimant is treated as an idempotent no-op, matching the
-// self-claim idempotency in swipeClaim.
+// (409), the caller being neither the current claimant nor an admin of the
+// task's owning team (403), and a lost CAS — either a genuine race or the
+// target-team-membership guard (409). Reassigning to the current claimant is
+// treated as an idempotent no-op, matching the self-claim idempotency in
+// swipeClaim.
+//
+// Why the mutation runs on the admin pool (ReassignClaimToUserSystem, not
+// ReassignClaimToUser): every other claim mutation ties "who's authorized to
+// write" to "whose membership the resulting team_id is derived from" — the
+// acting user IS the new claimant, so Postgres's tasks_update RLS naturally
+// holds (they're necessarily a member of whatever team their own membership
+// derived). Reassign is the first arm where the actor and the new claimant
+// are different people: an admin override authorized against the task's
+// CURRENT team can legitimately hand off to a user whose team is different
+// (and who the admin may not share a team with at all) — team_id then
+// consolidates to the target's team, which the acting admin's RLS session
+// may not be able to write. Both sides of that authorization decision
+// (actor permission below, target-team membership inside the CAS) are fully
+// made in Go before this call, so bypassing the per-request RLS check for
+// the write itself is safe — the same "authorize explicitly, then route
+// around RLS" shape the `...System` convention uses elsewhere, just reached
+// from a request path instead of a claims-less background goroutine.
 //
 // Deliberately out of scope: no Jira-side ticket reassignment. SKY-463 syncs
 // a Jira ticket's assignee to the ACTING user on self-claim; reassign moves
@@ -409,19 +430,33 @@ func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, us
 	}
 
 	// Permission: the current claimant may hand off their own claim; anyone
-	// else needs the team-admin override (TFAC-561's suggested "claimant +
-	// team admin" model).
+	// else needs to admin the task's owning team (TFAC-561's suggested
+	// "claimant + team admin" model). Scoped to task_id ONLY, not the wider
+	// task_teams visibility set: tasks_update RLS's task_teams branch only
+	// ever applies to an UNCLAIMED row (both claim cols NULL) — a reassign
+	// candidate is by definition already claimed, so team_id is the only
+	// team that ever governs a write here, and it's the only one meaningful
+	// to gate the override on. task.TeamID is guaranteed non-nil once
+	// ClaimedByUserID is non-empty (tasks_claimed_requires_team CHECK).
 	if task.ClaimedByUserID != userID {
-		isAdmin, err := s.callerIsAdminOfTaskTeam(r.Context(), orgID, userID, task)
-		if err != nil {
-			internalError(w, "swipe", err)
-			return "", false
-		}
-		if !isAdmin {
-			writeJSON(w, http.StatusForbidden, map[string]string{
-				"error": "only the current claimant or a team admin can reassign this task",
-			})
-			return "", false
+		if runmode.Current() != runmode.ModeLocal {
+			if task.TeamID == nil || *task.TeamID == "" {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "only the current claimant or a team admin can reassign this task",
+				})
+				return "", false
+			}
+			isAdmin, err := s.az.UserIsTeamAdmin(r.Context(), userID, orgID, *task.TeamID)
+			if err != nil {
+				internalError(w, "swipe", err)
+				return "", false
+			}
+			if !isAdmin {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "only the current claimant or a team admin can reassign this task",
+				})
+				return "", false
+			}
 		}
 	}
 
@@ -430,7 +465,7 @@ func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, us
 		var ok bool
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			var e error
-			ok, e = tx.Tasks.ReassignClaimToUser(r.Context(), orgID, id, task.ClaimedByUserID, targetUserID)
+			ok, e = tx.Tasks.ReassignClaimToUserSystem(r.Context(), orgID, id, task.ClaimedByUserID, targetUserID)
 			return e
 		}); err != nil {
 			swipeLog.Error("reassign claim flip failed", "task", id, "error", err)
@@ -438,9 +473,27 @@ func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, us
 			return "", false
 		}
 		if !ok {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "reassign race lost; refetch task and retry",
+			// Disambiguate the two guards the CAS collapses into one ok=false:
+			// a genuine race (someone else changed the claim/status since our
+			// read above) vs. the target-team-membership guard tripping (which
+			// no retry will fix). Re-reading the task tells them apart — if
+			// the claim + status we read earlier are unchanged, nothing raced;
+			// the target just isn't on a team that can see this task.
+			var fresh *domain.Task
+			_ = s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+				var e error
+				fresh, e = tx.Tasks.Get(r.Context(), orgID, id)
+				return e
 			})
+			if fresh != nil && fresh.ClaimedByUserID == task.ClaimedByUserID && fresh.Status == task.Status {
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error": "target user isn't on a team that can see this task",
+				})
+			} else {
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error": "reassign race lost; refetch task and retry",
+				})
+			}
 			return "", false
 		}
 	}
@@ -468,43 +521,6 @@ func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, us
 		})
 	}
 	return newStatus, true
-}
-
-// callerIsAdminOfTaskTeam reports whether userID holds the 'admin' role on
-// any team the task belongs to — its owning team_id or any task_teams
-// visibility row. This is the team-admin override arm of swipeReassign's
-// permission model (the other arm, "you're the current claimant," is checked
-// by the caller). Local mode short-circuits true — N=1's sole implicit owner
-// admins its one team, mirroring authz.Checker's other local-mode gates.
-func (s *Server) callerIsAdminOfTaskTeam(ctx context.Context, orgID, userID string, task *domain.Task) (bool, error) {
-	if runmode.Current() == runmode.ModeLocal {
-		return true, nil
-	}
-	teamIDs := map[string]struct{}{}
-	if task.TeamID != nil && *task.TeamID != "" {
-		teamIDs[*task.TeamID] = struct{}{}
-	}
-	var vis []string
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		var e error
-		vis, e = tx.Tasks.VisibilityTeams(ctx, orgID, task.ID)
-		return e
-	}); err != nil {
-		return false, err
-	}
-	for _, t := range vis {
-		teamIDs[t] = struct{}{}
-	}
-	for teamID := range teamIDs {
-		isAdmin, err := s.az.UserIsTeamAdmin(ctx, userID, orgID, teamID)
-		if err != nil {
-			return false, err
-		}
-		if isAdmin {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 // swipeLifecycle handles dismiss/snooze/complete: the swipe IS the state

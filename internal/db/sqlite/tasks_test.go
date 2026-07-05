@@ -135,9 +135,9 @@ func TestTaskStore_SQLite_AssertLocalOrg(t *testing.T) {
 
 // TestTaskStore_SQLite_ReassignClaimToUser covers the TFAC-561 user↔user
 // handoff arm: a CAS that only lands when the task is presently claimed by
-// the expected "from" user, moves the claim to a second seeded user, and
-// refuses on a stale expectation, an unclaimed/bot-claimed task, or a
-// terminal row.
+// the expected "from" user AND the target shares a team with the task, and
+// refuses on a stale expectation, an unrelated target, an unclaimed/bot-
+// claimed task, or a terminal row.
 func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
@@ -155,11 +155,22 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed local agent: %v", err)
 	}
+	// userB shares LocalDefaultTeamID with the seeded task chain (every
+	// seedSQLiteTaskChain task's team_id) — a legitimate reassign target.
+	// userC has no team membership at all — the target-relevance guard's
+	// negative case.
 	userB := uuid.New().String()
+	userC := uuid.New().String()
 	if _, err := conn.Exec(
-		`INSERT INTO users (id, display_name) VALUES (?, 'User B')`, userB,
+		`INSERT INTO users (id, display_name) VALUES (?, 'User B'), (?, 'User C')`, userB, userC,
 	); err != nil {
-		t.Fatalf("seed second user: %v", err)
+		t.Fatalf("seed second/third user: %v", err)
+	}
+	if _, err := conn.Exec(
+		`INSERT INTO memberships (user_id, team_id, role) VALUES (?, ?, 'member')`,
+		userB, runmode.LocalDefaultTeamID,
+	); err != nil {
+		t.Fatalf("seed userB membership: %v", err)
 	}
 	store := sqlitestore.New(conn).Tasks
 	ctx := t.Context()
@@ -239,6 +250,49 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 		}
 		if ok {
 			t.Error("ok=true reassigning a closed task; status guard broken")
+		}
+	})
+
+	// TFAC-561 review fix: a target with zero relationship to the task's
+	// team must be refused — landing the claim anyway would leave userC
+	// unable to even see the row afterward (tasks_select RLS requires team
+	// membership on a claimed task).
+	t.Run("refuses_target_with_no_team_membership", func(t *testing.T) {
+		_, _, taskID := seedSQLiteTaskChain(t, conn, "reassign-no-team")
+		if ok, err := store.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, taskID, userA); err != nil || !ok {
+			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
+		}
+		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userC)
+		if err != nil {
+			t.Fatalf("reassign to unrelated target: %v", err)
+		}
+		if ok {
+			t.Error("ok=true reassigning to a user with no team membership; target-relevance guard broken")
+		}
+		got, _ := store.Get(ctx, runmode.LocalDefaultOrgID, taskID)
+		if got.ClaimedByUserID != userA {
+			t.Errorf("claim was disturbed by the refused reassign: got %q want %q", got.ClaimedByUserID, userA)
+		}
+	})
+
+	// ReassignClaimToUserSystem is a thin same-connection wrapper in
+	// SQLite (local mode has one pool) — pin that it behaves identically
+	// to ReassignClaimToUser rather than silently diverging.
+	t.Run("system_variant_matches_plain", func(t *testing.T) {
+		_, _, taskID := seedSQLiteTaskChain(t, conn, "reassign-system")
+		if ok, err := store.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, taskID, userA); err != nil || !ok {
+			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
+		}
+		ok, err := store.ReassignClaimToUserSystem(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB)
+		if err != nil {
+			t.Fatalf("ReassignClaimToUserSystem: %v", err)
+		}
+		if !ok {
+			t.Fatal("ReassignClaimToUserSystem returned ok=false on a valid user-claimed task")
+		}
+		got, _ := store.Get(ctx, runmode.LocalDefaultOrgID, taskID)
+		if got.ClaimedByUserID != userB {
+			t.Errorf("ClaimedByUserID=%q, want %q", got.ClaimedByUserID, userB)
 		}
 	})
 }
