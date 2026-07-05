@@ -31,7 +31,12 @@ PUBLIC_URL=http://localhost:3000
 BIN="$ROOT/triagefactory"
 DEPS=(postgres postgres-postinit gotrue seaweedfs seaweedfs-postinit)
 
-dc() { docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f docker-compose.yml -f docker/compose.hostbind.yml "$@"; }
+# dc() reads DC_ENV_FILE rather than ENV_FILE directly so cmd_down's
+# no-env-file branch can point it at a throwaway file (via a `local`
+# override, restored once that function returns) instead of duplicating
+# the docker compose invocation.
+DC_ENV_FILE="$ENV_FILE"
+dc() { docker compose -p "$PROJECT" --env-file "$DC_ENV_FILE" -f docker-compose.yml -f docker/compose.hostbind.yml "$@"; }
 
 need_bin() {
   [ -x "$BIN" ] || { echo "no ./triagefactory binary — build one first: go build -o triagefactory ." >&2; exit 1; }
@@ -170,7 +175,8 @@ TF_SECRET_ENCRYPTION_KEY=unused
 TF_BLOB_ACCESS_KEY=unused
 TF_BLOB_SECRET_KEY=unused
 EOF
-  docker compose -p "$PROJECT" --env-file "$tmp_env" -f docker-compose.yml -f docker/compose.hostbind.yml down -v --remove-orphans
+  local DC_ENV_FILE="$tmp_env"
+  dc down -v --remove-orphans
 }
 
 case "${1:-}" in
