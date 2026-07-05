@@ -258,3 +258,15 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, own
 	}
 	return true, nil
 }
+
+// TracksRepoViewerScoped always reports true in local mode — N=1 has no
+// team boundary to enforce, mirroring the local-mode asymmetry of
+// ListActiveJiraTeamScoped / FactoryReadStore.Entities (TFAC-559). The
+// caller's org-admin-or-local short-circuit means this is only reached in
+// multi-mode anyway; kept here for interface conformance.
+func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID, owner, repo string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	return true, nil
+}

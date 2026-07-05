@@ -178,6 +178,30 @@ func TestTeamGitHubRepos_SQLite_TracksRepo(t *testing.T) {
 	}
 }
 
+// TestTeamGitHubRepos_SQLite_TracksRepoViewerScoped pins the local-mode
+// asymmetry (TFAC-559): N=1 has no team boundary to enforce, so
+// TracksRepoViewerScoped always reports true regardless of whether the
+// repo is actually tracked — unlike TracksRepoSystem, which is a real
+// per-team lookup. The org-id guard still applies.
+func TestTeamGitHubRepos_SQLite_TracksRepoViewerScoped(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	got, err := stores.TeamGitHubRepos.TracksRepoViewerScoped(ctx, runmode.LocalDefaultOrgID, "acme", "never-tracked")
+	if err != nil {
+		t.Fatalf("TracksRepoViewerScoped: %v", err)
+	}
+	if !got {
+		t.Error("local mode should report true unconditionally (N=1, no team boundary)")
+	}
+
+	const bogusOrg = "11111111-1111-1111-1111-111111111111"
+	if _, err := stores.TeamGitHubRepos.TracksRepoViewerScoped(ctx, bogusOrg, "acme", "api"); err == nil {
+		t.Error("TracksRepoViewerScoped with non-local orgID should error")
+	}
+}
+
 // TestTeamGitHubRepos_SQLite_ListOrgReposWithTeams pins the
 // tracked-repos-with-owning-teams read backing the switch reachability
 // preflights (TFAC-328): each repo carries the names of every team tracking

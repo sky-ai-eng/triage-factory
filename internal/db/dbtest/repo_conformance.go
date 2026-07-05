@@ -298,6 +298,34 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		}
 	})
 
+	t.Run("UpdateBaseBranch_matches_case_insensitively", func(t *testing.T) {
+		// GitHub owner/repo identifiers are case-insensitive, and the
+		// TFAC-559 repoAccessAllowed handler gate (TracksRepoViewerScoped)
+		// matches case-insensitively too. If UpdateBaseBranch's lookup were
+		// case-sensitive, a caller reaching the PATCH endpoint with
+		// different casing than what's stored could pass the gate yet
+		// silently affect 0 rows here. Stored casing ("Acme/Api") is sticky;
+		// the update is issued with different casing ("acme/API") and must
+		// still find the row.
+		s, orgID := mk(t)
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "Acme/Api", Owner: "Acme", Repo: "Api",
+			DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		if err := s.UpdateBaseBranch(ctx, orgID, "acme/API", "develop"); err != nil {
+			t.Fatalf("UpdateBaseBranch (mismatched case): %v", err)
+		}
+		got, err := s.Get(ctx, orgID, "Acme/Api")
+		if err != nil || got == nil {
+			t.Fatalf("Get: got=%v err=%v", got, err)
+		}
+		if got.BaseBranch != "develop" {
+			t.Errorf("BaseBranch = %q, want develop (case-insensitive update should have found the row)", got.BaseBranch)
+		}
+	})
+
 	t.Run("UpdateCloneStatus_records_outcome", func(t *testing.T) {
 		s, orgID := mk(t)
 		if err := s.Upsert(ctx, orgID, domain.RepoProfile{

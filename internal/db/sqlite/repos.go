@@ -83,6 +83,13 @@ func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.RepoProfil
 	return out, rows.Err()
 }
 
+// ListTeamScoped mirrors List in local mode — N=1, so there is no other
+// team to scope away (matches the ListActiveJiraTeamScoped /
+// FactoryReadStore.Entities local-mode asymmetry, TFAC-559).
+func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
+	return s.List(ctx, orgID)
+}
+
 func (s *repoStore) ListWithContent(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -193,8 +200,12 @@ func (s *repoStore) UpdateBaseBranch(ctx context.Context, orgID, repoID, baseBra
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
+	// Case-insensitive match (GitHub identifiers are, per TracksRepoSystem) —
+	// TFAC-559's repoAccessAllowed gate matches case-insensitively, so a
+	// caller reaching this with different casing than what's stored must
+	// still find the row rather than silently affecting 0.
 	_, err := s.q.ExecContext(ctx,
-		`UPDATE repo_profiles SET base_branch = ?, updated_at = datetime('now') WHERE id = ?`,
+		`UPDATE repo_profiles SET base_branch = ?, updated_at = datetime('now') WHERE LOWER(id) = LOWER(?)`,
 		nullIfEmpty(baseBranch), repoID,
 	)
 	return err

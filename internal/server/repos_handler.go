@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // handleGitHubRepos returns the repositories the Settings picker offers. The
@@ -223,17 +224,63 @@ func (s *Server) installationReposUnion(ctx context.Context, orgID string, insts
 	return out, nil
 }
 
-// handleRepoProfiles returns all configured repo profiles from the DB.
+// isOrgAdmin reports whether userID is an org admin of orgID, short-circuiting
+// to true under local mode (N=1 has a single implicit owner and no team
+// boundary — mirrors the org-admin gates elsewhere in this package).
+func (s *Server) isOrgAdmin(ctx context.Context, orgID, userID string) (bool, error) {
+	if runmode.Current() == runmode.ModeLocal {
+		return true, nil
+	}
+	return s.az.UserIsOrgAdmin(ctx, userID, orgID)
+}
+
+// repoAccessAllowed reports whether the caller may read or write the given
+// repo (TFAC-559): an org admin always may; a non-admin member may only when
+// the repo is tracked by at least one of their teams. Local mode (N=1) has
+// no team boundary and is covered by isOrgAdmin's short-circuit.
+func (s *Server) repoAccessAllowed(ctx context.Context, orgID, userID, owner, repo string) (bool, error) {
+	isAdmin, err := s.isOrgAdmin(ctx, orgID, userID)
+	if err != nil {
+		return false, err
+	}
+	if isAdmin {
+		return true, nil
+	}
+	var tracked bool
+	err = s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var e error
+		tracked, e = tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgID, owner, repo)
+		return e
+	})
+	return tracked, err
+}
+
+// handleRepoProfiles returns configured repo profiles from the DB. Org
+// admins get the org-wide union; non-admin members get only the repos
+// tracked by their own teams (TFAC-559) — repo_profiles is org-wide, so an
+// unscoped read would leak every team's repos to a teammate on none of them.
+// Local mode (N=1) has no team boundary and stays unscoped.
 func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
+
+	isAdmin, err := s.isOrgAdmin(r.Context(), orgID, userID)
+	if err != nil {
+		internalError(w, "repos", err)
+		return
+	}
+
 	var profiles []domain.RepoProfile
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		profiles, e = tx.Repos.List(r.Context(), orgID)
+		if isAdmin {
+			profiles, e = tx.Repos.List(r.Context(), orgID)
+		} else {
+			profiles, e = tx.Repos.ListTeamScoped(r.Context(), orgID)
+		}
 		return e
 	}); err != nil {
 		internalError(w, "repos", err)
@@ -283,7 +330,10 @@ func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// handleRepoUpdate updates per-repo settings like base_branch.
+// handleRepoUpdate updates per-repo settings like base_branch. Gated the same
+// as handleRepoProfiles (TFAC-559): an org admin may update any repo, a
+// non-admin member only one their own team tracks — otherwise a member could
+// repoint another team's push-protection floor (base_branch).
 func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -297,6 +347,17 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repoID := owner + "/" + repo
+
+	if allowed, err := s.repoAccessAllowed(r.Context(), orgID, userID, owner, repo); err != nil {
+		internalError(w, "repos", err)
+		return
+	} else if !allowed {
+		// 404, not 403 — a repo outside the caller's tracked set doesn't
+		// appear in their GET /api/repos list either, so don't disclose
+		// its existence via a role-boundary error.
+		notFound(w, "repo")
+		return
+	}
 
 	// Use json.RawMessage to distinguish null (clear) from omitted (no change).
 	// *string can't tell them apart — both decode to nil.
@@ -326,7 +387,10 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
-// handleRepoBranches returns branches for a repo, with optional search filtering.
+// handleRepoBranches returns branches for a repo, with optional search
+// filtering. Gated the same as handleRepoProfiles/handleRepoUpdate
+// (TFAC-559): a non-admin member can only list branches for a repo their own
+// team tracks.
 func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
@@ -337,6 +401,15 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+
+	if allowed, err := s.repoAccessAllowed(r.Context(), orgID, userID, owner, repo); err != nil {
+		internalError(w, "repos", err)
+		return
+	} else if !allowed {
+		notFound(w, "repo")
 		return
 	}
 
@@ -375,5 +448,8 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 // PUT /api/settings/team/{id}/repos (handleTeamReposPut), which writes
 // team_github_repos and reconciles the org-wide repo_profiles union. The
 // old org-global POST /api/repos was removed in favor of that single,
-// team-admin-gated entry point; GET /api/repos (the union profiles) and
-// PATCH /api/repos/{owner}/{repo} (base_branch) remain.
+// team-admin-gated entry point; GET /api/repos (the union profiles),
+// PATCH /api/repos/{owner}/{repo} (base_branch), and GET
+// /api/repos/{owner}/{repo}/branches remain, now scoped per-caller
+// (isOrgAdmin / repoAccessAllowed, TFAC-559): an org admin sees/touches
+// every repo, a non-admin member only the repos their own team(s) track.

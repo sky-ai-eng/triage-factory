@@ -94,4 +94,17 @@ type TeamGitHubReposStore interface {
 	// case-insensitive). This is the router gate lookup. Admin pool in
 	// Postgres: the router goroutine has no JWT claims.
 	TracksRepoSystem(ctx context.Context, teamID, owner, repo string) (bool, error)
+
+	// TracksRepoViewerScoped reports whether ANY team the calling user
+	// belongs to tracks (owner, repo), matched case-insensitively
+	// (TFAC-559). The app-pool, viewer-scoped sibling of TracksRepoSystem
+	// (which checks one named team via the admin pool): under RLS,
+	// team_github_repos_select auto-scopes the EXISTS to the caller's own
+	// memberships, so this is the per-repo gate for "does any of my teams
+	// track this repo" — used by the repo-settings base-branch PATCH and
+	// branches GET so a non-admin member can't touch a repo outside their
+	// team's tracked set. Org admins bypass this check entirely at the
+	// handler layer instead of calling it. Local mode (N=1) always
+	// reports true — no team boundary to enforce.
+	TracksRepoViewerScoped(ctx context.Context, orgID, owner, repo string) (bool, error)
 }

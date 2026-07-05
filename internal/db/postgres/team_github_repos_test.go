@@ -78,6 +78,56 @@ func TestTeamGitHubRepos_ReplaceForTeam_AppPath(t *testing.T) {
 	}
 }
 
+// TestTeamGitHubRepos_Postgres_TracksRepoViewerScoped_RLS pins the
+// per-repo, app-pool write/read gate (TFAC-559): under real RLS, a caller
+// only "tracks" a repo if one of THEIR teams tracks it — a sibling team
+// tracking the same-named repo in the org doesn't count. TracksRepoSystem
+// (a specific team, admin pool) is unaffected; this exercises the viewer-
+// scoped sibling.
+func TestTeamGitHubRepos_Postgres_TracksRepoViewerScoped_RLS(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
+	bob := pgtest.SeedUser(t, h, "bob")
+	pgtest.AddOrgMember(t, h, bob, orgA, teamB, "member", "member")
+
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, []domain.TeamGitHubRepo{{Owner: "Acme", Repo: "api"}})
+	}); err != nil {
+		t.Fatalf("track acme/api for teamA: %v", err)
+	}
+
+	tracksAs := func(userID, owner, repo string) bool {
+		t.Helper()
+		var got bool
+		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
+			var e error
+			got, e = tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgA, owner, repo)
+			return e
+		}); err != nil {
+			t.Fatalf("TracksRepoViewerScoped(%s, %s/%s): %v", userID, owner, repo, err)
+		}
+		return got
+	}
+
+	if !tracksAs(alice, "acme", "api") {
+		t.Error("alice's team tracks acme/api; want true")
+	}
+	if !tracksAs(alice, "ACME", "API") {
+		t.Error("match should be case-insensitive")
+	}
+	if tracksAs(bob, "acme", "api") {
+		t.Error("bob's team does not track acme/api; want false even though it exists org-wide")
+	}
+	if tracksAs(alice, "acme", "ghost") {
+		t.Error("acme/ghost is not tracked by anyone; want false")
+	}
+}
+
 func pgStrsEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

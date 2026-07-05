@@ -184,6 +184,74 @@ func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	})
 }
 
+// TestRepoStore_Postgres_ListTeamScoped_RLS pins the multi-mode discovery
+// read (TFAC-559): under the app pool with real RLS, a member's
+// ListTeamScoped semi-joins through team_github_repos and returns only the
+// repos their own team(s) track — not the org-wide union. A teamless
+// member gets zero rows even though repo_profiles has entries.
+func TestRepoStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
+	bob := pgtest.SeedUser(t, h, "bob")
+	// bob is teamB's *team* admin (needed so his own ReplaceForTeam call below
+	// satisfies team_github_repos_insert's tf.user_is_team_admin check) but an
+	// org-level plain "member" — the role the org-admin bypass gate we're
+	// testing actually reads. Team role and org role are orthogonal here.
+	pgtest.AddOrgMember(t, h, bob, orgA, teamB, "member", "admin")
+	carol := pgtest.SeedUser(t, h, "carol")
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`, carol, orgA)
+
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	// teamA tracks acme/api; teamB tracks acme/web.
+	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, []domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}})
+	}); err != nil {
+		t.Fatalf("track acme/api for teamA: %v", err)
+	}
+	if err := stores.Tx.WithTx(ctx, orgA, bob, func(tx db.TxStores) error {
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamB, []domain.TeamGitHubRepo{{Owner: "acme", Repo: "web"}})
+	}); err != nil {
+		t.Fatalf("track acme/web for teamB: %v", err)
+	}
+
+	listAs := func(userID string) []string {
+		t.Helper()
+		var got []domain.RepoProfile
+		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
+			var e error
+			got, e = tx.Repos.ListTeamScoped(ctx, orgA)
+			return e
+		}); err != nil {
+			t.Fatalf("ListTeamScoped(%s): %v", userID, err)
+		}
+		return repoIDs(got)
+	}
+
+	if got, want := listAs(alice), []string{"acme/api"}; !pgStrsEqual(got, want) {
+		t.Errorf("alice (teamA) ListTeamScoped = %v, want %v", got, want)
+	}
+	if got, want := listAs(bob), []string{"acme/web"}; !pgStrsEqual(got, want) {
+		t.Errorf("bob (teamB) ListTeamScoped = %v, want %v", got, want)
+	}
+	if got := listAs(carol); len(got) != 0 {
+		t.Errorf("teamless carol ListTeamScoped = %v, want empty", got)
+	}
+}
+
+func repoIDs(profiles []domain.RepoProfile) []string {
+	out := make([]string, len(profiles))
+	for i, p := range profiles {
+		out[i] = p.ID
+	}
+	return out
+}
+
 func seedPgRepoOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, agentID string) {
 	t.Helper()
 	orgID = uuid.New().String()
