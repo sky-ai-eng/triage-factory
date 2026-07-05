@@ -361,6 +361,14 @@ services:
       TF_BLOB_ACCESS_KEY: ${TF_BLOB_ACCESS_KEY:?missing TF_BLOB_ACCESS_KEY (see .env.example)}
       TF_BLOB_SECRET_KEY: ${TF_BLOB_SECRET_KEY:?missing TF_BLOB_SECRET_KEY (see .env.example)}
       TF_BLOB_REGION: ${TF_BLOB_REGION:-us-east-1}
+      # Deployment-policy knobs, documented in .env.example. Read from
+      # the process env at boot, so they must be forwarded here — a value
+      # set only in .env would otherwise be silently ignored. Empty means
+      # each knob's documented default (creation allowed / no trusted
+      # proxies / capture on).
+      TF_PREVENT_ORG_CREATION: ${TF_PREVENT_ORG_CREATION:-}
+      TF_TRUSTED_PROXY_CIDR: ${TF_TRUSTED_PROXY_CIDR:-}
+      TF_CAPTURE_CLIENT_IP: ${TF_CAPTURE_CLIENT_IP:-}
     # Required for the in-container gVisor sandbox to do its netns +
     # iptables + runsc work. Tightening these later is a hardening
     # follow-up (SKY-336); the initial release ships the well-known
