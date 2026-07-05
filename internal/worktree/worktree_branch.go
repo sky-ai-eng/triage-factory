@@ -323,7 +323,7 @@ func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, runI
 // state a fresh default / --ref `workspace add` lands in — yields "" so no push
 // is authorized until the agent creates its own branch.
 func CurrentBranch(path string) string {
-	out, err := gitOutputCtx(context.Background(), path, "symbolic-ref", "--short", "HEAD")
+	out, err := gitOutputCtxTrustingOwner(context.Background(), path, "symbolic-ref", "--short", "HEAD")
 	if err != nil {
 		return ""
 	}
@@ -392,7 +392,7 @@ func PushTargetBranch(path string) string {
 // among keys, read from the repo at path ("" when none is set).
 func gitConfigFirst(path string, keys ...string) string {
 	for _, key := range keys {
-		out, err := gitOutputCtx(context.Background(), path, "config", "--get", key)
+		out, err := gitOutputCtxTrustingOwner(context.Background(), path, "config", "--get", key)
 		if err != nil {
 			continue // unset key exits non-zero — a normal absent state
 		}
@@ -406,7 +406,7 @@ func gitConfigFirst(path string, keys ...string) string {
 // gitConfigAll returns every value of a multi-valued git config key, read from
 // the repo at path (nil when unset).
 func gitConfigAll(path, key string) []string {
-	out, err := gitOutputCtx(context.Background(), path, "config", "--get-all", key)
+	out, err := gitOutputCtxTrustingOwner(context.Background(), path, "config", "--get-all", key)
 	if err != nil {
 		return nil
 	}

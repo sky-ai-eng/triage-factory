@@ -1,7 +1,6 @@
 package worktree
 
 import (
-	"context"
 	"os"
 	"testing"
 )
@@ -15,27 +14,23 @@ import (
 // chowned to sandbox.WorktreeUID (10000) for the jailed agent.
 const foreignUID = 65534
 
-// requireChownCapable skips the test when the process can't chown a path to
-// an arbitrary uid (needs root / CAP_CHOWN) — same gate the sandbox
-// integration tests use (see internal/sandbox/integration_linux_test.go's
-// minimalConfig).
-func requireChownCapable(t *testing.T) {
-	t.Helper()
-	if os.Geteuid() != 0 {
-		t.Skip("chown to a foreign uid needs root; skipping dubious-ownership regression test")
-	}
-}
-
 // chownToForeignOwner reproduces the sandbox chown's effect on git's
-// ownership check. Git's dubious-ownership guard compares only the
-// repository's TOP-LEVEL working directory owner against the running euid,
-// so chowning just dir (not recursively) reproduces it exactly — verified
-// against chownWorktreeForSandbox's recursive Lchown, which necessarily
-// covers dir itself as one of the walked entries.
+// ownership check by chowning dir to a uid other than this process's. Git's
+// dubious-ownership guard compares only the repository's TOP-LEVEL working
+// directory owner against the running euid, so chowning just dir (not
+// recursively) reproduces it exactly — chownWorktreeForSandbox's recursive
+// Lchown necessarily covers dir itself as one of the walked entries.
+//
+// Skips (rather than fails) when the chown itself fails: euid==0 is not
+// sufficient to guarantee CAP_CHOWN in every environment (rootless /
+// user-namespaced containers in particular), so attempt-then-skip is the
+// robust gate — same pattern as internal/sandbox/integration_linux_test.go's
+// minimalConfig, which tries os.Chown and skips on error rather than
+// pre-checking os.Geteuid().
 func chownToForeignOwner(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.Chown(dir, foreignUID, foreignUID); err != nil {
-		t.Fatalf("chown %s to foreign uid: %v", dir, err)
+		t.Skipf("can't chown %s to a foreign uid (needs root/CAP_CHOWN): %v", dir, err)
 	}
 }
 
@@ -47,7 +42,6 @@ func chownToForeignOwner(t *testing.T, dir string) {
 // multi-mode push into a "ref-not-allowed" 403 (gitAuthorizeDecision treats
 // an unreadable branch identically to a detached HEAD: nothing authorized).
 func TestPushTargetBranch_DubiousOwnership(t *testing.T) {
-	requireChownCapable(t)
 	dir := ptRepo(t)
 	chownToForeignOwner(t, dir)
 
@@ -59,7 +53,6 @@ func TestPushTargetBranch_DubiousOwnership(t *testing.T) {
 // TestCurrentBranch_DubiousOwnership pins the same guarantee directly against
 // CurrentBranch, the lower-level primitive PushTargetBranch itself calls.
 func TestCurrentBranch_DubiousOwnership(t *testing.T) {
-	requireChownCapable(t)
 	dir := ptRepo(t)
 	chownToForeignOwner(t, dir)
 
@@ -68,27 +61,12 @@ func TestCurrentBranch_DubiousOwnership(t *testing.T) {
 	}
 }
 
-// TestCaptureWorkspaceGit_DubiousOwnership is the parking-snapshot half of the
-// TFAC-558 regression: `rev-parse HEAD` against a foreign-owned run root (the
-// "detected dubious ownership" WARN from the bug report) must succeed so the
-// snapshot captures the agent's work instead of failing outright.
-func TestCaptureWorkspaceGit_DubiousOwnership(t *testing.T) {
-	requireChownCapable(t)
-	dir := ptRepo(t)
-	wantHead := coOut(t, dir, "rev-parse", "HEAD")
-	chownToForeignOwner(t, dir)
-
-	delta, err := CaptureWorkspaceGit(context.Background(), dir)
-	if err != nil {
-		t.Fatalf("CaptureWorkspaceGit on a foreign-owned worktree: %v", err)
-	}
-	if delta == nil {
-		t.Fatal("CaptureWorkspaceGit returned nil delta")
-	}
-	if delta.Head != wantHead {
-		t.Errorf("delta.Head = %q, want %q", delta.Head, wantHead)
-	}
-	if delta.Branch != "work" {
-		t.Errorf("delta.Branch = %q, want work", delta.Branch)
-	}
-}
+// Note: the parking snapshot's CaptureWorkspaceGit is NOT covered here.
+// Unlike CurrentBranch/PushTargetBranch (pure config/ref reads), its
+// captureUncommitted step runs `git add -A` / `git diff`, which consult the
+// repository's own .gitattributes + .git/config to decide whether to invoke
+// an external clean/smudge filter or diff driver — content a compromised
+// sandboxed agent can write. Bypassing dubious-ownership there is a sandbox
+// escape, not a fix; see gitCapture's doc comment in snapshot.go. That half
+// of TFAC-558 stays open pending a fix that resolves such config from a
+// source the agent can't write.

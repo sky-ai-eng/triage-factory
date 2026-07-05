@@ -247,12 +247,9 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping(t *testing.T) {
 // AllowedRefs came back empty, which is exactly the observed symptom: the
 // receive-pack ref gate then denies every pushed ref with "ref-not-allowed"
 // even though the checkout's branch and push refspec are configured
-// correctly. Requires root (chowning to an arbitrary uid needs CAP_CHOWN).
+// correctly. Skips if the chown below fails (needs root/CAP_CHOWN — euid==0
+// alone doesn't guarantee it in a rootless/user-namespaced environment).
 func TestGitAuthorizeDecision_PRWorktreeRefspecMapping_DubiousOwnership(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("chown to a foreign uid needs root; skipping dubious-ownership regression test")
-	}
-
 	database := newDelegateTestDB(t)
 	stores := sqlitestore.New(database)
 	ctx := context.Background()
@@ -299,7 +296,7 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping_DubiousOwnership(t *testi
 	// itself (rather than walking the whole tree like the real chown does)
 	// reproduces the failure exactly.
 	if err := os.Chown(wt, 65534, 65534); err != nil {
-		t.Fatalf("chown worktree to foreign uid: %v", err)
+		t.Skipf("can't chown %s to a foreign uid (needs root/CAP_CHOWN): %v", wt, err)
 	}
 
 	d, err := gitAuthorizeDecision(ctx, stores, info, "acme", "api")

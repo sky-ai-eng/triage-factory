@@ -367,8 +367,21 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 // `git bundle` payload isn't corrupted by progress text on stderr — unlike
 // gitOutputCtx, which combines the two. env, when non-nil, replaces the
 // child's environment (used to point GIT_INDEX_FILE at a throwaway index).
+//
+// gitCapture deliberately does NOT bypass git's dubious-ownership guard the
+// way gitOutputCtxTrustingOwner does — captureUncommitted's `git add -A` /
+// `git diff` run through here, and unlike a plain config/ref read those DO
+// consult the repository's own (agent-writable, once chowned to the sandbox
+// uid) `.gitattributes` + `.git/config` to decide whether to invoke an
+// external clean/smudge filter or diff driver. Bypassing the guard here would
+// let a compromised sandboxed agent plant both halves of that pair and get
+// this host-side (root) capture to execute arbitrary code — see TFAC-558's
+// PR discussion. Left unfixed: the parking-snapshot `rev-parse HEAD` failure
+// against a chowned worktree needs config resolution routed through a source
+// the agent can't write (e.g. the host-owned bare clone), which is a
+// follow-up, not this.
 func gitCapture(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", safeDirectoryArgs(dir, args)...)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}

@@ -556,27 +556,61 @@ func gitBaseEnv() []string {
 	return append(out, "GIT_TERMINAL_PROMPT=0")
 }
 
-// safeDirectoryArgs prepends "-c safe.directory=<dir>" ahead of the git
-// subcommand when dir is non-empty. Host-side git subprocesses in this
-// package run as this process's uid (root, in the multi-mode container), but
-// a run's worktree may by now have been recursively chowned to the sandboxed
-// agent's uid (agentproc.chownWorktreeForSandbox /
-// ChownWorkspaceCheckoutForSandbox) so the agent can write to its own
-// checkout. That ownership mismatch trips
-// git's dubious-ownership refusal ("detected dubious ownership in repository
-// at ...") for every subsequent host-side read against dir, even though this
-// process is the one that created and populated it in the first place
-// (TFAC-558): the push-authorization gate's live-branch read
-// (CurrentBranch/PushTargetBranch, both routed through gitConfigFirst/
-// gitConfigAll/gitOutputCtx) came back empty, and the parking snapshot's
-// `rev-parse HEAD` (gitCapture) failed outright.
+func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = gitBaseEnv()
+	return runGitOutput(ctx, cmd, args)
+}
+
+// gitOutputCtxTrustingOwner is gitOutputCtx's counterpart for the narrow set
+// of callers that read pure metadata — ref names and config values — from a
+// worktree this process didn't necessarily create the ownership of: the
+// push-authorization gate's live-branch read runs host-side (root, in multi
+// mode) against a run root that agentproc.chownWorktreeForSandbox has
+// recursively chowned to the sandboxed agent's uid, and git's
+// dubious-ownership guard refuses to touch a directory owned by someone else
+// (TFAC-558: this silently blanked CurrentBranch/PushTargetBranch, starving
+// the gate's AllowedRefs and turning every push into a "ref-not-allowed" 403).
 //
-// Declaring the exact directory being operated on as safe — rather than a
-// container-wide safe.directory config, or a "/tmp/triagefactory-runs/*"
-// wildcard — keeps the trust boundary as narrow as the path we already
-// vouch for by construction (we created it), without weakening the check for
-// anything else on the host. A dir whose ownership already matches is
-// unaffected: the config entry is inert.
+// This is safe to bypass ONLY because every call site below is restricted —
+// by convention, not by anything this function enforces — to git subcommands
+// that read config/ref VALUES without ever executing repository-controlled
+// content: `config --get[-all]` and `symbolic-ref` never invoke a
+// clean/smudge/textconv/external-diff driver or a hook, so a `.git/config` /
+// `.gitattributes` pair the sandboxed agent had a chance to write (it is
+// LESS trusted than this host process — that's the entire point of the
+// sandbox, including against a jailbroken or prompt-injected agent) cannot
+// ride along into code execution here.
+//
+// Do NOT reuse this for a subcommand that touches working-tree content
+// (`add`, `diff`, `checkout`, `reset --hard`, `stash`, ...) — those DO
+// consult clean/smudge filters and external diff/merge drivers, resolved
+// through the repository's own (here: agent-writable) config. Bypassing
+// dubious-ownership for those would let a compromised agent plant a
+// `filter.<x>.clean` / `diff.<x>.command` in that config plus a matching
+// `.gitattributes` entry, and have the next host-side (root) git command
+// against this directory execute it — a sandbox escape. The parking
+// snapshot's `git add -A` / `git diff` (gitCapture, snapshot.go)
+// deliberately does NOT get this treatment for exactly that reason; fixing
+// its dubious-ownership failure needs config resolution routed through a
+// source the agent can't write (e.g. the host-owned bare clone), which is
+// its own follow-up.
+func gitOutputCtxTrustingOwner(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", safeDirectoryArgs(dir, args)...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = gitBaseEnv()
+	return runGitOutput(ctx, cmd, args)
+}
+
+// safeDirectoryArgs prepends "-c safe.directory=<dir>" ahead of the git
+// subcommand when dir is non-empty, so git's dubious-ownership guard trusts a
+// directory this process didn't create the ownership of. See
+// gitOutputCtxTrustingOwner for which callers may safely use this.
 func safeDirectoryArgs(dir string, args []string) []string {
 	if dir == "" {
 		return args
@@ -586,12 +620,10 @@ func safeDirectoryArgs(dir string, args []string) []string {
 	return append(out, args...)
 }
 
-func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", safeDirectoryArgs(dir, args)...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = gitBaseEnv()
+// runGitOutput executes cmd (already configured by the caller) and returns
+// its combined output, or a formatted error — the shared tail of
+// gitOutputCtx and gitOutputCtxTrustingOwner.
+func runGitOutput(ctx context.Context, cmd *exec.Cmd, args []string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -617,7 +649,7 @@ func gitRunCtx(ctx context.Context, dir string, args ...string) error {
 // spawns) whether or not auth is active; an inert auth uses that base alone,
 // behaving identically to before aside from the now-explicit prompt disable.
 func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", safeDirectoryArgs(dir, args)...)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
