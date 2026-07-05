@@ -507,7 +507,20 @@ func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, us
 	})
 	if swipeErr != nil {
 		swipeLog.Warn("audit write failed for reassign, claim mutation already landed", "task", id, "error", swipeErr)
+		// Mirror ReassignClaimToUser(System)'s own status transformation
+		// (SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE
+		// status END) rather than assuming the pre-mutation snapshot still
+		// matches: task.Status can't actually be "snoozed" here today
+		// (SnoozeTask refuses to snooze an already-claimed row, so a
+		// reassign candidate — always user-claimed — is never snoozed),
+		// but that's an app-level invariant, not a DB constraint, and this
+		// fallback shouldn't silently depend on it holding. Every other
+		// status (queued/in_progress/in_review) passes through unchanged,
+		// same as the CAS.
 		newStatus = task.Status
+		if newStatus == "snoozed" {
+			newStatus = "queued"
+		}
 	}
 	if claimChanged {
 		s.ws.Broadcast(websocket.Event{
