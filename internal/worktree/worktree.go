@@ -556,8 +556,38 @@ func gitBaseEnv() []string {
 	return append(out, "GIT_TERMINAL_PROMPT=0")
 }
 
+// safeDirectoryArgs prepends "-c safe.directory=<dir>" ahead of the git
+// subcommand when dir is non-empty. Host-side git subprocesses in this
+// package run as this process's uid (root, in the multi-mode container), but
+// a run's worktree may by now have been recursively chowned to the sandboxed
+// agent's uid (agentproc.chownWorktreeForSandbox /
+// ChownWorkspaceCheckoutForSandbox) so the agent can write to its own
+// checkout. That ownership mismatch trips
+// git's dubious-ownership refusal ("detected dubious ownership in repository
+// at ...") for every subsequent host-side read against dir, even though this
+// process is the one that created and populated it in the first place
+// (TFAC-558): the push-authorization gate's live-branch read
+// (CurrentBranch/PushTargetBranch, both routed through gitConfigFirst/
+// gitConfigAll/gitOutputCtx) came back empty, and the parking snapshot's
+// `rev-parse HEAD` (gitCapture) failed outright.
+//
+// Declaring the exact directory being operated on as safe — rather than a
+// container-wide safe.directory config, or a "/tmp/triagefactory-runs/*"
+// wildcard — keeps the trust boundary as narrow as the path we already
+// vouch for by construction (we created it), without weakening the check for
+// anything else on the host. A dir whose ownership already matches is
+// unaffected: the config entry is inert.
+func safeDirectoryArgs(dir string, args []string) []string {
+	if dir == "" {
+		return args
+	}
+	out := make([]string, 0, len(args)+2)
+	out = append(out, "-c", "safe.directory="+dir)
+	return append(out, args...)
+}
+
 func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", safeDirectoryArgs(dir, args)...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -587,7 +617,7 @@ func gitRunCtx(ctx context.Context, dir string, args ...string) error {
 // spawns) whether or not auth is active; an inert auth uses that base alone,
 // behaving identically to before aside from the now-explicit prompt disable.
 func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", safeDirectoryArgs(dir, args)...)
 	if dir != "" {
 		cmd.Dir = dir
 	}

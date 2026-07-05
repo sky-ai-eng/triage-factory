@@ -368,7 +368,7 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 // gitOutputCtx, which combines the two. env, when non-nil, replaces the
 // child's environment (used to point GIT_INDEX_FILE at a throwaway index).
 func gitCapture(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", safeDirectoryArgs(dir, args)...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
