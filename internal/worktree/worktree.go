@@ -572,8 +572,8 @@ func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, erro
 // mode) against a run root that agentproc.chownWorktreeForSandbox has
 // recursively chowned to the sandboxed agent's uid, and git's
 // dubious-ownership guard refuses to touch a directory owned by someone else
-// (TFAC-558: this silently blanked CurrentBranch/PushTargetBranch, starving
-// the gate's AllowedRefs and turning every push into a "ref-not-allowed" 403).
+// (this silently blanked CurrentBranch/PushTargetBranch, starving the gate's
+// AllowedRefs and turning every push into a "ref-not-allowed" 403).
 //
 // This is safe to bypass ONLY because every call site below is restricted —
 // by convention, not by anything this function enforces — to git subcommands

@@ -237,7 +237,7 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping(t *testing.T) {
 }
 
 // TestGitAuthorizeDecision_PRWorktreeRefspecMapping_DubiousOwnership is the
-// TFAC-558 regression: identical setup to
+// push-gate starvation regression: identical setup to
 // TestGitAuthorizeDecision_PRWorktreeRefspecMapping, except the worktree is
 // chowned to a different uid before the decision is computed — reproducing
 // what agentproc.chownWorktreeForSandbox leaves behind for every multi-mode

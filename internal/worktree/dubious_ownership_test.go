@@ -8,8 +8,8 @@ import (
 // foreignUID is a uid that (almost certainly) differs from the test
 // process's euid, used to reproduce git's dubious-ownership refusal without
 // depending on any real system user existing — the check only compares
-// numeric owner against euid, it never resolves the uid to a name. TFAC-558:
-// production hits this exact condition when the host process (root, uid 0)
+// numeric owner against euid, it never resolves the uid to a name.
+// Production hits this exact condition when the host process (root, uid 0)
 // reads a run root that agentproc.chownWorktreeForSandbox has recursively
 // chowned to sandbox.WorktreeUID (10000) for the jailed agent.
 const foreignUID = 65534
@@ -34,8 +34,8 @@ func chownToForeignOwner(t *testing.T, dir string) {
 	}
 }
 
-// TestPushTargetBranch_DubiousOwnership is the TFAC-558 regression: a
-// worktree owned by a different uid than the running process (the shape
+// TestPushTargetBranch_DubiousOwnership is the regression for the push-gate
+// read starvation: a worktree owned by a different uid than the running process (the shape
 // agentproc.chownWorktreeForSandbox leaves behind for every multi-mode run)
 // must not make PushTargetBranch silently return "" — that's exactly what
 // starved the push-authorization gate's AllowedRefs and turned every
@@ -67,6 +67,6 @@ func TestCurrentBranch_DubiousOwnership(t *testing.T) {
 // repository's own .gitattributes + .git/config to decide whether to invoke
 // an external clean/smudge filter or diff driver — content a compromised
 // sandboxed agent can write. Bypassing dubious-ownership there is a sandbox
-// escape, not a fix; see gitCapture's doc comment in snapshot.go. That half
-// of TFAC-558 stays open pending a fix that resolves such config from a
-// source the agent can't write.
+// escape, not a fix; see gitCapture's doc comment in snapshot.go. That capture
+// hardening is tracked separately, pending a fix that runs the capture with no
+// more privilege than the agent had (or avoids filter-honoring git entirely).

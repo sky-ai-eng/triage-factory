@@ -168,6 +168,19 @@ func EnsureSharedCuratorWorktree(ctx context.Context, orgID, owner, repo, branch
 		// gitRunCtxAuth: reset --hard materializes deferred blobs via the bare's
 		// origin promisor remote, so the lazy fetch needs the host-scoped
 		// credential on a private repo.
+		//
+		// SECURITY INVARIANT: this reset --hard (and the clean below) run
+		// host-side as root, and reset --hard applies smudge filters — so it
+		// executes any filter.<x>.smudge command named by this checkout's
+		// (agent-writable-looking) .gitattributes + .git/config. It is safe
+		// ONLY because the shared curator tree is never handed to a sandboxed
+		// agent: it lives outside any run's writable Cwd, so
+		// chownWorktreeForSandbox never reaches it and no agent can plant a
+		// filter here. If the curator checkout ever becomes agent-writable
+		// (e.g. mounted rw into a delegated run to avoid a re-clone), this line
+		// becomes a root RCE — the same class of host-side filter-execution
+		// escape as the parked-run snapshot-capture path. Keep this tree
+		// host-owned, or move this reset into the jail.
 		if err := gitRunCtxAuth(ctx, wtDir, auth, "reset", "--hard", remoteRef); err != nil {
 			return "", nil, fmt.Errorf("reset --hard %s: %w", branch, err)
 		}

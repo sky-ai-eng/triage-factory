@@ -390,9 +390,16 @@ func PushTargetBranch(path string) string {
 
 // gitConfigFirst returns the first non-empty single-valued git config entry
 // among keys, read from the repo at path ("" when none is set).
+//
+// --no-includes: this reads a config file whose ownership we're vouching for
+// via safe.directory (the sandbox-chowned run root), so the file is
+// agent-writable. Without --no-includes an include.path directive there would
+// make this root-side git open and parse any file it names — needless
+// attacker-directed file access. Legitimate run clones never use includes
+// (configurePRPushTracking writes plain keys), so disabling them costs nothing.
 func gitConfigFirst(path string, keys ...string) string {
 	for _, key := range keys {
-		out, err := gitOutputCtxTrustingOwner(context.Background(), path, "config", "--get", key)
+		out, err := gitOutputCtxTrustingOwner(context.Background(), path, "config", "--no-includes", "--get", key)
 		if err != nil {
 			continue // unset key exits non-zero — a normal absent state
 		}
@@ -404,9 +411,11 @@ func gitConfigFirst(path string, keys ...string) string {
 }
 
 // gitConfigAll returns every value of a multi-valued git config key, read from
-// the repo at path (nil when unset).
+// the repo at path (nil when unset). --no-includes for the same reason as
+// gitConfigFirst: the config file is agent-writable, so an include.path there
+// must not steer this root-side read into arbitrary files.
 func gitConfigAll(path, key string) []string {
-	out, err := gitOutputCtxTrustingOwner(context.Background(), path, "config", "--get-all", key)
+	out, err := gitOutputCtxTrustingOwner(context.Background(), path, "config", "--no-includes", "--get-all", key)
 	if err != nil {
 		return nil
 	}
