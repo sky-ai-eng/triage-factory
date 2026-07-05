@@ -27,6 +27,12 @@ cd frontend && pnpm run dev
 
 # Nuke local DB + config + keychain entries (fresh first-run flow)
 ./scripts/clean-slate.sh
+
+# Multi-mode (Postgres + GoTrue + SeaweedFS), on demand only — not part of
+# the default flow above and never run automatically:
+./scripts/multi-mode-dev.sh up    # start deps via docker-compose.yml + migrate
+./scripts/multi-mode-dev.sh run   # run the host binary in TF_MODE=multi against them
+./scripts/multi-mode-dev.sh down  # tear down
 ```
 
 The repo-root `.claude/settings.json` registers a `PostToolUse` hook that runs `goimports -w` on edited `.go` files and `prettier --write` on frontend sources — do not duplicate that work manually.

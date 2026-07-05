@@ -16,6 +16,13 @@ export default defineConfig({
     include: ['src/**/*.test.{ts,tsx}'],
   },
   server: {
+    // Pinned (not just Vite's default) because the backend's CSRF origin
+    // check trusts this exact origin in local mode (see
+    // internal/server/middleware.go's devFrontendOrigin) — a silent
+    // fallback to 5174+ if 5173 were busy would break that trust and
+    // reintroduce the cross-origin 403 this pin exists to avoid.
+    port: 5173,
+    strictPort: true,
     proxy: {
       '/api/ws': { target: 'ws://localhost:3000', ws: true },
       '/api': 'http://localhost:3000',

@@ -76,6 +76,12 @@ type deployConfig struct {
 	// secureCookies hardens cookie attributes when the deployment is
 	// HTTPS. Derived from publicURL at init time.
 	secureCookies bool
+
+	// trustDevFrontendOrigin additionally trusts devFrontendOrigin (see
+	// middleware.go) in withCSRFOriginCheck. Set only via
+	// AllowDevFrontendOrigin, which only local-mode boot calls — never
+	// wired into multi-mode's deploy config.
+	trustDevFrontendOrigin bool
 }
 
 // authConfig holds GoTrue-only configuration for the multi-mode auth
@@ -96,6 +102,20 @@ func (s *Server) SetDeployConfig(publicURL string, hmacKey [32]byte) {
 		hmacKey:       hmacKey,
 		secureCookies: strings.HasPrefix(pub, "https://"),
 	}
+}
+
+// AllowDevFrontendOrigin additionally trusts devFrontendOrigin (Vite's
+// dev server — see middleware.go) in withCSRFOriginCheck. Local-mode
+// boot only: `cd frontend && pnpm run dev` serves the UI from port 5173
+// while the backend listens on publicURL's port (3000 by default), so a
+// mutating request proxied through Vite arrives with an Origin that
+// legitimately differs from publicURL. Call only after SetDeployConfig;
+// a no-op if deployCfg isn't set yet.
+func (s *Server) AllowDevFrontendOrigin() {
+	if s.deployCfg == nil {
+		return
+	}
+	s.deployCfg.trustDevFrontendOrigin = true
 }
 
 // SetAuthDeps wires the multi-mode auth dependencies into the server.

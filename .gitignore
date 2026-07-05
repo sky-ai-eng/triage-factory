@@ -20,5 +20,6 @@ _scratch/
 docs/triagefactory-spec.md
 docs/oauth-smoke.html
 .env
+.env.multi-dev
 triage-factory
 bench-results/

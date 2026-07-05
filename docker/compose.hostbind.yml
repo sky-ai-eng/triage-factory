@@ -1,0 +1,19 @@
+# Optional compose override: publishes postgres (5432) and seaweedfs's S3
+# port (8333) to the host loopback. The base docker-compose.yml
+# deliberately keeps both off the host network — everything talks to them
+# over the compose network instead. This override exists only for
+# scripts/multi-mode-dev.sh, which runs the triagefactory binary directly
+# on the host (skipping docker/Dockerfile's image build) and so needs to
+# reach Postgres + the blob store from outside the compose network — that
+# only requires 127.0.0.1, so bind explicitly rather than Docker's default
+# 0.0.0.0 (which would also expose both on the host's other interfaces).
+#
+# Not used by the documented self-host flow (`docker compose up -d`) —
+# only multi-mode-dev.sh references this file explicitly via `-f`.
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+  seaweedfs:
+    ports:
+      - "127.0.0.1:8333:8333"

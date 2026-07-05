@@ -34,6 +34,10 @@ func (a *App) buildServer(ctx context.Context, static fs.FS) error {
 			return fmt.Errorf("generate local HMAC key: %w", err)
 		}
 		a.srv.SetDeployConfig(a.cfg.BrowserURL, hmacKey)
+		// Trust the Vite dev server's origin too, so `cd frontend && pnpm
+		// run dev` (port 5173, proxying /api to this backend) can make
+		// mutating requests — see AllowDevFrontendOrigin's doc comment.
+		a.srv.AllowDevFrontendOrigin()
 	} else {
 		if err := a.wireAuth(ctx); err != nil {
 			return err
