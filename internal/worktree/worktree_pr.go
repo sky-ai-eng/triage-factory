@@ -654,7 +654,7 @@ func liveWorktreeBranches(ctx context.Context, bareDir string) map[string]bool {
 //     head. Without this ref, branch.<localBranch>.merge below resolves to a
 //     remote-tracking ref that was never created, and `git status` reports
 //     "upstream is gone" on every PR run even though the push config is
-//     intact (TFAC-565).
+//     intact.
 //   - remote.<remoteName>.push as an explicit refspec mapping
 //     refs/heads/<localBranch> -> refs/heads/<headBranch>. Both the fork and
 //     own-repo paths now have local (triagefactory/<runID>/pr-<n>) differ from

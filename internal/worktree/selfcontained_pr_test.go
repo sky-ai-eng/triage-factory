@@ -94,18 +94,24 @@ func TestCreateForPR_SelfContainedClone_MultiMode(t *testing.T) {
 		t.Errorf("PushTargetBranch = %q, want feature-branch (the PR head the push refspec targets)", target)
 	}
 
-	// TFAC-565: the tfpush remote's tracking ref must be materialized in the
-	// clone too, or branch.<local>.merge resolves to nothing and `git status`
-	// reports "upstream is gone".
-	if err := exec.Command("git", "-C", wtPath, "rev-parse", "--verify", "--quiet", "refs/remotes/"+remote+"/feature-branch").Run(); err != nil {
-		t.Errorf("clone is missing refs/remotes/%s/feature-branch (tfpush tracking ref)", remote)
-	}
-	statusOut, err := exec.Command("git", "-C", wtPath, "status").CombinedOutput()
+	// The tfpush remote's tracking ref must be materialized in the clone too,
+	// or branch.<local>.merge resolves to nothing and `git status` reports
+	// "upstream is gone".
+	trackingTip, err := exec.Command("git", "-C", wtPath, "rev-parse", "--verify", "--quiet", "refs/remotes/"+remote+"/feature-branch").Output()
 	if err != nil {
-		t.Fatalf("git status: %v: %s", err, statusOut)
+		t.Fatalf("clone is missing refs/remotes/%s/feature-branch (tfpush tracking ref): %v", remote, err)
 	}
-	if strings.Contains(string(statusOut), "gone") {
-		t.Errorf("git status reports upstream gone:\n%s", statusOut)
+	// HEAD@{upstream} resolves branch.<local>.remote/.merge through the
+	// remote's fetch refspec to a remote-tracking ref, exactly what `git
+	// status` does to decide "gone" — checking the exit code (rather than
+	// matching status's human-readable, locale-dependent text) confirms the
+	// upstream actually resolves.
+	upstreamSHA, err := exec.Command("git", "-C", wtPath, "rev-parse", "--verify", "--quiet", "HEAD@{upstream}").Output()
+	if err != nil {
+		t.Fatalf("HEAD@{upstream} did not resolve (upstream is gone): %v", err)
+	}
+	if got := strings.TrimSpace(string(upstreamSHA)); got != strings.TrimSpace(string(trackingTip)) {
+		t.Errorf("HEAD@{upstream} = %q, want %q (the tfpush tracking ref)", got, trackingTip)
 	}
 
 	// The shared bare is left with no per-run ref (dropBareRunRefs ran after the

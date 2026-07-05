@@ -912,7 +912,7 @@ func TestCreateForPR_OwnRepoPR_FetchesViaPullRef(t *testing.T) {
 	}
 }
 
-// TestCreateForPR_TrackingRefMaterialized is the TFAC-565 regression.
+// TestCreateForPR_TrackingRefMaterialized guards against a regression where
 // configurePRPushTracking points branch.<local>.remote / .merge at the
 // tfpush-<runID>-<n> remote's PR head branch, but that remote is never
 // fetched (fetches route through refs/pull/<n>/head on the upstream
@@ -968,12 +968,17 @@ func TestCreateForPR_TrackingRefMaterialized(t *testing.T) {
 		t.Errorf("tracking ref = %q, want %q (PR head)", trackingTip, localTip)
 	}
 
-	statusOut, err := exec.Command("git", "-C", wtPath, "status").CombinedOutput()
+	// HEAD@{upstream} resolves branch.<local>.remote/.merge through the
+	// remote's fetch refspec to a remote-tracking ref, exactly what `git
+	// status` does to decide "gone" — checking the exit code (rather than
+	// matching status's human-readable, locale-dependent text) confirms the
+	// upstream actually resolves.
+	upstreamSHA, err := exec.Command("git", "-C", wtPath, "rev-parse", "--verify", "--quiet", "HEAD@{upstream}").Output()
 	if err != nil {
-		t.Fatalf("git status: %v: %s", err, statusOut)
+		t.Fatalf("HEAD@{upstream} did not resolve (upstream is gone): %v", err)
 	}
-	if strings.Contains(string(statusOut), "gone") {
-		t.Errorf("git status reports upstream gone:\n%s", statusOut)
+	if got := strings.TrimSpace(string(upstreamSHA)); got != strings.TrimSpace(string(trackingTip)) {
+		t.Errorf("HEAD@{upstream} = %q, want %q (the tfpush tracking ref)", got, trackingTip)
 	}
 }
 
