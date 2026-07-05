@@ -912,6 +912,71 @@ func TestCreateForPR_OwnRepoPR_FetchesViaPullRef(t *testing.T) {
 	}
 }
 
+// TestCreateForPR_TrackingRefMaterialized is the TFAC-565 regression.
+// configurePRPushTracking points branch.<local>.remote / .merge at the
+// tfpush-<runID>-<n> remote's PR head branch, but that remote is never
+// fetched (fetches route through refs/pull/<n>/head on the upstream
+// instead) — so without materializing the tracking ref locally, git can't
+// resolve the configured upstream and `git status` reports "the upstream is
+// gone" on every PR run even though the push config is intact.
+func TestCreateForPR_TrackingRefMaterialized(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+
+	work := filepath.Join(t.TempDir(), "work-tracking")
+	if out, err := exec.Command("git", "init", "-b", "main", work).CombinedOutput(); err != nil {
+		t.Fatalf("git init work: %v: %s", err, out)
+	}
+	cmds := [][]string{
+		{"-C", work, "config", "user.email", "me@example.com"},
+		{"-C", work, "config", "user.name", "Me"},
+		{"-C", work, "remote", "add", "origin", upstream},
+		{"-C", work, "fetch", "origin", "main"},
+		{"-C", work, "checkout", "-b", "my-feature", "FETCH_HEAD"},
+		{"-C", work, "commit", "--allow-empty", "-m", "PR commit"},
+		{"-C", work, "push", "origin", "my-feature:refs/heads/my-feature"},
+		{"-C", work, "push", "origin", "my-feature:refs/pull/9/head"},
+	}
+	for _, c := range cmds {
+		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", c, err, out)
+		}
+	}
+
+	wtPath, err := CreateForPR(context.Background(), "owner-tracking-test", "repo-tracking-test", upstream, upstream, "my-feature", 9, "tracking-test-run")
+	if err != nil {
+		t.Fatalf("CreateForPR: %v", err)
+	}
+	t.Cleanup(func() { _ = RemoveAt(wtPath, "tracking-test-run") })
+
+	localBranch := "triagefactory/tracking-test-run/pr-9"
+	remote := prPushRemoteName("tracking-test-run", 9)
+
+	bareDir, err := repoDir("owner-tracking-test", "repo-tracking-test")
+	if err != nil {
+		t.Fatalf("repoDir: %v", err)
+	}
+	localTip, err := exec.Command("git", "-C", bareDir, "rev-parse", "refs/heads/"+localBranch).Output()
+	if err != nil {
+		t.Fatalf("rev-parse local branch: %v", err)
+	}
+	trackingTip, err := exec.Command("git", "-C", bareDir, "rev-parse", "refs/remotes/"+remote+"/my-feature").Output()
+	if err != nil {
+		t.Fatalf("tracking ref refs/remotes/%s/my-feature missing: %v", remote, err)
+	}
+	if strings.TrimSpace(string(localTip)) != strings.TrimSpace(string(trackingTip)) {
+		t.Errorf("tracking ref = %q, want %q (PR head)", trackingTip, localTip)
+	}
+
+	statusOut, err := exec.Command("git", "-C", wtPath, "status").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status: %v: %s", err, statusOut)
+	}
+	if strings.Contains(string(statusOut), "gone") {
+		t.Errorf("git status reports upstream gone:\n%s", statusOut)
+	}
+}
+
 // TestCreateForPR_ConcurrentSamePR_OwnRepo is the TFAC-87 regression: two
 // concurrent runs reviewing the SAME own-repo PR off one shared bare must BOTH
 // materialize (pre-fix the second failed — git refuses to fetch into / check

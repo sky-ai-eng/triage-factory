@@ -645,6 +645,16 @@ func liveWorktreeBranches(ctx context.Context, bareDir string) map[string]bool {
 //   - A remote tfpush-<runID>-<n> -> pushURL (in gitDir). Per (run, PR), not
 //     per-PR: two concurrent runs on the same PR own separate remotes so one
 //     run's cleanup can reclaim its remote without breaking the other.
+//   - refs/remotes/<remoteName>/<headBranch>, pointed at localBranch's tip —
+//     the exact remote-tracking ref the tfpush remote's default fetch refspec
+//     (refs/heads/*:refs/remotes/<remote>/*) would produce, materialized
+//     locally instead of via an actual fetch (which would need a separate
+//     fork credential this path deliberately avoids). localBranch was just
+//     fetched from refs/pull/<n>/head by the caller, so its tip IS the PR
+//     head. Without this ref, branch.<localBranch>.merge below resolves to a
+//     remote-tracking ref that was never created, and `git status` reports
+//     "upstream is gone" on every PR run even though the push config is
+//     intact (TFAC-565).
 //   - remote.<remoteName>.push as an explicit refspec mapping
 //     refs/heads/<localBranch> -> refs/heads/<headBranch>. Both the fork and
 //     own-repo paths now have local (triagefactory/<runID>/pr-<n>) differ from
@@ -683,6 +693,18 @@ func configurePRPushTracking(ctx context.Context, gitDir, runID string, prNumber
 		if err := gitRunCtx(ctx, gitDir, "remote", "set-url", remoteName, pushURL); err != nil {
 			return fmt.Errorf("add or set-url remote %s: %w", remoteName, err)
 		}
+	}
+
+	// localBranch's tip in gitDir is the PR head the caller just fetched (via
+	// refs/pull/<n>/head) — reuse it as the tfpush remote's tracking ref
+	// instead of an actual fetch. See the doc comment above.
+	headSHA, err := gitOutputCtx(ctx, gitDir, "rev-parse", "refs/heads/"+localBranch)
+	if err != nil {
+		return fmt.Errorf("resolve PR head sha for %s: %w", localBranch, err)
+	}
+	trackingRef := fmt.Sprintf("refs/remotes/%s/%s", remoteName, headBranch)
+	if err := gitRunCtx(ctx, gitDir, "update-ref", trackingRef, strings.TrimSpace(headSHA)); err != nil {
+		return fmt.Errorf("update-ref %s: %w", trackingRef, err)
 	}
 
 	pushRefspec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", localBranch, headBranch)

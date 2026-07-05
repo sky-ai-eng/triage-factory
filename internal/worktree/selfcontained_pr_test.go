@@ -94,6 +94,20 @@ func TestCreateForPR_SelfContainedClone_MultiMode(t *testing.T) {
 		t.Errorf("PushTargetBranch = %q, want feature-branch (the PR head the push refspec targets)", target)
 	}
 
+	// TFAC-565: the tfpush remote's tracking ref must be materialized in the
+	// clone too, or branch.<local>.merge resolves to nothing and `git status`
+	// reports "upstream is gone".
+	if err := exec.Command("git", "-C", wtPath, "rev-parse", "--verify", "--quiet", "refs/remotes/"+remote+"/feature-branch").Run(); err != nil {
+		t.Errorf("clone is missing refs/remotes/%s/feature-branch (tfpush tracking ref)", remote)
+	}
+	statusOut, err := exec.Command("git", "-C", wtPath, "status").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status: %v: %s", err, statusOut)
+	}
+	if strings.Contains(string(statusOut), "gone") {
+		t.Errorf("git status reports upstream gone:\n%s", statusOut)
+	}
+
 	// The shared bare is left with no per-run ref (dropBareRunRefs ran after the
 	// clone copied its objects).
 	bareDir, err := repoDir("acme", "repo")
