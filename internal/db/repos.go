@@ -85,7 +85,12 @@ type RepoStore interface {
 
 	// UpdateBaseBranch sets the user-configured base branch for a
 	// repo. Empty string stores SQL NULL → falls back to the
-	// detected default_branch at use-site.
+	// detected default_branch at use-site. repoID is matched
+	// case-insensitively on owner/repo (GitHub identifiers are) so a
+	// caller whose casing differs from what's stored still finds the
+	// row — TFAC-559's repoAccessAllowed handler gate matches
+	// case-insensitively too, and the two must agree or a request
+	// could pass the gate yet silently affect 0 rows here.
 	UpdateBaseBranch(ctx context.Context, orgID, repoID, baseBranch string) error
 
 	// Get returns a single repo profile by "owner/repo" id, or nil

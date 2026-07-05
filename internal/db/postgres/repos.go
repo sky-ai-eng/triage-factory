@@ -314,10 +314,14 @@ func (s *repoStore) UpdateBaseBranch(ctx context.Context, orgID, repoID, baseBra
 	if owner == "" || repo == "" {
 		return nil
 	}
+	// Case-insensitive match (GitHub identifiers are, per TracksRepoSystem /
+	// TracksRepoViewerScoped) — TFAC-559's repoAccessAllowed gate matches
+	// case-insensitively, so a caller reaching this with different casing than
+	// what's stored must still find the row rather than silently affecting 0.
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE repo_profiles
 		   SET base_branch = NULLIF($1, '')
-		 WHERE org_id = $2 AND owner = $3 AND repo = $4
+		 WHERE org_id = $2 AND lower(owner) = lower($3) AND lower(repo) = lower($4)
 	`, baseBranch, orgID, owner, repo)
 	return err
 }
