@@ -26,7 +26,7 @@ type repoScopeRig struct {
 	orgID        string
 	teamA, teamB string
 	orgOwner     string // founder: org role 'owner', teamA admin
-	memberB      string // teamB member, no org-admin role
+	memberB      string // teamB *team* admin but org-level plain "member" (no org-admin role)
 	teamless     string // org member on zero teams
 }
 
@@ -43,7 +43,13 @@ func newRepoScopeRig(t *testing.T) *repoScopeRig {
 	orgID, owner, teamA := pgtest.SeedOrgWithUser(t, h, "owner")
 	teamB := pgtest.SeedTeam(t, h, orgID, "team-b")
 	memberB := pgtest.SeedUser(t, h, "member-b")
-	pgtest.AddOrgMember(t, h, memberB, orgID, teamB, "member", "member")
+	// memberB is teamB's *team* admin (needed so replaceTeamRepos below, run
+	// as memberB, satisfies team_github_repos_insert's tf.user_is_team_admin
+	// check) but an org-level plain "member" — the role isOrgAdmin/
+	// repoAccessAllowed actually gate on. Team role and org role are
+	// orthogonal; this is a common real shape (team admins who aren't org
+	// admins).
+	pgtest.AddOrgMember(t, h, memberB, orgID, teamB, "member", "admin")
 	teamless := pgtest.SeedUser(t, h, "teamless")
 	pgtest.MustExec(t, h.AdminDB,
 		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`, teamless, orgID)

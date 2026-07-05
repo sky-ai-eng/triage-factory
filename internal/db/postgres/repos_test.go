@@ -197,7 +197,11 @@ func TestRepoStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
 	bob := pgtest.SeedUser(t, h, "bob")
-	pgtest.AddOrgMember(t, h, bob, orgA, teamB, "member", "member")
+	// bob is teamB's *team* admin (needed so his own ReplaceForTeam call below
+	// satisfies team_github_repos_insert's tf.user_is_team_admin check) but an
+	// org-level plain "member" — the role the org-admin bypass gate we're
+	// testing actually reads. Team role and org role are orthogonal here.
+	pgtest.AddOrgMember(t, h, bob, orgA, teamB, "member", "admin")
 	carol := pgtest.SeedUser(t, h, "carol")
 	pgtest.MustExec(t, h.AdminDB,
 		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`, carol, orgA)
