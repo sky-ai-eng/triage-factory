@@ -17,6 +17,7 @@ interface TeamMemberPickerProps {
 interface OrgMemberApiRow {
   user_id: string
   display_name: string
+  github_username: string | null
   role: string
 }
 
@@ -184,7 +185,8 @@ function PickerModal({
                 >
                   {candidates.map((m) => (
                     <option key={m.user_id} value={m.user_id}>
-                      {m.display_name || 'Unnamed user'}
+                      {m.display_name ||
+                        (m.github_username ? `@${m.github_username}` : 'Unnamed user')}
                     </option>
                   ))}
                 </select>

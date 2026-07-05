@@ -590,7 +590,7 @@ function VariantB({
                 className="px-3 py-2 text-[12px] text-text-tertiary opacity-60"
                 title={`No ${sourceLabel} identity captured — ask this user to configure ${sourceLabel} on Settings`}
               >
-                {m.display_name || '(no name)'}{' '}
+                {m.display_name || (m.github_username ? `@${m.github_username}` : '(no name)')}{' '}
                 <span className="text-[10px]">— no {sourceLabel} identity</span>
               </li>
             ))}
