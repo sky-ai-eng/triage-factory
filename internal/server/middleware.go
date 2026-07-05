@@ -341,12 +341,14 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 // withCSRFOriginCheck only when deployCfg.trustDevFrontendOrigin is set
 // (local mode only, via AllowDevFrontendOrigin) — never in multi mode.
 //
-// This doesn't weaken the check: Origin isn't attacker-settable, the browser
-// stamps it from the page's true origin, so the only way a request ever
-// carries this exact value is if something is genuinely listening and
-// serving on :5173 — which, by this repo's convention, is only ever the
-// first-party dev server hot-reloading this same frontend. A malicious
-// site's Origin is its own domain and never matches this literal.
+// This is a deliberate, narrow trust expansion for local-dev convenience,
+// not a strict equivalent of publicURL: a remote website can't forge this
+// Origin (the browser stamps it from the page's real origin), so a
+// cross-site attacker is still rejected — but ANY local process that binds
+// :5173 and serves a page, not just Vite, would also be trusted here.
+// That's accepted only because local mode already assumes a single
+// trusted user on a single trusted machine; it is not a generally-safe
+// pattern and must not be widened beyond this one dev-only port.
 const devFrontendOrigin = "http://localhost:5173"
 
 // withCSRFOriginCheck rejects mutating requests (POST/PUT/PATCH/DELETE)

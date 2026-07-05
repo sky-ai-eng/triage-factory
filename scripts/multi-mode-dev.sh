@@ -41,7 +41,10 @@ need_bin() {
 # design — postgres-postinit, seaweedfs-postinit) as a failure, so it can't
 # be used across this service set. Poll healthchecks for the long-running
 # services and exit codes for the one-shots instead, mirroring
-# scripts/compose-smoke.sh.
+# scripts/compose-smoke.sh. A one-shot reaching Status=exited isn't enough
+# on its own — ExitCode must be 0 too, or a failed role-password ALTER or
+# bucket create (Status=exited, ExitCode!=0) would read as "ready" and the
+# script would carry on against a partially-initialized stack.
 wait_healthy() {
   local timeout=180 elapsed=0
   while :; do
@@ -52,7 +55,21 @@ wait_healthy() {
     done
     for svc in postgres-postinit seaweedfs-postinit; do
       cid=$(dc ps -aq "$svc" | head -1)
-      [ -n "$cid" ] && [ "$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null)" = "exited" ] || ready=0
+      if [ -z "$cid" ]; then
+        ready=0
+        continue
+      fi
+      case "$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null)" in
+        exited)
+          code=$(docker inspect -f '{{.State.ExitCode}}' "$cid" 2>/dev/null)
+          if [ "$code" != "0" ]; then
+            echo "$svc exited $code (expected 0) — recent logs:" >&2
+            dc logs --no-color --tail 50 "$svc" >&2
+            return 1
+          fi
+          ;;
+        *) ready=0 ;;
+      esac
     done
     [ "$ready" = 1 ] && return 0
     [ "$elapsed" -ge "$timeout" ] && { echo "services not ready after ${timeout}s" >&2; dc ps; return 1; }
@@ -118,7 +135,42 @@ cmd_run() {
 }
 
 cmd_down() {
-  dc down -v --remove-orphans
+  if [ -f "$ENV_FILE" ]; then
+    dc down -v --remove-orphans
+    return
+  fi
+  # docker-compose.yml requires several ${VAR:?} vars just to PARSE
+  # (compose loads/validates the full config regardless of subcommand), so
+  # `--env-file $ENV_FILE` fails outright if that file is missing — e.g.
+  # `down` before any `up`, or after deleting .env.multi-dev to reset
+  # secrets. Synthesize a throwaway file with placeholder values (down
+  # only needs the config to parse; it doesn't need real credentials) so
+  # teardown still works. Never written as .env.multi-dev — a later `up`
+  # still generates fresh secrets.
+  echo "no $ENV_FILE — tearing down with placeholder values (config-parse only)"
+  local tmp_env
+  tmp_env=$(mktemp)
+  # Double-quoted so $tmp_env expands NOW, embedding the literal path into
+  # the trap command — a single-quoted trap would defer expansion until
+  # the trap fires, by which point this function's `local` has gone out
+  # of scope and $tmp_env is unbound (set -u then kills the trap itself).
+  trap "rm -f $tmp_env" EXIT
+  cat > "$tmp_env" <<EOF
+POSTGRES_PASSWORD=unused
+SUPABASE_AUTH_ADMIN_PASSWORD=unused
+TF_AUTHENTICATOR_PASSWORD=unused
+TF_PUBLIC_URL=$PUBLIC_URL
+GH_CLIENT_ID=unused
+GH_CLIENT_SECRET=unused
+GOTRUE_JWT_KEYS=unused
+GOTRUE_JWT_SECRET=unused
+TF_SESSION_ENCRYPTION_KEY=unused
+TF_COOKIE_SECRET=unused
+TF_SECRET_ENCRYPTION_KEY=unused
+TF_BLOB_ACCESS_KEY=unused
+TF_BLOB_SECRET_KEY=unused
+EOF
+  docker compose -p "$PROJECT" --env-file "$tmp_env" -f docker-compose.yml -f docker/compose.hostbind.yml down -v --remove-orphans
 }
 
 case "${1:-}" in
