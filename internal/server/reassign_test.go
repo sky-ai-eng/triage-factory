@@ -251,13 +251,34 @@ func TestSwipeReassign_PermissionModel(t *testing.T) {
 	bystander := pgtest.SeedUser(t, r.h, "bystander")
 	pgtest.AddOrgMember(t, r.h, bystander, r.orgID, r.teamID, "member", "member")
 
+	// seedClaimedTask mints its OWN entity per call (unlike r.seedTask, which
+	// hardcodes a single fixed source_id — fine for its other callers, which
+	// each seed at most one task per rig, but this test seeds one per
+	// subtest against the same rig/org, so a fixed source_id would collide
+	// on entities' (org_id, source, source_id) unique constraint after the
+	// first call). t.Name() is unique per subtest, so it's a clean,
+	// dependency-free uniqueness key.
 	seedClaimedTask := func(t *testing.T, claimant string) string {
 		t.Helper()
-		taskID := r.seedTask(t)
-		if _, err := r.h.AdminDB.Exec(
-			`UPDATE tasks SET claimed_by_user_id = $2 WHERE id = $1`, taskID, claimant,
-		); err != nil {
-			t.Fatalf("seed claim: %v", err)
+		var entityID string
+		if err := r.h.AdminDB.QueryRow(`
+			INSERT INTO entities (org_id, source, source_id, kind, title)
+			VALUES ($1, 'github', $2, 'pr', 'test pr') RETURNING id
+		`, r.orgID, "octo/reassign#"+t.Name()).Scan(&entityID); err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		var evtID string
+		if err := r.h.AdminDB.QueryRow(`
+			INSERT INTO events (org_id, entity_id, event_type) VALUES ($1, $2, 'github:pr:opened') RETURNING id
+		`, r.orgID, entityID).Scan(&evtID); err != nil {
+			t.Fatalf("seed event: %v", err)
+		}
+		var taskID string
+		if err := r.h.AdminDB.QueryRow(`
+			INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id, claimed_by_user_id)
+			VALUES ($1, $2, $3, $4, 'github:pr:opened', $5, $6) RETURNING id
+		`, r.orgID, r.admin, r.teamID, entityID, evtID, claimant).Scan(&taskID); err != nil {
+			t.Fatalf("seed claimed task: %v", err)
 		}
 		return taskID
 	}
