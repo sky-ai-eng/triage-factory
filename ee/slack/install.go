@@ -83,6 +83,16 @@ func install(api server.ExtensionAPI) {
 	api.APIMutating("DELETE /api/slack/workspaces/{workspace_id}/{api_app_id}", h.handleDelete)
 	api.API("GET /api/slack/manifest", h.handleManifest)
 
+	ch := &channelsHandler{
+		tx:     api.Tx(),
+		stores: stores,
+		az:     api.Authz(),
+		client: slackHTTPClient,
+	}
+	api.API("GET /api/slack/teams/{team_id}/channels", ch.handleList)
+	api.APIMutating("PUT /api/slack/teams/{team_id}/channels", ch.handlePut)
+	api.APIMutating("POST /api/slack/channels/{channel_id}/primary", ch.handlePrimary)
+
 	wh := &webhookHandler{stores: stores, pipeline: pipeline}
 	api.Raw("POST /api/webhooks/slack/{org_id}", api.PreAuthRateLimit(http.HandlerFunc(wh.handleWebhook)))
 
