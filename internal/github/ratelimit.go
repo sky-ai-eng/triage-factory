@@ -110,8 +110,9 @@ func (c *Client) awaitBudget(ctx context.Context) error {
 type reqBuilder func() (*http.Request, error)
 
 // doIdempotent sends the request(s) built by build over c.http, retrying a
-// 429 or secondary-rate-limit 403 per Retry-After (or exponential backoff
-// when absent) up to maxRateLimitRetries extra attempts. See doWithRetry.
+// 429 or a rate-limited 403 (primary budget exhausted, or secondary/abuse)
+// per Retry-After or the primary reset (or exponential backoff when neither
+// is present) up to maxRateLimitRetries extra attempts. See doWithRetry.
 func (c *Client) doIdempotent(ctx context.Context, build reqBuilder) (*http.Response, error) {
 	return c.doWithRetry(ctx, c.http, true, build)
 }
@@ -119,7 +120,7 @@ func (c *Client) doIdempotent(ctx context.Context, build reqBuilder) (*http.Resp
 // doMutation sends a single, non-retried request over c.http. A mutation
 // (POST/PUT/PATCH/DELETE that changes state) must never be silently
 // replayed — a retried mutation could double the side effect — so a
-// 429/secondary-403 response short-circuits straight into ErrRateLimited
+// rate-limited 429/403 response short-circuits straight into ErrRateLimited
 // instead of being retried. See doWithRetry.
 func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Response, error) {
 	return c.doWithRetry(ctx, c.http, false, build)
@@ -129,11 +130,13 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 // request-core method (request, GetConditional, PostGraphQL, DownloadArtifact
 // — the last supplies its own hc with an extended timeout, everything else
 // passes c.http). For idempotent calls it pre-flights a known exhausted
-// budget (awaitBudget) and retries a 429 or secondary-rate-limit 403 up to
-// maxRateLimitRetries extra attempts, honoring Retry-After when present and
-// falling back to exponential backoff otherwise; every sleep is ctx-aware.
-// Mutations get exactly one attempt: a 429/secondary-403 returns
-// ErrRateLimited immediately rather than retrying.
+// budget (awaitBudget) and retries a 429 or rate-limited 403 (primary budget
+// exhausted via x-ratelimit-remaining: 0, or secondary/abuse) up to
+// maxRateLimitRetries extra attempts — honoring Retry-After when present,
+// else the primary reset time when that's what triggered it, else
+// exponential backoff; every sleep is ctx-aware. Mutations get exactly one
+// attempt: a rate-limited 429/403 returns ErrRateLimited immediately rather
+// than retrying.
 //
 // A non-rate-limit response (any 2xx, or a 403/429 that doesn't look like
 // rate limiting) is returned to the caller with its body untouched and still
@@ -170,12 +173,13 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 		}
 
 		retryAfter, hasRetryAfter := parseRetryAfter(resp.Header)
+		primaryReset, primaryExhausted := primaryBudgetExhausted(resp.Header)
 		data, readErr := readAllClose(resp)
 		if readErr != nil {
 			return nil, readErr
 		}
 
-		if resp.StatusCode == http.StatusForbidden && !hasRetryAfter && !isSecondaryRateLimitBody(data) {
+		if resp.StatusCode == http.StatusForbidden && !hasRetryAfter && !primaryExhausted && !isSecondaryRateLimitBody(data) {
 			// A genuine 403 (auth/permissions), not rate limiting — replay the
 			// already-drained body so the caller's normal handling sees it.
 			resp.Body = newBodyReader(data)
@@ -183,7 +187,14 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 		}
 
 		wait := retryAfter
-		if !hasRetryAfter {
+		switch {
+		case hasRetryAfter:
+			// wait already set.
+		case primaryExhausted && !primaryReset.IsZero() && time.Until(primaryReset) > 0:
+			// GitHub told us exactly when the primary budget resets — use it
+			// instead of a blind guess.
+			wait = time.Until(primaryReset)
+		default:
 			wait = backoffDuration(attempt)
 		}
 
@@ -197,16 +208,36 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 }
 
 // rateLimitCandidate reports whether status is one GitHub might use to
-// signal rate limiting — 429 always, 403 sometimes (secondary/abuse limits).
-// A 403 candidate is only actually treated as rate limiting once its
-// Retry-After header or body text confirms it (see doWithRetry).
+// signal rate limiting — 429 always, 403 sometimes (both the classic primary
+// budget exhaustion and secondary/abuse limits). A 403 candidate is only
+// actually treated as rate limiting once its Retry-After header, its
+// x-ratelimit-remaining: 0 header, or its body text confirms it (see
+// doWithRetry).
 func rateLimitCandidate(status int) bool {
 	return status == http.StatusTooManyRequests || status == http.StatusForbidden
 }
 
+// primaryBudgetExhausted reports whether resp signals the primary rate-limit
+// budget is exhausted via x-ratelimit-remaining: 0 — GitHub's classic
+// response to primary-limit exhaustion is a 403 with this header set and no
+// Retry-After, so this is the only way to recognize it (as distinct from an
+// ordinary permissions 403). reset is the x-ratelimit-reset value when
+// present and parsable; it's the zero Time otherwise, in which case the
+// caller falls back to exponential backoff instead of a computed wait.
+func primaryBudgetExhausted(h http.Header) (reset time.Time, exhausted bool) {
+	if h.Get("X-RateLimit-Remaining") != "0" {
+		return time.Time{}, false
+	}
+	resetUnix, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64)
+	if err != nil {
+		return time.Time{}, true
+	}
+	return time.Unix(resetUnix, 0), true
+}
+
 // isSecondaryRateLimitBody reports whether body looks like one of GitHub's
 // secondary-rate-limit / abuse-detection error messages, for a 403 that
-// carries no Retry-After header.
+// carries no Retry-After header and no x-ratelimit-remaining: 0.
 func isSecondaryRateLimitBody(body []byte) bool {
 	b := bytes.ToLower(body)
 	return bytes.Contains(b, []byte("secondary rate limit")) || bytes.Contains(b, []byte("abuse detection mechanism"))

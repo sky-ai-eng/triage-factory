@@ -113,6 +113,95 @@ func TestGet_SecondaryRateLimitBodySniffedWithoutRetryAfter(t *testing.T) {
 	}
 }
 
+// TestGet_RetriesOnPrimary403RateLimitExhausted covers GitHub's classic
+// primary-rate-limit response: a 403 carrying x-ratelimit-remaining: 0, no
+// Retry-After, and a generic body that does NOT match the secondary-limit
+// text. This must still be recognized as rate limiting — not a genuine
+// permissions 403 — and retried.
+func TestGet_RetriesOnPrimary403RateLimitExhausted(t *testing.T) {
+	var calls int32
+	reset := time.Now().Add(300 * time.Millisecond)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", reset.Unix()))
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded for 127.0.0.1."}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c := clientAgainst(srv.URL)
+	data, err := c.Get(context.Background(), "/x")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(data) != `{"ok":true}` {
+		t.Errorf("data = %q, want the second response's body", data)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("upstream requests = %d, want exactly 2", got)
+	}
+}
+
+// TestPost_Primary403DoesNotRetry pins the mutation side-effect-safety
+// requirement for the primary-limit-403 case too: exactly one upstream
+// request and a typed ErrRateLimited, no retry.
+func TestPost_Primary403DoesNotRetry(t *testing.T) {
+	var calls int32
+	resetAt := time.Now().Add(time.Hour)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", resetAt.Unix()))
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded for 127.0.0.1."}`))
+	}))
+	defer srv.Close()
+
+	c := clientAgainst(srv.URL)
+	_, err := c.Post(context.Background(), "/x", map[string]any{"a": 1})
+
+	var rl *ErrRateLimited
+	if !errors.As(err, &rl) {
+		t.Fatalf("err = %v, want *ErrRateLimited", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("upstream requests = %d, want exactly 1 (mutations must not retry)", got)
+	}
+}
+
+// TestPrimaryBudgetExhausted pins the header-parsing rule directly: only
+// x-ratelimit-remaining: 0 signals primary exhaustion, and the reset comes
+// along when parsable.
+func TestPrimaryBudgetExhausted(t *testing.T) {
+	t.Run("remaining zero with reset", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("X-RateLimit-Remaining", "0")
+		resetAt := time.Now().Add(time.Hour).Truncate(time.Second)
+		h.Set("X-RateLimit-Reset", fmt.Sprintf("%d", resetAt.Unix()))
+		reset, exhausted := primaryBudgetExhausted(h)
+		if !exhausted || !reset.Equal(resetAt) {
+			t.Errorf("primaryBudgetExhausted = (%v, %v), want (%v, true)", reset, exhausted, resetAt)
+		}
+	})
+	t.Run("remaining nonzero", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("X-RateLimit-Remaining", "5")
+		if _, exhausted := primaryBudgetExhausted(h); exhausted {
+			t.Error("primaryBudgetExhausted should be false when remaining > 0")
+		}
+	})
+	t.Run("missing header", func(t *testing.T) {
+		if _, exhausted := primaryBudgetExhausted(http.Header{}); exhausted {
+			t.Error("primaryBudgetExhausted should be false with no header")
+		}
+	})
+}
+
 // TestGet_Genuine403PassesThroughUnchanged pins that an ordinary permission
 // 403 (no Retry-After, no secondary-rate-limit text) is NOT treated as rate
 // limiting — it returns the normal *HTTPError, with its body intact, on the
