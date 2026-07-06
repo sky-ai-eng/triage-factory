@@ -36,7 +36,18 @@ var captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error)
 // filter a hostile .git/config could trigger executes only as the agent's own
 // uid with no network — not as the host root — which is the whole point; and
 // the reader's uid matching the tree owner means git's own capture commands
-// (rev-parse/bundle/diff) no longer fail dubious-ownership. The child receives a
+// (rev-parse/bundle/diff) no longer fail dubious-ownership.
+//
+// Dropping to the sandbox uid is SUFFICIENT for the whole capture only because
+// a multi-mode delegated run's worktree is always a SELF-CONTAINED clone: its
+// .git is a real directory fully inside the run root, so chownWorktreeForSandbox
+// covers config, objects, and refs together. A linked `git worktree` (the
+// local-mode / curator layout) keeps its objects + config in a separate bare
+// cache that is never chowned and stays root-owned — dropping to uid 10000 there
+// would trade dubious-ownership for EACCES on the bare. Multi mode never uses
+// that layout (the sandbox can't see the shared bare), a property pinned by
+// worktree.TestCreateForPR_SelfContainedClone_MultiMode; if that ever changes,
+// this capture must resolve the commondir's ownership too. The child receives a
 // deliberately minimal environment: never the TF process env (which carries DB
 // and service credentials), plus config overrides that neuter the two
 // attribute-free exec vectors (core.fsmonitor, diff.external) as defense in

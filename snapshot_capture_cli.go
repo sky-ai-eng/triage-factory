@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -27,13 +28,23 @@ func handleSnapshotCapture(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: triagefactory snapshot-capture <worktree-path>")
 		os.Exit(2)
 	}
-	delta, err := worktree.CaptureWorkspaceGit(context.Background(), args[0])
-	if err != nil {
+	if err := runSnapshotCapture(context.Background(), args[0], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "snapshot-capture:", err)
 		os.Exit(1)
 	}
-	if err := json.NewEncoder(os.Stdout).Encode(delta); err != nil {
-		fmt.Fprintln(os.Stderr, "snapshot-capture: encode delta:", err)
-		os.Exit(1)
+}
+
+// runSnapshotCapture captures the git delta for wtPath and writes it as JSON to
+// w (a nil delta encodes as "null"). The testable core of handleSnapshotCapture,
+// separated from the argv parsing + os.Exit so the child's actual
+// capture-then-encode body can be exercised without spawning a process.
+func runSnapshotCapture(ctx context.Context, wtPath string, w io.Writer) error {
+	delta, err := worktree.CaptureWorkspaceGit(ctx, wtPath)
+	if err != nil {
+		return err
 	}
+	if err := json.NewEncoder(w).Encode(delta); err != nil {
+		return fmt.Errorf("encode delta: %w", err)
+	}
+	return nil
 }
