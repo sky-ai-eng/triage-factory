@@ -313,3 +313,151 @@ func nonEmpty(s, fallback string) string {
 	}
 	return s
 }
+
+// slackConversation is one channel returned by conversations.list or
+// users.conversations — the shape the channels API (channels_handler.go)
+// needs for the live Slack candidate merge (TFAC-543).
+type slackConversation struct {
+	ID        string
+	Name      string
+	IsPrivate bool
+}
+
+// slackConversationsListCap bounds how many channels a single
+// conversations.list/users.conversations pagination loop collects,
+// regardless of how many pages Slack offers — a defensive cap (ticket's
+// "paginate to a sane cap ~1000 channels") against an org with an unbounded
+// channel count turning the channels-list request into an unbounded loop.
+// A var (not a const), mirroring slackAPIBase, so a test can lower it to
+// exercise the truncation path without generating a thousand fake channels.
+var slackConversationsListCap = 1000
+
+// slackConversationsList enumerates the workspace's public channel universe
+// via conversations.list (types=public_channel, exclude_archived=true),
+// paginating until Slack stops returning a next_cursor or the cap is hit.
+// truncated=true means the cap was hit before Slack ran out of pages — the
+// returned list is a prefix, not the whole universe (see
+// slackConversationsListCap).
+func slackConversationsList(ctx context.Context, client *http.Client, botToken string) (channels []slackConversation, truncated bool, err error) {
+	return slackConversationsPaginate(ctx, client, botToken, "conversations.list", "types=public_channel&exclude_archived=true&limit=200")
+}
+
+// slackUsersConversations enumerates the bot's own channel memberships
+// (public + private) via users.conversations — the source of BotIsMember /
+// IsPrivate for the live candidate merge. truncated has the same meaning as
+// slackConversationsList's.
+func slackUsersConversations(ctx context.Context, client *http.Client, botToken string) (channels []slackConversation, truncated bool, err error) {
+	return slackConversationsPaginate(ctx, client, botToken, "users.conversations", "types=public_channel,private_channel&exclude_archived=true&limit=200")
+}
+
+// slackConversationsPaginate is the shared pagination loop for
+// conversations.list and users.conversations — both return the same
+// {ok, channels: [{id,name,is_private}], response_metadata: {next_cursor}}
+// shape. A non-2xx HTTP response or a Slack-level {"ok":false} both surface
+// as an error; the caller (liveSlackCandidates) treats any error here as
+// transient and drops just this workspace's live candidates. truncated=true
+// means slackConversationsListCap was hit while Slack still had more pages
+// (a non-empty next_cursor) — the caller must not treat the returned list as
+// exhaustive; it surfaces a warning rather than silently under-reporting.
+func slackConversationsPaginate(ctx context.Context, client *http.Client, botToken, method, query string) (out []slackConversation, truncated bool, err error) {
+	cursor := ""
+	for {
+		reqURL := slackAPIBase + "/" + method + "?" + query
+		if cursor != "" {
+			reqURL += "&cursor=" + url.QueryEscape(cursor)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, false, err
+		}
+		req.Header.Set("Authorization", "Bearer "+botToken)
+
+		var resp struct {
+			OK       bool   `json:"ok"`
+			Error    string `json:"error"`
+			Channels []struct {
+				ID        string `json:"id"`
+				Name      string `json:"name"`
+				IsPrivate bool   `json:"is_private"`
+			} `json:"channels"`
+			ResponseMetadata struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		if err := doSlackJSON(ctx, client, req, &resp); err != nil {
+			return nil, false, err
+		}
+		if !resp.OK {
+			return nil, false, fmt.Errorf("slack %s: %s", method, nonEmpty(resp.Error, "not ok"))
+		}
+		for _, c := range resp.Channels {
+			out = append(out, slackConversation{ID: c.ID, Name: c.Name, IsPrivate: c.IsPrivate})
+			if len(out) >= slackConversationsListCap {
+				return out, resp.ResponseMetadata.NextCursor != "", nil
+			}
+		}
+		cursor = resp.ResponseMetadata.NextCursor
+		if cursor == "" {
+			return out, false, nil
+		}
+	}
+}
+
+// slackJoinPrivateChannelCodes are the conversations.join error codes Slack
+// returns when the target turns out to be a private channel the bot isn't
+// already in — there is no API-level "request to join" for a private
+// channel, only an existing member's /invite, so these classify as
+// invite_required rather than the generic join_failed (channels_handler.go's
+// ensureAndAutoJoin). "channel_not_found" covers the common case: the bot
+// has no visibility at all into a private channel it isn't a member of, so
+// Slack answers as if the channel doesn't exist rather than "forbidden."
+var slackJoinPrivateChannelCodes = map[string]bool{
+	"channel_not_found":                     true,
+	"method_not_supported_for_channel_type": true,
+}
+
+// slackJoinPrivateChannelError wraps a conversations.join failure whose
+// error code is in slackJoinPrivateChannelCodes.
+type slackJoinPrivateChannelError struct{ code string }
+
+func (e *slackJoinPrivateChannelError) Error() string { return "slack: " + e.code }
+
+// isSlackJoinPrivateChannelError reports whether err wraps a
+// slackJoinPrivateChannelError.
+func isSlackJoinPrivateChannelError(err error) bool {
+	var e *slackJoinPrivateChannelError
+	return errors.As(err, &e)
+}
+
+// slackConversationsJoin has the bot join channelID via conversations.join —
+// the auto-join step for a newly tracked channel (channels_handler.go's
+// ensureAndAutoJoin) whose live-candidate view didn't already show the bot
+// as a member. Requires the channels:join scope (in the shipped manifest
+// since #561). A private-channel failure surfaces as
+// *slackJoinPrivateChannelError (see isSlackJoinPrivateChannelError); any
+// other non-ok response is a plain error (join_failed).
+func slackConversationsJoin(ctx context.Context, client *http.Client, botToken, channelID string) error {
+	form := url.Values{"channel": {channelID}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/conversations.join",
+		bytes.NewReader([]byte(form.Encode())))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := doSlackJSON(ctx, client, req, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		if slackJoinPrivateChannelCodes[resp.Error] {
+			return &slackJoinPrivateChannelError{code: nonEmpty(resp.Error, "not ok")}
+		}
+		return fmt.Errorf("slack conversations.join: %s", nonEmpty(resp.Error, "not ok"))
+	}
+	return nil
+}

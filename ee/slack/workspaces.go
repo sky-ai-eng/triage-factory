@@ -10,9 +10,7 @@ import (
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -78,26 +76,11 @@ func toWorkspaceView(w *slackstore.Workspace, sockets *socketManager) workspaceV
 
 // memberGate resolves the active org and confirms the `slack` entitlement.
 // Any org member may reach a member-gated route once past this — used by
-// the read-only list. Local mode 404s unconditionally, before even looking
-// at the entitlement: local's org-context shim always supplies an org (see
-// httpx.RequireOrg), so a locally-licensed request would otherwise sail
-// through the entitlement check and reach the Postgres-only Slack store,
-// whose SQLite stub returns db.ErrNotApplicableInLocal — an internal-error
-// 500, not the clean 404 a gated-off feature should produce.
+// the read-only list. Delegates to slackEntitlementGate (channels_handler.go),
+// the shared local-mode-404 + entitlement-404 gate every Slack route runs
+// before its own authz — factored out so channelsHandler can share it.
 func (h *workspacesHandler) memberGate(w http.ResponseWriter, r *http.Request) (orgID string, ok bool) {
-	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
-		return "", false
-	}
-	orgID, ok = httpx.RequireOrg(w, r)
-	if !ok {
-		return "", false
-	}
-	if !entitlements.For(orgID).Has(entitlements.FeatureSlack) {
-		http.NotFound(w, r)
-		return "", false
-	}
-	return orgID, true
+	return slackEntitlementGate(w, r)
 }
 
 // adminGate is memberGate plus an org-admin check — 404 (non-disclosure) on
