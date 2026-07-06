@@ -182,8 +182,8 @@ func installToolchain(ctx context.Context, rootfsDir string) error {
 		return fmt.Errorf("chroot apk add: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
 	}
 
-	if err := enableCorepack(ctx, rootfsDir); err != nil {
-		return fmt.Errorf("enable corepack: %w", err)
+	if err := installPnpm(ctx, rootfsDir); err != nil {
+		return fmt.Errorf("install pnpm: %w", err)
 	}
 	return nil
 }
@@ -191,55 +191,51 @@ func installToolchain(ctx context.Context, rootfsDir string) error {
 // chrootToolchainEnv is the environment every chroot+node invocation
 // into the cached rootfs runs under (beyond the bare apk-add above,
 // which only execs an absolute-path busybox binary and needs neither).
-// Explicit rather than inherited from the host process: corepack's
-// entry point has a `#!/usr/bin/env node` shebang, so PATH must
-// resolve to a `node` that exists inside the chroot's own filesystem
-// view (the apk-installed /usr/bin/node), not wherever the host
-// happens to keep its own Node.
-//
-// COREPACK_HOME is the load-bearing entry: corepack's release cache
-// defaults to a $HOME-derived path, and the bake (HOME=/root here)
-// and the agent runtime (HOME=/work, agentproc's buildSandboxEnv) run
-// under DIFFERENT homes — without the shared pin the pre-warmed pnpm
-// would freeze into /root/.cache where runtime corepack never looks,
-// and the first `pnpm` call would fall back to a network fetch.
-// Verified empirically (node:22-alpine, non-root, network disabled):
-// bake+run under the same COREPACK_HOME serves pnpm fully offline
-// from the root-owned, world-readable cache.
+// Explicit rather than inherited from the host process: npm's entry
+// point has a `#!/usr/bin/env node` shebang, so PATH must resolve to a
+// `node` that exists inside the chroot's own filesystem view (the
+// apk-installed /usr/bin/node), not wherever the host happens to keep
+// its own Node. HOME=/root gives npm a writable cache directory for the
+// duration of the global install (installPnpm removes it afterward so
+// it doesn't freeze into the shared rootfs).
 var chrootToolchainEnv = []string{
 	"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 	"HOME=/root",
-	"COREPACK_HOME=" + CorepackHome,
 }
 
-// enableCorepack runs `corepack enable` inside the chroot so the
-// pnpm/yarn dispatcher shims exist on disk in the cached rootfs, then
-// pre-warms the exact pnpm release the frontend pins (pnpmVersion) via
-// `corepack prepare --activate`.
+// installPnpm installs the exact pnpm release the frontend pins
+// (pnpmVersion) as a global npm package inside the chroot, so
+// /usr/bin/pnpm exists on PATH in the cached rootfs. pnpm is not an apk
+// package, so it is layered on top of the apk-installed npm here.
 //
-// Both steps run at rootfs-BUILD time, when the host has ordinary
-// internet egress (the same path the apk-add call above just used
-// successfully) — not at agent-RUN time, when the sandboxed agent's
-// egress is locked to its own gateway IP (applyEgressPolicy, SKY-395)
-// and cannot reach the npm registry at all. `corepack enable` alone
-// would leave the pnpm shim in place but still unable to fetch the
-// version pin on the agent's first real `pnpm install`; prepare avoids
-// that by caching the release now, while the network still works.
-func enableCorepack(ctx context.Context, rootfsDir string) error {
-	enable := exec.CommandContext(ctx, "chroot", rootfsDir, "/usr/bin/corepack", "enable")
-	enable.Env = chrootToolchainEnv
+// This runs at rootfs-BUILD time, when the host has ordinary internet
+// egress (the same path the apk-add call above just used) — not at
+// agent-RUN time, when the sandboxed agent's egress is locked to its
+// own gateway IP (applyEgressPolicy) and only reaches the allowlisted
+// package registries. Baking pnpm now means the agent's frontend build
+// finds it already on PATH; because pnpm >= 10 self-manages the
+// packageManager field, a repo pinning this exact version runs the
+// baked binary in place with zero network, and a repo pinning a
+// different version fetches that one through the egress proxy.
+//
+// --prefix=/usr is explicit for determinism — alpine node derives the
+// same default, but pin it rather than lean on the derivation. The
+// install leaves an npm cache under HOME (/root/.npm); a global install
+// is HOME-independent once written, so nothing at runtime needs the
+// cache — remove it so it doesn't bloat the frozen rootfs.
+func installPnpm(ctx context.Context, rootfsDir string) error {
+	install := exec.CommandContext(ctx, "chroot", rootfsDir,
+		"/usr/bin/npm", "install", "-g", "--prefix=/usr",
+		"--no-audit", "--no-fund", "pnpm@"+pnpmVersion)
+	install.Env = chrootToolchainEnv
 	var stderr bytes.Buffer
-	enable.Stderr = &stderr
-	if err := enable.Run(); err != nil {
-		return fmt.Errorf("corepack enable: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	install.Stderr = &stderr
+	if err := install.Run(); err != nil {
+		return fmt.Errorf("npm install -g pnpm@%s: %w (stderr: %s)", pnpmVersion, err, strings.TrimSpace(stderr.String()))
 	}
 
-	prepare := exec.CommandContext(ctx, "chroot", rootfsDir, "/usr/bin/corepack", "prepare", "pnpm@"+pnpmVersion, "--activate")
-	prepare.Env = chrootToolchainEnv
-	stderr.Reset()
-	prepare.Stderr = &stderr
-	if err := prepare.Run(); err != nil {
-		return fmt.Errorf("corepack prepare pnpm@%s: %w (stderr: %s)", pnpmVersion, err, strings.TrimSpace(stderr.String()))
+	if err := os.RemoveAll(filepath.Join(rootfsDir, "root", ".npm")); err != nil {
+		return fmt.Errorf("clean npm cache: %w", err)
 	}
 	return nil
 }

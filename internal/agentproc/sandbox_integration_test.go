@@ -4,8 +4,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // TestBuildSandboxEnv_NoGitConfig enforces the invariant documented on
@@ -28,23 +26,6 @@ func TestBuildSandboxEnv_NoGitConfig(t *testing.T) {
 			}
 		}
 	}
-}
-
-// TestBuildSandboxEnv_CorepackHomeMatchesBake pins the bake/runtime
-// agreement: the sandbox env's COREPACK_HOME must equal the constant
-// the rootfs bake pre-warmed pnpm under (sandbox.CorepackHome, used by
-// chrootToolchainEnv). Corepack's cache path is $HOME-derived unless
-// this pins it, and the two phases run under different HOMEs — a
-// drifted value silently turns every first `pnpm` invocation into a
-// network fetch.
-func TestBuildSandboxEnv_CorepackHomeMatchesBake(t *testing.T) {
-	want := "COREPACK_HOME=" + sandbox.CorepackHome
-	for _, kv := range buildSandboxEnv(nil) {
-		if kv == want {
-			return
-		}
-	}
-	t.Errorf("buildSandboxEnv missing %q; the runtime pin must match the rootfs bake's corepack cache path", want)
 }
 
 // TestBuildSandboxEnv_JSCJITDefaultOff pins the engine runtime tuning:

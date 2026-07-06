@@ -14,12 +14,16 @@ import (
 	"strings"
 )
 
-// alpineVersion pins the alpine minirootfs release. Same release as the
-// validation probe (probe.sh line 64) so the runtime behavior matches
-// what was tested. Bumping requires re-running the probe to verify
-// nothing changed in alpine's syscall surface that the SDK depends on
-// and re-pinning both per-arch sha256s in alpineRootfsForArch.
-const alpineVersion = "3.20.3"
+// alpineVersion pins the alpine minirootfs release. The floor is 3.21:
+// it is the first release whose nodejs apk package is new enough
+// (>= 22.13) to run the pnpm release the frontend pins (see pnpmVersion)
+// — 3.20 shipped node 20, on which that pnpm refuses to start. Bumping
+// requires re-pinning both per-arch sha256s in alpineRootfsForArch and
+// re-validating that the release still boots under gVisor with the
+// toolchain reachable and nothing changed in the syscall surface the SDK
+// depends on (the internal/sandbox integration suite, TestIntegration_*,
+// exercises exactly that on real runsc).
+const alpineVersion = "3.21.7"
 
 // alpineRootfsForArch returns the URL + sha256 for the alpine
 // minirootfs tarball matching the current GOARCH. Pinned per-arch
@@ -37,18 +41,18 @@ func alpineRootfsForArch(arch string) (url, sha string, err error) {
 	case "amd64":
 		return "https://dl-cdn.alpinelinux.org/alpine/v" + majorMinor(alpineVersion) +
 				"/releases/x86_64/alpine-minirootfs-" + alpineVersion + "-x86_64.tar.gz",
-			"d4e6fd67dcf75e40c451560ac7265166c2b72a0f38ddc9aae756a7de3d1efa0c", nil
+			"8cba1ea3e8b500ea986a313d8eecf3d5952a2a0d23a69117bb81c023d9ceac05", nil
 	case "arm64":
 		return "https://dl-cdn.alpinelinux.org/alpine/v" + majorMinor(alpineVersion) +
 				"/releases/aarch64/alpine-minirootfs-" + alpineVersion + "-aarch64.tar.gz",
-			"041fa34a81788242df9e78fa69b97ab45b8ec47ddbf88864755610414a7bf3de", nil
+			"d1d1a3fae5f4d6146e9742790a47fcb116199622cfb8439f218a4d5fbe5000da", nil
 	default:
 		return "", "", fmt.Errorf("sandbox: unsupported GOARCH %q (only amd64 and arm64 are pinned; add a case to alpineRootfsForArch to support more)", arch)
 	}
 }
 
 // majorMinor strips the patch suffix off a semver-ish version string —
-// "3.20.3" → "3.20" — for use in the alpine release-tree URL.
+// "3.21.7" → "3.21" — for use in the alpine release-tree URL.
 func majorMinor(version string) string {
 	parts := strings.SplitN(version, ".", 3)
 	if len(parts) < 2 {
@@ -71,11 +75,9 @@ func currentArchRootfs() (url, sha string, err error) {
 // tarball sha) so a fresh extraction picks up the new package set
 // on the next sandbox launch.
 //
-//   - nodejs/npm — agent SDK runtime. Corepack ships bundled with npm,
-//     but shipping isn't the same as being on PATH: pnpm/yarn only
-//     become runnable once `corepack enable` writes their dispatcher
-//     shims, which installToolchain (rootfs_linux.go) now does at
-//     build time — see enableCorepack and pnpmVersion below.
+//   - nodejs/npm — agent SDK runtime. pnpm is not an apk package, so
+//     installToolchain (rootfs_linux.go) npm-global-installs the pinned
+//     pnpm on top at build time — see installPnpm and pnpmVersion below.
 //   - git — every delegate/curator flow does status/diff/commit/push.
 //   - ripgrep — agent's primary code-search tool; faster than grep
 //     on large repos.
@@ -96,30 +98,15 @@ var apkPackages = []string{
 	"python3", "go", "make", "curl", "openssh-client", "build-base",
 }
 
-// pnpmVersion pins the pnpm release that installToolchain pre-warms
-// into the cached rootfs via `corepack prepare --activate`
-// (rootfs_linux.go's enableCorepack), so a sandboxed agent's `pnpm
-// install` resolves the pin from the local corepack cache instead of
-// reaching for the network. Must match frontend/package.json's
-// "packageManager" field — bump both together. Folded into
+// pnpmVersion pins the pnpm release that installToolchain bakes into
+// the cached rootfs as an npm global (rootfs_linux.go's installPnpm),
+// so a sandboxed agent building this repo's frontend finds pnpm already
+// on PATH. Must match frontend/package.json's "packageManager" field —
+// bump both together; because pnpm self-manages that field, an exact
+// match runs the baked binary with zero network. Folded into
 // rootfsCacheKeyFor's hash so a version bump invalidates existing
 // operator caches the same way an apkPackages change does.
 const pnpmVersion = "11.9.0"
-
-// CorepackHome is the fixed, $HOME-independent corepack cache
-// directory, set as COREPACK_HOME at BOTH rootfs-bake time
-// (chrootToolchainEnv, rootfs_linux.go) and agent-run time
-// (agentproc's buildSandboxEnv). Corepack resolves its cache from
-// $HOME unless COREPACK_HOME overrides it, and the two phases run
-// under different HOMEs (/root in the bake chroot, /work in the
-// sandbox) — without this pin the pre-warmed pnpm release lands in
-// /root/.cache, runtime corepack looks in /work/.cache, misses, and
-// falls back to a network fetch, defeating the pre-warm entirely.
-// Exported so the agentproc runtime env references the same constant
-// the bake writes to — the compile-time link is what keeps the two
-// sides from drifting. Folded into the rootfs cache key: moving the
-// path changes what the bake produces, so it must re-extract.
-const CorepackHome = "/opt/corepack"
 
 // rootfsCacheKey returns the 12-hex-char cache key for the current
 // rootfs build inputs, or an error if the host's GOARCH is not
@@ -156,8 +143,6 @@ func rootfsCacheKeyFor(alpineSha string, packages []string) string {
 		h.Write([]byte{0})
 	}
 	h.Write([]byte(pnpmVersion))
-	h.Write([]byte{0})
-	h.Write([]byte(CorepackHome))
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
