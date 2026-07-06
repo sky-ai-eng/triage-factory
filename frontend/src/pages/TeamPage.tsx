@@ -4,30 +4,38 @@ import { Users } from 'lucide-react'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
+import { useEntitlements, FeatureSlack } from '../hooks/useEntitlements'
 import TeamMembersPanel from '../components/TeamMembersPanel'
 import TeamSettings from './settings/stack/TeamSettings'
+import TeamSlackChannelsPanel from '../components/TeamSlackChannelsPanel'
 import PromptsWorkspace from '../components/PromptsWorkspace'
 import TeamSwitch from '../components/TeamSwitch'
 import ZeroTeamState from '../components/ZeroTeamState'
 import type { TeamSummary } from '../types'
 
 // TeamPage is the multi-mode team surface (TFAC-445): the
-// [Members · Settings · Prompts] shell with one shared team-switcher in the
-// header. Members hosts the shared roster (TFAC-444); Settings hosts the
-// team-scoped config relocated off the global Settings page; Prompts hosts the
-// binding-graph canvas (also reachable one-click via the top-level Prompts nav,
-// which deep-links to ?tab=prompts). Multi-mode only — mounted under
-// /orgs/:org_id; local N=1 keeps team config on the global Settings page.
+// [Members · Settings · Slack · Prompts] shell with one shared team-switcher
+// in the header. Members hosts the shared roster (TFAC-444); Settings hosts
+// the team-scoped config relocated off the global Settings page; Slack hosts
+// the channel-tracking claim/status UX (TFAC-544) — its own tab rather than a
+// Settings subheading, since it's substantial enough (its own fetch, its own
+// full-set-replace PUT, a primary-reassignment side action) to earn one, same
+// as Members/Prompts; Prompts hosts the binding-graph canvas (also reachable
+// one-click via the top-level Prompts nav, which deep-links to
+// ?tab=prompts). Multi-mode only — mounted under /orgs/:org_id; local N=1
+// keeps team config on the global Settings page (and never licenses the
+// `slack` entitlement, so the Slack tab never applies there).
 //
 // The first-class zero-team state (a user in the org but on no team — produced
 // today by team-less invites) renders a friendly empty landing here instead of
 // a crash or an empty dropdown.
 
-type TeamTab = 'members' | 'settings' | 'prompts'
+type TeamTab = 'members' | 'settings' | 'slack' | 'prompts'
 
 const TABS: { id: TeamTab; label: string }[] = [
   { id: 'members', label: 'Members' },
   { id: 'settings', label: 'Settings' },
+  { id: 'slack', label: 'Slack' },
   { id: 'prompts', label: 'Prompts' },
 ]
 
@@ -122,6 +130,15 @@ function TeamPageBody({
   // enforces. Gates the Settings tab + the roster's management controls.
   const canManage = team.role === 'admin' || orgIsAdmin
 
+  // Slack tab (TFAC-544): gated on the `slack` entitlement, same idiom as
+  // OrgSettings' Slack workspaces / SSO sections — dark until the probe
+  // resolves so the tab doesn't flash in then out. Unlike Settings, it's
+  // NOT gated on canManage: any team member can view tracked-channel status
+  // (the GET only requires membership); TeamSlackChannelsPanel disables
+  // editing for a non-admin viewer.
+  const { has: hasFeature, loaded: entLoaded } = useEntitlements()
+  const slackEnt = entLoaded && hasFeature(FeatureSlack)
+
   const switchTeam = useCallback(
     (id: string) => {
       if (id === teamId) return
@@ -149,7 +166,7 @@ function TeamPageBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const tab = resolveTab(searchParams.get('tab'), canManage)
+  const tab = resolveTab(searchParams.get('tab'), canManage, slackEnt)
   // Members owns the bare URL (drop the param); the others carry an explicit
   // ?tab=. replace so flipping tabs doesn't pile up history entries.
   const setTab = (t: TeamTab) => {
@@ -160,9 +177,12 @@ function TeamPageBody({
     setSearchParams(t === 'members' ? {} : { tab: t }, { replace: true })
   }
 
-  // Settings is gated to managers (team-admin or org-admin); members + prompts
-  // are visible to every team member (writes are gated server-side).
-  const tabs = canManage ? TABS : TABS.filter((t) => t.id !== 'settings')
+  // Settings is gated to managers (team-admin or org-admin); Slack is gated
+  // on the entitlement; members + prompts are visible to every team member
+  // (writes are gated server-side).
+  const tabs = TABS.filter(
+    (t) => (t.id !== 'settings' || canManage) && (t.id !== 'slack' || slackEnt),
+  )
 
   // Arrow-key navigation within the tablist (WAI-ARIA tabs pattern, automatic
   // activation): Left/Right move the active tab and follow focus to it.
@@ -197,7 +217,7 @@ function TeamPageBody({
               {team.name}
             </h1>
             <p className="text-[11px] leading-tight text-text-tertiary">
-              Members, settings, and prompts.
+              Members, settings, Slack, and prompts.
             </p>
           </div>
         </div>
@@ -256,6 +276,9 @@ function TeamPageBody({
             onDirtyChange={setSettingsDirty}
           />
         )}
+        {tab === 'slack' && (
+          <TeamSlackChannelsPanel key={teamId} teamId={teamId} orgIsAdmin={orgIsAdmin} />
+        )}
         {promptsTab && <PromptsWorkspace key={teamId} teamId={teamId} ready={teamId !== ''} />}
       </div>
     </div>
@@ -263,10 +286,12 @@ function TeamPageBody({
 }
 
 // resolveTab maps the ?tab= param to a concrete tab, flooring Settings to
-// Members for non-managers so a stale/hand-typed ?tab=settings can't surface a
-// tab the viewer can't use. Members is the default.
-function resolveTab(raw: string | null, canManage: boolean): TeamTab {
+// Members for non-managers and Slack to Members when the org isn't entitled,
+// so a stale/hand-typed ?tab= can't surface a tab the viewer can't use.
+// Members is the default.
+function resolveTab(raw: string | null, canManage: boolean, slackEnt: boolean): TeamTab {
   if (raw === 'settings' && canManage) return 'settings'
+  if (raw === 'slack' && slackEnt) return 'slack'
   if (raw === 'prompts') return 'prompts'
   return 'members'
 }

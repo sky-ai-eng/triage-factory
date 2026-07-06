@@ -1,38 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
-import type { SlackChannelsResponse, SlackChannelView } from '../../../types'
+import type { SlackChannelsResponse, SlackChannelView } from '../types'
 
-// TeamSettings composes several self-fetching / heavy sibling sections
-// unrelated to the Slack channels surface under test here — stub them out so
-// a render only exercises team-settings load + the Slack section.
-vi.mock('../../../hooks/useTeams', () => ({
-  useTeams: () => ({ refresh: vi.fn() }),
-}))
-vi.mock('../../../components/RepoPickerModal', () => ({
-  default: () => <div data-testid="repo-picker" />,
-}))
-vi.mock('../GitHubTeamGroup', () => ({
-  default: () => <div data-testid="github-teams" />,
-}))
-vi.mock('../JiraProjectRulesGroup', () => ({
-  default: () => <div data-testid="jira-projects" />,
-}))
-vi.mock('../../setup/ModelStep', () => ({
-  TeamModelStep: () => <div data-testid="model-step" />,
-}))
-
-// useEntitlements gates the whole section — default on (loaded + licensed);
-// individual tests flip `slack` off to exercise the "absent" gate.
-const entMock = vi.hoisted(() => ({ slack: true, loaded: true }))
-vi.mock('../../../hooks/useEntitlements', () => ({
-  FeatureSlack: 'slack',
-  useEntitlements: () => ({
-    has: (f: string) => f === 'slack' && entMock.slack,
-    loaded: entMock.loaded,
-  }),
-}))
-
-import TeamSettings from './TeamSettings'
+import TeamSlackChannelsPanel from './TeamSlackChannelsPanel'
 
 const TEAM_ID = 'team-1'
 
@@ -52,13 +22,13 @@ function channel(over: Partial<SlackChannelView> = {}): SlackChannelView {
 }
 
 // Mutable server state the fetch mock reads/writes, mirroring the
-// stateful-mock shape SSOSettings.test.tsx uses. Reassigned per test via
-// seedSlack(); the PUT/primary handlers mutate it in place so a re-GET (or a
-// second render read) reflects the last write.
+// stateful-mock shape SSOSettings.test.tsx uses. The PUT handler reads
+// `slackState` at call time, so a test can arm the post-save body by
+// reassigning it before triggering the request.
 let slackState: SlackChannelsResponse
 let putRequests: string[][]
 
-function seedSlack(resp: SlackChannelsResponse) {
+function seed(resp: SlackChannelsResponse) {
   slackState = resp
   putRequests = []
 }
@@ -75,35 +45,11 @@ function jsonResponse(body: unknown): Response {
   } as unknown as Response
 }
 
-const TEAM_SETTINGS_BODY = {
-  team_settings: {
-    JiraProjects: [],
-    AIReprioritizeThreshold: 0,
-    AIPreferenceUpdateInterval: 0,
-    DefaultModel: 'sonnet',
-    AutoDelegateEnabled: true,
-    BranchTemplate: 'tfac/<ticket-id>',
-    PermissionAbsentGraceMS: 15000,
-    PermissionAbsentAutodenyEnabled: true,
-  },
-  jira_projects: [],
-  member_count: 1,
-  role: 'admin',
-}
-
 function installFetch() {
   const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : String(input)
     const [path] = url.split('?')
     const method = init?.method ?? 'GET'
-
-    if (path === `/api/settings/team/${TEAM_ID}`) return jsonResponse(TEAM_SETTINGS_BODY)
-    if (path === `/api/settings/team/${TEAM_ID}/repos`)
-      return jsonResponse({ repos: [], role: 'admin' })
-    if (path === `/api/settings/team/${TEAM_ID}/github-groups`) {
-      return jsonResponse({ groups: [], candidates: [], role: 'admin' })
-    }
-    if (path === '/api/integrations/status') return jsonResponse({})
 
     if (path === `/api/slack/teams/${TEAM_ID}/channels` && method === 'GET') {
       return jsonResponse(slackState)
@@ -124,14 +70,8 @@ function installFetch() {
   return fetchMock
 }
 
-async function expandSlackSection() {
-  fireEvent.click(await screen.findByRole('button', { name: /slack channels/i }))
-}
-
 beforeEach(() => {
-  entMock.slack = true
-  entMock.loaded = true
-  seedSlack({ role: 'admin', warnings: [], channels: [] })
+  seed({ role: 'admin', warnings: [], channels: [] })
   installFetch()
 })
 
@@ -139,35 +79,19 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('TeamSettings — Slack channels gating', () => {
-  it('renders nothing when the org lacks the Slack entitlement', async () => {
-    entMock.slack = false
-    seedSlack({
-      role: 'admin',
-      warnings: [],
-      channels: [channel({ channel_id: 'C1', name: 'general' })],
-    })
-    render(<TeamSettings isLocal={false} teamId={TEAM_ID} />)
-
-    await screen.findByText('Repositories')
-    expect(screen.queryByText('Slack channels')).not.toBeInTheDocument()
-  })
-
+describe('TeamSlackChannelsPanel', () => {
   it('shows a quiet "connect a workspace" line when GET returns zero candidates', async () => {
-    seedSlack({ role: 'admin', warnings: [], channels: [] })
-    render(<TeamSettings isLocal={false} teamId={TEAM_ID} />)
+    seed({ role: 'admin', warnings: [], channels: [] })
+    render(<TeamSlackChannelsPanel teamId={TEAM_ID} orgIsAdmin={false} />)
 
-    await expandSlackSection()
     expect(
       await screen.findByText(/connect a slack workspace in organization settings first/i),
     ).toBeInTheDocument()
   })
-})
 
-describe('TeamSettings — Slack channels list', () => {
   it('sorts an unclaimed-with-activity row above a plain candidate and shows its chip + hint', async () => {
     const recentMention = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString()
-    seedSlack({
+    seed({
       role: 'admin',
       warnings: [],
       channels: [
@@ -179,8 +103,7 @@ describe('TeamSettings — Slack channels list', () => {
         }),
       ],
     })
-    render(<TeamSettings isLocal={false} teamId={TEAM_ID} />)
-    await expandSlackSection()
+    render(<TeamSlackChannelsPanel teamId={TEAM_ID} orgIsAdmin={false} />)
 
     const rows = await screen.findAllByRole('checkbox')
     expect(rows).toHaveLength(2)
@@ -195,13 +118,8 @@ describe('TeamSettings — Slack channels list', () => {
   })
 
   it('falls back to the raw channel_id (mono) when name is empty', async () => {
-    seedSlack({
-      role: 'admin',
-      warnings: [],
-      channels: [channel({ channel_id: 'C0RAWID', name: '' })],
-    })
-    render(<TeamSettings isLocal={false} teamId={TEAM_ID} />)
-    await expandSlackSection()
+    seed({ role: 'admin', warnings: [], channels: [channel({ channel_id: 'C0RAWID', name: '' })] })
+    render(<TeamSlackChannelsPanel teamId={TEAM_ID} orgIsAdmin={false} />)
 
     const row = await screen.findByRole('checkbox')
     expect(within(row).getByText('C0RAWID')).toBeInTheDocument()
@@ -209,24 +127,21 @@ describe('TeamSettings — Slack channels list', () => {
   })
 
   it('disables checkboxes and Save for a non-admin viewer, but keeps the list visible', async () => {
-    seedSlack({
+    seed({
       role: 'member',
       warnings: [],
       channels: [channel({ channel_id: 'C1', name: 'general' })],
     })
-    render(<TeamSettings isLocal={false} teamId={TEAM_ID} />)
-    await expandSlackSection()
+    render(<TeamSlackChannelsPanel teamId={TEAM_ID} orgIsAdmin={false} />)
 
     const row = await screen.findByRole('checkbox')
     expect(row).toHaveAttribute('aria-disabled', 'true')
     expect(within(row).getByText('#general')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
   })
-})
 
-describe('TeamSettings — Slack channels claim + save', () => {
   it('claiming an unclaimed channel PUTs the union of the existing tracked set plus the new pick', async () => {
-    seedSlack({
+    seed({
       role: 'admin',
       warnings: [],
       channels: [
@@ -241,8 +156,7 @@ describe('TeamSettings — Slack channels claim + save', () => {
         channel({ channel_id: 'C-new', name: 'newly-claimed', tracked: false, tracked_by: [] }),
       ],
     })
-    render(<TeamSettings isLocal={false} teamId={TEAM_ID} />)
-    await expandSlackSection()
+    render(<TeamSlackChannelsPanel teamId={TEAM_ID} orgIsAdmin={false} />)
 
     const newRow = await screen.findByRole('checkbox', { name: /newly-claimed/i })
     fireEvent.click(newRow)
@@ -256,15 +170,14 @@ describe('TeamSettings — Slack channels claim + save', () => {
   })
 
   it('renders the invite_required warning as a /invite instruction after save', async () => {
-    seedSlack({
+    seed({
       role: 'admin',
       warnings: [],
       channels: [
         channel({ channel_id: 'C-priv', name: 'secret-room', is_private: true, tracked: false }),
       ],
     })
-    render(<TeamSettings isLocal={false} teamId={TEAM_ID} />)
-    await expandSlackSection()
+    render(<TeamSlackChannelsPanel teamId={TEAM_ID} orgIsAdmin={false} />)
 
     fireEvent.click(await screen.findByRole('checkbox', { name: /secret-room/i }))
 

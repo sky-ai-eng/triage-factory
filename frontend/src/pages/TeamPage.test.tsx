@@ -11,9 +11,19 @@ const mockState = vi.hoisted(() => ({
   teams: [] as TeamSummary[],
   lastActingTeamId: '',
   orgAdmin: false,
+  slackEnt: false,
 }))
 
 vi.mock('../contexts/OrgContext', () => ({ useActiveOrgId: () => 'org-1' }))
+// Gates the Slack tab (TFAC-544) — default off so existing tests (written
+// before the tab existed) see the same [Members · Settings · Prompts] shell.
+vi.mock('../hooks/useEntitlements', () => ({
+  FeatureSlack: 'slack',
+  useEntitlements: () => ({
+    has: (f: string) => f === 'slack' && mockState.slackEnt,
+    loaded: true,
+  }),
+}))
 vi.mock('../hooks/useOrgRole', () => ({
   useOrgRole: () => ({
     role: mockState.orgAdmin ? 'admin' : 'member',
@@ -58,6 +68,13 @@ vi.mock('../components/PromptsWorkspace', () => ({
     </div>
   ),
 }))
+vi.mock('../components/TeamSlackChannelsPanel', () => ({
+  default: ({ teamId, orgIsAdmin }: { teamId: string; orgIsAdmin: boolean }) => (
+    <div data-testid="slack" data-team={teamId} data-org-admin={String(orgIsAdmin)}>
+      slack
+    </div>
+  ),
+}))
 // Stub the switcher as a plain <select> so the persistence test drives it
 // through a stable interface instead of coupling to TeamSwitch's dropdown DOM.
 vi.mock('../components/TeamSwitch', () => ({
@@ -99,6 +116,7 @@ beforeEach(() => {
   mockState.teams = [team('t-a', 'Team A'), team('t-b', 'Team B')]
   mockState.lastActingTeamId = ''
   mockState.orgAdmin = false
+  mockState.slackEnt = false
   localStorage.clear()
 })
 
@@ -148,6 +166,30 @@ describe('TeamPage — tab shell', () => {
     renderAt('/team?tab=settings')
     expect(screen.getByRole('tab', { name: 'Settings' })).toBeInTheDocument()
     expect(screen.getByTestId('settings')).toHaveAttribute('data-team', 't-a')
+  })
+})
+
+describe('TeamPage — Slack tab (TFAC-544)', () => {
+  it('is absent, and ?tab=slack floors to Members, when the org lacks the entitlement', () => {
+    mockState.slackEnt = false
+    renderAt('/team?tab=slack')
+    expect(screen.queryByRole('tab', { name: 'Slack' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('slack')).not.toBeInTheDocument()
+    expect(screen.getByTestId('members')).toBeInTheDocument()
+  })
+
+  it('is visible to a plain member (not gated on canManage like Settings) when entitled', () => {
+    mockState.slackEnt = true
+    renderAt('/team?tab=slack')
+    expect(screen.getByRole('tab', { name: 'Slack' })).toBeInTheDocument()
+    expect(screen.getByTestId('slack')).toHaveAttribute('data-team', 't-a')
+  })
+
+  it('passes orgIsAdmin through to the panel', () => {
+    mockState.slackEnt = true
+    mockState.orgAdmin = true
+    renderAt('/team?tab=slack')
+    expect(screen.getByTestId('slack')).toHaveAttribute('data-org-admin', 'true')
   })
 })
 

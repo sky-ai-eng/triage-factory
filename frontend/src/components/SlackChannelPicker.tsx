@@ -1,10 +1,10 @@
-// SlackChannelPicker — the merged searchable checklist body for the team
-// Settings "Slack channels" section (TFAC-544). Mirrors RepoPickerModal's
-// inline searchable-checkbox idiom (controlled selection, no footer of its
-// own — the host owns Save/Cancel) but purely presentational: it renders
-// whatever `channels` the host already fetched (TeamSettings owns the
-// fetch/save via teamConfig's fetchTeamSlackChannels/saveTeamSlackChannels),
-// rather than fetching its own candidate list the way RepoPickerModal does.
+// SlackChannelPicker — the merged searchable checklist body for the /team
+// page's Slack tab (TFAC-544). Mirrors RepoPickerModal's inline searchable-
+// checkbox idiom (controlled selection, no footer of its own — the host owns
+// Save/Cancel) but purely presentational: it renders whatever `channels` the
+// host already fetched (TeamSlackChannelsPanel owns the fetch/save via
+// teamConfig's fetchTeamSlackChannels/saveTeamSlackChannels), rather than
+// fetching its own candidate list the way RepoPickerModal does.
 //
 // Each row surfaces this team's relationship to the channel via one status
 // chip (unclaimed / tracked-by-another-team / watching / primary) plus,
