@@ -21,9 +21,11 @@ import (
 func init() {
 	db.RegisterStoreExtension("postgres", slackstore.ExtKey, func(app, admin db.Execer) any {
 		return &slackstore.Bundle{
-			Workspaces: newWorkspaceStore(app, admin),
-			Identities: newIdentityStore(admin),
-			Deliveries: newDeliveryStore(admin),
+			Workspaces:   newWorkspaceStore(app, admin),
+			Identities:   newIdentityStore(admin),
+			Deliveries:   newDeliveryStore(admin),
+			Channels:     newChannelRegistryStore(app, admin),
+			TeamChannels: newTeamChannelStore(app, admin),
 		}
 	})
 }
