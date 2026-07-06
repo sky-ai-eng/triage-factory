@@ -79,6 +79,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
@@ -133,10 +134,20 @@ type Config struct {
 	// conscious-opt-out contract as llmproxy/gitproxy.
 	AllowNonLoopback bool
 
-	// RecordDenial, when non-nil, is invoked (best-effort, never
-	// blocking the response) for each refused CONNECT. The TFAC-483
-	// external-action audit log is the intended consumer; nil skips.
-	RecordDenial func(DeniedConnect)
+	// RecordDenial, when non-nil, is invoked once per refused CONNECT
+	// for the audit log (TFAC-483 is the intended consumer; nil skips).
+	// Delivery is asynchronous through a bounded queue drained by one
+	// goroutine, with each sink call bounded by a timeout ctx — a slow
+	// sink (a DB write) never adds latency to the 403, and a sandbox
+	// spamming denials at wire speed can't amplify into unbounded
+	// goroutines or memory (contrast gitproxy's goroutine-per-denial,
+	// which is fine there because git-op rates are inherently low; a
+	// CONNECT flood is attacker-priced). Best-effort: records are
+	// dropped when the queue is full or on Shutdown (drops are counted,
+	// see DroppedDenials). Denials are always also logged synchronously
+	// via slog, so a dropped record loses the structured audit row, not
+	// the operational trace.
+	RecordDenial func(ctx context.Context, denied DeniedConnect)
 }
 
 // Server is a single per-run gating proxy instance. Create one per run
@@ -156,6 +167,17 @@ type Server struct {
 	httpSrv  *http.Server
 	serveErr chan error
 
+	// Denial audit plumbing (only allocated when cfg.RecordDenial is
+	// set): deny() does a non-blocking send into denials; one drain
+	// goroutine (started by Start, stopped via drainStop) delivers to
+	// the sink with a per-record timeout. dropped counts records lost
+	// to a full queue — see the Config.RecordDenial doc for why this
+	// is bounded-and-dropping rather than goroutine-per-denial.
+	denials   chan DeniedConnect
+	drainStop chan struct{}
+	stopOnce  sync.Once
+	dropped   atomic.Int64
+
 	// Hijacked tunnel conns, tracked so Shutdown can close them —
 	// http.Server.Shutdown deliberately ignores hijacked connections,
 	// which would otherwise leak the copy goroutines of any tunnel
@@ -164,10 +186,22 @@ type Server struct {
 	tunnels map[net.Conn]struct{}
 }
 
+// denialQueueCap bounds the denial audit queue. Sized for bursts (a
+// package manager fanning out to a dozen blocked hosts) rather than
+// sustained floods — a flood is exactly the case where dropping audit
+// breadcrumbs beats buffering an attacker's backlog.
+const denialQueueCap = 256
+
+// recordDenialTimeout bounds each sink invocation so one wedged write
+// can't stall the drain goroutine forever (it would otherwise turn the
+// bounded queue into a permanently-full one). Mirrors gitproxy's
+// per-record timeout.
+const recordDenialTimeout = 5 * time.Second
+
 // New constructs a Server but does not listen. Call Start to bind.
 func New(cfg Config) (*Server, error) {
 	dialer := &net.Dialer{Timeout: dialTimeout}
-	return &Server{
+	s := &Server{
 		cfg:     cfg,
 		allowed: newHostSet(cfg.AllowedHosts),
 		resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
@@ -175,7 +209,12 @@ func New(cfg Config) (*Server, error) {
 		},
 		dial:    dialer.DialContext,
 		tunnels: make(map[net.Conn]struct{}),
-	}, nil
+	}
+	if cfg.RecordDenial != nil {
+		s.denials = make(chan DeniedConnect, denialQueueCap)
+		s.drainStop = make(chan struct{})
+	}
+	return s, nil
 }
 
 // Start binds addr ("host:port"; port 0 lets the kernel pick) and
@@ -211,16 +250,24 @@ func (s *Server) Start(addr string) (string, error) {
 		}
 		close(s.serveErr)
 	}()
+	if s.denials != nil {
+		go s.drainDenials()
+	}
 	return ln.Addr().String(), nil
 }
 
-// Shutdown stops the listener and closes every live tunnel. Hijacked
-// conns are closed explicitly because http.Server.Shutdown ignores
-// them; without this a tunnel open at run teardown would leak its
-// copy goroutines past the run's lifetime.
+// Shutdown stops the listener, the denial drain goroutine, and every
+// live tunnel. Hijacked conns are closed explicitly because
+// http.Server.Shutdown ignores them; without this a tunnel open at run
+// teardown would leak its copy goroutines past the run's lifetime.
+// Denials still queued at shutdown are dropped (best-effort audit,
+// same acceptance as gitproxy).
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s.httpSrv == nil {
 		return nil
+	}
+	if s.drainStop != nil {
+		s.stopOnce.Do(func() { close(s.drainStop) })
 	}
 	err := s.httpSrv.Shutdown(ctx)
 	s.mu.Lock()
@@ -230,6 +277,28 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Unlock()
 	return err
 }
+
+// drainDenials is the single consumer of the denial queue: it delivers
+// each record to the sink under a per-record timeout ctx, so one
+// wedged sink call is bounded and the queue keeps moving. Exits on
+// drainStop; anything still queued then is dropped by design.
+func (s *Server) drainDenials() {
+	for {
+		select {
+		case d := <-s.denials:
+			ctx, cancel := context.WithTimeout(context.Background(), recordDenialTimeout)
+			s.cfg.RecordDenial(ctx, d)
+			cancel()
+		case <-s.drainStop:
+			return
+		}
+	}
+}
+
+// DroppedDenials reports how many audit records were dropped because
+// the denial queue was full. Nonzero under a denial flood; the
+// synchronous slog line per denial remains the operational trace.
+func (s *Server) DroppedDenials() int64 { return s.dropped.Load() }
 
 // Err exposes the background Serve goroutine's first unexpected error,
 // mirroring llmproxy.Server.Err. Closed on goroutine exit.
@@ -398,13 +467,26 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, upstream net.Con
 	<-done
 }
 
-// deny sends the 403 with a client-visible reason and fires the audit
-// hook. One funnel so the agent-visible message and the audit record
-// can never drift apart.
+// deny sends the 403 with a client-visible reason and enqueues the
+// audit record. One funnel so the agent-visible message and the audit
+// record can never drift apart. The enqueue is non-blocking: the 403
+// must never wait on the audit sink (a slow DB write behind a
+// synchronous hook would let a sandbox spamming denials hold handler
+// goroutines hostage — the DoS shape the bounded queue exists to
+// kill). A full queue drops the record and counts it; the slog line
+// above is the trace that survives drops.
 func (s *Server) deny(w http.ResponseWriter, target, reason string) {
 	egressLog.Info("egress denied", "target", target, "reason", reason)
-	if s.cfg.RecordDenial != nil {
-		s.cfg.RecordDenial(DeniedConnect{Target: target, Reason: reason})
+	if s.denials != nil {
+		select {
+		case s.denials <- DeniedConnect{Target: target, Reason: reason}:
+		default:
+			if s.dropped.Add(1) == 1 {
+				// Warn once per Server, not per drop — a flood is
+				// exactly when per-drop logging would amplify.
+				egressLog.Warn("denial audit queue full; dropping records (see DroppedDenials)")
+			}
+		}
 	}
 	http.Error(w, "egress proxy: "+reason, http.StatusForbidden)
 }

@@ -170,13 +170,15 @@ func basicAuth(token string) string {
 
 // TestProxy_DeniesOffAllowlistHost pins the default-deny: a public
 // host not on the allowlist gets 403 with an actionable reason and is
-// never resolved or dialed.
+// never resolved or dialed. The audit record arrives asynchronously,
+// so the test waits on a channel sink (same pattern as gitproxy's
+// denialSink) rather than reading a shared slice.
 func TestProxy_DeniesOffAllowlistHost(t *testing.T) {
 	var dialed []string
-	var denials []DeniedConnect
+	denialCh := make(chan DeniedConnect, 16)
 	addr := newTestServer(t, Config{
 		AllowedHosts: []string{"registry.npmjs.org"},
-		RecordDenial: func(d DeniedConnect) { denials = append(denials, d) },
+		RecordDenial: func(_ context.Context, d DeniedConnect) { denialCh <- d },
 	}, []netip.Addr{netip.MustParseAddr("104.16.0.35")}, &dialed, nil)
 
 	resp := rawConnect(t, addr, "evil.example.com:443", "")
@@ -189,8 +191,119 @@ func TestProxy_DeniesOffAllowlistHost(t *testing.T) {
 	if len(dialed) != 0 {
 		t.Errorf("proxy dialed %v for a denied host; must not touch the network", dialed)
 	}
-	if len(denials) != 1 || denials[0].Target != "evil.example.com:443" {
-		t.Errorf("RecordDenial = %+v, want one entry for evil.example.com:443", denials)
+	select {
+	case d := <-denialCh:
+		if d.Target != "evil.example.com:443" {
+			t.Errorf("RecordDenial target = %q, want evil.example.com:443", d.Target)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("RecordDenial not invoked within 2s of the denial")
+	}
+}
+
+// TestProxy_SlowDenialSinkDoesNotDelayResponse pins the async-audit
+// contract: with a sink wedged on a never-closed channel, the 403
+// still returns immediately — the response path must never wait on
+// the audit sink (a slow DB write behind a synchronous hook would let
+// a sandbox spamming denials hold handler goroutines hostage).
+func TestProxy_SlowDenialSinkDoesNotDelayResponse(t *testing.T) {
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	addr := newTestServer(t, Config{
+		AllowedHosts: []string{"registry.npmjs.org"},
+		RecordDenial: func(ctx context.Context, _ DeniedConnect) {
+			select {
+			case <-blocked:
+			case <-ctx.Done(): // per-record timeout also unblocks the drainer
+			}
+		},
+	}, []netip.Addr{netip.MustParseAddr("104.16.0.35")}, nil, nil)
+
+	start := time.Now()
+	resp := rawConnect(t, addr, "evil.example.com:443", "")
+	elapsed := time.Since(start)
+	if !strings.Contains(resp, "403") {
+		t.Fatalf("CONNECT got:\n%s\nwant 403", resp)
+	}
+	if elapsed > time.Second {
+		t.Errorf("403 took %v with a wedged audit sink; the response must not wait on RecordDenial", elapsed)
+	}
+
+	// A second denial while the sink is still wedged must also return
+	// promptly (queued, not blocked behind the in-flight sink call).
+	start = time.Now()
+	resp = rawConnect(t, addr, "evil2.example.com:443", "")
+	if !strings.Contains(resp, "403") {
+		t.Fatalf("second CONNECT got:\n%s\nwant 403", resp)
+	}
+	if elapsed = time.Since(start); elapsed > time.Second {
+		t.Errorf("second 403 took %v; queue must absorb denials while the sink is busy", elapsed)
+	}
+}
+
+// TestProxy_DenialQueueOverflowDropsNotBlocks pins the flood behavior:
+// when the queue is full behind a wedged sink, further denials drop
+// the audit record (counted via DroppedDenials) instead of blocking
+// the 403 — bounded memory, bounded goroutines, no attacker-priced
+// backlog.
+func TestProxy_DenialQueueOverflowDropsNotBlocks(t *testing.T) {
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	sinkEntered := make(chan struct{}, 1)
+	s, err := New(Config{
+		AllowedHosts: []string{"registry.npmjs.org"},
+		RecordDenial: func(ctx context.Context, _ DeniedConnect) {
+			select {
+			case sinkEntered <- struct{}{}:
+			default:
+			}
+			select {
+			case <-blocked:
+			case <-ctx.Done():
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Shrink the queue to 1 before Start so overflow is reachable with
+	// three requests: first → in-flight in the sink, second → fills the
+	// queue, third → must drop.
+	s.denials = make(chan DeniedConnect, 1)
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = s.Shutdown(ctx)
+	})
+
+	// First denial: wait until the sink actually holds it, so the
+	// queue-capacity accounting below is deterministic.
+	if resp := rawConnect(t, addr, "evil0.example.com:443", ""); !strings.Contains(resp, "403") {
+		t.Fatalf("CONNECT got:\n%s\nwant 403", resp)
+	}
+	select {
+	case <-sinkEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sink never received the first denial")
+	}
+
+	for i := 1; i <= 2; i++ {
+		start := time.Now()
+		resp := rawConnect(t, addr, fmt.Sprintf("evil%d.example.com:443", i), "")
+		if !strings.Contains(resp, "403") {
+			t.Fatalf("CONNECT %d got:\n%s\nwant 403", i, resp)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("403 #%d took %v; overflow must drop, not block", i, elapsed)
+		}
+	}
+
+	if got := s.DroppedDenials(); got != 1 {
+		t.Errorf("DroppedDenials = %d, want 1 (one in-flight + one queued + one dropped)", got)
 	}
 }
 
