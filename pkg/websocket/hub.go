@@ -149,7 +149,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID, si
 	h.indexLocked(c)
 	h.mu.Unlock()
 
-	wsLog.Info("client connected", "total", h.clientCount())
+	wsLog.Info("client connected", "total", h.ClientCount())
 
 	// Start write pump in background
 	go h.writePump(c)
@@ -170,7 +170,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID, si
 	// the error (broken pipe / already-closed) is not actionable.
 	_ = conn.Close(ws.StatusNormalClosure, "")
 
-	wsLog.Info("client disconnected", "total", h.clientCount())
+	wsLog.Info("client disconnected", "total", h.ClientCount())
 }
 
 // Broadcast sends an event to all connected clients, gated by the
@@ -385,7 +385,13 @@ func (h *Hub) writePump(c *client) {
 	}
 }
 
-func (h *Hub) clientCount() int {
+// ClientCount reports the number of currently registered connections. A
+// client only counts once HandleWS has added it to the hub's maps — i.e. once
+// it is guaranteed to receive subsequent Broadcasts. Tests use this to close
+// the window between a client's dial returning (handshake done) and the
+// server goroutine completing registration, during which a Broadcast is
+// silently delivered to nobody.
+func (h *Hub) ClientCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients)
