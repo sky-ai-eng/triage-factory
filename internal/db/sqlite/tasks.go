@@ -830,6 +830,61 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 	return n > 0, nil
 }
 
+func (s *taskStore) ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	return reassignClaimToUserSQLite(ctx, s.q, taskID, fromUserID, toUserID)
+}
+
+func (s *taskStore) ReassignClaimToUserSystem(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error) {
+	return s.ReassignClaimToUser(ctx, orgID, taskID, fromUserID, toUserID)
+}
+
+// reassignClaimToUserSQLite is the shared body for ReassignClaimToUser and
+// its (trivial, single-connection) ReassignClaimToUserSystem wrapper. Besides
+// the claim CAS every other claim mutation does, it bakes the target-team-
+// membership guard directly into the WHERE clause — an EXISTS against
+// memberships requiring toUserID to belong to a team associated with the
+// task (its task_teams visibility set or its current team_id) — atomically
+// with the CAS itself, mirroring the Postgres impl. Local mode is N=1 in
+// practice (no real cross-user memberships), but the guard keeps the SQLite
+// store conformant with the interface contract.
+func reassignClaimToUserSQLite(ctx context.Context, q queryer, taskID, fromUserID, toUserID string) (bool, error) {
+	if fromUserID == "" {
+		return false, fmt.Errorf("ReassignClaimToUser: empty fromUserID")
+	}
+	if toUserID == "" {
+		return false, fmt.Errorf("ReassignClaimToUser: empty toUserID")
+	}
+	res, err := q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET claimed_by_user_id = ?,
+		       team_id = `+sqliteActingTeamExpr+`,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		 WHERE id = ?
+		   AND claimed_by_user_id = ?
+		   AND status NOT IN ('done', 'dismissed')
+		   AND EXISTS (
+		         SELECT 1 FROM memberships m2
+		          WHERE m2.user_id = ?
+		            AND (
+		              m2.team_id IN (SELECT team_id FROM task_teams WHERE task_id = ?)
+		              OR m2.team_id = (SELECT team_id FROM tasks WHERE id = ?)
+		            )
+		       )
+	`, toUserID, taskID, toUserID, taskID, fromUserID, toUserID, taskID, taskID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // --- Breaker ---
 
 func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error) {

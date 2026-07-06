@@ -28,12 +28,13 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 	}
 	// Action → effect mapping. SKY-261 B+ split the responsibility axis
 	// (who owns this) off the lifecycle axis (where in its life the
-	// task is). claim + delegate are responsibility-only — the handler
-	// stamps claim columns and may already have moved the lifecycle
-	// status (e.g. snooze-wake inside ClaimQueuedForUser). This audit
-	// path MUST NOT write status for those actions or it would clobber
-	// the lifecycle status of an in_progress / in_review task during a
-	// takeover/delegate (SKY-330's assignee picker exercises both).
+	// task is). claim + delegate + reassign (TFAC-561) are
+	// responsibility-only — the handler stamps claim columns and may
+	// already have moved the lifecycle status (e.g. snooze-wake inside
+	// ClaimQueuedForUser). This audit path MUST NOT write status for
+	// those actions or it would clobber the lifecycle status of an
+	// in_progress / in_review task during a takeover/delegate/reassign
+	// (SKY-330's assignee picker exercises all three).
 	// Only dismiss + complete are genuine lifecycle moves recorded
 	// here; snooze flows through SnoozeTask separately.
 	//
@@ -47,7 +48,7 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 	terminal := action == "dismiss" || action == "complete"
 	var newStatus, closeReason string
 	switch action {
-	case "claim", "delegate":
+	case "claim", "delegate", "reassign":
 		// Audit-only path — read the current status to return so the
 		// caller's WS broadcast carries the right value.
 	case "dismiss":

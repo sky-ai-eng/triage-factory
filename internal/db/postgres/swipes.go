@@ -32,15 +32,16 @@ var _ db.SwipeStore = (*swipeStore)(nil)
 
 func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int) (string, error) {
 	// See sqlite/swipes.go for the full rationale. Summary: claim +
-	// delegate are responsibility-only and MUST NOT touch the
-	// lifecycle status (or in_progress / in_review tasks lose their
-	// stage during takeover/delegate via the assignee picker).
-	// Terminal swipes (dismiss / complete) write status + closed_at
-	// + close_reason. Snooze flows through SnoozeTask.
+	// delegate + reassign (TFAC-561) are responsibility-only and MUST
+	// NOT touch the lifecycle status (or in_progress / in_review tasks
+	// lose their stage during takeover/delegate/reassign via the
+	// assignee picker). Terminal swipes (dismiss / complete) write
+	// status + closed_at + close_reason. Snooze flows through
+	// SnoozeTask.
 	terminal := action == "dismiss" || action == "complete"
 	var newStatus, closeReason string
 	switch action {
-	case "claim", "delegate":
+	case "claim", "delegate", "reassign":
 		// Audit-only path.
 	case "dismiss":
 		newStatus = "dismissed"

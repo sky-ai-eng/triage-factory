@@ -810,6 +810,20 @@ func (s *taskStore) ResolveClaimTeam(ctx context.Context, orgID, taskID, userID 
 	return team, nil
 }
 
+// pgActingTeamExpr is the shared team-consolidation subquery for the claim
+// mutations that bind the new claimant's userID at $1 and the task id at
+// $3 — ClaimQueuedForUser, TakeoverClaimFromAgent, and reassignClaimToUser
+// all share that exact positional shape, so the literal SQL lives here once
+// instead of being copy-pasted per method. HandoffAgentClaim binds a
+// different argument shape (the agent id occupies $1; the user id is a
+// separate $4) and keeps its own inline copy.
+const pgActingTeamExpr = `COALESCE(
+		(SELECT tt.team_id FROM task_teams tt
+		   JOIN memberships m ON m.team_id = tt.team_id
+		  WHERE tt.task_id = $3 AND m.user_id = $1
+		  ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC LIMIT 1),
+		team_id)`
+
 func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string) (bool, error) {
 	if userID == "" {
 		return false, errors.New("TakeoverClaimFromAgent: empty userID")
@@ -818,12 +832,7 @@ func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, u
 		UPDATE tasks
 		   SET claimed_by_user_id  = $1,
 		       claimed_by_agent_id = NULL,
-		       team_id = COALESCE(
-		           (SELECT tt.team_id FROM task_teams tt
-		              JOIN memberships m ON m.team_id = tt.team_id
-		             WHERE tt.task_id = $3 AND m.user_id = $1
-		             ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC LIMIT 1),
-		           team_id),
+		       team_id = `+pgActingTeamExpr+`,
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE org_id = $2 AND id = $3
@@ -848,12 +857,7 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_user_id = $1,
-		       team_id = COALESCE(
-		           (SELECT tt.team_id FROM task_teams tt
-		              JOIN memberships m ON m.team_id = tt.team_id
-		             WHERE tt.task_id = $3 AND m.user_id = $1
-		             ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC LIMIT 1),
-		           team_id),
+		       team_id = `+pgActingTeamExpr+`,
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE org_id = $2 AND id = $3
@@ -861,6 +865,60 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 		   AND claimed_by_user_id  IS NULL
 		   AND claimed_by_agent_id IS NULL
 	`, userID, orgID, taskID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *taskStore) ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error) {
+	return reassignClaimToUser(ctx, s.q, orgID, taskID, fromUserID, toUserID)
+}
+
+func (s *taskStore) ReassignClaimToUserSystem(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error) {
+	return reassignClaimToUser(ctx, s.admin, orgID, taskID, fromUserID, toUserID)
+}
+
+// reassignClaimToUser is the shared body behind ReassignClaimToUser and its
+// admin-pool ReassignClaimToUserSystem sibling. Besides the claim CAS every
+// other claim mutation does, it bakes the target-team-membership guard
+// directly into the WHERE clause — an EXISTS against memberships requiring
+// toUserID to belong to a team associated with the task (its task_teams
+// visibility set or its current team_id) — atomically with the CAS itself:
+// no separate round trip, no TOCTOU window between validating the target and
+// landing the write. Without this guard a reassign could hand the claim to a
+// user with zero relationship to the task's team, who would then be unable
+// to even see the row (tasks_select RLS requires team membership once a task
+// is claimed — there's no "or you're the claimant" escape hatch).
+func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUserID, toUserID string) (bool, error) {
+	if fromUserID == "" {
+		return false, errors.New("ReassignClaimToUser: empty fromUserID")
+	}
+	if toUserID == "" {
+		return false, errors.New("ReassignClaimToUser: empty toUserID")
+	}
+	res, err := q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET claimed_by_user_id = $1,
+		       team_id = `+pgActingTeamExpr+`,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		 WHERE org_id = $2 AND id = $3
+		   AND claimed_by_user_id = $4
+		   AND status NOT IN ('done', 'dismissed')
+		   AND EXISTS (
+		         SELECT 1 FROM memberships m2
+		          WHERE m2.user_id = $1
+		            AND (
+		              m2.team_id IN (SELECT team_id FROM task_teams WHERE task_id = $3)
+		              OR m2.team_id = (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2)
+		            )
+		       )
+	`, toUserID, orgID, taskID, fromUserID)
 	if err != nil {
 		return false, err
 	}
