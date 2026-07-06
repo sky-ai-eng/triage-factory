@@ -53,7 +53,9 @@ flags (see `go run ./cmd/pollbench -h` for all):
 - `--seed` — dataset seed. Same seed + shape ⇒ identical request counts;
   only wall time varies.
 - `--check` — CI mode: runs twice and fails on any sanity violation or on
-  request counts differing between the runs.
+  request counts differing between the runs. The count comparison is
+  skipped when a rate limit is active (retry timing varies run-to-run);
+  the sanity assertions still apply to both runs.
 
 ## Standard shapes
 

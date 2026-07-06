@@ -57,8 +57,9 @@ type Result struct {
 	Cycles []CycleMetrics
 
 	// ColdCycles is how many cycles the cold sync took to complete (1 unless
-	// a rate limit forced resumption); ColdSyncWall is wall time to full sync
-	// including any between-cycle waits for a rate-limit window to reset.
+	// a rate limit forced resumption); ColdSyncWall is the summed cold-cycle
+	// wall time plus any between-cycle waits for a rate-limit window to
+	// reset — harness bookkeeping between cycles is excluded.
 	ColdCycles   int
 	ColdSyncWall time.Duration
 	ColdEvents   int
@@ -245,10 +246,16 @@ func Run(cfg RunConfig) (*Result, error) {
 	// case the poller's next scheduled cycle resumes where the ETag and
 	// snapshot state left off — the driver models "next cycle after the
 	// window resets."
-	coldStart := time.Now()
+	//
+	// ColdSyncWall sums the measured cycle walls plus the measured
+	// between-cycle waits — NOT time.Since over the whole loop, which would
+	// fold harness bookkeeping (the syncState snapshot parse over every
+	// entity, counter/memstats snapshots) into a metric that claims to be
+	// poll cost. At low latency the bookkeeping would dominate.
 	for cycle := 1; ; cycle++ {
 		m := runCycle(fmt.Sprintf("cold #%d", cycle))
 		res.ColdEvents += m.Events
+		res.ColdSyncWall += m.Wall
 		entities, refreshed, done := syncState(ctx, stores, orgID, ds.TotalPRs)
 		if done {
 			res.ColdCycles = cycle
@@ -263,10 +270,10 @@ func Run(cfg RunConfig) (*Result, error) {
 		if reset := srv.NextReset(); !reset.IsZero() {
 			if wait := time.Until(reset) + 100*time.Millisecond; wait > 0 {
 				time.Sleep(wait)
+				res.ColdSyncWall += wait
 			}
 		}
 	}
-	res.ColdSyncWall = time.Since(coldStart)
 
 	for i := 1; i <= cfg.WarmCycles; i++ {
 		m := runCycle(fmt.Sprintf("warm #%d", i))

@@ -134,7 +134,12 @@ func main() {
 		for _, s := range res2.SanityErrors {
 			fmt.Printf("check: second run sanity FAIL — %s\n", s)
 		}
-		if !requestCountsEqual(res, res2) {
+		if *rateLimit > 0 {
+			// Retry counts and even cycles-to-complete legitimately vary with
+			// timing under an active rate limit; only the sanity assertions
+			// are meaningful, so don't fail on count differences.
+			fmt.Println("check: skipping request-count comparison (rate limit active — retry timing varies run-to-run)")
+		} else if !requestCountsEqual(res, res2) {
 			failed = true
 			fmt.Println("check: FAIL — request counts differ between identically-seeded runs")
 		} else {
@@ -155,8 +160,9 @@ func main() {
 
 // requestCountsEqual compares the per-cycle request-counter deltas of two
 // runs. Wall time and allocation counts legitimately vary; request counts
-// must not (with rate limiting off — retries under a live rate limit are
-// timing-dependent, so -check is meant for non-rate-limited configs).
+// must not. Only called with rate limiting off — the -check flow skips the
+// comparison under an active rate limit, where retry counts and
+// cycles-to-complete are timing-dependent.
 func requestCountsEqual(a, b *pollbench.Result) bool {
 	if len(a.Cycles) != len(b.Cycles) {
 		return false
