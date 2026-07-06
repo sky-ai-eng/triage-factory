@@ -28,9 +28,9 @@ func TestSlackMentionSchema_Registered(t *testing.T) {
 	}
 }
 
-// TestSlackMentionPredicate_MatchesAll pins this leaf's deliberately-empty
-// predicate: every metadata shape matches, since nothing routes on it until
-// TFAC-510 enriches the predicate with channel_in.
+// TestSlackMentionPredicate_MatchesAll pins the empty-predicate case: an
+// empty (or absent) channel_in list means "no filter," matching everything
+// — the *_in convention shared with GitHubPRCICheckFailedPredicate.AuthorIn.
 func TestSlackMentionPredicate_MatchesAll(t *testing.T) {
 	sc, ok := events.Get(domain.EventSlackMention)
 	if !ok {
@@ -54,6 +54,30 @@ func TestSlackMentionPredicate_MatchesAll(t *testing.T) {
 	}
 	if !got {
 		t.Error("{} predicate did not match; want match-all")
+	}
+}
+
+// TestSlackMentionPredicate_ChannelIn covers channel_in's membership check,
+// including its deliberate divergence from stringInSliceFold: Slack channel
+// IDs are case-sensitive tokens, so "c123" must NOT match "C123".
+func TestSlackMentionPredicate_ChannelIn(t *testing.T) {
+	cases := []struct {
+		name string
+		pred SlackMentionPredicate
+		want bool
+	}{
+		{"empty list matches any channel", SlackMentionPredicate{}, true},
+		{"member channel matches", SlackMentionPredicate{ChannelIn: []string{"C999", "C123"}}, true},
+		{"non-member channel does not match", SlackMentionPredicate{ChannelIn: []string{"C999"}}, false},
+		{"case-sensitive: lowercase does not match", SlackMentionPredicate{ChannelIn: []string{"c123"}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := SlackMentionMetadata{Channel: "C123"}
+			if got := tc.pred.Matches(meta); got != tc.want {
+				t.Errorf("Matches() = %v; want %v", got, tc.want)
+			}
+		})
 	}
 }
 

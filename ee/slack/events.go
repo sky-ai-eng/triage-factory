@@ -24,18 +24,33 @@ type SlackMentionMetadata struct {
 	EventID     string `json:"event_id"` // Slack's Ev… id — the dedup key
 }
 
-// SlackMentionPredicate is deliberately empty in this leaf (match-all).
-// TFAC-510 enriches it (channel_in) once routing exists to scope on —
-// predicates decide what runs, and nothing routes until then anyway.
-type SlackMentionPredicate struct{}
+// SlackMentionPredicate narrows which mentions a handler fires on.
+type SlackMentionPredicate struct {
+	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only mentions in these Slack channel IDs (empty = any tracked channel)."`
+}
 
-func (SlackMentionPredicate) Matches(SlackMentionMetadata) bool { return true }
+// Matches applies the *_in convention: an empty ChannelIn means "no
+// filter," matching everything. Channel IDs are case-sensitive Slack
+// tokens, so this is a strict == rather than events.stringInSliceFold's
+// case-fold (that helper is also unexported outside package events).
+func (p SlackMentionPredicate) Matches(m SlackMentionMetadata) bool {
+	if len(p.ChannelIn) == 0 {
+		return true
+	}
+	for _, c := range p.ChannelIn {
+		if c == m.Channel {
+			return true
+		}
+	}
+	return false
+}
 
 // init registers slack:mention's schema and dormancy gate — the "inert
 // declaration" half of TFAC-530. OwnershipOwned is the settled
 // classification (channel-primary owns; watch semantics apply);
 // registering it now is data-only — resolution behavior (which team
-// actually owns a given channel) arrives with TFAC-510's SourceHooks.
+// actually owns a given channel) arrives with TFAC-542's SourceHooks
+// (routing.go).
 // GateEventSource activates every TFAC-524 dormancy surface for slack:*
 // (event-types/schemas lists, handler create, router freeze) — FeatureSlack
 // is already in entitlements.AllFeatures() (TFAC-529), so the composition-
