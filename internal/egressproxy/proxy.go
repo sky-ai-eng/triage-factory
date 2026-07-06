@@ -378,6 +378,14 @@ func (s *Server) dialVetted(ctx context.Context, host string) (net.Conn, error) 
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", host, err)
 	}
+	if len(addrs) == 0 {
+		// Distinct from the all-denylisted case below: DefaultResolver
+		// normally errors on no records, but a custom resolver (or a
+		// future seam consumer) may return an empty, error-free answer —
+		// don't accuse an empty result of being "internal".
+		return nil, policyDenial{reason: fmt.Sprintf(
+			"host %q resolved to no addresses", host)}
+	}
 	vetted := make([]netip.Addr, 0, len(addrs))
 	for _, a := range addrs {
 		if !ipDenied(a) {

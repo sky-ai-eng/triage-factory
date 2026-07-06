@@ -51,16 +51,39 @@ var deniedRanges = []netip.Prefix{
 	netip.MustParsePrefix("255.255.255.255/32"),
 }
 
-// ipDenied reports whether addr falls in the operator denylist. The
-// Unmap strips the IPv4-mapped-IPv6 form (::ffff:10.0.0.1 → 10.0.0.1)
-// before matching, so the v4 prefixes above apply to a resolver that
-// returned the mapped form — without it, a AAAA record of
-// ::ffff:169.254.169.254 would sail past every v4 prefix.
+// nat64Prefix is the well-known DNS64/NAT64 translation prefix
+// (RFC 6052): an address inside it embeds an IPv4 host in its low 32
+// bits, and a NAT64 gateway will deliver the connection to that v4
+// host. A DNS64 resolver can therefore hand back
+// 64:ff9b::a9fe:a9fe — the metadata endpoint wearing a public-looking
+// v6 coat that no prefix above matches. We don't deny the whole
+// prefix (that would fail closed for legitimate registry traffic on a
+// NAT64-only network); instead ipDenied extracts the embedded v4 and
+// applies the denylist to it, mirroring the Unmap treatment of
+// ::ffff: mapped forms. Typical Fly/cloud-VM resolvers don't do DNS64
+// synthesis, so this is defense-in-depth, not a live hole.
+var nat64Prefix = netip.MustParsePrefix("64:ff9b::/96")
+
+// ipDenied reports whether addr falls in the operator denylist. Two
+// v4-in-v6 encodings are normalized before matching so the v4 ranges
+// can't be smuggled past in a v6 coat (§3.6 alternate-encodings gate):
+// Unmap strips the IPv4-mapped form (::ffff:10.0.0.1 → 10.0.0.1), and
+// NAT64 addresses (64:ff9b::/96) are additionally judged by their
+// embedded v4 host.
 func ipDenied(addr netip.Addr) bool {
 	a := addr.Unmap()
 	for _, p := range deniedRanges {
 		if p.Contains(a) {
 			return true
+		}
+	}
+	if nat64Prefix.Contains(a) {
+		raw := a.As16()
+		embedded := netip.AddrFrom4([4]byte{raw[12], raw[13], raw[14], raw[15]})
+		for _, p := range deniedRanges {
+			if p.Contains(embedded) {
+				return true
+			}
 		}
 	}
 	return false

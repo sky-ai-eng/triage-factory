@@ -63,6 +63,28 @@ func TestIPDenied_CoversInternalRanges(t *testing.T) {
 	}
 }
 
+// TestIPDenied_NAT64EmbeddedV4 pins the RFC 6052 defense: a DNS64
+// resolver can synthesize 64:ff9b::<v4> for any A record, and a NAT64
+// gateway delivers to the embedded v4 host — so a NAT64 coat around an
+// internal v4 must be denied by the embedded address, while a NAT64
+// coat around a public v4 must pass (denying the whole prefix would
+// fail closed on legitimate NAT64-only networks).
+func TestIPDenied_NAT64EmbeddedV4(t *testing.T) {
+	denied := []string{
+		"64:ff9b::a9fe:a9fe", // 169.254.169.254 — metadata behind NAT64
+		"64:ff9b::a00:5",     // 10.0.0.5 — RFC1918 behind NAT64
+		"64:ff9b::7f00:1",    // 127.0.0.1 behind NAT64
+	}
+	for _, s := range denied {
+		if !ipDenied(netip.MustParseAddr(s)) {
+			t.Errorf("ipDenied(%s) = false; NAT64-embedded internal v4 must be denied", s)
+		}
+	}
+	if ipDenied(netip.MustParseAddr("64:ff9b::6810:23")) { // 104.16.0.35
+		t.Error("ipDenied(64:ff9b::6810:23) = true; NAT64-embedded PUBLIC v4 must pass")
+	}
+}
+
 // --- allowlist matching -----------------------------------------------------
 
 func TestHostSet_NormalizesCaseAndTrailingDot(t *testing.T) {
