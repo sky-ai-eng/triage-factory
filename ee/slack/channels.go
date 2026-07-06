@@ -1,6 +1,6 @@
 // Slack channel name resolution (TFAC-542): best-effort resolve a
-// channel's display name via conversations.info once the sighting
-// registry (channels.go's ingest call site, TFAC-541's slack_channels
+// channel's display name via conversations.info once the sighting registry
+// (ingest.go's captureChannelSighting call site, TFAC-541's slack_channels
 // table) records a first-seen or stale-named channel. Same posture as
 // sender identity capture (identity.go): detached from the ingest path, off
 // context.Background() plus a short timeout, every failure logged and
@@ -11,6 +11,7 @@ package slack
 import (
 	"context"
 	"net/http"
+	"sync"
 	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
@@ -35,6 +36,11 @@ type ChannelResolver struct {
 	secrets  db.SecretStore
 	channels slackstore.ChannelRegistryStore
 	client   *http.Client
+
+	// mu guards inFlight, the per-(org, channel) in-progress set dispatch
+	// consults — see dispatch's doc.
+	mu       sync.Mutex
+	inFlight map[string]bool
 }
 
 // NewChannelResolver builds a resolver from the server's non-tx admin-pool
@@ -47,17 +53,44 @@ func NewChannelResolver(stores db.Stores) *ChannelResolver {
 	}
 }
 
+// dispatch starts resolveChannelName for (ws.OrgID, channelID) in a detached
+// goroutine, unless a resolution for that channel is already in flight. This
+// is the thundering-herd guard: while conversations.info is slow or failing
+// for a channel, every mention in it would otherwise re-check the same stale
+// row and spawn another goroutine hitting the Slack API, one per mention,
+// until the first one finally succeeds. Callers should call this instead of
+// spawning resolveChannelName directly — see ingest.go's
+// captureChannelSighting.
+func (r *ChannelResolver) dispatch(ws slackstore.Workspace, channelID string) {
+	key := ws.OrgID + "/" + channelID
+	r.mu.Lock()
+	if r.inFlight == nil {
+		r.inFlight = map[string]bool{}
+	}
+	if r.inFlight[key] {
+		r.mu.Unlock()
+		return
+	}
+	r.inFlight[key] = true
+	r.mu.Unlock()
+
+	go func() {
+		defer func() {
+			r.mu.Lock()
+			delete(r.inFlight, key)
+			r.mu.Unlock()
+		}()
+		r.resolveChannelName(context.Background(), ws, channelID)
+	}()
+}
+
 // resolveChannelName looks up channelID's current display name and writes
 // it into the registry. Best-effort: every failure is logged and
 // swallowed, there is no error return, and it MUST NEVER run inline on the
-// ingest request path — callers dispatch it as
-//
-//	go r.resolveChannelName(context.Background(), ws, channelID)
-//
-// off context.Background(), never the request ctx (see ingest.go's
-// captureChannelSighting). Never writes a name on API failure — an
-// unresolved row renders its raw channel ID rather than risk a wrong
-// fallback name.
+// ingest request path — callers dispatch it via dispatch (above), never
+// directly, so a slow/stuck resolution can't spawn duplicates. Never writes
+// a name on API failure — an unresolved row renders its raw channel ID
+// rather than risk a wrong fallback name.
 func (r *ChannelResolver) resolveChannelName(ctx context.Context, ws slackstore.Workspace, channelID string) {
 	ctx, cancel := context.WithTimeout(ctx, channelNameResolveTimeout)
 	defer cancel()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -122,5 +123,65 @@ func TestResolveChannelName_EmptyNameNeverWrites(t *testing.T) {
 
 	if row := channels.rows[channelKey(ws.OrgID, "C1")]; row.Name != "old-name" {
 		t.Errorf("Name = %q; want old-name preserved (empty response name must not overwrite)", row.Name)
+	}
+}
+
+// TestChannelResolverDispatch_DedupsConcurrentResolutions pins the
+// thundering-herd guard: while a resolution for a channel is in flight
+// (conversations.info deliberately held open here), further dispatch calls
+// for the same channel must be no-ops rather than spawning their own
+// goroutine and hitting the Slack API again.
+func TestChannelResolverDispatch_DedupsConcurrentResolutions(t *testing.T) {
+	release := make(chan struct{})
+	var mu sync.Mutex
+	hits := 0
+	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		<-release
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "channel": map[string]any{"name": "general"}})
+	})
+	channels := newFakeChannelRegistry()
+	channels.done = make(chan struct{}, 1)
+	ws := testWorkspaceForChannelResolver()
+	channels.rows[channelKey(ws.OrgID, "C1")] = &slackstore.Channel{OrgID: ws.OrgID, ChannelID: "C1"}
+	r := &ChannelResolver{secrets: &fakeSecrets{token: "xoxb-test"}, channels: channels, client: srv.Client()}
+
+	r.dispatch(ws, "C1")
+
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		reached := hits == 1
+		mu.Unlock()
+		if reached {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("first dispatch never reached conversations.info")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Further dispatches while the first is still blocked in
+	// conversations.info must not spawn another resolution.
+	for i := 0; i < 5; i++ {
+		r.dispatch(ws, "C1")
+	}
+
+	close(release)
+
+	select {
+	case <-channels.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolution never completed")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 1 {
+		t.Errorf("conversations.info hits = %d; want 1 (concurrent dispatches for the same channel must dedup)", hits)
 	}
 }

@@ -164,6 +164,12 @@ func (p *ingestPipeline) captureChannelSighting(ctx context.Context, ws slacksto
 	}
 	needsResolve := created
 	if !created {
+		// One extra read per non-first mention, only to check staleness —
+		// accepted here rather than threading a "last known name state"
+		// through UpsertSightingSystem's return value: mention volume is
+		// inherently low (one delivery per @mention, not per message), and
+		// this keeps the staleness rule (channels.go's channelNameStaleAfter)
+		// out of the store layer's write path.
 		row, err := p.channels.GetSystem(ctx, ws.OrgID, channelID)
 		if err != nil {
 			slackLog.Warn("channel sighting: staleness check failed", "workspace", ws.WorkspaceID, "channel", channelID, "error", err)
@@ -172,7 +178,7 @@ func (p *ingestPipeline) captureChannelSighting(ctx context.Context, ws slacksto
 		}
 	}
 	if needsResolve && p.channelName != nil {
-		go p.channelName.resolveChannelName(context.Background(), ws, channelID)
+		p.channelName.dispatch(ws, channelID)
 	}
 }
 

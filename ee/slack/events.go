@@ -26,7 +26,7 @@ type SlackMentionMetadata struct {
 
 // SlackMentionPredicate narrows which mentions a handler fires on.
 type SlackMentionPredicate struct {
-	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only mentions in these Slack channel IDs (empty = any tracked channel)."`
+	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only mentions in these Slack channel IDs (empty = no filter, matches any channel)."`
 }
 
 // Matches applies the *_in convention: an empty ChannelIn means "no
