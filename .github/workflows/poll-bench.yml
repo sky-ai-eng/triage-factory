@@ -1,0 +1,53 @@
+name: poll-bench
+
+# Regression tripwire for the GitHub polling path: runs the poll-scale
+# benchmark's smoke shape (20 repos, ~100 open PRs) against the in-process
+# fake GitHub API and fails on any sanity violation — event counts diverging
+# from the dataset's expected transitions, an incomplete cold sync, warm
+# cycles emitting events, a warm 304 hit rate under 100%, or request counts
+# differing between identically-seeded runs (determinism). See
+# docs/poll-bench.md.
+#
+# Deliberately NOT part of the PR-blocking test.yml: it triggers only on
+# changes to the polling surface (poller, tracker, GitHub client, the bench
+# itself) plus pushes to main, and can be dispatched manually for a full
+# shape run.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'internal/poller/**'
+      - 'internal/tracker/**'
+      - 'internal/github/**'
+      - 'internal/pollbench/**'
+      - 'cmd/pollbench/**'
+      - 'scripts/poll-bench.sh'
+      - '.github/workflows/poll-bench.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: poll-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  poll-bench-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # No frontend build needed: cmd/pollbench doesn't touch the go:embed
+      # root package. Low latency keeps the run to seconds; --check runs the
+      # bench twice and asserts determinism + sanity.
+      - name: Poll bench (smoke shape)
+        run: go run ./cmd/pollbench --shape smoke --latency 2ms --check

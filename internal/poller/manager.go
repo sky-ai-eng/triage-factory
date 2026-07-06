@@ -260,6 +260,18 @@ func (m *Manager) PollSoon(source, orgID string) {
 	delete(m.nextPoll, pollKey(source, orgID))
 }
 
+// PollGitHubOnce runs one synchronous GitHub poll cycle for a single org,
+// bypassing the scheduler entirely — no due gate, no slot reservation, no
+// ticker. It is the driver entrypoint for the poll-scale benchmark harness
+// (internal/pollbench), which needs to time discrete cycles against a fake
+// GitHub server; in-package tests call runGitHubCycleForOrg directly for the
+// same reason. Not used by the production loop: server code goes through
+// startGitHub's scheduled cycles (or PollSoon to re-due an org) so per-org
+// cadence and the anti-stampede scheduling stay intact.
+func (m *Manager) PollGitHubOnce(ctx context.Context, orgID string) {
+	m.runGitHubCycleForOrg(ctx, orgID)
+}
+
 // loadJiraRules pulls the UNION of every team's per-project Jira status
 // rules across the org (not just the default team's), so a non-default
 // team's Jira config is discovered and polled too. toTrackerJiraRules
