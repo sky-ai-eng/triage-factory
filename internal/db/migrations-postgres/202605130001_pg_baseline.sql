@@ -7770,6 +7770,140 @@ REVOKE ALL ON public.slack_event_deliveries FROM PUBLIC;
 REVOKE ALL ON public.slack_event_deliveries FROM anon, authenticated, service_role;
 
 
+-- Slack channel registry (TFAC-541): slack_channels — org-wide "channels we
+-- know of." Applies the entities pattern (durable "what exists" facts vs.
+-- team "who cares" choices) to Slack channels: this table is the registry
+-- (what exists), team_slack_channels below is the tracking (who cares).
+-- Powers the discovery/claim UX — a mention in an untracked channel becomes
+-- a visible "#eng-alerts — unclaimed" row instead of a silent drop — and
+-- caches display names, since Slack event payloads carry only the channel
+-- ID and resolving one costs an API call that needs a home rather than
+-- being repeated on every render.
+--
+-- org_id is part of the PRIMARY KEY, not a plain column with a
+-- channel_id-only unique index: channel IDs (C.../G...) are globally
+-- unique in Slack's model and stable across Enterprise Grid / Slack
+-- Connect shared channels (the same property domain.SlackSourceID leans
+-- on), so the SAME channel can legitimately be seen by two different TF
+-- orgs each running their own app in a shared/Connect channel (the
+-- two-orgs/two-apps/one-workspace scenario TFAC-533 re-keyed
+-- org_slack_workspaces for). Each org gets its own registry row for that
+-- channel, never a shared one.
+--
+-- workspace_id is the workspace we last saw the channel through — context
+-- for which bot token a name-resolution call would use, not a foreign key
+-- (a channel can be seen through more than one workspace over an app's
+-- lifetime, e.g. a Connect channel). name = '' means unresolved; render
+-- the raw channel_id, never invent a display name.
+--
+-- Postgres-only, same posture as every other Slack table: local mode is
+-- N=1 with no multi-workspace concept, so the SQLite store is a stub
+-- returning ErrNotApplicableInLocal.
+CREATE TABLE public.slack_channels (
+    org_id uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
+    channel_id text NOT NULL,
+    workspace_id text NOT NULL,
+    name text NOT NULL DEFAULT '',
+    name_resolved_at timestamptz,
+    first_seen_at timestamptz NOT NULL DEFAULT now(),
+    last_mention_at timestamptz,
+    PRIMARY KEY (org_id, channel_id),
+    CONSTRAINT sc_channel_populated CHECK (channel_id <> '')
+);
+
+ALTER TABLE public.slack_channels ENABLE ROW LEVEL SECURITY;
+
+-- Member-read, system-write: any org member can see what channels TF knows
+-- about, mirroring org_slack_workspaces_select's member-visible read. There
+-- is NO app-pool insert/update/delete policy at all — every write is a
+-- `...System` method on the admin pool (ingest sightings, name resolution,
+-- the channels API's ensure — a sibling leaf).
+CREATE POLICY slack_channels_select ON public.slack_channels FOR SELECT TO tf_app
+  USING ((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id));
+
+-- supabase_admin's ALTER DEFAULT PRIVILEGES auto-grants public-schema tables
+-- to anon/authenticated/service_role at CREATE time. Strip them so the table
+-- is reachable only by tf_app (SELECT-only, under RLS) and the admin pool
+-- (which bypasses RLS for every System write) — same posture as the other
+-- Slack tables, minus the write grants: there is no app-pool write path.
+REVOKE ALL ON public.slack_channels FROM PUBLIC;
+REVOKE ALL ON public.slack_channels FROM anon, authenticated, service_role;
+GRANT SELECT ON public.slack_channels TO tf_app;
+
+
+-- Slack channel tracking (TFAC-541): team_slack_channels — the team<->
+-- channel bind, the tracking half of the registry/tracking split above.
+-- The stage-1 scope gate for slack:mention routing (a sibling leaf) and the
+-- source of a channel's primary owning team.
+--
+-- Deliberate deviation from team_github_repos (which carries no org_id —
+-- org rides the teams FK): this table denormalizes org_id specifically so
+-- the one-primary-per-channel invariant below can be a partial unique
+-- index over (org_id, channel_id) rather than channel_id alone. Channel
+-- IDs are global (see slack_channels above), so without the org column the
+-- index would wrongly forbid two DIFFERENT orgs from each having their own
+-- primary tracker on the same Connect channel. Resist "simplifying" this
+-- column away — it is load-bearing for the invariant, not redundant with
+-- the teams FK.
+--
+-- No FK to slack_channels: a team may track a channel TF has never seen a
+-- mention in (the TF-first picker flow, a sibling leaf) — registry rows
+-- are upserted opportunistically elsewhere and must never gate a tracking
+-- write.
+--
+-- is_primary is never written from the app pool. RLS cannot gate a single
+-- column, so this is purely a store-layer contract: the app-pool
+-- ReplaceForTeam always inserts is_primary = false and leaves existing
+-- rows' is_primary untouched; promotion, succession, and admin
+-- reassignment happen ONLY through the admin-pool
+-- ReconcilePrimariesSystem / SetPrimarySystem store methods.
+CREATE TABLE public.team_slack_channels (
+    org_id uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
+    team_id uuid NOT NULL REFERENCES public.teams(id) ON DELETE CASCADE,
+    channel_id text NOT NULL,
+    is_primary boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (team_id, channel_id),
+    CONSTRAINT tsc_channel_populated CHECK (channel_id <> '')
+);
+
+-- The one-primary-per-channel invariant: at most one tracking row per
+-- (org_id, channel_id) may have is_primary = true. See the table comment
+-- for why org_id (not channel_id alone) is the partial index's scope.
+CREATE UNIQUE INDEX team_slack_channels_one_primary
+    ON public.team_slack_channels (org_id, channel_id) WHERE is_primary;
+
+-- Serves the cross-team reads (PrimaryTeamForChannelSystem,
+-- ListTrackersForOrgSystem, TracksChannelSystem, ReconcilePrimariesSystem)
+-- that look up every tracker of a channel rather than one team's rows.
+CREATE INDEX team_slack_channels_channel_idx
+    ON public.team_slack_channels (org_id, channel_id);
+
+ALTER TABLE public.team_slack_channels ENABLE ROW LEVEL SECURITY;
+
+-- Mirrors team_github_repos_select exactly (see team_github_repos above),
+-- with the org guard added since the column exists here: any team member
+-- can see their team's tracked channels.
+CREATE POLICY team_slack_channels_select ON public.team_slack_channels FOR SELECT TO tf_app
+  USING ((org_id = tf.current_org_id()) AND tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
+   FROM public.memberships m
+  WHERE ((m.team_id = team_slack_channels.team_id) AND (m.user_id = tf.current_user_id())))));
+
+CREATE POLICY team_slack_channels_insert ON public.team_slack_channels FOR INSERT TO tf_app
+  WITH CHECK ((org_id = tf.current_org_id()) AND tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id));
+
+CREATE POLICY team_slack_channels_update ON public.team_slack_channels FOR UPDATE TO tf_app
+  USING ((org_id = tf.current_org_id()) AND tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id))
+  WITH CHECK ((org_id = tf.current_org_id()) AND tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id));
+
+CREATE POLICY team_slack_channels_delete ON public.team_slack_channels FOR DELETE TO tf_app
+  USING ((org_id = tf.current_org_id()) AND tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id));
+
+REVOKE ALL ON public.team_slack_channels FROM PUBLIC;
+REVOKE ALL ON public.team_slack_channels FROM anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.team_slack_channels TO tf_app;
+
+
 -- === Marketplace V1 (TFAC-535) ===========================================
 -- Within-org publish/copy for prompts + blueprints. Foundation schema only —
 -- publish/browse/install flows land in TFAC-536/537/538. Copy-on-publish

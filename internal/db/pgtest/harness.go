@@ -278,6 +278,11 @@ var orgScopedTables = []string{
 	// into orgs), it must be listed explicitly or Reset would leak
 	// delivery-dedup rows across tests sharing this container.
 	"slack_event_deliveries",
+	// slack_channels, team_slack_channels (TFAC-541): both carry an org_id
+	// FK (cascading via orgs, and via teams for the latter) so TRUNCATE
+	// CASCADE would reach them even unlisted; listed explicitly anyway,
+	// matching the team_github_repos / team_github_groups convention above.
+	"slack_channels", "team_slack_channels",
 	// users last — most other tables FK into it.
 	"users",
 	// NOT INCLUDED explicitly: system_prompt_versions, events_catalog.
