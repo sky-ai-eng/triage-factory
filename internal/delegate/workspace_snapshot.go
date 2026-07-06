@@ -95,8 +95,11 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 	}
 
 	// Git delta — nil for a non-git run-root (e.g. a Jira lazy run), in which
-	// case the snapshot carries only _scratch + the session transcript.
-	delta, err := worktree.CaptureWorkspaceGit(ctx, wtPath)
+	// case the snapshot carries only _scratch + the session transcript. In multi
+	// mode this runs in a dropped-privilege, network-isolated child so the
+	// capture's filter-honoring git never executes agent-planted drivers as root
+	// (see captureWorkspaceGit).
+	delta, err := captureWorkspaceGit(ctx, wtPath)
 	if err != nil {
 		return fmt.Errorf("snapshot: capture git: %w", err)
 	}
