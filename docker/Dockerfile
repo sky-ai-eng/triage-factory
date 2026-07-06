@@ -90,7 +90,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 # Enterprise PUBLIC key, baked so official images verify licenses. Public (it ships in
 # every binary); empty = community image, EE off. Passed as a build-arg by docker-publish.yml.
-ARG TF_LICENSE_PUBLIC_KEY=""
+ARG TF_LICENSE_PUBLIC_KEY=
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
