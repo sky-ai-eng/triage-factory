@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -69,6 +70,14 @@ type Client struct {
 	baseURL string // API base: "https://api.github.com" or "{ghe}/api/v3"
 	pat     string
 	http    *http.Client
+
+	// Rate-limit state (see ratelimit.go), updated from the headers on every
+	// response the request core sees and read by RateLimit()/awaitBudget().
+	rlMu        sync.Mutex
+	rlRemaining int
+	rlReset     time.Time
+	rlUsed      int
+	rlOK        bool // true once a response has carried rate-limit headers
 }
 
 // NewClient creates a GitHub API client. baseURL is the user-facing URL
@@ -135,13 +144,23 @@ func (c *Client) newRequest(ctx context.Context, method, fullURL string, body an
 // status-discriminate via errors.As. The error string is the verbatim
 // "%s %s returned %d: %s" the pre-unification do() formatted, so string-matching
 // callers are unaffected and errors.As callers only gain accuracy.
+//
+// GET requests go through doIdempotent (rate-limit pre-flight + retry);
+// every other method is a mutation and goes through doMutation (single
+// attempt, no retry — see ratelimit.go). Either can return *ErrRateLimited
+// in place of the transport error.
 func (c *Client) request(ctx context.Context, method, path string, body any, accept string) ([]byte, error) {
-	req, err := c.newRequest(ctx, method, c.baseURL+path, body, accept)
-	if err != nil {
-		return nil, err
+	build := func() (*http.Request, error) {
+		return c.newRequest(ctx, method, c.baseURL+path, body, accept)
 	}
 
-	resp, err := c.http.Do(req)
+	var resp *http.Response
+	var err error
+	if method == http.MethodGet {
+		resp, err = c.doIdempotent(ctx, build)
+	} else {
+		resp, err = c.doMutation(ctx, build)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("request %s: %w", path, err)
 	}
@@ -214,15 +233,18 @@ func (c *Client) UserID(ctx context.Context, login string) (int64, error) {
 // don't use; it shares the newRequest build prefix but keeps the 304
 // short-circuit and ETag return that the unified core doesn't model.
 func (c *Client) GetConditional(ctx context.Context, path, etag string) (body []byte, newEtag string, notModified bool, err error) {
-	req, err := c.newRequest(ctx, "GET", c.baseURL+path, nil, acceptJSON)
-	if err != nil {
-		return nil, "", false, err
-	}
-	if etag != "" {
-		req.Header.Set("If-None-Match", etag)
+	build := func() (*http.Request, error) {
+		req, err := c.newRequest(ctx, "GET", c.baseURL+path, nil, acceptJSON)
+		if err != nil {
+			return nil, err
+		}
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
+		return req, nil
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := c.doIdempotent(ctx, build)
 	if err != nil {
 		return nil, "", false, fmt.Errorf("request %s: %w", path, err)
 	}
@@ -293,16 +315,15 @@ func (c *Client) Delete(ctx context.Context, path string) ([]byte, error) {
 // ctx cancels the (potentially long) download; it's additive to the 15-minute
 // clone timeout. Returns the number of bytes written to dst.
 func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Writer, maxBytes int64) (int64, error) {
-	req, err := c.newRequest(ctx, "GET", c.baseURL+path, nil, acceptJSON)
-	if err != nil {
-		return 0, err
+	build := func() (*http.Request, error) {
+		return c.newRequest(ctx, "GET", c.baseURL+path, nil, acceptJSON)
 	}
 
 	// Shallow copy so the long-download timeout doesn't bleed into other
 	// API calls that share the same client. Inherits Transport/Jar/CheckRedirect.
 	client := *c.http
 	client.Timeout = downloadTimeout
-	resp, err := client.Do(req)
+	resp, err := c.doWithRetry(ctx, &client, true, build)
 	if err != nil {
 		return 0, fmt.Errorf("download request %s: %w", path, err)
 	}
@@ -394,13 +415,17 @@ func (e gqlErrors) first(context string) error {
 // load-bearing 200-carrying-errors[] partial-vs-total-failure path below is
 // preserved exactly — a usable `data` block degrades to the partial result,
 // an absent/null `data` is a genuine failure.
+//
+// Every caller in this codebase uses PostGraphQL for reads (queries), never
+// mutations, so it goes through doIdempotent — a 429/secondary-403 retries
+// like a GET rather than surfacing immediately as it would for a real
+// mutation.
 func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
-	req, err := c.newRequest(ctx, "POST", graphqlURL(c.baseURL), body, "")
-	if err != nil {
-		return nil, err
+	build := func() (*http.Request, error) {
+		return c.newRequest(ctx, "POST", graphqlURL(c.baseURL), body, "")
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := c.doIdempotent(ctx, build)
 	if err != nil {
 		return nil, fmt.Errorf("graphql request: %w", err)
 	}
