@@ -345,6 +345,19 @@ func TestIntegration_RootfsHasGo(t *testing.T) {
 	toolchainTest(t, []string{"/usr/bin/go", "version"}, "go version")
 }
 
+// TestIntegration_RootfsHasPnpm pins the fix for the "pnpm: command
+// not found" failure real delegated runs hit building this repo's own
+// frontend: nodejs/npm alone don't put pnpm on PATH, only `corepack
+// enable` (installToolchain, rootfs_linux.go) does. `pnpm --version`
+// also exercises the pre-warmed pin (corepack prepare --activate) —
+// if that step were skipped, this would still fail inside the
+// sandbox's locked-down egress even with the shim in place, because
+// corepack would have no cached release to resolve the version
+// against and no network to fetch one.
+func TestIntegration_RootfsHasPnpm(t *testing.T) {
+	toolchainTest(t, []string{"/usr/bin/pnpm", "--version"}, pnpmVersion)
+}
+
 // TestIntegration_ConfigureProxies_InjectsEnv is the SKY-335
 // sandbox-side proxy wiring test. Asserts:
 //
