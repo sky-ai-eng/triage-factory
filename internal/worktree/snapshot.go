@@ -23,6 +23,17 @@ import (
 // reconstructs those from the bare and layers this delta on top. A nil
 // *GitDelta means the path was not a git worktree (e.g. a Jira lazy run-root),
 // so there is no git state to carry.
+//
+// SECURITY INVARIANT — the agent's .git/config is NEVER part of this delta,
+// and must never be added. Restore rebuilds the worktree from the host-owned
+// bare, so the config in effect during the restore-side `git apply` is the
+// bare's clean config, not anything the agent authored. That is the only
+// reason restore's apply is safe against a hostile checkout: a tracked
+// .gitattributes can select a filter driver, but only config defines the
+// command that driver runs, and restore's config is ours. Carrying the
+// agent's config across a snapshot (or applying it into the rebuilt worktree)
+// would arm the restore-side apply the same way an agent-authored config arms
+// the capture path — keep config out of the delta.
 type GitDelta struct {
 	// Branch is the worktree's checked-out branch. Empty when HEAD is
 	// detached — restore then checks out Head directly (detached).
@@ -367,6 +378,20 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 // `git bundle` payload isn't corrupted by progress text on stderr — unlike
 // gitOutputCtx, which combines the two. env, when non-nil, replaces the
 // child's environment (used to point GIT_INDEX_FILE at a throwaway index).
+//
+// gitCapture runs git as the host (root, in multi mode) directly against the
+// worktree, and captureUncommitted's `git add -A` / `git diff` go through here.
+// Unlike the push-gate's metadata reads (a byte read of HEAD, and config read
+// from OUTSIDE any repository — neither of which lets an agent-writable config
+// run anything), add/diff DO consult the repository's own (agent-writable, once
+// chowned to the sandbox uid) `.gitattributes` + `.git/config` to decide
+// whether to invoke an external clean/smudge filter or diff driver. So this
+// path must NOT be made ownership-tolerant against a chowned run root: doing so
+// would let a compromised sandboxed agent plant both halves of that pair and
+// get this host-side (root) capture to execute arbitrary code. Fixing the
+// parking-snapshot failure against a chowned worktree needs the capture to run
+// with no more privilege than the agent had (inside the jail), or to avoid
+// filter-honoring git entirely — its own follow-up, not this.
 func gitCapture(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {

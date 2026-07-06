@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"testing"
 
@@ -232,6 +233,78 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping(t *testing.T) {
 	}
 	if !d.Allowed || len(d.AllowedRefs) != 0 {
 		t.Errorf("decision with a protected-mapped refspec = %+v, want Allowed=true with no refs", d)
+	}
+}
+
+// TestGitAuthorizeDecision_PRWorktreeRefspecMapping_DubiousOwnership is the
+// push-gate starvation regression: identical setup to
+// TestGitAuthorizeDecision_PRWorktreeRefspecMapping, except the worktree is
+// chowned to a different uid before the decision is computed — reproducing
+// what agentproc.chownWorktreeForSandbox leaves behind for every multi-mode
+// run. Before the fix, the host-side (root) read of PushTargetBranch hit
+// git's "detected dubious ownership" refusal, silently came back "", and the
+// row was skipped — Allowed stayed true (fetch/advertise still fine) but
+// AllowedRefs came back empty, which is exactly the observed symptom: the
+// receive-pack ref gate then denies every pushed ref with "ref-not-allowed"
+// even though the checkout's branch and push refspec are configured
+// correctly. Skips if the chown below fails (needs root/CAP_CHOWN — euid==0
+// alone doesn't guarantee it in a rootless/user-namespaced environment).
+func TestGitAuthorizeDecision_PRWorktreeRefspecMapping_DubiousOwnership(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := sqlitestore.New(database)
+	ctx := context.Background()
+	seedRun(t, database, "run-pr-own", "sess", "/tmp/wt")
+	info := agenthost.RunInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, RunID: "run-pr-own"}
+
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+		{Owner: "acme", Repo: "api"},
+	}); err != nil {
+		t.Fatalf("track repo: %v", err)
+	}
+	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.RepoProfile{
+		ID: "acme/api", Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
+	}); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+
+	// A real repo shaped like the multi-mode PR run clone.
+	wt := t.TempDir()
+	gitAt := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", append([]string{"-C", wt}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	gitAt("init", "-b", "triagefactory/run-pr-own/pr-58")
+	gitAt("config", "user.email", "t@example.com")
+	gitAt("config", "user.name", "T")
+	gitAt("commit", "--allow-empty", "-m", "seed")
+	gitAt("remote", "add", "tfpush-run-pr-own-58", "https://github.com/acme/api.git")
+	gitAt("config", "remote.tfpush-run-pr-own-58.push", "refs/heads/triagefactory/run-pr-own/pr-58:refs/heads/aa/SKY-101")
+	gitAt("config", "branch.triagefactory/run-pr-own/pr-58.pushRemote", "tfpush-run-pr-own-58")
+
+	if _, _, err := stores.RunWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.RunWorktree{
+		RunID: "run-pr-own", RepoID: "acme/api", Path: wt, Ref: "pr-58",
+	}); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+
+	// Reproduce chownWorktreeForSandbox's effect: the worktree ends up owned
+	// by a uid other than this (root) process's. Git's dubious-ownership
+	// check only compares the top-level directory's owner, so chowning wt
+	// itself (rather than walking the whole tree like the real chown does)
+	// reproduces the failure exactly.
+	if err := os.Chown(wt, 65534, 65534); err != nil {
+		t.Skipf("can't chown %s to a foreign uid (needs root/CAP_CHOWN): %v", wt, err)
+	}
+
+	d, err := gitAuthorizeDecision(ctx, stores, info, "acme", "api")
+	if err != nil {
+		t.Fatalf("gitAuthorizeDecision: %v", err)
+	}
+	if !d.Allowed || !equalRefs(d.AllowedRefs, []string{"refs/heads/aa/SKY-101"}) {
+		t.Errorf("decision against a foreign-owned worktree = %+v, want Allowed with refs/heads/aa/SKY-101 (dubious ownership must not starve AllowedRefs)", d)
 	}
 }
 

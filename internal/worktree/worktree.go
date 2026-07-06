@@ -562,6 +562,13 @@ func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, erro
 		cmd.Dir = dir
 	}
 	cmd.Env = gitBaseEnv()
+	return runGitOutput(ctx, cmd, args)
+}
+
+// runGitOutput executes cmd (already configured by the caller) and returns
+// its combined output, or a formatted error — the shared tail of gitOutputCtx
+// and the config-file reads in worktree_branch.go.
+func runGitOutput(ctx context.Context, cmd *exec.Cmd, args []string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() != nil {

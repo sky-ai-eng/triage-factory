@@ -687,10 +687,11 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 			continue
 		}
 		found = true
-		// A few git subprocesses per matching row (symbolic-ref + config
-		// reads). run_worktrees is keyed (run_id, repo_id, ref), so several
-		// rows can match; git ops per run are few enough that per-row spawning
-		// stays fine.
+		// A HEAD file read plus a few `git config --file` subprocesses per
+		// matching row (the current branch comes from a plain .git/HEAD read,
+		// no subprocess). run_worktrees is keyed (run_id, repo_id, ref), so
+		// several rows can match; git ops per run are few enough that per-row
+		// spawning stays fine.
 		branch := worktreePushTargetBranch(w.Path)
 		if branch == "" || protected[branch] {
 			continue
