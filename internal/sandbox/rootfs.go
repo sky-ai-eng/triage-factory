@@ -106,6 +106,21 @@ var apkPackages = []string{
 // operator caches the same way an apkPackages change does.
 const pnpmVersion = "11.9.0"
 
+// CorepackHome is the fixed, $HOME-independent corepack cache
+// directory, set as COREPACK_HOME at BOTH rootfs-bake time
+// (chrootToolchainEnv, rootfs_linux.go) and agent-run time
+// (agentproc's buildSandboxEnv). Corepack resolves its cache from
+// $HOME unless COREPACK_HOME overrides it, and the two phases run
+// under different HOMEs (/root in the bake chroot, /work in the
+// sandbox) — without this pin the pre-warmed pnpm release lands in
+// /root/.cache, runtime corepack looks in /work/.cache, misses, and
+// falls back to a network fetch, defeating the pre-warm entirely.
+// Exported so the agentproc runtime env references the same constant
+// the bake writes to — the compile-time link is what keeps the two
+// sides from drifting. Folded into the rootfs cache key: moving the
+// path changes what the bake produces, so it must re-extract.
+const CorepackHome = "/opt/corepack"
+
 // rootfsCacheKey returns the 12-hex-char cache key for the current
 // rootfs build inputs, or an error if the host's GOARCH is not
 // supported. Error-returning rather than panicking so a misconfigured
@@ -141,6 +156,8 @@ func rootfsCacheKeyFor(alpineSha string, packages []string) string {
 		h.Write([]byte{0})
 	}
 	h.Write([]byte(pnpmVersion))
+	h.Write([]byte{0})
+	h.Write([]byte(CorepackHome))
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 

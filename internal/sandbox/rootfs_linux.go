@@ -195,13 +195,21 @@ func installToolchain(ctx context.Context, rootfsDir string) error {
 // entry point has a `#!/usr/bin/env node` shebang, so PATH must
 // resolve to a `node` that exists inside the chroot's own filesystem
 // view (the apk-installed /usr/bin/node), not wherever the host
-// happens to keep its own Node. HOME matters too — it's where corepack
-// caches downloaded package-manager releases, and pinning it to /root
-// keeps that cache inside the chroot so it freezes into the cached
-// rootfs image alongside everything else installToolchain lays down.
+// happens to keep its own Node.
+//
+// COREPACK_HOME is the load-bearing entry: corepack's release cache
+// defaults to a $HOME-derived path, and the bake (HOME=/root here)
+// and the agent runtime (HOME=/work, agentproc's buildSandboxEnv) run
+// under DIFFERENT homes — without the shared pin the pre-warmed pnpm
+// would freeze into /root/.cache where runtime corepack never looks,
+// and the first `pnpm` call would fall back to a network fetch.
+// Verified empirically (node:22-alpine, non-root, network disabled):
+// bake+run under the same COREPACK_HOME serves pnpm fully offline
+// from the root-owned, world-readable cache.
 var chrootToolchainEnv = []string{
 	"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 	"HOME=/root",
+	"COREPACK_HOME=" + CorepackHome,
 }
 
 // enableCorepack runs `corepack enable` inside the chroot so the

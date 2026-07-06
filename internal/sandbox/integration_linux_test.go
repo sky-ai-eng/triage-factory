@@ -117,6 +117,11 @@ func minimalConfig(t *testing.T) Config {
 		Env: []string{
 			"PATH=/usr/local/bin:/usr/bin:/bin",
 			"HOME=/work",
+			// Mirrors agentproc's buildSandboxEnv: without the pin the
+			// pnpm toolchain probe would look for corepack's cache under
+			// HOME=/work and miss the bake's pre-warm (which is why the
+			// pin exists — see sandbox.CorepackHome).
+			"COREPACK_HOME=" + CorepackHome,
 		},
 	}
 }
@@ -301,11 +306,12 @@ func TestIntegration_ReapOrphans(t *testing.T) {
 // agent runs will fail at the first Bash(...) invocation that tries
 // to use that tool.
 
-func toolchainTest(t *testing.T, argv []string, wantSubstring string) {
+func toolchainTest(t *testing.T, argv []string, wantSubstring string, extraEnv ...string) {
 	t.Helper()
 	requireApk(t)
 	cfg := minimalConfig(t)
 	cfg.Argv = argv
+	cfg.Env = append(cfg.Env, extraEnv...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -349,13 +355,19 @@ func TestIntegration_RootfsHasGo(t *testing.T) {
 // not found" failure real delegated runs hit building this repo's own
 // frontend: nodejs/npm alone don't put pnpm on PATH, only `corepack
 // enable` (installToolchain, rootfs_linux.go) does. `pnpm --version`
-// also exercises the pre-warmed pin (corepack prepare --activate) —
-// if that step were skipped, this would still fail inside the
-// sandbox's locked-down egress even with the shim in place, because
-// corepack would have no cached release to resolve the version
-// against and no network to fetch one.
+// also exercises the pre-warmed pin (corepack prepare --activate)
+// through the shared COREPACK_HOME (minimalConfig carries the same
+// pin buildSandboxEnv does — the bake and runtime HOMEs differ, so
+// the pre-warm is only visible through it).
+//
+// COREPACK_ENABLE_NETWORK=0 makes a cache miss fail fast with a clear
+// "network access disabled" error instead of hanging out the 120s ctx
+// on a fetch the egress policy blackholes anyway — and doubles as the
+// offline proof: a pass means the version came entirely from the
+// baked cache.
 func TestIntegration_RootfsHasPnpm(t *testing.T) {
-	toolchainTest(t, []string{"/usr/bin/pnpm", "--version"}, pnpmVersion)
+	toolchainTest(t, []string{"/usr/bin/pnpm", "--version"}, pnpmVersion,
+		"COREPACK_ENABLE_NETWORK=0")
 }
 
 // TestIntegration_ConfigureProxies_InjectsEnv is the SKY-335
