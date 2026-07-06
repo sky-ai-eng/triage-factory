@@ -277,8 +277,16 @@ func dialHubClient(t *testing.T, h *websocket.Hub) (*ws.Conn, func()) {
 
 // dialHubClientOrg is dialHubClient with an explicit org on the registered
 // connection, for the presence tests that need a client scoped to a tenant.
+//
+// It returns only once the hub has REGISTERED the connection, not merely once
+// the handshake completed: ws.Dial resolves when the client sees the 101, but
+// the server-side HandleWS goroutine still has to add the client to the hub's
+// maps. A Broadcast fired inside that window is delivered to nobody, so a test
+// that dials and immediately triggers a broadcast would flake on a starved
+// runner (observed in CI as readPermissionResolved timing out).
 func dialHubClientOrg(t *testing.T, h *websocket.Hub, orgID string) (*ws.Conn, func()) {
 	t.Helper()
+	before := h.ClientCount()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.HandleWS(w, r, "user", orgID, "")
 	}))
@@ -287,6 +295,15 @@ func dialHubClientOrg(t *testing.T, h *websocket.Hub, orgID string) (*ws.Conn, f
 	if err != nil {
 		srv.Close()
 		t.Fatalf("dial hub: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for h.ClientCount() <= before {
+		if time.Now().After(deadline) {
+			_ = conn.Close(ws.StatusNormalClosure, "")
+			srv.Close()
+			t.Fatalf("hub never registered dialed client (count still %d)", before)
+		}
+		time.Sleep(time.Millisecond)
 	}
 	return conn, func() {
 		_ = conn.Close(ws.StatusNormalClosure, "")
