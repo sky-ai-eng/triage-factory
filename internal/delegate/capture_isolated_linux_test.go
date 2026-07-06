@@ -68,11 +68,35 @@ func TestCaptureIsolated_DropsPrivilegeAndNetns(t *testing.T) {
 	if strings.Contains(idLine, "(root)") || strings.Contains(idLine, "groups=0") {
 		t.Errorf("child retained a root supplementary group:\n%s", idLine)
 	}
-	// An empty network namespace has only loopback in /proc/net/dev; a host
-	// interface leaking in means CLONE_NEWNET did not take.
-	for _, iface := range []string{"eth0", "ens", "eno", "docker0", "veth"} {
-		if strings.Contains(netPart, iface) {
-			t.Errorf("child network namespace not isolated (saw %q):\n%s", iface, netPart)
+
+	// A fresh CLONE_NEWNET namespace contains ONLY loopback. Assert exactly that
+	// — the positive property — rather than blocklisting known host interface
+	// names, so an interface with any name (enpXsY, wlan0, …) leaking in fails.
+	ifaces := parseProcNetDevIfaces(netPart)
+	if len(ifaces) == 0 {
+		t.Fatalf("could not parse any interface from /proc/net/dev:\n%s", netPart)
+	}
+	for _, name := range ifaces {
+		if name != "lo" {
+			t.Errorf("child network namespace not isolated (interface %q present, want only lo): %v", name, ifaces)
 		}
 	}
+}
+
+// parseProcNetDevIfaces extracts interface names from a /proc/net/dev dump.
+// Data lines are "  <name>: <counters...>"; the two header lines have no
+// pre-colon interface token, so keying on the colon-delimited first field and
+// dropping empties yields exactly the interface set.
+func parseProcNetDevIfaces(procNetDev string) []string {
+	var names []string
+	for _, line := range strings.Split(procNetDev, "\n") {
+		i := strings.IndexByte(line, ':')
+		if i < 0 {
+			continue
+		}
+		if name := strings.TrimSpace(line[:i]); name != "" && !strings.Contains(name, "|") {
+			names = append(names, name)
+		}
+	}
+	return names
 }

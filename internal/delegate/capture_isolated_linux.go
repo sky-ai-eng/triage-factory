@@ -82,18 +82,27 @@ func captureIsolated(ctx context.Context, wtPath string) (*worktree.GitDelta, er
 // captureChildEnv is the minimal environment for the capture child. It
 // deliberately does NOT inherit the TF process env — that holds DB passwords and
 // service tokens the child (running attacker-influenceable git) must never see.
-// It carries only what git needs to run locally, plus config overrides
-// disabling the attribute-free code-exec config keys (core.fsmonitor,
-// diff.external); the uid drop, not these overrides, is the actual boundary.
+// It carries only what git needs to run locally.
+//
+// It also refuses to read any user/global/system git config: GIT_CONFIG_GLOBAL
+// and GIT_CONFIG_SYSTEM point at /dev/null so git ignores ~/.gitconfig, the XDG
+// global config, and /etc/gitconfig, and HOME is a non-existent path so nothing
+// resolves through it either. Without this, HOME pointing at a shared writable
+// directory (/tmp) would let anyone plant /tmp/.gitconfig — a filter, an
+// include.path — and make the capture attacker-influenceable and
+// non-deterministic across runs. Only the run root's own repo config is read.
+// On top of that, config overrides neuter the two attribute-free code-exec keys
+// (core.fsmonitor, diff.external) as defense in depth; the uid drop, not these,
+// is the actual boundary.
 func captureChildEnv() []string {
-	env := []string{
+	return []string{
 		"PATH=" + os.Getenv("PATH"), // locate the git binary
-		"HOME=/tmp",                 // git's global-config lookup; absent file is fine
+		"HOME=/nonexistent",         // no user config from a shared/writable HOME
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_TERMINAL_PROMPT=0",
-		// Neutralize the two exec vectors that need no .gitattributes selection.
 		"GIT_CONFIG_COUNT=2",
 		"GIT_CONFIG_KEY_0=core.fsmonitor", "GIT_CONFIG_VALUE_0=",
 		"GIT_CONFIG_KEY_1=diff.external", "GIT_CONFIG_VALUE_1=",
 	}
-	return env
 }
