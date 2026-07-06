@@ -71,8 +71,11 @@ func currentArchRootfs() (url, sha string, err error) {
 // tarball sha) so a fresh extraction picks up the new package set
 // on the next sandbox launch.
 //
-//   - nodejs/npm — agent SDK runtime; corepack ships with npm so
-//     pnpm/yarn are available on demand without a separate apk add.
+//   - nodejs/npm — agent SDK runtime. Corepack ships bundled with npm,
+//     but shipping isn't the same as being on PATH: pnpm/yarn only
+//     become runnable once `corepack enable` writes their dispatcher
+//     shims, which installToolchain (rootfs_linux.go) now does at
+//     build time — see enableCorepack and pnpmVersion below.
 //   - git — every delegate/curator flow does status/diff/commit/push.
 //   - ripgrep — agent's primary code-search tool; faster than grep
 //     on large repos.
@@ -93,6 +96,31 @@ var apkPackages = []string{
 	"python3", "go", "make", "curl", "openssh-client", "build-base",
 }
 
+// pnpmVersion pins the pnpm release that installToolchain pre-warms
+// into the cached rootfs via `corepack prepare --activate`
+// (rootfs_linux.go's enableCorepack), so a sandboxed agent's `pnpm
+// install` resolves the pin from the local corepack cache instead of
+// reaching for the network. Must match frontend/package.json's
+// "packageManager" field — bump both together. Folded into
+// rootfsCacheKeyFor's hash so a version bump invalidates existing
+// operator caches the same way an apkPackages change does.
+const pnpmVersion = "11.9.0"
+
+// CorepackHome is the fixed, $HOME-independent corepack cache
+// directory, set as COREPACK_HOME at BOTH rootfs-bake time
+// (chrootToolchainEnv, rootfs_linux.go) and agent-run time
+// (agentproc's buildSandboxEnv). Corepack resolves its cache from
+// $HOME unless COREPACK_HOME overrides it, and the two phases run
+// under different HOMEs (/root in the bake chroot, /work in the
+// sandbox) — without this pin the pre-warmed pnpm release lands in
+// /root/.cache, runtime corepack looks in /work/.cache, misses, and
+// falls back to a network fetch, defeating the pre-warm entirely.
+// Exported so the agentproc runtime env references the same constant
+// the bake writes to — the compile-time link is what keeps the two
+// sides from drifting. Folded into the rootfs cache key: moving the
+// path changes what the bake produces, so it must re-extract.
+const CorepackHome = "/opt/corepack"
+
 // rootfsCacheKey returns the 12-hex-char cache key for the current
 // rootfs build inputs, or an error if the host's GOARCH is not
 // supported. Error-returning rather than panicking so a misconfigured
@@ -106,16 +134,17 @@ func rootfsCacheKey() (string, error) {
 	return rootfsCacheKeyFor(sha, apkPackages), nil
 }
 
-// rootfsCacheKeyFor hashes (alpine_sha, sorted-package-set) and
-// returns the first 12 hex chars. Sorting before hashing means the
+// rootfsCacheKeyFor hashes (alpine_sha, sorted-package-set, pnpmVersion)
+// and returns the first 12 hex chars. Sorting before hashing means the
 // key depends on the package set, not on slice ordering — a future
 // maintainer reshuffling apkPackages won't silently invalidate a
 // cache that's actually still correct.
 //
 // The cache directory is derived from this key, so adding a package
-// produces a new key, forces a fresh extraction, and avoids the
-// failure mode where the on-disk cache contains the old toolchain
-// while the running binary expects the new one.
+// (or bumping pnpmVersion) produces a new key, forces a fresh
+// extraction, and avoids the failure mode where the on-disk cache
+// contains the old toolchain while the running binary expects the
+// new one.
 func rootfsCacheKeyFor(alpineSha string, packages []string) string {
 	sorted := append([]string(nil), packages...)
 	sort.Strings(sorted)
@@ -126,6 +155,9 @@ func rootfsCacheKeyFor(alpineSha string, packages []string) string {
 		h.Write([]byte(p))
 		h.Write([]byte{0})
 	}
+	h.Write([]byte(pnpmVersion))
+	h.Write([]byte{0})
+	h.Write([]byte(CorepackHome))
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
