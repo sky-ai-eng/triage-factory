@@ -469,6 +469,108 @@ func TestMigrate_LLMSpendTriggerIDView(t *testing.T) {
 	}
 }
 
+// TestMigrate_RunsTriggerIDBackfill pins the 202607060001 backfill: step runs
+// minted while enqueueBlueprintStep dropped the firing trigger (trigger_type =
+// 'event' with a NULL trigger_id — the shape every autonomous run carried
+// after the blueprint orchestrator unification) are healed from their parent
+// blueprint_run's frozen trigger_id, so historical autonomous spend regains
+// its by-rule attribution in llm_spend. Manual step runs (parent carries no
+// trigger) stay NULL.
+func TestMigrate_RunsTriggerIDBackfill(t *testing.T) {
+	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+
+	goose.SetBaseFS(migrationsSQLiteFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("set dialect: %v", err)
+	}
+
+	// Up to the migration *before* the backfill, then seed the legacy shape.
+	const priorVersion = 202607030001
+	if err := goose.UpTo(database, "migrations-sqlite", priorVersion); err != nil {
+		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
+	}
+	// events_catalog is seeded by Migrate (not by goose alone), and the seed
+	// chain below FKs into it via events / tasks / event_handlers.
+	if err := SeedEventTypes(database, "sqlite3"); err != nil {
+		t.Fatalf("seed event types: %v", err)
+	}
+
+	// Minimal FK chain for two step runs: one under an event-fired
+	// blueprint_run (trigger frozen on the parent only — the bug shape), one
+	// under a manual blueprint_run. The sentinel user satisfies
+	// runs.creator_user_id's FK (pure-goose DBs carry no tenant rows); the
+	// event_type FKs reuse the catalog rows seeded above.
+	const userID = "00000000-0000-0000-0000-000000000100"
+	for _, stmt := range []string{
+		`INSERT INTO users (id) VALUES ('` + userID + `')`,
+		`INSERT INTO entities (id, source, source_id, kind) VALUES ('e1', 'github', 'o/r#1', 'pr')`,
+		`INSERT INTO events (id, event_type) VALUES ('ev1', (SELECT id FROM events_catalog LIMIT 1))`,
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id)
+			VALUES ('t1', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'ev1')`,
+		`INSERT INTO blueprints (id, name, creator_user_id) VALUES ('bp1', 'BP', '` + userID + `')`,
+		`INSERT INTO event_handlers (id, creator_user_id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability)
+			VALUES ('trig1', '` + userID + `', 'trigger', (SELECT id FROM events_catalog LIMIT 1), 'bp1', 3, 0.5)`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, creator_user_id, step_plan, worktree_path)
+			VALUES ('br-ev', 'bp1', 't1', 'event', 'trig1', NULL, '[]', '')`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, step_plan, worktree_path)
+			VALUES ('br-man', 'bp1', 't1', '[]', '')`,
+		`INSERT INTO prompts (id, name, body, creator_user_id) VALUES ('p1', 'P', 'b', '` + userID + `')`,
+		`INSERT INTO runs (id, task_id, prompt_id, trigger_type, creator_user_id, status, blueprint_run_id, blueprint_step_index, total_cost_usd)
+			VALUES ('run-ev', 't1', 'p1', 'event', NULL, 'completed', 'br-ev', 0, 1.0)`,
+		`INSERT INTO runs (id, task_id, prompt_id, status, blueprint_run_id, blueprint_step_index, total_cost_usd)
+			VALUES ('run-man', 't1', 'p1', 'completed', 'br-man', 0, 2.0)`,
+	} {
+		if _, err := database.Exec(stmt); err != nil {
+			t.Fatalf("seed %q: %v", stmt, err)
+		}
+	}
+
+	// Apply the backfill.
+	if err := goose.Up(database, "migrations-sqlite"); err != nil {
+		t.Fatalf("goose Up: %v", err)
+	}
+
+	assertRunTriggerID(t, database, `SELECT trigger_id FROM runs WHERE id = 'run-ev'`, "trig1")
+	assertRunTriggerID(t, database, `SELECT trigger_id FROM runs WHERE id = 'run-man'`, "")
+	// And through the spend layer: the autonomous row is now rule-attributed.
+	assertRunTriggerID(t, database,
+		`SELECT trigger_id FROM llm_spend WHERE source = 'run' AND source_id = 'run-ev'`, "trig1")
+	var cat string
+	if err := database.QueryRow(
+		`SELECT category FROM llm_spend WHERE source = 'run' AND source_id = 'run-ev'`,
+	).Scan(&cat); err != nil {
+		t.Fatalf("scan llm_spend category: %v", err)
+	}
+	if cat != "autonomous" {
+		t.Errorf("llm_spend category = %q, want autonomous", cat)
+	}
+}
+
+// assertRunTriggerID runs a single-row trigger_id query and checks it against
+// want ("" means SQL NULL is expected).
+func assertRunTriggerID(t *testing.T, database *sql.DB, query, want string) {
+	t.Helper()
+	var got sql.NullString
+	if err := database.QueryRow(query).Scan(&got); err != nil {
+		t.Fatalf("query %q: %v", query, err)
+	}
+	if want == "" {
+		if got.Valid {
+			t.Errorf("%q = %q, want NULL", query, got.String)
+		}
+		return
+	}
+	if !got.Valid || got.String != want {
+		t.Errorf("%q = %v (valid=%t), want %q", query, got.String, got.Valid, want)
+	}
+}
+
 // assertCuratorTeamID runs a single-row team_id query and checks it against want
 // ("" means SQL NULL is expected).
 func assertCuratorTeamID(t *testing.T, database *sql.DB, query, want string) {
