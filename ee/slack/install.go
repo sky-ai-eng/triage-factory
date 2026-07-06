@@ -8,11 +8,14 @@
 // This leaf adds event ingest: the transport-neutral pipeline (ingest.go),
 // the Events API (webhook) receiver (webhook.go), and the Socket Mode
 // receiver (socket.go/socket_conn.go) — both transports publish slack:*
-// events onto the bus. Until TFAC-510 registers routing.RegisterSource,
-// published events reach the in-memory bus only — routing.RouterBound
-// stays false for "slack:", so nothing is durably enqueued or routed yet.
-// The pipeline also dispatches best-effort sender identity capture
-// (identity.go, TFAC-531) after each publish — detached, never gating.
+// events onto the bus. install registers routing.RegisterSource("slack",
+// ...) (routing.go, TFAC-542), which flips routing.RouterBound("slack:")
+// true: a mention is now durably enqueued and routed through the owner
+// ladder, resolving to its channel's primary tracking team (or, absent one,
+// recorded taskless and visible only to applies_to_unowned watchers). The
+// pipeline also dispatches best-effort sender identity capture (identity.go,
+// TFAC-531) and channel-name resolution (channels.go, TFAC-542) after each
+// publish — both detached, never gating.
 //
 // Enterprise Edition — governed by the repository-root LICENSE (Triage Factory
 // License 1.0); enabling its features requires a valid license key.
@@ -22,6 +25,7 @@ import (
 	"net/http"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
+	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 
 	// Link the Slack store factories (postgres + sqlite) so the Slack
@@ -50,11 +54,20 @@ func init() {
 // complete and its status is read out through workspacesHandler.sockets.
 func install(api server.ExtensionAPI) {
 	stores := api.Stores()
+
+	bundle := slackstore.FromStores(stores)
+	routing.RegisterSource("slack", routing.SourceHooks{
+		ResolveOwner: slackChannelOwner(bundle),
+		TracksScope:  slackTeamTracksChannel(bundle),
+	})
+
 	pipeline := &ingestPipeline{
-		entities:   stores.Entities,
-		deliveries: slackstore.FromStores(stores).Deliveries,
-		publish:    api.PublishEvent,
-		identity:   NewIdentityResolver(stores),
+		entities:    stores.Entities,
+		deliveries:  bundle.Deliveries,
+		channels:    bundle.Channels,
+		publish:     api.PublishEvent,
+		identity:    NewIdentityResolver(stores),
+		channelName: NewChannelResolver(stores),
 	}
 	sockets := newSocketManager(stores, pipeline, slackHTTPClient, socketConfigChanged)
 

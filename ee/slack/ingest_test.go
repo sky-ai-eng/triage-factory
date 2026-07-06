@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,6 +58,77 @@ func (f *fakeDeliveries) MarkDeliveredSystem(_ context.Context, workspaceID, eve
 }
 
 var _ slackstore.DeliveryStore = (*fakeDeliveries)(nil)
+
+// fakeChannelRegistry is a minimal slackstore.ChannelRegistryStore fake: an
+// in-memory map keyed (orgID, channelID), tracking every UpsertSightingSystem
+// call so tests can assert dedup (dropped-before-sighting) behavior.
+type fakeChannelRegistry struct {
+	mu   sync.Mutex
+	rows map[string]*slackstore.Channel
+
+	upsertErr error
+	sawUpsert []string // channelKey values, one per UpsertSightingSystem call
+
+	// done, if non-nil, receives whenever SetNameSystem completes — the
+	// same deterministic "the detached resolver goroutine finished" signal
+	// fakeIdentityStore.done provides in identity_test.go.
+	done chan struct{}
+}
+
+func newFakeChannelRegistry() *fakeChannelRegistry {
+	return &fakeChannelRegistry{rows: map[string]*slackstore.Channel{}}
+}
+
+func channelKey(orgID, channelID string) string { return orgID + "/" + channelID }
+
+func (f *fakeChannelRegistry) UpsertSightingSystem(_ context.Context, orgID, workspaceID, channelID string, at time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := channelKey(orgID, channelID)
+	f.sawUpsert = append(f.sawUpsert, key)
+	if f.upsertErr != nil {
+		return false, f.upsertErr
+	}
+	if row, ok := f.rows[key]; ok {
+		row.WorkspaceID = workspaceID
+		lastMention := at
+		row.LastMentionAt = &lastMention
+		return false, nil
+	}
+	firstSeen := at
+	f.rows[key] = &slackstore.Channel{OrgID: orgID, ChannelID: channelID, WorkspaceID: workspaceID, FirstSeenAt: at, LastMentionAt: &firstSeen}
+	return true, nil
+}
+
+func (f *fakeChannelRegistry) EnsureSystem(context.Context, string, string, string, string) error {
+	return nil
+}
+
+func (f *fakeChannelRegistry) SetNameSystem(_ context.Context, orgID, channelID, name string) error {
+	f.mu.Lock()
+	if row, ok := f.rows[channelKey(orgID, channelID)]; ok {
+		row.Name = name
+		resolvedAt := time.Now()
+		row.NameResolvedAt = &resolvedAt
+	}
+	f.mu.Unlock()
+	if f.done != nil {
+		f.done <- struct{}{}
+	}
+	return nil
+}
+
+func (f *fakeChannelRegistry) GetSystem(_ context.Context, orgID, channelID string) (*slackstore.Channel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.rows[channelKey(orgID, channelID)], nil
+}
+
+func (f *fakeChannelRegistry) ListForOrg(context.Context, string) ([]slackstore.Channel, error) {
+	return nil, nil
+}
+
+var _ slackstore.ChannelRegistryStore = (*fakeChannelRegistry)(nil)
 
 // testWorkspaceRow is a small helper for a slackstore.Workspace fixture.
 func testWorkspaceRow(orgID string) slackstore.Workspace {
@@ -294,6 +367,114 @@ func TestHandleEventCallback_DispatchesIdentityResolution(t *testing.T) {
 	row := identities.rows[identityKey(ws.WorkspaceID, "U0SENDER1")]
 	if row == nil || row.UserID == nil || *row.UserID != "user-1" {
 		t.Fatalf("row = %+v; want resolved to user-1", row)
+	}
+}
+
+// TestHandleEventCallback_ChannelSightingUpsertedOnFreshDelivery pins the
+// TFAC-542 ingest-time capture: a fresh delivery records exactly one
+// sighting for its channel.
+func TestHandleEventCallback_ChannelSightingUpsertedOnFreshDelivery(t *testing.T) {
+	p, _, _, _ := newTestPipeline()
+	channels := newFakeChannelRegistry()
+	p.channels = channels
+	ws := testWorkspaceRow("org-1")
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", TS: "1600000000.000100"}
+
+	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+	if len(channels.sawUpsert) != 1 {
+		t.Fatalf("sighting upserts = %d; want 1", len(channels.sawUpsert))
+	}
+	if row := channels.rows[channelKey("org-1", "C1")]; row == nil {
+		t.Fatal("no sighting row recorded")
+	}
+}
+
+// TestHandleEventCallback_ChannelSightingNotUpsertedOnDuplicate pins that a
+// redelivered event_id never reaches sighting capture — it's dropped by the
+// dedup check first, same as it never reaches entity creation or publish.
+func TestHandleEventCallback_ChannelSightingNotUpsertedOnDuplicate(t *testing.T) {
+	p, _, _, _ := newTestPipeline()
+	channels := newFakeChannelRegistry()
+	p.channels = channels
+	ws := testWorkspaceRow("org-1")
+	ev := inboundMention{Type: "app_mention", EventID: "Ev-dup", Channel: "C1", User: "U1", TS: "1.0"}
+
+	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+		t.Fatalf("duplicate delivery: %v", err)
+	}
+	if len(channels.sawUpsert) != 1 {
+		t.Errorf("sighting upserts across 2 identical deliveries = %d; want 1 (dropped before sighting capture)", len(channels.sawUpsert))
+	}
+}
+
+// TestHandleEventCallback_ChannelSightingUpsertErrorDoesNotFailPipeline pins
+// the best-effort contract: a sighting-registry hiccup must never 5xx the
+// webhook or withhold the mention's own publish.
+func TestHandleEventCallback_ChannelSightingUpsertErrorDoesNotFailPipeline(t *testing.T) {
+	p, _, _, published := newTestPipeline()
+	channels := newFakeChannelRegistry()
+	channels.upsertErr = errors.New("boom")
+	p.channels = channels
+	ws := testWorkspaceRow("org-1")
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", TS: "1.0"}
+
+	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+		t.Fatalf("handleEventCallback: %v (a sighting-store error must not fail the pipeline)", err)
+	}
+	if len(*published) != 1 {
+		t.Errorf("published %d events; want 1 (mention still publishes despite sighting error)", len(*published))
+	}
+}
+
+// TestHandleEventCallback_DispatchesChannelNameResolutionOnCreated is the
+// TFAC-542 call-site wiring test for channel name resolution: a fresh
+// (first-sighted) channel dispatches resolveChannelName, which writes the
+// resolved name back into the registry. Runs a real ChannelResolver against
+// fakes rather than a nil channelName (every other test in this file), so
+// this is an end-to-end check of the wiring itself — mirrors
+// TestHandleEventCallback_DispatchesIdentityResolution's shape.
+func TestHandleEventCallback_DispatchesChannelNameResolutionOnCreated(t *testing.T) {
+	hits := 0
+	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "channel": map[string]any{"name": "general"},
+		})
+	})
+	channels := newFakeChannelRegistry()
+	channels.done = make(chan struct{}, 1)
+	resolver := &ChannelResolver{secrets: &fakeSecrets{token: "xoxb-test"}, channels: channels, client: srv.Client()}
+	p := &ingestPipeline{
+		entities:    newFakeEntities(),
+		deliveries:  newFakeDeliveries(),
+		channels:    channels,
+		publish:     func(domain.Event) {},
+		channelName: resolver,
+	}
+	ws := testWorkspaceRow("org-1")
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", TS: "1600000000.000100"}
+
+	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+
+	select {
+	case <-channels.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolveChannelName never completed — handleEventCallback did not dispatch it")
+	}
+
+	if hits != 1 {
+		t.Errorf("conversations.info hits = %d; want 1 (resolveChannelName should have called it)", hits)
+	}
+	row := channels.rows[channelKey("org-1", "C1")]
+	if row == nil || row.Name != "general" {
+		t.Fatalf("row = %+v; want name resolved to general", row)
 	}
 }
 

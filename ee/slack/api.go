@@ -248,6 +248,44 @@ func slackUsersInfo(ctx context.Context, client *http.Client, botToken, slackUse
 	}, nil
 }
 
+// conversationsInfoResult is the subset of Slack's conversations.info
+// response the channel registry (TFAC-541/542) needs: the channel's
+// current display name.
+type conversationsInfoResult struct {
+	Name string
+}
+
+// slackConversationsInfo looks up a channel's display name via
+// conversations.info — the channel name resolver's only network call
+// (channels.go). Requires the channels:read/groups:read scopes (already in
+// the shipped manifest, #561). A non-2xx HTTP response or a Slack-level
+// {"ok":false} both surface as an error; the caller treats any error here
+// as transient — it writes nothing, so the next sighting or stale-name
+// sweep retries (see ee/slack/channels.go).
+func slackConversationsInfo(ctx context.Context, client *http.Client, botToken, channelID string) (*conversationsInfoResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		slackAPIBase+"/conversations.info?channel="+url.QueryEscape(channelID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+
+	var out struct {
+		OK      bool   `json:"ok"`
+		Error   string `json:"error"`
+		Channel struct {
+			Name string `json:"name"`
+		} `json:"channel"`
+	}
+	if err := doSlackJSON(ctx, client, req, &out); err != nil {
+		return nil, err
+	}
+	if !out.OK {
+		return nil, fmt.Errorf("slack conversations.info: %s", nonEmpty(out.Error, "not ok"))
+	}
+	return &conversationsInfoResult{Name: out.Channel.Name}, nil
+}
+
 // doSlackJSON executes req and decodes the JSON body into out. Slack
 // answers 200 even for most application-level failures (the {"ok":false}
 // convention) — a non-2xx here means something more fundamental (rate

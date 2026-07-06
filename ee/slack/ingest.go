@@ -55,6 +55,12 @@ type ingestPipeline struct {
 	// and any future caller that doesn't need identity capture simply
 	// construct ingestPipeline without it.
 	identity *IdentityResolver
+	// channels records the sighting registry (slack_channels, TFAC-541);
+	// channelName resolves a sighted channel's display name (TFAC-542),
+	// best-effort and detached — see captureChannelSighting/
+	// resolveChannelName. Both nil-safe for the same reason as identity.
+	channels    slackstore.ChannelRegistryStore
+	channelName *ChannelResolver
 }
 
 // handleEventCallback is the one function both transports call for an
@@ -92,6 +98,9 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 		return nil
 	}
 
+	occurredAt := parseSlackTS(ev.TS)
+	p.captureChannelSighting(ctx, ws, ev.Channel, occurredAt)
+
 	root := ev.ThreadTS
 	if root == "" {
 		root = ev.TS
@@ -121,7 +130,7 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 		EventType:    domain.EventSlackMention,
 		EntityID:     &entity.ID,
 		MetadataJSON: string(metaJSON),
-		OccurredAt:   parseSlackTS(ev.TS),
+		OccurredAt:   occurredAt,
 	})
 
 	// Best-effort sender identity capture (TFAC-531), detached from the
@@ -133,6 +142,44 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 	}
 
 	return nil
+}
+
+// captureChannelSighting upserts the sighting registry row (slack_channels,
+// TFAC-541) for channelID and, on the first sighting or a stale name,
+// dispatches best-effort channel-name resolution — detached from the
+// publish path exactly like sender identity capture (resolveSender): a
+// registry hiccup or a slow conversations.info round-trip must never
+// withhold the publish that follows or the transport's ack. Every failure
+// here is logged and swallowed, never returned — see handleEventCallback's
+// caller, which always proceeds to publish regardless of this call's
+// outcome.
+func (p *ingestPipeline) captureChannelSighting(ctx context.Context, ws slackstore.Workspace, channelID string, at time.Time) {
+	if p.channels == nil {
+		return
+	}
+	created, err := p.channels.UpsertSightingSystem(ctx, ws.OrgID, ws.WorkspaceID, channelID, at)
+	if err != nil {
+		slackLog.Warn("channel sighting upsert failed", "workspace", ws.WorkspaceID, "channel", channelID, "error", err)
+		return
+	}
+	needsResolve := created
+	if !created {
+		// One extra read per non-first mention, only to check staleness —
+		// accepted here rather than threading a "last known name state"
+		// through UpsertSightingSystem's return value: mention volume is
+		// inherently low (one delivery per @mention, not per message), and
+		// this keeps the staleness rule (channels.go's channelNameStaleAfter)
+		// out of the store layer's write path.
+		row, err := p.channels.GetSystem(ctx, ws.OrgID, channelID)
+		if err != nil {
+			slackLog.Warn("channel sighting: staleness check failed", "workspace", ws.WorkspaceID, "channel", channelID, "error", err)
+		} else if row != nil {
+			needsResolve = row.NameResolvedAt == nil || time.Since(*row.NameResolvedAt) > channelNameStaleAfter
+		}
+	}
+	if needsResolve && p.channelName != nil {
+		p.channelName.dispatch(ws, channelID)
+	}
 }
 
 // mentionTitle derives the entity title from a mention's raw text: every
