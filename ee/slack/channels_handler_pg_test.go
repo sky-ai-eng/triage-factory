@@ -358,6 +358,61 @@ func TestChannelsHandler_Primary_NonOrgAdmin_Refused(t *testing.T) {
 	}
 }
 
+// TestChannelsHandler_Primary_ArchivedDestinationTeam_Refused: an archived
+// team stays a tracker of a channel after archiving (tracking changes are
+// forward-only — archiving never untracks), so SetPrimarySystem's own
+// "does this team track the channel" check alone would let reassignment
+// succeed. The handler must independently refuse an archived destination
+// team — read-only-and-vanished (TFAC-448) may not become a channel's live
+// routing owner — mirroring handlePut's destination-team guard.
+func TestChannelsHandler_Primary_ArchivedDestinationTeam_Refused(t *testing.T) {
+	r := newSlackChannelsRig(t)
+	orgID, owner, team1 := pgtest.SeedOrgWithUser(t, r.h, "chan-primary-archived")
+	team2 := pgtest.SeedTeam(t, r.h, orgID, "team2")
+	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'admin')`, owner, team2)
+
+	for _, teamID := range []string{team1, team2} {
+		rec := httptest.NewRecorder()
+		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+			map[string]any{"channel_ids": []string{"C1"}}))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT(%s) status = %d (body=%s)", teamID, rec.Code, rec.Body.String())
+		}
+	}
+	// team1 tracked first (primary by default); reassign to team2 so team1
+	// is a non-primary tracker — the scenario the archived-team guard must
+	// still refuse even though team1 isn't currently primary.
+	reassign := httptest.NewRecorder()
+	r.hdl.handlePrimary(reassign, r.reqPrimary(owner, orgID, "C1", map[string]string{"team_id": team2}))
+	if reassign.Code != http.StatusOK {
+		t.Fatalf("reassign to team2 status = %d (body=%s)", reassign.Code, reassign.Body.String())
+	}
+
+	pgtest.MustExec(t, r.h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, team1)
+
+	rec := httptest.NewRecorder()
+	r.hdl.handlePrimary(rec, r.reqPrimary(owner, orgID, "C1", map[string]string{"team_id": team1}))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (archived destination team); body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Archived bool `json:"archived"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if !body.Archived {
+		t.Errorf("403 body missing archived:true marker; body=%s", rec.Body.String())
+	}
+
+	// The primary must still be team2 — the refused reassignment must not
+	// have partially applied.
+	list := httptest.NewRecorder()
+	r.hdl.handleList(list, r.req(http.MethodGet, "/api/slack/teams/"+team2+"/channels", owner, orgID, team2, nil))
+	got := decodeChannels(t, list)
+	if len(got.Channels) != 1 || !got.Channels[0].IsPrimary {
+		t.Fatalf("team2's view after the refused reassignment = %+v; want still primary", got.Channels)
+	}
+}
+
 // ---------- blueprint seeding ----------
 
 func TestChannelsHandler_FirstTrack_SeedsDefaultBlueprint(t *testing.T) {

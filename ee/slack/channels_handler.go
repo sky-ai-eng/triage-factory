@@ -272,6 +272,12 @@ func (h *channelsHandler) handlePrimary(w http.ResponseWriter, r *http.Request) 
 	if !h.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
+	// An archived team is read-only-and-vanished (TFAC-448) — reassignment
+	// must not make one the live routing owner of a channel, mirroring
+	// handlePut's destination-team guard (VerifyTeamNotArchived above).
+	if !h.az.VerifyTeamNotArchived(w, r, orgID, userID, teamID) {
+		return
+	}
 
 	admin := slackstore.FromStores(h.stores)
 	if err := admin.TeamChannels.SetPrimarySystem(r.Context(), orgID, channelID, teamID); err != nil {
