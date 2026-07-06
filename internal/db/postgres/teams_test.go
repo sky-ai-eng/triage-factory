@@ -94,3 +94,52 @@ func TestTeamsStore_Postgres_GetDefaultForOrgSystem_IsolatesPerOrg(t *testing.T)
 		t.Errorf("default team resolved identically across two orgs: %q (per-tenant isolation broken)", gotA)
 	}
 }
+
+// TestTeamsStore_Postgres_NamesForIDsSystem: resolves names for exactly the
+// requested ids, cross-org id excluded, unknown id simply absent — the
+// narrow read a cross-team disclosure surface (e.g. the Slack channel-
+// tracking API's tracked_by) needs instead of an org-wide team enumeration.
+func TestTeamsStore_Postgres_NamesForIDsSystem(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgID, _, teamID := pgtest.SeedOrgWithUser(t, h, "names-for-ids")
+	team2 := pgtest.SeedTeam(t, h, orgID, "team2")
+	otherOrgID, _, otherTeamID := pgtest.SeedOrgWithUser(t, h, "names-for-ids-other")
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	got, err := stores.Teams.NamesForIDsSystem(context.Background(), orgID, []string{teamID, team2, otherTeamID, uuid.New().String()})
+	if err != nil {
+		t.Fatalf("NamesForIDsSystem: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("NamesForIDsSystem = %+v; want exactly 2 (teamID + team2, cross-org and unknown ids excluded)", got)
+	}
+	if _, ok := got[teamID]; !ok {
+		t.Errorf("NamesForIDsSystem = %+v; missing teamID %s", got, teamID)
+	}
+	if _, ok := got[team2]; !ok {
+		t.Errorf("NamesForIDsSystem = %+v; missing team2 %s", got, team2)
+	}
+	if _, ok := got[otherTeamID]; ok {
+		t.Errorf("NamesForIDsSystem = %+v; a different org's team (%s, org %s) must not resolve under orgID %s",
+			got, otherTeamID, otherOrgID, orgID)
+	}
+}
+
+// TestTeamsStore_Postgres_NamesForIDsSystem_EmptyInput: an empty id list
+// returns an empty map without erroring.
+func TestTeamsStore_Postgres_NamesForIDsSystem_EmptyInput(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgID := seedPgOrgForAgents(t, h)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	got, err := stores.Teams.NamesForIDsSystem(context.Background(), orgID, nil)
+	if err != nil {
+		t.Fatalf("NamesForIDsSystem: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("NamesForIDsSystem(nil) = %+v; want empty map", got)
+	}
+}

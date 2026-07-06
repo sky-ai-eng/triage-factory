@@ -35,20 +35,22 @@ type fakeChannelsSlack struct {
 	mu sync.Mutex
 	// public/mine are keyed by bot token — the channel list each endpoint
 	// answers with for that token.
-	public       map[string][]map[string]any
-	mine         map[string][]map[string]any
-	joinFailCode map[string]string // channel_id -> conversations.join error code (absent = success)
-	joinCalls    []string
-	failList     map[string]bool // bot token -> conversations.list itself should fail (ok:false)
+	public        map[string][]map[string]any
+	mine          map[string][]map[string]any
+	joinFailCode  map[string]string // channel_id -> conversations.join error code (absent = success)
+	joinCalls     []string
+	failList      map[string]bool // bot token -> conversations.list itself should fail (ok:false)
+	moreAvailable map[string]bool // bot token -> conversations.list should claim more pages exist
 }
 
 func newFakeChannelsSlack(t *testing.T) *fakeChannelsSlack {
 	t.Helper()
 	f := &fakeChannelsSlack{
-		public:       map[string][]map[string]any{},
-		mine:         map[string][]map[string]any{},
-		joinFailCode: map[string]string{},
-		failList:     map[string]bool{},
+		public:        map[string][]map[string]any{},
+		mine:          map[string][]map[string]any{},
+		joinFailCode:  map[string]string{},
+		failList:      map[string]bool{},
+		moreAvailable: map[string]bool{},
 	}
 	withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r)
@@ -57,12 +59,16 @@ func newFakeChannelsSlack(t *testing.T) *fakeChannelsSlack {
 			f.mu.Lock()
 			fail := f.failList[token]
 			chans := f.public[token]
+			nextCursor := ""
+			if f.moreAvailable[token] {
+				nextCursor = "more"
+			}
 			f.mu.Unlock()
 			if fail {
 				writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "internal_error"})
 				return
 			}
-			writeSlackFakeJSON(w, map[string]any{"ok": true, "channels": chans, "response_metadata": map[string]any{"next_cursor": ""}})
+			writeSlackFakeJSON(w, map[string]any{"ok": true, "channels": chans, "response_metadata": map[string]any{"next_cursor": nextCursor}})
 		case strings.HasSuffix(r.URL.Path, "/users.conversations"):
 			f.mu.Lock()
 			chans := f.mine[token]
@@ -98,6 +104,18 @@ func (f *fakeChannelsSlack) failConversationsList(botToken string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failList[botToken] = true
+}
+
+// setMoreAvailable makes conversations.list always claim a non-empty
+// next_cursor for botToken, regardless of the cursor query param (this fake
+// doesn't paginate by cursor — it always answers the full configured list) —
+// paired with a lowered slackConversationsListCap, this exercises the
+// truncated=true path: the pagination loop hits the cap on the first page,
+// but Slack (per this fake) still had more.
+func (f *fakeChannelsSlack) setMoreAvailable(botToken string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.moreAvailable[botToken] = true
 }
 
 // failJoin makes conversations.join fail with a generic, non-private-channel
@@ -746,6 +764,41 @@ func TestChannelsHandler_Merge_SlackUnreachable_Warning(t *testing.T) {
 	}
 	if !foundWarning {
 		t.Errorf("warnings = %+v; want slack_unreachable", got.Warnings)
+	}
+}
+
+// TestChannelsHandler_Merge_ChannelsTruncated_Warning: the live-candidate
+// enumeration hits slackConversationsListCap while Slack still had more
+// pages — GET must surface a distinct warning (never silently under-report
+// the live view as if it were exhaustive).
+func TestChannelsHandler_Merge_ChannelsTruncated_Warning(t *testing.T) {
+	withLoweredCap(t, 1)
+	r := newSlackChannelsRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-truncated")
+	r.seedWorkspace(orgID, owner, "T0TRUNC1", "xoxb-trunc")
+	r.fake.setChannels("xoxb-trunc",
+		[]map[string]any{
+			{"id": "C1", "name": "one", "is_private": false},
+			{"id": "C2", "name": "two", "is_private": false},
+		},
+		nil,
+	)
+	r.fake.setMoreAvailable("xoxb-trunc")
+
+	rec := httptest.NewRecorder()
+	r.hdl.handleList(rec, r.req(http.MethodGet, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	got := decodeChannels(t, rec)
+	found := false
+	for _, w := range got.Warnings {
+		if w.Code == "slack_channels_truncated" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %+v; want slack_channels_truncated", got.Warnings)
 	}
 }
 

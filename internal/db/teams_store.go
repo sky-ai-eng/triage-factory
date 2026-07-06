@@ -246,6 +246,18 @@ type TeamsStore interface {
 	// org (a bootstrap bug). DeletedAt is left nil (all rows are active).
 	ListActiveForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error)
 
+	// NamesForIDsSystem resolves id->name for exactly the given team IDs
+	// (deduped; blanks ignored), on the admin pool — the narrow cross-team
+	// disclosure read a caller needs when it already knows WHICH teams it
+	// cares about (e.g. the Slack channel-tracking API's tracked_by, which
+	// only needs names for the handful of teams that actually track at
+	// least one channel) and would otherwise over-fetch by calling
+	// ListActiveForOrgSystem and discarding most of it. An id that doesn't
+	// resolve (unknown, or belongs to a different org) is simply absent
+	// from the result rather than an error. Empty input returns an empty
+	// map without a query.
+	NamesForIDsSystem(ctx context.Context, orgID string, teamIDs []string) (map[string]string, error)
+
 	// ListMembers returns every member of teamID with their team role and
 	// host-scoped identity readiness, ordered by display name then user id
 	// for a stable roster — the team-tier sibling of

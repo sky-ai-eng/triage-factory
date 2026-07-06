@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -345,6 +346,45 @@ func (s *teamsStore) ListActiveForOrgSystem(ctx context.Context, orgID string) (
 			return nil, fmt.Errorf("scan active team: %w", err)
 		}
 		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *teamsStore) NamesForIDsSystem(ctx context.Context, orgID string, teamIDs []string) (map[string]string, error) {
+	seen := make(map[string]bool, len(teamIDs))
+	ids := make([]string, 0, len(teamIDs))
+	for _, id := range teamIDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	out := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, orgID)
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id, name FROM teams WHERE org_id = ? AND id IN (`+strings.Join(placeholders, ",")+`)
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("names for ids teams: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, fmt.Errorf("scan team name: %w", err)
+		}
+		out[id] = name
 	}
 	return out, rows.Err()
 }

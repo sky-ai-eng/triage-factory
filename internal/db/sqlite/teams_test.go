@@ -381,6 +381,63 @@ func containsTeam(teams []domain.Team, id string) bool {
 	return false
 }
 
+// TestTeamsStore_SQLite_NamesForIDsSystem: resolves names for exactly the
+// requested ids — a third, unrequested team in the same org is excluded
+// (the point of the narrower read vs. ListActiveForOrgSystem), and an
+// unknown id is simply absent rather than an error.
+func TestTeamsStore_SQLite_NamesForIDsSystem(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	orgID, teamID := seedSQLiteTeam(t, conn)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	if _, err := conn.Exec(
+		`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'apollo', 'Apollo')`,
+		"team-apollo", orgID,
+	); err != nil {
+		t.Fatalf("seed second team: %v", err)
+	}
+	if _, err := conn.Exec(
+		`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'unwanted', 'Unwanted')`,
+		"team-unwanted", orgID,
+	); err != nil {
+		t.Fatalf("seed third team: %v", err)
+	}
+
+	got, err := stores.Teams.NamesForIDsSystem(ctx, orgID, []string{teamID, "team-apollo", "team-does-not-exist"})
+	if err != nil {
+		t.Fatalf("NamesForIDsSystem: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("NamesForIDsSystem = %+v; want exactly 2 resolved names", got)
+	}
+	if got["team-apollo"] != "Apollo" {
+		t.Errorf("NamesForIDsSystem[team-apollo] = %q; want Apollo", got["team-apollo"])
+	}
+	if _, ok := got["team-unwanted"]; ok {
+		t.Errorf("NamesForIDsSystem = %+v; want team-unwanted excluded (never requested)", got)
+	}
+	if _, ok := got["team-does-not-exist"]; ok {
+		t.Errorf("NamesForIDsSystem = %+v; want the unknown id simply absent", got)
+	}
+}
+
+// TestTeamsStore_SQLite_NamesForIDsSystem_EmptyInput: an empty id list
+// returns an empty map without erroring.
+func TestTeamsStore_SQLite_NamesForIDsSystem_EmptyInput(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	orgID, _ := seedSQLiteTeam(t, conn)
+	stores := sqlitestore.New(conn)
+
+	got, err := stores.Teams.NamesForIDsSystem(context.Background(), orgID, nil)
+	if err != nil {
+		t.Fatalf("NamesForIDsSystem: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("NamesForIDsSystem(nil) = %+v; want empty map", got)
+	}
+}
+
 // TestTeamsStore_SQLite_TeamIDsForUserInOrgSystem_ExcludesArchived pins the
 // router-facing exclusion (TFAC-448): the team-resolution the event router uses
 // to route new tasks drops archived teams, so an archived team never receives

@@ -3,8 +3,10 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -161,5 +163,103 @@ func TestSlackConversationsInfo_HTTPError(t *testing.T) {
 	_, err := slackConversationsInfo(context.Background(), srv.Client(), "xoxb-test", "C0THROTTL1")
 	if err == nil {
 		t.Fatal("slackConversationsInfo with HTTP 429 should return an error")
+	}
+}
+
+// withLoweredCap temporarily lowers slackConversationsListCap for a test,
+// restoring the original on cleanup — mirrors withFakeSlackAPI's swap-and-
+// restore seam so a truncation test doesn't need to generate a thousand
+// fake channels.
+func withLoweredCap(t *testing.T, n int) {
+	t.Helper()
+	orig := slackConversationsListCap
+	slackConversationsListCap = n
+	t.Cleanup(func() { slackConversationsListCap = orig })
+}
+
+// fakePaginatedChannels serves conversations.list/users.conversations
+// across pageSize-sized pages, cursoring by an opaque integer offset, for
+// exactly total channels.
+func fakePaginatedChannels(t *testing.T, total, pageSize int) *httptest.Server {
+	t.Helper()
+	return withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		offset := 0
+		if c := r.URL.Query().Get("cursor"); c != "" {
+			var e error
+			offset, e = strconv.Atoi(c)
+			if e != nil {
+				t.Fatalf("bad test cursor %q: %v", c, e)
+			}
+		}
+		end := offset + pageSize
+		if end > total {
+			end = total
+		}
+		channels := make([]map[string]any, 0, end-offset)
+		for i := offset; i < end; i++ {
+			channels = append(channels, map[string]any{"id": fmt.Sprintf("C%04d", i), "name": "chan", "is_private": false})
+		}
+		next := ""
+		if end < total {
+			next = strconv.Itoa(end)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "channels": channels,
+			"response_metadata": map[string]any{"next_cursor": next},
+		})
+	})
+}
+
+// TestSlackConversationsList_PaginatesAcrossPages: fewer channels than the
+// cap, spread across several pages — every page is fetched and nothing is
+// reported truncated.
+func TestSlackConversationsList_PaginatesAcrossPages(t *testing.T) {
+	srv := fakePaginatedChannels(t, 25, 10)
+	got, truncated, err := slackConversationsList(context.Background(), srv.Client(), "xoxb-test")
+	if err != nil {
+		t.Fatalf("slackConversationsList: %v", err)
+	}
+	if len(got) != 25 {
+		t.Errorf("len(got) = %d; want 25 (all pages fetched)", len(got))
+	}
+	if truncated {
+		t.Errorf("truncated = true; want false (well under the cap)")
+	}
+}
+
+// TestSlackConversationsList_CapTruncates: more channels available than the
+// (lowered) cap — the result is capped AND truncated=true, since Slack still
+// had a next_cursor when the cap was hit.
+func TestSlackConversationsList_CapTruncates(t *testing.T) {
+	withLoweredCap(t, 15)
+	srv := fakePaginatedChannels(t, 40, 10)
+	got, truncated, err := slackConversationsList(context.Background(), srv.Client(), "xoxb-test")
+	if err != nil {
+		t.Fatalf("slackConversationsList: %v", err)
+	}
+	if len(got) != 15 {
+		t.Errorf("len(got) = %d; want 15 (capped)", len(got))
+	}
+	if !truncated {
+		t.Errorf("truncated = false; want true (more pages existed beyond the cap)")
+	}
+}
+
+// TestSlackConversationsList_CapExactlyMatchesTotal_NotTruncated: the cap
+// happens to land exactly on the last channel of the last page — the
+// universe was NOT actually cut short, so truncated must be false even
+// though the loop stopped at the cap.
+func TestSlackConversationsList_CapExactlyMatchesTotal_NotTruncated(t *testing.T) {
+	withLoweredCap(t, 20)
+	srv := fakePaginatedChannels(t, 20, 10)
+	got, truncated, err := slackConversationsList(context.Background(), srv.Client(), "xoxb-test")
+	if err != nil {
+		t.Fatalf("slackConversationsList: %v", err)
+	}
+	if len(got) != 20 {
+		t.Errorf("len(got) = %d; want 20", len(got))
+	}
+	if truncated {
+		t.Errorf("truncated = true; want false (the cap coincided with the actual end of data)")
 	}
 }

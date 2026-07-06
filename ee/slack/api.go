@@ -328,19 +328,25 @@ type slackConversation struct {
 // regardless of how many pages Slack offers — a defensive cap (ticket's
 // "paginate to a sane cap ~1000 channels") against an org with an unbounded
 // channel count turning the channels-list request into an unbounded loop.
-const slackConversationsListCap = 1000
+// A var (not a const), mirroring slackAPIBase, so a test can lower it to
+// exercise the truncation path without generating a thousand fake channels.
+var slackConversationsListCap = 1000
 
 // slackConversationsList enumerates the workspace's public channel universe
 // via conversations.list (types=public_channel, exclude_archived=true),
 // paginating until Slack stops returning a next_cursor or the cap is hit.
-func slackConversationsList(ctx context.Context, client *http.Client, botToken string) ([]slackConversation, error) {
+// truncated=true means the cap was hit before Slack ran out of pages — the
+// returned list is a prefix, not the whole universe (see
+// slackConversationsListCap).
+func slackConversationsList(ctx context.Context, client *http.Client, botToken string) (channels []slackConversation, truncated bool, err error) {
 	return slackConversationsPaginate(ctx, client, botToken, "conversations.list", "types=public_channel&exclude_archived=true&limit=200")
 }
 
 // slackUsersConversations enumerates the bot's own channel memberships
 // (public + private) via users.conversations — the source of BotIsMember /
-// IsPrivate for the live candidate merge.
-func slackUsersConversations(ctx context.Context, client *http.Client, botToken string) ([]slackConversation, error) {
+// IsPrivate for the live candidate merge. truncated has the same meaning as
+// slackConversationsList's.
+func slackUsersConversations(ctx context.Context, client *http.Client, botToken string) (channels []slackConversation, truncated bool, err error) {
 	return slackConversationsPaginate(ctx, client, botToken, "users.conversations", "types=public_channel,private_channel&exclude_archived=true&limit=200")
 }
 
@@ -349,9 +355,11 @@ func slackUsersConversations(ctx context.Context, client *http.Client, botToken 
 // {ok, channels: [{id,name,is_private}], response_metadata: {next_cursor}}
 // shape. A non-2xx HTTP response or a Slack-level {"ok":false} both surface
 // as an error; the caller (liveSlackCandidates) treats any error here as
-// transient and drops just this workspace's live candidates.
-func slackConversationsPaginate(ctx context.Context, client *http.Client, botToken, method, query string) ([]slackConversation, error) {
-	var out []slackConversation
+// transient and drops just this workspace's live candidates. truncated=true
+// means slackConversationsListCap was hit while Slack still had more pages
+// (a non-empty next_cursor) — the caller must not treat the returned list as
+// exhaustive; it surfaces a warning rather than silently under-reporting.
+func slackConversationsPaginate(ctx context.Context, client *http.Client, botToken, method, query string) (out []slackConversation, truncated bool, err error) {
 	cursor := ""
 	for {
 		reqURL := slackAPIBase + "/" + method + "?" + query
@@ -360,7 +368,7 @@ func slackConversationsPaginate(ctx context.Context, client *http.Client, botTok
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		req.Header.Set("Authorization", "Bearer "+botToken)
 
@@ -377,20 +385,20 @@ func slackConversationsPaginate(ctx context.Context, client *http.Client, botTok
 			} `json:"response_metadata"`
 		}
 		if err := doSlackJSON(ctx, client, req, &resp); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if !resp.OK {
-			return nil, fmt.Errorf("slack %s: %s", method, nonEmpty(resp.Error, "not ok"))
+			return nil, false, fmt.Errorf("slack %s: %s", method, nonEmpty(resp.Error, "not ok"))
 		}
 		for _, c := range resp.Channels {
 			out = append(out, slackConversation{ID: c.ID, Name: c.Name, IsPrivate: c.IsPrivate})
 			if len(out) >= slackConversationsListCap {
-				return out, nil
+				return out, resp.ResponseMetadata.NextCursor != "", nil
 			}
 		}
 		cursor = resp.ResponseMetadata.NextCursor
 		if cursor == "" {
-			return out, nil
+			return out, false, nil
 		}
 	}
 }

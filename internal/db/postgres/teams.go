@@ -264,6 +264,44 @@ func (s *teamsStore) ListActiveForOrgSystem(ctx context.Context, orgID string) (
 	return out, rows.Err()
 }
 
+func (s *teamsStore) NamesForIDsSystem(ctx context.Context, orgID string, teamIDs []string) (map[string]string, error) {
+	ids := dedupeNonEmpty(teamIDs)
+	out := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT id::text, name FROM teams WHERE org_id = $1 AND id = ANY($2)
+	`, orgID, pgUUIDArray(ids))
+	if err != nil {
+		return nil, fmt.Errorf("names for ids teams: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, fmt.Errorf("scan team name: %w", err)
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
+}
+
+// dedupeNonEmpty drops blanks and duplicates from ids, preserving
+// first-seen order.
+func dedupeNonEmpty(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
 func (s *teamsStore) TeamIDsForUserInOrgSystem(ctx context.Context, orgID, userID string) ([]string, error) {
 	// memberships ⋈ teams, scoped to the org. The join to teams is what
 	// applies the org filter (memberships carries no org_id — it FKs to

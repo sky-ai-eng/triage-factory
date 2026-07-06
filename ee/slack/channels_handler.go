@@ -314,7 +314,7 @@ func (h *channelsHandler) buildChannelsResponse(ctx context.Context, orgID, user
 	if err != nil {
 		return nil, err
 	}
-	teamNames, err := h.teamNames(ctx, orgID)
+	teamNames, err := h.teamNames(ctx, orgID, trackerTeamIDs(trackersByChannel))
 	if err != nil {
 		return nil, err
 	}
@@ -352,9 +352,12 @@ func (h *channelsHandler) buildChannelsResponse(ctx context.Context, orgID, user
 	}
 
 	warnings := []channelsWarning{}
-	candidates, anyFailed := h.liveSlackCandidates(ctx, orgID, workspaces)
+	candidates, anyFailed, anyTruncated := h.liveSlackCandidates(ctx, orgID, workspaces)
 	if anyFailed {
 		warnings = append(warnings, channelsWarning{Code: "slack_unreachable"})
+	}
+	if anyTruncated {
+		warnings = append(warnings, channelsWarning{Code: "slack_channels_truncated"})
 	}
 	for _, sc := range candidates {
 		v := get(sc.ChannelID)
@@ -394,20 +397,33 @@ func (h *channelsHandler) buildChannelsResponse(ctx context.Context, orgID, user
 	return &channelsResponse{Role: role, Warnings: warnings, Channels: out}, nil
 }
 
-// teamNames resolves every active team's name in the org — name + role-in-
-// channel only, never activity/config, and does NOT widen GET /api/teams
-// (which deliberately returns only the caller's teams). Admin pool, cross-
-// team by design (the ratified disclosure line for tracked_by).
-func (h *channelsHandler) teamNames(ctx context.Context, orgID string) (map[string]string, error) {
-	teams, err := h.stores.Teams.ListActiveForOrgSystem(ctx, orgID)
-	if err != nil {
-		return nil, err
+// teamNames resolves id->name for exactly the teams referenced in
+// tracked_by (teamIDs) — name + role-in-channel only, never activity/
+// config, and does NOT widen GET /api/teams (which deliberately returns
+// only the caller's teams). Admin pool, cross-team by design (the ratified
+// disclosure line for tracked_by). Deliberately narrower than an org-wide
+// team enumeration: an org can have many teams that track no Slack channel
+// at all, and this response only ever needs names for the ones that do.
+func (h *channelsHandler) teamNames(ctx context.Context, orgID string, teamIDs []string) (map[string]string, error) {
+	return h.stores.Teams.NamesForIDsSystem(ctx, orgID, teamIDs)
+}
+
+// trackerTeamIDs collects the distinct team IDs referenced across every
+// channel's tracker list — the exact (and typically much smaller than
+// org-wide) set teamNames needs to resolve.
+func trackerTeamIDs(trackersByChannel map[string][]slackstore.TeamChannel) []string {
+	seen := map[string]bool{}
+	var ids []string
+	for _, trackers := range trackersByChannel {
+		for _, tc := range trackers {
+			if seen[tc.TeamID] {
+				continue
+			}
+			seen[tc.TeamID] = true
+			ids = append(ids, tc.TeamID)
+		}
 	}
-	out := make(map[string]string, len(teams))
-	for _, t := range teams {
-		out[t.ID] = t.Name
-	}
-	return out, nil
+	return ids
 }
 
 // slackCandidate is one live Slack channel candidate resolved via
@@ -423,7 +439,12 @@ type slackCandidate struct {
 // missing bot token, or a Slack API error) — the caller surfaces a single
 // "slack_unreachable" warning rather than 500ing the whole list; candidates
 // from workspaces that DID succeed are still returned (partial degradation).
-func (h *channelsHandler) liveSlackCandidates(ctx context.Context, orgID string, workspaces []slackstore.Workspace) (candidates []slackCandidate, anyFailed bool) {
+// anyTruncated=true means at least one workspace's enumeration hit
+// slackConversationsListCap before Slack ran out of pages — the returned
+// candidates for that workspace are a prefix, not the whole channel
+// universe, so the caller must not treat "channel absent from candidates"
+// as "channel doesn't exist" (it surfaces a warning instead).
+func (h *channelsHandler) liveSlackCandidates(ctx context.Context, orgID string, workspaces []slackstore.Workspace) (candidates []slackCandidate, anyFailed, anyTruncated bool) {
 	for _, ws := range workspaces {
 		botToken, err := h.stores.Secrets.GetSystem(ctx, orgID, ws.BotTokenRef)
 		if err != nil || botToken == "" {
@@ -431,17 +452,21 @@ func (h *channelsHandler) liveSlackCandidates(ctx context.Context, orgID string,
 			anyFailed = true
 			continue
 		}
-		pub, err := slackConversationsList(ctx, h.client, botToken)
+		pub, pubTruncated, err := slackConversationsList(ctx, h.client, botToken)
 		if err != nil {
 			slackLog.Warn("channels: conversations.list failed", "workspace", ws.WorkspaceID, "error", err)
 			anyFailed = true
 			continue
 		}
-		mine, err := slackUsersConversations(ctx, h.client, botToken)
+		mine, mineTruncated, err := slackUsersConversations(ctx, h.client, botToken)
 		if err != nil {
 			slackLog.Warn("channels: users.conversations failed", "workspace", ws.WorkspaceID, "error", err)
 			anyFailed = true
 			continue
+		}
+		if pubTruncated || mineTruncated {
+			slackLog.Warn("channels: live candidate enumeration truncated", "workspace", ws.WorkspaceID, "cap", slackConversationsListCap)
+			anyTruncated = true
 		}
 		member := make(map[string]bool, len(mine))
 		for _, m := range mine {
@@ -463,7 +488,7 @@ func (h *channelsHandler) liveSlackCandidates(ctx context.Context, orgID string,
 			})
 		}
 	}
-	return candidates, anyFailed
+	return candidates, anyFailed, anyTruncated
 }
 
 // ensureAndAutoJoin is PUT's step 4 (post-commit, admin pool + live Slack
@@ -482,7 +507,7 @@ func (h *channelsHandler) ensureAndAutoJoin(ctx context.Context, orgID, userID s
 		slackLog.Warn("channels: list workspaces for auto-join failed", "org_id", orgID, "error", err)
 	}
 
-	candidates, _ := h.liveSlackCandidates(ctx, orgID, workspaces)
+	candidates, _, _ := h.liveSlackCandidates(ctx, orgID, workspaces)
 	byID := make(map[string]slackCandidate, len(candidates))
 	for _, c := range candidates {
 		byID[c.ChannelID] = c
