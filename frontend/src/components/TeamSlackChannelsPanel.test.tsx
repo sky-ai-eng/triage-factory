@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import type { SlackChannelsResponse, SlackChannelView } from '../types'
+import { toast } from './Toast/toastStore'
 
 import TeamSlackChannelsPanel from './TeamSlackChannelsPanel'
 
@@ -27,10 +28,27 @@ function channel(over: Partial<SlackChannelView> = {}): SlackChannelView {
 // reassigning it before triggering the request.
 let slackState: SlackChannelsResponse
 let putRequests: string[][]
+// When true, the NEXT channels GET fails (once) — used to exercise the
+// post-primary-reassignment refresh failing while the reassignment itself
+// still committed.
+let failNextChannelsGet = false
 
 function seed(resp: SlackChannelsResponse) {
   slackState = resp
   putRequests = []
+  failNextChannelsGet = false
+}
+
+function errorResponse(): Response {
+  return {
+    ok: false,
+    status: 500,
+    json: async () => ({}),
+    text: async () => '',
+    clone() {
+      return this as unknown as Response
+    },
+  } as unknown as Response
 }
 
 function jsonResponse(body: unknown): Response {
@@ -52,6 +70,10 @@ function installFetch() {
     const method = init?.method ?? 'GET'
 
     if (path === `/api/slack/teams/${TEAM_ID}/channels` && method === 'GET') {
+      if (failNextChannelsGet) {
+        failNextChannelsGet = false
+        return errorResponse()
+      }
       return jsonResponse(slackState)
     }
     if (path === `/api/slack/teams/${TEAM_ID}/channels` && method === 'PUT') {
@@ -208,5 +230,37 @@ describe('TeamSlackChannelsPanel', () => {
     expect(
       await screen.findByText(/secret-room.*invite the bot manually.*\/invite @bot/i),
     ).toBeInTheDocument()
+  })
+
+  it('toasts an error when the post-reassignment refresh fails, instead of silently staying stale', async () => {
+    seed({
+      role: 'admin',
+      warnings: [],
+      channels: [
+        channel({
+          channel_id: 'C-shared',
+          name: 'shared-channel',
+          tracked: true,
+          is_primary: false,
+          tracked_by: [
+            { team_id: 'other-team', team_name: 'Other Team', is_primary: true },
+            { team_id: TEAM_ID, team_name: 'Team One', is_primary: false },
+          ],
+          source: 'tracked',
+        }),
+      ],
+    })
+    const errorSpy = vi.spyOn(toast, 'error')
+    render(<TeamSlackChannelsPanel teamId={TEAM_ID} orgIsAdmin />)
+
+    const makePrimaryBtn = await screen.findByRole('button', { name: /make primary/i })
+    // The reassignment POST itself succeeds; only the follow-up GET (the
+    // refresh) fails — the reassignment must not read as a no-op.
+    failNextChannelsGet = true
+    fireEvent.click(makePrimaryBtn)
+
+    await waitFor(() =>
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('reload to see the change')),
+    )
   })
 })

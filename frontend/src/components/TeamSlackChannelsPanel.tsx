@@ -111,6 +111,11 @@ export default function TeamSlackChannelsPanel({
     () => (channels ?? []).filter((c) => c.tracked).map((c) => c.channel_id),
     [channels],
   )
+  // Memoized so identity is stable across renders that don't touch the
+  // selection (e.g. `saving` or `makingPrimaryId` flipping) — SlackChannelPicker
+  // re-sorts its list off this Set's reference, and a fresh `new Set(...)` every
+  // render would invalidate that memo for no reason.
+  const selectedSet = useMemo(() => new Set(selected), [selected])
   const dirty = channels !== null && !sameIdSet(selected, trackedIds)
   const toggleChannel = (channelId: string) => {
     setSelected((prev) =>
@@ -160,6 +165,13 @@ export default function TeamSlackChannelsPanel({
         if (wasClean) {
           setSelected(fresh.channels.filter((c) => c.tracked).map((c) => c.channel_id))
         }
+      } else {
+        // The reassignment itself committed — only the refresh failed. Say so
+        // rather than leaving the list silently stale with no indication a
+        // reload is needed.
+        toast.error(
+          'Primary reassigned, but the list failed to refresh — reload to see the change.',
+        )
       }
     } finally {
       setMakingPrimaryId(null)
@@ -200,7 +212,7 @@ export default function TeamSlackChannelsPanel({
         <>
           <SlackChannelPicker
             channels={channels}
-            selected={new Set(selected)}
+            selected={selectedSet}
             onToggle={toggleChannel}
             disabled={role !== 'admin' || saving}
             orgIsAdmin={orgIsAdmin}
