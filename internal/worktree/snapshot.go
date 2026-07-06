@@ -379,16 +379,18 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 // gitOutputCtx, which combines the two. env, when non-nil, replaces the
 // child's environment (used to point GIT_INDEX_FILE at a throwaway index).
 //
-// gitCapture deliberately does NOT bypass git's dubious-ownership guard the
-// way gitOutputCtxTrustingOwner does — captureUncommitted's `git add -A` /
-// `git diff` run through here, and unlike a plain config/ref read those DO
-// consult the repository's own (agent-writable, once chowned to the sandbox
-// uid) `.gitattributes` + `.git/config` to decide whether to invoke an
-// external clean/smudge filter or diff driver. Bypassing the guard here would
-// let a compromised sandboxed agent plant both halves of that pair and get
-// this host-side (root) capture to execute arbitrary code. Left unfixed here:
-// the parking-snapshot failure against a chowned worktree needs the capture to
-// run with no more privilege than the agent had (inside the jail), or to avoid
+// gitCapture runs git as the host (root, in multi mode) directly against the
+// worktree, and captureUncommitted's `git add -A` / `git diff` go through here.
+// Unlike the push-gate's metadata reads (a byte read of HEAD, and config read
+// from OUTSIDE any repository — neither of which lets an agent-writable config
+// run anything), add/diff DO consult the repository's own (agent-writable, once
+// chowned to the sandbox uid) `.gitattributes` + `.git/config` to decide
+// whether to invoke an external clean/smudge filter or diff driver. So this
+// path must NOT be made ownership-tolerant against a chowned run root: doing so
+// would let a compromised sandboxed agent plant both halves of that pair and
+// get this host-side (root) capture to execute arbitrary code. Fixing the
+// parking-snapshot failure against a chowned worktree needs the capture to run
+// with no more privilege than the agent had (inside the jail), or to avoid
 // filter-honoring git entirely — its own follow-up, not this.
 func gitCapture(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)

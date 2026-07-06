@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -315,19 +316,82 @@ func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, runI
 	return wtDir, nil
 }
 
-// CurrentBranch returns the worktree's checked-out branch (the short symbolic
-// ref of HEAD), or "" when HEAD is detached, the path isn't a git worktree, or
-// the command otherwise fails. The push gate (internal/delegate) uses this to
-// authorize "whatever branch the checkout is currently on" rather than a
-// prescribed run_worktrees.FeatureBranch (TFAC-498): a detached HEAD — the
-// state a fresh default / --ref `workspace add` lands in — yields "" so no push
-// is authorized until the agent creates its own branch.
+// CurrentBranch returns the worktree's checked-out branch (the short name HEAD
+// symbolically points at), or "" when HEAD is detached, the path isn't a git
+// worktree, or HEAD can't be read. The push gate (internal/delegate) uses this
+// to authorize "whatever branch the checkout is currently on" rather than a
+// prescribed run_worktrees.FeatureBranch: a detached HEAD — the state a fresh
+// default / --ref `workspace add` lands in — yields "" so no push is authorized
+// until the agent creates its own branch.
+//
+// It reads .git/HEAD as a plain file rather than shelling out to git. In multi
+// mode the run root is chowned to the sandbox uid, so its .git/config is
+// agent-writable; ANY git invocation there (even `symbolic-ref`) bootstraps the
+// repository config on startup and follows an attacker-planted include.path /
+// includeIf, opening+parsing whatever file it names as this (host-root)
+// process. A byte read of HEAD enters no repository, runs no git, and consults
+// no config, so there is nothing for a hostile .git/config to steer.
 func CurrentBranch(path string) string {
-	out, err := gitOutputCtxTrustingOwner(context.Background(), path, "symbolic-ref", "--short", "HEAD")
+	gitDir, _, ok := worktreeGitPaths(path)
+	if !ok {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(out)
+	const p = "ref: refs/heads/"
+	ref := strings.TrimSpace(string(b))
+	if !strings.HasPrefix(ref, p) {
+		return "" // detached HEAD (raw SHA) or a non-branch symref: no branch
+	}
+	return strings.TrimPrefix(ref, p)
+}
+
+// worktreeGitPaths resolves a worktree root's per-worktree git dir and its
+// common git dir WITHOUT invoking git, so it never enters a repository and thus
+// never triggers git's startup config bootstrap (which would open+parse an
+// agent-writable include.path as this process). A plain clone's ".git" is a
+// directory that is both; a linked worktree's ".git" is a "gitdir: <path>"
+// pointer whose shared config lives in the common dir. ok is false when root is
+// not a worktree.
+func worktreeGitPaths(root string) (gitDir, commonDir string, ok bool) {
+	if root == "" {
+		return "", "", false
+	}
+	dot := filepath.Join(root, ".git")
+	fi, err := os.Lstat(dot)
+	if err != nil {
+		return "", "", false
+	}
+	if fi.IsDir() {
+		return dot, dot, true // plain clone: per-worktree dir == common dir
+	}
+	b, err := os.ReadFile(dot)
+	if err != nil {
+		return "", "", false
+	}
+	line := strings.TrimSpace(string(b))
+	p := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
+	if p == "" || p == line {
+		return "", "", false // not a "gitdir:" pointer
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(root, p)
+	}
+	gitDir = filepath.Clean(p)
+	commonDir = gitDir
+	// A linked worktree records the shared common dir (holding the shared
+	// config) in <gitDir>/commondir, as an absolute or gitDir-relative path.
+	if cb, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
+		if c := strings.TrimSpace(string(cb)); c != "" {
+			if !filepath.IsAbs(c) {
+				c = filepath.Join(gitDir, c)
+			}
+			commonDir = filepath.Clean(c)
+		}
+	}
+	return gitDir, commonDir, true
 }
 
 // PushTargetBranch returns the REMOTE branch a bare `git push` from the
@@ -389,17 +453,15 @@ func PushTargetBranch(path string) string {
 }
 
 // gitConfigFirst returns the first non-empty single-valued git config entry
-// among keys, read from the repo at path ("" when none is set).
-//
-// --no-includes: this reads a config file whose ownership we're vouching for
-// via safe.directory (the sandbox-chowned run root), so the file is
-// agent-writable. Without --no-includes an include.path directive there would
-// make this root-side git open and parse any file it names — needless
-// attacker-directed file access. Legitimate run clones never use includes
-// (configurePRPushTracking writes plain keys), so disabling them costs nothing.
+// among keys, read from the worktree at path ("" when none is set).
 func gitConfigFirst(path string, keys ...string) string {
+	_, commonDir, ok := worktreeGitPaths(path)
+	if !ok {
+		return ""
+	}
+	cfg := filepath.Join(commonDir, "config")
 	for _, key := range keys {
-		out, err := gitOutputCtxTrustingOwner(context.Background(), path, "config", "--no-includes", "--get", key)
+		out, err := gitConfigFileValue(cfg, "--get", key)
 		if err != nil {
 			continue // unset key exits non-zero — a normal absent state
 		}
@@ -411,11 +473,13 @@ func gitConfigFirst(path string, keys ...string) string {
 }
 
 // gitConfigAll returns every value of a multi-valued git config key, read from
-// the repo at path (nil when unset). --no-includes for the same reason as
-// gitConfigFirst: the config file is agent-writable, so an include.path there
-// must not steer this root-side read into arbitrary files.
+// the worktree at path (nil when unset).
 func gitConfigAll(path, key string) []string {
-	out, err := gitOutputCtxTrustingOwner(context.Background(), path, "config", "--no-includes", "--get-all", key)
+	_, commonDir, ok := worktreeGitPaths(path)
+	if !ok {
+		return nil
+	}
+	out, err := gitConfigFileValue(filepath.Join(commonDir, "config"), "--get-all", key)
 	if err != nil {
 		return nil
 	}
@@ -426,6 +490,52 @@ func gitConfigAll(path, key string) []string {
 		}
 	}
 	return vals
+}
+
+// gitConfigFileValue reads config values from a single file with `git config
+// --file <configPath> --no-includes`, executed from a neutral non-repository
+// working directory. That combination is what keeps an agent-writable
+// .git/config (the sandbox-chowned run root, read here host-side as root in
+// multi mode) from steering this read into opening an attacker-chosen file:
+//
+//   - Running OUTSIDE any repository means git performs no startup repository
+//     config bootstrap, and it is that bootstrap — not the --file read — that
+//     follows the config's own include.path / includeIf. (Inside the repo, even
+//     `git config --file X` still bootstraps the ambient repo config and opens
+//     its includes.)
+//   - --no-includes then suppresses include directives within configPath
+//     itself. On its own --no-includes is NOT sufficient: git honors it for a
+//     single-key `--get` but ignores it for `--get-all` / `--get-regexp` /
+//     `--list`, and there is no equivalent for a non-config command like
+//     `symbolic-ref` at all — which is why the branch read reads HEAD directly
+//     and every config read runs from outside the repo.
+//
+// Because no repository is discovered, git runs no dubious-ownership check, so
+// reading a config file the sandbox uid owns needs no safe.directory grant.
+func gitConfigFileValue(configPath string, getArgs ...string) (string, error) {
+	args := append([]string{"config", "--file", configPath, "--no-includes"}, getArgs...)
+	cmd := exec.CommandContext(context.Background(), "git", args...)
+	// A neutral CWD with no ancestor .git so git discovers no repository (and
+	// GIT_DIR/GIT_WORK_TREE dropped so an inherited value can't reintroduce one).
+	cmd.Dir = os.TempDir()
+	cmd.Env = gitConfigReadEnv()
+	return runGitOutput(context.Background(), cmd, args)
+}
+
+// gitConfigReadEnv is gitBaseEnv with GIT_DIR / GIT_WORK_TREE stripped, so a
+// value inherited from the parent process can't pull gitConfigFileValue back
+// into a repository (and thus back into the startup include-following it exists
+// to avoid).
+func gitConfigReadEnv() []string {
+	base := gitBaseEnv()
+	out := base[:0:0]
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "GIT_DIR=") || strings.HasPrefix(kv, "GIT_WORK_TREE=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // createBranchWorktreeAt is the shared body of the two CreateForBranch
