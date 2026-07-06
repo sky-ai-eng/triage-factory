@@ -88,10 +88,13 @@ COPY --from=frontend-builder /src/frontend/dist ./frontend/dist
 # fail to exec in either alpine container.
 ARG TARGETOS=linux
 ARG TARGETARCH
+# Enterprise PUBLIC key, baked so official images verify licenses. Public (it ships in
+# every binary); empty = community image, EE off. Passed as a build-arg by docker-publish.yml.
+ARG TF_LICENSE_PUBLIC_KEY=
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/triagefactory .
+    go build -trimpath -ldflags="-s -w -X github.com/sky-ai-eng/triage-factory/ee.publicKeyB64=${TF_LICENSE_PUBLIC_KEY}" -o /out/triagefactory .
 
 # --- stage 4: runtime -------------------------------------------------------
 

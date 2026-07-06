@@ -37,8 +37,22 @@ jobs:
       - name: Check third-party dependency licenses
         run: ./scripts/license-check.sh
 
+  # Fail-closed gate on the baked Enterprise public key. The (public) key comes from the
+  # TF_LICENSE_PUBLIC_KEY repo variable; a malformed/wrong value would otherwise silently
+  # ship EE-disabled binaries (loadPublicKey → nil). goreleaser only runs on a tag, so this
+  # is the release-time catch. See scripts/verify-license-key.sh.
+  verify-license-key:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify TF_LICENSE_PUBLIC_KEY
+        env:
+          TF_LICENSE_PUBLIC_KEY: ${{ vars.TF_LICENSE_PUBLIC_KEY }}
+          CANONICAL: ${{ github.repository == 'sky-ai-eng/triage-factory' }}
+        run: ./scripts/verify-license-key.sh
+
   goreleaser:
-    needs: dependency-licenses
+    needs: [dependency-licenses, verify-license-key]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,3 +80,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          # Public Enterprise key baked into release binaries. A repo VARIABLE, not a
+          # secret — it ships in every binary by design. Empty on forks without the
+          # variable → EE off (community build).
+          TF_LICENSE_PUBLIC_KEY: ${{ vars.TF_LICENSE_PUBLIC_KEY }}

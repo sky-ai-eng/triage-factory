@@ -37,6 +37,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Fail-closed gate on the baked Enterprise public key, mirroring release.yml's
+      # verify-license-key job. A workflow can't `needs:` a job in another workflow, so
+      # we run the same committed check inline here — before the (expensive) build — or a
+      # bad/empty TF_LICENSE_PUBLIC_KEY would publish :latest/:vX.Y.Z/:edge images with
+      # enterprise features silently disabled. Runs on both the tag and main (:edge) paths.
+      - name: Verify baked Enterprise public key
+        env:
+          TF_LICENSE_PUBLIC_KEY: ${{ vars.TF_LICENSE_PUBLIC_KEY }}
+          CANONICAL: ${{ github.repository == 'sky-ai-eng/triage-factory' }}
+        run: ./scripts/verify-license-key.sh
+
       # QEMU lets the amd64 runner cross-build the arm64 image
       # without provisioning a native arm runner. Slow but free.
       - name: Set up QEMU
@@ -92,6 +103,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Public Enterprise key baked into the image (repo variable, not a secret).
+          # Empty on forks without the variable → community image, EE off.
+          build-args: |
+            TF_LICENSE_PUBLIC_KEY=${{ vars.TF_LICENSE_PUBLIC_KEY }}
           # GHA cache halves repeat-build times. Scoped per-arch so
           # cross-build doesn't poison the native cache.
           cache-from: type=gha
