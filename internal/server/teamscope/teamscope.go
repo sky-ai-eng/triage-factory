@@ -33,11 +33,31 @@ var ErrRequired = errors.New("a team is required: you belong to multiple teams, 
 // it to 400.
 var ErrForbidden = errors.New("invalid team selection: you are not a member of the selected team")
 
+// ErrNoTeam is returned by ResolveActing / ResolveActingNoStamp when the
+// caller belongs to zero teams in the org (whether because the org itself has
+// none, or because the caller just isn't on any of them). An earlier version
+// of this function substituted the org's default team here instead of
+// erroring — a "never block" posture from before teams carried per-team roles
+// or RLS enforcement. That substitution never actually helped the caller it
+// was meant to: teams.GetDefaultForOrg just picks the org's oldest
+// non-archived team, with no relationship to a teamless caller, so the write
+// failed anyway — either at a downstream write gate (RequireTeamWrite), with
+// a misleading "view-only access" message since the caller isn't a *viewer*
+// of that team, they're not on it at all, or — for any call site that skips
+// that gate — as a raw, uncontrolled RLS/db error (TFAC-562 found this
+// surfacing as a leaked SQLSTATE 42501 message inside an HTTP 200 on the Jira
+// stock POST). Erroring here instead lets every caller answer a clean 4xx via
+// WriteIfSelectionError; a caller with some other legitimate no-team story
+// (e.g. TFAC-562's private/org-visibility projects) checks team membership
+// explicitly before ever calling ResolveActing, rather than relying on this
+// function to guess.
+var ErrNoTeam = errors.New("you don't belong to a team in this org — join one first")
+
 // IsSelectionError reports whether err is a caller-fault team-selection problem
 // (→ 400) versus an internal failure (→ 500). Handlers use it to map the error
 // surfaced out of the WithTx closure.
 func IsSelectionError(err error) bool {
-	return errors.Is(err, ErrRequired) || errors.Is(err, ErrForbidden)
+	return errors.Is(err, ErrRequired) || errors.Is(err, ErrForbidden) || errors.Is(err, ErrNoTeam)
 }
 
 // WriteIfSelectionError writes a 400 with the error's message and returns true
@@ -118,9 +138,13 @@ func ResolveActingNoStamp(ctx context.Context, teams db.TeamsStore, users db.Use
 //     malformed non-UI write; failing loudly beats guessing a team that could
 //     misattribute shared work.
 //
-//  5. Zero teams (a member of the org but of no team — a bootstrap edge that
-//     shouldn't occur in practice) → fall back to the org's default team,
-//     preserving PR1's never-block posture; a truly teamless org still errors.
+//  5. Zero teams (a member of the org but of no team — happens today via a
+//     teamless invite or a team archival, see ZeroTeamState/TFAC-445) →
+//     ErrNoTeam. Every write site must decide what "no team" means for its
+//     own semantics (require joining a team first, or fall back to some
+//     other non-team-scoped story, e.g. TFAC-562's private/org-visibility
+//     projects) rather than have this function silently guess by picking an
+//     arbitrary team the caller has no relationship to.
 func resolveActingID(ctx context.Context, teams db.TeamsStore, users db.UsersStore, orgID, userID, picked string) (string, error) {
 	myTeams, err := teams.ListForUser(ctx, orgID)
 	if err != nil {
@@ -158,16 +182,9 @@ func resolveActingID(ctx context.Context, teams db.TeamsStore, users db.UsersSto
 		return "", ErrRequired
 	}
 
-	// 5. No team membership — fall back to the org's default team rather than
-	// block (mirrors PR1). A genuinely teamless org still errors.
-	teamID, err := teams.GetDefaultForOrg(ctx, orgID)
-	if err != nil {
-		return "", fmt.Errorf("acting team lookup: %w", err)
-	}
-	if teamID == "" {
-		return "", fmt.Errorf("org %s has no team", orgID)
-	}
-	return teamID, nil
+	// 5. No team membership — see the ErrNoTeam doc comment for why this
+	// errors rather than substituting an arbitrary team.
+	return "", ErrNoTeam
 }
 
 // ResolveRead picks the single team a single-team-oriented read should target,

@@ -140,21 +140,12 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		if visibility == domain.ProjectVisibilityTeam {
-			// teamscope.ResolveActing's zero-teams case falls back to the
-			// org's default team (a "never block" posture that predates
-			// this visibility column) — for a caller who isn't a member of
-			// that team, the fallback then trips the projects_insert RLS
-			// check and 500s. That's the exact opaque failure TFAC-562
-			// reported. Checking membership up front turns it into a clean
-			// 400 instead; the paired frontend fix grays out "team"
-			// visibility for teamless users and defaults them to private.
-			myTeams, e2 := tx.Teams.ListForUser(r.Context(), orgID)
-			if e2 != nil {
-				return fmt.Errorf("list teams: %w", e2)
-			}
-			if len(myTeams) == 0 {
-				return errNoTeamsForTeamVisibility
-			}
+			// teamscope.ResolveActing's zero-teams case returns
+			// teamscope.ErrNoTeam (not a silent fallback — see its doc
+			// comment), which WriteIfSelectionError maps to a clean 400
+			// below. That's the exact opaque-500 case TFAC-562 reported;
+			// the paired frontend fix grays out "team" visibility for
+			// teamless users and defaults them to private instead.
 			teamID, e = teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 			if e != nil {
 				return e
@@ -219,11 +210,14 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		created, getErr = tx.Projects.Get(r.Context(), orgID, id)
 		return getErr
 	}); err != nil {
-		if teamscope.WriteIfSelectionError(w, err) {
+		// teamscope.ErrNoTeam gets a project-flavored message (mentioning the
+		// private/org escape hatch) ahead of WriteIfSelectionError's generic
+		// one; ErrRequired/ErrForbidden fall through to that generic 400.
+		if errors.Is(err, teamscope.ErrNoTeam) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "join a team to create a team-visibility project, or choose private/org visibility"})
 			return
 		}
-		if errors.Is(err, errNoTeamsForTeamVisibility) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		if errors.Is(err, db.ErrVisibilityForbidden) {
@@ -248,11 +242,6 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, created)
 }
-
-// errNoTeamsForTeamVisibility is returned from handleProjectCreate's WithTx
-// closure when the caller has zero team memberships but requested
-// visibility="team" — see the comment at its call site.
-var errNoTeamsForTeamVisibility = errors.New("join a team to create a team-visibility project, or choose private/org visibility")
 
 func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)

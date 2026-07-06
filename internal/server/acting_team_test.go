@@ -2,7 +2,7 @@ package server
 
 import (
 	"context"
-	"strings"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -43,19 +43,25 @@ func TestResolveActingTeam_ReturnsSoleTeam(t *testing.T) {
 	}
 }
 
-// TestResolveActingTeam_NoTeamErrors pins the bootstrap-bug guard: an org
-// with no team resolves to a hard error rather than an empty string a
-// caller might thread into a write.
+// TestResolveActingTeam_NoTeamErrors pins the teamless-caller guard
+// (TFAC-562): a caller with no team membership in the org — whether
+// because the org itself has no teams, or because they just aren't on any
+// of the org's teams — resolves to teamscope.ErrNoTeam, a clean
+// caller-mappable 400, rather than silently substituting an arbitrary team
+// (the org's default) the caller has no relationship to.
 func TestResolveActingTeam_NoTeamErrors(t *testing.T) {
 	s := newTestServer(t)
 
 	const orglessOrg = "00000000-0000-0000-0000-0000000009ff"
 	_, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, orglessOrg, runmode.LocalDefaultUserID, "")
 	if err == nil {
-		t.Fatalf("resolveActingTeam on a teamless org returned nil error; want a hard error")
+		t.Fatalf("resolveActingTeam on a teamless org returned nil error; want teamscope.ErrNoTeam")
 	}
-	if !strings.Contains(err.Error(), "has no team") {
-		t.Errorf("error = %q; want it to mention the missing team", err.Error())
+	if !errors.Is(err, teamscope.ErrNoTeam) {
+		t.Errorf("error = %v; want teamscope.ErrNoTeam", err)
+	}
+	if !teamscope.IsSelectionError(err) {
+		t.Errorf("error %v is not a selection error; should map to 400", err)
 	}
 }
 
