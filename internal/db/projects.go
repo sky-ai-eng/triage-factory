@@ -2,11 +2,22 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 //go:generate go run github.com/vektra/mockery/v2 --name=ProjectStore --output=./mocks --case=underscore --with-expecter
+
+// ErrVisibilityForbidden is returned by ProjectStore.Create / Update when
+// the caller lacks the role a requested visibility requires — org
+// visibility needs an org admin, private visibility needs the project's
+// own creator — mirroring the WITH CHECK branches of the projects_insert /
+// projects_update RLS policies. Postgres surfaces the denial as SQLSTATE
+// 42501; the impl translates it to this sentinel so the handler can answer
+// a clean 403 instead of a raw RLS error. SQLite (single-tenant, always
+// visibility="team") never returns it.
+var ErrVisibilityForbidden = errors.New("db: insufficient privilege for that project visibility")
 
 // ProjectStore owns the projects table — user-curated work groupings
 // (a Linear/Jira "project" mirrored locally, with pinned repos and
@@ -49,8 +60,12 @@ type ProjectStore interface {
 	// Update writes the full mutable row from p (caller is responsible
 	// for merging partial PATCH input over an existing row first).
 	// updated_at is stamped server-side. created_at + creator_user_id
-	// + team_id + visibility are preserved. Returns sql.ErrNoRows when
-	// the project doesn't exist so handlers can map to 404.
+	// + team_id are preserved — team_id is create-time-only in v1, no
+	// PATCH path re-teams a project. p.Visibility IS written (the
+	// handler merges any patched value in); Postgres translates a
+	// resulting RLS denial to ErrVisibilityForbidden. Returns
+	// sql.ErrNoRows when the project doesn't exist so handlers can map
+	// to 404.
 	Update(ctx context.Context, orgID string, p domain.Project) error
 
 	// Delete removes the project. The entities.project_id FK is

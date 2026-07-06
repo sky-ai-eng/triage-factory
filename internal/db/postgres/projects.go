@@ -8,11 +8,26 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// translateVisibilityErr maps the projects_insert / projects_update RLS
+// policies' WITH CHECK denial (SQLSTATE 42501 — the caller's role doesn't
+// match the visibility they're writing: org needs an org admin, private
+// needs the row's own creator) to db.ErrVisibilityForbidden, so the
+// handler can answer a clean 403 instead of a raw RLS error. Any other
+// error (or nil) passes through untouched.
+func translateVisibilityErr(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "42501" {
+		return errors.Join(db.ErrVisibilityForbidden, err)
+	}
+	return err
+}
 
 // projectStore is the Postgres impl of db.ProjectStore. Holds two
 // pools (SKY-297):
@@ -58,21 +73,26 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 		return "", fmt.Errorf("marshal pinned_repos: %w", err)
 	}
 
-	// teamID: required, no synthesis. Projects are user-driven writes
-	// and the human picks which team owns the project at the Create
-	// UI (SKY-294). A "first of caller's teams" or "any team in org"
-	// fallback would either silently attach to the wrong team or
-	// collide with projects_insert RLS (tf.user_in_team(team_id)).
-	// The handler ships runmode.LocalDefaultTeamID today; the
-	// sentinel filter converts that to empty, which then trips the
-	// explicit guard below. Post-D9, the handler threads a real team
-	// from request context.
+	// teamID: required only for visibility="team" (the
+	// projects_team_visibility_requires_team CHECK). private/org
+	// visibility permit a NULL team_id — TFAC-562's teamless-user case:
+	// the human picks a team at the Create UI when one applies (SKY-294),
+	// but a private/org project may have none. A "first of caller's
+	// teams" or "any team in org" fallback would either silently attach
+	// to the wrong team or collide with projects_insert RLS
+	// (tf.user_can_write_team(team_id)). The handler ships
+	// runmode.LocalDefaultTeamID for local mode; the sentinel filter
+	// converts that to empty.
 	teamBind := teamID
 	if teamBind == runmode.LocalDefaultTeamID {
 		teamBind = ""
 	}
-	if teamBind == "" {
-		return "", fmt.Errorf("project store: team_id required for Postgres Create (handler must thread the user-selected team from request context; the SQLite-only LocalDefaultTeamID sentinel does not satisfy the projects_insert RLS policy)")
+	visibility := p.Visibility
+	if visibility == "" {
+		visibility = domain.ProjectVisibilityTeam
+	}
+	if visibility == domain.ProjectVisibilityTeam && teamBind == "" {
+		return "", fmt.Errorf("project store: team_id required for Postgres Create under visibility=%q (handler must thread the user-selected team from request context; the SQLite-only LocalDefaultTeamID sentinel does not satisfy the projects_insert RLS policy)", domain.ProjectVisibilityTeam)
 	}
 
 	// creator_user_id: pulled from tf.current_user_id() set by WithTx
@@ -83,23 +103,24 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 	// always set and the COALESCE stops at the first branch.
 	_, err = s.q.ExecContext(ctx, `
 		INSERT INTO projects
-		  (id, org_id, creator_user_id, team_id, name, description,
+		  (id, org_id, creator_user_id, team_id, visibility, name, description,
 		   curator_session_id, pinned_repos,
 		   jira_project_key, linear_project_key, spec_authorship_blueprint_id)
 		VALUES
 		  ($1, $2,
 		   COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-		   $3::uuid,
-		   $4, $5, NULLIF($6, ''), $7::jsonb,
-		   NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''))
+		   NULLIF($3, '')::uuid,
+		   $4,
+		   $5, $6, NULLIF($7, ''), $8::jsonb,
+		   NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''))
 	`,
-		id, orgID, teamBind,
+		id, orgID, teamBind, visibility,
 		p.Name, p.Description,
 		p.CuratorSessionID, string(pinnedJSON),
 		p.JiraProjectKey, p.LinearProjectKey, p.SpecAuthorshipBlueprintID,
 	)
 	if err != nil {
-		return "", err
+		return "", translateVisibilityErr(err)
 	}
 	return id, nil
 }
@@ -108,7 +129,7 @@ func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Proje
 	row := s.q.QueryRowContext(ctx, `
 		SELECT id, name, description, curator_session_id, pinned_repos,
 		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
-		       team_id, created_at, updated_at
+		       team_id, visibility, creator_user_id, created_at, updated_at
 		FROM projects
 		WHERE org_id = $1 AND id = $2
 	`, orgID, id)
@@ -155,7 +176,7 @@ func listProjects(ctx context.Context, q queryer, orgID string) ([]domain.Projec
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, name, description, curator_session_id, pinned_repos,
 		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
-		       team_id, created_at, updated_at
+		       team_id, visibility, creator_user_id, created_at, updated_at
 		FROM projects
 		WHERE org_id = $1
 		ORDER BY LOWER(name) ASC
@@ -194,16 +215,18 @@ func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Projec
 		    jira_project_key = NULLIF($5, ''),
 		    linear_project_key = NULLIF($6, ''),
 		    spec_authorship_blueprint_id = NULLIF($7, ''),
+		    visibility = $8,
 		    updated_at = now()
-		WHERE org_id = $8 AND id = $9
+		WHERE org_id = $9 AND id = $10
 	`,
 		p.Name, p.Description,
 		p.CuratorSessionID, string(pinnedJSON),
 		p.JiraProjectKey, p.LinearProjectKey, p.SpecAuthorshipBlueprintID,
+		p.Visibility,
 		orgID, p.ID,
 	)
 	if err != nil {
-		return err
+		return translateVisibilityErr(err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -265,7 +288,7 @@ func scanProjectRow(row interface {
 	err := row.Scan(
 		&p.ID, &p.Name, &p.Description, &sessionID, &pinnedJSON,
 		&jiraKey, &linearKey, &specBlueprintID,
-		&teamID, &p.CreatedAt, &p.UpdatedAt,
+		&teamID, &p.Visibility, &p.CreatorUserID, &p.CreatedAt, &p.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil

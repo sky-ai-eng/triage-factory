@@ -15,15 +15,25 @@ import {
   Download,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
-import type { Project, KnowledgeFile, KnowledgeUploadResult, ProjectExportPreview } from '../types'
+import type {
+  Project,
+  ProjectVisibility,
+  KnowledgeFile,
+  KnowledgeUploadResult,
+  ProjectExportPreview,
+} from '../types'
 import { readError } from '../lib/api'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
+import ProjectVisibilitySelect from '../components/ProjectVisibilitySelect'
 import CuratorChat from '../components/CuratorChat'
 import ProjectEntitiesPanel from '../components/ProjectEntitiesPanel'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { useOrgRole } from '../hooks/useOrgRole'
+import { useTeamRole } from '../hooks/useTeamRole'
+import { useDeploymentConfig, useMe } from '../hooks/useDeploymentConfig'
 
 // ProjectDetail is the per-project workspace. Top-to-bottom on the
 // left:
@@ -340,7 +350,13 @@ export default function ProjectDetail() {
             onPatchPinnedRepos={(pinned_repos) => patch({ pinned_repos })}
           />
 
-          <IntegrationsPanel project={project} onPatch={patch} />
+          <VisibilityPanel project={project} onPatch={patch} />
+
+          {/* A teamless private/org project (TFAC-562) has no team to
+              validate a Jira/Linear key against in v1 — the header's
+              pinned-repos hint already explains that, so skip a second,
+              redundant empty card here rather than duplicating it. */}
+          {project.team_id && <IntegrationsPanel project={project} onPatch={patch} />}
 
           <KnowledgePanel projectId={project.id} />
 
@@ -530,13 +546,23 @@ function ProjectHeader({
       </div>
 
       <div className="mt-4">
-        <PinnedReposInline
-          pinned={project.pinned_repos}
-          teamId={project.team_id}
-          onChange={onPatchPinnedRepos}
-          jiraKey={project.jira_project_key}
-          linearKey={project.linear_project_key}
-        />
+        {project.team_id ? (
+          <PinnedReposInline
+            pinned={project.pinned_repos}
+            teamId={project.team_id}
+            onChange={onPatchPinnedRepos}
+            jiraKey={project.jira_project_key}
+            linearKey={project.linear_project_key}
+          />
+        ) : (
+          // A private/org-visibility project created teamless has no team
+          // to validate pinned repos or tracker keys against in v1 (see
+          // handleProjectUpdate's matching 400s) — mirrors the same copy
+          // ProjectCreateModal shows when those fields are hidden there.
+          <p className="text-[12px] text-text-tertiary italic">
+            Pinned repos and tracker projects are available for team-visibility projects.
+          </p>
+        )}
       </div>
     </Card>
   )
@@ -606,12 +632,14 @@ function PinnedReposInline({
   const loadRepos = useCallback(
     async (signal: AbortSignal) => {
       setLoadError(null)
-      // team_id is non-optional on Project and the create handler enforces
-      // it, so an empty value here means a malformed row (e.g. a future
-      // migration bug). Guard explicitly: fetching `/api/settings/team//repos`
-      // would 404 and bury the real cause behind a generic load error.
+      // Empty team_id is a legitimate state since TFAC-562 (a private/org-
+      // visibility project has no team) — the caller (ProjectHeader) only
+      // mounts this component when project.team_id is set, so this guard
+      // is unreachable in practice. It stays as defense in depth: fetching
+      // `/api/settings/team//repos` would 404 and bury the real cause
+      // behind a generic load error if that invariant is ever violated.
       if (!teamId) {
-        setLoadError('This project has no team set — reload, and contact support if it persists.')
+        setLoadError('This project has no team — pinned repos are unavailable.')
         setLoading(false)
         return
       }
@@ -827,6 +855,80 @@ function RepoChip({ slug, onRemove }: { slug: string; onRemove: () => void }) {
         <X size={10} />
       </button>
     </span>
+  )
+}
+
+// VISIBILITY_RANK orders the three visibility values so a change can be
+// classified as an upgrade (more readers) or a downgrade (fewer) — the
+// downgrade case gets a confirm() warning since it can revoke access
+// people currently have, mirroring the delete confirm() pattern already
+// used on this page.
+const VISIBILITY_RANK: Record<ProjectVisibility, number> = { private: 0, team: 1, org: 2 }
+
+const VISIBILITY_LABEL: Record<ProjectVisibility, string> = {
+  private: 'private (only you)',
+  team: 'team (your team only)',
+  org: 'org-wide',
+}
+
+// VisibilityPanel (TFAC-562) is multi-mode only — local's N=1 tenancy has
+// no team/org distinction, so this renders nothing there and every local
+// project stays implicitly "team" as it always has. Options are grayed
+// out via the same rule the backend RLS enforces: "team" needs the
+// project to already have one AND the viewer to be able to write it (v1
+// doesn't support attaching a team to a project that has none — see
+// handleProjectUpdate's 400 for that case); "org" needs an org admin;
+// "private" needs the viewer to be the project's own creator. A downgrade
+// (fewer future readers) prompts a confirm() first since it can revoke
+// access people currently have; an upgrade applies immediately.
+function VisibilityPanel({
+  project,
+  onPatch,
+}: {
+  project: Project
+  onPatch: (body: Record<string, unknown>) => Promise<boolean | undefined>
+}) {
+  const { config } = useDeploymentConfig()
+  const { isAdmin: orgIsAdmin } = useOrgRole()
+  const { canWriteTeam } = useTeamRole()
+  const { me } = useMe()
+  const [pending, setPending] = useState(false)
+
+  if (config?.deployment_mode !== 'multi') return null
+
+  const canTeam = project.team_id !== '' && canWriteTeam(project.team_id)
+  const canOrg = orgIsAdmin
+  const canPrivate = !!me && me.id === project.creator_user_id
+
+  const handleChange = async (next: ProjectVisibility) => {
+    if (next === project.visibility || pending) return
+    if (VISIBILITY_RANK[next] < VISIBILITY_RANK[project.visibility]) {
+      const ok = confirm(
+        `Change visibility to ${VISIBILITY_LABEL[next]}? People who can currently see this project may lose access.`,
+      )
+      if (!ok) return
+    }
+    setPending(true)
+    try {
+      await onPatch({ visibility: next })
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <Card>
+      <h2 className="text-[13px] font-semibold tracking-tight text-text-primary uppercase mb-4">
+        Visibility
+      </h2>
+      <ProjectVisibilitySelect
+        value={project.visibility}
+        onChange={handleChange}
+        canTeam={canTeam}
+        canOrg={canOrg}
+        canPrivate={canPrivate}
+      />
+    </Card>
   )
 }
 
