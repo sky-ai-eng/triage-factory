@@ -296,3 +296,34 @@ func TestProjectPatch_TeamlessProject_CannotUpgradeToTeam(t *testing.T) {
 		t.Errorf("body = %s, want a \"no team\" hint", rec.Body.String())
 	}
 }
+
+// TestProjectPatch_TeamlessProject_TeamScopedFieldsCleanBadRequest pins a
+// review-caught gap: handleProjectUpdate's pinned_repos / jira_project_key
+// / spec_authorship_blueprint_id branches each guard on existing.TeamID ==
+// "" and, before this test, answered internalError (500) — a "should never
+// happen" guard written before TFAC-562 made a teamless project a normal,
+// reachable state. Each must now 400 with an actionable message instead.
+func TestProjectPatch_TeamlessProject_TeamScopedFieldsCleanBadRequest(t *testing.T) {
+	r := newProjectVisibilityRig(t)
+	_, created := r.create(t, r.teamless, map[string]any{
+		"name":       "teamless project",
+		"visibility": "private",
+	})
+
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+	}{
+		{"pinned_repos", map[string]any{"pinned_repos": []string{"owner/repo"}}},
+		{"jira_project_key", map[string]any{"jira_project_key": "SKY"}},
+		{"spec_authorship_blueprint_id", map[string]any{"spec_authorship_blueprint_id": "some-blueprint-id"}},
+	} {
+		rec := r.patch(t, r.teamless, created.ID, tc.body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want 400; body=%s", tc.name, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "no team") {
+			t.Errorf("%s: body = %s, want a \"no team\" hint", tc.name, rec.Body.String())
+		}
+	}
+}

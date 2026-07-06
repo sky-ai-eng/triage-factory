@@ -352,7 +352,11 @@ export default function ProjectDetail() {
 
           <VisibilityPanel project={project} onPatch={patch} />
 
-          <IntegrationsPanel project={project} onPatch={patch} />
+          {/* A teamless private/org project (TFAC-562) has no team to
+              validate a Jira/Linear key against in v1 — the header's
+              pinned-repos hint already explains that, so skip a second,
+              redundant empty card here rather than duplicating it. */}
+          {project.team_id && <IntegrationsPanel project={project} onPatch={patch} />}
 
           <KnowledgePanel projectId={project.id} />
 
@@ -542,13 +546,23 @@ function ProjectHeader({
       </div>
 
       <div className="mt-4">
-        <PinnedReposInline
-          pinned={project.pinned_repos}
-          teamId={project.team_id}
-          onChange={onPatchPinnedRepos}
-          jiraKey={project.jira_project_key}
-          linearKey={project.linear_project_key}
-        />
+        {project.team_id ? (
+          <PinnedReposInline
+            pinned={project.pinned_repos}
+            teamId={project.team_id}
+            onChange={onPatchPinnedRepos}
+            jiraKey={project.jira_project_key}
+            linearKey={project.linear_project_key}
+          />
+        ) : (
+          // A private/org-visibility project created teamless has no team
+          // to validate pinned repos or tracker keys against in v1 (see
+          // handleProjectUpdate's matching 400s) — mirrors the same copy
+          // ProjectCreateModal shows when those fields are hidden there.
+          <p className="text-[12px] text-text-tertiary italic">
+            Pinned repos and tracker projects are available for team-visibility projects.
+          </p>
+        )}
       </div>
     </Card>
   )
@@ -618,12 +632,14 @@ function PinnedReposInline({
   const loadRepos = useCallback(
     async (signal: AbortSignal) => {
       setLoadError(null)
-      // team_id is non-optional on Project and the create handler enforces
-      // it, so an empty value here means a malformed row (e.g. a future
-      // migration bug). Guard explicitly: fetching `/api/settings/team//repos`
-      // would 404 and bury the real cause behind a generic load error.
+      // Empty team_id is a legitimate state since TFAC-562 (a private/org-
+      // visibility project has no team) — the caller (ProjectHeader) only
+      // mounts this component when project.team_id is set, so this guard
+      // is unreachable in practice. It stays as defense in depth: fetching
+      // `/api/settings/team//repos` would 404 and bury the real cause
+      // behind a generic load error if that invariant is ever violated.
       if (!teamId) {
-        setLoadError('This project has no team set — reload, and contact support if it persists.')
+        setLoadError('This project has no team — pinned repos are unavailable.')
         setLoading(false)
         return
       }

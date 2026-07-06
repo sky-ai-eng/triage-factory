@@ -560,9 +560,13 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		// Validate against the project's OWN team, not the org default — a
 		// non-default-team project's pins must be tracked by that team.
 		// existing.TeamID is populated by Projects.Get; the store preserves
-		// team_id on update.
+		// team_id on update. Empty is a legitimate state since TFAC-562 (a
+		// private/org-visibility project has no team), not a malformed row —
+		// pinned repos just aren't available for one in v1.
 		if existing.TeamID == "" {
-			internalError(w, "projects", fmt.Errorf("project %s has no team_id", existing.ID))
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "this project has no team — pinned repos aren't available for a private/org visibility project",
+			})
 			return
 		}
 		var pinned []string
@@ -603,9 +607,13 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			// Rule lookup against the project's OWN team (not the org
 			// default), inside WithTx so the read goes through
 			// tx.JiraStatusRules.ListForTeam (app pool, jira_rules_select
-			// RLS gates by team membership).
+			// RLS gates by team membership). Empty is a legitimate state
+			// since TFAC-562 (a private/org-visibility project has no
+			// team) — a tracker key just isn't available for one in v1.
 			if existing.TeamID == "" {
-				internalError(w, "projects", fmt.Errorf("project %s has no team_id", existing.ID))
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": "this project has no team — a tracker project key isn't available for a private/org visibility project",
+				})
 				return
 			}
 			var teamRules []domain.JiraProjectStatusRules
@@ -653,9 +661,14 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			// curator runs this blueprint under existing.TeamID, so a
 			// cross-team blueprint would let a team-A project run a team-B
 			// blueprint. List the team's blueprints and require membership.
-			// SQLite ignores teamID (local is single-team).
+			// SQLite ignores teamID (local is single-team). Empty is a
+			// legitimate state since TFAC-562 (a private/org-visibility
+			// project has no team) — a blueprint override just isn't
+			// available for one in v1.
 			if existing.TeamID == "" {
-				internalError(w, "projects", fmt.Errorf("project %s has no team_id", existing.ID))
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": "this project has no team — a spec-authorship blueprint override isn't available for a private/org visibility project",
+				})
 				return
 			}
 			var visible []domain.Blueprint
