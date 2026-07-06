@@ -239,7 +239,13 @@ export default function SlackChannelPicker({
                           e.stopPropagation()
                           onMakePrimary(channel.channel_id)
                         }}
-                        disabled={makingPrimaryId === channel.channel_id}
+                        // Mirrors the row checkbox's own gate (a non-team-admin
+                        // viewer, or a tracked-set Save in flight) — orgIsAdmin
+                        // only decides whether this button renders at all, not
+                        // whether it's safe to fire right now. Also blocked
+                        // while ANY row's reassignment is in flight, not just
+                        // this one, so two "Make primary" clicks can't race.
+                        disabled={disabled || makingPrimaryId !== null}
                         className="shrink-0 text-[11px] font-medium text-accent underline-offset-2 hover:underline disabled:opacity-40"
                       >
                         {makingPrimaryId === channel.channel_id

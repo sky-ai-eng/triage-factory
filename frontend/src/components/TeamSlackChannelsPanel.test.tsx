@@ -162,6 +162,33 @@ describe('TeamSlackChannelsPanel', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
   })
 
+  it("disables Make primary for an org admin who is not this team's admin", async () => {
+    // orgIsAdmin gates whether the button renders at all; team `role` gates
+    // whether it's safe to click right now — an org admin viewing as a
+    // non-admin team member sees the button but can't fire it, mirroring the
+    // row checkboxes (also disabled here) and the Save button.
+    seed({
+      role: 'member',
+      warnings: [],
+      channels: [
+        channel({
+          channel_id: 'C-shared',
+          name: 'shared-channel',
+          tracked: true,
+          is_primary: false,
+          tracked_by: [
+            { team_id: 'other-team', team_name: 'Other Team', is_primary: true },
+            { team_id: TEAM_ID, team_name: 'Team One', is_primary: false },
+          ],
+          source: 'tracked',
+        }),
+      ],
+    })
+    render(<TeamSlackChannelsPanel teamId={TEAM_ID} orgIsAdmin />)
+
+    expect(await screen.findByRole('button', { name: /make primary/i })).toBeDisabled()
+  })
+
   it('claiming an unclaimed channel PUTs the union of the existing tracked set plus the new pick', async () => {
     seed({
       role: 'admin',
