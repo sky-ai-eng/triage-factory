@@ -7892,16 +7892,20 @@ CREATE POLICY team_slack_channels_select ON public.team_slack_channels FOR SELEC
 CREATE POLICY team_slack_channels_insert ON public.team_slack_channels FOR INSERT TO tf_app
   WITH CHECK ((org_id = tf.current_org_id()) AND tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id));
 
-CREATE POLICY team_slack_channels_update ON public.team_slack_channels FOR UPDATE TO tf_app
-  USING ((org_id = tf.current_org_id()) AND tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id))
-  WITH CHECK ((org_id = tf.current_org_id()) AND tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id));
-
 CREATE POLICY team_slack_channels_delete ON public.team_slack_channels FOR DELETE TO tf_app
   USING ((org_id = tf.current_org_id()) AND tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id));
 
+-- Deliberately no UPDATE policy/grant, unlike team_github_repos (which
+-- carries one nobody uses either). This table's only mutable column is
+-- is_primary, and is_primary is never app-pool-writable BY DESIGN (see the
+-- table comment) — RLS cannot gate a single column, so a team-admin-scoped
+-- UPDATE policy would be a live, unused path to flip it that a future bug
+-- could walk through. The app pool only ever needs INSERT (new tracking
+-- rows) and DELETE (untracking); every legitimate is_primary transition
+-- goes through the admin-pool ReconcilePrimariesSystem / SetPrimarySystem.
 REVOKE ALL ON public.team_slack_channels FROM PUBLIC;
 REVOKE ALL ON public.team_slack_channels FROM anon, authenticated, service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.team_slack_channels TO tf_app;
+GRANT SELECT, INSERT, DELETE ON public.team_slack_channels TO tf_app;
 
 
 -- === Marketplace V1 (TFAC-535) ===========================================

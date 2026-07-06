@@ -13,7 +13,9 @@ import (
 // teamChannelStore is the Postgres impl of slackstore.TeamChannelStore.
 //
 //   - app: ListForTeam + ReplaceForTeam. RLS gates the team-row write by
-//     team admin (team_slack_channels_insert/_update/_delete).
+//     team admin (team_slack_channels_insert/_delete — there is no
+//     app-pool UPDATE grant/policy; ReplaceForTeam is insert-then-prune
+//     only, see its doc).
 //   - admin: TracksChannelSystem, PrimaryTeamForChannelSystem,
 //     ListTrackersForOrgSystem, ReconcilePrimariesSystem, SetPrimarySystem —
 //     claims-free cross-team reads/writes the routing hooks (a sibling
@@ -205,6 +207,19 @@ func (s *teamChannelStore) ReconcilePrimariesSystem(ctx context.Context, orgID s
 // serializes normally on Postgres's row locking, and clearing the old
 // primary before setting the new one never trips the partial unique index
 // (at most one row is_primary=true at any statement boundary).
+//
+// The final UPDATE's RowsAffected is checked deliberately: under READ
+// COMMITTED, each statement in this tx sees the latest committed data at
+// the moment IT runs, not a snapshot from the transaction's start. If
+// teamID's tracking row is concurrently deleted (e.g. a racing
+// ReplaceForTeam untracks the channel) after the EXISTS check above but
+// before this UPDATE runs, the UPDATE matches zero rows — without this
+// check the call would return nil having already cleared the old primary,
+// silently leaving the channel with NO primary at all. Treating that as
+// ErrTeamNotTrackingChannel instead rolls back the whole transaction
+// (inTx's deferred Rollback fires because this returns non-nil before
+// reaching Commit), which undoes the clear too and restores the prior
+// primary.
 func (s *teamChannelStore) SetPrimarySystem(ctx context.Context, orgID, channelID, teamID string) error {
 	return inTx(ctx, s.admin, func(q db.Execer) error {
 		var tracks bool
@@ -225,11 +240,19 @@ func (s *teamChannelStore) SetPrimarySystem(ctx context.Context, orgID, channelI
 		`, orgID, channelID); err != nil {
 			return fmt.Errorf("clear current primary team_slack_channels: %w", err)
 		}
-		if _, err := q.ExecContext(ctx, `
+		res, err := q.ExecContext(ctx, `
 			UPDATE team_slack_channels SET is_primary = true
 			WHERE org_id = $1 AND channel_id = $2 AND team_id = $3
-		`, orgID, channelID, teamID); err != nil {
+		`, orgID, channelID, teamID)
+		if err != nil {
 			return fmt.Errorf("set new primary team_slack_channels: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("rows affected set new primary team_slack_channels: %w", err)
+		}
+		if n == 0 {
+			return slackstore.ErrTeamNotTrackingChannel
 		}
 		return nil
 	})
