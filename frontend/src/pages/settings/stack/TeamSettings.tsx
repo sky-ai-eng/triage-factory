@@ -19,26 +19,32 @@
 //     refetch candidates (a newly-tracked owner's teams appear; an untracked
 //     owner's mapping shows as an orphan).
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Archive } from 'lucide-react'
 import { toast } from '../../../components/Toast/toastStore'
 import Slider from '../../../components/Slider'
 import ArchiveTeamModal from '../../../components/ArchiveTeamModal'
 import { useTeams } from '../../../hooks/useTeams'
 import RepoPickerModal from '../../../components/RepoPickerModal'
+import SlackChannelPicker from '../../../components/SlackChannelPicker'
 import GitHubTeamGroup from '../GitHubTeamGroup'
 import JiraProjectRulesGroup from '../JiraProjectRulesGroup'
 import { TeamModelStep } from '../../setup/ModelStep'
 import { initialWizardState } from '../../setup/steps'
 import type { StepContext } from '../../setup/types'
+import { useEntitlements, FeatureSlack } from '../../../hooks/useEntitlements'
+import type { SlackChannelsWarning, SlackChannelView } from '../../../types'
 import {
   emptyTeamConfig,
   fetchTeamRepos,
   fetchTeamGitHubGroups,
   fetchTeamSettings,
+  fetchTeamSlackChannels,
+  reassignSlackChannelPrimary,
   saveTeamGitHubGroups,
   saveTeamRepos,
   saveTeamSettings,
+  saveTeamSlackChannels,
   teamConfigFromSettings,
   teamProjectsBlocked,
   type GitHubGroup,
@@ -77,6 +83,37 @@ const sameGroups = (a: GitHubGroup[], b: GitHubGroup[]): boolean => {
   const ka = groupKeys(a)
   const kb = groupKeys(b)
   return ka.length === kb.length && ka.every((x, i) => x === kb[i])
+}
+
+// Process-level Slack warning codes (GET or PUT) → friendly copy. A
+// per-channel PUT warning (invite_required / join_failed) is formatted by
+// slackWarningMessage below instead, since it needs the channel's name.
+const SLACK_WARNING_CODES: Record<string, string> = {
+  slack_unreachable:
+    'The live Slack channel list is unavailable right now — showing tracked and previously seen channels only.',
+  slack_channels_truncated:
+    'Slack has more channels than we could list — some may be missing below.',
+}
+
+const slackChannelLabel = (channels: SlackChannelView[], channelId?: string): string => {
+  if (!channelId) return 'This channel'
+  const match = channels.find((ch) => ch.channel_id === channelId)
+  return match?.name ? `#${match.name}` : channelId
+}
+
+// slackWarningMessage renders one entry of a channels response's `warnings`
+// (see ee/slack's channelsWarning doc: a process-level `code` OR a
+// per-channel `channel_id` + `reason`, never both).
+function slackWarningMessage(w: SlackChannelsWarning, channels: SlackChannelView[]): string {
+  if (w.code) return SLACK_WARNING_CODES[w.code] ?? w.code
+  const label = slackChannelLabel(channels, w.channel_id)
+  if (w.reason === 'invite_required') {
+    return `${label} is private — invite the bot manually (/invite @bot) to finish tracking it.`
+  }
+  if (w.reason === 'join_failed') {
+    return `Couldn't add the bot to ${label} automatically — check its permissions and try again.`
+  }
+  return `${label}: ${w.reason ?? 'unknown issue'}`
 }
 
 export default function TeamSettings({
@@ -139,6 +176,26 @@ export default function TeamSettings({
   // Bumped on a successful repos save to remount GitHubTeamGroup so it refetches
   // its candidate list (which is derived live from the tracked-repo owners).
   const [reposVersion, setReposVersion] = useState(0)
+
+  // ── Slack channels (TFAC-544) ── EE, multi-mode only: every /api/slack/*
+  // seam 404s an unlicensed org, so the section is entirely absent (no
+  // upsell stub) rather than presenting a dead flow — same gating idiom as
+  // OrgSettings' Slack workspaces / SSO sections.
+  const { has: hasFeature, loaded: entLoaded } = useEntitlements()
+  const slackEnt = !isLocal && entLoaded && hasFeature(FeatureSlack)
+
+  // null = not loaded yet (or the load failed) — distinct from [] ("loaded,
+  // genuinely zero candidates and zero tracked/sighting rows", the
+  // "connect a workspace" empty state).
+  const [slackChannels, setSlackChannels] = useState<SlackChannelView[] | null>(null)
+  const [slackWarnings, setSlackWarnings] = useState<SlackChannelsWarning[]>([])
+  const [slackRole, setSlackRole] = useState('')
+  const [slackLoadError, setSlackLoadError] = useState<string | null>(null)
+  const [slackSelected, setSlackSelected] = useState<string[]>([])
+  const [savingSlack, setSavingSlack] = useState(false)
+  const [makingPrimaryId, setMakingPrimaryId] = useState<string | null>(null)
+  // Bumped by the load-error Retry button to re-run the fetch effect below.
+  const [slackReloadKey, setSlackReloadKey] = useState(0)
 
   const load = useCallback(() => {
     let cancelled = false
@@ -209,6 +266,36 @@ export default function TeamSettings({
     return cancel
   }, [load])
 
+  // Slack channels load independently of the Promise.all above: it depends on
+  // the entitlement probe (useEntitlements), which resolves asynchronously
+  // and on its own schedule, so this effect fires once slackEnt flips true
+  // (and again on a team switch).
+  useEffect(() => {
+    if (!slackEnt) return
+    let cancelled = false
+    setSlackLoadError(null)
+    fetchTeamSlackChannels(endpointTeamId)
+      .then((resp) => {
+        if (cancelled) return
+        if (!resp) {
+          setSlackLoadError('Could not load Slack channels. Check your connection and try again.')
+          return
+        }
+        setSlackChannels(resp.channels)
+        setSlackSelected(resp.channels.filter((c) => c.tracked).map((c) => c.channel_id))
+        setSlackWarnings(resp.warnings)
+        setSlackRole(resp.role)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSlackLoadError('Could not load Slack channels. Check your connection and try again.')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [slackEnt, endpointTeamId, slackReloadKey])
+
   // ── Repos ──
   const reposDirty = reposLoaded && !sameRepos(repos, baseline.repos ?? [])
   const saveRepos = async (): Promise<boolean> => {
@@ -267,6 +354,66 @@ export default function TeamSettings({
       return true
     } finally {
       setSavingProjects(false)
+    }
+  }
+
+  // ── Slack channels (own PUT — not the team-settings POST) ──
+  const slackTrackedIds = useMemo(
+    () => (slackChannels ?? []).filter((c) => c.tracked).map((c) => c.channel_id),
+    [slackChannels],
+  )
+  const slackDirty = slackChannels !== null && !sameRepos(slackSelected, slackTrackedIds)
+  const toggleSlackChannel = (channelId: string) => {
+    setSlackSelected((prev) =>
+      prev.includes(channelId) ? prev.filter((id) => id !== channelId) : [...prev, channelId],
+    )
+  }
+  const saveSlackChannels = async (): Promise<boolean> => {
+    setSavingSlack(true)
+    try {
+      const res = await saveTeamSlackChannels(endpointTeamId, slackSelected)
+      if (!res.ok) {
+        toast.error(res.error)
+        return false
+      }
+      setSlackChannels(res.data.channels)
+      setSlackSelected(res.data.channels.filter((c) => c.tracked).map((c) => c.channel_id))
+      setSlackWarnings(res.data.warnings)
+      setSlackRole(res.data.role)
+      toast.success('Slack channels saved')
+      // Keep the section open when there's a warning to show (a join failure
+      // or invite-required instruction) — collapsing on success is right for
+      // the clean case, but not when there's something the admin needs to
+      // read right where they just acted.
+      return res.data.warnings.length === 0
+    } finally {
+      setSavingSlack(false)
+    }
+  }
+  // Primary reassignment is deliberately minimal (no modal, no confirm beyond
+  // the click) and commits immediately rather than riding the section's Save.
+  // A clean draft (no pending pick/unpick) re-syncs to the refreshed tracked
+  // set; an in-progress unsaved selection is left alone rather than clobbered.
+  const handleMakeSlackPrimary = async (channelId: string) => {
+    setMakingPrimaryId(channelId)
+    try {
+      const res = await reassignSlackChannelPrimary(channelId, endpointTeamId)
+      if (!res.ok) {
+        toast.error(res.error)
+        return
+      }
+      const wasClean = !slackDirty
+      const fresh = await fetchTeamSlackChannels(endpointTeamId)
+      if (fresh) {
+        setSlackChannels(fresh.channels)
+        setSlackWarnings(fresh.warnings)
+        setSlackRole(fresh.role)
+        if (wasClean) {
+          setSlackSelected(fresh.channels.filter((c) => c.tracked).map((c) => c.channel_id))
+        }
+      }
+    } finally {
+      setMakingPrimaryId(null)
     }
   }
 
@@ -350,7 +497,8 @@ export default function TeamSettings({
   // confirm-before-discard on a team switch (the switch fires outside this
   // component now). Reset to false on unmount so a stale "dirty" can't block a
   // switch after the user navigates off the Settings tab.
-  const anyDirty = reposDirty || groupsDirty || projectsDirty || defaultsDirty || promptsDirty
+  const anyDirty =
+    reposDirty || groupsDirty || projectsDirty || slackDirty || defaultsDirty || promptsDirty
   useEffect(() => {
     onDirtyChange?.(anyDirty)
   }, [anyDirty, onDirtyChange])
@@ -447,6 +595,68 @@ export default function TeamSettings({
           bare
         />
       </SettingsSection>
+
+      {/* Slack channels (TFAC-544) — EE, multi-mode only: every /api/slack/*
+          seam 404s an unlicensed org, so the section is entirely absent (no
+          upsell stub) rather than presenting a dead flow — same gating shape
+          as OrgSettings' Slack workspaces / SSO sections. Own PUT (not the
+          team-settings POST), so it's independently dirty-tracked like
+          Repositories above. */}
+      {slackEnt && (
+        <SettingsSection
+          title="Slack channels"
+          summary={slackChannels !== null ? `${slackTrackedIds.length} tracked` : undefined}
+          dirty={slackDirty}
+          saving={savingSlack}
+          saveDisabled={slackRole !== 'admin'}
+          onSave={saveSlackChannels}
+          onCancel={() => setSlackSelected(slackTrackedIds)}
+        >
+          {slackLoadError ? (
+            <p className="text-[13px] text-text-secondary">
+              {slackLoadError}{' '}
+              <button
+                type="button"
+                onClick={() => setSlackReloadKey((k) => k + 1)}
+                className="text-accent underline"
+              >
+                Retry
+              </button>
+            </p>
+          ) : slackChannels === null ? (
+            <p className="text-[13px] text-text-tertiary">Loading Slack channels…</p>
+          ) : slackChannels.length === 0 ? (
+            <p className="text-[13px] leading-relaxed text-text-tertiary">
+              Connect a Slack workspace in organization settings first.
+            </p>
+          ) : (
+            <>
+              <p className="text-[13px] leading-relaxed text-text-tertiary">
+                Channels this team tracks route Slack @mentions to its board. Claim a channel
+                someone already mentioned the bot in, or pick one before anyone has.
+              </p>
+              <SlackChannelPicker
+                channels={slackChannels}
+                selected={new Set(slackSelected)}
+                onToggle={toggleSlackChannel}
+                disabled={slackRole !== 'admin' || savingSlack}
+                orgIsAdmin={orgIsAdmin}
+                onMakePrimary={handleMakeSlackPrimary}
+                makingPrimaryId={makingPrimaryId}
+              />
+              {slackWarnings.length > 0 && (
+                <ul className="space-y-1">
+                  {slackWarnings.map((w, i) => (
+                    <li key={i} className="text-[12px] text-amber-600">
+                      {slackWarningMessage(w, slackChannels)}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </SettingsSection>
+      )}
 
       <SettingsSection
         title="Team defaults"

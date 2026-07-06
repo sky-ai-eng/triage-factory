@@ -15,6 +15,7 @@
 import { readError } from '../../lib/api'
 import type { JiraStatusRuleValue } from '../../components/JiraStatusRule'
 import type { GitHubTeamCandidate } from '../../lib/githubTeams'
+import type { SlackChannelsResponse } from '../../types'
 
 // JiraProjectConfig mirrors the backend per-project rule wire shape (key +
 // the three status rules). One project's tracking config; a team can carry
@@ -269,6 +270,65 @@ export async function saveTeamGitHubGroups(
   })
   if (!res.ok) {
     return { ok: false, error: await readError(res, 'Failed to save GitHub teams') }
+  }
+  return { ok: true }
+}
+
+// slackChannelsPath is the ee/slack channel-tracking route — deliberately
+// under /api/slack/* rather than teamPath()'s /api/settings/team/... (see
+// ee/slack/channels_handler.go's package doc: ee-owned routes stay in the
+// slack namespace).
+const slackChannelsPath = (teamId: string) =>
+  `/api/slack/teams/${encodeURIComponent(teamId)}/channels`
+
+// fetchTeamSlackChannels returns the merged channel list (tracked + sighting
+// registry + live Slack candidates, deduped by channel_id) for teamId, or
+// null on failure — 404 when unentitled/local/non-member, or a transient
+// error. Same null-vs-empty-array contract as fetchTeamRepos: a caller must
+// not read a failed load as "tracks nothing."
+export async function fetchTeamSlackChannels(
+  teamId: string,
+): Promise<SlackChannelsResponse | null> {
+  const res = await fetch(slackChannelsPath(teamId))
+  return res.ok ? ((await res.json()) as SlackChannelsResponse) : null
+}
+
+export type SlackSaveResult =
+  | { ok: true; data: SlackChannelsResponse }
+  | { ok: false; error: string }
+
+// saveTeamSlackChannels persists the tracked-channel set via PUT (full-set
+// replace). The response is the post-change GET shape plus any auto-join
+// warnings (invite-required / join-failed), so callers refresh their rows
+// straight from `data` rather than re-fetching.
+export async function saveTeamSlackChannels(
+  teamId: string,
+  channelIds: string[],
+): Promise<SlackSaveResult> {
+  const res = await fetch(slackChannelsPath(teamId), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel_ids: channelIds }),
+  })
+  if (!res.ok) {
+    return { ok: false, error: await readError(res, 'Failed to save Slack channels') }
+  }
+  return { ok: true, data: (await res.json()) as SlackChannelsResponse }
+}
+
+// reassignSlackChannelPrimary makes teamId the primary tracker of channelId
+// (org-admin only; the server 400s if teamId isn't already tracking it).
+export async function reassignSlackChannelPrimary(
+  channelId: string,
+  teamId: string,
+): Promise<SaveResult> {
+  const res = await fetch(`/api/slack/channels/${encodeURIComponent(channelId)}/primary`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ team_id: teamId }),
+  })
+  if (!res.ok) {
+    return { ok: false, error: await readError(res, 'Failed to reassign the primary team') }
   }
   return { ok: true }
 }
