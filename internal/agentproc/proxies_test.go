@@ -5,13 +5,16 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
@@ -933,4 +936,121 @@ func envValue(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+// TestStartProxiesForSandbox_EgressProxyEnv pins the TFAC-567 wiring:
+// every sandbox run's env carries all four proxy-var spellings pointing
+// at the gating egress proxy with the per-run token as URL userinfo,
+// plus the NO_PROXY exemption for the gateway IP. The exemption is
+// load-bearing — git's insteadOf rewrite targets http://<gateway>:<port>,
+// and git honors http_proxy for http:// URLs, so without it every
+// sandbox git op would try to tunnel through the egress proxy and 403.
+func TestStartProxiesForSandbox_EgressProxyEnv(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	creds := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-x", "ANTHROPIC_BASE_URL": upstream.URL}
+
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil)
+	if err != nil {
+		t.Fatalf("startProxiesForSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = bundle.Shutdown(ctx)
+	})
+
+	if bundle.egress == nil {
+		t.Fatal("bundle.egress is nil; the gating egress proxy must start for every sandbox run")
+	}
+
+	httpsProxy := envValue(env, "HTTPS_PROXY")
+	if httpsProxy == "" {
+		t.Fatalf("HTTPS_PROXY missing from sandbox env: %v", env)
+	}
+	for _, key := range []string{"https_proxy", "HTTP_PROXY", "http_proxy"} {
+		if got := envValue(env, key); got != httpsProxy {
+			t.Errorf("%s = %q, want %q (all four spellings must agree)", key, got, httpsProxy)
+		}
+	}
+
+	// URL shape: scheme http, userinfo x-run:<token>, host = the veth IP.
+	u, perr := url.Parse(httpsProxy)
+	if perr != nil {
+		t.Fatalf("parse HTTPS_PROXY %q: %v", httpsProxy, perr)
+	}
+	if u.User == nil || u.User.Username() != egressproxy.BasicUser {
+		t.Errorf("proxy URL user = %v, want %q", u.User, egressproxy.BasicUser)
+	}
+	if pw, ok := u.User.Password(); !ok || pw == "" {
+		t.Error("proxy URL must carry the per-run token as the password")
+	}
+	if host, _, _ := net.SplitHostPort(u.Host); host != "127.0.0.1" {
+		t.Errorf("proxy URL host = %q, want the veth IP", u.Host)
+	}
+
+	// NO_PROXY carries the gateway IP so the git/LLM proxy hops stay
+	// direct instead of looping through the egress proxy.
+	for _, key := range []string{"NO_PROXY", "no_proxy"} {
+		got := envValue(env, key)
+		if !strings.Contains(got, "127.0.0.1") {
+			t.Errorf("%s = %q, must exempt the gateway IP", key, got)
+		}
+	}
+}
+
+// TestStartProxiesForSandbox_EgressProxyGatesConnect drives one CONNECT
+// through the egress proxy that startProxiesForSandbox actually started,
+// using the exact env the sandbox would see: right token + off-allowlist
+// host → 403 (policy reached, auth passed); wrong token → 407. Pins that
+// the token in the env and the token the proxy checks are the same mint.
+func TestStartProxiesForSandbox_EgressProxyGatesConnect(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	creds := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-x", "ANTHROPIC_BASE_URL": upstream.URL}
+
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil)
+	if err != nil {
+		t.Fatalf("startProxiesForSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = bundle.Shutdown(ctx)
+	})
+
+	u, err := url.Parse(envValue(env, "HTTPS_PROXY"))
+	if err != nil {
+		t.Fatalf("parse HTTPS_PROXY: %v", err)
+	}
+	token, _ := u.User.Password()
+
+	connect := func(auth string) string {
+		conn, derr := net.DialTimeout("tcp", u.Host, 2*time.Second)
+		if derr != nil {
+			t.Fatalf("dial egress proxy: %v", derr)
+		}
+		defer conn.Close()
+		req := "CONNECT evil.example.com:443 HTTP/1.1\r\nHost: evil.example.com:443\r\n"
+		if auth != "" {
+			req += "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(auth)) + "\r\n"
+		}
+		req += "\r\n"
+		_, _ = conn.Write([]byte(req))
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 2048)
+		n, _ := conn.Read(buf)
+		return string(buf[:n])
+	}
+
+	if resp := connect(egressproxy.BasicUser + ":" + token); !strings.Contains(resp, "403") {
+		t.Errorf("authorized CONNECT to off-allowlist host got:\n%s\nwant 403 (past auth, denied by policy)", resp)
+	}
+	if resp := connect(egressproxy.BasicUser + ":not-the-token"); !strings.Contains(resp, "407") {
+		t.Errorf("wrong-token CONNECT got:\n%s\nwant 407", resp)
+	}
 }

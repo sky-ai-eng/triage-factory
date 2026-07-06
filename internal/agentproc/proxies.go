@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
@@ -63,18 +64,19 @@ func randomHexToken() (string, error) {
 }
 
 // runProxies bundles the per-run proxy handles for shutdown: the LLM
-// egress proxy and, for runs with git egress (a GitHub repo in scope),
-// the git credential proxy. Either may be nil — a prompt-only run
-// (scorer / classifier) has no git proxy.
+// egress proxy, the gating package-registry egress proxy (TFAC-567),
+// and, for runs with git egress (a GitHub repo in scope), the git
+// credential proxy. Any may be nil — a prompt-only run (scorer /
+// classifier) has no git proxy.
 type runProxies struct {
-	llm *llmproxy.Server
-	git *gitproxy.Server
+	llm    *llmproxy.Server
+	git    *gitproxy.Server
+	egress *egressproxy.Server
 }
 
 // Shutdown stops every proxy in the bundle. Returns errors.Join of
-// every proxy's Shutdown error so both proxies' failures surface, not
-// just the first. With a single proxy wired the result is either nil
-// or one wrapped error.
+// every proxy's Shutdown error so all failures surface, not just the
+// first.
 func (p *runProxies) Shutdown(ctx context.Context) error {
 	if p == nil {
 		return nil
@@ -88,6 +90,11 @@ func (p *runProxies) Shutdown(ctx context.Context) error {
 	if p.git != nil {
 		if err := p.git.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("git proxy shutdown: %w", err))
+		}
+	}
+	if p.egress != nil {
+		if err := p.egress.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("egress proxy shutdown: %w", err))
 		}
 	}
 	return errors.Join(errs...)
@@ -247,6 +254,21 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 
 	env := buildSandboxProxyEnv(cfg, llmURL, token)
 
+	// Gating egress proxy (TFAC-567): the CONNECT-only door to public
+	// package registries, so `pnpm install` / `go mod download` /
+	// `pip install` work inside the L3-locked sandbox. Started for
+	// every sandbox run — prompt-only runs never dial it, and one idle
+	// listener is cheaper than a second wiring path.
+	egressEnv, egressSrv, err := startEgressProxyForSandbox(hostVethIP)
+	if err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = bundle.Shutdown(shutdownCtx)
+		return nil, nil, err
+	}
+	bundle.egress = egressSrv
+	env = append(env, egressEnv...)
+
 	// Assemble the single GIT_CONFIG_* block for the sandboxed git. It
 	// always carries core.hooksPath (F2, TFAC-456) so the TF hooks fire
 	// for every repo the agent touches — including subdir clones in a
@@ -356,6 +378,69 @@ func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitPro
 	}
 
 	return sandboxGitProxyPairs("http://"+addr, upstream, incoming), srv, nil
+}
+
+// startEgressProxyForSandbox mints a per-run secret, starts the gating
+// package-registry egress proxy (TFAC-567) on a free port of
+// hostVethIP, and returns the proxy env entries plus the server for
+// the shutdown bundle.
+//
+// The allowlist is the compiled-in registry set (egressproxy.
+// DefaultRegistryHosts); TFAC-408's sandbox profiles replace this
+// constant with per-profile data resolved by the spawner — the wiring
+// here doesn't change shape. The proxy enforces the operator denylist
+// (metadata / private ranges / sandbox pool) against resolved IPs
+// regardless of allowlist content.
+func startEgressProxyForSandbox(hostVethIP string) ([]string, *egressproxy.Server, error) {
+	incoming, err := randomHexToken()
+	if err != nil {
+		return nil, nil, err
+	}
+	srv, err := egressproxy.New(egressproxy.Config{
+		AllowedHosts:     egressproxy.DefaultRegistryHosts(),
+		IncomingToken:    incoming,
+		AllowNonLoopback: true,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentproc: construct egress proxy: %w", err)
+	}
+	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentproc: start egress proxy on %s: %w", hostVethIP, err)
+	}
+	return sandboxEgressProxyEnv(addr, hostVethIP, incoming), srv, nil
+}
+
+// sandboxEgressProxyEnv builds the proxy env entries that route the
+// sandbox's package managers through the gating egress proxy. The
+// per-run token travels as proxy-URL userinfo — curl, git, npm, pnpm,
+// pip, and Go's net/http all turn it into Proxy-Authorization on the
+// CONNECT. Both spellings of each var: curl reads only the lowercase
+// forms, Go and npm read either, and tools disagree just enough that
+// setting all four is the only portable choice.
+//
+// NO_PROXY is load-bearing, not cosmetic: the git proxy routes via
+// url.<http://gateway:port>/.insteadOf rewrites and git (libcurl)
+// honors http_proxy for http:// URLs — without the gateway-IP
+// exemption every sandbox git fetch/push would try to CONNECT through
+// the egress proxy (non-443 port → 403) and multi-mode git would
+// break. The same exemption keeps ANTHROPIC_BASE_URL traffic direct
+// should the SDK ever grow proxy support.
+//
+// Property B: the only secret-shaped value is the per-run token, a
+// capability scoped to this run's own egress proxy — same class as
+// the LLM and git tokens.
+func sandboxEgressProxyEnv(proxyAddr, hostVethIP, incomingToken string) []string {
+	proxyURL := "http://" + egressproxy.BasicUser + ":" + incomingToken + "@" + proxyAddr
+	noProxy := hostVethIP + ",localhost,127.0.0.1"
+	return []string{
+		"HTTPS_PROXY=" + proxyURL,
+		"https_proxy=" + proxyURL,
+		"HTTP_PROXY=" + proxyURL,
+		"http_proxy=" + proxyURL,
+		"NO_PROXY=" + noProxy,
+		"no_proxy=" + noProxy,
+	}
 }
 
 // sandboxProxyConfig collects the parsed proxy-side configuration the
