@@ -15,15 +15,25 @@ import {
   Download,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
-import type { Project, KnowledgeFile, KnowledgeUploadResult, ProjectExportPreview } from '../types'
+import type {
+  Project,
+  ProjectVisibility,
+  KnowledgeFile,
+  KnowledgeUploadResult,
+  ProjectExportPreview,
+} from '../types'
 import { readError } from '../lib/api'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
+import ProjectVisibilitySelect from '../components/ProjectVisibilitySelect'
 import CuratorChat from '../components/CuratorChat'
 import ProjectEntitiesPanel from '../components/ProjectEntitiesPanel'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { useOrgRole } from '../hooks/useOrgRole'
+import { useTeamRole } from '../hooks/useTeamRole'
+import { useDeploymentConfig, useMe } from '../hooks/useDeploymentConfig'
 
 // ProjectDetail is the per-project workspace. Top-to-bottom on the
 // left:
@@ -339,6 +349,8 @@ export default function ProjectDetail() {
             onPatchDescription={(description) => patch({ description })}
             onPatchPinnedRepos={(pinned_repos) => patch({ pinned_repos })}
           />
+
+          <VisibilityPanel project={project} onPatch={patch} />
 
           <IntegrationsPanel project={project} onPatch={patch} />
 
@@ -827,6 +839,80 @@ function RepoChip({ slug, onRemove }: { slug: string; onRemove: () => void }) {
         <X size={10} />
       </button>
     </span>
+  )
+}
+
+// VISIBILITY_RANK orders the three visibility values so a change can be
+// classified as an upgrade (more readers) or a downgrade (fewer) — the
+// downgrade case gets a confirm() warning since it can revoke access
+// people currently have, mirroring the delete confirm() pattern already
+// used on this page.
+const VISIBILITY_RANK: Record<ProjectVisibility, number> = { private: 0, team: 1, org: 2 }
+
+const VISIBILITY_LABEL: Record<ProjectVisibility, string> = {
+  private: 'private (only you)',
+  team: 'team (your team only)',
+  org: 'org-wide',
+}
+
+// VisibilityPanel (TFAC-562) is multi-mode only — local's N=1 tenancy has
+// no team/org distinction, so this renders nothing there and every local
+// project stays implicitly "team" as it always has. Options are grayed
+// out via the same rule the backend RLS enforces: "team" needs the
+// project to already have one AND the viewer to be able to write it (v1
+// doesn't support attaching a team to a project that has none — see
+// handleProjectUpdate's 400 for that case); "org" needs an org admin;
+// "private" needs the viewer to be the project's own creator. A downgrade
+// (fewer future readers) prompts a confirm() first since it can revoke
+// access people currently have; an upgrade applies immediately.
+function VisibilityPanel({
+  project,
+  onPatch,
+}: {
+  project: Project
+  onPatch: (body: Record<string, unknown>) => Promise<boolean | undefined>
+}) {
+  const { config } = useDeploymentConfig()
+  const { isAdmin: orgIsAdmin } = useOrgRole()
+  const { canWriteTeam } = useTeamRole()
+  const { me } = useMe()
+  const [pending, setPending] = useState(false)
+
+  if (config?.deployment_mode !== 'multi') return null
+
+  const canTeam = project.team_id !== '' && canWriteTeam(project.team_id)
+  const canOrg = orgIsAdmin
+  const canPrivate = !!me && me.id === project.creator_user_id
+
+  const handleChange = async (next: ProjectVisibility) => {
+    if (next === project.visibility || pending) return
+    if (VISIBILITY_RANK[next] < VISIBILITY_RANK[project.visibility]) {
+      const ok = confirm(
+        `Change visibility to ${VISIBILITY_LABEL[next]}? People who can currently see this project may lose access.`,
+      )
+      if (!ok) return
+    }
+    setPending(true)
+    try {
+      await onPatch({ visibility: next })
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <Card>
+      <h2 className="text-[13px] font-semibold tracking-tight text-text-primary uppercase mb-4">
+        Visibility
+      </h2>
+      <ProjectVisibilitySelect
+        value={project.visibility}
+        onChange={handleChange}
+        canTeam={canTeam}
+        canOrg={canOrg}
+        canPrivate={canPrivate}
+      />
+    </Card>
   )
 }
 

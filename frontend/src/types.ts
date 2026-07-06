@@ -711,14 +711,34 @@ export interface TeamMembersResponse {
   bot: TeamBot | null
 }
 
+/** Project.visibility — see domain.Project.Visibility. Multi-mode only:
+ *  local mode's projects are always "team" and never expose a control for
+ *  this. */
+export type ProjectVisibility = 'private' | 'team' | 'org'
+
 export interface Project {
   id: string
   name: string
   description: string
   /** The team that owns this project (domain.Project.TeamID). The
    *  pinned-repos editor sources its options from this team's tracked
-   *  set, since the PATCH validator only accepts repos this team tracks. */
+   *  set, since the PATCH validator only accepts repos this team tracks.
+   *  Empty for a private/org project created without one (see
+   *  visibility) — pinned repos and tracker keys aren't available then. */
   team_id: string
+  /** Who can read/write this project: "private" (creator only), "team"
+   *  (the owning team's write-members), or "org" (every org member
+   *  reads; only org admins create/downgrade into it). The
+   *  projects_{select,insert,update} RLS policies are the actual
+   *  enforcement — the UI's job is to gray out choices the viewer
+   *  doesn't have, not to be the source of truth. */
+  visibility: ProjectVisibility
+  /** The user who created the project (domain.Project.CreatorUserID).
+   *  Only the creator may set visibility to "private" (mirrors the
+   *  projects_update RLS policy's private branch) — the edit surface
+   *  compares this against the viewer's own id to gray that option out
+   *  for anyone else. */
+  creator_user_id: string
   curator_session_id?: string
   pinned_repos: string[]
   jira_project_key: string

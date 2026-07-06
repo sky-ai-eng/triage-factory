@@ -1,13 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { X } from 'lucide-react'
-import type { Project } from '../types'
+import type { Project, ProjectVisibility } from '../types'
 import { readError } from '../lib/api'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from './Toast/toastStore'
 import RepoMultiSelect from './RepoMultiSelect'
 import TrackerProjectPickers from './TrackerProjectPickers'
 import TeamPicker from './TeamPicker'
-import { useWriteTeam, noteWrittenTeam } from '../hooks/useTeams'
+import ProjectVisibilitySelect from './ProjectVisibilitySelect'
+import { useWriteTeam, useTeams, noteWrittenTeam } from '../hooks/useTeams'
+import { useOrgRole } from '../hooks/useOrgRole'
+import { useDeploymentConfig } from '../hooks/useDeploymentConfig'
 
 // ProjectCreateModal is the only way to create a project from the UI.
 // Required: name. Optional: description, pinned repos, tracker
@@ -31,6 +34,31 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
   // false until /api/teams resolves — the submit button gates on it so a
   // multi-team user can't submit team_id:'' in the cold-load window.
   const { team, setTeam, multi, ready: teamReady } = useWriteTeam()
+  const { teams } = useTeams()
+  const { isAdmin: orgIsAdmin } = useOrgRole()
+  const { config } = useDeploymentConfig()
+  // Visibility (TFAC-562) is a multi-mode-only sharing distinction — local's
+  // N=1 tenancy has no team/org split worth making, so the selector (and the
+  // whole private/org path) simply doesn't render there and every project
+  // stays "team" as it always has.
+  const isMultiMode = config?.deployment_mode === 'multi'
+
+  // Default to "team" once teams load, unless the viewer belongs to none —
+  // a teamless caller can't satisfy team visibility (TFAC-562's reported
+  // 500), so they land on "private" instead. Seeded once; a manual pick
+  // afterward is never overwritten by a later teams refresh.
+  const [visibility, setVisibility] = useState<ProjectVisibility>('team')
+  const visibilitySeeded = useRef(false)
+  useEffect(() => {
+    if (!teamReady || visibilitySeeded.current) return
+    visibilitySeeded.current = true
+    setVisibility(teams.length > 0 ? 'team' : 'private')
+  }, [teamReady, teams])
+
+  // Pinned repos / tracker projects require team visibility (v1: a
+  // private/org project has no team to validate them against — see
+  // ProjectDetail's teamless-project handling for the read-side mirror).
+  const showTeamScopedFields = !isMultiMode || visibility === 'team'
 
   // The pinned-repo picker offers the acting team's tracked repos, so it
   // must wait until the team resolves: for a multi-team user the seed lands
@@ -55,7 +83,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
   useEffect(() => {
     setPinnedRepos([])
     setJiraKey('')
-  }, [team])
+  }, [team, showTeamScopedFields])
   // Holds the in-flight POST's AbortController so the close path
   // can cancel it. Without this, clicking the backdrop / hitting
   // Escape after submit would dismiss the dialog while leaving the
@@ -105,6 +133,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
             jira_project_key: jiraKey,
             linear_project_key: linearKey,
             team_id: team,
+            visibility,
           }),
           signal: controller.signal,
         })
@@ -128,7 +157,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
         setSubmitting(false)
       }
     },
-    [name, description, pinnedRepos, jiraKey, linearKey, team, onCreated],
+    [name, description, pinnedRepos, jiraKey, linearKey, team, visibility, onCreated],
   )
 
   // Backdrop click closes only when no submit is in flight. If a
@@ -191,7 +220,18 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
         </header>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <TeamPicker value={team} onChange={setTeam} label="Team" />
+          {isMultiMode && (
+            <Field label="Visibility">
+              <ProjectVisibilitySelect
+                value={visibility}
+                onChange={setVisibility}
+                canTeam={teams.length > 0}
+                canOrg={orgIsAdmin}
+              />
+            </Field>
+          )}
+
+          {showTeamScopedFields && <TeamPicker value={team} onChange={setTeam} label="Team" />}
 
           <Field label="Name" required>
             <input
@@ -225,24 +265,32 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
             />
           </Field>
 
-          <Field label="Pinned repos">
-            <RepoMultiSelect
-              value={pinnedRepos}
-              onChange={setPinnedRepos}
-              teamId={team}
-              disabled={!repoPickerReady}
-            />
-          </Field>
+          {showTeamScopedFields ? (
+            <>
+              <Field label="Pinned repos">
+                <RepoMultiSelect
+                  value={pinnedRepos}
+                  onChange={setPinnedRepos}
+                  teamId={team}
+                  disabled={!repoPickerReady}
+                />
+              </Field>
 
-          <Field label="Tracker projects">
-            <TrackerProjectPickers
-              jiraKey={jiraKey}
-              linearKey={linearKey}
-              onJiraChange={setJiraKey}
-              onLinearChange={setLinearKey}
-              teamId={team}
-            />
-          </Field>
+              <Field label="Tracker projects">
+                <TrackerProjectPickers
+                  jiraKey={jiraKey}
+                  linearKey={linearKey}
+                  onJiraChange={setJiraKey}
+                  onLinearChange={setLinearKey}
+                  teamId={team}
+                />
+              </Field>
+            </>
+          ) : (
+            <p className="text-[12px] text-text-tertiary italic">
+              Pinned repos and tracker projects are available for team-visibility projects.
+            </p>
+          )}
 
           <div className="flex justify-end gap-2 pt-2">
             <button

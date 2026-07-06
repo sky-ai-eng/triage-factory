@@ -45,8 +45,14 @@ type createProjectRequest struct {
 	// TeamID is the acting team the write picker supplied — the team the
 	// new project (and its pinned-repo / tracker-key validation) is
 	// scoped to. Required in the UI when the caller belongs to ≥2 teams;
-	// empty (sole-team fallback) otherwise.
+	// empty (sole-team fallback) otherwise. Only consulted when
+	// Visibility is "team" — private/org projects have no team in v1.
 	TeamID string `json:"team_id"`
+	// Visibility is one of domain's "private" / "team" / "org". Empty
+	// defaults to "team", preserving pre-TFAC-562 behavior. Forced to
+	// "team" in local mode regardless of what's sent — private/org is a
+	// multi-mode sharing distinction that N=1 has no use for.
+	Visibility string `json:"visibility"`
 }
 
 // patchProjectRequest is the PATCH body shape. Pointers distinguish
@@ -61,6 +67,19 @@ type patchProjectRequest struct {
 	LinearProjectKey          *string   `json:"linear_project_key"`
 	CuratorSessionID          *string   `json:"curator_session_id"`
 	SpecAuthorshipBlueprintID *string   `json:"spec_authorship_blueprint_id"`
+	// Visibility changes an existing project's private/team/org gate.
+	// There's no TeamID field alongside it — v1 doesn't support
+	// attaching a team to a project that doesn't already have one, so a
+	// private/org project created teamless can move between private ⇄
+	// org freely but can't upgrade to "team" (existing.TeamID stays
+	// preserved across every transition; the handler 400s if a "team"
+	// target has no team to land on). A project already on a team can
+	// move freely across all three — RLS is the permission authority
+	// (see db.ErrVisibilityForbidden): private requires being the
+	// project's own creator, team requires write-membership on the
+	// team, org requires org-admin — symmetric for upgrades and
+	// downgrades alike.
+	Visibility *string `json:"visibility"`
 }
 
 func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
@@ -81,32 +100,72 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	jiraKey := strings.TrimSpace(req.JiraProjectKey)
 	linearKey := strings.TrimSpace(req.LinearProjectKey)
 
+	visibility := strings.TrimSpace(req.Visibility)
+	if visibility == "" {
+		visibility = domain.ProjectVisibilityTeam
+	}
+	if !domain.ValidProjectVisibility(visibility) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "visibility must be one of private, team, org"})
+		return
+	}
+	// Multi-mode-only feature (TFAC-562): local's N=1 tenancy has no
+	// team/org distinction worth making, so force team-scoped
+	// regardless of what a stale or hand-crafted client sends.
+	if runmode.Current() == runmode.ModeLocal {
+		visibility = domain.ProjectVisibilityTeam
+	}
+
 	// Resolve the acting team, validate pinned repos + tracker keys
 	// against that team, then create — all in ONE WithTx so the team the
 	// row is written under is the same team validation ran against (no
 	// resolve-then-write window where the team could change underneath
 	// us) and so teams_select / team_github_repos_select / jira_rules_select
 	// RLS gates all fire under the user's claims. Jira rules are loaded
-	// lazily — only when the Jira side needs validation. The two
-	// user-facing validation failures (bad pinned repo, unknown tracker
-	// key) short-circuit the closure with a nil error and surface their
-	// captured message as a 400 after the tx; nothing is written on those
-	// paths. The acting team owns the new project; UPDATE instead
-	// validates against the project's own existing.TeamID, so only this
-	// create path resolves a team.
+	// lazily — only when the Jira side needs validation. The three
+	// user-facing validation failures (bad visibility/team combo, bad
+	// pinned repo, unknown tracker key) short-circuit the closure with a
+	// nil error and surface their captured message as a 400 after the tx;
+	// nothing is written on those paths. The acting team owns the new
+	// project; UPDATE instead validates against the project's own
+	// existing.TeamID, so only this create path resolves a team.
 	var (
-		teamID        string
-		pinned        []string
-		pinnedErrMsg  string
-		trackerErrMsg string
-		teamJiraRules []domain.JiraProjectStatusRules
-		created       *domain.Project
+		teamID           string
+		pinned           []string
+		pinnedErrMsg     string
+		trackerErrMsg    string
+		visibilityErrMsg string
+		teamJiraRules    []domain.JiraProjectStatusRules
+		created          *domain.Project
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		teamID, e = teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
-		if e != nil {
-			return e
+		if visibility == domain.ProjectVisibilityTeam {
+			// teamscope.ResolveActing's zero-teams case falls back to the
+			// org's default team (a "never block" posture that predates
+			// this visibility column) — for a caller who isn't a member of
+			// that team, the fallback then trips the projects_insert RLS
+			// check and 500s. That's the exact opaque failure TFAC-562
+			// reported. Checking membership up front turns it into a clean
+			// 400 instead; the paired frontend fix grays out "team"
+			// visibility for teamless users and defaults them to private.
+			myTeams, e2 := tx.Teams.ListForUser(r.Context(), orgID)
+			if e2 != nil {
+				return fmt.Errorf("list teams: %w", e2)
+			}
+			if len(myTeams) == 0 {
+				return errNoTeamsForTeamVisibility
+			}
+			teamID, e = teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+			if e != nil {
+				return e
+			}
+		} else if len(req.PinnedRepos) > 0 || jiraKey != "" || linearKey != "" {
+			// private/org projects have no team to validate these
+			// against in v1 — they start as a bare shell (name +
+			// description + knowledge base); pinning resources requires
+			// team visibility.
+			visibilityErrMsg = "pinned repos and tracker projects require team visibility"
+			return nil
 		}
 		pinned, pinnedErrMsg = validatePinnedRepos(r.Context(), tx.TeamGitHubRepos, teamID, req.PinnedRepos)
 		if pinnedErrMsg != "" {
@@ -132,13 +191,16 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		// get NULL on insert and the curator runtime falls back to the same
 		// default at dispatch time anyway. Resolve the team's own copy of the
 		// shipped spec-authorship blueprint by slug (id is a random UUID per
-		// team copy); store the resolved UUID.
+		// team copy); store the resolved UUID. Skipped entirely for a
+		// teamless private/org project — there's no team copy to resolve.
 		specBlueprintID := ""
-		def, defErr := tx.Blueprints.GetBySystemSlug(r.Context(), orgID, teamID, domain.SystemTicketSpecPromptID)
-		if defErr != nil {
-			projectsLog.Warn("create: failed to load default spec-authorship blueprint", "slug", domain.SystemTicketSpecPromptID, "error", defErr)
-		} else if def != nil {
-			specBlueprintID = def.ID
+		if teamID != "" {
+			def, defErr := tx.Blueprints.GetBySystemSlug(r.Context(), orgID, teamID, domain.SystemTicketSpecPromptID)
+			if defErr != nil {
+				projectsLog.Warn("create: failed to load default spec-authorship blueprint", "slug", domain.SystemTicketSpecPromptID, "error", defErr)
+			} else if def != nil {
+				specBlueprintID = def.ID
+			}
 		}
 		id, createErr := tx.Projects.Create(r.Context(), orgID, teamID, domain.Project{
 			Name:                      name,
@@ -148,6 +210,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			LinearProjectKey:          linearKey,
 			CuratorSessionID:          req.CuratorSessionID,
 			SpecAuthorshipBlueprintID: specBlueprintID,
+			Visibility:                visibility,
 		})
 		if createErr != nil {
 			return createErr
@@ -159,8 +222,20 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
+		if errors.Is(err, errNoTeamsForTeamVisibility) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, db.ErrVisibilityForbidden) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "you don't have permission to create a project with that visibility"})
+			return
+		}
 		projectsLog.Error("create failed", "error", err)
 		internalError(w, "projects", err)
+		return
+	}
+	if visibilityErrMsg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": visibilityErrMsg})
 		return
 	}
 	if pinnedErrMsg != "" {
@@ -173,6 +248,11 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, created)
 }
+
+// errNoTeamsForTeamVisibility is returned from handleProjectCreate's WithTx
+// closure when the caller has zero team memberships but requested
+// visibility="team" — see the comment at its call site.
+var errNoTeamsForTeamVisibility = errors.New("join a team to create a team-visibility project, or choose private/org visibility")
 
 func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
@@ -615,10 +695,36 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		updated.SpecAuthorshipBlueprintID = trimmed
 	}
+	if req.Visibility != nil {
+		v := strings.TrimSpace(*req.Visibility)
+		if !domain.ValidProjectVisibility(v) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "visibility must be one of private, team, org"})
+			return
+		}
+		// Multi-mode-only (TFAC-562) — mirrors the create-path guard.
+		if runmode.Current() == runmode.ModeLocal {
+			v = domain.ProjectVisibilityTeam
+		}
+		updated.Visibility = v
+	}
+	if updated.Visibility == domain.ProjectVisibilityTeam && updated.TeamID == "" {
+		// v1 doesn't support attaching a team via PATCH — a project
+		// created private/org with no team can't become team-visibility
+		// without recreating it. existing.TeamID never changes here (no
+		// PATCH field sets it), so this only fires for that teamless case.
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "this project has no team — team visibility isn't available for it",
+		})
+		return
+	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Projects.Update(r.Context(), orgID, updated)
 	}); err != nil {
+		if errors.Is(err, db.ErrVisibilityForbidden) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "you don't have permission to change this project to that visibility"})
+			return
+		}
 		internalError(w, "projects", err)
 		return
 	}
