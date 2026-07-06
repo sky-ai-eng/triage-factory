@@ -170,7 +170,10 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 		}
 
 		retryAfter, hasRetryAfter := parseRetryAfter(resp.Header)
-		data, _ := readAllClose(resp)
+		data, readErr := readAllClose(resp)
+		if readErr != nil {
+			return nil, readErr
+		}
 
 		if resp.StatusCode == http.StatusForbidden && !hasRetryAfter && !isSecondaryRateLimitBody(data) {
 			// A genuine 403 (auth/permissions), not rate limiting — replay the
@@ -210,20 +213,28 @@ func isSecondaryRateLimitBody(body []byte) bool {
 }
 
 // parseRetryAfter reads the Retry-After header, which GitHub sends as either
-// delay-seconds or an HTTP-date (RFC 7231 §7.1.3).
+// delay-seconds or an HTTP-date (RFC 7231 §7.1.3). A value that resolves to
+// zero or negative — a non-positive delay-seconds count, or an HTTP-date
+// that's already past (a stale/expired header, or clock skew between us and
+// GitHub) — is reported as absent (ok=false) rather than honored as "wait
+// zero", so the caller falls back to backoffDuration's sane minimum instead
+// of retrying with no pause at all.
 func parseRetryAfter(h http.Header) (time.Duration, bool) {
 	v := h.Get("Retry-After")
 	if v == "" {
 		return 0, false
 	}
 	if secs, err := strconv.Atoi(v); err == nil {
-		if secs < 0 {
-			secs = 0
+		if secs <= 0 {
+			return 0, false
 		}
 		return time.Duration(secs) * time.Second, true
 	}
 	if t, err := http.ParseTime(v); err == nil {
-		return time.Until(t), true
+		if wait := time.Until(t); wait > 0 {
+			return wait, true
+		}
+		return 0, false
 	}
 	return 0, false
 }

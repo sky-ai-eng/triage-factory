@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -288,13 +289,15 @@ func TestGet_ContextCancelledDuringBackoffSleep(t *testing.T) {
 // TestGet_ExhaustsRetriesThenErrRateLimited pins the retry bound: a GET that
 // keeps hitting 429 gives up after maxRateLimitRetries extra attempts (one
 // initial + maxRateLimitRetries retries) and returns *ErrRateLimited rather
-// than retrying forever. Retry-After: 0 keeps the test fast — the bound
-// under test is the attempt count, not backoff timing.
+// than retrying forever. A small constant Retry-After keeps the wait bounded
+// and the test fast — the bound under test is the attempt count, not backoff
+// timing (a non-positive Retry-After is deliberately NOT used here: it's no
+// longer honored as "wait zero", see TestParseRetryAfter_NonPositiveNotHonored).
 func TestGet_ExhaustsRetriesThenErrRateLimited(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
-		w.Header().Set("Retry-After", "0")
+		w.Header().Set("Retry-After", "1")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"message":"rate limited"}`))
 	}))
@@ -395,5 +398,69 @@ func TestPostGraphQL_RetriesOn429(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Errorf("upstream requests = %d, want exactly 2", got)
+	}
+}
+
+// TestParseRetryAfter_NonPositiveNotHonored pins the fix for a hot-loop risk:
+// a non-positive delay-seconds value, or an HTTP-date that's already in the
+// past (a stale header, or clock skew between us and GitHub), must not be
+// honored as "wait zero" — that would make doWithRetry spin immediately
+// against the API on every bounded retry instead of backing off. Both forms
+// report ok=false so the caller falls back to backoffDuration's sane minimum.
+func TestParseRetryAfter_NonPositiveNotHonored(t *testing.T) {
+	cases := []struct {
+		name string
+		v    string
+	}{
+		{"zero seconds", "0"},
+		{"negative seconds", "-5"},
+		{"http-date in the past", time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			h.Set("Retry-After", tc.v)
+			wait, ok := parseRetryAfter(h)
+			if ok {
+				t.Errorf("parseRetryAfter(%q) = (%v, true), want ok=false so the caller falls back to backoff", tc.v, wait)
+			}
+		})
+	}
+}
+
+// errorBodyRoundTripper serves a 429 whose body errors on read, simulating a
+// truncated connection mid-response.
+type errorBodyRoundTripper struct{}
+
+func (errorBodyRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header:     http.Header{"Retry-After": []string{"1"}},
+		Body:       io.NopCloser(&erroringReader{}),
+	}, nil
+}
+
+// erroringReader always fails, standing in for a body read that fails
+// partway through (e.g. a connection reset).
+type erroringReader struct{}
+
+func (*erroringReader) Read([]byte) (int, error) {
+	return 0, errors.New("simulated truncated body")
+}
+
+// TestGet_BodyReadErrorSurfaced pins that a failed read of a rate-limit-
+// candidate's error body is surfaced to the caller, not silently discarded.
+// Discarding it would both mask the real transport failure and let the
+// (empty, misleading) data drive the 429-vs-genuine-403 classification.
+func TestGet_BodyReadErrorSurfaced(t *testing.T) {
+	c := &Client{baseURL: "http://ratelimit-test.invalid", pat: "test-token", http: &http.Client{Transport: errorBodyRoundTripper{}}}
+
+	_, err := c.Get(context.Background(), "/x")
+	if err == nil || !strings.Contains(err.Error(), "simulated truncated body") {
+		t.Fatalf("err = %v, want the body-read failure surfaced", err)
+	}
+	var rl *ErrRateLimited
+	if errors.As(err, &rl) {
+		t.Fatal("a body-read failure must not be misclassified as ErrRateLimited")
 	}
 }
