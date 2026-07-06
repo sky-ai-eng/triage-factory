@@ -176,14 +176,6 @@ func buildSandboxEnv(extraEnv []string) []string {
 		"PATH=/usr/local/bin:/usr/bin:/bin",
 		"HOME=/work",
 		"TERM=xterm",
-		// Corepack's release cache is $HOME-derived unless pinned, and
-		// the rootfs bake pre-warmed pnpm under sandbox.CorepackHome
-		// (chrootToolchainEnv ran with HOME=/root, this env runs with
-		// HOME=/work — different homes, so without the shared pin the
-		// pre-warm is invisible at runtime and pnpm's first invocation
-		// falls back to a network fetch). Same constant on both sides
-		// so bake and runtime can't drift.
-		"COREPACK_HOME=" + sandbox.CorepackHome,
 	}
 	// Engine runtime tuning (JSC JIT off by default). Non-credential by
 	// construction, so it belongs in the Property B-safe base set.
