@@ -37,6 +37,12 @@ func dispatchCLI(args []string) (handled bool, err error) {
 		hook.Handle(args[1:])
 	case "status":
 		exec.HandleStatus(args[1:])
+	case "snapshot-capture":
+		// Internal: run a parked run's git-delta capture, emitting the delta as
+		// JSON. Spawned by the delegate spawner as the sandbox uid so the
+		// capture's filter-honoring git never runs as root over agent-writable
+		// config. Undocumented in --help, like `hook`.
+		handleSnapshotCapture(args[1:])
 	case "install":
 		install.Handle(args[1:])
 	case "uninstall":
