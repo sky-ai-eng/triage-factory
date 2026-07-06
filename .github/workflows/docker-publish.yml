@@ -92,6 +92,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Public Enterprise key baked into the image (repo variable, not a secret).
+          # Empty on forks without the variable → community image, EE off.
+          build-args: |
+            TF_LICENSE_PUBLIC_KEY=${{ vars.TF_LICENSE_PUBLIC_KEY }}
           # GHA cache halves repeat-build times. Scoped per-arch so
           # cross-build doesn't poison the native cache.
           cache-from: type=gha

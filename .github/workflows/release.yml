@@ -66,3 +66,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          # Public Enterprise key baked into release binaries. A repo VARIABLE, not a
+          # secret — it ships in every binary by design. Empty on forks without the
+          # variable → EE off (community build).
+          TF_LICENSE_PUBLIC_KEY: ${{ vars.TF_LICENSE_PUBLIC_KEY }}
