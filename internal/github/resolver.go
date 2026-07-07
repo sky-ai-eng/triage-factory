@@ -181,20 +181,24 @@ type Resolver interface {
 }
 
 type resolver struct {
-	secrets  db.SecretStore
-	apps     db.GitHubAppsStore
-	orgs     db.OrgsStore
-	agents   db.AgentStore
-	cache    TokenCache
-	coverage *repoCoverageCache
+	secrets    db.SecretStore
+	apps       db.GitHubAppsStore
+	orgs       db.OrgsStore
+	agents     db.AgentStore
+	cache      TokenCache
+	coverage   *repoCoverageCache
+	rateLimits *rateLimitRegistry
 }
 
 // NewResolver builds a Resolver. A nil cache gets a fresh in-memory one.
+// Each instance owns its own rate-limit registry (see RateLimitReader) —
+// process-local, in-memory state, so there's nothing for a caller to
+// inject or share.
 func NewResolver(secrets db.SecretStore, apps db.GitHubAppsStore, orgs db.OrgsStore, agents db.AgentStore, cache TokenCache) Resolver {
 	if cache == nil {
 		cache = NewMemoryTokenCache()
 	}
-	return &resolver{secrets: secrets, apps: apps, orgs: orgs, agents: agents, cache: cache, coverage: newRepoCoverageCache()}
+	return &resolver{secrets: secrets, apps: apps, orgs: orgs, agents: agents, cache: cache, coverage: newRepoCoverageCache(), rateLimits: newRateLimitRegistry()}
 }
 
 // The production resolver implements the optional per-repo-scoping extensions
@@ -204,7 +208,27 @@ func NewResolver(secrets db.SecretStore, apps db.GitHubAppsStore, orgs db.OrgsSt
 var (
 	_ ScopedResolver     = (*resolver)(nil)
 	_ ScopedRepoResolver = (*resolver)(nil)
+	_ RateLimitReader    = (*resolver)(nil)
 )
+
+// RateLimitFor implements RateLimitReader, reading this resolver's
+// process-wide, per-org registry (see newObservedClient).
+func (r *resolver) RateLimitFor(orgID string) (RateLimitState, bool) {
+	return r.rateLimits.get(orgID)
+}
+
+// newObservedClient is the single *Client construction path every
+// resolver entry point (ClientFor, ClientForRepoWithIdentity,
+// ClientForRepoScoped, tier3PATClient) uses, so every credential tier —
+// App installation token or PAT — feeds the same per-org rate-limit
+// registry without each call site remembering to wire it.
+func (r *resolver) newObservedClient(orgID, base, token string) *Client {
+	c := NewClient(base, token)
+	c.SetRateLimitObserver(func(s RateLimitState) {
+		r.rateLimits.record(orgID, s)
+	})
+	return c
+}
 
 func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client, error) {
 	base, err := r.githubBaseFor(ctx, orgID)
@@ -219,7 +243,7 @@ func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client
 		if terr != nil {
 			return nil, terr
 		}
-		return NewClient(base, tok.Value), nil
+		return r.newObservedClient(orgID, base, tok.Value), nil
 	}
 
 	// No active App → PAT-borrow. A backend read error propagates — there's no
@@ -373,7 +397,7 @@ func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app *doma
 	if err != nil {
 		return nil, IdentityUnknown, err
 	}
-	client := NewClient(base, tok.Value)
+	client := r.newObservedClient(orgID, base, tok.Value)
 	if r.coverage.covered(orgID, owner, repo) {
 		return client, IdentityApp, nil // memoized: in the grant
 	}
@@ -488,7 +512,7 @@ func (r *resolver) ClientForRepoScoped(ctx context.Context, orgID, owner, repo s
 		if terr != nil {
 			return nil, IdentityUnknown, terr
 		}
-		return NewClient(base, tok.Value), IdentityApp, nil
+		return r.newObservedClient(orgID, base, tok.Value), IdentityApp, nil
 	}
 	client, err := r.tier3PATClient(ctx, orgID, base)
 	if err != nil {
@@ -674,7 +698,7 @@ func (r *resolver) tier3PATClient(ctx context.Context, orgID, base string) (*Cli
 	if pat == "" {
 		return nil, nil
 	}
-	return NewClient(base, pat), nil
+	return r.newObservedClient(orgID, base, pat), nil
 }
 
 // patBorrowUser is a human-readable identity for the tier-3 log line — the

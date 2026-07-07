@@ -23,6 +23,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -246,6 +247,31 @@ type Server struct {
 	// workersStarted guards StartExtensionWorkers so a double call (e.g. a
 	// test double-invoking Run) can't fire readyHooks twice.
 	workersStarted sync.Once
+
+	// version is main.Version (the release tag, or "dev" for an unreleased
+	// build), threaded through for GET /readyz (TFAC-573) so an operator
+	// can confirm a deploy landed without shelling into the host. Set via
+	// SetVersion; the zero value "" renders as an empty string rather than
+	// panicking for any Server built without it (bare test constructions).
+	version string
+	// migrationsOK records that db.Migrate completed successfully at boot,
+	// for GET /readyz's "migrations" hard check. Always set true in
+	// production — db.Migrate runs to completion in internal/app/stores.go
+	// before server.New / ListenAndServeContext, so there is no live-
+	// serving path where migrations failed. Kept as an explicit flag
+	// (default false) rather than hard-coding "ok" in the handler so the
+	// check has real meaning if a future boot path (e.g. async migrations)
+	// stops gating this as tightly, and so a Server built without the
+	// SetMigrationsOK call (bare test constructions) fails the check
+	// loudly instead of lying "ok". See SetMigrationsOK.
+	migrationsOK bool
+	// pollerHealth is the poller Manager's Health() method, wired via
+	// SetPollerManager, backing /readyz's poller-alive hard check + per-org
+	// poll-staleness soft signal. Narrower than handing over the whole
+	// *poller.Manager — the handler only needs the read. Nil until wired
+	// (bare test constructions); the handler reports both poller checks
+	// failed rather than nil-dereffing.
+	pollerHealth func(ctx context.Context) poller.HealthSnapshot
 }
 
 // reachableRepoEntry is one cached picker enumeration: the lowercased
@@ -621,6 +647,14 @@ func (s *Server) routes() {
 	//        checks, compose healthcheck, k8s liveness). Pre-auth so
 	//        the probe doesn't need a session; deliberately doesn't
 	//        consult the DB (see handleHealth).
+	//   GET  /readyz                    — readiness probe (TFAC-573): DB +
+	//        migrations + poller liveness (hard checks, 503 on failure)
+	//        plus poll-staleness + active-run count (soft signals). Bare
+	//        path (not /api/readyz) by convention — the universal k8s/ALB
+	//        probe target — so it's outside /api/* and the preAuthAllowlist
+	//        below / routes_coverage_test entirely; noted here only for
+	//        consistency with the other pre-auth routes. See
+	//        readyz_handler.go.
 	//   POST /api/webhooks/github/{org_id} — GitHub App webhook receiver;
 	//        GitHub has no session, and the handler verifies the HMAC
 	//        signature against the org's stored webhook secret itself.
@@ -671,6 +705,12 @@ func (s *Server) routes() {
 	// platforms use auto-restart on liveness failure and we don't want
 	// a flapping integration to recycle the whole process.
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
+	// Readiness probe (TFAC-573) — bare path (not under /api/*), matching
+	// the universal k8s/ALB probe convention; Go 1.22's ServeMux matches
+	// this exact literal ahead of the "/" SPA catch-all regardless of
+	// registration order. Pre-auth for the same reason as /api/health
+	// above. See readyz_handler.go.
+	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	// /auth/v1/* reverse-proxy to gotrue, wired lazily inside
 	// SetAuthDeps. The closure here re-reads s.authProxy each
 	// request so local-mode (where it stays nil) returns 404
@@ -1372,6 +1412,33 @@ func (s *Server) kickDashboardBackfill(orgID, userID, login, host string) {
 // main.go after the bus is created.
 func (s *Server) SetEventBus(bus *eventbus.Bus) {
 	s.bus = bus
+}
+
+// SetVersion records main.Version (the release tag, or "dev") for GET
+// /readyz (TFAC-573). Wired in internal/app/httpserver.go's buildServer,
+// right after server.New, in both modes.
+func (s *Server) SetVersion(v string) {
+	s.version = v
+}
+
+// SetMigrationsOK records that db.Migrate completed successfully at boot,
+// for GET /readyz's "migrations" hard check (TFAC-573). Called with true
+// in internal/app/app.go's New, right after buildServer succeeds — by
+// that point openStores has already run db.Migrate to completion (New
+// would have returned its error otherwise), so this simply makes that
+// already-true fact visible to the handler. See the migrationsOK field
+// doc for why the check exists despite always passing today.
+func (s *Server) SetMigrationsOK(ok bool) {
+	s.migrationsOK = ok
+}
+
+// SetPollerManager wires the poller Manager's Health() snapshot into GET
+// /readyz (TFAC-573): the poller-alive hard check plus the per-org
+// poll-staleness soft signal. Takes the bound method value rather than
+// the whole *poller.Manager so readyz_handler.go depends on one function,
+// not the poller package's full surface (PollSoon, RestartAll, etc).
+func (s *Server) SetPollerManager(healthFn func(ctx context.Context) poller.HealthSnapshot) {
+	s.pollerHealth = healthFn
 }
 
 // SetIngestor wires the durable ingest seam so ExtensionAPI.PublishEvent can

@@ -73,13 +73,34 @@ func (c *Client) recordRateLimit(h http.Header) {
 	if err != nil {
 		return
 	}
+	reset := time.Unix(resetUnix, 0)
 	used, _ := strconv.Atoi(h.Get("X-RateLimit-Used"))
 
 	c.rlMu.Lock()
 	c.rlRemaining = remaining
-	c.rlReset = time.Unix(resetUnix, 0)
+	c.rlReset = reset
 	c.rlUsed = used
 	c.rlOK = true
+	observer := c.rlObserver
+	c.rlMu.Unlock()
+
+	// Invoked outside the lock: the observer (the resolver's registry
+	// write) takes its own lock, and calling out to arbitrary caller code
+	// while holding rlMu is an avoidable lock-ordering risk.
+	if observer != nil {
+		observer(RateLimitState{Remaining: remaining, Reset: reset, Used: used})
+	}
+}
+
+// SetRateLimitObserver registers fn to be invoked every time this client's
+// cached rate-limit state updates from a response's headers (see
+// recordRateLimit) — the hook the resolver uses to mirror a short-lived,
+// per-resolve *Client's state into its process-wide, per-org
+// RateLimitRegistry (GET /readyz's soft rate-limit signal, TFAC-573).
+// Optional; a *Client with no observer set is unaffected.
+func (c *Client) SetRateLimitObserver(fn func(RateLimitState)) {
+	c.rlMu.Lock()
+	c.rlObserver = fn
 	c.rlMu.Unlock()
 }
 

@@ -74,6 +74,25 @@ type Manager struct {
 	// at the head" (no cursor set, or the last cycle fully wrapped).
 	cursorMu sync.Mutex
 	ghCursor map[string]string
+
+	// heartbeatMu guards lastGithubTick/lastJiraTick — stamped once per
+	// wake of runGitHubCycle/runJiraCycle regardless of whether any org
+	// was due that wake (TFAC-573). Distinct from nextPoll/dueMu: nextPoll
+	// only gets a slot for orgs actually polled, so an org roster of zero
+	// (or every org not-yet-due) would otherwise look identical to a dead
+	// loop. This is the /readyz hard "is the base-tick loop alive" check.
+	heartbeatMu    sync.Mutex
+	lastGithubTick time.Time
+	lastJiraTick   time.Time
+
+	// pollSuccessMu guards lastGithubSuccess/lastJiraSuccess — per-org
+	// timestamp of the last poll that completed a RefreshGitHub/RefreshJira
+	// call without error (TFAC-573). This is the /readyz soft signal: it
+	// proves an org's poll actually completed, where the heartbeat above
+	// only proves the loop woke.
+	pollSuccessMu     sync.Mutex
+	lastGithubSuccess map[string]time.Time
+	lastJiraSuccess   map[string]time.Time
 }
 
 func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
@@ -373,6 +392,7 @@ func (m *Manager) startGitHub() {
 // OnError but do not abort the remaining orgs in the cycle — a transient
 // failure on org A shouldn't starve orgs B..N of polls.
 func (m *Manager) runGitHubCycle() {
+	m.stampGitHubHeartbeat()
 	ctx := context.Background()
 	now := time.Now()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
@@ -516,6 +536,8 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		if rerr != nil {
 			githubLog.Error("tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
 			m.reportError("github", orgID, rerr)
+		} else {
+			m.stampGitHubSuccess(orgID)
 		}
 		var rl *ghclient.ErrRateLimited
 		if errors.As(rerr, &rl) {
@@ -684,6 +706,8 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	if rerr != nil {
 		githubLog.Error("tracker error", "org", orgID, "error", rerr)
 		m.reportError("github", orgID, rerr)
+	} else {
+		m.stampGitHubSuccess(orgID)
 	}
 	var rl *ghclient.ErrRateLimited
 	errors.As(rerr, &rl)
@@ -852,6 +876,7 @@ func (m *Manager) startJira() {
 // per-org failures are logged + reported via OnError but do not abort the
 // remaining orgs in the cycle.
 func (m *Manager) runJiraCycle() {
+	m.stampJiraHeartbeat()
 	ctx := context.Background()
 	now := time.Now()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
@@ -918,6 +943,8 @@ func (m *Manager) runJiraCycle() {
 		if _, err := m.trackerForOrg(orgID).RefreshJira(client, baseURL, projects); err != nil {
 			jiraLog.Error("tracker error", "org", orgID, "error", err)
 			m.reportError("jira", orgID, err)
+		} else {
+			m.stampJiraSuccess(orgID)
 		}
 	}
 	m.prunePoll("jira", orgIDs)

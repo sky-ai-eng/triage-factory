@@ -121,6 +121,10 @@ func New(ctx context.Context, cfg Config, static fs.FS) (*App, error) {
 	if err := a.buildServer(ctx, static); err != nil { // HTTP handlers + auth + static; owns the websocket hub
 		return nil, err
 	}
+	// TFAC-573: openStores' db.Migrate already ran to completion above (New
+	// would have returned its error otherwise) — record that for GET
+	// /readyz's "migrations" check now that the server exists to hold it.
+	a.srv.SetMigrationsOK(true)
 	a.buildInfra()                             // event bus
 	a.buildRunCredentials()                    // ghResolver / runSecrets / modelFor
 	a.buildAI()                                // scorer + project classifier
