@@ -141,6 +141,13 @@ func (s *Server) bufferSigV4Body(next http.Handler) http.Handler {
 		sum := sha256.Sum256(body)
 		payload := &sigV4Payload{body: body, sha256Hex: hex.EncodeToString(sum[:])}
 
+		// Re-arming r.Body does NOT orphan the original connection body:
+		// net/http's server captures it as response.reqBody at request-read
+		// time (before any handler runs) and closes THAT in finishRequest,
+		// regardless of what the handler leaves in r.Body. The NopCloser
+		// installed here holds no resources and needs no close, and the
+		// ReadAll above already consumed the original to EOF — the best
+		// case for keep-alive reuse.
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sigV4PayloadKey{}, payload)))
