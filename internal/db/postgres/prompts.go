@@ -101,7 +101,7 @@ func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID, teamID string, p 
 
 	// Identity is per-team: (org_id, team_id, system_slug). A second team
 	// gets its own copy (same slug, different team_id); re-seeds resolve
-	// the existing row by this key (SKY-380).
+	// the existing row by this key.
 	var (
 		existingID   string
 		userModified bool
@@ -200,7 +200,7 @@ func (s *promptStore) List(ctx context.Context, orgID string, teamID string) ([]
 		FROM prompts WHERE org_id = $1 AND hidden = FALSE AND deleted_at IS NULL`
 	if teamID != "" {
 		// Prompts page narrowed to one team: that team's prompts. Every
-		// prompt is team-scoped post-SKY-380 (no org-visible tier), so this
+		// prompt is team-scoped (no org-visible tier), so this
 		// is a plain team filter. RLS still gates what the caller may see.
 		args = append(args, teamID)
 		q += fmt.Sprintf(" AND team_id = $%d", len(args))
@@ -236,7 +236,7 @@ func (s *promptStore) GetSystem(ctx context.Context, orgID string, id string) (*
 
 // GetBySystemSlug resolves a team's copy of a shipped prompt by slug. Runs
 // on the app pool (RLS-gated); org + team are in the WHERE for defense in
-// depth (SKY-380).
+// depth.
 func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Prompt, error) {
 	if teamID == "" {
 		return nil, errors.New("postgres prompts: GetBySystemSlug requires team_id")
@@ -273,7 +273,7 @@ func getPrompt(ctx context.Context, q queryer, orgID, id string, includeDeleted 
 
 // scanPromptRowPG decodes a prompts row in the canonical column order
 // (id … team_id, system_slug, created_at, updated_at). system_slug is
-// nullable (user prompts); team_id is NOT NULL post-SKY-380. Note kind is
+// nullable (user prompts); team_id is NOT NULL. Note kind is
 // not selected here (the PG read path never populated it).
 func scanPromptRowPG(scanFn func(dst ...any) error) (domain.Prompt, error) {
 	var p domain.Prompt

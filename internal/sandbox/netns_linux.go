@@ -17,7 +17,7 @@ import (
 // precns-test.sh (lines 7-33). Shells out to `ip` rather than using
 // netlink Go bindings because:
 //
-//   - The TF runner image bundles iproute2 anyway (SKY-256), so no
+//   - The TF runner image bundles iproute2 anyway, so no
 //     new dep weight.
 //   - Matches the probe verbatim, making it trivial to cross-check
 //     by hand and debug from `ip` man pages.
@@ -91,7 +91,7 @@ func setupNetwork(ctx context.Context, runID string, subnetIdx uint8) (*netState
 		}
 	}
 
-	// Defense-in-depth (SKY-395): disable IPv6 inside the netns so the
+	// Defense-in-depth: disable IPv6 inside the netns so the
 	// Part B egress allowlist — which is IPv4-only (iptables, not
 	// ip6tables; the runner image bundles only iptables) — can't be
 	// flanked over v6. Today this is belt-and-suspenders, not an open

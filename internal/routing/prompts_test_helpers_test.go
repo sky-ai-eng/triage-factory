@@ -22,7 +22,7 @@ func testPromptStore(database *sql.DB) db.PromptStore {
 }
 
 // testEventHandlerStore returns a SQLite-backed EventHandlerStore for
-// routing tests. Post-SKY-259 the router takes one store covering both
+// routing tests. The router takes one store covering both
 // rules and triggers; tests construct it the same way as production.
 func testEventHandlerStore(database *sql.DB) db.EventHandlerStore {
 	if database == nil {
@@ -32,7 +32,7 @@ func testEventHandlerStore(database *sql.DB) db.EventHandlerStore {
 }
 
 // testTaskStore returns a SQLite-backed TaskStore for routing tests.
-// SKY-283 — Router takes one store for task lifecycle/claim/queue
+// The Router takes one store for task lifecycle/claim/queue
 // queries; the per-method orgID arg defaults to LocalDefaultOrgID.
 func testTaskStore(database *sql.DB) db.TaskStore {
 	if database == nil {
@@ -76,8 +76,8 @@ func blueprintWrappingPrompt(t *testing.T, database *sql.DB, promptID, teamID st
 }
 
 // createTriggerForTestRouting + setTriggerEnabledForTestRouting are
-// trigger-shape helpers used by drain_test + rederive_test. Post-
-// SKY-259 they wrap EventHandlerStore.Create / SetEnabled, building a
+// trigger-shape helpers used by drain_test + rederive_test. They
+// wrap EventHandlerStore.Create / SetEnabled, building a
 // kind='trigger' EventHandler from the legacy-shaped fields.
 // createTriggerForTestRouting builds a kind='trigger' EventHandler on the
 // local default team (team A). The trigger's BlueprintID field is supplied
@@ -122,7 +122,7 @@ func createTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 // insertPromptForTeam seeds a user prompt owned by a specific team via a
 // raw INSERT. createTestPrompt routes through PromptStore.Create which pins
 // LocalDefaultTeamID (team A); a team-B trigger or chain step can only bind
-// a prompt its own team owns under the same-team composite FK (SKY-380), so
+// a prompt its own team owns under the same-team composite FK, so
 // team-B fixtures seed their prompt here with the matching team_id.
 func insertPromptForTeam(t *testing.T, database *sql.DB, id, teamID string) {
 	t.Helper()
@@ -171,7 +171,7 @@ func floatPtr(v float64) *float64 { return &v }
 // wrapping its prompt as a 1-step list) → handlers; tests that call Seed
 // directly replicate that ordering here. Returns the system_slug →
 // blueprint-id map the caller threads into Seed (the id is a random UUID per
-// team copy post-SKY-380).
+// team copy).
 func seedHandlerFKTargets(t *testing.T, database *sql.DB) map[string]string {
 	t.Helper()
 	ctx := context.Background()

@@ -14,7 +14,7 @@ import (
 )
 
 // eventHandlerStore is the unified Postgres impl of db.EventHandlerStore.
-// Replaces taskRuleStore + triggerStore from before SKY-259.
+// Replaces taskRuleStore + triggerStore from the prior stores.
 //
 // Per-kind fields are nullable on the column level; the per-kind CHECK
 // constraints on event_handlers enforce the shape pair (rule populates
@@ -22,7 +22,7 @@ import (
 // breaker_threshold/min_autonomy_suitability). This impl branches on
 // the row's Kind where the SQL diverges.
 //
-// # Pool split (unchanged from the pre-SKY-259 stores)
+// # Pool split (unchanged from the predecessor stores)
 //
 //   - app   — tf_app, RLS-active. Every CRUD method runs here.
 //   - admin — supabase_admin, BYPASSRLS. Seed runs here because the
@@ -83,7 +83,7 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 		// event_handlers_system_has_no_creator allows creator_user_id NULL
 		// on source='system'. The id is a random UUID per team copy and h.ID
 		// is the system_slug; re-seed dedupes on (org_id, team_id,
-		// system_slug) via ON CONFLICT (SKY-380).
+		// system_slug) via ON CONFLICT.
 		switch h.Kind {
 		case domain.EventHandlerKindRule:
 			res, err := s.admin.ExecContext(ctx, `
@@ -242,7 +242,7 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 
 	// team_id is the acting team the handler resolved for this request —
 	// no "first/any team in org" fallback. team_id is NOT NULL (the sole
-	// scoping signal post-SKY-380; no visibility column) and the
+	// scoping signal; no visibility column) and the
 	// event_handlers_insert RLS gates on tf.user_in_team(team_id), so a
 	// real team here keeps the write valid. Empty is a handler bug, so
 	// reject it rather than write an invalid row.

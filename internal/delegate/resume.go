@@ -484,8 +484,8 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	if cwd == "" {
 		return nil, fmt.Errorf("resume: missing cwd")
 	}
-	// A resume MUST reuse the model the run started with (SKY-389 review
-	// #1). Requiring it here — rather than falling back to a live per-(org,
+	// A resume MUST reuse the model the run started with. Requiring it
+	// here — rather than falling back to a live per-(org,
 	// team) resolve — is what closes the mid-run model-drift gap: a config
 	// change between the initial invocation and this resume must never
 	// switch models underneath a single logical run. ResumeOpenRun captures

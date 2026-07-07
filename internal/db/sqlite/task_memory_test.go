@@ -98,9 +98,9 @@ func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (runI
 		t.Fatalf("seed prompt: %v", err)
 	}
 	taskID := uuid.New().String()
-	// 'done' is the terminal task status (pre-SKY-261 the seed used
+	// 'done' is the terminal task status (an earlier version of the seed used
 	// 'completed', which was never a valid task value — 'completed'
-	// is run-level; SKY-330's CHECK constraint caught the latent bug).
+	// is run-level; a later CHECK constraint caught the latent bug).
 	if _, err := conn.Exec(`
 		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
 		VALUES (?, ?, ?, ?, 'done')

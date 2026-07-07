@@ -449,7 +449,7 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	}
 	createTestPrompt(t, database, domain.Prompt{ID: "p-onerun", Name: "One-run", Body: "x", Source: "user"})
 	// Team B needs its OWN prompt copy — the same-team trigger→prompt FK
-	// forbids team B's trigger from binding team A's p-onerun (SKY-380).
+	// forbids team B's trigger from binding team A's p-onerun.
 	insertPromptForTeam(t, database, "p-onerun-b", teamB)
 
 	// teamA's immediate trigger (createTriggerForTestRouting hard-codes
@@ -555,7 +555,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 	createTestPrompt(t, database, domain.Prompt{ID: "p-attr", Name: "Attr", Body: "x", Source: "user"})
-	// Team B's own prompt copy for its trigger (same-team FK, SKY-380).
+	// Team B's own prompt copy for its trigger (same-team FK).
 	insertPromptForTeam(t, database, "p-attr-b", teamB)
 
 	// Team A is the owner via a high-priority rule, and also has a

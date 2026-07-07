@@ -16,7 +16,7 @@ import (
 // --------------------------------------------------------------------
 // Caller GitHub-team membership — the "which of these teams am I on?"
 // signal the onboarding wizard uses to pre-check the team admin's own
-// GitHub teams in the github-groups mapping step (SKY-411/SKY-413).
+// GitHub teams in the github-groups mapping step.
 //
 // This is NOT a standalone endpoint. It rides on
 // GET /api/settings/team/{id}/github-groups?include_membership=true (see

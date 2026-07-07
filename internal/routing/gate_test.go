@@ -234,8 +234,8 @@ func TestGate_EscapeHatches(t *testing.T) {
 	}
 }
 
-// TestJiraGate_DisjointProjects_DropsUntrackingTeam is the SKY-376
-// router-gate acceptance: a jira:issue:assigned event on project "SKY" →
+// TestJiraGate_DisjointProjects_DropsUntrackingTeam is a
+// router-gate acceptance test: a jira:issue:assigned event on project "SKY" →
 // team A (tracks SKY via jira_project_status_rules) fires; team B (tracks
 // a different project) is dropped from the task's visibility.
 func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {

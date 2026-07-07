@@ -20,7 +20,7 @@ import (
 )
 
 // orgTemplateHandler serves /api/org-template/* — the org-admin editor over
-// the org template that new teams are seeded from (SKY-381). Every endpoint
+// the org template that new teams are seeded from. Every endpoint
 // gates through az.RequireOrgTemplate (multi-mode + org-admin) and reads/
 // writes via the transactional store runner; those two deps are all it needs.
 type orgTemplateHandler struct {
@@ -56,7 +56,7 @@ func templateBlueprintTriggered(ctx context.Context, tx db.TxStores, orgID, blue
 }
 
 // /api/org-template/* — the org-admin editor over the org template that
-// new teams are seeded from (SKY-381). Full parity with the team-scoped
+// new teams are seeded from. Full parity with the team-scoped
 // /api/prompts + /api/event-handlers families, minus the team picker: the
 // template is org-scoped, so there is no acting team to resolve. Every
 // endpoint is multi-mode + org-admin gated (requireOrgTemplate); local mode

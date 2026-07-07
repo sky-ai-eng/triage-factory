@@ -20,7 +20,7 @@ import (
 //     land later as defense-in-depth but isn't a v1 concern.
 //   - runtime.GOOS == "linux": gVisor only works on Linux. Multi mode
 //     on macOS isn't a supported config (the production runner image
-//     is alpine Linux per SKY-256).
+//     is alpine Linux).
 func shouldSandbox() bool {
 	return runmode.Current() == runmode.ModeMulti && runtime.GOOS == "linux"
 }

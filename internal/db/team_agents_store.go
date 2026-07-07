@@ -19,10 +19,10 @@ import (
 //   - Bootstrap (internal/db/bootstrap.go) — AddForTeam on org-create
 //     (for each team that already exists) and on every subsequent
 //     team-create handler call.
-//   - D-Claims (SKY-261) router — GetForTeam to decide whether a
+//   - D-Claims router — GetForTeam to decide whether a
 //     trigger fire creates a claimed task (enabled team) or falls
 //     back to unclaimed (disabled team, prompt pre-filled).
-//   - Future admin UI (SKY-257 / D14) — SetEnabled + SetOverrides
+//   - Future admin UI — SetEnabled + SetOverrides
 //     for per-team toggling. ListForOrg for the "per-team bot config"
 //     table.
 //
@@ -80,7 +80,7 @@ type TeamAgentStore interface {
 }
 
 // LocalDefaultTeamID is the synthetic team id used in local mode.
-// Post-SKY-269 it equals runmode.LocalDefaultTeamID — the sentinel
+// It equals runmode.LocalDefaultTeamID — the sentinel
 // UUID that the SQLite migration inserts as the one row of the
 // teams table. Kept as an alias here for the migration period; new
 // code should reference runmode.LocalDefaultTeamID directly.

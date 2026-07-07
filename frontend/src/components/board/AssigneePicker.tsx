@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Bot } from 'lucide-react'
 import type { Task, TeamMember, TeamBot } from '../../types'
 
-// AssigneePicker is SKY-330's per-card assignee selector. Replaces
+// AssigneePicker is the per-card assignee selector. Replaces
 // the drag-to-Agent gesture that broke when the Agent column was
 // removed. Order is fixed: Me, Bot (when enabled), [teammates...].
 // Supports self-assign, self-unassign, delegate-to-bot, and (TFAC-561)
@@ -49,7 +49,7 @@ interface Props {
   onUnclaim: (task: Task) => Promise<void>
   onDelegate: (task: Task) => void
   onReassign: (task: Task, targetUserID: string) => Promise<void>
-  // SKY-330: terminal tasks (done/dismissed) skip the toggle UI —
+  // Terminal tasks (done/dismissed) skip the toggle UI —
   // the picker still renders the avatar showing who finished it for
   // audit/history but ignores clicks. Caller passes true for tasks
   // in the Done column.
@@ -115,7 +115,7 @@ export default function AssigneePicker({
     await onReassign(task, targetUserID)
   }
 
-  // SKY-330 chip styling: keeps the picker chrome small so it doesn't
+  // Chip styling keeps the picker chrome small so it doesn't
   // dominate the card. Avatar is the click target; the dropdown
   // appears below the card and is dismissible by clicking outside.
   return (

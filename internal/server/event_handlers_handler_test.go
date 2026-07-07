@@ -95,7 +95,7 @@ func TestHandleEventHandlerCreate_TriggerHappyPath(t *testing.T) {
 func TestHandleEventHandlerCreate_TriggerAppliesDefaults(t *testing.T) {
 	// breaker_threshold and min_autonomy_suitability are documented as
 	// optional with defaults (4 and 0.0) — preserved from the
-	// pre-SKY-259 /api/triggers contract so drag-to-create paths can
+	// the original /api/triggers contract so drag-to-create paths can
 	// supply only prompt_id + event_type.
 	s := newTestServer(t)
 	seedBlueprintForTrigger(t, s, "p-defaults")
@@ -287,7 +287,7 @@ func TestHandleEventHandlerDelete_UserRowHardDeletes(t *testing.T) {
 	}
 }
 
-// TestHandleEventHandlerDelete_SystemRowHardDeletes pins the post-SKY-436
+// TestHandleEventHandlerDelete_SystemRowHardDeletes pins the current
 // behavior: a shipped (system) handler hard-deletes unconditionally — no
 // soft-disable fallback, no resurrection. Nothing re-seeds at boot, so the
 // deletion is durable.

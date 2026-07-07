@@ -12,12 +12,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// usersStore is the Postgres impl of db.UsersStore. Holds two pools
-// (SKY-296):
+// usersStore is the Postgres impl of db.UsersStore. Holds two pools:
 //
 //   - q: app pool (tf_app, RLS-active). Every request-equivalent
 //     consumer hits this side. RLS policies gate by user_id
-//     identity once they land (SKY-251 territory).
+//     identity once they land.
 //   - admin: admin pool (BYPASSRLS). Claims-free system callers: the
 //     poller bootstrap's GetGitHubLoginSystem read at startup, the
 //     router's reverse identity lookups, and the dashboard-history
@@ -330,7 +329,7 @@ func (s *usersStore) SetLastActingTeam(ctx context.Context, userID, teamID strin
 }
 
 func (s *usersStore) GetSettings(ctx context.Context, userID string) (domain.UserSettings, error) {
-	// user_settings is empty post-SKY-354: just user_id + updated_at.
+	// user_settings is empty: just user_id + updated_at.
 	// The probe stays so callers can detect "row exists" vs "first
 	// touch" later when fields are added; current callers ignore the
 	// difference and consume the zero-value struct either way.

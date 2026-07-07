@@ -8,7 +8,7 @@ import (
 )
 
 // TestCheckRepoAccess_Classifies pins the per-repo reachability probe behind
-// the SKY-409 write-time gate: 200 → reachable, 404/403 → conclusively
+// the write-time gate: 200 → reachable, 404/403 → conclusively
 // unreachable, 5xx → indeterminate (fail open). The path is exactly
 // /repos/{owner}/{repo}.
 func TestCheckRepoAccess_Classifies(t *testing.T) {

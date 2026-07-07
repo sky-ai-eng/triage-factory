@@ -53,7 +53,7 @@ type stockTicket struct {
 //     new work the user could grab.
 //
 // Tickets without snapshots yet, tickets with active tasks, and parents
-// with open subtasks (SKY-173) are skipped. Returns {status: "polling"}
+// with open subtasks are skipped. Returns {status: "polling"}
 // while the Jira poller hasn't completed its first cycle since the last
 // config change — snapshots are seeded on first poll.
 func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
@@ -67,7 +67,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	// identity — runs through tx-bound stores under the user's
 	// claims so RLS (org_settings_select / team_settings_select /
 	// jira_rules_select / users_select) gates every read.
-	// SKY-270: identity facts live on the users row, not the
+	// Identity facts live on the users row, not the
 	// keychain. Account ID drives "is this assigned to me" (stable,
 	// predicate-grade); display name drives the optimistic post-
 	// claim snapshot update so the synthesized event metadata reads
@@ -104,7 +104,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return fmt.Errorf("list jira rules: %w", e)
 		}
-		// Jira identity is host-scoped (SKY-397): look it up for the org's
+		// Jira identity is host-scoped: look it up for the org's
 		// Jira host (org_settings already loaded above).
 		localAccountID, localDisplayName, e = tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
 		return e
@@ -178,7 +178,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 			stockLog.Warn("skipping entity, invalid snapshot", "entity", e.ID, "source_id", e.SourceID, "error", err)
 			continue
 		}
-		// Subtask gate (SKY-173) applies to both buckets — a parent ticket
+		// Subtask gate applies to both buckets — a parent ticket
 		// with open subtasks is a container, not a work unit. Its subtasks
 		// (if assigned or available) surface on their own; if the
 		// decomposition later collapses, became_atomic routes the parent
@@ -215,7 +215,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		// and leave prefilled actions empty for assigned tickets.
 		projectRule := domain.RuleForProject(jiraRules, projectKey)
 
-		// SKY-270: "is this assigned to me?" uses the Atlassian account ID
+		// "Is this assigned to me?" uses the Atlassian account ID
 		// — the stable identifier — rather than display name. Display name
 		// is a fallback for older snapshots that predate the account-id
 		// field (empty AssigneeAccountID); they degrade to today's behavior
@@ -380,7 +380,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return fmt.Errorf("list jira rules: %w", e)
 		}
-		// Jira identity is host-scoped (SKY-397): creds.JiraURL mirrors
+		// Jira identity is host-scoped: creds.JiraURL mirrors
 		// org_settings.jira_base_url (both set from the same field), so it
 		// is the canonical host this identity was captured under.
 		localAccountID, localDisplayName, e = tx.Users.GetJiraIdentity(r.Context(), userID, creds.JiraURL)
@@ -431,7 +431,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SKY-463: claim (assign + transition) and done (transition) are
+	// Claim (assign + transition) and done (transition) are
 	// user-initiated Jira writes — they must act as the acting user, not the
 	// org service account (AssignToSelf assigns to the token's user). Resolve
 	// the acting user's Jira client only when the batch actually contains a
@@ -530,7 +530,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Defensive subtask gate (SKY-173 principle): queue/claim on a parent
+		// Defensive subtask gate: queue/claim on a parent
 		// with open subtasks would create the exact non-atomic task the main
 		// flow works hard to suppress. The GET handler already filters these
 		// out so legitimate UI flows never submit them, but subtasks could be
@@ -593,7 +593,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			queued++
 
 		case "claim":
-			// SKY-463: claim performs Jira writes as the acting user; refuse
+			// Claim performs Jira writes as the acting user; refuse
 			// (don't act as the bot) when they have no connected Jira.
 			if jiraUserClient == nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "connect your Jira to act on tickets"})
@@ -652,7 +652,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 				if e != nil {
 					return e
 				}
-				// SKY-261 B+: claim is on the responsibility axis now,
+				// Claim is on the responsibility axis now,
 				// not status. status='claimed' was dropped along with
 				// status='delegated' once the claim cols took over the
 				// "who's responsible" answer. Stamp the user claim
@@ -673,7 +673,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			claimed++
 
 		case "done":
-			// SKY-463: done transitions the ticket as the acting user; refuse
+			// Done transitions the ticket as the acting user; refuse
 			// (don't act as the bot) when they have no connected Jira.
 			if jiraUserClient == nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "connect your Jira to act on tickets"})
@@ -711,7 +711,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 	// system:poll:completed fires to wake the scorer via its event-bus
 	// subscription. Poke it directly, but only when we actually produced
 	// queued tasks — done doesn't create a task at all, and claim now
-	// (post-SKY-261 B+) creates a status='queued' task with the user
+	// (post-B+) creates a status='queued' task with the user
 	// claim col stamped. UnscoredTasks would pick up those rows on its
 	// next natural cycle, so leaving the trigger off this branch is fine
 	// — scoring a user-claimed task is harmless dormant work rather than
@@ -742,11 +742,11 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 // on initial load" rule. Semantically this matches what would have fired if
 // the ticket had been assigned after we started watching. Routes through the
 // app-pool EventStore.Record (not bus.Publish) so downstream handlers don't
-// double-create a task. In multi-mode this caller will be WithTx-wrapped by
-// SKY-253 D9 so JWT claims are set for RLS; local-mode passes through
+// double-create a task. In multi-mode this caller will be WithTx-wrapped
+// so JWT claims are set for RLS; local-mode passes through
 // assertLocalOrg cleanly without a wrapping tx.
 //
-// SKY-270: account ID flows through from the (caller-mutated) snap so the
+// Account ID flows through from the (caller-mutated) snap so the
 // metadata carries the stable identifier the matcher needs. The display
 // name in metadata is informational; matching keys on account ID.
 func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, orgID, entityID string, snap domain.JiraSnapshot) (string, error) {
@@ -799,7 +799,8 @@ func recordCarryOverAvailableEvent(ctx context.Context, events_ db.EventStore, o
 	})
 }
 
-// projectFromKey pulls "SKY" out of "SKY-123". Mirrors tracker.extractProject.
+// projectFromKey pulls the project prefix out of a Jira key (e.g. "ABC" out
+// of "ABC-123"). Mirrors tracker.extractProject.
 func projectFromKey(key string) string {
 	if i := strings.IndexByte(key, '-'); i > 0 {
 		return key[:i]

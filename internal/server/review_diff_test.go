@@ -159,7 +159,7 @@ func TestFormatHumanFeedback_CommentRemovedAndAdded(t *testing.T) {
 }
 
 // TestFormatHumanFeedback_LegacyNullOriginalsDegrade is the regression
-// for the SKY-204 / SKY-205 cutover: pending_reviews rows whose
+// for the cutover: pending_reviews rows whose
 // original_review_body / original_review_event are NULL (mid-flight
 // when the columns were added) must produce a bare verdict line
 // without an unchanged/changed claim, and skip the body diff

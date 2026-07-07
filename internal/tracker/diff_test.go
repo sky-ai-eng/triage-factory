@@ -1075,7 +1075,7 @@ func TestDiffJira_CommentCountDecrease_NoEvent(t *testing.T) {
 	}
 }
 
-// --- Jira: subtask gating (SKY-173) ----------------------------------------
+// --- Jira: subtask gating ---------------------------------------------------
 
 func TestDiffJira_FirstDiscovery_OpenSubtasks_NoEvents(t *testing.T) {
 	// Parent ticket discovered with open subtasks: suppress assigned/available

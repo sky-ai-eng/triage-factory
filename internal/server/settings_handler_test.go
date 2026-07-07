@@ -287,7 +287,7 @@ func TestTeamSettingsPost_DoneCanonicalNotInMembers_Rejected(t *testing.T) {
 	}
 }
 
-// TestSettingsPost_PerProjectRules_RoundTrip verifies the core SKY-272
+// TestSettingsPost_PerProjectRules_RoundTrip verifies the core
 // contract: two projects in the same team can carry different rules,
 // and saving → loading preserves each project's rules independently.
 // Exercises the JiraStatusRulesStore directly (the HTTP handler's
@@ -395,8 +395,8 @@ func TestTeamSettingsPost_DuplicateProjectKey_Rejected(t *testing.T) {
 }
 
 // TestSettingsGet_MemberCountAndRole verifies the scope GET responses carry
-// the membership signals the frontend's N=1 collapse + role gating read
-// (SKY-358). Local mode is the degenerate single-member world, so the org
+// the membership signals the frontend's N=1 collapse + role gating read.
+// Local mode is the degenerate single-member world, so the org
 // and team both report one member and the caller is the team admin.
 func TestSettingsGet_MemberCountAndRole(t *testing.T) {
 	s := newTestServer(t)
@@ -434,7 +434,7 @@ func TestSettingsGet_MemberCountAndRole(t *testing.T) {
 	}
 }
 
-// --- SKY-359 model cap warnings --------------------------------------------
+// --- model cap warnings -----------------------------------------------------
 //
 // EffectiveModel's unit behavior is covered in internal/domain. These cover
 // the handler wiring: the cap never blocks a save, it just surfaces a
@@ -454,7 +454,7 @@ func postJSONResp(t *testing.T, s *Server, path string, body any) map[string]str
 }
 
 // TestOrgSettingsPost_GitHubURLClear_PreservesUserIdentity asserts the
-// access/identity decoupling (SKY-458): clearing the org's GitHub URL is an
+// access/identity decoupling: clearing the org's GitHub URL is an
 // access change (PAT_1), and it must NOT touch the user's per-user GitHub
 // identity (PAT_2). Identity is owned solely by its own capture surface (the
 // setup wizard's User step / the Connect gate page), never mutated as a side
@@ -515,7 +515,7 @@ func TestJiraConnect_DoesNotWriteUserIdentity(t *testing.T) {
 	jiraStub := jiraMyselfStub(t, `{"accountId":"org-bot","displayName":"Org Bot"}`, nil)
 
 	// Seed a pre-existing per-user Jira identity, as the bind flow would have,
-	// keyed on the org's Jira host (SKY-397).
+	// keyed on the org's Jira host.
 	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL, "user-acct", "User Name", "pat"); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}

@@ -62,7 +62,7 @@ func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, ru
 // variants. ON CONFLICT(run_id) is supported on both Postgres and
 // SQLite given the UNIQUE(run_id) constraint; the OVERWRITE only
 // touches agent_content so any already-attached human_content stays
-// intact across retries (the SKY-205 invariant).
+// intact across retries.
 //
 // created_at is bound from Go-side time.Now() rather than the schema
 // DEFAULT now() so multi-run bursts within the same Postgres tx don't

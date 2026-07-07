@@ -14,7 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// Author-centric routing tests (SKY-372). These exercise the owning-team
+// Author-centric routing tests. These exercise the owning-team
 // ladder for github:pr:* events that concern the PR's owner — CI failures,
 // conflicts, review feedback, new commits — as opposed to review_requested
 // (the reviewer axis, covered in review_routing_test.go). The shared helpers

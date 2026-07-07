@@ -115,7 +115,7 @@ func WaitFor(ctx context.Context, manager *Manager, orgID, entityID string, time
 //
 // A transient read error returns (false, false) and is logged, so the
 // caller keeps polling rather than short-circuiting the wait on a DB
-// blip — preserving the pre-SKY-392 behavior where any error was treated
+// blip — preserving the prior behavior where any error was treated
 // as "still pending." Context cancellation/deadline is the one error we
 // don't log: it's a deliberate shutdown signal (the loop's <-ctx.Done()
 // arm handles the return), not a DB blip, so logging it as "transient"

@@ -1,4 +1,4 @@
-// Stage-1 station, built as a hierarchy of Babylon meshes (SKY-197).
+// Stage-1 station, built as a hierarchy of Babylon meshes.
 //
 // Aesthetic: liquid glass + Halo Reach + Transcendence — a warm
 // ceramic chassis with two flat working surfaces on top: a small

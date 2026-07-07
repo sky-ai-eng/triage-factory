@@ -91,8 +91,8 @@ type ScopedRepoResolver interface {
 //
 //	tier 1  the org's own GitHub App installation token for the target
 //	        account — short-lived (~1h), repo-scoped, revocable.
-//	tier 2  a deployment-default (shared) App installation token. DEFERRED
-//	        to SKY-363; the resolver leaves a numbered gap so that ticket
+//	tier 2  a deployment-default (shared) App installation token. DEFERRED;
+//	        the resolver leaves a numbered gap so that a future tier
 //	        slots in between tiers 1 and 3 without renumbering.
 //	tier 3  PAT-borrow: the org's stored github_pat (keychain in local
 //	        mode, Vault in multi mode). Identical to the pre-resolver path.

@@ -22,14 +22,14 @@ import (
 // The per-project goroutine processes each turn under the requesting
 // user's identity (curator_requests.creator_user_id), wrapping every
 // store call in stores.Tx.SyntheticClaimsWithTx so multi-mode RLS
-// policies on (org_id, creator_user_id) gate the writes. SKY-298.
+// policies on (org_id, creator_user_id) gate the writes.
 type Curator struct {
 	stores db.Stores
 	wsHub  *websocket.Hub
 
 	mu    sync.Mutex
 	model string
-	// SKY-389 per-org run-credential seam, wired once at startup via
+	// Per-org run-credential seam, wired once at startup via
 	// SetRunCredentialResolvers. modelFor supersedes the process-global
 	// model above; secrets feeds RunOptions.Secrets. Tests leave both nil
 	// and fall back to model / the ambient-subscription path.
@@ -78,7 +78,7 @@ func New(stores db.Stores, wsHub *websocket.Hub, model string) *Curator {
 
 // SetRunCredentialResolvers wires the per-org run-credential seam: the GitHub
 // credential resolver (used to authenticate private pinned-repo refreshes
-// host-side), the per-org LLM-credential reader (SKY-389 — nil in
+// host-side), the per-org LLM-credential reader (nil in
 // local → ambient subscription; system-door reader in multi), and the
 // per-(org, team) default-model resolver. Both modes resolve through these so
 // credential resolution stops branching on mode. Set once at startup,
@@ -121,7 +121,7 @@ func (c *Curator) cloneTokenFor(ctx context.Context, orgID, owner string) string
 }
 
 // resolveModel resolves the project-owning team's default model via the
-// SKY-389 resolver, falling back to the constructor-supplied model when no
+// resolver, falling back to the constructor-supplied model when no
 // resolver is wired (tests) or the resolver returns empty. teamID is the
 // project's owning team (a project belongs to exactly one team), so a
 // multi-team org honors each team's model choice; empty falls back to the
@@ -141,7 +141,7 @@ func (c *Curator) resolveModel(ctx context.Context, orgID, teamID string) string
 
 // getSecrets returns the per-org LLM-credential reader threaded into
 // RunOptions.Secrets: nil in local (ambient subscription), the system-door
-// reader in multi. SKY-389.
+// reader in multi.
 func (c *Curator) getSecrets() agentproc.SecretsReader {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -154,7 +154,7 @@ func (c *Curator) getSecrets() agentproc.SecretsReader {
 // context) so the goroutine doesn't have to read the curator_requests
 // row again just to figure out who to bill the writes to — that read
 // would itself need claims set under Postgres RLS, creating a chicken-
-// and-egg problem. See SKY-298 routing notes.
+// and-egg problem.
 type queueItem struct {
 	requestID     string
 	orgID         string
@@ -172,7 +172,7 @@ type queueItem struct {
 // runs inside Stores.Tx.SyntheticClaimsWithTx with these claims set
 // so multi-mode RLS attributes the rows correctly. In local mode the
 // handler passes runmode.LocalDefaultOrgID + LocalDefaultUserID; the
-// D9 sweep (SKY-253) will replace those with values from request
+// D9 sweep will replace those with values from request
 // context.
 //
 // The user's content is required (empty/whitespace-only is rejected

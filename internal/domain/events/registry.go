@@ -10,7 +10,7 @@
 //     introspection, a type-erased matcher for runtime evaluation).
 //
 // The event ID constants themselves still live in `internal/domain/event.go`
-// — this package is additive, not a rename. The poller rewrite (SKY-178) will
+// — this package is additive, not a rename. The poller rewrite will
 // eventually consolidate the taxonomy here.
 //
 // See docs/data-model-target.md "Predicate schema" for the full rationale.

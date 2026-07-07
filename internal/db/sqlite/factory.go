@@ -134,11 +134,11 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 	}
 
 	// memory_missing is derived from a LEFT JOIN to run_memory rather
-	// than read off a column on runs (SKY-204): "the agent has not
+	// than read off a column on runs: "the agent has not
 	// produced its memory file" === "no run_memory row exists, OR the
 	// row's agent_content is NULL/whitespace." NULLIF(TRIM(...), '')
 	// collapses both empty strings (legacy carry-over from before
-	// SKY-204 normalized them) and whitespace-only writes onto the
+	// this was normalized) and whitespace-only writes onto the
 	// same NULL signal, so a single condition covers all three forms
 	// of noncompliance.
 	//

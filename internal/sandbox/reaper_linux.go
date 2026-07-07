@@ -67,7 +67,7 @@ func reapOrphansImpl(ctx context.Context) error {
 		// is unambiguously ours regardless of original upstream IF.
 		reapIptablesForSubnet(ctx, subnetCIDR(idx))
 
-		// Same for the SKY-395 Part B host-side egress DROP rules this
+		// Same for the Part B host-side egress DROP rules this
 		// orphan would have installed (matched by its gateway IP).
 		reapEgressForSubnet(ctx, idx)
 

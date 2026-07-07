@@ -20,7 +20,7 @@ import (
 // fixture that inserts additional rows iterates them correctly.
 //
 // orgsStore — SQLite impl. The constructor accepts two queryers for
-// signature parity with the Postgres impl (SKY-296); SQLite has one
+// signature parity with the Postgres impl; SQLite has one
 // connection so both collapse to the same queryer. The `...System`
 // variants delegate to their non-System counterparts.
 type orgsStore struct{ q queryer }

@@ -337,7 +337,7 @@ func scanBares() []bareEntry {
 
 // bareCacheRoots returns every directory tree that may hold bare clones.
 // Today repoDir resolves every bare under the sentinel org's root
-// (<StateRoot>/repos); once SKY-406 threads a real orgID through the
+// (<StateRoot>/repos); once a real orgID is threaded through the
 // cache, multi mode lays them under <StateRoot>/orgs/<orgID>/repos, so we
 // also glob that tier. Both are scanned so the reaper bounds disk
 // regardless of which layout produced the bare. Returns nil when the

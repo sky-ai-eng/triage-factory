@@ -22,7 +22,7 @@ func testPromptStore(database *sql.DB) db.PromptStore {
 }
 
 // testEventHandlerStore mirrors testPromptStore for trigger-touching
-// tests. Post-SKY-259 rules + triggers are unified into event_handlers;
+// tests. Rules + triggers are unified into event_handlers;
 // trigger-shaped fixtures use kind='trigger' rows on this store.
 func testEventHandlerStore(database *sql.DB) db.EventHandlerStore {
 	if database == nil {

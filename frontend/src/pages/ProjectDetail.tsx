@@ -1254,7 +1254,7 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
           .
         </div>
       ) : (
-        // SKY-238 caps the KB list so the entities panel below has
+        // Cap the KB list so the entities panel below has
         // breathing room in the left column. Unbounded growth would
         // push the entities panel below the fold on a typical laptop.
         <div className="max-h-[50vh] overflow-y-auto space-y-2 pr-1">

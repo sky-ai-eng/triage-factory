@@ -15,7 +15,7 @@ import (
 
 // handlerScopeMatchesEvent reports whether handler h's team is allowed
 // to act on evt given the team's tracking scope — the team↔repo gate
-// (SKY-375, GitHub) and team↔project gate (SKY-376, Jira). It is the
+// (GitHub) and team↔project gate (Jira). It is the
 // security teeth that keeps a team's handlers from firing on entities the
 // team doesn't track once polling goes org-wide.
 //
@@ -46,7 +46,7 @@ func (r *Router) handlerScopeMatchesEvent(evt domain.Event, h domain.EventHandle
 }
 
 // teamTracksEventScope dispatches the tracking lookup on the event's
-// source: github: → team↔repo (SKY-375), jira: → team↔project (SKY-376), a
+// source: github: → team↔repo, jira: → team↔project, a
 // registered event source (e.g. ee/slack) → its TracksScope hook. Each
 // branch fails open when its store is unwired so the gate degrades to "no
 // drop" in pre-ticket / test wiring; any other source is ungated.
@@ -98,7 +98,7 @@ func (r *Router) teamTracksEventRepo(evt domain.Event, teamID string) bool {
 }
 
 // teamTracksEventProject extracts the Jira project key from an event's
-// metadata and asks the store whether teamID tracks it (SKY-376). Every
+// metadata and asks the store whether teamID tracks it. Every
 // Jira issue metadata struct carries a top-level "project" (the project
 // key, e.g. "SKY" — see internal/domain/events/jira.go), so a minimal
 // unmarshal is enough. Fail-open on a missing / malformed project or a
@@ -121,10 +121,10 @@ func (r *Router) teamTracksEventProject(evt domain.Event, teamID string) bool {
 }
 
 // handlerTeamID resolves the team a matched event_handler routes its
-// tasks to. Post-SKY-295 every handler is team-scoped — user-source
+// tasks to. Every handler is team-scoped — user-source
 // rows carry the user's team, system-source rows are materialized
 // into each team at boot / team-create time. An empty TeamID here
-// indicates a pre-SKY-295 org-visibility row that survived a partial
+// indicates a legacy org-visibility row that survived a partial
 // migration or a test fixture that bypassed the materialization
 // path; we log it once per call but fall back to
 // runmode.LocalDefaultTeamID so the router keeps functioning. In

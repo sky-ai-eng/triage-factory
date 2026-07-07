@@ -6,12 +6,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// EventStore is the per-resource store for the events audit log
-// (SKY-305). Lifted out of the pre-D2 package-level functions in
+// EventStore is the per-resource store for the events audit log.
+// Lifted out of the pre-D2 package-level functions in
 // internal/db/events.go so multi-mode Postgres callers route through
 // $N placeholders + explicit org_id + JSONB metadata.
 //
-// Method naming follows the SKY-296 / SKY-297 dual-pool convention:
+// Method naming follows the dual-pool convention:
 //
 //   - Plain methods (Record, LatestForEntityTypeAndDedupKey) run on
 //     the app pool in Postgres (RLS-active). Callers are request-
@@ -65,7 +65,7 @@ type EventStore interface {
 	// Admin-pool only: today's consumers are the router re-derive
 	// pass and the delegate post-run prompt builder, both system
 	// services. No handler caller exists, so the speculative app-
-	// pool variant is omitted per the SKY-296 convention.
+	// pool variant is omitted per convention.
 	GetMetadataSystem(ctx context.Context, orgID, eventID string) (string, error)
 
 	// GetSystem returns the full event row by id, or (nil, nil) if the

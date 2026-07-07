@@ -99,7 +99,7 @@ func (c *Client) ListInstallationRepos(ctx context.Context) ([]UserRepo, error) 
 
 // CheckRepoAccess probes GET /repos/{owner}/{repo} to decide whether this
 // client's credential can reach a single repo. It is the per-repo primitive
-// behind the write-time reachability fan-out (SKY-409): instead of
+// behind the write-time reachability fan-out: instead of
 // enumerating the whole org to validate a selection, the gate checks only the
 // selected slugs, bounded by selection size rather than org size.
 //

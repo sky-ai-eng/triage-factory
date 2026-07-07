@@ -21,7 +21,7 @@ import (
 // events catalog seed, registers all HTTP routes, and returns the Server.
 // Each test gets its own DB so there's no cross-contamination.
 //
-// Pre-SKY-259 this helper lived in task_rules_handler_test.go; after the
+// This helper used to live in task_rules_handler_test.go; after the
 // unification it sits in a dedicated test_helpers_test.go so any
 // handler-level test can use it without depending on a specific feature's
 // test file.
@@ -39,7 +39,7 @@ func newTestServer(t *testing.T) *Server {
 	if err := db.BootstrapSchemaForTest(database); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
-	// SKY-261 B+: swipe-delegate and factory_delegate both call
+	// swipe-delegate and factory_delegate both call
 	// Agents.GetForOrg to stamp claim. Without an agents row, those
 	// paths return 500 with "no agent bootstrapped." Seed the local
 	// sentinel agent row so handler tests reach the actual logic
@@ -50,7 +50,7 @@ func newTestServer(t *testing.T) *Server {
 	); err != nil {
 		t.Fatalf("seed local agent: %v", err)
 	}
-	// SKY-261 C work: handlers now re-check team_agents.enabled before
+	// Handlers now re-check team_agents.enabled before
 	// stamping the bot claim (the spec's bot-disabled-team handling).
 	// Production seeds this via BootstrapLocalAgent; tests need the
 	// same row or every delegate gesture 409s.
@@ -95,7 +95,7 @@ func doJSON(t *testing.T, s *Server, method, path string, body any) *httptest.Re
 // pin repos pass the validatePinnedRepos existence check (which now reads
 // team_github_repos), and upserts the matching repo_profiles row the
 // Curator's repo-materialization eventually wants more of (clone_url,
-// default_branch). Post-SKY-375 the team's tracked set is the source of
+// default_branch). The team's tracked set is the source of
 // truth; the team_github_repos insert is accumulative so multiple seed
 // calls don't clobber each other the way ReplaceForTeam would.
 func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) {

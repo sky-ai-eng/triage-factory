@@ -103,7 +103,7 @@ func seedPgTasks(t *testing.T, conn *sql.DB, orgID, userID string, n int) []stri
 		`, eventID, orgID, entityID, eventType, now); err != nil {
 			t.Fatalf("seed event: %v", err)
 		}
-		// team_id resolved inline from the org's first team (SKY-262).
+		// team_id resolved inline from the org's first team.
 		if _, err := conn.Exec(`
 			INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id,
 			                   status, scoring_status, created_at)

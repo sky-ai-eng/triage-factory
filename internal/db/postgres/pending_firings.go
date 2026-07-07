@@ -40,7 +40,7 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 	// walk straight to org owner anyway.
 	//
 	// LocalDefaultUserID sentinel handling: the router still passes
-	// runmode.LocalDefaultUserID until D9 / SKY-253 retrofits handler-
+	// runmode.LocalDefaultUserID until D9 retrofits handler-
 	// level claims. That sentinel UUID has no FK target in a multi-
 	// mode users table, so binding it directly would trip
 	// pending_firings_creator_user_id_fkey on every busy-entity

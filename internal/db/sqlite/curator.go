@@ -18,7 +18,7 @@ import (
 // lifted verbatim from internal/db/curator.go +
 // internal/db/curator_pending_context.go (which retain their
 // *sql.DB-only signatures for the handler-side cancel/list/cleanup
-// paths still tracked by SKY-253). The only behavioral changes are
+// paths). The only behavioral changes are
 // the orgID assertion at each entry and the ctx-aware database/sql
 // methods so the per-turn SyntheticClaimsWithTx wrap binds the
 // store to the in-flight tx.

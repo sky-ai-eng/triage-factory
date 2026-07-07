@@ -242,7 +242,7 @@ function MultiRoutes() {
                 keeps the standalone /prompts path (and old bookmarks) pointing
                 at the canonical surface. `..` pops to /orgs/:org_id. */}
             <Route path="prompts" element={<Navigate to="../team?tab=prompts" replace />} />
-            {/* Legacy org-template route (SKY-381) — the standalone editor and
+            {/* Legacy org-template route — the standalone editor and
                 its top-bar pill are gone (TFAC-436); the org template lives at
                 the /org Template tab. Redirect old bookmarks/links to the
                 canonical surface. Relative `..` pops to the /orgs/:org_id

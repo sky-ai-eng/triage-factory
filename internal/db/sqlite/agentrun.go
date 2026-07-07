@@ -22,8 +22,8 @@ import (
 //
 // The constructor takes a single queryer (SQLite has one connection)
 // rather than the (app, admin) pair the Postgres impl uses — the
-// AgentRunStore was the first store to ship multi-pool before
-// SKY-296, and the SQLite side never grew the second arg. The
+// AgentRunStore was the first store to ship multi-pool, and the
+// SQLite side never grew the second arg. The
 // `...System` admin-pool variants are thin wrappers around their
 // non-System counterparts on the SQLite side.
 type agentRunStore struct{ q queryer }
@@ -52,7 +52,7 @@ func (s *agentRunStore) Create(ctx context.Context, orgID string, run domain.Age
 	// team_id is the LocalDefaultTeamID sentinel — local mode has
 	// exactly one team, so every run lands on it regardless of
 	// run.TeamID (which the read paths surface back out, TFAC-458).
-	// SKY-262's schema requires a non-NULL team_id for visibility='team'
+	// The schema requires a non-NULL team_id for visibility='team'
 	// rows. Multi-mode derives the real team from the parent task in the
 	// Postgres Create / EnqueueRun, never here.
 	_, err := s.q.ExecContext(ctx, `
@@ -67,7 +67,7 @@ func (s *agentRunStore) Create(ctx context.Context, orgID string, run domain.Age
 	return err
 }
 
-// CreateIfNotFiredSystem is the event-path fenced insert (SKY-424). It
+// CreateIfNotFiredSystem is the event-path fenced insert. It
 // mirrors Create's column binds but forces trigger_type='event' (so
 // creator_user_id stays NULL per the schema CHECK), writes
 // triggering_event_id, and adds ON CONFLICT … DO NOTHING against the
@@ -82,7 +82,7 @@ func (s *agentRunStore) CreateIfNotFiredSystem(ctx context.Context, orgID string
 	// Both halves of the fence key are required: an empty value binds NULL,
 	// the partial unique index treats NULL as distinct, and the insert would
 	// silently skip the fence. Fail loud — this is the fenced path, and an
-	// unfenced run here would defeat its purpose (SKY-424).
+	// unfenced run here would defeat its purpose.
 	if run.TriggeringEventID == "" || run.TriggerID == "" {
 		return false, db.ErrFenceRequiresEventAndTrigger
 	}
@@ -497,7 +497,7 @@ func (s *agentRunStore) HasActiveForTask(ctx context.Context, orgID, taskID stri
 // HasActiveAutoRunForEntity is the per-entity sibling of
 // HasActiveForTask: any non-terminal trigger_type='event' run on any
 // task that belongs to the entity. Manual delegations are excluded.
-// Used by the router's per-entity firing gate (SKY-189).
+// Used by the router's per-entity firing gate.
 func (s *agentRunStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err

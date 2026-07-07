@@ -32,7 +32,7 @@ type projectEntity struct {
 }
 
 // handleProjectEntities returns the list of active entities assigned
-// to this project, ordered most-recently-polled first. SKY-238.
+// to this project, ordered most-recently-polled first.
 //
 // Active-only: terminal-state entities (closed PRs, completed Jiras)
 // are filtered out at the DB layer. The panel surfaces work that's

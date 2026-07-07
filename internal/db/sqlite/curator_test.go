@@ -17,7 +17,7 @@ import (
 // TestCuratorStore_SQLite_FullTurn pins the per-turn write set the
 // curator goroutine produces against SQLite. Mirrors the Postgres
 // attribution test but without RLS — SQLite has no auth concept and
-// the assertion is purely behavioral. SKY-298.
+// the assertion is purely behavioral.
 func TestCuratorStore_SQLite_FullTurn(t *testing.T) {
 	conn := newSQLiteForCuratorTest(t)
 	stores := sqlitestore.New(conn)

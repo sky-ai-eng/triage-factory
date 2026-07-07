@@ -25,7 +25,7 @@ func drain(t *testing.T, mu *sync.Mutex, got *[]domain.Event, want int) {
 	}
 }
 
-// TestSubscribeFor_FiltersByOrg pins the SKY-310 / D9a contract that
+// TestSubscribeFor_FiltersByOrg pins the org-aware delivery contract that
 // org-scoped subscribers only see events whose evt.OrgID matches the
 // subscriber's declared org. Events for a different tenant must not
 // reach the org-A handler, and vice versa.

@@ -19,7 +19,7 @@ import (
 // have no org_id column — local mode is single-tenant by construction.
 //
 // The constructor takes two queryers for signature parity with the
-// Postgres impl (SKY-296), but SQLite has only one connection — both
+// Postgres impl, but SQLite has only one connection — both
 // arguments collapse onto the same queryer. The `...System` admin-
 // pool variants therefore run identically to the non-System variants
 // here; the pool distinction is purely a multi-mode concept.
@@ -365,8 +365,8 @@ func (s *entityStore) Reactivate(ctx context.Context, orgID, id string) (bool, e
 
 // --- Admin-pool (`...System`) variants ---
 //
-// SKY-296 introduces `...System` methods on these stores so multi-mode
-// consumers without JWT-claims context can route through the admin
+// The `...System` methods on these stores let multi-mode
+// consumers without JWT-claims context route through the admin
 // pool. SQLite has one connection and no auth concept, so each System
 // variant just delegates to its non-System counterpart — preserving
 // the same assertLocalOrg gate and behavior.

@@ -48,7 +48,7 @@ type Config struct {
 	Env []string
 
 	// ExtraMounts is additional bind mounts the caller needs (none
-	// in SKY-254 — SKY-303 will add a unix-socket mount here for
+	// today — a future change will add a unix-socket mount here for
 	// cmd/exec IPC).
 	ExtraMounts []Mount
 
@@ -71,7 +71,7 @@ type Config struct {
 	// the sandbox env. The returned slice is appended to Config.Env
 	// when constructing the OCI spec.
 	//
-	// SKY-335 owns the consumer side: the proxies hold the org's real
+	// The consumer side owns the proxies: they hold the org's real
 	// credential on the host, expose only a proxy URL to the agent.
 	// Property B holds because the returned env entries are URLs +
 	// placeholders, never the real credential.
@@ -99,12 +99,12 @@ type Mount struct {
 // defer) regardless of how the cmd terminates.
 //
 // Fields are read-only from outside the package. RunID, Subnet,
-// HostIP, NetnsPath are exposed for logs + the SKY-335 wiring point
+// HostIP, NetnsPath are exposed for logs + the proxy wiring point
 // (proxies bind on HostIP).
 type Sandbox struct {
 	RunID     string // sandbox.Config.RunID, preserved for telemetry
 	Subnet    string // e.g. "10.42.7.0/24"
-	HostIP    string // host-side veth IP, e.g. "10.42.7.1" — SKY-335 binds proxies here
+	HostIP    string // host-side veth IP, e.g. "10.42.7.1" — proxies bind here
 	NetnsPath string // /var/run/netns/tf-<runID>-<idx>
 
 	// teardown holds the platform-specific cleanup state. On Linux
@@ -128,7 +128,7 @@ type Sandbox struct {
 // PROPERTY B INVARIANT: Wrap does NOT inject credentials into
 // cfg.Env, does NOT read os.Environ for ANTHROPIC_*/AWS_*, and does
 // NOT call agentproc.resolveCredentials. Caller is responsible for
-// the env it passes; in SKY-254 the caller's env is intentionally
+// the env it passes; the caller's env is intentionally
 // credential-free.
 //
 // On any error, Wrap has cleaned up anything it created — caller

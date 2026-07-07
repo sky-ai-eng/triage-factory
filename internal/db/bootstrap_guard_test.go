@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// TestBootstrapUsesAdminPoolStoreCalls is the SKY-387 static guard. It is
+// TestBootstrapUsesAdminPoolStoreCalls is the static guard. It is
 // the always-on (no Docker) companion to the two-pool pgtest regression
 // guard TestBootstrapNewOrg_Postgres_TwoPool — same family as
 // TestBootstrapSchemaForTest_MatchesMigrate and
@@ -24,7 +24,7 @@ import (
 // method bootstrap calls must therefore route through the admin pool —
 // either a `*System` admin-pool read twin or one of the admin-pool writes.
 //
-// SKY-385 (PR #265) was one instance of this class: BootstrapTeamAgent
+// PR #265 was one instance of this class: BootstrapTeamAgent
 // looked up the agent via the app-pool Agents.GetForOrg, which failed
 // with "permission denied for table agents" (SQLSTATE 42501) on the
 // grant-less authenticator connection, the error was swallowed by the
@@ -63,7 +63,7 @@ func TestBootstrapUsesAdminPoolStoreCalls(t *testing.T) {
 	// after confirming that store's impl actually targets s.admin (see the
 	// per-store "Pool split" doc comments in internal/db/postgres/*.go).
 	// Adding an app-pool read here would defeat the whole guard — see the
-	// SKY-387 invariant documented above.
+	// invariant documented above.
 	adminWrites := map[string]bool{
 		// agentStore.Create — admin-pool INSERT, inTx-guarded (agents.go).
 		"Agents.Create": true,
@@ -72,7 +72,7 @@ func TestBootstrapUsesAdminPoolStoreCalls(t *testing.T) {
 		"TeamAgents.AddForTeam": true,
 		// orgTemplateStore.SeedFromShipped — admin-pool tx, inTx-guarded
 		// (org_template.go). Replaced the old direct Prompts.SeedOrUpdate /
-		// EventHandlers.Seed bootstrap writes when SKY-381 routed seeding
+		// EventHandlers.Seed bootstrap writes when seeding was routed
 		// through the org template.
 		"OrgTemplate.SeedFromShipped": true,
 		// orgTemplateStore.MaterializeIntoTeam — admin-pool tx, inTx-guarded

@@ -13,7 +13,7 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
-// TestBootstrapNewOrg_Postgres_TwoPool is the SKY-385 regression guard.
+// TestBootstrapNewOrg_Postgres_TwoPool is the regression guard.
 //
 // The bug: BootstrapTeamAgent looked up the org's agent via the app-pool
 // GetForOrg. The whole bootstrap chain runs outside any WithTx with no
@@ -68,9 +68,9 @@ func TestBootstrapNewOrg_Postgres_TwoPool(t *testing.T) {
 	}
 }
 
-// TestAppPoolRead_NoClaims_WrapsPermErr is the SKY-387 deliverable-D
+// TestAppPoolRead_NoClaims_WrapsPermErr is the deliverable-D
 // guard: an app-pool store read reached without the SET ROLE tf_app +
-// JWT-claims ceremony (the exact shape of the SKY-385 bug — a
+// JWT-claims ceremony (the exact shape of the bug — a
 // system/bootstrap caller hitting an app-pool method) must surface the
 // actionable, *System-naming error from wrapAppPoolPermErr, not the raw
 // "permission denied for table agents" 42501.

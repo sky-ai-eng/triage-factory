@@ -223,7 +223,7 @@ type JiraSnapshot struct {
 	Assignee string `json:"assignee"` // display name (UI surfaces)
 	// AssigneeAccountID is the Atlassian stable identifier — accountId
 	// on Cloud, legacy key on Server / DC. Captured alongside the
-	// display name in issueToState so the SKY-270 predicate matcher
+	// display name in issueToState so the predicate matcher
 	// (assignee_in / commenter_in / reporter_in) has a stable
 	// comparison target. Empty on snapshots that predate the field.
 	AssigneeAccountID string   `json:"assignee_account_id,omitempty"`

@@ -45,7 +45,7 @@ func hasLabel(pred *string, labels []string) bool {
 	return false
 }
 
-// stringInSliceFold is the SKY-264 matcher primitive for `author_in` /
+// stringInSliceFold is the matcher primitive for `author_in` /
 // `reviewer_in` allowlists. An empty (or nil) slice means "no filter,"
 // matching the nil-pointer convention above — if the rule didn't say who
 // it cared about, it doesn't filter on identity. A non-empty slice

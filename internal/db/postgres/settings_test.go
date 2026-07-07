@@ -44,8 +44,8 @@ func TestSettingsStores_Postgres(t *testing.T) {
 }
 
 // TestOrgsStore_Postgres_GetSettings_IsolatesPerOrg pins the cross-
-// tenant guarantee documented in the SKY-356 acceptance criteria:
-// a request bound to org A must not be able to read org B's
+// tenant guarantee that a request bound to org A must not be able
+// to read org B's
 // org_settings. The app-pool GetSettings runs under JWT claims
 // {sub=user, org_id=A}; org_settings_select RLS requires
 // org_id = tf.current_org_id() AND user_has_org_access — so the
@@ -72,7 +72,7 @@ func TestOrgsStore_Postgres_GetSettings_IsolatesPerOrg(t *testing.T) {
 	// userA, scoped to orgA, must not see orgB's row. The store
 	// returns domain.DefaultOrgSettings() on the underlying
 	// sql.ErrNoRows that RLS filtering produces — that's the
-	// "no row visible" signal post-SKY-355. The cross-tenant
+	// "no row visible" signal. The cross-tenant
 	// concern is "did userA observe orgB's actual configured
 	// state?", so probe against orgB's distinctive seeded
 	// BaseURL rather than the (default-or-zero) struct shape.

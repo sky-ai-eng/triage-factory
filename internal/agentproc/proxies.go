@@ -24,7 +24,7 @@ import (
 // construct a request at all. The body is fresh random per run; it is
 // NOT a real key. See newSandboxProxyToken and the llmproxy package
 // doc's trust-model section for why injecting a per-run token (rather
-// than a constant placeholder) is what closes the SKY-395 cross-tenant
+// than a constant placeholder) is what closes the cross-tenant
 // hole: the proxy now authenticates the caller against this exact value.
 const proxyTokenAnthropicPrefix = "sk-ant-"
 
@@ -238,7 +238,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	}
 
 	// Mint the per-run token that authenticates this sandbox to its own
-	// proxy (SKY-395 Part A). It's both the value the proxy checks
+	// proxy. It's both the value the proxy checks
 	// (IncomingToken) and the credential we inject into the sandbox
 	// below, so a sibling run — which holds a different token — cannot
 	// spend this run's key even if it reaches this proxy over the
@@ -600,7 +600,7 @@ func bedrockUpstream(creds map[string]string) string {
 // ANTHROPIC_BASE_URL for direct, ANTHROPIC_BEDROCK_BASE_URL +
 // CLAUDE_CODE_USE_BEDROCK for Bedrock. incomingToken is the value the
 // SDK forwards as x-api-key / "Authorization: Bearer", which the proxy
-// authenticates against (SKY-395 Part A).
+// authenticates against.
 //
 // Property B invariant: every value here is a URL, a provider-selection
 // toggle, or the per-run token — a capability scoped to this run's own

@@ -6,7 +6,7 @@
 //   - CI / dev with runsc installed runs via `go test -tags integration`
 //
 // Each test calls Wrap() with a busybox-shaped payload and asserts
-// against the SKY-254 acceptance criteria (Property B env curation,
+// against the acceptance criteria (Property B env curation,
 // filesystem isolation, loopback isolation, cleanup).
 //
 // Run prerequisites:
@@ -356,7 +356,7 @@ func TestIntegration_RootfsHasPnpm(t *testing.T) {
 	toolchainTest(t, []string{"/usr/bin/pnpm", "--version"}, pnpmVersion)
 }
 
-// TestIntegration_ConfigureProxies_InjectsEnv is the SKY-335
+// TestIntegration_ConfigureProxies_InjectsEnv is the
 // sandbox-side proxy wiring test. Asserts:
 //
 //   - The ConfigureProxies callback is invoked with a Sandbox whose
@@ -366,7 +366,7 @@ func TestIntegration_RootfsHasPnpm(t *testing.T) {
 //   - The original Config.Env is preserved alongside (the callback
 //     ADDS to, doesn't replace)
 //
-// Pins the load-bearing behavior of the SKY-335 hook so a future
+// Pins the load-bearing behavior of this hook so a future
 // refactor that misorders the network/spec phases or drops the env
 // merge will fail loudly.
 func TestIntegration_ConfigureProxies_InjectsEnv(t *testing.T) {
@@ -458,7 +458,7 @@ type configureProxyError struct{ msg string }
 
 func (e *configureProxyError) Error() string { return e.msg }
 
-// TestIntegration_AgentHostIPC_RoundTrip — SKY-303 end-to-end.
+// TestIntegration_AgentHostIPC_RoundTrip — end-to-end.
 //
 // Builds cmd/exec-test-stub as a pure-Go static binary, bind-mounts
 // it into the sandbox at /usr/local/bin/triagefactory, starts a
@@ -472,8 +472,8 @@ func (e *configureProxyError) Error() string { return e.msg }
 // glibc-linked on most dev/CI systems, and the sandbox rootfs is
 // alpine (musl) — a bind-mounted glibc binary fails to exec inside
 // alpine because the dynamic loader path doesn't resolve. The
-// production fix is a static-built musl image of the real binary,
-// owned by SKY-256; this ticket proves the IPC pipe with the stub.
+// production fix is a static-built musl image of the real binary;
+// this test proves the IPC pipe with the stub.
 func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 	requireRunsc(t)
 	requireApk(t)

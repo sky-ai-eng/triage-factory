@@ -339,7 +339,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 // it is treated as terminal for the purpose of emitting
 // jira:issue:completed.
 //
-// SKY-270: the actor-identity fields on emitted metadata
+// The actor-identity fields on emitted metadata
 // (Assignee/AssigneeAccountID, Reporter/ReporterAccountID,
 // Commenter/CommenterAccountID) are copied verbatim from the snapshot.
 // Predicate matching against assignee_in / reporter_in / commenter_in
@@ -577,7 +577,7 @@ func reviewMap(reviews []domain.ReviewState) map[string]domain.ReviewState {
 	return m
 }
 
-// extractProject extracts the project key from a Jira issue key (e.g. "SKY" from "SKY-123").
+// extractProject extracts the project key from a Jira issue key (e.g. "ABC" from "ABC-123").
 func extractProject(key string) string {
 	for i, c := range key {
 		if c == '-' {

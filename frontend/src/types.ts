@@ -31,7 +31,7 @@ export interface Task {
   // the task was created before subtasks appeared, or the user added them
   // after starting work. Always 0 for GitHub tasks.
   open_subtask_count?: number
-  // SKY-330: claim cols, exposed so the assignee picker on the board
+  // Claim cols, exposed so the assignee picker on the board
   // can render current state without a second fetch. Exactly one is
   // set when claimed; both absent (omitempty on the wire) when
   // unclaimed. The XOR is enforced server-side.
@@ -40,7 +40,7 @@ export interface Task {
   // The task's owning team. Surfaced so the multi-team board can
   // color-code / tag rows by team. The frontend only renders the tag
   // when the viewer belongs to ≥2 teams.
-  // TODO(SKY-379): board row color-coding consumes this.
+  // TODO: board row color-coding consumes this.
   team_id?: string
 }
 
@@ -66,7 +66,7 @@ export interface TeamsResponse {
   last_acting_team_id?: string
 }
 
-// TeamBot mirrors the bot half of /api/team/members (SKY-330). Null
+// TeamBot mirrors the bot half of /api/team/members. Null
 // when no agent is bootstrapped OR team_agents.enabled is false for
 // the caller's team — same gate the swipe-delegate handler enforces.
 // Frontend hides the Bot row in the picker when this is null. The
@@ -137,7 +137,7 @@ export interface AgentRun {
   // affordance without a per-card fetch; 0 / undefined hides the affordance.
   artifact_count?: number
   // actor_agent_id / actor_agent_name identify the bot that executed this run
-  // (runs.actor_agent_id, SKY-261 D-Claims), denormalized from agents.display_name
+  // (runs.actor_agent_id), denormalized from agents.display_name
   // via a JOIN on the run read projections. The card renders "Ran as: {name}" when
   // a name is present; both are absent/empty for a run with no actor (spawned before
   // agent bootstrap, or after the agent row was deleted).
@@ -379,7 +379,7 @@ export interface EventType {
   supports_watch: boolean
 }
 
-// Event handlers (SKY-259) — unified successor to the former TaskRule
+// Event handlers — unified successor to the former TaskRule
 // + PromptTrigger types. The backend stores both in one event_handlers
 // table; the FE keeps split UI pages but consumes the discriminated
 // union below. Each member is fully typed: TS catches cross-kind
@@ -692,13 +692,13 @@ export interface BreakGlassPrincipal {
 
 /** GET /api/team/members row. Backs Variant B's searchable multi-select.
  *  Local mode returns a single-entry array containing the synthetic
- *  LocalDefaultUserID; multi mode (post-SKY-251) returns the active
+ *  LocalDefaultUserID; multi mode returns the active
  *  user's team roster. */
 export interface TeamMember {
   user_id: string
   display_name: string
   github_username: string | null
-  /** Atlassian account ID (SKY-270). Null when this member hasn't
+  /** Atlassian account ID. Null when this member hasn't
    *  connected Jira yet. */
   jira_account_id: string | null
   is_current_user: boolean
@@ -706,7 +706,7 @@ export interface TeamMember {
 
 export interface TeamMembersResponse {
   members: TeamMember[]
-  // SKY-330: bot entry, populated when the caller's team has an
+  // Bot entry, populated when the caller's team has an
   // enabled agent (otherwise null). Same gate as swipe-delegate.
   bot: TeamBot | null
 }
@@ -789,7 +789,7 @@ export interface Project {
   pinned_repos: string[]
   jira_project_key: string
   linear_project_key: string
-  /** Per-project Curator spec-authorship skill (SKY-221). Empty string =
+  /** Per-project Curator spec-authorship skill. Empty string =
    *  use the seeded `system-ticket-spec` default. The Curator dispatch
    *  materializes whichever prompt this points at as a literal Claude
    *  Code skill at `<cwd>/.claude/skills/ticket-spec/SKILL.md` on every
@@ -989,7 +989,7 @@ export type WSEvent =
   | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }
   | {
-      // SKY-261 B+: claim-axis change. Exactly one of the two ID fields
+      // Claim-axis change. Exactly one of the two ID fields
       // is populated when claim landed; both empty when claim was
       // cleared (Requeue, revert). Status is NOT in the payload —
       // status changes fire as task_updated. The two channels stay

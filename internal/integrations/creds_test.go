@@ -474,8 +474,8 @@ func TestLoadSystem_SameKeySetAsLoad(t *testing.T) {
 }
 
 // TestAllKeys_IncludesLegacyKeychainKeys pins that the per-org Clear set still
-// sweeps the two legacy keychain keys (github_username from SKY-264,
-// jira_display_name from SKY-397). They have no companion DB ref, so they're
+// sweeps the two legacy keychain keys (github_username and
+// jira_display_name). They have no companion DB ref, so they're
 // safe on the Clear path. Keeping them in AllKeys also carries them into
 // AllLocalSweepKeys (the superset scripts/clean-slate.sh mirrors), which lists
 // both — so the script and the Go source can't drift on the legacy keys.

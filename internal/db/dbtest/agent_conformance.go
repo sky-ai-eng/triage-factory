@@ -222,7 +222,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		// FK; the read-back must match. Postgres needs a real
 		// users.id (the factory pre-seeds one and hands the UUID back);
 		// SQLite accepts any UUID-shaped string but the FK to users(id)
-		// exists too post-SKY-269.
+		// exists too.
 		store, orgID, patUserID := factory(t)
 		ctx := context.Background()
 		id, err := store.Create(ctx, orgID, domain.Agent{DisplayName: "Test"})

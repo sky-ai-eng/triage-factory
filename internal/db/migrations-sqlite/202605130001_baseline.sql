@@ -1,6 +1,6 @@
 -- +goose Up
 -- Consolidated baseline (2026-05-13). Captures the cumulative
--- post-state of the schema chain that ran from the SKY-245 D1 baseline
+-- post-state of the schema chain that ran from the original D1 baseline
 -- through every post-baseline migration up to and including 202605120012.
 --
 -- This baseline is a hard reset: any database that does not have *this*
@@ -79,7 +79,7 @@ CREATE TABLE prompts (
     allowed_tools   TEXT NOT NULL DEFAULT '',
     model           TEXT NOT NULL DEFAULT '',
     org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
-    -- team_id is NOT NULL: every prompt is team-owned (SKY-380). The
+    -- team_id is NOT NULL: every prompt is team-owned. The
     -- LocalDefaultTeamID sentinel is the default so local-mode inserts and
     -- the single-team N=1 case never thread it explicitly.
     team_id         TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000010',
@@ -89,7 +89,7 @@ CREATE TABLE prompts (
     -- system_slug is the stable shipped identifier ("system-ci-fix", …) for
     -- source='system' rows; NULL for user/imported prompts. The id is a
     -- random UUID per team copy, so re-seed idempotency and slug→id lookups
-    -- key on (org_id, team_id, system_slug) instead of the id (SKY-380).
+    -- key on (org_id, team_id, system_slug) instead of the id.
     system_slug     TEXT,
     -- deleted_at soft-deletes a prompt. The row + its runs stay as the
     -- durable audit trail (runs.prompt_id is RESTRICT, so a hard DELETE on a
@@ -115,7 +115,7 @@ CREATE TABLE prompts (
     -- Per-team re-seed idempotency key: each team gets exactly one copy of
     -- each shipped prompt (same system_slug, distinct team_id). NULLs are
     -- distinct in both dialects, so user prompts (system_slug NULL) never
-    -- collide with each other (SKY-380).
+    -- collide with each other.
     CONSTRAINT prompts_org_team_slug_unique UNIQUE (org_id, team_id, system_slug)
 );
 
@@ -230,8 +230,8 @@ CREATE TABLE users (
     -- is needed and the column stays declaration-order-independent.
     last_acting_team_id TEXT,
     -- Per-user Jira identity (account_id + display_name) is NOT a column:
-    -- it moved to the host-scoped user_jira_identities sibling below
-    -- (SKY-397), mirroring how the GitHub login moved to
+    -- it moved to the host-scoped user_jira_identities sibling below,
+    -- mirroring how the GitHub login moved to
     -- user_github_identities. A single human can hold a different Jira
     -- account on each host, so the identity is keyed (user_id, host),
     -- never a lone column.
@@ -239,7 +239,7 @@ CREATE TABLE users (
     updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- user_github_identities — host-scoped GitHub identity bindings (SKY-396).
+-- user_github_identities — host-scoped GitHub identity bindings.
 -- Replaces the single users.github_username column: one human can hold a
 -- different login on each GitHub host (github.com for one org, a corp GHES
 -- for another), so the natural key is (user_id, github_base_url), not a lone
@@ -247,7 +247,7 @@ CREATE TABLE users (
 -- row per user — the column behaviour, with a future-proof key.
 --
 -- source records HOW the binding was captured ('pat' | 'connect_oauth' |
--- 'scim' | 'login_claim') — load-bearing for SKY-271's "verified against the
+-- 'scim' | 'login_claim') — load-bearing for the "verified against the
 -- org's host, never typed-unverified" integrity rule and for trusting /
 -- distrusting a row later. verified_at timestamps the last authenticated
 -- /user confirmation against the host — the hook for future drift re-checks
@@ -256,7 +256,7 @@ CREATE TABLE users (
 -- sync (source='scim') would write when it learns a login from the directory
 -- without an authenticated round-trip to the host. Today's writers (pat,
 -- login_claim) always stamp it. An absent row is a durable, supported state:
--- the NULL-degrades-gracefully contract from SKY-264 carries over unchanged.
+-- the NULL-degrades-gracefully contract carries over unchanged.
 CREATE TABLE user_github_identities (
     user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     github_base_url TEXT NOT NULL,
@@ -269,7 +269,7 @@ CREATE TABLE user_github_identities (
     PRIMARY KEY (user_id, github_base_url)
 );
 
--- user_jira_identities — host-scoped Jira identity bindings (SKY-397).
+-- user_jira_identities — host-scoped Jira identity bindings.
 -- The Jira sibling of user_github_identities: it replaces the single-valued
 -- users.jira_account_id / users.jira_display_name columns. One human can hold
 -- a different Jira account on each Jira site (a Cloud site for one org, a
@@ -278,7 +278,7 @@ CREATE TABLE user_github_identities (
 -- exactly one row per user — the column behaviour, with a future-proof key.
 --
 -- The access layer already keys per-(user, host): the per-user Jira PAT is
--- custodied as "jira_token/<host>" (SKY-442). This table makes IDENTITY
+-- custodied as "jira_token/<host>". This table makes IDENTITY
 -- symmetric with that access — both keyed on the same canonical host — so a
 -- second Jira site can't overwrite the first's identity the way the single
 -- column did.
@@ -297,7 +297,7 @@ CREATE TABLE user_github_identities (
 -- confirmation against the host (nullable for a future SCIM directory sync
 -- that learns an account without a round-trip; today's pat writer always
 -- stamps it). An absent row is a durable, supported state: the
--- NULL-degrades-gracefully contract from SKY-264 carries over unchanged.
+-- NULL-degrades-gracefully contract carries over unchanged.
 CREATE TABLE user_jira_identities (
     user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     jira_base_url TEXT NOT NULL,
@@ -628,13 +628,13 @@ CREATE INDEX idx_events_type_created    ON events(event_type, created_at DESC);
 CREATE INDEX idx_events_entity_occurred ON events(entity_id, occurred_at DESC);
 CREATE INDEX idx_events_type_entity     ON events(event_type, entity_id) WHERE entity_id IS NOT NULL;
 
--- === Event handlers (rules + triggers, post-SKY-259) =====================
+-- === Event handlers (rules + triggers) ====================================
 CREATE TABLE event_handlers (
     id              TEXT PRIMARY KEY,
     org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     creator_user_id TEXT,
-    -- team_id is NOT NULL: every handler is team-owned (SKY-380 made shipped
-    -- rows per-team copies, so the old org-visible / team_id-NULL tier is
+    -- team_id is NOT NULL: every handler is team-owned (shipped
+    -- rows are per-team copies, so the old org-visible / team_id-NULL tier is
     -- gone). The LocalDefaultTeamID sentinel is the DEFAULT so local-mode
     -- inserts and direct INSERTs that omit it land on the sole team. There
     -- is no visibility column — team_id is the sole scoping signal.
@@ -653,7 +653,7 @@ CREATE TABLE event_handlers (
     -- system_slug is the stable shipped identifier ("system-rule-ci-check-failed",
     -- "system-trigger-ci-fix", …) for source='system' rows; NULL for user
     -- handlers. The id is a random UUID per team copy, so re-seed idempotency
-    -- keys on (org_id, team_id, system_slug) instead of the id (SKY-380).
+    -- keys on (org_id, team_id, system_slug) instead of the id.
     system_slug          TEXT,
 
     -- Rule-only fields. NULL for triggers.
@@ -703,7 +703,7 @@ CREATE TABLE event_handlers (
     ),
     -- Per-team re-seed idempotency key: each team gets one copy of each
     -- shipped handler (same system_slug, distinct team_id). NULLs distinct,
-    -- so user handlers (system_slug NULL) never collide (SKY-380).
+    -- so user handlers (system_slug NULL) never collide.
     CONSTRAINT event_handlers_org_team_slug_unique UNIQUE (org_id, team_id, system_slug)
 );
 CREATE UNIQUE INDEX event_handlers_id_org_unique          ON event_handlers (id, org_id);
@@ -719,7 +719,7 @@ CREATE INDEX        idx_event_handlers_blueprint          ON event_handlers(org_
 -- via many distinct trigger rows); this only bounds the per-blueprint side.
 CREATE UNIQUE INDEX event_handlers_one_trigger_per_blueprint ON event_handlers(blueprint_id) WHERE blueprint_id IS NOT NULL;
 
--- === Org default templates (SKY-381) =====================================
+-- === Org default templates ================================================
 -- The org-level template a new team's prompts + handlers are copied from at
 -- team creation. Org-scoped (no team_id): the template is the *source*, not a
 -- team-owned set — BootstrapNewTeam materializes a per-team copy of it. Mirrors
@@ -884,7 +884,7 @@ CREATE TABLE tasks (
     creator_user_id      TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000100',
     visibility           TEXT NOT NULL DEFAULT 'team'
                             CHECK (visibility IN ('private','team','org')),
-    -- SKY-261 D-Claims: two claim cols + XOR.
+    -- D-Claims: two claim cols + XOR.
     claimed_by_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,
     claimed_by_user_id   TEXT REFERENCES users(id)  ON DELETE SET NULL,
     CONSTRAINT tasks_claim_xor CHECK (claimed_by_agent_id IS NULL OR claimed_by_user_id IS NULL),
@@ -993,11 +993,11 @@ CREATE TABLE runs (
     -- section below.
     blueprint_run_id     TEXT REFERENCES blueprint_runs(id),
     blueprint_step_index INTEGER,
-    -- triggering_event_id is the event instance that auto-fired this run
-    -- (SKY-424). NULL for manual runs and blueprint-step runs. The
+    -- triggering_event_id is the event instance that auto-fired this run.
+    -- NULL for manual runs and blueprint-step runs. The
     -- runs_event_trigger_fence partial unique index below makes
     -- (triggering_event_id, trigger_id) at-most-once, so a replayed event
-    -- under the at-least-once router queue (SKY-414) can't spawn a second
+    -- under the at-least-once router queue can't spawn a second
     -- delegated run. Forward-only provenance — written by the event path's
     -- CreateIfNotFiredSystem, not read back into the run projection.
     triggering_event_id  TEXT REFERENCES events(id),
@@ -1046,7 +1046,7 @@ CREATE INDEX        idx_runs_status         ON runs(status);
 CREATE UNIQUE INDEX runs_id_org_unique      ON runs (id, org_id);
 CREATE INDEX        runs_actor_agent_idx    ON runs(actor_agent_id) WHERE actor_agent_id IS NOT NULL;
 CREATE INDEX        idx_runs_blueprint      ON runs(blueprint_run_id, blueprint_step_index);
--- Fired-fence (SKY-424): one event firing one trigger materializes at most
+-- Fired-fence: one event firing one trigger materializes at most
 -- one run. Partial WHERE triggering_event_id IS NOT NULL so manual and
 -- blueprint-step runs (NULL) never participate — multiple manual runs of one
 -- task stay allowed, and two distinct event instances still fire independently.
@@ -1489,7 +1489,7 @@ CREATE INDEX        idx_curator_pending_context_consumer
 CREATE UNIQUE INDEX prompts_id_org_unique          ON prompts          (id, org_id);
 -- Parent key for the same-team composite FKs (blueprint_steps.step_prompt_id
 -- references prompts(id, team_id) so a step can only bind a prompt its own
--- team owns) (SKY-380).
+-- team owns).
 CREATE UNIQUE INDEX prompts_id_team_unique         ON prompts          (id, team_id);
 -- Parent keys for the blueprint composite FKs: event_handlers.blueprint_id
 -- and blueprint_steps.blueprint_id reference blueprints(id, org_id) /

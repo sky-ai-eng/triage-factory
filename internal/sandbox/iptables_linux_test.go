@@ -5,7 +5,7 @@ package sandbox
 import "testing"
 
 // TestEgressRuleLineMatches pins the field-matching the orphan reaper
-// uses to find leaked SKY-395 Part B host-side egress rules. The
+// uses to find leaked Part B host-side egress rules. The
 // load-bearing properties: the gateway IP must match exactly (not as a
 // substring of a longer address), both the bare and "/32" address forms
 // must match, and the negated "! -d" form iptables actually prints must

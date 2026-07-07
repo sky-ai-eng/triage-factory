@@ -25,7 +25,7 @@ import (
 //     @login, and DISCARDS the token. The org's App/PAT does the acting, so the
 //     user level only needs to answer whoami.
 //   - Jira captures *access*: the user acts as themselves on board claims, so
-//     the per-user credential must be STORED (per-user vault scope, SKY-442)
+//     the per-user credential must be STORED (per-user vault scope)
 //     and the identity is derived from it. Retention is the whole point.
 //
 // DC = paste-a-PAT (this flow). Cloud OAuth (one-click Connect) is a later
@@ -33,7 +33,7 @@ import (
 // surfaces offer only the PAT path.
 //
 // The credential is stored per-user, host-keyed under "jira_token/<host>"
-// (SKY-442 PutUser). The host comes from the org's Jira base URL
+// (PutUser). The host comes from the org's Jira base URL
 // (org_settings.jira_base_url) — single Jira host per org for v1, but the key
 // is host-scoped for forward-compat with multi-host Cloud. The status reader
 // and the PAT writer both resolve the host through resolveJiraHost, so the key
@@ -48,7 +48,7 @@ import (
 // default — Jira has no canonical host, so an empty config is genuinely "not
 // configured."
 //
-// SKY-463: the canonicalization itself lives in internal/jira (jira.CanonicalHost)
+// The canonicalization itself lives in internal/jira (jira.CanonicalHost)
 // so the bind flow here and the write-actor resolver (jira.Resolver.ForUser)
 // compose the per-user key identically — a single source of truth.
 func resolveJiraHost(orgBase string) (string, bool) {
@@ -162,7 +162,7 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 			return nil
 		}
 
-		// Identity (user_jira_identities) is host-scoped (SKY-397), keyed on
+		// Identity (user_jira_identities) is host-scoped, keyed on
 		// the same canonical host the credential is stored under — read it
 		// for the host we just resolved. Prefer the display name for the
 		// human-facing label, falling back to the stable account id.
@@ -217,7 +217,7 @@ type jiraIdentityCaptureResponse struct {
 }
 
 // handleJiraIdentityPAT binds the caller's Jira access from a credential they
-// supply, STORING it (per-user vault scope, SKY-442) as a UserCredential
+// supply, STORING it (per-user vault scope) as a UserCredential
 // envelope. It resolves the org's Jira host + deployment, validates the
 // credential against it (GET /myself), persists the envelope under
 // "jira_token/<host>", and derives the user's Jira identity from the validated

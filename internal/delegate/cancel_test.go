@@ -123,7 +123,7 @@ func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-done", "sess-3", "/tmp/wt-rd")
 	// Trigger_type='event' requires creator_user_id IS NULL per the
-	// SKY-261 v0.9 CHECK invariant. seedRun defaults to manual +
+	// CHECK invariant. seedRun defaults to manual +
 	// sentinel creator; the UPDATE has to clear creator alongside.
 	if _, err := database.Exec(`UPDATE runs SET status = 'completed', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r-done'`); err != nil {
 		t.Fatalf("complete run: %v", err)

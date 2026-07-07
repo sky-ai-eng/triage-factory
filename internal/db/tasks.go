@@ -46,7 +46,7 @@ type TaskStore interface {
 
 	// Queued returns active queue tasks ordered by the matching
 	// event_handler rule's sort_order then priority_score DESC.
-	// Queue membership is the post-SKY-261 B+ derived filter:
+	// Queue membership is the derived filter:
 	// status='queued' AND both claim cols NULL AND not future-snoozed.
 	//
 	// teamIDs is the optional per-page read filter — a *multi-team* view
@@ -59,7 +59,7 @@ type TaskStore interface {
 	Queued(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error)
 
 	// QueuedIncludingSnoozed mirrors Queued but drops the snooze-
-	// window filter so future-snoozed rows surface too. SKY-330's
+	// window filter so future-snoozed rows surface too. The
 	// Board Queued column uses this when the user toggles "show
 	// snoozed"; the default Queued() stays the canonical "what's
 	// actually pickable right now" projection. teamIDs is the same
@@ -68,7 +68,7 @@ type TaskStore interface {
 
 	// ByStatus returns tasks with the given lifecycle status,
 	// ordered by priority. Two pseudo-values are mapped to claim-
-	// axis queries for API back-compat (SKY-261 B+):
+	// axis queries for API back-compat:
 	//   "claimed"   → claimed_by_user_id IS NOT NULL + active
 	//   "delegated" → claimed_by_agent_id IS NOT NULL + active
 	// Other status values are passed through literally. teamIDs is the
@@ -82,7 +82,7 @@ type TaskStore interface {
 
 	// FindActiveByEntityAndTypeSystem mirrors FindActiveByEntityAndType
 	// but routes through the admin pool in Postgres. The consumer is
-	// the tracker (SKY-297) — a background goroutine that reconciles
+	// the tracker — a background goroutine that reconciles
 	// stale review_requested tasks when the user is no longer in a
 	// PR's reviewer list. The tracker has no JWT-claims context, so
 	// this read needs to bypass RLS the same way the sibling entity
@@ -179,13 +179,13 @@ type TaskStore interface {
 	Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
 
 	// SetStatus updates the lifecycle status only — claim cols are
-	// unaffected. Post-SKY-261 B+ the only production caller is
+	// unaffected. The only production caller is
 	// revertTaskStatus in DrainEntity's mark-fired-failure rollback;
 	// every other lifecycle write routes through a guarded helper.
 	SetStatus(ctx context.Context, orgID, taskID, status string) error
 
 	// AdvanceStatusForUser flips a user-claimed task's lifecycle
-	// status forward (SKY-330 board manual transitions). Guards:
+	// status forward (board manual transitions). Guards:
 	//   - task must be claimed by userID
 	//   - current status must be one of {queued, in_progress, in_review}
 	//   - newStatus must be one of {in_progress, in_review}

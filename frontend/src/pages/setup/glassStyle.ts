@@ -1,4 +1,4 @@
-// Liquid Glass material tokens for the setup flow (SKY-457) — shared class
+// Liquid Glass material tokens for the setup flow — shared class
 // strings + motion easing, kept in a non-component module so the component file
 // (glass.tsx) stays component-only (react-refresh). Built from the existing
 // theme tokens: --color-surface-overlay (the translucent glass fill, already
