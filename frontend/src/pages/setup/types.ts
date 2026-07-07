@@ -215,8 +215,9 @@ export interface WizardState {
   jiraUserAccount: string
   // The org's Jira host the credential is keyed under (for the explanatory copy).
   jiraUserHost: string
-  // Whether one-click Connect is offerable — false until Cloud OAuth lands
-  // (DC = paste-a-PAT), so the step offers only the token path for now.
+  // Whether one-click Connect is offerable for this org — true when an
+  // Atlassian OAuth app resolves for it; false (DC, or no OAuth app
+  // configured) means the step offers only the token path.
   jiraUserConnectAvailable: boolean
   // The draft token the user pastes when binding Jira access. For a Data Center
   // org this is the personal access token; captured (validated → stored →

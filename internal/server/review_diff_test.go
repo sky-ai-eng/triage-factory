@@ -130,11 +130,15 @@ func TestFormatHumanFeedback_CommentEdited(t *testing.T) {
 	}
 }
 
-// TestFormatHumanFeedback_CommentRemovedAndAdded covers the two
-// statuses the v1 handler doesn't yet emit (soft-delete + UI add
-// flow are deferred). The formatter still supports them so the
-// future wiring is a one-line change. Pinning their output shape
-// here means that wiring can land without re-litigating format.
+// TestFormatHumanFeedback_CommentRemovedAndAdded covers both diff
+// statuses the formatter renders: Removed (soft-delete) is already
+// emitted in production by buildReviewHumanFeedbackInput via
+// handleArtifactCommentDelete; Added has no producer yet — there's no
+// UI/endpoint for a human to add a brand-new inline comment not in the
+// agent's own draft — buildReviewHumanFeedbackInput computes it anyway
+// so the diff stays honest if that ever lands. Pinning both output
+// shapes here means the Added wiring, when it lands, doesn't have to
+// re-litigate format.
 func TestFormatHumanFeedback_CommentRemovedAndAdded(t *testing.T) {
 	got := FormatHumanFeedback(HumanFeedbackInput{
 		OriginalBody:  strPtr("x"),

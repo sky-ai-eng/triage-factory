@@ -546,8 +546,9 @@ export interface JiraIdentityStatus {
   account?: string
   /** The org's Jira host the credential is keyed against. */
   host: string
-  /** Whether one-click Connect is offerable. False until Cloud OAuth lands
-   *  (DC = paste-a-PAT), so the surfaces offer only the token path for now. */
+  /** Whether one-click Connect is offerable — true when an Atlassian OAuth
+   *  app resolves for the org. False (DC, or no OAuth app configured) means
+   *  the surfaces offer only the token path. */
   connect_available: boolean
   /** The org's Jira backend ("cloud" / "data_center"), so the paste surfaces
    *  render the right fields — a Cloud org binds an email + API token, a Data

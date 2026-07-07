@@ -303,7 +303,8 @@ func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 
 // TestJiraIdentityStatus exercises the gate's status read: a fresh user reports
 // connected=false; after a credential is stored, connected=true with the
-// account + host. connect_available is always false (no Cloud OAuth yet).
+// account + host. connect_available is false because this test's org has no
+// Atlassian OAuth app configured.
 func TestJiraIdentityStatus(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -352,7 +353,7 @@ func TestJiraIdentityStatus(t *testing.T) {
 		t.Errorf("deployment = %q, want data_center", out.Deployment)
 	}
 	if out.ConnectAvailable {
-		t.Errorf("connect_available=true, want false (no Cloud OAuth yet): %+v", out)
+		t.Errorf("connect_available=true, want false (no Atlassian OAuth app configured for this org): %+v", out)
 	}
 }
 

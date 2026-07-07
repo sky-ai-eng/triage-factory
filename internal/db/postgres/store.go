@@ -336,14 +336,12 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 	return s.stores
 }
 
-// Connection openers (OpenAdmin, OpenApp) are NOT defined here in
-// wave 0. main.go fatals before reaching them; introducing them now
-// would require registering the pgx stdlib driver inside this
-// package (a side-effect import) without any caller exercising it.
-// A future startup-wiring change owns the multi-mode startup wiring
-// and will add the openers alongside the config + DSN plumbing that
-// actually consumes them. Tests construct *sql.DB via the pgtest harness, which
-// registers the pgx driver itself.
+// Connection openers (OpenAdmin, OpenApp) are NOT defined here — this
+// package deliberately doesn't register the pgx stdlib driver as a
+// side-effect import. internal/app/stores.go owns opening the admin and
+// app *sql.DB handles (sql.Open("pgx", ...) against the admin/app DSNs)
+// and passes them into New below. Tests construct *sql.DB via the
+// pgtest harness, which registers the pgx driver itself.
 
 // NewForTx returns a db.TxStores wired against one *sql.Tx — the
 // same shape WithTx produces internally for its closure body,

@@ -1373,10 +1373,11 @@ export async function loadJiraUserAccess(ctx: LoadContext): Promise<Partial<Wiza
 // Step · Your Jira access (User section, shown only when Jira is the connected
 // tracker). The Jira sibling of the GitHub identity step, with the structural
 // difference that the token is STORED (Jira's user level holds access, not just
-// identity). DC = paste-a-PAT — no Connect button yet (Cloud OAuth is a later
-// ticket). The PAT path is this step's Continue, which validates the token,
-// stores it, and derives the account. Mandatory while visible: the wizard can't
-// finish a Jira-tracked workspace until the user has bound their own access.
+// identity). DC = paste-a-PAT; Cloud orgs with an Atlassian OAuth app configured
+// get a one-click Connect button instead (see JiraUserAccessStep.tsx). The PAT
+// path is this step's Continue, which validates the token, stores it, and
+// derives the account. Mandatory while visible: the wizard can't finish a
+// Jira-tracked workspace until the user has bound their own access.
 const jiraUserAccessStep: WizardStep = {
   id: 'user-jira-access',
   section: 'user',

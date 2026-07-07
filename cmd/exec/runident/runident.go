@@ -13,10 +13,10 @@
 // identity) and event-triggered runs route through admin-pool
 // `...System` methods (no human identity exists).
 //
-// A future change will lift this helper behind an AgentHostClient
-// interface so the sandboxed-agent path can talk to a host daemon over
-// IPC instead of reaching the DB directly. Until then, every subcommand
-// resolves identity here and switches its store calls per branch.
+// This helper backs cmd/exec/agenthost's LocalClient, which every
+// subcommand reaches through agenthost.AutoDetect rather than calling
+// here directly; the sandboxed-agent path talks to a host daemon over
+// IPC (agenthost.IPCClient) instead of reaching the DB directly.
 package runident
 
 import (

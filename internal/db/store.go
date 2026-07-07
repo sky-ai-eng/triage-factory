@@ -276,8 +276,9 @@ type Stores struct {
 	// project-classifier). Admin pool in Postgres: every writer is a
 	// boot-launched background goroutine with no JWT-claims context
 	// (system-written, org-scoped — same shape as PendingFirings). The
-	// org-scoped RLS policy gates the app-pool reads a future spend view
-	// will make. See TFAC-451.
+	// org-scoped RLS policy gates the app-pool reads the llm_spend view
+	// makes (db.SpendStore, read by internal/server/usage_handler.go).
+	// See TFAC-451.
 	SystemLLMRuns SystemLLMRunStore
 
 	// AccessChangeLog owns the access_change_log table — the small, low-volume
@@ -285,8 +286,8 @@ type Stores struct {
 	// membership & role grants/changes/revokes, credential bind/rotate). App
 	// pool in Postgres: every Record composes inside the claims-bearing WithTx
 	// that runs the audited action, gated by an org-scoped RLS policy; the
-	// future org-admin audit view reads through the same pool. SQLite is N=1
-	// and unscoped. See TFAC-471.
+	// org-admin audit view (internal/server/usage_access_log.go) reads
+	// through the same pool. SQLite is N=1 and unscoped. See TFAC-471.
 	AccessChangeLog AccessChangeLogStore
 
 	// ExternalActions owns the external_actions table — the append-only audit

@@ -28,9 +28,10 @@ import (
 //     the per-user credential must be STORED (per-user vault scope)
 //     and the identity is derived from it. Retention is the whole point.
 //
-// DC = paste-a-PAT (this flow). Cloud OAuth (one-click Connect) is a later
-// Cloud-tier ticket; until it lands `connect_available` stays false, so the
-// surfaces offer only the PAT path.
+// DC = paste-a-PAT (this flow). Cloud OAuth (one-click Connect, see
+// handleJiraConnectStart / handleJiraConnectCallback below) is the Cloud
+// sibling; `connect_available` gates which of the two a given org's
+// surfaces offer (false when no Atlassian OAuth app resolves for the org).
 //
 // The credential is stored per-user, host-keyed under "jira_token/<host>"
 // (PutUser). The host comes from the org's Jira base URL
@@ -184,8 +185,9 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 	// connect_available is true exactly when an Atlassian OAuth app resolves
 	// for the org (per-org override or, in hosted, the deployment first-party).
 	// The frontend shows the one-click "Connect" button only then; otherwise it
-	// offers just the paste-a-PAT/token path. The authorize/callback flow that
-	// the button kicks off is a later ticket — this only advertises that the
+	// offers just the paste-a-PAT/token path. The button drives the
+	// authorize/callback flow below (handleJiraConnectStart /
+	// handleJiraConnectCallback) — this endpoint just advertises that the
 	// app credential it needs is in place.
 	writeJSON(w, http.StatusOK, jiraIdentityStatusResponse{
 		Connected:        connected,
@@ -227,8 +229,9 @@ type jiraIdentityCaptureResponse struct {
 // The credential shape follows the org's deployment, the same dispatch the
 // system resolver uses: a Data Center org binds a PAT (Bearer, REST v2); a Cloud
 // org binds an Atlassian email + API token (Basic, REST v3). The route is stable
-// across both — the branch is internal. Cloud OAuth (one-click Connect) is a
-// later ticket that extends the stored envelope with a third method.
+// across both — the branch is internal. Cloud OAuth (one-click Connect, see
+// handleJiraConnectCallback) is the third method, extending the same stored
+// envelope shape.
 //
 // Distinct failure shapes, like the GitHub handler: a host TF couldn't reach is
 // a 502 (infra), a credential the host rejected is a 422 (your action).
