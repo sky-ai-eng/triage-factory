@@ -122,20 +122,26 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 	// 304 (unchanged) this cycle; their tracked entities can keep their
 	// stored snapshot through the Phase-2 gate without a refresh.
 	discovered, quietRepos, err := t.discoverGitHub(ctx, client, username, repos)
+	var rateLimited *ghclient.ErrRateLimited
 	if err != nil {
-		var rl *ghclient.ErrRateLimited
-		if errors.As(err, &rl) {
+		if errors.As(err, &rateLimited) {
 			// The repo fan-out already stopped queuing new repos the moment
-			// this surfaced (see discoverGitHub); bail out of the whole cycle
-			// here too rather than press on into Phase 2/3, which share the
-			// same client and would just hit the same exhausted budget.
-			// Wrapped so errors.As still finds it — this is the "propagate
-			// distinctly" signal a future resumable-cycle caller (TFAC-568's
-			// budgeted-cycles ticket) can key off of.
-			trackerLog.Warn("github discovery: rate limit budget exhausted, stopping cycle", "resume_at", rl.ResumeAt)
-			return 0, err
+			// this surfaced (see discoverGitHub). Deliberately do NOT return
+			// here, though: `discovered` still holds every repo that DID
+			// complete before the budget ran out, and their pulls-etag was
+			// already persisted (recordPullsPoll, inline per-repo) as part of
+			// that success. Bailing out before the entity-seeding loop below
+			// runs would leave those repos' entities/snapshots un-seeded while
+			// their etag has already moved past the very PRs that needed
+			// seeding — a silent, hard-to-notice loss (they'd 304 on the next
+			// cycle and never get a second chance). So: let this loop process
+			// `discovered` as normal, and only skip Phase 2/3 (which share
+			// the same client and would just hit the same exhausted budget)
+			// afterward. See the check below the entity-seeding loop.
+			trackerLog.Warn("github discovery: rate limit budget exhausted, stopping repo fan-out", "resume_at", rateLimited.ResumeAt)
+		} else {
+			trackerLog.Error("github discovery error", "error", err)
 		}
-		trackerLog.Error("github discovery error", "error", err)
 	}
 
 	// Build a SourceID-keyed lookup of discovery snapshots so Phase 2 can
@@ -213,6 +219,16 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 				}
 			}
 		}
+	}
+
+	if rateLimited != nil {
+		// Every repo discovery managed to reach before the budget ran out is
+		// now seeded above. Phase 2's GraphQL refresh shares the same client,
+		// so it would immediately hit the same exhaustion — skip it and
+		// propagate the typed error distinctly (errors.As-able) rather than
+		// let a less-specific wrapped error surface from Phase 2, or none at
+		// all if this cycle happens to have no active entities to refresh.
+		return 0, rateLimited
 	}
 
 	// Phase 2: Refresh active entities.
