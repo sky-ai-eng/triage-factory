@@ -608,22 +608,27 @@ function UserRoster({ data, emptyLabel = '—' }: { data: UsageUserBucket[]; emp
   )
 }
 
-// dayTs turns a 'YYYY-MM-DD' bucket date into a local-midnight epoch ms — the
-// numeric X value the over-time traces plot against. by_day / by_day_model are
-// SPARSE (only days with settled spend, see spendByDay on the backend), so a
-// category axis (Recharts' default for a string dataKey) spaces every point
-// evenly by index regardless of the actual gap between them — a 5-day gap
-// would read identically to a 1-day gap. A numeric axis with
-// domain={['dataMin', 'dataMax']} spaces points proportionally to elapsed
-// time instead.
+// dayTs turns a 'YYYY-MM-DD' bucket date into its UTC-midnight epoch ms — the
+// numeric X value the over-time traces plot against. by_day / by_day_model
+// bucket by UTC calendar day (spendByDay on the backend uses
+// OccurredAt.UTC().Format("2006-01-02")) and are SPARSE (only days with
+// settled spend), so a category axis (Recharts' default for a string
+// dataKey) spaces every point evenly by index regardless of the actual gap
+// between them — a 5-day gap would read identically to a 1-day gap. Parsing
+// as UTC (not local midnight) keeps every bucket exactly 24h wide even across
+// a DST transition in the viewer's timezone — a local-midnight parse would
+// make the spring-forward/fall-back day read as 23h/25h, subtly skewing
+// spacing. A numeric axis with domain={['dataMin', 'dataMax']} then spaces
+// points proportionally to that elapsed time.
 function dayTs(date: string): number {
-  return new Date(date + 'T00:00:00').getTime()
+  return Date.parse(`${date}T00:00:00Z`)
 }
 
 // dayLabel renders a plotted timestamp back to the short display date used in
-// tooltips (e.g. "Jun 6").
+// tooltips (e.g. "Jun 6"), formatted in UTC so it always shows the same
+// calendar day the backend bucketed, independent of the viewer's timezone.
 function dayLabel(ts: number): string {
-  return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' })
+  return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric', timeZone: 'UTC' })
 }
 
 // Trace is the "over time" readout: a borderless accent line with a soft area
