@@ -325,6 +325,73 @@ PgBouncer/Supavisor independently, per TFAC-307 §2, with the RLS
 | `tf_ws` | anyone → every control pod | WS event envelope `{origin_pod, event}`; if > ~7.5 KB, a `ws_outbox` row ref instead (agent messages regularly exceed the limit) |
 | `tf_ctl` | control ↔ executors, control ↔ control | `{signal_id}` / `{kick_user}` / `{trigger: subsystem, org}` — see below |
 
+### 5.0 Why Postgres, and not Redis/NATS
+
+Doorbells, TTL state, and queues are a broker's home turf, so the
+choice needs a recorded argument, not a reflex. Four reasons, in
+decreasing order of weight:
+
+1. **Postgres is already mandatory; a broker is a second service.**
+   Isolated-network self-host is a first-class target, and every
+   additional service is operator burden compounded: another image to
+   mirror, another auth/TLS surface, another persistence + HA decision
+   tree (RDB/AOF? Sentinel? JetStream retention?), another thing to
+   monitor and upgrade. The fabric riding the store that must exist
+   anyway adds **zero** marginal operational surface. (NATS is the
+   strongest broker candidate here — a single small Go binary — but it
+   only softens this point; it doesn't touch the next three.)
+2. **Every signal we send is *about* a row, and co-commit deletes a
+   whole race class.** A run message NOTIFY rides the same commit as
+   its `run_messages` INSERT; a `run_signals` doorbell rides the
+   signal row's insert — the listener can never observe a doorbell
+   whose row isn't visible, and a crash can never emit one without the
+   other. With an external broker, every one of these becomes a
+   two-system ordering problem (publish-then-commit vs
+   commit-then-publish, both racy), whose standard fix is… an outbox
+   table in Postgres with the broker demoted to a doorbell. That
+   endgame is strictly more moving parts than starting and ending in
+   Postgres.
+3. **One liveness SPOF instead of two.** Postgres down = everything
+   down, obviously and totally. Adding a broker creates the
+   half-broken states ("API up, live streams dead, cancels dead")
+   that are the worst kind of page for a self-host operator — partial,
+   confusing, and only diagnosable with knowledge of our internals.
+4. **Mode parity.** Local mode is SQLite; a broker could never be
+   required there, so every mechanism would need a second (in-process)
+   implementation regardless. Multi-mode has Postgres unconditionally
+   — so the Postgres implementation is the *only* multi implementation
+   needed, and local degrades to the in-process no-ops it already has.
+
+The load numbers say the ceilings don't bind. Heartbeats: 50 executors
+at ~4 s ≈ 12 tiny UPDATEs/s. Control signals: human-initiated,
+~zero/s baseline. The WS backplane is the only real-volume channel:
+~300 concurrent runs at agent message rates is low hundreds of
+NOTIFYs/s, each riding a commit that was happening anyway. Postgres's
+genuine NOTIFY limit — the global notification-queue lock serializes
+committing notifiers, and slow listeners grow the (default 8 GB)
+queue — becomes measurable in the sustained thousands-per-second range
+with many concurrent committers: one to two orders of magnitude above
+target scale, and a deployment big enough to approach it (thousands of
+concurrent runs, each costing real LLM spend) gets re-benched long
+before then. Queue-table hygiene is the other classic Postgres-queue
+failure mode (dead-tuple bloat under high churn); our rows churn in
+minutes, not milliseconds — autovacuum health on `runs`/`event_queue`
+goes in the P1 ops docs, and that's all it needs. This is also the
+well-trodden boring path now (River/Oban/pgmq/Graphile Worker;
+Rails 8 shipped DB-backed Solid Queue/Cache as its default,
+*retiring* its Redis dependency).
+
+What a broker would actually buy — no 8 KB payload limit (we pay the
+`ws_outbox` ref pattern), native TTL/eviction (we pay small reapers),
+native cross-pod counters (a fleet-wide rate limiter), and a higher
+raw fan-out ceiling. None of these bind at target scale, and the two
+that ever could have **contained, per-channel escape hatches**: the
+Hub backplane is one interface, so `tf_ws` alone could move to a
+broker without touching queues, leases, or signals; and a fleet-wide
+GitHub-budget limiter would be a narrow *additive* adoption, not a
+fabric change. Decision rule: adopt a broker on measured evidence,
+per channel, never as the substrate.
+
 ### 5.1 WS fan-out
 
 `websocket.Hub.Broadcast` gains a backplane: publish to `tf_ws` (insert
@@ -664,7 +731,8 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
 
 - Kubernetes operators, service meshes, external brokers (NATS/Redis/
   SQS) — Postgres carries the coordination load at every realistic
-  fleet size this product targets; revisit only with evidence.
+  fleet size this product targets; the recorded rationale and the
+  per-channel crossover points are §5.0. Revisit only with evidence.
 - Cross-region fleets, geo-placement.
 - Autoscaling automation (operators add/drain machines; the dashboard
   tells them when).
