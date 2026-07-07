@@ -12,6 +12,7 @@ import (
 	"time"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
@@ -330,6 +331,132 @@ func TestRunGitHubCycleForOrg_CursorSurvivesRepoRemoval(t *testing.T) {
 	}
 	if visited["octo/d"] {
 		t.Error("octo/d was requested after being removed from the tracked set")
+	}
+}
+
+// perAccountFailResolver mints a fresh client per call (see
+// freshClientPerCallResolver) but fails ClientFor outright for accounts named
+// in failAccounts — modeling one App installation's credential being broken
+// while others resolve fine.
+type perAccountFailResolver struct {
+	url          string
+	failAccounts map[string]bool
+}
+
+func (r *perAccountFailResolver) ClientFor(ctx context.Context, orgID, target string) (*ghclient.Client, error) {
+	if r.failAccounts[target] {
+		return nil, fmt.Errorf("simulated credential failure for %s", target)
+	}
+	return ghclient.NewClient(r.url, "pat"), nil
+}
+
+func (r *perAccountFailResolver) ClientForRepo(ctx context.Context, orgID, owner, repo string) (*ghclient.Client, error) {
+	return r.ClientFor(ctx, orgID, owner)
+}
+
+func (r *perAccountFailResolver) TokenFor(ctx context.Context, orgID, target string) (githubapp.Token, error) {
+	return githubapp.Token{}, nil
+}
+
+func (r *perAccountFailResolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
+	return ghclient.DefaultBaseURL, nil
+}
+
+func (r *perAccountFailResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool) {
+	return "", "", false
+}
+
+// TestRunGitHubCycleForOrg_UnresolvedInstallationDoesNotFalselyResetCursor is
+// the multi-installation App-path counterpart to the rate-limit cursor test:
+// if one installation's credential can't even be resolved this cycle (not a
+// rate limit — its repos are simply never reached), the cycle must not be
+// treated as a full wrap just because a LATER installation happens to
+// succeed. Fixture: two installations, "acme" (broken credential) and "beta"
+// (healthy), each owning one configured repo. Cycle 1 must save the cursor at
+// acme's repo — not reset it to "" — so a later cycle (once acme's credential
+// is fixed) prioritizes retrying it instead of silently never catching up.
+func TestRunGitHubCycleForOrg_UnresolvedInstallationDoesNotFalselyResetCursor(t *testing.T) {
+	t.Setenv("TF_POLL_REPO_CONCURRENCY", "1")
+	runmode.SetForTest(t, runmode.ModeMulti)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/graphql"):
+			_, _ = w.Write([]byte(`{"data":{"nodes":[]}}`))
+		case strings.Contains(r.URL.Path, "/installation/repositories"):
+			// Only reached by beta's client — acme's ClientFor already
+			// failed, so acme's client never makes this call.
+			_, _ = w.Write([]byte(`{"total_count": 1, "repositories": [{"full_name": "beta/r1"}]}`))
+		case strings.Contains(r.URL.Path, "/pulls"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx := context.Background()
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+	repos := []string{"acme/r1", "beta/r1"}
+	if err := stores.Repos.SetConfigured(ctx, org, repos); err != nil {
+		t.Fatalf("SetConfigured: %v", err)
+	}
+
+	bus := eventbus.New()
+	t.Cleanup(bus.Close)
+
+	m := &Manager{
+		database: database,
+		pub:      bus,
+		tasks:    stores.Tasks,
+		entities: stores.Entities,
+		repos:    stores.Repos,
+		apps: &fakeInstallsStore{
+			app: &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: true},
+			installs: []domain.OrgGitHubAppInstallation{
+				{InstallationID: "1", AccountLogin: "acme"},
+				{InstallationID: "2", AccountLogin: "beta"},
+			},
+		},
+		resolver: &perAccountFailResolver{url: srv.URL, failAccounts: map[string]bool{"acme": true}},
+	}
+
+	m.runGitHubCycleForOrg(ctx, org)
+
+	if got := m.githubCursor(org); got != "acme/r1" {
+		t.Fatalf("cursor after cycle 1 = %q; want acme/r1 (acme's installation never resolved, so its repo is still outstanding — the cursor must not reset to \"\" just because beta succeeded)", got)
+	}
+
+	// "acme's credential gets fixed" — now every installation resolves. The
+	// first fake server only ever granted beta/r1 (acme's ClientFor never
+	// even reached it in cycle 1), so a second server grants both repos,
+	// modeling the fixed-credential installation now covering acme/r1 too.
+	// A cycle starting at the saved cursor should fully wrap and reset it.
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/graphql"):
+			_, _ = w.Write([]byte(`{"data":{"nodes":[]}}`))
+		case strings.Contains(r.URL.Path, "/installation/repositories"):
+			_, _ = w.Write([]byte(`{"total_count": 2, "repositories": [{"full_name": "acme/r1"}, {"full_name": "beta/r1"}]}`))
+		case strings.Contains(r.URL.Path, "/pulls"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv2.Close)
+	m.resolver = &freshClientPerCallResolver{url: srv2.URL}
+
+	m.runGitHubCycleForOrg(ctx, org)
+
+	if got := m.githubCursor(org); got != "" {
+		t.Errorf("cursor after cycle 2 = %q; want \"\" (every installation resolved and the wrap completed)", got)
 	}
 }
 

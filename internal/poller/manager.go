@@ -478,6 +478,16 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// cycle — host is stable across the per-installation loop below.
 	resolver := m.reviewerResolver(ctx, orgID, "", nil)
 
+	// unresolvedOwners collects the account logins of installations whose
+	// client/grant couldn't be resolved this cycle (ClientFor or
+	// ListInstallationRepos failed) — TFAC-571 follow-up. Those repos were
+	// never reached at all, the same as a rate-limited repo that never got
+	// dispatched, so the cursor computed below must not treat this cycle as
+	// a full wrap just because a LATER installation happened to succeed.
+	unresolvedOwners := make(map[string]bool)
+	var rateLimitResumeFrom string
+	var rateLimitErr *ghclient.ErrRateLimited
+
 	covered := make(map[string]bool, len(repos))
 	anyFunctional := false
 	for _, inst := range installs {
@@ -485,12 +495,14 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		if cerr != nil {
 			githubLog.Error("resolve client for installation failed", "org", orgID, "installation", inst.InstallationID, "account", inst.AccountLogin, "error", cerr)
 			m.reportError("github", orgID, cerr)
+			unresolvedOwners[strings.ToLower(inst.AccountLogin)] = true
 			continue
 		}
 		grant, gerr := client.ListInstallationRepos(ctx)
 		if gerr != nil {
 			githubLog.Error("list installation repos failed", "org", orgID, "account", inst.AccountLogin, "error", gerr)
 			m.reportError("github", orgID, gerr)
+			unresolvedOwners[strings.ToLower(inst.AccountLogin)] = true
 			continue
 		}
 		anyFunctional = true
@@ -507,14 +519,42 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 		var rl *ghclient.ErrRateLimited
 		if errors.As(rerr, &rl) {
-			// TFAC-571: budget's known exhausted for this credential — save
-			// the cursor and stop cleanly rather than trying the remaining
-			// installations against the same exhausted client budget.
-			m.recordGitHubCursor(orgID, resumeFrom, rl)
+			// TFAC-571: budget's known exhausted for this credential — stop
+			// cleanly rather than trying the remaining installations against
+			// the same exhausted client budget. Cursor placement is decided
+			// once, below, alongside any unresolved-installation gap.
+			rateLimitResumeFrom, rateLimitErr = resumeFrom, rl
 			break
 		}
-		m.recordGitHubCursor(orgID, resumeFrom, nil)
 	}
+
+	// TFAC-571: decide the cycle's actual resume point once, after every
+	// installation this cycle could reach has run. A rate-limited fan-out
+	// wins (it's the more specific signal — RefreshGitHub already pinned it
+	// to the exact repo that needs a retry). Otherwise, if any installation
+	// couldn't even be resolved this cycle, the cursor must not reset to ""
+	// (implying a full wrap) just because a later installation succeeded —
+	// resume at the earliest currently-configured repo that installation
+	// would own (matched by account-login prefix, same as
+	// reconcileGitHubGroups) and isn't already covered by a DIFFERENT,
+	// successful installation. A repo genuinely outside every installation's
+	// grant (the "not in any app installation grant" warning below) is a
+	// permanent gap, not a transient one, so it's excluded here — only
+	// unresolved-owner repos get cursor priority.
+	resumeFrom := rateLimitResumeFrom
+	if resumeFrom == "" && len(unresolvedOwners) > 0 {
+		for _, r := range repos {
+			if covered[r] {
+				continue
+			}
+			owner, _, _ := strings.Cut(r, "/")
+			if unresolvedOwners[strings.ToLower(owner)] {
+				resumeFrom = r
+				break
+			}
+		}
+	}
+	m.recordGitHubCursor(orgID, resumeFrom, rateLimitErr)
 
 	// No installation produced a usable installation token (every mint/list
 	// failed). Under XOR there is no PAT behind these failures to fall back to
@@ -709,16 +749,21 @@ func (m *Manager) setGitHubCursor(orgID, repo string) {
 	m.ghCursor[orgID] = repo
 }
 
-// recordGitHubCursor applies one RefreshGitHub call's outcome to the org's
-// round-robin cursor. resumeFrom == "" means the repos list passed to that
-// call was fully wrapped — the cursor resets to the head for next cycle.
-// A non-empty resumeFrom (only ever paired with rl != nil — see
-// Tracker.RefreshGitHub) means ErrRateLimited cut the fan-out short partway
-// through the list: the cursor is saved there, logged at INFO with the
-// resume time, and the org's next scheduled poll is pulled in to rl.ResumeAt
-// so the cursor gets picked back up as soon as the budget frees rather than
-// waiting out a full normal poll interval (which may be much longer, or —
-// if shorter — would just hit the same exhaustion again).
+// recordGitHubCursor applies one GitHub cycle's outcome to the org's
+// round-robin cursor. resumeFrom == "" means the cycle fully wrapped the
+// repo list — the cursor resets to the head for next cycle. A non-empty
+// resumeFrom means it didn't: either ErrRateLimited cut a fan-out short
+// partway through the list (rl != nil — see Tracker.RefreshGitHub), or, in
+// the multi-installation App path, an installation's client/grant couldn't
+// even be resolved this cycle so its repos were never reached (rl == nil —
+// see the unresolvedOwners handling in runGitHubCycleForOrg). Either way the
+// cursor is saved at resumeFrom so next cycle prioritizes it. Only the
+// rate-limited case additionally logs at INFO and pulls the org's next
+// scheduled poll in to rl.ResumeAt, so the cursor gets picked back up as
+// soon as the budget frees rather than waiting out a full normal poll
+// interval (which may be much longer, or — if shorter — would just hit the
+// same exhaustion again); the unresolved-installation case has no known
+// resume time, so it just waits for the org's ordinary cadence.
 func (m *Manager) recordGitHubCursor(orgID, resumeFrom string, rl *ghclient.ErrRateLimited) {
 	m.setGitHubCursor(orgID, resumeFrom)
 	if rl == nil {
