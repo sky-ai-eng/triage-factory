@@ -12,7 +12,7 @@ import { useWebSocket, setPresenceView } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
 import { isActiveRun, isPermissionTerminalStatus } from '../lib/runStatus'
 import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
-import { appendToFeed, feedFromMessages, type RunCardFeed } from '../lib/runFeed'
+import { appendToFeed, feedFromMessages, EMPTY_FEED, type RunCardFeed } from '../lib/runFeed'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
 import { useOrgRole } from '../hooks/useOrgRole'
@@ -520,21 +520,32 @@ export default function Board() {
 
   // Debounced board refresh for websocket-driven refetches. A poll cycle or a
   // scoring pass lands as a burst of task_updated / scoring_completed events,
-  // and each used to fire its own five-column refetch; a short trailing window
-  // collapses the burst into one round-trip. User-initiated mutations (drag,
-  // picker, delegate) still call fetchTasks() directly so their repaint isn't
-  // delayed behind the window.
+  // and each used to fire its own five-column refetch. Trailing debounce: each
+  // event pushes the fetch out another FETCH_DEBOUNCE_MS so the whole burst
+  // costs one round-trip after it ends — with a FETCH_MAX_WAIT_MS fence from
+  // the first deferred event, so a sustained event stream can't starve the
+  // refresh indefinitely. User-initiated mutations (drag, picker, delegate)
+  // still call fetchTasks() directly so their repaint isn't delayed.
+  const FETCH_DEBOUNCE_MS = 300
+  const FETCH_MAX_WAIT_MS = 1500
   const fetchTasksRef = useRef(fetchTasks)
   useEffect(() => {
     fetchTasksRef.current = fetchTasks
   }, [fetchTasks])
   const fetchDebounceTimer = useRef<number | null>(null)
+  const fetchDebounceDeadline = useRef(0)
   const scheduleFetchTasks = useCallback(() => {
-    if (fetchDebounceTimer.current != null) return
+    const now = Date.now()
+    if (fetchDebounceTimer.current == null) {
+      fetchDebounceDeadline.current = now + FETCH_MAX_WAIT_MS
+    } else {
+      window.clearTimeout(fetchDebounceTimer.current)
+    }
+    const delay = Math.min(FETCH_DEBOUNCE_MS, Math.max(0, fetchDebounceDeadline.current - now))
     fetchDebounceTimer.current = window.setTimeout(() => {
       fetchDebounceTimer.current = null
       fetchTasksRef.current()
-    }, 300)
+    }, delay)
   }, [])
   useEffect(
     () => () => {
@@ -680,11 +691,15 @@ export default function Board() {
           // keyed by run.ID; without this, new agent output only surfaces
           // after a status-change fetchTasks pass. Folding into the feed
           // (rather than appending to a full message array) keeps board state
-          // bounded and the per-event work O(1).
-          setRunFeeds((prev) => ({
-            ...prev,
-            [event.run_id]: appendToFeed(prev[event.run_id], event.data as AgentMessage),
-          }))
+          // bounded and the per-event work O(1). appendToFeed returns the same
+          // reference for a display-no-op message (tool results, mostly) —
+          // return prev in that case so React skips the board re-render.
+          setRunFeeds((prev) => {
+            const cur = prev[event.run_id]
+            const next = appendToFeed(cur, event.data as AgentMessage)
+            if (next === (cur ?? EMPTY_FEED)) return prev
+            return { ...prev, [event.run_id]: next }
+          })
         } else if (event.type === 'task_updated' || event.type === 'task_claimed') {
           // SKY-330: any column-affecting change re-pulls the whole
           // board. The 5-column buckets are cheap to refetch (each is

@@ -43,16 +43,24 @@ export function feedFromMessages(messages: AgentMessage[]): RunCardFeed {
   return feed
 }
 
-/** Fold one streamed message into a feed, returning a new feed object. */
+/**
+ * Fold one streamed message into a feed. Returns the SAME reference when the
+ * message changes nothing the card displays — no ticker lines, no token
+ * delta, no comment delta (tool-result rows are the common case: roughly half
+ * a live transcript). Callers rely on that identity to skip the state write
+ * entirely, so a display-no-op message doesn't re-render the board.
+ */
 export function appendToFeed(prev: RunCardFeed | undefined, msg: AgentMessage): RunCardFeed {
   const base = prev ?? EMPTY_FEED
   const lines = linesForMessage(msg)
-  const next: RunCardFeed = {
-    comments: base.comments + commentsForMessage(msg),
-    tokens: base.tokens + (msg.OutputTokens ?? 0) + (msg.InputTokens ?? 0),
+  const comments = commentsForMessage(msg)
+  const tokens = (msg.OutputTokens ?? 0) + (msg.InputTokens ?? 0)
+  if (lines.length === 0 && comments === 0 && tokens === 0) return base
+  return {
+    comments: base.comments + comments,
+    tokens: base.tokens + tokens,
     lines: lines.length === 0 ? base.lines : [...base.lines, ...lines].slice(-FEED_LINE_CAP),
   }
-  return next
 }
 
 function commentsForMessage(msg: AgentMessage): number {
