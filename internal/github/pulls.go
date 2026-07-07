@@ -259,7 +259,7 @@ func (c *Client) GetPRFiles(ctx context.Context, owner, repo string, number int)
 			break
 		}
 		if len(files) >= MaxPRFiles {
-			githubLog.Warn("PR files list truncated at cap; some changed files are missing from the result",
+			githubLog.Warn("PR files list truncated at cap; some changed files may be missing from the result",
 				"owner", owner, "repo", repo, "pr", number, "cap", MaxPRFiles)
 			break
 		}
