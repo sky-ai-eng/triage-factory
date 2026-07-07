@@ -343,3 +343,75 @@ func TestRefreshGitHub_RateLimitStopsFanOutAndPropagatesDistinctly(t *testing.T)
 		t.Errorf("active github entities = %d; want 0 (every repo hit the rate limit before discovering anything)", len(ents))
 	}
 }
+
+// TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping guards
+// against a real regression found in review: RefreshGitHub must not discard
+// the repos that already succeeded before a sibling hit ErrRateLimited.
+// Those repos' pulls-etag was already persisted (recordPullsPoll runs inline
+// per-repo, on success, inside discoverGitHub) — if RefreshGitHub bailed out
+// before running the entity-seeding loop over them, their PRs would never
+// become entities, yet the next cycle would see an unchanged (304) listing
+// and never get a second chance to discover them. So: repos before the
+// rate-limited one must still be seeded; repos at or after it must not be.
+func TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping(t *testing.T) {
+	// Concurrency=1 makes discovery fully serial and this test's outcome
+	// deterministic: ok1/ok2 are guaranteed to complete before "limited" is
+	// even attempted, and ok3/ok4 are guaranteed to never be seeded (either
+	// never dispatched, or dispatched but rejected by the pre-flight budget
+	// check that "limited"'s response already tripped).
+	t.Setenv("TF_POLL_REPO_CONCURRENCY", "1")
+
+	repos := []string{"octo/ok1", "octo/ok2", "octo/limited", "octo/ok3", "octo/ok4"}
+	resetAt := time.Now().Add(time.Hour)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/limited/") {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", resetAt.Unix()))
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded for 127.0.0.1."}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openPRBody))
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx := context.Background()
+	database := newMigratedSQLite(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+	if err := stores.Repos.SetConfigured(ctx, org, repos); err != nil {
+		t.Fatalf("SetConfigured: %v", err)
+	}
+
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, org)
+	client := ghclient.NewClient(srv.URL, "tok")
+
+	_, err := tr.RefreshGitHub(ctx, client, "", repos, nil)
+
+	var rl *ghclient.ErrRateLimited
+	if !errors.As(err, &rl) {
+		t.Fatalf("RefreshGitHub error = %v; want *ghclient.ErrRateLimited", err)
+	}
+
+	ents, lerr := stores.Entities.ListActiveSystem(ctx, org, "github")
+	if lerr != nil {
+		t.Fatalf("ListActiveSystem: %v", lerr)
+	}
+	seeded := make(map[string]bool, len(ents))
+	for _, e := range ents {
+		seeded[e.SourceID] = true
+	}
+
+	for _, want := range []string{"octo/ok1#42", "octo/ok2#42"} {
+		if !seeded[want] {
+			t.Errorf("entity %q was not seeded; a repo that succeeded before rate-limiting must still be discovered this cycle", want)
+		}
+	}
+	for _, notWant := range []string{"octo/ok3#42", "octo/ok4#42"} {
+		if seeded[notWant] {
+			t.Errorf("entity %q was seeded; repos at/after the rate-limited one must not be reached", notWant)
+		}
+	}
+}
