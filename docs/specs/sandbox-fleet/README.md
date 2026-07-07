@@ -214,7 +214,10 @@ At horizontal scale the profile becomes the **scheduling unit**: a heavy/browser
 profile routes to a large-Machine pool, a cheap profile to small ones. That same
 sizing is the natural **metering/billing hook** — "this profile's runs cost this
 much and go there." On shared SaaS, larger/browser profiles are the upcharge
-lever; on self-host, the operator sizes their own pools.
+lever; on self-host, the operator sizes their own pools. The fleet-side
+mechanics — budget-based admission, the eligibility-vs-affinity split in the
+run claim, warm-variant tracking, and the cross-org recipe-sharing invariant —
+are specified in `docs/specs/horizontal-scaling/` §6.4.
 
 ---
 
@@ -295,6 +298,9 @@ proxy + denylist are shipped and reviewed.
 
 ## Related
 
+- `docs/specs/horizontal-scaling/` — §6.4: how profiles interact with the
+  executor fleet (eligibility vs affinity in the claim, budget admission,
+  cross-org variant sharing).
 - `docs/specs/playwright-chromium-sandbox/` — the browser profile; the first
   worked instance of the image dimension.
 - `docs/isolation-tiers.md` — the tier ladder the egress power-dial and the

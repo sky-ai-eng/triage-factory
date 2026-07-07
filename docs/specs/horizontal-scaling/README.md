@@ -572,6 +572,66 @@ shared-RO worktree per (org,repo), bounded per-pod disk budget) are
 exactly what affinity preserves at N>1: without it, N pods re-multiply
 storage; with it, each key's cache lives on ~1 (or K) pods.
 
+### 6.4 Heterogeneous sandboxes (the TFAC-408 interplay)
+
+The sandbox-fleet spec (`docs/specs/sandbox-fleet/`) makes the sandbox
+configurable per org: named **profiles** with an image (rootfs
+variant), an egress policy, and a resource class. Two of those
+dimensions are placement-inert: egress and rlimits resolve per-run
+from the profile at spawn time — any executor enforces any policy,
+zero executor state. The image and the memory class are not, and they
+are exactly what "counts + memory" fails to capture:
+
+- **Admission becomes budget-based the day two resource classes
+  exist.** Today's `max_runs` and the ~512 MB/run rule assume uniform
+  runs; a browser profile is several × that. The profile carries a
+  `mem_budget_mb`, the run row is stamped with it at enqueue, the
+  claim admits on `reserved_mb + budget ≤ capacity` (keeping
+  `max_runs` as an absolute ceiling and the TFAC-552 floor as the
+  actual-memory backstop), and the heartbeat reports `reserved_mb`
+  alongside `active_runs`.
+- **The image dimension adds a third category to the claim doctrine:**
+  *the queue is the truth; placement is a preference; **eligibility is
+  a constraint**.* Variants are baked artifacts: an executor has one
+  cached, can bake it on demand (assumes alpine-CDN egress — on
+  isolated networks variants must instead be pre-baked into the
+  shipped image or served from an internal mirror), or cannot run the
+  profile at all. Warm-variant locality is a *preference* (folds into
+  the rendezvous tiers); bake-capability is a *constraint* — a WHERE
+  clause on the claim, because an aged run must never spill to an
+  executor that cannot execute it, and a key no live executor can
+  serve fails fast with a legible `failure_kind` instead of queueing
+  forever. Track warm variants in a small
+  `instance_variants(instance_id, rootfs_key, baked_at, last_used_at,
+  bytes)` table — which also gives the rootfs cache the LRU/disk
+  budget it currently lacks (variants run 400–700 MB and org-authored
+  recipes make the set unbounded) and feeds the dashboard. Operator
+  pool segmentation (big-memory executors for heavy profiles,
+  sandbox-fleet §5) is a static `instances.labels` match — same
+  family as `placement_overrides`, human intent only.
+- **Cross-org sharing is safe by construction — for recipes.** A
+  variant is not an uploaded artifact; it is a *recipe*,
+  content-addressed by `rootfsCacheKey` (alpine sha + package set),
+  and the key is deliberately org-blind: two orgs with identical
+  recipes share one baked rootfs. The tenancy invariant that makes
+  this fine: **a baked rootfs may be shared cross-tenant iff it
+  derives only from trusted public, sha-pinned inputs and is mounted
+  read-only** — both hold today (the base rootfs already shares
+  cross-tenant; same argument as the shared-RO worktree precedent).
+  The org boundary lives on the *profile object* (RLS-scoped, per
+  sandbox-fleet §6), never on the artifact. Anything org-*supplied*
+  (uploaded blobs, private packages) breaks the invariant and would
+  have to live as org-scoped artifacts with per-org disk accounting —
+  out of sandbox-fleet v1's scope; credentials and egress policy stay
+  per-run in the proxies, never baked into an image.
+
+None of this is needed while only the "base" profile exists — P1–P3
+deliberately assume one variant and a uniform budget. The gate:
+before TFAC-408's image or resource dimensions ship on a
+multi-executor deployment, land budget admission, the
+eligibility-constrained claim, and `instance_variants` with an
+eviction budget (the §9 P4 item).
+
 ---
 
 ## 7. Background jobs at N (and the system-sandbox endgame)
@@ -745,8 +805,10 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
     fleet-wide accounting replaces `syslimit`. (L)
 18. Per-org brain sharding across control pods (same lease table,
     org-keyed rows). (L)
-19. Hot-repo K-replication dial; sandbox-fleet profile classes as
-    placement labels (TFAC-408 §5). (M)
+19. Hot-repo K-replication dial; heterogeneous-profile support per
+    §6.4 — budget admission, eligibility-constrained claim,
+    `instance_variants` + rootfs-cache eviction budget, pool labels
+    (TFAC-408 §§4–5). (L)
 20. Budgeted/resumable poll cycles (poll-bench follow-up). (M)
 
 ---
