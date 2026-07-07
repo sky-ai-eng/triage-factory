@@ -55,6 +55,11 @@ export type GitHubAccessMode = 'app' | 'pat'
 // vs the import step. Null until chosen.
 export type GitHubAppSource = 'create' | 'existing'
 
+// The LLM provider a BYOK org connects with — Anthropic direct or Amazon
+// Bedrock. Mutually exclusive server-side (connecting one clears the other),
+// so the picker is a true either/or.
+export type ClaudeProvider = 'anthropic' | 'bedrock'
+
 export interface WizardState {
   org: OrgConfigForm
   // True once the org form has been seeded from the server (the GitHub step's
@@ -151,6 +156,20 @@ export interface WizardState {
   // has_anthropic_api_key. Drives the key step's isComplete (mandatory in multi
   // and local-BYOK) and the "leave blank to keep current" guard on its persist.
   anthropicConnected: boolean
+  // Which BYOK provider the key step edits — Anthropic direct or Amazon
+  // Bedrock. Seeded to whichever is stored (Bedrock when
+  // has_bedrock_credentials, else Anthropic); the providers are mutually
+  // exclusive server-side, so connecting one flips the other's connected flag
+  // off.
+  claudeProvider: ClaudeProvider
+  // Whether a Bedrock credential is stored — the in-flow mirror of
+  // has_bedrock_credentials, the Bedrock sibling of anthropicConnected.
+  bedrockConnected: boolean
+  // The auth method of the STORED Bedrock credential (null when none). The
+  // "leave blank to keep current" masking only arms when the form's selected
+  // method matches this — switching methods always requires the new method's
+  // secrets, mirroring the backend's keep-current rule.
+  bedrockStoredMethod: 'bearer' | 'access_keys' | null
   team: TeamConfigForm
   // True once the team form has been seeded from the server (the Repositories
   // step's load). The team mirror of orgLoaded: the team GET runs ONCE — on the

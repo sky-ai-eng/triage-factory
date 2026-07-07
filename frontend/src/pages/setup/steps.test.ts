@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { initialWizardState, persistOrg } from './steps'
+import { initialWizardState, persistOrg, bedrockFormError } from './steps'
 import type { WizardState } from './types'
 
 // TFAC-410: a wizard session that tried the GitHub PAT path first (typed a
@@ -76,5 +76,65 @@ describe('persistOrg — App-XOR stale-PAT guard (TFAC-410)', () => {
       persistOrg(loadedStateWithStalePat({ orgLoaded: false, githubAppRegistered: true })),
     ).rejects.toThrow(/reopen the GitHub step/)
     expect(bodies()).toHaveLength(0)
+  })
+})
+
+// TFAC-68: the Bedrock credential form's input-layer validation, shared by
+// the wizard key step's validate and the Settings section's Save gate. The
+// rules mirror the backend's 422 shapes: region always required; the selected
+// method's secrets required unless a credential for that SAME method is
+// already stored (switching methods always needs the new secrets).
+describe('bedrockFormError — Bedrock form validation (TFAC-68)', () => {
+  function bedrockState(over: Partial<WizardState> = {}, org: Partial<WizardState['org']> = {}) {
+    const base = initialWizardState()
+    return {
+      ...base,
+      claudeProvider: 'bedrock' as const,
+      org: { ...base.org, ...org },
+      ...over,
+    }
+  }
+
+  it('requires the region', () => {
+    const s = bedrockState({}, { bedrock_region: ' ', bedrock_bearer_token: 'bdrk' })
+    expect(bedrockFormError(s)).toMatch(/region/i)
+  })
+
+  it('requires a bearer token when nothing is stored', () => {
+    const s = bedrockState({}, { bedrock_auth_method: 'bearer' })
+    expect(bedrockFormError(s)).toMatch(/Bedrock API key/)
+  })
+
+  it('accepts a blank bearer token when a bearer credential is stored (keep current)', () => {
+    const s = bedrockState(
+      { bedrockConnected: true, bedrockStoredMethod: 'bearer' },
+      { bedrock_auth_method: 'bearer' },
+    )
+    expect(bedrockFormError(s)).toBeNull()
+  })
+
+  it('requires the key pair when switching methods, even though a bearer is stored', () => {
+    const s = bedrockState(
+      { bedrockConnected: true, bedrockStoredMethod: 'bearer' },
+      { bedrock_auth_method: 'access_keys' },
+    )
+    expect(bedrockFormError(s)).toMatch(/access key/i)
+  })
+
+  it('rejects a partial key pair', () => {
+    const s = bedrockState({}, { bedrock_auth_method: 'access_keys', aws_access_key_id: 'AKIA' })
+    expect(bedrockFormError(s)).toMatch(/both/i)
+  })
+
+  it('accepts a complete key pair', () => {
+    const s = bedrockState(
+      {},
+      {
+        bedrock_auth_method: 'access_keys',
+        aws_access_key_id: 'AKIA',
+        aws_secret_access_key: 'secret',
+      },
+    )
+    expect(bedrockFormError(s)).toBeNull()
   })
 })

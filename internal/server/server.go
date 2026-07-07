@@ -985,6 +985,9 @@ func (s *Server) routes() {
 	// Validated org Anthropic-key capture — the single write path for the
 	// anthropic_api_key vault secret (an empty key clears it for "system creds").
 	s.apiMutating("POST /api/anthropic/connect", se.handleAnthropicConnect)
+	// Validated org Bedrock-credential capture — the single write path for
+	// the aws_* / bedrock_* vault secrets (auth_method "none" clears them).
+	s.apiMutating("POST /api/bedrock/connect", se.handleBedrockConnect)
 	s.api("GET /api/jira/statuses", se.handleJiraStatuses)
 	s.api("GET /api/jira/stock", s.handleJiraStockGet)
 	s.apiMutating("POST /api/jira/stock", s.handleJiraStockPost)

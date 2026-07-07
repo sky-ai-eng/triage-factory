@@ -74,6 +74,7 @@ const (
 	CredentialKindJiraOrg      = "jira_org"
 	CredentialKindJiraUser     = "jira_user"
 	CredentialKindAnthropicKey = "anthropic_key"
+	CredentialKindBedrock      = "bedrock"
 )
 
 // AccessChangeListOpts bounds a ListByOrg read for the audit viewer (TFAC-484).
