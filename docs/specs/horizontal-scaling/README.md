@@ -402,6 +402,17 @@ transaction-mode pooler; the query pools can move behind
 PgBouncer/Supavisor independently, per TFAC-307 §2, with the RLS
 `SET LOCAL` pattern validated under transaction pooling).
 
+Connection budgets are part of the fabric design, not an ops
+afterthought. Today's defaults are 25 open per pool × two pools ≈ 50
+conns per process (`applyPGPoolDefaults`, `internal/app/stores.go`) —
+sized for one all-in-one binary. A fleet multiplies that: 3 executors
++ 2 control ≈ 250 conns, past a default `max_connections` long before
+any workload pressure. So pool ceilings become **per-role** (an
+executor's dispatcher + sinks need a fraction of what the API tier
+does), env-tunable, and the compose profile documents the
+`max_connections` arithmetic; a transaction-mode pooler (TFAC-307 §2)
+is the lever for large fleets, never a requirement for small ones.
+
 | Channel | Producer → consumer | Payload |
 | --- | --- | --- |
 | `tf_wake` | control (enqueue) → executors | `{kind: run\|event, org}` — claim nudges |
