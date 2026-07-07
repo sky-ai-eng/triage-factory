@@ -184,6 +184,56 @@ func TestResolveCredentials_BedrockBearerWinsOverTriple(t *testing.T) {
 	}
 }
 
+// TestResolveCredentials_BedrockEndpointOverride pins the
+// bedrock_base_url secret surfacing as ANTHROPIC_BEDROCK_BASE_URL on
+// BOTH Bedrock auth paths. This is how orgs on a VPC interface
+// endpoint (PrivateLink), GovCloud, or the China partition reach
+// Bedrock — those hostnames don't follow the public regional formula,
+// so the endpoint must be explicit config. In local direct-spawn mode
+// the env var routes the SDK straight at the endpoint; in multi mode
+// proxyConfigFromCreds consumes it as the proxy upstream.
+func TestResolveCredentials_BedrockEndpointOverride(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	cases := map[string]map[string]string{
+		"triple": {
+			"aws_access_key_id":     "AKIA-test",
+			"aws_secret_access_key": "secret-test",
+			"aws_region":            "us-gov-west-1",
+			"bedrock_base_url":      "https://vpce-0abc123-xyz.bedrock-runtime.us-gov-west-1.vpce.amazonaws.com",
+		},
+		"bearer": {
+			"aws_bearer_token_bedrock": "bdrk-test",
+			"bedrock_base_url":         "https://vpce-0abc123-xyz.bedrock-runtime.us-gov-west-1.vpce.amazonaws.com",
+		},
+	}
+	for name, kv := range cases {
+		t.Run(name, func(t *testing.T) {
+			const orgID = "99999999-9999-9999-9999-999999999999"
+			env, err := resolveCredentials(context.Background(), newFakeSecrets(orgID, kv), orgID)
+			if err != nil {
+				t.Fatalf("resolveCredentials: %v", err)
+			}
+			if got := env["ANTHROPIC_BEDROCK_BASE_URL"]; got != kv["bedrock_base_url"] {
+				t.Errorf("ANTHROPIC_BEDROCK_BASE_URL = %q, want the configured override %q", got, kv["bedrock_base_url"])
+			}
+		})
+	}
+
+	// Unset override → env var absent (SDK / proxy fall back to the
+	// regional formula).
+	const orgID = "99999999-9999-9999-9999-999999999999"
+	env, err := resolveCredentials(context.Background(), newFakeSecrets(orgID, map[string]string{
+		"aws_access_key_id":     "AKIA-test",
+		"aws_secret_access_key": "secret-test",
+	}), orgID)
+	if err != nil {
+		t.Fatalf("resolveCredentials (no override): %v", err)
+	}
+	if got, ok := env["ANTHROPIC_BEDROCK_BASE_URL"]; ok {
+		t.Errorf("ANTHROPIC_BEDROCK_BASE_URL = %q with no override configured; want absent", got)
+	}
+}
+
 func TestResolveCredentials_PartialBedrockIsNotConfigured(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	const orgID = "44444444-4444-4444-4444-444444444444"

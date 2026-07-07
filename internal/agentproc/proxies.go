@@ -508,17 +508,10 @@ func proxyConfigFromCreds(creds map[string]string) (sandboxProxyConfig, error) {
 	}
 
 	if bearer := creds["AWS_BEARER_TOKEN_BEDROCK"]; bearer != "" {
-		// Bedrock bearer path. Region is required for the upstream
-		// URL — the Bedrock endpoint is regional. The resolver
-		// already injected AWS_REGION when configured; default to
-		// us-east-1 (Bedrock's primary region for Anthropic models)
-		// when missing rather than refusing — matches the SDK's own
-		// region resolution fallback.
-		region := creds["AWS_REGION"]
-		if region == "" {
-			region = "us-east-1"
-		}
-		upstream := fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com", region)
+		// Bedrock bearer path. Upstream comes from the org's endpoint
+		// override when configured, else the standard regional formula —
+		// see bedrockUpstream.
+		upstream := bedrockUpstream(creds)
 		if err := validateProxyUpstream(upstream); err != nil {
 			return sandboxProxyConfig{}, fmt.Errorf("bedrock upstream: %w", err)
 		}
@@ -536,14 +529,16 @@ func proxyConfigFromCreds(creds map[string]string) (sandboxProxyConfig, error) {
 	if accessKey, secretKey := creds["AWS_ACCESS_KEY_ID"], creds["AWS_SECRET_ACCESS_KEY"]; accessKey != "" && secretKey != "" {
 		// Bedrock SigV4 path (Phase 2): the proxy holds the real triple
 		// and re-signs each request; the sandbox signs with a throwaway
-		// placeholder. Region resolution mirrors the bearer path — the
-		// endpoint is regional and the SigV4 credential scope must name
-		// the same region, so one value feeds both.
-		region := creds["AWS_REGION"]
-		if region == "" {
-			region = "us-east-1"
-		}
-		upstream := fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com", region)
+		// placeholder. Upstream honors the endpoint override like the
+		// bearer path, but the SIGNING SCOPE always comes from the
+		// region config: a VPC interface endpoint's hostname embeds the
+		// region it fronts and GovCloud regions look nothing like the
+		// formula's, so the scope region cannot be parsed from the URL —
+		// AWS validates the scope against the endpoint's real region and
+		// 403s a mismatch, which is the operator's signal that
+		// aws_region and bedrock_base_url disagree.
+		region := bedrockRegion(creds)
+		upstream := bedrockUpstream(creds)
 		if err := validateProxyUpstream(upstream); err != nil {
 			return sandboxProxyConfig{}, fmt.Errorf("bedrock sigv4 upstream: %w", err)
 		}
@@ -570,6 +565,33 @@ func proxyConfigFromCreds(creds map[string]string) (sandboxProxyConfig, error) {
 	}
 
 	return sandboxProxyConfig{}, fmt.Errorf("%w: empty credentials map", ErrUnsupportedSandboxCredentials)
+}
+
+// bedrockRegion resolves the region both Bedrock proxy paths use: the
+// resolver-injected AWS_REGION when configured, else us-east-1
+// (Bedrock's primary region for Anthropic models — matches the SDK's
+// own region-resolution fallback).
+func bedrockRegion(creds map[string]string) string {
+	if region := creds["AWS_REGION"]; region != "" {
+		return region
+	}
+	return "us-east-1"
+}
+
+// bedrockUpstream resolves the Bedrock endpoint the proxy forwards to.
+// The org's endpoint override (the bedrock_base_url secret, surfaced by
+// the resolver as ANTHROPIC_BEDROCK_BASE_URL) wins when set — that is
+// how VPC interface endpoints (PrivateLink), GovCloud, and the China
+// partition are reached, since their hostnames don't follow the public
+// regional formula. Otherwise the standard
+// https://bedrock-runtime.<region>.amazonaws.com is derived from the
+// region. Trailing slash is stripped to satisfy the proxy's no-path
+// upstream rule, mirroring the ANTHROPIC_BASE_URL gateway handling.
+func bedrockUpstream(creds map[string]string) string {
+	if override := strings.TrimRight(creds["ANTHROPIC_BEDROCK_BASE_URL"], "/"); override != "" {
+		return override
+	}
+	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com", bedrockRegion(creds))
 }
 
 // buildSandboxProxyEnv constructs the env entries the sandbox sees:

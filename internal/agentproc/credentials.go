@@ -86,6 +86,16 @@ const (
 	// application inference profile ARN). Maps to ANTHROPIC_MODEL
 	// per the Claude Code env var contract.
 	secretBedrockModelID = "bedrock_model_id"
+
+	// Bedrock endpoint override (both auth paths). Maps to
+	// ANTHROPIC_BEDROCK_BASE_URL per the Claude Code env var contract.
+	// Unset means the standard regional endpoint
+	// (https://bedrock-runtime.<aws_region>.amazonaws.com); orgs on a
+	// VPC interface endpoint (PrivateLink), GovCloud, or the China
+	// partition set the full https URL of their endpoint here. The
+	// SigV4 signing scope still comes from aws_region — the override
+	// changes only the host traffic is sent (and signed) for.
+	secretBedrockBaseURL = "bedrock_base_url"
 )
 
 // credentialEnvKeys is the *credential-precedence* guard — NOT an
@@ -301,6 +311,13 @@ func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string
 		if modelID != "" {
 			env["ANTHROPIC_MODEL"] = modelID
 		}
+		baseURL, err := secrets.Get(ctx, orgID, secretBedrockBaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("resolve bedrock_base_url: %w", err)
+		}
+		if baseURL != "" {
+			env["ANTHROPIC_BEDROCK_BASE_URL"] = baseURL
+		}
 		return env, nil
 	}
 
@@ -346,6 +363,13 @@ func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string
 		}
 		if modelID != "" {
 			env["ANTHROPIC_MODEL"] = modelID
+		}
+		baseURL, err := secrets.Get(ctx, orgID, secretBedrockBaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("resolve bedrock_base_url: %w", err)
+		}
+		if baseURL != "" {
+			env["ANTHROPIC_BEDROCK_BASE_URL"] = baseURL
 		}
 		return env, nil
 	}

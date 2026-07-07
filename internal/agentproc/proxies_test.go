@@ -163,6 +163,83 @@ func TestProxyConfigFromCreds_AWSTripleRegionFallback(t *testing.T) {
 	}
 }
 
+// TestProxyConfigFromCreds_BedrockEndpointOverride pins that both
+// Bedrock paths honor the org's endpoint override (surfaced by the
+// resolver as ANTHROPIC_BEDROCK_BASE_URL) as the proxy upstream — the
+// VPC-endpoint / GovCloud / China-partition path, whose hostnames the
+// regional formula can't produce. For SigV4 the signing scope must
+// STILL come from aws_region, not the URL: a vpce hostname embeds a
+// region a formula-parse couldn't recover, and AWS validates the
+// scope against the endpoint's real region.
+func TestProxyConfigFromCreds_BedrockEndpointOverride(t *testing.T) {
+	const vpce = "https://vpce-0abc123-xyz.bedrock-runtime.us-gov-west-1.vpce.amazonaws.com"
+
+	t.Run("sigv4", func(t *testing.T) {
+		cfg, err := proxyConfigFromCreds(map[string]string{
+			"AWS_ACCESS_KEY_ID":          "AKIA-test",
+			"AWS_SECRET_ACCESS_KEY":      "secret-test",
+			"AWS_REGION":                 "us-gov-west-1",
+			"ANTHROPIC_BEDROCK_BASE_URL": vpce + "/", // trailing slash must be stripped
+		})
+		if err != nil {
+			t.Fatalf("proxyConfigFromCreds: %v", err)
+		}
+		if cfg.llm.Upstream != vpce {
+			t.Errorf("Upstream = %q, want the override %q (trailing slash stripped)", cfg.llm.Upstream, vpce)
+		}
+		if got := cfg.llm.SigV4Credentials.Region; got != "us-gov-west-1" {
+			t.Errorf("SigV4Credentials.Region = %q, want us-gov-west-1 (scope comes from aws_region, never parsed from the URL)", got)
+		}
+	})
+
+	t.Run("bearer", func(t *testing.T) {
+		cfg, err := proxyConfigFromCreds(map[string]string{
+			"AWS_BEARER_TOKEN_BEDROCK":   "bdrk-test",
+			"ANTHROPIC_BEDROCK_BASE_URL": vpce,
+		})
+		if err != nil {
+			t.Fatalf("proxyConfigFromCreds: %v", err)
+		}
+		if cfg.llm.Upstream != vpce {
+			t.Errorf("Upstream = %q, want the override %q", cfg.llm.Upstream, vpce)
+		}
+	})
+}
+
+// TestProxyConfigFromCreds_RejectsMalformedBedrockEndpoint mirrors the
+// Anthropic-gateway validation for the Bedrock override: a URL with a
+// path / cleartext scheme / missing scheme fails at proxy-config time
+// with an error that names the bedrock upstream, on both auth paths.
+func TestProxyConfigFromCreds_RejectsMalformedBedrockEndpoint(t *testing.T) {
+	for name, baseURL := range map[string]string{
+		"with_path":         "https://vpce.example.amazonaws.com/bedrock",
+		"http_non_loopback": "http://vpce.example.amazonaws.com",
+		"missing_scheme":    "vpce.example.amazonaws.com",
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, creds := range []map[string]string{
+				{
+					"AWS_ACCESS_KEY_ID":          "AKIA-test",
+					"AWS_SECRET_ACCESS_KEY":      "secret-test",
+					"ANTHROPIC_BEDROCK_BASE_URL": baseURL,
+				},
+				{
+					"AWS_BEARER_TOKEN_BEDROCK":   "bdrk-test",
+					"ANTHROPIC_BEDROCK_BASE_URL": baseURL,
+				},
+			} {
+				_, err := proxyConfigFromCreds(creds)
+				if err == nil {
+					t.Fatalf("proxyConfigFromCreds accepted %q; want validation error", baseURL)
+				}
+				if !strings.Contains(err.Error(), "bedrock") {
+					t.Errorf("err = %v; want it to name the bedrock upstream", err)
+				}
+			}
+		})
+	}
+}
+
 // TestProxyConfigFromCreds_PartialAWSPair_Unsupported pins the
 // defensive rejection of a half-configured pair. The resolver never
 // emits one half without the other, so this only fires on a malformed
