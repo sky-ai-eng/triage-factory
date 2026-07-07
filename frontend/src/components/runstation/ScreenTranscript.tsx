@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import { Check, Copy } from 'lucide-react'
 import type { AgentMessage, AgentRun, ToolCall } from '../../types'
@@ -12,6 +12,12 @@ interface Props {
   run: AgentRun
 }
 
+// react-markdown parses its source on every render. Memoizing it means an
+// unchanged row's markdown is parsed exactly once — without this, every
+// streamed agent_message re-parsed the ENTIRE transcript (O(N²) over a run's
+// life), which is what made long live runs peg a core.
+const MemoMarkdown = memo(Markdown)
+
 // ScreenTranscript — the machine's display. The transcript runs on the screen
 // embedded in the station's housing (dark glass in dark mode, warm backlit paper
 // in light mode — the --hmi-* vars flip), under faint scanlines and grain.
@@ -21,7 +27,11 @@ interface Props {
 // scroll (any input modality — we read position deltas, not event sources, so
 // programmatic auto-scroll never trips the unpin). A ResizeObserver re-snaps as
 // late-rendering markdown grows the content.
-export default function ScreenTranscript({ messages, run }: Props) {
+//
+// Memoized (default export below): RunDetail re-renders once per second for
+// its elapsed-time tick, and the transcript — the most expensive subtree on
+// the page — doesn't depend on the clock at all.
+function ScreenTranscript({ messages, run }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
@@ -67,7 +77,17 @@ export default function ScreenTranscript({ messages, run }: Props) {
     if (top < prev) setPinned(false)
   }, [])
 
-  const rows = useMemo(() => buildRows(messages, run), [messages, run])
+  // Key the rows off run.WorktreePath — the only run field they read — rather
+  // than the run object itself, whose identity churns on every status refetch
+  // and artifact poll. Rebuilding here is cheap element creation; the heavy
+  // work (markdown parsing, tool panes) bails out per-row via the memoized
+  // leaf components when a row's inputs are unchanged.
+  const rows = useMemo(() => buildRows(messages, run.WorktreePath), [messages, run.WorktreePath])
+
+  // The settled-run verdict renders outside buildRows so the row list doesn't
+  // depend on the full run object (see above). Same visibility rule as before:
+  // present once the run is settled and carries a summary.
+  const verdict = run.ResultSummary && !isActiveRun(run) ? <Verdict run={run} /> : null
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden rounded-[5px]">
@@ -122,7 +142,14 @@ export default function ScreenTranscript({ messages, run }: Props) {
         className="absolute inset-0 overflow-y-auto px-5 py-5 focus:outline-none md:px-8"
       >
         <div ref={contentRef}>
-          {rows.length === 0 ? <EmptyReadout active={isActiveRun(run)} /> : rows}
+          {rows.length === 0 && !verdict ? (
+            <EmptyReadout active={isActiveRun(run)} />
+          ) : (
+            <>
+              {rows}
+              {verdict}
+            </>
+          )}
         </div>
       </div>
 
@@ -159,7 +186,7 @@ export default function ScreenTranscript({ messages, run }: Props) {
 
 // buildRows flattens the transcript into screen rows: assistant prose and tool
 // calls (each paired with its result), the JSON completion blob skipped.
-function buildRows(messages: AgentMessage[], run: AgentRun): React.ReactNode[] {
+function buildRows(messages: AgentMessage[], worktree: string | undefined): React.ReactNode[] {
   const toolResults = new Map<string, AgentMessage>()
   for (const m of messages) {
     if (m.Role === 'tool' && m.ToolCallID) toolResults.set(m.ToolCallID, m)
@@ -204,7 +231,7 @@ function buildRows(messages: AgentMessage[], run: AgentRun): React.ReactNode[] {
             className="max-w-none text-[13px] leading-relaxed [&_a]:text-[color:var(--hmi-cyan-bright)] [&_a]:underline [&_code]:rounded-[3px] [&_code]:bg-[color:var(--hmi-code-bg)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[11.5px] [&_h1]:mb-1 [&_h1]:mt-2 [&_h1]:text-[15px] [&_h1]:font-semibold [&_h2]:mb-1 [&_h2]:mt-2 [&_h2]:text-[14px] [&_h2]:font-semibold [&_li]:my-0.5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-1.5 [&_pre]:my-2 [&_pre]:overflow-auto [&_pre]:rounded-[4px] [&_pre]:bg-[color:var(--hmi-code-bg)] [&_pre]:p-3 [&_pre]:text-[11.5px] [&_strong]:font-semibold [&_strong]:text-[color:var(--hmi-strong)] [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
             style={{ color: 'var(--hmi-ink)' }}
           >
-            <Markdown>{msg.Content}</Markdown>
+            <MemoMarkdown>{msg.Content}</MemoMarkdown>
           </div>
         </ScreenRow>,
       )
@@ -214,16 +241,13 @@ function buildRows(messages: AgentMessage[], run: AgentRun): React.ReactNode[] {
       for (const tc of msg.ToolCalls) {
         rows.push(
           <ScreenRow key={`c-${tc.id}`} time={time}>
-            <ToolLine call={tc} result={toolResults.get(tc.id)} worktree={run.WorktreePath} />
+            <ToolLine call={tc} result={toolResults.get(tc.id)} worktree={worktree} />
           </ScreenRow>,
         )
       }
     }
   }
 
-  if (run.ResultSummary && !isActiveRun(run)) {
-    rows.push(<Verdict key="verdict" run={run} />)
-  }
   return rows
 }
 
@@ -246,8 +270,9 @@ function ScreenRow({ time, children }: { time: string; children: React.ReactNode
 
 // UserLine — an operator message steered into the run: a YOU tag in the
 // run's input tone, the text rendered plain (it's the user's raw words, not
-// agent markdown).
-function UserLine({ text }: { text: string }) {
+// agent markdown). Memoized (like ThinkingLine/ToolLine below) so appending a
+// new message to the transcript doesn't re-render every prior row.
+const UserLine = memo(function UserLine({ text }: { text: string }) {
   return (
     <div>
       <div className="mb-0.5">
@@ -266,11 +291,11 @@ function UserLine({ text }: { text: string }) {
       </div>
     </div>
   )
-}
+})
 
 // ThinkingLine — the agent's reasoning, kept quiet on the screen: dim italic
 // ink under a small THINKING tag, clamped to a few lines until toggled open.
-function ThinkingLine({ text }: { text: string }) {
+const ThinkingLine = memo(function ThinkingLine({ text }: { text: string }) {
   const [open, setOpen] = useState(false)
   const long = text.length > 320
   return (
@@ -301,11 +326,13 @@ function ThinkingLine({ text }: { text: string }) {
       </div>
     </div>
   )
-}
+})
 
 // ToolLine — a tool call as a machine log entry: cyan tool tag + headline, the
-// input/result expandable beneath.
-function ToolLine({
+// input/result expandable beneath. Memoized: `call` is a stable slice of its
+// message and `result` only changes identity when the tool's output actually
+// lands, so an unchanged row skips the JSON stringify + pane work entirely.
+const ToolLine = memo(function ToolLine({
   call,
   result,
   worktree,
@@ -365,7 +392,7 @@ function ToolLine({
       )}
     </div>
   )
-}
+})
 
 // Pane — a segmented IN / OUT block on the screen. Shows the (optionally
 // truncated) content with a faded copy affordance that flips to a check for a
@@ -469,7 +496,7 @@ function Verdict({ run }: { run: AgentRun }) {
         className="max-w-none text-[12.5px] leading-relaxed [&_code]:rounded-[3px] [&_code]:bg-[color:var(--hmi-code-bg)] [&_code]:px-1 [&_code]:font-mono [&_code]:text-[11px] [&_li]:my-0.5 [&_p]:my-1.5 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
         style={{ color: 'var(--hmi-ink)' }}
       >
-        <Markdown>{run.ResultSummary}</Markdown>
+        <MemoMarkdown>{run.ResultSummary}</MemoMarkdown>
       </div>
     </div>
   )
@@ -531,3 +558,5 @@ function safeJsonStringify(v: unknown): string {
     return String(v)
   }
 }
+
+export default memo(ScreenTranscript)

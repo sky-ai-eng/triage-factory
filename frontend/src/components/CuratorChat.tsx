@@ -808,7 +808,7 @@ function Composer({
   )
 }
 
-// --- Tool-call vocabulary (mirrors AgentCard.formatToolCall but keeps
+// --- Tool-call vocabulary (mirrors lib/runFeed's formatToolCall but keeps
 // curator-side knowledge of the tools the curator actually uses) ---
 
 function formatToolCall(name: string, input: Record<string, unknown>): string {
