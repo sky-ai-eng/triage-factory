@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
@@ -69,26 +70,39 @@ type OrgPollHealth struct {
 // time — the active-org roster can change between calls, and re-listing
 // it is cheap even at multi-mode scale — so repeated /readyz polls always
 // see the current set.
+//
+// The active-org list and each org's settings row are each read exactly
+// once here and shared across the GitHub/Jira/rate-limit branches below —
+// not once per branch — since org_settings carries both poll intervals in
+// a single row. A probe hit is meant to be cheap and frequent (an LB
+// health check can poll every few seconds), so avoiding N redundant reads
+// per org here matters at multi-mode scale.
 func (m *Manager) Health(ctx context.Context) HealthSnapshot {
+	orgIDs, err := m.orgs.ListActiveSystem(ctx)
+	if err != nil {
+		pollerLog.Warn("readyz: list active orgs failed", "error", err)
+		orgIDs = nil
+	}
+
+	settings := make(map[string]domain.OrgSettings, len(orgIDs))
+	for _, orgID := range orgIDs {
+		settings[orgID] = m.loadOrgSettings(ctx, orgID)
+	}
+
 	return HealthSnapshot{
-		GitHub:          m.sourceHealth(ctx, "github"),
-		Jira:            m.sourceHealth(ctx, "jira"),
-		GitHubRateLimit: m.rateLimitSnapshot(ctx),
+		GitHub:          m.sourceHealth(orgIDs, settings, "github"),
+		Jira:            m.sourceHealth(orgIDs, settings, "jira"),
+		GitHubRateLimit: m.rateLimitSnapshot(orgIDs),
 	}
 }
 
 // rateLimitSnapshot reads the resolver's per-org rate-limit registry for
-// every currently active org, when the resolver implements RateLimitReader
-// (the production resolver always does; test fakes typically don't). An
-// org with no observation yet is simply absent from the returned map.
-func (m *Manager) rateLimitSnapshot(ctx context.Context) map[string]ghclient.RateLimitState {
+// every org in orgIDs, when the resolver implements RateLimitReader (the
+// production resolver always does; test fakes typically don't). An org
+// with no observation yet is simply absent from the returned map.
+func (m *Manager) rateLimitSnapshot(orgIDs []string) map[string]ghclient.RateLimitState {
 	reader, ok := m.resolver.(ghclient.RateLimitReader)
 	if !ok {
-		return nil
-	}
-	orgIDs, err := m.orgs.ListActiveSystem(ctx)
-	if err != nil {
-		pollerLog.Warn("readyz: list active orgs failed", "source", "rate_limit", "error", err)
 		return nil
 	}
 	out := make(map[string]ghclient.RateLimitState, len(orgIDs))
@@ -100,22 +114,19 @@ func (m *Manager) rateLimitSnapshot(ctx context.Context) map[string]ghclient.Rat
 	return out
 }
 
-func (m *Manager) sourceHealth(ctx context.Context, source string) SourceHealth {
+// sourceHealth builds one source's liveness state from the shared orgIDs +
+// settings Health() already loaded — no store reads of its own.
+func (m *Manager) sourceHealth(orgIDs []string, settings map[string]domain.OrgSettings, source string) SourceHealth {
 	lastTick := m.heartbeat(source)
 	alive := !lastTick.IsZero() && time.Since(lastTick) <= heartbeatStaleFactor*basePollInterval
-
-	orgIDs, err := m.orgs.ListActiveSystem(ctx)
-	if err != nil {
-		pollerLog.Warn("readyz: list active orgs failed", "source", source, "error", err)
-		return SourceHealth{Alive: alive, LastTick: lastTick, Orgs: map[string]OrgPollHealth{}}
-	}
 
 	successMap := m.successSnapshot(source)
 	orgs := make(map[string]OrgPollHealth, len(orgIDs))
 	for _, orgID := range orgIDs {
-		interval := m.loadOrgSettings(ctx, orgID).GitHubPollInterval
+		orgSet := settings[orgID]
+		interval := orgSet.GitHubPollInterval
 		if source == "jira" {
-			interval = m.loadOrgSettings(ctx, orgID).JiraPollInterval
+			interval = orgSet.JiraPollInterval
 		}
 		orgs[orgID] = OrgPollHealth{
 			LastSuccess:     successMap[orgID],
