@@ -210,6 +210,8 @@ cosign verify ghcr.io/sky-ai-eng/triage-factory:vX.Y.Z \
 
 Inspect the attached SBOM + provenance attestations with `docker buildx imagetools inspect ghcr.io/sky-ai-eng/triage-factory:vX.Y.Z`.
 
+The regex above only matches tag-push signatures, scoped to what this "Verifying releases" section covers. `docker-publish.yml` also signs on every push to `main` (`:edge`, `:sha-<short>`) — those are legitimately signed too, but with `@refs/heads/main` in place of `@refs/tags/...`, so verifying one of those images needs `--certificate-identity-regexp '^https://github\.com/sky-ai-eng/triage-factory/\.github/workflows/docker-publish\.yml@refs/heads/main$'` instead.
+
 Each `*.sbom.json` (SPDX) attached to the release is a plain downloadable asset — no verification tooling needed, just fetch it over HTTPS.
 
 **Air-gapped / no Rekor-Fulcio reachability:** keyless verification needs the signer to reach GitHub's OIDC issuer at sign time (already true — it runs in Actions) and the *verifier* to reach the public Rekor transparency log and Fulcio CA at verify time. If your environment can't reach those, fall back to the plain `sha256sum -c checksums.txt` check against a `checksums.txt` you fetched over authenticated HTTPS from the GitHub release page — that gives you integrity (the file wasn't corrupted/tampered in transit) without the provenance guarantee (that it was GitHub Actions, specifically, that produced it).
