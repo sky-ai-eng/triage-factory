@@ -117,6 +117,11 @@ type Spawner struct {
 	// permission handler is built, not per prompt. A plain store ref like
 	// s.tasks/s.jiraRules; nil-safe (the helper falls back to defaults).
 	teams db.TeamsStore
+	// instances is the fleet membership registry (TFAC-577) RunInstanceHeartbeat
+	// renews on a timer. A plain store ref like s.jiraRules; nil-safe (a nil
+	// store makes the heartbeat loop a logged no-op, same shape as RunQueue on
+	// RunDispatcher).
+	instances db.InstanceStore
 	// tx runs synthetic-claims write batches for manual runs (the
 	// run's creator_user_id is the synthetic claim subject, so RLS
 	// policies on the writes pass under tf_app). Event-triggered runs
@@ -186,12 +191,19 @@ type Spawner struct {
 	// perms:nil, so the broker is dormant until a follow-up wires the handler
 	// in alongside the browser prompt UI.
 	permPending map[string]*pendingPermission
-	// executorID is this spawner instance's executor identity, generated
-	// once at construction and stamped onto runs.executor_id when a run
-	// goes live. At N=1 there is one executor per process; on restart a
-	// fresh id re-stamps re-claimed runs. The run→executor ownership hook
-	// horizontal scaling builds the lease layer on.
+	// executorID is this spawner instance's executor identity, stamped onto
+	// runs.executor_id when a run goes live. Defaults to a random per-boot
+	// uuid at construction (the test / no-seam path); production overrides
+	// it via SetExecutorID with the persistent instance-registry id
+	// (TFAC-577) once main resolves it, alongside bootEpoch — the pair the
+	// heartbeat loop's fenced renewal keys on. At N=1 there is one executor
+	// per process; on restart the persistent id re-stamps re-claimed runs
+	// (the constant was the pre-TFAC-577 behavior this replaces). The
+	// run→executor ownership hook horizontal scaling builds the lease
+	// layer on. Guarded by s.mu like the other startup-set seams
+	// (SetStores, SetStorage) — read through executorIdentity().
 	executorID string
+	bootEpoch  int64
 	// runSem bounds how many runs execute off the dispatcher at once — a
 	// process-wide cap so a burst of queued steps doesn't fan into an
 	// unbounded number of agent subprocesses. Sized in NewSpawner
@@ -270,6 +282,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		jiraRules:        stores.JiraStatusRules,
 		externalActions:  stores.ExternalActions,
 		teams:            stores.Teams,
+		instances:        stores.Instances,
 		tx:               stores.Tx,
 		ghClient:         ghClient,
 		wsHub:            wsHub,

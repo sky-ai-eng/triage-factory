@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/instance"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
@@ -46,6 +47,14 @@ import (
 // Run. The struct is the dependency graph written down in one place.
 type App struct {
 	cfg Config
+
+	// identity is this process's persistent instance identity (TFAC-577) —
+	// resolved first thing in New, held for the process lifetime via an
+	// exclusive file lock, released in Close. bootEpoch is the fleet
+	// registry's monotonic per-boot counter for that id, minted by
+	// registerInstance once stores is live.
+	identity  *instance.Identity
+	bootEpoch int64
 
 	// Persistence. database is the primary pool (SQLite in local mode,
 	// the admin Postgres pool in multi mode); appDB is the multi-mode
@@ -94,6 +103,15 @@ type App struct {
 func New(ctx context.Context, cfg Config, static fs.FS) (*App, error) {
 	a := &App{cfg: cfg, announce: newAnnouncer()}
 
+	// Resolve this process's persistent instance identity before anything
+	// else touches the state root (TFAC-577): the identity file's exclusive
+	// lock is the two-process-on-one-state-root guard, so it's most
+	// valuable held as early in boot as possible — even before the local
+	// bind guardrail below.
+	if err := a.ensureIdentity(); err != nil {
+		return nil, fmt.Errorf("instance identity: %w", err)
+	}
+
 	if a.local() {
 		// Local-mode public-exposure guardrail (TFAC-409 item 1): local mode
 		// runs with zero auth, so refuse to boot if it would bind a
@@ -116,6 +134,9 @@ func New(ctx context.Context, cfg Config, static fs.FS) (*App, error) {
 	}
 
 	if err := a.openStores(ctx); err != nil { // DB pool(s) + store bundle
+		return nil, err
+	}
+	if err := a.registerInstance(ctx); err != nil { // fleet registry boot-registration upsert
 		return nil, err
 	}
 	if err := a.buildServer(ctx, static); err != nil { // HTTP handlers + auth + static; owns the websocket hub
@@ -147,10 +168,13 @@ func (a *App) Run(ctx context.Context) error {
 	return a.srv.ListenAndServeContext(ctx, a.cfg.Addr)
 }
 
-// Close releases the database pools. Safe to call on a partially-built
-// App (nil pools are skipped), so `defer a.Close()` right after New is
-// always correct.
+// Close releases the database pools and the instance identity lock. Safe
+// to call on a partially-built App (nil fields are skipped), so
+// `defer a.Close()` right after New is always correct.
 func (a *App) Close() error {
+	if err := a.identity.Close(); err != nil {
+		appLog.Error("release instance identity lock failed", "error", err)
+	}
 	if a.appDB != nil {
 		if err := a.appDB.Close(); err != nil {
 			appLog.Error("close app db pool failed", "error", err)
