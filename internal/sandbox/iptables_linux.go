@@ -58,7 +58,7 @@ func teardownIptables(ctx context.Context, rule iptablesRule) error {
 
 // applyEgressPolicy restricts a sandbox's egress to its own gateway IP
 // (gatewayIP, = 10.42.<idx>.1) plus loopback, default-dropping
-// everything else. This closes two holes at once (SKY-395):
+// everything else. This closes two holes at once:
 //
 //   - cross-tenant: a compromised sandbox can no longer reach a
 //     *sibling* run's gateway (and thus that run's credential proxy)
@@ -68,7 +68,7 @@ func teardownIptables(ctx context.Context, rule iptablesRule) error {
 //     proxies bound on its own gateway IP.
 //
 // IP-scoped, not port-scoped: multiple proxies bind to the gateway IP
-// (LLM now, the git proxy in SKY-333 later), so the whole gateway IP is
+// (LLM now, the git proxy later), so the whole gateway IP is
 // allowed rather than a single port.
 //
 // Two layers, because the sandbox runs under gVisor whose user-space
@@ -77,7 +77,7 @@ func teardownIptables(ctx context.Context, rule iptablesRule) error {
 // ordinary process does:
 //
 //  1. In-netns OUTPUT allowlist. Proven to work for ordinary-namespace
-//     traffic (the SKY-395 acceptance repro probes from a socat process
+//     traffic (the acceptance repro probes from a socat process
 //     inside the netns). Vanishes with the netns — no teardown needed.
 //  2. Host-side ingress filter on the run's veth (vethHost): drop any
 //     packet arriving from the sandbox whose destination is not the
@@ -208,7 +208,7 @@ func runIptablesInNetns(ctx context.Context, netnsName string, args ...string) e
 }
 
 // reapEgressForSubnet removes leaked host-side egress DROP rules for a
-// given subnet idx (the SKY-395 Part B host-side layer). Matches the
+// given subnet idx (the Part B host-side layer). Matches the
 // rules by the gateway IP (10.42.<idx>.1) on a vh- veth in the
 // INPUT/FORWARD chains. Mirrors reapIptablesForSubnet: best-effort,
 // called from the orphan reaper when a netns was leaked by a

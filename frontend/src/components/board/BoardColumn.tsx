@@ -206,7 +206,7 @@ export default function BoardColumn({
 
   const hasFilters = filterIsActive(filter)
 
-  // SKY-330: fixed 430px width (keep in sync with COL_W in Board.tsx, which
+  // Fixed 430px width (keep in sync with COL_W in Board.tsx, which
   // computes the centered-lane layout). Fixed, not viewport-relative, so cards
   // don't compress as columns scroll into view.
   return (

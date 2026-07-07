@@ -55,7 +55,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 	t.Helper()
 
 	t.Run("RecordSwipe_ClaimLeavesStatusQueued", func(t *testing.T) {
-		// SKY-261 B+: claim is a responsibility-axis action, not a
+		// Claim is a responsibility-axis action, not a
 		// lifecycle one. RecordSwipe records the audit row but leaves
 		// status at 'queued' — the swipe handler stamps the claim
 		// column separately, and the Board's derived filter (claim
@@ -126,7 +126,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// Board. RecordSwipe must clear snooze_until on every
 		// transition; only SnoozeTask sets it.
 		//
-		// SKY-261 B+: claim no longer changes status (it's now a
+		// Claim no longer changes status (it's now a
 		// responsibility-axis action), so post-claim status reads as
 		// 'queued'. The snooze-cleared invariant still holds — that's
 		// what this test pins.

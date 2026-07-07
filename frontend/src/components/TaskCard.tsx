@@ -9,7 +9,7 @@ interface Props {
   style?: React.CSSProperties
   isDragging?: boolean
   onRequeue?: () => void
-  // SKY-261 B+: when a task is bot-claimed but the delegate run failed
+  // When a task is bot-claimed but the delegate run failed
   // to spawn (or no run materialized yet for the bot-claimed task),
   // the agent-lane card surfaces the failure here. delegateFailed
   // carries the error message (e.g. "prompt not found"); onRetry fires
@@ -17,7 +17,7 @@ interface Props {
   // execution; this prop is how the Board reflects that divergence.
   delegateFailed?: { message: string }
   onRetry?: () => void
-  // SKY-330: caller-supplied assignee picker, rendered at the top-right.
+  // Caller-supplied assignee picker, rendered at the top-right.
   assigneeSlot?: React.ReactNode
 }
 
@@ -32,7 +32,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
   ) => {
     const age = formatAge(task.created_at)
     const subtaskCount = task.open_subtask_count ?? 0
-    // SKY-261 B+: snooze is only expected on unclaimed tasks; we render the
+    // Snooze is only expected on unclaimed tasks; we render the
     // badge whenever snooze_until is in the future (a past time means the
     // snooze elapsed and the next wake path will requeue it).
     const snoozedUntil = parseFutureSnooze(task.snooze_until)
@@ -142,7 +142,7 @@ function SubtaskHint({ count }: { count: number }) {
 }
 
 // DelegateFailedBadge surfaces "the bot is claimed but the run didn't fire" —
-// the SKY-261 B+ failure state. Red to match the card's problem spine.
+// the delegate-run failure state. Red to match the card's problem spine.
 function DelegateFailedBadge({ message }: { message: string }) {
   return (
     <span

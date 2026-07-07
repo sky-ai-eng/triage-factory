@@ -27,8 +27,8 @@ const (
 
 // Profiler builds and persists AI-generated profiles for GitHub repositories.
 type Profiler struct {
-	resolver github.Resolver         // per-(org, owner) GitHub client source — App-installation token in multi, keychain PAT in local. SKY-389.
-	secrets  agentproc.SecretsReader // per-org LLM-credential reader for the profiling Haiku calls (nil in local → ambient subscription; system-door reader in multi). SKY-389.
+	resolver github.Resolver         // per-(org, owner) GitHub client source — App-installation token in multi, keychain PAT in local.
+	secrets  agentproc.SecretsReader // per-org LLM-credential reader for the profiling Haiku calls (nil in local → ambient subscription; system-door reader in multi).
 	repos    db.RepoStore            // profile reads + upserts go through the store
 	orgs     db.OrgsStore            // iterate active orgs at the top of each profile run
 	recorder *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)

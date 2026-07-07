@@ -14,7 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// agentStore is the SQLite impl of db.AgentStore. Post-SKY-269 the
+// agentStore is the SQLite impl of db.AgentStore. The
 // SQLite schema carries org_id with an FK to orgs(id), so every method
 // filters by org_id structurally instead of by the BootstrapAgentID-
 // derived row id. That matches the Postgres impl shape and removes
@@ -25,7 +25,7 @@ import (
 // constants); per-method entries don't need it because the org_id
 // column physically constrains writes/reads to the one synthetic org.
 // agentStore — SQLite impl. The constructor accepts two queryers for
-// signature parity with the Postgres impl (SKY-296); SQLite has one
+// signature parity with the Postgres impl; SQLite has one
 // connection so both collapse to the same queryer. The
 // `...System` variants delegate to their non-System counterparts.
 type agentStore struct{ q queryer }
@@ -67,8 +67,8 @@ func (s *agentStore) Create(ctx context.Context, orgID string, a domain.Agent) (
 	if displayName == "" {
 		displayName = "Triage Factory Bot"
 	}
-	// In local mode the agent borrows the lone user's PAT (post-SKY-269
-	// the users sentinel row exists, so the FK is satisfied). Caller
+	// In local mode the agent borrows the lone user's PAT (the users
+	// sentinel row exists, so the FK is satisfied). Caller
 	// can override via SetGitHubPATUser later; the default-on-insert
 	// shape just keeps "the local bot has the local user's identity"
 	// true from the moment the row appears.

@@ -14,7 +14,7 @@ package delegate
 // restructuring the spawner. The wrap follows the same pattern as
 // the IncrementUsage routing immediately above it in delegate.go;
 // SQLite passes through identically for both, and the Postgres RLS
-// matrix lands in D9-core's pgtest coverage per SKY-253's acceptance.
+// matrix lands in D9-core's pgtest coverage.
 
 import (
 	"context"

@@ -32,7 +32,7 @@ interface Props {
   // onClose dismisses the review popup without backend side
   // effects. Was previously named onDiscard to match an old
   // "Discard" button label that suggested destruction; renamed
-  // alongside the SKY-207 button text rename so the prop, the
+  // alongside a button text rename so the prop, the
   // user-facing label, and the actual behavior all agree. The
   // genuinely destructive "throw the prepared review away and
   // re-queue the task" action lives on AgentCard's "Return to

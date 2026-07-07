@@ -40,7 +40,7 @@ type TaskMemorySeeder struct {
 // RunTaskMemoryStoreConformance covers the TaskMemoryStore contract
 // every backend impl must hold. The System variants are NOT covered
 // by parallel cases — their behavior is documented as identical to
-// the non-System counterparts and the SKY-306 cleanup pruned the
+// the non-System counterparts and a cleanup pruned the
 // per-method passthrough tests for variants that don't diverge.
 //
 // What's covered:

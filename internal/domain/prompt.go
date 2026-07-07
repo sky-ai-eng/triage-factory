@@ -14,7 +14,7 @@ type Prompt struct {
 	AllowedTools string `json:"allowed_tools"` // comma-separated extra tools parsed from SKILL.md/agent frontmatter
 	Model        string `json:"model"`         // per-prompt model override; "" = inherit settings.AI.Model at dispatch
 	UsageCount   int    `json:"usage_count"`   // how many agent runs have used this prompt
-	// TeamID is the owning team. Every prompt is team-scoped (SKY-380):
+	// TeamID is the owning team. Every prompt is team-scoped:
 	// team_id is NOT NULL and is the sole scoping signal (no visibility
 	// column). Handlers read this to enforce same-team references (a
 	// blueprint step may only bind a prompt its own team owns).

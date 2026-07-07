@@ -50,8 +50,8 @@ const (
 type Tracker struct {
 	database *sql.DB
 	pub      Publisher
-	tasks    db.TaskStore   // SKY-283: tracker creates review_requested tasks during discovery + reconciles stale ones
-	entities db.EntityStore // SKY-284: entity lifecycle (find/create, snapshot, title/description, close/reactivate)
+	tasks    db.TaskStore   // tracker creates review_requested tasks during discovery + reconciles stale ones
+	entities db.EntityStore // entity lifecycle (find/create, snapshot, title/description, close/reactivate)
 	repos    db.RepoStore   // per-repo conditional-request (ETag) state for GitHub open-PR discovery
 	// orgID is the tenant this tracker emits events and reads/writes
 	// entities for. Set at construction and stable for the Tracker's
@@ -59,7 +59,7 @@ type Tracker struct {
 	// per tenant per cycle. Local mode passes runmode.LocalDefaultOrgID;
 	// multi mode passes the iterated active org.
 	//
-	// TODO: a future GitHub-App-credentials change (see SKY-263) will
+	// TODO: a future GitHub-App-credentials change will
 	// also bundle the per-org GitHub client + bot username on this
 	// struct — today those are method parameters because credentials
 	// are process-global.
@@ -745,11 +745,11 @@ func splitOwnerRepo(s string) (owner, repo string) {
 // backfillReviewRequested publishes a synthesized pr:review_requested
 // event for a PR being discovered for the first time with the session
 // user already in its requested-reviewer list. The router subscribes
-// to the bus, evaluates rules, and fans out to per-team tasks (SKY-295).
+// to the bus, evaluates rules, and fans out to per-team tasks.
 // The task's primary_event_id FK is satisfied when the router records
 // the event in its HandleEvent step 1.
 //
-// Pre-SKY-295 the tracker bypassed the bus and called
+// Previously the tracker bypassed the bus and called
 // tasks.FindOrCreateAt directly, which sidestepped rule evaluation —
 // every backfilled task ended up assigned to "the oldest team in the
 // org" regardless of which team's rule actually matched. Routing
@@ -881,7 +881,7 @@ func (r JiraRules) doneMembersForKey(issueKey string) []string {
 // project_key. Tickets whose project_key has no row degrade silently
 // — no terminal check, no pickup discovery.
 //
-// SKY-270 dropped the username parameter: actor identity now flows through
+// The username parameter was dropped: actor identity now flows through
 // the snapshot (assignee_account_id) and predicate matching happens
 // downstream against the assignee_in / reporter_in / commenter_in
 // allowlists.

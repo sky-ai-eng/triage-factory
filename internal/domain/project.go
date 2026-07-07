@@ -3,14 +3,14 @@ package domain
 import "time"
 
 // Project is the top-level concept that segments work items by *concept*
-// rather than by repo. SKY-211 / SKY-215. The Curator is the per-project
+// rather than by repo. The Curator is the per-project
 // long-lived Claude Code session that owns project context — its session
 // id lives on this row. The knowledge base lives on disk at
 // `~/.triagefactory/projects/<id>/knowledge-base/*.md`; the per-project
-// classifier (SKY-220) reads it inline at vote time.
+// classifier reads it inline at vote time.
 //
-// CuratorSessionID was originally named DesignerSessionID; SKY-216
-// renamed it to match the runtime that actually populates it. The
+// CuratorSessionID was originally named DesignerSessionID; it was
+// renamed to match the runtime that actually populates it. The
 // rename happened via the 20260503_001_curator.sql migration on
 // existing installs, with the new name carried through Go code in
 // the same release.
@@ -46,10 +46,10 @@ type Project struct {
 	// "team" regardless of what a client sends (N=1 has no team/org
 	// distinction worth making).
 	Visibility string `json:"visibility"`
-	// JiraProjectKey is the Jira project key (e.g. "SKY") this
+	// JiraProjectKey is the Jira project key (e.g. "PROJ") this
 	// project is linked to, or empty if not linked. Validation at the
 	// API layer requires a non-empty value to be present in
-	// config.Jira.Projects. SKY-217.
+	// config.Jira.Projects.
 	JiraProjectKey string `json:"jira_project_key"`
 	// LinearProjectKey is the Linear project key/identifier this
 	// project is linked to, or empty if not linked. Independent of

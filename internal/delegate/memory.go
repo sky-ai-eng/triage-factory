@@ -202,12 +202,13 @@ func streamCopyFile(src, dst string) (int64, error) {
 // noisily on ENOENT when no project is assigned.
 //
 // Reads from the Curator's per-project knowledge base (the path the
-// Curator writes to per SKY-216, resolved through internal/paths under
+// Curator writes to, resolved through internal/paths under
 // the project-owning org's subtree) and copies each .md file flat into
 // _scratch/project-knowledge/, preserving source filenames. orgID is the
 // run's owning tenant — the same org the assigned project belongs to —
 // so in multi mode this reads the org-scoped dir the Curator wrote
-// rather than the org-stripped default (SKY-402).
+// rather than the org-stripped default (the curator's on-disk path
+// was moved to be org-scoped).
 //
 // Degrades gracefully: a nil projectID, a missing knowledge-base dir,
 // or per-file copy failures are logged but never fail the run.

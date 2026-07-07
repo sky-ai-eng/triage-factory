@@ -27,7 +27,7 @@
 // one documented exception is ~/.claude state — Claude Code SDK session
 // dirs, which must follow the real HOME even in multi mode where TF
 // state diverges onto a mounted volume. (The curator runtime resolved
-// its own home until SKY-402 routed KnowledgeDir/ProjectsRoot through
+// its own home until it was routed through
 // ProjectKBDir/ProjectsRoot here.)
 package paths
 
@@ -49,7 +49,7 @@ const dirName = ".triagefactory"
 // defaultMultiStateRoot is the multi-mode state root when TF_STATE_ROOT
 // is unset: a conventional container mount point. Self-host / Fly
 // deployments point TF_STATE_ROOT at their mounted volume instead (this
-// is the hook SKY-407's shared-nothing executors lean on).
+// is the hook shared-nothing executors lean on).
 const defaultMultiStateRoot = "/data"
 
 // envStateRoot overrides the multi-mode state-root base.
@@ -131,8 +131,8 @@ func StateRootErr() (string, error) {
 // segment is stripped and OrgRoot collapses to StateRoot. That strip is
 // what keeps existing local installs byte-for-byte on disk and lets
 // callers that aren't org-threaded yet pass runmode.LocalDefaultOrgID
-// today without changing the local layout — SKY-406 threads the real
-// orgID through the worktree cache afterward.
+// today without changing the local layout — the real orgID gets
+// threaded through the worktree cache afterward.
 func OrgRoot(orgID string) string {
 	root := StateRoot()
 	if runmode.Current() != runmode.ModeMulti || orgID == runmode.LocalDefaultOrgID {
@@ -151,8 +151,8 @@ func BareCacheRoot(orgID string) string {
 }
 
 // BareCacheDir is the bare clone path for one repo:
-// <OrgRoot>/repos/<owner>/<repo>.git. SKY-406 consumes this as it
-// threads a real orgID through the bounded, evictable worktree cache.
+// <OrgRoot>/repos/<owner>/<repo>.git. This is consumed while threading
+// a real orgID through the bounded, evictable worktree cache.
 func BareCacheDir(orgID, owner, repo string) string {
 	return filepath.Join(BareCacheRoot(orgID), owner, repo+".git")
 }
@@ -165,7 +165,7 @@ func ProjectsRoot(orgID string) string {
 
 // ProjectKBDir is one curator project's working directory — the
 // knowledge base plus its pinned worktrees: <OrgRoot>/projects/<id>.
-// SKY-402 routes the curator runtime's KnowledgeDir through here.
+// The curator runtime's KnowledgeDir routes through here.
 func ProjectKBDir(orgID, projectID string) string {
 	return filepath.Join(ProjectsRoot(orgID), projectID)
 }

@@ -66,7 +66,7 @@ func TestHandleCuratorSend_404OnMissingProject(t *testing.T) {
 
 func TestHandleCuratorSend_AcceptedReturnsRequestID(t *testing.T) {
 	// 202 + a non-empty request_id + a persisted row is the HTTP
-	// contract the Projects page (SKY-217) will rely on. The
+	// contract the Projects page will rely on. The
 	// goroutine's dispatch behavior (running → terminal flips) is
 	// covered by the curator package's own tests; asserting on it
 	// here would be a flake — on hosts with `claude` on PATH it

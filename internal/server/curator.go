@@ -22,8 +22,8 @@ type curatorHandler struct {
 	runtime func() *curator.Curator
 }
 
-// Curator chat endpoints (SKY-216). Three operations the Projects
-// page (SKY-217) needs:
+// Curator chat endpoints. Three operations the Projects
+// page needs:
 //
 //   - POST .../messages   queue a user turn → 202 + {request_id}
 //   - GET  .../messages   chat history (requests + their messages)

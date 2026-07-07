@@ -71,7 +71,7 @@ func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID, teamID string, p 
 	err := inTx(ctx, s.seeder, func(q queryer) error {
 		// Identity is per-team: (org_id, team_id, system_slug). A second
 		// team gets its own copy (same slug, different team) and re-seeds
-		// resolve the existing row by this key (SKY-380).
+		// resolve the existing row by this key.
 		var (
 			existingID   string
 			userModified int
@@ -212,7 +212,7 @@ func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain
 
 // scanPromptRowSQLite decodes a prompts row in the canonical column order
 // (id … team_id, system_slug, created_at, updated_at). system_slug is
-// nullable (user prompts); team_id is NOT NULL post-SKY-380.
+// nullable (user prompts); team_id is NOT NULL.
 func scanPromptRowSQLite(scanFn func(dst ...any) error) (domain.Prompt, error) {
 	var p domain.Prompt
 	var systemSlug sql.NullString

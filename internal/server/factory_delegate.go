@@ -249,7 +249,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SKY-261 B+ alignment with swipe-delegate: the user's gesture is
+	// Alignment with swipe-delegate: the user's gesture is
 	// commitment regardless of run outcome. Stamp the agent claim
 	// BEFORE attempting the spawn so a failed Delegate leaves the
 	// task in the bot's lane (with no run, surfacing as a "delegate
@@ -261,7 +261,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// claim is the responsibility axis (commitment); runs are the
 	// execution axis. They're orthogonal; a failed run doesn't
 	// invalidate the assignment.
-	// SKY-261 acceptance: re-check team_agents.enabled at gesture
+	// Re-check team_agents.enabled at gesture
 	// time. Factory drag-to-bot is the same semantic as swipe-up
 	// "delegate to bot" — both refuse with 409 when the bot is off for
 	// this team. Gate on claimTeamID — the team HandoffAgentClaim will
@@ -325,7 +325,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// "after-spawn-success only" placement meant partial-success
 	// gestures (claim stamped, spawn failed) had no audit trail —
 	// inconsistent with swipe-delegate (which audits at the top of
-	// the swipe handler) and with the SKY-261 B+ semantic that
+	// the swipe handler) and with the semantic that
 	// claim is commitment regardless of run outcome. RecordSwipe
 	// failure stays non-fatal because the claim col + WS broadcast
 	// already captured the state-level effect; the audit is best-

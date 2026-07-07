@@ -424,7 +424,7 @@ func TestProxySigV4StripsStalePlaceholderSessionToken(t *testing.T) {
 	verifyReceivedSigV4(t, rec.input, real.SecretAccessKey)
 }
 
-// TestProxySigV4TokenGate pins SKY-395 caller auth for the SigV4 path:
+// TestProxySigV4TokenGate pins caller auth for the SigV4 path:
 // the per-run token is the placeholder access-key ID in the incoming
 // Authorization header's Credential scope. Only a request signed with
 // this run's placeholder AKID is forwarded; a sibling run's AKID, a

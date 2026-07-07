@@ -115,7 +115,7 @@ func fenceRunCount(t *testing.T, database *sql.DB, entityID string) int {
 }
 
 // fenceCompleteRuns moves every run on the entity to a terminal status,
-// reopening the per-entity auto-run gate — exactly the SKY-414 boot-recovery
+// reopening the per-entity auto-run gate — exactly the boot-recovery
 // window (the first run already went terminal) the replay re-fires into.
 func fenceCompleteRuns(t *testing.T, database *sql.DB, entityID string) {
 	t.Helper()
@@ -127,7 +127,7 @@ func fenceCompleteRuns(t *testing.T, database *sql.DB, entityID string) {
 	}
 }
 
-// TestHandleEvent_ReplayedEvent_FiresExactlyOnce is the SKY-424 regression
+// TestHandleEvent_ReplayedEvent_FiresExactlyOnce is a regression test
 // for the immediate-fire window: an event auto-fires a run, the run reaches
 // terminal (reopening the per-entity gate), then the at-least-once router
 // queue replays the SAME event after boot recovery. Pre-fence the replay
@@ -190,7 +190,7 @@ func TestHandleEvent_DistinctEvents_FireIndependently(t *testing.T) {
 }
 
 // TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate covers the drain
-// path's fence handling (SKY-424): a pending firing whose triggering event
+// path's fence handling: a pending firing whose triggering event
 // already has a committed run (a prior drain fired it but died before
 // MarkFired, or the immediate path fired it before this firing was popped)
 // must skip with reason "already_fired" rather than spawn a duplicate or

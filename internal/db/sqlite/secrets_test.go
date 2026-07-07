@@ -20,7 +20,7 @@ import (
 //
 // Establishes the local-equals-multi-at-N=1 framing for the secrets
 // layer: callers see the same Put/Get/Delete shape in either mode,
-// SKY-322's credential resolver can lean on this without branching
+// so the per-org credential resolver can lean on this without branching
 // on runmode.
 func TestSecretStore_SQLite_KeychainRoundTrip(t *testing.T) {
 	keyring.MockInit()
@@ -94,8 +94,8 @@ func TestSecretStore_SQLite_KeychainRoundTrip(t *testing.T) {
 // returns identical values. Local mode is single-org with no RLS and
 // no claims, so the system path and the claims-checked path collapse
 // onto the same keychain helper — there's nothing to differentiate.
-// This is the "no regression in local mode" leg of SKY-364's
-// acceptance.
+// This is the "no regression in local mode" leg of the GetSystem
+// acceptance criteria.
 func TestSecretStore_SQLite_GetSystemEqualsGet(t *testing.T) {
 	keyring.MockInit()
 	conn := openSQLiteForTest(t)
@@ -184,7 +184,7 @@ func TestSecretStore_SQLite_DeleteWithOnlyEnvOverlay(t *testing.T) {
 }
 
 // TestSecretStore_SQLite_RejectsNonLocalOrg pins the safety net for
-// callers that forgot to extract the request orgID via the SKY-316
+// callers that forgot to extract the request orgID via the correct
 // accessor. Passing a real UUID into the local-mode store would
 // otherwise silently write to a shared keychain bag and surface as a
 // "missing secret" later — much harder to debug than an upfront
@@ -208,7 +208,7 @@ func TestSecretStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 }
 
 // TestSecretStore_SQLite_PerUserKeychainRoundTrip pins the local-mode
-// per-user SecretStore contract (SKY-442): PutUser → keychain entry,
+// per-user SecretStore contract: PutUser → keychain entry,
 // GetUser → same value, rotation overwrites, DeleteUser → ok=true then
 // ok=false, and a missing key reads back "". Local mode is N=1 (one
 // user), so there's no cross-user RLS to enforce here — that gate lives

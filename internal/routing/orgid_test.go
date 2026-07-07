@@ -84,7 +84,7 @@ func TestHandleEvent_EmptyOrgID_Dropped(t *testing.T) {
 // HandleEvent's helpers into the persisted event row. The SQLite
 // store enforces the local-sentinel-only invariant (assertLocalOrg)
 // so a true multi-org smoke test belongs in the Postgres pgtest
-// matrix (deferred follow-up under SKY-253). Within SQLite the
+// matrix (a deferred follow-up). Within SQLite the
 // smallest non-vacuous assertion is that the recorded org_id matches
 // the event's OrgID — a regression that resurrected the hardcoded
 // LocalDefaultOrgID sentinel inside the events.RecordSystem call

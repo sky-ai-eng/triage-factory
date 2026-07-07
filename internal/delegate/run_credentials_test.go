@@ -28,8 +28,8 @@ func (f fakeUsers) GetGitHubLoginSystem(_ context.Context, _, _ string) (string,
 }
 
 // fakeResolver records ClientFor calls and returns a preconfigured client.
-// Mirrors the poller package's fake so the SKY-389 seam is exercised
-// through the real ghclient.Resolver interface.
+// Mirrors the poller package's fake so the per-org run-credential seam is
+// exercised through the real ghclient.Resolver interface.
 type fakeResolver struct {
 	calls  []resolverCall
 	client *ghclient.Client
@@ -130,7 +130,7 @@ func (recordingSecrets) Get(ctx context.Context, orgID, key string) (string, err
 
 var _ agentproc.SecretsReader = recordingSecrets{}
 
-// TestResolveRunCredentials_MultiSeam pins the SKY-389 contract: when the
+// TestResolveRunCredentials_MultiSeam pins the contract: when the
 // per-org seam is wired (the production path in both modes), a run's GitHub
 // client resolves per (org, owner) through the resolver — NOT the
 // process-global ghClient — and the org's default model comes from modelFor.
@@ -151,7 +151,7 @@ func TestResolveRunCredentials_MultiSeam(t *testing.T) {
 		if gotOrg != orgID {
 			t.Errorf("modelFor got org %q; want %q", gotOrg, orgID)
 		}
-		// SKY-389 review #2: the task's team must reach modelFor so a
+		// The task's team must reach modelFor so a
 		// multi-team org resolves the run's own team model, not the org default.
 		if gotTeam != teamID {
 			t.Errorf("modelFor got team %q; want %q", gotTeam, teamID)
@@ -217,7 +217,7 @@ func TestResolveGHClient_ResolveErrorReturnsNil(t *testing.T) {
 	}
 }
 
-// TestResumeWithMessage_RequiresModel pins SKY-389 review #1: a resume must
+// TestResumeWithMessage_RequiresModel pins the contract that a resume must
 // reuse the model captured at run start, so ResumeWithMessage rejects an
 // empty opts.Model with an error rather than falling back to a live
 // per-(org, team) resolve that could switch models mid-run. The guard sits

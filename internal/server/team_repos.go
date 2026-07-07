@@ -174,7 +174,7 @@ func repoSlugs(repos []domain.TeamGitHubRepo) []string {
 // tracking a repo this deployment's GitHub credentials can't reach (a
 // typo'd slug, a stale client, a hand-crafted curl). It validates the
 // input repos in two tiers, both bounded by *selection* size rather than
-// *org* size (SKY-409):
+// *org* size:
 //
 //   - Tier 1 (hot path): the in-process enumeration cache the picker
 //     warmed on its way out (handleGitHubRepos → reachableRepoCachePut).

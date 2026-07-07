@@ -8,7 +8,7 @@ import (
 )
 
 // Composition mutations (merge / split) + the ≤1-event-per-blueprint backstop.
-// These exercise the transactional endpoints SKY-429's canvas calls: merge
+// These exercise the transactional endpoints the canvas calls: merge
 // absorbs a trigger-less source onto a host's tail; split partitions a
 // blueprint at an index into the trigger-retaining upstream and a new
 // trigger-less downstream. The 409 tests pin the clean conflict on a second

@@ -30,8 +30,8 @@ func buildSessionReplacements(oldSessionID, newSessionID, oldCwd, newCwd string)
 }
 
 // rewriteByLine performs byte-substring replacement on each line from src and
-// writes to dst. The "per-line" contract matches the SKY-222 decision record
-// and avoids scanner token limits by using ReadBytes('\n').
+// writes to dst. The "per-line" contract matches the bundle format's decision
+// record and avoids scanner token limits by using ReadBytes('\n').
 func rewriteByLine(dst io.Writer, src io.Reader, reps []byteReplacement) error {
 	br := bufio.NewReader(src)
 	for {

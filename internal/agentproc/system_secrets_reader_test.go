@@ -9,7 +9,7 @@ import (
 // fakeSystemGetter records GetSystem calls. It deliberately implements
 // ONLY GetSystem (the claims-free door), so a regression that tried to
 // route NewSystemSecretsReader through the RLS-checked Get would fail to
-// compile against this double — pinning the SKY-389 "system door, not Get"
+// compile against this double — pinning the "system door, not Get"
 // decision structurally as well as behaviorally.
 type fakeSystemGetter struct {
 	gotOrg string
@@ -28,7 +28,7 @@ func (f *fakeSystemGetter) GetSystem(ctx context.Context, orgID, key string) (st
 
 var _ SystemSecretGetter = (*fakeSystemGetter)(nil)
 
-// TestNewSystemSecretsReader_RoutesThroughGetSystem pins the SKY-389
+// TestNewSystemSecretsReader_RoutesThroughGetSystem pins the
 // invariant: the background run paths' SecretsReader resolves per-org LLM
 // credentials via the system/admin door (GetSystem), not the RLS-checked
 // Get — these run claims-free, so Get would just trade the nil-Secrets

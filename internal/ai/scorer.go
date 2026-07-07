@@ -128,7 +128,7 @@ func (r *Runner) scoreTasks(ctx context.Context, tasks []domain.Task) (scores []
 		// The scorer is a singleton background goroutine triggered
 		// by event-bus sentinels — no JWT-claims context. Route the
 		// bulk description read through the admin pool variant
-		// (SKY-296) so Postgres multi-mode doesn't degrade every
+		// so Postgres multi-mode doesn't degrade every
 		// scored task to title-only context under RLS.
 		if descs, err := r.entities.DescriptionsSystem(ctx, orgID, entityIDs); err != nil {
 			aiLog.Warn("load entity descriptions for scoring failed", "error", err)

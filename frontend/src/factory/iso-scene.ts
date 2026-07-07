@@ -1,4 +1,4 @@
-// Debug scene for the 3D rewrite (SKY-196 / SKY-197).
+// Debug scene for the 3D rewrite.
 //
 // Section ported from the 2.5D factory: the new-commits intake,
 // CI fan-out, CI Failed re-queue loopback, and stubs for the

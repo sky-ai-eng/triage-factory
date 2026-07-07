@@ -19,7 +19,7 @@ import (
 
 // recordingJiraResolver is a test double for jira.Resolver that records the
 // (orgID, userID) ForUser was routed with and returns a configurable
-// client/error. It pins SKY-463's contract: user-initiated Jira writes resolve
+// client/error. It pins the contract: user-initiated Jira writes resolve
 // the ACTING user's credential, and the handler surfaces ErrNoJiraUserCredential
 // rather than falling back to the org/bot client.
 type recordingJiraResolver struct {
@@ -79,8 +79,8 @@ func seedQueuedJiraTask(t *testing.T, db *sql.DB, entityID, sourceID, taskID str
 // TestSwipeClaim_JiraTask_NoUserCredential_Returns409 pins the defense-in-depth
 // boundary: claiming a Jira-backed task when the acting user has no connected
 // Jira is refused with 409 BEFORE the claim lands. Acting as the org/bot here
-// would mis-assign the ticket to the service account — the exact bug SKY-463
-// closes — so the handler must refuse rather than fall back.
+// would mis-assign the ticket to the service account, so the handler must
+// refuse rather than fall back.
 func TestSwipeClaim_JiraTask_NoUserCredential_Returns409(t *testing.T) {
 	s := newTestServer(t)
 	s.jiraResolver = &recordingJiraResolver{userErr: jira.ErrNoJiraUserCredential}
@@ -165,7 +165,7 @@ func TestSwipeClaim_JiraTask_ResolvesActingUserCredential(t *testing.T) {
 	}
 
 	// The write actor was resolved as the acting user (org + user from the
-	// request), the provenance routing SKY-463 introduces.
+	// request), per the provenance routing.
 	calls, gotOrg, gotUser := res.snapshot()
 	if calls != 1 {
 		t.Errorf("ForUser called %d times, want 1", calls)
@@ -226,7 +226,7 @@ func TestSwipeClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
 	}
 }
 
-// TestStockPost_QueueOnly_SkipsJiraResolver pins SKY-463's queue-only
+// TestStockPost_QueueOnly_SkipsJiraResolver pins the queue-only
 // optimization: a stock batch containing only "queue" actions synthesizes
 // events + tasks with no Jira mutation, so it must NOT call ForUser — a pure
 // queue can't be made to depend on secret-store availability. The
@@ -255,7 +255,7 @@ func TestStockPost_QueueOnly_SkipsJiraResolver(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed jira rule: %v", err)
 	}
-	// Identity is host-scoped (SKY-397) — key it on the same Jira host the
+	// Identity is host-scoped — key it on the same Jira host the
 	// org creds (and thus the stock handler's read) use.
 	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, "https://jira.example.com", "acc-1", "Tester", "pat"); err != nil {
 		t.Fatalf("set jira identity: %v", err)

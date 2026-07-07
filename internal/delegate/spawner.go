@@ -53,7 +53,7 @@ func shortRunID(runID string) string {
 // firing queue that an auto run has reached a terminal state and the
 // entity may be ready to drain its next pending firing. Implemented by
 // the routing.Router. Manual runs do not call this — manual is fully
-// decoupled from the queue per the SKY-189 design. orgID scopes the
+// decoupled from the queue by design. orgID scopes the
 // drain to the run's tenant so multi-mode lookups hit the right
 // pending_firings rows.
 type QueueDrainer interface {
@@ -130,7 +130,7 @@ type Spawner struct {
 	mu       sync.Mutex
 	ghClient *ghclient.Client
 	model    string
-	// SKY-389 per-org run-credential seam, wired once at startup via
+	// Per-org run-credential seam, wired once at startup via
 	// SetRunCredentialResolvers. When set (both modes in production) these
 	// supersede the process-global ghClient/model above; tests leave them
 	// nil and the resolver helpers fall back to ghClient/model.
@@ -161,7 +161,7 @@ type Spawner struct {
 	cancels               map[string]context.CancelFunc                     // runID → cancel the entire run
 	dispatchWake          chan struct{}                                     // best-effort latency nudge for the run-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
 	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
-	waitForClassification func(ctx context.Context, orgID, entityID string) // SKY-220 hook: blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. orgID scopes the classification read to the run's tenant (SKY-392 — the read goes through the org-scoped admin-pool store, not a raw query). Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
+	waitForClassification func(ctx context.Context, orgID, entityID string) // hook that blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. orgID scopes the classification read to the run's tenant — the read goes through the org-scoped admin-pool store, not a raw query. Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
 
 	// procs holds the live agent process handle for each run currently
 	// executing as a LiveRun, keyed by run id. It survives across HTTP
@@ -341,7 +341,7 @@ func (s *Spawner) SetQueueDrainer(d QueueDrainer) {
 	s.drainer = d
 }
 
-// SetWaitForClassification wires the SKY-220 hook that blocks the
+// SetWaitForClassification wires the hook that blocks the
 // spawner until the project classifier has decided the entity (or
 // the timeout / ctx fires). main.go provides the implementation so
 // this package doesn't import projectclassify. Nil-safe — tests and
@@ -356,7 +356,7 @@ func (s *Spawner) SetWaitForClassification(fn func(ctx context.Context, orgID, e
 // is forwarded so the spawner's run cancellation / shutdown path
 // breaks out of the wait early instead of blocking the full
 // classifier timeout. orgID scopes the classification read to the
-// run's tenant (SKY-392).
+// run's tenant.
 func (s *Spawner) awaitClassification(ctx context.Context, orgID, entityID string) {
 	s.mu.Lock()
 	fn := s.waitForClassification
@@ -368,7 +368,7 @@ func (s *Spawner) awaitClassification(ctx context.Context, orgID, entityID strin
 
 // notifyDrainer fires the QueueDrainer hook for an entity if a drainer is
 // configured AND the run that just finished was an auto-fired one.
-// Manual runs are fully decoupled from the queue per SKY-189 — they
+// Manual runs are fully decoupled from the queue by design — they
 // neither participate in the gate nor trigger drains. Runs in goroutine
 // to keep run-teardown latency unaffected.
 func (s *Spawner) notifyDrainer(orgID, triggerType, entityID string) {
@@ -384,8 +384,8 @@ func (s *Spawner) notifyDrainer(orgID, triggerType, entityID string) {
 	go d.DrainEntity(orgID, entityID)
 }
 
-// SetRunCredentialResolvers wires the per-org run-credential seam
-// (SKY-389): both modes resolve a run's GitHub client + LLM key + default
+// SetRunCredentialResolvers wires the per-org run-credential seam:
+// both modes resolve a run's GitHub client + LLM key + default
 // model through these, so credential resolution stops branching on mode.
 //
 //   - resolver: per-(org, owner) GitHub client — App-installation token in
@@ -456,14 +456,14 @@ func (s *Spawner) Storage() storage.Storage {
 // secrets reader (system door vs nil), not at the call site. owner is the
 // GitHub account the run targets — empty for Jira runs, which don't
 // pre-clone. teamID is the task's owning team, so a multi-team org honors
-// each team's model choice (SKY-389 review #2); empty falls back to the
+// each team's model choice; empty falls back to the
 // org default team.
 func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, teamID string) (*ghclient.Client, string) {
 	return s.resolveGHClient(ctx, orgID, owner), s.resolveModel(ctx, orgID, teamID)
 }
 
 // resolveGHClient resolves the per-(org, owner) GitHub client via the
-// SKY-389 resolver, falling back to the constructor-supplied client when
+// resolver, falling back to the constructor-supplied client when
 // no resolver is wired (test fixtures). A resolve failure returns nil:
 // setupGitHub surfaces "GitHub credentials not configured" for GitHub
 // tasks, and Jira runs don't need a client. The error is logged so a real
@@ -485,7 +485,7 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner string) *ghc
 }
 
 // resolveCloneToken resolves the App installation token for the host-side
-// clone of a repo owned by owner, via the same SKY-389 resolver
+// clone of a repo owned by owner, via the same resolver
 // resolveGHClient uses — so the API client and the `git clone`/`git fetch`
 // share one cached installation token. owner selects the
 // installation.
@@ -773,7 +773,7 @@ func gitPushRecorder(stores db.Stores, info agenthost.RunInfo) func(context.Cont
 	}
 }
 
-// resolveModel resolves the run's team default model via the SKY-389
+// resolveModel resolves the run's team default model via the
 // resolver, falling back to the constructor-supplied model when no resolver
 // is wired (test fixtures) or the resolver returns empty. teamID is the
 // run's owning team; empty falls back to the org default team inside the
@@ -793,7 +793,7 @@ func (s *Spawner) resolveModel(ctx context.Context, orgID, teamID string) string
 
 // getRunSecrets returns the per-org LLM-credential reader threaded into
 // RunOptions.Secrets: nil in local (ambient subscription fallback), the
-// system-door reader in multi. SKY-389.
+// system-door reader in multi.
 func (s *Spawner) getRunSecrets() agentproc.SecretsReader {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -942,7 +942,7 @@ func (s *Spawner) placeTaskInApprovalColumn(ctx context.Context, orgID, taskID s
 	s.broadcastTaskUpdate(orgID, taskID, "in_review")
 }
 
-// broadcastTaskUpdate emits a SKY-330 task_updated WS event so the
+// broadcastTaskUpdate emits a task_updated WS event so the
 // board can refetch / patch the card without polling. Payload
 // matches the shared event shape (task_id + status) the other
 // emitters use (handleSwipe, handleSnooze, handleTaskAdvance,

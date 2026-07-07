@@ -34,8 +34,8 @@ const secretKeyAnthropicAPIKey = "anthropic_api_key"
 // jiraProjectKeyRe matches Jira's standard project-key rule: a
 // leading uppercase letter followed by uppercase letters or digits.
 // Keys arriving through the API are uppercased before matching so
-// users typing "sky" land on the same canonical form as Jira's
-// wire-side "SKY-123".
+// users typing the key in lowercase land on the same canonical form
+// as Jira's wire-side representation.
 var jiraProjectKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*$`)
 
 // normalizeJiraProjectKey trims whitespace and uppercases. Used at
@@ -673,7 +673,7 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	// user actually authenticates against; org_settings.github_base_url
 	// mirrors it but the SecretStore copy is the source of truth.
 	// Wrapped in WithTx so the org_secrets read sees claims and matches
-	// the rest of the post-SKY-355 settings surface.
+	// the rest of the settings surface.
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
 	var creds auth.Credentials

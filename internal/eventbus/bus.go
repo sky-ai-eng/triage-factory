@@ -4,7 +4,7 @@
 // values; subscribers register handlers with an optional event-type
 // prefix filter and an optional org dimension.
 //
-// Org-aware delivery (SKY-310 / D9a):
+// Org-aware delivery:
 //
 //   - Each published event carries evt.OrgID — the tenant the event
 //     belongs to. Publishers stamp this at the boundary they emit from

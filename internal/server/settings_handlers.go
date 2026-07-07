@@ -44,7 +44,7 @@ func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.UserSettings = settings
 
-		// Identity is host-scoped (SKY-396): resolve the org's GitHub host
+		// Identity is host-scoped: resolve the org's GitHub host
 		// from org_settings, then look up the login for (user, host). An
 		// absent row degrades to "" exactly as the old NULL column did.
 		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
@@ -57,7 +57,7 @@ func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.GitHubUsername = ghUsername
 
-		// Jira identity is host-scoped too (SKY-397): look it up for the
+		// Jira identity is host-scoped too: look it up for the
 		// org's Jira host (same org_settings already loaded above).
 		jiraAccountID, _, err := tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
 		if err != nil {
@@ -102,7 +102,7 @@ func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) 
 //
 // The path segment {team_id} accepts a UUID or the literal "default",
 // which resolves to the org's default team via TeamsStore.GetDefaultForOrg.
-// This keeps the frontend functional before team pickers ship (SKY-358).
+// This keeps the frontend functional before team pickers ship.
 // --------------------------------------------------------------------
 
 type teamSettingsResponse struct {

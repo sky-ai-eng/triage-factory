@@ -69,7 +69,7 @@ type FactoryReadStore interface {
 	// render most-recent-first without client-side sorting.
 	//
 	// memory_missing is derived from a LEFT JOIN to run_memory rather
-	// than read off a column — see SKY-204. The agent has not
+	// than read off a column. The agent has not
 	// produced its memory file iff no run_memory row exists, or the
 	// row's agent_content is NULL/whitespace.
 	ActiveRuns(ctx context.Context, orgID string) ([]domain.FactoryActiveRun, error)

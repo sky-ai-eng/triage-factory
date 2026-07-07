@@ -19,14 +19,14 @@ import (
 // you can't see it" would leak the row's existence across the tenancy
 // boundary. Mirrors auth_handlers_test.go's bullet-5 test
 // (TestAuthFlow_OrgMiddleware_CrossOrg404AndMember200) but exercises
-// the session-orgID path that the SKY-316 handler sweep + SKY-325
-// WithTx wrap rely on, rather than the URL-segment org_id path.
+// the session-orgID path that the handler sweep + WithTx wrap rely
+// on, rather than the URL-segment org_id path.
 //
 // What these tests together prove:
-//   - withSession (SKY-313) populates ctxKeyOrgID from the session's
+//   - withSession populates ctxKeyOrgID from the session's
 //     active_org_id, not from any URL parameter the caller could spoof
-//   - handlers extract orgID via requireOrg (SKY-316) and pass it into
-//     tx.X.Get inside s.tx.WithTx (SKY-325) so RLS sees the right claims
+//   - handlers extract orgID via requireOrg and pass it into
+//     tx.X.Get inside s.tx.WithTx so RLS sees the right claims
 //   - the per-store RLS USING filter (see _Postgres_CrossOrgRLSDenied
 //     suite in internal/db/postgres) returns no row for the cross-org
 //     pair, which the handler surfaces as 404

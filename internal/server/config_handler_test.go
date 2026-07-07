@@ -32,7 +32,7 @@ func TestHandleConfig_LocalDefaults(t *testing.T) {
 // local user) with is_current_user=true.
 func TestHandleTeamMembers_LocalSingleEntry(t *testing.T) {
 	s := newTestServer(t)
-	// Seed the host-scoped identity (SKY-396) at the empty host — the test
+	// Seed the host-scoped identity at the empty host — the test
 	// server's org_settings has no github_base_url configured, so the
 	// handler resolves host="" and looks up (user, "").
 	if err := s.users.UpsertGitHubIdentity(t.Context(), runmode.LocalDefaultUserID, "", "AidanAllchin", "pat"); err != nil {
@@ -60,7 +60,7 @@ func TestHandleTeamMembers_LocalSingleEntry(t *testing.T) {
 	if m.GitHubUsername == nil || *m.GitHubUsername != "AidanAllchin" {
 		t.Errorf("github_username: got %v want AidanAllchin", m.GitHubUsername)
 	}
-	// SKY-330: bot presence depends on agent bootstrap + team_agents.enabled.
+	// Bot presence depends on agent bootstrap + team_agents.enabled.
 	// The test server bootstraps a default-enabled agent (see newTestServer),
 	// so bot should be non-nil with the bootstrapped agent's display name.
 	if resp.Bot == nil {

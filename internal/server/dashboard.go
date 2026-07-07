@@ -286,7 +286,7 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	// stale pre-mutation snapshot and the card snaps back to its old column
 	// until the next poll cycle (up to several minutes later).
 	//
-	// TODO(SKY-193): we deliberately don't fire a synthetic pr:ready_for_review
+	// TODO: we deliberately don't fire a synthetic pr:ready_for_review
 	// / pr:converted_to_draft event here — the user's UI click is its own
 	// signal and a second event would race the next poll's diff and confuse
 	// the audit trail. Revisit if a user reports "my trigger didn't fire

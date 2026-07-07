@@ -49,9 +49,9 @@ type RunnerCallbacks struct {
 // the same code path serves both SQLite (local) and Postgres (multi).
 type Runner struct {
 	scores    db.ScoreStore
-	entities  db.EntityStore          // SKY-284: scorer bulk-loads entity descriptions for prompt context
+	entities  db.EntityStore          // scorer bulk-loads entity descriptions for prompt context
 	orgID     string                  // scoring context org — runmode.LocalDefaultOrgID in local mode
-	secrets   agentproc.SecretsReader // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi). SKY-389.
+	secrets   agentproc.SecretsReader // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi).
 	recorder  *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	limiter   *syslimit.Limiter       // shared system-job sandbox cap (nil → unlimited); captured by scoreFn.
 	callbacks RunnerCallbacks

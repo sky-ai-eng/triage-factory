@@ -410,7 +410,7 @@ func TestProxyConfigFromCreds_BearerWinsOverTriple(t *testing.T) {
 // proxy config retains for upstream injection) and asserting the
 // sentinel is absent from the env that goes into the sandbox.
 //
-// Pins the credential-channel CI test from SKY-254's acceptance:
+// Pins the credential-channel CI test acceptance:
 // the sandbox env contains only proxy URLs + placeholders.
 func TestBuildSandboxProxyEnv_NoRealCredentials(t *testing.T) {
 	const realKey = "sk-ant-SENTINEL-REAL-KEY-MUST-NOT-LEAK"
@@ -557,7 +557,7 @@ func TestStartProxiesForSandbox_GitProxyStandsDownPrePushHook(t *testing.T) {
 	}
 }
 
-// TestStartProxiesForSandbox_TokenAuthEnforced pins SKY-395 Part A from
+// TestStartProxiesForSandbox_TokenAuthEnforced pins the token-auth invariant from
 // agentproc's perspective: the proxy started for a run rejects a request
 // bearing some *other* value (what a sibling run, or the old constant
 // placeholder, would send) with 401, but accepts the exact token that
@@ -589,10 +589,10 @@ func TestStartProxiesForSandbox_TokenAuthEnforced(t *testing.T) {
 	sdkKey := envValue(env, "ANTHROPIC_API_KEY")
 
 	// A sibling run would present its own (different) token; an attacker
-	// might guess the pre-SKY-395 constant placeholder. Both must 401,
+	// might guess the prior constant placeholder. Both must 401,
 	// as must a missing header.
 	for _, wrong := range []string{
-		"sk-ant-PROXY-PLACEHOLDER-DO-NOT-USE", // the pre-SKY-395 constant
+		"sk-ant-PROXY-PLACEHOLDER-DO-NOT-USE", // the prior constant
 		"sk-ant-some-other-runs-token",
 		"", // missing
 	} {
@@ -735,7 +735,7 @@ func TestStartProxiesForSandbox_TokensArePerRun(t *testing.T) {
 
 // TestStartProxiesForSandbox_ShutdownTearsDownProxy pins the
 // lifecycle invariant: after Shutdown, the proxy stops accepting
-// connections. Required for SKY-335's "kill the agent run mid-
+// connections. Required for the "kill the agent run mid-
 // execution, assert both proxies are torn down" acceptance check.
 func TestStartProxiesForSandbox_ShutdownTearsDownProxy(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1109,7 +1109,7 @@ func TestStartProxiesForSandbox_GitNoCredentialsTypedError(t *testing.T) {
 
 // TestStartProxiesForSandbox_GitProxyTornDownOnShutdown pins that the
 // git proxy, like the LLM proxy, stops accepting connections after the
-// bundle's Shutdown — the SKY-335 "kill the run, both proxies die"
+// bundle's Shutdown — the "kill the run, both proxies die"
 // invariant extended to the git slot.
 func TestStartProxiesForSandbox_GitProxyTornDownOnShutdown(t *testing.T) {
 	llmUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))

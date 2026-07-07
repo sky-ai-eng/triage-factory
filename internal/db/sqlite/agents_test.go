@@ -12,7 +12,7 @@ import (
 // TestAgentStore_SQLite runs the shared AgentStore conformance suite
 // against the SQLite impl. Each subtest opens a fresh in-memory DB so
 // row state doesn't leak across cases. patUserID is the local sentinel
-// user ID — post-SKY-269 the agents.github_pat_user_id column has an
+// user ID — the agents.github_pat_user_id column has an
 // FK to users(id), so the value must reference a real row (the
 // migration's sentinel user is the only one available in test).
 func TestAgentStore_SQLite(t *testing.T) {
@@ -24,10 +24,10 @@ func TestAgentStore_SQLite(t *testing.T) {
 	})
 }
 
-// TestAgentStore_SQLite_NonLocalOrgReturnsEmpty pins the post-SKY-269
+// TestAgentStore_SQLite_NonLocalOrgReturnsEmpty pins the current
 // shape: GetForOrg with a non-local orgID returns (nil, nil) — same
 // as the Postgres impl's WHERE org_id = ? semantics for a missing
-// org. Pre-269 this method called assertLocalOrg and returned an
+// org. Previously this method called assertLocalOrg and returned an
 // error; the new structural approach replaces the convention with a
 // column filter that just finds no rows.
 func TestAgentStore_SQLite_NonLocalOrgReturnsEmpty(t *testing.T) {

@@ -38,7 +38,7 @@ func TestDashboardStore_Postgres(t *testing.T) {
 }
 
 // TestDashboardStore_Postgres_OnlyCountsRequestingUser is the org-wide
-// regression guard for SKY-367: the dashboard query reads every GitHub
+// regression guard: the dashboard query reads every GitHub
 // snapshot in the org (entities are org-wide, no team column), and the
 // per-user filtering happens in Go on snap.Author / review author. Once
 // org-wide polling lands, many other users' PRs share the org; this pins

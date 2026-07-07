@@ -50,9 +50,9 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 		return "", fmt.Errorf("mkdir owner subdir: %w", err)
 	}
 	// No CloneAuth here: this is the in-sandbox Jira `workspace add` path
-	// (cmd/exec/workspace), where in-sandbox git credentials are SKY-394's
+	// (cmd/exec/workspace), where in-sandbox git credentials are a separate
 	// concern, not the host-side clone path. The shared body is already
-	// auth-capable, so SKY-394 can thread a credential through when it wires
+	// auth-capable, so a credential can be threaded through when it wires
 	// the in-sandbox path.
 	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir, CloneAuth{})
 }
@@ -144,7 +144,7 @@ func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, ru
 // checkoutRefPattern restricts a checkout ref to a conservative refname
 // alphabet before it's interpolated into a fetch refspec and passed to git.
 // Uppercase is permitted (branch names routinely carry ticket keys like
-// SKY-220).
+// PROJ-220).
 //
 // Blocks: leading dash (interpreted as a git CLI flag), whitespace, shell
 // metacharacters (`;`, `|`, backticks, `$`), refname-illegal characters
@@ -617,8 +617,8 @@ func addExcludesOrRollback(runID, wtDir string) error {
 // managedExcludePatterns are the gitignore patterns writeLocalExcludes
 // ensures are present in .git/info/exclude for every delegated worktree.
 //
-//   - _scratch/ — CI log archives, ephemeral downloads (SKY-146), entity-memory
-//     and project-knowledge subdirs populated by the spawner (SKY-219).
+//   - _scratch/ — CI log archives, ephemeral downloads, entity-memory
+//     and project-knowledge subdirs populated by the spawner.
 //     One prefix covers everything under it.
 var managedExcludePatterns = []string{"_scratch/"}
 

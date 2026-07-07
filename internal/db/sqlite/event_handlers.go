@@ -14,8 +14,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// eventHandlerStore is the SQLite impl of db.EventHandlerStore. Post-
-// SKY-269 the SQLite schema carries org_id structurally, so every
+// eventHandlerStore is the SQLite impl of db.EventHandlerStore. The
+// SQLite schema carries org_id structurally, so every
 // method filters by org_id (matching the Postgres impl's WHERE pattern)
 // rather than the older assertLocalOrg convention the predecessor
 // stores used.
@@ -76,7 +76,7 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 		// creator_user_id NULL when source='system'. The id is a random
 		// UUID per team copy and h.ID is the system_slug; re-seed dedupes on
 		// the (org_id, team_id, system_slug) unique index via INSERT OR
-		// IGNORE (SKY-380).
+		// IGNORE.
 		switch h.Kind {
 		case domain.EventHandlerKindRule:
 			res, err := s.q.ExecContext(ctx, `

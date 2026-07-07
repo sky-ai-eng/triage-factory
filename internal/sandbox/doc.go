@@ -16,8 +16,8 @@
 // process's env in any form. A jailbroken agent dumping its own
 // /proc/self/environ finds only what the caller put there.
 //
-// The caller's env is intentionally credential-free. SKY-335 layers
-// proxy URLs + placeholder credentials on top via the
+// The caller's env is intentionally credential-free. Proxy configuration
+// layers proxy URLs + placeholder credentials on top via the
 // ConfigureProxies callback: after the netns + veth are up but
 // before the OCI bundle is written, the caller binds a per-run LLM
 // proxy on Sandbox.HostIP and returns ANTHROPIC_BASE_URL +
@@ -29,7 +29,7 @@
 // T1: credential exfiltration — addressed by Property B above.
 // T2: in-run credential misuse — bounded by run wall-clock + per-run
 //
-//	policy (SKY-336). Partial coverage in v1.
+//	policy. Partial coverage in v1.
 //
 // T3: RCE in the agent SDK escaping the SDK process — addressed by
 //

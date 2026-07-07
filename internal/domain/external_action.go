@@ -37,7 +37,7 @@ type ExternalAction struct {
 	// Action is the discriminator — one of the Action* consts below. Free text
 	// (extensible — no CHECK constraint on the column).
 	Action string `json:"action"`
-	// Target is the resource key: owner/repo#123, owner/repo, SKY-123.
+	// Target is the resource key: owner/repo#123, owner/repo, or a Jira issue key.
 	Target string `json:"target"`
 	// ExternalID is the provider-native id of the backing object (PR number /
 	// review node id / comment id / issue key / branch ref). Empty → SQL NULL.

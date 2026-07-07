@@ -129,8 +129,8 @@ func TestTaskTeams_ClaimPrefersOwnerWhenAmbiguous(t *testing.T) {
 	}
 }
 
-// TestTaskTeams_NullOwner_VisibleViaTaskTeams_ConsolidatesOnClaim is the
-// SKY-372 rendering acceptance: an unresolved-owner task (team_id NULL) with
+// TestTaskTeams_NullOwner_VisibleViaTaskTeams_ConsolidatesOnClaim pins the
+// rendering acceptance: an unresolved-owner task (team_id NULL) with
 // task_teams={A} renders for team A via the task_teams visibility branch and
 // is absent from a non-member team B (the owner branch's team_id IS NOT NULL
 // guard keeps NULL from granting anyone). A claim by A consolidates the owner

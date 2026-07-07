@@ -10,7 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// SKY-224 — projects PATCH inserts curator_pending_context rows for
+// Projects PATCH inserts curator_pending_context rows for
 // pinned-repos / tracker changes whenever the project has an active
 // curator_session_id. The handler is responsible for the diff and the
 // dispatch is responsible for consume/finalize/revert; these tests

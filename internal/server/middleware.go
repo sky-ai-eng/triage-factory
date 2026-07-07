@@ -186,7 +186,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 		ctx := httpx.WithClaims(r.Context(), claims)
 		ctx = httpx.WithAuthIdentityID(ctx, authIdentityID)
 		ctx = context.WithValue(ctx, ctxKeySession, sess)
-		// SKY-313: surface the session's active org so OrgIDFrom() works
+		// Surface the session's active org so OrgIDFrom() works
 		// uniformly in multi mode without per-handler plumbing. Sessions
 		// whose user has zero memberships carry NULL here — we leave
 		// the active org unset and handlers that require an org return 409.

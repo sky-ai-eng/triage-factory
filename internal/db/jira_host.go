@@ -19,7 +19,7 @@ import "strings"
 // doesn't change the stored key. So a credential keyed under
 // "jira_token/<jira.CanonicalHost(orgBase)>" and an identity row keyed under
 // NormalizeJiraHost(orgBase) land on the same host string, keeping access and
-// identity in lockstep (SKY-397). Case is preserved — Server/DC path-based
+// identity in lockstep. Case is preserved — Server/DC path-based
 // hosts are case-sensitive below the authority, matching NormalizeGitHubHost.
 func NormalizeJiraHost(host string) string {
 	return strings.TrimRight(strings.TrimSpace(host), "/")

@@ -158,8 +158,8 @@ func TestMatchPredicate_UnknownEventType_NoMatch(t *testing.T) {
 	}
 }
 
-// SKY-270 cutover: Jira predicates moved from *_is_self booleans to *_in
-// allowlists of Atlassian account IDs, mirroring the SKY-264 GitHub shape.
+// Jira predicates moved from *_is_self booleans to *_in
+// allowlists of Atlassian account IDs, mirroring the GitHub shape.
 // The matcher resolves an event's actor via the metadata's
 // assignee_account_id and looks for case-insensitive membership in the
 // rule's assignee_in slice.

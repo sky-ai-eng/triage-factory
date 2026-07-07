@@ -35,7 +35,7 @@ import (
 // consumer is request-equivalent or runs inside a server-side
 // goroutine that already operates within the org's identity scope
 // (tracker is started at server boot and is currently single-org;
-// multi-mode org fan-out lands in D9 / SKY-253).
+// multi-mode org fan-out lands in a later milestone).
 //
 // SQLite has one connection; assertLocalOrg pins orgID to
 // runmode.LocalDefaultOrgID so a confused caller fails loudly rather
@@ -95,13 +95,13 @@ type EntityStore interface {
 	// ListActiveJiraTeamScoped is the discovery-read variant of
 	// ListActive(orgID, "jira") that backs the Jira stock / carry-over
 	// swipe deck (internal/server/stock.go). It surfaces *untasked*
-	// entities, so the SKY-366 task-membership semi-join can't scope
+	// entities, so the task-membership semi-join can't scope
 	// it — by definition the deck shows tickets before any task
 	// exists. Instead it scopes by the Jira projects attached to the
 	// viewer's teams.
 	//
 	// Multi-mode (Postgres): returns only active Jira entities whose
-	// project key (the prefix of source_id, e.g. "SKY" in "SKY-123")
+	// project key (the prefix of source_id, e.g. "PROJ" in "PROJ-123")
 	// matches a jira_project_status_rules row — the table a team
 	// populates to declare which Jira projects it tracks. That table's
 	// RLS (jira_rules_select) is team-membership-scoped, so under the
@@ -206,8 +206,7 @@ type EntityStore interface {
 	// — the tracker (which writes entities for every polled repo
 	// regardless of which user configured it) and the project
 	// classifier (which reads every org's unclassified entities to
-	// triage them). Same SKY-296 pattern as AgentRunStore's
-	// admin/app split.
+	// triage them). Same admin/app split pattern as AgentRunStore's.
 	//
 	// Behavior contract is identical to the non-System variants:
 	// org_id is still filtered in every WHERE clause as defense in

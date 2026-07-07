@@ -15,7 +15,7 @@ import (
 // a synthetic Claims with Subject = LocalDefaultUserID and ctxKeyOrgID
 // = LocalDefaultOrgID before delegating. A regression that drops the
 // injection would put every handler back into "branch on mode" land —
-// every per-handler sweep PR in SKY-253 depends on this.
+// every per-handler sweep PR depends on this.
 func TestWithSession_LocalShim_InjectsSentinels(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 

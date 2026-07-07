@@ -13,7 +13,7 @@ import (
 // Signup no longer provisions a tenant.
 //
 // Org creation is a deliberate user action in both deployment modes
-// (the SKY-435 parity contract): the multi-mode onboarding entry's
+// (the parity contract): the multi-mode onboarding entry's
 // "Start your Factory" CTA → the create-org flow, and local mode's
 // "Start your factory" action. The OAuth callback therefore
 // never mints an org on first login — a fresh user lands with zero

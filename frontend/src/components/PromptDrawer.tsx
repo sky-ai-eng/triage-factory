@@ -16,7 +16,7 @@ interface Props {
   // label — the page's active team is the single source of truth. Empty /
   // undefined keeps the modal's own write picker (standalone / solo use).
   lockedTeamId?: string
-  // When true (the org-template editor, SKY-381), CRUD targets the
+  // When true (the org-template editor), CRUD targets the
   // /api/org-template/prompts family instead of /api/prompts: org-scoped,
   // no team picker, leaf-only (templates don't carry chain steps or run
   // stats). Mutually exclusive with lockedTeamId.

@@ -8,7 +8,7 @@ import (
 // Stores bundles every per-resource store interface plus the
 // transaction runner. Constructed once at startup by either
 // internal/db/sqlite.New (local mode) or internal/db/postgres.New
-// (multi mode); fields are populated wave by wave as SKY-246 lands.
+// (multi mode); fields are populated wave by wave.
 //
 // NEVER pass Stores to a handler. Handlers depend only on the
 // specific interfaces they consume (db.ScoreStore, db.TaskStore, …).
@@ -40,7 +40,7 @@ type Stores struct {
 	// claim/arg mismatch in multi, sqlite asserts LocalDefaultOrgID.
 	Secrets SecretStore
 
-	// EventHandlers owns the unified event_handlers table (post-SKY-259):
+	// EventHandlers owns the unified event_handlers table:
 	// rules + triggers as one primitive with a kind discriminator.
 	// Rules create unclaimed tasks (human triage); triggers also fire
 	// an auto-delegation prompt. The router reads via GetEnabledForEvent
@@ -53,7 +53,7 @@ type Stores struct {
 
 	// Agents owns the agents table — the org's workload identity.
 	// One row per org. Bootstrap-only Create (admin pool in Postgres);
-	// reads + admin-gated updates run on the app pool. See SKY-260.
+	// reads + admin-gated updates run on the app pool.
 	Agents AgentStore
 
 	// TeamAgents owns team_agents — per-team membership for the
@@ -64,8 +64,8 @@ type Stores struct {
 
 	// Users owns the users table — non-secret identity facts like
 	// display_name and the Jira binding — plus the host-scoped GitHub
-	// identity bindings in user_github_identities (SKY-396, which
-	// replaced the SKY-264 users.github_username column). The keychain
+	// identity bindings in user_github_identities (which
+	// replaced the users.github_username column). The keychain
 	// holds the PAT; the rows hold everything else. The GitHub login
 	// backs the predicate-matcher allowlists, keyed on (user, host).
 	Users UsersStore
@@ -133,7 +133,7 @@ type Stores struct {
 
 	// Events owns the events audit log — append-only event rows the
 	// router records and the factory/delegate paths read. Holds both
-	// pools (SKY-305): app for request-handler equivalents (stock
+	// pools: app for request-handler equivalents (stock
 	// carry-over, factory drag-to-delegate) and admin for background
 	// goroutines without JWT-claims context (router RecordSystem +
 	// re-derive, delegate post-run metadata enrichment).
@@ -236,7 +236,7 @@ type Stores struct {
 	// writes in Tx.SyntheticClaimsWithTx with the requesting
 	// user's identity (creator_user_id read from the request row
 	// at dequeue). RLS policies gate every row on the
-	// (org_id, creator_user_id) pair. See SKY-298.
+	// (org_id, creator_user_id) pair.
 	Curator CuratorStore
 
 	// GitHubApps owns the org_github_apps table — per-org GitHub
@@ -263,7 +263,7 @@ type Stores struct {
 
 	// OrgTemplate owns org_template_prompts + org_template_handlers — the
 	// per-org, org-admin-editable template BootstrapNewOrg/NewTeam copy into
-	// each new team's prompts + event_handlers (SKY-381). App pool for the
+	// each new team's prompts + event_handlers. App pool for the
 	// editor CRUD (org_template_*_all RLS gates on tf.user_is_org_admin);
 	// admin pool for SeedFromShipped (org-create seed) + MaterializeIntoTeam
 	// (per-team copy, which also writes the team's prompts/event_handlers/
@@ -276,8 +276,9 @@ type Stores struct {
 	// project-classifier). Admin pool in Postgres: every writer is a
 	// boot-launched background goroutine with no JWT-claims context
 	// (system-written, org-scoped — same shape as PendingFirings). The
-	// org-scoped RLS policy gates the app-pool reads a future spend view
-	// will make. See TFAC-451.
+	// org-scoped RLS policy gates the app-pool reads the llm_spend view
+	// makes (db.SpendStore, read by internal/server/usage_handler.go).
+	// See TFAC-451.
 	SystemLLMRuns SystemLLMRunStore
 
 	// AccessChangeLog owns the access_change_log table — the small, low-volume
@@ -285,8 +286,8 @@ type Stores struct {
 	// membership & role grants/changes/revokes, credential bind/rotate). App
 	// pool in Postgres: every Record composes inside the claims-bearing WithTx
 	// that runs the audited action, gated by an org-scoped RLS policy; the
-	// future org-admin audit view reads through the same pool. SQLite is N=1
-	// and unscoped. See TFAC-471.
+	// org-admin audit view (internal/server/usage_access_log.go) reads
+	// through the same pool. SQLite is N=1 and unscoped. See TFAC-471.
 	AccessChangeLog AccessChangeLogStore
 
 	// ExternalActions owns the external_actions table — the append-only audit

@@ -35,9 +35,9 @@ type SystemSecretGetter interface {
 // resume, scorer, classifier, profiler, curator) can resolve per-org LLM
 // credentials without a request JWT. These run claims-free, so they MUST
 // use the system door, not the RLS-checked Get — otherwise the multi-mode
-// nil-Secrets error just trades for an RLS denial (SKY-385/SKY-389).
+// nil-Secrets error just trades for an RLS denial.
 //
-// Invariant (SKY-389): the orgID passed to Get always originates from the
+// Invariant: the orgID passed to Get always originates from the
 // run / entity / task, never user input — so the unauthenticated GetSystem
 // read is safe.
 func NewSystemSecretsReader(g SystemSecretGetter) SecretsReader {
@@ -116,12 +116,12 @@ const (
 // injects the real key server-side) — separate ticket, post-D10.
 //
 // It does NOT hide host-process env or filesystem from the agent
-// in pre-sandbox multi mode. That state is unsafe to ship; SKY-254
-// (D10 gVisor) is the gate.
+// in pre-sandbox multi mode. That state is unsafe to ship; D10 gVisor
+// is the gate.
 //
 // # Where the strict allowlist actually lives
 //
-// SKY-254 builds the OCI bundle's process.env from scratch — see
+// The D10 gVisor sandbox builds the OCI bundle's process.env from scratch — see
 // the docs/specs/sky-254-runsc-validation/ probe, which curated
 // process.env to {PATH, TERM, AGENT_CURATED_KEY} and verified via
 // `env` inside the sandbox that nothing else leaked through. That

@@ -50,7 +50,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 // has an FK to users(id). Callers that lack a real user identity
 // (event-triggered runs by schema CHECK, system services) should
 // route through the admin pool via per-store `...System` methods
-// instead. See SKY-296.
+// instead.
 func (s *Store) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
 	if userID == runmode.LocalDefaultUserID {
 		return errors.New("postgres: SyntheticClaimsWithTx rejected runmode.LocalDefaultUserID — sentinel has no FK target in multi-mode users; route to admin pool via per-store ...System methods")

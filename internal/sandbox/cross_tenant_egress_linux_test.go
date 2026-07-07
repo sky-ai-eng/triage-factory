@@ -1,6 +1,6 @@
 //go:build linux && integration
 
-// SKY-395 acceptance: drive the REAL Wrap()/applyEgressPolicy path with a
+// Acceptance: drive the REAL Wrap()/applyEgressPolicy path with a
 // live gVisor sandbox and prove the per-sandbox egress allowlist actually
 // blocks a compromised run from reaching a *sibling* run's gateway/proxy
 // IP — the cross-tenant credential-abuse hole — while leaving the run's own
@@ -50,7 +50,7 @@ func mustRun(t *testing.T, name string, args ...string) {
 	}
 }
 
-// TestIntegration_CrossTenantEgressBlocked is the SKY-395 Part B acceptance
+// TestIntegration_CrossTenantEgressBlocked is the Part B acceptance
 // check against real gVisor.
 func TestIntegration_CrossTenantEgressBlocked(t *testing.T) {
 	requireRunsc(t)

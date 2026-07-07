@@ -23,9 +23,9 @@ import (
 //     Create with admin-pool routing in Postgres because at org-create
 //     time no org_memberships row exists yet for the founder and the
 //     agents_insert RLS policy would refuse.
-//   - Future admin UI (SKY-257 / D14) — Update + SetGitHubPATUser via
+//   - Future admin UI (D14) — Update + SetGitHubPATUser via
 //     the app pool, admin-gated by RLS.
-//   - D-Claims (SKY-261) + delegate spawner — GetForOrg on every run
+//   - D-Claims + delegate spawner — GetForOrg on every run
 //     dispatch to pick the credential source.
 //
 // GitHub App identity is no longer modelled on agents — per-org
@@ -100,7 +100,7 @@ type AgentStore interface {
 	// (BootstrapTeamAgent), the event router's auto-trigger gate +
 	// agent-claim stamping (internal/routing), the delegate spawner's
 	// actor stamping, and the credential resolver's PAT-borrow lookup.
-	// Same SKY-296 admin/app split convention as the other stores in
+	// Same admin/app split convention as the other stores in
 	// this wave.
 	GetForOrgSystem(ctx context.Context, orgID string) (*domain.Agent, error)
 }

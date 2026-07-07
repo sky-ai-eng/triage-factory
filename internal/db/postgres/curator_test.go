@@ -12,7 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestCuratorStore_Postgres_AttributesPerUser pins SKY-298: when Alice
+// TestCuratorStore_Postgres_AttributesPerUser pins the case where Alice
 // and Bob each post a message to the same project, the goroutine's
 // per-turn SyntheticClaimsWithTx wrap stamps creator_user_id on every
 // row that turn produces. We exercise the full write set the goroutine
@@ -217,7 +217,7 @@ func TestCuratorStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 // tf.current_user_id(). The goroutine's MarkRequestRunning + GetRequest
 // pair runs under the requesting user's claims, so this isolation
 // matters when the curator runtime grows per-user sessions later
-// (SKY-294 / per-user-vs-per-team direction).
+// (per-user-vs-per-team direction).
 func TestCuratorStore_Postgres_GetRequestRLS(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

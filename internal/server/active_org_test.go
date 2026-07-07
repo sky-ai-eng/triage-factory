@@ -19,7 +19,7 @@ import (
 )
 
 // TestActiveOrg_OAuthCallback_DefaultsToEarliestMembership exercises
-// the SKY-313 OAuth-callback path: after a successful PKCE handshake,
+// the OAuth-callback path: after a successful PKCE handshake,
 // the new session row's active_org_id is populated from the user's
 // earliest org membership. The middleware then surfaces it as
 // ctxKeyOrgID on the next request.

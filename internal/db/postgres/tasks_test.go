@@ -48,7 +48,7 @@ func TestTaskStore_Postgres(t *testing.T) {
 			t.Helper()
 			return seedPgTaskChain(t, h.AdminDB, orgID, userID, suffix)
 		}
-		// SKY-295: per-team conformance subtest needs a second team
+		// The per-team conformance subtest needs a second team
 		// inside the same org so the partial unique index fans out
 		// instead of collapsing. Seed the team + a membership for
 		// the harness's user so memberships-aware code paths stay

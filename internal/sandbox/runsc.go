@@ -10,7 +10,7 @@ import (
 
 // newRunscCommand constructs the runsc invocation matching the
 // validated probe (precns-test.sh line 66) plus the systrap platform
-// choice (SKY-334 benchmark — 27% faster sustained syscalls than
+// choice (benchmark — 27% faster sustained syscalls than
 // ptrace on the same Fly Machine, same cold-start).
 //
 //	runsc --platform=systrap --ignore-cgroups --network=sandbox \

@@ -87,7 +87,7 @@ func (taskMutForTest) SetClaimedByUser(t *testing.T, database *sql.DB, taskID, u
 
 // GetTask fetches the minimal task-claim projection the agent tests
 // assert against (id, status, ClaimedByAgentID, ClaimedByUserID).
-// Pre-SKY-291 this scanned the full taskColumnsWithEntity list via
+// This used to scan the full taskColumnsWithEntity list via
 // the package-shared scan helpers; once those moved to the per-
 // backend TaskStore impls (and the legacy bridge was deleted in this
 // PR), the only remaining consumer is this package's agent_test.go

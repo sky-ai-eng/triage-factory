@@ -38,7 +38,7 @@ const openPRBody = `[
 ]`
 
 // TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips is the
-// integration-level acceptance for SKY-353's discovery rewrite:
+// integration-level acceptance for the discovery rewrite:
 //
 //   - PAT-perspective discovery enumerates the configured repo set via REST
 //     state=open and a new PR becomes an entity (not "PRs involving me").

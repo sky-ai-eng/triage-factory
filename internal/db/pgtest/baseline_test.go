@@ -1538,7 +1538,7 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 	// rejects: there's no entities row with (entityB, orgA).
 	// AdminDB bypasses RLS but FKs are enforced regardless of role.
 	// team_id resolved inline so the test trips the entity FK violation
-	// (its intent), not the team_id NOT NULL added in SKY-262.
+	// (its intent), not the team_id NOT NULL constraint.
 	_, err := h.AdminDB.Exec(`
 		INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id)
 		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, 'github:pr:opened', gen_random_uuid())
@@ -1584,8 +1584,8 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	bob := SeedUser(t, h, "bob")
 	AddOrgMember(t, h, bob, orgA, teamA, "member", "member")
 
-	// Alice creates a task + a run + child rows. All in orgA. Post-
-	// SKY-262 the team-default would make these rows visible to bob too
+	// Alice creates a task + a run + child rows. All in orgA. The
+	// team-default would make these rows visible to bob too
 	// (same team), which would hide the "child inherits parent
 	// visibility" property this test pins. Pin the parents at
 	// visibility='private' so the inheritance check is meaningful: alice
@@ -1785,8 +1785,8 @@ func TestOrgOwnership_OnlyOwnerCanTransfer(t *testing.T) {
 	}
 }
 
-// TestPrompts_TeamIDRequired — every prompt is team-owned (SKY-380
-// dropped the visibility column; team_id is the sole scoping signal).
+// TestPrompts_TeamIDRequired — every prompt is team-owned (the
+// visibility column was dropped; team_id is the sole scoping signal).
 // A prompt with a NULL team_id is an invalid state the NOT NULL
 // constraint refuses (SQLSTATE 23502), replacing the old
 // prompts_team_visibility_requires_team CHECK.
@@ -1863,7 +1863,7 @@ func TestPrompts_SemanticIDsAccepted(t *testing.T) {
 
 	// System prompt with a semantic ID. creator_user_id is NULL per the
 	// prompts_system_has_no_creator CHECK — shipped rows have no human
-	// author. team_id required (NOT NULL, no visibility column post-SKY-380).
+	// author. team_id required (NOT NULL, no visibility column).
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO prompts (id, org_id, creator_user_id, team_id, source, name, body)
 		VALUES ('system-pr-review', $1, NULL, $2, 'system', 'PR Review', '...')
@@ -1882,7 +1882,7 @@ func TestPrompts_SemanticIDsAccepted(t *testing.T) {
 	}
 
 	// User prompt picks up the default (UUID-shaped string). team_id
-	// resolved inline from the org's first team (SKY-262).
+	// resolved inline from the org's first team.
 	var userPromptID string
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO prompts (org_id, creator_user_id, team_id, name, body)
@@ -2152,7 +2152,7 @@ func TestRLS_TeamAdminNotOrgAdmin(t *testing.T) {
 func seedPrompt(t *testing.T, h *Harness, orgID, creatorID, name string) string {
 	t.Helper()
 	var id string
-	// team_id resolved inline from the org's first team (SKY-262 team-default).
+	// team_id resolved inline from the org's first team (team-default).
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO prompts (org_id, creator_user_id, team_id, name, body)
 		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, '') RETURNING id
@@ -2165,7 +2165,7 @@ func seedPrompt(t *testing.T, h *Harness, orgID, creatorID, name string) string 
 func seedBlueprint(t *testing.T, h *Harness, orgID, creatorID, name string) string {
 	t.Helper()
 	var id string
-	// team_id resolved inline from the org's first team (SKY-262 team-default).
+	// team_id resolved inline from the org's first team (team-default).
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO blueprints (org_id, creator_user_id, team_id, name, source)
 		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, 'user') RETURNING id
@@ -2196,7 +2196,7 @@ func seedBlueprintRun(t *testing.T, h *Harness, orgID, creatorID, taskID string)
 func seedProject(t *testing.T, h *Harness, orgID, creatorID, name string) string {
 	t.Helper()
 	var id string
-	// team_id resolved inline from the org's first team (SKY-262 team-default).
+	// team_id resolved inline from the org's first team (team-default).
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO projects (org_id, creator_user_id, team_id, name)
 		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3) RETURNING id
@@ -2228,8 +2228,8 @@ func seedTask(t *testing.T, h *Harness, orgID, creatorID, entityID, eventType st
 		t.Fatalf("seed event: %v", err)
 	}
 	var id string
-	// team_id resolved inline from the org's first team (SKY-262 made it
-	// NOT NULL on tasks). visibility defaults to 'team' from the column.
+	// team_id resolved inline from the org's first team (NOT NULL
+	// on tasks). visibility defaults to 'team' from the column.
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id)
 		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4, $5) RETURNING id
@@ -2499,7 +2499,7 @@ func TestRLS_OrgMembershipsBootstrapStillWorks(t *testing.T) {
 }
 
 // TestRLS_TeamMembershipWithoutOrgAccessDenied pins the defense-in-depth
-// guard added in SKY-262: tf.user_in_team(team_id) only checks the
+// guard: tf.user_in_team(team_id) only checks the
 // memberships table, so a user with a memberships row pointing at a
 // team in orgA but NO org_memberships row in orgA must NOT be able to
 // SELECT/UPDATE/DELETE team-visible rows in orgA. The outer
@@ -2635,8 +2635,8 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	}
 }
 
-// TestRLS_NonAdminCannotInsertOrgVisible pins the second defense added
-// in SKY-262: non-admin org members must not be able to INSERT rows
+// TestRLS_NonAdminCannotInsertOrgVisible pins the second defense:
+// non-admin org members must not be able to INSERT rows
 // with visibility='org' on any of the five swept tables. The system-
 // driven seed paths use the admin pool (BYPASSRLS) for shipped
 // visibility='org' rows; this policy guards user-path callsites.
@@ -2645,7 +2645,7 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 // member could fabricate org-visible rows that look like sanctioned
 // admin-managed defaults — e.g., a "shipped" prompt or rule that
 // claims org-wide authority but was actually inserted by a regular
-// user. The admin gate matches the post-SKY-246 UPDATE policy shape.
+// user. The admin gate matches the UPDATE policy shape.
 func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -2736,7 +2736,7 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 		// Sanity: a team-owned prompt INSERT still succeeds for carol
 		// (she's on the team) — the dropped per-table org gate doesn't
 		// over-deny the legitimate team path. prompts has no visibility
-		// column post-SKY-380; team membership alone governs it.
+		// column; team membership alone governs it.
 		if _, err := tx.Exec(`
 			INSERT INTO prompts (org_id, creator_user_id, team_id, name, body)
 			VALUES ($1, $2, $3, 'carol-team-prompt', '')
@@ -2750,7 +2750,7 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 	}
 }
 
-// TestRLS_TasksClaimXorRejection pins the SKY-261 D-Claims tasks_claim_xor
+// TestRLS_TasksClaimXorRejection pins the D-Claims tasks_claim_xor
 // CHECK: at most one of (claimed_by_agent_id, claimed_by_user_id) can be
 // set on a row. Both NULL is the unclaimed-in-queue state; either one set
 // is the current-claimant state; both set is forbidden.
@@ -2810,8 +2810,8 @@ func TestRLS_TasksClaimXorRejection(t *testing.T) {
 	_ = teamA
 }
 
-// TestRLS_UserSelfWriteWithoutOrgClaim pins the invariant that the
-// SKY-327 D9 follow-up sweep relies on: a tf_app caller can write to
+// TestRLS_UserSelfWriteWithoutOrgClaim pins the invariant that a
+// follow-up sweep relies on: a tf_app caller can write to
 // their own public.users row even when the JWT claim's org_id is
 // empty. The users_modify policy gates USING + WITH CHECK on
 // (id = tf.current_user_id()) and never references
@@ -2884,7 +2884,7 @@ func TestRLS_UserSelfWriteWithoutOrgClaim(t *testing.T) {
 	}
 }
 
-// TestRLS_UserGitHubIdentitySelfAccess pins the SKY-396 acceptance
+// TestRLS_UserGitHubIdentitySelfAccess pins the acceptance
 // criterion: a user can read/write only their own user_github_identities
 // rows. The policies (user_github_identities_modify /
 // _select) gate purely on (user_id = tf.current_user_id()) with no org
@@ -2978,7 +2978,7 @@ func TestRLS_UserGitHubIdentitySelfAccess(t *testing.T) {
 	}
 }
 
-// TestRLS_UserJiraIdentitySelfAccess pins the SKY-397 acceptance
+// TestRLS_UserJiraIdentitySelfAccess pins the acceptance
 // criterion: a user can read/write only their own user_jira_identities
 // rows, mirroring the GitHub sibling above. The policies
 // (user_jira_identities_modify / _select) gate purely on
@@ -3121,8 +3121,8 @@ func assertPgCode(t *testing.T, err error, code, what string) {
 	}
 }
 
-// TestRLS_TeamGitHubRepos pins the team_github_repos RLS contract
-// (SKY-375): SELECT is gated by team membership, INSERT/DELETE by team
+// TestRLS_TeamGitHubRepos pins the team_github_repos RLS contract:
+// SELECT is gated by team membership, INSERT/DELETE by team
 // admin, and rows are isolated cross-team. The mirror of the
 // jira_project_status_rules policies.
 func TestRLS_TeamGitHubRepos(t *testing.T) {
@@ -3219,7 +3219,7 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 }
 
 // TestOrgTrackedRepos_OrgBoundaryAndTeamBypass pins the security contract
-// of the tf.org_tracked_repos() SECURITY DEFINER helper (SKY-375): it
+// of the tf.org_tracked_repos() SECURITY DEFINER helper: it
 // bypasses the per-team SELECT RLS (a within-org, non-security boundary)
 // so the repo_profiles reconcile can read the full org union, but it
 // holds the ORG boundary — a caller's claims org must match the requested

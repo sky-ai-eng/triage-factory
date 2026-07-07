@@ -16,7 +16,7 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // The SystemSlug values here must stay in sync with the slugs ShippedBlueprints
 // wraps and the BlueprintID references in db.ShippedEventHandlers.
 //
-// SKY-380: prompts are team-scoped. Each entry carries a SystemSlug (the
+// Prompts are team-scoped. Each entry carries a SystemSlug (the
 // stable shipped identifier) rather than a literal id — the seeder mints a
 // random UUID per team copy and dedupes on (org_id, team_id, system_slug).
 // This stays the content source; only the seed writer changed.
@@ -51,7 +51,7 @@ func ShippedPrompts() []domain.Prompt {
 		// push to branch.
 		{SystemSlug: "system-fix-review-feedback", Name: "Fix Review Feedback", Body: FixReviewFeedbackPromptTemplate, Source: "system"},
 
-		// Default Curator spec-authorship skill (SKY-221). The Curator
+		// Default Curator spec-authorship skill. The Curator
 		// materializes whichever prompt a project's blueprint points at as a
 		// literal Claude Code skill on each dispatch; new projects start
 		// pointing at this one's blueprint. Users override per-project via the

@@ -78,7 +78,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		// PAT path — identical to the pre-App behavior. Credentials + per-org
 		// base URL read through the app pool inside WithTx so SecretStore
 		// decrypts under the user's claims and org_settings_select RLS is
-		// enforced — same shape the rest of the post-SKY-355 settings surface
+		// enforced — same shape the rest of the settings surface
 		// uses.
 		var (
 			creds  auth.Credentials
@@ -129,7 +129,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Warm the reachable-repo enumeration cache (SKY-409) so the
+	// Warm the reachable-repo enumeration cache so the
 	// immediate-next team-repos PUT validates the selection against this
 	// in-memory set in ~µs instead of re-enumerating the org. We just paid
 	// for the enumeration; the gate shouldn't pay for it again. Only the
@@ -444,7 +444,7 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, names)
 }
 
-// Repo *tracking* selection is per-team (SKY-375): writes go through
+// Repo *tracking* selection is per-team: writes go through
 // PUT /api/settings/team/{id}/repos (handleTeamReposPut), which writes
 // team_github_repos and reconciles the org-wide repo_profiles union. The
 // old org-global POST /api/repos was removed in favor of that single,

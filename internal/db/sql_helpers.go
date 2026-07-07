@@ -8,7 +8,7 @@ import "database/sql"
 // own AgentStore/etc. interfaces this file goes away — the per-
 // backend impl files own their own copies of these helpers there.
 //
-// Lived on internal/db/agent.go pre-SKY-285; lifted here when the
+// Lived on internal/db/agent.go before being lifted here when the
 // AgentRunStore migration retired that file's raw functions.
 
 // nullIfEmpty maps an empty string to a SQL NULL bind. Non-empty

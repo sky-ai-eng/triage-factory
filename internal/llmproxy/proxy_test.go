@@ -516,7 +516,7 @@ func TestProxyErrChannelCleanOnShutdown(t *testing.T) {
 	}
 }
 
-// TestProxyTokenGateAnthropic pins SKY-395 Part A for the Anthropic
+// TestProxyTokenGateAnthropic pins the per-run token gate for the Anthropic
 // path: with IncomingToken set, only a request presenting that exact
 // token on x-api-key is forwarded; a wrong or missing token gets 401
 // and never reaches the upstream. This is the fail-closed guarantee
@@ -658,7 +658,7 @@ func TestProxyTokenGateBedrock(t *testing.T) {
 // TestProxyNoTokenDisablesGate pins the opt-out: an empty IncomingToken
 // leaves the proxy unauthenticated (the loopback/test + single-tenant
 // direct path), so a request with no credential header is still
-// forwarded. This is what keeps the pre-SKY-395 loopback usage working.
+// forwarded. This is what keeps the loopback usage working.
 func TestProxyNoTokenDisablesGate(t *testing.T) {
 	rec := &upstreamRecord{}
 	upstream := fakeUpstream(rec, false)

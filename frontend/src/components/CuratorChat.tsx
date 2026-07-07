@@ -36,7 +36,7 @@ const SYSTEM_TICKET_SPEC_PROMPT_ID = 'system-ticket-spec'
 //   - Tool calls collapse by default; the latest one auto-expands
 //     while the request is still running. The user can manually
 //     toggle either direction.
-//   - Hidden subtype="context_change" rows (SKY-224 audit anchors)
+//   - Hidden subtype="context_change" rows (audit anchors)
 //     are filtered out — they exist to inform the agent, not the
 //     user.
 
@@ -808,7 +808,7 @@ function Composer({
   )
 }
 
-// --- Tool-call vocabulary (mirrors AgentCard.formatToolCall but keeps
+// --- Tool-call vocabulary (mirrors lib/runFeed's formatToolCall but keeps
 // curator-side knowledge of the tools the curator actually uses) ---
 
 function formatToolCall(name: string, input: Record<string, unknown>): string {

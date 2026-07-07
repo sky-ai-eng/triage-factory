@@ -8,8 +8,8 @@ import (
 
 //go:generate go run github.com/vektra/mockery/v2 --name=EventHandlerStore --output=./mocks --case=underscore --with-expecter
 
-// EventHandlerStore is the unified successor to TaskRuleStore + TriggerStore
-// (SKY-259). One table, one store, one router query. Rows are partitioned by
+// EventHandlerStore is the unified successor to TaskRuleStore + TriggerStore.
+// One table, one store, one router query. Rows are partitioned by
 // the kind discriminator:
 //
 //	kind="rule"    — declarative; creates an unclaimed task. Carries
@@ -37,7 +37,7 @@ type EventHandlerStore interface {
 	// team's own copy if it isn't already present, leaving existing rows
 	// untouched so user customizations (renames, disables, predicate
 	// edits, re-enables) survive across restarts. Idempotency keys on
-	// (org_id, team_id, system_slug) via ON CONFLICT DO NOTHING (SKY-380):
+	// (org_id, team_id, system_slug) via ON CONFLICT DO NOTHING:
 	// the id is a random UUID per copy and the shipped slug lives in
 	// system_slug, so a second team gets its own distinct rows (same slug,
 	// different team_id) and a re-seed is a no-op. Shipped trigger rows
@@ -67,7 +67,7 @@ type EventHandlerStore interface {
 	// teamID="" returns all (solo/local, or unfiltered). A non-empty
 	// teamID — the multi-team prompts page narrowed to one team — scopes
 	// to that team's handlers. Every handler is team-owned (team_id NOT
-	// NULL, no org-visible tier post-SKY-380), so this is a plain team
+	// NULL, no org-visible tier), so this is a plain team
 	// filter. The SQLite impl ignores it (local mode is single-team).
 	List(ctx context.Context, orgID string, kind string, teamID string) ([]domain.EventHandler, error)
 
@@ -188,8 +188,8 @@ var ShippedEventHandlers = []ShippedEventHandler{
 	//
 	// Rules that scope to "my PR" carry `author_in: []` as a placeholder.
 	// The SQLite Seed implementation substitutes the local user's
-	// users.github_username into the empty allowlist at insert time
-	// (SKY-264). Postgres Seed leaves the empty allowlist alone — multi
+	// users.github_username into the empty allowlist at insert time.
+	// Postgres Seed leaves the empty allowlist alone — multi
 	// mode doesn't have a single "self" to substitute; team visibility
 	// is the scoping mechanism there. Either way, users can edit the
 	// allowlist via the Settings UI to add or remove handles.
@@ -240,7 +240,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 	},
 	{
 		// Companion to jira-assigned. A ticket that had subtasks
-		// suppresses the initial assigned event (SKY-173 — parents are
+		// suppresses the initial assigned event (parents are
 		// containers, not work), then emits became_atomic when the
 		// last subtask closes. Same task-creation behavior as the
 		// assignment rule.

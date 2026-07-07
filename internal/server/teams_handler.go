@@ -332,7 +332,7 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 
 	// Materialize the defaults for the new team — its default-enabled bot
 	// membership + its own copies of the prompts and event handlers (rules +
-	// triggers), copied from the *org template* (SKY-381) so the team inherits
+	// triggers), copied from the *org template* so the team inherits
 	// the org's house rules, not just the TF-shipped set. Runs AFTER the team
 	// row commits because the seeders route through the admin pool and refuse
 	// to run inside the request's WithTx. Idempotent. Log-and-continue on

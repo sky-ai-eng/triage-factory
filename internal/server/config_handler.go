@@ -10,7 +10,7 @@ import (
 
 // configResponse is the FE-facing shape exposed by GET /api/config.
 //
-// Single consumer + single purpose: AuthGate (SKY-252 D8) reads
+// Single consumer + single purpose: AuthGate (D8) reads
 // deployment_mode at boot to choose between the local keychain-capture
 // flow and the multi-mode cookie auth flow. The call is unauthenticated
 // — it has to work before login, hence the pre-auth allowlist mount in
@@ -41,14 +41,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // teamMembersResponse is the roster shown to Variant B (multi-person team)
-// of the predicate editor AND to SKY-330's per-card assignee picker.
+// of the predicate editor AND to the per-card assignee picker.
 // Each row carries display_name + github_username + is_current_user so
 // the FE can pre-rank the dropdown and highlight "you" among teammates.
 //
 // Bot is a sibling field rather than a member row because the bot is
 // not a user — it occupies the agent claim slot, not the user claim
-// slot. Frontend renders it as a distinct entry (right under "Me" per
-// SKY-330) when non-null. Null when the agent isn't bootstrapped or
+// slot. Frontend renders it as a distinct entry (right under "Me")
+// when non-null. Null when the agent isn't bootstrapped or
 // team_agents.enabled is false for the caller's team — same gate the
 // delegate handlers enforce, surfaced to the picker so disabled bots
 // don't appear as a (would-409) option.
@@ -91,7 +91,7 @@ func (s *Server) handleTeamMembers(w http.ResponseWriter, r *http.Request) {
 	// querying memberships — the SQLite roster methods are multi-only stubs.
 	var username, displayName, jiraAccount string
 	_ = s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		// Identity is host-scoped (SKY-396): resolve the org's GitHub
+		// Identity is host-scoped: resolve the org's GitHub
 		// host from org_settings, then look up the login for (user, host).
 		orgSet, _ := tx.Orgs.GetSettings(r.Context(), orgID)
 		username, _ = tx.Users.GetGitHubLogin(r.Context(), userID, orgSet.GitHubBaseURL)

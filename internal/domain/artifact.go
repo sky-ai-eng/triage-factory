@@ -31,7 +31,7 @@ type Artifact struct {
 	Kind     string `json:"kind"`
 
 	// Target is the resource key: 'owner/repo', 'owner/repo#123',
-	// 'SKY-123'. ExternalID is the provider-native id of the backing
+	// or a Jira-style issue key (e.g. 'PROJ-123'). ExternalID is the provider-native id of the backing
 	// object (PR number / review id / issue key / branch ref); empty
 	// until the object exists. URL links to it; empty until created.
 	Target     string `json:"target"`
@@ -128,7 +128,7 @@ const (
 // The key is ':'-delimited, so no segment may itself contain a ':' —
 // ("a:b", "") and ("a", "b") would otherwise collapse to the same
 // "...:a:b". Today's providers and GitHub/Jira identifiers (owner/repo,
-// refs/heads/x, SKY-123) carry no colons, so no current writer is at risk;
+// refs/heads/x, a Jira issue key) carry no colons, so no current writer is at risk;
 // a future provider passing something URL-like must encode it first.
 //
 // resource and anchor are the caller's choice of *stable* dedup
@@ -138,17 +138,17 @@ const (
 //
 //   - resource: the stable resource key — 'owner/repo' for a branch or a
 //     branch-anchored PR, 'owner/repo#123' for a PR keyed on its number,
-//     'SKY-123' for a Jira issue.
+//     the Jira issue key for a Jira issue.
 //   - anchor: an optional stable sub-discriminator appended when resource
 //     alone isn't unique — a branch ref for a branch, or for a PR whose
 //     number isn't known yet (see below). Empty when resource is already
-//     unique (e.g. jira:issue:SKY-123).
+//     unique (e.g. jira:issue:PROJ-123).
 //
 // Examples:
 //
 //	ArtifactDedupKey("github", "pull_request", "owner/repo#123", "")          => "github:pull_request:owner/repo#123"
 //	ArtifactDedupKey("git",    "branch",       "owner/repo", "refs/heads/x")  => "git:branch:owner/repo:refs/heads/x"
-//	ArtifactDedupKey("jira",   "issue",        "SKY-123", "")                 => "jira:issue:SKY-123"
+//	ArtifactDedupKey("jira",   "issue",        "PROJ-123", "")                 => "jira:issue:PROJ-123"
 //
 // Pending→real PR — why resource/anchor are NOT the struct fields: a
 // 'pending' PR has no number yet, so the writer keys it on the branch ref

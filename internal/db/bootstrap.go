@@ -8,7 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// Bootstrap functions for agent identity (SKY-260 D-Agent).
+// Bootstrap functions for agent identity.
 //
 // All entry points share one property: they're idempotent. The org /
 // team / local bootstrap can run at every signup, handler call, or
@@ -22,8 +22,8 @@ import (
 //     provision action (POST /api/setup/start). Creates the synthetic
 //     tenant rows, then runs the shared BootstrapNewOrg chain. Nothing
 //     provisions at boot anymore.
-//   - BootstrapAgentForOrg — multi-mode org-create handler (D7
-//     SKY-251), runs after the orgs row inserts + before any team is
+//   - BootstrapAgentForOrg — multi-mode org-create handler (D7),
+//     runs after the orgs row inserts + before any team is
 //     created for that org.
 //   - BootstrapTeamAgent — multi-mode team-create handler (also D7),
 //     runs after each new teams row inserts.
@@ -65,7 +65,7 @@ func BootstrapLocalOrg(ctx context.Context, stores Stores, shippedPrompts []doma
 }
 
 // BootstrapAgentForOrg inserts the org's single agents row. Called by
-// the org-create handler (D7 SKY-251) right after the orgs row +
+// the org-create handler (D7) right after the orgs row +
 // founder's org_memberships row insert. Returns the agents.id so the
 // caller can immediately stamp it into the first team via
 // BootstrapTeamAgent.
@@ -112,17 +112,17 @@ func BootstrapTeamAgent(ctx context.Context, stores Stores, orgID, teamID string
 }
 
 // BootstrapNewTeam materializes the structural defaults for a *new team
-// in an existing org* (SKY-378): the team's default-enabled bot
+// in an existing org*: the team's default-enabled bot
 // membership (team_agents) plus its own copies of the prompts + event
-// handlers (rules/triggers) — copied from the org template (SKY-381).
+// handlers (rules/triggers) — copied from the org template.
 //
-// Per-team seeding is correct (SKY-380): handler + prompt rows carry a
+// Per-team seeding is correct: handler + prompt rows carry a
 // random-UUID id and a system_slug, deduped on (org_id, team_id,
 // system_slug), so a 2nd+ team materializes its own distinct copies instead
 // of ON CONFLICT-vanishing against the org's first team.
 //
 // The *source* of those copies is the org template, not the TF-shipped Go
-// slices (SKY-381): an org admin edits org_template_prompts +
+// slices: an org admin edits org_template_prompts +
 // org_template_handlers, and MaterializeIntoTeam copies the *current*
 // template into the new team — so the team inherits the org's house rules
 // (an extra trigger, a tweaked prompt body, an enabled trigger). Editing the
@@ -148,10 +148,10 @@ func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string) 
 }
 
 // BootstrapNewOrg materializes the defaults for a brand-new org + its
-// default team (the multi-mode founder-signup path, SKY-378 / SKY-251 D7):
+// default team (the multi-mode founder-signup path, D7):
 // the org's single agents row, the org template (seeded from the shipped
 // lists), the founder's first team's prompts + blueprints + handlers (copied
-// *from the template*, SKY-381), and the team's default-enabled bot membership.
+// *from the template*), and the team's default-enabled bot membership.
 // shippedPrompts + shippedBlueprints are passed in (rather than read from
 // internal/ai) so internal/db stays free of the ai dependency — main / server
 // supply ai.ShippedPrompts() / ai.ShippedBlueprints().
@@ -159,7 +159,7 @@ func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string) 
 // Order is load-bearing: agent → seed template → materialize first team →
 // team_agents. The org template is seeded from the shipped lists first
 // (SeedFromShipped), then the founder's team is materialized by *copying the
-// template* rather than the shipped lists directly (SKY-381) — the path is now
+// template* rather than the shipped lists directly — the path is now
 // uniform (template → team) for the first team and every later one, and an
 // org admin who edits the template before adding a 2nd team gets those edits
 // in the 2nd team. First-team contents are unchanged from the direct shipped

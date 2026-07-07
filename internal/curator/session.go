@@ -250,7 +250,7 @@ func (s *projectSession) dispatch(item queueItem) {
 		return
 	}
 
-	// Per-(org, team) default model (SKY-389). project.TeamID scopes the
+	// Per-(org, team) default model. project.TeamID scopes the
 	// model to the project's owning team so a multi-team org honors each
 	// team's choice; project is loaded + nil-checked just above. WithoutCancel
 	// so a cancel mid-dispatch doesn't break the model read; the resolver has
@@ -271,7 +271,7 @@ func (s *projectSession) dispatch(item queueItem) {
 
 	// Resolve selfBin so the allowlist's `Bash(<selfBin> exec *)`
 	// pattern matches the same absolute path the agent will invoke
-	// for SKY-221's "ticket as a spec" skill. Falling back to a
+	// for the "ticket as a spec" skill. Falling back to a
 	// hard fail rather than running with a broken allowlist —
 	// `os.Executable()` errors are vanishingly rare, but if one
 	// happens we'd silently disable curator tooling.
@@ -306,7 +306,7 @@ func (s *projectSession) dispatch(item queueItem) {
 		message = contextNote + "\n\n" + message
 		// Persist the rendered note as a curator_messages audit row
 		// keyed to the consuming request. Frontend filters subtype
-		// `context_change` out of rendered chat (SKY-226), but having
+		// `context_change` out of rendered chat, but having
 		// the row keyed to request_id makes the chat history
 		// reproducible: replay shows exactly what the agent saw.
 		// Best-effort — failing to write the audit row should not
@@ -345,7 +345,7 @@ func (s *projectSession) dispatch(item queueItem) {
 	// Materialize the project's spec-authorship prompt as a Claude Code
 	// skill at <cwd>/.claude/skills/ticket-spec/SKILL.md. Written fresh
 	// on every dispatch so prompt edits + per-project re-targeting both
-	// take effect on the next turn without a session reset (SKY-221).
+	// take effect on the next turn without a session reset.
 	// Failure is non-fatal: the user's chat turn should still answer
 	// even if skill writing hits a permission glitch.
 	skillCtx := context.WithoutCancel(msgCtx)

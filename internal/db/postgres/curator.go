@@ -226,7 +226,7 @@ func (s *curatorStore) InsertMessage(ctx context.Context, orgID string, msg *dom
 	// curator_messages.creator_user_id is NOT NULL with no DEFAULT
 	// in the Postgres baseline, so this binding is load-bearing —
 	// omitting it lets the INSERT fail RLS before the NOT NULL
-	// check fires, which is what the SKY-298 multi-user test
+	// check fires, which is what the multi-user test
 	// originally tripped on.
 	var id int64
 	err := s.q.QueryRowContext(ctx, `

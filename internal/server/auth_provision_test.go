@@ -45,7 +45,7 @@ func TestLookupEarliestMembership_ReturnsEarliest(t *testing.T) {
 	}
 }
 
-// TestSignupCallback_CreatesNoTenant is the core SKY-437 acceptance: a
+// TestSignupCallback_CreatesNoTenant is the core acceptance: a
 // fresh signup (OAuth callback for a user with zero memberships)
 // provisions nothing — no org owned by the user, no membership rows — and
 // the session lands with a NULL active_org_id. The deliberate create-org

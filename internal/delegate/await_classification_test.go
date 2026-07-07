@@ -18,7 +18,7 @@ func TestAwaitClassification_NilSafe(t *testing.T) {
 // TestAwaitClassification_InvokesHookWithEntityID verifies the hook
 // is called with exactly the orgID + entityID the spawner passes
 // through, so the projectclassify.WaitFor wired in main.go can poll
-// the right row in the right tenant (SKY-392).
+// the right row in the right tenant.
 func TestAwaitClassification_InvokesHookWithEntityID(t *testing.T) {
 	s := &Spawner{}
 	var gotOrg, gotEntity atomic.Value

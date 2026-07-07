@@ -51,7 +51,7 @@ func TestTaskStore_SQLite(t *testing.T) {
 			t.Helper()
 			return seedSQLiteTaskChain(t, conn, suffix)
 		}
-		// SKY-295: per-team multi-team conformance test creates a
+		// Per-team multi-team conformance test creates a
 		// secondary team alongside LocalDefaultTeamID. Local mode is
 		// single-team in production, but the SQLite schema doesn't
 		// reject additional teams — useful for exercising the

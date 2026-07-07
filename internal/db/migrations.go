@@ -96,7 +96,7 @@ func migrationsFor(dialect string) (fs.FS, string, error) {
 //     table (`entities`) → proceed (fresh install; goose.Up will
 //     create the tracker and run the baseline).
 //   - anything else → ErrPreV1110Install. Covers (a) older goose
-//     installs stamped at the SKY-245 baseline 202605090001 without
+//     installs stamped at the earlier baseline 202605090001 without
 //     the v1.11.0 baseline applied, (b) legacy `schema_migrations`
 //     installs from before the goose cutover, and (c) pre-runner
 //     installs that have app tables but no version metadata.

@@ -1,4 +1,4 @@
-// glass.tsx — the Liquid Glass components for the setup flow (SKY-457): the
+// glass.tsx — the Liquid Glass components for the setup flow: the
 // ambient backdrop the flush flow sits on. The shared material class strings +
 // motion easing live in glassStyle.ts (a non-component module, so this stays
 // component-only for react-refresh).

@@ -28,7 +28,7 @@ type Manager struct {
 	// argument. See the per-org loops in runGitHubCycle / runJiraCycle.
 	tasks        db.TaskStore
 	entities     db.EntityStore
-	users        db.UsersStore            // source of the local user's host-scoped GitHub identity (SKY-396)
+	users        db.UsersStore            // source of the local user's host-scoped GitHub identity
 	repos        db.RepoStore             // configured-repo names for GitHub poller startup
 	orgs         db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
 	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules; discovery polls the org-wide union (every team's rules)
@@ -578,7 +578,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 }
 
 // reconcileGitHubGroups is the GitHub-team-deletion reconcile floor — the
-// "periodic refresh" trigger the SKY-369 lifecycle describes, run every
+// "periodic refresh" trigger the reconcile lifecycle describes, run every
 // GitHub poll cycle so team_github_groups stays fresh for the routing layer
 // without depending on someone opening the settings page. For each distinct
 // GitHub org behind the configured repos it fetches the live team set and
@@ -658,7 +658,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	var username string
 	var userTeams []string
 	if isLocal {
-		// Identity is host-scoped (SKY-396): resolve the org's GitHub host
+		// Identity is host-scoped: resolve the org's GitHub host
 		// from org_settings, then read the local user's login for that
 		// (user, host) pair. Boot-time goroutine with no JWT claims → the
 		// `...System` admin-pool variants.
@@ -860,7 +860,7 @@ func (m *Manager) runJiraCycle() {
 		m.reportError("jira", "", err)
 		return
 	}
-	// SKY-463: ForSystem is the canonical constructor for the org/bot service
+	// ForSystem is the canonical constructor for the org/bot service
 	// client. The poller is read-only (discovery), so it's bot-attributed by
 	// design; routing through the resolver keeps system-client construction in
 	// one place alongside the per-user write path.

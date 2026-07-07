@@ -24,7 +24,7 @@ import (
 // The body is a pipeline of named stages; each short-circuits the rest by
 // returning ok=false (or an empty result).
 func (r *Router) HandleEvent(evt domain.Event) {
-	// Defensive: every upstream emitter (poller, per-org loop in SKY-312) tags
+	// Defensive: every upstream emitter (poller, per-org loop) tags
 	// events with evt.OrgID. A missing OrgID indicates an emitter bug — failing
 	// loud here prevents tenant-mixed writes that would silently land on the
 	// local sentinel. The check lives here at the single entry point;
@@ -169,10 +169,10 @@ func (r *Router) matchHandlers(orgID string, evt domain.Event) (matchedRules, ma
 		if !matched {
 			continue
 		}
-		// Team↔scope gate (SKY-375 repos / SKY-376 Jira projects): a team's
+		// Team↔scope gate (repos / Jira projects): a team's
 		// handler only fires for events whose entity the team tracks. Dropped
 		// here so the team never enters the visibility set, its triggers never
-		// fire, and SKY-368's task_teams excludes it for free. System/org-union
+		// fire, and task_teams excludes it for free. System/org-union
 		// handlers (NULL team_id) skip the gate.
 		if !r.handlerScopeMatchesEvent(evt, h, scopeCache) {
 			continue

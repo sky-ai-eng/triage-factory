@@ -39,7 +39,7 @@ func newTestDB(t *testing.T) *sql.DB {
 // makeEntity inserts a fresh active GitHub PR entity for tests. The
 // (source, source_id) pair must be unique per test run; the i argument
 // gives a stable per-test-row discriminator. Shared by lifetime_counter
-// and events tests after factory_test.go was retired in SKY-291.
+// and events tests after factory_test.go was retired.
 func makeEntity(t *testing.T, database *sql.DB, i int) *domain.Entity {
 	t.Helper()
 	return createEntityForTest(
@@ -49,7 +49,7 @@ func makeEntity(t *testing.T, database *sql.DB, i int) *domain.Entity {
 }
 
 // recordEvent inserts a real entity-attached event for tests. Returns
-// the event's UUID. After SKY-305 the events.go top-level RecordEvent
+// the event's UUID. The events.go top-level RecordEvent
 // is gone (lifted into the per-backend EventStore impls); this helper
 // does the seed-only raw INSERT for package-internal tests that need
 // rows in the events table without dragging in the SQLite store

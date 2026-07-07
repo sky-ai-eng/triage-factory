@@ -13,7 +13,7 @@ import (
 // request at its own root (e.g. /authorize, /.well-known/jwks.json).
 //
 // Why in-binary instead of Caddy/Nginx: one less moving part for the
-// self-host operator. D13 (SKY-256) can refactor to a fronting Caddy
+// self-host operator. D13 can refactor to a fronting Caddy
 // once the container packaging lands. For v1, the TF binary fronts
 // the only HTTPS-bearing endpoint anyway.
 //

@@ -340,7 +340,7 @@ func (r *authRig) requestWithSid(method, path, sid string) *http.Response {
 	return rec.Result()
 }
 
-// ---------- tests: SKY-251 acceptance bullets ----------
+// ---------- tests: acceptance bullets ----------
 
 // Bullet 1: Login → /api/me returns user + org list.
 func TestAuthFlow_LoginToMe(t *testing.T) {
