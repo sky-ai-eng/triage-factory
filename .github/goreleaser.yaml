@@ -43,6 +43,28 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# SPDX SBOM per archive, attached to the GitHub release as "*.sbom.json".
+# Requires `syft` on PATH in the goreleaser job — see release.yml.
+sboms:
+  - artifacts: archive
+
+# Keyless signing (Sigstore/cosign) of checksums.txt via GitHub OIDC — no
+# signing keys to provision or rotate. Verifying the checksum signature
+# transitively verifies every archive (each line is a sha256 of one
+# archive). Requires `cosign` on PATH and `id-token: write` permission on
+# the goreleaser job — see release.yml. See "Verifying releases" in
+# docs/self-host-setup.md for the consumer-facing verify commands.
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
