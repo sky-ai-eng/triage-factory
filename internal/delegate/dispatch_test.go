@@ -196,6 +196,47 @@ func TestReactor_AdvanceInheritsActorAgent(t *testing.T) {
 	}
 }
 
+// TestReactor_AdvanceInheritsTriggerID pins the by-rule spend attribution
+// (TFAC-478): the next step the reactor enqueues inherits the blueprint_run's
+// frozen trigger_id onto runs.trigger_id, so an event-fired step lands in the
+// JOIN-free llm_spend view attributable to its firing rule. Without the
+// inheritance, every autonomous step run carried NULL there — autonomous cost
+// in the usage by-category split with an empty by-rule breakdown.
+func TestReactor_AdvanceInheritsTriggerID(t *testing.T) {
+	s, database, brID, _, run0 := reactorFixture(t, "trig-inherit", 2, "completed", "continue")
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+
+	// Freeze a firing trigger on the blueprint_run, as the event path does at
+	// mint. The event_handlers row satisfies the trigger_id FK; the br flips to
+	// the event shape (creator NULL) so its trigger-type CHECK holds.
+	breaker, minSuit := 3, 0.5
+	trigID := "trig-inherit-handler"
+	if err := sqlitestore.New(database).EventHandlers.Create(ctx, org, runmode.LocalDefaultTeamID, domain.EventHandler{
+		ID: trigID, Kind: domain.EventHandlerKindTrigger, EventType: domain.EventGitHubPRCICheckFailed,
+		BlueprintID: "rbp-trig-inherit", BreakerThreshold: &breaker, MinAutonomySuitability: &minSuit,
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("EventHandlers.Create: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE blueprint_runs SET trigger_type = 'event', trigger_id = ?, creator_user_id = NULL WHERE id = ?`, trigID, brID); err != nil {
+		t.Fatalf("freeze trigger on blueprint_run: %v", err)
+	}
+
+	stepRun, _ := s.agentRuns.GetSystem(ctx, org, run0)
+	stepRun.TriggerType = "event"
+	stepRun.CreatorUserID = ""
+	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+
+	var gotTrig string
+	if err := database.QueryRow(`SELECT COALESCE(trigger_id, '') FROM runs WHERE blueprint_run_id = ? AND blueprint_step_index = 1`, brID).Scan(&gotTrig); err != nil {
+		t.Fatalf("read step-1 trigger_id: %v", err)
+	}
+	if gotTrig != trigID {
+		t.Errorf("step-1 run trigger_id = %q, want %q (inherited from blueprint_run for by-rule spend attribution)", gotTrig, trigID)
+	}
+}
+
 // TestReactor_FinalStepFinishCompletes: the final step completing with 'finish'
 // terminates the blueprint completed and closes the task.
 func TestReactor_FinalStepFinishCompletes(t *testing.T) {

@@ -343,7 +343,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// does (current_step_index), so a crash mid-flight is recoverable. The
 	// blueprint_run was just committed (the replay fence point); if the enqueue
 	// fails, mark it failed so it doesn't strand non-terminal.
-	if err := s.enqueueBlueprintStep(bgCtx, orgID, blueprintRunID, task, steps[0], stepModelOrInherit(stepPlan[0].Model, model), triggerType, creatorUserID, brRow.ActorAgentID); err != nil {
+	if err := s.enqueueBlueprintStep(bgCtx, orgID, blueprintRunID, task, steps[0], stepModelOrInherit(stepPlan[0].Model, model), triggerType, triggerID, creatorUserID, brRow.ActorAgentID); err != nil {
 		if _, mErr := s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, domain.BlueprintRunStatusFailed, "enqueue first step: "+err.Error(), nil); mErr != nil {
 			delegateLog.Warn("mark blueprint_run failed after enqueue error", "blueprint_run", blueprintRunID, "error", mErr)
 		}

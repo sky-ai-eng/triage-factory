@@ -443,7 +443,7 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 		if err := s.blueprints.SetRunCurrentStepSystem(context.Background(), orgID, br.ID, next); err != nil {
 			dispatchLog.Warn("set current_step_index for blueprint_run failed", "blueprint_run", br.ID, "error", err)
 		}
-		if err := s.enqueueBlueprintStep(context.Background(), orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepModelOrInherit(plan[next].Model, stepRun.Model), triggerType, creatorUserID, br.ActorAgentID); err != nil {
+		if err := s.enqueueBlueprintStep(context.Background(), orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepModelOrInherit(plan[next].Model, stepRun.Model), triggerType, br.TriggerID, creatorUserID, br.ActorAgentID); err != nil {
 			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("enqueue step %d: %v", next, err), &stepIdx, false)
 			return
@@ -501,7 +501,15 @@ func stepModelOrInherit(stepModel, inherited string) string {
 // passed through here so every step inherits the same runs.actor_agent_id —
 // resolved once at the delegation entry point, never re-derived from the task
 // claim (which is empty at step 0 on the event path and cleared by a takeover).
-func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunID string, task domain.Task, step domain.BlueprintStep, model, triggerType, creatorUserID, actorAgentID string) error {
+// triggerID is likewise the blueprint_run's frozen firing event_handler,
+// denormalized onto every step's runs.trigger_id (empty for manual → NULL):
+// the JOIN-free llm_spend view reads autonomous spend attribution off the runs
+// row alone (the usage by-rule breakdown, TFAC-478), so a step run without it
+// would show as autonomous cost attributable to no rule. TriggeringEventID is
+// deliberately NOT inherited — the replay fence relocated to blueprint_runs,
+// and stamping it per step would collide a multi-step chain on the leftover
+// runs_event_trigger_fence index.
+func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunID string, task domain.Task, step domain.BlueprintStep, model, triggerType, triggerID, creatorUserID, actorAgentID string) error {
 	stepIdx := step.StepIndex
 	return s.runQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
 		ID:                 uuid.New().String(),
@@ -510,6 +518,7 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 		Status:             "queued",
 		Model:              model,
 		TriggerType:        triggerType,
+		TriggerID:          triggerID,
 		CreatorUserID:      creatorUserID,
 		ActorAgentID:       actorAgentID,
 		BlueprintRunID:     blueprintRunID,

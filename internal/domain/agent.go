@@ -123,8 +123,8 @@ type AgentRun struct {
 	FailureKind   RunFailureKind
 	SessionID     string // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
 	MemoryMissing bool   // true if the pre-complete memory-file gate was exhausted without the agent writing a memory file
-	TriggerType   string // "manual" | "event" (matches prompt_triggers.trigger_type vocabulary)
-	TriggerID     string // FK to prompt_triggers.id — populated for auto runs only
+	TriggerType   string // "manual" | "event" (matches runs.trigger_type / blueprint_runs.trigger_type vocabulary)
+	TriggerID     string // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step run so the llm_spend view can attribute autonomous spend by rule (TFAC-478); empty/NULL for manual runs
 
 	// TriggeringEventID is the event instance that auto-fired this run
 	// (SKY-424). Set only on the event path; empty (→ SQL NULL) for manual
