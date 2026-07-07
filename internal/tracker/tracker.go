@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -14,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	"golang.org/x/sync/errgroup"
 )
 
 // Publisher is the event sink the tracker emits to. In production it's
@@ -120,8 +122,26 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 	// 304 (unchanged) this cycle; their tracked entities can keep their
 	// stored snapshot through the Phase-2 gate without a refresh.
 	discovered, quietRepos, err := t.discoverGitHub(ctx, client, username, repos)
+	var rateLimited *ghclient.ErrRateLimited
 	if err != nil {
-		trackerLog.Error("github discovery error", "error", err)
+		if errors.As(err, &rateLimited) {
+			// The repo fan-out already stopped queuing new repos the moment
+			// this surfaced (see discoverGitHub). Deliberately do NOT return
+			// here, though: `discovered` still holds every repo that DID
+			// complete before the budget ran out, and their pulls-etag was
+			// already persisted (recordPullsPoll, inline per-repo) as part of
+			// that success. Bailing out before the entity-seeding loop below
+			// runs would leave those repos' entities/snapshots un-seeded while
+			// their etag has already moved past the very PRs that needed
+			// seeding — a silent, hard-to-notice loss (they'd 304 on the next
+			// cycle and never get a second chance). So: let this loop process
+			// `discovered` as normal, and only skip Phase 2/3 (which share
+			// the same client and would just hit the same exhausted budget)
+			// afterward. See the check below the entity-seeding loop.
+			trackerLog.Warn("github discovery: rate limit budget exhausted, stopping repo fan-out", "resume_at", rateLimited.ResumeAt)
+		} else {
+			trackerLog.Error("github discovery error", "error", err)
+		}
 	}
 
 	// Build a SourceID-keyed lookup of discovery snapshots so Phase 2 can
@@ -199,6 +219,16 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 				}
 			}
 		}
+	}
+
+	if rateLimited != nil {
+		// Every repo discovery managed to reach before the budget ran out is
+		// now seeded above. Phase 2's GraphQL refresh shares the same client,
+		// so it would immediately hit the same exhaustion — skip it and
+		// propagate the typed error distinctly (errors.As-able) rather than
+		// let a less-specific wrapped error surface from Phase 2, or none at
+		// all if this cycle happens to have no active entities to refresh.
+		return 0, rateLimited
 	}
 
 	// Phase 2: Refresh active entities.
@@ -482,47 +512,104 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 	var all []ghclient.DiscoveredPR
 	quiet := map[string]bool{}
 
-	// Phase 1a: per-repo conditional open-PR enumeration. Sequential — the
-	// per-repo sweep is paced to respect GitHub's secondary (concurrency /
-	// burst) limits, which a parallel fan-out would trip even though the
-	// conditional 304s are free on the primary limit.
-	for _, repoFull := range repos {
-		owner, name := splitOwnerRepo(repoFull)
-		if owner == "" || name == "" {
-			continue
-		}
+	// Phase 1a: per-repo conditional open-PR enumeration, fanned out across a
+	// bounded worker pool (TFAC-570) sized by repoConcurrency() — default 4,
+	// clamped to [1,16] via TF_POLL_REPO_CONCURRENCY, which keeps the burst
+	// well under GitHub's secondary (abuse-detection) limits while still
+	// letting a large tracked set's cold-start/post-outage sync run wide
+	// instead of one round-trip at a time. TF_POLL_REPO_CONCURRENCY=1
+	// reproduces the pre-TFAC-570 fully serial sweep exactly.
+	//
+	// Parallelism is across repos only: each goroutine below does nothing but
+	// the REST list + etag lookup/persist for its own repo (recordPullsPoll
+	// writes a distinct repo-keyed row — no cross-repo shared state, so it
+	// runs inline rather than waiting on the whole fan-out; deferring it to
+	// after g.Wait() would let one slow/hanging repo expire a ctx deadline
+	// out from under every OTHER repo's already-finished persist). The one
+	// piece each goroutine can't touch directly is the shared seen/all/quiet
+	// result — that's written to a private, index-owned slot in results (no
+	// mutex needed) and merged sequentially, in original repo order, below.
+	// Every entity/snapshot mutation — that merge, and all of Phase 2/3 in
+	// RefreshGitHub — stays strictly sequential, so per-repo event ordering
+	// and the snapshot-diff re-emit invariant are untouched regardless of
+	// what order the repo fetches actually complete in.
+	results := make([]repoListResult, len(repos))
 
-		etag := ""
-		if t.repos != nil {
-			if stored, _, err := t.repos.GetPullsPollStateSystem(ctx, t.orgID, repoFull); err != nil {
-				trackerLog.Error("read pulls poll state failed", "repo", repoFull, "error", err)
+	var rateLimited atomic.Bool
+	var rateLimitErr atomic.Pointer[ghclient.ErrRateLimited]
+
+	g := new(errgroup.Group) // no WithContext: a per-repo failure must never cancel siblings in flight
+	g.SetLimit(repoConcurrency())
+
+	for i, repoFull := range repos {
+		if rateLimited.Load() {
+			// Budget's known exhausted — stop queuing new repo fetches (no
+			// point hammering it further). Goroutines already dispatched (up
+			// to the concurrency limit) still run to completion below.
+			break
+		}
+		g.Go(func() error {
+			owner, name := splitOwnerRepo(repoFull)
+			if owner == "" || name == "" {
+				return nil
+			}
+
+			etag := ""
+			if t.repos != nil {
+				if stored, _, err := t.repos.GetPullsPollStateSystem(ctx, t.orgID, repoFull); err != nil {
+					trackerLog.Error("read pulls poll state failed", "repo", repoFull, "error", err)
+				} else {
+					etag = stored
+				}
+			}
+
+			prs, newEtag, notModified, err := client.ListOpenPRs(ctx, owner, name, etag)
+			if err != nil {
+				// A rate-limit budget exhaustion is distinct from an ordinary
+				// per-repo failure: it means every remaining fetch would fail
+				// the same way, so signal the dispatch loop above to stop
+				// queuing more work rather than logging N more failures.
+				var rl *ghclient.ErrRateLimited
+				if errors.As(err, &rl) {
+					rateLimited.Store(true)
+					rateLimitErr.Store(rl)
+					return nil
+				}
+				// 403/404 means the token can't reach this configured repo (a
+				// PAT user without access, or an App not installed on it) —
+				// skip and log rather than failing the whole sweep.
+				var he *ghclient.HTTPError
+				if errors.As(err, &he) && (he.StatusCode == 403 || he.StatusCode == 404) {
+					trackerLog.Warn("discovery: repo unreachable — skipping", "repo", repoFull, "status", he.StatusCode)
+					return nil
+				}
+				trackerLog.Error("discovery: list open PRs failed", "repo", repoFull, "error", err)
+				return nil
+			}
+
+			if notModified {
+				t.recordPullsPoll(ctx, repoFull, etag) // advance polled_at, keep etag
 			} else {
-				etag = stored
+				t.recordPullsPoll(ctx, repoFull, newEtag)
 			}
-		}
 
-		prs, newEtag, notModified, err := client.ListOpenPRs(ctx, owner, name, etag)
-		if err != nil {
-			// 403/404 means the token can't reach this configured repo (a
-			// PAT user without access, or an App not installed on it) — skip
-			// and log rather than aborting the whole sweep.
-			var he *ghclient.HTTPError
-			if errors.As(err, &he) && (he.StatusCode == 403 || he.StatusCode == 404) {
-				trackerLog.Warn("discovery: repo unreachable — skipping", "repo", repoFull, "status", he.StatusCode)
-				continue
-			}
-			trackerLog.Error("discovery: list open PRs failed", "repo", repoFull, "error", err)
+			results[i] = repoListResult{ok: true, prs: prs, notModified: notModified}
+			return nil
+		})
+	}
+	_ = g.Wait() // every goroutine above always returns nil; failures are carried via results/rateLimited instead
+
+	for i, repoFull := range repos {
+		r := results[i]
+		if !r.ok {
 			continue
 		}
-
-		if notModified {
+		if r.notModified {
 			quiet[repoFull] = true
-			t.recordPullsPoll(ctx, repoFull, etag) // advance polled_at, keep etag
 			continue
 		}
 
-		t.recordPullsPoll(ctx, repoFull, newEtag)
-		for _, pr := range prs {
+		for _, pr := range r.prs {
 			sid := ghSourceID(pr.Snapshot.Repo, pr.Snapshot.Number)
 			if !seen[sid] {
 				seen[sid] = true
@@ -531,13 +618,20 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 		}
 	}
 
+	var discoveryErr error
+	if rl := rateLimitErr.Load(); rl != nil {
+		discoveryErr = rl
+	}
+
 	// Phase 1b: merged/closed dashboard backfill (local/PAT-only). Seeds
 	// recent-history entities via user-perspective GraphQL search. App tokens
 	// have no "me", so this is skipped when username is empty; multi-mode
 	// instead backfills per bound user via Tracker.BackfillDashboardHistory.
 	// Query construction is shared with that path (dashboardBackfillQueries) so
-	// both search for exactly the same history.
-	if username != "" {
+	// both search for exactly the same history. Also skipped once Phase 1a hit
+	// ErrRateLimited — it shares the same client budget, so it would just fail
+	// the same way for no benefit.
+	if username != "" && discoveryErr == nil {
 		for _, q := range dashboardBackfillQueries(username, repos) {
 			prs, err := client.DiscoverPRs(ctx, q, 50)
 			if err != nil {
@@ -554,7 +648,24 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 		}
 	}
 
-	return all, quiet, nil
+	return all, quiet, discoveryErr
+}
+
+// repoListResult is one goroutine's outcome from Phase 1a's per-repo
+// open-PR listing — everything needed to merge into the shared seen/all/quiet
+// result, deferred to the sequential merge so that merge can run in original
+// repo order regardless of completion order. Per-repo side effects that
+// don't need that ordering (recordPullsPoll's etag persist) happen inline in
+// the goroutine instead — see the comment above the fan-out loop. Each index
+// in the results slice is owned by exactly one goroutine (index i writes
+// only results[i]), so concurrent writers never touch shared memory. ok is
+// false for a repo that was skipped (malformed slug, 403/404-unreachable,
+// rate-limited, or any other per-repo failure) and whose zero value should
+// be ignored by the merge.
+type repoListResult struct {
+	ok          bool
+	prs         []ghclient.DiscoveredPR
+	notModified bool
 }
 
 // recordPullsPoll persists the conditional-request state for a repo after a

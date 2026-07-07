@@ -1,5 +1,14 @@
 name: test
 
+# `test` is a required status check, so a docs-only PR must still make this
+# job run and report success — it just doesn't need to build or test
+# anything. Skipping the whole workflow via a top-level `paths-ignore`
+# instead would mean the check never gets created for that PR, which leaves
+# a required check permanently pending and blocks merge. Instead, the job
+# always runs and the "Detect docs-only change" step below decides whether
+# the build/test steps are needed; push-to-main always runs everything
+# since that's the release source of truth.
+
 on:
   pull_request:
   push:
@@ -13,19 +22,49 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # For pull_request events the checked-out ref is the synthetic
+      # refs/pull/<n>/merge commit — base tip merged with the PR head,
+      # including forked heads, since that merge commit already embeds
+      # the fork's commit as a parent object. depth 2 is what pulls the
+      # merge commit's parents in locally; depth 1 (the default) checks
+      # out only the merge commit itself, with no parents. Diffing HEAD
+      # (the merge result) against HEAD^1 (base) isolates just the PR's
+      # own changes even when base has moved on since the PR branched,
+      # without any extra fetch — unlike fetching base/head by SHA,
+      # which GitHub's remote rejects as an unadvertised object request
+      # for fork PRs.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect docs-only change
+        id: docs
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only HEAD^1 HEAD)
+          if [ -z "$changed" ] || echo "$changed" | grep -qvE '(^docs/|\.md$)'; then
+            echo "only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "only=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: pnpm/action-setup@v4
+        if: steps.docs.outputs.only != 'true'
         with:
           package_json_file: frontend/package.json
 
       - uses: actions/setup-node@v4
+        if: steps.docs.outputs.only != 'true'
         with:
           node-version: '22'
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
       - uses: actions/setup-go@v5
+        if: steps.docs.outputs.only != 'true'
         with:
           go-version-file: go.mod
           cache: true
@@ -34,15 +73,23 @@ jobs:
       # package embeds it via go:embed; without it, package main fails
       # to compile and `go test ./...` blows up before reaching any test.
       - name: Build frontend
+        if: steps.docs.outputs.only != 'true'
         run: cd frontend && pnpm install --frozen-lockfile && pnpm run build
 
       # Frontend unit/component tests (vitest + Testing Library, jsdom).
       # Runs after the build step so node_modules from its install is reused.
       - name: Frontend tests
+        if: steps.docs.outputs.only != 'true'
         run: cd frontend && pnpm run test:run
 
       - name: Go build
+        if: steps.docs.outputs.only != 'true'
         run: go build ./...
 
       - name: Go test
+        if: steps.docs.outputs.only != 'true'
         run: go test -race ./...
+
+      - name: Docs-only change, build/test skipped
+        if: steps.docs.outputs.only == 'true'
+        run: echo "All changed files are documentation (docs/** or *.md); skipping build and test steps."
