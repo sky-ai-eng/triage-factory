@@ -68,8 +68,8 @@ func TestRefreshGitHub_PollCompleteSentinel_OnlyOnFullWrap(t *testing.T) {
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, org)
 
-	// Rate-limited cycle: no entities exist yet (empty listings), so the only
-	// thing to check is that the sentinel stayed silent.
+	// Rate-limited (partial) cycle: octo/ok1 can seed an entity, but the poll-completed
+	// sentinel must stay silent until a later cycle fully wraps the repo list.
 	if _, _, err := tr.RefreshGitHub(ctx, ghclient.NewClient(srv.URL, "tok"), "", repos, nil); err == nil {
 		t.Fatal("RefreshGitHub error = nil; want ErrRateLimited")
 	}
