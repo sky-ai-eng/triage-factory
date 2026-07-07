@@ -608,6 +608,24 @@ function UserRoster({ data, emptyLabel = '—' }: { data: UsageUserBucket[]; emp
   )
 }
 
+// dayTs turns a 'YYYY-MM-DD' bucket date into a local-midnight epoch ms — the
+// numeric X value the over-time traces plot against. by_day / by_day_model are
+// SPARSE (only days with settled spend, see spendByDay on the backend), so a
+// category axis (Recharts' default for a string dataKey) spaces every point
+// evenly by index regardless of the actual gap between them — a 5-day gap
+// would read identically to a 1-day gap. A numeric axis with
+// domain={['dataMin', 'dataMax']} spaces points proportionally to elapsed
+// time instead.
+function dayTs(date: string): number {
+  return new Date(date + 'T00:00:00').getTime()
+}
+
+// dayLabel renders a plotted timestamp back to the short display date used in
+// tooltips (e.g. "Jun 6").
+function dayLabel(ts: number): string {
+  return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
 // Trace is the "over time" readout: a borderless accent line with a soft area
 // fade, sitting directly on the warm console over a single faint baseline — no
 // panel, no screen, no scanlines. It matches the gauges' gradient language and
@@ -624,10 +642,7 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
     )
   const formatted = data.map((d) => ({
     ...d,
-    label: new Date(d.date + 'T00:00:00').toLocaleDateString([], {
-      month: 'short',
-      day: 'numeric',
-    }),
+    ts: dayTs(d.date),
   }))
 
   return (
@@ -640,12 +655,12 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
               <stop offset="100%" stopColor="var(--color-accent)" stopOpacity={0} />
             </linearGradient>
           </defs>
-          <XAxis dataKey="label" hide />
+          <XAxis dataKey="ts" type="number" domain={['dataMin', 'dataMax']} hide />
           <YAxis hide />
           <Tooltip
             contentStyle={tooltipStyle}
             formatter={(value) => [fmtUSD(Number(value)), 'spend']}
-            labelFormatter={(label) => String(label)}
+            labelFormatter={(value) => dayLabel(Number(value))}
           />
           <Area
             type="monotone"
@@ -792,10 +807,7 @@ function StackedTrace({
     const row = byDate.get(date)!
     const out: Record<string, number | string> = {
       date,
-      label: new Date(date + 'T00:00:00').toLocaleDateString([], {
-        month: 'short',
-        day: 'numeric',
-      }),
+      ts: dayTs(date),
     }
     for (const s of series) out[s.key] = row[s.key] ?? 0
     return out
@@ -805,12 +817,12 @@ function StackedTrace({
     <div className={`relative ${heightClass}`}>
       <ResponsiveContainer>
         <AreaChart data={wide} margin={{ top: 6, right: 2, bottom: 0, left: 2 }}>
-          <XAxis dataKey="label" hide />
+          <XAxis dataKey="ts" type="number" domain={['dataMin', 'dataMax']} hide />
           <YAxis hide />
           <Tooltip
             contentStyle={tooltipStyle}
             formatter={(value, name) => [fmtUSD(Number(value)), String(name)]}
-            labelFormatter={(label) => String(label)}
+            labelFormatter={(value) => dayLabel(Number(value))}
           />
           {series.map((s) => (
             <Area
