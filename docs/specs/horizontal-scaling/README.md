@@ -235,12 +235,19 @@ behavior change.
 
 ### 4.1 Identity and registry
 
-Executor identity is **stable across restarts**: an id minted once and
+Instance identity is **stable across restarts**: an id minted once and
 persisted under `TF_STATE_ROOT` (so a rebooted executor recognizes *its
 own* in-flight rows), plus a `boot_epoch` that increments per boot.
 
+The registry is deliberately named for what it holds — **every TF
+process in the deployment**, not just executors ("instance" is already
+the shipped vocabulary: `runs.executor_id` stamps "a constant instance
+id"). "Executor" stays what it is everywhere else: a *role*. The
+capacity/admission columns are meaningful only for executor-capable
+roles and stay NULL/zero on pure-control rows.
+
 ```sql
-executors (
+instances (
   id               text PRIMARY KEY,
   role             text NOT NULL,             -- 'executor' | 'all' | 'control'
   version          text NOT NULL,             -- build version, for skew visibility
@@ -248,21 +255,23 @@ executors (
   started_at       timestamptz NOT NULL,
   last_heartbeat_at timestamptz NOT NULL,
   draining         boolean NOT NULL DEFAULT false,
-  -- capacity + admission state (TFAC-552's follow-up lands here)
-  max_runs         int NOT NULL,
-  active_runs      int NOT NULL,
+  -- capacity + admission state, executor-capable roles only
+  -- (TFAC-552's follow-up lands here)
+  max_runs         int,
+  active_runs      int,
   mem_total_mb     int,
   mem_available_mb int,
-  dispatch_gated   boolean NOT NULL,
+  dispatch_gated   boolean,
   labels           jsonb                      -- future: sandbox-fleet profile classes
 )
 ```
 
 Heartbeat every ~3–5 s (one UPDATE). Membership = rows with a fresh
 heartbeat; everything that needs "the live fleet" (placement §6,
-reaper §4.3, dashboard §8) reads this table. Control pods register too
-(so the dashboard sees the whole deployment), they just never claim
-runs.
+reaper §4.3, dashboard §8) reads this table, filtering on `role` where
+it wants only claimants. Control pods register too (so the dashboard
+sees the whole deployment — versions, lease holder, health), they just
+never claim runs.
 
 This registry is deliberately also **the dashboard's data source** —
 the scheduler's bookkeeping *is* the fleet view (§8). No parallel
@@ -523,7 +532,7 @@ should be the cheapest self-healing thing available:
   registry members, keyed `(org, repo)` for delegation and
   `(org, project)` for curator. No state to maintain, any pod computes
   it identically, joins/leaves reshuffle only the affected keys, and
-  weights come from `executors.max_runs`. Top-K candidates fall out for
+  weights come from `instances.max_runs`. Top-K candidates fall out for
   free (hot-repo bounded replication: the first K candidates all count
   as "preferred", bounding a hot monorepo's cache to K pods on a cost
   dial — no hard ceiling).
@@ -624,8 +633,8 @@ Already present on `runs`: `started_at` (enqueue), `claimed_at`,
 money. Net-new:
 
 ```sql
-executor_stats (          -- 1-minute samples, written by each pod, ~30d retention
-  executor_id  text,
+instance_stats (          -- 1-minute samples, written by each pod, ~30d retention
+  instance_id  text,
   at           timestamptz,
   active_runs  int,
   queued_visible int,      -- queue depth this executor could claim
@@ -638,7 +647,7 @@ executor_stats (          -- 1-minute samples, written by each pod, ~30d retenti
 )
 ```
 
-One row per executor per minute is negligible write load and answers
+One row per instance per minute is negligible write load and answers
 every time-series question the dashboard has (utilization history,
 claim rates, headroom trends). A retention reaper trims it.
 
@@ -651,8 +660,8 @@ admission and mis-reports capacity today.
 
 - **`GET /api/fleet/*`** (operator-gated): `overview` (fleet totals,
   capacity vs active, queue depth + wait percentiles, version skew),
-  `executors` (registry + live stats + drain control), `timeseries`
-  (executor_stats windows), `placement` (the §6.1 explainer),
+  `instances` (registry + live stats + drain control), `timeseries`
+  (instance_stats windows), `placement` (the §6.1 explainer),
   `queue` (oldest-waiting, per-org shares).
 - **Fleet page** in the SPA (or an Infrastructure tab on `/usage`):
   machines with capacity bars + gated/draining/version badges, live
@@ -724,7 +733,7 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
 12. Curator homes + re-home on death. (M)
 
 **P3 — Fleet operations**
-13. `executor_stats` sampler + retention + `/api/fleet` + Fleet UI +
+13. `instance_stats` sampler + retention + `/api/fleet` + Fleet UI +
     operator identity. (L)
 14. Per-org fairness + per-org concurrency cap in the claim. (M)
 15. TFAC-307 inheritances: cred cache, pooler validation + LISTEN conn
