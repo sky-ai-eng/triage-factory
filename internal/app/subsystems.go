@@ -288,6 +288,9 @@ func (a *App) buildRouting() {
 	a.srv.SetIngestor(a.ingestor)
 
 	a.pollerMgr = poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.ghResolver)
+	// TFAC-573: GET /readyz's poller-alive hard check + per-org poll-
+	// staleness soft signal read through this method.
+	a.srv.SetPollerManager(a.pollerMgr.Health)
 	a.pollerMgr.OnError = func(source, orgID string, err error) {
 		// Throttle key includes orgID so a chronic failure on one tenant
 		// doesn't suppress a fresh failure on another. Process-level errors

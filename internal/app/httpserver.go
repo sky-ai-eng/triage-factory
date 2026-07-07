@@ -24,6 +24,9 @@ import (
 func (a *App) buildServer(ctx context.Context, static fs.FS) error {
 	a.srv = server.New(a.database, a.stores, a.storedPort)
 	a.wsHub = a.srv.WSHub()
+	// TFAC-573: main.Version isn't otherwise threaded into this package;
+	// GET /readyz surfaces it so an operator can confirm a deploy landed.
+	a.srv.SetVersion(a.cfg.Version)
 
 	if a.local() {
 		// Local deploy config: publicURL is the local address, HMAC key is

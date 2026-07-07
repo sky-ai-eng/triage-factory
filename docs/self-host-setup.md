@@ -62,6 +62,30 @@ curl -fsS http://localhost:3000/api/health   # 200 OK
 curl -s http://localhost:9999/.well-known/jwks.json | jq .   # JWKS with one public RSA key
 ```
 
+### Monitoring
+
+Point your load balancer / uptime check at `GET /readyz` (a bare path, not under `/api/`) rather than `/api/health` above. `/api/health` is a liveness probe only — no DB or integration check, by design, so a flapping dependency can't trip a platform's auto-restart-on-liveness-failure. `/readyz` is the readiness signal: it 503s on a **hard** failure (DB unreachable, migrations not applied, or a poller's base-tick loop stalled/crashed) and reports, without ever 503ing on them, **soft** signals — each org's last-successful-poll age vs its configured poll interval, and a count of in-flight (`queued`/`running`) agent runs:
+
+```sh
+curl -fsS http://localhost:3000/readyz | jq .
+```
+
+```json
+{
+  "status": "ok",
+  "checked_at": 1783300042,
+  "version": "v1.12.0",
+  "checks": {"db": "ok", "migrations": "ok", "poller_github": "ok", "poller_jira": "ok"},
+  "sources": {
+    "github": {"<org_id>": {"last_success_unix": 1783300000, "age_seconds": 42, "interval_seconds": 300}},
+    "jira":   {"<org_id>": {"last_success_unix": 1783299900, "age_seconds": 142, "interval_seconds": 300}}
+  },
+  "active_runs": 3
+}
+```
+
+Alert on `age_seconds > 3 × interval_seconds` for whichever source/org you care about — that threshold is yours to pick; `/readyz` reports the raw numbers rather than guessing at your alerting policy (its own top-level `status` field applies that same 3x default and surfaces it as `"degraded"`, purely as a quick-glance dashboard signal, never as a 503). `/readyz` is unauthenticated by design, same as `/api/health` — the response carries only opaque org IDs, never repo names, usernames, or other tenant data, so there is no `?verbose=` mode and none is needed.
+
 ## 5. Verify the GitHub OAuth flow
 
 Drive the full OAuth roundtrip end-to-end in a browser:
