@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import * as Popover from '@radix-ui/react-popover'
-import type { AgentMessage, AgentRun, Task } from '../types'
+import type { AgentRun, Task } from '../types'
+import { EMPTY_FEED, type FeedLine, type RunCardFeed } from '../lib/runFeed'
 import { useOrgHref } from '../hooks/useOrgHref'
 import ArtifactList from './ArtifactList'
 import RequestedReviewerBadge from './RequestedReviewerBadge'
@@ -29,7 +30,10 @@ interface Props {
   task: Task
   run: AgentRun
   chainSteps?: AgentRun[]
-  messages: AgentMessage[]
+  // Bounded live-feed projection for this run (running stats + last few ticker
+  // lines) — see lib/runFeed. The board maintains it incrementally instead of
+  // holding every run's full message array in state.
+  feed?: RunCardFeed
   // Unanswered tool-permission prompts for this run, head-first. When non-empty
   // the card renders an inline Allow/Deny control and takes the attention tone.
   pendingPermissions?: PendingPermission[]
@@ -54,7 +58,7 @@ export default function AgentCard({
   task,
   run,
   chainSteps,
-  messages,
+  feed,
   pendingPermissions,
   onResolvePermission,
   onRequeue,
@@ -99,7 +103,7 @@ export default function AgentCard({
   const hasPending = pending.length > 0
   const glow: Glow | null =
     hasPending || needsApproval ? { tone: 'attention', breathing: false } : runGlow(run)
-  const stats = computeStats(messages, run)
+  const stats = feed ?? EMPTY_FEED
 
   const hasChain = !!chainSteps && chainSteps.length > 1
   const stepStates: StepState[] = useMemo(
@@ -202,7 +206,7 @@ export default function AgentCard({
             failureKind={run.FailureKind}
           />
         ) : (
-          <LiveFeed messages={messages} isActive={isActive} />
+          <LiveFeed lines={stats.lines} isActive={isActive} />
         )}
 
         {/* Inline tool-permission prompt — the parked turn's Allow/Deny,
@@ -329,57 +333,12 @@ function ArtifactsAffordance({
 // The feed fades in at its top edge so older lines dissolve as new ones arrive.
 const FEED_MASK = 'linear-gradient(to bottom, transparent 0, #000 22px, #000 100%)'
 
-interface FeedLine {
-  id: string
-  time: string
-  text: string
-}
-
-// feedLines flattens the transcript into compact one-liners — the agent's
-// actions (tool calls) and its prose turns — for the card's live ticker. The
-// full, nested transcript lives in the expanded run view.
-function feedLines(messages: AgentMessage[]): FeedLine[] {
-  const out: FeedLine[] = []
-  for (const msg of messages) {
-    const time = new Date(msg.CreatedAt).toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    })
-    // Operator steers show on the ticker too — the card should reflect that
-    // someone redirected the run.
-    if (msg.Role === 'user' && msg.Content) {
-      out.push({ id: `u-${msg.ID}`, time, text: `you: ${clip(msg.Content, 64)}` })
-      continue
-    }
-    if (msg.Role !== 'assistant') continue
-    // Skip the raw JSON completion message (the agent's structured output).
-    if (msg.Content && msg.Content.trimStart().startsWith('{"status":')) continue
-    // Reasoning stays off the ticker — it's a verbose stream; the expanded
-    // run view renders it under its own THINKING rows.
-    if (msg.Subtype === 'thinking') continue
-    if (msg.Content) out.push({ id: `txt-${msg.ID}`, time, text: clip(msg.Content, 70) })
-    if (msg.ToolCalls?.length) {
-      for (const tc of msg.ToolCalls) {
-        out.push({ id: `tc-${tc.id}`, time, text: formatToolCall(tc.name, tc.input) })
-      }
-    }
-  }
-  return out
-}
-
-function clip(s: string, n: number): string {
-  const t = s.replace(/\s+/g, ' ').trim()
-  return t.length > n ? t.slice(0, n - 1) + '…' : t
-}
-
 // LiveFeed is the flush, borderless activity ticker: a few of the most recent
 // one-liners in monospace, auto-advancing to the newest, top-masked so older
-// lines dissolve upward. No box, no scrollbar — it's part of the card.
-function LiveFeed({ messages, isActive }: { messages: AgentMessage[]; isActive: boolean }) {
-  const lines = useMemo(() => feedLines(messages), [messages])
-
+// lines dissolve upward. No box, no scrollbar — it's part of the card. The
+// lines arrive pre-flattened (lib/runFeed) so the card does no per-render
+// transcript work.
+function LiveFeed({ lines, isActive }: { lines: FeedLine[]; isActive: boolean }) {
   if (lines.length === 0) {
     return (
       <div className="flex h-[3.5rem] items-end px-4 pb-1 font-mono text-[10.5px] text-text-tertiary/70">
@@ -489,75 +448,4 @@ function chainStepStates(
     if (s.ID === currentRunID || i === currentStepIndex) return 'current'
     return 'pending'
   })
-}
-
-function formatToolCall(name: string, input: Record<string, unknown>): string {
-  if (name === 'Bash') {
-    // Prefer the agent-authored description — the human-readable intent.
-    // The curated exec mappings below cover description-less internal calls.
-    const desc = String(input.description || '')
-    if (desc) return desc
-    const cmd = String(input.command || '')
-    if (cmd.includes('triagefactory exec gh pr view')) return 'Fetching PR details'
-    if (cmd.includes('triagefactory exec gh pr diff') && cmd.includes('--file'))
-      return `Reading diff: ${extractFlag(cmd, '--file')}`
-    if (cmd.includes('triagefactory exec gh pr diff')) return 'Reading full diff'
-    if (cmd.includes('triagefactory exec gh pr files')) return 'Listing changed files'
-    if (cmd.includes('triagefactory exec gh pr review-view')) return 'Expanding previous review'
-    if (cmd.includes('triagefactory exec gh pr start-review'))
-      return cmd.includes('--fresh') ? 'Restarting review' : 'Starting review'
-    if (cmd.includes('triagefactory exec gh pr add-review-comment')) {
-      const file = extractFlag(cmd, '--file')
-      return file ? `Adding comment on ${file}` : 'Adding review comment'
-    }
-    // finalize-review (renamed from submit-review): hands the drafted review to
-    // human approval — it does not submit to GitHub, so the label says "Finalizing".
-    if (cmd.includes('triagefactory exec gh pr finalize-review')) {
-      const event = extractFlag(cmd, '--event')
-      return `Finalizing review (${event || 'comment'})`
-    }
-    if (cmd.includes('triagefactory exec gh pr comment-list-pending'))
-      return 'Reviewing pending comments'
-    if (cmd.includes('triagefactory exec gh pr comment-update')) return 'Editing comment'
-    if (cmd.includes('triagefactory exec gh pr comment-delete')) return 'Deleting comment'
-    if (cmd.includes('triagefactory exec gh pr add-comment')) return 'Adding comment'
-    if (cmd.includes('triagefactory exec'))
-      return `Running: ${cmd.split('triagefactory exec ')[1]?.slice(0, 60)}`
-    return `Running command`
-  }
-  if (name === 'Read') return `Reading ${basename(String(input.file_path || ''))}`
-  if (name === 'Glob') return `Searching for ${String(input.pattern || 'files')}`
-  if (name === 'Grep') return `Searching for "${String(input.pattern || '').slice(0, 40)}"`
-  return `${name}`
-}
-
-function extractFlag(cmd: string, flag: string): string {
-  const parts = cmd.split(/\s+/)
-  const idx = parts.indexOf(flag)
-  if (idx >= 0 && idx + 1 < parts.length) return parts[idx + 1]
-  return ''
-}
-
-function basename(path: string): string {
-  const parts = path.split('/')
-  return parts[parts.length - 1] || path
-}
-
-function computeStats(messages: AgentMessage[], _run: AgentRun) {
-  let comments = 0
-  let tokens = 0
-
-  for (const msg of messages) {
-    if (msg.OutputTokens) tokens += msg.OutputTokens
-    if (msg.InputTokens) tokens += msg.InputTokens
-
-    if (msg.Role === 'assistant' && msg.Subtype === 'tool_use' && msg.ToolCalls?.length) {
-      const cmd = String(msg.ToolCalls[0].input?.command || '')
-      if (cmd.includes('add-review-comment') || cmd.includes('add-comment')) {
-        comments++
-      }
-    }
-  }
-
-  return { comments, tokens }
 }
