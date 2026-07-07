@@ -144,7 +144,7 @@ func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, ru
 // checkoutRefPattern restricts a checkout ref to a conservative refname
 // alphabet before it's interpolated into a fetch refspec and passed to git.
 // Uppercase is permitted (branch names routinely carry ticket keys like
-// TFAC-220).
+// PROJ-220).
 //
 // Blocks: leading dash (interpreted as a git CLI flag), whitespace, shell
 // metacharacters (`;`, `|`, backticks, `$`), refname-illegal characters
