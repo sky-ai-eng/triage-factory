@@ -183,3 +183,31 @@ Any `jwk-init --write-env` run (rotate or not) rewrites `.env` atomically and no
 `docker compose up -d` (without `stop`/`start`) detects the env diff against the existing container and recreates it. `docker compose start gotrue` would reuse the cached env from container creation and the new key would NOT be loaded — this is a common foot-gun. The Verifier picks up the new key automatically on the next unknown-`kid` lookup — no TF restart needed.
 
 **Caveat:** any access tokens still in flight that were signed by the old key will fail verification as soon as GoTrue restarts. GoTrue's default access-token lifetime is 1 hour, so the practical impact is "users with active sessions need to re-authenticate." For zero-downtime overlap rotation (publish both old and new keys, switch the signing kid, wait for the old to expire, drop the old) you'd need to maintain a multi-key `GOTRUE_JWT_KEYS` array by hand — our `jwk-init` doesn't currently support merge semantics. Planned for a future ticket; for now, rotate during low-traffic windows or treat each rotation as a forced re-auth event.
+
+## Verifying releases
+
+Every release artifact is signed keylessly via [cosign](https://docs.sigstore.dev/) and GitHub OIDC — there's no signing key for us to manage, rotate, or leak, and no key for you to fetch and pin before verifying. Each tagged release also carries an SPDX SBOM per archive, and the GHCR image carries an SBOM + SLSA provenance attestation alongside its signature.
+
+**Release tarball / checksums** — `checksums.txt` is signed as a blob; verifying its signature transitively verifies every archive it lists (each line is a sha256 of one archive):
+
+```sh
+cosign verify-blob --certificate checksums.txt.pem --signature checksums.txt.sig \
+  --certificate-identity-regexp 'github.com/sky-ai-eng/triage-factory' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+```
+
+Download `checksums.txt`, `checksums.txt.sig`, and `checksums.txt.pem` from the release page alongside the archive, then `sha256sum -c checksums.txt` to confirm the archive you downloaded matches.
+
+**Docker image** — verify by digest or tag:
+
+```sh
+cosign verify ghcr.io/sky-ai-eng/triage-factory:vX.Y.Z \
+  --certificate-identity-regexp 'github.com/sky-ai-eng/triage-factory' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Inspect the attached SBOM + provenance attestations with `docker buildx imagetools inspect ghcr.io/sky-ai-eng/triage-factory:vX.Y.Z`.
+
+Each `*.sbom.json` (SPDX) attached to the release is a plain downloadable asset — no verification tooling needed, just fetch it over HTTPS.
+
+**Air-gapped / no Rekor-Fulcio reachability:** keyless verification needs the signer to reach GitHub's OIDC issuer at sign time (already true — it runs in Actions) and the *verifier* to reach the public Rekor transparency log and Fulcio CA at verify time. If your environment can't reach those, fall back to the plain `sha256sum -c checksums.txt` check against a `checksums.txt` you fetched over authenticated HTTPS from the GitHub release page — that gives you integrity (the file wasn't corrupted/tampered in transit) without the provenance guarantee (that it was GitHub Actions, specifically, that produced it).

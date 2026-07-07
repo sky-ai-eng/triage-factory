@@ -1,0 +1,111 @@
+name: vulncheck
+
+# Supply-chain hardening (TFAC-574): govulncheck scans the Go dependency
+# graph for known-vulnerable modules, but only flags vulnerabilities that
+# are actually reachable via the call graph — false-positive noise is low
+# enough that no allowlist file is needed today. If that ever changes for a
+# specific finding that's flagged-but-unreachable, prefer documenting the
+# call with a comment and falling back to `govulncheck -mode=binary` over
+# silently ignoring the job.
+#
+# Two triggers, two different jobs to run:
+#   - pull_request: blocking. A PR that pulls in a known-vulnerable module
+#     version fails this job.
+#   - schedule (weekly) + workflow_dispatch: the same, unchanged tree can
+#     start failing over time as new CVEs are published — that's the case
+#     procurement/security questionnaires actually care about. Failing the
+#     Actions run alone is easy to miss, so this path opens/updates a
+#     tracking GitHub issue via `gh` (authenticated with the default
+#     GITHUB_TOKEN — this workflow doesn't need to trigger further
+#     workflows the way release-please.yml's tag push does, so no PAT is
+#     needed here).
+#
+# Frontend `pnpm audit` runs in the same job, non-blocking: npm advisory
+# noise is high enough that gating merges on it isn't worth it until we've
+# observed the signal for a while.
+
+on:
+  pull_request:
+  schedule:
+    # Monday 06:17 UTC. Off-the-hour to dodge GitHub's cron congestion at :00.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        id: govulncheck
+        run: |
+          if govulncheck ./... > govulncheck.log 2>&1; then
+            echo "status=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=1" >> "$GITHUB_OUTPUT"
+          fi
+          cat govulncheck.log
+
+      - name: Fail PR on reachable vulnerabilities
+        if: github.event_name == 'pull_request' && steps.govulncheck.outputs.status != '0'
+        run: |
+          echo "::error::govulncheck found reachable known vulnerabilities — see the 'Run govulncheck' step output above."
+          exit 1
+
+      - name: Open/update tracking issue on scheduled findings
+        if: github.event_name != 'pull_request' && steps.govulncheck.outputs.status != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TITLE="govulncheck: reachable vulnerabilities detected in dependencies"
+          BODY_FILE=$(mktemp)
+          {
+            echo "The weekly \`govulncheck\` scan found reachable known vulnerabilities in Go dependencies."
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo '```'
+            cat govulncheck.log
+            echo '```'
+          } > "$BODY_FILE"
+
+          existing=$(gh issue list --search "$TITLE in:title" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$BODY_FILE"
+          else
+            gh issue create --title "$TITLE" --body-file "$BODY_FILE"
+          fi
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend deps
+        run: cd frontend && pnpm install --frozen-lockfile
+
+      - name: pnpm audit (non-blocking)
+        continue-on-error: true
+        run: cd frontend && pnpm audit --prod --audit-level=high

@@ -18,6 +18,12 @@
 # Image is published unauthenticated-pullable if the repo is public,
 # private otherwise (GHCR inherits the repo's visibility on the first
 # publish). For private repos, consumers need a PAT with read:packages.
+#
+# Every published image carries an SBOM + SLSA provenance attestation
+# (buildx `sbom`/`provenance`) and a keyless cosign signature over its
+# digest (GitHub OIDC — no signing keys to manage). See "Verifying
+# releases" in docs/self-host-setup.md for the consumer-facing verify
+# commands.
 
 name: docker-publish
 
@@ -30,6 +36,9 @@ on:
 permissions:
   contents: read
   packages: write
+  # Keyless cosign signing authenticates via GitHub's OIDC token — no
+  # signing keys to provision or rotate.
+  id-token: write
 
 jobs:
   build-and-push:
@@ -65,6 +74,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
       # Derives the right tag set automatically from the trigger:
       #   - branch push          → sha-<short>, edge
       #   - tag push (v1.2.3)    → 1.2.3, 1.2, 1, latest
@@ -95,6 +107,7 @@ jobs:
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build + push multi-arch image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -111,4 +124,17 @@ jobs:
           # cross-build doesn't poison the native cache.
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: false
+          # buildx-native SBOM + SLSA provenance attestations, attached to
+          # the GHCR image alongside the platform manifests.
+          sbom: true
+          provenance: mode=max
+
+      # Sign by digest, not tag — a tag is mutable, the digest is what was
+      # actually just pushed. Runs on every trigger (main push, tag push,
+      # workflow_dispatch): a signing failure here indicates real breakage
+      # and should fail the job visibly rather than be swallowed.
+      - name: Sign image (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "ghcr.io/${{ github.repository_owner }}/triage-factory@${DIGEST}"

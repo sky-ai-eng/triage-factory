@@ -54,6 +54,11 @@ jobs:
   goreleaser:
     needs: [dependency-licenses, verify-license-key]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Keyless cosign signing authenticates via GitHub's OIDC token — no
+      # signing keys to provision or rotate. See goreleaser.yaml's `signs:`.
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,6 +77,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Install syft (SBOM generation)
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Install cosign (artifact signing)
+        uses: sigstore/cosign-installer@v3
 
       - uses: goreleaser/goreleaser-action@v6
         with:
