@@ -12,7 +12,7 @@ live-run / steering line (TFAC-13 → TFAC-305 → TFAC-309), the memory
 guardrail (TFAC-552), the curator storage design (TFAC-60/61), and the
 sandbox-fleet profiles spec (`docs/specs/sandbox-fleet/`).
 
-Scope note: multi mode only. Local mode (Tier 4, one user, SQLite) is
+Scope note: multi-mode only. Local mode (Tier 4, one user, SQLite) is
 structurally N=1: it always runs `TF_ROLE=all` and every mechanism below
 degrades to a no-op there. Local behavior does not change.
 
@@ -192,8 +192,9 @@ leases (
 ```
 
 - Control pods attempt acquisition on boot and on a watch interval:
-  `UPDATE ... SET holder=me, term=term+1 WHERE renewed_at < now() - TTL`
-  (plus the insert-if-absent bootstrap). Renewal every ~5 s, TTL ~20 s.
+  `UPDATE ... SET holder_id=me, term=term+1, acquired_at=now(),
+  renewed_at=now() WHERE renewed_at < now() - TTL` (plus the
+  insert-if-absent bootstrap). Renewal every ~5 s, TTL ~20 s.
 - The holder starts the brain (pollers, drainer, managers, sweepers) and
   **stops it promptly on renewal failure** — self-demote before the TTL
   expires so the overlap window on failover is seconds and one-sided.
@@ -488,7 +489,7 @@ storage; with it, each key's cache lives on ~1 (or K) pods.
 ## 7. Background jobs at N (and the system-sandbox endgame)
 
 Phase 1 keeps all system jobs (scorer/classifier/profiler batches —
-Haiku, jailed in multi mode) **on the leader**: sentinels stay
+Haiku, jailed in multi-mode) **on the leader**: sentinels stay
 in-process, `syslimit`'s cap stays globally true because exactly one
 process runs them, and nothing about their (already replica-tolerant:
 last-writer-wins, delegation-fenced) writes changes. The cost: control
@@ -584,7 +585,7 @@ admission and mis-reports capacity today.
   registry — at N=1 it's the one-row special case of the fleet view.
 - Per-role health: control keeps `/api/health` + gains readiness (LB
   rotation); executors expose local healthz; both already log
-  structured JSON in multi mode.
+  structured JSON in multi-mode.
 
 ### 8.4 Packaging (decision for the epic owner)
 
