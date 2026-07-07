@@ -114,14 +114,20 @@ func (t *Tracker) publish(evt domain.Event) {
 // create→snapshot pair would not be re-seeded, since the next cycle's
 // FindOrCreate returns created=false). Threading cancellation into those
 // persistence calls is a separate concern, out of scope here.
-func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, username string, repos []string, resolver ReviewerResolver) (int, error) {
+// The third return, resumeFrom, is TFAC-571's round-robin resume point —
+// see discoverGitHub. It is only ever non-empty alongside a non-nil error
+// (the rate-limited discovery-interruption path); every other return path
+// (success, or a non-rate-limit failure in Phase 2/3 reached only once Phase
+// 1 already covered every entry in repos) reports "" — a full wrap of the
+// list passed in, so the poller's cursor resets rather than resuming mid-list.
+func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, username string, repos []string, resolver ReviewerResolver) (int, string, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
 	// quietRepos is the set of "owner/repo" whose open-PR listing returned
 	// 304 (unchanged) this cycle; their tracked entities can keep their
 	// stored snapshot through the Phase-2 gate without a refresh.
-	discovered, quietRepos, err := t.discoverGitHub(ctx, client, username, repos)
+	discovered, quietRepos, resumeFrom, err := t.discoverGitHub(ctx, client, username, repos)
 	var rateLimited *ghclient.ErrRateLimited
 	if err != nil {
 		if errors.As(err, &rateLimited) {
@@ -228,13 +234,19 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// propagate the typed error distinctly (errors.As-able) rather than
 		// let a less-specific wrapped error surface from Phase 2, or none at
 		// all if this cycle happens to have no active entities to refresh.
-		return 0, rateLimited
+		// resumeFrom carries the round-robin cursor's resume point; the
+		// completion sentinel deliberately does NOT fire on this path (see
+		// EmitPollComplete's call sites below, both unreached from here) —
+		// TFAC-571's decision to only announce "poll complete" on a full wrap
+		// so downstream scoring/classifier/profiler triggers don't churn on
+		// a cold-start cycle that's still partway through the repo list.
+		return 0, resumeFrom, rateLimited
 	}
 
 	// Phase 2: Refresh active entities.
 	entities, err := t.entities.ListActiveSystem(context.Background(), orgID, "github")
 	if err != nil {
-		return 0, fmt.Errorf("list active github entities: %w", err)
+		return 0, "", fmt.Errorf("list active github entities: %w", err)
 	}
 
 	// Classify by snapshot state (open vs terminal) for query cost tiering.
@@ -356,7 +368,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		if len(entities) > 0 {
 			t.EmitPollComplete("github", startedAt, len(entities), 0)
 		}
-		return 0, nil
+		return 0, "", nil
 	}
 
 	// Fetch fresh state — open PRs get the full fragment (includes CheckRuns).
@@ -368,7 +380,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		}
 		open, err := client.RefreshPRs(ctx, nodeIDs, true)
 		if err != nil {
-			return 0, fmt.Errorf("refresh open PRs: %w", err)
+			return 0, "", fmt.Errorf("refresh open PRs: %w", err)
 		}
 		for k, v := range open {
 			refreshed[k] = v
@@ -381,7 +393,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		}
 		terminal, err := client.RefreshPRs(ctx, nodeIDs, false)
 		if err != nil {
-			return 0, fmt.Errorf("refresh terminal PRs: %w", err)
+			return 0, "", fmt.Errorf("refresh terminal PRs: %w", err)
 		}
 		for k, v := range terminal {
 			refreshed[k] = v
@@ -448,7 +460,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		t.EmitPollComplete("github", startedAt, len(entities), eventsEmitted)
 	}
 
-	return eventsEmitted, nil
+	return eventsEmitted, "", nil
 }
 
 // resolveStubNodeID resolves the GitHub GraphQL node_id for a snapshot-less stub
@@ -507,7 +519,14 @@ const maxSearchQueryLen = 256
 // GraphQL search to seed recent-history entities the dashboard reads. That
 // backfill is inherently user-perspective and stays local/PAT-only;
 // multi-mode dashboard history is out of scope.
-func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, map[string]bool, error) {
+//
+// The fourth return, resumeFrom, is TFAC-571's round-robin resume point: ""
+// when the fan-out covered every entry in repos (a full wrap — the poller
+// resets its cursor), or the name of the first repo that still needs a
+// refresh (never dispatched once the fan-out stopped queuing, or dispatched
+// but itself rate-limited) when ErrRateLimited cut the cycle short. It's only
+// ever non-empty alongside a non-nil error.
+func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, map[string]bool, string, error) {
 	seen := map[string]bool{}
 	var all []ghclient.DiscoveredPR
 	quiet := map[string]bool{}
@@ -541,6 +560,13 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 	g := new(errgroup.Group) // no WithContext: a per-repo failure must never cancel siblings in flight
 	g.SetLimit(repoConcurrency())
 
+	// dispatched tracks how many leading entries of repos were handed to
+	// g.Go before the fan-out stopped (TFAC-571's resume-cursor needs this).
+	// The dispatch loop below is single-threaded — only the per-repo bodies
+	// run concurrently — so this count is exact regardless of completion
+	// order or repoConcurrency().
+	dispatched := 0
+
 	for i, repoFull := range repos {
 		if rateLimited.Load() {
 			// Budget's known exhausted — stop queuing new repo fetches (no
@@ -548,6 +574,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 			// to the concurrency limit) still run to completion below.
 			break
 		}
+		dispatched = i + 1
 		g.Go(func() error {
 			owner, name := splitOwnerRepo(repoFull)
 			if owner == "" || name == "" {
@@ -573,6 +600,10 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 				if errors.As(err, &rl) {
 					rateLimited.Store(true)
 					rateLimitErr.Store(rl)
+					// This repo's own fetch is what hit the rate limit — it
+					// was NOT refreshed, so TFAC-571's cursor must resume
+					// here (not at the next repo) next cycle.
+					results[i] = repoListResult{rateLimited: true}
 					return nil
 				}
 				// 403/404 means the token can't reach this configured repo (a
@@ -619,8 +650,22 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 	}
 
 	var discoveryErr error
+	resumeFrom := ""
 	if rl := rateLimitErr.Load(); rl != nil {
 		discoveryErr = rl
+		// TFAC-571: find the earliest repo (in the caller's list order —
+		// already rotated to the org's round-robin cursor by the poller)
+		// that still needs a refresh: either it was never dispatched once
+		// the fan-out stopped queuing, or it was dispatched but its own
+		// fetch is what hit the rate limit. Repos before that point either
+		// succeeded or were permanently skipped (403/404) — both are
+		// "handled" for cursor purposes and don't need an immediate retry.
+		for i := range repos {
+			if i >= dispatched || results[i].rateLimited {
+				resumeFrom = repos[i]
+				break
+			}
+		}
 	}
 
 	// Phase 1b: merged/closed dashboard backfill (local/PAT-only). Seeds
@@ -648,7 +693,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 		}
 	}
 
-	return all, quiet, discoveryErr
+	return all, quiet, resumeFrom, discoveryErr
 }
 
 // repoListResult is one goroutine's outcome from Phase 1a's per-repo
@@ -661,11 +706,17 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 // only results[i]), so concurrent writers never touch shared memory. ok is
 // false for a repo that was skipped (malformed slug, 403/404-unreachable,
 // rate-limited, or any other per-repo failure) and whose zero value should
-// be ignored by the merge.
+// be ignored by the merge. rateLimited (TFAC-571) narrows that further for
+// the resume-cursor computation: true only when THIS repo's own fetch is
+// what returned ErrRateLimited — as opposed to a 403/404 (permanently
+// unreachable, no retry needed) or a generic per-repo error (retried
+// naturally on this repo's next turn in the rotation) — so the cursor
+// resumes exactly at the repo that still needs a refresh, not the one after.
 type repoListResult struct {
 	ok          bool
 	prs         []ghclient.DiscoveredPR
 	notModified bool
+	rateLimited bool
 }
 
 // recordPullsPoll persists the conditional-request state for a repo after a

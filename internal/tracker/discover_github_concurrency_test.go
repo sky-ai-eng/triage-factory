@@ -67,7 +67,7 @@ func TestDiscoverGitHub_BoundedConcurrency_MaxInFlight(t *testing.T) {
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	start := time.Now()
-	if _, _, err := tr.discoverGitHub(ctx, client, "", repos); err != nil {
+	if _, _, _, err := tr.discoverGitHub(ctx, client, "", repos); err != nil {
 		t.Fatalf("discoverGitHub: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -130,7 +130,7 @@ func TestDiscoverGitHub_ConcurrencyOne_IsFullySerial(t *testing.T) {
 	tr := &Tracker{repos: stores.Repos, orgID: org}
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	if _, _, err := tr.discoverGitHub(ctx, client, "", repos); err != nil {
+	if _, _, _, err := tr.discoverGitHub(ctx, client, "", repos); err != nil {
 		t.Fatalf("discoverGitHub: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestDiscoverGitHub_HangingRepoDoesNotBlockOthers(t *testing.T) {
 	var discovered []ghclient.DiscoveredPR
 	var discoverErr error
 	go func() {
-		discovered, _, discoverErr = tr.discoverGitHub(ctx, client, "", repos)
+		discovered, _, _, discoverErr = tr.discoverGitHub(ctx, client, "", repos)
 		close(done)
 	}()
 
@@ -248,7 +248,7 @@ func TestDiscoverGitHub_DeterministicOrderAcrossConcurrency(t *testing.T) {
 		tr := &Tracker{repos: stores.Repos, orgID: org}
 		client := ghclient.NewClient(srv.URL, "tok")
 
-		discovered, _, err := tr.discoverGitHub(ctx, client, "", repos)
+		discovered, _, _, err := tr.discoverGitHub(ctx, client, "", repos)
 		if err != nil {
 			t.Fatalf("discoverGitHub: %v", err)
 		}
@@ -321,7 +321,7 @@ func TestRefreshGitHub_RateLimitStopsFanOutAndPropagatesDistinctly(t *testing.T)
 	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	_, err := tr.RefreshGitHub(ctx, client, "", repos, nil)
+	_, _, err := tr.RefreshGitHub(ctx, client, "", repos, nil)
 
 	var rl *ghclient.ErrRateLimited
 	if !errors.As(err, &rl) {
@@ -388,7 +388,7 @@ func TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping(t *tes
 	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	_, err := tr.RefreshGitHub(ctx, client, "", repos, nil)
+	_, _, err := tr.RefreshGitHub(ctx, client, "", repos, nil)
 
 	var rl *ghclient.ErrRateLimited
 	if !errors.As(err, &rl) {

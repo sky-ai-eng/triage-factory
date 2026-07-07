@@ -60,7 +60,7 @@ These are internal signals, not shown in the triage UI.
 
 | Event | ID | Trigger |
 |-------|----|---------|
-| **Poll Complete** | `system:poll:completed` | A tracker refresh cycle finished and processed items |
+| **Poll Complete** | `system:poll:completed` | A tracker refresh cycle finished and processed items. For GitHub, this fires only once a cycle fully wraps its round-robin repo cursor (TFAC-571) — a cycle interrupted by a rate-limit budget exhaustion saves its resume point and stays silent, so scoring/classification/profiling don't churn on a still-partial cold-start sync |
 | **Scoring Complete** | `system:scoring:completed` | AI scoring finished for a batch of tasks |
 | **Delegation Complete** | `system:delegation:completed` | An agent delegation run completed successfully |
 | **Delegation Failed** | `system:delegation:failed` | An agent delegation run failed |
