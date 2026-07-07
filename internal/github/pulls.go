@@ -229,12 +229,15 @@ type PRFile struct {
 }
 
 // MaxPRFiles caps the total number of files fetched by GetPRFiles across all
-// pages. Exported so callers can detect a truncated listing (len(files) >=
-// MaxPRFiles means GetPRFiles hit the cap and the result may be incomplete).
-const MaxPRFiles = 1000
+// pages (maxFetchPages × 100). Exported so callers can detect a truncated
+// listing (len(files) >= MaxPRFiles means GetPRFiles hit the cap and the
+// result may be incomplete).
+const MaxPRFiles = maxFetchPages * 100
 
 // GetPRFiles lists files changed in a PR, including per-file patch content.
-// Paginates up to MaxPRFiles total results.
+// Paginates up to MaxPRFiles total results; a PR with more changed files than
+// that truncates, logged at WARN so the gap is visible (TFAC-571) rather than
+// a silently-incomplete file list.
 func (c *Client) GetPRFiles(ctx context.Context, owner, repo string, number int) ([]PRFile, error) {
 	var files []PRFile
 	for page := 1; ; page++ {
@@ -252,7 +255,12 @@ func (c *Client) GetPRFiles(ctx context.Context, owner, repo string, number int)
 			files = append(files, prFileFromRaw(f))
 		}
 
-		if len(rawFiles) < 100 || len(files) >= MaxPRFiles {
+		if len(rawFiles) < 100 {
+			break
+		}
+		if len(files) >= MaxPRFiles {
+			githubLog.Warn("PR files list truncated at cap; some changed files are missing from the result",
+				"owner", owner, "repo", repo, "pr", number, "cap", MaxPRFiles)
 			break
 		}
 	}
@@ -913,7 +921,14 @@ func (c *Client) ListOpenPRs(ctx context.Context, owner, repo, etag string) ([]D
 	out = append(out, page1...)
 
 	// Single-page fast path: fewer than a full page means no more pages.
+	// Capped at maxFetchPages (TFAC-571): a repo with more than 1,000 open
+	// PRs would otherwise paginate unbounded on every discovery cycle.
 	for page := 2; len(out) > 0 && len(out)%100 == 0; page++ {
+		if page > maxFetchPages {
+			githubLog.Warn("open PR listing truncated at page cap; some open PRs may be missing from discovery this cycle",
+				"owner", owner, "repo", repo, "resource", "pulls", "page_cap", maxFetchPages)
+			break
+		}
 		data, perr := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls?state=open&per_page=100&page=%d", owner, repo, page))
 		if perr != nil {
 			return nil, "", false, perr

@@ -65,6 +65,15 @@ type Manager struct {
 	// dashboard_backfilled_at marker is what prevents re-running across
 	// processes / restarts. Zero value is ready to use.
 	dashboardBackfillInflight sync.Map
+
+	// cursorMu guards ghCursor, the per-org GitHub round-robin repo cursor
+	// (TFAC-571). In-memory only for v1 (per the ticket's explicit
+	// allowance) — a restart loses the cursor and the next cycle starts
+	// from the head, same as today. Key is orgID; value is the full-name
+	// ("owner/repo") of the next repo to refresh, or absent/"" for "start
+	// at the head" (no cursor set, or the last cycle fully wrapped).
+	cursorMu sync.Mutex
+	ghCursor map[string]string
 }
 
 func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
@@ -397,8 +406,17 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		return
 	}
 	if len(repos) == 0 {
+		m.setGitHubCursor(orgID, "") // tracked set emptied — drop any stale cursor
 		return
 	}
+
+	// TFAC-571: rotate the repo list to start at this org's round-robin
+	// cursor (the resume point saved by a prior cycle that got cut short by
+	// ErrRateLimited), so a large tracked set doesn't starve the repos at
+	// the tail — without this, every cycle restarts from index 0 and repos
+	// early in the (stable) list get refreshed every time while repos late
+	// in the list may never complete a first refresh.
+	repos = rotateFromCursor(repos, m.githubCursor(orgID))
 
 	// Reconcile the GitHub-team mappings against the live team set — the
 	// deletion floor's "periodic refresh" trigger, independent of the
@@ -482,10 +500,20 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
-		if _, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, "", scoped, resolver); rerr != nil {
+		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, "", scoped, resolver)
+		if rerr != nil {
 			githubLog.Error("tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
 			m.reportError("github", orgID, rerr)
 		}
+		var rl *ghclient.ErrRateLimited
+		if errors.As(rerr, &rl) {
+			// TFAC-571: budget's known exhausted for this credential — save
+			// the cursor and stop cleanly rather than trying the remaining
+			// installations against the same exhausted client budget.
+			m.recordGitHubCursor(orgID, resumeFrom, rl)
+			break
+		}
+		m.recordGitHubCursor(orgID, resumeFrom, nil)
 	}
 
 	// No installation produced a usable installation token (every mint/list
@@ -612,10 +640,14 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	}
 
 	resolver := m.reviewerResolver(ctx, orgID, username, userTeams)
-	if _, err := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, username, repos, resolver); err != nil {
-		githubLog.Error("tracker error", "org", orgID, "error", err)
-		m.reportError("github", orgID, err)
+	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, username, repos, resolver)
+	if rerr != nil {
+		githubLog.Error("tracker error", "org", orgID, "error", rerr)
+		m.reportError("github", orgID, rerr)
 	}
+	var rl *ghclient.ErrRateLimited
+	errors.As(rerr, &rl)
+	m.recordGitHubCursor(orgID, resumeFrom, rl)
 }
 
 // orgHasRegisteredApp reports whether the org has an active GitHub App
@@ -649,6 +681,81 @@ func intersectConfigured(configured []string, grant []ghclient.UserRepo, covered
 			covered[r] = true
 		}
 	}
+	return out
+}
+
+// githubCursor returns the org's saved round-robin repo cursor (TFAC-571) —
+// the full-name ("owner/repo") of the next repo to refresh, or "" if none is
+// set (never polled, or the last cycle fully wrapped the list).
+func (m *Manager) githubCursor(orgID string) string {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	return m.ghCursor[orgID]
+}
+
+// setGitHubCursor records the org's round-robin repo cursor. An empty repo
+// clears it (full wrap completed, or the tracked set is now empty) rather
+// than storing a meaningless "resume at the head" entry.
+func (m *Manager) setGitHubCursor(orgID, repo string) {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if repo == "" {
+		delete(m.ghCursor, orgID)
+		return
+	}
+	if m.ghCursor == nil {
+		m.ghCursor = make(map[string]string)
+	}
+	m.ghCursor[orgID] = repo
+}
+
+// recordGitHubCursor applies one RefreshGitHub call's outcome to the org's
+// round-robin cursor. resumeFrom == "" means the repos list passed to that
+// call was fully wrapped — the cursor resets to the head for next cycle.
+// A non-empty resumeFrom (only ever paired with rl != nil — see
+// Tracker.RefreshGitHub) means ErrRateLimited cut the fan-out short partway
+// through the list: the cursor is saved there, logged at INFO with the
+// resume time, and the org's next scheduled poll is pulled in to rl.ResumeAt
+// so the cursor gets picked back up as soon as the budget frees rather than
+// waiting out a full normal poll interval (which may be much longer, or —
+// if shorter — would just hit the same exhaustion again).
+func (m *Manager) recordGitHubCursor(orgID, resumeFrom string, rl *ghclient.ErrRateLimited) {
+	m.setGitHubCursor(orgID, resumeFrom)
+	if rl == nil {
+		return
+	}
+	githubLog.Info("github poll cycle interrupted by rate limit; resuming repo cursor next cycle",
+		"org", orgID, "resume_repo", resumeFrom, "resume_at", rl.ResumeAt)
+	m.schedulePoll("github", orgID, rl.ResumeAt)
+}
+
+// rotateFromCursor returns repos rotated so iteration starts at cursor's
+// position and wraps around — TFAC-571's round-robin fairness mechanism, so
+// a large tracked set doesn't starve the repos at the tail of the list when
+// a cycle can't finish (rate budget exhausted, restart, GHES flake).
+//
+// Churn-tolerant by construction: repos are matched by full name, not index,
+// so an insertion/removal elsewhere in the tracked set doesn't shift the
+// resume point. If cursor is empty or its repo is no longer present (removed
+// from the tracked set between cycles), rotation is a no-op — resume at the
+// head rather than panicking or skipping the list.
+func rotateFromCursor(repos []string, cursor string) []string {
+	if cursor == "" {
+		return repos
+	}
+	idx := -1
+	for i, r := range repos {
+		if r == cursor {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 {
+		return repos
+	}
+	out := make([]string, 0, len(repos))
+	out = append(out, repos[idx:]...)
+	out = append(out, repos[:idx]...)
 	return out
 }
 
