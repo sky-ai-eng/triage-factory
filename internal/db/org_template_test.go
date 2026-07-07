@@ -15,7 +15,7 @@ import (
 )
 
 // TestOrgTemplate_UpdateHandler_MatchedSemantics pins the conditional-update
-// contract that closes the PATCH-vs-promote race (SKY-381): UpdateHandler's
+// contract that closes the PATCH-vs-promote race: UpdateHandler's
 // WHERE pins the row's kind, so it reports matched=false — rather than
 // silently no-op'ing — when the row was deleted or promoted (rule→trigger)
 // since the caller read it. The handler relies on this to 404/409 instead of

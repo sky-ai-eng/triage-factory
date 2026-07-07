@@ -40,7 +40,7 @@ type taskJSON struct {
 	PriorityReasoning   string   `json:"priority_reasoning,omitempty"`
 	CloseReason         string   `json:"close_reason,omitempty"`
 	// SnoozeUntil — populated when the task is in a snoozed state.
-	// Under the SKY-261 v0.7 invariant ("snoozed ↔ unclaimed"),
+	// Under the "snoozed ↔ unclaimed" invariant,
 	// this is only ever set on queue-lane tasks. Any claim-axis
 	// transition wakes the task atomically (clears snooze_until +
 	// flips status='snoozed' → 'queued'), so claimed cards on the
@@ -50,10 +50,10 @@ type taskJSON struct {
 	// tail with a "wakes Mar 5" badge (deferred UI follow-up).
 	SnoozeUntil string `json:"snooze_until,omitempty"`
 	// OpenSubtaskCount lets the UI flag a task whose Jira entity has open
-	// subtasks — the "consider decomposing" signal (SKY-173). Zero for
+	// subtasks — the "consider decomposing" signal. Zero for
 	// GitHub tasks and Jira tickets without subtasks.
 	OpenSubtaskCount int `json:"open_subtask_count"`
-	// Claim cols (SKY-330): exposed so the per-card assignee picker
+	// Claim cols: exposed so the per-card assignee picker
 	// can render the current assignee without a second round-trip.
 	// Exactly one is set when claimed; both empty when unclaimed.
 	// omitempty keeps the wire shape clean for the unclaimed-queue case.
@@ -62,7 +62,7 @@ type taskJSON struct {
 	// TeamID is the task's owning team. Exposed so the multi-team board
 	// can color-code / tag rows by team. Always set; the
 	// frontend only surfaces it when the viewer belongs to ≥2 teams.
-	// TODO(SKY-379): board row color-coding consumes this.
+	// TODO: board row color-coding consumes this.
 	TeamID string `json:"team_id,omitempty"`
 }
 
@@ -116,7 +116,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	// SKY-330: ?include_snoozed=true keeps future-snoozed rows in the
+	// ?include_snoozed=true keeps future-snoozed rows in the
 	// response so the Board's "show snoozed" toggle can render them
 	// at the tail of the Queued column. Default = false so /api/queue
 	// stays the canonical "pickable right now" projection for the
@@ -270,7 +270,7 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !snoozed {
-		// SKY-261 v0.7: snooze is queue-only ("snoozed ↔ both claim
+		// Snooze is queue-only ("snoozed ↔ both claim
 		// cols NULL"). The store's atomic UPDATE refused because
 		// the task is currently claimed by a user or the bot.
 		// Requeue first (releases the claim) then snooze.
@@ -300,7 +300,7 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 // row tagged 'undo' for the swipe analytics, then runs the same
 // requeue cleanup that /requeue does.
 //
-// State-driven requeue (Board's drag-to-Queue, SKY-207's "Return
+// State-driven requeue (Board's drag-to-Queue, the "Return
 // to queue" button) lives at /requeue and skips the swipe row.
 // Same finalizer, same observable outcome — different audit shape.
 func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
@@ -349,7 +349,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 
 // handleRequeue is the state-driven counterpart to handleUndo: same
 // task-back-to-queue outcome, no swipe_events row. Used by Board's
-// drag-to-Queue gesture and (once SKY-207 lands) the AgentCard's
+// drag-to-Queue gesture and the AgentCard's
 // "Return to queue" button on pending_approval runs. Both of those
 // are deliberate state changes, not "reverse my last swipe," so
 // audit-logging them as undo events would muddy the swipe-UX
@@ -405,7 +405,7 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
 }
 
-// handleTaskAdvance is the SKY-330 board's manual user transition —
+// handleTaskAdvance is the board's manual user transition —
 // "I'm working on this now" (in_progress) and "I've submitted this for
 // review" (in_review). Refuses if the caller doesn't hold the user
 // claim, if the task is bot-claimed (those transition automatically
@@ -438,7 +438,7 @@ func (s *Server) handleTaskAdvance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SKY-330: validate the path id as a UUID up front. On Postgres
+	// Validate the path id as a UUID up front. On Postgres
 	// tasks.id is the uuid column type, so a malformed id surfaces as
 	// SQLSTATE 22P02 from the store call → 500. Treating malformed
 	// ids as "task not found" keeps the API portable across SQLite
@@ -525,7 +525,7 @@ const (
 	// the Cards swipe-right against a delegated task). The agent's
 	// prepared review is being thrown away in favor of the human
 	// handling the entity themselves. This case exists primarily
-	// to close the SKY-206 race where a stale frontend agentRuns
+	// to close the race where a stale frontend agentRuns
 	// map could let /swipe claim slip past without /requeue's
 	// cleanup; the swipe handler now runs the cleanup on every
 	// claim regardless of frontend state.
@@ -582,7 +582,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 	cleanupCtx := context.WithoutCancel(r.Context())
 	s.teardownTaskArtifacts(cleanupCtx, orgID, userID, taskID, discardOutcomeRequeued)
 	s.revertJiraStateIfApplicable(cleanupCtx, orgID, userID, task)
-	// SKY-330: requeue clears both claim cols and flips status to
+	// Requeue clears both claim cols and flips status to
 	// 'queued'. Peer Board sessions need a task_updated event to
 	// pull the card back into the Queued column; without this they
 	// keep showing the stale claim/status until the next refresh.
@@ -797,7 +797,7 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 	if task == nil || task.EntitySource != "jira" || task.SourceStatus == "" {
 		return
 	}
-	// SKY-463: the requeue/undo reversal (unassign + transition back) reverses
+	// The requeue/undo reversal (unassign + transition back) reverses
 	// the user's own claim, so it must act as that user, not the org service
 	// account. Resolve their Jira client. Best-effort: the task is already
 	// requeued by the time we get here, so a missing/again-unresolvable user
