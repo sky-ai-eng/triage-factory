@@ -95,6 +95,10 @@ Each driven cycle is one row:
   completed check, each review, each conflicted PR emits once on the first
   full refresh; a warm cycle emits nothing) and fails `sanity` on any
   mismatch — the metrics are only meaningful when the run did the real work.
+  `sanity` also fails on any request to an endpoint the fake doesn't model
+  (`other` > 0 means the poll path's call set changed — extend the fake) and
+  on any poll-cycle error other than a rate-limit interrupt on a run that
+  configured `--rate-limit`.
 - **allocs** — Go heap allocated during the cycle; **peak RSS** is the
   process high-water mark.
 

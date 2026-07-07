@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -69,9 +70,11 @@ type Result struct {
 	EventTypes   map[string]int // emitted github:* events by type, whole run
 
 	// SanityErrors is non-empty when the run's behavior diverged from what
-	// the dataset predicts (event count mismatch, incomplete sync, warm-cycle
-	// noise). An empty slice is the "harness observed exactly the expected
-	// transitions" signal the metrics are only meaningful under.
+	// the dataset predicts: event count mismatch, incomplete sync,
+	// warm-cycle noise, requests to endpoints the fake doesn't model, or an
+	// unexpected poll-cycle error (anything but a rate-limit interrupt on a
+	// rate-limited run). An empty slice is the "harness observed exactly the
+	// expected transitions" signal the metrics are only meaningful under.
 	SanityErrors []string
 }
 
@@ -193,19 +196,38 @@ func Run(cfg RunConfig) (*Result, error) {
 		stores.JiraStatusRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps,
 		resolver)
 
-	var cycleErrs []string
+	// Poll-cycle errors surfaced via OnError are classified at capture: an
+	// ErrRateLimited on a run that configured a rate limit is the expected
+	// interrupt-and-resume behavior (still shown in the report); anything
+	// else is a real failure and must fail the run — a bug that doesn't
+	// happen to change the final entity/event counts would otherwise print
+	// its evidence right next to "sanity: OK".
+	type cycleErr struct {
+		msg      string
+		expected bool
+	}
+	var cycleErrs []cycleErr
 	var cycleErrsMu sync.Mutex
 	mgr.OnError = func(source, org string, err error) {
+		var rl *ghclient.ErrRateLimited
 		cycleErrsMu.Lock()
-		cycleErrs = append(cycleErrs, fmt.Sprintf("%s: %v", source, err))
+		cycleErrs = append(cycleErrs, cycleErr{
+			msg:      fmt.Sprintf("%s: %v", source, err),
+			expected: cfg.Server.RateLimit > 0 && errors.As(err, &rl),
+		})
 		cycleErrsMu.Unlock()
 	}
-	takeErrs := func() []string {
+	takeErrs := func() (display, unexpected []string) {
 		cycleErrsMu.Lock()
 		defer cycleErrsMu.Unlock()
-		out := cycleErrs
+		for _, e := range cycleErrs {
+			display = append(display, e.msg)
+			if !e.expected {
+				unexpected = append(unexpected, e.msg)
+			}
+		}
 		cycleErrs = nil
-		return out
+		return display, unexpected
 	}
 
 	res := &Result{
@@ -228,6 +250,7 @@ func Run(cfg RunConfig) (*Result, error) {
 		var msAfter runtime.MemStats
 		runtime.ReadMemStats(&msAfter)
 		entities, _, _ := syncState(ctx, stores, orgID, ds.TotalPRs)
+		display, unexpected := takeErrs()
 		m := CycleMetrics{
 			Label:      label,
 			Wall:       wall,
@@ -235,7 +258,10 @@ func Run(cfg RunConfig) (*Result, error) {
 			Events:     pub.snapshot() - evtBefore,
 			Entities:   entities,
 			AllocBytes: msAfter.TotalAlloc - msBefore.TotalAlloc,
-			Errors:     takeErrs(),
+			Errors:     display,
+		}
+		for _, e := range unexpected {
+			res.SanityErrors = append(res.SanityErrors, fmt.Sprintf("cycle %s: unexpected poll error: %s", label, e))
 		}
 		res.Cycles = append(res.Cycles, m)
 		return m
@@ -294,6 +320,15 @@ func Run(cfg RunConfig) (*Result, error) {
 	if res.WarmEvents != 0 {
 		res.SanityErrors = append(res.SanityErrors,
 			fmt.Sprintf("warm cycles emitted %d events, expected 0", res.WarmEvents))
+	}
+	// The Other counter is the fake server's bug tripwire: the poll path
+	// reached an endpoint the fake doesn't model (path-shape drift, an
+	// unknown repo, a GraphQL query that isn't the nodes refresh). The
+	// benchmark's numbers can't be trusted to cover the real call set when
+	// this fires, so it always fails the run.
+	if other := srv.Snapshot().Other; other > 0 {
+		res.SanityErrors = append(res.SanityErrors,
+			fmt.Sprintf("%d request(s) hit endpoints the fake server doesn't model (other)", other))
 	}
 	return res, nil
 }

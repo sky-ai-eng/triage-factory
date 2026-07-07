@@ -4,9 +4,10 @@ name: poll-bench
 # benchmark's smoke shape (20 repos, ~100 open PRs) against the in-process
 # fake GitHub API and fails on any sanity violation — event counts diverging
 # from the dataset's expected transitions, an incomplete cold sync, warm
-# cycles emitting events, a warm 304 hit rate under 100%, or request counts
-# differing between identically-seeded runs (determinism). See
-# docs/poll-bench.md.
+# cycles emitting events, poll-cycle errors, requests to endpoints the fake
+# doesn't model (the poll path's call set changed — update the fake), a warm
+# 304 hit rate under 100%, or request counts differing between
+# identically-seeded runs (determinism). See docs/poll-bench.md.
 #
 # Deliberately NOT part of the PR-blocking test.yml: it triggers only on
 # changes to the polling surface (poller, tracker, GitHub client, the bench
