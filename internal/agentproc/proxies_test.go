@@ -103,21 +103,81 @@ func TestProxyConfigFromCreds_BedrockBearerRegionFallback(t *testing.T) {
 	}
 }
 
-// TestProxyConfigFromCreds_AWSTriple_Unsupported pins the typed
-// rejection for the SigV4 path. The Phase 1 llmproxy doesn't
-// implement re-signing; an org configured this way can't run in
-// multi mode until the Phase 2 proxy lands. Refusing here surfaces
-// the misconfiguration as a clear admin-facing error rather than a
-// confusing upstream auth failure from inside the Node subprocess.
-func TestProxyConfigFromCreds_AWSTriple_Unsupported(t *testing.T) {
+// TestProxyConfigFromCreds_AWSTripleSigV4 pins the Phase 2 mapping:
+// the AWS access-key triple resolves to the SigV4 re-signing provider,
+// with the full triple (including the optional session token) landing
+// in SigV4Credentials and the region feeding both the upstream URL and
+// the signing scope.
+func TestProxyConfigFromCreds_AWSTripleSigV4(t *testing.T) {
 	creds := map[string]string{
 		"AWS_ACCESS_KEY_ID":       "AKIA-test",
 		"AWS_SECRET_ACCESS_KEY":   "secret-test",
+		"AWS_SESSION_TOKEN":       "session-test",
+		"AWS_REGION":              "us-west-2",
 		"CLAUDE_CODE_USE_BEDROCK": "1",
 	}
-	_, err := proxyConfigFromCreds(creds)
-	if !errors.Is(err, ErrUnsupportedSandboxCredentials) {
-		t.Fatalf("err = %v, want ErrUnsupportedSandboxCredentials wrap", err)
+	cfg, err := proxyConfigFromCreds(creds)
+	if err != nil {
+		t.Fatalf("proxyConfigFromCreds: %v", err)
+	}
+	if cfg.llm.Provider != llmproxy.ProviderBedrockSigV4 {
+		t.Errorf("Provider = %q, want bedrock_sigv4", cfg.llm.Provider)
+	}
+	if cfg.llm.Upstream != "https://bedrock-runtime.us-west-2.amazonaws.com" {
+		t.Errorf("Upstream = %q, want the regional Bedrock endpoint", cfg.llm.Upstream)
+	}
+	sc := cfg.llm.SigV4Credentials
+	if sc == nil {
+		t.Fatal("SigV4Credentials is nil; the real triple must flow into the proxy config")
+	}
+	if sc.AccessKeyID != "AKIA-test" || sc.SecretAccessKey != "secret-test" || sc.SessionToken != "session-test" {
+		t.Errorf("SigV4Credentials = %+v, want the resolver's triple", sc)
+	}
+	if sc.Region != "us-west-2" {
+		t.Errorf("SigV4Credentials.Region = %q, want us-west-2 (must match the endpoint region)", sc.Region)
+	}
+	if !cfg.llm.AllowNonLoopback {
+		t.Error("AllowNonLoopback = false; sandbox path must opt in")
+	}
+}
+
+// TestProxyConfigFromCreds_AWSTripleRegionFallback mirrors the bearer
+// path's missing-region default: us-east-1 for both the endpoint and
+// the signing scope.
+func TestProxyConfigFromCreds_AWSTripleRegionFallback(t *testing.T) {
+	cfg, err := proxyConfigFromCreds(map[string]string{
+		"AWS_ACCESS_KEY_ID":     "AKIA-test",
+		"AWS_SECRET_ACCESS_KEY": "secret-test",
+	})
+	if err != nil {
+		t.Fatalf("proxyConfigFromCreds: %v", err)
+	}
+	if cfg.llm.Upstream != "https://bedrock-runtime.us-east-1.amazonaws.com" {
+		t.Errorf("Upstream = %q, want us-east-1 fallback", cfg.llm.Upstream)
+	}
+	if got := cfg.llm.SigV4Credentials.Region; got != "us-east-1" {
+		t.Errorf("SigV4Credentials.Region = %q, want us-east-1 fallback", got)
+	}
+	if got := cfg.llm.SigV4Credentials.SessionToken; got != "" {
+		t.Errorf("SessionToken = %q, want empty when the resolver provided none", got)
+	}
+}
+
+// TestProxyConfigFromCreds_PartialAWSPair_Unsupported pins the
+// defensive rejection of a half-configured pair. The resolver never
+// emits one half without the other, so this only fires on a malformed
+// caller-built map — but it must fail typed rather than half-signing.
+func TestProxyConfigFromCreds_PartialAWSPair_Unsupported(t *testing.T) {
+	for name, creds := range map[string]map[string]string{
+		"access_key_only": {"AWS_ACCESS_KEY_ID": "AKIA-test"},
+		"secret_only":     {"AWS_SECRET_ACCESS_KEY": "secret-test"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := proxyConfigFromCreds(creds)
+			if !errors.Is(err, ErrUnsupportedSandboxCredentials) {
+				t.Fatalf("err = %v, want ErrUnsupportedSandboxCredentials wrap", err)
+			}
+		})
 	}
 }
 
@@ -190,6 +250,79 @@ func TestBuildSandboxProxyEnv_BedrockBearer(t *testing.T) {
 	}
 	if got := envValue(env, "CLAUDE_CODE_USE_BEDROCK"); got != "1" {
 		t.Errorf("CLAUDE_CODE_USE_BEDROCK = %q, want 1", got)
+	}
+}
+
+// TestBuildSandboxProxyEnv_BedrockSigV4 pins the SigV4-path env shape:
+// the proxy URL, the per-run token as the placeholder AWS_ACCESS_KEY_ID
+// (the SDK signs with it and the proxy reads it back out of the SigV4
+// Authorization header's Credential scope), a constant throwaway
+// secret, the Bedrock toggle, and the org's region so the sandbox SDK
+// and the proxy's signing scope agree. Property B: the org's REAL
+// secret key and session token must not appear anywhere.
+func TestBuildSandboxProxyEnv_BedrockSigV4(t *testing.T) {
+	const (
+		realSecret  = "REAL-AWS-SECRET-MUST-NOT-LEAK"
+		realSession = "REAL-SESSION-TOKEN-MUST-NOT-LEAK"
+	)
+	cfg, err := proxyConfigFromCreds(map[string]string{
+		"AWS_ACCESS_KEY_ID":     "AKIAREALORGKEY",
+		"AWS_SECRET_ACCESS_KEY": realSecret,
+		"AWS_SESSION_TOKEN":     realSession,
+		"AWS_REGION":            "eu-central-1",
+	})
+	if err != nil {
+		t.Fatalf("proxyConfigFromCreds: %v", err)
+	}
+	token, err := newSandboxProxyToken(cfg.providerKind)
+	if err != nil {
+		t.Fatalf("newSandboxProxyToken: %v", err)
+	}
+	if !strings.HasPrefix(token, "AKIA") {
+		t.Errorf("per-run SigV4 token = %q, want an AKIA-prefixed access-key-ID shape", token)
+	}
+	env := buildSandboxProxyEnv(cfg, "http://10.42.7.1:53312", token)
+
+	if got := envValue(env, "ANTHROPIC_BEDROCK_BASE_URL"); got != "http://10.42.7.1:53312" {
+		t.Errorf("ANTHROPIC_BEDROCK_BASE_URL = %q, want proxy URL", got)
+	}
+	if got := envValue(env, "AWS_ACCESS_KEY_ID"); got != token {
+		t.Errorf("AWS_ACCESS_KEY_ID = %q, want the per-run token", got)
+	}
+	if got := envValue(env, "AWS_SECRET_ACCESS_KEY"); got != sigV4PlaceholderSecret {
+		t.Errorf("AWS_SECRET_ACCESS_KEY = %q, want the constant placeholder", got)
+	}
+	if got := envValue(env, "CLAUDE_CODE_USE_BEDROCK"); got != "1" {
+		t.Errorf("CLAUDE_CODE_USE_BEDROCK = %q, want 1", got)
+	}
+	if got := envValue(env, "AWS_REGION"); got != "eu-central-1" {
+		t.Errorf("AWS_REGION = %q, want the org's region", got)
+	}
+	if got := envValue(env, "AWS_SESSION_TOKEN"); got != "" {
+		t.Errorf("AWS_SESSION_TOKEN = %q present in sandbox env; the real session token belongs to the proxy only", got)
+	}
+	for _, e := range env {
+		if strings.Contains(e, realSecret) || strings.Contains(e, realSession) {
+			t.Errorf("PROPERTY B VIOLATED: sandbox env entry %q carries real AWS credential material", e)
+		}
+	}
+}
+
+// TestProxyConfigFromCreds_BearerWinsOverTriple pins mapping precedence
+// within the Bedrock family: a (malformed) map carrying both the bearer
+// and the triple resolves to the simpler bearer path, mirroring the
+// resolver's own branch order.
+func TestProxyConfigFromCreds_BearerWinsOverTriple(t *testing.T) {
+	cfg, err := proxyConfigFromCreds(map[string]string{
+		"AWS_BEARER_TOKEN_BEDROCK": "bdrk-wins",
+		"AWS_ACCESS_KEY_ID":        "AKIA-loses",
+		"AWS_SECRET_ACCESS_KEY":    "secret-loses",
+	})
+	if err != nil {
+		t.Fatalf("proxyConfigFromCreds: %v", err)
+	}
+	if cfg.llm.Provider != llmproxy.ProviderBedrockBearer {
+		t.Errorf("Provider = %q, want bedrock_bearer (wins over the triple)", cfg.llm.Provider)
 	}
 }
 
@@ -416,6 +549,74 @@ func TestStartProxiesForSandbox_TokenAuthEnforced(t *testing.T) {
 	}
 	if hits != 1 {
 		t.Errorf("upstream hits = %d, want 1", hits)
+	}
+}
+
+// TestStartProxiesForSandbox_SigV4LifecycleAndGate pins the Phase 2
+// provider from agentproc's perspective: an org configured with the
+// AWS triple gets a running proxy (no more typed rejection), the
+// sandbox env carries the SigV4 placeholder shape with zero real
+// credential material, and the token gate 401s callers that don't
+// present this run's placeholder access-key ID. Only unauthorized
+// requests are sent — they fail closed at the gate, so nothing ever
+// dials the real Bedrock upstream the proxy points at.
+func TestStartProxiesForSandbox_SigV4LifecycleAndGate(t *testing.T) {
+	const realSecret = "REAL-AWS-SECRET-MUST-NOT-LEAK"
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
+		"AWS_ACCESS_KEY_ID":     "AKIAREALORGKEY",
+		"AWS_SECRET_ACCESS_KEY": realSecret,
+		"AWS_REGION":            "us-east-1",
+	}, nil)
+	if err != nil {
+		t.Fatalf("startProxiesForSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = bundle.Shutdown(ctx)
+	})
+
+	proxyURL := envValue(env, "ANTHROPIC_BEDROCK_BASE_URL")
+	if proxyURL == "" {
+		t.Fatalf("ANTHROPIC_BEDROCK_BASE_URL missing from sandbox env: %v", env)
+	}
+	token := envValue(env, "AWS_ACCESS_KEY_ID")
+	if !strings.HasPrefix(token, "AKIA") {
+		t.Errorf("sandbox AWS_ACCESS_KEY_ID = %q, want the AKIA-shaped per-run token", token)
+	}
+	if got := envValue(env, "AWS_SECRET_ACCESS_KEY"); got != sigV4PlaceholderSecret {
+		t.Errorf("sandbox AWS_SECRET_ACCESS_KEY = %q, want the constant placeholder", got)
+	}
+	for _, e := range env {
+		if strings.Contains(e, realSecret) {
+			t.Fatalf("PROPERTY B VIOLATED: sandbox env entry %q carries the real AWS secret", e)
+		}
+	}
+
+	// No credential header at all → 401 at the gate.
+	reqBare, _ := http.NewRequest("POST", proxyURL+"/model/m/invoke", strings.NewReader("{}"))
+	respBare, err := http.DefaultClient.Do(reqBare)
+	if err != nil {
+		t.Fatalf("bare roundtrip: %v", err)
+	}
+	_ = respBare.Body.Close()
+	if respBare.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no Authorization: status = %d, want 401", respBare.StatusCode)
+	}
+
+	// A sibling run's placeholder AKID in a SigV4-shaped header → 401.
+	// The gate parses only the Credential= access-key ID, so a dummy
+	// signature suffices and nothing is forwarded upstream.
+	reqSibling, _ := http.NewRequest("POST", proxyURL+"/model/m/invoke", strings.NewReader("{}"))
+	reqSibling.Header.Set("Authorization",
+		"AWS4-HMAC-SHA256 Credential=AKIAOTHERRUNSTOKEN/20260707/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef")
+	respSibling, err := http.DefaultClient.Do(reqSibling)
+	if err != nil {
+		t.Fatalf("sibling roundtrip: %v", err)
+	}
+	_ = respSibling.Body.Close()
+	if respSibling.StatusCode != http.StatusUnauthorized {
+		t.Errorf("sibling AKID: status = %d, want 401", respSibling.StatusCode)
 	}
 }
 

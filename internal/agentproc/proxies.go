@@ -28,12 +28,31 @@ import (
 // hole: the proxy now authenticates the caller against this exact value.
 const proxyTokenAnthropicPrefix = "sk-ant-"
 
+// proxyTokenSigV4Prefix shapes the per-run SigV4 token like an AWS
+// access-key ID for the same reason sk-ant- exists on the Anthropic
+// path: the token is injected as the sandbox's AWS_ACCESS_KEY_ID, and a
+// plausibly-shaped value survives any key-shape check a future SDK
+// version might add. The AWS SDK signs with whatever ID it's given and
+// the ID rides in cleartext in the Authorization header's Credential=
+// scope, which is where the proxy's token gate reads it back.
+const proxyTokenSigV4Prefix = "AKIA"
+
+// sigV4PlaceholderSecret is the throwaway AWS_SECRET_ACCESS_KEY the
+// sandbox signs with on the SigV4 path. It is NOT a secret and NOT
+// per-run: the proxy never verifies the placeholder signature (caller
+// auth is the access-key ID / per-run token), it exists only so the
+// SDK constructs a Bedrock client and produces a request at all. The
+// org's real secret key stays in the proxy and re-signs upstream.
+const sigV4PlaceholderSecret = "tf-proxy-placeholder-not-a-credential"
+
 // newSandboxProxyToken mints the fresh per-run secret that both
 // authenticates the sandbox to its own proxy (set as
 // llmproxy.Config.IncomingToken) and is injected into the sandbox as
 // the credential the SDK sends. 32 bytes of crypto/rand, hex-encoded.
 // For Anthropic it carries the sk-ant- prefix so the SDK's key-shape
-// check passes; the Bedrock bearer path has no such shape requirement.
+// check passes; for Bedrock SigV4 it is uppercased behind an AKIA
+// prefix so it reads as an access-key ID (that path injects it as
+// AWS_ACCESS_KEY_ID); the Bedrock bearer path has no shape requirement.
 //
 // This is a per-run capability, not a durable credential: generated
 // fresh here and destroyed when the proxy is torn down at run end. It
@@ -45,8 +64,11 @@ func newSandboxProxyToken(kind llmproxy.Provider) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if kind == llmproxy.ProviderAnthropic {
+	switch kind {
+	case llmproxy.ProviderAnthropic:
 		return proxyTokenAnthropicPrefix + tok, nil
+	case llmproxy.ProviderBedrockSigV4:
+		return proxyTokenSigV4Prefix + strings.ToUpper(tok), nil
 	}
 	return tok, nil
 }
@@ -101,13 +123,15 @@ func (p *runProxies) Shutdown(ctx context.Context) error {
 }
 
 // ErrUnsupportedSandboxCredentials is returned when the resolved
-// credentials don't map to a proxy-able shape. AWS SigV4 (access-key
-// triple without bearer) is the current gap: the Phase 1 llmproxy
-// only handles bearer-style headers, so an org configured with the
-// AWS triple can't run in multi mode until the Phase 2 SigV4 proxy
-// lands. Surfaced as a typed error so the caller (delegate / scorer)
-// can produce a clear admin-facing message rather than a confusing
-// upstream auth error from inside the Node subprocess.
+// credentials don't map to a proxy-able shape: an empty map, or a
+// partial AWS access-key pair (one half of the triple without the
+// other — a malformed admin config the resolver normally filters out).
+// Every complete credential shape the resolver produces now has a
+// proxy path: Anthropic direct, Bedrock bearer, and Bedrock SigV4
+// (the access-key triple, Phase 2). Surfaced as a typed error so the
+// caller (delegate / scorer) can produce a clear admin-facing message
+// rather than a confusing upstream auth error from inside the Node
+// subprocess.
 var ErrUnsupportedSandboxCredentials = errors.New("agentproc: resolved credentials shape not supported in sandbox mode")
 
 // ErrNoSandboxGitCredentials is returned when a run that needs git
@@ -448,21 +472,16 @@ func sandboxEgressProxyEnv(proxyAddr, hostVethIP, incomingToken string) []string
 // is startProxiesForSandbox in this file.
 type sandboxProxyConfig struct {
 	llm llmproxy.Config
-	// One of "anthropic" or "bedrock_bearer". Drives the placeholder
-	// env shape (different env vars for each provider).
+	// One of "anthropic", "bedrock_bearer", or "bedrock_sigv4". Drives
+	// the placeholder env shape (different env vars for each provider).
 	providerKind llmproxy.Provider
 }
 
 // proxyConfigFromCreds maps a resolveCredentials output to the
 // llmproxy.Config + provider kind. The mapping mirrors the resolver's
 // precedence order: Anthropic key wins over Bedrock; Bedrock bearer
-// wins over the AWS triple.
-//
-// AWS triple without bearer is rejected with
-// ErrUnsupportedSandboxCredentials — the Phase 1 proxy doesn't
-// implement SigV4 re-signing. An org configured this way can't run
-// in multi mode until the Phase 2 SigV4 proxy lands. Admin UX:
-// surface this as "switch to Bedrock API key or Anthropic direct".
+// wins over the AWS triple; the triple maps to the Phase 2 SigV4
+// re-signing provider.
 func proxyConfigFromCreds(creds map[string]string) (sandboxProxyConfig, error) {
 	if apiKey := creds["ANTHROPIC_API_KEY"]; apiKey != "" {
 		// Anthropic direct (or org-gateway) path. The org may have
@@ -514,11 +533,40 @@ func proxyConfigFromCreds(creds map[string]string) (sandboxProxyConfig, error) {
 		}, nil
 	}
 
+	if accessKey, secretKey := creds["AWS_ACCESS_KEY_ID"], creds["AWS_SECRET_ACCESS_KEY"]; accessKey != "" && secretKey != "" {
+		// Bedrock SigV4 path (Phase 2): the proxy holds the real triple
+		// and re-signs each request; the sandbox signs with a throwaway
+		// placeholder. Region resolution mirrors the bearer path — the
+		// endpoint is regional and the SigV4 credential scope must name
+		// the same region, so one value feeds both.
+		region := creds["AWS_REGION"]
+		if region == "" {
+			region = "us-east-1"
+		}
+		upstream := fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com", region)
+		if err := validateProxyUpstream(upstream); err != nil {
+			return sandboxProxyConfig{}, fmt.Errorf("bedrock sigv4 upstream: %w", err)
+		}
+		return sandboxProxyConfig{
+			llm: llmproxy.Config{
+				Provider:         llmproxy.ProviderBedrockSigV4,
+				Upstream:         upstream,
+				AllowNonLoopback: true,
+				SigV4Credentials: &llmproxy.SigV4Credentials{
+					AccessKeyID:     accessKey,
+					SecretAccessKey: secretKey,
+					SessionToken:    creds["AWS_SESSION_TOKEN"],
+					Region:          region,
+				},
+			},
+			providerKind: llmproxy.ProviderBedrockSigV4,
+		}, nil
+	}
+
 	if creds["AWS_ACCESS_KEY_ID"] != "" || creds["AWS_SECRET_ACCESS_KEY"] != "" {
-		// The resolver only returns the AWS triple when both halves
-		// are present; checking either is sufficient to detect the
-		// triple-without-bearer case here.
-		return sandboxProxyConfig{}, fmt.Errorf("%w: AWS access-key triple requires SigV4 proxy (Phase 2); configure aws_bearer_token_bedrock or anthropic_api_key instead", ErrUnsupportedSandboxCredentials)
+		// Defensive: the resolver only emits the triple when both halves
+		// are present, so a lone half means a malformed caller-built map.
+		return sandboxProxyConfig{}, fmt.Errorf("%w: partial AWS access-key pair (need both aws_access_key_id and aws_secret_access_key)", ErrUnsupportedSandboxCredentials)
 	}
 
 	return sandboxProxyConfig{}, fmt.Errorf("%w: empty credentials map", ErrUnsupportedSandboxCredentials)
@@ -549,6 +597,25 @@ func buildSandboxProxyEnv(cfg sandboxProxyConfig, llmURL, incomingToken string) 
 			"AWS_BEARER_TOKEN_BEDROCK=" + incomingToken,
 			"CLAUDE_CODE_USE_BEDROCK=1",
 		}
+	case llmproxy.ProviderBedrockSigV4:
+		// The per-run token IS the placeholder access-key ID: the SDK
+		// signs with it, it rides in cleartext in the Authorization
+		// header's Credential= scope, and the proxy authenticates the
+		// caller against it (llmproxy.sigV4AccessKeyID). The secret half
+		// is a constant throwaway — the placeholder signature is never
+		// verified, and the proxy discards it wholesale when re-signing
+		// with the org's real triple. AWS_REGION keeps the sandbox SDK's
+		// client construction and the proxy's signing scope in agreement.
+		env := []string{
+			"ANTHROPIC_BEDROCK_BASE_URL=" + llmURL,
+			"AWS_ACCESS_KEY_ID=" + incomingToken,
+			"AWS_SECRET_ACCESS_KEY=" + sigV4PlaceholderSecret,
+			"CLAUDE_CODE_USE_BEDROCK=1",
+		}
+		if cfg.llm.SigV4Credentials != nil {
+			env = append(env, "AWS_REGION="+cfg.llm.SigV4Credentials.Region)
+		}
+		return env
 	}
 	return nil
 }
