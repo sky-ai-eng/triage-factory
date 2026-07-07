@@ -238,6 +238,48 @@ behavior change.
 Instance identity is **stable across restarts**: an id minted once and
 persisted under `TF_STATE_ROOT` (so a rebooted executor recognizes *its
 own* in-flight rows), plus a `boot_epoch` that increments per boot.
+Mechanically:
+
+1. **The id is a file; the file is the identity.** First boot mints a
+   random id into `<TF_STATE_ROOT>/instance-id`; every boot re-reads
+   it under an **exclusive flock held for the process lifetime**, so
+   two processes pointed at one state root fail fast instead of
+   silently sharing an identity. The id deliberately identifies the
+   *state root*, not the machine or the process (hostnames are
+   recycled in container platforms; PIDs are meaningless): ownership
+   of rows is really ownership of the disk state — worktrees, caches —
+   those rows reference, so identity must travel with the volume.
+2. **The epoch is minted by the registry, not the file.** Boot
+   registration is one statement — `INSERT … ON CONFLICT (id) DO
+   UPDATE SET boot_epoch = instances.boot_epoch + 1, … RETURNING
+   boot_epoch` — atomic and monotonic, immune to the volume
+   snapshot/restore/clone weirdness that corrupts a file-local
+   counter. Registration and epoch-mint are the same write.
+3. **Claims stamp the pair.** `runs` (and event-queue claims) record a
+   `claimed_epoch` next to `executor_id`. The boot self-sweep (§4.2)
+   is then a pure predicate — reset `WHERE executor_id = me AND
+   claimed_epoch < my epoch` — with no ordering dependence: rows from
+   the current life can't match by construction, so the sweep is safe
+   to run (or re-run) at any time, not only inside a carefully
+   sequenced boot window.
+4. **The heartbeat doubles as a split-identity fence.** Renewal is
+   `UPDATE … WHERE id = me AND boot_epoch = mine`; matching zero rows
+   means another process has re-registered this identity (a cloned
+   volume, a duplicated state root across hosts — the case the flock
+   can't see). The instance stops claiming and exits loudly rather
+   than fight over ownership.
+5. **Ephemeral state roots degrade to the reaper, never to
+   corruption.** A pod with no persistent volume mints a fresh id
+   each boot; its prior lives' rows are never self-swept, but the
+   leader reaper collects them by heartbeat staleness like any dead
+   executor's (§4.3), and a registry GC tombstones rows whose
+   heartbeat is days stale. Persistent volumes are the recommendation
+   for executors regardless (they carry the caches); correctness
+   never depends on them.
+
+At `TF_ROLE=all`/local the same mechanism runs against
+`~/.triagefactory` and trivially yields one row, epoch bumping per
+restart.
 
 The registry is deliberately named for what it holds — **every TF
 process in the deployment**, not just executors ("instance" is already
