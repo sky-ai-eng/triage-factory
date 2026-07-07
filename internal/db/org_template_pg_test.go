@@ -14,7 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestOrgTemplate_Postgres_ForwardOnlyAndIsolation is the SKY-381 multi-tenant
+// TestOrgTemplate_Postgres_ForwardOnlyAndIsolation is the multi-tenant
 // acceptance pin, on the real two-pool Postgres store:
 //
 //   - an org admin can edit their org's template (RLS allows the write);

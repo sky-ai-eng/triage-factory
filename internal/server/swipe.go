@@ -28,7 +28,7 @@ type swipeRequest struct {
 // effects an accepted swipe may need: tearing down a pending run, syncing a
 // Jira claim, and firing a delegation.
 //
-// SKY-261 v0.7 audit contract: swipe_events is a "state-change log," not a
+// swipe_events is a "state-change log," not a
 // "user-gesture log." For lifecycle actions (dismiss/snooze/complete) the
 // swipe IS the state change, so the audit + lifecycle UPDATE land together.
 // For responsibility-axis actions (claim/delegate) the real state change is a
@@ -67,7 +67,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// newStatus is the task status reported back to the client. jiraUserClient
-	// is set only by the claim path for Jira-backed tasks (SKY-463) and is
+	// is set only by the claim path for Jira-backed tasks and is
 	// consumed by the post-dispatch claim sync; nil otherwise.
 	var (
 		newStatus      string
@@ -102,7 +102,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 
 	// Any user gesture that takes a task off the agent's hands — dismiss,
 	// complete, claim, or delegate — resolves every unresolved artifact the task
-	// holds and cancels any in-flight run (SKY-206). Reassign (TFAC-561) is
+	// holds and cancels any in-flight run. Reassign (TFAC-561) is
 	// deliberately excluded: it's a user→user handoff on a task that's already
 	// off the agent's hands, and run ownership is per-run, not per-claim — an
 	// active delegated run (if the frozen actor is somehow still running
@@ -157,7 +157,7 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 		return "", nil, false
 	}
 
-	// SKY-463: a Jira-backed claim assigns the ticket to the claiming user and
+	// A Jira-backed claim assigns the ticket to the claiming user and
 	// transitions it — a write that must act as THAT user. Resolve the acting
 	// user's credential up front; the RequireJiraIdentity gate guarantees
 	// presence in the normal flow, so this 409 is defense-in-depth.
@@ -256,8 +256,8 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 // swipeDelegate handles the delegate action: HandoffAgentClaim transitions the
 // task to bot ownership (unclaimed→bot, my-claim→bot, idempotent bot-owns) and
 // refuses a different-user claim. It re-checks team_agents.enabled at swipe
-// time (SKY-261), gating on the team the claim consolidates onto rather than
-// the pre-handoff task.TeamID (SKY-378). Returns the new status and ok=false
+// time, gating on the team the claim consolidates onto rather than
+// the pre-handoff task.TeamID. Returns the new status and ok=false
 // when it already wrote an error response.
 func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, userID, id string, req swipeRequest) (string, bool) {
 	// Pre-load to disambiguate HandoffRefused (404 missing / 409 terminal /
@@ -388,7 +388,7 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 // around RLS" shape the `...System` convention uses elsewhere, just reached
 // from a request path instead of a claims-less background goroutine.
 //
-// Deliberately out of scope: no Jira-side ticket reassignment. SKY-463 syncs
+// Deliberately out of scope: no Jira-side ticket reassignment. Claim syncs
 // a Jira ticket's assignee to the ACTING user on self-claim; reassign moves
 // the claim to a THIRD party who may not have Jira connected at all, so
 // syncing here would mean acting through someone else's (possibly absent)
@@ -567,8 +567,8 @@ func (s *Server) swipeLifecycle(w http.ResponseWriter, r *http.Request, orgID, u
 // PRs, dismisses all pending reviews, a no-op when none exist) and cancels
 // in-flight runs. The discard memory note differs per action so the next agent
 // reading run_memory can tell apart "human walked away" (dismiss) from "human
-// resolved it" (complete) from "human took over" (claim) from "re-delegate"
-// (SKY-330). Best-effort.
+// resolved it" (complete) from "human took over" (claim) from "re-delegate".
+// Best-effort.
 func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action string) {
 	outcome := discardOutcomeDismissed
 	switch action {
@@ -608,7 +608,7 @@ func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action st
 // skips the transition when the ticket is already assigned-to-self and already
 // in any in-progress member, so a second claim on the same issue doesn't
 // re-assign/re-transition redundantly. jiraUserClient is the acting user's own
-// client (SKY-463), so the assignment attributes to the claimer.
+// client, so the assignment attributes to the claimer.
 func (s *Server) swipeJiraClaimSync(r *http.Request, orgID, userID, id string, jiraUserClient *jira.Client) {
 	// Fetch the task and its team's status rules in one WithTx so the rule read
 	// goes through the app-pool ListForTeam under jira_rules_select RLS.

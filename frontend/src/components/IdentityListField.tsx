@@ -4,8 +4,8 @@ import { useMe, useTeamMembers } from '../hooks/useDeploymentConfig'
 import type { MeResponse, TeamMember } from '../types'
 
 /** IdentityListField is the editor for `author_in` / `reviewer_in` /
- *  `commenter_in` (GitHub, SKY-264) and `assignee_in` / `reporter_in` /
- *  `commenter_in` (Jira, SKY-270) predicate fields. Two variants based
+ *  `commenter_in` (GitHub) and `assignee_in` / `reporter_in` /
+ *  `commenter_in` (Jira) predicate fields. Two variants based
  *  on the active user's team size, derived from the /api/team/members
  *  roster:
  *

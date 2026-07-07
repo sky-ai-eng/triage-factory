@@ -29,7 +29,6 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 // runmode.LocalDefaultOrgID, userID is ignored, no JWT-claims setup is
 // needed because SQLite has no auth concept. Signature parity with
 // the Postgres impl is the only reason this exists on SQLite at all.
-// See SKY-296.
 func (s *Store) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
 	return s.runTx(ctx, orgID, userID, fn)
 }

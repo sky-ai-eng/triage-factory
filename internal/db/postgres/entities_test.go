@@ -350,7 +350,7 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped_RLS(t *testing.T) {
 }
 
 // TestEntityStore_Postgres_ClassificationStatusSystem_NoClaims pins the
-// SKY-392 fix end-to-end against Postgres. The classification WaitFor
+// fix end-to-end against Postgres. The classification WaitFor
 // runs in the background spawner with NO request.jwt.claims, so its read
 // must route through the admin pool (the System variant) — the app pool
 // (tf_app) would RLS-deny it (current_org_id() is NULL). This drives

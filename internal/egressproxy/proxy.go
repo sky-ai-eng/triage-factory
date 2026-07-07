@@ -4,8 +4,8 @@
 //
 // # The problem it solves
 //
-// The sandbox's L3 egress policy (internal/sandbox applyEgressPolicy,
-// SKY-395) pins all traffic to the run's own gateway IP — the only
+// The sandbox's L3 egress policy (internal/sandbox applyEgressPolicy)
+// pins all traffic to the run's own gateway IP — the only
 // listeners there are the per-run LLM and git credential proxies. That
 // wall is what keeps a compromised agent off cloud metadata, the
 // operator's private network, and sibling runs' proxies. But it also
@@ -54,7 +54,7 @@
 //
 // # Trust model on the local hop
 //
-// Same shape as llmproxy (SKY-395 Part A): the gateway IP lives in the
+// Same shape as llmproxy: the gateway IP lives in the
 // shared host netns, so "reaching this proxy" must not be treated as
 // "is this run's own agent." Every CONNECT must carry the per-run
 // secret (Config.IncomingToken) as a Proxy-Authorization Basic

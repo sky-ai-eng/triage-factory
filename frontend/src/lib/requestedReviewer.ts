@@ -1,6 +1,6 @@
 import type { Task } from '../types'
 
-// SKY-412: with per-reviewer dedup (SKY-370) a single PR mints one
+// With per-reviewer dedup a single PR mints one
 // `github:pr:review_requested` task per requested reviewer, distinguished
 // only by dedup_key. These helpers read *who* the review was requested of
 // out of that key and derive a GitHub link, so RequestedReviewerBadge can
@@ -18,7 +18,7 @@ export type RequestedReviewer =
 //   user:<login>           e.g. "user:aidanallchin"
 //   team:<org>/<slug>      e.g. "team:eng/platform"
 // Returns null for any non-conforming key — non-review_requested events,
-// and legacy tasks predating SKY-370 whose dedup_key is empty — so the
+// and legacy tasks whose dedup_key is empty — so the
 // badge simply never renders where it doesn't apply.
 export function parseRequestedReviewer(task: Task): RequestedReviewer | null {
   if (task.event_type !== 'github:pr:review_requested') return null

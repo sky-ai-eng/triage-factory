@@ -72,7 +72,7 @@ func (r *reloader) onJiraChanged(orgID string) {
 
 	serverLog.Info("jira config changed, restarting jira poller")
 	r.announce.setPending("jira")
-	// SKY-463: the server no longer holds a process-global Jira write client —
+	// The server no longer holds a process-global Jira write client —
 	// user writes resolve per-user via jira.Resolver, system reads via the
 	// poller's ForSystem. Restarting the poller is all this callback needs to do.
 	r.pollerMgr.RestartJira()

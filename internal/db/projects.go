@@ -28,9 +28,9 @@ var ErrVisibilityForbidden = errors.New("db: insufficient privilege for that pro
 // and the human picks which team owns the project at the Create UI;
 // the store does not synthesize a team. creator_user_id is resolved
 // from tf.current_user_id() set by WithTx (falling back to org owner
-// only on the admin-pool test path where claims aren't set). SKY-294
-// owns the broader team-selection UX work (per-page filter + write-
-// time picker + sticky default).
+// only on the admin-pool test path where claims aren't set). Broader
+// team-selection UX work (per-page filter + write-time picker +
+// sticky default) is tracked separately.
 //
 // Postgres wires against the app pool — every consumer is request-
 // equivalent (projects handler, curator, backfill, project_entities)
@@ -111,7 +111,7 @@ type ProjectStore interface {
 	// --- Admin-pool variants (`...System`) ---
 	//
 	// ListSystem mirrors List but routes through the admin pool in
-	// Postgres. The consumer is the project classifier (SKY-297) —
+	// Postgres. The consumer is the project classifier —
 	// a background goroutine spawned from main.go that pairs each
 	// org's unclassified entities against that org's project set.
 	// The classifier has no JWT-claims context, so the read needs

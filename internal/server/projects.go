@@ -26,8 +26,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// SKY-215. Projects are the data layer underneath the Curator stack —
-// the long-lived per-project context that the rest of the SKY-211
+// Projects are the data layer underneath the Curator stack —
+// the long-lived per-project context that the rest of the
 // family hangs work onto. This file is pure CRUD + on-disk knowledge
 // dir cleanup; the Curator runtime, classifier, and UI all land in
 // later tickets and can hit the same handlers without changes here.
@@ -746,7 +746,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	// InsertPendingContext helper uses ON CONFLICT DO NOTHING so a
 	// second PATCH between user messages preserves the *earliest*
 	// baseline_value, which is the correct anchor for diffing at
-	// consume time. SKY-224.
+	// consume time.
 	if existing.CuratorSessionID != "" {
 		// Wrap under the request user's claims so the Postgres impl's
 		// InsertPendingContext sees tf.current_user_id() for the NOT
@@ -920,7 +920,7 @@ func validatePinnedRepoShape(repos []string) ([]string, string) {
 
 // validatePinnedRepos composes shape validation with the must-be-tracked
 // existence check: every slug must be a repo the project's *team* tracks
-// (team_github_repos). Post-SKY-375 repos are per-team, so pinning is
+// (team_github_repos). Repos are per-team, so pinning is
 // gated on the team's set rather than the org-wide union — a repo another
 // team tracks (and that therefore exists in the shared repo_profiles
 // cache) is still rejected here if the project's own team doesn't track
@@ -947,7 +947,7 @@ func validatePinnedRepos(ctx context.Context, teamRepos db.TeamGitHubReposStore,
 		return nil, "failed to load tracked repos: " + err.Error()
 	}
 	// Key both sides case-insensitively: GitHub owner/repo names are
-	// case-insensitive and the rest of SKY-375 folds case (TracksRepoSystem,
+	// case-insensitive and the rest of the codebase folds case (TracksRepoSystem,
 	// newlyAddedRepos, the reconcile). A repo re-saved into team_github_repos
 	// with different capitalization than the incoming pin is the same repo,
 	// so an exact-string match would wrongly reject an otherwise-valid pin.
@@ -1014,8 +1014,6 @@ func validateTrackerKeys(teamRules []domain.JiraProjectStatusRules, jiraKey, lin
 // from the user's next message or a follow-up PATCH. Surfacing the
 // failure as a 500 would imply the settings change failed, which is
 // strictly worse.
-//
-// SKY-224.
 func queuePendingContextChanges(ctx context.Context, curatorStore db.CuratorStore, orgID string, before, after domain.Project) {
 	sessionID := after.CuratorSessionID
 	if sessionID == "" {
@@ -1132,7 +1130,7 @@ const knowledgeMaxUploadBytes = 5 * 1024 * 1024
 const knowledgeMaxRequestBytes = 25 * 1024 * 1024
 
 // handleProjectKnowledge serves the files under the project's
-// knowledge-base directory. SKY-217.
+// knowledge-base directory.
 //
 // Returns an empty list (not 404) when the project exists but the
 // knowledge subdir doesn't, so the frontend can render an empty state

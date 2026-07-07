@@ -34,7 +34,7 @@ interface Props {
   /**
    * True while the parent's onSave (the team-repos PUT) is in flight. Disables
    * the Continue/Save button and swaps in a spinner so a slow save on a large
-   * GHES org reads as "working" rather than "broken" (SKY-409). Distinct from
+   * GHES org reads as "working" rather than "broken". Distinct from
    * the component's internal repo-list fetch `loading`.
    */
   saving?: boolean

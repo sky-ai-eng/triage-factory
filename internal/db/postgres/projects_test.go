@@ -153,7 +153,7 @@ func TestProjectStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 // guard: passing runmode.LocalDefaultTeamID (the SQLite-only sentinel)
 // returns a clear error instead of silently attaching the project to
 // any team. Projects are user-driven writes; the human picks the
-// team at the Create UI (SKY-294), and the store refuses to make one
+// team at the Create UI, and the store refuses to make one
 // up. Once D9 retrofits handler claims, the caller threads a real
 // team from request context.
 func TestProjectStore_Postgres_CreateRefusesTeamSentinel(t *testing.T) {
@@ -172,15 +172,16 @@ func TestProjectStore_Postgres_CreateRefusesTeamSentinel(t *testing.T) {
 	}
 }
 
-// TestProjectStore_Postgres_CrossTeamRLSHidesProject is the SKY-367
+// TestProjectStore_Postgres_CrossTeamRLSHidesProject is the
 // regression guard for the projects-panel and backfill-candidates
 // handlers. Both list entities by project_id but gate the listing on
 // Projects.Get returning a non-nil project first (project == nil →
-// early return, no entities). Entities are org-wide, so that gate is
-// the *only* thing stopping a user from listing another team's
-// project entities once org-wide polling lands. This pins that a
-// team-visibility project owned by a team the viewer doesn't belong to
-// is invisible to Projects.Get under RLS — so the handler's gate holds.
+// early return, no entities). Entities are org-wide (polling is
+// org-wide, per CLAUDE.md's standing rule on multi-mode read scoping),
+// so that gate is the *only* thing stopping a user from listing
+// another team's project entities. This pins that a team-visibility
+// project owned by a team the viewer doesn't belong to is invisible to
+// Projects.Get under RLS — so the handler's gate holds.
 func TestProjectStore_Postgres_CrossTeamRLSHidesProject(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

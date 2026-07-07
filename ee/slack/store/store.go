@@ -52,8 +52,9 @@ func FromTx(tx db.TxStores) *Bundle {
 }
 
 // FromStores returns the non-tx Slack bundle (admin-pool reads — the
-// future socket connection manager's boot-time enumeration), or nil if no
-// Slack extension is registered.
+// socket connection manager's boot-time enumeration, see
+// socketManager.run in ee/slack/socket.go), or nil if no Slack
+// extension is registered.
 func FromStores(s db.Stores) *Bundle {
 	b, _ := s.Extension(ExtKey).(*Bundle)
 	return b
@@ -95,7 +96,7 @@ type Workspace struct {
 // org-admin-gated CRUD (RLS gates SELECT on org membership, writes on
 // org-admin); admin pool for ListAllSystem/GetByWorkspaceAppSystem/
 // AppBoundToOtherOrgSystem, the org-wide system reads a claims-free caller
-// (the pre-auth webhook receiver, the future socket connection manager, the
+// (the pre-auth webhook receiver, the socket connection manager, the
 // connect handler's own cross-org invariant check) needs — annotated
 // org-wide-system-job like EntityStore.ListUnclassified, not a per-request
 // read.
@@ -167,8 +168,8 @@ type WorkspaceStore interface {
 // app's envelopes across all of that app's open sockets regardless of which
 // workspace(s) it's installed in), so two apps sharing a workspace must not
 // share a dedup key. Postgres admin-pool only: the pre-auth webhook receiver
-// has no request claims, and the future Socket Mode client is similarly
-// claims-free. The SQLite impl is a stub returning
+// has no request claims, and the Socket Mode client (ee/slack/socket_conn.go)
+// is similarly claims-free. The SQLite impl is a stub returning
 // db.ErrNotApplicableInLocal, same posture as WorkspaceStore.
 type DeliveryStore interface {
 	// MarkDeliveredSystem records one (apiAppID, eventID) delivery via an

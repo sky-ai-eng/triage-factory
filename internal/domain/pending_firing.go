@@ -42,12 +42,12 @@ const (
 	PendingFiringSkipBreakerTripped  = "breaker_tripped"
 	// PendingFiringSkipClaimChanged fires when the task is no longer
 	// bot-claimed at drain time — typically because a user took it
-	// over via swipe-claim or requeued it. SKY-261 B+ added the check;
-	// pre-B+ the drain would still fire even after a user grabbed the
+	// over via swipe-claim or requeued it. Without this check
+	// the drain would still fire even after a user grabbed the
 	// task, producing a phantom bot run on a now-user-claimed task.
 	PendingFiringSkipClaimChanged = "claim_changed"
 	// PendingFiringSkipAlreadyFired fires when the drain's fenced run
-	// insert hits the (triggering_event_id, trigger_id) fence (SKY-424):
+	// insert hits the (triggering_event_id, trigger_id) fence:
 	// a run for this firing's event already committed — a prior drain
 	// fired it but died before MarkFired, or the immediate path fired it
 	// before this firing was popped. Skipping is correct: the existing

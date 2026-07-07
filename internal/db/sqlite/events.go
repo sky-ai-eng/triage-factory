@@ -11,7 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// eventStore is the SQLite impl of db.EventStore (SKY-305).
+// eventStore is the SQLite impl of db.EventStore.
 // Behavioral notes vs the pre-store internal/db/events.go body:
 //
 //   - assertLocalOrg(orgID) at every entry point.

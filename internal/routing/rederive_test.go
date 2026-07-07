@@ -173,7 +173,7 @@ func TestReDeriveAfterScoring_BelowThreshold_Skips(t *testing.T) {
 	}
 }
 
-// TestReDeriveAfterScoring_BotClaimed_Skips covers the post-SKY-261 B+
+// TestReDeriveAfterScoring_BotClaimed_Skips covers the
 // shape of "already delegated": the responsibility axis lives on
 // claimed_by_agent_id, not on status='delegated' (which is gone).
 // Re-derive must skip claim-stamped tasks regardless of their status
@@ -323,13 +323,13 @@ func TestReDeriveAfterScoring_Snoozed_Skips(t *testing.T) {
 	}
 }
 
-// TestReDeriveAfterScoring_CrossTeamTrigger_Skips pins SKY-295 (P1.1):
-// when a task is created for team A and team B has its own deferred
-// trigger matching the same event type + predicate, the re-derive
-// pass must NOT fire team B's trigger against team A's task. Pre-
-// SKY-295 reDeriveTask loaded all enabled triggers for the event
-// type and matched on predicate alone, leaking cross-team after
-// scoring landed.
+// TestReDeriveAfterScoring_CrossTeamTrigger_Skips pins the cross-team
+// isolation: when a task is created for team A and team B has its own
+// deferred trigger matching the same event type + predicate, the
+// re-derive pass must NOT fire team B's trigger against team A's
+// task. Previously reDeriveTask loaded all enabled triggers for the
+// event type and matched on predicate alone, leaking cross-team
+// after scoring landed.
 func TestReDeriveAfterScoring_CrossTeamTrigger_Skips(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
@@ -440,7 +440,7 @@ func TestReDeriveAfterScoring_TeamNotInVisibilitySet_Skips(t *testing.T) {
 		t.Fatalf("add agent to team B: %v", err)
 	}
 	// Team-B-owned prompt + blueprint so the same-team trigger→blueprint FK
-	// holds (SKY-380/SKY-416).
+	// holds.
 	insertPromptForTeam(t, database, "p-novis", teamB)
 	bpNovis := insertBlueprintForTeam(t, database, "bp-novis", "p-novis", teamB)
 	if _, err := database.Exec(`

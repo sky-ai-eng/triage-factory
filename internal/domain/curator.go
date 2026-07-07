@@ -17,7 +17,7 @@ type CuratorRequest struct {
 	UserInput string `json:"user_input"`
 	// CreatorUserID is the requesting user (curator_requests.creator_user_id).
 	// The per-project goroutine reads this when dequeuing a row so each turn's
-	// writes attribute to the user that sent the message — see SKY-298.
+	// writes attribute to the user that sent the message.
 	CreatorUserID string  `json:"creator_user_id,omitempty"`
 	ErrorMsg      string  `json:"error_msg,omitempty"`
 	CostUSD       float64 `json:"cost_usd"`
@@ -58,7 +58,7 @@ const (
 
 // CuratorPendingContext is a queued "the world changed since the agent
 // last saw it" delta — pinned-repos changed, tracker key changed, etc.
-// (SKY-224). The Curator dispatch loop drains pending rows for the
+// The Curator dispatch loop drains pending rows for the
 // active session at the start of each turn, renders them as a hidden
 // [system note] block prepended to the user's message, and then either
 // finalizes (deletes) them on a successful run or reverts (un-consumes)

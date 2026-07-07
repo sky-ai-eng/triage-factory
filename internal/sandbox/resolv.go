@@ -13,7 +13,7 @@ import (
 //
 // Self-host customers may want to override this to use their own
 // internal resolvers; a future Config.DNSServers field can add that
-// without changing the bind-mount mechanism. For SKY-254 we hardcode.
+// without changing the bind-mount mechanism. For now we hardcode.
 const resolvConfContent = `nameserver 1.1.1.1
 nameserver 8.8.8.8
 options edns0

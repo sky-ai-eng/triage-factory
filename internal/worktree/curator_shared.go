@@ -76,7 +76,7 @@ func sharedReadersDec(wtDir string) {
 // the next refresh lands once the tree goes quiescent. Detached HEAD (not a
 // local branch) is used so multiple worktrees derived from the one shared bare
 // — across projects, and across orgs while the bare cache stays org-global
-// pre-SKY-406 — never collide on "branch already checked out".
+// (no per-org orgID threaded through yet) — never collide on "branch already checked out".
 //
 // Bind-mount readability: the returned tree is left owned by the host TF
 // process (no per-session chown — chowning a shared tree to one session's

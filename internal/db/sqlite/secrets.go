@@ -22,7 +22,7 @@ import (
 // The Postgres impl is the canonical consumer of this interface
 // (vault-backed, RLS-gated per org). The local impl exists so callers
 // that don't want to branch on runmode — most importantly the per-org
-// credential resolver SKY-322 will add — can issue one Get call and
+// credential resolver — can issue one Get call and
 // have it work in either mode. In local mode there's a single org
 // (runmode.LocalDefaultOrgID) and a single keychain bag; orgID is
 // asserted to match the sentinel and otherwise ignored.
@@ -31,7 +31,7 @@ import (
 //
 // orgID MUST equal runmode.LocalDefaultOrgID in local mode. A mismatched
 // orgID is a caller bug (probably forgot to extract the request orgID
-// via the SKY-316 accessor), and silently writing to the wrong bag
+// via the correct accessor), and silently writing to the wrong bag
 // would be a footgun. The error surfaces the caller mistake instead.
 type secretStore struct{}
 

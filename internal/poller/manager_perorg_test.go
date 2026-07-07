@@ -109,7 +109,7 @@ func TestManager_StartGitHub_StartsInMultiMode(t *testing.T) {
 
 // TestManager_RestartAll_StartsBothInMultiMode pins the boot/config-change
 // entry point main.go uses: RestartAll must start the process-global GitHub
-// poller in multi mode (SKY-386 — nothing ever started a poll loop in multi, so
+// poller in multi mode (nothing ever started a poll loop in multi, so
 // no entities were discovered) AND the Jira poller. Jira polling now reads
 // service creds through the claims-free system door (integrations.LoadSystem,
 // resolver.ForSystem), so it no longer needs a request JWT and runs in multi

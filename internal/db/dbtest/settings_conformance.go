@@ -416,7 +416,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
-		// List* reads populate TeamID (the PK's first column, SKY-376);
+		// List* reads populate TeamID (the PK's first column);
 		// ReplaceForTeam takes the team as a parameter and ignores the
 		// struct field, so set the expected TeamID before the round-trip
 		// compare.
@@ -433,7 +433,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	})
 
 	t.Run("JiraStatusRules_TeamID_And_OrgUnion_RoundTrip", func(t *testing.T) {
-		// SKY-376: TeamID populates on every List* read, ListForOrgSystem
+		// TeamID populates on every List* read, ListForOrgSystem
 		// returns the org-wide union (every team's rows), and
 		// TracksProjectSystem answers the router gate.
 		stores, ids := factory(t)

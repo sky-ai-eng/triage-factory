@@ -12,7 +12,7 @@ import (
 // seedPgMember inserts a fresh users + org_memberships row pair for
 // org-policy tests that need a distinct caller identity. role is one
 // of 'member' / 'admin' / 'owner'. Returns the user id. Lifted out of
-// the per-store test files in SKY-259 (the predecessor task_rules /
+// the per-store test files (the predecessor task_rules /
 // prompt_triggers test files defined this helper inline) so it's
 // available to every postgres-package test.
 func seedPgMember(t *testing.T, h *pgtest.Harness, orgID, label, role string) string {
@@ -50,7 +50,7 @@ func mustOwnerUserForOrg(t *testing.T, h *pgtest.Harness, orgID string) string {
 }
 
 // seedPgDefaultTeam creates a default team for orgID and adds userID as
-// an admin member. Required post-SKY-262 because the team-default
+// an admin member. Required because the team-default
 // visibility schema needs every team-scoped row to point at a team, and
 // RLS gates team-visible reads on memberships. Per-store test seeders
 // that pre-date the team reframe (org + user only) need to call this

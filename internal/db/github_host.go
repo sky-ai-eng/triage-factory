@@ -10,7 +10,7 @@ import "strings"
 // path-based hosts are case-sensitive below the authority.
 //
 // Shared by the SQLite and Postgres usersStore impls so the rule has one
-// home (SKY-396); the Jira/Linear sibling tables (SKY-397/398) add their
+// home; the Jira/Linear sibling tables add their
 // own scope-normalization rather than reusing this GitHub-specific one.
 func NormalizeGitHubHost(host string) string { return strings.TrimRight(host, "/") }
 

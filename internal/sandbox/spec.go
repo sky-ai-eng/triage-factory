@@ -126,7 +126,7 @@ func buildSpec(cfg Config, netnsPath string) (*specs.Spec, error) {
 				Options: []string{"rbind", "ro"}},
 
 			// CA certificates from the host so outbound TLS (to the
-			// proxy in SKY-335, to git/Anthropic upstream) verifies.
+			// proxy, to git/Anthropic upstream) verifies.
 			// /etc/ssl/certs is the conventional Debian/Alpine path;
 			// most distros symlink it.
 			{Destination: "/etc/ssl/certs", Type: "bind",

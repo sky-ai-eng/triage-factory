@@ -15,7 +15,7 @@ import (
 //   - the orgID to pass to every method (sqlite returns
 //     runmode.LocalDefaultOrgID, postgres returns a fresh org UUID)
 //   - the teamID Create/SeedOrUpdate should attribute prompts to. Every
-//     prompt is team-scoped post-SKY-380, so the seeder threads it; SQLite
+//     prompt is team-scoped, so the seeder threads it; SQLite
 //     pins the local sentinel, Postgres binds the test team.
 //   - a RunSeeder hook that lets the harness create runs rows the
 //     Stats subtests need. The harness doesn't know how to create
@@ -32,7 +32,7 @@ type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID 
 // staggered across days so the per-day grouping has signal. Returns
 // the inserted run IDs in case the harness wants to clean them up
 // (it doesn't today — the per-test DB reset handles it). promptID is
-// the prompt's id (a random UUID post-SKY-380 — the harness passes the
+// the prompt's id (a random UUID — the harness passes the
 // id SeedOrUpdate returned, not the slug).
 type RunSeederForStats func(t *testing.T, promptID string, statusByOffset []string) []string
 
@@ -40,7 +40,7 @@ type RunSeederForStats func(t *testing.T, promptID string, statusByOffset []stri
 // any db.PromptStore impl. Each subtest gets a fresh store via
 // factory() so test bodies don't have to coordinate state.
 //
-// SKY-380 note: prompts are team-scoped and identified by a random UUID;
+// Prompts are team-scoped and identified by a random UUID;
 // the shipped slug lives in system_slug. SeedOrUpdate dedupes on
 // (org_id, team_id, system_slug) and returns the team copy's id, so the
 // suite seeds by SystemSlug and reads back by the returned id. The
@@ -369,7 +369,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("Delete_WithRunHistory_Succeeds", func(t *testing.T) {
-		// The original SKY-430 regression: a user prompt with run history must be
+		// Regression: a user prompt with run history must be
 		// deletable without hitting the runs.prompt_id RESTRICT FK (a hard DELETE
 		// would 500). Soft-delete sidesteps the FK and keeps the audit trail.
 		store, orgID, teamID, seedRuns := factory(t)
@@ -403,7 +403,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("GetBySystemSlug_ResolvesSeededCopy", func(t *testing.T) {
-		// The shipped-prompt id is a random UUID per team copy (SKY-380);
+		// The shipped-prompt id is a random UUID per team copy;
 		// callers resolve by slug. GetBySystemSlug must return the same row
 		// SeedOrUpdate created, and (nil, nil) for an unknown slug.
 		store, orgID, teamID, _ := factory(t)

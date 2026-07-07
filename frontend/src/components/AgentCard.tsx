@@ -40,7 +40,7 @@ interface Props {
   // artifacts popover (TFAC-470). Distinct from onReview, which fires the parked
   // run's single gating overlay; this addresses any artifact in the full set.
   onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
-  // SKY-330: caller-supplied assignee picker, rendered in the header cluster.
+  // Caller-supplied assignee picker, rendered in the header cluster.
   assigneeSlot?: React.ReactNode
 }
 

@@ -127,7 +127,7 @@ func TestPromptStore_Postgres_SeedOrUpdate_AdminOnly(t *testing.T) {
 // silently filtered (USING); cross-org Create raises 42501 from
 // prompts_insert WITH CHECK.
 //
-// Every prompt is team-owned (no visibility column post-SKY-380); the
+// Every prompt is team-owned (no visibility column); the
 // store's Create path stamps the acting team. The test seeds an
 // admin-pool prompt on teamA in orgA so the same-org user (a teamA
 // member) can see it through the team-membership branch of prompts_select.
@@ -259,7 +259,7 @@ func seedPgRunsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID stri
 	`, eventID, orgID, entityID, now); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
-	// team_id resolved inline from the org's first team (SKY-262).
+	// team_id resolved inline from the org's first team.
 	if _, err := conn.Exec(`
 		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id,
 		                   status, scoring_status, created_at)

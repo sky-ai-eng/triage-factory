@@ -43,7 +43,7 @@ var jiraFormattingSkillTemplate string
 //
 // orgID + creatorUserID identify the requesting user — the prompt
 // lookup runs inside SyntheticClaimsWithTx so multi-mode RLS reads
-// stay attributed to the user that triggered the turn. SKY-298.
+// stay attributed to the user that triggered the turn.
 func materializeSpecSkill(ctx context.Context, stores db.Stores, orgID, creatorUserID string, project *domain.Project, cwd string) error {
 	if project == nil {
 		return nil

@@ -153,8 +153,8 @@ function FieldRow({ field, eventType, value, onChange }: FieldRowProps) {
       )}
       {field.type === 'int' && <IntField value={value as number | undefined} onChange={onChange} />}
       {/* Every string_list field today is an identity allowlist:
-          GitHub (SKY-264) → author_in / reviewer_in / commenter_in;
-          Jira (SKY-270) → assignee_in / reporter_in / commenter_in.
+          GitHub → author_in / reviewer_in / commenter_in;
+          Jira → assignee_in / reporter_in / commenter_in.
           IdentityListField branches on identityKind to read the right
           column (github_username vs jira_account_id) from /api/config.
           If a non-identity string_list lands later (e.g. labels_any_of),

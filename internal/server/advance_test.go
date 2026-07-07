@@ -12,7 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestHandleAdvance_RejectsBotClaimedTask pins SKY-330's guard rule
+// TestHandleAdvance_RejectsBotClaimedTask pins the guard rule
 // for the manual user transition: only user-claimed tasks may move
 // through Claimed → In Progress → In Review via /advance. Bot-claimed
 // tasks transition automatically via the spawner (see

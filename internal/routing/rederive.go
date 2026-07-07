@@ -33,7 +33,7 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 		return
 	}
 
-	// Only re-derive queued tasks. Post-SKY-261 B+ the lifecycle axis
+	// Only re-derive queued tasks. The lifecycle axis
 	// collapsed to {queued, snoozed, done, dismissed} so this gate
 	// also has to cover snoozed (a snoozed task is on a "wait" until
 	// its wake-on-bump event lands; a deferred-threshold re-derive
@@ -48,8 +48,8 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 	// teams, so a single owner-team gate here would wrongly suppress (or
 	// admit) other teams' deferred triggers.
 
-	// Re-derive must not promote a task that's already claimed. After
-	// SKY-261 B+ the responsibility axis lives on the claim cols, not
+	// Re-derive must not promote a task that's already claimed. The
+	// responsibility axis lives on the claim cols, not
 	// status — so a queued task may still be "already taken" by either
 	// the bot (auto-delegate already fired and enqueued a firing, or
 	// drag-to-bot stamped) or a user ("I'll take this myself" claim).

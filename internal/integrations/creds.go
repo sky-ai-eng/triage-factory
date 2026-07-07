@@ -44,15 +44,15 @@ const (
 
 // legacyJiraDisplayName is the legacy key that held the Jira display
 // name in the keychain. Jira identity now lives in the host-scoped
-// user_jira_identities table (SKY-397), but ClearJira and Clear still
+// user_jira_identities table, but ClearJira and Clear still
 // sweep this key so an upgrade from an older install leaves no orphan
 // keychain row.
 const legacyJiraDisplayName = "jira_display_name"
 
 // legacyGitHubUsername is the legacy key that held the org bot's GitHub login
-// in the keychain. SKY-264 moved GitHub identity into the users.github_username
+// in the keychain. GitHub identity moved into the users.github_username
 // DB column, so nothing writes this key anymore — but AllKeys still sweeps it so
-// an upgrade from a pre-SKY-264 install leaves no orphan keychain row (same
+// an upgrade from an older install leaves no orphan keychain row (same
 // rationale as legacyJiraDisplayName). It has no companion DB ref, so it's safe
 // on the per-org Clear path.
 const legacyGitHubUsername = "github_username"

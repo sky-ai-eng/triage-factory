@@ -97,9 +97,9 @@ func slackManifestName(orgName string) string {
 }
 
 // slackWebhookPath is the URL shape ee/slack's manifest advertises for the
-// events_api transport. The receiver at this path doesn't exist yet — it's
-// the next leaf's job — but the shape must be fixed now so today's manifest
-// is the one the receiver actually serves.
+// events_api transport; ee/slack/webhook.go's handleWebhook is mounted at
+// exactly this path (see install.go), so the manifest and the receiver
+// stay in lockstep.
 func slackWebhookPath(orgID string) string {
 	return "/api/webhooks/slack/" + orgID
 }

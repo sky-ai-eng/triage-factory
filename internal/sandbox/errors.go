@@ -15,7 +15,7 @@ var ErrUnsupportedPlatform = errors.New("sandbox: gVisor sandboxing requires Lin
 
 // ErrRunscMissing is returned when exec.LookPath("runsc") fails.
 // Surfaced with an install hint so deployment-time misconfiguration
-// is obvious. The TF runner image (SKY-256) bundles runsc; self-host
+// is obvious. The TF runner image bundles runsc; self-host
 // customers install via the gVisor release bundle.
 var ErrRunscMissing = errors.New("sandbox: runsc binary not found on PATH — install gVisor from gvisor.dev/releases")
 

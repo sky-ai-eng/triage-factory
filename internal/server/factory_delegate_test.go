@@ -146,8 +146,8 @@ func TestHandleFactoryDelegate_400OnMalformedJSON(t *testing.T) {
 	}
 }
 
-// TestHandleFactoryDelegate_DelegateErrorPreservesClaim pins the SKY-261
-// B+ semantic: when the user's drag-to-delegate gesture commits at the
+// TestHandleFactoryDelegate_DelegateErrorPreservesClaim pins the
+// semantic: when the user's drag-to-delegate gesture commits at the
 // claim axis but the spawner.Delegate call fails (e.g. ErrPromptNotFound
 // from a race-deleted prompt), the handler returns 200 OK with
 // delegate_error populated and claim_stamped=true. Mirrors the swipe-
@@ -232,7 +232,7 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	}
 }
 
-// TestHandleFactoryDelegate_RefusedWhenBotDisabled pins the SKY-261
+// TestHandleFactoryDelegate_RefusedWhenBotDisabled pins the
 // bot-disabled-team gate for the factory drag-to-Agent gesture.
 // Symmetric with the swipe-delegate handler's gate: when an admin
 // has flipped team_agents.enabled = false, the factory drop refuses

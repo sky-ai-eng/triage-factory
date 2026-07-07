@@ -4,7 +4,7 @@ import { keyOf, type GitHubTeamCandidate } from '../lib/githubTeams'
 import SearchField from './SearchField'
 
 // Teams larger than this get a "broad team — noisy queue" hint. Fixed, not
-// configurable: it's a nudge, not a policy (SKY-411 open-question call).
+// configurable: it's a nudge, not a policy (an open-question call).
 const NOISY_TEAM_THRESHOLD = 20
 
 // The three filter modes behind the segmented control. 'all' is the default
@@ -41,7 +41,7 @@ interface Props {
    *  footer; Settings leaves it content-height. */
   className?: string
   /** Classes for the scrollable list region. Default is a fixed bounded
-   *  cap (Settings — the SKY-388 fix); the onboarding card overrides to
+   *  cap (the Settings fix); the onboarding card overrides to
    *  flex-fill within its own max-h-[80vh] envelope. */
   scrollClassName?: string
   /** Flush variant for the setup wizard: glass search + filter, no carded

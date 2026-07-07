@@ -214,7 +214,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	teamFilter := teamscope.FilterParam(r)
 
 	// Session user's GitHub login drives the "mine" flag. Identity lives in
-	// user_github_identities, host-scoped (SKY-396) — resolve the org's
+	// user_github_identities, host-scoped — resolve the org's
 	// GitHub host from org_settings, then look up (user, host). Missing
 	// identity (fresh install, no GitHub configured) degrades to
 	// everyone-is-other rather than failing the whole endpoint — the

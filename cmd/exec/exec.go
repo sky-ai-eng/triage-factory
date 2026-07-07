@@ -149,7 +149,8 @@ func Handle(args []string) {
 	}
 }
 
-// HandleStatus processes status update commands from the agent.
+// HandleStatus is the `triagefactory status` subcommand's entry point.
+// Not implemented yet.
 func HandleStatus(args []string) {
 	fmt.Fprintln(os.Stderr, "not implemented: status")
 }

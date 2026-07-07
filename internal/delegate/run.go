@@ -247,7 +247,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// nothing leaks into the PR.
 	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, claudeCwd, task.EntityID, namespace)
 
-	// SKY-219: copy the entity's project knowledge-base into
+	// Copy the entity's project knowledge-base into
 	// ./_scratch/project-knowledge/ if the entity is assigned to a
 	// project, so the agent has curated project context available
 	// alongside prior memories.

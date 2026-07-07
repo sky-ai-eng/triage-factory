@@ -117,7 +117,7 @@ func EffectiveCloneProtocol(stored string, multiMode bool) string {
 // without joining; the rules table is the source of truth for the
 // per-project status semantics.
 //
-// DefaultModel + AutoDelegateEnabled moved off user_settings in SKY-354:
+// DefaultModel + AutoDelegateEnabled moved off user_settings:
 // the team owns the AI behavior policy, users do not override in v1.
 type TeamSettings struct {
 	JiraProjects               []string
@@ -181,8 +181,8 @@ func DefaultTeamSettings() TeamSettings {
 
 // UserSettings is the user-scope settings row (user_settings table).
 // Reserved for future per-user prefs (theme, notification destinations,
-// swipe sensitivity, onboarding state). Empty for v1 post-SKY-354
-// cleanup — the AI model + auto-delegate toggle that used to live here
+// swipe sensitivity, onboarding state). Empty for v1 — the AI model +
+// auto-delegate toggle that used to live here
 // moved to TeamSettings. The struct stays so the store API can grow
 // fields without a signature change.
 type UserSettings struct{}

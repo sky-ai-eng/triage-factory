@@ -9,7 +9,7 @@ import "time"
 //	                 default_priority, sort_order, name are required.
 //	                 prompt_id, breaker_threshold, min_autonomy_suitability
 //	                 must be nil.
-//	kind="trigger" — auto-delegation; creates a task and (post-SKY-261)
+//	kind="trigger" — auto-delegation; creates a task and
 //	                 stamps claimed_by_agent_id at creation. blueprint_id,
 //	                 breaker_threshold, min_autonomy_suitability are
 //	                 required. default_priority, sort_order must be nil.
@@ -26,7 +26,7 @@ type EventHandler struct {
 	Enabled            bool    `json:"enabled"`
 	Source             string  `json:"source"` // "system" | "user"
 	// TeamID is the owning team — NOT NULL, the sole scoping signal
-	// (SKY-380 dropped the visibility column; every handler is
+	// (the visibility column was dropped; every handler is
 	// team-owned). The router reads this to route tasks created off
 	// matched rules to the correct team's queue.
 	TeamID string `json:"team_id"`
@@ -56,7 +56,7 @@ type EventHandler struct {
 	AppliesToUnowned bool `json:"applies_to_unowned"`
 	// SystemSlug is the stable identifier for shipped handlers
 	// ("system-rule-ci-check-failed", "system-trigger-ci-fix") and for the
-	// org-template handlers SKY-381 adds (a generated tmpl-<uuid> for
+	// org-template handlers (a generated tmpl-<uuid> for
 	// admin-authored rows). Empty for user-authored team handlers — the team
 	// event_handlers scanners don't surface it (it's a seed/idempotency key,
 	// not request data); the org_template store populates it because the
@@ -93,6 +93,6 @@ const (
 
 // TriggerTypeEvent is the V1 trigger_type value carried by triggers
 // (event_handlers with kind='trigger'). Persisted only on the runs
-// row (runs.trigger_type) post-SKY-259; the column was dropped from
-// the pre-SKY-259 prompt_triggers table during unification.
+// row (runs.trigger_type); the column was dropped from
+// the prior prompt_triggers table during unification.
 const TriggerTypeEvent = "event"

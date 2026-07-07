@@ -52,7 +52,7 @@
 // means it's our own run": that assumption (the original Phase 1
 // rationale) was false the moment two tenants' sandboxes shared the
 // host namespace, and it is the cross-tenant credential-abuse hole
-// SKY-395 closes.
+// this proxy closes.
 //
 // So the proxy authenticates the caller with a per-run secret. Config
 // carries IncomingToken — a fresh random value the caller generates per
@@ -71,8 +71,8 @@
 // provider key still lives only in the proxy (injected upstream by the
 // rewrite hook) and never enters any sandbox.
 //
-// Defense-in-depth: the network layer (per-sandbox egress allowlist,
-// SKY-395 Part B) aims to make a sibling proxy unreachable in the first
+// Defense-in-depth: the network layer (per-sandbox egress allowlist)
+// aims to make a sibling proxy unreachable in the first
 // place; this token makes it useless even if a packet gets through.
 // Empty IncomingToken disables the check — the loopback/test path and
 // any single-tenant direct usage where the local hop is already trusted.
@@ -163,7 +163,7 @@ type Config struct {
 	// presented value constant-time and returns 401 on mismatch (see
 	// the package doc's trust-model section).
 	//
-	// This is the fail-closed half of cross-tenant isolation (SKY-395):
+	// This is the fail-closed half of cross-tenant isolation:
 	// a sibling run that reaches this proxy over the shared host
 	// namespace holds a *different* token, so it cannot spend this run's
 	// credential. It is NOT a durable credential and does not violate
@@ -273,7 +273,7 @@ func New(cfg Config) (*Server, error) {
 		s.handler = s.bufferSigV4Body(s.handler)
 	}
 	// When a per-run token is configured, gate every request on it
-	// before anything else runs (SKY-395 Part A) — outermost, so an
+	// before anything else runs — outermost, so an
 	// unauthenticated caller costs no body buffering either. Empty
 	// token = no gate (the loopback/test path).
 	if cfg.IncomingToken != "" {
@@ -286,8 +286,8 @@ func New(cfg Config) (*Server, error) {
 // request must present Config.IncomingToken on the provider's
 // credential header (x-api-key for Anthropic, "Authorization: Bearer"
 // for Bedrock); a missing or mismatched token gets 401 and is never
-// forwarded upstream. This is the fail-closed guarantee of SKY-395
-// Part A: even if network isolation fails and a sibling sandbox reaches
+// forwarded upstream. This is the fail-closed guarantee of the token
+// gate: even if network isolation fails and a sibling sandbox reaches
 // this proxy, it can't spend the org's key without this run's secret.
 func (s *Server) tokenGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

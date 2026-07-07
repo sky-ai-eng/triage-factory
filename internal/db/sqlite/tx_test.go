@@ -14,7 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestSyntheticClaimsWithTx_SQLite_AcceptsLocalOrg pins the SKY-296
+// TestSyntheticClaimsWithTx_SQLite_AcceptsLocalOrg pins the
 // SQLite contract: SyntheticClaimsWithTx delegates to the same body as
 // WithTx in local mode (no auth concept), so passing
 // runmode.LocalDefaultOrgID + any userID runs fn inside a tx and commits

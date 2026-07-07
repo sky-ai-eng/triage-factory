@@ -34,14 +34,14 @@ interface Props {
 
 // GitHubTeamSelector is the onboarding step that creates the GitHub-team →
 // TF-team review-request mapping before the first poll, so a user who is
-// only review-requested via a team isn't left with an empty queue (SKY-411).
+// only review-requested via a team isn't left with an empty queue.
 // It is a thin wrapper around the shared GitHubTeamChecklist: this file owns
 // only the wizard chrome (header, Back / Skip / Continue footer, the broad-
 // team hint) and the onboarding-specific seed; the search box, the
 // selected/unselected/all filter, the bounded scrollable list, and the
-// badges all live in the shared body (SKY-388).
+// badges all live in the shared body.
 //
-// Candidate-source invariant (SKY-413). The rows come from the SAME org-wide
+// Candidate-source invariant. The rows come from the SAME org-wide
 // source as the Settings editor — GET /api/settings/team/{id}/github-groups,
 // which lists every team in the configured repos' GitHub orgs, NOT the
 // caller's personal memberships. The only onboarding-specific behavior is
@@ -50,7 +50,7 @@ interface Props {
 // candidate SET is therefore perspective-independent — two surfaces (this
 // wizard and the Settings editor) share one list and one write target (the
 // github-groups replace-set PUT), differing only in what starts checked.
-// This is deliberately unlike the original SKY-411 shape, where the wizard
+// This is deliberately unlike the original shape, where the wizard
 // sourced candidates from one user's `/user/teams`: mounting this elsewhere
 // no longer risks scoping a team's candidates from a single admin's view —
 // only the default check state is personal, and an over/under-checked

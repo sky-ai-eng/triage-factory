@@ -67,7 +67,7 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		if newStatus == "" {
 			// claim / delegate: preserve in_progress / in_review
 			// across takeover, but flip 'snoozed' → 'queued' so the
-			// SKY-261 "snoozed ↔ unclaimed" invariant holds when a
+			// "snoozed ↔ unclaimed" invariant holds when a
 			// path bypasses the claim helpers. See SQLite mirror for
 			// the full rationale.
 			if _, err := tx.ExecContext(ctx,
@@ -154,13 +154,13 @@ var errSnoozeRefused = errors.New("postgres swipes: snooze refused (task is clai
 func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID string) (bool, error) {
 	var ok bool
 	err := s.runInTx(ctx, func(tx *sql.Tx) error {
-		// SKY-261 B+: Requeue puts a task back in the team's triage
+		// Requeue puts a task back in the team's triage
 		// queue, which means it's no longer claimed by anyone. Clear
 		// both claim cols in the same UPDATE so the derived queue
 		// filter (claim cols all NULL + status 'queued') picks the
 		// row up immediately. Status reset to 'queued' covers the
 		// snoozed-back-to-queue path too.
-		// SKY-330: also clear close metadata — re-queueing a
+		// Also clear close metadata — re-queueing a
 		// previously-terminal task means it isn't terminal anymore.
 		res, err := tx.ExecContext(ctx,
 			`UPDATE tasks
@@ -191,13 +191,13 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID str
 		if err := insertSwipeEvent(ctx, tx, orgID, taskID, "undo", nil); err != nil {
 			return err
 		}
-		// SKY-261 B+: undo mirrors requeue's full reset — claim cols
+		// Undo mirrors requeue's full reset — claim cols
 		// also clear. A claim/delegate swipe stamps the relevant
 		// claim col; leaving it on the row would keep the task in
 		// the owner's lane even after status returns to 'queued'.
 		// Clear both cols so the task lands back in the team's
 		// unclaimed triage queue, matching RequeueTask's shape.
-		// SKY-330: clear close metadata too — undoing a dismiss /
+		// Clear close metadata too — undoing a dismiss /
 		// complete swipe means the task isn't terminal anymore.
 		_, err := tx.ExecContext(ctx,
 			`UPDATE tasks

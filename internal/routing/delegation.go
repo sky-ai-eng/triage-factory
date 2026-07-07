@@ -62,7 +62,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			agentID = a.ID
 		}
 
-		// SKY-261 bot-disabled-team gate. If the task's team has the bot
+		// Bot-disabled-team gate. If the task's team has the bot
 		// turned off in team_agents.enabled, the auto-trigger is a no-op
 		// — the task is already in the team queue (created by HandleEvent
 		// upstream); a human will swipe-delegate later if they want a
@@ -165,7 +165,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		if inserted {
 			routerLog.Info("queued firing, entity busy",
 				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
-			// SKY-261 D-Claims: pending firing landed in the queue,
+			// Pending firing landed in the queue,
 			// commit the task to the org's agent. Stamp here (after
 			// EnqueuePendingFiring succeeded) so a failed enqueue
 			// doesn't leave a phantom claim on an otherwise queued
@@ -199,7 +199,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		}
 	}
 	if _, err := r.fireDelegate(orgID, task, trigger, triggeringEventID, agentID); err != nil {
-		// SKY-424: a replayed event (at-least-once queue) whose first run
+		// A replayed event (at-least-once queue) whose first run
 		// already committed hits the (event, trigger) fence and comes back
 		// as ErrAlreadyFired. Clean skip — the original run + its claim
 		// stand, so we must NOT re-stamp the claim or log an error.
@@ -211,7 +211,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		routerLog.Error("fire failed", "task_id", task.ID, "trigger", trigger.ID, "error", err)
 		return
 	}
-	// SKY-261 D-Claims: fireDelegate succeeded (run inserted + spawner
+	// fireDelegate succeeded (run inserted + spawner
 	// goroutine launched) — stamp the agent claim. Done AFTER success
 	// so a fireDelegate that fails + reverts to status='queued'
 	// doesn't leave a phantom bot claim on a task that's back in the
@@ -220,7 +220,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 }
 
 // stampAgentClaim writes claimed_by_agent_id on a task AND broadcasts the
-// SKY-261 B+ task_claimed event so listeners (Board) can re-render the
+// task_claimed event so listeners (Board) can re-render the
 // per-claim lanes. Called from the two commitment points in tryAutoDelegate
 // (post-fireDelegate success, post-EnqueuePendingFiring success). Both paths
 // converge on "the bot has committed to this task."
@@ -285,7 +285,7 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID, 
 // change, then fires the spawner. Returns the run ID on success — used by
 // DrainEntity to record which run a queued firing materialized into.
 //
-// triggeringEventID is the event instance driving this fire (SKY-424):
+// triggeringEventID is the event instance driving this fire:
 // the immediate path passes tryAutoDelegate's event id, the drain path
 // passes the pending firing's. It threads into DelegateOpts so the run
 // insert is fenced on (triggering_event_id, trigger_id); a replayed event
@@ -301,8 +301,8 @@ func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.Ev
 		return "", fmt.Errorf("spawner not configured")
 	}
 
-	// SKY-261 B+: no status flip here. Pre-SKY-261 we transitioned to
-	// status='delegated' for UI feedback + dedup. Post-B+ the
+	// No status flip here. Previously we transitioned to
+	// status='delegated' for UI feedback + dedup. Now the
 	// responsibility axis is the claim columns: stampAgentClaim
 	// (called by the caller on fireDelegate success) writes
 	// claimed_by_agent_id and broadcasts task_claimed, which is what
@@ -502,7 +502,7 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 //     marks 'skipped_stale'. Reserved for: task_closed (done /
 //     dismissed / snoozed — task isn't drain-eligible on the
 //     lifecycle axis), trigger_disabled, breaker_tripped,
-//     claim_changed (SKY-261 B+: a user took the task over or
+//     claim_changed (a user took the task over or
 //     requeued it after the firing was enqueued, so the bot's
 //     original commitment is no longer current; drainer must not
 //     fire a phantom bot run against a now-user-claimed task).
@@ -524,7 +524,7 @@ func (r *Router) attemptDrainOne(orgID string, firing *domain.PendingFiring) (ru
 	if err != nil {
 		return "", "", fmt.Errorf("task lookup: %w", err)
 	}
-	// SKY-261 B+: status='snoozed' belongs on the lifecycle-skip axis,
+	// status='snoozed' belongs on the lifecycle-skip axis,
 	// not the claim axis. A bot-claimed task that gets snoozed (e.g.,
 	// the user said "wait until Tuesday") shouldn't fire a queued
 	// drain when the entity slot opens — the snooze itself is a "do
@@ -537,7 +537,7 @@ func (r *Router) attemptDrainOne(orgID string, firing *domain.PendingFiring) (ru
 		return "", domain.PendingFiringSkipTaskClosed, nil
 	}
 
-	// SKY-261 B+: drain only fires if the bot's claim still holds.
+	// Drain only fires if the bot's claim still holds.
 	// User-claim (claimed_by_user_id set) or requeue (both cleared)
 	// invalidates the original commitment. Without this check, a
 	// pending firing would fire even after the user explicitly took
@@ -569,7 +569,7 @@ func (r *Router) attemptDrainOne(orgID string, firing *domain.PendingFiring) (ru
 	// the new blueprint_run's frozen actor matches the standing task claim.
 	id, err := r.fireDelegate(orgID, task, *trigger, firing.TriggeringEventID, task.ClaimedByAgentID)
 	if err != nil {
-		// SKY-424: the run for this (event, trigger) already exists — a
+		// The run for this (event, trigger) already exists — a
 		// prior drain attempt fired it (process died before MarkFired), or
 		// the immediate path did before this firing was popped. Definitive
 		// "no longer relevant": mark skipped_stale so the firing doesn't
@@ -585,7 +585,7 @@ func (r *Router) attemptDrainOne(orgID string, firing *domain.PendingFiring) (ru
 // revertTaskStatus moves a task's lifecycle axis back to the given
 // status and broadcasts the change so the frontend doesn't get stuck
 // showing a stale state. Claim cols are intentionally left alone —
-// after SKY-261 B+ the three axes (lifecycle / claim / runs) are
+// The three axes (lifecycle / claim / runs) are
 // orthogonal, and this helper only touches lifecycle.
 //
 // The only caller today is the mark-fired-failure rollback path in

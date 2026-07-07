@@ -200,9 +200,9 @@ func TestBootstrapTeamAgent_ErrorsWhenOrgHasNoAgent(t *testing.T) {
 // TestBootstrapNewTeam_SeedsPerTeamDefaults pins the team-create bootstrap:
 // a new 2nd+ team in an existing org gets a default-enabled team_agents row
 // (so manual delegation works immediately) AND its own copies of the prompts
-// + event handlers. Per-team seeding is correct (SKY-380) — random-UUID id +
+// + event handlers. Per-team seeding is correct — random-UUID id +
 // system_slug, deduped on (org, team, slug) — so the second team materializes
-// its own distinct rows. Post-SKY-381 the *source* of those copies is the org
+// its own distinct rows. The *source* of those copies is the org
 // template (seeded from the shipped lists at org-create by BootstrapNewOrg),
 // not the shipped Go slices directly — so this seeds the org first, then adds
 // a 2nd team.
@@ -269,7 +269,7 @@ func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 	}
 }
 
-// TestBootstrapNewOrg_SeedsFullStack pins SKY-378's org-create
+// TestBootstrapNewOrg_SeedsFullStack pins the org-create
 // bootstrap: a brand-new org + default team gets the agent, the shipped
 // prompts, the shipped handlers, and the team's enabled bot membership —
 // the founder-signup path that previously created only the tenant rows.
@@ -299,7 +299,7 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 		t.Errorf("default team has no enabled team_agents row: %+v", ta)
 	}
 
-	// Prompts seeded. The id is a random UUID per team copy now (SKY-380),
+	// Prompts seeded. The id is a random UUID per team copy now,
 	// so resolve by system_slug rather than by id.
 	got, err := stores.Prompts.GetBySystemSlug(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, "system-pr-review-security")
 	if err != nil {
@@ -322,7 +322,7 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 	}
 }
 
-// TestOrgTemplate_ForwardOnly pins SKY-381's load-bearing invariant: editing
+// TestOrgTemplate_ForwardOnly pins the load-bearing invariant: editing
 // the org template affects FUTURE team creations only. An admin who adds a
 // prompt and enables a trigger in the template AFTER the founder's team exists
 // sees those edits in the next new team but NOT in the team that already

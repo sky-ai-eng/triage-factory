@@ -127,7 +127,7 @@ func parseGitHubEntitySourceID(s string) (owner, repo, prNumber string) {
 	return repoStr[:slashIdx], repoStr[slashIdx+1:], prNumber
 }
 
-// projectFromJiraKey pulls "SKY" out of "SKY-123". Mirrors the tracker's
+// projectFromJiraKey pulls "PROJ" out of "PROJ-123". Mirrors the tracker's
 // extractProject helper so the placeholder matches what the scorer sees.
 func projectFromJiraKey(key string) string {
 	if i := strings.IndexByte(key, '-'); i > 0 {

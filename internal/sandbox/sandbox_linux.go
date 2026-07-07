@@ -22,7 +22,7 @@ type teardownState struct {
 	hostVethName    string
 	sandboxVethName string
 	iptablesRule    iptablesRule
-	// egressRules are the host-side SKY-395 Part B egress-allowlist
+	// egressRules are the host-side Part B egress-allowlist
 	// rules (filter/INPUT + filter/FORWARD DROPs on the run's veth).
 	// The in-netns OUTPUT rules vanish with the netns and aren't
 	// tracked here.
@@ -46,7 +46,7 @@ type iptablesRule struct {
 }
 
 // wrap is the Linux-only implementation of the public Wrap entry
-// point. Orchestrates the 12-step pipeline from SKY-254's body —
+// point. Orchestrates the 12-step pipeline —
 // subnet allocation, netns + veth + iptables, rootfs cache, OCI
 // bundle on disk, runsc command construction.
 //
@@ -106,7 +106,7 @@ func wrap(ctx context.Context, cfg Config) (*exec.Cmd, *Sandbox, error) {
 	}
 	td.iptablesRule = rule
 
-	// Step 9: egress allowlist (SKY-395 Part B). Restrict the sandbox
+	// Step 9: egress allowlist (Part B). Restrict the sandbox
 	// to its own gateway IP only — closes the cross-tenant
 	// sibling-proxy reach and the direct-internet exfil path. Must run
 	// after the netns + veth exist (it installs both in-netns and
@@ -118,7 +118,7 @@ func wrap(ctx context.Context, cfg Config) (*exec.Cmd, *Sandbox, error) {
 	}
 	td.egressRules = egressRules
 
-	// Step 9.5: invoke the proxy-configuration callback (SKY-335) so
+	// Step 9.5: invoke the proxy-configuration callback so
 	// the caller can bind per-run LLM / git proxies on sb.HostIP and
 	// return the env entries naming them. The proxies have to be
 	// listening before the OCI bundle's env is finalized — that env
@@ -254,7 +254,7 @@ func (s *Sandbox) Close() error {
 		// Best-effort; log via stderr.
 		fmt.Fprintf(os.Stderr, "sandbox: teardown iptables: %v\n", err)
 	}
-	// Host-side egress-allowlist rules (SKY-395 Part B). The in-netns
+	// Host-side egress-allowlist rules (Part B). The in-netns
 	// OUTPUT rules go away with the netns delete below, so only the
 	// host-side ones need explicit removal.
 	for _, r := range t.egressRules {

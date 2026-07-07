@@ -1,7 +1,7 @@
 // Package postgres is the Postgres-backed implementation of the
 // per-resource store interfaces declared in package db. Multi-tenant
 // installs of triagefactory wire this implementation at startup
-// (local-mode wires internal/db/sqlite). See the SKY-246 D2 spec at
+// (local-mode wires internal/db/sqlite). See the D2 spec at
 // docs/specs/sky-246-d2-store-abstraction.html for the full design,
 // and the D3 schema at internal/db/migrations-postgres/.
 //
@@ -112,13 +112,13 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// bootstrap reason; SetEnabled/Overrides/Remove/Get run on
 		// app where RLS gates by team membership.
 		TeamAgents: newTeamAgentStore(app, admin),
-		// Users wires both pools (SKY-296): app for request-equivalent
+		// Users wires both pools: app for request-equivalent
 		// reads/writes (RLS gated by tf.user_can_read_user() /
 		// tf.user_can_update_user()), admin for the poller bootstrap's
 		// GetGitHubLoginSystem read at startup. Row creation is an
-		// auth-flow concern owned by SKY-251.
+		// auth-flow concern owned separately.
 		Users: newUsersStore(app, admin),
-		// Tasks wires both pools (SKY-297): app for request-equivalent
+		// Tasks wires both pools: app for request-equivalent
 		// consumers (server tasks handler, router, delegate) and admin
 		// for the tracker's stale-review reconciliation read via
 		// FindActiveByEntityAndTypeSystem. The AI scorer still uses
@@ -148,7 +148,7 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// app side (TFAC-459). artifacts_* RLS scopes by team_id like
 		// runs; org_id stays in every clause as defense in depth.
 		Artifacts: newArtifactStore(app, admin),
-		// Entities wires both pools (SKY-296): app for request-
+		// Entities wires both pools: app for request-
 		// equivalent consumers (server panels, delegate context
 		// loaders) and admin for the `...System` variants the tracker
 		// + project classifier use. RLS policy entities_all gates
@@ -157,7 +157,7 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// RLS, and org_id stays in every WHERE clause as defense
 		// in depth.
 		Entities: newEntityStore(app, admin),
-		// Repos wires both pools (SKY-296): app for request-
+		// Repos wires both pools: app for request-
 		// equivalent consumers (repos/settings/projects handlers,
 		// curator) and admin for the `...System` variants the
 		// poller bootstrap + startup clone-status writes use. RLS
@@ -173,13 +173,13 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// via an EXISTS subquery against tasks; org_id defense-in-
 		// depth fires in every WHERE/INSERT clause regardless.
 		PendingFirings: newPendingFiringsStore(admin),
-		// Projects wires both pools (SKY-297): app for request-equivalent
+		// Projects wires both pools: app for request-equivalent
 		// consumers and admin for ListSystem, the project classifier's
 		// cross-org read. projects_* RLS policies gate the app side
 		// by visibility + team membership; admin bypasses RLS, and
 		// org_id stays in every WHERE clause as defense in depth.
 		Projects: newProjectStore(app, admin),
-		// Events wires both pools (SKY-305): app for request-handler
+		// Events wires both pools: app for request-handler
 		// equivalents (stock carry-over, factory drag-to-delegate) and
 		// admin for background goroutines without JWT-claims context
 		// (router RecordSystem + re-derive, delegate post-run metadata
@@ -336,14 +336,12 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 	return s.stores
 }
 
-// Connection openers (OpenAdmin, OpenApp) are NOT defined here in
-// wave 0. main.go fatals before reaching them; introducing them now
-// would require registering the pgx stdlib driver inside this
-// package (a side-effect import) without any caller exercising it.
-// SKY-251 (D7) owns the multi-mode startup wiring and will add the
-// openers alongside the config + DSN plumbing that actually consumes
-// them. Tests construct *sql.DB via the pgtest harness, which
-// registers the pgx driver itself.
+// Connection openers (OpenAdmin, OpenApp) are NOT defined here — this
+// package deliberately doesn't register the pgx stdlib driver as a
+// side-effect import. internal/app/stores.go owns opening the admin and
+// app *sql.DB handles (sql.Open("pgx", ...) against the admin/app DSNs)
+// and passes them into New below. Tests construct *sql.DB via the
+// pgtest harness, which registers the pgx driver itself.
 
 // NewForTx returns a db.TxStores wired against one *sql.Tx — the
 // same shape WithTx produces internally for its closure body,
@@ -379,7 +377,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		// NewForTx is a test door — both pools collapse to the
 		// supplied tx. Tests that exercise the admin-only branch
 		// (event-triggered AgentRunStore.Create, or any of the
-		// SKY-296 `...System` methods that bypass RLS in
+		// `...System` methods that bypass RLS in
 		// production) need the production WithTx wiring instead,
 		// which gets the real admin pool via Store.admin.
 		AgentRuns:        newAgentRunStore(tx, tx),

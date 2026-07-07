@@ -531,7 +531,7 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 // source-specific setup and stamps the resolved path onto the blueprint_run. On
 // every later claim it reconstructs the lightweight config from the task and
 // guarantees the shared worktree is on disk (warm reuse, or cold rehydrate from
-// the durable snapshot via ensureWorkspace — SKY-423).
+// the durable snapshot via ensureWorkspace).
 func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, run domain.AgentRun, gh *ghclient.Client) (runConfig, error) {
 	if br.WorktreePath == "" {
 		var (

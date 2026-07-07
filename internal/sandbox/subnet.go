@@ -16,7 +16,7 @@ import (
 //
 // Each /24 looks like 10.42.<N>.0/24:
 //
-//	10.42.<N>.1  = host-side veth IP (where SKY-335's proxies will bind)
+//	10.42.<N>.1  = host-side veth IP (where the proxies will bind)
 //	10.42.<N>.2  = sandbox-side veth IP
 //	10.42.<N>.3+ = reserved for additional host-side bindings (multi-proxy)
 const subnetBase = "10.42"

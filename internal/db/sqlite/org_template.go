@@ -14,7 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// orgTemplateStore is the SQLite impl of db.OrgTemplateStore (SKY-381).
+// orgTemplateStore is the SQLite impl of db.OrgTemplateStore.
 //
 // SQLite has one connection (no pool split): the seeder/materializer wrap their
 // multi-statement work in a tx via the inTx helper, every other method runs on

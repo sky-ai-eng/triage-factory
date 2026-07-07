@@ -22,7 +22,7 @@ interface Props {
 }
 
 // ProjectEntitiesPanel renders below the knowledge-base panel on the
-// project-detail page. SKY-238. Active-only entities scoped to this
+// project-detail page. Active-only entities scoped to this
 // project, ordered most-recently-polled first. Each row collapses to
 // a single line; click to expand and reveal the classifier's
 // rationale.

@@ -118,7 +118,7 @@ func (s *runWorktreeStore) DeleteByPathSystem(ctx context.Context, orgID, runID,
 	return err
 }
 
-// --- SKY-302 admin-pool variants — SQLite collapses to non-System ---
+// --- admin-pool variants — SQLite collapses to non-System ---
 
 func (s *runWorktreeStore) InsertSystem(ctx context.Context, orgID string, w domain.RunWorktree) (bool, string, error) {
 	return s.Insert(ctx, orgID, w)

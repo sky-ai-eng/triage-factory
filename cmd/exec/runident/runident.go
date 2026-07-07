@@ -11,12 +11,12 @@
 // the spawner-side bookkeeping: branch on the run's trigger_type so
 // manual runs route through synthetic-claims (carrying the human's
 // identity) and event-triggered runs route through admin-pool
-// `...System` methods (no human identity exists). See SKY-302.
+// `...System` methods (no human identity exists).
 //
-// SKY-303 will lift this helper behind an AgentHostClient interface
-// so the sandboxed-agent path can talk to a host daemon over IPC
-// instead of reaching the DB directly. Until then, every subcommand
-// resolves identity here and switches its store calls per branch.
+// This helper backs cmd/exec/agenthost's LocalClient, which every
+// subcommand reaches through agenthost.AutoDetect rather than calling
+// here directly; the sandboxed-agent path talks to a host daemon over
+// IPC (agenthost.IPCClient) instead of reaching the DB directly.
 package runident
 
 import (
@@ -31,8 +31,8 @@ import (
 
 // RunIdentityEnvVar is the env var name the delegate spawner sets on
 // the agent subprocess and `triagefactory exec ...` reads at startup.
-// Hardcoded to match internal/delegate/run.go's runAgent — see
-// SKY-299 for the spawner-side injection.
+// Hardcoded to match internal/delegate/run.go's runAgent, which
+// handles the spawner-side injection.
 const RunIdentityEnvVar = "TRIAGE_FACTORY_RUN_ID"
 
 // ErrRunIdentityMissing is returned by ResolveRunIdentity when the

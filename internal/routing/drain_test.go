@@ -131,7 +131,7 @@ func setupDrainScenario(t *testing.T, database *sql.DB) (entityID, taskID, trigg
 	}
 	taskID = task.ID
 
-	// SKY-261 B+: drain checks task.ClaimedByAgentID before firing.
+	// Drain checks task.ClaimedByAgentID before firing.
 	// In production the enqueue path (tryAutoDelegate) stamps the
 	// claim when a firing lands in pending_firings; the test setup
 	// here bypasses that by inserting the firing directly, so stamp
@@ -199,8 +199,8 @@ func TestDrainEntity_ClosedTask(t *testing.T) {
 // TestRevertTaskStatus_PreservesClaim pins the contract that
 // revertTaskStatus only touches the lifecycle axis. Its sole caller
 // (the mark-fired-failure rollback in DrainEntity) leaves the
-// pending_firings row in 'pending' so the next drain retries; after
-// SKY-261 B+, the retry's attemptDrainOne gate requires the bot
+// pending_firings row in 'pending' so the next drain retries; the
+// retry's attemptDrainOne gate requires the bot
 // claim to still be set or it skips with claim_changed. Clearing
 // the claim cols here would silently drop the queued intent — the
 // guard would fire and the retry never would. This test pins that
@@ -238,7 +238,7 @@ func TestRevertTaskStatus_PreservesClaim(t *testing.T) {
 	}
 }
 
-// TestDrainEntity_SnoozedTask pins the SKY-261 B+ semantic: snooze is
+// TestDrainEntity_SnoozedTask pins the semantic that snooze is
 // a lifecycle-axis "do not act" signal that's orthogonal to claim. A
 // pending firing for a bot-claimed task that gets snoozed (e.g., user
 // said "wait until Tuesday" while the firing was queued behind a busy

@@ -49,7 +49,7 @@ func TestBuildSpec_RequiredFields(t *testing.T) {
 }
 
 // TestBuildSpec_PropertyB_NoEnvLeakage is THE load-bearing test for
-// SKY-254's security posture. The sandbox MUST NOT propagate any
+// the sandbox's security posture. The sandbox MUST NOT propagate any
 // credential-shaped env var from the test process into the sandbox's
 // process.env. We seed the test process with a sentinel via t.Setenv
 // and assert the sentinel appears nowhere in the marshaled spec

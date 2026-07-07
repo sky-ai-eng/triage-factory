@@ -3,8 +3,8 @@
 // It is the storage-neutral half of the runtime: it knows how to talk
 // to Claude Code and parse what comes back, but not where to put the
 // results. Callers wire it up with a Sink that decides persistence
-// (delegate writes to runs / run_messages; the curator runtime in
-// SKY-216 writes to its own tables).
+// (delegate writes to runs / run_messages; the curator runtime
+// writes to its own tables).
 package agentproc
 
 import (

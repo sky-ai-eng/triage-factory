@@ -9,7 +9,7 @@ import (
 // OrgTemplateStore owns the org_template_prompts + org_template_blueprints
 // (+ org_template_blueprint_steps) + org_template_handlers tables — the
 // org-level template that BootstrapNewOrg / BootstrapNewTeam copy into a new
-// team's prompts + blueprints + event_handlers (SKY-381). It is the editable
+// team's prompts + blueprints + event_handlers. It is the editable
 // source that sits between TF's shipped defaults and the per-team seed:
 //
 //	ai.ShippedPrompts() + ai.ShippedBlueprints() + db.ShippedEventHandlers

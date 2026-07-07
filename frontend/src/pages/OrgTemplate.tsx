@@ -12,7 +12,7 @@ import { handlersBase } from '../lib/scope'
 import type { TriggerHandler, RuleHandler } from '../types'
 
 // OrgTemplate is the org-admin editor over the template new teams are seeded
-// from (SKY-381). It is the SAME binding-graph editor as /prompts, at template
+// from. It is the SAME binding-graph editor as /prompts, at template
 // scope — but deliberately, unmistakably NOT a team: no TeamSwitch, a persistent
 // forward-only banner + an accent frame on the canvas.
 //
@@ -103,7 +103,7 @@ export default function OrgTemplate() {
         </button>
       </div>
 
-      {/* Persistent forward-only banner (load-bearing per SKY-381). */}
+      {/* Persistent forward-only banner (load-bearing). */}
       <div className="mb-3 shrink-0 rounded-xl border border-amber-300/60 bg-amber-50/70 px-4 py-2.5">
         <p className="text-[12px] text-amber-900">
           <span className="font-semibold">Changes apply to teams created from now on.</span>{' '}

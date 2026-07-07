@@ -601,7 +601,7 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 //
 // POST /api/me/active-org  body: { "org_id": "<uuid>" }
 //
-// SKY-313: the active-org primitive. We deliberately store the choice
+// The active-org primitive. We deliberately store the choice
 // on the session row (single source of truth across tabs) rather than
 // in the URL path. The next request's withSession reads the new value
 // into ctxKeyOrgID; tab B sees the switch on its next round trip.
@@ -742,7 +742,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// rig still works while production calls (always wired)
 		// populate identity from the users row.
 		if s.users != nil {
-			// Identity is host-scoped (GitHub SKY-396, Jira SKY-397):
+			// Identity is host-scoped (GitHub, Jira):
 			// resolve the local org's GitHub + Jira hosts, then look up
 			// each binding for (user, host). s.orgs is wired by New();
 			// guard like s.users for the bare-rig test.
@@ -779,14 +779,14 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// queries become RLS-defended end-to-end without further edits.
 	// Pass the session's active org as the org claim too (not just sub) so
 	// the host-scoped GitHub identity lookup below can prefer the row bound
-	// to the active org's GitHub host (SKY-396). A stale/empty active org
+	// to the active org's GitHub host. A stale/empty active org
 	// is harmless: org_settings RLS filters it out and the lookup falls
 	// back to the most-recently-verified identity row.
 	err := tfdb.WithTx(r.Context(), s.db,
 		tfdb.Claims{Sub: claims.Subject, OrgID: resp.ActiveOrgID},
 		func(tx *sql.Tx) error {
-			// Identity is host-scoped for both providers (GitHub SKY-396,
-			// Jira SKY-397): prefer the row bound to the active org's host
+			// Identity is host-scoped for both providers (GitHub,
+			// Jira): prefer the row bound to the active org's host
 			// (GitHub login via the correlated subquery; Jira account_id +
 			// display_name via the LATERAL, which keeps the pair on one row),
 			// else the most recently verified row. An absent row scans to ""

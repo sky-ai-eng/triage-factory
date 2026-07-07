@@ -4,9 +4,8 @@
 //	triagefactory migrate up      bring the schema to head
 //	triagefactory migrate status  show applied / pending versions
 //
-// Down migrations are intentionally not exposed (see SKY-245's spec for
-// the rationale — installed user-tools shouldn't ship a footgun for
-// downgrade-induced data loss).
+// Down migrations are intentionally not exposed — installed user-tools
+// shouldn't ship a footgun for downgrade-induced data loss.
 //
 // The subcommand opens the same SQLite path the server does so an
 // operator can run `triagefactory migrate status` against an existing
@@ -26,12 +25,10 @@ import (
 
 // openTarget returns the (db, dialect) pair for the current runmode.
 // Local mode opens the same SQLite file the server uses; multi mode
-// opens TF_DATABASE_URL via pgx. This is the only path through the
-// CLI that touches a Postgres handle today — the server side is
-// stubbed by main.go pending the rest of SKY-242's multi-mode wiring,
-// but the migrate subcommand needs to work standalone so the Docker
-// image's entrypoint can bring the schema to head before the server
-// process starts.
+// opens TF_DATABASE_URL via pgx. The migrate subcommand opens its own
+// handle independent of the server's startup wiring (internal/app) so
+// the Docker image's entrypoint can bring the schema to head before
+// the server process starts.
 func openTarget() (*sql.DB, string, error) {
 	if runmode.Current() == runmode.ModeMulti {
 		dsn := os.Getenv("TF_DATABASE_URL")
@@ -115,5 +112,5 @@ USAGE
 NOTES
   Down migrations are intentionally not exposed; for installed
   user-tools, downgrade-induced data loss is a footgun without a
-  matching upside. See SKY-245 for the design discussion.`)
+  matching upside.`)
 }

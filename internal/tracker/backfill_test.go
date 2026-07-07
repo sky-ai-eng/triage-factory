@@ -11,7 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 )
 
-// TestBackfillReviewRequested_EmitsBusEvent pins the SKY-295 contract
+// TestBackfillReviewRequested_EmitsBusEvent pins the contract
 // that the tracker no longer creates tasks directly for the
 // review-requested backfill path. Instead it publishes a
 // github:pr:review_requested event to the bus and the router

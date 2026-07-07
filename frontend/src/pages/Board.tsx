@@ -47,7 +47,7 @@ import {
 import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 
-// SKY-330: five columns on the board. Default view scrolls so Claimed
+// Five columns on the board. Default view scrolls so Claimed
 // is leftmost-visible; user scrolls left for Queued, right for Done.
 // Column ids double as drop targets — keep them lowercase + stable
 // since they're persisted in localStorage filter keys.
@@ -144,7 +144,7 @@ function loadCollapsed(userID: string): CollapseMap {
 }
 
 export default function Board() {
-  // SKY-330: one bucket per column. Bot/user auto-routing keeps these
+  // One bucket per column. Bot/user auto-routing keeps these
   // disjoint at the backend, so a task only appears in one list.
   const [queued, setQueued] = useState<Task[]>([])
   const [claimed, setClaimed] = useState<Task[]>([])
@@ -280,7 +280,7 @@ export default function Board() {
   // Delegate flow
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const pendingDelegateTask = useRef<Task | null>(null)
-  // SKY-261 B+: tracks bot-claimed tasks where the delegate run failed
+  // Tracks bot-claimed tasks where the delegate run failed
   // to fire. Cleared when a run for the task lands.
   const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
 
@@ -374,7 +374,7 @@ export default function Board() {
     })()
   }, [])
 
-  // SKY-330: derive the five column lists from a single /api/tasks
+  // Derive the five column lists from a single /api/tasks
   // multi-status fetch. /api/queue is still the canonical Queued
   // source (it handles the snooze-window filter); the others fetch
   // by status. The done query is backend-capped at 7 days.
@@ -522,7 +522,7 @@ export default function Board() {
   }, [teamFilter, fetchTasks])
 
   // WS listener — covers agent_run_update (the existing path) and the
-  // new task_updated / task_claimed events that SKY-330 fires from
+  // new task_updated / task_claimed events that fire from
   // every claim/status mutation. task_updated is the catch-all for
   // "this card may have moved columns; refetch."
   useWebSocket(
@@ -569,7 +569,7 @@ export default function Board() {
             })
             .catch(() => {})
 
-          // SKY-330: a few server paths still mutate task state but
+          // A few server paths still mutate task state but
           // only emit agent_run_update (review/PR approval flips
           // task='done', then broadcasts the run completion). Without
           // a refetch here the card stays in its old column until a
@@ -646,14 +646,14 @@ export default function Board() {
           // Live run-log append. AgentCard renders from agentMessages
           // keyed by run.ID; without this, new agent output only
           // surfaces after a status-change fetchTasks pass. Was
-          // present pre-SKY-330; lost in the board rewrite, restored
+          // present before the board rewrite; lost in the rewrite, restored
           // here per PR #212 review.
           setAgentMessages((prev) => ({
             ...prev,
             [event.run_id]: [...(prev[event.run_id] || []), event.data as AgentMessage],
           }))
         } else if (event.type === 'task_updated' || event.type === 'task_claimed') {
-          // SKY-330: any column-affecting change re-pulls the whole
+          // Any column-affecting change re-pulls the whole
           // board. The 5-column buckets are cheap to refetch (each is
           // a single indexed query) and this avoids the per-column
           // patch logic getting out of sync with backend rules.
@@ -846,7 +846,7 @@ export default function Board() {
     [agentRuns],
   )
 
-  // SKY-330: the board opens at the left (Queued first). With Claimed + In
+  // The board opens at the left (Queued first). With Claimed + In
   // Review collapsed by default, the lane strip is compact enough that the
   // work-bearing lanes fit without a forced scroll offset — so we start at the
   // natural left edge rather than snapping past Queued (the old fixed 544px
@@ -1068,7 +1068,7 @@ export default function Board() {
   )
 
   // Assignee picker callbacks. The picker is the primary surface for
-  // claim mutations in the SKY-330 board; drag is for column moves.
+  // claim mutations in the board; drag is for column moves.
   const handlePickerClaim = useCallback(
     async (task: Task) => {
       await fetch(`/api/tasks/${task.id}/swipe`, {
@@ -1227,7 +1227,7 @@ export default function Board() {
           </div>
         )}
 
-        {/* SKY-330: horizontal-scroll container for 5 columns. The strip is
+        {/* Horizontal-scroll container for 5 columns. The strip is
             parked so the open-columns midpoint sits at the viewport center (see
             `lane` above) via dynamic left/right padding + a scroll offset. The
             dynamic mask dissolves columns into the page at whichever edge still
@@ -1529,7 +1529,7 @@ function SortableTaskCard({
     transition,
     opacity: isDragging ? 0.3 : 1,
   }
-  // SKY-330: assigneeSlot is forwarded into TaskCard's header instead
+  // assigneeSlot is forwarded into TaskCard's header instead
   // of overlaid via absolute positioning — the prior approach
   // collided with the bottom-row affordances on tall cards and with
   // AgentCard's elapsed-time / expand cluster after a run completes.
@@ -1582,7 +1582,7 @@ function SortableAgentCard({
   onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
   assigneeSlot?: React.ReactNode
 }) {
-  // SKY-330: bot-managed cards in in_progress / in_review are
+  // Bot-managed cards in in_progress / in_review are
   // read-only — column placement is owned by the spawner's run-state
   // mirror. The drop handler also short-circuits these drags, but
   // baking the guard into `disabled` here removes the misleading
@@ -1607,7 +1607,7 @@ function SortableAgentCard({
     opacity: isDragging ? 0.3 : 1,
     cursor: draggable ? 'grab' : undefined,
   }
-  // SKY-330: assigneeSlot forwarded into AgentCard's header cluster
+  // assigneeSlot forwarded into AgentCard's header cluster
   // so it shares the gap-2 spacing with elapsed/expand/cancel
   // instead of overlapping them via absolute positioning. Same
   // reasoning as the TaskCard wrapper above.

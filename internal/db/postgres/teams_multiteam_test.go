@@ -244,8 +244,8 @@ func TestMultiTeam_Postgres(t *testing.T) {
 	t.Run("prompts_list_scoped_to_active_team", func(t *testing.T) {
 		// The single-team prompts page narrows List to one team. The founder
 		// is a member of A and B, so the union shows both, but List(teamA)
-		// must show only team A's prompts — never team B's. Post-SKY-380
-		// every prompt is team-scoped (no org-visible tier), so this is a
+		// must show only team A's prompts — never team B's. Every prompt
+		// is team-scoped (no org-visible tier), so this is a
 		// pure team filter; that's what closes the cross-team trigger→prompt
 		// hole structurally — team B's prompts simply aren't on team A's canvas.
 		mkPrompt := func(team, name string) string {

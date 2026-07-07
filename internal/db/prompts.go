@@ -39,7 +39,7 @@ type PromptStore interface {
 	//
 	// Returns the team copy's prompt id (existing or freshly inserted) so
 	// callers can resolve slug→id for the trigger seed's same-team FK
-	// (SKY-380 two-phase seed).
+	// (two-phase seed).
 	//
 	// Atomic: prompts insert/update + system_prompt_versions upsert
 	// happen in one transaction so the version row never races ahead
@@ -62,7 +62,7 @@ type PromptStore interface {
 	// List returns non-hidden prompts ordered by updated_at DESC. When
 	// teamID is non-empty — the multi-team prompts page narrowed to one
 	// team — the result is scoped to that team's prompts (team_id=teamID).
-	// Every prompt is team-scoped post-SKY-380, so there is no org-visible
+	// Every prompt is team-scoped, so there is no org-visible
 	// tier to union in. Empty teamID returns everything visible (solo/local,
 	// or an unfiltered view). The SQLite impl ignores teamID (local mode is
 	// single-team).
@@ -77,7 +77,7 @@ type PromptStore interface {
 	// GetBySystemSlug resolves a team's copy of a shipped prompt by its
 	// stable system_slug (e.g. domain.SystemTicketSpecPromptID). Returns
 	// (nil, nil) when the team has no copy. The id moved to a random UUID
-	// per team copy (SKY-380), so callers that used to Get(slug) — the
+	// per team copy, so callers that used to Get(slug) — the
 	// curator spec fallback, the project-create default — resolve through
 	// this instead. The Postgres impl filters org+team and runs on the app
 	// pool (RLS-gated); the SQLite impl filters by slug only (single team)
