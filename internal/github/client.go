@@ -78,6 +78,12 @@ type Client struct {
 	rlReset     time.Time
 	rlUsed      int
 	rlOK        bool // true once a response has carried rate-limit headers
+	// rlObserver, when set via SetRateLimitObserver, is invoked on every
+	// update to the fields above — the resolver's hook for mirroring this
+	// client's (short-lived, per-resolve) state into its process-wide,
+	// per-org RateLimitRegistry (see ratelimit_registry.go). nil-safe: a
+	// *Client used directly (tests, other callers) simply has no observer.
+	rlObserver func(RateLimitState)
 }
 
 // NewClient creates a GitHub API client. baseURL is the user-facing URL

@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
 
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -201,6 +203,55 @@ func TestHandleReadyz_ActiveRunsCount(t *testing.T) {
 	}
 	if resp.ActiveRuns != 2 {
 		t.Errorf("active_runs: got %d want 2 (queued+running, not completed)", resp.ActiveRuns)
+	}
+}
+
+// TestHandleReadyz_RateLimitSurfaced covers the TFAC-573 follow-up: the
+// poller's per-org GitHub rate-limit observation is mapped into
+// rate_limit.github as a soft signal — reported, but never affecting the
+// hard checks or the top-level status. Hand-builds the HealthSnapshot
+// (bypassing poller.Manager) since poller.Health()'s own rate-limit
+// plumbing is covered by internal/poller's tests — this one only pins
+// the handler's JSON mapping.
+func TestHandleReadyz_RateLimitSurfaced(t *testing.T) {
+	s := newTestServer(t)
+	s.SetMigrationsOK(true)
+
+	now := time.Now()
+	resetAt := now.Add(45 * time.Minute).Truncate(time.Second)
+	s.SetPollerManager(func(ctx context.Context) poller.HealthSnapshot {
+		return poller.HealthSnapshot{
+			GitHub: poller.SourceHealth{Alive: true, LastTick: now, Orgs: map[string]poller.OrgPollHealth{}},
+			Jira:   poller.SourceHealth{Alive: true, LastTick: now, Orgs: map[string]poller.OrgPollHealth{}},
+			GitHubRateLimit: map[string]ghclient.RateLimitState{
+				runmode.LocalDefaultOrgID: {Remaining: 123, Reset: resetAt, Used: 4877},
+			},
+		}
+	})
+
+	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp readyzResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" {
+		t.Errorf("status: got %q want %q (rate limit must never gate status)", resp.Status, "ok")
+	}
+	got, ok := resp.RateLimit.GitHub[runmode.LocalDefaultOrgID]
+	if !ok {
+		t.Fatalf("rate_limit.github: expected entry for %s, got %+v", runmode.LocalDefaultOrgID, resp.RateLimit.GitHub)
+	}
+	if got.Remaining != 123 {
+		t.Errorf("remaining: got %d want 123", got.Remaining)
+	}
+	if got.Used != 4877 {
+		t.Errorf("used: got %d want 4877", got.Used)
+	}
+	if got.ResetUnix != resetAt.Unix() {
+		t.Errorf("reset_unix: got %d want %d", got.ResetUnix, resetAt.Unix())
 	}
 }
 

@@ -3,6 +3,8 @@ package poller
 import (
 	"context"
 	"time"
+
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
 // heartbeatStaleFactor is the multiple of basePollInterval past which a
@@ -18,6 +20,15 @@ const heartbeatStaleFactor = 3
 type HealthSnapshot struct {
 	GitHub SourceHealth
 	Jira   SourceHealth
+	// GitHubRateLimit is the per-org last-observed GitHub primary
+	// rate-limit budget (TFAC-573 follow-up to the TFAC-569 rate-limit-
+	// aware client), read from m.resolver's RateLimitReader registry when
+	// the resolver implements it — never a live API call of its own. Keyed
+	// by org ID; an org absent from the map has no observation yet (never
+	// polled this process, or its host doesn't send rate-limit headers —
+	// e.g. GHES with rate limiting disabled). nil when m.resolver doesn't
+	// implement RateLimitReader (a test fake).
+	GitHubRateLimit map[string]ghclient.RateLimitState
 }
 
 // SourceHealth is one poll source's (github/jira) liveness state.
@@ -60,9 +71,33 @@ type OrgPollHealth struct {
 // see the current set.
 func (m *Manager) Health(ctx context.Context) HealthSnapshot {
 	return HealthSnapshot{
-		GitHub: m.sourceHealth(ctx, "github"),
-		Jira:   m.sourceHealth(ctx, "jira"),
+		GitHub:          m.sourceHealth(ctx, "github"),
+		Jira:            m.sourceHealth(ctx, "jira"),
+		GitHubRateLimit: m.rateLimitSnapshot(ctx),
 	}
+}
+
+// rateLimitSnapshot reads the resolver's per-org rate-limit registry for
+// every currently active org, when the resolver implements RateLimitReader
+// (the production resolver always does; test fakes typically don't). An
+// org with no observation yet is simply absent from the returned map.
+func (m *Manager) rateLimitSnapshot(ctx context.Context) map[string]ghclient.RateLimitState {
+	reader, ok := m.resolver.(ghclient.RateLimitReader)
+	if !ok {
+		return nil
+	}
+	orgIDs, err := m.orgs.ListActiveSystem(ctx)
+	if err != nil {
+		pollerLog.Warn("readyz: list active orgs failed", "source", "rate_limit", "error", err)
+		return nil
+	}
+	out := make(map[string]ghclient.RateLimitState, len(orgIDs))
+	for _, orgID := range orgIDs {
+		if s, ok := reader.RateLimitFor(orgID); ok {
+			out[orgID] = s
+		}
+	}
+	return out
 }
 
 func (m *Manager) sourceHealth(ctx context.Context, source string) SourceHealth {
