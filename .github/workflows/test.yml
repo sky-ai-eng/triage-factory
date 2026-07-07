@@ -22,11 +22,21 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # For pull_request events the checked-out ref is the synthetic
+      # refs/pull/<n>/merge commit — base tip merged with the PR head,
+      # including forked heads, since that merge commit already embeds
+      # the fork's commit as a parent object. depth 2 is what pulls the
+      # merge commit's parents in locally; depth 1 (the default) checks
+      # out only the merge commit itself, with no parents. Diffing HEAD
+      # (the merge result) against HEAD^1 (base) isolates just the PR's
+      # own changes even when base has moved on since the PR branched,
+      # without any extra fetch — unlike fetching base/head by SHA,
+      # which GitHub's remote rejects as an unadvertised object request
+      # for fork PRs.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
-      # Diffs the PR's base/head SHAs directly (fetched by SHA, not by ref,
-      # so no history walk is needed) rather than relying on checkout's
-      # default single-commit fetch, which only has the merge commit.
       - name: Detect docs-only change
         id: docs
         run: |
@@ -34,12 +44,7 @@ jobs:
             echo "only=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git fetch --no-tags --depth=1 origin \
-            "${{ github.event.pull_request.base.sha }}" \
-            "${{ github.event.pull_request.head.sha }}"
-          changed=$(git diff --name-only \
-            "${{ github.event.pull_request.base.sha }}" \
-            "${{ github.event.pull_request.head.sha }}")
+          changed=$(git diff --name-only HEAD^1 HEAD)
           if [ -z "$changed" ] || echo "$changed" | grep -qvE '(^docs/|\.md$)'; then
             echo "only=false" >> "$GITHUB_OUTPUT"
           else
