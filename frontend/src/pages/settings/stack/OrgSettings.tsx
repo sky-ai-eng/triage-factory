@@ -39,7 +39,12 @@ import {
 } from '../../../lib/reachability'
 import { GitHubUrlStep, GitHubCloneStep } from '../../setup/GitHubStep'
 import { OrgModelStep } from '../../setup/ModelStep'
-import { initialWizardState, loadOrg, loadGitHubAppInstall } from '../../setup/steps'
+import {
+  initialWizardState,
+  loadOrg,
+  loadGitHubAppInstall,
+  bedrockFormError,
+} from '../../setup/steps'
 import type { StepContext, WizardState } from '../../setup/types'
 import PollerTimingGroup from '../PollerTimingGroup'
 import { inputClass } from '../primitives'
@@ -50,7 +55,8 @@ import TeamManagementSection from '../../../components/TeamManagementSection'
 import { dailyCapError, saveOrgConfig, type OrgConfigForm } from '../orgConfig'
 import { connectJira, JIRA_DEPLOYMENT_OPTIONS } from '../jiraConnect'
 import { connectAnthropic, CLAUDE_SOURCE_OPTIONS } from '../anthropicConnect'
-import { ClaudeProviderCards, AnthropicKeyField } from '../../setup/ClaudeStep'
+import { connectBedrock, bedrockPayloadFromForm } from '../bedrockConnect'
+import { ClaudeProviderCards, AnthropicKeyField, BedrockFields } from '../../setup/ClaudeStep'
 import { ChoiceCards } from '../../setup/parts'
 import GitHubAccessControl from './GitHubAccessControl'
 import SSOSettings from './SSOSettings'
@@ -225,23 +231,47 @@ export default function OrgSettings({
   // (blank = no cap). Gates the section's Save and surfaces an inline message.
   const dailyCapErr = dailyCapError(draft.org.max_daily_cost_usd)
 
-  // ── Claude credentials ── Captured via the validated connectAnthropic
-  // endpoint (never the bulk org POST). Local shows the system-vs-BYOK source
-  // radio; multi shows provider+key only (no system-creds option). "Configured"
-  // reflects has_anthropic_api_key (seeded into anthropicConnected by loadOrg).
-  const claudeConfigured = baseline.anthropicConnected
+  // ── Claude credentials ── Captured via the validated connectAnthropic /
+  // connectBedrock endpoints (never the bulk org POST). Local shows the
+  // system-vs-BYOK source radio; multi shows provider + credentials only (no
+  // system-creds option). "Configured" reflects whichever provider is stored
+  // (they're mutually exclusive server-side); the provider radio swaps the
+  // credential fields.
   const claudeWantsByok = !isLocal || draft.anthropicKeySource === 'byok'
   const claudeKeyTyped = draft.org.anthropic_api_key.trim() !== ''
-  const claudeSummary = claudeConfigured
-    ? 'Configured'
-    : isLocal
-      ? 'System Claude credentials'
-      : 'Not configured'
-  // Dirty on a source switch (local) or a typed key.
+  const claudeSummary = baseline.bedrockConnected
+    ? 'Configured · Amazon Bedrock'
+    : baseline.anthropicConnected
+      ? 'Configured · Anthropic'
+      : isLocal
+        ? 'System Claude credentials'
+        : 'Not configured'
+  const bedrockSelected = claudeWantsByok && draft.claudeProvider === 'bedrock'
+  const bedrockSecretTyped =
+    draft.org.bedrock_bearer_token !== '' ||
+    draft.org.aws_access_key_id !== '' ||
+    draft.org.aws_secret_access_key !== '' ||
+    draft.org.aws_session_token !== ''
+  const bedrockConfigChanged =
+    draft.org.bedrock_auth_method !== baseline.org.bedrock_auth_method ||
+    draft.org.bedrock_region !== baseline.org.bedrock_region ||
+    draft.org.bedrock_model_id !== baseline.org.bedrock_model_id ||
+    draft.org.bedrock_base_url !== baseline.org.bedrock_base_url
+  // Input-layer gate for the Bedrock form — the same rules the wizard step
+  // validates, so Save blocks before bouncing off the backend's 422.
+  const bedrockErr = bedrockSelected ? bedrockFormError(draft) : null
+  // Dirty on a source switch (local), a provider switch, a typed secret, or a
+  // Bedrock config edit.
   const claudeDirty =
-    (isLocal && draft.anthropicKeySource !== baseline.anthropicKeySource) || claudeKeyTyped
-  // BYOK needs a key unless one is already stored ("leave blank to keep current").
-  const claudeSaveDisabled = claudeWantsByok && !claudeKeyTyped && !claudeConfigured
+    (isLocal && draft.anthropicKeySource !== baseline.anthropicKeySource) ||
+    draft.claudeProvider !== baseline.claudeProvider ||
+    claudeKeyTyped ||
+    (bedrockSelected && (bedrockSecretTyped || bedrockConfigChanged))
+  // Anthropic BYOK needs a key unless one is already stored ("leave blank to
+  // keep current"); Bedrock gates on its own form validation.
+  const claudeSaveDisabled = bedrockSelected
+    ? bedrockErr !== null
+    : claudeWantsByok && !claudeKeyTyped && !baseline.anthropicConnected
 
   return (
     <div className="divide-y divide-border-subtle">
@@ -612,9 +642,10 @@ export default function OrgSettings({
         </div>
       </SettingsSection>
 
-      {/* ── Claude credentials ── Save drives the validated connectAnthropic
-          endpoint (not the bulk org POST). Local: source radio, then provider +
-          key when BYOK. Multi: provider + key only. */}
+      {/* ── Claude credentials ── Save drives the selected provider's validated
+          connect endpoint (connectAnthropic / connectBedrock — never the bulk
+          org POST). Local: source radio, then provider + credentials when BYOK.
+          Multi: provider + credentials only. */}
       <SettingsSection
         title="Claude credentials"
         summary={claudeSummary}
@@ -625,11 +656,53 @@ export default function OrgSettings({
           setSavingKey('claude', true)
           try {
             const useSystem = isLocal && draft.anthropicKeySource === 'system'
+
+            // Amazon Bedrock: the whole form goes to the validated connect
+            // endpoint; blank secrets with the stored method = keep current.
+            if (!useSystem && draft.claudeProvider === 'bedrock') {
+              if (bedrockErr !== null) {
+                toast.error(bedrockErr)
+                return false
+              }
+              const r = await connectBedrock(bedrockPayloadFromForm(draft.org))
+              if (!r.ok) {
+                toast.error(r.error)
+                return false
+              }
+              const clearSecrets = {
+                bedrock_bearer_token: '',
+                aws_access_key_id: '',
+                aws_secret_access_key: '',
+                aws_session_token: '',
+                anthropic_api_key: '',
+              }
+              const storedConfig = {
+                bedrock_auth_method: draft.org.bedrock_auth_method,
+                bedrock_region: draft.org.bedrock_region,
+                bedrock_model_id: draft.org.bedrock_model_id,
+                bedrock_base_url: draft.org.bedrock_base_url,
+              }
+              const apply = (s: WizardState): WizardState => ({
+                ...s,
+                claudeProvider: 'bedrock',
+                bedrockConnected: true,
+                bedrockStoredMethod: draft.org.bedrock_auth_method,
+                // The backend cleared any Anthropic key in the same call.
+                anthropicConnected: false,
+                anthropicKeySource: isLocal ? 'byok' : s.anthropicKeySource,
+                org: { ...s.org, ...storedConfig, ...clearSecrets },
+              })
+              setBaseline(apply)
+              setDraft(apply)
+              toast.success('Amazon Bedrock credentials saved')
+              return true
+            }
+
             const key = draft.org.anthropic_api_key.trim()
             // BYOK + blank + already configured = "leave blank to keep current":
             // a no-op that must NOT POST an empty key (which would clear it).
             if (!useSystem && key === '') {
-              if (claudeConfigured) {
+              if (baseline.anthropicConnected) {
                 patch({ org: { ...draft.org, anthropic_api_key: '' } })
                 return true
               }
@@ -643,18 +716,19 @@ export default function OrgSettings({
             }
             const nowConfigured = !useSystem
             const nextSource = isLocal ? (useSystem ? 'system' : 'byok') : draft.anthropicKeySource
-            setBaseline((b) => ({
-              ...b,
+            const apply = (s: WizardState): WizardState => ({
+              ...s,
               anthropicConnected: nowConfigured,
               anthropicKeySource: nextSource,
-              org: { ...b.org, anthropic_api_key: '' },
-            }))
-            setDraft((d) => ({
-              ...d,
-              anthropicConnected: nowConfigured,
-              anthropicKeySource: nextSource,
-              org: { ...d.org, anthropic_api_key: '' },
-            }))
+              claudeProvider: 'anthropic',
+              // Setting a key (and the "system" clear) both wipe the Bedrock
+              // set server-side.
+              bedrockConnected: false,
+              bedrockStoredMethod: null,
+              org: { ...s.org, anthropic_api_key: '' },
+            })
+            setBaseline(apply)
+            setDraft(apply)
             toast.success(useSystem ? 'Using system Claude credentials' : 'Claude API key saved')
             return true
           } finally {
@@ -665,7 +739,19 @@ export default function OrgSettings({
           setDraft((d) => ({
             ...d,
             anthropicKeySource: baseline.anthropicKeySource,
-            org: { ...d.org, anthropic_api_key: '' },
+            claudeProvider: baseline.claudeProvider,
+            org: {
+              ...d.org,
+              anthropic_api_key: '',
+              bedrock_auth_method: baseline.org.bedrock_auth_method,
+              bedrock_bearer_token: '',
+              aws_access_key_id: '',
+              aws_secret_access_key: '',
+              aws_session_token: '',
+              bedrock_region: baseline.org.bedrock_region,
+              bedrock_model_id: baseline.org.bedrock_model_id,
+              bedrock_base_url: baseline.org.bedrock_base_url,
+            },
           }))
         }
       >
@@ -680,12 +766,26 @@ export default function OrgSettings({
           )}
           {claudeWantsByok && (
             <>
-              <ClaudeProviderCards />
-              <AnthropicKeyField
-                value={draft.org.anthropic_api_key}
-                onChange={(v) => patch({ org: { ...draft.org, anthropic_api_key: v } })}
-                hasKey={claudeConfigured}
+              <ClaudeProviderCards
+                selected={draft.claudeProvider}
+                onSelect={(kind) => patch({ claudeProvider: kind })}
               />
+              {draft.claudeProvider === 'anthropic' ? (
+                <AnthropicKeyField
+                  value={draft.org.anthropic_api_key}
+                  onChange={(v) => patch({ org: { ...draft.org, anthropic_api_key: v } })}
+                  hasKey={baseline.anthropicConnected}
+                />
+              ) : (
+                <BedrockFields
+                  form={draft.org}
+                  onChange={(p) => patch({ org: { ...draft.org, ...p } })}
+                  hasStored={
+                    baseline.bedrockConnected &&
+                    baseline.bedrockStoredMethod === draft.org.bedrock_auth_method
+                  }
+                />
+              )}
             </>
           )}
         </div>

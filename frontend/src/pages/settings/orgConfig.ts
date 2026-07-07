@@ -9,6 +9,11 @@ import { readError } from '../../lib/api'
 
 export type CloneProtocol = 'ssh' | 'https'
 
+// BedrockAuthMethod mirrors the connect endpoint's auth_method wire values:
+// a Bedrock API key (bearer) or the IAM access-key pair (+ optional session
+// token) served by the SigV4 re-signing proxy.
+export type BedrockAuthMethod = 'bearer' | 'access_keys'
+
 // OrgConfigForm is the editable org-level field set the shared components
 // drive. Field names match the GET/POST /api/settings/org wire keys so a
 // container can spread component patches straight into its form state.
@@ -37,6 +42,20 @@ export interface OrgConfigForm {
   // connectAnthropic endpoint and is deliberately NOT sent by saveOrgConfig, so
   // the bulk settings POST can't be an unvalidated write path.
   anthropic_api_key: string
+  // ── Amazon Bedrock (alternative Claude provider) ── Captured ONLY via the
+  // validated connectBedrock endpoint, never sent by saveOrgConfig — same rule
+  // as anthropic_api_key. The secret fields (bearer token / key pair / session
+  // token) stay blank on load; presence rides has_bedrock_credentials +
+  // bedrock_auth_method. The non-secret config (method, region, model,
+  // endpoint) round-trips so the form shows current values.
+  bedrock_auth_method: BedrockAuthMethod
+  bedrock_bearer_token: string
+  aws_access_key_id: string
+  aws_secret_access_key: string
+  aws_session_token: string
+  bedrock_region: string
+  bedrock_model_id: string
+  bedrock_base_url: string
 }
 
 // OrgSettingsData mirrors the GET /api/settings/org response. Token fields
@@ -58,6 +77,13 @@ export interface OrgSettingsData {
   max_daily_cost_usd: number
   has_anthropic_api_key: boolean
   has_bedrock_credentials: boolean
+  // Bedrock non-secret config — echoed by the GET so the form renders the
+  // stored method / region / model / endpoint. The credential itself never
+  // leaves the vault.
+  bedrock_auth_method?: string
+  bedrock_region?: string
+  bedrock_model_id?: string
+  bedrock_base_url?: string
   member_count: number
 }
 
@@ -74,6 +100,16 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
   max_llm_model_tier: '',
   max_daily_cost_usd: '',
   anthropic_api_key: '',
+  bedrock_auth_method: 'bearer',
+  bedrock_bearer_token: '',
+  aws_access_key_id: '',
+  aws_secret_access_key: '',
+  aws_session_token: '',
+  // us-east-1 is Bedrock's primary region for Anthropic models and the
+  // resolver's own fallback — pre-filled so the common case is zero-typing.
+  bedrock_region: 'us-east-1',
+  bedrock_model_id: '',
+  bedrock_base_url: '',
 })
 
 // orgConfigFromSettings seeds the editable form from a GET response.
@@ -99,6 +135,16 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
     // so it stays blank and a save without a re-typed key leaves the vault key
     // untouched.
     anthropic_api_key: '',
+    // Bedrock secrets stay blank like the key above; the non-secret config
+    // seeds from the GET echo so the form shows what's stored.
+    bedrock_auth_method: org.bedrock_auth_method === 'access_keys' ? 'access_keys' : 'bearer',
+    bedrock_bearer_token: '',
+    aws_access_key_id: '',
+    aws_secret_access_key: '',
+    aws_session_token: '',
+    bedrock_region: org.bedrock_region || 'us-east-1',
+    bedrock_model_id: org.bedrock_model_id || '',
+    bedrock_base_url: org.bedrock_base_url || '',
   }
 }
 
