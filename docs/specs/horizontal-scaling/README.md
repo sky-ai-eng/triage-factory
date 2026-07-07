@@ -207,9 +207,18 @@ leases (
   `UPDATE ... SET holder_id=me, term=term+1, acquired_at=now(),
   renewed_at=now() WHERE renewed_at < now() - TTL` (plus the
   insert-if-absent bootstrap). Renewal every ~5 s, TTL ~20 s.
-- The holder starts the brain (pollers, drainer, managers, sweepers) and
-  **stops it promptly on renewal failure** — self-demote before the TTL
-  expires so the overlap window on failover is seconds and one-sided.
+- The holder starts the brain (pollers, drainer, managers, sweepers)
+  and **self-demotes on renewal failure, on its own monotonic clock**:
+  the brain runs only while `now_mono < last_successful_renewal +
+  demote_deadline`, with `demote_deadline` strictly less than the
+  takeover TTL — so the old brain is provably stopping before a
+  successor can acquire. All *cross-node* comparisons (`renewed_at <
+  now() - TTL`) use DB time only; no wall-clock agreement between
+  nodes is ever assumed. Long-running brain components bound the
+  residual overlap window themselves: the event-queue drainer
+  re-verifies the lease term between batches, and the tracker's
+  snapshot writes carry the `poll_seq` CAS (§5.4) — so a straggler
+  ex-leader mid-cycle degrades to no-ops, not corruption.
 - Failover cost is bounded and benign: the new leader's poll schedule
   starts cold (every org due), but poll cursors + ETags are in the DB,
   so the catch-up cycle is mostly free 304s (`docs/poll-bench.md`).
@@ -355,6 +364,17 @@ claim → execute); three additions to the claim:
   absorb most of it, and `failure_kind='executor_lost'` makes the rest
   auditable. A *parked* run has no owner at all and rehydrates anywhere
   from its S3 snapshot — already true today.
+- **A stale heartbeat means *fenced*, not just dead.** The reaper
+  cannot distinguish a crashed executor from one partitioned away
+  from Postgres, so the protocol makes them equivalent: an executor
+  that fails to renew its heartbeat past a self-fence deadline (own
+  monotonic clock, strictly shorter than the reaper's staleness
+  threshold — same discipline as leader demotion, §3) **kills its
+  live sandboxes, stops its sinks, and stops claiming** before the
+  reaper may requeue its runs. It forfeits nothing by doing so — a
+  partitioned executor can't write `run_messages` or heartbeats
+  anyway — and without it, a requeued run and a zombie sandbox could
+  both finish and double their external writes.
 - **Graceful drain** (deploys, scale-down): set `draining=true` → the
   executor stops claiming; live runs finish or hibernate-on-idle
   (TFAC-305) — the fleet's natural quiesce; when `active_runs=0` the
@@ -387,6 +407,16 @@ PgBouncer/Supavisor independently, per TFAC-307 §2, with the RLS
 | `tf_wake` | control (enqueue) → executors | `{kind: run\|event, org}` — claim nudges |
 | `tf_ws` | anyone → every control pod | WS event envelope `{origin_pod, event}`; if > ~7.5 KB, a `ws_outbox` row ref instead (agent messages regularly exceed the limit) |
 | `tf_ctl` | control ↔ executors, control ↔ control | `{signal_id}` / `{kick_user}` / `{trigger: subsystem, org}` — see below |
+
+One rule governs every channel: **NOTIFY is a doorbell — never the
+data, and never the only path.** A notification means "scan your
+backing table now": `tf_ctl` consumers scan `run_signals` for unacked
+rows on every (re)connect and on a slow backstop poll; `tf_wake`
+consumers keep their claim-poll interval as the backstop; so a dropped
+LISTEN connection *delays* work, it cannot *lose* it. The one
+deliberate exception is `tf_ws`: live UI events are lossy by contract
+(durable state is in Postgres and the frontend refetches on
+navigation), so a missed window degrades liveness, never state.
 
 ### 5.0 Why Postgres, and not Redis/NATS
 
@@ -514,7 +544,13 @@ Control-pod handler logic (`message` / `interrupt` / `cancel` /
 run enqueues its continuation as ordinary claimable work (preferred to
 its last executor for the warm worktree, rehydratable anywhere from
 S3). This replaces the in-process resume goroutine and is what makes
-hibernation genuinely location-transparent.
+hibernation genuinely location-transparent. State-machine shape,
+settled here: the user message is recorded first (`run_messages` +
+pending-input on the run), then the **same `runs` row** transitions
+back to queued and is claimed like any other; the claiming executor's
+resume path rehydrates, spawns with `--resume <session_id>`, and
+delivers the recorded message as the turn input. No second runs row,
+and — keeping the standing invariant — no new run status.
 
 Stale signals expire harmlessly (the reaper owns the run's fate if the
 owner died mid-signal).
