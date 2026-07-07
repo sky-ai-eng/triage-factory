@@ -164,6 +164,18 @@ filesystem, and coordinate only through Postgres rows.
 | Curator turn execution | the session's **home executor** (§6.3) | shared-RO worktree + cwd cache locality |
 | Migrations (`goose.Up`) | control pods only, under an advisory lock | executors assert schema version and wait |
 
+### 2.4 Recommended shapes
+
+| Shape | Control | Executors | What you get |
+| --- | --- | --- | --- |
+| **All-in-one** (default; local + small self-host) | `TF_ROLE=all`, one process | in-process | Today's box. Every mechanism self-resolves; nothing to operate. |
+| **First fleet** | 1 | N | The main win: sandbox capacity scales independently and executor deploys never touch the API. The lone control pod trivially holds the brain lease. A control restart is a brief API blip + brain restart whose poll catch-up is mostly free 304s. |
+| **HA** | 2–3 behind the LB | N | Every control pod serves API/WS (replica-safe already) and competes for the one brain lease; exactly one holds it, the rest are **working API replicas + warm standbys, not idle spares**. Leader loss → takeover ≤ ~TTL. Zero-downtime rolls both tiers: control one-at-a-time behind readiness, executors drain-and-replace. Postgres HA remains the floor — control HA cannot exceed the database's. |
+
+Start at the smallest shape that meets the requirement and move down
+the table only on evidence; the mechanisms are identical in all three,
+so moving is a compose edit, not a migration.
+
 The load-bearing move is the second column's first five rows: **the
 entire org brain moves as one unit** with a single leader lease. That
 one decision preserves four invariants at once — tracker single-writer,
@@ -560,7 +572,10 @@ Haiku, jailed in multi-mode) **on the leader**: sentinels stay
 in-process, `syslimit`'s cap stays globally true because exactly one
 process runs them, and nothing about their (already replica-tolerant:
 last-writer-wins, delegation-fenced) writes changes. The cost: control
-pods keep the privileged container caps to jail Haiku.
+pods keep the privileged container caps to jail Haiku — and in the HA
+shape that means *every* control pod, since any of them can become
+leader (one more reason a deployment that wants an unprivileged
+control tier pulls the job-classes below forward; open question §11.3).
 
 The endgame (P4, when wanted): generalize the run queue with a **job
 class** so system jobs become claimable work on executors like any
