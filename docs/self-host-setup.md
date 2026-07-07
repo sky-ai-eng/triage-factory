@@ -188,11 +188,13 @@ Any `jwk-init --write-env` run (rotate or not) rewrites `.env` atomically and no
 
 Every release artifact is signed keylessly via [cosign](https://docs.sigstore.dev/) and GitHub OIDC — there's no signing key for us to manage, rotate, or leak, and no key for you to fetch and pin before verifying. Each tagged release also carries an SPDX SBOM per archive, and the GHCR image carries an SBOM + SLSA provenance attestation alongside its signature.
 
+The `--certificate-identity-regexp` below pins the exact workflow file *and* the tag-push trigger that ran it — not just the repo. A bare repo-name match would also accept a signature from any other workflow in this repo that happened to hold `id-token: write` (e.g. one added on a PR branch), which defeats the point of checking provenance at all.
+
 **Release tarball / checksums** — `checksums.txt` is signed as a blob; verifying its signature transitively verifies every archive it lists (each line is a sha256 of one archive):
 
 ```sh
 cosign verify-blob --certificate checksums.txt.pem --signature checksums.txt.sig \
-  --certificate-identity-regexp 'github.com/sky-ai-eng/triage-factory' \
+  --certificate-identity-regexp '^https://github\.com/sky-ai-eng/triage-factory/\.github/workflows/release\.yml@refs/tags/.+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
 ```
 
@@ -202,7 +204,7 @@ Download `checksums.txt`, `checksums.txt.sig`, and `checksums.txt.pem` from the 
 
 ```sh
 cosign verify ghcr.io/sky-ai-eng/triage-factory:vX.Y.Z \
-  --certificate-identity-regexp 'github.com/sky-ai-eng/triage-factory' \
+  --certificate-identity-regexp '^https://github\.com/sky-ai-eng/triage-factory/\.github/workflows/docker-publish\.yml@refs/tags/.+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 

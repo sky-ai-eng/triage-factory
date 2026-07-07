@@ -49,8 +49,15 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Pinned, not @latest: the vulnerability DATABASE is still fetched
+      # live every run (that's intentional — it's what lets the weekly
+      # cron catch newly-published CVEs against unchanged code), but the
+      # govulncheck TOOL itself floating under @latest would mean a PR
+      # could start failing (or a new false-positive/negative appear) from
+      # a tool release alone, with zero diff to point to. Bump deliberately
+      # — check https://pkg.go.dev/golang.org/x/vuln for the current release.
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
 
       - name: Run govulncheck
         id: govulncheck
