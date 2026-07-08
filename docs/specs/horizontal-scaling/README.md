@@ -209,7 +209,7 @@ across control pods is a later refinement (§9 P4) that reuses the same
 lease table at a finer key; the poll bench says one leader carries
 realistic multi-org load for a long time.
 
-### 2.5 Where requests land (nobody "knows who responds" — nobody needs to)
+### 2.5 Where requests land
 
 Inbound traffic never routes *to* anything specific. The LB picks a
 control pod per REST request and per WS connection (plain round-robin,
@@ -233,34 +233,33 @@ What a request might need, and how each need is location-independent:
 | session revoke to bite everywhere | kick broadcast on `tf_ctl` (§5.1) |
 
 A WS reconnect may land on a *different* pod than before; that is
-fine by construction — nothing session-shaped lives in pod memory,
-and missed live events during the gap are the §5 lossy-by-contract
-window over durable state.
+fine — nothing session-shaped lives in pod memory, and missed live
+events during the gap are the §5 lossy-by-contract window over
+durable state.
 
-Residual per-pod request state, called out honestly: the in-process
-**request serializers** (`projectMutexes` around project-config
-autosave RMW, `githubAppRegMu` around GitHub-App registration)
-serialize only within one pod — two pods can interleave the same RMW.
-Fix is the existing advisory-lock precedent
-(`pg_advisory_xact_lock` keyed on the project/org, as
+Residual per-pod request state: the in-process **request serializers**
+(`projectMutexes` around project-config autosave RMW, `githubAppRegMu`
+around GitHub-App registration) serialize only within one pod — two
+pods can interleave the same RMW. Fix is the existing advisory-lock
+precedent (`pg_advisory_xact_lock` keyed on the project/org, as
 `team_github_repos.go:131` already does), folded into the P0
 replica-correctness bundle. The pre-auth **ip rate limiter** stays
 per-pod (effective limit ≈ ×M, LB-dependent — accepted and
 documented), and the TTL caches (reachable-repo, token caches) merely
 lose cross-pod hit-rate, never correctness.
 
-### 2.6 The load balancer (operator-provided, deliberately boring)
+### 2.6 The load balancer (operator-provided)
 
 **When one exists at all.** Executors accept no inbound traffic —
 they are outbound-only participants (claims, heartbeats, and LISTEN
 toward Postgres; GitHub/LLM egress through their per-run proxies), so
 there is never anything to balance *toward executors* at any N. The
-LB enters only at **M ≥ 2 control pods** (the HA row of §2.4). The
+LB enters only at $M \geq 2$ control pods (the HA row of §2.4). The
 all-in-one and first-fleet shapes have exactly today's single
 entrypoint: one published port on the one control process.
 
-**We do not write or ship one — by design, any reverse proxy works.**
-The properties that usually make LB selection fraught were removed on
+**We do not write or ship one — any reverse proxy works.** The
+properties that usually make LB selection fraught were removed on
 purpose: no sticky sessions (DB sessions + the `tf_ws` backplane), no
 path-based routing (any pod serves any route, §2.5), no server
 affinity, no LB-level auth. What remains is the boring minimum any
@@ -281,7 +280,7 @@ proxy) provides:
    operator prefers, exactly as now.
 
 What the repo ships is a **reference configuration, not software**: the
-M ≥ 2 compose profile includes an optional stock-proxy service (a
+$M \geq 2$ compose profile includes an optional stock-proxy service (a
 few dozen lines of Caddy/nginx config) as a worked example
 (TFAC-582's docs scope). On the managed side, the platform's own
 proxy (e.g. Fly's) plays this role with zero additions. Building or
@@ -654,6 +653,24 @@ broker without touching queues, leases, or signals; and a fleet-wide
 GitHub-budget limiter would be a narrow *additive* adoption, not a
 fabric change. Decision rule: adopt a broker on measured evidence,
 per channel, never as the substrate.
+
+**The same replaces-what-exactly test bounds Kubernetes as a design
+basis.** The tempting swap — "let k8s be the fleet" — founders on the
+unit of scale: a run is not a pod (§2.2 — one executor pod hosts
+~a hundred gVisor sandboxes with warm caches, a subnet pool, and
+per-run proxies; run-per-pod would forfeit all three and trade a
+200 ms sandbox spawn for pod-startup seconds). So k8s could supply
+process supervision, node heartbeats, and a drain-ish verb — the
+trivial fifth of this spec — while the application-semantic
+four-fifths (queue claims, cross-pod run control, WS fan-out,
+per-`(org,repo)` affinity, single-writer and FIFO invariants,
+ownership-scoped recovery) remain ours to build on any substrate.
+Requiring it would also invert the deployment floor for exactly the
+segments the product exists to serve (§2.1's ladder) and fork local
+mode off the shared mechanism. Hence the settled posture: k8s is
+**permitted as an executor substrate** where it genuinely earns its
+keep — node management and autoscaling underneath privileged executor
+pods (§2.1, §4.5) — and never designed against.
 
 ### 5.1 WS fan-out
 
@@ -1171,6 +1188,12 @@ epic owner on 2026-07-07. Reopening conditions noted per entry.
    short-circuit exists only for operations on live processes
    (steer/interrupt/cancel-live/permission), never for work creation
    (§5.2).
+8. **Kubernetes as design basis** — rejected; permitted as an
+   executor substrate only (§2.1, §5.0). It replaces the trivial
+   layer (supervision, node heartbeat, drain) and none of the
+   application-semantic layer; requiring it inverts the deployment
+   floor. Reopens only if the unit of scale ever became run-per-pod,
+   which §2.2 rejects independently.
 
 ## Related
 
