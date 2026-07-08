@@ -410,6 +410,15 @@ func updateEntityDescription(ctx context.Context, q queryer, orgID, id, descript
 	return err
 }
 
+// UpdateURLSystem sets the entity's url through the admin pool. No
+// non-System counterpart exists (see the interface doc) — the only caller
+// (ee/slack's permalink resolver) runs detached with no JWT claims, so
+// there is no app-pool-equivalent request context to route through.
+func (s *entityStore) UpdateURLSystem(ctx context.Context, orgID, id, url string) error {
+	_, err := s.admin.ExecContext(ctx, `UPDATE entities SET url = $1 WHERE org_id = $2 AND id = $3`, url, orgID, id)
+	return err
+}
+
 func (s *entityStore) AssignProject(ctx context.Context, orgID, id string, projectID *string, rationale string) error {
 	return assignEntityProject(ctx, s.q, orgID, id, projectID, rationale)
 }

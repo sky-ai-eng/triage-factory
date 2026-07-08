@@ -399,6 +399,18 @@ func (s *entityStore) UpdateDescriptionSystem(ctx context.Context, orgID, id, de
 	return s.UpdateDescription(ctx, orgID, id, description)
 }
 
+// UpdateURLSystem sets the entity's url. No non-System counterpart exists
+// (see the interface doc) — SQLite has one connection and no auth concept,
+// so this is inlined here rather than delegating to a shared non-System
+// method the way the other `...System` variants in this file do.
+func (s *entityStore) UpdateURLSystem(ctx context.Context, orgID, id, url string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `UPDATE entities SET url = ? WHERE id = ?`, url, id)
+	return err
+}
+
 func (s *entityStore) AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) error {
 	return s.AssignProject(ctx, orgID, id, projectID, rationale)
 }

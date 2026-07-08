@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -286,18 +288,73 @@ func slackConversationsInfo(ctx context.Context, client *http.Client, botToken, 
 	return &conversationsInfoResult{Name: out.Channel.Name}, nil
 }
 
+// slackRetryAfterCap bounds how long doSlackJSON will wait on a 429's
+// Retry-After header before retrying — Slack's own advertised wait is
+// honored up to this ceiling so a single misbehaving upstream response
+// can't stall a caller far past what's tolerable inline (every wrapper
+// flows through here, including ones called on a user-facing request
+// path).
+const slackRetryAfterCap = 10 * time.Second
+
+// slackRetryAfterDefault is the wait used when a 429 response carries no
+// (or an unparsable) Retry-After header — Slack always sends one on a real
+// rate limit, so this only guards against a malformed upstream response,
+// not the common case.
+const slackRetryAfterDefault = 1 * time.Second
+
+// slackRateLimitError wraps a doSlackJSON call that hit a second
+// consecutive 429 even after the single Retry-After-honoring retry.
+// Distinguishes a sustained rate limit from every other non-2xx failure
+// doSlackJSON otherwise returns as a plain error — callers that want to
+// special-case sustained throttling (vs. treating it like any other
+// failure) can type-assert via isSlackRateLimitError.
+type slackRateLimitError struct{ retryAfter time.Duration }
+
+func (e *slackRateLimitError) Error() string {
+	return fmt.Sprintf("slack api: rate limited (retry-after %s)", e.retryAfter)
+}
+
+// isSlackRateLimitError reports whether err wraps a slackRateLimitError.
+func isSlackRateLimitError(err error) bool {
+	var e *slackRateLimitError
+	return errors.As(err, &e)
+}
+
 // doSlackJSON executes req and decodes the JSON body into out. Slack
 // answers 200 even for most application-level failures (the {"ok":false}
 // convention) — a non-2xx here means something more fundamental (rate
 // limit, upstream outage), so it's surfaced with the raw status and a
 // capped body rather than attempting to parse it as the {ok,...} shape.
+//
+// A 429 is a special case: doSlackJSON honors the Retry-After header
+// (capped at slackRetryAfterCap, respecting ctx cancellation) and retries
+// the request exactly once. A second consecutive 429 returns a typed
+// *slackRateLimitError rather than looping further — there is no general
+// retry loop here.
 func doSlackJSON(ctx context.Context, client *http.Client, req *http.Request, out any) error {
-	resp, err := client.Do(req)
+	resp, body, err := doSlackRequest(client, req)
 	if err != nil {
-		return fmt.Errorf("slack api request: %w", err)
+		return err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		wait := slackRetryAfterDuration(resp.Header.Get("Retry-After"))
+		if err := slackSleep(ctx, wait); err != nil {
+			return err
+		}
+		retryReq, err := cloneSlackRequest(ctx, req)
+		if err != nil {
+			return fmt.Errorf("slack api: rebuild request for retry: %w", err)
+		}
+		resp, body, err = doSlackRequest(client, retryReq)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return &slackRateLimitError{retryAfter: slackRetryAfterDuration(resp.Header.Get("Retry-After"))}
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("slack api: http %d: %s", resp.StatusCode, bytes.TrimSpace(body))
 	}
@@ -305,6 +362,72 @@ func doSlackJSON(ctx context.Context, client *http.Client, req *http.Request, ou
 		return fmt.Errorf("slack api: decode response: %w", err)
 	}
 	return nil
+}
+
+// doSlackRequest executes req and reads its (capped) body, wrapping a
+// transport-level failure the same way the original inline doSlackJSON
+// body did. Shared by doSlackJSON's initial attempt and its single 429
+// retry.
+func doSlackRequest(client *http.Client, req *http.Request) (*http.Response, []byte, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("slack api request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	return resp, body, nil
+}
+
+// slackRetryAfterDuration parses a Retry-After header value (Slack always
+// sends whole seconds) and caps it at slackRetryAfterCap. An empty or
+// unparsable header falls back to slackRetryAfterDefault rather than
+// retrying immediately or not at all.
+func slackRetryAfterDuration(header string) time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSpace(header))
+	if err != nil || secs < 0 {
+		return slackRetryAfterDefault
+	}
+	d := time.Duration(secs) * time.Second
+	if d > slackRetryAfterCap {
+		return slackRetryAfterCap
+	}
+	return d
+}
+
+// slackSleep waits out d, or returns ctx's error immediately if ctx is
+// canceled first — the "respecting ctx cancellation" half of the 429
+// retry contract, so a caller with a short-lived context isn't held
+// hostage by Slack's advertised wait.
+func slackSleep(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// cloneSlackRequest rebuilds orig for the single 429 retry. orig's Body
+// (if any) was already drained by the first doSlackRequest call, so this
+// re-derives it from GetBody — the standard-library-populated replay hook
+// every request built by this file gets automatically, since every body
+// here originates from a bytes.Reader (see slackConversationsJoin and the
+// Part 1 wrappers) rather than an arbitrary one-shot io.Reader.
+func cloneSlackRequest(ctx context.Context, orig *http.Request) (*http.Request, error) {
+	clone := orig.Clone(ctx)
+	if orig.GetBody != nil {
+		body, err := orig.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		clone.Body = body
+	}
+	return clone, nil
 }
 
 func nonEmpty(s, fallback string) string {
@@ -460,4 +583,583 @@ func slackConversationsJoin(ctx context.Context, client *http.Client, botToken, 
 		return fmt.Errorf("slack conversations.join: %s", nonEmpty(resp.Error, "not ok"))
 	}
 	return nil
+}
+
+// --- Part 1 (TFAC-595): outbound wrappers ---
+//
+// Everything below is the Slack agent runtime's outbound surface: post/
+// update a message, react, read thread/history context, resolve a
+// permalink, drive the assistant status indicator, and move files in both
+// directions. Every wrapper still builds on doSlackJSON (api.go's
+// doSlackJSON/doSlackRequest), so the 429-retry contract applies uniformly
+// — the two exceptions are slackFileDownload and slackUploadFileBytes,
+// which move raw bytes rather than a {ok,...} JSON envelope and so talk to
+// the HTTP client directly (see each function's doc).
+
+// slackMessageParams is the shared param shape for slackChatPostMessage and
+// slackChatUpdate — see each function's doc for how ThreadTS's wire meaning
+// differs between the two (thread-reply target vs. the ts of the message
+// being edited).
+type slackMessageParams struct {
+	Channel      string
+	ThreadTS     string
+	Text         string
+	MarkdownBody string
+}
+
+// slackMarkdownBodyMaxRunes is Block Kit's documented character cap for a
+// "markdown" block. slackChatPostMessage/slackChatUpdate return a typed
+// *slackMarkdownTooLongError rather than silently truncating an over-long
+// agent-composed body — the caller decides how to shorten it.
+const slackMarkdownBodyMaxRunes = 12000
+
+// slackMarkdownTooLongError is slackChatPostMessage/slackChatUpdate's typed
+// error for a MarkdownBody exceeding slackMarkdownBodyMaxRunes.
+type slackMarkdownTooLongError struct{ length int }
+
+func (e *slackMarkdownTooLongError) Error() string {
+	return fmt.Sprintf("slack: markdown body is %d runes, exceeds the %d-rune cap", e.length, slackMarkdownBodyMaxRunes)
+}
+
+// isSlackMarkdownTooLongError reports whether err wraps a
+// slackMarkdownTooLongError.
+func isSlackMarkdownTooLongError(err error) bool {
+	var e *slackMarkdownTooLongError
+	return errors.As(err, &e)
+}
+
+// slackMarkdownBlock is Block Kit's "markdown" block type — Slack renders
+// real Markdown from it (including tables), unlike the legacy mrkdwn text
+// object. The shape both slackChatPostMessage and slackChatUpdate send
+// alongside a plain-text fallback.
+type slackMarkdownBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// slackMarkdownBlocksFor validates markdown and wraps it as a single-
+// element []slackMarkdownBlock, or returns (nil, nil) when markdown is
+// empty — the plain-text-only case neither wrapper should attach blocks
+// for.
+func slackMarkdownBlocksFor(markdown string) ([]slackMarkdownBlock, error) {
+	if markdown == "" {
+		return nil, nil
+	}
+	if n := len([]rune(markdown)); n > slackMarkdownBodyMaxRunes {
+		return nil, &slackMarkdownTooLongError{length: n}
+	}
+	return []slackMarkdownBlock{{Type: "markdown", Text: markdown}}, nil
+}
+
+// slackPostJSON POSTs a JSON-encoded payload to slackAPIBase+"/"+method —
+// the transport chat.postMessage/chat.update/files.completeUploadExternal
+// need to express nested structures (blocks, the files array) that the
+// form-urlencoded idiom (slackConversationsJoin, slackReactionsAdd) can't.
+// Flows through doSlackJSON like every other wrapper, so the 429 retry
+// applies uniformly; the JSON body is built from a bytes.Reader, so
+// doSlackJSON's retry clone (cloneSlackRequest) can always replay it via
+// the standard library's auto-populated GetBody.
+func slackPostJSON(ctx context.Context, client *http.Client, botToken, method string, payload, out any) error {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("slack api: marshal %s payload: %w", method, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/"+method, bytes.NewReader(encoded))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	return doSlackJSON(ctx, client, req, out)
+}
+
+// slackChatPostMessage posts a new message via chat.postMessage, returning
+// its ts (the id a later slackChatUpdate/slackReactionsAdd call needs).
+// params.ThreadTS, when set, is the optional thread root to reply into
+// (chat.postMessage's own "thread_ts"). When params.MarkdownBody is set it
+// is sent as a single {type:"markdown"} block alongside params.Text as the
+// plain-text notification fallback — blocks are never sent alone, so a
+// screen reader or notification surface still has something to render.
+func slackChatPostMessage(ctx context.Context, client *http.Client, botToken string, params slackMessageParams) (ts string, err error) {
+	blocks, err := slackMarkdownBlocksFor(params.MarkdownBody)
+	if err != nil {
+		return "", err
+	}
+	body := map[string]any{"channel": params.Channel, "text": params.Text}
+	if params.ThreadTS != "" {
+		body["thread_ts"] = params.ThreadTS
+	}
+	if blocks != nil {
+		body["blocks"] = blocks
+	}
+
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		TS    string `json:"ts"`
+	}
+	if err := slackPostJSON(ctx, client, botToken, "chat.postMessage", body, &out); err != nil {
+		return "", err
+	}
+	if !out.OK {
+		return "", fmt.Errorf("slack chat.postMessage: %s", nonEmpty(out.Error, "not ok"))
+	}
+	return out.TS, nil
+}
+
+// slackChatUpdate edits an existing message via chat.update. params.ThreadTS
+// here carries the ts of the message BEING EDITED (chat.update's own "ts"
+// parameter) — unlike slackChatPostMessage, where the same struct field is
+// an optional thread-reply target. Slack's chat.update has a destructive
+// quirk: sending text without blocks REMOVES any blocks the message already
+// had. This wrapper always sends text, and sends blocks whenever
+// params.MarkdownBody is set; a caller that wants to preserve a message's
+// markdown formatting across an edit MUST re-supply MarkdownBody — this
+// wrapper does not fetch-and-preserve the prior body on the caller's
+// behalf.
+func slackChatUpdate(ctx context.Context, client *http.Client, botToken string, params slackMessageParams) error {
+	blocks, err := slackMarkdownBlocksFor(params.MarkdownBody)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{"channel": params.Channel, "ts": params.ThreadTS, "text": params.Text}
+	if blocks != nil {
+		body["blocks"] = blocks
+	}
+
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := slackPostJSON(ctx, client, botToken, "chat.update", body, &out); err != nil {
+		return err
+	}
+	if !out.OK {
+		return fmt.Errorf("slack chat.update: %s", nonEmpty(out.Error, "not ok"))
+	}
+	return nil
+}
+
+// slackReactionsAdd adds an emoji reaction via reactions.add. Idempotent:
+// Slack's own "already_reacted" error means the reaction is already there —
+// exactly the caller's desired end state — so it's treated as success
+// rather than surfaced as an error.
+func slackReactionsAdd(ctx context.Context, client *http.Client, botToken, channel, ts, name string) error {
+	form := url.Values{"channel": {channel}, "timestamp": {ts}, "name": {name}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/reactions.add",
+		bytes.NewReader([]byte(form.Encode())))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := doSlackJSON(ctx, client, req, &resp); err != nil {
+		return err
+	}
+	if !resp.OK && resp.Error != "already_reacted" {
+		return fmt.Errorf("slack reactions.add: %s", nonEmpty(resp.Error, "not ok"))
+	}
+	return nil
+}
+
+// slackMessage is one message returned by conversations.replies or
+// conversations.history — the shared shape both need for thread/history
+// display (agent context).
+type slackMessage struct {
+	User     string
+	BotID    string
+	Text     string
+	TS       string
+	ThreadTS string
+}
+
+// slackConversationsRepliesCap bounds how many messages a single
+// slackConversationsReplies pagination loop collects, mirroring
+// slackConversationsListCap's defensive-cap rationale — an unexpectedly
+// long thread must not turn one call into an unbounded loop. A var so a
+// test can lower it.
+var slackConversationsRepliesCap = 1000
+
+// slackConversationsReplies returns a thread's messages (the root message
+// first) via conversations.replies, paginating by cursor until Slack stops
+// returning a next_cursor or slackConversationsRepliesCap is hit.
+// truncated=true means the cap was hit before Slack ran out of pages — the
+// same contract as slackConversationsList's truncated. limit, when > 0, is
+// passed through as the per-page size Slack should return.
+func slackConversationsReplies(ctx context.Context, client *http.Client, botToken, channel, ts string, limit int) (messages []slackMessage, truncated bool, err error) {
+	cursor := ""
+	for {
+		q := url.Values{"channel": {channel}, "ts": {ts}}
+		if limit > 0 {
+			q.Set("limit", strconv.Itoa(limit))
+		}
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, slackAPIBase+"/conversations.replies?"+q.Encode(), nil)
+		if err != nil {
+			return nil, false, err
+		}
+		req.Header.Set("Authorization", "Bearer "+botToken)
+
+		var resp struct {
+			OK       bool   `json:"ok"`
+			Error    string `json:"error"`
+			Messages []struct {
+				User     string `json:"user"`
+				BotID    string `json:"bot_id"`
+				Text     string `json:"text"`
+				TS       string `json:"ts"`
+				ThreadTS string `json:"thread_ts"`
+			} `json:"messages"`
+			HasMore          bool `json:"has_more"`
+			ResponseMetadata struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		if err := doSlackJSON(ctx, client, req, &resp); err != nil {
+			return nil, false, err
+		}
+		if !resp.OK {
+			return nil, false, fmt.Errorf("slack conversations.replies: %s", nonEmpty(resp.Error, "not ok"))
+		}
+		for _, m := range resp.Messages {
+			messages = append(messages, slackMessage{User: m.User, BotID: m.BotID, Text: m.Text, TS: m.TS, ThreadTS: m.ThreadTS})
+			if len(messages) >= slackConversationsRepliesCap {
+				return messages, resp.ResponseMetadata.NextCursor != "" || resp.HasMore, nil
+			}
+		}
+		cursor = resp.ResponseMetadata.NextCursor
+		if cursor == "" {
+			return messages, false, nil
+		}
+	}
+}
+
+// slackConversationsHistoryParams bounds ONE conversations.history call.
+// Unlike slackConversationsReplies, this wrapper never loops internally —
+// see slackConversationsHistory's doc for why.
+type slackConversationsHistoryParams struct {
+	Channel   string
+	Latest    string
+	Oldest    string
+	Inclusive bool
+	Limit     int
+}
+
+// slackConversationsHistory returns one bounded page of channel history via
+// conversations.history. Deliberately NOT a pagination loop like
+// slackConversationsReplies: a caller building N-before/N-after context
+// around an anchor ts makes two separate bounded calls instead — Latest=
+// anchor (Inclusive=false) for the messages just before it, Oldest=anchor
+// (Inclusive=false) for the messages just after — rather than this wrapper
+// walking cursors on its own.
+func slackConversationsHistory(ctx context.Context, client *http.Client, botToken string, params slackConversationsHistoryParams) ([]slackMessage, error) {
+	q := url.Values{"channel": {params.Channel}}
+	if params.Latest != "" {
+		q.Set("latest", params.Latest)
+	}
+	if params.Oldest != "" {
+		q.Set("oldest", params.Oldest)
+	}
+	if params.Inclusive {
+		q.Set("inclusive", "true")
+	}
+	if params.Limit > 0 {
+		q.Set("limit", strconv.Itoa(params.Limit))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, slackAPIBase+"/conversations.history?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+
+	var resp struct {
+		OK       bool   `json:"ok"`
+		Error    string `json:"error"`
+		Messages []struct {
+			User     string `json:"user"`
+			BotID    string `json:"bot_id"`
+			Text     string `json:"text"`
+			TS       string `json:"ts"`
+			ThreadTS string `json:"thread_ts"`
+		} `json:"messages"`
+	}
+	if err := doSlackJSON(ctx, client, req, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("slack conversations.history: %s", nonEmpty(resp.Error, "not ok"))
+	}
+	out := make([]slackMessage, 0, len(resp.Messages))
+	for _, m := range resp.Messages {
+		out = append(out, slackMessage{User: m.User, BotID: m.BotID, Text: m.Text, TS: m.TS, ThreadTS: m.ThreadTS})
+	}
+	return out, nil
+}
+
+// slackChatGetPermalink resolves a message's shareable URL via
+// chat.getPermalink. No extra scopes needed beyond what's already granted.
+func slackChatGetPermalink(ctx context.Context, client *http.Client, botToken, channel, messageTS string) (string, error) {
+	q := url.Values{"channel": {channel}, "message_ts": {messageTS}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, slackAPIBase+"/chat.getPermalink?"+q.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+
+	var out struct {
+		OK        bool   `json:"ok"`
+		Error     string `json:"error"`
+		Permalink string `json:"permalink"`
+	}
+	if err := doSlackJSON(ctx, client, req, &out); err != nil {
+		return "", err
+	}
+	if !out.OK {
+		return "", fmt.Errorf("slack chat.getPermalink: %s", nonEmpty(out.Error, "not ok"))
+	}
+	return out.Permalink, nil
+}
+
+// slackAssistantLoadingMessagesMax caps how many rotating loading strings
+// slackAssistantSetStatus sends — Slack documents a 10-message limit for
+// assistant.threads.setStatus's loading_messages.
+const slackAssistantLoadingMessagesMax = 10
+
+// slackAssistantSetStatus sets (or, when status == "", clears) the
+// assistant thinking-status indicator via assistant.threads.setStatus.
+// Works under chat:write alone — no assistant:write grant needed (Slack
+// changelog 2026-03-05 widened the accepted scopes). loadingMessages beyond
+// slackAssistantLoadingMessagesMax is truncated; status is always sent
+// (even empty), matching Slack's own "empty status clears it" contract.
+// loading_messages goes over the wire as a single comma-joined value, not a
+// JSON array — this endpoint is form-urlencoded, not one of the JSON-body
+// wrappers above.
+func slackAssistantSetStatus(ctx context.Context, client *http.Client, botToken, channel, threadTS, status string, loadingMessages []string) error {
+	if len(loadingMessages) > slackAssistantLoadingMessagesMax {
+		loadingMessages = loadingMessages[:slackAssistantLoadingMessagesMax]
+	}
+	form := url.Values{"channel_id": {channel}, "thread_ts": {threadTS}, "status": {status}}
+	if len(loadingMessages) > 0 {
+		form.Set("loading_messages", strings.Join(loadingMessages, ","))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/assistant.threads.setStatus",
+		bytes.NewReader([]byte(form.Encode())))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := doSlackJSON(ctx, client, req, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("slack assistant.threads.setStatus: %s", nonEmpty(resp.Error, "not ok"))
+	}
+	return nil
+}
+
+// slackFileInfoResult is the subset of files.info's response the file
+// download/context flow needs: enough to name the file and fetch its
+// bytes.
+type slackFileInfoResult struct {
+	ID         string
+	Name       string
+	Mimetype   string
+	Size       int64
+	URLPrivate string
+}
+
+// slackFilesInfo looks up a file's metadata via files.info — the
+// prerequisite for slackFileDownload, which needs URLPrivate.
+func slackFilesInfo(ctx context.Context, client *http.Client, botToken, fileID string) (*slackFileInfoResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		slackAPIBase+"/files.info?file="+url.QueryEscape(fileID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		File  struct {
+			ID         string `json:"id"`
+			Name       string `json:"name"`
+			Mimetype   string `json:"mimetype"`
+			Size       int64  `json:"size"`
+			URLPrivate string `json:"url_private"`
+		} `json:"file"`
+	}
+	if err := doSlackJSON(ctx, client, req, &out); err != nil {
+		return nil, err
+	}
+	if !out.OK {
+		return nil, fmt.Errorf("slack files.info: %s", nonEmpty(out.Error, "not ok"))
+	}
+	return &slackFileInfoResult{
+		ID: out.File.ID, Name: out.File.Name, Mimetype: out.File.Mimetype,
+		Size: out.File.Size, URLPrivate: out.File.URLPrivate,
+	}, nil
+}
+
+// slackFileDownload streams urlPrivate's bytes (slackFilesInfo's
+// URLPrivate) to w, using botToken as a Bearer credential — url_private is
+// only fetchable with the workspace's own bot token, never anonymously.
+// Streams directly from the response body rather than buffering the whole
+// file in memory, so a large attachment can't blow up process memory. Does
+// NOT flow through doSlackJSON (this isn't a slack.com/api {ok,...}
+// endpoint, and the response body is opaque file bytes, not JSON) — no 429
+// retry here, matching the rest of this function's plain-HTTP posture.
+func slackFileDownload(ctx context.Context, client *http.Client, botToken, urlPrivate string, w io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlPrivate, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("slack file download request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("slack file download: http %d: %s", resp.StatusCode, bytes.TrimSpace(body))
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return fmt.Errorf("slack file download: copy response body: %w", err)
+	}
+	return nil
+}
+
+// slackUploadedFile is one entry of files.completeUploadExternal's "files"
+// array: the file id slackGetUploadURLExternal reserved, with an optional
+// display title.
+type slackUploadedFile struct {
+	ID    string `json:"id"`
+	Title string `json:"title,omitempty"`
+}
+
+// slackGetUploadURLExternal is the first leg of the v2 upload flow. Slack
+// retired the legacy files.upload (newly-created apps lost access
+// 2024-05-16; the method stopped working entirely 2025-11-12 per Slack's
+// changelog), so this — files.getUploadURLExternal +
+// files.completeUploadExternal — is the only current path. It reserves a
+// short-lived upload destination sized for a file of length bytes.
+func slackGetUploadURLExternal(ctx context.Context, client *http.Client, botToken, filename string, length int) (uploadURL, fileID string, err error) {
+	form := url.Values{"filename": {filename}, "length": {strconv.Itoa(length)}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/files.getUploadURLExternal",
+		bytes.NewReader([]byte(form.Encode())))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var out struct {
+		OK        bool   `json:"ok"`
+		Error     string `json:"error"`
+		UploadURL string `json:"upload_url"`
+		FileID    string `json:"file_id"`
+	}
+	if err := doSlackJSON(ctx, client, req, &out); err != nil {
+		return "", "", err
+	}
+	if !out.OK {
+		return "", "", fmt.Errorf("slack files.getUploadURLExternal: %s", nonEmpty(out.Error, "not ok"))
+	}
+	return out.UploadURL, out.FileID, nil
+}
+
+// slackUploadFileBytes POSTs r's contents to uploadURL — the destination
+// slackGetUploadURLExternal reserved. Not a slack.com/api method: the URL
+// itself is a one-time credential, so no Authorization header and no
+// doSlackJSON envelope decode (Slack's response here isn't the {ok,...}
+// shape). Streams from r rather than buffering, mirroring
+// slackFileDownload's rationale in the opposite direction.
+func slackUploadFileBytes(ctx context.Context, client *http.Client, uploadURL string, r io.Reader) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, r)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("slack file upload request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("slack file upload: http %d: %s", resp.StatusCode, bytes.TrimSpace(body))
+	}
+	return nil
+}
+
+// slackCompleteUploadExternal finalizes files previously reserved via
+// slackGetUploadURLExternal and uploaded via slackUploadFileBytes, sharing
+// them into channel (in-thread when threadTS is set) — the second leg of
+// the v2 upload flow.
+func slackCompleteUploadExternal(ctx context.Context, client *http.Client, botToken, channel, threadTS string, files []slackUploadedFile) error {
+	body := map[string]any{"files": files}
+	if channel != "" {
+		body["channel_id"] = channel
+	}
+	if threadTS != "" {
+		body["thread_ts"] = threadTS
+	}
+
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := slackPostJSON(ctx, client, botToken, "files.completeUploadExternal", body, &out); err != nil {
+		return err
+	}
+	if !out.OK {
+		return fmt.Errorf("slack files.completeUploadExternal: %s", nonEmpty(out.Error, "not ok"))
+	}
+	return nil
+}
+
+// slackFileUploadParams bundles one file's upload through the full v2
+// flow — see slackFilesUpload.
+type slackFileUploadParams struct {
+	Filename string
+	Length   int
+	Title    string
+	Channel  string
+	ThreadTS string
+	Body     io.Reader
+}
+
+// slackFilesUpload performs the full v2 upload flow for one file: reserve
+// (slackGetUploadURLExternal), upload the bytes (slackUploadFileBytes),
+// complete (slackCompleteUploadExternal) — landing it in Channel, in-thread
+// when ThreadTS is set. Returns the file id Slack assigned.
+func slackFilesUpload(ctx context.Context, client *http.Client, botToken string, params slackFileUploadParams) (fileID string, err error) {
+	uploadURL, fileID, err := slackGetUploadURLExternal(ctx, client, botToken, params.Filename, params.Length)
+	if err != nil {
+		return "", err
+	}
+	if err := slackUploadFileBytes(ctx, client, uploadURL, params.Body); err != nil {
+		return "", err
+	}
+	if err := slackCompleteUploadExternal(ctx, client, botToken, params.Channel, params.ThreadTS,
+		[]slackUploadedFile{{ID: fileID, Title: params.Title}}); err != nil {
+		return "", err
+	}
+	return fileID, nil
 }
