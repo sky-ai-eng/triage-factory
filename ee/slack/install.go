@@ -104,5 +104,15 @@ func install(api server.ExtensionAPI) {
 	// (see exec_host.go's package doc for why that's the intended posture).
 	registerSlackExec(stores)
 
+	// Lifecycle adapters (TFAC-597): 👀 acknowledge, the live setStatus
+	// driver, the failure note, and the no-match reply — everything the bot
+	// does in Slack without the agent asking. api.Bus is passed as an
+	// accessor (not called here), same read-through-at-hook-time posture as
+	// api.PublicURL: ExtensionAPI.Bus() is nil until app wiring completes,
+	// and OnReady hooks are the seam that fires after it does (see
+	// lifecycle.go's package doc).
+	lifecycle := newLifecycleAdapter(stores, slackHTTPClient, api.PublicURL, api.Bus)
+	api.OnReady(lifecycle.run)
+
 	api.OnReady(sockets.run)
 }

@@ -63,8 +63,17 @@ func (p SlackMentionPredicate) Matches(m SlackMentionMetadata) bool {
 // (event-types/schemas lists, handler create, router freeze) — FeatureSlack
 // is already in entitlements.AllFeatures() (TFAC-529), so the composition-
 // root parity test (TestRegisteredFeaturesAreDeclared) passes.
+//
+// Additive=true (TFAC-597) flips the auto-delegation defer/inject
+// decision: a re-mention on an entity whose task already has an active
+// auto run injects a <system-note> into that live run (internal/routing's
+// tryAutoDelegate, via events.AdditiveFor) instead of enqueueing a second
+// pending_firing. A fresh mention (no active run) is unaffected — it still
+// fires a new run exactly as before.
 func init() {
-	events.Register(events.NewSchema[SlackMentionMetadata, SlackMentionPredicate](
-		domain.EventSlackMention, events.OwnershipOwned))
+	schema := events.NewSchema[SlackMentionMetadata, SlackMentionPredicate](
+		domain.EventSlackMention, events.OwnershipOwned)
+	schema.Additive = true
+	events.Register(schema)
 	entitlements.GateEventSource("slack", entitlements.FeatureSlack)
 }
