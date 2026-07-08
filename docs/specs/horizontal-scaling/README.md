@@ -882,9 +882,18 @@ should be the cheapest self-healing thing available:
 
 ### 6.2 Mechanics
 
-- Control stamps `runs.preferred_executor_id` at enqueue (re-stamped on
-  requeue — queue dwell is seconds-to-minutes, so membership staleness
-  is bounded).
+- Control stamps `runs.preferred_executor_id` at enqueue: the
+  enqueuing pod computes the rendezvous winner over live registry
+  members and writes it onto the row, so tier-1 claims are an indexed
+  equality instead of per-claim hash evaluation. The stamp is a
+  snapshot of membership and can go stale if the fleet changes while
+  the run waits — but a run waits seconds-to-minutes while membership
+  changes hours-to-days apart, and the two row classes that *do*
+  outlive their stamp (reaper requeues, whose stamped executor is
+  likely the dead one; resumes of long-parked runs) are **re-stamped
+  against current membership on requeue**. Net invariant: no stamp is
+  ever older than one queue dwell, and a stale one costs a warm cache
+  via the aging tier, never correctness.
 - Claim is two-tier: **(1)** my queued runs (`preferred = me`), **(2)**
   anyone's queued runs older than an aging threshold (~15–30 s) or
   whose preferred executor is dead/gated/draining. Tier 2 is the
