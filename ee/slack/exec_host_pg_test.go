@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -21,20 +22,42 @@ import (
 
 // ---------- fake Slack API (chat.postMessage/update, reactions.add, reads) ----------
 
+// fakeSlackFile is one file fakeExecSlack.files knows about, backing
+// files.info + the raw byte download the download verb drives.
+type fakeSlackFile struct {
+	Name     string
+	Content  []byte
+	Channels []string
+}
+
 // fakeExecSlack is a minimal fake covering the endpoints the exec verbs
-// exercise. conversations.history/replies/chat.getPermalink answer a bland
-// "nothing there" response — fine for these tests, since none of them assert
-// on read output or on the best-effort permalink.
+// exercise. chat.getPermalink answers a bland "there's a link" response —
+// fine, since no test asserts on the best-effort permalink.
 type fakeExecSlack struct {
 	lastPostText, lastPostMarkdown, lastPostChannel, lastPostThreadTS string
 	lastUpdateText, lastUpdateChannel, lastUpdateTS                   string
 	lastReactionEmoji, lastReactionChannel, lastReactionTS            string
 	postTS                                                            string
+
+	// historyMessages / repliesMessages are returned verbatim for every
+	// conversations.history / conversations.replies call in a test — good
+	// enough to prove a read verb's request/response wiring end-to-end
+	// without modeling per-call window slicing (covered structurally by the
+	// CLI-level anchored-argument tests instead).
+	historyMessages []map[string]any
+	repliesMessages []map[string]any
+
+	// userNames maps a Slack user id to the display name users.info answers
+	// with — backs the sender-name resolution test.
+	userNames map[string]string
+
+	// files backs files.info + the raw download endpoint; keyed by file id.
+	files map[string]fakeSlackFile
 }
 
 func newFakeExecSlack(t *testing.T) *fakeExecSlack {
 	t.Helper()
-	f := &fakeExecSlack{postTS: "1700000001.000100"}
+	f := &fakeExecSlack{postTS: "1700000001.000100", userNames: map[string]string{}, files: map[string]fakeSlackFile{}}
 	withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/chat.postMessage"):
@@ -69,13 +92,47 @@ func newFakeExecSlack(t *testing.T) *fakeExecSlack {
 			writeSlackFakeJSON(w, map[string]any{"ok": true})
 		case strings.HasSuffix(r.URL.Path, "/chat.getPermalink"):
 			writeSlackFakeJSON(w, map[string]any{"ok": true, "permalink": "https://acme.slack.com/archives/x"})
-		case strings.HasSuffix(r.URL.Path, "/conversations.history"), strings.HasSuffix(r.URL.Path, "/conversations.replies"):
-			writeSlackFakeJSON(w, map[string]any{"ok": true, "messages": []map[string]any{}})
+		case strings.HasSuffix(r.URL.Path, "/conversations.history"):
+			writeSlackFakeJSON(w, map[string]any{"ok": true, "messages": f.historyMessages})
+		case strings.HasSuffix(r.URL.Path, "/conversations.replies"):
+			writeSlackFakeJSON(w, map[string]any{"ok": true, "messages": f.repliesMessages})
+		case strings.HasSuffix(r.URL.Path, "/users.info"):
+			userID := r.URL.Query().Get("user")
+			name := f.userNames[userID]
+			writeSlackFakeJSON(w, map[string]any{"ok": true, "user": map[string]any{
+				"profile": map[string]any{"display_name": name, "real_name": name},
+			}})
+		case strings.HasSuffix(r.URL.Path, "/files.info"):
+			fileID := r.URL.Query().Get("file")
+			file, ok := f.files[fileID]
+			if !ok {
+				writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "file_not_found"})
+				return
+			}
+			writeSlackFakeJSON(w, map[string]any{"ok": true, "file": map[string]any{
+				"id": fileID, "name": file.Name, "mimetype": "application/octet-stream",
+				"size": len(file.Content), "url_private": slackAPIBase + "/fake-file-download/" + fileID,
+				"channels": file.Channels,
+			}})
+		case strings.Contains(r.URL.Path, "/fake-file-download/"):
+			fileID := strings.TrimPrefix(r.URL.Path, "/fake-file-download/")
+			file, ok := f.files[fileID]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(file.Content)
 		default:
 			writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "unhandled_path:" + r.URL.Path})
 		}
 	})
 	return f
+}
+
+// setFile registers a file's metadata + bytes for files.info/download.
+func (f *fakeExecSlack) setFile(fileID, name string, content []byte, channels []string) {
+	f.files[fileID] = fakeSlackFile{Name: name, Content: content, Channels: channels}
 }
 
 // decodeSlackFakeBody decodes a JSON request body (chat.postMessage/
@@ -511,6 +568,192 @@ func TestSlackExecHandler_Send_WorkspaceAmbiguity_TwoAppsOneWorkspace(t *testing
 	}
 	if r.fake.lastPostChannel != "" {
 		t.Error("must never guess which bot identity to act as")
+	}
+}
+
+// ---------- read thread / read channel ----------
+
+func TestSlackExecHandler_ReadThread_Golden(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-read-thread")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	r.fake.userNames["U1"] = "Ada Lovelace"
+	r.fake.repliesMessages = []map[string]any{
+		{"ts": "1700000000.000000", "user": "U1", "text": "root message", "files": []map[string]any{{"id": "F1", "name": "spec.pdf"}}},
+		{"ts": "1700000000.000001", "thread_ts": "1700000000.000000", "user": "U1", "text": "a reply"},
+	}
+
+	out, err := r.hdl.readThread(context.Background(), info, slackReadThreadArgs{Channel: "C1", TS: "1700000000.000000", Limit: 50})
+	if err != nil {
+		t.Fatalf("readThread: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("want 2 messages, got %d: %+v", len(out), out)
+	}
+	if out[0].SenderName != "Ada Lovelace" {
+		t.Errorf("SenderName = %q, want Ada Lovelace (users.info resolution)", out[0].SenderName)
+	}
+	if len(out[0].Files) != 1 || out[0].Files[0].ID != "F1" || out[0].Files[0].Name != "spec.pdf" {
+		t.Errorf("Files = %+v, want [{F1 spec.pdf}]", out[0].Files)
+	}
+	if out[1].ThreadTS != "1700000000.000000" {
+		t.Errorf("reply ThreadTS = %q, want the root ts", out[1].ThreadTS)
+	}
+}
+
+func TestSlackExecHandler_ReadChannel_LimitOnly_Golden(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-read-channel")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	r.fake.historyMessages = []map[string]any{
+		{"ts": "1700000002.000000", "user": "U2", "text": "third"},
+		{"ts": "1700000000.000000", "user": "U2", "text": "first"},
+		{"ts": "1700000001.000000", "user": "U2", "text": "second"},
+	}
+
+	out, err := r.hdl.readChannel(context.Background(), info, slackReadChannelArgs{Channel: "C1", Limit: 20})
+	if err != nil {
+		t.Fatalf("readChannel: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("want 3 messages, got %d: %+v", len(out), out)
+	}
+	wantOrder := []string{"first", "second", "third"}
+	for i, m := range out {
+		if m.Text != wantOrder[i] {
+			t.Errorf("position %d = %q, want %q (sortMessagesByTS should have reordered): %+v", i, m.Text, wantOrder[i], out)
+		}
+	}
+}
+
+func TestSlackExecHandler_ReadChannel_AuthzRefusal(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-read-authz")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	// Deliberately NOT tracked.
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	if _, err := r.hdl.readChannel(context.Background(), info, slackReadChannelArgs{Channel: "C1", Limit: 10}); err == nil {
+		t.Fatal("expected an authz refusal, got nil")
+	} else if !strings.Contains(err.Error(), "does not track") {
+		t.Errorf("error = %q, want it to mention the team doesn't track the channel", err)
+	}
+}
+
+// ---------- download ----------
+
+func TestSlackExecHandler_Download_Golden(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-download")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	r.fake.setFile("F1", "report.csv", []byte("a,b,c\n1,2,3\n"), []string{"C1"})
+
+	out, err := r.hdl.download(context.Background(), info, slackDownloadArgs{FileID: "F1"})
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if out.Name != "report.csv" {
+		t.Errorf("Name = %q, want report.csv", out.Name)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(out.Base64)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+	if string(decoded) != "a,b,c\n1,2,3\n" {
+		t.Errorf("decoded content = %q, want the seeded file bytes", decoded)
+	}
+}
+
+// TestSlackExecHandler_Download_UntrackedChannel_Refused pins the fix for
+// the gap Copilot's review missed and a later human review caught: download
+// has no --channel of its own, so it must authorize against the FILE's own
+// channel membership (files.info) rather than skip authorization entirely.
+// The file here is shared only into a channel the team does NOT track.
+func TestSlackExecHandler_Download_UntrackedChannel_Refused(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-dl-untracked")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.seedChannel(orgID, "T1", "C-untracked")
+	r.trackChannel(orgID, owner, teamID, "C1") // tracks C1, NOT C-untracked
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	r.fake.setFile("F1", "secret.csv", []byte("data"), []string{"C-untracked"})
+
+	_, err := r.hdl.download(context.Background(), info, slackDownloadArgs{FileID: "F1"})
+	if err == nil {
+		t.Fatal("expected a refusal — the file is shared only into an untracked channel")
+	}
+	if !strings.Contains(err.Error(), "does not track") {
+		t.Errorf("error = %q, want it to mention the team doesn't track the file's channel(s)", err)
+	}
+}
+
+// TestSlackExecHandler_Download_NoChannels_Refused pins that a file shared
+// nowhere channel-scoped (DM-only, or Slack simply reports none) has nothing
+// to authorize against and is refused rather than allowed by default.
+func TestSlackExecHandler_Download_NoChannels_Refused(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-dl-nochan")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	r.fake.setFile("F1", "dm-only.csv", []byte("data"), nil)
+
+	_, err := r.hdl.download(context.Background(), info, slackDownloadArgs{FileID: "F1"})
+	if err == nil {
+		t.Fatal("expected a refusal — the file has no channel to authorize against")
+	}
+	if !strings.Contains(err.Error(), "isn't shared into any channel") {
+		t.Errorf("error = %q, want it to explain there's no channel to authorize against", err)
+	}
+}
+
+// TestSlackExecHandler_Download_FallbackPath_StillAuthorizes is the direct
+// regression test for the gap: a run with NO Slack task context (so
+// resolveWorkspaceForDownload takes the "org's sole connected workspace"
+// fallback, which — before this fix — returned a token with zero channel
+// authorization at all) must still be refused when the requested file
+// belongs only to a channel this team doesn't track.
+func TestSlackExecHandler_Download_FallbackPath_StillAuthorizes(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-dl-fallback")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test") // exactly one connected workspace
+	r.seedChannel(orgID, "T1", "C-untracked")
+	// teamID tracks nothing — this run's seeded task is a plain GitHub task
+	// (seedRun/seedNonSlackTask), so workspaceFromRunTaskMetadata reports
+	// "no Slack context" and resolveWorkspaceForDownload falls through to
+	// the org-wide sole-workspace path.
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	r.fake.setFile("F1", "leak.csv", []byte("data"), []string{"C-untracked"})
+
+	_, err := r.hdl.download(context.Background(), info, slackDownloadArgs{FileID: "F1"})
+	if err == nil {
+		t.Fatal("expected the fallback (no-task-context) path to still enforce channel authorization")
+	}
+	if !strings.Contains(err.Error(), "does not track") {
+		t.Errorf("error = %q, want it to mention the team doesn't track the file's channel(s)", err)
 	}
 }
 

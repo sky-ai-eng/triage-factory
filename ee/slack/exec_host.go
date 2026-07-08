@@ -163,19 +163,19 @@ func (h *slackExecHandler) resolveWorkspaceAndToken(ctx context.Context, info ag
 // resolveWorkspaceForDownload resolves a bot token for `download`, which
 // carries no --channel (a file id alone doesn't name one). It prefers this
 // run's own mention-task metadata (the thread context the run was spawned
-// from, if any — authorized against that channel when present); absent that,
-// it falls back to the org's sole connected workspace, refusing when the org
-// has none or more than one (no channel to disambiguate against, so no
-// guessing).
+// from, if any); absent that, it falls back to the org's sole connected
+// workspace, refusing when the org has none or more than one (no channel to
+// disambiguate against, so no guessing). This resolves ONLY which bot
+// identity to speak as — it does NOT authorize the download; a token here is
+// just enough credential to look up the file's own metadata. The actual
+// authorization gate is authorizeFileChannels, run against the file's real
+// channel membership once files.info answers (see download) — this two-step
+// split exists because, unlike every other verb, download has no --channel
+// upfront to gate on before making any Slack call at all.
 func (h *slackExecHandler) resolveWorkspaceForDownload(ctx context.Context, info agenthost.RunInfo) (string, error) {
-	if ws, metaChannel, ok, err := h.workspaceFromRunTaskMetadata(ctx, info); err != nil {
+	if ws, _, ok, err := h.workspaceFromRunTaskMetadata(ctx, info); err != nil {
 		return "", err
 	} else if ok {
-		if metaChannel != "" {
-			if err := h.authorizeChannel(ctx, info, metaChannel); err != nil {
-				return "", err
-			}
-		}
 		return h.botToken(ctx, info, ws)
 	}
 
@@ -189,6 +189,34 @@ func (h *slackExecHandler) resolveWorkspaceForDownload(ctx context.Context, info
 			len(workspaces))
 	}
 	return h.botToken(ctx, info, workspaces[0])
+}
+
+// authorizeFileChannels is download's authorization gate — run only after
+// files.info resolves the file's real channel membership, since download
+// carries no --channel upfront to check via authorizeChannel like every
+// other verb. Refuses when channelIDs is empty (a file shared nowhere
+// channel-scoped — e.g. only ever DM'd — has nothing to authorize against,
+// so there's no basis to allow it) or when the team tracks none of them;
+// passes as soon as ANY one of the file's channels is tracked, since a file
+// shared into several channels only needs one legitimate path to it.
+func (h *slackExecHandler) authorizeFileChannels(ctx context.Context, info agenthost.RunInfo, channelIDs []string) error {
+	if len(channelIDs) == 0 {
+		return fmt.Errorf("slack: this file isn't shared into any channel this team could be authorized against")
+	}
+	bundle := slackstore.FromStores(h.stores)
+	if bundle == nil {
+		return fmt.Errorf("slack: not available")
+	}
+	for _, channelID := range channelIDs {
+		tracks, err := bundle.TeamChannels.TracksChannelSystem(ctx, info.OrgID, info.TeamID, channelID)
+		if err != nil {
+			return fmt.Errorf("slack: check channel authorization: %w", err)
+		}
+		if tracks {
+			return nil
+		}
+	}
+	return fmt.Errorf("slack: this team does not track any channel this file is shared into")
 }
 
 // workspaceFromRunTaskMetadata resolves the run's own Slack context — its
@@ -581,9 +609,10 @@ func (h *slackExecHandler) readChannelAnchored(ctx context.Context, token string
 	anchor, err := slackConversationsHistory(ctx, h.client, token, slackConversationsHistoryParams{
 		Channel: a.Channel, Latest: a.TS, Inclusive: true, Limit: 1,
 	})
-	if err == nil {
-		out = append(out, anchor...)
+	if err != nil {
+		return nil, fmt.Errorf("resolve anchor message: %w", err)
 	}
+	out = append(out, anchor...)
 	if a.NumFollowing > 0 {
 		after, err := slackConversationsHistory(ctx, h.client, token, slackConversationsHistoryParams{
 			Channel: a.Channel, Oldest: a.TS, Inclusive: false, Limit: a.NumFollowing,
@@ -681,6 +710,15 @@ func (h *slackExecHandler) download(ctx context.Context, info agenthost.RunInfo,
 	fi, err := slackFilesInfo(ctx, h.client, token, a.FileID)
 	if err != nil {
 		return slackDownloadResult{}, fmt.Errorf("slack: look up file: %w", err)
+	}
+	// Authorize against the file's OWN channel membership, not the run's
+	// context — resolveWorkspaceForDownload only picked a bot identity, it
+	// never checked a channel (download has none to check upfront). Every
+	// other verb authorizes before making any Slack call; download can only
+	// do so after this lookup answers, since a bare file id doesn't name a
+	// channel on its own.
+	if err := h.authorizeFileChannels(ctx, info, fi.Channels); err != nil {
+		return slackDownloadResult{}, err
 	}
 	if fi.Size > slackExecMaxFileBytes {
 		return slackDownloadResult{}, fmt.Errorf("slack: file is %d bytes, exceeds the %d-byte download cap", fi.Size, slackExecMaxFileBytes)

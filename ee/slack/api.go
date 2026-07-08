@@ -1012,18 +1012,27 @@ func slackAssistantSetStatus(ctx context.Context, client *http.Client, botToken,
 }
 
 // slackFileInfoResult is the subset of files.info's response the file
-// download/context flow needs: enough to name the file and fetch its
-// bytes.
+// download/context flow needs: enough to name the file, fetch its bytes,
+// and authorize which channel(s) it belongs to.
 type slackFileInfoResult struct {
 	ID         string
 	Name       string
 	Mimetype   string
 	Size       int64
 	URLPrivate string
+	// Channels is every channel/group id the file is shared into, unioned
+	// from both response shapes Slack has used for this (the legacy
+	// top-level channels/groups arrays and the newer shares.public/private
+	// maps keyed by channel id) — a download authorization check should
+	// consult this, not assume either shape alone is exhaustive. Excludes
+	// IMs (a DM share has no team-tracked-channel concept to authorize
+	// against).
+	Channels []string
 }
 
 // slackFilesInfo looks up a file's metadata via files.info — the
-// prerequisite for slackFileDownload, which needs URLPrivate.
+// prerequisite for slackFileDownload, which needs URLPrivate, and for
+// authorizing the download against the file's channel(s).
 func slackFilesInfo(ctx context.Context, client *http.Client, botToken, fileID string) (*slackFileInfoResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		slackAPIBase+"/files.info?file="+url.QueryEscape(fileID), nil)
@@ -1036,11 +1045,17 @@ func slackFilesInfo(ctx context.Context, client *http.Client, botToken, fileID s
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
 		File  struct {
-			ID         string `json:"id"`
-			Name       string `json:"name"`
-			Mimetype   string `json:"mimetype"`
-			Size       int64  `json:"size"`
-			URLPrivate string `json:"url_private"`
+			ID         string   `json:"id"`
+			Name       string   `json:"name"`
+			Mimetype   string   `json:"mimetype"`
+			Size       int64    `json:"size"`
+			URLPrivate string   `json:"url_private"`
+			Channels   []string `json:"channels"`
+			Groups     []string `json:"groups"`
+			Shares     struct {
+				Public  map[string]json.RawMessage `json:"public"`
+				Private map[string]json.RawMessage `json:"private"`
+			} `json:"shares"`
 		} `json:"file"`
 	}
 	if err := doSlackJSON(ctx, client, req, &out); err != nil {
@@ -1052,7 +1067,33 @@ func slackFilesInfo(ctx context.Context, client *http.Client, botToken, fileID s
 	return &slackFileInfoResult{
 		ID: out.File.ID, Name: out.File.Name, Mimetype: out.File.Mimetype,
 		Size: out.File.Size, URLPrivate: out.File.URLPrivate,
+		Channels: unionSlackFileChannels(out.File.Channels, out.File.Groups, out.File.Shares.Public, out.File.Shares.Private),
 	}, nil
+}
+
+// unionSlackFileChannels dedupes+unions a files.info response's channel
+// identifiers across both shapes Slack has shipped for this field.
+func unionSlackFileChannels(channels, groups []string, shareMaps ...map[string]json.RawMessage) []string {
+	seen := make(map[string]bool, len(channels)+len(groups))
+	var out []string
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for _, id := range channels {
+		add(id)
+	}
+	for _, id := range groups {
+		add(id)
+	}
+	for _, m := range shareMaps {
+		for id := range m {
+			add(id)
+		}
+	}
+	return out
 }
 
 // slackFileDownload streams urlPrivate's bytes (slackFilesInfo's
