@@ -49,6 +49,28 @@ fleet concurrent runs ≈ Σ over executors of
 e.g. three 64 GB executors ≈ ~300 concurrent runs, with the control
 plane on a 2–4 GB pod.
 
+Three precisions on the formula's terms, now that the substrate
+shipped:
+
+- **`RAM_MB` is cgroup-truthful** (TFAC-581): the instance's effective
+  memory is the most restrictive `memory.max` in its own cgroup
+  ancestry when confined — cross-clamped against `/proc/meminfo` so a
+  limit above physical RAM can't overstate capacity — and host MemTotal
+  only when genuinely unconfined.
+- **`/512` is the conservative planning budget** (wrapper + clone +
+  context growth). The shipped boot-log advisory
+  (`DerivedRunCapacity`) divides by the 256 MB *marginal-engine*
+  budget instead — an upper advisory bound, roughly 2× this planning
+  figure. Both cite the same bench; they answer different questions.
+  Plan fleets with 512; the dispatch memory floor defends the
+  difference at runtime (the derived figure is a log line and an
+  over-provision warning, never admission).
+- **The 12288 reserve models a co-resident platform stack** (TF +
+  Postgres + GoTrue + object store on one box). Under cgroup-truthful
+  figures it derives capacity 0 for any dedicated executor pod under
+  ~12.5 GB — a per-role reserve default ships with `TF_ROLE`
+  (TFAC-582).
+
 ---
 
 ## 1. What already exists (the substrate is queue-shaped)
@@ -75,39 +97,48 @@ of what this design **reuses rather than builds**:
 | Readiness probe | `GET /readyz` (`internal/server/readyz_handler.go`, TFAC-573) | Built. Hard-fails DB/migrations/poller-alive → 503 for LB rotation; soft-reports poll staleness, GitHub rate budget, active runs. The split makes the poller hard-check **lease-conditional** (§8.3) — as shipped it would 503 every standby control pod. |
 | Budgeted, resumable poll cycles | TFAC-571 (GitHub) | Built. A mid-cycle leader handoff resumes from the durable cursor instead of restarting discovery (§3). |
 
-And the inverse — what today **assumes exactly one process** (the
-gap list this design closes):
+And the inverse — what at design time **assumed exactly one process**
+(the gap list this design closes; ✅ = closed by the shipped P0s,
+2026-07-08):
 
-1. **Boot recovery is global, not ownership-scoped.** Any process boot
-   runs `ResetProcessingRuns` and `event_queue.ResetProcessing`, which
-   flip **all** in-flight rows back to queued — a second replica booting
-   (any rolling deploy) re-queues and re-executes work the first replica
-   is still running. Highest-severity hazard.
-2. **The tracker's snapshot diff is single-writer by silent assumption.**
-   `UpdateSnapshotSystem` is a blind write (no version, no CAS); two
-   concurrent pollers of one org duplicate events, clobber snapshots,
-   and can *lose* transitions (the forward-only diff never re-emits).
+1. ✅ **Boot recovery was global, not ownership-scoped.** Any process
+   boot ran `ResetProcessingRuns` and `event_queue.ResetProcessing`,
+   flipping **all** in-flight rows back to queued — a second replica
+   booting re-queued work the first was still running. Closed by
+   TFAC-578 (+ #624's resume-path stamp and the one-time upgrade
+   normalization); was the highest-severity hazard.
+2. ✅ (mitigated) **The tracker's snapshot diff was single-writer by
+   silent assumption.** Closed at the write layer by the `poll_seq`
+   CAS + emission suppression (TFAC-579 + #624): a concurrent writer
+   now degrades to dropped no-op cycles, not duplicated events or lost
+   transitions. Leadership (P1) remains the primary guarantee — the
+   CAS is the belt-and-suspenders, and N pollers still waste N× the
+   API budget until the lease lands.
 3. **Per-entity event ordering is a single-worker property.** Close
    checks and route ordering rely on the event queue's one-worker global
    FIFO; `SKIP LOCKED` across N drainers would break same-entity order.
+   (Open — leadership, P1.)
 4. **The WS hub, permission broker, process registry, poll schedule,
    one-shot announce toasts, presence, and user-kick are all
    process-local.** A browser on pod A never sees events produced on pod
    B; `CloseUserConnections` (session revoke) only closes local sockets;
    cancel/steer/permission answers 409 unless they land on the owning
-   process.
-5. **`pending_firings` drain is only serialized in-memory** — the pop is
-   a bare SELECT (claim lands later), the per-entity mutex is
-   process-local, and the "one active auto-run per entity" gate is
-   check-then-act. Cross-replica, two drains can double-pop and
-   double-start runs on one entity (different triggers).
+   process. (Open — P1, §5.1/§5.2.)
+5. ✅ **`pending_firings` drain was only serialized in-memory.** Closed
+   by TFAC-579 + #624: claiming pop under `SKIP LOCKED` with
+   staleness-based crash recovery, the one-active-per-entity partial
+   unique index with a distinct entity-busy outcome, and `'draining'`
+   visible to the dedup index and the busy gate.
 6. **Every replica would run every background job.** Pollers, scorer,
    classifier, profiler, reconciler, reapers all start unconditionally
    (`app.Run`), so N replicas = N× GitHub/Jira polling, N× Haiku spend,
-   N× `system_llm_runs` accounting rows (append-only, no idempotency
-   key), and the `syslimit` "global" cap silently becomes 8×N.
-7. **Migrations race**: `goose.Up` has no lock; two booting replicas can
-   collide.
+   and the `syslimit` "global" cap silently becomes 8×N. (Open —
+   leadership, P1. The double-*accounting* half is closed: TFAC-579's
+   `system_llm_runs` idempotency key means overlap can no longer
+   double-count spend.)
+7. ✅ **Migrations race**: closed by TFAC-580 — `goose.Up` under a
+   session advisory lock, executors refuse behind/ahead schemas at
+   `migrate up` time (in-process server assert → TFAC-582).
 8. Assorted per-process caches degrade quietly (token caches, reachable-
    repo cache, ip rate limiter ×N) — acceptable, documented below.
 
@@ -340,16 +371,26 @@ leases (
   posts) duplicating ×M.
 - **Fencing where it counts, tolerance elsewhere.** Full fencing (every
   brain write carries the term) is overkill; the one genuinely dangerous
-  overlap is the tracker snapshot RMW, and it gets its own guard: an
-  `entities.poll_seq` CAS (`... SET snapshot_json=$1, poll_seq=poll_seq+1
-  WHERE id=$2 AND poll_seq=$3`) so a straggler ex-leader's late write is
-  a no-op instead of a regression. Everything else the brain writes is
-  either fence-protected already (delegation), last-writer-wins-safe
-  (scores, profiles), or idempotent (task dedup index).
+  overlap is the tracker snapshot RMW, and it gets its own guard
+  (✅ shipped, TFAC-579 + #624): an `entities.poll_seq` CAS (`... SET
+  snapshot_json=$1, poll_seq=poll_seq+1 WHERE id=$2 AND poll_seq=$3`),
+  **and a lost CAS suppresses that cycle's diffed events too** — the
+  no-op has to cover emission, not just the write, or the straggler's
+  transitions re-fire under fresh event ids (§5.4). Everything else the
+  brain writes is either fence-protected already (delegation),
+  last-writer-wins-safe (scores, profiles), or idempotent (task dedup
+  index).
 - `goose.Up` wraps in `pg_advisory_lock` so M control pods can boot
-  concurrently. Executors don't migrate; they compare the schema version
-  at boot and wait/exit if behind (drain-first deploys are the rule for
-  schema changes anyway, §5.5).
+  concurrently (✅ shipped, TFAC-580; the wait is announced in the log
+  so a pod queued behind a peer is legible). Executors don't migrate;
+  they compare the schema version and refuse if behind or ahead —
+  precision on what shipped: the compare runs at `migrate up` time,
+  i.e. in the **container entrypoint**, and "wait if behind" is the
+  entrypoint's bounded retry + restart policy, not an in-process poll.
+  A multi-mode server started WITHOUT the entrypoint (k8s `command:`
+  override, systemd unit) currently boots against an unchecked schema —
+  the in-process assert at executor server boot belongs to TFAC-582
+  (drain-first deploys remain the rule for schema changes, §5.5).
 
 At `TF_ROLE=all` the single process always wins the lease — zero
 behavior change.
@@ -365,40 +406,63 @@ persisted under `TF_STATE_ROOT` (so a rebooted executor recognizes *its
 own* in-flight rows), plus a `boot_epoch` that increments per boot.
 Mechanically:
 
-1. **The id is a file; the file is the identity.** First boot mints a
-   random id into `<TF_STATE_ROOT>/instance-id`; every boot re-reads
-   it under an **exclusive flock held for the process lifetime**, so
-   two processes pointed at one state root fail fast instead of
-   silently sharing an identity. The id deliberately identifies the
-   *state root*, not the machine or the process (hostnames are
-   recycled in container platforms; PIDs are meaningless): ownership
-   of rows is really ownership of the disk state — worktrees, caches —
-   those rows reference, so identity must travel with the volume.
-2. **The epoch is minted by the registry, not the file.** Boot
-   registration is one statement — `INSERT … ON CONFLICT (id) DO
+1. **The id is a file; the file is the identity.** (✅ shipped) First
+   boot mints a random id into `<TF_STATE_ROOT>/instance-id`; every
+   boot re-reads it under an **exclusive flock held for the process
+   lifetime**, so two processes pointed at one state root fail fast
+   instead of silently sharing an identity. (Platform caveat: the
+   flock is unix-only — on Windows builds the fail-fast guarantee
+   doesn't exist; multi-node is a Linux deployment, so this is a
+   documented gap, not a fix target.) Content is validated as a UUID:
+   a torn write or stray edit is a loud boot error, never a silently
+   adopted new identity that orphans the real id's rows. The id
+   deliberately identifies the *state root*, not the machine or the
+   process (hostnames are recycled in container platforms; PIDs are
+   meaningless): ownership of rows is really ownership of the disk
+   state — worktrees, caches — those rows reference, so identity must
+   travel with the volume.
+2. **The epoch is minted by the registry, not the file.** (✅ shipped)
+   Boot registration is one statement — `INSERT … ON CONFLICT (id) DO
    UPDATE SET boot_epoch = instances.boot_epoch + 1, … RETURNING
    boot_epoch` — atomic and monotonic, immune to the volume
    snapshot/restore/clone weirdness that corrupts a file-local
-   counter. Registration and epoch-mint are the same write.
-3. **Claims stamp the pair.** `runs` (and event-queue claims) record a
-   `claimed_epoch` next to `executor_id`. The boot self-sweep (§4.2)
-   is then a pure predicate — reset `WHERE executor_id = me AND
-   claimed_epoch < my epoch` — with no ordering dependence: rows from
-   the current life can't match by construction, so the sweep is safe
-   to run (or re-run) at any time, not only inside a carefully
-   sequenced boot window.
-4. **The heartbeat doubles as a split-identity fence.** Renewal is
-   `UPDATE … WHERE id = me AND boot_epoch = mine`; matching zero rows
-   means another process has re-registered this identity (a cloned
-   volume, a duplicated state root across hosts — the case the flock
-   can't see). The instance stops claiming and exits loudly rather
-   than fight over ownership.
+   counter. Registration and epoch-mint are the same write; it also
+   clears the dead boot's capacity snapshot (no fresh epoch wearing
+   stale admission data) while **preserving operator intent** —
+   `draining` and `labels` survive restarts, and the heartbeat never
+   writes them (a 4s renewal loop that reset `draining=false` would
+   un-drain an instance within one tick of the operator draining it).
+3. **Claims stamp the pair.** (✅ shipped — the column is
+   `runs.boot_epoch` / `event_queue.boot_epoch`, not the
+   `claimed_epoch` name earlier drafts used.) `runs` and event-queue
+   claims record the epoch next to `executor_id`, atomically in the
+   claim statement; **resumes re-stamp in the same statement that
+   flips the row to 'running'** (a parked run resumed on instance A
+   must not spend its rehydrate+spawn window wearing instance B's
+   identity — B's next boot would sweep a live resume); requeues and
+   resets clear the stamp (a queued row has no owner). The boot
+   self-sweep (§4.2) is then a pure predicate — reset `WHERE
+   executor_id = me AND boot_epoch < my epoch` — with no ordering
+   dependence: rows from the current life can't match by
+   construction, so the sweep is safe to run (or re-run) at any time.
+4. **The heartbeat doubles as a split-identity fence.** (✅ shipped in
+   two halves.) Renewal is `UPDATE … WHERE id = me AND boot_epoch =
+   mine`; matching zero rows means another process has re-registered
+   this identity (a cloned volume, a duplicated state root across
+   hosts — the case the flock can't see). Shipped reaction: a sticky
+   fence latch — the dispatcher stops claiming, resumes are refused,
+   the heartbeat loop exits, one loud ERROR names the remediation
+   (restart to re-register). The remaining half — kill live sandboxes
+   and exit, so a zombie's in-flight work can't double external
+   writes — is the reaper phase's self-fence (§4.3, TFAC-586's
+   scope): sandbox teardown belongs to the machinery that owns it.
 5. **Ephemeral state roots degrade to the reaper, never to
    corruption.** A pod with no persistent volume mints a fresh id
    each boot; its prior lives' rows are never self-swept, but the
    leader reaper collects them by heartbeat staleness like any dead
    executor's (§4.3), and a registry GC tombstones rows whose
-   heartbeat is 7+ days stale (default). Persistent volumes are the recommendation
+   heartbeat is 7+ days stale (default; the GC is TFAC-586 scope
+   alongside the reaper). Persistent volumes are the recommendation
    for executors regardless (they carry the caches); correctness
    never depends on them.
 
@@ -449,10 +513,19 @@ metrics plumbing.
 The dispatcher loop is unchanged in shape (mem-gate → semaphore →
 claim → execute); three additions to the claim:
 
-1. **Ownership-scoped recovery** (P0, fixes hazard #1 even at N=1):
-   `ResetProcessingRuns` / `ResetProcessing` become "reset rows where
-   `executor_id = me AND boot_epoch < my current epoch`" — a booting
-   process only sweeps *its own* orphans. Fleet-wide orphan recovery
+1. **Ownership-scoped recovery** (✅ shipped — TFAC-578, fixes hazard
+   #1 even at N=1): `ResetProcessingRuns` / `ResetProcessing` are
+   "reset rows where `executor_id = me AND boot_epoch < my current
+   epoch`" — a booting process only sweeps *its own* orphans, and the
+   reset clears the stamp on the way out. The released-upgrade
+   boundary needed one extra piece: pre-registry rows carry per-boot
+   random uuids (or NULL) that no persistent id ever matches, so a
+   one-time SQLite migration replays the old global reset once —
+   without it, a run mid-flight at upgrade shutdown stayed `running`
+   forever and a mid-processing event was lost permanently. One
+   sanctioned exception stays global: `ReconcileOrphanedRuns` (cancel
+   children under terminal blueprints) is a cross-instance heal whose
+   terminal-parent guard makes it safe. Fleet-wide orphan recovery
    moves to the **leader reaper**: runs whose executor's heartbeat is
    stale past a threshold are requeued (`attempts`-capped, then failed
    with `failure_kind='executor_lost'`).
@@ -725,13 +798,24 @@ run_signals (
   id           bigserial PRIMARY KEY,
   org_id       uuid NOT NULL,
   run_id       text NOT NULL,
-  kind         text NOT NULL,      -- cancel | interrupt | steer | permission
-  payload      jsonb,              -- steer text, permission decision, ...
+  kind         text NOT NULL,      -- cancel | interrupt | steer | permission | inject
+  payload      jsonb,              -- steer text, permission decision, injection body, ...
   target       text NOT NULL,      -- executor id owning the run
   created_at   timestamptz NOT NULL,
   acked_at     timestamptz
 )
 ```
+
+The fifth kind, `inject`, exists because TFAC-594's additive-event
+injection is a routed operation wearing a queued API: its live path is
+`getProc(runID)` — a process-local map hit — and its fallback durably
+stages for the next resume. On one process that's correct. Across the
+split, the router (brain) misses `getProc` for every run executing on
+an executor, so every additive event would silently degrade to
+staged-and-probably-never-delivered (active auto-runs usually
+terminate without another resume). Under `run_signals`, the owner
+delivers into its live process; the staged fallback remains for
+genuinely parked runs.
 
 Control-pod handler logic (`message` / `interrupt` / `cancel` /
 `permissions/{id}`):
@@ -821,29 +905,79 @@ Delivery is lossy-by-contract like `tf_ws` — sentinels are an
 observability seam (liveness indicators), never load-bearing state —
 so a leader-handoff gap costs a blip, not correctness.
 
-### 5.4 Correctness bundle (needed regardless of N)
+One more sentinel joined the brain-local family since this section was
+written: `system:routing:disposition` (TFAC-593), published by
+`HandleEvent` — i.e. by the router, a brain component — with no
+consumer yet (the Slack ack-reaction work will be the first). As long
+as its consumers are brain-domain they share the router's process and
+the in-process bus suffices, no relay needed; a consumer that ever
+lives elsewhere makes it a `tf_bus` case like the run sentinels.
 
-Small fixes the fleet exposes but that are wrong-by-inspection today:
+### 5.4 Correctness bundle (needed regardless of N) — ✅ shipped
 
-- `PopForEntity` becomes a claiming pop (`UPDATE ... SET status='draining'
-  ... RETURNING` under `SKIP LOCKED`), retiring the process-local
-  `drainLocks` as the only serialization.
-- The "one active auto-run per entity" gate moves from check-then-act
-  to a DB-enforced guard (partial unique index on active auto-runs per
-  entity, or the claim above folded into one statement).
-- The `became_atomic` suppression gets the same treatment (unique
-  backing instead of SELECT-then-decide).
-- `system_llm_runs` gains an idempotency key (the `agentproc` TraceID)
-  so any overlap window can't double-count spend.
-- `entities.poll_seq` CAS (§3).
+Small fixes the fleet exposes but that were wrong-by-inspection
+(TFAC-579 #622, review fixes #624). What shipped, including where the
+implementation deliberately diverges from the original text:
+
+- `PopForEntity` is a claiming pop (`UPDATE ... SET status='draining',
+  claimed_at=now() ... RETURNING` under `SKIP LOCKED`), retiring the
+  process-local `drainLocks` as the only serialization. The new
+  in-flight state comes with its own crash recovery: the drain sweeper
+  requeues `'draining'` rows whose claim is stale (~2 min) —
+  **staleness-based, not ownership-scoped**, on purpose (decision 9,
+  §11): a firing claim is a milliseconds-scale DB transaction, not
+  long-lived owned work, and a duplicate drain is absorbed by the
+  fences below. `'draining'` counts as queued intent everywhere it
+  matters: the dedup index and the router's busy gate both see it, so
+  a duplicate enqueue mid-drain collapses and a fresh event can't jump
+  the queue inside the drain window.
+- The "one active auto-run per entity" gate is DB-enforced: a partial
+  unique index on `blueprint_runs (org_id, entity_id) WHERE
+  trigger_type='event' AND status='running'`, with `entity_id`
+  denormalized at insert. The in-memory check survives as a fast-path
+  only. **The index loser is a distinct outcome from the replay
+  fence** (`ErrEntityBusy` vs `inserted=false`): a replay is
+  permanently satisfied; entity-busy is a deferral the router queues
+  onto `pending_firings` — conflating them silently dropped intent on
+  a routine gate race.
+- The `became_atomic` suppression is serialized under the per-entity
+  advisory lock shared with task creation rather than a unique index —
+  the invariant is cross-row/cross-event-type, which no partial index
+  can express. Mechanism drift from this spec's original "unique
+  backing" wording, correctness equivalent.
+- `system_llm_runs` idempotency keys on the Claude Code **session id**,
+  not the `agentproc` TraceID this spec originally named — the TraceID
+  is a per-job label ("scorer-batch") and would have collapsed all of a
+  job's spend rows into one. Partial unique index excludes NULL, so
+  trace-less rows never collide.
+- `entities.poll_seq` CAS (§3) — **and the tracker suppresses the
+  cycle's diffed events when the CAS loses or errors.** The snapshot
+  write is the sole re-emit prevention; publishing transitions off a
+  snapshot that didn't win re-derives them next cycle under fresh event
+  ids the (event, trigger) fence can't collapse. The winner's next
+  cycle re-diffs and emits, so suppression loses nothing.
 
 ### 5.5 Deploys and version skew
 
 Heartbeats carry `version`; the dashboard surfaces skew. Rolling rule:
-control pods first (they migrate, under the goose lock), then executors
-drain-and-replace. Schema changes require drain-first executor deploys
-— cheap to enforce because executors refuse to start against a newer
-schema than their build.
+control pods first (they migrate, under the goose lock — ✅ shipped,
+TFAC-580), then executors drain-and-replace. Schema changes require
+drain-first executor deploys — cheap to enforce because executors
+refuse to start against a newer schema than their build.
+
+Two shipped details worth knowing (§3 has the enforcement-point
+precision):
+
+- **An executor performs zero boot-time DB writes** — no DDL, and it
+  skips the `SeedEventTypes` catalog reconciliation too, so a stale
+  executor build can never stomp catalog rows a newer control build
+  wrote. That skip is itself a version-skew protection, not an
+  optimization.
+- **"Wait if behind" is the entrypoint's bounded retry** (30×1s, then
+  the restart policy), and today it retries the never-self-resolving
+  "ahead" refusal identically — both exit 1. Distinguishing them (and
+  the in-process assert for entrypoint-less starts) rides with
+  TFAC-582.
 
 ---
 
@@ -1094,12 +1228,24 @@ instance_stats (          -- 1-minute samples, written by each pod, ~30d retenti
 
 One row per instance per minute is negligible write load and answers
 every time-series question the dashboard has (utilization history,
-claim rates, headroom trends). A retention reaper trims it.
+claim rates, headroom trends). A retention reaper trims it. One
+constraint on the sampler when it's promoted from
+`cmd/sandbox-bench/hostmetrics_linux.go`: its memory fields must come
+from `hostmem`, not the bench's own `/proc/meminfo` reader — the bench
+deliberately reads host-wide (it benchmarks hosts); the dashboard must
+report instance truth.
 
-Prerequisite fix folded in: `hostmem` becomes **cgroup-aware**
-(`memory.max`/`memory.current` when containerized) — `/proc/meminfo`
-inside a container reports host-wide numbers, which silently mis-gates
-admission and mis-reports capacity today.
+Prerequisite fix: ✅ shipped (TFAC-581 + #624). `hostmem` is
+**cgroup-aware** — and slightly stronger than this section originally
+asked for: it resolves the process's own cgroup from
+`/proc/self/cgroup` and takes the most restrictive `memory.max` across
+the whole ancestry (with `memory.stat` inactive_file as the
+reclaimable credit), so it is truthful under shared cgroup namespaces
+and under bare-metal systemd slices with `MemoryMax` set, not just
+"when containerized". Figures cross-clamp against `/proc/meminfo`, so
+a limit above physical RAM can't fabricate headroom; ambiguous cgroup
+reads fail open to Unknown with a logged warning (Unknown disarms the
+dispatch floor — silence there was itself a hazard).
 
 ### 8.3 Surfaces
 
@@ -1168,17 +1314,22 @@ runs its own licensed deployment — no special case.
 Each phase ships green and independently valuable; nothing requires a
 flag day. Sizes in house S/M/L/XL.
 
-**P0 — Substrate (all N=1-safe, most N=1-valuable)**
+**P0 — Substrate (all N=1-safe, most N=1-valuable) — ✅ shipped**
+(TFAC-577 #612 · TFAC-578 #614 · TFAC-579 #622 · TFAC-580 #621 ·
+TFAC-581 #620, merged 2026-07-07/08; post-merge review fixes in #624 —
+identity-fence reaction, resume-path ownership stamp, CAS emission
+gate, `'draining'` crash recovery, entity-busy≠replay, meminfo
+cross-clamp. The sections above carry the per-item deltas.)
 1. Executor registry + heartbeat + persistent identity + boot_epoch;
    stamp real `executor_id`; TFAC-552's gated-flag/headroom follow-up
-   lands on the row; TFAC-555 capacity endpoint reads it. (M)
+   lands on the row; TFAC-555 capacity endpoint reads it. (M) ✅
 2. Ownership-scoped boot resets + leader-reaper skeleton (at N=1 it
    reaps only stale-epoch self rows — fixes today's restart
-   double-execution window). (M)
+   double-execution window). (M) ✅
 3. Correctness bundle §5.4: claiming pop, auto-run DB gate,
-   became_atomic fence, `system_llm_runs` trace-id, `poll_seq` CAS. (M)
-4. `goose.Up` advisory lock; executor schema-version assert. (S)
-5. cgroup-aware `hostmem`. (S)
+   became_atomic fence, `system_llm_runs` trace-id, `poll_seq` CAS. (M) ✅
+4. `goose.Up` advisory lock; executor schema-version assert. (S) ✅
+5. cgroup-aware `hostmem`. (S) ✅
 
 **P1 — The split (first real fleet)**
 6. `TF_ROLE` + per-role subsystem wiring + compose profile (N executors
@@ -1243,7 +1394,8 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
 ## 11. Decision log
 
 Every question this spec originally left open was settled with the
-epic owner on 2026-07-07. Reopening conditions noted per entry.
+epic owner on 2026-07-07; entry 9 was added by the post-ship P0 review
+pass (2026-07-08). Reopening conditions noted per entry.
 
 1. **EE boundary** — console EE, operability core, with the
    deployment-scope entitlement rule (§8.4). Reopens only with a
@@ -1279,6 +1431,18 @@ epic owner on 2026-07-07. Reopening conditions noted per entry.
    application-semantic layer; requiring it inverts the deployment
    floor. Reopens only if the unit of scale ever became run-per-pod,
    which §2.2 rejects independently.
+9. **Crash recovery is matched to the work's lifetime, not
+   standardized** (settled 2026-07-08, the P0 review pass). Two
+   patterns coexist deliberately: **ownership-scoped self-sweep**
+   (runs, event_queue — long-lived owned work where a false requeue
+   duplicates an agent run's external writes, so only the owner may
+   sweep, and dead owners wait for the reaper) and **staleness-based
+   requeue** (pending_firings `'draining'` — a milliseconds-scale
+   claim whose redelivery is absorbed by the (event, trigger) fence
+   and the one-active index, so any process may recover it and no
+   reaper dependency exists). Deciding factor: cost of a wrong
+   recovery vs cost of a stalled one. Reopens if a queue appears
+   whose claims are both long-lived AND cheaply redeliverable.
 
 ## Related
 
