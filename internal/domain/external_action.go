@@ -123,6 +123,13 @@ const (
 	ActionIssueAssigned      = "issue_assigned"
 	ActionIssueUpdated       = "issue_updated"
 	ActionIssueCommentPosted = "issue_comment_posted"
+
+	// Slack messages (TFAC-596). Reads (thread/channel history, file
+	// download) are writes-only-by-charter exclusions — see external_actions'
+	// table doc — so there is no read-side action here.
+	ActionSlackMessagePosted = "slack_message_posted"
+	ActionSlackMessageEdited = "slack_message_edited"
+	ActionSlackReactionAdded = "slack_reaction_added"
 )
 
 // Org-credential identities an external action can be performed under. The
@@ -131,6 +138,7 @@ const (
 const (
 	CredentialGitHubApp = "github_app"
 	CredentialJiraOrg   = "jira_org"
+	CredentialSlackBot  = "slack_bot"
 )
 
 // BranchPushDedupKey builds the deterministic dedup key for a branch push:
