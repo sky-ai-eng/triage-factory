@@ -606,7 +606,7 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 		if err := tx.AgentRuns.SetStatus(ctx, orgID, runID, "open"); err != nil {
 			return err
 		}
-		r, mErr := tx.AgentRuns.MarkResuming(ctx, orgID, runID)
+		r, mErr := tx.AgentRuns.MarkResuming(ctx, orgID, runID, "test-instance", 1)
 		resumed = r
 		return mErr
 	}); err != nil {

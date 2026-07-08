@@ -68,35 +68,55 @@ func TestController_InterruptSteerNoProcErrors(t *testing.T) {
 	}
 }
 
-// TestSpawnerExecutorIDDistinctPerInstance pins that each spawner instance
-// gets its own executor identity — the N=1 model where one process owns its
-// runs, and a restart re-stamps re-claimed runs under a fresh id.
-func TestSpawnerExecutorIDDistinctPerInstance(t *testing.T) {
+// TestSpawnerExecutorIdentityIndependentPerInstance pins that spawner
+// identity is per-instance state wired via SetExecutorID — unset (empty)
+// at construction, and setting one spawner's identity never leaks into
+// another. The empty default is deliberate: a missed wiring stays
+// observable (heartbeat refuses to start, stamps bind NULL) instead of
+// minting a plausible-looking random uuid.
+func TestSpawnerExecutorIdentityIndependentPerInstance(t *testing.T) {
 	a := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	b := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	if a.executorID == "" || b.executorID == "" {
-		t.Fatal("expected non-empty executor ids")
+	if a.executorID != "" || b.executorID != "" {
+		t.Fatal("expected empty executor ids before SetExecutorID wires them")
 	}
+	a.SetExecutorID("instance-a", 1)
+	if b.executorID != "" {
+		t.Error("wiring one spawner's identity leaked into another instance")
+	}
+	b.SetExecutorID("instance-b", 1)
 	if a.executorID == b.executorID {
 		t.Error("expected distinct executor ids per spawner instance")
 	}
 }
 
 // TestStampExecutor_WritesExecutorID is the acceptance check for "a live run
-// stamps executor_id": stampExecutor writes the instance id onto the row.
+// stamps executor_id": stampExecutor writes the wired instance id onto the
+// row — and an unwired spawner (no SetExecutorID) stamps NULL, never a
+// fabricated id.
 func TestStampExecutor_WritesExecutorID(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-exec", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
+	// Unwired: the stamp must bind NULL (empty string is nullIfEmpty'd),
+	// not invent an identity.
 	s.stampExecutor(runmode.LocalDefaultOrgID, "r-exec")
-
 	var got sql.NullString
 	if err := database.QueryRow(`SELECT executor_id FROM runs WHERE id='r-exec'`).Scan(&got); err != nil {
 		t.Fatalf("read executor_id: %v", err)
 	}
-	if !got.Valid || got.String != s.executorID {
-		t.Errorf("executor_id = %v, want %q", got, s.executorID)
+	if got.Valid {
+		t.Errorf("executor_id = %v, want NULL from an unwired spawner", got)
+	}
+
+	s.SetExecutorID("persistent-registry-id", 5)
+	s.stampExecutor(runmode.LocalDefaultOrgID, "r-exec")
+	if err := database.QueryRow(`SELECT executor_id FROM runs WHERE id='r-exec'`).Scan(&got); err != nil {
+		t.Fatalf("read executor_id: %v", err)
+	}
+	if !got.Valid || got.String != "persistent-registry-id" {
+		t.Errorf("executor_id = %v, want the wired registry id", got)
 	}
 }
 

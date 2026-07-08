@@ -1170,6 +1170,10 @@ CREATE TABLE public.pending_firings (
     status text DEFAULT 'pending'::text NOT NULL,
     skip_reason text,
     queued_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- claimed_at stamps a claiming pop (status -> 'draining'); cleared on
+    -- release. The drain sweeper requeues 'draining' rows whose claim is
+    -- stale -- the crash recovery for a drainer that died mid-drain.
+    claimed_at timestamp with time zone,
     drained_at timestamp with time zone,
     fired_run_id uuid
 );
@@ -1489,7 +1493,9 @@ CREATE TABLE public.runs (
     -- process while it is running. Stamped atomically at claim (queued ->
     -- running) alongside boot_epoch below, so a running row's ownership is
     -- never unknown between claim and the process actually going live; NULL
-    -- only for never-claimed (queued) rows. At N=1 it's a single per-process
+    -- whenever the row is not claimed (never claimed, or returned to the
+    -- queue by a requeue/reset, which clear the stamp — a queued row has no
+    -- owner). Resumes re-stamp in MarkResuming. At N=1 it's a single per-process
     -- instance id; at N>1 it's the fence ResetProcessingRuns (TFAC-578)
     -- reads to self-sweep only its own orphans, never a live sibling's
     -- claimed work.
@@ -2624,7 +2630,7 @@ CREATE INDEX idx_events_org_type_entity ON public.events USING btree (org_id, ev
 -- Name: idx_pending_firings_dedup; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX idx_pending_firings_dedup ON public.pending_firings USING btree (task_id, trigger_id) WHERE (status = 'pending'::text);
+CREATE UNIQUE INDEX idx_pending_firings_dedup ON public.pending_firings USING btree (task_id, trigger_id) WHERE (status = ANY (ARRAY['pending'::text, 'draining'::text]));
 
 
 --

@@ -64,9 +64,10 @@ func TestInstanceStore_Postgres_RegisterMintsAndBumpsEpoch(t *testing.T) {
 
 // TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot pins that
 // Heartbeat renews last_heartbeat_at and writes the full capacity +
-// admission snapshot, and that nil pointer fields read back as nil (not a
-// spurious zero) — including a wholesale clear on a second all-nil
-// heartbeat.
+// admission snapshot (wholesale — an all-nil heartbeat clears it), that
+// nil pointer fields read back as nil (not a spurious zero), and that the
+// operator-intent columns (draining, labels) survive both heartbeats and
+// restarts untouched.
 func TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -83,13 +84,11 @@ func TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot(t *testing.T
 	maxRuns, activeRuns, memTotal, memAvail := 4, 1, 8192, 6000
 	gated := true
 	matched, err := stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{
-		Draining:       false,
 		MaxRuns:        &maxRuns,
 		ActiveRuns:     &activeRuns,
 		MemTotalMB:     &memTotal,
 		MemAvailableMB: &memAvail,
 		DispatchGated:  &gated,
-		LabelsJSON:     `{"zone":"us-east"}`,
 	})
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
@@ -117,17 +116,18 @@ func TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot(t *testing.T
 	if after.DispatchGated == nil || !*after.DispatchGated {
 		t.Errorf("DispatchGated = %v, want true", after.DispatchGated)
 	}
-	// jsonb normalizes the text form (key order / whitespace), so parse + compare.
-	var labels map[string]any
-	if err := json.Unmarshal([]byte(after.LabelsJSON), &labels); err != nil {
-		t.Fatalf("labels not valid json: %q (%v)", after.LabelsJSON, err)
-	}
-	if labels["zone"] != "us-east" {
-		t.Errorf("labels = %v, want zone=us-east", labels)
+
+	// draining and labels are operator/control-plane intent, written
+	// out-of-band (the drain verb / placement tooling). A heartbeat must
+	// never touch them — a 4s renewal loop that reset draining=false would
+	// silently cancel a drain within one tick of the operator setting it.
+	if _, err := h.AdminDB.Exec(`UPDATE instances SET draining = true, labels = '{"pool":"gpu"}'::jsonb WHERE id = $1`, id); err != nil {
+		t.Fatalf("seed operator intent: %v", err)
 	}
 
-	// A second heartbeat with every pointer left nil clears the snapshot back to
-	// NULL — Heartbeat overwrites wholesale, it doesn't merge.
+	// An all-nil heartbeat clears the capacity snapshot back to NULL
+	// (capacity is heartbeat-owned, overwritten wholesale) — while the
+	// intent columns survive untouched.
 	matched, err = stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{})
 	if err != nil {
 		t.Fatalf("Heartbeat (clear): %v", err)
@@ -140,8 +140,44 @@ func TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot(t *testing.T
 		t.Fatalf("Get (after clear): %v", err)
 	}
 	if cleared.MaxRuns != nil || cleared.ActiveRuns != nil || cleared.MemTotalMB != nil ||
-		cleared.MemAvailableMB != nil || cleared.DispatchGated != nil || cleared.LabelsJSON != "" {
-		t.Errorf("expected every optional field to read back nil/empty after a nil-valued heartbeat, got %+v", cleared)
+		cleared.MemAvailableMB != nil || cleared.DispatchGated != nil {
+		t.Errorf("expected every capacity field to read back nil after a nil-valued heartbeat, got %+v", cleared)
+	}
+	if !cleared.Draining {
+		t.Error("heartbeat clobbered draining — operator intent must survive renewals")
+	}
+	var labels map[string]any
+	if err := json.Unmarshal([]byte(cleared.LabelsJSON), &labels); err != nil {
+		t.Fatalf("labels not valid json after heartbeat: %q (%v)", cleared.LabelsJSON, err)
+	}
+	if labels["pool"] != "gpu" {
+		t.Errorf("heartbeat clobbered labels: %v, want pool=gpu", labels)
+	}
+
+	// A restart (Register) bumps the epoch and clears the dead boot's
+	// capacity snapshot — but operator intent survives restarts too: a
+	// drained instance stays drained until explicitly un-drained.
+	if _, err := stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{MaxRuns: &maxRuns}); err != nil {
+		t.Fatalf("Heartbeat (repopulate): %v", err)
+	}
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v2"); err != nil {
+		t.Fatalf("Register (restart): %v", err)
+	}
+	rebooted, err := stores.Instances.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get (after restart): %v", err)
+	}
+	if rebooted.MaxRuns != nil {
+		t.Errorf("Register left the prior boot's capacity snapshot in place: MaxRuns=%v, want nil", rebooted.MaxRuns)
+	}
+	if !rebooted.Draining {
+		t.Error("Register clobbered draining — operator intent must survive restarts")
+	}
+	if err := json.Unmarshal([]byte(rebooted.LabelsJSON), &labels); err != nil {
+		t.Fatalf("labels not valid json after restart: %q (%v)", rebooted.LabelsJSON, err)
+	}
+	if labels["pool"] != "gpu" {
+		t.Errorf("Register clobbered labels: %v, want pool=gpu", labels)
 	}
 }
 

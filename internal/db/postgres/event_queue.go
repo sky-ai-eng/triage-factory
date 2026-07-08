@@ -73,7 +73,8 @@ func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, boot
 	row := s.conn.QueryRowContext(ctx, `
 		UPDATE public.event_queue
 		SET status = 'processing', claimed_at = now(), attempts = attempts + 1,
-		    executor_id = $1, boot_epoch = $2
+		    executor_id = NULLIF($1, ''),
+		    boot_epoch  = CASE WHEN $1 = '' THEN NULL ELSE $2::bigint END
 		WHERE id = (
 			SELECT id FROM public.event_queue
 			WHERE status = 'pending'
@@ -105,9 +106,11 @@ func (s *eventQueueStore) MarkFailed(ctx context.Context, orgID string, id int64
 
 func (s *eventQueueStore) Requeue(ctx context.Context, orgID string, id int64, lastErr string) error {
 	// attempts left as-is (the claim counted this try); claimed_at
-	// cleared so the row reads clean for the next claim.
+	// cleared so the row reads clean for the next claim. The ownership
+	// stamp is cleared too: a pending row has no owner.
 	_, err := s.conn.ExecContext(ctx, `
-		UPDATE public.event_queue SET status = 'pending', last_error = $3, claimed_at = NULL
+		UPDATE public.event_queue SET status = 'pending', last_error = $3, claimed_at = NULL,
+			executor_id = NULL, boot_epoch = NULL
 		WHERE org_id = $1 AND id = $2 AND status = 'processing'
 	`, orgID, id, lastErr)
 	return err
@@ -118,10 +121,16 @@ func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string
 	// only rows this instance itself claimed (executor_id = $1) during a
 	// strictly earlier boot (boot_epoch < $2) are reset. A live sibling's
 	// still-processing row carries a different executor_id and is never
-	// touched. `boot_epoch IS NULL` covers the one-time upgrade edge: a row
-	// already 'processing' from before this column existed.
+	// touched. `boot_epoch IS NULL` is a narrow defensive catch (this
+	// instance's persistent id, no epoch — a state only pre-epoch
+	// from-source builds could produce); it does NOT cover pre-registry
+	// rows (random per-boot uuid or NULL executor_id) — moot on Postgres
+	// (fresh-installs-only posture), normalized on SQLite by migration
+	// 202607080003_pre_registry_orphan_normalization. The reset clears
+	// the stamp: a pending row has no owner.
 	res, err := s.conn.ExecContext(ctx, `
-		UPDATE public.event_queue SET status = 'pending', claimed_at = NULL
+		UPDATE public.event_queue SET status = 'pending', claimed_at = NULL,
+			executor_id = NULL, boot_epoch = NULL
 		WHERE status = 'processing'
 		  AND executor_id = $1
 		  AND (boot_epoch IS NULL OR boot_epoch < $2)

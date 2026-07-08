@@ -141,6 +141,71 @@ func TestSystemLLMRunStore_SQLite_HonorsProvidedID(t *testing.T) {
 	}
 }
 
+// TestSystemLLMRunStore_SQLite_DuplicateTraceIDIsNoOp mirrors the Postgres
+// pin on this dialect (TFAC-579): a second Record with the same trace_id
+// must be a clean no-op — the ON CONFLICT (trace_id) WHERE trace_id IS NOT
+// NULL clause fires, no error, no second row, no double-counted spend.
+func TestSystemLLMRunStore_SQLite_DuplicateTraceIDIsNoOp(t *testing.T) {
+	conn := newSQLiteForSystemLLMTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	const traceID = "session-dedup-sqlite"
+
+	if err := stores.SystemLLMRuns.Record(ctx, domain.SystemLLMRun{
+		OrgID: runmode.LocalDefaultOrgID, Job: "scorer", Model: "haiku",
+		StartedAt: time.Now().UTC(), TraceID: traceID,
+	}); err != nil {
+		t.Fatalf("first Record: %v", err)
+	}
+	if err := stores.SystemLLMRuns.Record(ctx, domain.SystemLLMRun{
+		OrgID: runmode.LocalDefaultOrgID, Job: "scorer", Model: "haiku",
+		StartedAt: time.Now().UTC(), TraceID: traceID,
+		TotalCostUSD: 999, // distinguishable if it wrongly inserted
+	}); err != nil {
+		t.Fatalf("duplicate TraceID Record should be a no-op, not an error: %v", err)
+	}
+
+	var count int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM system_llm_runs WHERE trace_id = ?`, traceID).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 row for trace_id %q, got %d (duplicate double-counted spend)", traceID, count)
+	}
+	var cost float64
+	if err := conn.QueryRow(`SELECT total_cost_usd FROM system_llm_runs WHERE trace_id = ?`, traceID).Scan(&cost); err != nil {
+		t.Fatalf("read cost: %v", err)
+	}
+	if cost == 999 {
+		t.Error("second Record's row landed (cost=999) — ON CONFLICT DO NOTHING didn't fire")
+	}
+}
+
+// TestSystemLLMRunStore_SQLite_EmptyTraceIDNeverCollides mirrors the
+// Postgres pin: an empty TraceID binds NULL (nullIfEmpty), the partial
+// unique index excludes NULL, so two trace-less rows must both land.
+func TestSystemLLMRunStore_SQLite_EmptyTraceIDNeverCollides(t *testing.T) {
+	conn := newSQLiteForSystemLLMTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	for range 2 {
+		if err := stores.SystemLLMRuns.Record(ctx, domain.SystemLLMRun{
+			OrgID: runmode.LocalDefaultOrgID, Job: "scorer", Model: "haiku",
+			StartedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	var count int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM system_llm_runs WHERE trace_id IS NULL`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected both NULL-trace_id rows to land, got %d", count)
+	}
+}
+
 func newSQLiteForSystemLLMTest(t *testing.T) *sql.DB {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")

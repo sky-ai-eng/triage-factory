@@ -70,6 +70,12 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 	if userID == "" {
 		return fmt.Errorf("resume: empty user id")
 	}
+	// Identity fence: a superseded instance identity must not start new
+	// live work (the resume would stamp this process's dead identity onto
+	// the row). Same latch the dispatcher's claim loop honors.
+	if s.IdentityFenced() {
+		return fmt.Errorf("resume: this instance's identity was superseded by a newer boot (duplicated state root?); restart the process to re-register")
+	}
 	run, err := s.agentRuns.GetSystem(context.Background(), orgID, runID)
 	if err != nil {
 		return fmt.Errorf("load run: %w", err)
@@ -200,7 +206,8 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 	bgCtx := context.Background()
 	var flipped bool
 	err = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, userID, func(ts db.TxStores) error {
-		f, fErr := ts.AgentRuns.MarkResuming(bgCtx, orgID, runID)
+		resumeExecutorID, resumeBootEpoch := s.executorIdentity()
+		f, fErr := ts.AgentRuns.MarkResuming(bgCtx, orgID, runID, resumeExecutorID, resumeBootEpoch)
 		if fErr != nil {
 			return fErr
 		}

@@ -194,6 +194,49 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
+	t.Run("UpdateSnapshotCASSystem_stale_seq_loses_cleanly", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#cas", "pr", "T", ""); err != nil {
+			t.Fatalf("FindOrCreate: %v", err)
+		}
+		ent, err := s.GetBySource(ctx, orgID, "github", "owner/repo#cas")
+		if err != nil || ent == nil {
+			t.Fatalf("GetBySource: ent=%v err=%v", ent, err)
+		}
+
+		// Winner: writes at the seq it read → lands, seq bumps by 1.
+		ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, ent.ID, `{"winner":true}`, ent.PollSeq)
+		if err != nil || !ok {
+			t.Fatalf("CAS at current seq: ok=%v err=%v, want true/nil", ok, err)
+		}
+
+		// Straggler: writes at the seq it read BEFORE the winner landed →
+		// zero rows, no error, snapshot untouched (the straggler-ex-leader
+		// contract: a late write is a no-op, never a regression).
+		ok, err = s.UpdateSnapshotCASSystem(ctx, orgID, ent.ID, `{"stale":true}`, ent.PollSeq)
+		if err != nil {
+			t.Fatalf("CAS at stale seq errored: %v", err)
+		}
+		if ok {
+			t.Fatal("CAS at a stale poll_seq must report ok=false")
+		}
+		got, err := s.Get(ctx, orgID, ent.ID)
+		if err != nil || got == nil {
+			t.Fatalf("re-read: %v", err)
+		}
+		if strings.Contains(got.SnapshotJSON, "stale") || !strings.Contains(got.SnapshotJSON, "winner") {
+			t.Errorf("stale CAS overwrote the winning snapshot: %q", got.SnapshotJSON)
+		}
+		if got.PollSeq != ent.PollSeq+1 {
+			t.Errorf("poll_seq = %d, want %d (exactly one successful write)", got.PollSeq, ent.PollSeq+1)
+		}
+
+		// The next reader CASes at the fresh seq and wins normally.
+		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, ent.ID, `{"next":true}`, got.PollSeq); err != nil || !ok {
+			t.Errorf("CAS at the advanced seq: ok=%v err=%v, want true/nil", ok, err)
+		}
+	})
+
 	t.Run("PatchSnapshot_does_not_touch_last_polled_at", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 

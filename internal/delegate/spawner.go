@@ -18,7 +18,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -211,16 +210,18 @@ type Spawner struct {
 	// in alongside the browser prompt UI.
 	permPending map[string]*pendingPermission
 	// executorID is this spawner instance's executor identity, stamped onto
-	// runs.executor_id when a run goes live. Defaults to a random per-boot
-	// uuid at construction (the test / no-seam path); production overrides
-	// it via SetExecutorID with the persistent instance-registry id once
-	// main resolves it, alongside bootEpoch — the pair the heartbeat
-	// loop's fenced renewal keys on. At N=1 there is one executor per
-	// process; on restart the persistent id re-stamps re-claimed runs (a
-	// random per-boot constant was the prior behavior this replaces). The
-	// run→executor ownership hook horizontal scaling builds the lease
-	// layer on. Guarded by s.mu like the other startup-set seams
-	// (SetStores, SetStorage) — read through executorIdentity().
+	// runs.executor_id at claim and resume. Empty at construction —
+	// production wires the persistent instance-registry id via
+	// SetExecutorID once main resolves it, alongside bootEpoch (the pair
+	// the heartbeat loop's fenced renewal keys on), and the empty default
+	// is what makes a missed wiring observable: the heartbeat loop
+	// refuses to start (logged) and claim stamps bind NULL rather than a
+	// plausible-looking-but-unregistered random uuid. At N=1 there is one
+	// executor per process; on restart the persistent id re-stamps
+	// re-claimed runs. The run→executor ownership hook horizontal scaling
+	// builds the lease layer on. Guarded by s.mu like the other
+	// startup-set seams (SetStores, SetStorage) — read through
+	// executorIdentity().
 	executorID string
 	bootEpoch  int64
 	// runSem bounds how many runs execute off the dispatcher at once — a
@@ -245,7 +246,8 @@ type Spawner struct {
 	// means use DefaultSnapshotRetentionTTL; tests inject a short value via
 	// SetSnapshotRetentionTTL. Read through snapshotRetention().
 	snapshotRetentionTTL time.Duration
-	// memFloorMB is the dispatch memory guardrail: when host MemAvailable
+	// memFloorMB is the dispatch memory guardrail: when available memory
+	// (hostmem.AvailableMB — cgroup-scoped when confined)
 	// drops below this, drainRunQueue defers claims (runs stay queued)
 	// until memory recovers. Zero disables. Set once at startup via
 	// SetDispatchMemFloor; the probe is injectable for tests.
@@ -257,6 +259,12 @@ type Spawner struct {
 	// transition (and only the transition) is logged — a gated host
 	// would otherwise emit a line every scan tick.
 	memGated atomic.Bool
+	// identityFenced latches (sticky, restart to clear) when a heartbeat
+	// renewal proves another process re-registered this instance id with
+	// a newer boot_epoch — the split-identity case. Once set, the
+	// dispatcher stops claiming and resumes are refused; see
+	// fenceIdentity / IdentityFenced (instance_heartbeat.go).
+	identityFenced atomic.Bool
 
 	agentToolsOnce  sync.Once
 	agentToolsCache string
@@ -310,7 +318,6 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		dispatchWake:     make(chan struct{}, 1),
 		procs:            make(map[string]*liveRunHandle),
 		permPending:      make(map[string]*pendingPermission),
-		executorID:       uuid.New().String(),
 		runSem:           make(chan struct{}, DefaultMaxConcurrentRuns),
 		memAvailMB:       hostmem.AvailableMB,
 	}

@@ -387,14 +387,11 @@ func (s *entityStore) FindOrCreateSystem(ctx context.Context, orgID, source, sou
 	return s.FindOrCreate(ctx, orgID, source, sourceID, kind, title, url)
 }
 
-func (s *entityStore) UpdateSnapshotSystem(ctx context.Context, orgID, id, snapshotJSON string) error {
-	return s.UpdateSnapshot(ctx, orgID, id, snapshotJSON)
-}
-
 // UpdateSnapshotCASSystem mirrors the Postgres impl's poll_seq CAS
 // (TFAC-579) for interface conformance — real CAS semantics even though
 // SQLite/local is single-connection N=1 and has no concurrent-leader race
-// for it to guard against.
+// for it to guard against. There is no blind-write system variant: every
+// tracker snapshot write goes through this CAS.
 func (s *entityStore) UpdateSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err

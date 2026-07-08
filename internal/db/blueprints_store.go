@@ -30,6 +30,16 @@ var (
 	// distinct — the fence would silently not engage. The event path always
 	// supplies both, so an empty value is a programming error surfaced loud.
 	ErrBlueprintRunFenceRequiresEventAndTrigger = errors.New("db: CreateRunIfNotFiredSystem requires non-empty TriggeringEventID and TriggerID")
+	// ErrEntityBusyActiveAutoRun is returned by CreateRunIfNotFiredSystem
+	// (Postgres) when the insert loses to the one-active-auto-run-per-entity
+	// partial unique index: a DIFFERENT (event, trigger) pair won the race
+	// to fire on the same entity. Deliberately distinct from the
+	// inserted=false replay-fence outcome — a replay is permanently
+	// satisfied (the run for THIS event exists), while entity-busy is a
+	// deferral: the caller's intent is still valid and must be queued (or
+	// released back to the queue), never dropped. Conflating the two turns
+	// a routine busy-entity race into silent intent loss.
+	ErrEntityBusyActiveAutoRun = errors.New("db: another auto run is active on this entity (one-active-per-entity index)")
 )
 
 // DuplicationStep is one selected prompt resolved to its place in a source

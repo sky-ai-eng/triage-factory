@@ -220,13 +220,23 @@ func TestRunQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	// A parked (dormant) run — directly insert with status open.
+	// A parked (dormant) run — directly insert with status open, then stamp
+	// it as owned by THIS instance from an EARLIER boot (epoch 0 < the
+	// sweep's epoch). Without the stamp the ownership predicate alone would
+	// exclude the row and this test would pass even with 'open' dropped
+	// from the status exclusion list; with it, only the status list
+	// protects the row — which is exactly the invariant being pinned
+	// (parked rows stay parked through a self-sweep of prior-boot orphans).
 	step0 := 0
 	if err := stores.AgentRuns.Create(ctx, org, domain.AgentRun{
 		ID: "rqd-run-0", TaskID: task.ID, PromptID: "rqd-p0", Status: "open",
 		Model: "m", TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
 		t.Fatalf("Create dormant run: %v", err)
+	}
+	if _, err := conn.Exec(`UPDATE runs SET executor_id = ?, boot_epoch = 0 WHERE id = 'rqd-run-0'`,
+		sqliteRQExecutorID); err != nil {
+		t.Fatalf("stamp dormant run with prior-boot ownership: %v", err)
 	}
 
 	n, err := stores.RunQueue.ResetProcessingRuns(ctx, sqliteRQExecutorID, sqliteRQBootEpoch)

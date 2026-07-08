@@ -145,13 +145,11 @@ func runMigrations(db *sql.DB, dialect string) error {
 
 // postgresMigrationLockText seeds the fixed session-level advisory
 // lock every migrating Postgres process acquires before calling
-// goose.Up. hashtextextended over a literal keeps this lock's key
-// space separate from the org/user-keyed xact-locks elsewhere
-// (internal/server/auth_provision.go, internal/db/postgres/
-// team_github_repos.go) without either family needing to agree on a
-// shared key scheme — those lock one entity for the duration of a
-// transaction; this locks the entire migration run for the whole
-// process.
+// goose.Up. Uses hashtextextended salt 0 — shared with two other key
+// families whose domains can't collide with this fixed literal (org
+// uuids, emails); the full salt registry lives on the const block in
+// internal/server/advisorylock.go, which is the place to update when
+// claiming a new salt.
 const postgresMigrationLockText = "triagefactory:goose-migrate"
 
 // runPostgresMigrationLocked wraps goose.Up in a session-level
@@ -179,6 +177,13 @@ const postgresMigrationLockText = "triagefactory:goose-migrate"
 // to physically close the connection instead of pooling it, so the
 // backend session — and with it the lock — always ends here,
 // regardless of whether the unlock statement succeeded.
+//
+// Pool-sizing constraint: this function holds one pool connection (the
+// lock) while goose.Up checks out others for the DDL — a caller whose
+// pool is capped at MaxOpenConns(1) would self-deadlock waiting for a
+// second connection that can never free. Every current caller is fine
+// (cmd/migrate and pgtest are uncapped; applyPGPoolDefaults sets 25);
+// keep it that way.
 func runPostgresMigrationLocked(database *sql.DB, treeDir string) error {
 	ctx := context.Background()
 	conn, err := database.Conn(ctx)
@@ -190,11 +195,19 @@ func runPostgresMigrationLocked(database *sql.DB, treeDir string) error {
 		_ = conn.Close()
 	}()
 
+	// Announce BEFORE the blocking acquire: pg_advisory_lock waits
+	// indefinitely, and a pod queued behind a peer's slow (or wedged)
+	// migration would otherwise hang with zero output — indistinguishable
+	// from a hung database, and invisible to the entrypoint's retry loop
+	// (the wait is inside one attempt). This line plus the "acquired" one
+	// below turn that state into a legible "waiting on a peer".
+	migrateLog.Info("acquiring migration advisory lock (blocks if another instance is migrating)")
 	if _, err := conn.ExecContext(ctx,
 		`SELECT pg_advisory_lock(hashtextextended($1, 0))`, postgresMigrationLockText,
 	); err != nil {
 		return fmt.Errorf("acquire migration advisory lock: %w", err)
 	}
+	migrateLog.Info("migration advisory lock acquired")
 	defer func() {
 		if _, err := conn.ExecContext(ctx,
 			`SELECT pg_advisory_unlock(hashtextextended($1, 0))`, postgresMigrationLockText,
@@ -205,6 +218,18 @@ func runPostgresMigrationLocked(database *sql.DB, treeDir string) error {
 
 	if err := goose.Up(database, treeDir); err != nil {
 		return fmt.Errorf("goose up: %w", err)
+	}
+
+	// The lock connection sat idle for the whole goose.Up run (DDL flows
+	// through other pool conns). If an idle-timeout proxy or a TCP reset
+	// killed it mid-migration, the session lock auto-released and another
+	// pod may have been migrating concurrently — every TF migration is
+	// transactional so the overlap usually surfaces as duplicate-DDL
+	// errors, but say so explicitly rather than leave the operator
+	// guessing at those errors' cause.
+	if pingErr := conn.PingContext(ctx); pingErr != nil {
+		migrateLog.Warn("migration lock connection died during goose.Up — mutual exclusion may have lapsed mid-migration; if another instance was booting concurrently, duplicate-DDL errors on either side trace back to this",
+			"error", pingErr)
 	}
 	return nil
 }

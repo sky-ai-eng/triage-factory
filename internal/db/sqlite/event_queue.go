@@ -74,11 +74,12 @@ func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, boot
 	row := s.conn.QueryRowContext(ctx, `
 		UPDATE event_queue
 		SET status = 'processing', claimed_at = ?, attempts = attempts + 1,
-		    executor_id = ?, boot_epoch = ?
+		    executor_id = NULLIF(?, ''),
+		    boot_epoch  = CASE WHEN ? = '' THEN NULL ELSE ? END
 		WHERE id = (SELECT id FROM event_queue WHERE status = 'pending' ORDER BY id LIMIT 1)
 		RETURNING id, org_id, event_id, COALESCE(entity_id, ''), event_type,
 		          status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at
-	`, time.Now(), executorID, bootEpoch)
+	`, time.Now(), executorID, executorID, bootEpoch)
 	return scanSqliteQueuedEvent(row)
 }
 
@@ -111,9 +112,11 @@ func (s *eventQueueStore) Requeue(ctx context.Context, orgID string, id int64, l
 	// attempts is intentionally left as-is — the claim already counted
 	// this try, so the worker can fail the row out once attempts crosses
 	// its budget. claimed_at is cleared so the row reads clean for the
-	// next claim.
+	// next claim. The ownership stamp is cleared too: a pending row has
+	// no owner (mirrors the Postgres impl).
 	_, err := s.conn.ExecContext(ctx, `
-		UPDATE event_queue SET status = 'pending', last_error = ?, claimed_at = NULL
+		UPDATE event_queue SET status = 'pending', last_error = ?, claimed_at = NULL,
+			executor_id = NULL, boot_epoch = NULL
 		WHERE id = ? AND status = 'processing'
 	`, lastErr, id)
 	return err
@@ -122,11 +125,14 @@ func (s *eventQueueStore) Requeue(ctx context.Context, orgID string, id int64, l
 func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
 	// Ownership-scoped (TFAC-578), mirroring the Postgres impl. SQLite is
 	// N=1, so this is trivially self-scoped, but the predicate keeps the two
-	// backends' semantics identical. `boot_epoch IS NULL` covers the
-	// one-time upgrade edge: a row already 'processing' from before this
-	// column existed.
+	// backends' semantics identical. `boot_epoch IS NULL` is a narrow
+	// defensive catch (this instance's persistent id, no epoch); pre-registry
+	// rows (random per-boot uuid or NULL executor_id) are normalized once by
+	// migration 202607080003_pre_registry_orphan_normalization, not by this
+	// sweep. The reset clears the stamp: a pending row has no owner.
 	res, err := s.conn.ExecContext(ctx, `
-		UPDATE event_queue SET status = 'pending', claimed_at = NULL
+		UPDATE event_queue SET status = 'pending', claimed_at = NULL,
+			executor_id = NULL, boot_epoch = NULL
 		WHERE status = 'processing'
 		  AND executor_id = ?
 		  AND (boot_epoch IS NULL OR boot_epoch < ?)

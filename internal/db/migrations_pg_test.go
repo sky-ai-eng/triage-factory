@@ -85,7 +85,12 @@ func TestMigrate_Postgres_ConcurrentMigrateSerializes(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			cmd := exec.Command(os.Args[0], "-test.run=^TestMigrateSubprocessHelper$", "-test.v")
-			cmd.Env = append(os.Environ(), tfMigrateSubprocessDSNEnv+"="+dsn)
+			// TF_ROLE= (empty) pins the children to the migrating path
+			// even when the invoking shell exports TF_ROLE=executor —
+			// an ambient executor role would flip both subprocesses into
+			// the schema-assert path and fail this test with a baffling
+			// "schema behind" error.
+			cmd.Env = append(os.Environ(), tfMigrateSubprocessDSNEnv+"="+dsn, "TF_ROLE=")
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				errs[i] = fmt.Errorf("subprocess %d: %w\n%s", i, err, out)
@@ -220,12 +225,29 @@ func TestMigrate_Postgres_ExecutorRole_SkipsEventTypeSeed(t *testing.T) {
 	h.Reset(t)
 
 	const drifted = "drifted-for-test"
+	var origDesc string
+	if err := h.AdminDB.QueryRow(
+		`SELECT description FROM events_catalog WHERE id = $1`, string(domain.EventGitHubPRReviewApproved),
+	).Scan(&origDesc); err != nil {
+		t.Fatalf("read original events_catalog description: %v", err)
+	}
 	if _, err := h.AdminDB.Exec(
 		`UPDATE events_catalog SET description = $1 WHERE id = $2`,
 		drifted, string(domain.EventGitHubPRReviewApproved),
 	); err != nil {
 		t.Fatalf("drift events_catalog description: %v", err)
 	}
+	// events_catalog deliberately survives Harness.Reset, so restore the
+	// row on the way out — later tests in the shared container must not
+	// inherit the drift.
+	t.Cleanup(func() {
+		if _, err := h.AdminDB.Exec(
+			`UPDATE events_catalog SET description = $1 WHERE id = $2`,
+			origDesc, string(domain.EventGitHubPRReviewApproved),
+		); err != nil {
+			t.Errorf("restore events_catalog description: %v", err)
+		}
+	})
 
 	t.Setenv("TF_ROLE", "executor")
 	if err := db.Migrate(h.AdminDB, "postgres"); err != nil {

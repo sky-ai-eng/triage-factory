@@ -68,13 +68,15 @@ func ParseMaxConcurrentRuns(raw string) (n int, clamped bool, err error) {
 // See docs/sandbox-bench.md for the measurements behind it.
 const DefaultRunMemoryBudgetMB = 256
 
-// DefaultPlatformReserveMB is the host memory the capacity rule sets
+// DefaultPlatformReserveMB is the instance memory the capacity rule sets
 // aside for everything that isn't a run: the TF binary, Postgres,
 // GoTrue, the object store, and safety headroom the dispatcher's
 // memory floor defends at runtime.
 const DefaultPlatformReserveMB = 12288
 
-// DerivedRunCapacity applies the sizing rule to a host's MemTotal:
+// DerivedRunCapacity applies the sizing rule to this instance's total
+// memory (hostmem.TotalMB — the cgroup limit when confined, host
+// MemTotal otherwise):
 // runs ≈ (RAM − reserve) ÷ budget, clamped to [0, ceiling]. This is
 // advisory (boot log + over-provision warning) — the runtime
 // protections are the concurrency cap and the dispatch memory floor.
@@ -143,10 +145,10 @@ func (s *Spawner) dispatchMemGated() bool {
 	gated := avail < floor
 	if s.memGated.CompareAndSwap(!gated, gated) {
 		if gated {
-			dispatchLog.Warn("dispatch paused: host memory below floor; queued runs deferred until it recovers",
+			dispatchLog.Warn("dispatch paused: available memory below floor; queued runs deferred until it recovers",
 				"available_mb", avail, "floor_mb", floor)
 		} else {
-			dispatchLog.Info("dispatch resumed: host memory recovered above floor",
+			dispatchLog.Info("dispatch resumed: available memory recovered above floor",
 				"available_mb", avail, "floor_mb", floor)
 		}
 	}

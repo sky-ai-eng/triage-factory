@@ -63,6 +63,15 @@ type runConfig struct {
 	appendSysPrompt string
 }
 
+// ErrEntityBusy is returned by Delegate on the event path when the fenced
+// insert loses to the one-active-auto-run-per-entity index: a different
+// (event, trigger) pair went active on the same entity between the
+// router's gate read and this insert. Unlike ErrAlreadyFired (permanently
+// satisfied — the run for this exact event exists), entity-busy means the
+// caller's intent is still valid and must be deferred onto
+// pending_firings (or released back there), never dropped.
+var ErrEntityBusy = errors.New("delegate: another auto run is active on this entity")
+
 // ErrAlreadyFired is returned by Delegate on the event path when the run
 // insert hit the (triggering_event_id, trigger_id) fence — a run for this
 // (event, trigger) already committed on a prior delivery of the same event.
@@ -329,6 +338,9 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	} else {
 		inserted, err := s.blueprints.CreateRunIfNotFiredSystem(bgCtx, orgID, brRow)
 		if err != nil {
+			if errors.Is(err, db.ErrEntityBusyActiveAutoRun) {
+				return "", ErrEntityBusy
+			}
 			return "", fmt.Errorf("create blueprint run: %w", err)
 		}
 		if !inserted {

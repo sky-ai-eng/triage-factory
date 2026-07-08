@@ -104,7 +104,8 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 	row := s.conn.QueryRowContext(ctx, `
 		UPDATE runs
 		SET status = 'running', claimed_at = now(), attempts = attempts + 1,
-		    executor_id = $1, boot_epoch = $2
+		    executor_id = NULLIF($1, ''),
+		    boot_epoch  = CASE WHEN $1 = '' THEN NULL ELSE $2::bigint END
 		WHERE id = (
 			SELECT r.id FROM runs r
 			JOIN blueprint_runs br ON br.id = r.blueprint_run_id
@@ -122,8 +123,12 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr string) error {
 	// attempts left as-is (the claim counted this try); claimed_at cleared.
 	// Guarded on 'running' so a stale requeue can't resurrect a terminal row.
+	// The ownership stamp is cleared too: a queued row has no owner, and a
+	// stale pair here would misdirect any owner-keyed reader (the reaper,
+	// the fleet view) toward an instance that stopped touching the row.
 	_, err := s.conn.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', claimed_at = NULL, result_summary = $3
+		UPDATE runs SET status = 'queued', claimed_at = NULL, result_summary = $3,
+			executor_id = NULL, boot_epoch = NULL
 		WHERE org_id = $1 AND id = $2 AND status = 'running'
 	`, orgID, runID, lastErr)
 	return err
@@ -134,13 +139,20 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 	// (executor_id = $1) during a strictly earlier boot (boot_epoch < $2) are
 	// reset. A live sibling's claimed/running row carries a different
 	// executor_id and is never touched — that's what makes a booting process
-	// safe alongside a still-live one. `boot_epoch IS NULL` is included
-	// defensively for the one-time upgrade edge: a row already 'running' from
-	// before this column existed (same persistent executor_id, no boot_epoch
-	// yet stamped) is still unambiguously this instance's own prior-boot
-	// orphan, not another instance's live work.
+	// safe alongside a still-live one. The `boot_epoch IS NULL` disjunct is
+	// a narrow defensive catch: it matches only rows stamped with THIS
+	// instance's persistent id but no epoch (a state only pre-epoch
+	// from-source builds could produce) — it does NOT cover pre-registry
+	// rows, which carry a per-boot random uuid or NULL executor_id that no
+	// persistent id ever matches. On Postgres that boundary is moot (the
+	// multi-mode posture is fresh-installs-only, migrations.go
+	// assertFreshOrCurrent); SQLite — which has released pre-registry
+	// installs — normalizes it once via migration
+	// 202607080003_pre_registry_orphan_normalization. The reset clears the
+	// stamp: a queued row has no owner.
 	res, err := s.conn.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', claimed_at = NULL
+		UPDATE runs SET status = 'queued', claimed_at = NULL,
+			executor_id = NULL, boot_epoch = NULL
 		WHERE status NOT IN (
 			'queued',
 			'completed','failed','cancelled','task_unsolvable',

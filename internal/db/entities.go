@@ -218,9 +218,8 @@ type EntityStore interface {
 	ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error)
 	ListUnclassifiedSystem(ctx context.Context, orgID string) ([]domain.Entity, error)
 	FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
-	UpdateSnapshotSystem(ctx context.Context, orgID, id, snapshotJSON string) error
 
-	// UpdateSnapshotCASSystem is UpdateSnapshotSystem with a
+	// UpdateSnapshotCASSystem writes the tracker snapshot under a
 	// compare-and-swap on poll_seq (TFAC-579): the write only lands when
 	// the row's current poll_seq still equals expectedPollSeq (the value
 	// the caller last read the entity with), and it bumps poll_seq by 1
@@ -230,9 +229,10 @@ type EntityStore interface {
 	// expectedPollSeq, e.g. mid-poll during a lease handoff) becomes a
 	// harmless ok=false no-op instead of silently overwriting a newer
 	// snapshot and losing a transition. Returns ok=false (no error) on a
-	// CAS miss; the caller drops the write and lets the next poll cycle
-	// reconcile — there is nothing to retry inline since a fresher
-	// snapshot already won.
+	// CAS miss; the caller drops the write AND suppresses the transitions
+	// it diffed (the snapshot-diff is the sole re-emit prevention — see
+	// the tracker) and lets the next poll cycle reconcile. There is no
+	// blind-write variant: every snapshot write goes through the CAS.
 	UpdateSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (ok bool, err error)
 	UpdateTitleSystem(ctx context.Context, orgID, id, title string) error
 	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error

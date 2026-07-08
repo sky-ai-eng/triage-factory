@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -340,10 +341,87 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 			t.Errorf("queue with pending row should report true")
 		}
 		row, _ := s.PopForEntity(ctx, orgID, tup.EntityID)
+		// A popped ('draining') row is still queued intent — the gate must
+		// stay closed while a drain is mid-flight, or a fresh event in
+		// that window would fire immediately and jump the queue.
+		has, _ = s.HasPendingForEntity(ctx, orgID, tup.EntityID)
+		if !has {
+			t.Errorf("a 'draining' row must keep HasPending true (gate stays closed mid-drain)")
+		}
 		_ = s.MarkSkipped(ctx, orgID, row.ID, domain.PendingFiringSkipTriggerDisabled)
 		has, _ = s.HasPendingForEntity(ctx, orgID, tup.EntityID)
 		if has {
 			t.Errorf("after only terminal rows remain, HasPending should be false")
+		}
+	})
+
+	t.Run("Enqueue_collapses_against_draining", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		if row, err := s.PopForEntity(ctx, orgID, tup.EntityID); err != nil || row == nil {
+			t.Fatalf("PopForEntity: row=%v err=%v", row, err)
+		}
+		// While the drain is mid-flight ('draining'), a duplicate
+		// (task, trigger) enqueue must collapse exactly as it would
+		// against a 'pending' row — the intent is already queued.
+		inserted, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID)
+		if err != nil {
+			t.Fatalf("duplicate Enqueue during drain: %v", err)
+		}
+		if inserted {
+			t.Errorf("duplicate (task_id, trigger_id) while draining should collapse (inserted=false)")
+		}
+		if rows, _ := s.ListForEntity(ctx, orgID, tup.EntityID); len(rows) != 1 {
+			t.Errorf("dedup should keep one row through the drain window, got %d", len(rows))
+		}
+	})
+
+	t.Run("RequeueStaleDraining_recovers_orphaned_claims", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		if row, err := s.PopForEntity(ctx, orgID, tup.EntityID); err != nil || row == nil {
+			t.Fatalf("PopForEntity: row=%v err=%v", row, err)
+		}
+
+		// A cutoff in the past: the fresh claim is NOT stale — a live
+		// drain must never have its row stolen mid-flight.
+		n, err := s.RequeueStaleDraining(ctx, orgID, time.Now().Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("RequeueStaleDraining (fresh claim): %v", err)
+		}
+		if n != 0 {
+			t.Errorf("a fresh 'draining' claim must not be requeued, got n=%d", n)
+		}
+
+		// A cutoff in the future makes the claim stale — the crashed-
+		// drainer shape. The row must come back to 'pending' and be
+		// poppable again.
+		n, err = s.RequeueStaleDraining(ctx, orgID, time.Now().Add(time.Minute))
+		if err != nil {
+			t.Fatalf("RequeueStaleDraining (stale claim): %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("expected exactly the orphaned claim requeued, got n=%d", n)
+		}
+		rows, _ := s.ListForEntity(ctx, orgID, tup.EntityID)
+		if len(rows) != 1 || rows[0].Status != domain.PendingFiringStatusPending {
+			t.Fatalf("requeued row should be back in 'pending', got %+v", rows)
+		}
+		reclaimed, err := s.PopForEntity(ctx, orgID, tup.EntityID)
+		if err != nil || reclaimed == nil {
+			t.Fatalf("re-pop after requeue: row=%v err=%v", reclaimed, err)
+		}
+		// The dead drainer's late MarkFired-after-requeue-and-re-pop is
+		// the reclaim race; the new claimant resolving it normally is the
+		// expected outcome.
+		if err := s.MarkSkipped(ctx, orgID, reclaimed.ID, domain.PendingFiringSkipTriggerDisabled); err != nil {
+			t.Fatalf("resolve reclaimed row: %v", err)
 		}
 	})
 

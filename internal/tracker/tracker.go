@@ -443,16 +443,26 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// Diff against previous snapshot.
 		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver)
 
-		// Update entity snapshot + title. CAS against item.entity.PollSeq (the
-		// value this cycle's diff was read against) — a miss means a
-		// straggler ex-leader's late write and the transition it computed
-		// above is dropped along with it (TFAC-579): the next poll cycle
-		// re-diffs from whatever snapshot actually won.
+		// Update entity snapshot + title. CAS against item.entity.PollSeq
+		// (the value this cycle's diff was read against) — and the snapshot
+		// write MUST land before the diffed transitions may publish. The
+		// snapshot-diff is the sole re-emit prevention: events published
+		// off a snapshot that didn't win would be re-derived next cycle
+		// under fresh event ids (the event/trigger fence can't collapse
+		// them → duplicate tasks/runs). A CAS miss is a straggler
+		// ex-leader losing to the current one; a write error means this
+		// cycle's view didn't commit. Either way the winning writer's next
+		// cycle re-diffs and emits the transition, so suppression loses
+		// nothing (TFAC-579).
 		snapJSON, _ := json.Marshal(newSnap)
-		if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq); err != nil {
-			trackerLog.Error("update snapshot failed", "source_id", item.entity.SourceID, "error", err)
-		} else if !ok {
-			trackerLog.Warn("update snapshot CAS lost race (stale poll_seq), skipping", "source_id", item.entity.SourceID)
+		ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq)
+		if err != nil {
+			trackerLog.Error("update snapshot failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", item.entity.SourceID, "error", err)
+			continue
+		}
+		if !ok {
+			trackerLog.Warn("update snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", item.entity.SourceID)
+			continue
 		}
 		if item.entity.Title != newSnap.Title {
 			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
@@ -1040,14 +1050,24 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		events := DiffJiraSnapshots(prevSnap, newSnap, e.ID, projects.doneMembersForKey(newSnap.Key))
 
 		// CAS against e.PollSeq (the value this cycle's diff was read
-		// against) — a miss drops the transition computed above along with
-		// the stale write (TFAC-579); the next poll cycle re-diffs from
-		// whatever snapshot actually won.
+		// against) — the snapshot write MUST land before the diffed
+		// transitions may publish, because the snapshot-diff is the sole
+		// re-emit prevention: events published off a snapshot that didn't
+		// win would re-derive next cycle under fresh event ids (the
+		// event/trigger fence can't collapse them → duplicate tasks/runs).
+		// A CAS miss is a straggler ex-leader losing to the current one; a
+		// write error just means this cycle's view didn't commit. Either
+		// way the winner's next cycle re-diffs and emits the transition —
+		// suppression here loses nothing (TFAC-579).
 		snapJSON, _ := json.Marshal(newSnap)
-		if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq); err != nil {
-			trackerLog.Error("update jira snapshot failed", "source_id", e.SourceID, "error", err)
-		} else if !ok {
-			trackerLog.Warn("update jira snapshot CAS lost race (stale poll_seq), skipping", "source_id", e.SourceID)
+		ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq)
+		if err != nil {
+			trackerLog.Error("update jira snapshot failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", e.SourceID, "error", err)
+			continue
+		}
+		if !ok {
+			trackerLog.Warn("update jira snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", e.SourceID)
+			continue
 		}
 		if e.Title != newSnap.Summary {
 			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)

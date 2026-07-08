@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql/driver"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -20,11 +21,15 @@ import (
 // several independent s.tx.WithTx calls (and, for the knowledge-upload
 // handler, file I/O in between) rather than one transaction — a
 // pg_advisory_xact_lock would release at the first call's commit and stop
-// covering the rest. Unlock best-effort precedes the connection Close so
-// the pool gets a clean connection back; if the unlock itself fails the
-// connection is already in a bad enough state that Postgres will drop the
-// session (and every lock it held) once the backend disconnects, so the
-// lock is never leaked past that.
+// covering the rest. Release runs the unlock and returns the connection to
+// the pool on success; on unlock FAILURE it forces a physical close via
+// conn.Raw + driver.ErrBadConn instead — (*sql.Conn).Close alone only
+// pools the connection, and a pooled session that still holds the lock
+// blocks every other acquirer of that key deployment-wide until the pool
+// happens to evict it (up to ConnMaxLifetime). A failed unlock with a
+// healthy session is real (e.g. a server-side statement_timeout cancel),
+// so "unlock failed ⇒ session is dying anyway" is not a safe assumption —
+// same discipline as db/migrations.go's migration lock.
 //
 // In local mode (SQLite has no advisory-lock primitive, and there's no
 // second process to race at N=1 anyway) it falls back to the existing
@@ -57,21 +62,40 @@ func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64,
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(hashtextextended($1, $2))`, key, salt)
+			if _, uerr := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(hashtextextended($1, $2))`, key, salt); uerr != nil {
+				// See the doc comment: a pooled connection still holding
+				// the lock wedges this key for every pod; force the
+				// backend session closed so the lock dies with it.
+				_ = conn.Raw(func(driverConn any) error { return driver.ErrBadConn })
+			}
 			_ = conn.Close()
 		})
 	}, nil
 }
 
 // Advisory-lock salts (TFAC-579). hashtextextended's salt is a global
-// namespace shared by every pg_advisory_lock/pg_advisory_xact_lock caller in
-// the database, not just this package — each guarded RMW domain across the
-// whole codebase needs its own value so two unrelated keyspaces (a project
-// id here, an entity id in internal/db/postgres/tasks.go, an org id in
-// team_github_repos.go/auth_provision.go/ee/slack) can't accidentally
-// collide. 7 and 8 are unclaimed as of this writing (0-2 are taken by
-// auth_provision.go/team_github_repos.go/ee/slack, 5 by
-// internal/db/postgres/tasks.go's entityTaskCreationLockSalt).
+// namespace shared by every pg_advisory_lock/pg_advisory_xact_lock caller
+// in the database (session and xact locks share one keyspace), not just
+// this package — each guarded domain across the whole codebase needs its
+// own value so two unrelated keyspaces can't accidentally collide.
+//
+// Registry of every hashtextextended salt in the codebase (keep this list
+// current when claiming a new one):
+//
+//	0 — internal/db/postgres/team_github_repos.go (org id, xact)
+//	    internal/server/auth_handlers.go          (email, xact)
+//	    internal/db/migrations.go                 (fixed goose-migrate
+//	    literal, session; disjoint key domains make sharing 0 safe)
+//	1 — internal/server/auth_handlers.go          (auth user id, xact)
+//	2 — ee/slack/store/pg                         (Slack api_app_id, xact)
+//	5 — internal/db/postgres/tasks.go             (entity id, xact;
+//	    entityTaskCreationLockSalt)
+//	7 — this file                                 (project id, session)
+//	8 — this file                                 (org id, session)
+//
+// internal/auth/auth_provision.go's user lock hashes with FNV-1a in Go —
+// a separate un-salted keyspace, listed here only so the next auditor
+// doesn't go hunting for its salt.
 const (
 	projectRMWLockSalt      int64 = 7
 	githubAppRegRMWLockSalt int64 = 8

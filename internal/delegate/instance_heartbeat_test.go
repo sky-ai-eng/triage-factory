@@ -9,17 +9,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestSetExecutorID_OverridesConstructorDefault pins that SetExecutorID
-// replaces NewSpawner's random per-boot uuid default, and that
+// TestSetExecutorID_OverridesConstructorDefault pins that a Spawner has NO
+// identity until SetExecutorID wires the persistent registry id (an empty
+// default is what makes a missed wiring observable — a random uuid default
+// would stamp plausible-looking but unregistered ids onto runs), and that
 // stampExecutor picks up the override — runs.executor_id on claim must
-// equal the registry id, not a per-boot random uuid.
+// equal the registry id.
 func TestSetExecutorID_OverridesConstructorDefault(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
 
 	defaultID, defaultEpoch := s.executorIdentity()
-	if defaultID == "" {
-		t.Fatal("expected NewSpawner to default to a non-empty random executor id")
+	if defaultID != "" {
+		t.Fatalf("expected NewSpawner to default to an EMPTY executor id (unset identity), got %q", defaultID)
 	}
 	if defaultEpoch != 0 {
 		t.Fatalf("expected the constructor default boot epoch to be 0, got %d", defaultEpoch)
@@ -150,12 +152,56 @@ func TestRunInstanceHeartbeat_NilStoreIsNoOp(t *testing.T) {
 
 // TestRunInstanceHeartbeat_NoExecutorIDIsNoOp pins that an InstanceStore
 // alone isn't enough to start the loop — SetExecutorID must have run too
-// (production always calls it before starting this loop).
+// (production always calls it before starting this loop). This is the real
+// missed-wiring state, reachable exactly because the constructor default
+// is empty.
 func TestRunInstanceHeartbeat_NoExecutorIDIsNoOp(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
-	s.mu.Lock()
-	s.executorID = "" // simulate SetExecutorID never having run
-	s.mu.Unlock()
 	s.RunInstanceHeartbeat(context.Background(), DefaultInstanceHeartbeatInterval)
+}
+
+// TestHeartbeatOnce_SupersededIdentityFences pins the split-identity
+// reaction: a heartbeat that matches no row (another boot of the same id
+// re-registered and bumped the epoch) latches the identity fence — the
+// dispatcher must stop claiming, resumes are refused, and heartbeatOnce
+// reports the loop should stop. The latch is sticky: only a restart
+// (re-register) clears it.
+func TestHeartbeatOnce_SupersededIdentityFences(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := testSpawnerStores(database)
+	s := NewSpawner(database, stores, nil, nil, "")
+
+	ctx := context.Background()
+	const id = "fence-instance"
+	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	if err != nil {
+		t.Fatalf("Register (boot 1): %v", err)
+	}
+	s.SetExecutorID(id, staleEpoch)
+
+	if s.IdentityFenced() {
+		t.Fatal("fence must not be latched before any supersession evidence")
+	}
+	if !s.heartbeatOnce(ctx) {
+		t.Fatal("a matching heartbeat must keep the loop running")
+	}
+
+	// A second boot of the same id (duplicated state root) bumps the epoch
+	// out from under this process.
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1"); err != nil {
+		t.Fatalf("Register (boot 2): %v", err)
+	}
+
+	if s.heartbeatOnce(ctx) {
+		t.Fatal("a superseded heartbeat must tell the loop to stop")
+	}
+	if !s.IdentityFenced() {
+		t.Fatal("supersession must latch the identity fence")
+	}
+	// Sticky: another (still-superseded) probe doesn't flip it back, and
+	// the fence holds without further heartbeats.
+	if !s.IdentityFenced() {
+		t.Fatal("fence must be sticky")
+	}
 }

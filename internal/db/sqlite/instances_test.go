@@ -81,13 +81,11 @@ func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) 
 	maxRuns, activeRuns, memTotal, memAvail := 4, 1, 8192, 6000
 	gated := true
 	matched, err := stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{
-		Draining:       false,
 		MaxRuns:        &maxRuns,
 		ActiveRuns:     &activeRuns,
 		MemTotalMB:     &memTotal,
 		MemAvailableMB: &memAvail,
 		DispatchGated:  &gated,
-		LabelsJSON:     `{"zone":"us-east"}`,
 	})
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
@@ -118,15 +116,21 @@ func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) 
 	if after.DispatchGated == nil || !*after.DispatchGated {
 		t.Errorf("DispatchGated = %v, want true", after.DispatchGated)
 	}
-	if after.LabelsJSON != `{"zone":"us-east"}` {
-		t.Errorf("LabelsJSON = %q, want the seeded json", after.LabelsJSON)
-	}
 	if after.LastHeartbeatAt.Before(before.LastHeartbeatAt) {
 		t.Errorf("expected last_heartbeat_at to advance (or hold, under coarse clock resolution): before=%v after=%v", before.LastHeartbeatAt, after.LastHeartbeatAt)
 	}
 
-	// A second heartbeat with every pointer left nil clears the snapshot back to
-	// NULL — Heartbeat overwrites wholesale, it doesn't merge.
+	// draining and labels are operator/control-plane intent, written
+	// out-of-band (the drain verb / placement tooling). A heartbeat must
+	// never touch them — a 4s renewal loop that reset draining=false would
+	// silently cancel a drain within one tick of the operator setting it.
+	if _, err := conn.Exec(`UPDATE instances SET draining = 1, labels_json = '{"pool":"gpu"}' WHERE id = ?`, id); err != nil {
+		t.Fatalf("seed operator intent: %v", err)
+	}
+
+	// A heartbeat with every pointer left nil clears the capacity snapshot
+	// back to NULL (capacity is heartbeat-owned and overwritten wholesale)
+	// — while the intent columns survive untouched.
 	matched, err = stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{})
 	if err != nil {
 		t.Fatalf("Heartbeat (clear): %v", err)
@@ -139,8 +143,38 @@ func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) 
 		t.Fatalf("Get (after clear): %v", err)
 	}
 	if cleared.MaxRuns != nil || cleared.ActiveRuns != nil || cleared.MemTotalMB != nil ||
-		cleared.MemAvailableMB != nil || cleared.DispatchGated != nil || cleared.LabelsJSON != "" {
-		t.Errorf("expected every optional field to read back nil/empty after a nil-valued heartbeat, got %+v", cleared)
+		cleared.MemAvailableMB != nil || cleared.DispatchGated != nil {
+		t.Errorf("expected every capacity field to read back nil after a nil-valued heartbeat, got %+v", cleared)
+	}
+	if !cleared.Draining {
+		t.Error("heartbeat clobbered draining — operator intent must survive renewals")
+	}
+	if cleared.LabelsJSON != `{"pool":"gpu"}` {
+		t.Errorf("heartbeat clobbered labels: %q, want the operator-set json", cleared.LabelsJSON)
+	}
+
+	// A restart (Register) bumps the epoch and clears the dead boot's
+	// capacity snapshot — but operator intent survives restarts too: a
+	// drained instance stays drained until explicitly un-drained.
+	freshHB := domain.InstanceHeartbeat{MaxRuns: &maxRuns}
+	if _, err := stores.Instances.Heartbeat(ctx, id, epoch, freshHB); err != nil {
+		t.Fatalf("Heartbeat (repopulate): %v", err)
+	}
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v2"); err != nil {
+		t.Fatalf("Register (restart): %v", err)
+	}
+	rebooted, err := stores.Instances.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get (after restart): %v", err)
+	}
+	if rebooted.MaxRuns != nil {
+		t.Errorf("Register left the prior boot's capacity snapshot in place: MaxRuns=%v, want nil", rebooted.MaxRuns)
+	}
+	if !rebooted.Draining {
+		t.Error("Register clobbered draining — operator intent must survive restarts")
+	}
+	if rebooted.LabelsJSON != `{"pool":"gpu"}` {
+		t.Errorf("Register clobbered labels: %q, want the operator-set json", rebooted.LabelsJSON)
 	}
 }
 
