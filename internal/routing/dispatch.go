@@ -427,25 +427,6 @@ func (r *Router) resolveRequestedPartyRouting(orgID string, evt domain.Event, en
 //     not an error.
 //   - (nil, false, err)     — a store failure; no task exists to report.
 func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID string, routing eventRouting) (task *domain.Task, created bool, err error) {
-	// became_atomic is the belated-discovery path for parents whose subtasks
-	// just closed. Suppress the new card if any active task already exists on
-	// the entity — otherwise an atomic ticket that gained and then lost
-	// subtasks ends up with two cards. The dedup index can't catch this because
-	// the existing task's event_type (jira:issue:assigned) differs from the new
-	// one (jira:issue:became_atomic). The event is still recorded; only task
-	// creation is skipped.
-	if evt.EventType == domain.EventJiraIssueBecameAtomic {
-		active, err := r.tasks.FindActiveByEntitySystem(context.Background(), orgID, entityID)
-		if err != nil {
-			routerLog.Error("became_atomic: failed to check active tasks on entity", "entity_id", entityID, "error", err)
-			return nil, false, err
-		}
-		if len(active) > 0 {
-			routerLog.Warn("became_atomic: entity already has an active task, skipping duplicate creation", "entity_id", entityID)
-			return nil, false, nil
-		}
-	}
-
 	// Task createdAt = OccurredAt when the source reported a time, falling back
 	// to time.Now(). Keeps the backfill path's "stamp the task with the PR's
 	// CreatedAt for week-old review requests" semantic — queue ordering reflects
@@ -454,10 +435,37 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 	if !evt.OccurredAt.IsZero() {
 		createdAt = evt.OccurredAt
 	}
-	task, created, err = r.tasks.FindOrCreateAtSystem(context.Background(), orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
-	if err != nil {
-		routerLog.Error("failed to find/create task", "event_type", evt.EventType, "entity_id", entityID, "error", err)
-		return nil, false, err
+
+	if evt.EventType == domain.EventJiraIssueBecameAtomic {
+		// became_atomic is the belated-discovery path for parents whose
+		// subtasks just closed. Suppress the new card if any active task
+		// already exists on the entity — otherwise an atomic ticket that
+		// gained and then lost subtasks ends up with two cards. The
+		// standard dedup index can't catch this because the existing
+		// task's event_type (e.g. jira:issue:assigned) differs from the
+		// new one (jira:issue:became_atomic) — this is a cross-event-type
+		// invariant, not a same-key race. FindOrCreateAtUnlessEntityActiveSystem
+		// (TFAC-579) backs the active-check + create with a real per-entity
+		// lock instead of a separate check-then-act, so a concurrent
+		// normal event's task creation on this entity can't land in the
+		// gap between the check and the insert. The event is still
+		// recorded; only task creation is skipped.
+		var suppressed bool
+		task, created, suppressed, err = r.tasks.FindOrCreateAtUnlessEntityActiveSystem(context.Background(), orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
+		if err != nil {
+			routerLog.Error("became_atomic: failed to check/create task on entity", "entity_id", entityID, "error", err)
+			return nil, false, err
+		}
+		if suppressed {
+			routerLog.Warn("became_atomic: entity already has an active task, skipping duplicate creation", "entity_id", entityID)
+			return nil, false, nil
+		}
+	} else {
+		task, created, err = r.tasks.FindOrCreateAtSystem(context.Background(), orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
+		if err != nil {
+			routerLog.Error("failed to find/create task", "event_type", evt.EventType, "entity_id", entityID, "error", err)
+			return nil, false, err
+		}
 	}
 
 	// Record the visibility set transactionally with the task. Additive: a

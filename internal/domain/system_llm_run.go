@@ -40,4 +40,12 @@ type SystemLLMRun struct {
 
 	StartedAt   time.Time `json:"started_at"`
 	CompletedAt time.Time `json:"completed_at"`
+
+	// TraceID is the agentproc invocation's Claude Code session id — the
+	// idempotency key (TFAC-579). It is NOT the caller-supplied agentproc
+	// TraceID (that's a per-job-type label like "scorer-batch", reused
+	// across every invocation of that job, so it can't identify one call).
+	// Empty when the subprocess never got far enough to mint a session;
+	// the store's insert only enforces uniqueness when non-empty.
+	TraceID string `json:"trace_id,omitempty"`
 }

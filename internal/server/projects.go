@@ -523,12 +523,16 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	// edits from different widgets (pinned-repos chip + tracker
 	// picker) would otherwise both read pre-edit state, merge their
 	// own field, and serially overwrite the row — leaving whichever
-	// landed second as the only contribution. Holding the mutex
+	// landed second as the only contribution. Holding the lock
 	// across read+merge+write makes the whole sequence atomic from
-	// the perspective of other PATCHes for the same project.
-	mu := s.projectMutex(id)
-	mu.Lock()
-	defer mu.Unlock()
+	// the perspective of other PATCHes for the same project — across
+	// every control pod in multi mode, not just this process (TFAC-579).
+	release, err := s.acquireKeyedLock(r.Context(), &s.projectMutexes, projectRMWLockSalt, id)
+	if err != nil {
+		internalError(w, "projects", err)
+		return
+	}
+	defer release()
 
 	var existing *domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -781,15 +785,18 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	// Take the same per-project lock that PATCH uses. Without this,
-	// an in-flight autosave (holding the mutex, mid read-merge-write)
+	// an in-flight autosave (holding the lock, mid read-merge-write)
 	// races a DELETE: DELETE drops the row out from under PATCH, and
 	// PATCH's UPDATE returns sql.ErrNoRows which the handler maps to
 	// a 500. With the lock, DELETE waits for PATCH to finish
 	// committing, then deletes — and a PATCH that arrives after the
 	// DELETE finds the row gone and 404s cleanly.
-	mu := s.projectMutex(id)
-	mu.Lock()
-	defer mu.Unlock()
+	release, err := s.acquireKeyedLock(r.Context(), &s.projectMutexes, projectRMWLockSalt, id)
+	if err != nil {
+		internalError(w, "projects", err)
+		return
+	}
+	defer release()
 
 	// Snapshot pinned_repos BEFORE the cascade fires so we can prune
 	// each affected bare clone's worktree registration list after the
@@ -1536,12 +1543,15 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	// RemoveAll's the project dir, then this handler re-creates
 	// knowledge-base/ and writes files into a project that no
 	// longer exists in the DB — leaving orphaned on-disk state
-	// after a successful delete. Holding the mutex across the
+	// after a successful delete. Holding the lock across the
 	// existence check + write makes the upload visibly atomic
 	// to a concurrent delete.
-	mu := s.projectMutex(id)
-	mu.Lock()
-	defer mu.Unlock()
+	release, err := s.acquireKeyedLock(r.Context(), &s.projectMutexes, projectRMWLockSalt, id)
+	if err != nil {
+		internalError(w, "projects", err)
+		return
+	}
+	defer release()
 
 	userID := ClaimsFrom(r.Context()).Subject
 	var project *domain.Project
@@ -1755,9 +1765,12 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 	// atomic from the perspective of other writers, so a racing
 	// PATCH can't sandwich a stale snapshot of the project row
 	// over the timestamp bump.
-	mu := s.projectMutex(id)
-	mu.Lock()
-	defer mu.Unlock()
+	release, err := s.acquireKeyedLock(r.Context(), &s.projectMutexes, projectRMWLockSalt, id)
+	if err != nil {
+		internalError(w, "projects", err)
+		return
+	}
+	defer release()
 
 	userID := ClaimsFrom(r.Context()).Subject
 	var project *domain.Project

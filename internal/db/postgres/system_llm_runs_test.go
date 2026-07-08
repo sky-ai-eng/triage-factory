@@ -143,6 +143,99 @@ func TestSystemLLMRunStore_Postgres_HonorsProvidedID(t *testing.T) {
 	}
 }
 
+// TestSystemLLMRunStore_Postgres_DuplicateTraceIDIsNoOp pins the TFAC-579
+// idempotency key: a second Record() call carrying the same TraceID (e.g. a
+// retried or double-invoked recording of the same agentproc session) must
+// not insert a second row or error — the partial unique index on trace_id
+// makes it a clean no-op via ON CONFLICT DO NOTHING.
+func TestSystemLLMRunStore_Postgres_DuplicateTraceIDIsNoOp(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID := seedPgSystemLLMOrg(t, h)
+	traceID := "session-" + uuid.New().String()
+
+	first := domain.SystemLLMRun{
+		OrgID:     orgID,
+		Job:       "scorer",
+		Model:     "haiku",
+		StartedAt: time.Now().UTC(),
+		TraceID:   traceID,
+	}
+	if err := stores.SystemLLMRuns.Record(ctx, first); err != nil {
+		t.Fatalf("first Record: %v", err)
+	}
+
+	// A second call with a fresh id but the SAME trace_id must be a no-op,
+	// not a second row and not an error.
+	second := domain.SystemLLMRun{
+		OrgID:        orgID,
+		Job:          "scorer",
+		Model:        "haiku",
+		StartedAt:    time.Now().UTC(),
+		TraceID:      traceID,
+		TotalCostUSD: 999, // distinguishable if it wrongly inserted
+	}
+	if err := stores.SystemLLMRuns.Record(ctx, second); err != nil {
+		t.Fatalf("duplicate TraceID Record should be a no-op, not an error: %v", err)
+	}
+
+	var count int
+	if err := h.AdminDB.QueryRow(
+		`SELECT COUNT(*) FROM system_llm_runs WHERE trace_id = $1`, traceID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 row for trace_id %q, got %d (duplicate double-counted spend)", traceID, count)
+	}
+
+	var cost float64
+	if err := h.AdminDB.QueryRow(
+		`SELECT total_cost_usd FROM system_llm_runs WHERE trace_id = $1`, traceID,
+	).Scan(&cost); err != nil {
+		t.Fatalf("read cost: %v", err)
+	}
+	if cost == 999 {
+		t.Errorf("second Record's row landed (cost=999) — ON CONFLICT DO NOTHING didn't fire")
+	}
+}
+
+// TestSystemLLMRunStore_Postgres_EmptyTraceIDNeverCollides pins that rows
+// with no TraceID (the subprocess never minted a session) never collide
+// with each other — the partial unique index excludes NULL trace_id, so
+// two such rows must both land.
+func TestSystemLLMRunStore_Postgres_EmptyTraceIDNeverCollides(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID := seedPgSystemLLMOrg(t, h)
+	for range 2 {
+		if err := stores.SystemLLMRuns.Record(ctx, domain.SystemLLMRun{
+			OrgID:     orgID,
+			Job:       "scorer",
+			Model:     "haiku",
+			StartedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	var count int
+	if err := h.AdminDB.QueryRow(
+		`SELECT COUNT(*) FROM system_llm_runs WHERE org_id = $1 AND trace_id IS NULL`, orgID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected both NULL-trace_id rows to land, got %d", count)
+	}
+}
+
 func seedPgSystemLLMOrg(t *testing.T, h *pgtest.Harness) string {
 	t.Helper()
 	orgID := uuid.New().String()

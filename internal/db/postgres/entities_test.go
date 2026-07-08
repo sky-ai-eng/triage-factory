@@ -3,7 +3,9 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -414,6 +416,130 @@ func TestEntityStore_Postgres_ClassificationStatusSystem_NoClaims(t *testing.T) 
 	}
 	if classified || exists {
 		t.Errorf("cross-org read: classified=%v exists=%v, want false/false", classified, exists)
+	}
+}
+
+// TestEntityStore_Postgres_UpdateSnapshotCASSystem_StaleMissIsNoOp pins the
+// TFAC-579 CAS contract directly: a write against a stale (already-bumped)
+// poll_seq reports ok=false and leaves the row untouched — the straggler
+// ex-leader case the CAS exists for.
+func TestEntityStore_Postgres_UpdateSnapshotCASSystem_StaleMissIsNoOp(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, _ := seedPgEntityOrg(t, h)
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "owner/repo#cas1", "pr", "T", "")
+	if err != nil {
+		t.Fatalf("FindOrCreate: %v", err)
+	}
+	if entity.PollSeq != 0 {
+		t.Fatalf("fresh entity poll_seq = %d, want 0", entity.PollSeq)
+	}
+
+	// First writer wins (poll_seq 0 -> 1).
+	ok, err := stores.Entities.UpdateSnapshotCASSystem(ctx, orgID, entity.ID, `{"v":1}`, 0)
+	if err != nil {
+		t.Fatalf("first CAS: %v", err)
+	}
+	if !ok {
+		t.Fatal("first CAS should succeed against a fresh row")
+	}
+
+	// A straggler still holding the STALE poll_seq=0 (e.g. an ex-leader's
+	// in-flight poll cycle that read the entity before the winner's write)
+	// must lose — ok=false, and the winner's snapshot must survive untouched.
+	ok, err = stores.Entities.UpdateSnapshotCASSystem(ctx, orgID, entity.ID, `{"v":"stale-should-not-land"}`, 0)
+	if err != nil {
+		t.Fatalf("stale CAS: %v", err)
+	}
+	if ok {
+		t.Fatal("stale CAS (poll_seq=0 after a winner already bumped it to 1) should report ok=false")
+	}
+
+	fresh, err := stores.Entities.GetSystem(ctx, orgID, entity.ID)
+	if err != nil {
+		t.Fatalf("GetSystem: %v", err)
+	}
+	// jsonb round-trips with Postgres's own whitespace, so compare parsed
+	// values rather than the raw string.
+	var got struct {
+		V json.Number `json:"v"`
+	}
+	if err := json.Unmarshal([]byte(fresh.SnapshotJSON), &got); err != nil {
+		t.Fatalf("unmarshal snapshot %q: %v", fresh.SnapshotJSON, err)
+	}
+	if got.V.String() != "1" {
+		t.Errorf("snapshot v = %q, want the winner's 1 — stale write must not land", got.V.String())
+	}
+	if fresh.PollSeq != 1 {
+		t.Errorf("poll_seq = %d, want 1 (only the winning write bumps it)", fresh.PollSeq)
+	}
+}
+
+// TestEntityStore_Postgres_SnapshotCAS_ConcurrentWriters_ExactlyOneWins is
+// the pgtest acceptance criterion for TFAC-579 item 5: two concurrent
+// snapshot writers (simulating a leader-failover overlap — the outgoing and
+// incoming leader both mid-poll-cycle against the same entity) both read
+// the entity's poll_seq, then race to CAS their own snapshot in. Exactly
+// one must win; the loser must report ok=false (no error) rather than
+// silently overwriting the winner's transition.
+func TestEntityStore_Postgres_SnapshotCAS_ConcurrentWriters_ExactlyOneWins(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, _ := seedPgEntityOrg(t, h)
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "owner/repo#cas2", "pr", "T", "")
+	if err != nil {
+		t.Fatalf("FindOrCreate: %v", err)
+	}
+
+	const writers = 8
+	var wg sync.WaitGroup
+	oks := make([]bool, writers)
+	errs := make([]error, writers)
+	var ready sync.WaitGroup
+	ready.Add(writers)
+	start := make(chan struct{})
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ready.Done()
+			<-start
+			// Every writer read the SAME poll_seq (0) before racing to
+			// write — the leader-failover-overlap scenario.
+			snap := fmt.Sprintf(`{"writer":%d}`, i)
+			ok, err := stores.Entities.UpdateSnapshotCASSystem(ctx, orgID, entity.ID, snap, entity.PollSeq)
+			oks[i], errs[i] = ok, err
+		}(i)
+	}
+	ready.Wait()
+	close(start)
+	wg.Wait()
+
+	winners := 0
+	for i, ok := range oks {
+		if errs[i] != nil {
+			t.Fatalf("writer %d: unexpected error: %v", i, errs[i])
+		}
+		if ok {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("expected exactly 1 winning CAS, got %d", winners)
+	}
+
+	fresh, err := stores.Entities.GetSystem(ctx, orgID, entity.ID)
+	if err != nil {
+		t.Fatalf("GetSystem: %v", err)
+	}
+	if fresh.PollSeq != 1 {
+		t.Errorf("poll_seq = %d, want 1 (one winning write, no lost/double transition)", fresh.PollSeq)
 	}
 }
 

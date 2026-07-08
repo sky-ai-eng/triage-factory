@@ -47,4 +47,12 @@ type Entity struct {
 	CreatedAt               time.Time  `json:"created_at"`
 	LastPolledAt            *time.Time `json:"last_polled_at"`
 	ClosedAt                *time.Time `json:"closed_at"`
+	// PollSeq backs the tracker's snapshot-write CAS (TFAC-579):
+	// UpdateSnapshotCASSystem bumps it by 1 on every successful write and
+	// requires the caller's last-observed value to still match, so a
+	// straggler ex-leader's late write (stale PollSeq) becomes a harmless
+	// no-op instead of overwriting a newer snapshot and losing a
+	// transition. Populated on every read; callers thread it straight back
+	// into their next CAS call.
+	PollSeq int64 `json:"poll_seq"`
 }

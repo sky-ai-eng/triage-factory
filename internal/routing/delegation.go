@@ -487,12 +487,20 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 
 		runID, skipReason, transientErr := r.attemptDrainOne(orgID, firing)
 		if transientErr != nil {
-			// Transient failure (DB read, Delegate). Leave the firing in
-			// 'pending' state and bail the drain loop — marking
+			// Transient failure (DB read, Delegate). PopForEntity already
+			// claimed this row into 'draining' (TFAC-579), so release it
+			// back to 'pending' rather than leaving it stuck — marking
 			// 'skipped_stale' here would permanently drop a queued intent
-			// over a temporary problem. The periodic sweeper or the next
-			// run-terminal will retry.
-			routerLog.Warn("drain transient error, leaving firing pending for retry",
+			// over a temporary problem, and a 'draining' row left
+			// unresolved is invisible to HasPendingForEntity /
+			// ListEntitiesWithPending and would never be retried. The
+			// periodic sweeper or the next run-terminal will retry once
+			// released.
+			if err := r.firings.Release(context.Background(), orgID, firing.ID); err != nil {
+				routerLog.Error("release firing after transient drain error failed",
+					"firing_id", firing.ID, "entity", entityID, "error", err)
+			}
+			routerLog.Warn("drain transient error, released firing for retry",
 				"firing_id", firing.ID, "entity", entityID, "error", transientErr)
 			return
 		}

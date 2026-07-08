@@ -212,12 +212,21 @@ type Server struct {
 	// state, A writes, B writes B's merge over pre-A state, and
 	// A's contribution is lost. Holding the per-project mutex
 	// across the read+write window closes that hole.
+	//
+	// TFAC-579: this map is now only the LOCAL-mode half of
+	// acquireKeyedLock — sufficient at N=1 (there's no second process to
+	// race), but not across control pods in multi mode, where
+	// acquireKeyedLock instead takes a Postgres session-scoped advisory
+	// lock. Both call sites go through acquireKeyedLock; nothing reaches
+	// into this map directly anymore.
 	projectMutexes sync.Map // map[string]*sync.Mutex
 
 	// githubAppRegMu serializes per-org GitHub App registration so
 	// two concurrent callbacks can't both pass the existence check,
 	// both call GitHub's conversion endpoint, and leave an orphan
-	// App. Same sync.Map pattern as projectMutexes.
+	// App. Same sync.Map pattern as projectMutexes, and the same
+	// TFAC-579 local-mode-only caveat: acquireKeyedLock backs multi mode
+	// with a real cross-pod advisory lock instead.
 	githubAppRegMu sync.Map // map[orgID]*sync.Mutex
 
 	// reachableRepoMu guards reachableRepoCache — the in-process
@@ -353,20 +362,6 @@ func (s *Server) evictReachableRepoCache(orgID string) {
 			delete(s.reachableRepoCache, k)
 		}
 	}
-}
-
-// projectMutex returns the per-project mutex for serializing
-// read-merge-write handlers. Created on demand via LoadOrStore; the
-// map grows monotonically with project count, which is fine — they
-// stay user-curated and small. Project deletion doesn't bother
-// removing the entry: a stale mutex on a missing project is just
-// unused memory, and the next call for that ID is a no-op.
-func (s *Server) projectMutex(id string) *sync.Mutex {
-	if v, ok := s.projectMutexes.Load(id); ok {
-		return v.(*sync.Mutex)
-	}
-	v, _ := s.projectMutexes.LoadOrStore(id, &sync.Mutex{})
-	return v.(*sync.Mutex)
 }
 
 // agentEnabledForOrg returns the resolved agent and whether the bot is

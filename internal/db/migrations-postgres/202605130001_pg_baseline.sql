@@ -777,7 +777,16 @@ CREATE TABLE public.system_llm_runs (
     is_error boolean DEFAULT false NOT NULL,
     metadata_json text,
     started_at timestamp with time zone NOT NULL,
-    completed_at timestamp with time zone DEFAULT now() NOT NULL
+    completed_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- trace_id (TFAC-579) is the agentproc invocation's Claude Code
+    -- session id — the only value genuinely unique per Run call (the
+    -- caller-supplied agentproc TraceID is a per-job-type label like
+    -- "scorer-batch", reused across every invocation, so it can't serve as
+    -- a key). Backs the idempotency constraint below: an accidental
+    -- duplicate Record() for the same invocation (retry, double-call) is a
+    -- no-op instead of double-counting spend. NULL when the subprocess
+    -- never got far enough to mint a session.
+    trace_id text
 );
 
 
@@ -879,7 +888,16 @@ CREATE TABLE public.entities (
     classification_rationale text,
     last_polled_at timestamp with time zone,
     closed_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- poll_seq (TFAC-579) backs a CAS on the tracker's snapshot write:
+    -- UpdateSnapshotSystem was a blind UPDATE, so a straggler ex-leader
+    -- (a poll cycle still in flight after a lease handoff) could overwrite
+    -- a newer snapshot the current leader already wrote, losing a
+    -- transition. Leadership (P1) is the primary guarantee; this CAS makes
+    -- a late write from a stale reader a harmless no-op (poll_seq no
+    -- longer matches) instead of a silent regression. Bumped by 1 on every
+    -- successful snapshot write.
+    poll_seq bigint DEFAULT 0 NOT NULL
 );
 
 
@@ -2635,6 +2653,18 @@ CREATE INDEX idx_system_llm_runs_org_started ON public.system_llm_runs USING btr
 --
 
 CREATE INDEX idx_system_llm_runs_org_job_started ON public.system_llm_runs USING btree (org_id, job, started_at DESC);
+
+
+--
+-- Name: idx_system_llm_runs_trace_id; Type: INDEX; Schema: public; Owner: -
+--
+
+-- Idempotency key (TFAC-579): a duplicate Record() call for the same
+-- agentproc invocation (retry, double-call) is a no-op via ON CONFLICT
+-- rather than double-counting spend. Partial on trace_id IS NOT NULL so
+-- the rare invocation that never minted a session (subprocess died before
+-- the init event) doesn't collide with every other such row.
+CREATE UNIQUE INDEX idx_system_llm_runs_trace_id ON public.system_llm_runs USING btree (trace_id) WHERE (trace_id IS NOT NULL);
 
 
 --
@@ -5893,6 +5923,17 @@ CREATE TABLE public.blueprint_runs (
     worktree_path text NOT NULL,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
+    -- entity_id (TFAC-579) denormalizes task_id's entity, backfilled from
+    -- tasks at insert time. Exists solely so
+    -- blueprint_runs_one_active_auto_run_per_entity below can express the
+    -- router's "at most one auto run in flight per entity" invariant as a
+    -- real DB constraint — the entity gate (HasActiveAutoRunForEntitySystem)
+    -- was check-then-act, so two processes (or two goroutines racing a
+    -- leader-failover overlap) could both pass the check and each mint an
+    -- active auto run on the same entity via different triggers. Nullable:
+    -- manual runs (trigger_type='manual') never populate it and never
+    -- participate in the partial index.
+    entity_id uuid,
     CONSTRAINT blueprint_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'aborted'::text, 'failed'::text, 'cancelled'::text]))),
     CONSTRAINT blueprint_runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL))))
 );
@@ -5927,6 +5968,15 @@ CREATE INDEX idx_runs_queued ON public.runs (started_at, id) WHERE (status = 'qu
 -- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
 -- manual blueprint runs (NULL) never participate.
 CREATE UNIQUE INDEX blueprint_runs_event_trigger_fence ON public.blueprint_runs (triggering_event_id, trigger_id) WHERE (triggering_event_id IS NOT NULL);
+-- One active auto (trigger_type='event') run per entity (TFAC-579). Partial
+-- on entity_id IS NOT NULL so manual runs (which never populate it) never
+-- collide. The insert (CreateRunIfNotFiredSystem) catches a violation here
+-- the same way it already catches the event/trigger fence above — a lost
+-- race translates to inserted=false, the same "clean skip" contract.
+CREATE UNIQUE INDEX blueprint_runs_one_active_auto_run_per_entity ON public.blueprint_runs (org_id, entity_id) WHERE (trigger_type = 'event'::text AND status = 'running'::text AND entity_id IS NOT NULL);
+
+ALTER TABLE ONLY public.blueprint_runs
+    ADD CONSTRAINT blueprint_runs_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.blueprint_steps
     ADD CONSTRAINT blueprint_steps_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;

@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -284,11 +283,15 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 
 	// Serialize per-org against the manifest callback + concurrent imports so two
 	// requests can't both pass the one-slot check and race to CreateForOrg. The
-	// unique constraint is the durable fallback (handled below); this prevents the
-	// common case. Same mutex the register callback uses.
-	regMu, _ := s.githubAppRegMu.LoadOrStore(orgID, &sync.Mutex{})
-	regMu.(*sync.Mutex).Lock()
-	defer regMu.(*sync.Mutex).Unlock()
+	// unique constraint is the durable fallback (handled below); this closes the
+	// common case — across every control pod in multi mode, not just this
+	// process (TFAC-579). Same lock the register callback uses.
+	release, err := s.acquireKeyedLock(ctx, &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	defer release()
 
 	// One-slot rule. A staged app occupies the slot too — the discard endpoint
 	// frees it. System read: the admin gate already authorized orgID.
