@@ -333,6 +333,11 @@ func (a *App) buildRouting() {
 	// event_queue (not the bus); the ingestor enqueues there at emit time.
 	a.router = routing.NewRouter(a.stores.Prompts, a.stores.Blueprints, a.stores.EventHandlers, a.stores.Agents, a.stores.TeamAgents, a.stores.Users, a.stores.Tasks, a.stores.AgentRuns, a.stores.Entities, a.stores.PendingFirings, a.stores.Events, a.stores.Orgs, a.stores.Teams, a.stores.TeamGitHubRepos, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.spawner, a.scorer, a.wsHub)
 	a.router.SetEventQueue(a.stores.EventQueue)
+	// Mirror the per-event routing disposition sentinel onto the bus
+	// (TFAC-593) so an async event source (e.g. Slack) can learn
+	// synchronously-unavailable routing outcomes. The bus is built in
+	// buildInfra, which runs before buildRouting.
+	a.router.SetEventPublisher(a.bus)
 	// Ownership-scoped boot recovery (TFAC-578): the router's event_queue
 	// self-sweep needs the same persistent instance-registry identity the
 	// spawner's run-queue self-sweep already uses (registerInstance minted it

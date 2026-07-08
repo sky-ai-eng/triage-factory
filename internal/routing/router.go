@@ -30,6 +30,16 @@ type Delegator interface {
 	Cancel(orgID, runID, userID string) error
 }
 
+// EventPublisher is the bus-publish seam the router uses to mirror the
+// per-event routing disposition sentinel (TFAC-593) onto the event bus, so
+// an async event source (e.g. Slack) can learn synchronously-unavailable
+// routing outcomes. Same minimal shape as internal/tracker's Publisher and
+// delegate.Spawner's EventPublisher; the plain *eventbus.Bus satisfies it
+// directly.
+type EventPublisher interface {
+	Publish(evt domain.Event)
+}
+
 // Router is the central eventbus subscriber that replaces the old auto-
 // delegate hook. On every event it:
 //  1. Records the event (durable audit log)
@@ -64,6 +74,7 @@ type Router struct {
 	spawner      Delegator
 	scorer       Scorer
 	ws           *websocket.Hub
+	publisher    EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors the per-event routing disposition sentinel onto the bus (TFAC-593)
 
 	// executorID/bootEpoch are this process's persistent instance-registry
 	// identity (TFAC-577), set post-construction via SetExecutorID before
@@ -169,6 +180,17 @@ func (r *Router) breakerPromptID(orgID, blueprintID string) string {
 // the ~30 existing test constructions don't have to thread it.
 func (r *Router) SetEventQueue(q dbpkg.EventQueueStore) {
 	r.eventQueue = q
+}
+
+// SetEventPublisher wires the bus publisher the router mirrors the
+// per-event routing disposition sentinel onto (TFAC-593), same
+// post-construction injection pattern as SetEventQueue — the bus is built
+// before the router in app composition, but the setter keeps
+// internal/routing decoupled from internal/eventbus's concrete type. Safe
+// to call once at startup; nil publisher (the default) disables the bus
+// mirror entirely — routing behavior is unaffected either way.
+func (r *Router) SetEventPublisher(p EventPublisher) {
+	r.publisher = p
 }
 
 // SetExecutorID wires this router's persistent instance-registry identity

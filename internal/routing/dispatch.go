@@ -2,6 +2,7 @@ package routing
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -22,7 +23,8 @@ import (
 // index makes a replay a no-op rather than a double-create.
 //
 // The body is a pipeline of named stages; each short-circuits the rest by
-// returning ok=false (or an empty result).
+// returning ok=false (or an empty result), setting disp.Disposition on its
+// way out so the deferred publish below still reports the outcome.
 func (r *Router) HandleEvent(evt domain.Event) {
 	// Defensive: every upstream emitter (poller, per-org loop) tags
 	// events with evt.OrgID. A missing OrgID indicates an emitter bug — failing
@@ -50,6 +52,22 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		evt.ID = id
 	}
 
+	// Disposition sentinel (TFAC-593) — published exactly once per handled
+	// event, after its outcome's DB writes have landed (task upsert,
+	// task_events), so a consumer reading stores on receipt sees the
+	// settled state. disp is a value captured by the closure below, so
+	// every field write between here and return is visible when the
+	// deferred call actually runs — each stage sets disp.Disposition on
+	// its way out instead of a publish call at every return site.
+	//
+	// publishDisposition itself drops OwnershipUnrouted event types
+	// (system:* sentinels, including this one): HandleEvent doesn't see
+	// them in production (RouterBound gates the durable queue they'd have
+	// to arrive through to reach here), but a direct call must not let the
+	// router sentinel its own sentinel.
+	disp := events.SystemRoutingDispositionMetadata{EventID: evt.ID, EventType: evt.EventType}
+	defer func() { r.publishDisposition(orgID, disp) }()
+
 	// Entitlement gate (TFAC-524) — a gated-off event source (never entitled,
 	// or entitled and lapsed; deliberately identical) is frozen: the event
 	// stays recorded above (the append-only log is an honest record of what
@@ -59,6 +77,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// producing events at all; this covers lapse races, drained-outbox
 	// stragglers, and any future emitter that forgets to gate.
 	if !entitlements.EventTypeAllowed(orgID, evt.EventType) {
+		disp.Disposition = events.DispositionFrozen
 		return
 	}
 
@@ -68,8 +87,10 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// passes; only later stragglers on the now-closed entity drop.
 	entityID, ok := r.routableEntity(orgID, evt)
 	if !ok {
+		disp.Disposition = events.DispositionTasklessUnroutable
 		return
 	}
+	disp.EntityID = entityID
 
 	// Close phase — runs unconditionally, before routing, and independent of
 	// whether any handler matches. It closes the tasks this event resolves
@@ -92,6 +113,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	matchedRules, matchedTriggers := r.matchHandlers(orgID, evt)
 	if len(matchedRules) == 0 && len(matchedTriggers) == 0 {
 		// Nothing matched — event is recorded but no task created.
+		disp.Disposition = events.DispositionTasklessNoHandler
 		return
 	}
 
@@ -99,18 +121,57 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// creation-seed priority.
 	routing, ok := r.resolveTeamRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
 	if !ok {
+		disp.Disposition = events.DispositionTasklessNoOwner
 		return
 	}
+	disp.OwnerTeamID = routing.ownerTeam
 
 	// Find or create the single task for this (entity, event_type,
 	// dedup_key); record visibility + lifecycle and enqueue scoring.
-	task, ok := r.upsertTaskForEvent(orgID, evt, entityID, routing)
+	task, created, ok := r.upsertTaskForEvent(orgID, evt, entityID, routing)
 	if !ok {
+		// A store failure, or the became_atomic dedup suppression (an
+		// active task already covers the entity) — no task exists to
+		// report. Buckets with the other "recorded, nothing created"
+		// outcomes rather than earning its own disposition.
+		disp.Disposition = events.DispositionTasklessUnroutable
 		return
+	}
+	disp.TaskID = task.ID
+	if created {
+		disp.Disposition = events.DispositionTaskCreated
+	} else {
+		disp.Disposition = events.DispositionTaskBumped
 	}
 
 	// Auto-delegate matching triggers in priority order.
-	r.fireMatchedTriggers(orgID, evt, entityID, task, routing)
+	disp.TriggersFired = r.fireMatchedTriggers(orgID, evt, entityID, task, routing)
+}
+
+// publishDisposition is HandleEvent's single deferred publish point for the
+// per-event routing disposition sentinel (TFAC-593). Nil-guards the
+// publisher and drops OwnershipUnrouted event types (system:* sentinels) so
+// the router never sentinels its own sentinel. Best-effort past that: a
+// marshal failure is logged and dropped, never fails routing — the outcome
+// it describes already landed in the DB before this runs.
+func (r *Router) publishDisposition(orgID string, disp events.SystemRoutingDispositionMetadata) {
+	if r.publisher == nil {
+		return
+	}
+	if ownershipModelForEvent(disp.EventType) == events.OwnershipUnrouted {
+		return
+	}
+	raw, err := json.Marshal(disp)
+	if err != nil {
+		routerLog.Warn("marshal routing disposition metadata failed", "event_type", disp.EventType, "error", err)
+		return
+	}
+	r.publisher.Publish(domain.Event{
+		OrgID:        orgID,
+		EventType:    domain.EventSystemRoutingDisposition,
+		MetadataJSON: string(raw),
+		OccurredAt:   time.Now(),
+	})
 }
 
 // routableEntity is the entity-lifecycle gate that precedes the close + route
@@ -328,9 +389,10 @@ func (r *Router) resolveRequestedPartyRouting(orgID string, evt domain.Event, en
 
 // upsertTaskForEvent finds or creates the single task for this (entity,
 // event_type, dedup_key), records its visibility set + spawned/bumped
-// lifecycle, enqueues scoring, and broadcasts. ok=false means no task should
-// exist (the became_atomic dedup) or creation failed.
-func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID string, routing eventRouting) (*domain.Task, bool) {
+// lifecycle, enqueues scoring, and broadcasts. created reports which; it is
+// meaningless when ok=false. ok=false means no task should exist (the
+// became_atomic dedup) or creation failed.
+func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID string, routing eventRouting) (task *domain.Task, created bool, ok bool) {
 	// became_atomic is the belated-discovery path for parents whose subtasks
 	// just closed. Suppress the new card if any active task already exists on
 	// the entity — otherwise an atomic ticket that gained and then lost
@@ -342,11 +404,11 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 		active, err := r.tasks.FindActiveByEntitySystem(context.Background(), orgID, entityID)
 		if err != nil {
 			routerLog.Error("became_atomic: failed to check active tasks on entity", "entity_id", entityID, "error", err)
-			return nil, false
+			return nil, false, false
 		}
 		if len(active) > 0 {
 			routerLog.Warn("became_atomic: entity already has an active task, skipping duplicate creation", "entity_id", entityID)
-			return nil, false
+			return nil, false, false
 		}
 	}
 
@@ -361,7 +423,7 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 	task, created, err := r.tasks.FindOrCreateAtSystem(context.Background(), orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
 	if err != nil {
 		routerLog.Error("failed to find/create task", "event_type", evt.EventType, "entity_id", entityID, "error", err)
-		return nil, false
+		return nil, false, false
 	}
 
 	// Record the visibility set transactionally with the task. Additive: a
@@ -390,7 +452,7 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 	// broadcast the task update to the frontend.
 	r.scorer.Trigger(orgID)
 	r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
-	return task, true
+	return task, created, true
 }
 
 // fireMatchedTriggers auto-delegates the matched triggers against the task, one
@@ -399,8 +461,10 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 // highest-priority matched team's trigger actually runs; later teams find the
 // task claimed and skip inside tryAutoDelegate. The per-team kill switch is
 // checked per firing team, and triggers with min_autonomy_suitability > 0 defer
-// to the post-scoring re-derive.
-func (r *Router) fireMatchedTriggers(orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) {
+// to the post-scoring re-derive. Returns the count of triggers actually fired
+// (i.e. passed to tryAutoDelegate) — deferred triggers don't count.
+func (r *Router) fireMatchedTriggers(orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) int {
+	fired := 0
 	for _, teamID := range routing.orderedTeams {
 		triggers := routing.teamTriggers[teamID]
 		if len(triggers) == 0 {
@@ -417,6 +481,8 @@ func (r *Router) fireMatchedTriggers(orgID string, evt domain.Event, entityID st
 				continue // deferred to post-scoring handler
 			}
 			r.tryAutoDelegate(orgID, task, trigger, entityID, evt.ID, acting)
+			fired++
 		}
 	}
+	return fired
 }
