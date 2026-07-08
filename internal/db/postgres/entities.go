@@ -13,8 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// entityStore is the Postgres impl of db.EntityStore. Holds two pools
-// (SKY-296):
+// entityStore is the Postgres impl of db.EntityStore. Holds two pools:
 //
 //   - q: app pool (tf_app, RLS-active). Every request-equivalent
 //     consumer (server panels, delegate context loaders, the classifier
@@ -229,15 +228,15 @@ func listActiveEntities(ctx context.Context, q queryer, orgID, source string) ([
 // to the projects attached to the viewer's teams. A team "attaches" a
 // Jira project by configuring its status rules, so an entity belongs in
 // the viewer's discovery deck iff a jira_project_status_rules row exists
-// for the entity's project key (the prefix of source_id, "SKY" in
-// "SKY-123"). split_part(source_id, '-', 1) extracts the key — Jira keys
+// for the entity's project key (the prefix of source_id, e.g. "PROJ" in
+// "PROJ-123"). split_part(source_id, '-', 1) extracts the key — Jira keys
 // are hyphen-free, so the first segment is always the project key.
 //
 // The team scoping is free: under the app pool (tf_app, RLS active) the
 // jira_rules_select policy already constrains visible rows to the
 // viewer's team memberships, so the EXISTS auto-scopes with no explicit
 // team_id — the same RLS-does-the-scoping pattern as the factory belt's
-// task-membership semi-join (SKY-366). The teams join binds org_id as
+// task-membership semi-join. The teams join binds org_id as
 // defense-in-depth (jira_project_status_rules has no org_id column) so
 // the filter holds even on the admin pool where RLS is bypassed.
 const jiraTeamProjectMembershipExists = `EXISTS (

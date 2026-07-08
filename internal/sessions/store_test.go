@@ -394,7 +394,7 @@ func seedOrg(t *testing.T, h *pgtest.Harness, ownerID uuid.UUID, slug string) uu
 	return uuid.MustParse(oID)
 }
 
-// TestStore_CreateLookupRoundtrip_WithActiveOrg pins SKY-313's storage
+// TestStore_CreateLookupRoundtrip_WithActiveOrg pins the storage
 // path: a valid active_org_id at create time round-trips through
 // Lookup so the middleware can lift it into ctxKeyOrgID.
 func TestStore_CreateLookupRoundtrip_WithActiveOrg(t *testing.T) {

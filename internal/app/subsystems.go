@@ -153,6 +153,11 @@ func (a *App) buildExecution() error {
 	// Per-run credentials resolve through the run-credential seam, not a
 	// process-global hot-swap.
 	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "")
+	// Replace the constructor's random per-boot uuid with the persistent
+	// instance-registry identity registerInstance minted above —
+	// runs.executor_id on claimed rows must equal the registry id, and
+	// RunInstanceHeartbeat's fenced renewal needs the matching boot_epoch.
+	a.spawner.SetExecutorID(a.identity.ID, a.bootEpoch)
 	// Dispatcher concurrency is a deployment decision: the default of 4 is
 	// conservative for a laptop, while a provisioned multi-mode host handles
 	// far more (memory-bound; see the TF_MAX_CONCURRENT_RUNS guidance in
@@ -288,6 +293,9 @@ func (a *App) buildRouting() {
 	a.srv.SetIngestor(a.ingestor)
 
 	a.pollerMgr = poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.ghResolver)
+	// TFAC-573: GET /readyz's poller-alive hard check + per-org poll-
+	// staleness soft signal read through this method.
+	a.srv.SetPollerManager(a.pollerMgr.Health)
 	a.pollerMgr.OnError = func(source, orgID string, err error) {
 		// Throttle key includes orgID so a chronic failure on one tenant
 		// doesn't suppress a fresh failure on another. Process-level errors

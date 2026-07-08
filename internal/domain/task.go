@@ -22,9 +22,9 @@ type Task struct {
 	// team on the first human claim.
 	TeamID *string `json:"team_id,omitempty"`
 
-	// Status + lifecycle. SKY-261 B+ removed `claimed` and `delegated`
-	// (responsibility moved to the claim cols). SKY-330 added
-	// `in_progress` and `in_review` as real lifecycle stages so the
+	// Status + lifecycle. `claimed` and `delegated` were removed
+	// (responsibility moved to the claim cols). `in_progress` and
+	// `in_review` were added as real lifecycle stages so the
 	// board can show work moving through stages independently of who
 	// (user or bot) is doing it. Bot-claimed tasks auto-transition
 	// based on run state; user-claimed tasks transition manually.
@@ -46,7 +46,7 @@ type Task struct {
 	RelevanceReason string `json:"relevance_reason"` // "review_requested" | "authored" | "mentioned" | "assigned"
 	SourceStatus    string `json:"source_status"`    // captured for undo (e.g., Jira ticket's prior status)
 
-	// Claim columns (SKY-261 D-Claims). XOR via tasks_claim_xor CHECK:
+	// Claim columns. XOR via tasks_claim_xor CHECK:
 	// at most one is set at a time. Both NULL = unclaimed (in the
 	// team queue). Sticky past close — status in ('done', 'dismissed')
 	// + non-empty claim is the audit "who finished this." Empty string = NULL.
@@ -59,13 +59,13 @@ type Task struct {
 	// Populated by GetTask / QueuedTasks / TasksByStatus via entity JOIN.
 	Title          string `json:"title"`
 	SourceURL      string `json:"source_url"`
-	EntitySourceID string `json:"entity_source_id"` // e.g. "owner/repo#42", "SKY-123"
+	EntitySourceID string `json:"entity_source_id"` // e.g. "owner/repo#42", a Jira issue key
 	EntitySource   string `json:"entity_source"`    // "github" | "jira"
 	EntityKind     string `json:"entity_kind"`      // "pr" | "issue"
 	// OpenSubtaskCount is extracted from the Jira entity's snapshot_json in
 	// the same join (json_extract). Zero for GitHub tasks and for Jira
 	// tickets with no subtasks. Surfaced so the UI can flag a task whose
-	// entity has gained subtasks since the task was created — SKY-173's
+	// entity has gained subtasks since the task was created — the
 	// "consider decomposing" pill.
 	OpenSubtaskCount int `json:"open_subtask_count"`
 }

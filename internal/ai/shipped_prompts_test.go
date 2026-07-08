@@ -9,7 +9,7 @@ import (
 
 // TestShippedPromptsParse ensures every shipped prompt has a unique,
 // non-empty system_slug, a name, a body, and the system source — and
-// leaves ID empty (the seeder mints a random UUID per team copy, SKY-380).
+// leaves ID empty (the seeder mints a random UUID per team copy).
 // Drift here means the seeder or a trigger's prompt-slug reference dangles.
 func TestShippedPromptsParse(t *testing.T) {
 	seen := map[string]bool{}

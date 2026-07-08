@@ -20,7 +20,7 @@ import (
 // directly — no synthetic uuid to translate.
 //
 // The constructor takes two queryers for signature parity with the
-// Postgres impl (SKY-296), but SQLite has one connection — both
+// Postgres impl, but SQLite has one connection — both
 // arguments collapse onto the same queryer. The `...System` admin-
 // pool variants are thin wrappers around the non-System methods.
 type repoStore struct{ q queryer }
@@ -243,7 +243,7 @@ func (s *repoStore) UpdateCloneStatus(ctx context.Context, orgID, owner, repo, s
 
 // --- Admin-pool (`...System`) variants ---
 //
-// SKY-296 surface — SQLite has one connection so each System variant
+// SQLite has one connection so each System variant
 // delegates to its non-System counterpart.
 
 func (s *repoStore) ListSystem(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {

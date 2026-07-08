@@ -46,7 +46,7 @@ type AgentRunSeeder struct {
 
 	// EventHandler inserts a minimal enabled rule handler and returns
 	// its id, used as a stable runs.trigger_id FK target for the
-	// SKY-424 fence subtest. A rule (not a trigger) keeps the seed
+	// fence subtest. A rule (not a trigger) keeps the seed
 	// cheap — no blueprint row to wire — and the fence only needs a
 	// non-NULL handler id, since the partial unique index treats NULL
 	// trigger_id as distinct (the fence would silently not engage).
@@ -133,7 +133,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	})
 
 	t.Run("Create_EventTriggered_PersistsWithNullCreator", func(t *testing.T) {
-		// SKY-285 review: event-triggered Create must succeed and
+		// Event-triggered Create must succeed and
 		// land creator_user_id=NULL (the runs_creator_matches_trigger_type
 		// CHECK demands NULL for trigger_type='event'). On Postgres
 		// this routes through the admin pool because the runs_insert
@@ -177,7 +177,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	})
 
 	t.Run("CreateIfNotFiredSystem_FencesReplayPerEventTrigger", func(t *testing.T) {
-		// SKY-424: the (triggering_event_id, trigger_id) fence makes
+		// The (triggering_event_id, trigger_id) fence makes
 		// event-triggered auto-delegation exactly-once under the
 		// at-least-once router queue. A replayed event whose first run
 		// already committed must not insert a second run; two DISTINCT
@@ -250,7 +250,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	})
 
 	t.Run("Create_ManualRuns_NotFencedByNullTriggeringEvent", func(t *testing.T) {
-		// SKY-424: manual runs carry no triggering_event_id, so the
+		// Manual runs carry no triggering_event_id, so the
 		// partial fence index never applies — multiple manual runs of one
 		// task stay allowed. Pins that the fence didn't accidentally
 		// constrain the manual path.
@@ -286,7 +286,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// The fenced insert must refuse an empty TriggeringEventID or
 		// TriggerID rather than bind NULL and silently skip the fence —
 		// otherwise the method meant to enforce exactly-once would hand
-		// back an unfenced row (SKY-424).
+		// back an unfenced row.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "fence-guard")
@@ -860,7 +860,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("HasActiveAutoRunForEntity", func(t *testing.T) {
 		// Per-entity sibling of HasActiveForTask: any non-terminal
 		// trigger_type='event' run on any task that belongs to the
-		// entity. Manual delegations are excluded (SKY-189 design —
+		// entity. Manual delegations are excluded (by design —
 		// manual decoupled from the auto-queue gate); terminal runs
 		// don't count either.
 		store, orgID, _, seed := mk(t)

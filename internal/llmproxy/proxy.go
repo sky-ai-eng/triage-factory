@@ -33,13 +33,13 @@
 // translation. The proxy is built on httputil.ReverseProxy which
 // handles streaming responses (SSE / chunked) natively.
 //
-// # Out of scope (Phase 2 follow-up)
+// # Phase 2 (sigv4.go)
 //
-// SigV4 re-signing for the Bedrock AWS-access-key-triple path. That
-// case requires the proxy to re-sign request bodies with the real AWS
-// credentials before forwarding, using aws-sdk-go-v2's SignHTTP. It's
-// strictly more complex and gets its own ticket — Phase 1 is the
-// architectural validation.
+// SigV4 re-signing for the Bedrock AWS-access-key-triple path
+// (ProviderBedrockSigV4). The proxy buffers the request body, strips
+// the placeholder signature the sandbox SDK produced, and re-signs the
+// whole outgoing request with the org's real triple via aws-sdk-go-v2's
+// SignHTTP. See sigv4.go's file doc for the full flow.
 //
 // # Trust model on the local hop
 //
@@ -52,7 +52,7 @@
 // means it's our own run": that assumption (the original Phase 1
 // rationale) was false the moment two tenants' sandboxes shared the
 // host namespace, and it is the cross-tenant credential-abuse hole
-// SKY-395 closes.
+// this proxy closes.
 //
 // So the proxy authenticates the caller with a per-run secret. Config
 // carries IncomingToken — a fresh random value the caller generates per
@@ -71,8 +71,8 @@
 // provider key still lives only in the proxy (injected upstream by the
 // rewrite hook) and never enters any sandbox.
 //
-// Defense-in-depth: the network layer (per-sandbox egress allowlist,
-// SKY-395 Part B) aims to make a sibling proxy unreachable in the first
+// Defense-in-depth: the network layer (per-sandbox egress allowlist)
+// aims to make a sibling proxy unreachable in the first
 // place; this token makes it useless even if a packet gets through.
 // Empty IncomingToken disables the check — the loopback/test path and
 // any single-tenant direct usage where the local hop is already trusted.
@@ -91,11 +91,14 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 )
 
 // Provider distinguishes the auth-header shape the proxy injects.
-// More providers (Bedrock SigV4, Vertex) get added with their own
-// resigning logic in later phases.
+// Bearer-style providers live here; ProviderBedrockSigV4 (sigv4.go)
+// re-signs the whole request instead of rewriting one header. More
+// providers (Vertex) get added in later phases.
 type Provider string
 
 const (
@@ -115,9 +118,16 @@ type Config struct {
 	// Provider selects the auth-header injection style.
 	Provider Provider
 
-	// APIKey is the real credential the proxy injects upstream.
-	// Never appears in the agent subprocess's env.
+	// APIKey is the real credential the proxy injects upstream for the
+	// bearer-style providers (Anthropic, Bedrock bearer). Never appears
+	// in the agent subprocess's env. Ignored when Provider ==
+	// ProviderBedrockSigV4, whose credential is SigV4Credentials.
 	APIKey string
+
+	// SigV4Credentials is the real AWS access-key triple for the
+	// Bedrock SigV4 path. Required when Provider ==
+	// ProviderBedrockSigV4; ignored otherwise. See sigv4.go.
+	SigV4Credentials *SigV4Credentials
 
 	// Upstream is the absolute URL of the real LLM provider — e.g.
 	// "https://api.anthropic.com" or "https://bedrock-runtime.us-east-1.amazonaws.com".
@@ -153,7 +163,7 @@ type Config struct {
 	// presented value constant-time and returns 401 on mismatch (see
 	// the package doc's trust-model section).
 	//
-	// This is the fail-closed half of cross-tenant isolation (SKY-395):
+	// This is the fail-closed half of cross-tenant isolation:
 	// a sibling run that reaches this proxy over the shared host
 	// namespace holds a *different* token, so it cannot spend this run's
 	// credential. It is NOT a durable credential and does not violate
@@ -177,6 +187,9 @@ type Server struct {
 	// wrapper (tokenGate) when a per-run secret is configured.
 	handler      http.Handler
 	requestCount atomic.Int64
+	// signer re-signs outgoing requests for ProviderBedrockSigV4; nil
+	// for the bearer providers. Stateless and safe for concurrent use.
+	signer *v4.Signer
 
 	// listener is owned once Start has been called. nil until then.
 	listener net.Listener
@@ -196,12 +209,15 @@ type Server struct {
 func New(cfg Config) (*Server, error) {
 	switch cfg.Provider {
 	case ProviderAnthropic, ProviderBedrockBearer:
-		// supported
+		if cfg.APIKey == "" {
+			return nil, errors.New("llmproxy: APIKey is required")
+		}
+	case ProviderBedrockSigV4:
+		if err := cfg.SigV4Credentials.validate(); err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("llmproxy: unsupported provider %q", cfg.Provider)
-	}
-	if cfg.APIKey == "" {
-		return nil, errors.New("llmproxy: APIKey is required")
 	}
 	if cfg.Upstream == "" {
 		return nil, errors.New("llmproxy: Upstream is required")
@@ -247,13 +263,21 @@ func New(cfg Config) (*Server, error) {
 		// Default ErrorHandler logs to stderr and 502s. That's fine
 		// for Phase 1; upgrade observability comes later.
 	}
+	s.handler = s.proxy
+	// The SigV4 path needs the full body in hand before the reverse
+	// proxy runs (the signature covers the payload hash); the buffering
+	// middleware owns the 400/413 error paths the Rewrite hook doesn't
+	// have.
+	if cfg.Provider == ProviderBedrockSigV4 {
+		s.signer = v4.NewSigner()
+		s.handler = s.bufferSigV4Body(s.handler)
+	}
 	// When a per-run token is configured, gate every request on it
-	// before the reverse proxy runs (SKY-395 Part A). Empty token =
-	// no gate (the loopback/test path).
+	// before anything else runs — outermost, so an
+	// unauthenticated caller costs no body buffering either. Empty
+	// token = no gate (the loopback/test path).
 	if cfg.IncomingToken != "" {
-		s.handler = s.tokenGate(s.proxy)
-	} else {
-		s.handler = s.proxy
+		s.handler = s.tokenGate(s.handler)
 	}
 	return s, nil
 }
@@ -262,8 +286,8 @@ func New(cfg Config) (*Server, error) {
 // request must present Config.IncomingToken on the provider's
 // credential header (x-api-key for Anthropic, "Authorization: Bearer"
 // for Bedrock); a missing or mismatched token gets 401 and is never
-// forwarded upstream. This is the fail-closed guarantee of SKY-395
-// Part A: even if network isolation fails and a sibling sandbox reaches
+// forwarded upstream. This is the fail-closed guarantee of the token
+// gate: even if network isolation fails and a sibling sandbox reaches
 // this proxy, it can't spend the org's key without this run's secret.
 func (s *Server) tokenGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -293,6 +317,11 @@ func (s *Server) callerAuthorized(r *http.Request) bool {
 		// comparing. A header without the prefix won't match (TrimPrefix
 		// returns it unchanged, which then fails the compare).
 		presented = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	case ProviderBedrockSigV4:
+		// The per-run token is the placeholder access-key ID the sandbox
+		// SDK signed with; it rides in cleartext in the Credential=
+		// scope of the SigV4 Authorization header. See sigV4AccessKeyID.
+		presented = sigV4AccessKeyID(r.Header.Get("Authorization"))
 	}
 	return subtle.ConstantTimeCompare([]byte(presented), []byte(s.cfg.IncomingToken)) == 1
 }
@@ -355,8 +384,10 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 	pr.SetURL(s.upstreamURL)
 
 	// Shield the upstream exchange from the server's response-time close
-	// of the shared request body (see eofLatchedBody).
-	if pr.Out.Body != nil {
+	// of the shared request body (see eofLatchedBody). The SigV4 path
+	// is exempt: rewriteSigV4 replaces the body outright with a fresh
+	// in-memory reader, so there is no shared server-owned body to race.
+	if s.cfg.Provider != ProviderBedrockSigV4 && pr.Out.Body != nil {
 		pr.Out.Body = &eofLatchedBody{rc: pr.Out.Body}
 	}
 
@@ -364,6 +395,8 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 	// X-Forwarded-* headers (some misconfigured caller), drop them.
 	// We deliberately do not call pr.SetXForwarded() — the stdlib
 	// only adds these when explicitly invoked under the Rewrite API.
+	// For SigV4 this must precede signing so a deleted header can't be
+	// part of the signed set.
 	pr.Out.Header.Del("X-Forwarded-For")
 	pr.Out.Header.Del("X-Forwarded-Host")
 	pr.Out.Header.Del("X-Forwarded-Proto")
@@ -375,6 +408,8 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 		// The SDK already sets anthropic-version; we don't override.
 	case ProviderBedrockBearer:
 		pr.Out.Header.Set("Authorization", "Bearer "+s.cfg.APIKey)
+	case ProviderBedrockSigV4:
+		s.rewriteSigV4(pr)
 	}
 }
 

@@ -112,7 +112,7 @@ type RepoStore interface {
 
 	// --- Admin-pool variants (`...System`) ---
 	//
-	// Same SKY-296 pattern as EntityStore: routed through the admin
+	// Same pattern as EntityStore: routed through the admin
 	// pool in Postgres for system-service callers that have no JWT
 	// claims in scope. Consumers are the poller bootstrap (reads
 	// every configured repo for every org at server boot) and the

@@ -13,7 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// orgTemplateStore is the Postgres impl of db.OrgTemplateStore (SKY-381).
+// orgTemplateStore is the Postgres impl of db.OrgTemplateStore.
 //
 // # Pool split
 //

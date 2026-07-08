@@ -79,6 +79,7 @@ import {
 } from '../settings/orgConfig'
 import { connectJira, type JiraDeployment } from '../settings/jiraConnect'
 import { connectAnthropic } from '../settings/anthropicConnect'
+import { connectBedrock, bedrockPayloadFromForm } from '../settings/bedrockConnect'
 import {
   emptyTeamConfig,
   fetchTeamRepos,
@@ -115,6 +116,9 @@ export const initialWizardState = (): WizardState => ({
   tracker: 'none',
   anthropicKeySource: null,
   anthropicConnected: false,
+  claudeProvider: 'anthropic',
+  bedrockConnected: false,
+  bedrockStoredMethod: null,
   team: emptyTeamConfig(),
   teamLoaded: false,
   userIdentityConnected: false,
@@ -238,12 +242,21 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     // stored one.
     jiraDeployment: integrations.jiraConnected ? integrations.jiraDeployment : null,
     tracker: integrations.jiraConnected ? 'jira' : 'none',
-    // Claude credentials: a stored key resumes as BYOK (in either mode); multi
-    // is always BYOK-effective (no system-creds option); a fresh local org
-    // defaults to "system" (the local default), so the source step auto-resolves
-    // and a zero-config local setup uses the subscription/env path.
+    // Claude credentials: a stored credential (either provider) resumes as
+    // BYOK (in either mode); multi is always BYOK-effective (no system-creds
+    // option); a fresh local org defaults to "system" (the local default), so
+    // the source step auto-resolves and a zero-config local setup uses the
+    // subscription/env path. The provider radio resumes on whichever provider
+    // is stored — they're mutually exclusive server-side.
     anthropicConnected: org.has_anthropic_api_key,
-    anthropicKeySource: org.has_anthropic_api_key || !ctx.isLocal ? 'byok' : 'system',
+    anthropicKeySource:
+      org.has_anthropic_api_key || org.has_bedrock_credentials || !ctx.isLocal ? 'byok' : 'system',
+    claudeProvider: org.has_bedrock_credentials ? 'bedrock' : 'anthropic',
+    bedrockConnected: org.has_bedrock_credentials,
+    bedrockStoredMethod:
+      org.bedrock_auth_method === 'bearer' || org.bedrock_auth_method === 'access_keys'
+        ? org.bedrock_auth_method
+        : null,
   }
 }
 
@@ -1013,13 +1026,19 @@ const orgClaudeSourceStep: WizardStep = {
   visible: (s) => s.isLocal,
   isComplete: (s) => s.anthropicKeySource !== null,
   persist: async ({ state, patch }) => {
-    // Selecting "system" ensures no key is stored: POST an empty key to clear
-    // any prior BYOK key (idempotent when none is stored). "byok" defers the
-    // write to the key step.
+    // Selecting "system" ensures no credential is stored: POST an empty key to
+    // clear any prior BYOK key — the backend wipes the Bedrock set in the same
+    // call (system = no org-level LLM credential of any provider). Idempotent
+    // when nothing is stored. "byok" defers the write to the key step.
     if (state.anthropicKeySource === 'system') {
       const r = await connectAnthropic('')
       if (!r.ok) throw new Error(r.error)
-      patch({ anthropicConnected: false, org: { ...state.org, anthropic_api_key: '' } })
+      patch({
+        anthropicConnected: false,
+        bedrockConnected: false,
+        bedrockStoredMethod: null,
+        org: { ...state.org, anthropic_api_key: '' },
+      })
     }
   },
   collapsedSummary: (s) =>
@@ -1031,20 +1050,51 @@ const orgClaudeSourceStep: WizardStep = {
   render: (ctx) => <OrgClaudeSourceStep {...ctx} />,
 }
 
-// Step · Claude provider + key. Visible in multi always; in local only when BYOK
-// was chosen (so "system" hides it). Continue validates the pasted key via the
-// connectAnthropic endpoint and blocks advancing on failure (the error reddens
-// the field and shows in the host error line). Mandatory while visible: a run
-// can't execute without a credential, so isComplete requires a validated+stored
-// key — which blocks Finish in multi and local-BYOK until one is set. Mirrors the
+// bedrockFormError is the input-layer validation for the Bedrock credential
+// form, shared by the wizard step's validate and the Settings section's Save
+// gate so both surfaces block on the same rules (mirroring the backend's 422
+// shapes): region always required; the selected method's secrets required
+// unless a credential for that same method is already stored ("leave blank
+// to keep current" — switching methods always needs the new secrets).
+export function bedrockFormError(s: WizardState): string | null {
+  const f = s.org
+  if (f.bedrock_region.trim() === '') return 'Enter the AWS region (e.g. us-east-1).'
+  const keep = s.bedrockConnected && s.bedrockStoredMethod === f.bedrock_auth_method
+  if (f.bedrock_auth_method === 'bearer') {
+    if (f.bedrock_bearer_token.trim() === '' && !keep) {
+      return 'Paste your Bedrock API key to continue.'
+    }
+    return null
+  }
+  const id = f.aws_access_key_id.trim()
+  const secret = f.aws_secret_access_key.trim()
+  if ((id === '') !== (secret === '')) {
+    return 'Enter both the access key ID and the secret access key.'
+  }
+  if (id === '' && !keep) {
+    return 'Enter your AWS access key ID and secret access key.'
+  }
+  return null
+}
+
+// Step · Claude provider + credentials. Visible in multi always; in local only
+// when BYOK was chosen (so "system" hides it). Continue drives the selected
+// provider's validated connect endpoint (connectAnthropic / connectBedrock) and
+// blocks advancing on failure (the error reddens the fields and shows in the
+// host error line). Mandatory while visible: a run can't execute without a
+// credential, so isComplete requires a validated+stored credential for the
+// SELECTED provider — which blocks Finish in multi and local-BYOK until one is
+// set. The providers are mutually exclusive server-side, so a successful
+// connect flips the other provider's connected flag off. Mirrors the
 // org-jira-access persist shape.
 const orgClaudeKeyStep: WizardStep = {
   id: 'org-claude-key',
   section: 'org',
-  title: 'Anthropic API key',
+  title: 'Claude provider',
   visible: (s) => !s.isLocal || s.anthropicKeySource === 'byok',
-  isComplete: (s) => s.anthropicConnected,
+  isComplete: (s) => (s.claudeProvider === 'bedrock' ? s.bedrockConnected : s.anthropicConnected),
   validate: (s) => {
+    if (s.claudeProvider === 'bedrock') return bedrockFormError(s)
     // Already connected (resuming) with no new entry: valid — the stored key
     // stays ("leave blank to keep current").
     if (s.anthropicConnected && s.org.anthropic_api_key.trim() === '') return null
@@ -1053,15 +1103,44 @@ const orgClaudeKeyStep: WizardStep = {
       : null
   },
   persist: async ({ state, patch }) => {
+    if (state.claudeProvider === 'bedrock') {
+      const r = await connectBedrock(bedrockPayloadFromForm(state.org))
+      if (!r.ok) throw new Error(r.error)
+      patch({
+        bedrockConnected: true,
+        bedrockStoredMethod: state.org.bedrock_auth_method,
+        // The backend cleared any Anthropic key in the same call.
+        anthropicConnected: false,
+        org: {
+          ...state.org,
+          bedrock_bearer_token: '',
+          aws_access_key_id: '',
+          aws_secret_access_key: '',
+          aws_session_token: '',
+        },
+      })
+      return
+    }
     const typed = state.org.anthropic_api_key.trim()
     // Resuming with a stored key and no new entry: nothing to do — don't re-POST
     // an empty key, which would CLEAR the stored one.
     if (state.anthropicConnected && typed === '') return
     const r = await connectAnthropic(typed)
     if (!r.ok) throw new Error(r.error)
-    patch({ anthropicConnected: true, org: { ...state.org, anthropic_api_key: '' } })
+    patch({
+      anthropicConnected: true,
+      // The backend cleared any Bedrock set in the same call.
+      bedrockConnected: false,
+      bedrockStoredMethod: null,
+      org: { ...state.org, anthropic_api_key: '' },
+    })
   },
-  collapsedSummary: (s) => (s.anthropicConnected ? 'Connected · Anthropic' : 'Not connected'),
+  collapsedSummary: (s) =>
+    s.bedrockConnected
+      ? 'Connected · Amazon Bedrock'
+      : s.anthropicConnected
+        ? 'Connected · Anthropic'
+        : 'Not connected',
   render: (ctx) => <OrgClaudeKeyStep {...ctx} />,
 }
 
@@ -1294,10 +1373,11 @@ export async function loadJiraUserAccess(ctx: LoadContext): Promise<Partial<Wiza
 // Step · Your Jira access (User section, shown only when Jira is the connected
 // tracker). The Jira sibling of the GitHub identity step, with the structural
 // difference that the token is STORED (Jira's user level holds access, not just
-// identity). DC = paste-a-PAT — no Connect button yet (Cloud OAuth is a later
-// ticket). The PAT path is this step's Continue, which validates the token,
-// stores it, and derives the account. Mandatory while visible: the wizard can't
-// finish a Jira-tracked workspace until the user has bound their own access.
+// identity). DC = paste-a-PAT; Cloud orgs with an Atlassian OAuth app configured
+// get a one-click Connect button instead (see JiraUserAccessStep.tsx). The PAT
+// path is this step's Continue, which validates the token, stores it, and
+// derives the account. Mandatory while visible: the wizard can't finish a
+// Jira-tracked workspace until the user has bound their own access.
 const jiraUserAccessStep: WizardStep = {
   id: 'user-jira-access',
   section: 'user',

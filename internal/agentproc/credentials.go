@@ -35,9 +35,9 @@ type SystemSecretGetter interface {
 // resume, scorer, classifier, profiler, curator) can resolve per-org LLM
 // credentials without a request JWT. These run claims-free, so they MUST
 // use the system door, not the RLS-checked Get — otherwise the multi-mode
-// nil-Secrets error just trades for an RLS denial (SKY-385/SKY-389).
+// nil-Secrets error just trades for an RLS denial.
 //
-// Invariant (SKY-389): the orgID passed to Get always originates from the
+// Invariant: the orgID passed to Get always originates from the
 // run / entity / task, never user input — so the unauthenticated GetSystem
 // read is safe.
 func NewSystemSecretsReader(g SystemSecretGetter) SecretsReader {
@@ -86,6 +86,16 @@ const (
 	// application inference profile ARN). Maps to ANTHROPIC_MODEL
 	// per the Claude Code env var contract.
 	secretBedrockModelID = "bedrock_model_id"
+
+	// Bedrock endpoint override (both auth paths). Maps to
+	// ANTHROPIC_BEDROCK_BASE_URL per the Claude Code env var contract.
+	// Unset means the standard regional endpoint
+	// (https://bedrock-runtime.<aws_region>.amazonaws.com); orgs on a
+	// VPC interface endpoint (PrivateLink), GovCloud, or the China
+	// partition set the full https URL of their endpoint here. The
+	// SigV4 signing scope still comes from aws_region — the override
+	// changes only the host traffic is sent (and signed) for.
+	secretBedrockBaseURL = "bedrock_base_url"
 )
 
 // credentialEnvKeys is the *credential-precedence* guard — NOT an
@@ -106,12 +116,12 @@ const (
 // injects the real key server-side) — separate ticket, post-D10.
 //
 // It does NOT hide host-process env or filesystem from the agent
-// in pre-sandbox multi mode. That state is unsafe to ship; SKY-254
-// (D10 gVisor) is the gate.
+// in pre-sandbox multi mode. That state is unsafe to ship; D10 gVisor
+// is the gate.
 //
 // # Where the strict allowlist actually lives
 //
-// SKY-254 builds the OCI bundle's process.env from scratch — see
+// The D10 gVisor sandbox builds the OCI bundle's process.env from scratch — see
 // the docs/specs/sky-254-runsc-validation/ probe, which curated
 // process.env to {PATH, TERM, AGENT_CURATED_KEY} and verified via
 // `env` inside the sandbox that nothing else leaked through. That
@@ -301,6 +311,13 @@ func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string
 		if modelID != "" {
 			env["ANTHROPIC_MODEL"] = modelID
 		}
+		baseURL, err := secrets.Get(ctx, orgID, secretBedrockBaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("resolve bedrock_base_url: %w", err)
+		}
+		if baseURL != "" {
+			env["ANTHROPIC_BEDROCK_BASE_URL"] = baseURL
+		}
 		return env, nil
 	}
 
@@ -346,6 +363,13 @@ func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string
 		}
 		if modelID != "" {
 			env["ANTHROPIC_MODEL"] = modelID
+		}
+		baseURL, err := secrets.Get(ctx, orgID, secretBedrockBaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("resolve bedrock_base_url: %w", err)
+		}
+		if baseURL != "" {
+			env["ANTHROPIC_BEDROCK_BASE_URL"] = baseURL
 		}
 		return env, nil
 	}

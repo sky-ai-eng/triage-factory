@@ -198,7 +198,7 @@ func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 		}
 		// Manual claim should stamp the sentinel rationale so the
 		// entities panel surfaces "Manually assigned by user" rather
-		// than the empty-fallback. SKY-238.
+		// than the empty-fallback.
 		if got.ClassificationRationale != manualAssignmentMessage {
 			t.Errorf("entity %s rationale = %q, want %q", e.ID, got.ClassificationRationale, manualAssignmentMessage)
 		}

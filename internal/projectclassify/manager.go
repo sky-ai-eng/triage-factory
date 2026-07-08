@@ -26,7 +26,7 @@ import (
 type Manager struct {
 	entities db.EntityStore
 	projects db.ProjectStore
-	secrets  agentproc.SecretsReader // per-org LLM-credential reader threaded into each Runner's Haiku calls (nil in local; system-door in multi). SKY-389.
+	secrets  agentproc.SecretsReader // per-org LLM-credential reader threaded into each Runner's Haiku calls (nil in local; system-door in multi).
 	recorder *systemllm.Recorder     // captures per-vote LLM cost + tokens into system_llm_runs (TFAC-451)
 	limiter  *syslimit.Limiter       // shared system-job sandbox cap, injected into every per-org Runner.
 

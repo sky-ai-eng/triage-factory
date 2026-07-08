@@ -267,7 +267,7 @@ func TestCurator_Postgres_Multimode_SharedReadOnlyWorktree(t *testing.T) {
 		}
 	}
 	// Exactly one linked worktree backs the bare even with two live readers.
-	// LocalDefaultOrgID (not orgA): the bare cache is org-global until SKY-406;
+	// LocalDefaultOrgID (not orgA): the bare cache is org-global for now;
 	// the org-scoped shared worktree is what isolates tenants, not the bare.
 	if n := linkedWorktreeCount(t, paths.BareCacheDir(runmode.LocalDefaultOrgID, owner, repo)); n != 1 {
 		t.Errorf("linked worktrees against the bare = %d, want 1 (single shared checkout for 2 sessions)", n)
@@ -310,7 +310,7 @@ func TestCurator_Postgres_Multimode_BoundedEvictableCache(t *testing.T) {
 	coldRelease()
 
 	// LocalDefaultOrgID, not orgCold/orgHot: the bare cache is still org-global
-	// (repoDir resolves the sentinel org until SKY-406), so both orgs' bares
+	// (repoDir resolves the sentinel org for now), so both orgs' bares
 	// live under the one <state-root>/repos tree. The shared *worktree* each
 	// session mounts is org-scoped — that's the tenant-isolation boundary, not
 	// the bare — which is why eviction here keys on the global bare path.

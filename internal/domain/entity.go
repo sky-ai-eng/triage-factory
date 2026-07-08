@@ -31,16 +31,16 @@ func SlackSourceID(channel, threadTS string) string {
 type Entity struct {
 	ID           string  `json:"id"`
 	Source       string  `json:"source"`    // "github" | "jira" | "linear" | "slack"
-	SourceID     string  `json:"source_id"` // "owner/repo#18", "SKY-123", etc.
+	SourceID     string  `json:"source_id"` // "owner/repo#18", a Jira issue key, etc.
 	Kind         string  `json:"kind"`      // "pr" | "issue" | "epic" | "message"
 	Title        string  `json:"title"`
 	URL          string  `json:"url"`
 	SnapshotJSON string  `json:"snapshot_json"`        // opaque poller state — diff scope only, kept small
 	Description  string  `json:"description"`          // flattened issue/PR body; NOT diffed
 	State        string  `json:"state"`                // "active" | "closed"
-	ProjectID    *string `json:"project_id,omitempty"` // SKY-215; nil = unassigned. FK ON DELETE SET NULL.
+	ProjectID    *string `json:"project_id,omitempty"` // nil = unassigned. FK ON DELETE SET NULL.
 	// ClassificationRationale is the highest-scoring project's one-sentence
-	// rationale from the SKY-220 classifier, regardless of whether the
+	// rationale from the classifier, regardless of whether the
 	// score crossed threshold. Empty until the classifier has run for
 	// this entity. Useful for surfacing "why is this unassigned?" in UI.
 	ClassificationRationale string     `json:"classification_rationale,omitempty"`

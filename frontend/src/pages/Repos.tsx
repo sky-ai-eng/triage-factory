@@ -8,9 +8,9 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
 import { readError } from '../lib/api'
 
-// Repo tracking is per-team (SKY-375); writes go to the team's repos
+// Repo tracking is per-team; writes go to the team's repos
 // endpoint. This page is pre-team-context, so it targets the org's
-// default team — SKY-294 will thread the selected team here.
+// default team — a future change will thread the selected team here.
 // The default team's repo *tracking* set — read to seed the selection and
 // written on Save/Re-profile. This must NOT be sourced from GET /api/repos
 // (the org-wide repo_profiles union): in a multi-team org that union

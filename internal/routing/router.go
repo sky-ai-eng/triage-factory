@@ -35,26 +35,26 @@ type Delegator interface {
 //  1. Records the event (durable audit log)
 //  2. Handles entity lifecycle (merged/closed → close entity + all tasks)
 //  3. Guards against closed entities (no task creation on dead PRs)
-//  4. Matches event_handlers (rules + triggers, unified post-SKY-259) via
+//  4. Matches event_handlers (rules + triggers, unified) via
 //     typed predicates — one store query, kind-discriminated handling
 //  5. Dedup-creates or bumps tasks
 //  6. Enqueues AI scoring
 //  7. Auto-delegates on matching triggers — fires if the entity is idle,
 //     enqueues onto pending_firings if the entity already has an active
-//     auto run or earlier queued firings (SKY-189).
+//     auto run or earlier queued firings.
 //  8. Runs inline close checks for the event type
 type Router struct {
 	prompts      dbpkg.PromptStore
 	blueprints   dbpkg.BlueprintStore // resolves a trigger's blueprint → first step prompt for the per-(entity, prompt) breaker
 	handlers     dbpkg.EventHandlerStore
 	agents       dbpkg.AgentStore
-	teamAgents   dbpkg.TeamAgentStore        // SKY-261: read team_agents.enabled before auto-firing triggers
-	users        dbpkg.UsersStore            // SKY-270: read local user's host-scoped Jira identity for inline close gates
-	tasks        dbpkg.TaskStore             // SKY-283: task lifecycle, dedup, claims, breaker
-	agentRuns    dbpkg.AgentRunStore         // SKY-285: lookup active runs for the task-close cancel cascade
-	entities     dbpkg.EntityStore           // SKY-284: closed-entity guard + entity-terminating close cascade
-	firings      dbpkg.PendingFiringsStore   // SKY-289: per-entity firing queue + active-run gate
-	events       dbpkg.EventStore            // SKY-305: admin-pool RecordSystem + GetMetadataSystem for the background subscriber
+	teamAgents   dbpkg.TeamAgentStore        // read team_agents.enabled before auto-firing triggers
+	users        dbpkg.UsersStore            // read local user's host-scoped Jira identity for inline close gates
+	tasks        dbpkg.TaskStore             // task lifecycle, dedup, claims, breaker
+	agentRuns    dbpkg.AgentRunStore         // lookup active runs for the task-close cancel cascade
+	entities     dbpkg.EntityStore           // closed-entity guard + entity-terminating close cascade
+	firings      dbpkg.PendingFiringsStore   // per-entity firing queue + active-run gate
+	events       dbpkg.EventStore            // admin-pool RecordSystem + GetMetadataSystem for the background subscriber
 	eventQueue   dbpkg.EventQueueStore       // durable router queue the drain worker claims from; set post-construction via SetEventQueue (nil → worker is a no-op)
 	orgs         dbpkg.OrgsStore             // per-org iteration for the drain sweeper; required (RunDrainSweeper dereferences it directly)
 	teams        dbpkg.TeamsStore            // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
@@ -82,16 +82,16 @@ type Router struct {
 }
 
 // NewRouter creates a Router. teamAgents is nil-safe — callers wired
-// before SKY-261 D-Claims can pass nil; the bot-disabled-team check
-// degrades to "always enabled" in that case (the pre-SKY-261
-// behavior). users is nil-safe too — the SKY-270 inline-close gate
+// before that behavior existed can pass nil; the bot-disabled-team check
+// degrades to "always enabled" in that case (the prior
+// behavior). users is nil-safe too — the inline-close gate
 // degrades to "treat every reassignment as away-from-me" when missing,
 // which over-closes (acceptable: user can reopen via the next poll).
 // orgs is required — the drain sweeper (RunDrainSweeper) iterates it per
 // org and dereferences it directly, so a nil orgs is a startup wiring bug
 // that panics there, not a degraded mode.
-// teamRepos is nil-safe — the SKY-375 team↔repo gate is skipped (no
-// handler is dropped) when missing, matching pre-SKY-375 behavior where
+// teamRepos is nil-safe — the team↔repo gate is skipped (no
+// handler is dropped) when missing, matching prior behavior where
 // repos were org-global and every team implicitly tracked them all.
 // jiraRules is nil-safe the same way — the team↔project gate is
 // skipped when missing. githubGroups is nil-safe — review_requested

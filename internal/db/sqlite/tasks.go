@@ -22,7 +22,7 @@ import (
 // mode it's in.
 //
 // The constructor takes two queryers for signature parity with the
-// Postgres impl (SKY-297), but SQLite has one connection — both
+// Postgres impl, but SQLite has one connection — both
 // arguments collapse onto the same queryer. The `...System` admin-
 // pool variants are thin wrappers around the non-System methods.
 type taskStore struct{ q queryer }
@@ -79,7 +79,7 @@ func (s *taskStore) Queued(ctx context.Context, orgID string, teamIDs []string) 
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	// SKY-261 B+ derived filter: queue = status='queued' + both claim
+	// Derived filter: queue = status='queued' + both claim
 	// cols NULL + not future-snoozed.
 	teamClause, args := sqliteTaskTeamFilter(teamIDs, nil)
 	return queryTasksCtx(ctx, s.q, `
@@ -104,10 +104,10 @@ func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID string, te
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	// SKY-330: drops the snooze-window filter so the Board's "show
+	// Drops the snooze-window filter so the Board's "show
 	// snoozed" toggle surfaces deferred entries. Status='queued' +
-	// status='snoozed' both qualify; SKY-261 enforces snoozed↔unclaimed
-	// so the claim guards are still safe to apply.
+	// status='snoozed' both qualify; the derived queue filter enforces
+	// snoozed↔unclaimed so the claim guards are still safe to apply.
 	//
 	// Ordering puts snoozed rows at the tail (the "wakes Mar 5"
 	// badge cluster) regardless of priority so a high-priority but
@@ -138,9 +138,9 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status string, teamIDs 
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	// SKY-261 B+: 'claimed' and 'delegated' aren't real lifecycle
+	// 'claimed' and 'delegated' aren't real lifecycle
 	// values — they're derived filters on the claim columns.
-	// SKY-330 added in_progress + in_review as first-class statuses,
+	// in_progress + in_review were added as first-class statuses,
 	// so the "claimed" derivation now means specifically "any claim
 	// (user or bot) at status='queued'." Status='queued' avoids
 	// double-rendering once a task advances to in_progress / in_review
@@ -170,7 +170,7 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status string, teamIDs 
 			ORDER BY COALESCE(t.priority_score, 0.5) DESC
 		`, args...)
 	case "done", "dismissed":
-		// SKY-330: cap the Done column at the last 7 days so the
+		// Cap the Done column at the last 7 days so the
 		// board doesn't accumulate an unbounded history. closed_at
 		// is now populated by every close path — Close(),
 		// RecordSwipe (complete/dismiss), spawner auto-close — so
@@ -212,7 +212,7 @@ func (s *taskStore) FindActiveByEntityAndType(ctx context.Context, orgID, entity
 }
 
 // FindActiveByEntityAndTypeSystem mirrors FindActiveByEntityAndType.
-// SKY-297: the tracker consumes this through the admin pool in
+// The tracker consumes this through the admin pool in
 // Postgres; SQLite has one connection, so this delegates straight
 // through with the same assertLocalOrg gate.
 func (s *taskStore) FindActiveByEntityAndTypeSystem(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error) {

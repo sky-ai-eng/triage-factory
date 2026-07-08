@@ -141,7 +141,7 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 }
 
 func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]domain.FactoryActiveRun, error) {
-	// memory_missing derivation: SKY-204. The agent has not produced
+	// memory_missing derivation: the agent has not produced
 	// its memory file iff no run_memory row exists, OR the row's
 	// agent_content is NULL/whitespace. BTRIM with the whitespace set
 	// collapses tabs, newlines, and carriage returns onto the same
@@ -298,7 +298,7 @@ const pgFactoryEntitySelectColumns = `
 // team_github_repos_select and jira_rules_select policies already
 // constrain visible rows to the viewer's team memberships, so each EXISTS
 // auto-scopes to the viewer's teams with no explicit team_id — the same
-// RLS-does-the-scoping pattern ListActiveJiraTeamScoped (SKY-366) uses
+// RLS-does-the-scoping pattern ListActiveJiraTeamScoped uses
 // for the Jira discovery deck. The teams join binds org (via e.org_id) as
 // defense-in-depth so the filter still holds on the admin pool where RLS
 // is bypassed: team_github_repos and jira_project_status_rules carry no
@@ -308,8 +308,8 @@ const pgFactoryEntitySelectColumns = `
 // '/' yields the owner, split_part on '/' then '#' yields the repo.
 // Matching is case-insensitive on both axes, mirroring TracksRepoSystem
 // (GitHub identifiers are case-insensitive). Jira keys are hyphen-free,
-// so split_part(source_id, '-', 1) is the project key ("SKY" in
-// "SKY-123"), matching jiraTeamProjectMembershipExists.
+// so split_part(source_id, '-', 1) is the project key (e.g. "PROJ" in
+// "PROJ-123"), matching jiraTeamProjectMembershipExists.
 
 // factoryGitHubRepoTrackedExists scopes a github entities row (alias e)
 // to the tracked repos of the viewer's teams.

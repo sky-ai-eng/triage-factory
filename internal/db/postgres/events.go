@@ -11,7 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// eventStore is the Postgres impl of db.EventStore (SKY-305). SQL is
+// eventStore is the Postgres impl of db.EventStore. SQL is
 // written fresh against D3's schema: $N placeholders, JSONB cast on
 // metadata_json, explicit org_id bind (the column is NOT NULL with
 // no default), and org_id in every WHERE clause as defense in depth

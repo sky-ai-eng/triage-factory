@@ -112,7 +112,7 @@ func (s *requestSink) OnMessage(msg *domain.AgentMessage) error {
 	}
 	// Per-message synthetic-claims wrap — each row attributes to the
 	// requesting user. Short-lived tx (one INSERT) so the long-running
-	// claude subprocess never holds a tx open. See SKY-298.
+	// claude subprocess never holds a tx open.
 	ctx := context.Background()
 	var id int64
 	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, s.orgID, s.creatorUserID, func(ts db.TxStores) error {

@@ -427,8 +427,6 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 //     and tf.current_user_id() supplies the right value so the
 //     RLS predicate (creator_user_id = tf.current_user_id())
 //     passes.
-//
-// SKY-285 review findings #5 + #6.
 func TestAgentRunStore_Postgres_Create_UnderAppPoolRLS(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -530,7 +528,7 @@ func TestAgentRunStore_Postgres_Create_UnderAppPoolRLS(t *testing.T) {
 }
 
 // TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims
-// pins the routing the SKY-299 delegate spawner uses for manual-run
+// pins the routing the delegate spawner uses for manual-run
 // bookkeeping: lifecycle writes (Complete, MarkCancelledIfActive,
 // MarkResuming) wrapped in SyntheticClaimsWithTx must pass RLS under
 // tf_app and land the expected status. Mirrors the spawner's per-call-site
@@ -545,7 +543,7 @@ func TestAgentRunStore_Postgres_Create_UnderAppPoolRLS(t *testing.T) {
 // The admin-pool System variants are already pgtested via the
 // conformance suite. This test specifically exercises the app-pool
 // arm under realistic RLS — the only way the manual-routing path
-// can succeed in multi-mode without SKY-299's tx wrap is if the
+// can succeed in multi-mode without the tx wrap is if the
 // row's creator_user_id matches tf.current_user_id() under the
 // claims set by WithTx.
 func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.T) {

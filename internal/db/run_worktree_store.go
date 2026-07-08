@@ -89,7 +89,7 @@ type RunWorktreeStore interface {
 	// pool only; the only caller is the delegate goroutine.
 	DeleteByPathSystem(ctx context.Context, orgID, runID, path string) error
 
-	// --- Admin-pool variants for the cmd/exec event-triggered branch (SKY-302) ---
+	// --- Admin-pool variants for the cmd/exec event-triggered branch ---
 	//
 	// `triagefactory exec workspace add` invoked by an event-triggered
 	// agent run has no user identity to wrap synthetic claims around,

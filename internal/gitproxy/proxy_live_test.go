@@ -189,7 +189,7 @@ func TestLive_GitCloneThroughProxy(t *testing.T) {
 	// Bind on the default loopback address — Start("") below resolves
 	// to 127.0.0.1:0. The future sandbox-veth case (binding to the
 	// host-side veth IP) requires AllowNonLoopback=true, but that's
-	// wired up at SKY-254 integration time; for the live-test path
+	// wired up at sandbox integration time; for the live-test path
 	// here, loopback is sufficient and avoids needing routable
 	// interface coordination.
 	srv, err := gitproxy.New(gitproxy.Config{

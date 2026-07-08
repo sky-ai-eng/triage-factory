@@ -20,7 +20,7 @@ func reapOrphans(ctx context.Context) error {
 //
 // Called from reapOrphansImpl on Linux (after netns cleanup) and
 // could be called from a non-Linux no-op Wrap path in the future.
-// In SKY-254 it only runs on Linux because reapOrphansImpl is
+// It only runs on Linux because reapOrphansImpl is
 // a no-op on other platforms (see reaper_other.go).
 func reapBundleOrphans(_ context.Context) error {
 	entries, err := os.ReadDir(os.TempDir())

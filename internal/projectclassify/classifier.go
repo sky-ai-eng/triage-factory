@@ -1,5 +1,5 @@
 // Package projectclassify decides which project (if any) a newly-
-// discovered entity belongs to. SKY-220.
+// discovered entity belongs to.
 //
 // Two-stage design:
 //
@@ -112,7 +112,7 @@ type Vote struct {
 // tenant in multi-mode would mean a mis-routed Runner; the Manager keys
 // runners by org so that can't happen. r.secrets is the per-org
 // LLM-credential reader read off the receiver (nil in local → ambient
-// subscription; system-door reader in multi). SKY-389.
+// subscription; system-door reader in multi).
 func (r *Runner) classify(ctx context.Context, projects []domain.Project, entity domain.Entity) (*string, []Vote) {
 	if len(projects) == 0 {
 		return nil, nil
@@ -198,7 +198,7 @@ func mergeStages(stage1, stage2 []Vote) []Vote {
 // pickWinner returns the highest-scoring above-threshold project_id,
 // or nil if none qualify. Ties resolve to first-returned (slice order
 // == iteration order from db.ListProjects, which is alphabetical by
-// name). Per the SKY-220 spec, a tie-breaking heuristic is out of
+// name). A tie-breaking heuristic is out of
 // scope for v1.
 func pickWinner(votes []Vote) *string {
 	bestScore := -1

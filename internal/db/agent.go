@@ -12,7 +12,7 @@ import (
 // when run.TriggeringEventID or run.TriggerID is empty. Both bind to SQL
 // NULL, which the runs_event_trigger_fence partial unique index treats as
 // distinct — the fence would silently not engage and the method's
-// exactly-once contract would be lost without a trace (SKY-424). The event
+// exactly-once contract would be lost without a trace. The event
 // path always supplies both (the router threads the event id + the matched
 // handler id), so an empty value is a programming error, surfaced loud
 // rather than degrading to an unfenced insert.
@@ -33,7 +33,7 @@ var ErrFenceRequiresEventAndTrigger = errors.New("db: CreateIfNotFiredSystem req
 // lifecycle.
 //
 // The MemoryMissing field returned by Get and ListForTask is
-// derived from a LEFT JOIN to run_memory (SKY-204) rather than read
+// derived from a LEFT JOIN to run_memory rather than read
 // off a column on runs. The JOIN keeps the projection honest by
 // construction — a denormalized column drifted from ground truth
 // whenever a memory row was written outside the spawner's gate.
@@ -53,9 +53,9 @@ type AgentRunStore interface {
 
 	// CreateIfNotFiredSystem inserts an event-triggered run fenced on
 	// (triggering_event_id, trigger_id) by the runs_event_trigger_fence
-	// partial unique index (SKY-424). Returns inserted=false (no error)
+	// partial unique index. Returns inserted=false (no error)
 	// when a run for this (event, trigger) already committed — the
-	// at-least-once router queue (SKY-414) replayed an event whose first
+	// at-least-once router queue replayed an event whose first
 	// auto-delegation already happened. The run insert is the crash-
 	// consistent commit point: fence row exists iff run exists, so a crash
 	// after the run commits replays into a clean skip and a crash before it
@@ -114,7 +114,7 @@ type AgentRunStore interface {
 
 	// SetSession stores the Claude Code session_id captured from
 	// the agent's init event. Persisted mid-run, before any
-	// terminal state, so the write-gate retry loop (SKY-141) can
+	// terminal state, so the write-gate retry loop can
 	// resume a run whose initial invocation failed the memory
 	// check.
 	SetSession(ctx context.Context, orgID, runID, sessionID string) error
@@ -222,7 +222,7 @@ type AgentRunStore interface {
 
 	// HasActiveAutoRunForEntity returns true if any task on the
 	// entity has a non-terminal run with trigger_type='event'.
-	// Manual delegations are intentionally excluded per SKY-189
+	// Manual delegations are intentionally excluded
 	// (manual decoupled from the queue). Used by the router's
 	// per-entity firing gate; sweeper uses the same predicate to
 	// skip entities that wouldn't drain anyway.

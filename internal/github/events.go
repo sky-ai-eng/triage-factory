@@ -21,11 +21,18 @@ type UserRepo struct {
 }
 
 // ListUserRepos returns all repositories the authenticated user has access to,
-// sorted by most recently pushed. Paginates until all repos are fetched.
+// sorted by most recently pushed. Paginates until all repos are fetched, or
+// maxFetchPages is reached (TFAC-571) — truncation logs a WARN rather than
+// silently returning a partial list.
 func (c *Client) ListUserRepos(ctx context.Context) ([]UserRepo, error) {
 	var all []UserRepo
 
 	for page := 1; ; page++ {
+		if page > maxFetchPages {
+			githubLog.Warn("user repos list truncated at page cap; some repos may be missing",
+				"resource", "user/repos", "page_cap", maxFetchPages)
+			break
+		}
 		path := fmt.Sprintf("/user/repos?sort=pushed&direction=desc&per_page=100&page=%d", page)
 		data, err := c.Get(ctx, path)
 		if err != nil {
@@ -51,11 +58,19 @@ func (c *Client) ListUserRepos(ctx context.Context) ([]UserRepo, error) {
 // installation access token — a PAT gets 403 ("You must authenticate with an
 // installation access token…"), so only call it on an App-issued client. The
 // poller uses the result to map each configured repo onto the installation
-// whose token can reach it. Paginates until all repos are fetched.
+// whose token can reach it. Paginates until all repos are fetched, or
+// maxFetchPages is reached (TFAC-571) — an installation grant beyond 1,000
+// repos truncates with a logged WARN rather than silently under-covering the
+// poll's tracked-repo intersection.
 func (c *Client) ListInstallationRepos(ctx context.Context) ([]UserRepo, error) {
 	var all []UserRepo
 
 	for page := 1; ; page++ {
+		if page > maxFetchPages {
+			githubLog.Warn("installation repos list truncated at page cap; some repos may be missing from the poll's tracked-repo intersection",
+				"resource", "installation/repositories", "page_cap", maxFetchPages)
+			break
+		}
 		path := fmt.Sprintf("/installation/repositories?per_page=100&page=%d", page)
 		data, err := c.Get(ctx, path)
 		if err != nil {
@@ -84,7 +99,7 @@ func (c *Client) ListInstallationRepos(ctx context.Context) ([]UserRepo, error) 
 
 // CheckRepoAccess probes GET /repos/{owner}/{repo} to decide whether this
 // client's credential can reach a single repo. It is the per-repo primitive
-// behind the write-time reachability fan-out (SKY-409): instead of
+// behind the write-time reachability fan-out: instead of
 // enumerating the whole org to validate a selection, the gate checks only the
 // selected slugs, bounded by selection size rather than org size.
 //

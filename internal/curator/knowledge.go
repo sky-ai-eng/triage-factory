@@ -1,6 +1,6 @@
 // Package curator owns the per-project long-lived Claude Code
 // session that turns a project's name + knowledge files into chat-
-// shaped help. SKY-216.
+// shaped help.
 //
 // One Curator instance per process. Each project gets its own
 // goroutine + cancel handle on first SendMessage, so cross-project
@@ -21,7 +21,7 @@ import (
 // mode/org-aware state root: ~/.triagefactory/projects in local mode and
 // <state-root>/orgs/<orgID>/projects in multi mode. Single source of
 // truth for the per-project working-dir layout — both KnowledgeDir below
-// and the kbwatcher derive paths from here (SKY-402).
+// and the kbwatcher derive paths from here.
 //
 // It pre-flights paths.StateRootErr so a missing $HOME surfaces as the
 // actionable error every caller already handles, rather than letting the
@@ -44,8 +44,8 @@ func ProjectsRoot(orgID string) (string, error) {
 // orgID is the project's owning tenant. In multi mode it inserts the
 // per-org subtree so two tenants' projects never collide on disk; in
 // local mode (or when orgID is the local-default sentinel) the org
-// segment is stripped and the layout is byte-for-byte what it was before
-// SKY-402.
+// segment is stripped and the layout is byte-for-byte what it was
+// before.
 func KnowledgeDir(orgID, projectID string) (string, error) {
 	if projectID == "" {
 		return "", errors.New("project id is required")

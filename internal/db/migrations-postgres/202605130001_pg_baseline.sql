@@ -3,7 +3,7 @@
 --
 -- This file is mechanically regenerated from `pg_dump --schema-only -n public
 -- -n tf` of all 14 prior Postgres migrations applied to a fresh supabase
--- testcontainer. It collapses the SKY-247 D3 + SKY-246 D2 + SKY-249 D6/D7/D9
+-- testcontainer. It collapses the prior multi-milestone
 -- migration history into a single fresh-install baseline.
 --
 -- Brick policy: pre-baseline Postgres installs are refused at boot. (No such
@@ -447,7 +447,7 @@ $$;
 --
 
 -- The cross-team union read behind team_github_repos -> repo_profiles
--- reconciliation (SKY-375). repo_profiles is the org-wide UNION of every
+-- reconciliation. repo_profiles is the org-wide UNION of every
 -- team's tracked repos, but the team_github_repos SELECT policy is
 -- team-membership-scoped, so a team admin's app-pool tx can't see sibling
 -- teams' rows. This SECURITY DEFINER helper bypasses that per-team SELECT
@@ -1836,14 +1836,14 @@ CREATE TABLE public.users (
 -- Name: user_github_identities; Type: TABLE; Schema: public; Owner: -
 --
 
--- Host-scoped GitHub identity bindings (SKY-396). Replaces the single
+-- Host-scoped GitHub identity bindings. Replaces the single
 -- users.github_username column: one human can hold a different login on each
 -- GitHub host (github.com for one org, a corp GHES for another), so the
 -- natural key is (user_id, github_base_url), not a lone column. For the first
 -- self-deploy (one org, one host) this is exactly one row per user.
 --
 -- source records HOW the binding was captured ('pat' | 'connect_oauth' |
--- 'scim' | 'login_claim') — load-bearing for SKY-271's "verified against the
+-- 'scim' | 'login_claim') — load-bearing for the "verified against the
 -- org's host, never typed-unverified" integrity rule. verified_at timestamps
 -- the last authenticated /user confirmation against the host — the hook for
 -- future drift re-checks. It is deliberately nullable: NULL is a meaningful
@@ -1851,7 +1851,7 @@ CREATE TABLE public.users (
 -- sync (source='scim') would write when it learns a login from the directory
 -- without an authenticated round-trip to the host. Today's writers (pat,
 -- login_claim) always stamp it. An absent row is a durable, supported state
--- (the NULL-degrades-gracefully contract from SKY-264).
+-- (the NULL-degrades-gracefully contract).
 CREATE TABLE public.user_github_identities (
     user_id uuid NOT NULL,
     github_base_url text NOT NULL,
@@ -1868,7 +1868,7 @@ CREATE TABLE public.user_github_identities (
 -- Name: user_jira_identities; Type: TABLE; Schema: public; Owner: -
 --
 
--- Host-scoped Jira identity bindings (SKY-397). The Jira sibling of
+-- Host-scoped Jira identity bindings. The Jira sibling of
 -- user_github_identities: it replaces the single-valued users.jira_account_id
 -- / users.jira_display_name columns. One human can hold a different Jira
 -- account on each Jira site (a Cloud site for one org, a Server/DC host for
@@ -1877,7 +1877,7 @@ CREATE TABLE public.user_github_identities (
 -- user.
 --
 -- The access layer already keys per-(user, host): the per-user Jira PAT is
--- custodied as "jira_token/<host>" (SKY-442). This table makes IDENTITY
+-- custodied as "jira_token/<host>". This table makes IDENTITY
 -- symmetric with that access — both on the same canonical host — so a second
 -- Jira site can't overwrite the first's identity the way the single column did.
 --
@@ -1887,8 +1887,7 @@ CREATE TABLE public.user_github_identities (
 -- today (DC paste-a-PAT); Cloud OAuth and SCIM are later tickets. verified_at
 -- timestamps the last authenticated /myself confirmation (nullable for a
 -- future SCIM directory sync; today's pat writer always stamps it). An absent
--- row is a durable, supported state (the NULL-degrades-gracefully contract
--- from SKY-264).
+-- row is a durable, supported state (the NULL-degrades-gracefully contract).
 CREATE TABLE public.user_jira_identities (
     user_id uuid NOT NULL,
     jira_base_url text NOT NULL,
@@ -2047,7 +2046,7 @@ ALTER TABLE ONLY public.event_handlers
 
 -- Per-team re-seed idempotency key: one copy of each shipped handler per team
 -- (same system_slug, distinct team_id); NULLs distinct so user handlers never
--- collide (SKY-380).
+-- collide.
 ALTER TABLE ONLY public.event_handlers
     ADD CONSTRAINT event_handlers_org_team_slug_key UNIQUE (org_id, team_id, system_slug);
 
@@ -2201,7 +2200,7 @@ ALTER TABLE ONLY public.prompts
 --
 
 -- Parent key for the same-team composite FK (blueprint_steps.step_prompt_id)
--- so a blueprint step can only bind a prompt its own team owns (SKY-380).
+-- so a blueprint step can only bind a prompt its own team owns.
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_id_team_id_key UNIQUE (id, team_id);
 
@@ -2212,7 +2211,7 @@ ALTER TABLE ONLY public.prompts
 
 -- Per-team re-seed idempotency key: one copy of each shipped prompt per team
 -- (same system_slug, distinct team_id); NULLs distinct so user prompts never
--- collide (SKY-380).
+-- collide.
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_org_team_slug_key UNIQUE (org_id, team_id, system_slug);
 
@@ -2850,7 +2849,7 @@ CREATE INDEX runs_actor_agent_idx ON public.runs USING btree (actor_agent_id) WH
 --
 -- Name: runs_event_trigger_fence; Type: INDEX; Schema: public; Owner: -
 --
--- Fired-fence (SKY-424): one event firing one trigger materializes at most
+-- Fired-fence: one event firing one trigger materializes at most
 -- one run. Partial WHERE triggering_event_id IS NOT NULL so manual and
 -- blueprint-step runs (NULL) never participate — multiple manual runs of one
 -- task stay allowed, and two distinct event instances still fire independently.
@@ -6173,7 +6172,7 @@ GRANT ALL ON TABLE public.org_github_app_installations TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_github_app_installations TO tf_app;
 
 
--- === Org default templates (SKY-381) ====================================
+-- === Org default templates ================================================
 -- The org-level template a new team's prompts + handlers are copied from at
 -- team creation. Org-scoped (no team_id): the template is the *source*, not a
 -- team-owned set — BootstrapNewTeam materializes a per-team copy of it. Mirrors
@@ -6409,7 +6408,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.event_queue TO tf_app;
 
 
 --
--- SKY-442: per-user secret scope. Mirrors the vault_*_org_secret quartet
+-- Per-user secret scope. Mirrors the vault_*_org_secret quartet
 -- (defined above), adding a p_user_id dimension and a user-scoped RLS
 -- gate. Vault name convention: 'org/<org_id>/user/<user_id>/<key>'. The
 -- claims-checked trio gates on BOTH p_org_id = tf.current_org_id() AND
@@ -8210,6 +8209,59 @@ GRANT ALL ON TABLE public.marketplace_listing_stats TO anon;
 GRANT ALL ON TABLE public.marketplace_listing_stats TO authenticated;
 GRANT ALL ON TABLE public.marketplace_listing_stats TO service_role;
 GRANT SELECT ON TABLE public.marketplace_listing_stats TO tf_app;
+
+
+-- instances: the fleet membership registry every TF process registers
+-- into at boot and refreshes via periodic heartbeat. Role-neutral name on
+-- purpose — every TF process registers (control pods too, for
+-- deployment-wide visibility: versions, lease holder, health), not just
+-- executors; "executor" stays the *role* name everywhere else
+-- (runs.executor_id keeps its shipped meaning: the id of the instance
+-- acting as a run's executor).
+--
+-- id is text, not uuid: it is minted OUTSIDE Postgres, by a file under
+-- <TF_STATE_ROOT>/instance-id (internal/instance) read/created once per
+-- state root and re-read on every boot — identity travels with the state
+-- root/volume, not the host or the process. Register is the atomic
+-- boot-registration upsert (INSERT ... ON CONFLICT (id) DO UPDATE SET
+-- boot_epoch = instances.boot_epoch + 1 ...) so a restart with the same id
+-- keeps the id and bumps the epoch monotonically regardless of volume
+-- snapshot/restore/clone weirdness.
+--
+-- max_runs / active_runs / mem_total_mb / mem_available_mb / dispatch_gated
+-- move capacity + admission state that used to be process-local onto this
+-- heartbeat row. Meaningful only for executor-capable roles; NULL on
+-- pure-control rows.
+--
+-- Admin-pool-only / system table, same posture as auth_events /
+-- system_llm_runs: no org_id (a fleet member isn't tenant data), so an
+-- org-scoped RLS policy can't gate it and there's nothing for the app pool
+-- to read here anyway. RLS enabled with NO policy (deny-by-default to
+-- non-BYPASSRLS roles) + REVOKE ALL from PUBLIC + the app roles; the
+-- superuser/admin pool bypasses RLS and does all I/O.
+CREATE TABLE public.instances (
+    id                 text NOT NULL,
+    role               text NOT NULL,
+    version            text NOT NULL,
+    boot_epoch         bigint NOT NULL,
+    started_at         timestamp with time zone NOT NULL,
+    last_heartbeat_at  timestamp with time zone NOT NULL,
+    draining           boolean NOT NULL DEFAULT false,
+    max_runs           integer,
+    active_runs        integer,
+    mem_total_mb       integer,
+    mem_available_mb   integer,
+    dispatch_gated     boolean,
+    labels             jsonb
+);
+
+ALTER TABLE ONLY public.instances
+    ADD CONSTRAINT instances_pkey PRIMARY KEY (id);
+
+ALTER TABLE public.instances ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.instances FROM PUBLIC;
+REVOKE ALL ON public.instances FROM anon, authenticated, service_role;
 
 
 -- +goose Down

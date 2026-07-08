@@ -23,6 +23,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -34,23 +35,23 @@ type Server struct {
 	db           *sql.DB
 	prompts      db.PromptStore
 	swipes       db.SwipeStore
-	agents       db.AgentStore           // SKY-261 D-Claims: resolves the org's agent for claim stamps
-	teamAgents   db.TeamAgentStore       // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
-	users        db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities (SKY-396)
+	agents       db.AgentStore           // resolves the org's agent for claim stamps
+	teamAgents   db.TeamAgentStore       // re-checks team_agents.enabled on swipe-delegate / factory-delegate
+	users        db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities
 	blueprints   db.BlueprintStore       // used by event-handler + project test fixtures
-	tasks        db.TaskStore            // SKY-283: task lifecycle, claim, queue + factory snapshot reads
-	agentRuns    db.AgentRunStore        // SKY-285: agent run lifecycle + transcript
-	repos        db.RepoStore            // SKY-288: repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
-	projects     db.ProjectStore         // SKY-290: projects CRUD for projects/curator/backfill/project_entities handlers
+	tasks        db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
+	agentRuns    db.AgentRunStore        // agent run lifecycle + transcript
+	repos        db.RepoStore            // repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
+	projects     db.ProjectStore         // projects CRUD for projects/curator/backfill/project_entities handlers
 	curatorStore db.CuratorStore         // curator-runtime CRUD (curator_requests / curator_messages / curator_pending_context) — handler-side writes go through here so Postgres mode honors RLS and uses the right placeholder syntax
-	events       db.EventStore           // SKY-305: events audit log Record/Latest for stock carry-over + factory drag-to-delegate
+	events       db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
 	taskMemory   db.TaskMemoryStore      // run_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
 	secrets      db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
 	teams        db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, projects, prompts)
 	orgs         db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
 	jiraRules    db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
 	githubApps   db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
-	orgTemplate  db.OrgTemplateStore     // SKY-381: org-admin-editable template new teams are seeded from
+	orgTemplate  db.OrgTemplateStore     // org-admin-editable template new teams are seeded from
 	authEvents   db.AuthEventStore       // TFAC-76: SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
 	// serverPort is the stored instance_config.server_port value
 	// surfaced to the settings GET response. The actual bind port
@@ -94,7 +95,7 @@ type Server struct {
 	// repo picker's PAT fallback and GitHub-teams discovery.) Built in New from
 	// the stores, so it's never nil — handlers don't need a guard.
 	ghResolver ghclient.Resolver
-	// jiraResolver routes Jira writes by provenance (SKY-463): ForSystem for
+	// jiraResolver routes Jira writes by provenance: ForSystem for
 	// the org/bot service cred, ForUser for the acting user's own stored
 	// credential. User-initiated board claim / undo / requeue resolve via
 	// ForUser so the write is attributed to the user, not the service account.
@@ -221,7 +222,7 @@ type Server struct {
 
 	// reachableRepoMu guards reachableRepoCache — the in-process
 	// enumeration cache the team-repos write gate consults before
-	// re-enumerating the org (SKY-409). The picker
+	// re-enumerating the org. The picker
 	// (handleGitHubRepos) warms it on the way out; the immediate-next
 	// PUT /api/settings/team/{id}/repos validates against this set in
 	// ~µs instead of paying the full ListUserRepos cost a second time.
@@ -246,6 +247,31 @@ type Server struct {
 	// workersStarted guards StartExtensionWorkers so a double call (e.g. a
 	// test double-invoking Run) can't fire readyHooks twice.
 	workersStarted sync.Once
+
+	// version is main.Version (the release tag, or "dev" for an unreleased
+	// build), threaded through for GET /readyz (TFAC-573) so an operator
+	// can confirm a deploy landed without shelling into the host. Set via
+	// SetVersion; the zero value "" renders as an empty string rather than
+	// panicking for any Server built without it (bare test constructions).
+	version string
+	// migrationsOK records that db.Migrate completed successfully at boot,
+	// for GET /readyz's "migrations" hard check. Always set true in
+	// production — db.Migrate runs to completion in internal/app/stores.go
+	// before server.New / ListenAndServeContext, so there is no live-
+	// serving path where migrations failed. Kept as an explicit flag
+	// (default false) rather than hard-coding "ok" in the handler so the
+	// check has real meaning if a future boot path (e.g. async migrations)
+	// stops gating this as tightly, and so a Server built without the
+	// SetMigrationsOK call (bare test constructions) fails the check
+	// loudly instead of lying "ok". See SetMigrationsOK.
+	migrationsOK bool
+	// pollerHealth is the poller Manager's Health() method, wired via
+	// SetPollerManager, backing /readyz's poller-alive hard check + per-org
+	// poll-staleness soft signal. Narrower than handing over the whole
+	// *poller.Manager — the handler only needs the read. Nil until wired
+	// (bare test constructions); the handler reports both poller checks
+	// failed rather than nil-dereffing.
+	pollerHealth func(ctx context.Context) poller.HealthSnapshot
 }
 
 // reachableRepoEntry is one cached picker enumeration: the lowercased
@@ -349,7 +375,7 @@ func (s *Server) projectMutex(id string) *sync.Mutex {
 // (config_handler) that just wants "is a bot generally available to
 // show in the picker." Delegation paths must use agentEnabledForTeam
 // with the actual acting team, or a non-default team's bot setting is
-// read off the default team (the SKY-378 multi-team bug).
+// read off the default team (a multi-team bug).
 func (s *Server) agentEnabledForOrg(ctx context.Context, orgID, userID string) (*domain.Agent, bool, error) {
 	var (
 		a      *domain.Agent
@@ -371,9 +397,9 @@ func (s *Server) agentEnabledForOrg(ctx context.Context, orgID, userID string) (
 
 // agentEnabledForTeam returns the resolved agent and whether the
 // team_agents.enabled flag is true for it *on the given team*. This is
-// the SKY-261 acceptance rule "swipe-to-delegate re-checks
+// the acceptance rule "swipe-to-delegate re-checks
 // team_agents.enabled at delegate time," now correctly scoped to the
-// acting team (SKY-378) rather than always the org default — so a
+// acting team rather than always the org default — so a
 // multi-team user delegating for team B is gated on B's bot setting.
 //
 // Three outcomes the caller maps:
@@ -510,7 +536,7 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 	// its AuthMethodCloudOAuth branch to.
 	s.jiraOAuthMinter = jiraoauth.NewMinter()
 	s.jiraTokenCache = jiraoauth.NewTokenCache(s.jiraOAuthMinter, s.jiraOAuthApps, stores.Secrets)
-	// Jira write-actor resolver (SKY-463): ForSystem (org/bot cred) +
+	// Jira write-actor resolver: ForSystem (org/bot cred) +
 	// ForUser (acting user's cred, incl. the Cloud OAuth mint path).
 	// Constructed here like ghResolver so a Server is always usable without
 	// external wiring.
@@ -621,6 +647,14 @@ func (s *Server) routes() {
 	//        checks, compose healthcheck, k8s liveness). Pre-auth so
 	//        the probe doesn't need a session; deliberately doesn't
 	//        consult the DB (see handleHealth).
+	//   GET  /readyz                    — readiness probe (TFAC-573): DB +
+	//        migrations + poller liveness (hard checks, 503 on failure)
+	//        plus poll-staleness + active-run count (soft signals). Bare
+	//        path (not /api/readyz) by convention — the universal k8s/ALB
+	//        probe target — so it's outside /api/* and the preAuthAllowlist
+	//        below / routes_coverage_test entirely; noted here only for
+	//        consistency with the other pre-auth routes. See
+	//        readyz_handler.go.
 	//   POST /api/webhooks/github/{org_id} — GitHub App webhook receiver;
 	//        GitHub has no session, and the handler verifies the HMAC
 	//        signature against the org's stored webhook secret itself.
@@ -671,6 +705,12 @@ func (s *Server) routes() {
 	// platforms use auto-restart on liveness failure and we don't want
 	// a flapping integration to recycle the whole process.
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
+	// Readiness probe (TFAC-573) — bare path (not under /api/*), matching
+	// the universal k8s/ALB probe convention; Go 1.22's ServeMux matches
+	// this exact literal ahead of the "/" SPA catch-all regardless of
+	// registration order. Pre-auth for the same reason as /api/health
+	// above. See readyz_handler.go.
+	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	// /auth/v1/* reverse-proxy to gotrue, wired lazily inside
 	// SetAuthDeps. The closure here re-reads s.authProxy each
 	// request so local-mode (where it stays nil) returns 404
@@ -688,7 +728,7 @@ func (s *Server) routes() {
 	// session-auth routes above — these are per-user-stored credentials
 	// for talking to third-party services on the user's behalf, not the
 	// user's own login. Lived under /api/auth/* historically; renamed in
-	// the post-SKY-251 cleanup so /api/auth/* unambiguously means
+	// a cleanup so /api/auth/* unambiguously means
 	// "session authentication." Wrapped via s.api/apiMutating since you
 	// need to be logged in to manage your integration credentials.
 	s.apiMutating("POST /api/integrations/setup", s.handleIntegrationsSetup)
@@ -905,9 +945,9 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/agent/runs/{runID}/artifacts/refresh", ag.handleArtifactRefresh)
 	s.api("GET /api/agent/runs", ag.handleAgentRuns)
 
-	// Projects (SKY-215). Pure CRUD over the projects table; the
-	// Curator runtime that populates curator_session_id lands in
-	// SKY-216 and per-project entity classification in SKY-220.
+	// Projects. Pure CRUD over the projects table; the
+	// Curator runtime that populates curator_session_id and per-project
+	// entity classification land separately.
 	s.apiMutating("POST /api/projects", s.handleProjectCreate)
 	s.api("GET /api/projects", s.handleProjectList)
 	s.api("GET /api/projects/{id}", s.handleProjectGet)
@@ -920,17 +960,17 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/projects/{id}/knowledge", s.handleProjectKnowledgeUpload)
 	s.api("GET /api/projects/{id}/knowledge/{path}", s.handleProjectKnowledgeFile)
 	s.apiMutating("DELETE /api/projects/{id}/knowledge/{path}", s.handleProjectKnowledgeDelete)
-	// Project-creation backfill popup (SKY-220 PR B).
+	// Project-creation backfill popup.
 	bf := &backfillHandler{tx: s.tx, ws: s.ws}
 	s.api("GET /api/projects/{id}/backfill-candidates", bf.handleBackfillCandidates)
 	s.apiMutating("POST /api/projects/{id}/backfill", bf.handleBackfill)
-	// Project entities panel (SKY-238).
+	// Project entities panel.
 	pe := &projectEntitiesHandler{tx: s.tx}
 	s.api("GET /api/projects/{id}/entities", pe.handleProjectEntities)
 
-	// Curator chat per project (SKY-216). The Curator package owns the
+	// Curator chat per project. The Curator package owns the
 	// long-lived CC session lifecycle; these endpoints are the API
-	// the Projects page (SKY-217) will hit.
+	// the Projects page will hit.
 	ch := &curatorHandler{db: s.db, tx: s.tx, ws: s.ws, runtime: func() *curator.Curator { return s.curator }}
 	s.apiMutating("POST /api/projects/{id}/curator/messages", ch.handleCuratorSend)
 	s.api("GET /api/projects/{id}/curator/messages", ch.handleCuratorHistory)
@@ -962,7 +1002,7 @@ func (s *Server) routes() {
 	s.api("GET /api/settings/org", s.handleOrgSettingsGet)
 	s.apiMutating("POST /api/settings/org", s.handleOrgSettingsPost)
 
-	// SKY-264: team roster for the predicate editor. Fetched fresh on
+	// Team roster for the predicate editor. Fetched fresh on
 	// every consumer mount (the FE dedups concurrent in-flight calls
 	// within a render but doesn't hold a persistent cache — the roster
 	// is mutable mid-session). One SELECT per call. /api/config — the
@@ -985,6 +1025,9 @@ func (s *Server) routes() {
 	// Validated org Anthropic-key capture — the single write path for the
 	// anthropic_api_key vault secret (an empty key clears it for "system creds").
 	s.apiMutating("POST /api/anthropic/connect", se.handleAnthropicConnect)
+	// Validated org Bedrock-credential capture — the single write path for
+	// the aws_* / bedrock_* vault secrets (auth_method "none" clears them).
+	s.apiMutating("POST /api/bedrock/connect", se.handleBedrockConnect)
 	s.api("GET /api/jira/statuses", se.handleJiraStatuses)
 	s.api("GET /api/jira/stock", s.handleJiraStockGet)
 	s.apiMutating("POST /api/jira/stock", s.handleJiraStockPost)
@@ -1014,7 +1057,7 @@ func (s *Server) routes() {
 	s.api("GET /api/event-types", ph.handleEventTypes)
 	s.api("GET /api/event-schemas", handleEventSchemasList)
 	s.api("GET /api/event-schemas/{event_type}", handleEventSchemaGet)
-	// Unified event_handlers endpoints (SKY-259). Replace the former
+	// Unified event_handlers endpoints. Replace the former
 	// /api/task-rules + /api/triggers split — kind is passed as ?kind=
 	// on list, in the body on create, derived on update.
 	eh := &eventHandlersHandler{tx: s.tx, az: s.az}
@@ -1065,7 +1108,7 @@ func (s *Server) routes() {
 	// current snapshot into the caller's team as a brand-new fork.
 	s.apiMutating("POST /api/marketplace/listings/{id}/install", mh.handleMarketplaceInstall)
 
-	// Org template editor (SKY-381) — org-admin-gated, multi-mode only.
+	// Org template editor — org-admin-gated, multi-mode only.
 	// Mirrors the /api/prompts + /api/event-handlers families at org-template
 	// scope (no team_id); each handler gates via requireOrgTemplate.
 	ot := &orgTemplateHandler{tx: s.tx, az: s.az}
@@ -1287,7 +1330,7 @@ func (s *Server) SetCurator(c *curator.Curator) {
 // The orgID is the tenant whose creds changed — closure re-resolves via SecretStore.
 //
 // The registered callback is wrapped so the reachable-repo enumeration cache
-// (SKY-409) is evicted for the org *before* the re-due runs: a creds
+// is evicted for the org *before* the re-due runs: a creds
 // rotation, App install, or repo-set change can move which repos the org can
 // reach, and a stale cached enumeration must never satisfy the next write.
 //
@@ -1369,6 +1412,33 @@ func (s *Server) kickDashboardBackfill(orgID, userID, login, host string) {
 // main.go after the bus is created.
 func (s *Server) SetEventBus(bus *eventbus.Bus) {
 	s.bus = bus
+}
+
+// SetVersion records main.Version (the release tag, or "dev") for GET
+// /readyz (TFAC-573). Wired in internal/app/httpserver.go's buildServer,
+// right after server.New, in both modes.
+func (s *Server) SetVersion(v string) {
+	s.version = v
+}
+
+// SetMigrationsOK records that db.Migrate completed successfully at boot,
+// for GET /readyz's "migrations" hard check (TFAC-573). Called with true
+// in internal/app/app.go's New, right after buildServer succeeds — by
+// that point openStores has already run db.Migrate to completion (New
+// would have returned its error otherwise), so this simply makes that
+// already-true fact visible to the handler. See the migrationsOK field
+// doc for why the check exists despite always passing today.
+func (s *Server) SetMigrationsOK(ok bool) {
+	s.migrationsOK = ok
+}
+
+// SetPollerManager wires the poller Manager's Health() snapshot into GET
+// /readyz (TFAC-573): the poller-alive hard check plus the per-org
+// poll-staleness soft signal. Takes the bound method value rather than
+// the whole *poller.Manager so readyz_handler.go depends on one function,
+// not the poller package's full surface (PollSoon, RestartAll, etc).
+func (s *Server) SetPollerManager(healthFn func(ctx context.Context) poller.HealthSnapshot) {
+	s.pollerHealth = healthFn
 }
 
 // SetIngestor wires the durable ingest seam so ExtensionAPI.PublishEvent can

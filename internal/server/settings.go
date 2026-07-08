@@ -34,8 +34,8 @@ const secretKeyAnthropicAPIKey = "anthropic_api_key"
 // jiraProjectKeyRe matches Jira's standard project-key rule: a
 // leading uppercase letter followed by uppercase letters or digits.
 // Keys arriving through the API are uppercased before matching so
-// users typing "sky" land on the same canonical form as Jira's
-// wire-side "SKY-123".
+// users typing the key in lowercase land on the same canonical form
+// as Jira's wire-side representation.
 var jiraProjectKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*$`)
 
 // normalizeJiraProjectKey trims whitespace and uppercases. Used at
@@ -476,18 +476,24 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 	key := strings.TrimSpace(req.APIKey)
 
 	// Empty key ⟺ "system credentials": clear the stored key (and its ref) so the
-	// resolver degrades to the local subscription/env fallback. Idempotent — a
-	// Delete with no matching row is not an error.
+	// resolver degrades to the local subscription/env fallback. The Bedrock set
+	// goes too — "system credentials" means no org-level LLM credential of any
+	// provider, and the resolver would otherwise fall through to a stale Bedrock
+	// config. Idempotent — a Delete with no matching row is not an error.
 	if key == "" {
 		if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			if _, err := tx.Secrets.Delete(r.Context(), orgID, secretKeyAnthropicAPIKey); err != nil {
 				return fmt.Errorf("clear Anthropic key: %w", err)
+			}
+			if err := clearBedrockSecrets(r, tx, orgID); err != nil {
+				return err
 			}
 			orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
 			if err != nil {
 				return fmt.Errorf("load org settings: %w", err)
 			}
 			orgSet.AnthropicAPIKeyRef = ""
+			orgSet.BedrockCredentialsRef = ""
 			return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
 		}); err != nil {
 			settingsLog.Error("anthropic connect clear failed", "error", err)
@@ -523,7 +529,15 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 		if err := tx.Secrets.Put(r.Context(), orgID, secretKeyAnthropicAPIKey, key, "Org's Anthropic API key"); err != nil {
 			return fmt.Errorf("store Anthropic key: %w", err)
 		}
+		// Provider exclusivity (mirrors handleBedrockConnect): a stored
+		// Bedrock set would be dead config under the resolver's
+		// Anthropic-first precedence — clear it so the UI never shows two
+		// providers configured at once.
+		if err := clearBedrockSecrets(r, tx, orgID); err != nil {
+			return err
+		}
 		orgSet.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
+		orgSet.BedrockCredentialsRef = ""
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}
@@ -659,7 +673,7 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	// user actually authenticates against; org_settings.github_base_url
 	// mirrors it but the SecretStore copy is the source of truth.
 	// Wrapped in WithTx so the org_secrets read sees claims and matches
-	// the rest of the post-SKY-355 settings surface.
+	// the rest of the settings surface.
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
 	var creds auth.Credentials

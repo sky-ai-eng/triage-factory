@@ -1,7 +1,7 @@
 // Package sqlite is the SQLite-backed implementation of the
 // per-resource store interfaces declared in package db. Local-mode
 // installs of triagefactory wire this implementation at startup
-// (multi-mode wires internal/db/postgres). See the SKY-246 D2 spec
+// (multi-mode wires internal/db/postgres). See the D2 spec
 // at docs/specs/sky-246-d2-store-abstraction.html for the full
 // design.
 package sqlite
@@ -27,7 +27,7 @@ type Store struct {
 // 21 fields on the bundle.
 func New(conn *sql.DB) db.Stores {
 	s := &Store{conn: conn}
-	// SKY-296 introduced two-pool constructors on EntityStore /
+	// Two-pool constructors exist on EntityStore /
 	// RepoStore / UsersStore / AgentStore so the Postgres impl can
 	// route `...System` admin-pool variants distinctly. SQLite has
 	// one connection — both args collapse to conn here.
@@ -137,6 +137,10 @@ func New(conn *sql.DB) db.Stores {
 		// ErrNotApplicableInLocal from every method — wired so the bundle is
 		// complete in both modes; local never mounts the marketplace routes.
 		Marketplace: newMarketplaceStore(conn, conn),
+		// Instances is admin-pool only in Postgres; SQLite collapses to the
+		// one connection (N=1, no RLS). Fleet membership registry — one
+		// row, epoch bumping per restart.
+		Instances: newInstanceStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

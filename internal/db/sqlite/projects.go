@@ -27,7 +27,7 @@ import (
 // under the default visibility='team').
 //
 // The constructor takes two queryers for signature parity with the
-// Postgres impl (SKY-297), but SQLite has one connection — both
+// Postgres impl, but SQLite has one connection — both
 // arguments collapse onto the same queryer. The `...System` admin-
 // pool variants are thin wrappers around the non-System methods.
 type projectStore struct{ q queryer }
@@ -153,7 +153,7 @@ func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Projec
 	return nil
 }
 
-// ListSystem mirrors List. SKY-297: the project classifier consumes
+// ListSystem mirrors List. The project classifier consumes
 // this through the admin pool in Postgres; SQLite has one connection,
 // so this delegates straight through with the same assertLocalOrg
 // gate.

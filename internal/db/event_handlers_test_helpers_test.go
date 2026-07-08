@@ -10,7 +10,7 @@ import (
 )
 
 // createTriggerForTest is the raw-SQL replacement for SavePromptTrigger
-// (now also for the unified event_handlers table, post-SKY-259). Used by
+// (now also for the unified event_handlers table). Used by
 // tests in package db that need to seed a trigger row but can't import
 // internal/db/sqlite (cycle: the sqlite package depends on db). Tests
 // outside this package use stores.EventHandlers.Create directly.

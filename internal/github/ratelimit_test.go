@@ -461,6 +461,46 @@ func TestRateLimit_ReflectsMostRecentHeaders(t *testing.T) {
 	}
 }
 
+// TestSetRateLimitObserver_FiresOnEveryUpdate pins that a registered
+// observer sees every recordRateLimit update, in order, with the same
+// values RateLimit() itself would return — the hook the resolver's
+// per-org RateLimitRegistry depends on (TFAC-573).
+func TestSetRateLimitObserver_FiresOnEveryUpdate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", r.URL.Query().Get("remaining"))
+		w.Header().Set("X-RateLimit-Reset", r.URL.Query().Get("reset"))
+		w.Header().Set("X-RateLimit-Used", "7")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c := clientAgainst(srv.URL)
+	var seen []RateLimitState
+	c.SetRateLimitObserver(func(s RateLimitState) {
+		seen = append(seen, s)
+	})
+
+	reset1 := time.Now().Add(time.Hour).Truncate(time.Second)
+	if _, err := c.Get(context.Background(), fmt.Sprintf("/x?remaining=42&reset=%d", reset1.Unix())); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	reset2 := time.Now().Add(2 * time.Hour).Truncate(time.Second)
+	if _, err := c.Get(context.Background(), fmt.Sprintf("/x?remaining=10&reset=%d", reset2.Unix())); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	if len(seen) != 2 {
+		t.Fatalf("observer fired %d times, want 2", len(seen))
+	}
+	if seen[0].Remaining != 42 || !seen[0].Reset.Equal(reset1) || seen[0].Used != 7 {
+		t.Errorf("seen[0] = %+v, want {42 %v 7}", seen[0], reset1)
+	}
+	if seen[1].Remaining != 10 || !seen[1].Reset.Equal(reset2) || seen[1].Used != 7 {
+		t.Errorf("seen[1] = %+v, want {10 %v 7}", seen[1], reset2)
+	}
+}
+
 // TestPostGraphQL_RetriesOn429 pins that the GraphQL query path is retryable
 // like a GET, per the ticket's "treat GraphQL reads as retryable" directive.
 func TestPostGraphQL_RetriesOn429(t *testing.T) {

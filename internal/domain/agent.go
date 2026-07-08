@@ -109,8 +109,8 @@ type AgentRun struct {
 	// Outcome is the parsed terminal envelope `outcome` (RunOutcome
 	// vocabulary), persisted by processCompletion. Empty string === SQL
 	// NULL: an infra-error run (status='failed') or a blueprint step whose
-	// outcome gate exhausted its retries without a valid envelope. SKY-419
-	// reads this to advance the orchestrator.
+	// outcome gate exhausted its retries without a valid envelope. The
+	// orchestrator reads this to advance.
 	Outcome string
 	// OutcomeReason is the natural-language "why I stopped / what a human
 	// needs to do" populated only on an abort outcome. Distinct from
@@ -126,8 +126,8 @@ type AgentRun struct {
 	TriggerType   string // "manual" | "event" (matches runs.trigger_type / blueprint_runs.trigger_type vocabulary)
 	TriggerID     string // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step run so the llm_spend view can attribute autonomous spend by rule (TFAC-478); empty/NULL for manual runs
 
-	// TriggeringEventID is the event instance that auto-fired this run
-	// (SKY-424). Set only on the event path; empty (→ SQL NULL) for manual
+	// TriggeringEventID is the event instance that auto-fired this run.
+	// Set only on the event path; empty (→ SQL NULL) for manual
 	// runs and blueprint-step runs. Paired with TriggerID it forms the
 	// runs_event_trigger_fence partial unique index, which makes
 	// event-triggered auto-delegation exactly-once under the at-least-once
@@ -136,8 +136,8 @@ type AgentRun struct {
 	// written via AgentRunStore.CreateIfNotFiredSystem, not hydrated by Get.
 	TriggeringEventID string
 
-	// ActorAgentID is the agents.id the spawner stamped at run start
-	// (SKY-261 D-Claims). Immutable audit pointer — survives later
+	// ActorAgentID is the agents.id the spawner stamped at run start.
+	// Immutable audit pointer — survives later
 	// config edits and agent-row deletion (SET NULL on delete). Empty
 	// string = NULL on the row (run was spawned before the agent
 	// bootstrap completed, or after the agent was deleted).
@@ -152,11 +152,11 @@ type AgentRun struct {
 	ActorAgentName string
 
 	// CreatorUserID is the users.id of the human who initiated this
-	// run (SKY-261 D-Claims). Set for manual runs (swipe-delegate /
+	// run. Set for manual runs (swipe-delegate /
 	// drag-to-Agent / factory drop); empty / NULL for trigger-
 	// spawned runs where no human asked for the work. The schema
 	// CHECK pairs this with trigger_type: 'manual' ↔ non-NULL,
-	// 'event' ↔ NULL. Same shape SKY-262's system_rows_nullable
+	// 'event' ↔ NULL. Same shape the system_rows_nullable
 	// migration introduced for prompts / task_rules / etc.
 	CreatorUserID string
 

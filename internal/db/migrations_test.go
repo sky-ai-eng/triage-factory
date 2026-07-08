@@ -83,7 +83,7 @@ func TestMigrate_Idempotent(t *testing.T) {
 }
 
 // TestMigrate_BricksPreV1110_GooseStampedAtOldBaseline covers the
-// most-likely upgrade attempt: a user on the SKY-245 baseline (or any
+// most-likely upgrade attempt: a user on the earlier baseline (or any
 // pre-v1.11.0 goose-tracked install) tries to upgrade. The
 // goose_db_version table exists but doesn't contain the v1.11.0
 // baseline version, so the brick check fires.
@@ -99,7 +99,7 @@ func TestMigrate_BricksPreV1110_GooseStampedAtOldBaseline(t *testing.T) {
 		)`); err != nil {
 		t.Fatalf("create goose_db_version: %v", err)
 	}
-	// Stamp the pre-v1.11.0 SKY-245 baseline (202605090001) and one
+	// Stamp the pre-v1.11.0 baseline (202605090001) and one
 	// post-baseline migration — simulating a typical upgrade path.
 	for _, v := range []int64{0, 202605090001, 202605120003} {
 		if _, err := database.Exec(

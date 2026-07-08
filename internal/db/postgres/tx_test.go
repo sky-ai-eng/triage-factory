@@ -16,7 +16,7 @@ import (
 )
 
 // TestSyntheticClaimsWithTx_Postgres_RunsFn_UnderClaimsAndRole pins
-// the SKY-296 helper's basic contract: it opens a tx on the app pool,
+// the helper's basic contract: it opens a tx on the app pool,
 // elevates to tf_app, sets request.jwt.claims from caller-supplied
 // (orgID, userID), and runs fn against tx-bound stores.
 //
@@ -92,7 +92,7 @@ func TestSyntheticClaimsWithTx_Postgres_CrossOrgLeakage(t *testing.T) {
 
 	// Confirm orgB's row is visible via the admin pool, ruling out
 	// "the seed didn't land" as a false negative on the assertion
-	// above. Uses the SKY-296 `...System` admin variant to exercise
+	// above. Uses the `...System` admin variant to exercise
 	// that path end-to-end.
 	got, err := stores.Repos.ListSystem(context.Background(), orgB)
 	if err != nil {
@@ -104,7 +104,7 @@ func TestSyntheticClaimsWithTx_Postgres_CrossOrgLeakage(t *testing.T) {
 }
 
 // TestSyntheticClaimsWithTx_Postgres_RejectsLocalDefaultUserID pins
-// the SKY-296 guardrail: passing runmode.LocalDefaultUserID is
+// the guardrail: passing runmode.LocalDefaultUserID is
 // rejected loudly because the sentinel has no FK target in
 // multi-mode users and the sentinel-shaped caller belongs on the
 // admin pool, not in synthetic claims.
@@ -184,7 +184,7 @@ func TestSyntheticClaimsWithTx_Postgres_RollsBackOnError(t *testing.T) {
 	}
 }
 
-// TestWithTx_Postgres_SurvivesCancelledOriginCtx pins the SKY-300
+// TestWithTx_Postgres_SurvivesCancelledOriginCtx pins the
 // handler-cleanup pattern: a goroutine-like cleanup that needs to
 // outlive its originating request gets a cancellation-detached ctx
 // via context.WithoutCancel(r.Context()), and WithTx runs to

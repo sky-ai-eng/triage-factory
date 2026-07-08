@@ -1,4 +1,4 @@
-// Binding-graph editor scope (SKY-381). The /prompts page and the org-template
+// Binding-graph editor scope. The /prompts page and the org-template
 // editor are the *same* editor over different row sets: a team's prompts +
 // handlers, or the org's template. The scope discriminator picks the endpoint
 // set; everything downstream (nodes, drag-wire, drawers) is identical.

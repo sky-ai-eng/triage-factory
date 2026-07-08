@@ -22,7 +22,7 @@ type userTeam struct {
 }
 
 // UserTeam is one of the authenticated user's GitHub team memberships,
-// the wire-ready shape the onboarding team-mapping step (SKY-411)
+// the wire-ready shape the onboarding team-mapping step
 // presents. OrgSlug + TeamSlug are the routing identity (matching what
 // the tracker emits for team reviewers); Name is display-only;
 // MemberCount drives the "broad team — noisy queue" hint and is
@@ -92,8 +92,8 @@ func (c *Client) ListMyTeams(ctx context.Context) ([]string, error) {
 }
 
 // ListMyTeamsDetailed returns the authenticated user's GitHub teams with
-// the display name and member count the onboarding mapping step needs
-// (SKY-411). It is the richer twin of ListMyTeams (which returns bare
+// the display name and member count the onboarding mapping step needs.
+// It is the richer twin of ListMyTeams (which returns bare
 // "org/slug" strings for the tracker's set-membership check): same
 // endpoint and pagination, just carrying the extra fields GET /user/teams
 // already includes in its full-team response.

@@ -30,8 +30,10 @@ interface JiraAccessValue {
  * explicitly upstream (the wizard's deployment-picker step / the Settings
  * deployment toggle), not sniffed from the URL: Cloud shows the Atlassian
  * account email + API token (Basic auth); Data Center shows the single PAT
- * (Bearer). Cloud OAuth (one-click Connect) is a later Cloud-tier ticket;
- * until it lands the paste paths here are the only connect affordances.
+ * (Bearer). Cloud OAuth (one-click Connect) is a per-user flow that lives on
+ * the identity surfaces (JiraUserAccessStep / the Settings identity section)
+ * instead — this group is the org-level credential and only ever offers the
+ * paste paths.
  *
  * showBaseUrl (default true) mirrors GitHubAccessGroup: the setup wizard
  * confirms the Jira URL in its own reachability sub-step and feeds it in via

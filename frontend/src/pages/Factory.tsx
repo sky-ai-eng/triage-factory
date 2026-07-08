@@ -346,7 +346,7 @@ export default function Factory() {
       //   - Non-2xx HTTP — input/state validation failures (entity
       //     not found, no matching event, spawner missing). The
       //     handler returns 400/404/409/503 + `{error: "..."}`.
-      //   - 200 OK + delegate_error — SKY-261 B+ partial success: the
+      //   - 200 OK + delegate_error — partial success: the
       //     claim stamped (`claim_stamped: true`) but the spawn
       //     itself didn't fire (prompt deleted between request and
       //     execution, DB hiccup creating the run row). We still

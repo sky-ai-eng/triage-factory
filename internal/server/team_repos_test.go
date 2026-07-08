@@ -57,7 +57,7 @@ func TestFirstUnreachableRepo(t *testing.T) {
 	})
 }
 
-// TestReachableRepoCache_HitMissExpiryEviction exercises the SKY-409
+// TestReachableRepoCache_HitMissExpiryEviction exercises the
 // enumeration cache directly: a put is readable until it expires or the org is
 // evicted, and an unrelated org's eviction leaves it intact.
 func TestReachableRepoCache_HitMissExpiryEviction(t *testing.T) {
@@ -283,7 +283,7 @@ func TestTeamReposPut_ColdPathFailsOpenOn5xx(t *testing.T) {
 //     (CheckRepoAccess). 200 when the slug is in the reachable set, 404
 //     otherwise — exactly the signal the per-repo fan-out classifies.
 //
-// Pre-SKY-409 the gate only used the enumeration; now a cache-miss PUT probes
+// Previously the gate only used the enumeration; now a cache-miss PUT probes
 // per-repo, so the helper answers both. The test *cases* are unchanged: they
 // still pass a reachable set and assert reachable→200 / unreachable→400.
 func fakeReposServer(t *testing.T, fullNames ...string) *httptest.Server {

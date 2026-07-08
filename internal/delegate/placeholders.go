@@ -42,7 +42,7 @@ import (
 // inlines those sections into the template text before this pass, because
 // strings.Replacer does not re-scan replacement values and the tools docs carry
 // their own placeholders ({{BINARY_PATH}}, the run-root memory paths).
-func BuildPromptReplacer(task domain.Task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate string) *strings.Replacer {
+func BuildPromptReplacer(task domain.Task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate, runURL string) *strings.Replacer {
 	pairs := []string{
 		"{{RUN_ID}}", runID,
 		"{{BINARY_PATH}}", binaryPath,
@@ -58,6 +58,12 @@ func BuildPromptReplacer(task domain.Task, metadataJSON, runID, binaryPath, runR
 		// buildPrompt's pre-pass — so it also interpolates inside the injected
 		// {{TOOLS_REFERENCE}} value (which the non-rescanning pre-pass can't reach).
 		"{{BRANCH_TEMPLATE}}", branchTemplate,
+		// Deep link back to this run in the TF UI (TFAC-591). Computed
+		// spawner-side (Spawner.runURLFor) from the deployment's public URL;
+		// empty when no public URL is configured — never a fabricated
+		// localhost link. Guidance in the envelope tells the agent to omit a
+		// blank URL rather than invent one.
+		"{{RUN_URL}}", runURL,
 	}
 
 	var meta map[string]any
@@ -78,6 +84,11 @@ func BuildPromptReplacer(task domain.Task, metadataJSON, runID, binaryPath, runR
 	case "jira":
 		issueKey = task.EntitySourceID
 		project = projectFromJiraKey(issueKey)
+	case "slack":
+		// No source-specific pairs yet — Slack context (channel, thread ts,
+		// message text) rides {{EVENT_METADATA_JSON}} instead. Case kept
+		// explicit so this switch stays exhaustive-by-intent as sources
+		// are added.
 	}
 	pairs = append(pairs,
 		"{{OWNER}}", owner,
@@ -127,7 +138,7 @@ func parseGitHubEntitySourceID(s string) (owner, repo, prNumber string) {
 	return repoStr[:slashIdx], repoStr[slashIdx+1:], prNumber
 }
 
-// projectFromJiraKey pulls "SKY" out of "SKY-123". Mirrors the tracker's
+// projectFromJiraKey pulls "PROJ" out of "PROJ-123". Mirrors the tracker's
 // extractProject helper so the placeholder matches what the scorer sees.
 func projectFromJiraKey(key string) string {
 	if i := strings.IndexByte(key, '-'); i > 0 {

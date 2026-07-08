@@ -247,7 +247,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// nothing leaks into the PR.
 	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, claudeCwd, task.EntityID, namespace)
 
-	// SKY-219: copy the entity's project knowledge-base into
+	// Copy the entity's project knowledge-base into
 	// ./_scratch/project-knowledge/ if the entity is assigned to a
 	// project, so the agent has curated project context available
 	// alongside prior memories.
@@ -285,7 +285,8 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// agent as envelope guidance (TFAC-498). Not enforced — the push gate
 	// authorizes whatever branch the worktree lands on.
 	branchTemplate := s.resolveBranchTemplate(context.Background(), task)
-	prompt := buildPrompt(task, metadataJSON, mission, cfg.scope, cfg.toolsRef, agentBin, runID, agentRunRoot, namespace, branchTemplate)
+	runURL := s.runURLFor(orgID, runID)
+	prompt := buildPrompt(task, metadataJSON, mission, cfg.scope, cfg.toolsRef, agentBin, runID, agentRunRoot, namespace, branchTemplate, runURL)
 
 	s.updateStatus(orgID, runID, "agent_starting")
 	if ctx.Err() != nil {

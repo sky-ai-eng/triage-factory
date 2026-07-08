@@ -30,7 +30,7 @@ func translateVisibilityErr(err error) error {
 }
 
 // projectStore is the Postgres impl of db.ProjectStore. Holds two
-// pools (SKY-297):
+// pools:
 //
 //   - q: app pool (tf_app, RLS-active). Every request-equivalent
 //     consumer (projects handler, curator, backfill, project_entities)
@@ -76,7 +76,7 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 	// teamID: required only for visibility="team" (the
 	// projects_team_visibility_requires_team CHECK). private/org
 	// visibility permit a NULL team_id — TFAC-562's teamless-user case:
-	// the human picks a team at the Create UI when one applies (SKY-294),
+	// the human picks a team at the Create UI when one applies,
 	// but a private/org project may have none. A "first of caller's
 	// teams" or "any team in org" fallback would either silently attach
 	// to the wrong team or collide with projects_insert RLS

@@ -154,7 +154,7 @@ func (s *Spawner) resolvePrompt(orgID string, task domain.Task, explicitPromptID
 // through as literal braces so they're obvious to prompt authors on first
 // run. metadataJSON is the primary event's metadata blob ("" is fine —
 // event-derived placeholders just render empty).
-func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binaryPath, runID, runRoot, blueprintRunID, branchTemplate string) string {
+func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binaryPath, runID, runRoot, blueprintRunID, branchTemplate, runURL string) string {
 	// Compatibility shim: some early prompts were written with the literal
 	// "triagefactory exec" prefix on CLI invocations, assuming the binary
 	// was on PATH. The binary lives at an absolute path in the worktree
@@ -174,7 +174,7 @@ func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binar
 		"{{SCOPE}}", scope,
 	).Replace(full)
 
-	return BuildPromptReplacer(task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate).Replace(full)
+	return BuildPromptReplacer(task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate, runURL).Replace(full)
 }
 
 // resolveBranchTemplate returns the team's branch-naming convention with the

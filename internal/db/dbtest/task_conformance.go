@@ -14,8 +14,8 @@ import (
 //   - the wired TaskStore impl
 //   - the orgID to pass to every method (sqlite returns
 //     runmode.LocalDefaultOrgID, postgres returns a fresh org UUID)
-//   - the teamID — caller-supplied team_id for FindOrCreate
-//     (SKY-295). SQLite returns runmode.LocalDefaultTeamID; Postgres
+//   - the teamID — caller-supplied team_id for FindOrCreate.
+//     SQLite returns runmode.LocalDefaultTeamID; Postgres
 //     returns the seeded default team's UUID.
 //   - the agentID + userID the backend test has seeded — claim
 //     transitions need real FK-resolvable ids (auth.users / agents
@@ -44,7 +44,7 @@ type TaskSeeder func(t *testing.T, suffix string) (entityID, eventID, taskID str
 
 // TeamSeeder creates a secondary team inside the harness's org and
 // returns its ID, so the per-team dedup conformance subtest can
-// exercise the SKY-295 fanout. Local-mode (SQLite) seeds a real
+// exercise the per-team dedup fanout. Local-mode (SQLite) seeds a real
 // teams row alongside the LocalDefaultTeamID baseline; Postgres
 // seeds a fresh team UUID in the same org as the factory's primary
 // teamID. The harness only calls this in the multi-team subtests
@@ -142,11 +142,11 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	// SKY-330: the "claimed" derived branch in ByStatus filters
+	// The "claimed" derived branch in ByStatus filters
 	// status='queued' so the Board's Claimed column doesn't
 	// double-render a user-claimed task that's also in In Progress
 	// or In Review. Distinct from the broader "any non-terminal
-	// user-claimed task" set the pre-330 derivation produced.
+	// user-claimed task" set the prior derivation produced.
 	t.Run("ByStatus_claimed_excludes_in_progress_and_in_review", func(t *testing.T) {
 		s, orgID, _, _, userID, seed, _ := mk(t)
 		_, _, queuedID := seed(t, "bs-claimed-q")
@@ -186,7 +186,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	// SKY-330: bot-claimed status='queued' tasks (just-delegated, run
+	// Bot-claimed status='queued' tasks (just-delegated, run
 	// not yet advanced) also belong in the Claimed projection so the
 	// board's Claimed column surfaces them and the delegate-spawn-
 	// failure retry UI can render. Without this they'd disappear
@@ -587,7 +587,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	// SKY-330: AdvanceStatusForUser — the manual user board transition.
+	// AdvanceStatusForUser — the manual user board transition.
 
 	t.Run("AdvanceStatusForUser_lands_for_user_claim", func(t *testing.T) {
 		s, orgID, _, _, userID, seed, _ := mk(t)
@@ -691,7 +691,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	// SKY-330: QueuedIncludingSnoozed — surfaces future-snoozed entries
+	// QueuedIncludingSnoozed — surfaces future-snoozed entries
 	// for the board's "show snoozed" toggle while keeping the canonical
 	// Queued() projection unchanged.
 
@@ -756,12 +756,12 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		for _, x := range out {
 			if x.ID == taskID {
-				t.Error("QueuedIncludingSnoozed surfaced a user-claimed task; SKY-261 invariant says only unclaimed rows belong in the queue projection")
+				t.Error("QueuedIncludingSnoozed surfaced a user-claimed task; only unclaimed rows belong in the queue projection")
 			}
 		}
 	})
 
-	// --- Author-centric owner routing (SKY-372) ---
+	// --- Author-centric owner routing ---
 
 	t.Run("FindOrCreate_empty_team_stores_null_owner", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)

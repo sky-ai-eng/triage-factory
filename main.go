@@ -69,6 +69,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	cfg.Version = Version
 	static, err := frontendDist() // go:embed lives in package main (embed.go)
 	if err != nil {
 		return fmt.Errorf("load embedded frontend: %w", err)

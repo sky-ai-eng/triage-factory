@@ -121,7 +121,7 @@ func pgTaskTeamFilter(teamIDs []string, args []any) (string, []any) {
 }
 
 func (s *taskStore) Queued(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error) {
-	// SKY-261 B+ derived filter mirrors SQLite. The event_handlers
+	// Derived filter mirrors SQLite. The event_handlers
 	// derived table is org-scoped so rules in another org can't
 	// influence ordering — load-bearing in multi mode.
 	args := []any{orgID}
@@ -146,7 +146,7 @@ func (s *taskStore) Queued(ctx context.Context, orgID string, teamIDs []string) 
 }
 
 func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error) {
-	// SKY-330: snoozed rows render at the tail regardless of
+	// Snoozed rows render at the tail regardless of
 	// priority so deferred entries don't jump above live queued
 	// work. Postgres sorts false before true on the boolean
 	// expression (matches the SQLite mirror's 0/1 ordering).
@@ -175,7 +175,7 @@ func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID string, te
 func (s *taskStore) ByStatus(ctx context.Context, orgID, status string, teamIDs []string) ([]domain.Task, error) {
 	switch status {
 	case "claimed":
-		// SKY-330: "claimed" = any claim (user or bot) at
+		// "claimed" = any claim (user or bot) at
 		// status='queued'. Mirrors the SQLite branch — see that
 		// file's comment for the full rationale around the
 		// status='queued' filter and including bot claims to
@@ -204,7 +204,7 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status string, teamIDs 
 			ORDER BY COALESCE(t.priority_score, 0.5) DESC
 		`, args...)
 	case "done", "dismissed":
-		// SKY-330: cap the Done column at the last 7 days. Mirrors
+		// Cap the Done column at the last 7 days. Mirrors
 		// the SQLite branch — every close path now populates
 		// closed_at, so the NOT NULL guard turns missing values into
 		// surfacable bugs rather than letting them accumulate.

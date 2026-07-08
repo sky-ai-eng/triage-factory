@@ -12,7 +12,7 @@ import (
 )
 
 // usersStore — SQLite impl. The constructor accepts two queryers for
-// signature parity with the Postgres impl (SKY-296); SQLite has one
+// signature parity with the Postgres impl; SQLite has one
 // connection so both collapse to the same queryer. The
 // `...System` variants delegate to their non-System counterparts.
 type usersStore struct{ q queryer }
@@ -304,7 +304,7 @@ func (s *usersStore) SetLastActingTeam(ctx context.Context, userID, teamID strin
 }
 
 func (s *usersStore) GetSettings(ctx context.Context, userID string) (domain.UserSettings, error) {
-	// user_settings is empty post-SKY-354: just user_id + updated_at.
+	// user_settings is empty: just user_id + updated_at.
 	// The probe stays so callers can detect "row exists" vs "first
 	// touch" later when fields are added; current callers ignore the
 	// difference and consume the zero-value struct either way.

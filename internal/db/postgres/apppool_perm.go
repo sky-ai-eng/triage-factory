@@ -22,7 +22,7 @@ import (
 // This is pure diagnosis, applied at the app-pool read sites of the
 // stores whose `*System` convention exists precisely because bootstrap /
 // background code must avoid the app pool (agents, github_apps,
-// team_agents, secrets). It does NOT prevent the bug — the SKY-387 static
+// team_agents, secrets). It does NOT prevent the bug — the static
 // guard (TestBootstrapUsesAdminPoolStoreCalls) does that for the
 // bootstrap chain — it just makes the one remaining runtime failure mode
 // legible. The original *pgconn.PgError is wrapped (%w), so callers that

@@ -44,15 +44,15 @@ const (
 
 // legacyJiraDisplayName is the legacy key that held the Jira display
 // name in the keychain. Jira identity now lives in the host-scoped
-// user_jira_identities table (SKY-397), but ClearJira and Clear still
+// user_jira_identities table, but ClearJira and Clear still
 // sweep this key so an upgrade from an older install leaves no orphan
 // keychain row.
 const legacyJiraDisplayName = "jira_display_name"
 
 // legacyGitHubUsername is the legacy key that held the org bot's GitHub login
-// in the keychain. SKY-264 moved GitHub identity into the users.github_username
+// in the keychain. GitHub identity moved into the users.github_username
 // DB column, so nothing writes this key anymore — but AllKeys still sweeps it so
-// an upgrade from a pre-SKY-264 install leaves no orphan keychain row (same
+// an upgrade from an older install leaves no orphan keychain row (same
 // rationale as legacyJiraDisplayName). It has no companion DB ref, so it's safe
 // on the per-org Clear path.
 const legacyGitHubUsername = "github_username"
@@ -81,10 +81,36 @@ const legacyGitHubUsername = "github_username"
 // agentproc's anthropic_auth_token / anthropic_base_url are intentionally NOT
 // here: they are read-only resolver inputs with no local-mode write path (no
 // SecretStore.Put), so there's never a keychain row to sweep.
+//
+// The Bedrock keys ARE here: POST /api/bedrock/connect (internal/server) is a
+// local-mode write path for all seven, so a full local uninstall must sweep
+// them. Read-path literals live in internal/agentproc's catalog; write-path
+// literals in internal/server; both are drift-pinned against these exports
+// (agentproc.TestBedrockKeysMatchIntegrations /
+// server.TestSecretKeyLiteralsMatchIntegrations).
 const (
 	KeyAnthropicAPIKey       = "anthropic_api_key"
 	KeyJiraOAuthClientSecret = "jira_oauth_client_secret"
+
+	KeyAWSAccessKeyID        = "aws_access_key_id"
+	KeyAWSSecretAccessKey    = "aws_secret_access_key"
+	KeyAWSSessionToken       = "aws_session_token"
+	KeyAWSRegion             = "aws_region"
+	KeyAWSBearerTokenBedrock = "aws_bearer_token_bedrock"
+	KeyBedrockModelID        = "bedrock_model_id"
+	KeyBedrockBaseURL        = "bedrock_base_url"
 )
+
+// BedrockKeys returns every Bedrock-related secret key the connect flow
+// manages: both auth methods' credentials plus the non-secret config
+// riding the same vault. One list so the write path (replace/clear), the
+// uninstall sweep, and the drift tests all agree on the full set.
+func BedrockKeys() []string {
+	return []string{
+		KeyAWSAccessKeyID, KeyAWSSecretAccessKey, KeyAWSSessionToken,
+		KeyAWSRegion, KeyAWSBearerTokenBedrock, KeyBedrockModelID, KeyBedrockBaseURL,
+	}
+}
 
 // AllKeys returns the integration-credential keys the SecretStore manages for a
 // tenant — the GitHub + Jira well-known keys plus legacy keys still swept on
@@ -118,7 +144,7 @@ func AllKeys() []string {
 // sweeping. Keep scripts/clean-slate.sh's hardcoded keychain list in sync with
 // this function.
 func AllLocalSweepKeys() []string {
-	return append(AllKeys(), KeyAnthropicAPIKey, KeyJiraOAuthClientSecret)
+	return append(append(AllKeys(), KeyAnthropicAPIKey, KeyJiraOAuthClientSecret), BedrockKeys()...)
 }
 
 // GitHubAppKeyset is the trio of keychain/vault keys one registered GitHub App

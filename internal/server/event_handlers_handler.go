@@ -45,8 +45,8 @@ func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.
 	return eh.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID)
 }
 
-// /api/event-handlers — unified successor to /api/task-rules + /api/triggers
-// (SKY-259). The two frontend pages (rules tab + triggers tab) keep their
+// /api/event-handlers — unified successor to /api/task-rules + /api/triggers.
+// The two frontend pages (rules tab + triggers tab) keep their
 // split UX but hit this one endpoint family with a kind filter.
 //
 // Wire shape:
@@ -121,7 +121,7 @@ func filterEventHandlersByGate(orgID string, handlers []domain.EventHandler) []d
 //     when omitted. The defaults are load-bearing for
 //     drag-to-create paths in the prompts UI that supply
 //     only the minimum identifying fields — match the
-//     pre-SKY-259 /api/triggers behavior.
+//     the original /api/triggers behavior.
 type createEventHandlerRequest struct {
 	Kind               string `json:"kind"`
 	EventType          string `json:"event_type"`

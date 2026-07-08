@@ -217,7 +217,7 @@ function subscribe(handler: Handler) {
  *     the existing reconnect-on-close loop, same as any other dropped
  *     connection.
  *
- * Multi-tab note (matches the SKY-313 multi-tab caveat): each tab
+ * Multi-tab note: each tab
  * holds its own globalWs reference, so reconnect only affects the
  * tab that initiated the switch. Other tabs continue to receive
  * events for their previously-selected org until the user navigates

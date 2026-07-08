@@ -24,6 +24,9 @@ import (
 func (a *App) buildServer(ctx context.Context, static fs.FS) error {
 	a.srv = server.New(a.database, a.stores, a.storedPort)
 	a.wsHub = a.srv.WSHub()
+	// TFAC-573: main.Version isn't otherwise threaded into this package;
+	// GET /readyz surfaces it so an operator can confirm a deploy landed.
+	a.srv.SetVersion(a.cfg.Version)
 
 	if a.local() {
 		// Local deploy config: publicURL is the local address, HMAC key is
@@ -34,6 +37,7 @@ func (a *App) buildServer(ctx context.Context, static fs.FS) error {
 			return fmt.Errorf("generate local HMAC key: %w", err)
 		}
 		a.srv.SetDeployConfig(a.cfg.BrowserURL, hmacKey)
+		a.deployPublicURL = a.cfg.BrowserURL
 		// Trust the Vite dev server's origin too, so `cd frontend && pnpm
 		// run dev` (port 5173, proxying /api to this backend) can make
 		// mutating requests — see AllowDevFrontendOrigin's doc comment.
@@ -64,6 +68,7 @@ func (a *App) wireAuth(ctx context.Context) error {
 	if err := validateHTTPURL("TF_PUBLIC_URL", publicURL); err != nil {
 		return err
 	}
+	a.deployPublicURL = publicURL
 
 	// Org-creation toggle. Unset → creation allowed (right default for
 	// hosted SaaS + unconfigured self-hosts); a locked-down self-host sets

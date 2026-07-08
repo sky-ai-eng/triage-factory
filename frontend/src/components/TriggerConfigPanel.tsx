@@ -14,7 +14,7 @@ import { blueprintsBase, handlersBase } from '../lib/scope'
 interface TriggerConfigPanelProps {
   open: boolean
   trigger: TriggerHandler | null
-  // When true (the org-template editor, SKY-381), reads/writes target the
+  // When true (the org-template editor), reads/writes target the
   // /api/org-template/* families instead of /api/event-handlers + /api/prompts.
   templateScope?: boolean
   // When true the panel is read-only (TFAC-447): inputs are disabled and the

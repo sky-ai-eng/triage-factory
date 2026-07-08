@@ -12,8 +12,7 @@ import (
 // of "intent to auto-delegate" rows the router enqueues whenever an
 // event matches a trigger but the entity already has an active auto
 // run (or earlier queued firings ahead of it). The drain loop pops
-// them in queue order as auto runs terminate. See SKY-189 for the
-// design.
+// them in queue order as auto runs terminate.
 //
 // All methods take orgID; local mode passes runmode.LocalDefaultOrgID.
 // Postgres impl runs against the admin pool (system-service: the
@@ -41,7 +40,7 @@ type PendingFiringsStore interface {
 	//
 	// userID populates creator_user_id (NOT NULL in the Postgres
 	// schema). The router passes runmode.LocalDefaultUserID today;
-	// D9 / SKY-253 retrofits the call site to pass the request user
+	// a later milestone retrofits the call site to pass the request user
 	// once handler-level claims are wired. SQLite impl ignores
 	// userID — the local schema has no creator column.
 	Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string) (bool, error)

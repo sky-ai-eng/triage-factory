@@ -32,7 +32,7 @@ const run = (over: Partial<AgentRun>): AgentRun =>
 function renderCard(over: Partial<AgentRun>, onOpenArtifact = vi.fn()) {
   render(
     <MemoryRouter>
-      <AgentCard task={task} run={run(over)} messages={[]} onOpenArtifact={onOpenArtifact} />
+      <AgentCard task={task} run={run(over)} onOpenArtifact={onOpenArtifact} />
     </MemoryRouter>,
   )
   return onOpenArtifact

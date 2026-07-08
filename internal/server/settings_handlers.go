@@ -44,7 +44,7 @@ func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.UserSettings = settings
 
-		// Identity is host-scoped (SKY-396): resolve the org's GitHub host
+		// Identity is host-scoped: resolve the org's GitHub host
 		// from org_settings, then look up the login for (user, host). An
 		// absent row degrades to "" exactly as the old NULL column did.
 		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
@@ -57,7 +57,7 @@ func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.GitHubUsername = ghUsername
 
-		// Jira identity is host-scoped too (SKY-397): look it up for the
+		// Jira identity is host-scoped too: look it up for the
 		// org's Jira host (same org_settings already loaded above).
 		jiraAccountID, _, err := tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
 		if err != nil {
@@ -102,7 +102,7 @@ func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) 
 //
 // The path segment {team_id} accepts a UUID or the literal "default",
 // which resolves to the org's default team via TeamsStore.GetDefaultForOrg.
-// This keeps the frontend functional before team pickers ship (SKY-358).
+// This keeps the frontend functional before team pickers ship.
 // --------------------------------------------------------------------
 
 type teamSettingsResponse struct {
@@ -385,6 +385,14 @@ type orgSettingsResponse struct {
 	MaxDailyCostUSD    float64 `json:"max_daily_cost_usd"`
 	HasAnthropicAPIKey bool    `json:"has_anthropic_api_key"`
 	HasBedrockCreds    bool    `json:"has_bedrock_credentials"`
+	// Bedrock non-secret config (TFAC-68). The credential itself never
+	// leaves the vault — presence rides has_bedrock_credentials and the
+	// method marker below; these three let the Settings form render the
+	// current region / model / endpoint without a secrets round-trip.
+	BedrockAuthMethod string `json:"bedrock_auth_method,omitempty"` // "bearer" | "access_keys"
+	BedrockRegion     string `json:"bedrock_region,omitempty"`
+	BedrockModelID    string `json:"bedrock_model_id,omitempty"`
+	BedrockBaseURL    string `json:"bedrock_base_url,omitempty"`
 	// MemberCount is the number of members in this org. Feeds the
 	// frontend's N=1 collapse alongside the team member count. A property
 	// of the org, so it rides the org-scope response rather than /api/me.
@@ -400,6 +408,7 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 
 	var orgSet domain.OrgSettings
 	var creds auth.Credentials
+	var bedrockRegion, bedrockModelID, bedrockBaseURL string
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error
 		orgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
@@ -407,6 +416,13 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
+		// Bedrock non-secret config rides the same vault as the
+		// credential; missing keys come back ("", nil). Best-effort like
+		// the integrations.Load above — a vault hiccup degrades the form
+		// to blank fields, not a 500.
+		bedrockRegion, _ = tx.Secrets.Get(r.Context(), orgID, integrations.KeyAWSRegion)
+		bedrockModelID, _ = tx.Secrets.Get(r.Context(), orgID, integrations.KeyBedrockModelID)
+		bedrockBaseURL, _ = tx.Secrets.Get(r.Context(), orgID, integrations.KeyBedrockBaseURL)
 		return nil
 	}); err != nil {
 		internalError(w, "settings/org", err)
@@ -447,6 +463,10 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		MaxDailyCostUSD:     orgSet.MaxDailyCostUSD,
 		HasAnthropicAPIKey:  orgSet.AnthropicAPIKeyRef != "",
 		HasBedrockCreds:     orgSet.BedrockCredentialsRef != "",
+		BedrockAuthMethod:   bedrockAuthMethodFromRef(orgSet.BedrockCredentialsRef),
+		BedrockRegion:       bedrockRegion,
+		BedrockModelID:      bedrockModelID,
+		BedrockBaseURL:      bedrockBaseURL,
 		MemberCount:         memberCount,
 	})
 }

@@ -166,7 +166,7 @@ type BlueprintRun struct {
 	// projection.
 	TriggeringEventID string `json:"triggering_event_id,omitempty"`
 	// ActorAgentID is the agents.id of the bot executing this blueprint run
-	// (blueprint_runs.actor_agent_id, SKY-261 D-Claims). Resolved once at the
+	// (blueprint_runs.actor_agent_id). Resolved once at the
 	// delegation entry point — from the task's bot claim, or the org agent the
 	// router/handler already holds — and frozen here at mint. Every step run
 	// inherits it onto runs.actor_agent_id, so execution attribution is stable

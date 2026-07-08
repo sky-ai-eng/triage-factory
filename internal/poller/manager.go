@@ -28,7 +28,7 @@ type Manager struct {
 	// argument. See the per-org loops in runGitHubCycle / runJiraCycle.
 	tasks        db.TaskStore
 	entities     db.EntityStore
-	users        db.UsersStore            // source of the local user's host-scoped GitHub identity (SKY-396)
+	users        db.UsersStore            // source of the local user's host-scoped GitHub identity
 	repos        db.RepoStore             // configured-repo names for GitHub poller startup
 	orgs         db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
 	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules; discovery polls the org-wide union (every team's rules)
@@ -65,6 +65,34 @@ type Manager struct {
 	// dashboard_backfilled_at marker is what prevents re-running across
 	// processes / restarts. Zero value is ready to use.
 	dashboardBackfillInflight sync.Map
+
+	// cursorMu guards ghCursor, the per-org GitHub round-robin repo cursor
+	// (TFAC-571). In-memory only for v1 (per the ticket's explicit
+	// allowance) — a restart loses the cursor and the next cycle starts
+	// from the head, same as today. Key is orgID; value is the full-name
+	// ("owner/repo") of the next repo to refresh, or absent/"" for "start
+	// at the head" (no cursor set, or the last cycle fully wrapped).
+	cursorMu sync.Mutex
+	ghCursor map[string]string
+
+	// heartbeatMu guards lastGithubTick/lastJiraTick — stamped once per
+	// wake of runGitHubCycle/runJiraCycle regardless of whether any org
+	// was due that wake (TFAC-573). Distinct from nextPoll/dueMu: nextPoll
+	// only gets a slot for orgs actually polled, so an org roster of zero
+	// (or every org not-yet-due) would otherwise look identical to a dead
+	// loop. This is the /readyz hard "is the base-tick loop alive" check.
+	heartbeatMu    sync.Mutex
+	lastGithubTick time.Time
+	lastJiraTick   time.Time
+
+	// pollSuccessMu guards lastGithubSuccess/lastJiraSuccess — per-org
+	// timestamp of the last poll that completed a RefreshGitHub/RefreshJira
+	// call without error (TFAC-573). This is the /readyz soft signal: it
+	// proves an org's poll actually completed, where the heartbeat above
+	// only proves the loop woke.
+	pollSuccessMu     sync.Mutex
+	lastGithubSuccess map[string]time.Time
+	lastJiraSuccess   map[string]time.Time
 }
 
 func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
@@ -364,6 +392,7 @@ func (m *Manager) startGitHub() {
 // OnError but do not abort the remaining orgs in the cycle — a transient
 // failure on org A shouldn't starve orgs B..N of polls.
 func (m *Manager) runGitHubCycle() {
+	m.stampGitHubHeartbeat()
 	ctx := context.Background()
 	now := time.Now()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
@@ -397,8 +426,17 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		return
 	}
 	if len(repos) == 0 {
+		m.setGitHubCursor(orgID, "") // tracked set emptied — drop any stale cursor
 		return
 	}
+
+	// TFAC-571: rotate the repo list to start at this org's round-robin
+	// cursor (the resume point saved by a prior cycle that got cut short by
+	// ErrRateLimited), so a large tracked set doesn't starve the repos at
+	// the tail — without this, every cycle restarts from index 0 and repos
+	// early in the (stable) list get refreshed every time while repos late
+	// in the list may never complete a first refresh.
+	repos = rotateFromCursor(repos, m.githubCursor(orgID))
 
 	// Reconcile the GitHub-team mappings against the live team set — the
 	// deletion floor's "periodic refresh" trigger, independent of the
@@ -460,6 +498,16 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// cycle — host is stable across the per-installation loop below.
 	resolver := m.reviewerResolver(ctx, orgID, "", nil)
 
+	// unresolvedOwners collects the account logins of installations whose
+	// client/grant couldn't be resolved this cycle (ClientFor or
+	// ListInstallationRepos failed) — TFAC-571 follow-up. Those repos were
+	// never reached at all, the same as a rate-limited repo that never got
+	// dispatched, so the cursor computed below must not treat this cycle as
+	// a full wrap just because a LATER installation happened to succeed.
+	unresolvedOwners := make(map[string]bool)
+	var rateLimitResumeFrom string
+	var rateLimitErr *ghclient.ErrRateLimited
+
 	covered := make(map[string]bool, len(repos))
 	anyFunctional := false
 	for _, inst := range installs {
@@ -467,12 +515,14 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		if cerr != nil {
 			githubLog.Error("resolve client for installation failed", "org", orgID, "installation", inst.InstallationID, "account", inst.AccountLogin, "error", cerr)
 			m.reportError("github", orgID, cerr)
+			unresolvedOwners[strings.ToLower(inst.AccountLogin)] = true
 			continue
 		}
 		grant, gerr := client.ListInstallationRepos(ctx)
 		if gerr != nil {
 			githubLog.Error("list installation repos failed", "org", orgID, "account", inst.AccountLogin, "error", gerr)
 			m.reportError("github", orgID, gerr)
+			unresolvedOwners[strings.ToLower(inst.AccountLogin)] = true
 			continue
 		}
 		anyFunctional = true
@@ -482,11 +532,51 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
-		if _, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, "", scoped, resolver); rerr != nil {
+		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, "", scoped, resolver)
+		if rerr != nil {
 			githubLog.Error("tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
 			m.reportError("github", orgID, rerr)
+		} else {
+			m.stampGitHubSuccess(orgID)
+		}
+		var rl *ghclient.ErrRateLimited
+		if errors.As(rerr, &rl) {
+			// TFAC-571: budget's known exhausted for this credential — stop
+			// cleanly rather than trying the remaining installations against
+			// the same exhausted client budget. Cursor placement is decided
+			// once, below, alongside any unresolved-installation gap.
+			rateLimitResumeFrom, rateLimitErr = resumeFrom, rl
+			break
 		}
 	}
+
+	// TFAC-571: decide the cycle's actual resume point once, after every
+	// installation this cycle could reach has run. A rate-limited fan-out
+	// wins (it's the more specific signal — RefreshGitHub already pinned it
+	// to the exact repo that needs a retry). Otherwise, if any installation
+	// couldn't even be resolved this cycle, the cursor must not reset to ""
+	// (implying a full wrap) just because a later installation succeeded —
+	// resume at the earliest currently-configured repo that installation
+	// would own (matched by account-login prefix, same as
+	// reconcileGitHubGroups) and isn't already covered by a DIFFERENT,
+	// successful installation. A repo genuinely outside every installation's
+	// grant (the "not in any app installation grant" warning below) is a
+	// permanent gap, not a transient one, so it's excluded here — only
+	// unresolved-owner repos get cursor priority.
+	resumeFrom := rateLimitResumeFrom
+	if resumeFrom == "" && len(unresolvedOwners) > 0 {
+		for _, r := range repos {
+			if covered[r] {
+				continue
+			}
+			owner, _, _ := strings.Cut(r, "/")
+			if unresolvedOwners[strings.ToLower(owner)] {
+				resumeFrom = r
+				break
+			}
+		}
+	}
+	m.recordGitHubCursor(orgID, resumeFrom, rateLimitErr)
 
 	// No installation produced a usable installation token (every mint/list
 	// failed). Under XOR there is no PAT behind these failures to fall back to
@@ -510,7 +600,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 }
 
 // reconcileGitHubGroups is the GitHub-team-deletion reconcile floor — the
-// "periodic refresh" trigger the SKY-369 lifecycle describes, run every
+// "periodic refresh" trigger the reconcile lifecycle describes, run every
 // GitHub poll cycle so team_github_groups stays fresh for the routing layer
 // without depending on someone opening the settings page. For each distinct
 // GitHub org behind the configured repos it fetches the live team set and
@@ -590,7 +680,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	var username string
 	var userTeams []string
 	if isLocal {
-		// Identity is host-scoped (SKY-396): resolve the org's GitHub host
+		// Identity is host-scoped: resolve the org's GitHub host
 		// from org_settings, then read the local user's login for that
 		// (user, host) pair. Boot-time goroutine with no JWT claims → the
 		// `...System` admin-pool variants.
@@ -612,10 +702,16 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	}
 
 	resolver := m.reviewerResolver(ctx, orgID, username, userTeams)
-	if _, err := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, username, repos, resolver); err != nil {
-		githubLog.Error("tracker error", "org", orgID, "error", err)
-		m.reportError("github", orgID, err)
+	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, username, repos, resolver)
+	if rerr != nil {
+		githubLog.Error("tracker error", "org", orgID, "error", rerr)
+		m.reportError("github", orgID, rerr)
+	} else {
+		m.stampGitHubSuccess(orgID)
 	}
+	var rl *ghclient.ErrRateLimited
+	errors.As(rerr, &rl)
+	m.recordGitHubCursor(orgID, resumeFrom, rl)
 }
 
 // orgHasRegisteredApp reports whether the org has an active GitHub App
@@ -649,6 +745,86 @@ func intersectConfigured(configured []string, grant []ghclient.UserRepo, covered
 			covered[r] = true
 		}
 	}
+	return out
+}
+
+// githubCursor returns the org's saved round-robin repo cursor (TFAC-571) —
+// the full-name ("owner/repo") of the next repo to refresh, or "" if none is
+// set (never polled, or the last cycle fully wrapped the list).
+func (m *Manager) githubCursor(orgID string) string {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	return m.ghCursor[orgID]
+}
+
+// setGitHubCursor records the org's round-robin repo cursor. An empty repo
+// clears it (full wrap completed, or the tracked set is now empty) rather
+// than storing a meaningless "resume at the head" entry.
+func (m *Manager) setGitHubCursor(orgID, repo string) {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if repo == "" {
+		delete(m.ghCursor, orgID)
+		return
+	}
+	if m.ghCursor == nil {
+		m.ghCursor = make(map[string]string)
+	}
+	m.ghCursor[orgID] = repo
+}
+
+// recordGitHubCursor applies one GitHub cycle's outcome to the org's
+// round-robin cursor. resumeFrom == "" means the cycle fully wrapped the
+// repo list — the cursor resets to the head for next cycle. A non-empty
+// resumeFrom means it didn't: either ErrRateLimited cut a fan-out short
+// partway through the list (rl != nil — see Tracker.RefreshGitHub), or, in
+// the multi-installation App path, an installation's client/grant couldn't
+// even be resolved this cycle so its repos were never reached (rl == nil —
+// see the unresolvedOwners handling in runGitHubCycleForOrg). Either way the
+// cursor is saved at resumeFrom so next cycle prioritizes it. Only the
+// rate-limited case additionally logs at INFO and pulls the org's next
+// scheduled poll in to rl.ResumeAt, so the cursor gets picked back up as
+// soon as the budget frees rather than waiting out a full normal poll
+// interval (which may be much longer, or — if shorter — would just hit the
+// same exhaustion again); the unresolved-installation case has no known
+// resume time, so it just waits for the org's ordinary cadence.
+func (m *Manager) recordGitHubCursor(orgID, resumeFrom string, rl *ghclient.ErrRateLimited) {
+	m.setGitHubCursor(orgID, resumeFrom)
+	if rl == nil {
+		return
+	}
+	githubLog.Info("github poll cycle interrupted by rate limit; resuming repo cursor next cycle",
+		"org", orgID, "resume_repo", resumeFrom, "resume_at", rl.ResumeAt)
+	m.schedulePoll("github", orgID, rl.ResumeAt)
+}
+
+// rotateFromCursor returns repos rotated so iteration starts at cursor's
+// position and wraps around — TFAC-571's round-robin fairness mechanism, so
+// a large tracked set doesn't starve the repos at the tail of the list when
+// a cycle can't finish (rate budget exhausted, restart, GHES flake).
+//
+// Churn-tolerant by construction: repos are matched by full name, not index,
+// so an insertion/removal elsewhere in the tracked set doesn't shift the
+// resume point. If cursor is empty or its repo is no longer present (removed
+// from the tracked set between cycles), rotation is a no-op — resume at the
+// head rather than panicking or skipping the list.
+func rotateFromCursor(repos []string, cursor string) []string {
+	if cursor == "" {
+		return repos
+	}
+	idx := -1
+	for i, r := range repos {
+		if r == cursor {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 {
+		return repos
+	}
+	out := make([]string, 0, len(repos))
+	out = append(out, repos[idx:]...)
+	out = append(out, repos[:idx]...)
 	return out
 }
 
@@ -700,6 +876,7 @@ func (m *Manager) startJira() {
 // per-org failures are logged + reported via OnError but do not abort the
 // remaining orgs in the cycle.
 func (m *Manager) runJiraCycle() {
+	m.stampJiraHeartbeat()
 	ctx := context.Background()
 	now := time.Now()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
@@ -708,7 +885,7 @@ func (m *Manager) runJiraCycle() {
 		m.reportError("jira", "", err)
 		return
 	}
-	// SKY-463: ForSystem is the canonical constructor for the org/bot service
+	// ForSystem is the canonical constructor for the org/bot service
 	// client. The poller is read-only (discovery), so it's bot-attributed by
 	// design; routing through the resolver keeps system-client construction in
 	// one place alongside the per-user write path.
@@ -766,6 +943,8 @@ func (m *Manager) runJiraCycle() {
 		if _, err := m.trackerForOrg(orgID).RefreshJira(client, baseURL, projects); err != nil {
 			jiraLog.Error("tracker error", "org", orgID, "error", err)
 			m.reportError("jira", orgID, err)
+		} else {
+			m.stampJiraSuccess(orgID)
 		}
 	}
 	m.prunePoll("jira", orgIDs)

@@ -32,7 +32,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	keyring.MockInit()
 
 	const eventType = "github:pr:ci_check_passed"
-	// SKY-261 B+: pre-B+ this fixture used status='delegated' to mean
+	// Pre-B+ this fixture used status='delegated' to mean
 	// "the bot owns this task and has a pending review." Post-B+ that
 	// shape is status='queued' + claimed_by_agent_id stamped — status
 	// is lifecycle-only, claim is responsibility. Statements split
@@ -74,7 +74,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	}
 
 	// run_memory: agent finished and wrote its self-report (the
-	// SKY-204 termination upsert). We assert below that
+	// termination upsert). We assert below that
 	// human_content lands without trampling agent_content.
 	if err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "e_pa", "", "agent self-report"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
@@ -109,7 +109,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 // resolve-all teardown is meant to deliver: task at the expected post-state, the
 // unresolved review artifact flipped to dismissed, human_content recording the
 // discard with a marker phrase that distinguishes the requeue from the dismiss
-// flavor, agent_content preserved (the whole point of SKY-204 was keeping both
+// flavor, agent_content preserved (the whole point was keeping both
 // halves). wantTaskStatus and wantHumanContentMarker let callers vary the
 // assertion across the requeue (`queued` + "returned to the triage queue") and
 // dismiss (`dismissed` + "dismissed the task entirely") paths.
@@ -195,7 +195,7 @@ func assertPendingApprovalCleanedUp(
 	}
 }
 
-// TestHandleUndo_CleansUpPendingApprovalRun is the SKY-206 regression
+// TestHandleUndo_CleansUpPendingApprovalRun is the regression
 // for the swipe-toast UX path: Cards user dismissed/claimed the
 // task, agent ran and reached pending_approval, user hits Cmd-Z (or
 // the toast's Undo button). The full cleanup must run AND a swipe
@@ -227,7 +227,7 @@ func TestHandleUndo_CleansUpPendingApprovalRun(t *testing.T) {
 }
 
 // TestHandleRequeue_CleansUpPendingApprovalRun is the parallel for
-// the state-driven path: Board's drag-to-Queue, SKY-207's "Return
+// the state-driven path: Board's drag-to-Queue, the "Return
 // to queue" button. Same cleanup, but NO swipe row — drag/click
 // gestures aren't swipes and shouldn't muddy the swipe analytics.
 func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
@@ -261,7 +261,7 @@ func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
 // entry point: user swipes left to dismiss a delegated card whose
 // agent already produced a pending_approval review. Today this
 // orphans the review and leaves the run as a phantom
-// pending_approval against a dismissed task — SKY-206's other half.
+// pending_approval against a dismissed task — this is the other half.
 //
 // The dismiss-flavored human_content note carries a different
 // implication marker ("dismissed the task entirely") than the
@@ -287,7 +287,7 @@ func TestHandleSwipe_DismissCleansUpPendingApprovalRun(t *testing.T) {
 // pending_approval run. The complete swipe action flips the task to
 // 'done' (so the card lands in the Done column rather than
 // disappearing from the board, the way dismiss makes it) but reuses
-// the same SKY-206 cleanup — pending_reviews row gone, run flipped
+// the same cleanup — pending_reviews row gone, run flipped
 // to cancelled, agent_content preserved, human_content recording
 // the user's verdict with a complete-flavored marker that's distinct
 // from both the requeue and dismiss shapes. Future agents reading
@@ -308,7 +308,7 @@ func TestHandleSwipe_CompleteCleansUpPendingApprovalRun(t *testing.T) {
 		"done", "marked the task complete without submitting")
 }
 
-// TestHandleSwipe_ClaimCleansUpPendingApprovalRun guards the SKY-206
+// TestHandleSwipe_ClaimCleansUpPendingApprovalRun guards the
 // race the PR #77 review flagged: Board's drag-Agent-to-You issues
 // /swipe claim, but the frontend's agentRuns map can be transiently
 // empty during a fetchTasks refresh — so any frontend gating on a stale
@@ -330,7 +330,7 @@ func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// SKY-261 B+: claim no longer transitions status; the task stays
+	// Claim no longer transitions status; the task stays
 	// 'queued' and claimed_by_user_id is set instead. The
 	// pending-approval cleanup invariants (run cancelled, review row
 	// removed, human_content marker) are unchanged.
@@ -378,7 +378,7 @@ func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// SKY-261 B+: claim is a responsibility-axis action; status stays
+	// Claim is a responsibility-axis action; status stays
 	// 'queued', claim col gets stamped.
 	var status string
 	var claimedByUserID sql.NullString
@@ -445,7 +445,7 @@ func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ClaimRefusedLeavesNoAuditRow pins the SKY-261 v0.7
+// TestHandleSwipe_ClaimRefusedLeavesNoAuditRow pins the
 // audit contract: swipe_events records state CHANGES, not gesture
 // ATTEMPTS. A claim swipe that's refused (different user owns the
 // task) returns 409 with no audit row, no status flip, no snooze
@@ -752,7 +752,7 @@ func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
 	})
 }
 
-// TestHandleSwipe_DelegateRefusedWhenBotDisabled pins the SKY-261
+// TestHandleSwipe_DelegateRefusedWhenBotDisabled pins the
 // acceptance criterion "swipe-to-delegate re-checks team_agents.enabled
 // at swipe time." A team admin can toggle the bot off via SetEnabled
 // — subsequent /swipe delegate gestures must 409, with no claim
@@ -836,7 +836,7 @@ func TestHandleSnooze_404OnMissingTask(t *testing.T) {
 	}
 }
 
-// TestHandleSnooze_RefusesOnClaimedTask pins the SKY-261 B+
+// TestHandleSnooze_RefusesOnClaimedTask pins the
 // "snoozed ↔ unclaimed" invariant from the snooze side: the
 // SnoozeTask store-level atomic UPDATE refuses on a claimed task,
 // the handler maps the refusal to 409, and no state mutates (status
@@ -907,7 +907,7 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_DelegateTransfersOwnUserClaim pins the SKY-133
+// TestHandleSwipe_DelegateTransfersOwnUserClaim pins the
 // flow: when the user drags their own claimed task from the You
 // lane to the Agent lane, the FE fires a delegate swipe. The
 // handler must accept the gesture as a legitimate user → bot
@@ -1098,8 +1098,8 @@ func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 
 	// Seed a plain user-claimed task with no run at all — the simplest
 	// shape that exercises handleUndo's other half (claim clear +
-	// Jira reversal skipped because EntitySource isn't 'jira'). Post-
-	// SKY-261 B+ this is status='queued' + claimed_by_user_id; pre-B+
+	// Jira reversal skipped because EntitySource isn't 'jira'). Post-B+
+	// this is status='queued' + claimed_by_user_id; pre-B+
 	// it was status='claimed'.
 	if _, err := s.db.Exec(
 		`INSERT INTO entities (id, source, source_id, kind, state)
@@ -1134,7 +1134,7 @@ func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	}
 }
 
-// TestHandleUndo_ClearsClaimColumns pins the SKY-261 B+ semantic:
+// TestHandleUndo_ClearsClaimColumns pins the B+ semantic:
 // /undo returns the task to the team's unclaimed queue, which means
 // both claim_by_* cols are cleared — not just status reset. Without
 // this, a claim/delegate swipe followed by Undo would leave the task
@@ -1304,7 +1304,7 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 }
 
 // TestTeardownTaskArtifacts_AgentContentNullSurvives is the
-// SKY-204 synthetic-row case: agent skipped the memory file, so
+// synthetic-row case: agent skipped the memory file, so
 // run_memory exists with agent_content NULL. The discard teardown
 // still lands human_content cleanly on the existing row (the spec's
 // guarantee that the unconditional termination-time upsert means
@@ -1314,7 +1314,7 @@ func TestTeardownTaskArtifacts_AgentContentNullSurvives(t *testing.T) {
 	taskID, runID, _ := pendingApprovalFixture(t, s.db)
 
 	// Force agent_content NULL to simulate a noncompliant gate
-	// (SKY-204's UpsertAgentMemory("") would have done this in
+	// (UpsertAgentMemory("") would have done this in
 	// production; we set it directly to skip the dependency).
 	if _, err := s.db.Exec(
 		`UPDATE run_memory SET agent_content = NULL WHERE run_id = ?`, runID,

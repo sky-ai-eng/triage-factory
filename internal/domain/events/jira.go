@@ -11,7 +11,7 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // status-changed tasks can exist on the same issue when it transitions
 // through several states before being addressed.
 //
-// SKY-270: actor predicates moved from `*_is_self` booleans to `*_in`
+// Actor predicates moved from `*_is_self` booleans to `*_in`
 // allowlists of Atlassian account IDs. "Self" relative to a team is
 // N-valued, so the team-shared rule needs a slice of identifiers. The
 // metadata carries the *_account_id alongside the existing display-name
@@ -27,7 +27,7 @@ type JiraIssueAssignedMetadata struct {
 	AssigneeAccountID string `json:"assignee_account_id"` // Atlassian stable identifier
 	Reporter          string `json:"reporter"`
 	ReporterAccountID string `json:"reporter_account_id"`
-	IssueKey          string `json:"issue_key"` // "SKY-123"
+	IssueKey          string `json:"issue_key"` // "PROJ-123"
 	Project           string `json:"project"`   // "SKY"
 	IssueType         string `json:"issue_type"`
 	Priority          string `json:"priority"`

@@ -159,7 +159,7 @@ func TestKnowledgeWatcher_DebouncesBurstOfWrites(t *testing.T) {
 	// busy scheduler (a full `go test ./...` run with -race) the gap
 	// between two *delivered* fsnotify events could exceed
 	// knowledgeDebounce, so the burst straddled the window and emitted
-	// two events (SKY-384). That coupling — a wall-clock debounce vs.
+	// two events. That coupling — a wall-clock debounce vs.
 	// OS-paced event delivery — is what made it flake, and it's
 	// orthogonal to the coalescing this test exists to verify. The
 	// fs -> handle -> fire path is already covered by
@@ -222,7 +222,7 @@ func TestKnowledgeWatcher_IgnoresChangesOutsideKnowledgeBase(t *testing.T) {
 
 func TestKnowledgeWatcher_Multi_FiresUnderOrgScopedTree(t *testing.T) {
 	// In multi mode the curator writes to
-	// <root>/orgs/<orgID>/projects/<id>/knowledge-base (SKY-402), so the
+	// <root>/orgs/<orgID>/projects/<id>/knowledge-base, so the
 	// watcher roots at the state root and descends the per-org tree. The
 	// whole chain is laid down by one MkdirAll (a project's first turn),
 	// exactly the atomic case the local import test covers — the watcher

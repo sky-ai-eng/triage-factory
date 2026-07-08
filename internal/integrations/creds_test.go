@@ -474,8 +474,8 @@ func TestLoadSystem_SameKeySetAsLoad(t *testing.T) {
 }
 
 // TestAllKeys_IncludesLegacyKeychainKeys pins that the per-org Clear set still
-// sweeps the two legacy keychain keys (github_username from SKY-264,
-// jira_display_name from SKY-397). They have no companion DB ref, so they're
+// sweeps the two legacy keychain keys (github_username and
+// jira_display_name). They have no companion DB ref, so they're
 // safe on the Clear path. Keeping them in AllKeys also carries them into
 // AllLocalSweepKeys (the superset scripts/clean-slate.sh mirrors), which lists
 // both — so the script and the Go source can't drift on the legacy keys.
@@ -502,8 +502,10 @@ func TestStaticOrgSecretsExcludedFromAllKeys(t *testing.T) {
 }
 
 // TestAllLocalSweepKeys_IsAllKeysPlusStaticOrgSecrets pins that the uninstall
-// sweep set is exactly AllKeys plus the org-level secrets — a superset that
-// covers everything Clear covers and nothing it can't reconcile.
+// sweep set is exactly AllKeys plus the org-level secrets (the Anthropic key,
+// the Atlassian OAuth client secret, and the Bedrock set managed by
+// POST /api/bedrock/connect) — a superset that covers everything Clear covers
+// and nothing it can't reconcile.
 func TestAllLocalSweepKeys_IsAllKeysPlusStaticOrgSecrets(t *testing.T) {
 	sweep := integrations.AllLocalSweepKeys()
 	for _, k := range integrations.AllKeys() {
@@ -511,13 +513,15 @@ func TestAllLocalSweepKeys_IsAllKeysPlusStaticOrgSecrets(t *testing.T) {
 			t.Errorf("AllLocalSweepKeys missing AllKeys entry %q (must be a superset)", k)
 		}
 	}
-	for _, k := range []string{integrations.KeyAnthropicAPIKey, integrations.KeyJiraOAuthClientSecret} {
+	orgSecrets := append([]string{integrations.KeyAnthropicAPIKey, integrations.KeyJiraOAuthClientSecret},
+		integrations.BedrockKeys()...)
+	for _, k := range orgSecrets {
 		if !slices.Contains(sweep, k) {
 			t.Errorf("AllLocalSweepKeys missing org-level secret %q", k)
 		}
 	}
-	if got, want := len(sweep), len(integrations.AllKeys())+2; got != want {
-		t.Errorf("AllLocalSweepKeys has %d keys, want %d (AllKeys + the 2 org secrets, no dupes)", got, want)
+	if got, want := len(sweep), len(integrations.AllKeys())+len(orgSecrets); got != want {
+		t.Errorf("AllLocalSweepKeys has %d keys, want %d (AllKeys + the org secrets, no dupes)", got, want)
 	}
 }
 

@@ -57,7 +57,7 @@ func TestEventStore_Postgres_CrossOrgLeakage(t *testing.T) {
 
 	entityA := seedPgEntityForEvents(t, h, orgA, "cross-org-A")
 	// Record an event in orgA via the admin-pool RecordSystem path —
-	// the router's SKY-305 call site uses this admin variant.
+	// the router's call site uses this admin variant.
 	eid := entityA
 	evtID, err := stores.Events.RecordSystem(ctx, orgA, domain.Event{
 		EntityID:     &eid,

@@ -45,7 +45,7 @@ type runConfig struct {
 	owner     string  // resolved GitHub owner (empty for Jira lazy runs)
 	repo      string  // resolved GitHub repo (empty for Jira lazy runs)
 	prNumber  int     // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-run branch + push remote the bare repo would otherwise accumulate
-	projectID *string // entity's project assignment (nil for un-assigned); SKY-219 uses this to copy the project's knowledge-base into ./_scratch/project-knowledge/
+	projectID *string // entity's project assignment (nil for un-assigned); used to copy the project's knowledge-base into ./_scratch/project-knowledge/
 
 	extraAllowedTools string // comma-separated extra tools from prompt.AllowedTools + agent scans; merged into --allowedTools at spawn time
 
@@ -65,8 +65,8 @@ type runConfig struct {
 
 // ErrAlreadyFired is returned by Delegate on the event path when the run
 // insert hit the (triggering_event_id, trigger_id) fence — a run for this
-// (event, trigger) already committed on a prior delivery of the same event
-// (SKY-424). The router treats it as a clean skip: the at-least-once event
+// (event, trigger) already committed on a prior delivery of the same event.
+// The router treats it as a clean skip: the at-least-once event
 // queue replayed an event whose first auto-delegation already happened, so
 // there is nothing to re-fire and the original run's claim still stands.
 var ErrAlreadyFired = errors.New("delegate: run already fired for this (event, trigger)")
@@ -116,7 +116,7 @@ type DelegateOpts struct {
 	TriggerID string
 
 	// TriggeringEventID is the event instance that fired this run, for
-	// event-triggered delegations; empty for manual (SKY-424). Server-side
+	// event-triggered delegations; empty for manual. Server-side
 	// provenance like TriggerID — the router threads it from the event
 	// being processed (immediate path) or the pending firing row (drain
 	// path). Paired with TriggerID it drives the runs_event_trigger_fence:
@@ -164,7 +164,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	}
 
 	// Resolve this run's GitHub client + default model per (org, owner, team).
-	// Both modes go through the same seam (SKY-389): the resolver mints an
+	// Both modes go through the same seam: the resolver mints an
 	// App-installation token in multi or borrows the keychain PAT in local;
 	// modelFor reads the task's team default (a multi-team org honors each
 	// team's model choice). owner is parsed from the task (empty for Jira
@@ -364,7 +364,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 }
 
 // ownerForTask extracts the GitHub account a task targets, for the
-// per-(org, owner) credential resolution at Delegate entry (SKY-389).
+// per-(org, owner) credential resolution at Delegate entry.
 // GitHub PR tasks carry "owner/repo#N" in EntitySourceID; Jira (and any
 // non-github source) has no single owner, so the resolver receives "" and
 // resolves the org's sole App installation, falling through to PAT when
@@ -495,7 +495,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 		}
 	}
 
-	// SKY-220: block briefly so the project classifier (post-poll
+	// Block briefly so the project classifier (post-poll
 	// runner) can decide this entity before we read project_id for KB
 	// injection. Nil-safe — tests and pre-classifier configurations
 	// skip the wait.
@@ -542,7 +542,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID string, task domai
 		delegateLog.Warn("set worktree_path for Jira run failed; resume will reject this run", "run", runID, "error", err)
 	}
 
-	// SKY-220: block briefly so the project classifier can decide this
+	// Block briefly so the project classifier can decide this
 	// entity before we read project_id for KB injection. Nil-safe.
 	s.awaitClassification(ctx, orgID, task.EntityID)
 
@@ -555,5 +555,47 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID string, task domai
 		runRoot:   runRoot,
 		projectID: lookupEntityProjectID(s.entities, orgID, task.EntityID),
 		// owner/repo intentionally empty: the agent picks per-ticket via `workspace add`
+	}, nil
+}
+
+// setupSlack prepares the run-root for a Slack-thread delegation
+// (TFAC-591). Mirrors setupJira: no repo is pre-cloned, the agent acquires
+// repo(s) on demand via `triagefactory exec workspace add` (TFAC-498), and
+// the run-root is the agent's session cwd — the same resume load-bearing
+// invariant documented on setupJira above.
+//
+// Two differences from Jira:
+//   - Slack threads are not project-classifier targets, so
+//     awaitClassification is skipped and projectID stays nil.
+//   - The tools reference layers in an ee-registered Slack verb doc (if
+//     any registered via ai.RegisterToolsReference) on top of the GH
+//     template — GH tools are included because the agent acquires repos on
+//     demand and then needs the gh verbs, the same reasoning as the Jira
+//     arm's GH+Jira composition. No registered reference is not an error:
+//     the run still works with base tools.
+func (s *Spawner) setupSlack(ctx context.Context, orgID, runID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+	runRoot, err := worktree.MakeRunRoot(runID)
+	if err != nil {
+		return runConfig{}, fmt.Errorf("create run root: %w", err)
+	}
+	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, runID, runRoot); err != nil {
+		delegateLog.Warn("set worktree_path for Slack run failed; resume will reject this run", "run", runID, "error", err)
+	}
+
+	toolsRef := ai.GHToolsTemplate
+	if ref, ok := ai.ToolsReferenceFor("slack"); ok {
+		toolsRef += "\n\n" + ref
+	}
+
+	return runConfig{
+		orgID:    orgID,
+		scope:    fmt.Sprintf("Slack thread: %s", task.EntitySourceID),
+		toolsRef: toolsRef,
+		wtPath:   runRoot,
+		hasWT:    false,
+		runRoot:  runRoot,
+		// owner/repo/projectID intentionally empty/nil: the agent picks
+		// repos per-thread via `workspace add`, and Slack threads are not
+		// project-classifier targets (no awaitClassification call above).
 	}, nil
 }

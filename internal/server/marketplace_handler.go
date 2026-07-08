@@ -584,7 +584,7 @@ func (mh *marketplaceHandler) handleMarketplaceGet(w http.ResponseWriter, r *htt
 	// Validate up front: id is a uuid column on Postgres, so a malformed
 	// value surfaces as a SQLSTATE 22P02 cast error from the store call
 	// (→ 500) rather than a clean miss. Treating malformed ids as "not
-	// found" mirrors the house pattern (see tasks.go's SKY-330 comment).
+	// found" mirrors the house pattern (see tasks.go's comment).
 	if _, err := uuid.Parse(id); err != nil {
 		notFound(w, "listing")
 		return

@@ -49,9 +49,9 @@ const (
 
 // Local-mode sentinel identity values. Four constants — one each for
 // org, team, user, and agent — used as the canonical local-mode
-// identity values at every API entry point. Pre-SKY-269 these were
-// synthetic runtime constants with no DB row backing them; post-
-// SKY-269 the SQLite migration inserts one row per sentinel into
+// identity values at every API entry point. These were previously
+// synthetic runtime constants with no DB row backing them; now
+// the SQLite migration inserts one row per sentinel into
 // orgs/teams/users so FKs from every resource table have a real
 // target. The byte values here MUST match the migration's INSERTs
 // verbatim — TestBootstrapLocalTenancy_ConstantsMatchRows asserts the

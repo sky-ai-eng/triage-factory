@@ -10,12 +10,12 @@ import ProjectCreateModal from '../components/ProjectCreateModal'
 import ProjectBackfillModal from '../components/ProjectBackfillModal'
 
 // Projects index. List view only — the per-project view lives in
-// ProjectDetail.tsx and the Curator chat panel will graft into it
-// in SKY-226. We keep the visual language tight enough that a project
+// ProjectDetail.tsx and the Curator chat panel will graft into it.
+// We keep the visual language tight enough that a project
 // with zero pinned repos / no tracker / no description still renders
 // as a recognizable card rather than collapsing into nothing.
 //
-// Empty-state contract (per SKY-217): zero projects renders a centered
+// Empty-state contract: zero projects renders a centered
 // "Create your first project" CTA, not an empty grid. The full grid
 // only appears once at least one project exists.
 export default function Projects() {
@@ -26,7 +26,7 @@ export default function Projects() {
   const [createOpen, setCreateOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [importSeedFile, setImportSeedFile] = useState<File | null>(null)
-  // SKY-220 PR B: after a project is created OR imported, surface a
+  // After a project is created OR imported, surface a
   // popup that lets the user reclaim existing non-terminal entities
   // into the new project. `backfillTarget` carries the destination;
   // `backfillThenNavigate` records whether the popup's close handler
@@ -74,7 +74,7 @@ export default function Projects() {
       // optimistically (e.g. anything the server post-processes).
       refresh()
       // Surface the backfill popup. Stay on the grid after — matches
-      // the pre-SKY-220 create flow that didn't navigate either.
+      // the prior create flow that didn't navigate either.
       setBackfillTarget(created)
       setBackfillThenNavigate(false)
     },

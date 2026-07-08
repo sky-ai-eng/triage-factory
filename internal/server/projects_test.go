@@ -99,7 +99,7 @@ func TestProjectCreate_Happy(t *testing.T) {
 	}
 }
 
-// TestProjectCreate_BindsToOrgDefaultTeam pins the SKY-340 fix:
+// TestProjectCreate_BindsToOrgDefaultTeam pins the fix:
 // handleProjectCreate must resolve team_id via TeamsStore.GetDefaultForOrgSystem
 // for the request's authenticated org rather than hardcoding the
 // local-mode sentinel. In local mode that resolves to the same
@@ -607,7 +607,7 @@ func TestValidatePinnedRepos_RejectsUnconfigured(t *testing.T) {
 	}
 
 	// Casing mismatch still passes: GitHub owner/repo names are
-	// case-insensitive and the rest of SKY-375 folds case, so a pin whose
+	// case-insensitive and the rest of the codebase folds case, so a pin whose
 	// capitalization differs from the tracked row (e.g. after the repo was
 	// re-saved with different casing) is the same repo, not an untracked one.
 	if _, errMsg := validatePinnedRepos(ctx, teamRepos, teamID, []string{"Sky-AI-Eng/Configured"}); errMsg != "" {
@@ -670,7 +670,7 @@ func TestValidateTrackerKeys_AcceptsConfigured(t *testing.T) {
 	}
 }
 
-// TestValidateTrackerKeys_RejectsUnconfigured exercises the SKY-217
+// TestValidateTrackerKeys_RejectsUnconfigured exercises the
 // contract: a Jira key not in the team's rules gets rejected with a
 // message pointing at Settings. Stale clients (project removed from
 // config after pinning) and curl users both hit this path.
@@ -758,7 +758,7 @@ func TestProjectKnowledge_EmptyForFreshProject(t *testing.T) {
 	}
 }
 
-// TestProjectKnowledge_ReturnsAllFileTypes pins the post-SKY-217
+// TestProjectKnowledge_ReturnsAllFileTypes pins the
 // "knowledge base accepts anything Claude Code can read" contract:
 // the listing surfaces every regular file under knowledge-base/,
 // detects mime type per extension, and inlines content only for

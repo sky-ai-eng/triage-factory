@@ -28,7 +28,7 @@ type EventHandlerStoreFactory func(t *testing.T) (store db.EventHandlerStore, or
 type BlueprintSeeder func(t *testing.T, slugs ...string) map[string]string
 
 // RunEventHandlerStoreConformance runs the shared assertion suite for
-// the unified rule + trigger store (SKY-259). What it covers:
+// the unified rule + trigger store. What it covers:
 //
 //   - Seed inserts both rule and trigger ShippedEventHandlers rows,
 //     resolving each trigger's blueprint slug through the seeded map;

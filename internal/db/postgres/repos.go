@@ -34,7 +34,7 @@ import (
 //
 // Upsert uses ON CONFLICT (org_id, owner, repo) for the same reason.
 //
-// # Pool split (SKY-296)
+// # Pool split
 //
 // Holds two pools: q is the app pool (request-equivalent consumers —
 // repos handler, settings, projects, curator) and admin is the

@@ -235,7 +235,7 @@ func (bf *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request
 				return nil
 			}
 			// Stamp manual-assignment display copy so the entities-panel
-			// UI (SKY-238) renders "Manually assigned by user." instead
+			// UI renders "Manually assigned by user." instead
 			// of the empty-rationale fallback. Overwrites any prior
 			// model-driven rationale on reclaim — the human's pick
 			// supersedes the classifier's vote, and showing the stale

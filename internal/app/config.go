@@ -33,6 +33,12 @@ type Config struct {
 	// are derived from Host/Port in LoadConfig.
 	Addr       string
 	BrowserURL string
+
+	// Version is main.Version (the linker-set release tag, or "dev" for
+	// an unreleased build) — not a flag, so LoadConfig leaves it at the
+	// zero value; main.go sets it after LoadConfig returns. Threaded
+	// through to the server for GET /readyz (TFAC-573).
+	Version string
 }
 
 // LoadConfig parses the server-mode flags (--port, --host, --no-browser)

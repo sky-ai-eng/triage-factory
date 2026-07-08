@@ -31,8 +31,8 @@ func seedTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 	store := testPromptStore(database)
 	ctx := context.Background()
 	// System prompts seed through SeedOrUpdate so they carry a system_slug
-	// (the curator's default-spec fallback resolves them by slug, not id,
-	// post-SKY-380 — the row's id is a random UUID). The fixture's ID field
+	// (the curator's default-spec fallback resolves them by slug, not id —
+	// the row's id is a random UUID). The fixture's ID field
 	// is reinterpreted as the slug. User/imported prompts keep their explicit
 	// id via Create (the project-override path resolves those by id).
 	if p.Source == "system" {

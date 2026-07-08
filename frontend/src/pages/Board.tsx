@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react'
+import { memo, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react'
 import type {
   Task,
   AgentRun,
@@ -12,6 +12,7 @@ import { useWebSocket, setPresenceView } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
 import { isActiveRun, isPermissionTerminalStatus } from '../lib/runStatus'
 import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
+import { appendToFeed, feedFromMessages, EMPTY_FEED, type RunCardFeed } from '../lib/runFeed'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
 import { useOrgRole } from '../hooks/useOrgRole'
@@ -47,7 +48,7 @@ import {
 import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 
-// SKY-330: five columns on the board. Default view scrolls so Claimed
+// Five columns on the board. Default view scrolls so Claimed
 // is leftmost-visible; user scrolls left for Queued, right for Done.
 // Column ids double as drop targets — keep them lowercase + stable
 // since they're persisted in localStorage filter keys.
@@ -144,7 +145,7 @@ function loadCollapsed(userID: string): CollapseMap {
 }
 
 export default function Board() {
-  // SKY-330: one bucket per column. Bot/user auto-routing keeps these
+  // One bucket per column. Bot/user auto-routing keeps these
   // disjoint at the backend, so a task only appears in one list.
   const [queued, setQueued] = useState<Task[]>([])
   const [claimed, setClaimed] = useState<Task[]>([])
@@ -166,7 +167,11 @@ export default function Board() {
   // the card is in (a user-claimed in_progress task can also have a
   // run; a bot-claimed in_review task definitely has one).
   const [agentRuns, setAgentRuns] = useState<Record<string, AgentRun>>({})
-  const [agentMessages, setAgentMessages] = useState<Record<string, AgentMessage[]>>({})
+  // Per-run card feed (running stats + last few ticker lines), keyed by run
+  // ID. Bounded by construction — the board used to accumulate every run's
+  // full message array here, growing without limit for the lifetime of the
+  // page while each card re-derived its stats from scratch per render.
+  const [runFeeds, setRunFeeds] = useState<Record<string, RunCardFeed>>({})
   const [chainStepRuns, setChainStepRuns] = useState<Record<string, AgentRun[]>>({})
   const chainStepRunsRef = useRef(chainStepRuns)
   useEffect(() => {
@@ -280,7 +285,7 @@ export default function Board() {
   // Delegate flow
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const pendingDelegateTask = useRef<Task | null>(null)
-  // SKY-261 B+: tracks bot-claimed tasks where the delegate run failed
+  // Tracks bot-claimed tasks where the delegate run failed
   // to fire. Cleared when a run for the task lands.
   const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
 
@@ -374,7 +379,7 @@ export default function Board() {
     })()
   }, [])
 
-  // SKY-330: derive the five column lists from a single /api/tasks
+  // Derive the five column lists from a single /api/tasks
   // multi-status fetch. /api/queue is still the canonical Queued
   // source (it handles the snooze-window filter); the others fetch
   // by status. The done query is backend-capped at 7 days.
@@ -438,7 +443,7 @@ export default function Board() {
       // iteration). Chains need a second per-chain fetch for their blueprint
       // step structure; resolve those concurrently rather than serially.
       const nextRuns: Record<string, AgentRun> = {}
-      const nextMessages: Record<string, AgentMessage[]> = {}
+      const nextFeeds: Record<string, RunCardFeed> = {}
       const chainSeeds: Array<Promise<{ taskID: string; steps: AgentRun[] } | null>> = []
 
       for (const task of withRuns) {
@@ -468,7 +473,7 @@ export default function Board() {
           // ever differ, the WS agent_message handler seeds the active step
           // shortly — keep this keyed by activeStep.ID so it stays aligned.
           const msgs = messagesByRun[activeStep.ID]
-          if (msgs) nextMessages[activeStep.ID] = msgs
+          if (msgs) nextFeeds[activeStep.ID] = feedFromMessages(msgs)
           chainSeeds.push(
             fetchChainStepRuns(chainRunID).then((steps) =>
               steps ? { taskID: task.id, steps } : null,
@@ -477,12 +482,15 @@ export default function Board() {
         } else {
           nextRuns[task.id] = latestRun
           const msgs = messagesByRun[latestRun.ID]
-          if (msgs) nextMessages[latestRun.ID] = msgs
+          if (msgs) nextFeeds[latestRun.ID] = feedFromMessages(msgs)
         }
       }
 
       setAgentRuns((prev) => ({ ...prev, ...nextRuns }))
-      setAgentMessages((prev) => ({ ...prev, ...nextMessages }))
+      // A fetched feed replaces the incrementally-built one wholesale — the
+      // server transcript is authoritative, so any WS/fetch race drift
+      // self-corrects here.
+      setRunFeeds((prev) => ({ ...prev, ...nextFeeds }))
 
       // Apply all chain step rails in one batch once their blueprint fetches
       // settle (concurrent above), so the whole refresh costs ~3 renders, not
@@ -510,6 +518,42 @@ export default function Board() {
     fetchTasks()
   }, [fetchTasks])
 
+  // Debounced board refresh for websocket-driven refetches. A poll cycle or a
+  // scoring pass lands as a burst of task_updated / scoring_completed events,
+  // and each used to fire its own five-column refetch. Trailing debounce: each
+  // event pushes the fetch out another FETCH_DEBOUNCE_MS so the whole burst
+  // costs one round-trip after it ends — with a FETCH_MAX_WAIT_MS fence from
+  // the first deferred event, so a sustained event stream can't starve the
+  // refresh indefinitely. User-initiated mutations (drag, picker, delegate)
+  // still call fetchTasks() directly so their repaint isn't delayed.
+  const FETCH_DEBOUNCE_MS = 300
+  const FETCH_MAX_WAIT_MS = 1500
+  const fetchTasksRef = useRef(fetchTasks)
+  useEffect(() => {
+    fetchTasksRef.current = fetchTasks
+  }, [fetchTasks])
+  const fetchDebounceTimer = useRef<number | null>(null)
+  const fetchDebounceDeadline = useRef(0)
+  const scheduleFetchTasks = useCallback(() => {
+    const now = Date.now()
+    if (fetchDebounceTimer.current == null) {
+      fetchDebounceDeadline.current = now + FETCH_MAX_WAIT_MS
+    } else {
+      window.clearTimeout(fetchDebounceTimer.current)
+    }
+    const delay = Math.min(FETCH_DEBOUNCE_MS, Math.max(0, fetchDebounceDeadline.current - now))
+    fetchDebounceTimer.current = window.setTimeout(() => {
+      fetchDebounceTimer.current = null
+      fetchTasksRef.current()
+    }, delay)
+  }, [])
+  useEffect(
+    () => () => {
+      if (fetchDebounceTimer.current != null) window.clearTimeout(fetchDebounceTimer.current)
+    },
+    [],
+  )
+
   // Re-fetch all columns when the team filter changes — fetchTasks reads
   // the latest filter via its ref, so this picks up the new scope.
   const teamFilterDidMount = useRef(false)
@@ -522,7 +566,7 @@ export default function Board() {
   }, [teamFilter, fetchTasks])
 
   // WS listener — covers agent_run_update (the existing path) and the
-  // new task_updated / task_claimed events that SKY-330 fires from
+  // new task_updated / task_claimed events that fire from
   // every claim/status mutation. task_updated is the catch-all for
   // "this card may have moved columns; refetch."
   useWebSocket(
@@ -569,7 +613,7 @@ export default function Board() {
             })
             .catch(() => {})
 
-          // SKY-330: a few server paths still mutate task state but
+          // A few server paths still mutate task state but
           // only emit agent_run_update (review/PR approval flips
           // task='done', then broadcasts the run completion). Without
           // a refetch here the card stays in its old column until a
@@ -580,7 +624,7 @@ export default function Board() {
             // stale — drop its queue so a finished card doesn't keep an
             // unanswerable Allow/Deny control.
             dropPermissionRun(event.run_id)
-            fetchTasks()
+            scheduleFetchTasks()
           }
 
           if (!matched) {
@@ -605,7 +649,7 @@ export default function Board() {
                   'pending_approval',
                 ].includes(event.data.status)
               ) {
-                fetchTasks()
+                scheduleFetchTasks()
               }
             } else {
               fetch(`/api/agent/runs/${event.run_id}`)
@@ -643,21 +687,25 @@ export default function Board() {
             })
             .catch(() => {})
         } else if (event.type === 'agent_message') {
-          // Live run-log append. AgentCard renders from agentMessages
-          // keyed by run.ID; without this, new agent output only
-          // surfaces after a status-change fetchTasks pass. Was
-          // present pre-SKY-330; lost in the board rewrite, restored
-          // here per PR #212 review.
-          setAgentMessages((prev) => ({
-            ...prev,
-            [event.run_id]: [...(prev[event.run_id] || []), event.data as AgentMessage],
-          }))
+          // Live run-log tick. AgentCard renders from the bounded per-run feed
+          // keyed by run.ID; without this, new agent output only surfaces
+          // after a status-change fetchTasks pass. Folding into the feed
+          // (rather than appending to a full message array) keeps board state
+          // bounded and the per-event work O(1). appendToFeed returns the same
+          // reference for a display-no-op message (tool results, mostly) —
+          // return prev in that case so React skips the board re-render.
+          setRunFeeds((prev) => {
+            const cur = prev[event.run_id]
+            const next = appendToFeed(cur, event.data as AgentMessage)
+            if (next === (cur ?? EMPTY_FEED)) return prev
+            return { ...prev, [event.run_id]: next }
+          })
         } else if (event.type === 'task_updated' || event.type === 'task_claimed') {
-          // SKY-330: any column-affecting change re-pulls the whole
+          // Any column-affecting change re-pulls the whole
           // board. The 5-column buckets are cheap to refetch (each is
           // a single indexed query) and this avoids the per-column
           // patch logic getting out of sync with backend rules.
-          fetchTasks()
+          scheduleFetchTasks()
         } else if (event.type === 'tasks_updated' || event.type === 'scoring_completed') {
           // scoring_completed: the scorer just landed priority_score
           // and ai_summary on a batch. Without this refetch the board
@@ -666,7 +714,7 @@ export default function Board() {
           // mirror — refetches on both scoring_started and
           // scoring_completed; we only need completed since the
           // priority_score it writes is what drives ordering here.
-          fetchTasks()
+          scheduleFetchTasks()
         } else if (event.type === 'permission_request') {
           // A run hit an off-allowlist tool — surface its Allow/Deny prompt on
           // the matching card. The queue core dedups + arms the dismiss TTL.
@@ -677,7 +725,13 @@ export default function Board() {
           forgetPermission(event)
         }
       },
-      [fetchTasks, seedChainStepRuns, ingestPermission, forgetPermission, dropPermissionRun],
+      [
+        scheduleFetchTasks,
+        seedChainStepRuns,
+        ingestPermission,
+        forgetPermission,
+        dropPermissionRun,
+      ],
     ),
   )
 
@@ -846,7 +900,7 @@ export default function Board() {
     [agentRuns],
   )
 
-  // SKY-330: the board opens at the left (Queued first). With Claimed + In
+  // The board opens at the left (Queued first). With Claimed + In
   // Review collapsed by default, the lane strip is compact enough that the
   // work-bearing lanes fit without a forced scroll offset — so we start at the
   // natural left edge rather than snapping past Queued (the old fixed 544px
@@ -1068,7 +1122,7 @@ export default function Board() {
   )
 
   // Assignee picker callbacks. The picker is the primary surface for
-  // claim mutations in the SKY-330 board; drag is for column moves.
+  // claim mutations in the board; drag is for column moves.
   const handlePickerClaim = useCallback(
     async (task: Task) => {
       await fetch(`/api/tasks/${task.id}/swipe`, {
@@ -1096,6 +1150,16 @@ export default function Board() {
     pendingDelegateTask.current = task
     setShowPromptPicker(true)
   }, [])
+
+  // Open a run's approval overlay (review or PR editor). Hoisted to a stable
+  // callback (rather than an inline closure in the column JSX) so the memoized
+  // cards' props don't churn on every board render.
+  const handleOpenApproval = useCallback(
+    (runID: string, kind: 'review' | 'pr', artifactId?: string) => {
+      setApprovalCtx({ runID, kind, artifactId })
+    },
+    [],
+  )
 
   const handlePickerReassign = useCallback(
     async (task: Task, targetUserID: string) => {
@@ -1227,7 +1291,7 @@ export default function Board() {
           </div>
         )}
 
-        {/* SKY-330: horizontal-scroll container for 5 columns. The strip is
+        {/* Horizontal-scroll container for 5 columns. The strip is
             parked so the open-columns midpoint sits at the viewport center (see
             `lane` above) via dynamic left/right padding + a scroll offset. The
             dynamic mask dissolves columns into the page at whichever edge still
@@ -1273,7 +1337,7 @@ export default function Board() {
                     colId={colId}
                     tasks={filtered[colId]}
                     agentRuns={agentRuns}
-                    agentMessages={agentMessages}
+                    runFeeds={runFeeds}
                     chainStepRuns={chainStepRuns}
                     permQueues={permQueueMap}
                     onResolvePermission={resolvePermission}
@@ -1286,13 +1350,8 @@ export default function Board() {
                     onPickerUnclaim={handlePickerUnclaim}
                     onPickerDelegate={handlePickerDelegate}
                     onPickerReassign={handlePickerReassign}
-                    onReview={(runID, kind, artifactId) =>
-                      setApprovalCtx({ runID, kind, artifactId })
-                    }
-                    onRetry={(task) => {
-                      pendingDelegateTask.current = task
-                      setShowPromptPicker(true)
-                    }}
+                    onReview={handleOpenApproval}
+                    onRetry={handlePickerDelegate}
                   />
                 </BoardColumn>
               ),
@@ -1368,17 +1427,33 @@ export default function Board() {
   )
 }
 
+// PickerProps is the assignee-picker wiring shared by both card wrappers —
+// the roster data plus the four claim-mutation callbacks (all useCallback-
+// stable in Board), threaded down so the wrappers can build the AssigneePicker
+// element themselves, below their memo boundary.
+interface PickerProps {
+  currentUserID: string
+  members: TeamMember[]
+  bot: TeamBot | null
+  pickerReadOnly: boolean
+  onPickerClaim: (task: Task) => Promise<void>
+  onPickerUnclaim: (task: Task) => Promise<void>
+  onPickerDelegate: (task: Task) => void
+  onPickerReassign: (task: Task, targetUserID: string) => Promise<void>
+}
+
 // ColumnContents is the per-column body — handles empty state, the
-// SortableContext, and the per-task card-vs-agentcard branching. Kept
-// inline here (not split further) because the card-rendering branching
-// is tightly coupled to the assignee picker + agentRuns state lookups,
-// and splitting would require threading every callback through one
-// more layer of props.
+// SortableContext, and the per-task card-vs-agentcard branching. The card
+// wrappers it renders are memoized with identity-stable props (per-run slices
+// of the board maps + useCallback'd handlers, with the per-card closures and
+// the AssigneePicker element built inside the wrapper, below its memo
+// boundary), so a live-feed tick for one run re-renders that run's card only —
+// not every card on the board.
 function ColumnContents({
   colId,
   tasks,
   agentRuns,
-  agentMessages,
+  runFeeds,
   chainStepRuns,
   permQueues,
   onResolvePermission,
@@ -1397,7 +1472,7 @@ function ColumnContents({
   colId: ColumnId
   tasks: Task[]
   agentRuns: Record<string, AgentRun>
-  agentMessages: Record<string, AgentMessage[]>
+  runFeeds: Record<string, RunCardFeed>
   chainStepRuns: Record<string, AgentRun[]>
   permQueues: Record<string, PendingPermission[]>
   onResolvePermission: (
@@ -1405,20 +1480,24 @@ function ColumnContents({
     requestID: string,
     decision: PermissionDecisionInput,
   ) => Promise<void>
-  currentUserID: string
-  members: TeamMember[]
-  bot: TeamBot | null
   delegateFailures: Record<string, string>
   onRequeue: (taskID: string) => void
-  onPickerClaim: (task: Task) => Promise<void>
-  onPickerUnclaim: (task: Task) => Promise<void>
-  onPickerDelegate: (task: Task) => void
-  onPickerReassign: (task: Task, targetUserID: string) => Promise<void>
   onReview: (runID: string, kind: 'review' | 'pr', artifactId?: string) => void
   onRetry: (task: Task) => void
-}) {
+} & Omit<PickerProps, 'pickerReadOnly'>) {
   if (tasks.length === 0) {
     return <EmptyColumn>{emptyLabelFor(colId)}</EmptyColumn>
+  }
+
+  const picker: PickerProps = {
+    currentUserID,
+    members,
+    bot,
+    pickerReadOnly: colId === 'done',
+    onPickerClaim,
+    onPickerUnclaim,
+    onPickerDelegate,
+    onPickerReassign,
   }
 
   return (
@@ -1432,19 +1511,6 @@ function ColumnContents({
         // on it. The map is cleaned up on the next WS update; this
         // gate covers the window before that lands.
         const run = colId === 'queued' ? undefined : agentRuns[task.id]
-        const picker = (
-          <AssigneePicker
-            task={task}
-            currentUserID={currentUserID}
-            members={members}
-            bot={bot}
-            onClaim={onPickerClaim}
-            onUnclaim={onPickerUnclaim}
-            onDelegate={onPickerDelegate}
-            onReassign={onPickerReassign}
-            readOnly={colId === 'done'}
-          />
-        )
         if (run) {
           return (
             <SortableAgentCard
@@ -1452,27 +1518,12 @@ function ColumnContents({
               task={task}
               run={run}
               chainSteps={chainStepRuns[task.id]}
-              messages={agentMessages[run.ID] || []}
-              pendingPermissions={permQueues[run.ID] ?? []}
-              onResolvePermission={(requestID, decision) =>
-                onResolvePermission(run.ID, requestID, decision)
-              }
-              onRequeue={() => onRequeue(task.id)}
-              onReview={() => {
-                // Minimal multi handling (the full mixed-kind dock is TFAC-385):
-                // open the FIRST unresolved artifact — pending_artifact_ids lists
-                // every draft PR first, then ready reviews, so unresolved_pr_count
-                // discriminates the head's kind. Resolving it re-derives the set;
-                // the next click opens the next. Guard the empty/undefined set
-                // (a transient projection omission / fetch race) so we never open
-                // an overlay with an undefined artifact id.
-                const ids = run.pending_artifact_ids ?? []
-                if (ids.length === 0) return
-                const kind: 'review' | 'pr' = (run.unresolved_pr_count ?? 0) > 0 ? 'pr' : 'review'
-                onReview(run.ID, kind, ids[0])
-              }}
-              onOpenArtifact={(kind, artifactId) => onReview(run.ID, kind, artifactId)}
-              assigneeSlot={picker}
+              feed={runFeeds[run.ID]}
+              pendingPermissions={permQueues[run.ID]}
+              onResolvePermission={onResolvePermission}
+              onRequeue={onRequeue}
+              onReview={onReview}
+              {...picker}
             />
           )
         }
@@ -1480,12 +1531,10 @@ function ColumnContents({
           <SortableTaskCard
             key={task.id}
             task={task}
-            onRequeue={() => onRequeue(task.id)}
-            delegateFailed={
-              delegateFailures[task.id] ? { message: delegateFailures[task.id] } : undefined
-            }
-            onRetry={delegateFailures[task.id] ? () => onRetry(task) : undefined}
-            assigneeSlot={picker}
+            delegateFailure={delegateFailures[task.id]}
+            onRequeue={onRequeue}
+            onRetry={onRetry}
+            {...picker}
           />
         )
       })}
@@ -1508,19 +1557,37 @@ function emptyLabelFor(colId: ColumnId): string {
   }
 }
 
-function SortableTaskCard({
+// CardAssigneePicker builds the per-card AssigneePicker element from the
+// shared PickerProps bundle — inside the memoized wrappers, so the element is
+// only recreated when the wrapper itself re-renders.
+function CardAssigneePicker({ task, picker }: { task: Task; picker: PickerProps }) {
+  return (
+    <AssigneePicker
+      task={task}
+      currentUserID={picker.currentUserID}
+      members={picker.members}
+      bot={picker.bot}
+      onClaim={picker.onPickerClaim}
+      onUnclaim={picker.onPickerUnclaim}
+      onDelegate={picker.onPickerDelegate}
+      onReassign={picker.onPickerReassign}
+      readOnly={picker.pickerReadOnly}
+    />
+  )
+}
+
+const SortableTaskCard = memo(function SortableTaskCard({
   task,
+  delegateFailure,
   onRequeue,
-  delegateFailed,
   onRetry,
-  assigneeSlot,
+  ...picker
 }: {
   task: Task
-  onRequeue?: () => void
-  delegateFailed?: { message: string }
-  onRetry?: () => void
-  assigneeSlot?: React.ReactNode
-}) {
+  delegateFailure?: string
+  onRequeue: (taskID: string) => void
+  onRetry: (task: Task) => void
+} & PickerProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
   })
@@ -1529,7 +1596,7 @@ function SortableTaskCard({
     transition,
     opacity: isDragging ? 0.3 : 1,
   }
-  // SKY-330: assigneeSlot is forwarded into TaskCard's header instead
+  // assigneeSlot is forwarded into TaskCard's header instead
   // of overlaid via absolute positioning — the prior approach
   // collided with the bottom-row affordances on tall cards and with
   // AgentCard's elapsed-time / expand cluster after a run completes.
@@ -1543,15 +1610,15 @@ function SortableTaskCard({
       // the in-place card fades via style.opacity (set in useSortable above).
       // isDragging only drives a redundant z-50 here, so we never forward it.
       isDragging={false}
-      onRequeue={onRequeue}
-      delegateFailed={delegateFailed}
-      onRetry={onRetry}
-      assigneeSlot={assigneeSlot}
+      onRequeue={() => onRequeue(task.id)}
+      delegateFailed={delegateFailure ? { message: delegateFailure } : undefined}
+      onRetry={delegateFailure ? () => onRetry(task) : undefined}
+      assigneeSlot={<CardAssigneePicker task={task} picker={picker} />}
       {...attributes}
       {...listeners}
     />
   )
-}
+})
 
 // Run statuses where the AgentCard is safe to drag between columns.
 // Active states (running, cloning, etc.) stay anchored — the cancel
@@ -1559,30 +1626,31 @@ function SortableTaskCard({
 // with the spawner's status transitions.
 const draggableRunStatuses = new Set(['failed', 'cancelled', 'completed', 'task_unsolvable'])
 
-function SortableAgentCard({
+const SortableAgentCard = memo(function SortableAgentCard({
   task,
   run,
   chainSteps,
-  messages,
+  feed,
   pendingPermissions,
   onResolvePermission,
   onRequeue,
   onReview,
-  onOpenArtifact,
-  assigneeSlot,
+  ...picker
 }: {
   task: Task
   run: AgentRun
   chainSteps?: AgentRun[]
-  messages: AgentMessage[]
-  pendingPermissions: PendingPermission[]
-  onResolvePermission: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
-  onRequeue?: () => void
-  onReview?: () => void
-  onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
-  assigneeSlot?: React.ReactNode
-}) {
-  // SKY-330: bot-managed cards in in_progress / in_review are
+  feed?: RunCardFeed
+  pendingPermissions?: PendingPermission[]
+  onResolvePermission: (
+    runID: string,
+    requestID: string,
+    decision: PermissionDecisionInput,
+  ) => Promise<void>
+  onRequeue: (taskID: string) => void
+  onReview: (runID: string, kind: 'review' | 'pr', artifactId?: string) => void
+} & PickerProps) {
+  // Bot-managed cards in in_progress / in_review are
   // read-only — column placement is owned by the spawner's run-state
   // mirror. The drop handler also short-circuits these drags, but
   // baking the guard into `disabled` here removes the misleading
@@ -1607,7 +1675,7 @@ function SortableAgentCard({
     opacity: isDragging ? 0.3 : 1,
     cursor: draggable ? 'grab' : undefined,
   }
-  // SKY-330: assigneeSlot forwarded into AgentCard's header cluster
+  // assigneeSlot forwarded into AgentCard's header cluster
   // so it shares the gap-2 spacing with elapsed/expand/cancel
   // instead of overlapping them via absolute positioning. Same
   // reasoning as the TaskCard wrapper above.
@@ -1622,17 +1690,31 @@ function SortableAgentCard({
         task={task}
         run={run}
         chainSteps={chainSteps}
-        messages={messages}
+        feed={feed}
         pendingPermissions={pendingPermissions}
-        onResolvePermission={onResolvePermission}
-        onRequeue={onRequeue}
-        onReview={onReview}
-        onOpenArtifact={onOpenArtifact}
-        assigneeSlot={assigneeSlot}
+        onResolvePermission={(requestID, decision) =>
+          onResolvePermission(run.ID, requestID, decision)
+        }
+        onRequeue={() => onRequeue(task.id)}
+        onReview={() => {
+          // Minimal multi handling (the full mixed-kind dock is TFAC-385):
+          // open the FIRST unresolved artifact — pending_artifact_ids lists
+          // every draft PR first, then ready reviews, so unresolved_pr_count
+          // discriminates the head's kind. Resolving it re-derives the set;
+          // the next click opens the next. Guard the empty/undefined set
+          // (a transient projection omission / fetch race) so we never open
+          // an overlay with an undefined artifact id.
+          const ids = run.pending_artifact_ids ?? []
+          if (ids.length === 0) return
+          const kind: 'review' | 'pr' = (run.unresolved_pr_count ?? 0) > 0 ? 'pr' : 'review'
+          onReview(run.ID, kind, ids[0])
+        }}
+        onOpenArtifact={(kind, artifactId) => onReview(run.ID, kind, artifactId)}
+        assigneeSlot={<CardAssigneePicker task={task} picker={picker} />}
       />
     </div>
   )
-}
+})
 
 function EmptyColumn({ children }: { children: React.ReactNode }) {
   return <p className="text-[12px] text-text-tertiary text-center py-12">{children}</p>

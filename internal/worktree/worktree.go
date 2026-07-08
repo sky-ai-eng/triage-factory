@@ -294,8 +294,8 @@ func CloneAuthFromOptions(opts ...CloneOption) CloneAuth {
 }
 
 func repoDir(owner, repo string) (string, error) {
-	// orgID is the local-default sentinel for now; SKY-406 threads the
-	// real orgID through as it makes this bare cache bounded + evictable.
+	// orgID is the local-default sentinel for now; threading the
+	// real orgID through here would make this bare cache bounded + evictable.
 	// StateRootErr surfaces a missing $HOME the way the pre-paths
 	// os.UserHomeDir call did, rather than letting BareCacheDir panic.
 	if _, err := paths.StateRootErr(); err != nil {

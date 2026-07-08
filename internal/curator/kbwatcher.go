@@ -20,8 +20,8 @@ import (
 // created, modified, removed, or renamed — so the frontend Knowledge
 // panel refreshes mid-turn as the curator agent writes notes.
 //
-// The watcher is mode-aware because SKY-402 moved the curator's on-disk
-// state under a per-org subtree in multi mode. Two layouts, one
+// The watcher is mode-aware because the curator's on-disk state moved
+// under a per-org subtree in multi mode. Two layouts, one
 // mechanism:
 //
 //	local:  <root>/<projectID>/knowledge-base/...
@@ -58,7 +58,7 @@ const (
 //
 //   - local: the single projects dir (paths.ProjectsRoot for the
 //     local-default org) — project dirs are its direct children, exactly
-//     as before SKY-402.
+//     as before the per-org subtree move.
 //   - multi: the state root itself — projects live under the per-org
 //     subtree <root>/orgs/<orgID>/projects/<id>, so the watcher roots
 //     above the org segment and descends through orgs/*/projects.
@@ -306,7 +306,7 @@ func (kw *KnowledgeWatcher) watchTree(dir string, depth int, fireExisting bool) 
 // nowhere else. depth is the index dir's children occupy. It stops at the
 // knowledge-base dir (depth pd+1): the kb dir itself is watched so file
 // changes fire, but we never descend into its subtree (parity with
-// pre-SKY-402 behavior, and it keeps repos/ + nested scratch off the
+// prior behavior, and it keeps repos/ + nested scratch off the
 // watch set).
 func (kw *KnowledgeWatcher) descendChildren(dir string, depth int, fireExisting bool) {
 	pd := kw.projectDepth()

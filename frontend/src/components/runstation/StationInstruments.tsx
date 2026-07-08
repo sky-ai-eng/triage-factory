@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import type { AgentMessage, AgentRun } from '../../types'
 import { formatDurationMs, formatElapsed } from '../../lib/runStatus'
 import { compactNum, tokenTotals, tint, type StationState } from './stationStyle'
@@ -18,8 +19,11 @@ interface Props {
 // quiet, all monospace readouts and thin gauges. It carries only data the run
 // actually has — no faked context meter (that arrives with P4's telemetry).
 export function TelemetryRail({ run, messages, state, now, onOpenArtifact }: Props) {
-  const tok = tokenTotals(messages)
-  const contextUsed = latestContextSize(messages)
+  // Both scans are O(all messages), and the rail re-renders every second for
+  // the elapsed readout (`now`) — memoize so the walk only happens when the
+  // transcript actually grew.
+  const tok = useMemo(() => tokenTotals(messages), [messages])
+  const contextUsed = useMemo(() => latestContextSize(messages), [messages])
   const started = run.StartedAt ? new Date(run.StartedAt) : null
   const duration =
     run.DurationMs != null && run.DurationMs > 0

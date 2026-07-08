@@ -31,7 +31,7 @@ type SwipeStore interface {
 	// misuse doesn't silently strand the task. Returns the new
 	// task status the handler echoes back in the JSON response.
 	//
-	// SKY-261 v0.7 audit contract: the handler calls this AFTER
+	// The audit contract: the handler calls this AFTER
 	// any responsibility-axis mutation has accepted (for claim/
 	// delegate), so swipe_events only records completed gestures.
 	// A refused claim/delegate is never audited. For dismiss/
@@ -44,7 +44,7 @@ type SwipeStore interface {
 	// tasks.status='snoozed'. Separate from RecordSwipe because the
 	// timestamp parameter has no other use and the action is fixed.
 	//
-	// SKY-261 B+ invariant: snooze is queue-only ("snoozed ↔ both
+	// Invariant: snooze is queue-only ("snoozed ↔ both
 	// claim cols NULL"). The UPDATE refuses on a claimed task and
 	// returns ok=false; the audit row is rolled back atomically so
 	// a refused gesture leaves no state change. Handler maps

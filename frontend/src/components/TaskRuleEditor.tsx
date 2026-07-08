@@ -21,7 +21,7 @@ interface TaskRuleEditorProps {
   // standalone path (TaskRulesPanel on Cards) passes nothing and is
   // unchanged.
   lockedTeamId?: string
-  // When true (the org-template editor, SKY-381), CRUD targets
+  // When true (the org-template editor), CRUD targets
   // /api/org-template/event-handlers instead of /api/event-handlers:
   // org-scoped, no team picker. Mutually exclusive with lockedTeamId.
   templateScope?: boolean

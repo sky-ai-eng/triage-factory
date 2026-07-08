@@ -2,7 +2,7 @@ import { Users } from 'lucide-react'
 import type { Task } from '../types'
 import { parseRequestedReviewer, reviewerProfileURL } from '../lib/requestedReviewer'
 
-// SKY-412: with per-reviewer dedup (SKY-370) a single PR mints one
+// With per-reviewer dedup a single PR mints one
 // `github:pr:review_requested` task per requested reviewer, distinguished
 // only by dedup_key. The cards are otherwise identical, so this badge
 // surfaces *who* the review was requested of — the queue's most relevant

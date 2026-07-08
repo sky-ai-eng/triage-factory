@@ -120,7 +120,7 @@ func (c *callRecorder) orgIDList() []string {
 	return out
 }
 
-// TestClassify_OrgIDFlowsToHaiku pins the SKY-323 contract: the Runner's org
+// TestClassify_OrgIDFlowsToHaiku pins the contract that the Runner's org
 // is threaded down through the per-project vote fan-out into the stage call,
 // so agentproc.Run resolves the right tenant's credentials. A regression that
 // dropped the orgID somewhere in the chain (classify → runVotes → voteStage1 →
@@ -364,7 +364,7 @@ func TestClassify_Stage2DoesNotFireWithoutTruncation(t *testing.T) {
 // against accidentally weakening the prompt's "score LOW when uncertain"
 // posture. The exact phrase is what makes "always vote, even on
 // thin-context projects" safe — if it goes missing, name-only projects
-// could over-claim entities. SKY-220.
+// could over-claim entities.
 func TestClassifyPrompt_IncludesCalibrationLanguage(t *testing.T) {
 	must := []string{
 		"Lack of information is a reason to score LOW",

@@ -9,19 +9,19 @@ import (
 
 // UsersStore owns the users table — identity facts that aren't secrets
 // (display_name) live on the row, plus the host-scoped per-provider
-// identity bindings in user_github_identities (SKY-396) and
-// user_jira_identities (SKY-397). The keychain holds only actual
+// identity bindings in user_github_identities and
+// user_jira_identities. The keychain holds only actual
 // credentials (PATs in local mode); usernames and display names live in
 // the DB so local mode and multi mode share storage.
 //
 // Local mode iterates a single synthetic LocalDefaultUserID row;
-// multi mode (post-SKY-251) has one row per authenticated user.
+// multi mode has one row per authenticated user.
 //
 // # Pool split (Postgres)
 //
 // Most methods run on the app pool. There's no admin-pool routing for
 // row mutation because user-row creation is an auth-flow concern
-// (SKY-251) and this store only mutates existing rows. The `...System`
+// and this store only mutates existing rows. The `...System`
 // read variants route through the admin pool for claims-free callers —
 // boot-time callers (poller bootstrap) and the routing eventbus
 // subscriber (reverse identity lookup) — that have no JWT-claims
@@ -30,7 +30,7 @@ type UsersStore interface {
 	// GetGitHubLogin returns the user's GitHub login on a specific host
 	// (user_github_identities, keyed on (user_id, github_base_url)), or
 	// "" when no row exists for that (user, host) pair. Used by the
-	// SKY-264 predicate matcher (author_in / reviewer_in / commenter_in
+	// predicate matcher (author_in / reviewer_in / commenter_in
 	// allowlists) and several display surfaces. Callers resolve the host
 	// from the org's org_settings.github_base_url so the lookup matches
 	// the host the binding was captured against. An absent row degrades
@@ -68,7 +68,7 @@ type UsersStore interface {
 	// GetJiraIdentity returns the user's Jira (account_id, display_name)
 	// on a specific host (user_jira_identities, keyed on (user_id,
 	// jira_base_url)), both "" when no row exists for that (user, host)
-	// pair. Used by the SKY-270 predicate matcher (assignee_in /
+	// pair. Used by the predicate matcher (assignee_in /
 	// reporter_in / commenter_in allowlists), the stock handler's "is
 	// this assigned to me" check, and the optimistic post-claim snapshot
 	// update. Callers resolve the host from the org's
@@ -240,7 +240,7 @@ type UsersStore interface {
 	SetLastActingTeam(ctx context.Context, userID, teamID string) error
 
 	// GetSettings returns the user's settings row. Empty for v1
-	// post-SKY-354 cleanup — the AI model + auto-delegate toggle
+	// cleanup — the AI model + auto-delegate toggle
 	// moved to team_settings. The store call exists so future
 	// per-user prefs (theme, notification destinations, swipe
 	// sensitivity, onboarding state) can be added without a

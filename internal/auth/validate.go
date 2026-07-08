@@ -75,7 +75,7 @@ type JiraUser struct {
 // StableID returns the deployment-appropriate stable identifier for this
 // Jira user — accountId on Cloud, falling back to the legacy key on
 // Server / DC. This is the value persisted to user_jira_identities.account_id
-// (host-scoped, SKY-397) and the value predicate matchers compare against.
+// (host-scoped) and the value predicate matchers compare against.
 // It routes through jira.StableUserID — the one source of truth for this
 // precedence — so the bound identity, the polled snapshot, and the claim
 // guard can never derive a different id for the same user.

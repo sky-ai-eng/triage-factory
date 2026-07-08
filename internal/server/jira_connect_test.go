@@ -240,7 +240,7 @@ func TestJiraIdentityStatus_Cloud_Connected(t *testing.T) {
 // against a stubbed DC host: the supplied PAT validates (GET /rest/api/2/myself
 // with Bearer auth), the credential is STORED under "jira_token/<host>" (the
 // Jira difference — GitHub discards), and the user's Jira identity is derived
-// from the /myself response. The stored credential round-trips via SKY-442
+// from the /myself response. The stored credential round-trips via
 // GetUserSystem.
 func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -274,7 +274,7 @@ func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 		t.Errorf("myself Authorization = %q, want the supplied PAT (Bearer)", gotAuth)
 	}
 
-	// The credential is STORED — round-trips via SKY-442 GetUserSystem under the
+	// The credential is STORED — round-trips via GetUserSystem under the
 	// host-scoped key. This is the structural difference from GitHub (PAT_2),
 	// which retains no credential. It is now a UserCredential envelope (a dc_pat
 	// for a Data Center host), not the bare token the original DC bind wrote.
@@ -291,7 +291,7 @@ func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 	}
 
 	// Identity is derived from the validated /myself response (accountId wins),
-	// keyed on the org's Jira host (SKY-397).
+	// keyed on the org's Jira host.
 	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL)
 	if err != nil {
 		t.Fatalf("GetJiraIdentity: %v", err)
@@ -303,7 +303,8 @@ func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 
 // TestJiraIdentityStatus exercises the gate's status read: a fresh user reports
 // connected=false; after a credential is stored, connected=true with the
-// account + host. connect_available is always false (no Cloud OAuth yet).
+// account + host. connect_available is false because this test's org has no
+// Atlassian OAuth app configured.
 func TestJiraIdentityStatus(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -352,7 +353,7 @@ func TestJiraIdentityStatus(t *testing.T) {
 		t.Errorf("deployment = %q, want data_center", out.Deployment)
 	}
 	if out.ConnectAvailable {
-		t.Errorf("connect_available=true, want false (no Cloud OAuth yet): %+v", out)
+		t.Errorf("connect_available=true, want false (no Atlassian OAuth app configured for this org): %+v", out)
 	}
 }
 

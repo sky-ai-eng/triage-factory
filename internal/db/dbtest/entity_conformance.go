@@ -376,7 +376,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
-	// OwningTeamForEntitySystem resolves the structural owner (SKY-372 tiers
+	// OwningTeamForEntitySystem resolves the structural owner (tiers
 	// 1+2). A plain entity has no override and no project → empty; an entity
 	// attached to a team-visibility project resolves to that project's team.
 	// (The owning_team_id override tier needs a writer this ticket doesn't add,
@@ -419,7 +419,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	})
 
 	t.Run("ClassificationStatusSystem_keys_on_classified_at", func(t *testing.T) {
-		// SKY-392: the delegation wait reads classification state through
+		// The delegation wait reads classification state through
 		// this dialect-aware store method (not a raw `?`-placeholder
 		// query). Pins both the (classified, exists) contract and the
 		// load-bearing detail that it keys on classified_at, NOT

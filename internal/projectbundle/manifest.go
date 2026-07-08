@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	// FormatVersion is the manifest format shipped in SKY-222.
+	// FormatVersion is the manifest format version.
 	FormatVersion = 1
 
 	manifestPath                      = "manifest.yaml"
@@ -89,8 +89,8 @@ type ManifestProject struct {
 	PinnedRepos      []string `yaml:"pinned_repos"`
 	JiraProjectKey   string   `yaml:"jira_project_key,omitempty"`
 	LinearProjectKey string   `yaml:"linear_project_key,omitempty"`
-	// SummaryMD is no longer written by the exporter (SKY-220 dropped
-	// the column) but is still accepted at unmarshal time so older
+	// SummaryMD is no longer written by the exporter (the column was
+	// dropped) but is still accepted at unmarshal time so older
 	// bundles that include it import without YAML errors. The value is
 	// dropped on import.
 	SummaryMD string `yaml:"summary_md,omitempty"`

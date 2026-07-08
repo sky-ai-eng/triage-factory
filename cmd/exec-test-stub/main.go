@@ -5,8 +5,8 @@
 //
 // The real binary is glibc-linked on most dev/prod systems; bind-
 // mounting it into an alpine (musl) rootfs makes it fail to exec
-// because the dynamic loader can't resolve. SKY-256 owns the
-// production fix (static-built musl image of the real binary). For
+// because the dynamic loader can't resolve. The production fix is a
+// static-built musl image of the real binary. For
 // this ticket's acceptance, the integration test just needs to prove
 // the IPC pipe works end-to-end — bind-mount socket, exec a binary
 // inside the sandbox, round-trip an RPC over the socket.

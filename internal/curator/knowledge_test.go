@@ -15,7 +15,7 @@ var orgSegment = string(filepath.Separator) + "orgs" + string(filepath.Separator
 
 // TestKnowledgeDir_LocalLayout pins the local on-disk layout: the curator
 // project dir resolves under <state-root>/projects/<id> with no org
-// segment — byte-for-byte what it was before SKY-402, so existing local
+// segment — byte-for-byte what it was before, so existing local
 // installs need no migration.
 func TestKnowledgeDir_LocalLayout(t *testing.T) {
 	root := t.TempDir()
@@ -46,7 +46,7 @@ func TestKnowledgeDir_LocalLayout(t *testing.T) {
 // TestKnowledgeDir_MultiLayout pins the multi-mode layout: the project
 // dir lands under the per-org subtree
 // <state-root>/orgs/<orgID>/projects/<id> that the shared-RO-worktree
-// (SKY-403) and per-org eviction (SKY-406) work build on.
+// and per-org eviction work build on.
 func TestKnowledgeDir_MultiLayout(t *testing.T) {
 	root := t.TempDir()
 	runmode.SetForTest(t, runmode.ModeMulti)

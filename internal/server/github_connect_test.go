@@ -550,7 +550,7 @@ func TestGitHubIdentityStatus(t *testing.T) {
 	}
 }
 
-// TestGitHubConnect_IdentityPersistsAcrossLoginProvider closes the SKY-266
+// TestGitHubConnect_IdentityPersistsAcrossLoginProvider closes a
 // regression by construction: a connect_oauth binding must survive a
 // subsequent login under a non-GitHub provider (no user_name claim), where
 // the login-claim writer deliberately writes nothing.
