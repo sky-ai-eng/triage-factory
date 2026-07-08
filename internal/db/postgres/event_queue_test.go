@@ -52,7 +52,7 @@ func TestEventQueueStore_Postgres_CrossOrg(t *testing.T) {
 	}
 
 	// ClaimNext is global — it claims orgA's row and tags it with orgA.
-	claimed, err := stores.EventQueue.ClaimNext(ctx)
+	claimed, err := stores.EventQueue.ClaimNext(ctx, "cross-org-executor", 1)
 	if err != nil || claimed == nil {
 		t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
 	}

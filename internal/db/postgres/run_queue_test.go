@@ -12,6 +12,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
+// pgRunQueueExecutorID/pgRunQueueBootEpoch are the fixed ownership identity
+// most claims in this file stamp a row with; tests specifically exercising
+// the ownership-scoping predicate (TFAC-578) pass their own values inline.
+const (
+	pgRunQueueExecutorID = "test-executor"
+	pgRunQueueBootEpoch  = int64(1)
+)
+
 // TestRunQueueStore_Postgres_EnqueueClaim exercises the basic enqueue → claim →
 // requeue → reset cycle against real Postgres (admin pool).
 func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
@@ -24,7 +32,7 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
 
 	// Empty queue.
-	if got, err := stores.RunQueue.ClaimNextRun(ctx); err != nil || got != nil {
+	if got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch); err != nil || got != nil {
 		t.Fatalf("ClaimNextRun on empty queue = (%v, %v), want (nil, nil)", got, err)
 	}
 
@@ -37,7 +45,7 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 		t.Fatalf("EnqueueRun: %v", err)
 	}
 
-	got, err := stores.RunQueue.ClaimNextRun(ctx)
+	got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch)
 	if err != nil || got == nil {
 		t.Fatalf("ClaimNextRun: (%v, %v)", got, err)
 	}
@@ -59,15 +67,108 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 	if err := stores.RunQueue.RequeueRun(ctx, orgID, runID, "transient"); err != nil {
 		t.Fatalf("RequeueRun: %v", err)
 	}
-	got2, err := stores.RunQueue.ClaimNextRun(ctx)
+	got2, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch)
 	if err != nil || got2 == nil || got2.Attempts != 2 {
 		t.Fatalf("re-claim = (%+v, %v), want attempts=2", got2, err)
 	}
 
-	// ResetProcessingRuns flips the mid-flight 'running' row back to queued.
-	n, err := stores.RunQueue.ResetProcessingRuns(ctx)
+	// ResetProcessingRuns flips the mid-flight 'running' row back to queued —
+	// a later boot epoch of the same executor (a restart) sweeps it.
+	n, err := stores.RunQueue.ResetProcessingRuns(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch+1)
 	if err != nil || n != 1 {
 		t.Fatalf("ResetProcessingRuns = (%d, %v), want (1, nil)", n, err)
+	}
+}
+
+// TestRunQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner is the core
+// TFAC-578 hazard test: two processes (distinct persistent executor
+// identities) against one Postgres. Process B booting must NOT reset process
+// A's claimed/running row — A's work would otherwise be re-queued and
+// re-executed by A while it's still live, a duplicate-execution hazard on a
+// rolling deploy or any N>1 topology.
+func TestRunQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	step0 := 0
+	runID := uuid.New().String()
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+		ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
+		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("EnqueueRun: %v", err)
+	}
+
+	// Process A claims and is still live (never crashed).
+	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "process-a", 1)
+	if err != nil || claimed == nil || claimed.ID != runID {
+		t.Fatalf("process-a claim: got=%v err=%v", claimed, err)
+	}
+
+	// Process B boots (a distinct instance, not a restart of A) and runs its
+	// own boot reconcile. A's row must be untouched — different executor_id.
+	n, err := stores.RunQueue.ResetProcessingRuns(ctx, "process-b", 1)
+	if err != nil {
+		t.Fatalf("process-b ResetProcessingRuns: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("process-b's boot reset %d rows, want 0 (must not touch process-a's live claim)", n)
+	}
+	if st, _ := pgRunStatus(t, h, runID); st != "running" {
+		t.Errorf("run status = %q, want running (untouched by process-b's boot reset)", st)
+	}
+
+	// A itself restarting (a later boot epoch of the SAME executor_id) DOES
+	// sweep its own orphan — this is the "kill -9 mid-run, restart" path.
+	n2, err := stores.RunQueue.ResetProcessingRuns(ctx, "process-a", 2)
+	if err != nil {
+		t.Fatalf("process-a restart ResetProcessingRuns: %v", err)
+	}
+	if n2 != 1 {
+		t.Errorf("process-a's restart reset %d rows, want 1 (its own prior-boot orphan)", n2)
+	}
+	if st, _ := pgRunStatus(t, h, runID); st != "queued" {
+		t.Errorf("run status = %q, want queued after process-a's own restart swept it", st)
+	}
+}
+
+// TestRunQueueStore_Postgres_ResetProcessingRuns_NeverResetsCurrentEpoch pins
+// that a boot's own reconcile never touches rows claimed under its OWN
+// current epoch — only strictly earlier boots of itself are orphans. This is
+// what keeps ResetProcessingRuns safe to call unconditionally at every boot.
+func TestRunQueueStore_Postgres_ResetProcessingRuns_NeverResetsCurrentEpoch(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	step0 := 0
+	runID := uuid.New().String()
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+		ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
+		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("EnqueueRun: %v", err)
+	}
+
+	if _, err := stores.RunQueue.ClaimNextRun(ctx, "process-self", 5); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	// Same executor, same epoch: must not reset (not an earlier boot).
+	if n, err := stores.RunQueue.ResetProcessingRuns(ctx, "process-self", 5); err != nil {
+		t.Fatalf("ResetProcessingRuns at same epoch: %v", err)
+	} else if n != 0 {
+		t.Errorf("ResetProcessingRuns at the SAME epoch reset %d rows, want 0", n)
+	}
+	if st, _ := pgRunStatus(t, h, runID); st != "running" {
+		t.Errorf("run status = %q, want running (untouched by a same-epoch reset)", st)
 	}
 }
 
@@ -92,7 +193,7 @@ func TestRunQueueStore_Postgres_CancelRequestedNotClaimed(t *testing.T) {
 	if changed, err := stores.Blueprints.RequestRunCancelSystem(ctx, orgID, brID); err != nil || !changed {
 		t.Fatalf("RequestRunCancelSystem = (%v, %v)", changed, err)
 	}
-	if got, err := stores.RunQueue.ClaimNextRun(ctx); err != nil || got != nil {
+	if got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch); err != nil || got != nil {
 		t.Fatalf("ClaimNextRun on cancel-requested blueprint = (%v, %v), want (nil, nil)", got, err)
 	}
 }
@@ -134,7 +235,7 @@ func TestRunQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for {
-				run, err := stores.RunQueue.ClaimNextRun(ctx)
+				run, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch)
 				if err != nil {
 					t.Errorf("ClaimNextRun: %v", err)
 					return

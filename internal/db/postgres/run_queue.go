@@ -92,14 +92,19 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 	return err
 }
 
-func (s *runQueueStore) ClaimNextRun(ctx context.Context) (*domain.AgentRun, error) {
+func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64) (*domain.AgentRun, error) {
 	// FOR UPDATE SKIP LOCKED on the inner select so a future multi-worker
 	// dispatcher never claims the same queued run. Claimable = the owning
 	// blueprint_run is still 'running' and not cancel-requested. An empty queue
 	// matches no row and the scan reports ErrNoRows -> (nil, nil).
+	//
+	// executor_id + boot_epoch are stamped in this same statement (TFAC-578)
+	// so the row's ownership is never ambiguous between claim and the process
+	// actually going live — see ResetProcessingRuns.
 	row := s.conn.QueryRowContext(ctx, `
 		UPDATE runs
-		SET status = 'running', claimed_at = now(), attempts = attempts + 1
+		SET status = 'running', claimed_at = now(), attempts = attempts + 1,
+		    executor_id = $1, boot_epoch = $2
 		WHERE id = (
 			SELECT r.id FROM runs r
 			JOIN blueprint_runs br ON br.id = r.blueprint_run_id
@@ -110,7 +115,7 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context) (*domain.AgentRun, err
 			FOR UPDATE OF r SKIP LOCKED
 			LIMIT 1
 		)
-		RETURNING `+runQueueClaimCols)
+		RETURNING `+runQueueClaimCols, executorID, bootEpoch)
 	return scanPgClaimedRun(row)
 }
 
@@ -124,7 +129,16 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	return err
 }
 
-func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
+func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
+	// Ownership-scoped (TFAC-578): only rows this instance itself claimed
+	// (executor_id = $1) during a strictly earlier boot (boot_epoch < $2) are
+	// reset. A live sibling's claimed/running row carries a different
+	// executor_id and is never touched — that's what makes a booting process
+	// safe alongside a still-live one. `boot_epoch IS NULL` is included
+	// defensively for the one-time upgrade edge: a row already 'running' from
+	// before this column existed (same persistent executor_id, no boot_epoch
+	// yet stamped) is still unambiguously this instance's own prior-boot
+	// orphan, not another instance's live work.
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL
 		WHERE status NOT IN (
@@ -133,7 +147,9 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
 			'open','pending_approval'
 		)
 		AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
-	`)
+		AND executor_id = $1
+		AND (boot_epoch IS NULL OR boot_epoch < $2)
+	`, executorID, bootEpoch)
 	if err != nil {
 		return 0, err
 	}

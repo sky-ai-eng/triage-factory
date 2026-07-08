@@ -64,6 +64,11 @@ These are internal signals, not shown in the triage UI.
 | **Scoring Complete** | `system:scoring:completed` | AI scoring finished for a batch of tasks |
 | **Delegation Complete** | `system:delegation:completed` | An agent delegation run completed successfully |
 | **Delegation Failed** | `system:delegation:failed` | An agent delegation run failed |
+| **Task Auto-suspended** *(deprecated)* | `system:task:auto_suspended` | Per-task breaker trip; superseded by the per-(entity, prompt) breaker below and no longer emitted |
+| **Prompt Auto-suspended** | `system:prompt:auto_suspended` | The per-(entity, prompt) breaker tripped after repeated run failures |
+| **Delegation Blocked: Subtasks** | `system:task:delegation_blocked_by_subtasks` | Auto-delegation was skipped for a Jira issue because its parent has open subtasks |
+| **Run Status** | `system:run:status` | A delegated run's status changed (mirrors the `agent_run_update` websocket event; TFAC-592) |
+| **Run Activity** | `system:run:activity` | A delegated run invoked a tool (mirrors the `agent_message` websocket event, `tool_use` messages only; TFAC-592) |
 
 ## Snapshot fields
 

@@ -196,17 +196,23 @@ func (s *Spawner) deregisterProc(runID string) {
 	delete(s.procs, runID)
 }
 
-// stampExecutor records this spawner instance's executor identity on the
-// run row when the run goes live (an unguarded system write — the run
-// goroutine holds no JWT claims). Best-effort: a failure is logged, not
-// fatal, because executor ownership is a forward-compat hook, not a
-// correctness gate at N=1.
+// stampExecutor records this spawner instance's executor identity + boot
+// epoch on the run row when the run goes live (an unguarded system write —
+// the run goroutine holds no JWT claims). This re-stamps what
+// RunQueueStore.ClaimNextRun already wrote atomically at claim (TFAC-578) on
+// a fresh claim — cheap and harmless — but it is the ONLY stamp on the
+// resume path (ResumeOpenRun flips a parked run straight to 'running' via
+// MarkResuming, bypassing the claim), so it must write both columns, not
+// just executor_id, to keep boot_epoch reflecting the most recent boot that
+// touched the row rather than whatever epoch it was originally claimed
+// under. Best-effort: a failure is logged, not fatal, because executor
+// ownership is a forward-compat hook, not a correctness gate at N=1.
 func (s *Spawner) stampExecutor(orgID, runID string) {
 	if s.agentRuns == nil {
 		return
 	}
-	executorID, _ := s.executorIdentity()
-	if err := s.agentRuns.SetExecutorSystem(context.Background(), orgID, runID, executorID); err != nil {
+	executorID, bootEpoch := s.executorIdentity()
+	if err := s.agentRuns.SetExecutorSystem(context.Background(), orgID, runID, executorID, bootEpoch); err != nil {
 		delegateLog.Warn("stamp executor on run failed", "executor", executorID, "run_id", runID, "error", err)
 	}
 }

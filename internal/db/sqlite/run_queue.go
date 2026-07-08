@@ -71,15 +71,23 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 	return err
 }
 
-func (s *runQueueStore) ClaimNextRun(ctx context.Context) (*domain.AgentRun, error) {
+func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64) (*domain.AgentRun, error) {
 	// Flip the oldest claimable queued run to 'running', stamp claimed_at, bump
 	// attempts. Claimable = its owning blueprint_run is still 'running' and not
 	// cancel-requested (a sequence-cancelled blueprint's queued step is never
 	// claimed). A NULL subquery (nothing claimable) matches no row, RETURNING
 	// yields nothing, and the scan reports ErrNoRows -> (nil, nil).
+	//
+	// executor_id + boot_epoch are stamped in this same statement (TFAC-578),
+	// mirroring the Postgres impl, so the row's ownership is never ambiguous
+	// between claim and the process actually going live — see
+	// ResetProcessingRuns. SQLite is N=1, so this is trivially self-scoped,
+	// but keeping the write here (not deferred to "goes live") closes the
+	// same claim-to-live gap Postgres closes.
 	row := s.conn.QueryRowContext(ctx, `
 		UPDATE runs
-		SET status = 'running', claimed_at = ?, attempts = attempts + 1
+		SET status = 'running', claimed_at = ?, attempts = attempts + 1,
+		    executor_id = ?, boot_epoch = ?
 		WHERE id = (
 			SELECT r.id FROM runs r
 			JOIN blueprint_runs br ON br.id = r.blueprint_run_id
@@ -89,7 +97,7 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context) (*domain.AgentRun, err
 			ORDER BY r.started_at, r.id
 			LIMIT 1
 		)
-		RETURNING `+runQueueClaimCols, time.Now())
+		RETURNING `+runQueueClaimCols, time.Now(), executorID, bootEpoch)
 	return scanSqliteClaimedRun(row)
 }
 
@@ -107,10 +115,18 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	return err
 }
 
-func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
+func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
 	// Mid-flight runs left by a crash (claimed/running/setup statuses) go back
 	// to 'queued' for re-claim. Terminal + dormant + already-queued rows are
 	// left alone. attempts retained so a poison run still fails out.
+	//
+	// Ownership-scoped (TFAC-578), mirroring the Postgres impl: only rows
+	// this instance itself claimed (executor_id = ?) during a strictly
+	// earlier boot (boot_epoch < ?) are reset. SQLite is N=1, so there is
+	// never a live sibling to protect, but the same predicate keeps the two
+	// backends' semantics identical. `boot_epoch IS NULL` covers the
+	// one-time upgrade edge: a row already 'running' from before this column
+	// existed.
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL
 		WHERE status NOT IN (
@@ -119,7 +135,9 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
 			'open','pending_approval'
 		)
 		AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
-	`)
+		AND executor_id = ?
+		AND (boot_epoch IS NULL OR boot_epoch < ?)
+	`, executorID, bootEpoch)
 	if err != nil {
 		return 0, err
 	}

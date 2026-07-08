@@ -153,6 +153,10 @@ func (a *App) buildExecution() error {
 	// Per-run credentials resolve through the run-credential seam, not a
 	// process-global hot-swap.
 	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "")
+	// Mirror run status/activity onto the bus (TFAC-592) so an EE
+	// subscriber (ExtensionAPI.Bus()) can observe run lifecycle — the
+	// bus is built in buildInfra, which runs before buildExecution.
+	a.spawner.SetEventPublisher(a.bus)
 	// Replace the constructor's random per-boot uuid with the persistent
 	// instance-registry identity registerInstance minted above —
 	// runs.executor_id on claimed rows must equal the registry id, and
@@ -329,4 +333,9 @@ func (a *App) buildRouting() {
 	// event_queue (not the bus); the ingestor enqueues there at emit time.
 	a.router = routing.NewRouter(a.stores.Prompts, a.stores.Blueprints, a.stores.EventHandlers, a.stores.Agents, a.stores.TeamAgents, a.stores.Users, a.stores.Tasks, a.stores.AgentRuns, a.stores.Entities, a.stores.PendingFirings, a.stores.Events, a.stores.Orgs, a.stores.Teams, a.stores.TeamGitHubRepos, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.spawner, a.scorer, a.wsHub)
 	a.router.SetEventQueue(a.stores.EventQueue)
+	// Ownership-scoped boot recovery (TFAC-578): the router's event_queue
+	// self-sweep needs the same persistent instance-registry identity the
+	// spawner's run-queue self-sweep already uses (registerInstance minted it
+	// at boot, above).
+	a.router.SetExecutorID(a.identity.ID, a.bootEpoch)
 }

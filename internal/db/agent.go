@@ -119,14 +119,22 @@ type AgentRunStore interface {
 	// check.
 	SetSession(ctx context.Context, orgID, runID, sessionID string) error
 
-	// SetExecutorSystem stamps runs.executor_id with the instance id of
-	// the executor that owns this run's live process. Called when a run
-	// goes live (an unguarded write, like SetStatus); pass "" to clear
-	// the pointer. Forward-compat run→executor ownership at N=1; the
-	// admin pool is the right door because the run goroutine that stamps
-	// it holds no JWT claims. No app-pool variant — ownership is a
-	// system concern, never request-scoped.
-	SetExecutorSystem(ctx context.Context, orgID, runID, executorID string) error
+	// SetExecutorSystem stamps runs.executor_id + runs.boot_epoch with the
+	// identity of the executor that owns this run's live process. Called
+	// when a run goes live (an unguarded write, like SetStatus); pass "" to
+	// clear the pointer. This is largely a re-stamp of what
+	// RunQueueStore.ClaimNextRun already wrote atomically at claim
+	// (TFAC-578) — cheap and harmless on that path — but it is the ONLY
+	// stamp on the resume path (ResumeOpenRun flips a parked run straight to
+	// 'running' via MarkResuming, bypassing the claim), so both columns must
+	// be written together here too, not just executor_id, to keep the
+	// invariant "boot_epoch always reflects the most recent boot that
+	// touched this row" true everywhere rather than relying on
+	// boot_epoch's monotonicity across restarts to save an unrefreshed
+	// value. The admin pool is the right door because the run goroutine
+	// that stamps it holds no JWT claims. No app-pool variant — ownership is
+	// a system concern, never request-scoped.
+	SetExecutorSystem(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) error
 
 	// SetStatus writes runs.status without a guard. Used by the
 	// delegate spawner for transient progress transitions

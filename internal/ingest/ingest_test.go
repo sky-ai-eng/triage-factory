@@ -207,12 +207,16 @@ type failingEnqueueQueue struct{ err error }
 func (q failingEnqueueQueue) Enqueue(context.Context, string, domain.Event) (string, error) {
 	return "", q.err
 }
-func (failingEnqueueQueue) ClaimNext(context.Context) (*domain.QueuedEvent, error)  { return nil, nil }
+func (failingEnqueueQueue) ClaimNext(context.Context, string, int64) (*domain.QueuedEvent, error) {
+	return nil, nil
+}
 func (failingEnqueueQueue) MarkDone(context.Context, string, int64) error           { return nil }
 func (failingEnqueueQueue) MarkFailed(context.Context, string, int64, string) error { return nil }
 func (failingEnqueueQueue) Requeue(context.Context, string, int64, string) error    { return nil }
-func (failingEnqueueQueue) ResetProcessing(context.Context) (int, error)            { return 0, nil }
-func (failingEnqueueQueue) PruneDone(context.Context, time.Time) (int, error)       { return 0, nil }
+func (failingEnqueueQueue) ResetProcessing(context.Context, string, int64) (int, error) {
+	return 0, nil
+}
+func (failingEnqueueQueue) PruneDone(context.Context, time.Time) (int, error) { return 0, nil }
 func (failingEnqueueQueue) ListForEntity(context.Context, string, string) ([]domain.QueuedEvent, error) {
 	return nil, nil
 }

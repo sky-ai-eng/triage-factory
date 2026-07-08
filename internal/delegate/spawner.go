@@ -10,6 +10,7 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
@@ -58,6 +60,15 @@ func shortRunID(runID string) string {
 // pending_firings rows.
 type QueueDrainer interface {
 	DrainEntity(orgID, entityID string)
+}
+
+// EventPublisher is the bus-publish seam the spawner uses to mirror run
+// lifecycle onto the event bus (TFAC-592), so an EE subscriber
+// (ExtensionAPI.Bus()) can observe run status/activity alongside the
+// websocket broadcast. Mirrors internal/tracker's Publisher shape; the
+// plain *eventbus.Bus satisfies this interface directly.
+type EventPublisher interface {
+	Publish(evt domain.Event)
 }
 
 // Spawner manages delegated agent runs.
@@ -173,6 +184,7 @@ type Spawner struct {
 	cancels               map[string]context.CancelFunc                     // runID → cancel the entire run
 	dispatchWake          chan struct{}                                     // best-effort latency nudge for the run-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
 	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
+	eventPublisher        EventPublisher                                    // nil-safe; set post-construction via SetEventPublisher — mirrors run status/activity onto the bus (TFAC-592)
 	waitForClassification func(ctx context.Context, orgID, entityID string) // hook that blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. orgID scopes the classification read to the run's tenant — the read goes through the org-scoped admin-pool store, not a raw query. Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
 
 	// procs holds the live agent process handle for each run currently
@@ -359,6 +371,42 @@ func (s *Spawner) SetQueueDrainer(d QueueDrainer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.drainer = d
+}
+
+// SetEventPublisher wires the bus publisher the spawner mirrors run
+// status/activity onto (TFAC-592). Post-construction, same pattern as
+// SetQueueDrainer — the bus is built before the spawner in app
+// composition, but the setter keeps internal/delegate decoupled from
+// internal/eventbus's concrete type. Safe to call once at startup; nil
+// publisher (the default) disables the bus mirror entirely (tests).
+func (s *Spawner) SetEventPublisher(p EventPublisher) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.eventPublisher = p
+}
+
+// publishEvent nil-guards and marshal-failure-guards a bus publish so
+// the run lifecycle mirror can never affect the websocket broadcast it
+// follows. orgID is always stamped by the caller — every broadcast
+// choke point has it in scope.
+func (s *Spawner) publishEvent(orgID, eventType string, metadata any) {
+	s.mu.Lock()
+	pub := s.eventPublisher
+	s.mu.Unlock()
+	if pub == nil {
+		return
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		delegateLog.Warn("marshal run lifecycle event metadata failed", "event_type", eventType, "error", err)
+		return
+	}
+	pub.Publish(domain.Event{
+		OrgID:        orgID,
+		EventType:    eventType,
+		MetadataJSON: string(raw),
+		OccurredAt:   time.Now(),
+	})
 }
 
 // SetWaitForClassification wires the hook that blocks the
@@ -1028,14 +1076,17 @@ func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
 // that already has orgID in scope (the run's tenant, set at
 // Delegate() entry and threaded through every helper).
 func (s *Spawner) broadcastRunUpdate(orgID, runID, status string) {
-	if s.wsHub == nil {
-		return
+	if s.wsHub != nil {
+		s.wsHub.Broadcast(websocket.Event{
+			Type:  "agent_run_update",
+			OrgID: orgID,
+			RunID: runID,
+			Data:  map[string]string{"status": status},
+		})
 	}
-	s.wsHub.Broadcast(websocket.Event{
-		Type:  "agent_run_update",
-		OrgID: orgID,
-		RunID: runID,
-		Data:  map[string]string{"status": status},
+	s.publishEvent(orgID, domain.EventSystemRunStatus, events.SystemRunStatusMetadata{
+		RunID:  runID,
+		Status: status,
 	})
 }
 
@@ -1046,29 +1097,49 @@ func (s *Spawner) broadcastRunUpdate(orgID, runID, status string) {
 // for an unclassified failure — consumers treat absence as "generic
 // failed", which keeps the payload backward compatible.
 func (s *Spawner) broadcastRunFailed(orgID, runID string, kind domain.RunFailureKind) {
-	if s.wsHub == nil {
-		return
-	}
 	data := map[string]string{"status": "failed"}
 	if kind != domain.RunFailureUnclassified {
 		data["failure_kind"] = string(kind)
 	}
-	s.wsHub.Broadcast(websocket.Event{
-		Type:  "agent_run_update",
-		OrgID: orgID,
-		RunID: runID,
-		Data:  data,
-	})
+	if s.wsHub != nil {
+		s.wsHub.Broadcast(websocket.Event{
+			Type:  "agent_run_update",
+			OrgID: orgID,
+			RunID: runID,
+			Data:  data,
+		})
+	}
+	meta := events.SystemRunStatusMetadata{RunID: runID, Status: "failed"}
+	if kind != domain.RunFailureUnclassified {
+		meta.FailureKind = string(kind)
+	}
+	s.publishEvent(orgID, domain.EventSystemRunStatus, meta)
 }
 
 func (s *Spawner) broadcastMessage(orgID, runID string, msg *domain.AgentMessage) {
-	if s.wsHub == nil {
+	if s.wsHub != nil {
+		s.wsHub.Broadcast(websocket.Event{
+			Type:  "agent_message",
+			OrgID: orgID,
+			RunID: runID,
+			Data:  msg,
+		})
+	}
+	// Only tool_use is published — text/thinking are noise for bus
+	// consumers and this bounds volume (TFAC-592).
+	if msg.Subtype != "tool_use" {
 		return
 	}
-	s.wsHub.Broadcast(websocket.Event{
-		Type:  "agent_message",
-		OrgID: orgID,
+	tools := make([]events.RunActivityTool, 0, len(msg.ToolCalls))
+	for _, tc := range msg.ToolCalls {
+		tool := events.RunActivityTool{Name: tc.Name}
+		if desc, ok := tc.Input["description"].(string); ok {
+			tool.Description = desc
+		}
+		tools = append(tools, tool)
+	}
+	s.publishEvent(orgID, domain.EventSystemRunActivity, events.SystemRunActivityMetadata{
 		RunID: runID,
-		Data:  msg,
+		Tools: tools,
 	})
 }

@@ -342,10 +342,17 @@ func setRunSession(ctx context.Context, q queryer, orgID, runID, sessionID strin
 	return err
 }
 
-func (s *agentRunStore) SetExecutorSystem(ctx context.Context, orgID, runID, executorID string) error {
+func (s *agentRunStore) SetExecutorSystem(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) error {
+	// Clearing the pointer (executorID == "") clears boot_epoch with it —
+	// the two columns are always either both set or both NULL, never a
+	// stale boot_epoch left behind for no owner.
+	var epoch any
+	if executorID != "" {
+		epoch = bootEpoch
+	}
 	_, err := s.admin.ExecContext(ctx, `
-		UPDATE runs SET executor_id = $1 WHERE org_id = $2 AND id = $3
-	`, nullIfEmpty(executorID), orgID, runID)
+		UPDATE runs SET executor_id = $1, boot_epoch = $2 WHERE org_id = $3 AND id = $4
+	`, nullIfEmpty(executorID), epoch, orgID, runID)
 	return err
 }
 
