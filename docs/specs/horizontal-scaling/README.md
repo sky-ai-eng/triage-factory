@@ -953,6 +953,21 @@ are exactly what "counts + memory" fails to capture:
   pool segmentation (big-memory executors for heavy profiles,
   sandbox-fleet §5) is a static `instances.labels` match — same
   family as `placement_overrides`, human intent only.
+
+  Composition with §6.2's claim, stated precisely: a claim decision
+  has three nested layers — **eligibility** (could this executor
+  *ever* run this run: variant availability/bakeability, pool
+  labels), **admission** (can it right now: budget headroom, mem
+  floor, gated/draining, `max_runs`), and **preference** (should it,
+  for cache warmth: the stamp, tier 1 vs tier 2). **Aging erodes
+  only the third.** Tier-2 "claimable by anyone" means anyone
+  *eligible and admissible*; an empty eligibility set fails fast
+  (above); an eligible-but-saturated set queues as ordinary
+  under-capacity for that profile class. And the enqueue-time stamp
+  rendezvouses over the **eligible subset**, not all members —
+  otherwise a run whose global winner lacks its variant is born with
+  a useless stamp and eats the aging delay on every single run of
+  that profile.
 - **Cross-org sharing is safe by construction — for recipes.** A
   variant is not an uploaded artifact; it is a *recipe*,
   content-addressed by `rootfsCacheKey` (alpine sha + package set),
