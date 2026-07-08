@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -105,6 +106,16 @@ func (a *App) handleReconcilerPoll(evt domain.Event) {
 // everywhere). It also re-emits the legacy "tasks_updated" message on poll
 // completion for backward compatibility.
 func (a *App) broadcastEvent(evt domain.Event) {
+	// system:run:* sentinels (TFAC-592) are EE-observable bus mirrors of
+	// the agent_run_update/agent_message websocket events the spawner's
+	// two broadcast choke points already emit — forwarding them here
+	// would double every tool call on the wire in a second shape. This
+	// is also defense-in-depth for tenant isolation: broadcastEvent fans
+	// out org-unstamped events to ALL clients, so a future emitter bug
+	// that forgot OrgID must not leak run activity text cross-org.
+	if strings.HasPrefix(evt.EventType, "system:run:") {
+		return
+	}
 	a.wsHub.Broadcast(websocket.Event{
 		Type:  "event",
 		OrgID: evt.OrgID,

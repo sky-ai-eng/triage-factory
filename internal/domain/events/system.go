@@ -123,6 +123,45 @@ func (p SystemTaskDelegationBlockedSubtasksPredicate) Matches(m SystemTaskDelega
 }
 
 // -----------------------------------------------------------------------------
+// system:run:status / system:run:activity — EE-observable run lifecycle
+// sentinels (TFAC-592), mirroring the two websocket choke points in
+// internal/delegate/spawner.go onto the bus. Deliberately minimal: no
+// TaskID/EntitySource, so consumers resolve run→task→entity context
+// themselves (and cache it) rather than costing a DB read on the hot
+// broadcast path.
+// -----------------------------------------------------------------------------
+
+type SystemRunStatusMetadata struct {
+	RunID       string `json:"run_id"`
+	Status      string `json:"status"`                 // the broadcast status string
+	FailureKind string `json:"failure_kind,omitempty"` // set on the failed arm only
+}
+
+// No predicate fields — fires once per instance, users can only enable / disable.
+type SystemRunStatusPredicate struct{}
+
+func (p SystemRunStatusPredicate) Matches(m SystemRunStatusMetadata) bool {
+	return true
+}
+
+type RunActivityTool struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"` // Input["description"] when a string; else ""
+}
+
+type SystemRunActivityMetadata struct {
+	RunID string            `json:"run_id"`
+	Tools []RunActivityTool `json:"tools"`
+}
+
+// No predicate fields — fires once per instance, users can only enable / disable.
+type SystemRunActivityPredicate struct{}
+
+func (p SystemRunActivityPredicate) Matches(m SystemRunActivityMetadata) bool {
+	return true
+}
+
+// -----------------------------------------------------------------------------
 // Registration.
 // -----------------------------------------------------------------------------
 
@@ -137,4 +176,6 @@ func init() {
 	Register(NewSchema[SystemDelegationFailedMetadata, SystemDelegationFailedPredicate](domain.EventSystemDelegationFailed, OwnershipUnrouted))
 	Register(NewSchema[SystemPromptAutoSuspendedMetadata, SystemPromptAutoSuspendedPredicate](domain.EventSystemPromptAutoSuspended, OwnershipUnrouted))
 	Register(NewSchema[SystemTaskDelegationBlockedSubtasksMetadata, SystemTaskDelegationBlockedSubtasksPredicate](domain.EventSystemTaskDelegationBlockedSubtasks, OwnershipUnrouted))
+	Register(NewSchema[SystemRunStatusMetadata, SystemRunStatusPredicate](domain.EventSystemRunStatus, OwnershipUnrouted))
+	Register(NewSchema[SystemRunActivityMetadata, SystemRunActivityPredicate](domain.EventSystemRunActivity, OwnershipUnrouted))
 }

@@ -153,6 +153,10 @@ func (a *App) buildExecution() error {
 	// Per-run credentials resolve through the run-credential seam, not a
 	// process-global hot-swap.
 	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "")
+	// Mirror run status/activity onto the bus (TFAC-592) so an EE
+	// subscriber (ExtensionAPI.Bus()) can observe run lifecycle — the
+	// bus is built in buildInfra, which runs before buildExecution.
+	a.spawner.SetEventPublisher(a.bus)
 	// Replace the constructor's random per-boot uuid with the persistent
 	// instance-registry identity registerInstance minted above —
 	// runs.executor_id on claimed rows must equal the registry id, and
