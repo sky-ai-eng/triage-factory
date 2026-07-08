@@ -13,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // tfMigrateSubprocessDSNEnv is set by
@@ -46,8 +47,8 @@ func TestMigrateSubprocessHelper(t *testing.T) {
 	}
 }
 
-// TestMigrate_Postgres_ConcurrentMigrateSerializes is the TFAC-580
-// regression guard for the advisory-lock wrap: two processes booting
+// TestMigrate_Postgres_ConcurrentMigrateSerializes is the regression
+// guard for the advisory-lock wrap: two processes booting
 // against the same never-migrated Postgres database concurrently must
 // not race goose's own version-tracking inserts. Without the lock,
 // both processes would observe "nothing applied yet" and race to run
@@ -130,9 +131,9 @@ func TestMigrate_Postgres_ConcurrentMigrateSerializes(t *testing.T) {
 }
 
 // TestMigrate_Postgres_ExecutorRole_NeverMigrated_Behind covers the
-// executor-boot-against-a-behind-schema half of TFAC-580's acceptance:
-// TF_ROLE=executor against a database no control-plane process has
-// ever migrated must refuse to boot with ErrExecutorSchemaBehind, and
+// executor-boot-against-a-behind-schema case: TF_ROLE=executor against
+// a database no control-plane process has ever migrated must refuse to
+// boot with ErrExecutorSchemaBehind, and
 // — the load-bearing assertion — must not create a single table doing
 // so. An executor that silently ran goose.Up here would defeat the
 // entire point of the role split.
@@ -202,5 +203,42 @@ func TestMigrate_Postgres_ExecutorRole_Current(t *testing.T) {
 	t.Setenv("TF_ROLE", "executor")
 	if err := db.Migrate(h.AdminDB, "postgres"); err != nil {
 		t.Fatalf("Migrate on a current schema: %v", err)
+	}
+}
+
+// TestMigrate_Postgres_ExecutorRole_SkipsEventTypeSeed pins that
+// Migrate's executor-role skip covers SeedEventTypes too, not just
+// goose.Up. Deliberately drifts one events_catalog row's description
+// away from its domain.AllEventTypes() canonical value — a
+// control-plane Migrate call's WHERE-guarded upsert would correct this
+// straight back, so seeing it still drifted after an executor-role
+// Migrate call is the only direct way to observe the reconciliation
+// write was skipped (the upsert is otherwise a no-op whether it runs
+// or not, since it's idempotent).
+func TestMigrate_Postgres_ExecutorRole_SkipsEventTypeSeed(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	const drifted = "drifted-for-test"
+	if _, err := h.AdminDB.Exec(
+		`UPDATE events_catalog SET description = $1 WHERE id = $2`,
+		drifted, string(domain.EventGitHubPRReviewApproved),
+	); err != nil {
+		t.Fatalf("drift events_catalog description: %v", err)
+	}
+
+	t.Setenv("TF_ROLE", "executor")
+	if err := db.Migrate(h.AdminDB, "postgres"); err != nil {
+		t.Fatalf("Migrate on a current schema: %v", err)
+	}
+
+	var desc string
+	if err := h.AdminDB.QueryRow(
+		`SELECT description FROM events_catalog WHERE id = $1`, string(domain.EventGitHubPRReviewApproved),
+	).Scan(&desc); err != nil {
+		t.Fatalf("read events_catalog description: %v", err)
+	}
+	if desc != drifted {
+		t.Errorf("description = %q, want still %q — executor-role Migrate must not run SeedEventTypes", desc, drifted)
 	}
 }

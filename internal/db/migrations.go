@@ -51,13 +51,11 @@ var ErrPreV1110Install = errors.New(
 
 // tfRoleExecutorEnv is the TF_ROLE value runMigrations gates goose.Up
 // on. The full TF_ROLE plumbing — subsystem wiring, per-role pool
-// defaults, the N-executor compose profile — is TFAC-582, which
-// depends on this ticket landing first. Reading the env var directly
-// here (rather than standing up a stub in internal/runmode) keeps this
-// migration-coordination assert self-contained: it doesn't partially
-// build a config surface that belongs to TFAC-582, and it costs
-// nothing to ship ahead of that split (see the parent epic's P0
-// framing — "the assert is cheap now").
+// defaults, the N-executor compose profile — lands separately. Reading
+// the env var directly here (rather than standing up a stub in
+// internal/runmode) keeps this migration-coordination assert self-
+// contained rather than partially building a config surface that
+// belongs elsewhere.
 const tfRoleExecutorEnv = "executor"
 
 // isExecutorRole reports whether this process is TF_ROLE=executor.
@@ -97,8 +95,8 @@ var gooseMu sync.Mutex
 
 // runMigrations brings the on-disk schema up to head via goose — or,
 // for a TF_ROLE=executor process on Postgres, refuses to and instead
-// asserts the already-migrated schema matches what this build expects
-// (spec TFAC-71 §5.5: executors never migrate).
+// asserts the already-migrated schema matches what this build expects.
+// Executors never migrate.
 //
 // Sequence:
 //  1. assertFreshOrCurrent gates entry — pre-v1.11.0 installs refuse
