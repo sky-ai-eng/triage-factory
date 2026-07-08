@@ -72,6 +72,8 @@ of what this design **reuses rather than builds**:
 | Poll cursors + conditional-request state in DB | `poller_state`, repo pulls-poll-state (ETags) | Built. Poll position survives a process swap; a cold handoff re-lists as free 304s. |
 | Cost/usage accounting + quotas | `llm_spend` view, `/api/usage/*`, daily + per-team caps, `system_llm_runs` | Built (TFAC-449). The **spend** layer of the dashboard exists; the **infrastructure** layer (this spec §8) does not. |
 | Re-seedable per-org disk state | `internal/paths` under `TF_STATE_ROOT`; bounded evictable bare/worktree cache (TFAC-60); shared-RO curator worktrees (TFAC-61) | Built per-pod. Durable copies live in Postgres + S3; everything on executor disk is cache. |
+| Readiness probe | `GET /readyz` (`internal/server/readyz_handler.go`, TFAC-573) | Built. Hard-fails DB/migrations/poller-alive → 503 for LB rotation; soft-reports poll staleness, GitHub rate budget, active runs. The split makes the poller hard-check **lease-conditional** (§8.3) — as shipped it would 503 every standby control pod. |
+| Budgeted, resumable poll cycles | TFAC-571 (GitHub) | Built. A mid-cycle leader handoff resumes from the durable cursor instead of restarting discovery (§3). |
 
 And the inverse — what today **assumes exactly one process** (the
 gap list this design closes):
@@ -268,10 +270,11 @@ proxy) provides:
 
 1. HTTP/1.1 with WebSocket upgrade passthrough.
 2. Idle/read timeouts generous enough for long-lived WS connections.
-3. Health-aware rotation against the control readiness endpoint
-   (P1 §8.3) — this is what makes one-at-a-time control deploys
-   zero-downtime; a dropped WS is absorbed by the frontend's
-   auto-reconnect.
+3. Health-aware rotation against `GET /readyz` (already shipped,
+   TFAC-573; P1 makes its poller hard-check lease-conditional so
+   standbys stay in rotation, §8.3) — this is what makes
+   one-at-a-time control deploys zero-downtime; a dropped WS is
+   absorbed by the frontend's auto-reconnect.
 4. `X-Forwarded-For` passthrough, with `TF_TRUSTED_PROXY_CIDR` /
    `TF_CAPTURE_CLIENT_IP` set so the per-pod rate limiter and
    client-IP capture see real client addresses — **plumbing that
@@ -323,7 +326,18 @@ leases (
   ex-leader mid-cycle degrades to no-ops, not corruption.
 - Failover cost is bounded and benign: the new leader's poll schedule
   starts cold (every org due), but poll cursors + ETags are in the DB,
-  so the catch-up cycle is mostly free 304s (`docs/poll-bench.md`).
+  so the catch-up cycle is mostly free 304s (`docs/poll-bench.md`) —
+  and GitHub cycles are budgeted/resumable (TFAC-571), so even a
+  mid-cycle handoff resumes from the durable cursor rather than
+  restarting discovery.
+- **The brain includes EE background workers.** `ExtensionAPI.OnReady`
+  fires unconditionally in every process today; under the split those
+  workers (connection managers, adapters — e.g. the Slack liveness
+  consumer of TFAC-592's run sentinels) are brain components and gate
+  on the lease like the core set, unless one is explicitly marked
+  replica-safe. Ungated, every control pod runs every EE worker —
+  §1's hazard 6 wearing EE clothes, with external writes (Slack
+  posts) duplicating ×M.
 - **Fencing where it counts, tolerance elsewhere.** Full fencing (every
   brain write carries the term) is overkill; the one genuinely dangerous
   overlap is the tracker snapshot RMW, and it gets its own guard: an
@@ -681,6 +695,16 @@ every control pod LISTENs and fans-in remote events to its local
 sockets through the existing per-`(org,user)` scope filter. Origin-pod
 id in the envelope prevents double-delivery to the producer's own
 clients. Per-connection NOTIFY ordering keeps per-run message order.
+
+One deliberate exception to bus-locality rides this channel: the
+`system:run:status` / `system:run:activity` sentinels (TFAC-592) are
+published on the bus of the process *running the run* — an executor,
+after the split — while their consumers (EE bus subscribers such as
+the Slack liveness adapter) live with the brain. The executor's
+bridge forwards these bus-only sentinels over `tf_ws` tagged as
+bus-relay; the **leader** re-publishes them onto its local bus;
+standby control pods drop them — an EE consumer that posts to Slack
+must fire once, not ×M.
 
 Same channel fixes the two security/UX locals:
 
@@ -1052,9 +1076,17 @@ admission and mis-reports capacity today.
   renames) and org-owner auto-grant (wrong on shared SaaS).
 - `GET /api/system/capacity` (TFAC-555) ships early and reads the same
   registry — at N=1 it's the one-row special case of the fleet view.
-- Per-role health: control keeps `/api/health` + gains readiness (LB
-  rotation); executors expose local healthz; both already log
-  structured JSON in multi-mode.
+- Per-role health: `GET /readyz` **already exists** (TFAC-573) — DB +
+  migrations + poller-alive as hard 503s, poll staleness / GitHub rate
+  budget / active-runs as soft signals. The split's remaining work is
+  conditionality, not construction: the poller hard-check applies
+  **only on the lease holder** (a standby runs no pollers and must
+  stay in LB rotation — as shipped, `hardOK && pollerAlive` would 503
+  every non-leader and collapse the HA shape to leader-only serving);
+  standbys hard-check DB + migrations and report lease state
+  informationally; executors serve a separate local healthz
+  (dispatcher + heartbeat-write liveness — they have no user HTTP).
+  All roles already log structured JSON in multi-mode.
 
 ### 8.4 Packaging (settled 2026-07-07)
 
@@ -1101,10 +1133,12 @@ flag day. Sizes in house S/M/L/XL.
 **P1 — The split (first real fleet)**
 6. `TF_ROLE` + per-role subsystem wiring + compose profile (N executors
    + LB) + self-host docs. (L)
-7. Leader lease + brain gating + standby takeover; trigger/PollSoon
-   relay on `tf_ctl`. (L)
+7. Leader lease + brain gating (incl. EE `OnReady` workers) + standby
+   takeover; trigger/PollSoon relay on `tf_ctl`; `/readyz` poller
+   hard-check becomes lease-conditional (§8.3). (L)
 8. WS backplane `tf_ws` + `ws_outbox` + presence table + cross-pod
-   user-kick. (L)
+   user-kick; leader re-emit of TFAC-592 run sentinels from the
+   fan-in (§5.1). (L)
 9. `run_signals` cross-pod control (cancel/interrupt/steer/permission)
    + resume-by-enqueue for parked runs. (L)
 10. Fleet reaper (dead-executor requeue, attempts-capped) + drain flag +
@@ -1138,7 +1172,8 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
     §6.4 — budget admission, eligibility-constrained claim,
     `instance_variants` + rootfs-cache eviction budget, pool labels
     (TFAC-408 §§4–5). (L)
-20. Budgeted/resumable poll cycles (poll-bench follow-up). (M)
+20. Budgeted/resumable poll cycles — GitHub half shipped (TFAC-571);
+    Jira parity on demand. (S)
 
 ---
 
