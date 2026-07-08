@@ -40,6 +40,12 @@ type fakeLifecycleSlack struct {
 	posts         []postCall
 	statuses      []statusCall
 	reactionError string // if set, reactions.add responds {"ok":false,"error":reactionError}
+	// statusClearDelay, when set, makes a setStatus("") call (a clearing
+	// call — status=="") sleep before this fake records/answers it —
+	// TestLifecycleAdapter_RunStatus_TerminalJoin_PreventsResumeInterleaving's
+	// way of forcing the old-worker-still-mid-flight window the join fix
+	// closes.
+	statusClearDelay time.Duration
 }
 
 func newFakeLifecycleSlack(t *testing.T) *fakeLifecycleSlack {
@@ -73,10 +79,19 @@ func newFakeLifecycleSlack(t *testing.T) *fakeLifecycleSlack {
 			writeSlackFakeJSON(w, map[string]any{"ok": true, "ts": "1700000099.000001"})
 		case strings.HasSuffix(r.URL.Path, "/assistant.threads.setStatus"):
 			_ = r.ParseForm()
+			channel, threadTS, status := r.FormValue("channel_id"), r.FormValue("thread_ts"), r.FormValue("status")
 			f.mu.Lock()
-			f.statuses = append(f.statuses, statusCall{
-				Channel: r.FormValue("channel_id"), ThreadTS: r.FormValue("thread_ts"), Status: r.FormValue("status"),
-			})
+			delay := f.statusClearDelay
+			f.mu.Unlock()
+			if delay > 0 && status == "" {
+				time.Sleep(delay)
+			}
+			// Recorded AFTER the delay (and always before the response is
+			// written) so the slice's order reflects when each call actually
+			// RESOLVED, not when its request arrived — the thing that
+			// determines the indicator's final visible state.
+			f.mu.Lock()
+			f.statuses = append(f.statuses, statusCall{Channel: channel, ThreadTS: threadTS, Status: status})
 			f.mu.Unlock()
 			writeSlackFakeJSON(w, map[string]any{"ok": true})
 		default:
@@ -108,6 +123,12 @@ func (f *fakeLifecycleSlack) statusCalls() []statusCall {
 	out := make([]statusCall, len(f.statuses))
 	copy(out, f.statuses)
 	return out
+}
+
+func (f *fakeLifecycleSlack) setStatusClearDelay(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statusClearDelay = d
 }
 
 // ---------- rig / seeding ----------
@@ -322,18 +343,25 @@ func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 }
 
-// stopAllLifecycleWorkers stops every live worker in runs and waits for it
-// to finish — test cleanup so a worker's ticker doesn't keep firing (into a
-// closed httptest server) after the test itself has ended.
+// stopAllLifecycleWorkers stops every live worker in runs — test cleanup so
+// a worker's ticker doesn't keep firing (into a closed httptest server)
+// after the test itself has ended. worker.stop already blocks until the
+// worker has fully quiesced (see its doc); this just runs each stop off the
+// test goroutine so a regression that hangs stop() fails with a t.Error
+// instead of hanging the whole test.
 func stopAllLifecycleWorkers(t *testing.T, runs map[string]*runEntry) {
 	t.Helper()
 	for _, e := range runs {
 		if e.worker == nil {
 			continue
 		}
-		e.worker.stop(false)
+		done := make(chan struct{})
+		go func(w *runStatusWorker) {
+			w.stop(false)
+			close(done)
+		}(e.worker)
 		select {
-		case <-e.worker.done:
+		case <-done:
 		case <-time.After(2 * time.Second):
 			t.Error("worker did not stop within 2s of stop()")
 		}
@@ -659,6 +687,54 @@ func TestLifecycleAdapter_RunStatus_Parked_ClearsWithoutFailureReply(t *testing.
 	time.Sleep(50 * time.Millisecond)
 	if len(fake.postCalls()) != 0 {
 		t.Errorf("parked/open must never post the failure reply, got %+v", fake.postCalls())
+	}
+}
+
+// TestLifecycleAdapter_RunStatus_TerminalJoin_PreventsResumeInterleaving is
+// the direct regression test for the park→resume ordering fix: worker.stop
+// now blocks until the retiring worker's trailing setStatus("") has
+// actually resolved, so a fast-following "running" for the SAME run can't
+// start a new worker whose initial status then gets clobbered by the old
+// worker's late-arriving clear.
+//
+// The fake's setStatusClearDelay makes the OLD worker's clearing call slow
+// (simulating it being mid-flight on a real Slack round trip when "open"
+// dispatches) — long enough that, under the pre-fix non-blocking stop, the
+// resumed run's new "is working on it…" call would complete and get
+// recorded FIRST, with the stale clear landing after it and wiping the
+// indicator right back to blank. Recording happens after each call resolves
+// (see the fake's setStatus handler), so the LAST entry in statusCalls()
+// always reflects the indicator's actual final state — asserting it here is
+// exactly what would have failed against the old non-blocking stop.
+func TestLifecycleAdapter_RunStatus_TerminalJoin_PreventsResumeInterleaving(t *testing.T) {
+	withFastLifecycleTimings(t)
+	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
+	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
+	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+
+	adapter := newTestLifecycleAdapter(stores, staticURL(""))
+	runs := map[string]*runEntry{}
+	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
+	ctx := context.Background()
+
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
+
+	fake.setStatusClearDelay(150 * time.Millisecond)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "open"), runs) // parked — resumable
+	// No wait needed: dispatch() itself must not return until the old
+	// worker's delayed clear has already resolved (that's the fix).
+	fake.setStatusClearDelay(0)
+
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs) // resumes immediately
+	waitForCondition(t, 2*time.Second, func() bool {
+		calls := fake.statusCalls()
+		return len(calls) > 0 && calls[len(calls)-1].Status == slackLifecycleInitialStatusText
+	})
+
+	last := fake.statusCalls()[len(fake.statusCalls())-1]
+	if last.Status != slackLifecycleInitialStatusText {
+		t.Errorf("final indicator state = %q, want %q (the resumed run's new worker, not the old worker's stale clear)", last.Status, slackLifecycleInitialStatusText)
 	}
 }
 

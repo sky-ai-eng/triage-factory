@@ -332,6 +332,16 @@ func isTerminalRunStatus(status string) bool {
 // (queued/fetching/cloning/agent_starting — pre-"running" progress states)
 // is a deliberate no-op: nothing meaningful to show via the assistant status
 // before the agent is actually running.
+//
+// The terminal branch's worker.stop call blocks (see stop's doc) — this
+// dispatcher goroutine stalls for that worker's final Slack call(s) before
+// moving on to the next queued sentinel. That's deliberate: "open" (parked/
+// awaiting-input) is one of the terminal statuses here, and a parked run is
+// resumable — its NEXT sentinel for the same runID can legitimately be
+// another "running". Blocking here guarantees the old worker's trailing
+// setStatus("") has actually landed before a resumed run's new worker can
+// send its own initial setStatus, closing an interleaving race that would
+// otherwise only show up on a very fast park→resume turnaround.
 func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event, runs map[string]*runEntry) {
 	var meta events.SystemRunStatusMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
@@ -609,14 +619,26 @@ func (w *runStatusWorker) keepAlive() {
 }
 
 // stop signals the worker to clear its status (and, if failed, post the
-// failure reply) and exit. Non-blocking — the dispatcher never waits on a
-// Slack call here; drainLifecycleWorkers is the only place that joins on
-// w.done, and only at adapter shutdown.
+// failure reply) and exit, then BLOCKS until it actually has (joining
+// w.done) — deliberately synchronous, unlike keepAlive/sendActivity.
+// Without the join, a resumed run's next "running" could start a brand-new
+// worker while this one's own goroutine is still mid-flight on its trailing
+// setStatus("") (e.g. it was blocked inside a slow Slack call when stop was
+// sent): the two calls can then land out of order, clobbering the new
+// worker's initial status right back to cleared. Joining here — the only
+// call site, since a run transitions to a terminal status once — makes that
+// interleaving structurally impossible: handleRunStatus's terminal branch
+// doesn't return (and therefore can't process a later "running" for the
+// same runID) until this worker's final Slack call has actually completed.
+// Safe to call more than once on the same worker: a second stopCh send is a
+// harmless no-op (buffered, and by then nothing is reading it), and
+// receiving from an already-closed w.done returns immediately.
 func (w *runStatusWorker) stop(failed bool) {
 	select {
 	case w.stopCh <- failed:
 	default:
 	}
+	<-w.done
 }
 
 // loop is the worker's whole lifecycle. ctx cancellation (adapter shutdown)
