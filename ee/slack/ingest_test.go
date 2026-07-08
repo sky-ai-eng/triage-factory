@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -539,13 +540,14 @@ func TestHandleEventCallback_DispatchesPermalinkResolutionOnCreated(t *testing.T
 // (created=false) must not re-dispatch resolvePermalink — the thread-root
 // permalink is stable once minted.
 func TestHandleEventCallback_DoesNotDispatchPermalinkResolutionOnReMention(t *testing.T) {
-	hits := 0
+	var hits int32
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		atomic.AddInt32(&hits, 1)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "permalink": "https://acme.slack.com/archives/C1/p1"})
 	})
 	entities := newFakeEntities()
 	entityURLs := newFakeEntityURLUpdater()
+	entityURLs.done = make(chan struct{}, 1)
 	resolver := &PermalinkResolver{secrets: &fakeSecrets{token: "xoxb-test"}, entities: entityURLs, client: srv.Client()}
 	p := &ingestPipeline{
 		entities:   entities,
@@ -560,30 +562,28 @@ func TestHandleEventCallback_DoesNotDispatchPermalinkResolutionOnReMention(t *te
 	if err := p.handleEventCallback(context.Background(), ws, first); err != nil {
 		t.Fatalf("first handleEventCallback: %v", err)
 	}
-	// Give the detached goroutine a chance to run before the second mention,
-	// so any (incorrect) second dispatch would be a clearly distinct event.
-	deadline := time.After(2 * time.Second)
-	for hits == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("first mention never dispatched resolvePermalink")
-		case <-time.After(10 * time.Millisecond):
-		}
+	// Wait for the first dispatch to fully complete via the resolver's own
+	// deterministic completion signal — NOT a sleep/poll on shared state
+	// (which would itself race the detached goroutine, and risks a
+	// still-running goroutine reading slackAPIBase out from under
+	// withFakeSlackAPI's t.Cleanup restore once this test returns).
+	select {
+	case <-entityURLs.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first mention never dispatched resolvePermalink")
 	}
 
 	// Second mention on the SAME thread (same channel/thread_ts) re-resolves
-	// the same entity (created=false) and must not dispatch again.
+	// the same entity (created=false), so handleEventCallback never calls
+	// dispatch again — no new goroutine, nothing further to wait for before
+	// checking hits below.
 	second := inboundMention{Type: "app_mention", EventID: "Ev2", Channel: "C1", User: "U2", TS: "1600000000.000200", ThreadTS: "1600000000.000100"}
 	if err := p.handleEventCallback(context.Background(), ws, second); err != nil {
 		t.Fatalf("second handleEventCallback: %v", err)
 	}
-	// No deterministic completion signal for "definitely did not dispatch";
-	// a short settle window is the standard bounded-wait idiom for a
-	// negative assertion on a detached goroutine.
-	time.Sleep(50 * time.Millisecond)
 
-	if hits != 1 {
-		t.Errorf("chat.getPermalink hits = %d; want 1 (no re-dispatch on re-mention)", hits)
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("chat.getPermalink hits = %d; want 1 (no re-dispatch on re-mention)", got)
 	}
 }
 
