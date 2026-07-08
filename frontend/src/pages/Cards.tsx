@@ -518,16 +518,18 @@ function SwipeCard({
             ) : isScoring ? (
               <div className="w-7 h-[18px] rounded bg-black/[0.04] animate-pulse" />
             ) : null}
-            <a
-              href={task.source_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors"
-              onClick={(e) => e.stopPropagation()}
-              onPointerDown={(e) => e.stopPropagation()}
-            >
-              Open
-            </a>
+            {task.source_url && (
+              <a
+                href={task.source_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors"
+                onClick={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                Open
+              </a>
+            )}
           </div>
         </div>
       </div>

@@ -259,14 +259,16 @@ export default function AgentCard({
                 Return to queue
               </button>
             )}
-            <a
-              href={task.source_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[12px] font-semibold text-accent transition-colors hover:text-accent/70"
-            >
-              Open
-            </a>
+            {task.source_url && (
+              <a
+                href={task.source_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[12px] font-semibold text-accent transition-colors hover:text-accent/70"
+              >
+                Open
+              </a>
+            )}
           </div>
         </div>
       </CardPlane>

@@ -2,7 +2,9 @@ import {
   CircleDot,
   GitBranch,
   GitPullRequest,
+  MessageCircle,
   MessageSquare,
+  SmilePlus,
   Eye,
   type LucideIcon,
 } from 'lucide-react'
@@ -26,8 +28,9 @@ export interface ActionMeta {
 }
 
 // ACTION_META is keyed by the backend action discriminator. The icon follows the
-// object family (PR / review / comment / branch / issue); the tone reads the
-// outcome — created/advanced = good, retired = problem, in-place change = neutral.
+// object family (PR / review / comment / branch / issue / message); the tone
+// reads the outcome — created/advanced = good, retired = problem, in-place
+// change = neutral.
 export const ACTION_META: Record<string, ActionMeta> = {
   pr_created: { icon: GitPullRequest, label: 'PR opened', text: 'text-delegate', tone: 'good' },
   pr_marked_ready: {
@@ -103,6 +106,24 @@ export const ACTION_META: Record<string, ActionMeta> = {
     text: 'text-accent',
     tone: 'good',
   },
+  slack_message_posted: {
+    icon: MessageCircle,
+    label: 'Message posted',
+    text: 'text-text-tertiary',
+    tone: 'good',
+  },
+  slack_message_edited: {
+    icon: MessageCircle,
+    label: 'Message edited',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
+  slack_reaction_added: {
+    icon: SmilePlus,
+    label: 'Reaction added',
+    text: 'text-text-tertiary',
+    tone: 'good',
+  },
 }
 
 export const FALLBACK_ACTION_META: ActionMeta = {
@@ -128,5 +149,6 @@ export const ACTION_OPTIONS = Object.keys(ACTION_META).map((value) => ({
 
 // ACTION_PROVIDERS backs the Actions-lens provider filter. Unlike the artifacts
 // feed (which also carries 'git'/'linear'), every external ACTION is performed
-// under an org github/jira credential, so only those two appear.
-export const ACTION_PROVIDERS = ['github', 'jira'] as const
+// under an org github/jira credential or the workspace Slack bot token, so
+// only those three appear.
+export const ACTION_PROVIDERS = ['github', 'jira', 'slack'] as const
