@@ -721,6 +721,20 @@ multi-executor deployment, land budget admission, the
 eligibility-constrained claim, and `instance_variants` with an
 eviction budget (the §9 P4 item).
 
+These are deliberately **not** pre-added to the registry schema, and
+the reasons are specific, not reflexive YAGNI: `reserved_mb` is
+identically `active_runs ×` the uniform budget until budgets are
+heterogeneous, so pre-adding it ships a writer that cannot be
+exercised in anger; `instance_variants`' key shape hangs on
+TFAC-408's unresolved catalog-vs-recipe decision (variant *name* vs
+`rootfsCacheKey` content hash), so freezing it early converts a cheap
+future ADD into a semantic ALTER on populated data; and the
+fresh-install forward-migration model makes late additive schema on
+these tiny tables ~free — the classic front-loading justification
+(painful online ALTERs at scale) never applies. `instances.labels`
+is the deliberate forward-compat room in the meantime, per the
+`executor_id` precedent: pre-ship only the shape-certain thing.
+
 ---
 
 ## 7. Background jobs at N (and the system-sandbox endgame)
