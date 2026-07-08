@@ -81,16 +81,15 @@ func (c *LocalClient) Close() error { return nil }
 // SyntheticClaimsWithTx with the kicking-off human's identity so RLS
 // policies see the right (orgID, userID) pair. The two-arg shape lets
 // each call site pick its own admin-pool function and tx-pool closure
-// without duplicating the if/else everywhere.
+// without duplicating the if/else everywhere. Thin wrapper over
+// withWriteInfo (record.go) — the free-function form an ee extension
+// handler (no LocalClient) also uses.
 func (c *LocalClient) withWrite(
 	ctx context.Context,
 	system func() error,
 	user func(ts db.TxStores) error,
 ) error {
-	if c.info.IsEventTriggered {
-		return system()
-	}
-	return c.stores.Tx.SyntheticClaimsWithTx(ctx, c.info.OrgID, c.info.UserID, user)
+	return withWriteInfo(ctx, c.stores, c.info, system, user)
 }
 
 // --- review draft finalization ---
@@ -786,48 +785,15 @@ func (c *LocalClient) recordJiraComment(ctx context.Context, key, commentID, bod
 	c.upsertJiraArtifact(ctx, a, jiraAction(a, domain.ActionIssueCommentPosted, "", ""))
 }
 
-// upsertJiraArtifact stamps the run attribution (run/org/team) + provider onto
-// a and writes it best-effort: a recording failure is logged and swallowed so
-// it never fails the agent's already-applied Jira action. The write routes the
-// same way every other exec choke-point write does (withWrite) — admin pool
-// for event-triggered runs (no user), a synthetic-claims tx for manual ones.
-//
-// act is the external-action audit row appended in the SAME write as the
-// artifact (TFAC-483), under the org Jira service-account credential. Composed in
-// one tx on the manual path; two admin-pool writes on the event path. See
-// upsertGithubArtifact.
+// upsertJiraArtifact stamps the provider onto a and writes it best-effort via
+// the shared recording funnel (RecordExternalWrite, record.go): a recording
+// failure is logged and swallowed so it never fails the agent's already-
+// applied Jira action. act is the external-action audit row appended in the
+// SAME write as the artifact (TFAC-483), under the org Jira service-account
+// credential. See upsertGithubArtifact.
 func (c *LocalClient) upsertJiraArtifact(ctx context.Context, a domain.Artifact, act *domain.ExternalAction) {
-	if c.stores.Artifacts == nil {
-		return
-	}
-	a.RunID = c.info.RunID
-	a.OrgID = c.info.OrgID
-	a.TeamID = c.info.TeamID
 	a.Provider = domain.ArtifactProviderJira
-	if act != nil {
-		c.stampActionIdentity(act)
-	}
-
-	err := c.withWrite(ctx,
-		func() error {
-			if _, e := c.stores.Artifacts.UpsertSystem(ctx, c.info.OrgID, a); e != nil {
-				return e
-			}
-			return c.recordActionSystem(ctx, act)
-		},
-		func(ts db.TxStores) error {
-			if _, e := ts.Artifacts.Upsert(ctx, c.info.OrgID, a); e != nil {
-				return e
-			}
-			return recordActionTx(ctx, ts, c.info.OrgID, act)
-		},
-	)
-	if err != nil {
-		agenthostLog.Warn("jira artifact recording failed (action already applied)",
-			"run", c.info.RunID, "kind", a.Kind, "target", a.Target, "error", err)
-	}
-	// Resolve the touched entity outside the audit write (TFAC-513 §2).
-	c.recordTouch(ctx, act)
+	RecordExternalWrite(ctx, c.stores, c.info, &a, act)
 }
 
 // jiraSiteBase returns the org's configured Jira site URL, trailing slash
@@ -1667,193 +1633,62 @@ func githubCommentDedupKey(commentID int) string {
 	return domain.ArtifactDedupKey(domain.ArtifactProviderGitHub, domain.ArtifactKindComment, strconv.Itoa(commentID), "")
 }
 
-// upsertGithubArtifact stamps the run attribution (run/org/team) + provider onto
-// a and writes it best-effort: a recording failure is logged and swallowed so
-// it never fails the agent's already-applied GitHub action. The write routes the
-// same way every other exec choke-point write does (withWrite) — admin pool for
-// event-triggered runs (no user), a synthetic-claims tx for manual ones.
-//
-// act is the external-action audit row to append in the SAME write as the
-// artifact (the audit log of record, TFAC-483) — nil when this upsert carries no
-// distinct external action (a review reuse that re-records the artifact without a
-// new GitHub write). On the manual path both compose in one synthetic-claims tx,
-// so a Record failure rolls the artifact back too (they agree); on the event path
-// they are two admin-pool writes (no admin tx), both best-effort.
+// upsertGithubArtifact stamps the provider onto a and writes it best-effort via
+// the shared recording funnel (RecordExternalWrite, record.go): a recording
+// failure is logged and swallowed so it never fails the agent's already-
+// applied GitHub action. act is the external-action audit row to append in the
+// SAME write as the artifact (the audit log of record, TFAC-483) — nil when
+// this upsert carries no distinct external action (a review reuse that
+// re-records the artifact without a new GitHub write).
 func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifact, act *domain.ExternalAction) {
-	if c.stores.Artifacts == nil {
-		return
-	}
-	a.RunID = c.info.RunID
-	a.OrgID = c.info.OrgID
-	a.TeamID = c.info.TeamID
 	a.Provider = domain.ArtifactProviderGitHub
-	if act != nil {
-		c.stampActionIdentity(act)
-	}
-
-	err := c.withWrite(ctx,
-		func() error {
-			if _, e := c.stores.Artifacts.UpsertSystem(ctx, c.info.OrgID, a); e != nil {
-				return e
-			}
-			return c.recordActionSystem(ctx, act)
-		},
-		func(ts db.TxStores) error {
-			if _, e := ts.Artifacts.Upsert(ctx, c.info.OrgID, a); e != nil {
-				return e
-			}
-			return recordActionTx(ctx, ts, c.info.OrgID, act)
-		},
-	)
-	if err != nil {
-		agenthostLog.Warn("github artifact recording failed (action already applied)",
-			"run", c.info.RunID, "kind", a.Kind, "target", a.Target, "error", err)
-	}
-	// Resolve the touched entity outside the audit write (TFAC-513 §2).
-	c.recordTouch(ctx, act)
+	RecordExternalWrite(ctx, c.stores, c.info, &a, act)
 }
 
 // --- external-action recording (TFAC-483) ---
 //
 // The bot funnels compose an append-only external_actions row alongside the
 // artifact upsert (the audit log of record for every org-credential write). The
-// credential is the org GitHub App / org Jira service account by construction —
-// exec resolves the org's system credential, never a user's own — so every bot
-// write qualifies. run_id is this run, actor_user_id is the kicking-off user
-// (empty → NULL for an event-triggered run, an autonomous system action).
+// credential is the org GitHub App / org Jira service account / Slack bot
+// token by construction — exec resolves the org's system credential, never a
+// user's own — so every bot write qualifies. run_id is this run, actor_user_id
+// is the kicking-off user (empty → NULL for an event-triggered run, an
+// autonomous system action).
+//
+// stampActionIdentity / recordActionSystem / resolveTouchedEntity are thin
+// LocalClient-bound wrappers over the free functions in record.go — kept here
+// so the several other call sites in this file (UpsertArtifact,
+// RecordGitDenied, RecordGitPushFailed, branchPushAction) don't have to thread
+// c.stores/c.info through by hand. Touch-recording itself
+// (recordTouchInfo) has no LocalClient-bound wrapper: RecordExternalWrite
+// (record.go) is the only caller, and it already holds (stores, info)
+// directly.
 
 // stampActionIdentity fills the run/org/team/actor common to every
-// bot-attributed action from this client's RunInfo. The action-specific fields
-// (provider, action, target, credential, from/to, dedup) are set by the caller.
+// bot-attributed action from this client's RunInfo.
 func (c *LocalClient) stampActionIdentity(act *domain.ExternalAction) {
-	act.OrgID = c.info.OrgID
-	act.TeamID = c.info.TeamID
-	act.RunID = c.info.RunID
-	act.ActorUserID = c.info.UserID // empty for event-triggered → SQL NULL
+	stampActionIdentityInfo(act, c.info)
 }
 
 // recordActionSystem appends act on the admin pool (event-triggered runs). A nil
 // act — or a partial test wiring with no ExternalActions store — is a no-op.
 func (c *LocalClient) recordActionSystem(ctx context.Context, act *domain.ExternalAction) error {
-	if act == nil || c.stores.ExternalActions == nil {
-		return nil
-	}
-	return c.stores.ExternalActions.RecordSystem(ctx, c.info.OrgID, *act)
-}
-
-// recordActionTx appends act inside the caller's synthetic-claims tx (manual
-// runs), composing with the artifact upsert. A nil act is a no-op.
-func recordActionTx(ctx context.Context, ts db.TxStores, orgID string, act *domain.ExternalAction) error {
-	if act == nil || ts.ExternalActions == nil {
-		return nil
-	}
-	return ts.ExternalActions.Record(ctx, orgID, *act)
+	return recordActionSystemInfo(ctx, c.stores, c.info, act)
 }
 
 // recordBotAction records one STANDALONE external-action audit row for a bot
-// write that produces no artifact to compose with — a review-thread reply (it
-// rides the review, not a comment artifact, but is still an immediate
-// org-credential write the audit log of record must capture). It stamps the run
-// identity, then routes the same way the artifact funnels do (admin pool for
-// event-triggered runs, the synthetic-claims tx for manual ones) and is
-// best-effort: a recording failure is logged and swallowed so it never fails the
-// agent's already-applied GitHub write.
+// write that produces no artifact to compose with — a review-thread reply, a
+// Slack reaction. Routes through the shared recording funnel
+// (RecordExternalWrite, record.go) with a nil artifact; best-effort like every
+// other funnel here.
 func (c *LocalClient) recordBotAction(ctx context.Context, act *domain.ExternalAction) {
-	if act == nil || c.stores.ExternalActions == nil {
-		return
-	}
-	c.stampActionIdentity(act)
-	err := c.withWrite(ctx,
-		func() error { return c.recordActionSystem(ctx, act) },
-		func(ts db.TxStores) error { return recordActionTx(ctx, ts, c.info.OrgID, act) },
-	)
-	if err != nil {
-		agenthostLog.Warn("external-action recording failed (github write already applied)",
-			"run", c.info.RunID, "action", act.Action, "target", act.Target, "error", err)
-	}
-	// Resolve the touched entity outside the audit write (TFAC-513 §2).
-	c.recordTouch(ctx, act)
+	RecordExternalWrite(ctx, c.stores, c.info, nil, act)
 }
 
-// --- touched-entity resolution (TFAC-513 §2) ---
-//
-// Every org-credential write the bot makes lands on an external object — a PR, a
-// Jira issue. resolveTouchedEntity turns that object's (provider, target) into an
-// entities row, returning an existing entity or a freshly-minted snapshot-less
-// stub. The returned id is the foundation the run's touched-set is built on
-// (TFAC-507 captures it per run); this ticket lands the resolver + the durable
-// entity it guarantees exists, the shared dependency exec-touch and Slack build
-// on.
-//
-// The key vocabulary is shared with the tracker, so no translation is needed:
-// ExternalAction.Provider is already the entity source ("github"/"jira") and
-// ExternalAction.Target is already the entity source_id ("owner/repo#N" /
-// "PROJ-123"). A bare "owner/repo" GitHub target (no '#') is a repo-level action,
-// not an entity — skipped. That target-shape skip is also what drops a branch
-// push: branchPushAction stamps Provider="github" with a repo-level Target, so it
-// falls out here, not on the provider. Any provider we don't map to an entity
-// grain (the default arm below) likewise resolves to nothing.
-//
-// Writes route System (admin pool / BYPASSRLS), mirroring the tracker's entity
-// writes: the host records actions outside any user's RLS claims on the event
-// path, and an entity is org-wide bookkeeping that must not ride one user's tx.
-// A stub created here carries no snapshot_json; the next poll cycle enriches it
-// (TFAC-513 §3 ensures Phase-2 no longer skips a node-id-less entity). Returns
-// ("", nil) when the target isn't an entity — a normal skip, not an error.
+// resolveTouchedEntity turns act's (provider, target) into an entities row —
+// see resolveTouchedEntityInfo (record.go) for the full rationale.
 func (c *LocalClient) resolveTouchedEntity(ctx context.Context, act *domain.ExternalAction) (string, error) {
-	if act == nil || c.stores.Entities == nil {
-		return "", nil
-	}
-	var kind string
-	switch act.Provider {
-	case domain.ArtifactProviderGitHub:
-		// owner/repo#N is a PR entity; bare owner/repo is a repo-level action.
-		// NOTE: this assumes every github target is a PR (kind="pr"). Exec only
-		// writes PRs/reviews today, so that holds — but a GitHub *issue* shares
-		// the "owner/repo#N" shape, and the poller's resolveStubNodeID would then
-		// 404 against /pulls/{n} every cycle. GitHub issue support must branch on
-		// kind here (and give the poller an issue-aware enrichment path).
-		if _, _, _, ok := domain.ParsePRTarget(act.Target); !ok {
-			return "", nil
-		}
-		kind = "pr"
-	case domain.ArtifactProviderJira:
-		if act.Target == "" {
-			return "", nil
-		}
-		kind = "issue"
-	default:
-		return "", nil
-	}
-	// title is left empty — ExternalAction carries no human title, and the poll
-	// cycle seeds it from the upstream snapshot. url rides through when present.
-	entity, _, err := c.stores.Entities.FindOrCreateSystem(ctx, c.info.OrgID, act.Provider, act.Target, kind, "", act.URL)
-	if err != nil {
-		return "", err
-	}
-	return entity.ID, nil
-}
-
-// recordTouch resolves-or-creates the touched entity as a best-effort side step
-// in the recording funnels: a failure is logged and swallowed so it never fails
-// the agent's already-applied write (the entity self-heals on a later touch or
-// poll). It MUST run outside the audit tx — local mode holds the single SQLite
-// connection for the life of a synthetic-claims tx, so a System write inside
-// that closure would deadlock; every caller invokes this only after withWrite
-// returns.
-func (c *LocalClient) recordTouch(ctx context.Context, act *domain.ExternalAction) {
-	if act == nil {
-		return
-	}
-	id, err := c.resolveTouchedEntity(ctx, act)
-	if err != nil {
-		agenthostLog.Warn("touched-entity resolve failed (will retry on next poll)",
-			"run", c.info.RunID, "target", act.Target, "error", err)
-		return
-	}
-	if id != "" {
-		agenthostLog.Debug("resolved touched entity", "run", c.info.RunID, "entity", id, "target", act.Target)
-	}
+	return resolveTouchedEntityInfo(ctx, c.stores, c.info, act)
 }
 
 // RecordGitDenied appends a git_denied external-action audit row for a git op

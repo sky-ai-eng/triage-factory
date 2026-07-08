@@ -776,6 +776,14 @@ type slackMessage struct {
 	Text     string
 	TS       string
 	ThreadTS string
+	Files    []slackMessageFile
+}
+
+// slackMessageFile is one entry of a message's "files" array — just enough
+// to name the file and let the agent fetch it via `exec slack download`.
+type slackMessageFile struct {
+	ID   string
+	Name string
 }
 
 // slackConversationsRepliesCap bounds how many messages a single
@@ -816,6 +824,10 @@ func slackConversationsReplies(ctx context.Context, client *http.Client, botToke
 				Text     string `json:"text"`
 				TS       string `json:"ts"`
 				ThreadTS string `json:"thread_ts"`
+				Files    []struct {
+					ID   string `json:"id"`
+					Name string `json:"name"`
+				} `json:"files"`
 			} `json:"messages"`
 			HasMore          bool `json:"has_more"`
 			ResponseMetadata struct {
@@ -829,7 +841,10 @@ func slackConversationsReplies(ctx context.Context, client *http.Client, botToke
 			return nil, false, fmt.Errorf("slack conversations.replies: %s", nonEmpty(resp.Error, "not ok"))
 		}
 		for _, m := range resp.Messages {
-			messages = append(messages, slackMessage{User: m.User, BotID: m.BotID, Text: m.Text, TS: m.TS, ThreadTS: m.ThreadTS})
+			messages = append(messages, slackMessage{
+				User: m.User, BotID: m.BotID, Text: m.Text, TS: m.TS, ThreadTS: m.ThreadTS,
+				Files: slackMessageFilesFrom(m.Files),
+			})
 			if len(messages) >= slackConversationsRepliesCap {
 				return messages, resp.ResponseMetadata.NextCursor != "" || resp.HasMore, nil
 			}
@@ -888,6 +903,10 @@ func slackConversationsHistory(ctx context.Context, client *http.Client, botToke
 			Text     string `json:"text"`
 			TS       string `json:"ts"`
 			ThreadTS string `json:"thread_ts"`
+			Files    []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"files"`
 		} `json:"messages"`
 	}
 	if err := doSlackJSON(ctx, client, req, &resp); err != nil {
@@ -898,9 +917,31 @@ func slackConversationsHistory(ctx context.Context, client *http.Client, botToke
 	}
 	out := make([]slackMessage, 0, len(resp.Messages))
 	for _, m := range resp.Messages {
-		out = append(out, slackMessage{User: m.User, BotID: m.BotID, Text: m.Text, TS: m.TS, ThreadTS: m.ThreadTS})
+		out = append(out, slackMessage{
+			User: m.User, BotID: m.BotID, Text: m.Text, TS: m.TS, ThreadTS: m.ThreadTS,
+			Files: slackMessageFilesFrom(m.Files),
+		})
 	}
 	return out, nil
+}
+
+// slackMessageFilesFrom converts a message's raw "files" array (the shared
+// anonymous shape both conversations.replies and conversations.history
+// decode into) to the public slackMessageFile slice. Returns nil for no
+// files, so a message with none serializes without an empty "files":[] noise
+// field (slackMessageFile is only ever surfaced with omitempty).
+func slackMessageFilesFrom(files []struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}) []slackMessageFile {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]slackMessageFile, len(files))
+	for i, f := range files {
+		out[i] = slackMessageFile{ID: f.ID, Name: f.Name}
+	}
+	return out
 }
 
 // slackChatGetPermalink resolves a message's shareable URL via
@@ -971,18 +1012,27 @@ func slackAssistantSetStatus(ctx context.Context, client *http.Client, botToken,
 }
 
 // slackFileInfoResult is the subset of files.info's response the file
-// download/context flow needs: enough to name the file and fetch its
-// bytes.
+// download/context flow needs: enough to name the file, fetch its bytes,
+// and authorize which channel(s) it belongs to.
 type slackFileInfoResult struct {
 	ID         string
 	Name       string
 	Mimetype   string
 	Size       int64
 	URLPrivate string
+	// Channels is every channel/group id the file is shared into, unioned
+	// from both response shapes Slack has used for this (the legacy
+	// top-level channels/groups arrays and the newer shares.public/private
+	// maps keyed by channel id) — a download authorization check should
+	// consult this, not assume either shape alone is exhaustive. Excludes
+	// IMs (a DM share has no team-tracked-channel concept to authorize
+	// against).
+	Channels []string
 }
 
 // slackFilesInfo looks up a file's metadata via files.info — the
-// prerequisite for slackFileDownload, which needs URLPrivate.
+// prerequisite for slackFileDownload, which needs URLPrivate, and for
+// authorizing the download against the file's channel(s).
 func slackFilesInfo(ctx context.Context, client *http.Client, botToken, fileID string) (*slackFileInfoResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		slackAPIBase+"/files.info?file="+url.QueryEscape(fileID), nil)
@@ -995,11 +1045,17 @@ func slackFilesInfo(ctx context.Context, client *http.Client, botToken, fileID s
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
 		File  struct {
-			ID         string `json:"id"`
-			Name       string `json:"name"`
-			Mimetype   string `json:"mimetype"`
-			Size       int64  `json:"size"`
-			URLPrivate string `json:"url_private"`
+			ID         string   `json:"id"`
+			Name       string   `json:"name"`
+			Mimetype   string   `json:"mimetype"`
+			Size       int64    `json:"size"`
+			URLPrivate string   `json:"url_private"`
+			Channels   []string `json:"channels"`
+			Groups     []string `json:"groups"`
+			Shares     struct {
+				Public  map[string]json.RawMessage `json:"public"`
+				Private map[string]json.RawMessage `json:"private"`
+			} `json:"shares"`
 		} `json:"file"`
 	}
 	if err := doSlackJSON(ctx, client, req, &out); err != nil {
@@ -1011,7 +1067,33 @@ func slackFilesInfo(ctx context.Context, client *http.Client, botToken, fileID s
 	return &slackFileInfoResult{
 		ID: out.File.ID, Name: out.File.Name, Mimetype: out.File.Mimetype,
 		Size: out.File.Size, URLPrivate: out.File.URLPrivate,
+		Channels: unionSlackFileChannels(out.File.Channels, out.File.Groups, out.File.Shares.Public, out.File.Shares.Private),
 	}, nil
+}
+
+// unionSlackFileChannels dedupes+unions a files.info response's channel
+// identifiers across both shapes Slack has shipped for this field.
+func unionSlackFileChannels(channels, groups []string, shareMaps ...map[string]json.RawMessage) []string {
+	seen := make(map[string]bool, len(channels)+len(groups))
+	var out []string
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for _, id := range channels {
+		add(id)
+	}
+	for _, id := range groups {
+		add(id)
+	}
+	for _, m := range shareMaps {
+		for id := range m {
+			add(id)
+		}
+	}
+	return out
 }
 
 // slackFileDownload streams urlPrivate's bytes (slackFilesInfo's

@@ -95,6 +95,16 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 	// non-empty incoming value still overwrites (the intentional-change /
 	// migration path). state/details_json stay last-writer-wins by design
 	// (state tracks the latest action).
+	//
+	// run_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
+	// the artifact belongs to its CREATING run (domain.Artifact's doc), and
+	// team_id is denormalized off THAT SAME run — not off whichever writer
+	// happens to touch the row later — so a later writer touching the same
+	// dedup key (e.g. a different run editing a Slack message, or a
+	// re-delegate updating a GitHub comment) must not reassign either. Letting
+	// team_id follow the last writer while run_id stayed pinned to the first
+	// would desync the two and mis-scope the artifact out of its owning
+	// team's reads.
 	row := q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, run_id, org_id, team_id, provider, kind, target,
@@ -103,8 +113,8 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 		        NULLIF($2, '')::uuid, $3, $4, $5, $6, $7,
 		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now())
 		ON CONFLICT (org_id, dedup_key) DO UPDATE SET
-			run_id       = EXCLUDED.run_id,
-			team_id      = EXCLUDED.team_id,
+			run_id       = artifacts.run_id,
+			team_id      = artifacts.team_id,
 			target       = COALESCE(NULLIF(EXCLUDED.target, ''), artifacts.target),
 			external_id  = COALESCE(EXCLUDED.external_id, artifacts.external_id),
 			url          = COALESCE(EXCLUDED.url, artifacts.url),
