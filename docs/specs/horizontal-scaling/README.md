@@ -751,11 +751,15 @@ its last executor for the warm worktree, rehydratable anywhere from
 S3). This retires the in-process resume goroutine **in every mode,
 `TF_ROLE=all` included** — deliberately unlike the signal handlers
 above, which do keep a local short-circuit. The rule that separates
-them: **operations on live processes short-circuit locally; creation
-of work always goes through the queue.** Steer/interrupt/permission
-are only meaningful against an in-memory process handle, and their
-interactive latency budget is real — the signal layer just routes to
-the handle's owner. A resume has no live process; it *mints work*,
+them: **operations on live processes are routed; creation of work is
+queued.** Steer/interrupt/permission act on an in-memory process
+handle that exists in exactly one process, so they are deliverable
+from any pod at any N — `run_signals` finds the owner and delivers,
+one NOTIFY hop (~ms) each way, no leader involvement — but they can
+never be *claimed* by an arbitrary worker the way queue work can; the
+local short-circuit is merely the degenerate route when the caller
+already owns the handle (`TF_ROLE=all`). A resume has no live
+process; it *mints work*,
 and work that bypasses the queue bypasses every admission gate built
 in this design — the memory floor, the per-org concurrency cap, fair
 ordering, budget admission (§6.4) — exactly the storm path (wake 20
