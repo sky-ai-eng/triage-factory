@@ -105,14 +105,14 @@ func Shared(t *testing.T) *Harness {
 }
 
 // bootContainer starts a fresh supabase/postgres container and returns
-// it alongside its raw (postgres-user) DSN and its supabase_admin
-// (real superuser) admin connection. Factored out of boot() so
-// NewInstance can reuse the exact same container recipe to hand a
-// test a dedicated, unmigrated instance — the image's own init (auth
-// schema, vault extension, authenticator role) is complete, but
-// db.Migrate has not yet run, which boot() cannot offer once shared
-// has been populated.
-func bootContainer(ctx context.Context) (pg *postgres.PostgresContainer, pgDSN string, adminDB *sql.DB, err error) {
+// it alongside its raw (postgres-user) DSN, its supabase_admin
+// (real superuser) DSN, and an admin connection opened from that DSN.
+// Factored out of boot() so NewInstance can reuse the exact same
+// container recipe to hand a test a dedicated, unmigrated instance —
+// the image's own init (auth schema, vault extension, authenticator
+// role) is complete, but db.Migrate has not yet run, which boot()
+// cannot offer once shared has been populated.
+func bootContainer(ctx context.Context) (pg *postgres.PostgresContainer, pgDSN, adminDSN string, adminDB *sql.DB, err error) {
 	// Wait strategy: a single SQL probe for auth.users in the
 	// POSTGRES_DB-named DB. We tried a two-stage approach earlier
 	// (wait.ForLog "PostgreSQL init process complete" THEN ForSQL)
@@ -166,13 +166,13 @@ func bootContainer(ctx context.Context) (pg *postgres.PostgresContainer, pgDSN s
 		testcontainers.WithWaitStrategyAndDeadline(3*time.Minute, waitStrategies...),
 	)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("start container: %w", err)
+		return nil, "", "", nil, fmt.Errorf("start container: %w", err)
 	}
 
 	pgDSN, err = pg.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
 		_ = pg.Terminate(ctx)
-		return nil, "", nil, fmt.Errorf("admin dsn: %w", err)
+		return nil, "", "", nil, fmt.Errorf("admin dsn: %w", err)
 	}
 
 	// The supabase image demotes `postgres` to non-superuser during
@@ -182,24 +182,24 @@ func bootContainer(ctx context.Context) (pg *postgres.PostgresContainer, pgDSN s
 	// supabase_admin for migrations + reserved-role ALTERs (the
 	// supautils extension would otherwise reject "ALTER ROLE
 	// authenticator" from a non-superuser).
-	adminDSN, err := rewriteUser(pgDSN, "supabase_admin", "postgres")
+	adminDSN, err = rewriteUser(pgDSN, "supabase_admin", "postgres")
 	if err != nil {
 		_ = pg.Terminate(ctx)
-		return nil, "", nil, fmt.Errorf("admin dsn rewrite: %w", err)
+		return nil, "", "", nil, fmt.Errorf("admin dsn rewrite: %w", err)
 	}
 	adminDB, err = sql.Open("pgx", adminDSN)
 	if err != nil {
 		_ = pg.Terminate(ctx)
-		return nil, "", nil, fmt.Errorf("open admin db: %w", err)
+		return nil, "", "", nil, fmt.Errorf("open admin db: %w", err)
 	}
-	return pg, pgDSN, adminDB, nil
+	return pg, pgDSN, adminDSN, adminDB, nil
 }
 
 func boot() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	pg, pgDSN, adminDB, err := bootContainer(ctx)
+	pg, pgDSN, _, adminDB, err := bootContainer(ctx)
 	if err != nil {
 		sharedErr = err
 		return
@@ -250,10 +250,20 @@ func boot() {
 // NewInstance boots a dedicated, independent supabase/postgres
 // container — NOT the process-shared Shared(t) instance — and returns
 // its admin (supabase_admin, BYPASSRLS) connection WITHOUT running
-// db.Migrate. The image's own init is complete (auth schema, vault
-// extension, authenticator role), but the TF app schema has not been
-// applied — the exact state a genuinely fresh install's control pod
-// sees at boot.
+// db.Migrate, alongside that same connection's DSN. The image's own
+// init is complete (auth schema, vault extension, authenticator role),
+// but the TF app schema has not been applied — the exact state a
+// genuinely fresh install's control pod sees at boot.
+//
+// The DSN is returned so a caller can hand it to a genuinely separate
+// OS process (e.g. via exec.Command re-invoking the test binary) —
+// necessary for tests that need real cross-process concurrency rather
+// than goroutines racing on this one process's copy of goose's
+// package-level globals (goose.SetBaseFS / goose.SetDialect have no
+// synchronization of their own, so two goroutines calling db.Migrate
+// concurrently race on them regardless of what the pg_advisory_lock
+// they end up contending on does — that lock coordinates the shared
+// database across processes, not goose's in-memory config within one).
 //
 // Use this instead of Shared(t) when a test needs to observe or race
 // the migration step itself — e.g. concurrent db.Migrate calls, or an
@@ -266,14 +276,14 @@ func boot() {
 // no sharing across tests. Reserve for tests that specifically need
 // the pre-migration state. Terminates the container via t.Cleanup, so
 // callers don't need to.
-func NewInstance(t *testing.T) *sql.DB {
+func NewInstance(t *testing.T) (adminDB *sql.DB, adminDSN string) {
 	t.Helper()
 	testcontainers.SkipIfProviderIsNotHealthy(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	pg, _, adminDB, err := bootContainer(ctx)
+	pg, _, adminDSN, adminDB, err := bootContainer(ctx)
 	if err != nil {
 		t.Fatalf("pgtest.NewInstance: boot failed (Docker is reachable but bring-up errored): %v", err)
 	}
@@ -286,7 +296,7 @@ func NewInstance(t *testing.T) *sql.DB {
 		defer termCancel()
 		_ = pg.Terminate(termCtx)
 	})
-	return adminDB
+	return adminDB, adminDSN
 }
 
 // orgScopedTables is the closed list of tables Reset truncates. Order

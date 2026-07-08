@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/pressly/goose/v3"
 )
@@ -80,6 +81,20 @@ var (
 	ErrExecutorSchemaAhead  = errors.New("connected schema is ahead of this executor build's expected version")
 )
 
+// gooseMu guards every call into the goose package below. goose.SetBaseFS
+// / goose.SetDialect are plain package-level globals with no
+// synchronization of their own — goose.Up, goose.CollectMigrations, and
+// goose.GetDBVersion all read them internally over their full
+// execution, not just at entry. In production this is moot (each
+// process calls Migrate exactly once, synchronously, at boot); it only
+// matters if something in-process ever called Migrate/MigrationStatus
+// concurrently from multiple goroutines, which would otherwise race on
+// goose's shared state regardless of anything the pg_advisory_lock
+// below does — that lock coordinates separate OS processes over the
+// shared database, it says nothing about two goroutines sharing one
+// process's copy of goose's package globals.
+var gooseMu sync.Mutex
+
 // runMigrations brings the on-disk schema up to head via goose — or,
 // for a TF_ROLE=executor process on Postgres, refuses to and instead
 // asserts the already-migrated schema matches what this build expects
@@ -105,6 +120,10 @@ func runMigrations(db *sql.DB, dialect string) error {
 	if err != nil {
 		return err
 	}
+
+	gooseMu.Lock()
+	defer gooseMu.Unlock()
+
 	goose.SetBaseFS(treeFS)
 	if err := goose.SetDialect(dialect); err != nil {
 		return fmt.Errorf("set dialect %s: %w", dialect, err)
@@ -380,6 +399,10 @@ func MigrationStatus(db *sql.DB, dialect string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+
+	gooseMu.Lock()
+	defer gooseMu.Unlock()
+
 	goose.SetBaseFS(treeFS)
 	if err := goose.SetDialect(dialect); err != nil {
 		return fmt.Errorf("set dialect %s: %w", dialect, err)

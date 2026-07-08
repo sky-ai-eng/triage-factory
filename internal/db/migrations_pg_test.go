@@ -1,30 +1,80 @@
 package db_test
 
 import (
+	"database/sql"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
 	"sync"
 	"testing"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 )
 
+// tfMigrateSubprocessDSNEnv is set by
+// TestMigrate_Postgres_ConcurrentMigrateSerializes on the child
+// processes it execs, carrying the DSN each child should independently
+// connect to and migrate. Its presence is what tells
+// TestMigrateSubprocessHelper it's running as a child rather than as
+// an ordinary (skipped) test in a normal `go test` invocation.
+const tfMigrateSubprocessDSNEnv = "TF_MIGRATE_SUBPROCESS_DSN"
+
+// TestMigrateSubprocessHelper is not an independent test — it is the
+// child-process entrypoint TestMigrate_Postgres_ConcurrentMigrateSerializes
+// execs (via exec.Command(os.Args[0], ...), the standard Go
+// re-invoke-the-test-binary-as-a-subprocess idiom) to get a genuinely
+// separate OS process attempting Migrate, rather than a goroutine
+// racing another goroutine on goose's own non-thread-safe package-level
+// globals within ONE process. A plain `go test` run (no env var set)
+// treats this as a no-op skip.
+func TestMigrateSubprocessHelper(t *testing.T) {
+	dsn := os.Getenv(tfMigrateSubprocessDSNEnv)
+	if dsn == "" {
+		t.Skip("not invoked as a migrate subprocess (see TestMigrate_Postgres_ConcurrentMigrateSerializes)")
+	}
+	conn, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer conn.Close()
+	if err := db.Migrate(conn, "postgres"); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+}
+
 // TestMigrate_Postgres_ConcurrentMigrateSerializes is the TFAC-580
 // regression guard for the advisory-lock wrap: two processes booting
 // against the same never-migrated Postgres database concurrently must
 // not race goose's own version-tracking inserts. Without the lock,
-// both goroutines would observe "nothing applied yet" and race to run
+// both processes would observe "nothing applied yet" and race to run
 // the (sizable) baseline migration's DDL simultaneously — which fails
 // outright (duplicate CREATE TABLE) far more often than it silently
 // corrupts, so this is a real regression guard, not just a sanity
 // check.
+//
+// Deliberately spawns two real OS processes (exec.Command re-invoking
+// this test binary as TestMigrateSubprocessHelper) rather than two
+// goroutines in this one process: goose.SetBaseFS / goose.SetDialect
+// are unsynchronized package-level globals, so two goroutines calling
+// db.Migrate concurrently would race on those regardless of whether
+// the advisory lock they contend on afterward is correct — that lock
+// coordinates the shared database across processes, it does nothing
+// for two goroutines sharing one process's copy of goose's in-memory
+// config. Separate processes have separate address spaces (and hence
+// separate copies of goose's globals), so this is both race-detector
+// clean AND a more faithful reproduction of "M concurrently-booting
+// control pods" than goroutines ever were.
 //
 // Uses pgtest.NewInstance (a dedicated, never-migrated container)
 // rather than pgtest.Shared — Shared's tf_test is always already fully
 // migrated by the time a test can touch it, which would make this a
 // no-op (nothing pending to race over).
 func TestMigrate_Postgres_ConcurrentMigrateSerializes(t *testing.T) {
-	adminDB := pgtest.NewInstance(t)
+	adminDB, dsn := pgtest.NewInstance(t)
 
 	const concurrency = 2
 	errs := make([]error, concurrency)
@@ -33,7 +83,12 @@ func TestMigrate_Postgres_ConcurrentMigrateSerializes(t *testing.T) {
 	for i := 0; i < concurrency; i++ {
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = db.Migrate(adminDB, "postgres")
+			cmd := exec.Command(os.Args[0], "-test.run=^TestMigrateSubprocessHelper$", "-test.v")
+			cmd.Env = append(os.Environ(), tfMigrateSubprocessDSNEnv+"="+dsn)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				errs[i] = fmt.Errorf("subprocess %d: %w\n%s", i, err, out)
+			}
 		}(i)
 	}
 	wg.Wait()
@@ -46,8 +101,8 @@ func TestMigrate_Postgres_ConcurrentMigrateSerializes(t *testing.T) {
 
 	// No corruption: exactly one row per version_id (a race that
 	// double-applied a migration would show up here as a duplicate
-	// insert into goose_db_version, or as one of the two calls above
-	// erroring out first).
+	// insert into goose_db_version, or as one of the two subprocesses
+	// above erroring out first).
 	var total, distinct int
 	if err := adminDB.QueryRow(
 		`SELECT COUNT(*), COUNT(DISTINCT version_id) FROM goose_db_version`,
@@ -64,7 +119,7 @@ func TestMigrate_Postgres_ConcurrentMigrateSerializes(t *testing.T) {
 	for _, table := range []string{"entities", "events", "tasks", "runs", "orgs", "users", "instances"} {
 		var exists bool
 		if err := adminDB.QueryRow(
-			`SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = $1)`, table,
+			`SELECT to_regclass($1) IS NOT NULL`, table,
 		).Scan(&exists); err != nil {
 			t.Fatalf("probe %s: %v", table, err)
 		}
@@ -82,7 +137,7 @@ func TestMigrate_Postgres_ConcurrentMigrateSerializes(t *testing.T) {
 // so. An executor that silently ran goose.Up here would defeat the
 // entire point of the role split.
 func TestMigrate_Postgres_ExecutorRole_NeverMigrated_Behind(t *testing.T) {
-	adminDB := pgtest.NewInstance(t)
+	adminDB, _ := pgtest.NewInstance(t)
 	t.Setenv("TF_ROLE", "executor")
 
 	err := db.Migrate(adminDB, "postgres")
@@ -93,7 +148,7 @@ func TestMigrate_Postgres_ExecutorRole_NeverMigrated_Behind(t *testing.T) {
 	for _, table := range []string{"goose_db_version", "entities", "orgs"} {
 		var exists bool
 		if err := adminDB.QueryRow(
-			`SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = $1)`, table,
+			`SELECT to_regclass($1) IS NOT NULL`, table,
 		).Scan(&exists); err != nil {
 			t.Fatalf("probe %s: %v", table, err)
 		}
