@@ -590,6 +590,7 @@ ones.
 | `tf_wake` | control (enqueue) → executors | `{kind: run\|event, org}` — claim nudges |
 | `tf_ws` | anyone → every control pod | WS event envelope `{origin_pod, event}`; over the inline threshold (default 6 KB; NOTIFY caps at 8 KB and agent messages regularly exceed it), a `ws_outbox` row ref instead — 60 s TTL reaper on the outbox |
 | `tf_ctl` | control ↔ executors, control ↔ control | `{signal_id}` / `{kick_user}` / `{trigger: subsystem, org}` — see below |
+| `tf_bus` | executors → **the brain only** | brain-bound bus-relay envelopes (run sentinels, §5.3); the LISTEN starts/stops with the lease; lossy-by-contract |
 
 One rule governs every channel: **NOTIFY is a doorbell — never the
 data, and never the only path.** A notification means "scan your
@@ -696,15 +697,8 @@ sockets through the existing per-`(org,user)` scope filter. Origin-pod
 id in the envelope prevents double-delivery to the producer's own
 clients. Per-connection NOTIFY ordering keeps per-run message order.
 
-One deliberate exception to bus-locality rides this channel: the
-`system:run:status` / `system:run:activity` sentinels (TFAC-592) are
-published on the bus of the process *running the run* — an executor,
-after the split — while their consumers (EE bus subscribers such as
-the Slack liveness adapter) live with the brain. The executor's
-bridge forwards these bus-only sentinels over `tf_ws` tagged as
-bus-relay; the **leader** re-publishes them onto its local bus;
-standby control pods drop them — an EE consumer that posts to Slack
-must fire once, not ×M.
+(Run sentinels deliberately do **not** ride this channel — they are
+brain-bound, not socket-bound; see §5.3 and the `tf_bus` channel.)
 
 Same channel fixes the two security/UX locals:
 
@@ -786,7 +780,7 @@ Acked signal rows are purged after 24 h (audit convenience window);
 stale unacked signals expire harmlessly (the reaper owns the run's fate if the
 owner died mid-signal).
 
-### 5.3 Trigger relay
+### 5.3 Brain-bound relays (triggers + run sentinels)
 
 `Manager.Trigger(orgID)` (scorer/classifier/profiler/reconciler) and
 `PollSoon(source, orgID)` grow a cross-process path: non-leader callers
@@ -794,6 +788,26 @@ publish `{trigger}` on `tf_ctl`; the leader routes to the in-process
 manager. Callers that need this: config-save handlers on non-leader
 control pods, the delegation spawner's classifier wait on executors,
 the re-profile button. At `all`, loopback.
+
+The same brain-bound motion carries the run sentinels
+(`system:run:status` / `system:run:activity`, TFAC-592): they are
+published on the bus of the process *running the run* — an executor,
+after the split — while their consumers (EE bus subscribers such as
+the Slack liveness adapter) are brain components (§3). They ride a
+dedicated **`tf_bus`** channel: not `tf_ctl`, because their volume
+tracks agent activity and a burst must never queue ahead of a cancel
+on the control channel's per-connection FIFO; and not `tf_ws`, whose
+contract is "every pod fans to sockets" — M−1 pods would receive a
+high-volume stream only to discard it. **Only the brain LISTENs on
+`tf_bus`.** The subscription starts and stops with the lease like any
+other brain subsystem, so subscription *scope* replaces per-message
+routing: there is no relay tag and nothing for standbys to remember
+to drop, because they never receive the traffic. The holder
+re-publishes envelopes onto its local bus, skipping self-origin ones
+(at `TF_ROLE=all` the sentinel is already on the only bus there is).
+Delivery is lossy-by-contract like `tf_ws` — sentinels are an
+observability seam (liveness indicators), never load-bearing state —
+so a leader-handoff gap costs a blip, not correctness.
 
 ### 5.4 Correctness bundle (needed regardless of N)
 
@@ -1137,8 +1151,8 @@ flag day. Sizes in house S/M/L/XL.
    takeover; trigger/PollSoon relay on `tf_ctl`; `/readyz` poller
    hard-check becomes lease-conditional (§8.3). (L)
 8. WS backplane `tf_ws` + `ws_outbox` + presence table + cross-pod
-   user-kick; leader re-emit of TFAC-592 run sentinels from the
-   fan-in (§5.1). (L)
+   user-kick; `tf_bus` brain-bound sentinel relay (TFAC-592, §5.3 —
+   leader-only LISTEN, lease-scoped). (L)
 9. `run_signals` cross-pod control (cancel/interrupt/steer/permission)
    + resume-by-enqueue for parked runs. (L)
 10. Fleet reaper (dead-executor requeue, attempts-capped) + drain flag +
