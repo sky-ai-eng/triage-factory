@@ -226,11 +226,17 @@ func (s *agentRunStore) SetWorktreePath(ctx context.Context, orgID, runID, path 
 	return err
 }
 
-func (s *agentRunStore) SetExecutorSystem(ctx context.Context, orgID, runID, executorID string) error {
+func (s *agentRunStore) SetExecutorSystem(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE runs SET executor_id = ? WHERE id = ?`, nullIfEmpty(executorID), runID)
+	// Clearing the pointer (executorID == "") clears boot_epoch with it —
+	// the two columns are always either both set or both NULL.
+	var epoch any
+	if executorID != "" {
+		epoch = bootEpoch
+	}
+	_, err := s.q.ExecContext(ctx, `UPDATE runs SET executor_id = ?, boot_epoch = ? WHERE id = ?`, nullIfEmpty(executorID), epoch, runID)
 	return err
 }
 

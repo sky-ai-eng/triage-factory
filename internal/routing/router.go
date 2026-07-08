@@ -73,6 +73,14 @@ type Router struct {
 	// this instance itself claimed, never a live sibling's. Zero values
 	// (tests that never call SetExecutorID) degrade to the empty-string
 	// identity — fine for single-router tests, never used in production.
+	//
+	// Guarded by executorMu, mirroring delegate.Spawner's executorID/
+	// bootEpoch + s.mu: today SetExecutorID only ever runs once at startup
+	// before RunEventQueue's goroutine starts, so the lock is a no-op in
+	// practice, but it keeps the pattern symmetric with the spawner and
+	// keeps a future second call site (e.g. a hot-reload path) from
+	// becoming a real data race.
+	executorMu sync.Mutex
 	executorID string
 	bootEpoch  int64
 
@@ -168,8 +176,20 @@ func (r *Router) SetEventQueue(q dbpkg.EventQueueStore) {
 // before RunEventQueue starts; tests that never call this keep the
 // zero-value ("", 0) identity.
 func (r *Router) SetExecutorID(id string, bootEpoch int64) {
+	r.executorMu.Lock()
+	defer r.executorMu.Unlock()
 	r.executorID = id
 	r.bootEpoch = bootEpoch
+}
+
+// executorIdentity returns the current (executorID, bootEpoch) pair under
+// lock — the read side of SetExecutorID, mirroring
+// delegate.Spawner.executorIdentity. Used by RunEventQueue's boot reset and
+// drainEventQueue's claim.
+func (r *Router) executorIdentity() (string, int64) {
+	r.executorMu.Lock()
+	defer r.executorMu.Unlock()
+	return r.executorID, r.bootEpoch
 }
 
 // autoDelegateEnabledForTeam returns the team's auto_delegate_enabled

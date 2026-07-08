@@ -87,7 +87,8 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 	// Ownership-scoped (TFAC-578): only sweeps rows this router instance
 	// itself claimed during an earlier boot, never a live sibling's
 	// still-processing row — see EventQueueStore.ResetProcessing.
-	if n, err := r.eventQueue.ResetProcessing(ctx, r.executorID, r.bootEpoch); err != nil {
+	executorID, bootEpoch := r.executorIdentity()
+	if n, err := r.eventQueue.ResetProcessing(ctx, executorID, bootEpoch); err != nil {
 		routerLog.Error("event-queue boot recovery: reset processing rows failed", "error", err)
 	} else if n > 0 {
 		routerLog.Info("event-queue boot recovery: reset in-flight rows to pending", "rows", n)
@@ -150,7 +151,8 @@ func (r *Router) drainEventQueue(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil // clean stop, not a claim failure
 		}
-		qe, err := r.eventQueue.ClaimNext(ctx, r.executorID, r.bootEpoch)
+		executorID, bootEpoch := r.executorIdentity()
+		qe, err := r.eventQueue.ClaimNext(ctx, executorID, bootEpoch)
 		if err != nil {
 			return err // caller owns logging + consecutive-failure escalation
 		}
