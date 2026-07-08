@@ -176,15 +176,55 @@ Start at the smallest shape that meets the requirement and move down
 the table only on evidence; the mechanisms are identical in all three,
 so moving is a compose edit, not a migration.
 
-The load-bearing move is the second column's first five rows: **the
-entire org brain moves as one unit** with a single leader lease. That
-one decision preserves four invariants at once — tracker single-writer,
-event-queue FIFO, bus-local sentinels, process-true `syslimit` — and
-makes leadership *coarse* (one lease), which is the cheapest thing that
-can possibly work. Sharding the brain per-org across control pods is a
-later refinement (§9 P4) that reuses the same lease table at a finer
-key; the poll bench says one leader carries realistic multi-org load for
-a long time.
+The load-bearing move is the first five "leader" rows of §2.3's Home
+column: **the entire org brain moves as one unit** with a single leader
+lease. That one decision preserves four invariants at once — tracker
+single-writer, event-queue FIFO, bus-local sentinels, process-true
+`syslimit` — and makes leadership *coarse* (one lease), which is the
+cheapest thing that can possibly work. Sharding the brain per-org
+across control pods is a later refinement (§9 P4) that reuses the same
+lease table at a finer key; the poll bench says one leader carries
+realistic multi-org load for a long time.
+
+### 2.5 Where requests land (nobody "knows who responds" — nobody needs to)
+
+Inbound traffic never routes *to* anything specific. The LB picks a
+control pod per REST request and per WS connection (plain round-robin,
+no stickiness), and the design's job is to make every control pod
+equally able to answer everything — including pods that are not the
+leader. **The leader is invisible to the request path**: user traffic
+never routes to it, waits on it, or knows it exists; the lease governs
+background work only.
+
+What a request might need, and how each need is location-independent:
+
+| The request needs… | Served from any pod because… |
+| --- | --- |
+| authentication | JWKS verify is stateless; sessions are DB rows (§1) |
+| state reads/writes | Postgres is the one truth; RLS context is per-tx |
+| to create work (delegate, wake a parked run) | it's an enqueue — executors claim it; the receiving pod is irrelevant (§4.2, §5.2) |
+| to control a live run (steer/cancel/interrupt/permission) | resolved via `runs.executor_id` → `run_signals` to the owner; local short-circuit only if this pod happens to own it (§5.2) |
+| to poke a brain singleton (PollSoon, re-profile, trigger) | `tf_ctl` trigger relay → whichever pod holds the lease (§5.3) |
+| live events pushed to the browser | the pod holding *your* socket fans in everything via `tf_ws`, filtered per `(org, user)` — producers don't matter (§5.1) |
+| inbound WS frames (presence) | the socket-owning pod writes `ws_presence` rows — globally visible (§5.1) |
+| session revoke to bite everywhere | kick broadcast on `tf_ctl` (§5.1) |
+
+A WS reconnect may land on a *different* pod than before; that is
+fine by construction — nothing session-shaped lives in pod memory,
+and missed live events during the gap are the §5 lossy-by-contract
+window over durable state.
+
+Residual per-pod request state, called out honestly: the in-process
+**request serializers** (`projectMutexes` around project-config
+autosave RMW, `githubAppRegMu` around GitHub-App registration)
+serialize only within one pod — two pods can interleave the same RMW.
+Fix is the existing advisory-lock precedent
+(`pg_advisory_xact_lock` keyed on the project/org, as
+`team_github_repos.go:131` already does), folded into the P0
+replica-correctness bundle. The pre-auth **ip rate limiter** stays
+per-pod (effective limit ≈ ×M, LB-dependent — accepted and
+documented), and the TTL caches (reachable-repo, token caches) merely
+lose cross-pod hit-rate, never correctness.
 
 ---
 
