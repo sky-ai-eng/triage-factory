@@ -62,19 +62,23 @@ func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.
 	return id, nil
 }
 
-func (s *eventQueueStore) ClaimNext(ctx context.Context) (*domain.QueuedEvent, error) {
+func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, bootEpoch int64) (*domain.QueuedEvent, error) {
 	// Single-statement claim: flip the oldest pending row to processing
 	// and return it. With one worker there's no contention, so the
 	// scalar-subquery form is sufficient (Postgres adds SKIP LOCKED for
 	// the multi-worker case). A NULL subquery (empty queue) matches no
 	// row, RETURNING yields nothing, and the scan reports ErrNoRows.
+	//
+	// executor_id + boot_epoch are stamped in this same statement (TFAC-578),
+	// mirroring the Postgres impl — see ResetProcessing.
 	row := s.conn.QueryRowContext(ctx, `
 		UPDATE event_queue
-		SET status = 'processing', claimed_at = ?, attempts = attempts + 1
+		SET status = 'processing', claimed_at = ?, attempts = attempts + 1,
+		    executor_id = ?, boot_epoch = ?
 		WHERE id = (SELECT id FROM event_queue WHERE status = 'pending' ORDER BY id LIMIT 1)
 		RETURNING id, org_id, event_id, COALESCE(entity_id, ''), event_type,
 		          status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at
-	`, time.Now())
+	`, time.Now(), executorID, bootEpoch)
 	return scanSqliteQueuedEvent(row)
 }
 
@@ -115,11 +119,18 @@ func (s *eventQueueStore) Requeue(ctx context.Context, orgID string, id int64, l
 	return err
 }
 
-func (s *eventQueueStore) ResetProcessing(ctx context.Context) (int, error) {
+func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
+	// Ownership-scoped (TFAC-578), mirroring the Postgres impl. SQLite is
+	// N=1, so this is trivially self-scoped, but the predicate keeps the two
+	// backends' semantics identical. `boot_epoch IS NULL` covers the
+	// one-time upgrade edge: a row already 'processing' from before this
+	// column existed.
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE event_queue SET status = 'pending', claimed_at = NULL
 		WHERE status = 'processing'
-	`)
+		  AND executor_id = ?
+		  AND (boot_epoch IS NULL OR boot_epoch < ?)
+	`, executorID, bootEpoch)
 	if err != nil {
 		return 0, err
 	}

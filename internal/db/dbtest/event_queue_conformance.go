@@ -26,6 +26,15 @@ type EventQueueSeeder struct {
 	Entity func(t *testing.T) string
 }
 
+// conformanceExecutorID/conformanceBootEpoch are the fixed ownership
+// identity every claim in this suite stamps a row with, except where a test
+// is specifically exercising the ownership-scoping predicate (TFAC-578) —
+// those pass their own values inline.
+const (
+	conformanceExecutorID = "conformance-executor"
+	conformanceBootEpoch  = int64(1)
+)
+
 // enqueueOn is a local helper: Enqueue a ci_check_failed event against
 // entityID and return the event id. ci_check_failed is a seeded catalog
 // entry, so the events.event_type FK is satisfied.
@@ -123,7 +132,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		first := enqueueOn(t, ctx, s, orgID, entityID)
 		second := enqueueOn(t, ctx, s, orgID, entityID)
 
-		got, err := s.ClaimNext(ctx)
+		got, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
 		if err != nil || got == nil {
 			t.Fatalf("ClaimNext #1: got=%v err=%v", got, err)
 		}
@@ -140,7 +149,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 			t.Errorf("claimed_at should be set after ClaimNext")
 		}
 
-		got2, err := s.ClaimNext(ctx)
+		got2, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
 		if err != nil || got2 == nil {
 			t.Fatalf("ClaimNext #2: got=%v err=%v", got2, err)
 		}
@@ -148,7 +157,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 			t.Errorf("ClaimNext #2 returned %q, want %q", got2.EventID, second)
 		}
 
-		empty, err := s.ClaimNext(ctx)
+		empty, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
 		if err != nil {
 			t.Fatalf("ClaimNext #3: %v", err)
 		}
@@ -159,7 +168,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 
 	t.Run("ClaimNext_nil_on_empty", func(t *testing.T) {
 		s, _, _ := mk(t)
-		got, err := s.ClaimNext(ctx)
+		got, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
 		if err != nil {
 			t.Fatalf("ClaimNext: %v", err)
 		}
@@ -172,7 +181,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
 		enqueueOn(t, ctx, s, orgID, entityID)
-		claimed, _ := s.ClaimNext(ctx)
+		claimed, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
 
 		if err := s.MarkDone(ctx, orgID, claimed.ID); err != nil {
 			t.Fatalf("MarkDone: %v", err)
@@ -199,7 +208,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
 		enqueueOn(t, ctx, s, orgID, entityID)
-		claimed, _ := s.ClaimNext(ctx)
+		claimed, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
 
 		if err := s.MarkFailed(ctx, orgID, claimed.ID, "boom"); err != nil {
 			t.Fatalf("MarkFailed: %v", err)
@@ -217,7 +226,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
 		enqueueOn(t, ctx, s, orgID, entityID)
-		claimed, _ := s.ClaimNext(ctx)
+		claimed, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
 
 		if err := s.Requeue(ctx, orgID, claimed.ID, "transient"); err != nil {
 			t.Fatalf("Requeue: %v", err)
@@ -237,7 +246,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 			t.Errorf("attempts = %d, want 1 retained after Requeue", rows[0].Attempts)
 		}
 		// Re-claimable.
-		again, err := s.ClaimNext(ctx)
+		again, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
 		if err != nil || again == nil {
 			t.Fatalf("re-claim after Requeue: got=%v err=%v", again, err)
 		}
@@ -252,14 +261,16 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		enqueueOn(t, ctx, s, orgID, entityID)
 		enqueueOn(t, ctx, s, orgID, entityID)
 		// Claim both → both processing.
-		if _, err := s.ClaimNext(ctx); err != nil {
+		if _, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch); err != nil {
 			t.Fatalf("claim 1: %v", err)
 		}
-		if _, err := s.ClaimNext(ctx); err != nil {
+		if _, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch); err != nil {
 			t.Fatalf("claim 2: %v", err)
 		}
 
-		n, err := s.ResetProcessing(ctx)
+		// A later boot epoch of the SAME executor sweeps both — this models
+		// a restart of the same persistent instance identity.
+		n, err := s.ResetProcessing(ctx, conformanceExecutorID, conformanceBootEpoch+1)
 		if err != nil {
 			t.Fatalf("ResetProcessing: %v", err)
 		}
@@ -277,19 +288,97 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		}
 	})
 
+	// TFAC-578: ResetProcessing must self-scope to (executor_id, boot_epoch)
+	// so a booting instance never resets a live sibling's claimed row.
+	t.Run("ResetProcessing_scoped_to_owner", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		enqueueOn(t, ctx, s, orgID, entityID) // claimed by "exec-a"
+		enqueueOn(t, ctx, s, orgID, entityID) // claimed by "exec-b"
+
+		rowA, err := s.ClaimNext(ctx, "exec-a", 1)
+		if err != nil || rowA == nil {
+			t.Fatalf("claim as exec-a: got=%v err=%v", rowA, err)
+		}
+		rowB, err := s.ClaimNext(ctx, "exec-b", 1)
+		if err != nil || rowB == nil {
+			t.Fatalf("claim as exec-b: got=%v err=%v", rowB, err)
+		}
+
+		// exec-a booting (a later epoch of itself) must reset only its own
+		// row — exec-b's still-processing row is a live sibling's claimed
+		// work and must be untouched.
+		n, err := s.ResetProcessing(ctx, "exec-a", 2)
+		if err != nil {
+			t.Fatalf("ResetProcessing as exec-a: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("ResetProcessing(exec-a) reset %d rows, want 1 (only its own)", n)
+		}
+		rows, _ := s.ListForEntity(ctx, orgID, entityID)
+		var gotA, gotB *domain.QueuedEvent
+		for i := range rows {
+			switch rows[i].ID {
+			case rowA.ID:
+				gotA = &rows[i]
+			case rowB.ID:
+				gotB = &rows[i]
+			}
+		}
+		if gotA == nil || gotA.Status != domain.QueuedEventStatusPending {
+			t.Errorf("exec-a's row = %+v, want status pending", gotA)
+		}
+		if gotB == nil || gotB.Status != domain.QueuedEventStatusProcessing {
+			t.Errorf("exec-b's row = %+v, want status processing (untouched — a live sibling's claim)", gotB)
+		}
+	})
+
+	// TFAC-578: a boot must never reset rows claimed under its OWN current
+	// epoch — only strictly earlier boots of itself are orphans. Guards
+	// against a self-sweep treating its own in-flight claims as stale.
+	t.Run("ResetProcessing_never_resets_current_epoch", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		enqueueOn(t, ctx, s, orgID, entityID)
+
+		claimed, err := s.ClaimNext(ctx, "exec-self", 5)
+		if err != nil || claimed == nil {
+			t.Fatalf("claim at epoch 5: got=%v err=%v", claimed, err)
+		}
+
+		// Same executor, same epoch: not an orphan of an earlier boot — must
+		// not reset.
+		if n, err := s.ResetProcessing(ctx, "exec-self", 5); err != nil {
+			t.Fatalf("ResetProcessing at epoch 5: %v", err)
+		} else if n != 0 {
+			t.Errorf("ResetProcessing at the SAME epoch reset %d rows, want 0", n)
+		}
+		rows, _ := s.ListForEntity(ctx, orgID, entityID)
+		if rows[0].Status != domain.QueuedEventStatusProcessing {
+			t.Errorf("row status = %q, want processing (untouched by a same-epoch reset)", rows[0].Status)
+		}
+
+		// A later epoch of the same executor (a restart) DOES sweep it.
+		if n, err := s.ResetProcessing(ctx, "exec-self", 6); err != nil {
+			t.Fatalf("ResetProcessing at epoch 6: %v", err)
+		} else if n != 1 {
+			t.Errorf("ResetProcessing at a later epoch reset %d rows, want 1", n)
+		}
+	})
+
 	t.Run("PruneDone_deletes_old_done_keeps_failed", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
 
 		// One done row.
 		enqueueOn(t, ctx, s, orgID, entityID)
-		doneRow, _ := s.ClaimNext(ctx)
+		doneRow, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
 		if err := s.MarkDone(ctx, orgID, doneRow.ID); err != nil {
 			t.Fatalf("MarkDone: %v", err)
 		}
 		// One failed row.
 		enqueueOn(t, ctx, s, orgID, entityID)
-		failRow, _ := s.ClaimNext(ctx)
+		failRow, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
 		if err := s.MarkFailed(ctx, orgID, failRow.ID, "boom"); err != nil {
 			t.Fatalf("MarkFailed: %v", err)
 		}

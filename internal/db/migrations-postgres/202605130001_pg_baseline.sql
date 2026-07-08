@@ -1468,12 +1468,21 @@ CREATE TABLE public.runs (
     claimed_at timestamp with time zone,
     attempts integer DEFAULT 0 NOT NULL,
     -- executor_id records which executor instance owns a run's live
-    -- process while it is running. Stamped when the run goes live; NULL
-    -- for queued / never-live / terminal-parked rows. At N=1 it's a single
-    -- per-process instance id (forward-compat ownership hook for
-    -- horizontal scaling, where it becomes the lease the control plane
-    -- signals through). Not a status — purely the run→executor pointer.
+    -- process while it is running. Stamped atomically at claim (queued ->
+    -- running) alongside boot_epoch below, so a running row's ownership is
+    -- never unknown between claim and the process actually going live; NULL
+    -- only for never-claimed (queued) rows. At N=1 it's a single per-process
+    -- instance id; at N>1 it's the fence ResetProcessingRuns (TFAC-578)
+    -- reads to self-sweep only its own orphans, never a live sibling's
+    -- claimed work.
     executor_id text,
+    -- boot_epoch pairs with executor_id: an instance's persistent id
+    -- survives restarts, so executor_id alone can't distinguish "still live
+    -- under an earlier boot of me" from "orphaned by a crash". Stamped at
+    -- claim time from instances.boot_epoch (TFAC-577); ResetProcessingRuns
+    -- only resets rows where executor_id = self AND boot_epoch < the
+    -- current boot's epoch.
+    boot_epoch bigint,
     CONSTRAINT runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT runs_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT runs_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
@@ -6380,7 +6389,14 @@ CREATE TABLE public.event_queue (
     last_error   text,
     enqueued_at  timestamp with time zone NOT NULL DEFAULT now(),
     claimed_at   timestamp with time zone,
-    processed_at timestamp with time zone
+    processed_at timestamp with time zone,
+    -- executor_id / boot_epoch (TFAC-578) are runs.executor_id/boot_epoch's
+    -- twins: stamped atomically at claim (pending -> processing) so
+    -- ResetProcessing can self-sweep only its own instance's orphaned rows
+    -- (executor_id = self AND boot_epoch < the current boot's epoch), never
+    -- a live sibling's claimed-but-still-processing row.
+    executor_id  text,
+    boot_epoch   bigint
 );
 
 ALTER TABLE ONLY public.event_queue

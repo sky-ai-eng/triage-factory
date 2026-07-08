@@ -65,6 +65,17 @@ type Router struct {
 	scorer       Scorer
 	ws           *websocket.Hub
 
+	// executorID/bootEpoch are this process's persistent instance-registry
+	// identity (TFAC-577), set post-construction via SetExecutorID before
+	// RunEventQueue starts. Stamped onto every event_queue row this router
+	// claims (mirroring delegate.Spawner's executorID/bootEpoch for runs), so
+	// the boot-time ResetProcessing sweep (TFAC-578) can self-scope to rows
+	// this instance itself claimed, never a live sibling's. Zero values
+	// (tests that never call SetExecutorID) degrade to the empty-string
+	// identity — fine for single-router tests, never used in production.
+	executorID string
+	bootEpoch  int64
+
 	// drainLocks serializes DrainEntity calls per entity. Without this,
 	// the non-mutating PopPendingFiringForEntity creates a window between
 	// pop and MarkPendingFiringFired/Skipped where a concurrent drain
@@ -150,6 +161,15 @@ func (r *Router) breakerPromptID(orgID, blueprintID string) string {
 // the ~30 existing test constructions don't have to thread it.
 func (r *Router) SetEventQueue(q dbpkg.EventQueueStore) {
 	r.eventQueue = q
+}
+
+// SetExecutorID wires this router's persistent instance-registry identity
+// (TFAC-577), mirroring delegate.Spawner.SetExecutorID. Call once at startup,
+// before RunEventQueue starts; tests that never call this keep the
+// zero-value ("", 0) identity.
+func (r *Router) SetExecutorID(id string, bootEpoch int64) {
+	r.executorID = id
+	r.bootEpoch = bootEpoch
 }
 
 // autoDelegateEnabledForTeam returns the team's auto_delegate_enabled
