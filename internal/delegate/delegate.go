@@ -557,3 +557,45 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID string, task domai
 		// owner/repo intentionally empty: the agent picks per-ticket via `workspace add`
 	}, nil
 }
+
+// setupSlack prepares the run-root for a Slack-thread delegation
+// (TFAC-591). Mirrors setupJira: no repo is pre-cloned, the agent acquires
+// repo(s) on demand via `triagefactory exec workspace add` (TFAC-498), and
+// the run-root is the agent's session cwd — the same resume load-bearing
+// invariant documented on setupJira above.
+//
+// Two differences from Jira:
+//   - Slack threads are not project-classifier targets, so
+//     awaitClassification is skipped and projectID stays nil.
+//   - The tools reference layers in an ee-registered Slack verb doc (if
+//     any registered via ai.RegisterToolsReference) on top of the GH
+//     template — GH tools are included because the agent acquires repos on
+//     demand and then needs the gh verbs, the same reasoning as the Jira
+//     arm's GH+Jira composition. No registered reference is not an error:
+//     the run still works with base tools.
+func (s *Spawner) setupSlack(ctx context.Context, orgID, runID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+	runRoot, err := worktree.MakeRunRoot(runID)
+	if err != nil {
+		return runConfig{}, fmt.Errorf("create run root: %w", err)
+	}
+	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, runID, runRoot); err != nil {
+		delegateLog.Warn("set worktree_path for Slack run failed; resume will reject this run", "run", runID, "error", err)
+	}
+
+	toolsRef := ai.GHToolsTemplate
+	if ref, ok := ai.ToolsReferenceFor("slack"); ok {
+		toolsRef += "\n\n" + ref
+	}
+
+	return runConfig{
+		orgID:    orgID,
+		scope:    fmt.Sprintf("Slack thread: %s", task.EntitySourceID),
+		toolsRef: toolsRef,
+		wtPath:   runRoot,
+		hasWT:    false,
+		runRoot:  runRoot,
+		// owner/repo/projectID intentionally empty/nil: the agent picks
+		// repos per-thread via `workspace add`, and Slack threads are not
+		// project-classifier targets (no awaitClassification call above).
+	}, nil
+}

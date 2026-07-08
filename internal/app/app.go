@@ -59,6 +59,13 @@ type App struct {
 	bus   *eventbus.Bus
 	wsHub *websocket.Hub
 
+	// deployPublicURL is the deployment's externally-visible base URL —
+	// the same value handed to Server.SetDeployConfig (local: a.cfg.BrowserURL;
+	// multi: TF_PUBLIC_URL), captured in buildServer for wire() to hand to
+	// the spawner once it exists (buildExecution runs after buildServer, so
+	// the spawner can't be wired directly at SetDeployConfig time).
+	deployPublicURL string
+
 	// Per-org run-credential seam shared by every AI feature.
 	ghResolver ghclient.Resolver
 	runSecrets agentproc.SecretsReader
@@ -170,6 +177,10 @@ func (a *App) wire() {
 	// spawner.Delegate ← router (construction arg); router.DrainEntity ←
 	// spawner (post-construction). The latter closes the cycle.
 	a.spawner.SetQueueDrainer(a.router)
+	// {{RUN_URL}} prompt placeholder (TFAC-591) — the value captured in
+	// buildServer from whichever branch ran (local a.cfg.BrowserURL / multi
+	// TF_PUBLIC_URL), same as SetDeployConfig received.
+	a.spawner.SetPublicURL(a.deployPublicURL)
 
 	a.reloader = newReloader(a)
 	a.srv.SetOnGitHubChanged(a.reloader.onGitHubChanged)

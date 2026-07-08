@@ -24,7 +24,7 @@ func TestBuildPrompt_InterpolatesInjectedSections(t *testing.T) {
 	toolsRef := ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate
 
 	out := buildPrompt(task, "", "mission body", "Repository: owner/repo", toolsRef,
-		"/usr/local/bin/triagefactory", "run-1", "/work", "bp-run-1", "tfac/SKY-9")
+		"/usr/local/bin/triagefactory", "run-1", "/work", "bp-run-1", "tfac/SKY-9", "")
 
 	if strings.Contains(out, "{{BINARY_PATH}}") {
 		t.Error("literal {{BINARY_PATH}} survived in the composed prompt (tools section not interpolated)")

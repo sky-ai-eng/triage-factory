@@ -543,6 +543,8 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 			cfg, err = s.setupGitHub(ctx, orgID, run.ID, task, gh)
 		case "jira":
 			cfg, err = s.setupJira(ctx, orgID, run.ID, task, gh)
+		case "slack":
+			cfg, err = s.setupSlack(ctx, orgID, run.ID, task, gh)
 		default:
 			err = fmt.Errorf("unsupported task source: %s", task.EntitySource)
 		}
@@ -577,6 +579,19 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	case "jira":
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
 		cfg.toolsRef = ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate
+		cfg.hasWT = false
+		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, "", "", "")
+		if err != nil {
+			return runConfig{}, err
+		}
+		cfg.wtPath, cfg.runRoot = wt, wt
+	case "slack":
+		cfg.scope = fmt.Sprintf("Slack thread: %s", task.EntitySourceID)
+		toolsRef := ai.GHToolsTemplate
+		if ref, ok := ai.ToolsReferenceFor("slack"); ok {
+			toolsRef += "\n\n" + ref
+		}
+		cfg.toolsRef = toolsRef
 		cfg.hasWT = false
 		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, "", "", "")
 		if err != nil {
