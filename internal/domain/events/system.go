@@ -166,8 +166,8 @@ func (p SystemRunActivityPredicate) Matches(m SystemRunActivityMetadata) bool {
 // finishes handling (TFAC-593). Routing is async (event_queue → worker), so
 // this is how a source that published an event (e.g. Slack) learns
 // synchronously-unavailable outcomes: frozen, taskless (no handler/owner/
-// unroutable), or task created/bumped. Deliberately lean — a consumer
-// needing the original event's payload reads it via
+// unroutable), task created/bumped, or an internal error. Deliberately
+// lean — a consumer needing the original event's payload reads it via
 // EventStore.GetMetadataSystem(orgID, EventID); taskless events are still
 // recorded, so the row exists.
 // -----------------------------------------------------------------------------
@@ -189,6 +189,13 @@ const (
 	DispositionTasklessNoOwner    = "taskless_no_owner"
 	DispositionTaskCreated        = "task_created"
 	DispositionTaskBumped         = "task_bumped"
+	// DispositionError means the pipeline hit an internal failure (a store
+	// query it depends on errored) rather than reaching a legitimate
+	// outcome — kept distinct from the taskless_* values so a consumer
+	// (e.g. Slack deciding between an acknowledging reaction and a
+	// "not configured" reply) never mistakes "we couldn't tell" for "there
+	// really is nothing configured here."
+	DispositionError = "error"
 )
 
 // No predicate fields — fires once per instance, users can only enable / disable.
