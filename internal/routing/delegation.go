@@ -160,6 +160,18 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		// keeps the deferral: injection needs a live target to fold into.
 		if hasActive && events.AdditiveFor(trigger.EventType) {
 			if r.tryAdditiveInjection(gateCtx, orgID, entityID, task, trigger, triggeringEventID) {
+				// The gate is entity-wide, not task-scoped (see
+				// HasActiveAutoRunForEntitySystem's doc comment) — the
+				// active run's task may differ from THIS task (e.g. a
+				// ci_check_failed-derived task owns the live run while a
+				// separate slack:mention-derived task on the same entity
+				// additively fires). Commit the claim on task here
+				// exactly like the deferral path does post-Enqueue: the
+				// bot has taken responsibility for this task by folding
+				// its event into the live conversation, even though the
+				// run belongs to another task. A same-task repeat firing
+				// makes this a no-op (bot already owns it).
+				r.stampAgentClaim(orgID, task, actingTeamID, agentID)
 				return
 			}
 			// Resolution failed, or the active run went terminal in the
@@ -307,9 +319,12 @@ func runIsResumable(status, outcome string) bool {
 
 // stampAgentClaim writes claimed_by_agent_id on a task AND broadcasts the
 // task_claimed event so listeners (Board) can re-render the
-// per-claim lanes. Called from the two commitment points in tryAutoDelegate
-// (post-fireDelegate success, post-EnqueuePendingFiring success). Both paths
-// converge on "the bot has committed to this task."
+// per-claim lanes. Called from the three commitment points in
+// tryAutoDelegate (post-fireDelegate success, post-EnqueuePendingFiring
+// success, post-tryAdditiveInjection success). All three converge on "the
+// bot has committed to this task" — including the additive-injection case,
+// where the task committed to may not be the task that owns the run the
+// event got folded into (the busy gate is entity-wide, not task-scoped).
 //
 // agentID is the org agent resolved ONCE by the caller (tryAutoDelegate) — the
 // same id frozen onto the run's blueprint_run actor — so the claim and the run's

@@ -496,3 +496,62 @@ func TestTryAutoDelegate_AdditiveEvent_DroppedStagingFallsThroughToDeferral(t *t
 		t.Fatalf("expected the firing to fall through to the normal deferral on a genuine drop, got %d pending_firings rows", len(rows))
 	}
 }
+
+// TestTryAutoDelegate_AdditiveEvent_StampsAgentClaimOnInjectedTask pins that
+// a successful injection is a commitment point exactly like the deferral
+// path (post-Enqueue): the firing's OWN task gets claimed for the bot, even
+// though — per HasActiveAutoRunForEntitySystem's doc comment, the busy
+// gate is entity-wide, not task-scoped — the run the event got folded into
+// may belong to a DIFFERENT task on the same entity. Without this, an
+// injected task could sit unclaimed in the board's queue lanes despite its
+// event already having been forwarded into a live agent conversation.
+func TestTryAutoDelegate_AdditiveEvent_StampsAgentClaimOnInjectedTask(t *testing.T) {
+	database := newTestDB(t)
+	entityID, task, trigger, _ := setupAdditiveScenario(t, database)
+
+	if _, err := database.Exec(
+		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	if task.ClaimedByAgentID != "" {
+		t.Fatalf("precondition: task already claimed before the fire")
+	}
+
+	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType:    additiveTestEventType,
+		EntityID:     &entityID,
+		MetadataJSON: `{"mention":"second"}`,
+		CreatedAt:    time.Now(),
+		OrgID:        runmode.LocalDefaultOrgID,
+	})
+	if err != nil {
+		t.Fatalf("record second event: %v", err)
+	}
+
+	st := sqlitestore.New(database)
+	stub := &injectingStubDelegator{delivered: true}
+	// Agents wired (real store, a seeded agent to resolve) so agentID
+	// resolves to something non-empty; teamAgents left nil so the
+	// bot-disabled-team gate degrades to "proceed" and doesn't interfere.
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), st.Agents, nil, nil,
+		testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings,
+		st.Events, st.Orgs, st.Teams, nil, nil, nil,
+		stub, noopScorer{}, websocket.NewHub())
+
+	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+
+	if len(stub.calls) != 1 {
+		t.Fatalf("expected exactly 1 injection attempt, got %d", len(stub.calls))
+	}
+
+	got, err := testTaskStore(database).Get(context.Background(), runmode.LocalDefaultOrgID, task.ID)
+	if err != nil || got == nil {
+		t.Fatalf("re-read task: %v", err)
+	}
+	if got.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+		t.Errorf("ClaimedByAgentID = %q, want %q — a successful injection must commit the claim like the deferral path does",
+			got.ClaimedByAgentID, runmode.LocalDefaultAgentID)
+	}
+}
