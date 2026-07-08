@@ -16,12 +16,20 @@ type SlackMentionMetadata struct {
 	// (routing, exec verbs) resolves token/workspace context from THIS
 	// field, never from the entity key.
 	WorkspaceID string `json:"workspace_id"`
-	Channel     string `json:"channel"`
-	TS          string `json:"ts"`                  // the mention message's own ts
-	ThreadTS    string `json:"thread_ts,omitempty"` // parent thread root; empty on a root-message mention
-	SenderID    string `json:"sender_id"`           // Slack user ID of the mentioning human
-	Text        string `json:"text"`
-	EventID     string `json:"event_id"` // Slack's Ev… id — the dedup key
+	// APIAppID is the Slack app id, alongside WorkspaceID, needed to resolve
+	// the exact org_slack_workspaces row this mention belongs to — since
+	// TFAC-533's re-key, one org can hold two Slack apps in the same
+	// workspace, so WorkspaceID alone can't select the row (and the wrong
+	// row means acting as the wrong bot identity). Downstream consumers
+	// resolve via WorkspaceStore.GetByWorkspaceAppSystem(workspaceID,
+	// apiAppID). No fallback for pre-release events — none exist.
+	APIAppID string `json:"api_app_id"`
+	Channel  string `json:"channel"`
+	TS       string `json:"ts"`                  // the mention message's own ts
+	ThreadTS string `json:"thread_ts,omitempty"` // parent thread root; empty on a root-message mention
+	SenderID string `json:"sender_id"`           // Slack user ID of the mentioning human
+	Text     string `json:"text"`
+	EventID  string `json:"event_id"` // Slack's Ev… id — the dedup key
 }
 
 // SlackMentionPredicate narrows which mentions a handler fires on.

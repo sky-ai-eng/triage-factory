@@ -255,6 +255,39 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
+	t.Run("UpdateURLSystem_round_trips_and_is_a_noop_on_missing", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+
+		ent, _, err := s.FindOrCreate(ctx, orgID, "slack", "C0125/1700000000.000200", "message", "T", "")
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if ent.URL != "" {
+			t.Fatalf("seeded entity url = %q, want empty (permalink not yet resolved)", ent.URL)
+		}
+
+		const permalink = "https://acme.slack.com/archives/C0125/p1700000000000200"
+		if err := s.UpdateURLSystem(ctx, orgID, ent.ID, permalink); err != nil {
+			t.Fatalf("UpdateURLSystem: %v", err)
+		}
+		got, err := s.Get(ctx, orgID, ent.ID)
+		if err != nil || got == nil {
+			t.Fatalf("re-read: %v", err)
+		}
+		if got.URL != permalink {
+			t.Errorf("url = %q, want %q", got.URL, permalink)
+		}
+
+		// A missing id is a no-op (row must exist, but there is no
+		// existence-signal contract here the way AssignProject has —
+		// unlike that method, UpdateURLSystem's only caller already knows
+		// the entity exists (it just created it), so silently affecting
+		// zero rows is acceptable).
+		if err := s.UpdateURLSystem(ctx, orgID, uuid.New().String(), permalink); err != nil {
+			t.Errorf("UpdateURLSystem on missing entity: %v, want nil (no-op)", err)
+		}
+	})
+
 	t.Run("Close_only_fires_on_active", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 

@@ -14,8 +14,9 @@
 // ladder, resolving to its channel's primary tracking team (or, absent one,
 // recorded taskless and visible only to applies_to_unowned watchers). The
 // pipeline also dispatches best-effort sender identity capture (identity.go,
-// TFAC-531) and channel-name resolution (channels.go, TFAC-542) after each
-// publish — both detached, never gating.
+// TFAC-531), channel-name resolution (channels.go, TFAC-542), and — on
+// entity creation only — thread permalink resolution (permalink.go,
+// TFAC-595) after each publish — all detached, never gating.
 //
 // Enterprise Edition — governed by the repository-root LICENSE (Triage Factory
 // License 1.0); enabling its features requires a valid license key.
@@ -68,6 +69,7 @@ func install(api server.ExtensionAPI) {
 		publish:     api.PublishEvent,
 		identity:    NewIdentityResolver(stores),
 		channelName: NewChannelResolver(stores),
+		permalink:   NewPermalinkResolver(stores),
 	}
 	sockets := newSocketManager(stores, pipeline, slackHTTPClient, socketConfigChanged)
 

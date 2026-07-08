@@ -3,11 +3,14 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // withFakeSlackAPI points slackAPIBase at a local httptest server for the
@@ -261,5 +264,167 @@ func TestSlackConversationsList_CapExactlyMatchesTotal_NotTruncated(t *testing.T
 	}
 	if truncated {
 		t.Errorf("truncated = true; want false (the cap coincided with the actual end of data)")
+	}
+}
+
+// TestSlackRetryAfterDuration covers the Retry-After header parsing: typical
+// values pass through as seconds, an out-of-range value is capped, and an
+// empty/unparsable/negative header falls back to the default rather than
+// retrying immediately or blocking forever.
+func TestSlackRetryAfterDuration(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+		want   time.Duration
+	}{
+		{"typical short wait", "2", 2 * time.Second},
+		{"zero is immediate", "0", 0},
+		{"exceeds cap", "999", slackRetryAfterCap},
+		{"empty falls back to default", "", slackRetryAfterDefault},
+		{"unparsable falls back to default", "soon", slackRetryAfterDefault},
+		{"negative falls back to default", "-5", slackRetryAfterDefault},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := slackRetryAfterDuration(tc.header); got != tc.want {
+				t.Errorf("slackRetryAfterDuration(%q) = %v; want %v", tc.header, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDoSlackJSON_429ThenSuccess_RetriesOnce covers the Retry-After-honored
+// single retry: a 429 followed by 200 succeeds without surfacing an error,
+// and the request is sent exactly twice.
+func TestDoSlackJSON_429ThenSuccess_RetriesOnce(t *testing.T) {
+	var hits int32
+	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "value": "x"})
+	})
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, slackAPIBase+"/some.method", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	var out struct {
+		OK    bool   `json:"ok"`
+		Value string `json:"value"`
+	}
+	if err := doSlackJSON(context.Background(), srv.Client(), req, &out); err != nil {
+		t.Fatalf("doSlackJSON: %v", err)
+	}
+	if !out.OK || out.Value != "x" {
+		t.Errorf("out = %+v; want the post-retry success body decoded", out)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("hits = %d; want 2 (one 429, one successful retry)", got)
+	}
+}
+
+// TestDoSlackJSON_DoublePermanent429_ReturnsTypedError covers the "no
+// general retry loop" contract: a second consecutive 429 (after the single
+// Retry-After-honoring retry) surfaces as a typed *slackRateLimitError,
+// and doSlackJSON sends the request exactly twice — never a third time.
+func TestDoSlackJSON_DoublePermanent429_ReturnsTypedError(t *testing.T) {
+	var hits int32
+	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, slackAPIBase+"/some.method", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	err = doSlackJSON(context.Background(), srv.Client(), req, &out)
+	if err == nil {
+		t.Fatal("doSlackJSON with two consecutive 429s should return an error")
+	}
+	if !isSlackRateLimitError(err) {
+		t.Errorf("err = %v (%T); want a *slackRateLimitError", err, err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("hits = %d; want 2 (initial attempt + single retry, no further looping)", got)
+	}
+}
+
+// TestDoSlackJSON_429_RespectsContextCancellation pins that the Retry-After
+// wait is bounded by ctx, not just slackRetryAfterCap: a caller with a
+// short-lived context gets its own error back promptly rather than being
+// held hostage by Slack's advertised wait, and the retry request is never
+// sent once ctx has already expired.
+func TestDoSlackJSON_429_RespectsContextCancellation(t *testing.T) {
+	var hits int32
+	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, slackAPIBase+"/some.method", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	start := time.Now()
+	err = doSlackJSON(ctx, srv.Client(), req, &out)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("doSlackJSON should fail once ctx is canceled mid-wait")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v; want context.DeadlineExceeded", err)
+	}
+	if elapsed > 4*time.Second {
+		t.Errorf("doSlackJSON took %s; want a prompt return once ctx expired, not the full 5s Retry-After wait", elapsed)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("hits = %d; want 1 (ctx expired before the retry request was ever sent)", got)
+	}
+}
+
+// TestSlackConversationsJoin_429ThenSuccess_BodyPreservedOnRetry pins that a
+// POST wrapper's form body survives the 429 retry — cloneSlackRequest must
+// re-derive the already-drained body via GetBody rather than resending an
+// empty one.
+func TestSlackConversationsJoin_429ThenSuccess_BodyPreservedOnRetry(t *testing.T) {
+	var hits int32
+	var gotChannels []string
+	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		gotChannels = append(gotChannels, r.FormValue("channel"))
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+
+	if err := slackConversationsJoin(context.Background(), srv.Client(), "xoxb-test", "C0RETRY01"); err != nil {
+		t.Fatalf("slackConversationsJoin: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("hits = %d; want 2", got)
+	}
+	for i, ch := range gotChannels {
+		if ch != "C0RETRY01" {
+			t.Errorf("attempt %d channel = %q; want C0RETRY01 (body must survive the retry)", i+1, ch)
+		}
 	}
 }

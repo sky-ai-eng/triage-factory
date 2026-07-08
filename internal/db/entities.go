@@ -221,6 +221,15 @@ type EntityStore interface {
 	UpdateSnapshotSystem(ctx context.Context, orgID, id, snapshotJSON string) error
 	UpdateTitleSystem(ctx context.Context, orgID, id, title string) error
 	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error
+
+	// UpdateURLSystem sets the entity's url. Admin pool; no-op update
+	// semantics (row must exist). Added for detached external-link
+	// enrichment (first consumer: Slack thread permalinks — TFAC-595) —
+	// entities.url is otherwise written only at insert (FindOrCreate*),
+	// with no prior update path. System-only by design: the only caller,
+	// ee/slack's permalink resolver, runs detached from any request
+	// (best-effort, off context.Background()) with no JWT claims context.
+	UpdateURLSystem(ctx context.Context, orgID, id, url string) error
 	AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) error
 	MarkClosedSystem(ctx context.Context, orgID, id string) error
 	CloseSystem(ctx context.Context, orgID, id string) error
