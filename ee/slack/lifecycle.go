@@ -326,8 +326,12 @@ type runEntry struct {
 	// successor's initial status and wipe it. Deliberately NOT cleared when
 	// a successor starts: drainLifecycleWorkers also joins it (a retiring
 	// worker may have no successor at shutdown), and receiving from an
-	// already-closed channel is free.
+	// already-closed channel is free. While it is set and NOT yet closed,
+	// pruneRunCache must not evict this entry — see its doc.
 	prevDone chan struct{}
+	// cachedAt is refreshed on every run-status touch (handleRunStatus), not
+	// just first resolution, so pruneRunCache's oldest-first eviction is a
+	// real LRU over sentinel activity.
 	cachedAt time.Time
 }
 
@@ -375,6 +379,13 @@ func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event
 		entry = a.resolveRunEntry(ctx, evt.OrgID, meta.RunID)
 		runs[meta.RunID] = entry
 		pruneRunCache(runs)
+	} else {
+		// LRU touch (before the isSlack early-return — non-Slack entries are
+		// the bulk of the cache and exactly what it exists to avoid
+		// re-resolving): without this, cachedAt is "when first resolved" and
+		// the pruner would evict by age-since-resolution, hitting long-lived
+		// still-active runs first instead of genuinely idle ones.
+		entry.cachedAt = slackLifecycleNow()
 	}
 	if !entry.isSlack {
 		return
@@ -482,16 +493,29 @@ func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, runID str
 }
 
 // pruneRunCache bounds the cache once it exceeds slackLifecycleCacheMaxEntries:
-// evict the oldest (by cachedAt) entries with no live worker until the cache
-// is back at slackLifecycleCachePruneTarget. This is a genuine size cap, not
-// a staleness-only sweep — even entries seen moments ago are evicted if
+// evict the oldest (by cachedAt, refreshed on every run-status touch — LRU)
+// entries with no live worker until the cache is back at
+// slackLifecycleCachePruneTarget. This is a genuine size cap, not a
+// staleness-only sweep — even entries seen moments ago are evicted if
 // that's what it takes to stay under the target, so the map can never grow
 // past max regardless of how much traffic arrives within any given window.
-// An entry with a live worker is never evicted regardless of age — losing it
-// would leak the worker (the dispatcher would no longer know to route its
-// run's future sentinels to it); if every entry has a live worker, eviction
-// legitimately can't bring the count down further (bounded in practice by
-// concurrent live runs, not total history).
+//
+// Two kinds of entry are never evicted, regardless of age:
+//   - one with a live worker — losing it would leak the worker (the
+//     dispatcher would no longer know to route its run's future sentinels
+//     to it);
+//   - one whose prevDone hasn't closed yet — a retiring worker is still
+//     mid-flight on its trailing setStatus(""), and evicting the entry
+//     would drop the only reference to that ordering handle: a resume
+//     after eviction would rebuild a fresh entry with a nil predecessor
+//     and skip the gate, reintroducing the exact stale-clear-clobbers-
+//     resume race the gate exists to close. Once prevDone closes the
+//     entry is ordinary again (evicting it is safe — nothing is in
+//     flight, so a rebuilt entry's nil predecessor gates nothing real).
+//
+// If every entry is protected, eviction legitimately can't bring the count
+// down further — bounded in practice by concurrent live/retiring workers,
+// not total history.
 func pruneRunCache(runs map[string]*runEntry) {
 	if len(runs) <= slackLifecycleCacheMaxEntries {
 		return
@@ -502,9 +526,17 @@ func pruneRunCache(runs map[string]*runEntry) {
 	}
 	candidates := make([]candidate, 0, len(runs))
 	for id, entry := range runs {
-		if entry.worker == nil {
-			candidates = append(candidates, candidate{id: id, cachedAt: entry.cachedAt})
+		if entry.worker != nil {
+			continue
 		}
+		if entry.prevDone != nil {
+			select {
+			case <-entry.prevDone: // teardown finished — safe to evict
+			default:
+				continue // retiring worker still mid-flight — keep the handle
+			}
+		}
+		candidates = append(candidates, candidate{id: id, cachedAt: entry.cachedAt})
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].cachedAt.Before(candidates[j].cachedAt) })
 
