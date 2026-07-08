@@ -169,7 +169,7 @@ filesystem, and coordinate only through Postgres rows.
 | Shape | Control | Executors | What you get |
 | --- | --- | --- | --- |
 | **All-in-one** (default; local + small self-host) | `TF_ROLE=all`, one process | in-process | Today's box. Every mechanism self-resolves; nothing to operate. |
-| **First fleet** | 1 | N | The main win: sandbox capacity scales independently and executor deploys never touch the API. The lone control pod trivially holds the brain lease. A control restart is a brief API blip + brain restart whose poll catch-up is mostly free 304s. |
+| **First fleet** | 1 | N | The main win: sandbox capacity scales independently and executor deploys never touch the API. The lone control pod trivially holds the brain lease. **No load balancer** — one entrypoint, exactly like today's single container (§2.6). A control restart is a brief API blip + brain restart whose poll catch-up is mostly free 304s. |
 | **HA** | 2–3 behind the LB | N | Every control pod serves API/WS (replica-safe already) and competes for the one brain lease; exactly one holds it, the rest are **working API replicas + warm standbys, not idle spares**. Leader loss → takeover ≤ ~TTL. Zero-downtime rolls both tiers: control one-at-a-time behind readiness, executors drain-and-replace. Postgres HA remains the floor — control HA cannot exceed the database's. |
 
 Start at the smallest shape that meets the requirement and move down
@@ -225,6 +225,46 @@ replica-correctness bundle. The pre-auth **ip rate limiter** stays
 per-pod (effective limit ≈ ×M, LB-dependent — accepted and
 documented), and the TTL caches (reachable-repo, token caches) merely
 lose cross-pod hit-rate, never correctness.
+
+### 2.6 The load balancer (operator-provided, deliberately boring)
+
+**When one exists at all.** Executors accept no inbound traffic —
+they are outbound-only participants (claims, heartbeats, and LISTEN
+toward Postgres; GitHub/LLM egress through their per-run proxies), so
+there is never anything to balance *toward executors* at any N. The
+LB enters only at **M ≥ 2 control pods** (the HA row of §2.4). The
+all-in-one and first-fleet shapes have exactly today's single
+entrypoint: one published port on the one control process.
+
+**We do not write or ship one — by design, any reverse proxy works.**
+The properties that usually make LB selection fraught were removed on
+purpose: no sticky sessions (DB sessions + the `tf_ws` backplane), no
+path-based routing (any pod serves any route, §2.5), no server
+affinity, no LB-level auth. What remains is the boring minimum any
+stock proxy (nginx, Caddy, HAProxy, Traefik, a cloud ALB, Fly's
+proxy) provides:
+
+1. HTTP/1.1 with WebSocket upgrade passthrough.
+2. Idle/read timeouts generous enough for long-lived WS connections.
+3. Health-aware rotation against the control readiness endpoint
+   (P1 §8.3) — this is what makes one-at-a-time control deploys
+   zero-downtime; a dropped WS is absorbed by the frontend's
+   auto-reconnect.
+4. `X-Forwarded-For` passthrough, with `TF_TRUSTED_PROXY_CIDR` /
+   `TF_CAPTURE_CLIENT_IP` set so the per-pod rate limiter and
+   client-IP capture see real client addresses — **plumbing that
+   already exists**, because the single-pod deployment already
+   anticipates a fronting proxy today. TLS terminates wherever the
+   operator prefers, exactly as now.
+
+What the repo ships is a **reference configuration, not software**: the
+M ≥ 2 compose profile includes an optional stock-proxy service (a
+few dozen lines of Caddy/nginx config) as a worked example
+(TFAC-582's docs scope). On the managed side, the platform's own
+proxy (e.g. Fly's) plays this role with zero additions. Building or
+forking a proxy would recreate the §5.0 second-service argument in
+its strongest form — a bespoke component in the hot path of every
+request, carrying no logic of ours.
 
 ---
 
