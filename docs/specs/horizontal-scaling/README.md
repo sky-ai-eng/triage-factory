@@ -403,16 +403,16 @@ transaction-mode pooler; the query pools can move behind
 PgBouncer/Supavisor independently, per TFAC-307 §2, with the RLS
 `SET LOCAL` pattern validated under transaction pooling).
 
-Connection budgets are part of the fabric design, not an ops
-afterthought. Today's defaults are 25 open per pool × two pools ≈ 50
-conns per process (`applyPGPoolDefaults`, `internal/app/stores.go`) —
-sized for one all-in-one binary. A fleet multiplies that: 3 executors
-+ 2 control ≈ 250 conns, past a default `max_connections` long before
-any workload pressure. So pool ceilings become **per-role** (an
-executor's dispatcher + sinks need a fraction of what the API tier
-does), env-tunable, and the compose profile documents the
-`max_connections` arithmetic; a transaction-mode pooler (TFAC-307 §2)
-is the lever for large fleets, never a requirement for small ones.
+Today's defaults are $25 \text{ open per pool} \times \text{ two pools} \approx 50 \text{ conns}$ 
+per process (`applyPGPoolDefaults`, `internal/app/stores.go`) —
+sized for one all-in-one binary. A fleet multiplies that: 
+$3 \text{ executors} + 2 \text{ control} \approx 250 \text{ conns}$, past a default 
+`max_connections` long before any workload pressure. So pool ceilings
+become **per-role** (an executor's dispatcher + sinks need a fraction
+ of what the API tier does), env-tunable, and the compose profile 
+documents the `max_connections` arithmetic; a transaction-mode pooler 
+(TFAC-307 §2) is the lever for large fleets, never a requirement for small
+ones.
 
 | Channel | Producer → consumer | Payload |
 | --- | --- | --- |
@@ -433,8 +433,8 @@ navigation), so a missed window degrades liveness, never state.
 ### 5.0 Why Postgres, and not Redis/NATS
 
 Doorbells, TTL state, and queues are a broker's home turf, so the
-choice needs a recorded argument, not a reflex. Four reasons, in
-decreasing order of weight:
+choice needs a recorded argument. Four reasons, in decreasing
+order of weight:
 
 1. **Postgres is already mandatory; a broker is a second service.**
    Isolated-network self-host is a first-class target, and every
@@ -555,14 +555,33 @@ Control-pod handler logic (`message` / `interrupt` / `cancel` /
 `ResumeOpenRun` becomes *resume-by-enqueue* — a message to a hibernated
 run enqueues its continuation as ordinary claimable work (preferred to
 its last executor for the warm worktree, rehydratable anywhere from
-S3). This replaces the in-process resume goroutine and is what makes
-hibernation genuinely location-transparent. State-machine shape,
-settled here: the user message is recorded first (`run_messages` +
-pending-input on the run), then the **same `runs` row** transitions
-back to queued and is claimed like any other; the claiming executor's
-resume path rehydrates, spawns with `--resume <session_id>`, and
-delivers the recorded message as the turn input. No second runs row,
-and — keeping the standing invariant — no new run status.
+S3). This retires the in-process resume goroutine **in every mode,
+`TF_ROLE=all` included** — deliberately unlike the signal handlers
+above, which do keep a local short-circuit. The rule that separates
+them: **operations on live processes short-circuit locally; creation
+of work always goes through the queue.** Steer/interrupt/permission
+are only meaningful against an in-memory process handle, and their
+interactive latency budget is real — the signal layer just routes to
+the handle's owner. A resume has no live process; it *mints work*,
+and work that bypasses the queue bypasses every admission gate built
+in this design — the memory floor, the per-org concurrency cap, fair
+ordering, budget admission (§6.4) — exactly the storm path (wake 20
+parked runs at once) where those gates matter. Routing it through the
+queue costs ~ms at `all` (the wake is the in-process dispatcher
+nudge; the spawn it precedes costs seconds), makes a crash between
+"message recorded" and "process spawned" recoverable by the standard
+reconcile instead of an ad-hoc path, and keeps "the queue is the
+truth" true at N=1 — no class of running work exists that never
+appeared as a queued row.
+
+State-machine shape, settled here: the user message is recorded first
+(`run_messages` + pending-input on the run), then the **same `runs`
+row** transitions back to queued and is claimed like any other (its
+original enqueue time makes it oldest-first, so wakes claim
+promptly); the claiming executor's resume path rehydrates, spawns
+with `--resume <session_id>`, and delivers the recorded message as
+the turn input. No second runs row, and — keeping the standing
+invariant — no new run status.
 
 Acked signal rows are purged after 24 h (audit convenience window);
 stale unacked signals expire harmlessly (the reaper owns the run's fate if the
@@ -988,6 +1007,11 @@ epic owner on 2026-07-07. Reopening conditions noted per entry.
    design (§5).
 6. **TFAC-408 image keying** — two-layer, name → recipe → content
    hash; `instance_variants` keys on the hash (§6.4).
+7. **Resume path at `TF_ROLE=all`** — always resume-by-enqueue; no
+   in-process resume variant survives in any mode. The local
+   short-circuit exists only for operations on live processes
+   (steer/interrupt/cancel-live/permission), never for work creation
+   (§5.2).
 
 ## Related
 
