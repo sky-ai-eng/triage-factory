@@ -149,26 +149,70 @@ func (r *slackExecRig) trackChannel(orgID, userID, teamID, channelID string) {
 	}
 }
 
+// seedNonSlackTask seeds a minimal entity + event + task chain with a
+// GitHub (not slack:mention) event type, and returns the task id. Every run
+// this rig seeds carries one: AgentRunStore.GetSystem's column list
+// (pgRunColumns) selects task_id with no COALESCE, so scanning a run whose
+// task_id is genuinely NULL errors — harmless in production (every run
+// today is blueprint-origin, which requires a non-NULL task_id) but hit
+// immediately here since workspaceFromRunTaskMetadata unconditionally reads
+// the run first. Giving every seeded run a real, non-slack-mention task
+// keeps that read clean while still exercising the intended "no Slack
+// context" fallback path (task.EventType != domain.EventSlackMention) these
+// tests are actually about — a GitHub/Jira-triggered run using the Slack
+// verbs is exactly the "general-purpose" shape the ticket describes.
+func (r *slackExecRig) seedNonSlackTask(orgID, creatorID, teamID string) string {
+	r.t.Helper()
+	// source_id must be unique per (org_id, source) — a fresh uuid per call
+	// so a test seeding several runs (e.g. one per team) doesn't collide on
+	// entities_org_id_source_source_id_key.
+	entityID := uuid.New().String()
+	sourceID := "octo/repo#" + uuid.New().String()
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title)
+		VALUES ($1, $2, 'github', $3, 'pull_request', 'test pr')
+	`, entityID, orgID, sourceID); err != nil {
+		r.t.Fatalf("seed entity: %v", err)
+	}
+	eventID := uuid.New().String()
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO events (id, org_id, entity_id, event_type, metadata_json)
+		VALUES ($1, $2, $3, $4, '{}')
+	`, eventID, orgID, entityID, domain.EventGitHubPRCICheckFailed); err != nil {
+		r.t.Fatalf("seed event: %v", err)
+	}
+	taskID := uuid.New().String()
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, taskID, orgID, creatorID, teamID, entityID, domain.EventGitHubPRCICheckFailed, eventID); err != nil {
+		r.t.Fatalf("seed task: %v", err)
+	}
+	return taskID
+}
+
 // seedRun inserts a minimal run row the artifacts/external_actions FK can
-// point at, matching RunInfo.RunID. trigger_type/creator_user_id follow the
-// runs_creator_matches_trigger_type CHECK (event ⇒ NULL creator, manual ⇒
-// non-NULL) — mirrors seedPgArtifactRun (internal/db/postgres/artifacts_test.go).
+// point at, matching RunInfo.RunID, carrying a real task_id (seedNonSlackTask).
+// trigger_type/creator_user_id follow the runs_creator_matches_trigger_type
+// CHECK (event ⇒ NULL creator, manual ⇒ non-NULL) — mirrors seedPgArtifactRun
+// (internal/db/postgres/artifacts_test.go).
 func (r *slackExecRig) seedRun(orgID, teamID, userID string, eventTriggered bool) string {
 	r.t.Helper()
+	taskID := r.seedNonSlackTask(orgID, userID, teamID)
 	id := uuid.New().String()
 	if eventTriggered {
 		if _, err := r.h.AdminDB.Exec(`
-			INSERT INTO runs (id, org_id, team_id, trigger_type, origin, status, visibility)
-			VALUES ($1, $2, $3, 'event', 'interactive', 'running', 'team')
-		`, id, orgID, teamID); err != nil {
+			INSERT INTO runs (id, org_id, team_id, task_id, trigger_type, origin, status, visibility)
+			VALUES ($1, $2, $3, $4, 'event', 'interactive', 'running', 'team')
+		`, id, orgID, teamID, taskID); err != nil {
 			r.t.Fatalf("seed event-triggered run: %v", err)
 		}
 		return id
 	}
 	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO runs (id, org_id, team_id, creator_user_id, trigger_type, origin, status, visibility)
-		VALUES ($1, $2, $3, $4, 'manual', 'interactive', 'running', 'team')
-	`, id, orgID, teamID, userID); err != nil {
+		INSERT INTO runs (id, org_id, team_id, task_id, creator_user_id, trigger_type, origin, status, visibility)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'interactive', 'running', 'team')
+	`, id, orgID, teamID, taskID, userID); err != nil {
 		r.t.Fatalf("seed manual run: %v", err)
 	}
 	return id
@@ -305,6 +349,60 @@ func TestSlackExecHandler_Edit_UpsertsSameArtifactRow(t *testing.T) {
 	}
 	if !sawPosted || !sawEdited {
 		t.Errorf("expected both slack_message_posted and slack_message_edited, got %+v", acts)
+	}
+}
+
+// TestSlackExecHandler_Edit_PreservesCreatingRunAndTeam_AcrossDifferentTeams
+// pins the artifacts-upsert fix: both run_id and team_id stay pinned to the
+// message's CREATING run, even when a different team's run (both tracking
+// the same channel) later edits it. The edit's own external_action row still
+// attributes to the EDITING run/team — that's the audit trail's job — but
+// the artifact itself must not silently migrate to a different team's reads.
+func TestSlackExecHandler_Edit_PreservesCreatingRunAndTeam_AcrossDifferentTeams(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamA := pgtest.SeedOrgWithUser(t, r.h, "slack-cross-team")
+	teamB := pgtest.SeedTeam(t, r.h, orgID, "slack-cross-team-b")
+	// owner is already an org_memberships row (from SeedOrgWithUser) — only
+	// the per-team `memberships` row is needed to make them admin of teamB
+	// too (AddOrgMember would re-insert org_memberships and violate its PK).
+	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'admin')`, owner, teamB)
+
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamA, "C1")
+	r.trackChannel(orgID, owner, teamB, "C1")
+
+	runA := r.seedRun(orgID, teamA, owner, true)
+	runB := r.seedRun(orgID, teamB, owner, true)
+	infoA := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runA, TeamID: teamA, IsEventTriggered: true}
+	infoB := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runB, TeamID: teamB, IsEventTriggered: true}
+
+	sendOut, err := r.hdl.send(context.Background(), infoA, slackSendArgs{Channel: "C1", Body: "posted by team A"})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if _, err := r.hdl.edit(context.Background(), infoB, slackEditArgs{Channel: "C1", TS: sendOut.TS, Body: "edited by team B"}); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+
+	artsA := r.artifactsForRun(orgID, runA)
+	if len(artsA) != 1 {
+		t.Fatalf("want 1 artifact still attributed to the creating run A, got %d: %+v", len(artsA), artsA)
+	}
+	if artsA[0].RunID != runA || artsA[0].TeamID != teamA {
+		t.Errorf("artifact attribution drifted: run=%q team=%q, want run=%q team=%q", artsA[0].RunID, artsA[0].TeamID, runA, teamA)
+	}
+	if artsB := r.artifactsForRun(orgID, runB); len(artsB) != 0 {
+		t.Errorf("editing run B must not have reassigned the artifact to itself, got %+v", artsB)
+	}
+
+	actsA := r.actionsForRun(orgID, runA)
+	if len(actsA) != 1 || actsA[0].Action != domain.ActionSlackMessagePosted {
+		t.Errorf("run A's external_actions = %+v, want exactly one slack_message_posted", actsA)
+	}
+	actsB := r.actionsForRun(orgID, runB)
+	if len(actsB) != 1 || actsB[0].Action != domain.ActionSlackMessageEdited {
+		t.Errorf("run B's external_actions = %+v, want exactly one slack_message_edited (the audit trail still credits the editing run)", actsB)
 	}
 }
 

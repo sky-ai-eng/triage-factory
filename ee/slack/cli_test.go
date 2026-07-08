@@ -97,6 +97,29 @@ func TestSlackCLISend_AttachFileOnly_NoBodyRequired(t *testing.T) {
 	}
 }
 
+func TestSlackCLISend_AttachFileTooLarge_UsageError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.bin")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(slackExecMaxFileBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	host := &fakeExtensionHost{}
+	code := slackCLISend(context.Background(), []string{"--channel", "C1", "--attach-file", path}, host)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if host.calls != 0 {
+		t.Error("must not call the host (or base64-encode the file) when --attach-file exceeds the size cap")
+	}
+}
+
 func TestSlackCLISend_MissingChannel_UsageError(t *testing.T) {
 	host := &fakeExtensionHost{}
 	code := slackCLISend(context.Background(), []string{"--body", "hi"}, host)
@@ -291,6 +314,23 @@ func TestSlackCLIReadChannel_NumPriorWithoutTS_UsageError(t *testing.T) {
 	}
 	if host.calls != 0 {
 		t.Error("must not call the host when --num-prior lacks --ts")
+	}
+}
+
+// TestSlackCLIReadChannel_TSAloneWithoutAnchor_UsageError pins that --ts
+// with neither --num-prior nor --num-following is rejected rather than
+// silently falling back to a plain latest-N read that ignores the anchor —
+// the host's readChannel only takes the anchored branch when at least one
+// of num_prior/num_following is set, so an unaccompanied --ts would
+// otherwise vanish without a trace.
+func TestSlackCLIReadChannel_TSAloneWithoutAnchor_UsageError(t *testing.T) {
+	host := &fakeExtensionHost{}
+	code := slackCLIRead(context.Background(), []string{"channel", "--channel", "C1", "--ts", "1.0"}, host)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if host.calls != 0 {
+		t.Error("must not call the host when --ts has no --num-prior/--num-following to anchor")
 	}
 }
 

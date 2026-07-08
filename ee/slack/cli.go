@@ -171,7 +171,11 @@ func slackCLISend(ctx context.Context, args []string, host agenthost.Client) int
 // slackReadAttachFile reads --attach-file's bytes (path, or "-" for stdin,
 // matching --body-file's convention) and returns its base64 encoding plus
 // its base name for the wire args. ("", "", nil) when --attach-file isn't
-// passed.
+// passed. Enforces slackExecMaxFileBytes here, before base64-encoding and
+// marshaling into the extension call's args: skipping this check would let
+// an oversized file blow through the ~16 MiB IPC frame cap (base64 inflates
+// it further) before the host-side guard in exec_host.go ever gets a chance
+// to reject it with a clean error.
 func slackReadAttachFile(args []string) (name, base64Body string, err error) {
 	path := slackFlagVal(args, "--attach-file")
 	if path == "" {
@@ -179,14 +183,22 @@ func slackReadAttachFile(args []string) (name, base64Body string, err error) {
 	}
 	var data []byte
 	if path == "-" {
-		data, err = io.ReadAll(os.Stdin)
+		data, err = io.ReadAll(io.LimitReader(os.Stdin, slackExecMaxFileBytes+1))
 		name = "attachment"
 	} else {
+		// Stat first so an oversized file on disk is rejected without
+		// reading the whole thing into memory first.
+		if fi, statErr := os.Stat(path); statErr == nil && fi.Size() > slackExecMaxFileBytes {
+			return "", "", fmt.Errorf("--attach-file is %d bytes, exceeds the %d-byte cap", fi.Size(), slackExecMaxFileBytes)
+		}
 		data, err = os.ReadFile(path)
 		name = baseName(path)
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("read --attach-file: %w", err)
+	}
+	if len(data) > slackExecMaxFileBytes {
+		return "", "", fmt.Errorf("--attach-file is %d bytes, exceeds the %d-byte cap", len(data), slackExecMaxFileBytes)
 	}
 	return name, base64.StdEncoding.EncodeToString(data), nil
 }
@@ -314,6 +326,10 @@ func slackCLIReadChannel(ctx context.Context, args []string, host agenthost.Clie
 	}
 	if (numPrior > 0 || numFollowing > 0) && ts == "" {
 		slackReportErr("--num-prior/--num-following require --ts")
+		return 1
+	}
+	if ts != "" && numPrior == 0 && numFollowing == 0 {
+		slackReportErr("--ts requires --num-prior and/or --num-following (an anchor alone reads nothing)")
 		return 1
 	}
 

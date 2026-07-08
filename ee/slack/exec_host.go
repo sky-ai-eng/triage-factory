@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
@@ -193,33 +194,49 @@ func (h *slackExecHandler) resolveWorkspaceForDownload(ctx context.Context, info
 // workspaceFromRunTaskMetadata resolves the run's own Slack context — its
 // task, if a slack:mention task, and that mention's event metadata — via the
 // documented chain: AgentRuns.GetSystem -> Task -> PrimaryEventID ->
-// Events.GetMetadataSystem. ok=false (nil error) covers every "this run has
-// no Slack thread context" case (a GitHub/Jira-triggered run, a run with no
-// task, a task that isn't slack:mention) — none of those are errors, they
-// just mean the caller falls back to its own resolution path.
+// Events.GetMetadataSystem. ok=false with a nil error covers every "this run
+// genuinely has no Slack thread context" case (a GitHub/Jira-triggered run, a
+// run with no task, a task that isn't slack:mention, no metadata recorded) —
+// none of those are failures, they just mean the caller falls back to its
+// own resolution path. A non-nil error means a real lookup failed (a
+// transient store error) — the caller must NOT treat that the same as "no
+// context": silently falling through to the org-wide fallback on a masked
+// failure risks resolving a different (but not ambiguous, so not refused)
+// connected app than the one that actually owns this run's thread, i.e.
+// replying as the wrong bot identity. So every store call below propagates
+// its error; only a genuine "not found" result maps to ok=false, nil.
 func (h *slackExecHandler) workspaceFromRunTaskMetadata(ctx context.Context, info agenthost.RunInfo) (ws slackstore.Workspace, channel string, ok bool, err error) {
 	run, err := h.stores.AgentRuns.GetSystem(ctx, info.OrgID, info.RunID)
 	if err != nil {
-		return slackstore.Workspace{}, "", false, nil
+		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load run: %w", err)
 	}
 	if run == nil || run.TaskID == "" {
 		return slackstore.Workspace{}, "", false, nil
 	}
 	task, err := h.stores.Tasks.GetSystem(ctx, info.OrgID, run.TaskID)
-	if err != nil || task == nil || task.EventType != domain.EventSlackMention || task.PrimaryEventID == "" {
+	if err != nil {
+		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load task: %w", err)
+	}
+	if task == nil || task.EventType != domain.EventSlackMention || task.PrimaryEventID == "" {
 		return slackstore.Workspace{}, "", false, nil
 	}
 	metaJSON, err := h.stores.Events.GetMetadataSystem(ctx, info.OrgID, task.PrimaryEventID)
-	if err != nil || metaJSON == "" {
+	if err != nil {
+		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load event metadata: %w", err)
+	}
+	if metaJSON == "" {
 		return slackstore.Workspace{}, "", false, nil
 	}
 	var meta SlackMentionMetadata
-	if jsonErr := json.Unmarshal([]byte(metaJSON), &meta); jsonErr != nil || meta.WorkspaceID == "" {
+	if jsonErr := json.Unmarshal([]byte(metaJSON), &meta); jsonErr != nil {
+		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: parse event metadata: %w", jsonErr)
+	}
+	if meta.WorkspaceID == "" {
 		return slackstore.Workspace{}, "", false, nil
 	}
 	bundle := slackstore.FromStores(h.stores)
 	if bundle == nil {
-		return slackstore.Workspace{}, "", false, nil
+		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: not available")
 	}
 	row, err := bundle.Workspaces.GetByWorkspaceAppSystem(ctx, meta.WorkspaceID, meta.APIAppID)
 	if err != nil {
@@ -581,16 +598,38 @@ func (h *slackExecHandler) readChannelAnchored(ctx context.Context, token string
 
 // sortMessagesByTS orders messages oldest-first (conversations.history
 // returns newest-first) so a read verb's output reads top-to-bottom like the
-// thread/channel itself.
+// thread/channel itself. Compares ts as (seconds, fractional-nanoseconds)
+// integer pairs rather than a parsed float64: a Slack ts's 10-digit seconds
+// + 6-digit fraction is 16 significant digits, right at float64's ~15-17
+// digit precision ceiling, so two close-together messages could silently
+// misorder if compared as floats.
 func sortMessagesByTS(msgs []slackMessage) {
 	sort.Slice(msgs, func(i, j int) bool {
-		return parseSlackTSFloat(msgs[i].TS) < parseSlackTSFloat(msgs[j].TS)
+		si, fi := parseSlackTSParts(msgs[i].TS)
+		sj, fj := parseSlackTSParts(msgs[j].TS)
+		if si != sj {
+			return si < sj
+		}
+		return fi < fj
 	})
 }
 
-func parseSlackTSFloat(ts string) float64 {
-	f, _ := strconv.ParseFloat(ts, 64)
-	return f
+// parseSlackTSParts splits a Slack ts ("1355517523.000005") into its integer
+// seconds and a fixed-width (9-digit, nanosecond-scale) fractional part —
+// mirrors ingest.go's parseSlackTS zero-padding convention so the two stay
+// consistent. An unparsable ts yields (0, 0) — sorts first, same "unknown"
+// treatment parseSlackTS gives a bad timestamp elsewhere in this package.
+func parseSlackTSParts(ts string) (seconds, fracNanos int64) {
+	secStr, fracStr, _ := strings.Cut(ts, ".")
+	seconds, _ = strconv.ParseInt(secStr, 10, 64)
+	if fracStr == "" {
+		return seconds, 0
+	}
+	for len(fracStr) < 9 {
+		fracStr += "0"
+	}
+	fracNanos, _ = strconv.ParseInt(fracStr[:9], 10, 64)
+	return seconds, fracNanos
 }
 
 // viewMessages converts the API-level slackMessage slice to the CLI-facing
