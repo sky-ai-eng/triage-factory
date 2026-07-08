@@ -137,9 +137,32 @@ TF_ROLE = all | control | executor        (default: all; local mode forces all)
 
 Deployment floor stays compose: `postgres + gotrue + seaweedfs + 1..M
 control + 1..N executor` behind any plain round-robin LB (control pods
-only). Executors remain raw Docker / Fly Machines / VMs with
-`SYS_ADMIN`+`NET_ADMIN`+unconfined seccomp+private cgroup — the same
-caps the single container needs today; managed k8s remains a non-target.
+only). An executor needs a **privileged-capable container substrate**
+(`SYS_ADMIN`+`NET_ADMIN`+unconfined seccomp+cgroup-v2 private
+namespace — the same caps the single container needs today; systrap
+gVisor, so no KVM/nested-virt requirement) or a plain VM/bare-metal
+host with root+runsc. Being precise about where that line falls,
+because "no k8s" is *not* it:
+
+- **Impossible:** platforms that forbid privileged pods — PaaS
+  (Railway/Render-class) and locked-down managed-k8s modes (GKE
+  Autopilot, EKS Fargate). This is about who controls pod security
+  policy, not about Kubernetes the technology.
+- **Viable:** raw Docker/compose, Fly Machines, VMs — and
+  **self-managed k8s** (or managed k8s with self-controlled node
+  groups), where an executor is just a privileged pod. Executors are
+  in fact the k8s-*friendly* half of the system: outbound-only (no
+  Service, no Ingress, no mesh), ephemeral-volume-tolerant (§4.1
+  degradation), pull-based (any pod autoscaler composes, §4.5).
+  Validate on the integration suite before blessing a given
+  cluster/runtime combo (cgroupns behavior varies by containerd
+  config) — same validate-early posture as hardened hosts.
+- **Non-target** means we don't *build for* k8s (no operator, no
+  Helm chart, no manifests shipped) — not that it's forbidden.
+
+Control pods are the k8s-hostile half while they still jail system
+jobs (§7); once P4's job-classes land, control is unprivileged and
+runs anywhere, Autopilot included.
 
 ### 2.2 The unit of scale
 
@@ -498,11 +521,18 @@ that decides *when* to add or remove machines. Three reasons:
    bump, or an enterprise infra team racking a hardened host — the
    §5.0 second-service argument applies to owning N platform
    integrations in the deploy path.
-2. **The primary self-host segment can't autoscale anyway.** An
-   isolated-network deployment has a fixed, security-reviewed host
-   pool; its "autoscaling" is a capacity-planning conversation, which
-   the §0 arithmetic (memory-bound, known per-run budget) and the
-   fleet dashboard serve directly.
+2. **Self-hosters who can autoscale, can — with their own scaler.**
+   Anyone on programmable compute already has the loop half: an ASG /
+   MIG with a launch template running the executor container, or
+   executors as privileged pods on self-managed k8s (§2.1) where
+   KEDA can scale the Deployment straight off a queue-depth SQL query
+   and the cluster-autoscaler provisions nodes — zero code from us,
+   because the contract below is the whole integration surface. The
+   one segment that structurally won't autoscale is the
+   isolated-network deployment: a fixed, security-reviewed host pool,
+   where "autoscaling" is a capacity-planning conversation served by
+   the §0 arithmetic and the fleet dashboard. That segment's
+   constraint is policy, not software.
 3. **Under-capacity degrades gracefully by construction.** Because
    gating never mutates queue state (TFAC-552 → §4.2), a saturated
    fleet means longer queue waits — visible as dashboard percentiles —
