@@ -38,9 +38,15 @@ type EventQueueStore interface {
 	Enqueue(ctx context.Context, orgID string, evt domain.Event) (eventID string, err error)
 
 	// ClaimNext claims the globally-oldest pending row (FIFO by id),
-	// flips it pending -> processing, stamps claimed_at, increments
-	// attempts, and returns it. Returns (nil, nil) when the queue is
-	// empty.
+	// flips it pending -> processing, stamps claimed_at + executor_id +
+	// boot_epoch, increments attempts, and returns it. Returns (nil, nil)
+	// when the queue is empty.
+	//
+	// executorID/bootEpoch (the caller's persistent instance-registry
+	// identity, TFAC-577) are stamped atomically in the same claim
+	// statement, mirroring RunQueueStore.ClaimNextRun — so ResetProcessing
+	// (TFAC-578) can later self-sweep only this instance's own
+	// orphaned rows.
 	//
 	// Cross-org by design: the drain worker is a single system service
 	// draining every tenant in insertion order, so this is one of the
@@ -48,7 +54,7 @@ type EventQueueStore interface {
 	// org_id, which scopes all downstream processing). Postgres uses
 	// FOR UPDATE SKIP LOCKED so a future multi-worker drainer never
 	// double-claims; SQLite is single-worker.
-	ClaimNext(ctx context.Context) (*domain.QueuedEvent, error)
+	ClaimNext(ctx context.Context, executorID string, bootEpoch int64) (*domain.QueuedEvent, error)
 
 	// MarkDone marks a claimed row done (processed_at = now). Guarded by
 	// status = 'processing' so a stale call can't flip an already-terminal
@@ -67,11 +73,18 @@ type EventQueueStore interface {
 	// attempts crosses its retry budget. Guarded by status = 'processing'.
 	Requeue(ctx context.Context, orgID string, id int64, lastErr string) error
 
-	// ResetProcessing flips every 'processing' row back to pending across
-	// all orgs and returns the count reset. Called once at boot: under the
-	// single worker a 'processing' row at startup means a crash
-	// mid-process, so it must be replayed. Cross-org system sweep.
-	ResetProcessing(ctx context.Context) (int, error)
+	// ResetProcessing flips 'processing' rows back to pending and returns
+	// the count reset. Called once at boot: under the single worker a
+	// 'processing' row at startup means a crash mid-process, so it must be
+	// replayed.
+	//
+	// Ownership-scoped (TFAC-578), mirroring RunQueueStore.ResetProcessingRuns:
+	// only rows stamped executor_id = executorID AND boot_epoch < bootEpoch
+	// are reset — this instance's own orphans from a strictly earlier boot
+	// of itself. A live sibling's still-processing row (a different
+	// executor_id) is never touched, which is what makes a rolling deploy /
+	// two-replica boot safe.
+	ResetProcessing(ctx context.Context, executorID string, bootEpoch int64) (int, error)
 
 	// PruneDone deletes 'done' rows whose processed_at < before across all
 	// orgs, returning the count removed. The retention sweep — done rows

@@ -39,8 +39,16 @@ type RunQueueStore interface {
 
 	// ClaimNextRun claims the globally-oldest queued run whose owning
 	// blueprint_run is still 'running' and not cancel-requested, flips it
-	// queued -> running, stamps claimed_at, increments attempts, and returns
-	// it. Returns (nil, nil) when nothing is claimable.
+	// queued -> running, stamps claimed_at + executor_id + boot_epoch,
+	// increments attempts, and returns it. Returns (nil, nil) when nothing is
+	// claimable.
+	//
+	// executorID/bootEpoch (the caller's persistent instance-registry
+	// identity, TFAC-577) are stamped atomically in the same claim statement
+	// — not later, once the run goes live — so there is never a window where
+	// a 'running' row's ownership is unknown to ResetProcessingRuns (TFAC-578):
+	// a crash during workspace setup, before the process ever goes live,
+	// still leaves the row correctly self-attributed.
 	//
 	// Cross-org by design: the dispatcher is a single system worker draining
 	// every tenant in insertion order (the claimed run carries its org_id,
@@ -49,7 +57,7 @@ type RunQueueStore interface {
 	// single-worker. A queued step of a cancel-requested or already-terminal
 	// blueprint is deliberately never claimed — the sequence-level cancel is
 	// honored here (decision: a queued-not-started step cancels with zero work).
-	ClaimNextRun(ctx context.Context) (*domain.AgentRun, error)
+	ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64) (*domain.AgentRun, error)
 
 	// RequeueRun returns a claimed run to status='queued' after a transient
 	// dispatcher failure (e.g. workspace setup hiccup), recording lastErr for
@@ -65,9 +73,16 @@ type RunQueueStore interface {
 	// pending_approval) are intentionally left parked — they resume through
 	// their own paths, not the queue. attempts is retained (mirrors
 	// EventQueue.ResetProcessing) so a run that keeps hard-crashing the process
-	// eventually fails out rather than crash-looping the boot. Cross-org system
-	// sweep; returns the count reset.
-	ResetProcessingRuns(ctx context.Context) (int, error)
+	// eventually fails out rather than crash-looping the boot.
+	//
+	// Ownership-scoped (TFAC-578): only rows stamped executor_id = executorID
+	// AND boot_epoch < bootEpoch are reset — i.e. this instance's own orphans
+	// from a strictly earlier boot of itself. A live sibling instance's
+	// claimed/running rows (a different executor_id) are never touched, which
+	// is what makes a rolling deploy / two-replica boot safe: the booting
+	// process only ever sweeps its own prior-boot mess, never work another
+	// still-live process owns. Returns the count reset.
+	ResetProcessingRuns(ctx context.Context, executorID string, bootEpoch int64) (int, error)
 
 	// ReconcileOrphanedRuns is the boot self-heal mirror of ResetProcessingRuns:
 	// every child run left non-terminal (queued/claimed/running/

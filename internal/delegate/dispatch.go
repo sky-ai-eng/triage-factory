@@ -89,7 +89,12 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	// No step-plan handling needed: a re-queued mid-flight run is re-claimed by
 	// dispatchClaimedRun, which reads the plan frozen on its blueprint_run (off
 	// br.StepPlan), so the resumed step runs the same program it was minted with.
-	n, err := s.runQueue.ResetProcessingRuns(ctx)
+	//
+	// Ownership-scoped (TFAC-578): this only sweeps rows this instance itself
+	// claimed during an earlier boot (executorIdentity()), never a live
+	// sibling's claimed/running work — see RunQueueStore.ResetProcessingRuns.
+	executorID, bootEpoch := s.executorIdentity()
+	n, err := s.runQueue.ResetProcessingRuns(ctx, executorID, bootEpoch)
 	if err != nil {
 		dispatchLog.Error("boot reconcile: reset in-flight runs failed", "error", err)
 		return
@@ -155,7 +160,8 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		}
-		run, err := s.runQueue.ClaimNextRun(ctx)
+		executorID, bootEpoch := s.executorIdentity()
+		run, err := s.runQueue.ClaimNextRun(ctx, executorID, bootEpoch)
 		if err != nil {
 			<-sem
 			dispatchLog.Warn("claim next run failed; retrying on the next scan", "error", err)

@@ -65,6 +65,25 @@ type Router struct {
 	scorer       Scorer
 	ws           *websocket.Hub
 
+	// executorID/bootEpoch are this process's persistent instance-registry
+	// identity (TFAC-577), set post-construction via SetExecutorID before
+	// RunEventQueue starts. Stamped onto every event_queue row this router
+	// claims (mirroring delegate.Spawner's executorID/bootEpoch for runs), so
+	// the boot-time ResetProcessing sweep (TFAC-578) can self-scope to rows
+	// this instance itself claimed, never a live sibling's. Zero values
+	// (tests that never call SetExecutorID) degrade to the empty-string
+	// identity — fine for single-router tests, never used in production.
+	//
+	// Guarded by executorMu, mirroring delegate.Spawner's executorID/
+	// bootEpoch + s.mu: today SetExecutorID only ever runs once at startup
+	// before RunEventQueue's goroutine starts, so the lock is a no-op in
+	// practice, but it keeps the pattern symmetric with the spawner and
+	// keeps a future second call site (e.g. a hot-reload path) from
+	// becoming a real data race.
+	executorMu sync.Mutex
+	executorID string
+	bootEpoch  int64
+
 	// drainLocks serializes DrainEntity calls per entity. Without this,
 	// the non-mutating PopPendingFiringForEntity creates a window between
 	// pop and MarkPendingFiringFired/Skipped where a concurrent drain
@@ -150,6 +169,27 @@ func (r *Router) breakerPromptID(orgID, blueprintID string) string {
 // the ~30 existing test constructions don't have to thread it.
 func (r *Router) SetEventQueue(q dbpkg.EventQueueStore) {
 	r.eventQueue = q
+}
+
+// SetExecutorID wires this router's persistent instance-registry identity
+// (TFAC-577), mirroring delegate.Spawner.SetExecutorID. Call once at startup,
+// before RunEventQueue starts; tests that never call this keep the
+// zero-value ("", 0) identity.
+func (r *Router) SetExecutorID(id string, bootEpoch int64) {
+	r.executorMu.Lock()
+	defer r.executorMu.Unlock()
+	r.executorID = id
+	r.bootEpoch = bootEpoch
+}
+
+// executorIdentity returns the current (executorID, bootEpoch) pair under
+// lock — the read side of SetExecutorID, mirroring
+// delegate.Spawner.executorIdentity. Used by RunEventQueue's boot reset and
+// drainEventQueue's claim.
+func (r *Router) executorIdentity() (string, int64) {
+	r.executorMu.Lock()
+	defer r.executorMu.Unlock()
+	return r.executorID, r.bootEpoch
 }
 
 // autoDelegateEnabledForTeam returns the team's auto_delegate_enabled

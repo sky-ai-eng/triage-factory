@@ -122,15 +122,19 @@ func TestEventQueue_SurvivesRestart(t *testing.T) {
 
 	// Simulate a crash mid-process: claim one row (pending → processing)
 	// and "die" before routing or marking it done. r1 is then abandoned.
-	if _, err := st.EventQueue.ClaimNext(context.Background()); err != nil {
+	// "restart-instance" boot 1 stands in for r1's (unset in this test)
+	// identity.
+	if _, err := st.EventQueue.ClaimNext(context.Background(), "restart-instance", 1); err != nil {
 		t.Fatalf("pre-crash claim: %v", err)
 	}
 	_ = r1
 
 	// Restart: a fresh worker over the same DB. Boot recovery resets the
-	// in-flight row back to pending; the drain then routes all three.
+	// in-flight row back to pending (the SAME persistent instance identity,
+	// a later boot epoch — TFAC-578's self-sweep); the drain then routes all
+	// three.
 	r2 := newQueueWorkerRouter(t, database)
-	if n, err := st.EventQueue.ResetProcessing(context.Background()); err != nil {
+	if n, err := st.EventQueue.ResetProcessing(context.Background(), "restart-instance", 2); err != nil {
 		t.Fatalf("boot recovery: %v", err)
 	} else if n != 1 {
 		t.Errorf("ResetProcessing reset %d rows, want 1 (the in-flight claim)", n)
@@ -171,7 +175,7 @@ func TestEventQueue_NoDoubleTaskOnReclaim(t *testing.T) {
 
 	// First pass: claim + route, but DON'T mark done — simulating a crash
 	// after the routing side effects committed, before MarkDone.
-	qe, err := st.EventQueue.ClaimNext(context.Background())
+	qe, err := st.EventQueue.ClaimNext(context.Background(), "reclaim-instance", 1)
 	if err != nil || qe == nil {
 		t.Fatalf("claim: qe=%v err=%v", qe, err)
 	}
@@ -187,7 +191,7 @@ func TestEventQueue_NoDoubleTaskOnReclaim(t *testing.T) {
 
 	// Crash recovery re-claims the still-'processing' row, then the drain
 	// reprocesses the same event — HandleEvent runs a second time.
-	if _, err := st.EventQueue.ResetProcessing(context.Background()); err != nil {
+	if _, err := st.EventQueue.ResetProcessing(context.Background(), "reclaim-instance", 2); err != nil {
 		t.Fatalf("reset processing: %v", err)
 	}
 	r.drainEventQueue(context.Background())

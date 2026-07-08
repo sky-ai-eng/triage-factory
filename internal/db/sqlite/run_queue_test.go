@@ -9,6 +9,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+// sqliteRQExecutorID/sqliteRQBootEpoch are the fixed ownership identity most
+// claims in this file stamp a row with.
+const (
+	sqliteRQExecutorID = "sqlite-test-executor"
+	sqliteRQBootEpoch  = int64(1)
+)
+
 func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -31,7 +38,7 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	}
 
 	// Empty queue: nothing claimable.
-	if got, err := stores.RunQueue.ClaimNextRun(ctx); err != nil || got != nil {
+	if got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch); err != nil || got != nil {
 		t.Fatalf("ClaimNextRun on empty queue = (%v, %v), want (nil, nil)", got, err)
 	}
 
@@ -50,7 +57,7 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 		t.Fatalf("set session_id: %v", err)
 	}
 
-	got, err := stores.RunQueue.ClaimNextRun(ctx)
+	got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch)
 	if err != nil {
 		t.Fatalf("ClaimNextRun: %v", err)
 	}
@@ -77,7 +84,7 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	}
 
 	// Claimed → no longer queued, so a second claim finds nothing.
-	if got2, err := stores.RunQueue.ClaimNextRun(ctx); err != nil || got2 != nil {
+	if got2, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch); err != nil || got2 != nil {
 		t.Fatalf("second ClaimNextRun = (%v, %v), want (nil, nil)", got2, err)
 	}
 }
@@ -115,7 +122,7 @@ func TestRunQueueStore_SQLite_CancelRequestedNotClaimed(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("RequestRunCancelSystem = (%v, %v), want (true, nil)", changed, err)
 	}
-	if got, err := stores.RunQueue.ClaimNextRun(ctx); err != nil || got != nil {
+	if got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch); err != nil || got != nil {
 		t.Fatalf("ClaimNextRun on cancel-requested blueprint = (%v, %v), want (nil, nil)", got, err)
 	}
 	// Idempotent: re-requesting on an already-flagged running row reports no change.
@@ -158,7 +165,7 @@ func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	}
 
 	// Claim it → running, attempts=1.
-	claimed, err := stores.RunQueue.ClaimNextRun(ctx)
+	claimed, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch)
 	if err != nil || claimed == nil {
 		t.Fatalf("ClaimNextRun: (%v, %v)", claimed, err)
 	}
@@ -167,7 +174,7 @@ func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	if err := stores.RunQueue.RequeueRun(ctx, org, "rqr-run-0", "transient setup error"); err != nil {
 		t.Fatalf("RequeueRun: %v", err)
 	}
-	reclaimed, err := stores.RunQueue.ClaimNextRun(ctx)
+	reclaimed, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch)
 	if err != nil || reclaimed == nil {
 		t.Fatalf("re-ClaimNextRun: (%v, %v)", reclaimed, err)
 	}
@@ -177,14 +184,14 @@ func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 
 	// Now the run is 'running' again (mid-flight). ResetProcessingRuns should
 	// flip it back to 'queued'.
-	n, err := stores.RunQueue.ResetProcessingRuns(ctx)
+	n, err := stores.RunQueue.ResetProcessingRuns(ctx, sqliteRQExecutorID, sqliteRQBootEpoch+1)
 	if err != nil {
 		t.Fatalf("ResetProcessingRuns: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("ResetProcessingRuns reset %d rows, want 1", n)
 	}
-	afterReset, err := stores.RunQueue.ClaimNextRun(ctx)
+	afterReset, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch)
 	if err != nil || afterReset == nil {
 		t.Fatalf("ClaimNextRun after reset: (%v, %v)", afterReset, err)
 	}
@@ -222,7 +229,7 @@ func TestRunQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 		t.Fatalf("Create dormant run: %v", err)
 	}
 
-	n, err := stores.RunQueue.ResetProcessingRuns(ctx)
+	n, err := stores.RunQueue.ResetProcessingRuns(ctx, sqliteRQExecutorID, sqliteRQBootEpoch)
 	if err != nil {
 		t.Fatalf("ResetProcessingRuns: %v", err)
 	}
@@ -230,8 +237,66 @@ func TestRunQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 		t.Fatalf("ResetProcessingRuns reset %d rows, want 0 (dormant run must stay parked)", n)
 	}
 	// And it is not claimable (it's not 'queued').
-	if got, err := stores.RunQueue.ClaimNextRun(ctx); err != nil || got != nil {
+	if got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch); err != nil || got != nil {
 		t.Fatalf("ClaimNextRun = (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
+// TestRunQueueStore_SQLite_ResetProcessingRuns_ScopedToOwner pins the
+// TFAC-578 ownership predicate on the SQLite impl too — SQLite is N=1 (there
+// is never a live sibling to protect in practice), but the predicate must
+// hold identically to Postgres: a different executor_id is never swept, and
+// the same executor/epoch (not yet an earlier boot) is left untouched.
+func TestRunQueueStore_SQLite_ResetProcessingRuns_ScopedToOwner(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	task := seedEntityEventTask(t, conn, "rq-scoped")
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqso-p0", Name: "Step 0", Body: "b", Source: "user"})
+	insertBlueprintForTest(t, conn, "rqso-bp", "RQ Scoped Blueprint")
+	if err := stores.Blueprints.ReplaceSteps(ctx, org, "rqso-bp", []string{"rqso-p0"}, nil); err != nil {
+		t.Fatalf("ReplaceSteps: %v", err)
+	}
+	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "rqso-br", BlueprintID: "rqso-bp", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+		WorktreePath: "/tmp/wt-rqso",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	step0 := 0
+	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+		ID: "rqso-run-0", TaskID: task.ID, PromptID: "rqso-p0", Model: "m",
+		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("EnqueueRun: %v", err)
+	}
+	if _, err := stores.RunQueue.ClaimNextRun(ctx, "instance-a", 3); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	// A different executor_id (never happens at real N=1, but the predicate
+	// must not match) leaves the row untouched.
+	if n, err := stores.RunQueue.ResetProcessingRuns(ctx, "instance-b", 4); err != nil {
+		t.Fatalf("ResetProcessingRuns (other executor): %v", err)
+	} else if n != 0 {
+		t.Errorf("ResetProcessingRuns for a different executor_id reset %d rows, want 0", n)
+	}
+	// The same executor at the SAME epoch (not an earlier boot) also leaves
+	// it untouched.
+	if n, err := stores.RunQueue.ResetProcessingRuns(ctx, "instance-a", 3); err != nil {
+		t.Fatalf("ResetProcessingRuns (same epoch): %v", err)
+	} else if n != 0 {
+		t.Errorf("ResetProcessingRuns at the same epoch reset %d rows, want 0", n)
+	}
+	// The same executor at a LATER epoch (a restart) sweeps it.
+	if n, err := stores.RunQueue.ResetProcessingRuns(ctx, "instance-a", 4); err != nil {
+		t.Fatalf("ResetProcessingRuns (restart): %v", err)
+	} else if n != 1 {
+		t.Errorf("ResetProcessingRuns on restart reset %d rows, want 1", n)
 	}
 }
 

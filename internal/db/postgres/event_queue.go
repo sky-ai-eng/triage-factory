@@ -60,16 +60,20 @@ func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.
 	return id, nil
 }
 
-func (s *eventQueueStore) ClaimNext(ctx context.Context) (*domain.QueuedEvent, error) {
+func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, bootEpoch int64) (*domain.QueuedEvent, error) {
 	// FOR UPDATE SKIP LOCKED on the inner select so multiple router
 	// workers can drain concurrently without ever claiming the same row
 	// — the horizontal-routing groundwork (running N workers is a
 	// non-goal for now). The single-statement UPDATE ... RETURNING is
 	// atomic; an empty queue matches no row and the scan reports
 	// ErrNoRows -> (nil, nil).
+	//
+	// executor_id + boot_epoch are stamped in this same statement (TFAC-578),
+	// mirroring RunQueueStore.ClaimNextRun — see ResetProcessing.
 	row := s.conn.QueryRowContext(ctx, `
 		UPDATE public.event_queue
-		SET status = 'processing', claimed_at = now(), attempts = attempts + 1
+		SET status = 'processing', claimed_at = now(), attempts = attempts + 1,
+		    executor_id = $1, boot_epoch = $2
 		WHERE id = (
 			SELECT id FROM public.event_queue
 			WHERE status = 'pending'
@@ -79,7 +83,7 @@ func (s *eventQueueStore) ClaimNext(ctx context.Context) (*domain.QueuedEvent, e
 		)
 		RETURNING id, org_id, event_id, entity_id, event_type,
 		          status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at
-	`)
+	`, executorID, bootEpoch)
 	return scanPgQueuedEvent(row)
 }
 
@@ -109,11 +113,19 @@ func (s *eventQueueStore) Requeue(ctx context.Context, orgID string, id int64, l
 	return err
 }
 
-func (s *eventQueueStore) ResetProcessing(ctx context.Context) (int, error) {
+func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
+	// Ownership-scoped (TFAC-578), mirroring RunQueueStore.ResetProcessingRuns:
+	// only rows this instance itself claimed (executor_id = $1) during a
+	// strictly earlier boot (boot_epoch < $2) are reset. A live sibling's
+	// still-processing row carries a different executor_id and is never
+	// touched. `boot_epoch IS NULL` covers the one-time upgrade edge: a row
+	// already 'processing' from before this column existed.
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE public.event_queue SET status = 'pending', claimed_at = NULL
 		WHERE status = 'processing'
-	`)
+		  AND executor_id = $1
+		  AND (boot_epoch IS NULL OR boot_epoch < $2)
+	`, executorID, bootEpoch)
 	if err != nil {
 		return 0, err
 	}
