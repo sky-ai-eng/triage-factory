@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -691,11 +692,12 @@ func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID stri
 	if _, err := s.admin.ExecContext(ctx, `
 		INSERT INTO blueprint_runs
 			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
-			 actor_agent_id, status, worktree_path, abort_reason, completed_at, started_at, step_plan)
+			 actor_agent_id, status, worktree_path, abort_reason, completed_at, started_at, step_plan, entity_id)
 		VALUES (
 			$1, $2, NULL,
 			$3, $4, $5, $6, $7,
-			$8, $9, $10, $11, $12, now(), $13
+			$8, $9, $10, $11, $12, now(), $13,
+			(SELECT entity_id FROM tasks WHERE id = $4 AND org_id = $2)
 		)
 	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan); err != nil {
 		return "", fmt.Errorf("insert blueprint_run (event): %w", err)
@@ -725,9 +727,29 @@ func (s *blueprintStore) createRunManual(ctx context.Context, orgID string, br d
 	return br.ID, nil
 }
 
-// CreateRunIfNotFiredSystem is the event-path fenced insert (admin pool): ON
-// CONFLICT against blueprint_runs_event_trigger_fence makes a replayed
-// (triggering_event_id, trigger_id) a clean no-op (inserted=false).
+// blueprintRunsOneActivePerEntityConstraint is the partial unique index
+// name backing "at most one active (trigger_type='event', status='running')
+// blueprint_run per entity" (TFAC-579) — the DB-enforced twin of the
+// router's in-process entity gate (HasActiveAutoRunForEntitySystem), which
+// was check-then-act: two processes (or a leader-failover overlap within
+// one) could both pass the check and each mint an active auto run on the
+// same entity via different triggers. See the migration for the full index
+// definition.
+const blueprintRunsOneActivePerEntityConstraint = "blueprint_runs_one_active_auto_run_per_entity"
+
+// CreateRunIfNotFiredSystem is the event-path fenced insert (admin pool).
+// Two independent unique constraints can turn this insert into a clean
+// no-op instead of a duplicate:
+//
+//   - blueprint_runs_event_trigger_fence (ON CONFLICT, inference-targeted):
+//     a replayed (triggering_event_id, trigger_id) — the at-least-once event
+//     queue redelivering an event whose first auto-delegation already fired.
+//   - blueprint_runs_one_active_auto_run_per_entity (caught below): a
+//     DIFFERENT (event, trigger) pair racing to fire on the SAME entity
+//     while another auto run is still active there. A single INSERT's ON
+//     CONFLICT can only target one arbiter index, so this second case
+//     isn't inference-eligible — it surfaces as a raw unique_violation,
+//     which is translated to the identical inserted=false contract.
 func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun) (bool, error) {
 	if br.TriggeringEventID == "" || br.TriggerID == "" {
 		return false, db.ErrBlueprintRunFenceRequiresEventAndTrigger
@@ -745,15 +767,20 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 	res, err := s.admin.ExecContext(ctx, `
 		INSERT INTO blueprint_runs
 			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
-			 actor_agent_id, status, worktree_path, started_at, step_plan)
+			 actor_agent_id, status, worktree_path, started_at, step_plan, entity_id)
 		VALUES (
 			$1, $2, NULL,
 			$3, $4, 'event', $5, $6,
-			$7, $8, $9, now(), $10
+			$7, $8, $9, now(), $10,
+			(SELECT entity_id FROM tasks WHERE id = $4 AND org_id = $2)
 		)
 		ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
 	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blueprintRunsOneActivePerEntityConstraint {
+			return false, nil
+		}
 		return false, fmt.Errorf("insert blueprint_run (fenced): %w", err)
 	}
 	n, err := res.RowsAffected()

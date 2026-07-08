@@ -37,13 +37,14 @@ func (s *systemLLMRunStore) Record(ctx context.Context, row domain.SystemLLMRun)
 		INSERT INTO system_llm_runs
 			(id, org_id, job, model, total_cost_usd,
 			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-			 duration_ms, num_turns, is_error, metadata_json, started_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 duration_ms, num_turns, is_error, metadata_json, started_at, completed_at, trace_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (trace_id) WHERE trace_id IS NOT NULL DO NOTHING
 	`,
 		id, row.OrgID, row.Job, row.Model, row.TotalCostUSD,
 		row.InputTokens, row.OutputTokens, row.CacheReadTokens, row.CacheCreationTokens,
 		row.DurationMs, row.NumTurns, row.IsError, nullIfEmpty(row.MetadataJSON),
-		row.StartedAt, completedAt,
+		row.StartedAt, completedAt, nullIfEmpty(row.TraceID),
 	)
 	return err
 }

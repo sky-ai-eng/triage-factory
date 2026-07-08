@@ -45,28 +45,50 @@ type PendingFiringsStore interface {
 	// userID — the local schema has no creator column.
 	Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string) (bool, error)
 
-	// PopForEntity returns the oldest pending firing for the entity,
-	// or nil if none. Does NOT mutate or reserve the row — the
-	// drainer is responsible for marking 'fired' or 'skipped_stale'
-	// once it decides the outcome. Callers must serialize draining
-	// per entity (the router holds a per-entity mutex around the
-	// pop→decide→mark sequence; without it concurrent drains can
-	// observe and double-fire the same row).
+	// PopForEntity is a CLAIMING pop (TFAC-579): it atomically flips the
+	// oldest 'pending' row for the entity to 'draining' and returns it, or
+	// nil if none. Postgres implements this as one UPDATE ... WHERE id =
+	// (SELECT ... FOR UPDATE SKIP LOCKED) statement, so two concurrent
+	// drains (different processes, or a leader-failover overlap within
+	// one) can never observe and pop the same row — the second caller's
+	// claim simply finds the row already 'draining' (excluded from the
+	// 'pending' predicate) and moves on to the next one, or nil.
+	//
+	// The caller owns resolving a popped row to a terminal state
+	// (MarkFired / MarkSkipped) or, on a transient failure, releasing it
+	// back to 'pending' via Release so a future drain retries it — a
+	// 'draining' row left unresolved is not itself unsafe (it simply
+	// isn't picked up again until released), but it also never surfaces
+	// via HasPendingForEntity / ListEntitiesWithPending, so a caller that
+	// forgets to release orphans the row for that firing's lifetime. The
+	// per-entity in-process mutex the router already holds around the
+	// whole pop→decide→mark sequence is still worth keeping (it avoids
+	// needless round-trips reclaiming rows across goroutines in one
+	// process), but is no longer load-bearing for correctness.
 	PopForEntity(ctx context.Context, orgID, entityID string) (*domain.PendingFiring, error)
 
-	// MarkFired transitions a pending firing to 'fired' and records the
+	// Release reverts a 'draining' row back to 'pending' after a
+	// transient failure (DB read, spawner.Delegate error) downstream of
+	// PopForEntity — the claim didn't pan out, but the intent is still
+	// valid and should be retried by a future drain or the periodic
+	// sweeper. Guarded by status='draining' so it's a no-op on a row
+	// that's since reached a terminal state some other way.
+	Release(ctx context.Context, orgID string, firingID int64) error
+
+	// MarkFired transitions a 'draining' firing to 'fired' and records the
 	// blueprint_run that resulted from it (runID is a blueprint_run id — the
 	// firing unit — which fired_run_id FKs to blueprint_runs). Guarded by
-	// status='pending' so a duplicate drain that lost the per-entity mutex race
-	// can't flip a terminal row.
+	// status='draining' — only a row PopForEntity actually claimed can be
+	// resolved this way — so a stray call against a 'pending' or already-
+	// terminal row is a no-op rather than a silent double-transition.
 	MarkFired(ctx context.Context, orgID string, firingID int64, runID string) error
 
-	// MarkSkipped transitions a pending firing to 'skipped_stale'
+	// MarkSkipped transitions a 'draining' firing to 'skipped_stale'
 	// with a reason describing a definitive stale outcome (task
 	// closed, trigger disabled, breaker tripped, claim changed).
-	// Transient fire-time failures stay 'pending' for retry. Skipping
-	// doesn't halt the drain loop — the next pending firing for the
-	// entity is still considered.
+	// Transient fire-time failures release back to 'pending' via Release
+	// instead. Skipping doesn't halt the drain loop — the next pending
+	// firing for the entity is still considered.
 	MarkSkipped(ctx context.Context, orgID string, firingID int64, reason string) error
 
 	// HasPendingForEntity returns true iff the entity has any

@@ -523,12 +523,16 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	// edits from different widgets (pinned-repos chip + tracker
 	// picker) would otherwise both read pre-edit state, merge their
 	// own field, and serially overwrite the row — leaving whichever
-	// landed second as the only contribution. Holding the mutex
+	// landed second as the only contribution. Holding the lock
 	// across read+merge+write makes the whole sequence atomic from
-	// the perspective of other PATCHes for the same project.
-	mu := s.projectMutex(id)
-	mu.Lock()
-	defer mu.Unlock()
+	// the perspective of other PATCHes for the same project — across
+	// every control pod in multi mode, not just this process (TFAC-579).
+	release, err := s.acquireKeyedLock(r.Context(), &s.projectMutexes, projectRMWLockSalt, id)
+	if err != nil {
+		internalError(w, "projects", err)
+		return
+	}
+	defer release()
 
 	var existing *domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -781,15 +785,18 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	// Take the same per-project lock that PATCH uses. Without this,
-	// an in-flight autosave (holding the mutex, mid read-merge-write)
+	// an in-flight autosave (holding the lock, mid read-merge-write)
 	// races a DELETE: DELETE drops the row out from under PATCH, and
 	// PATCH's UPDATE returns sql.ErrNoRows which the handler maps to
 	// a 500. With the lock, DELETE waits for PATCH to finish
 	// committing, then deletes — and a PATCH that arrives after the
 	// DELETE finds the row gone and 404s cleanly.
-	mu := s.projectMutex(id)
-	mu.Lock()
-	defer mu.Unlock()
+	release, err := s.acquireKeyedLock(r.Context(), &s.projectMutexes, projectRMWLockSalt, id)
+	if err != nil {
+		internalError(w, "projects", err)
+		return
+	}
+	defer release()
 
 	// Snapshot pinned_repos BEFORE the cascade fires so we can prune
 	// each affected bare clone's worktree registration list after the
@@ -829,6 +836,16 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "projects", err)
 		return
 	}
+
+	// The row is gone — any concurrent PATCH/upload racing in from here
+	// will do its own existence check and 404 cleanly, so the lock has
+	// nothing left to guard. Release now rather than holding it (a
+	// Postgres connection, in multi mode) through the best-effort disk
+	// cleanup and worktree prune below, which can be slow for a large
+	// knowledge-base dir or a big pinned-repo list. release is
+	// idempotent, so the deferred call above still fires safely as a
+	// no-op on every return path.
+	release()
 
 	// Best-effort on-disk cleanup. The DB delete is the source of
 	// truth and a stale on-disk dir is recoverable (next run that
@@ -1530,18 +1547,53 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	}
 	id := r.PathValue("id")
 
+	// Parse the multipart body BEFORE taking the per-project lock.
+	// ParseMultipartForm reads the whole request off the wire — the
+	// slow, client-bandwidth-bound part of this handler — and doesn't
+	// touch the project row or its on-disk directory, so it doesn't
+	// need the lock. Acquiring the lock only after this point means a
+	// slow uploader doesn't hold a Postgres connection (and, in multi
+	// mode, the advisory lock's session) idle for the duration of the
+	// network transfer; see the lock acquisition below for what it
+	// does need to cover. MaxBytesReader caps the WHOLE request,
+	// including form fields and per-file streams; per-file caps are
+	// enforced separately during the copy below so a single oversize
+	// file doesn't poison siblings that were within budget.
+	r.Body = http.MaxBytesReader(w, r.Body, knowledgeMaxRequestBytes)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart parse: " + err.Error()})
+		return
+	}
+	defer func() {
+		if r.MultipartForm != nil {
+			if err := r.MultipartForm.RemoveAll(); err != nil {
+				projectsLog.Warn("knowledge upload: cleanup multipart form failed", "project", id, "error", err)
+			}
+		}
+	}()
+	files := r.MultipartForm.File["file"]
+	if len(files) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no files in upload (use form field 'file')"})
+		return
+	}
+
 	// Take the same per-project lock that PATCH and DELETE use.
 	// Without it, an upload that has just verified the project
 	// exists could race a DELETE: DELETE drops the row and
 	// RemoveAll's the project dir, then this handler re-creates
 	// knowledge-base/ and writes files into a project that no
 	// longer exists in the DB — leaving orphaned on-disk state
-	// after a successful delete. Holding the mutex across the
+	// after a successful delete. Holding the lock across the
 	// existence check + write makes the upload visibly atomic
-	// to a concurrent delete.
-	mu := s.projectMutex(id)
-	mu.Lock()
-	defer mu.Unlock()
+	// to a concurrent delete. Acquired here, after the body is
+	// already fully read above, so the held connection only spans
+	// the DB check + local disk writes below, not the upload itself.
+	release, err := s.acquireKeyedLock(r.Context(), &s.projectMutexes, projectRMWLockSalt, id)
+	if err != nil {
+		internalError(w, "projects", err)
+		return
+	}
+	defer release()
 
 	userID := ClaimsFrom(r.Context()).Subject
 	var project *domain.Project
@@ -1568,28 +1620,6 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
 		projectsLog.Error("knowledge upload: mkdir failed", "dir", kbDir, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create knowledge dir"})
-		return
-	}
-
-	// MaxBytesReader caps the WHOLE request, including form fields
-	// and per-file streams. Per-file caps are enforced separately
-	// during the copy below so a single oversize file doesn't poison
-	// siblings that were within budget.
-	r.Body = http.MaxBytesReader(w, r.Body, knowledgeMaxRequestBytes)
-	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart parse: " + err.Error()})
-		return
-	}
-	defer func() {
-		if r.MultipartForm != nil {
-			if err := r.MultipartForm.RemoveAll(); err != nil {
-				projectsLog.Warn("knowledge upload: cleanup multipart form failed", "project", id, "error", err)
-			}
-		}
-	}()
-	files := r.MultipartForm.File["file"]
-	if len(files) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no files in upload (use form field 'file')"})
 		return
 	}
 
@@ -1755,9 +1785,12 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 	// atomic from the perspective of other writers, so a racing
 	// PATCH can't sandwich a stale snapshot of the project row
 	// over the timestamp bump.
-	mu := s.projectMutex(id)
-	mu.Lock()
-	defer mu.Unlock()
+	release, err := s.acquireKeyedLock(r.Context(), &s.projectMutexes, projectRMWLockSalt, id)
+	if err != nil {
+		internalError(w, "projects", err)
+		return
+	}
+	defer release()
 
 	userID := ClaimsFrom(r.Context()).Subject
 	var project *domain.Project

@@ -239,6 +239,24 @@ func (s *taskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, ent
 	return s.FindOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
 }
 
+// FindOrCreateAtUnlessEntityActiveSystem mirrors the plain check-then-act
+// the router used to do inline (FindActiveByEntitySystem, then
+// conditionally FindOrCreateAtSystem) before TFAC-579 moved it behind a
+// real lock on Postgres. SQLite/local is single-connection N=1 — there's no
+// concurrent writer for a lock to exclude — so this exists for interface
+// conformance with the Postgres impl rather than a correctness fix here.
+func (s *taskStore) FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (task *domain.Task, created, suppressed bool, err error) {
+	active, err := s.FindActiveByEntitySystem(ctx, orgID, entityID)
+	if err != nil {
+		return nil, false, false, err
+	}
+	if len(active) > 0 {
+		return nil, false, true, nil
+	}
+	task, created, err = s.FindOrCreateAtSystem(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+	return task, created, false, err
+}
+
 func (s *taskStore) SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error {
 	return s.SetVisibilityTeams(ctx, orgID, taskID, teamIDs)
 }

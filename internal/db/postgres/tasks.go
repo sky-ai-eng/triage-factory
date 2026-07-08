@@ -342,6 +342,38 @@ func (s *taskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, ent
 	return findOrCreateTaskAt(ctx, s.admin, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
 }
 
+// FindOrCreateAtUnlessEntityActiveSystem backs the became_atomic suppression
+// with a real DB guarantee (TFAC-579) instead of a separate check-then-act
+// (FindActiveByEntitySystem, then conditionally FindOrCreateAtSystem): the
+// active-check and the select-or-insert run in ONE transaction, under the
+// SAME per-entity pg_advisory_xact_lock findOrCreateTaskAt takes — so a
+// concurrent call creating a DIFFERENT-event-type task on this entity (via
+// FindOrCreateAt/FindOrCreateAtSystem, which contend on the identical lock
+// key) can never land in the window between this method's active-check and
+// its own insert.
+func (s *taskStore) FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (task *domain.Task, created, suppressed bool, err error) {
+	err = inTx(ctx, s.admin, func(tx queryer) error {
+		if _, e := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, entityID, entityTaskCreationLockSalt); e != nil {
+			return fmt.Errorf("lock entity for became_atomic upsert: %w", e)
+		}
+		active, e := findActiveTasksByEntity(ctx, tx, orgID, entityID)
+		if e != nil {
+			return e
+		}
+		if len(active) > 0 {
+			suppressed = true
+			return nil
+		}
+		var e2 error
+		task, created, e2 = findOrCreateTaskAtLocked(ctx, tx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+		return e2
+	})
+	if err != nil {
+		return nil, false, false, err
+	}
+	return task, created, suppressed, nil
+}
+
 func (s *taskStore) SetVisibilityTeams(ctx context.Context, orgID, taskID string, teamIDs []string) error {
 	return setVisibilityTeams(ctx, s.q, orgID, taskID, teamIDs)
 }
@@ -441,7 +473,33 @@ func resolveTeamBind(ctx context.Context, q queryer, orgID, teamID string) (stri
 	return canonical, nil
 }
 
+// entityTaskCreationLockSalt is the hashtextextended salt for the
+// per-entity advisory lock findOrCreateTaskAt and
+// findOrCreateTaskAtUnlessEntityActive take before touching tasks for an
+// entity (TFAC-579). Both MUST use this same salt — they only close the
+// became_atomic cross-event-type race (see the interface doc on
+// FindOrCreateAtUnlessEntityActiveSystem) if every task-creation path for
+// an entity contends on the identical lock key.
+const entityTaskCreationLockSalt = 5
+
 func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+	var task *domain.Task
+	var created bool
+	err := inTx(ctx, q, func(tx queryer) error {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, entityID, entityTaskCreationLockSalt); err != nil {
+			return fmt.Errorf("lock entity for task upsert: %w", err)
+		}
+		var err error
+		task, created, err = findOrCreateTaskAtLocked(ctx, tx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+		return err
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return task, created, nil
+}
+
+func findOrCreateTaskAtLocked(ctx context.Context, q queryer, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
 	// team_id is the owning/attributed team stamped on a newly created
 	// row — caller-supplied. User-source handlers carry a real team
 	// UUID. Org-visible handlers (visibility='org', team_id NULL)

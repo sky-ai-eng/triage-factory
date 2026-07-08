@@ -173,10 +173,13 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		}
 
 		if created {
-			// Seed the discovery snapshot.
+			// Seed the discovery snapshot. CAS against entity.PollSeq (0 for
+			// a just-created row); a miss means a concurrent seed already won.
 			snapJSON, _ := json.Marshal(snap)
-			if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, entity.ID, string(snapJSON)); err != nil {
+			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 				trackerLog.Error("seed snapshot failed", "source_id", sid, "error", err)
+			} else if !ok {
+				trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", sid)
 			}
 			// If the PR is already terminal, mark the entity closed immediately
 			// so it doesn't sit in the active refresh set forever (Phase 3
@@ -421,8 +424,10 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			// stub from emitting a merged/closed event for a PR that closed before
 			// we tracked it. The next cycle diffs against this seed normally.
 			snapJSON, _ := json.Marshal(newSnap)
-			if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, item.entity.ID, string(snapJSON)); err != nil {
+			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq); err != nil {
 				trackerLog.Error("seed stub snapshot failed", "source_id", item.entity.SourceID, "error", err)
+			} else if !ok {
+				trackerLog.Warn("seed stub snapshot CAS lost race, skipping", "source_id", item.entity.SourceID)
 			}
 			if item.entity.Title != newSnap.Title {
 				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
@@ -438,10 +443,16 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// Diff against previous snapshot.
 		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver)
 
-		// Update entity snapshot + title.
+		// Update entity snapshot + title. CAS against item.entity.PollSeq (the
+		// value this cycle's diff was read against) — a miss means a
+		// straggler ex-leader's late write and the transition it computed
+		// above is dropped along with it (TFAC-579): the next poll cycle
+		// re-diffs from whatever snapshot actually won.
 		snapJSON, _ := json.Marshal(newSnap)
-		if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, item.entity.ID, string(snapJSON)); err != nil {
+		if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq); err != nil {
 			trackerLog.Error("update snapshot failed", "source_id", item.entity.SourceID, "error", err)
+		} else if !ok {
+			trackerLog.Warn("update snapshot CAS lost race (stale poll_seq), skipping", "source_id", item.entity.SourceID)
 		}
 		if item.entity.Title != newSnap.Title {
 			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
@@ -920,8 +931,10 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		}
 		if created {
 			snapJSON, _ := json.Marshal(snap)
-			if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, entity.ID, string(snapJSON)); err != nil {
+			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 				trackerLog.Error("seed snapshot failed", "source_id", snap.Key, "error", err)
+			} else if !ok {
+				trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", snap.Key)
 			}
 			if state.Description != "" {
 				if err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description); err != nil {
@@ -994,8 +1007,10 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 			// a rediscovered stub picks it up from Phase 1's else-branch,
 			// otherwise it fills in on a later discovery pass.
 			snapJSON, _ := json.Marshal(newSnap)
-			if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, e.ID, string(snapJSON)); err != nil {
+			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq); err != nil {
 				trackerLog.Error("seed jira stub snapshot failed", "source_id", e.SourceID, "error", err)
+			} else if !ok {
+				trackerLog.Warn("seed jira stub snapshot CAS lost race, skipping", "source_id", e.SourceID)
 			}
 			if e.Title != newSnap.Summary {
 				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
@@ -1013,7 +1028,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 			if err := json.Unmarshal([]byte(e.SnapshotJSON), &prevSnap); err != nil {
 				trackerLog.Warn("corrupt jira snapshot, reseeding", "source_id", e.SourceID, "error", err)
 				snapJSON, _ := json.Marshal(newSnap)
-				_ = t.entities.UpdateSnapshotSystem(context.Background(), orgID, e.ID, string(snapJSON))
+				_, _ = t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq)
 				continue
 			}
 		}
@@ -1024,9 +1039,15 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		// detection still works for previously-known done statuses).
 		events := DiffJiraSnapshots(prevSnap, newSnap, e.ID, projects.doneMembersForKey(newSnap.Key))
 
+		// CAS against e.PollSeq (the value this cycle's diff was read
+		// against) — a miss drops the transition computed above along with
+		// the stale write (TFAC-579); the next poll cycle re-diffs from
+		// whatever snapshot actually won.
 		snapJSON, _ := json.Marshal(newSnap)
-		if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, e.ID, string(snapJSON)); err != nil {
+		if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq); err != nil {
 			trackerLog.Error("update jira snapshot failed", "source_id", e.SourceID, "error", err)
+		} else if !ok {
+			trackerLog.Warn("update jira snapshot CAS lost race (stale poll_seq), skipping", "source_id", e.SourceID)
 		}
 		if e.Title != newSnap.Summary {
 			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)

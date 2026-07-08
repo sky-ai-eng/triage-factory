@@ -71,23 +71,45 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 	return n > 0, nil
 }
 
+// PopForEntity is a claiming pop: the subquery locks the oldest pending row
+// under FOR UPDATE SKIP LOCKED (so a concurrent claimant skips it rather
+// than blocking on it) and the outer UPDATE flips it to 'draining' in the
+// same statement — there is no window between "read the candidate" and
+// "claim it" for a second drain to observe. Two concurrent PopForEntity
+// calls against the same entity therefore never return the same row: the
+// loser's subquery either skips the now-locked row and returns the next
+// candidate, or finds none.
 func (s *pendingFiringsStore) PopForEntity(ctx context.Context, orgID, entityID string) (*domain.PendingFiring, error) {
 	row := s.q.QueryRowContext(ctx, `
-		SELECT id, entity_id, task_id, trigger_id, triggering_event_id,
-		       status, COALESCE(skip_reason, ''), queued_at, drained_at, fired_run_id
-		FROM pending_firings
-		WHERE org_id = $1 AND entity_id = $2 AND status = 'pending'
-		ORDER BY queued_at ASC, id ASC
-		LIMIT 1
+		UPDATE pending_firings
+		SET status = 'draining'
+		WHERE id = (
+			SELECT id FROM pending_firings
+			WHERE org_id = $1 AND entity_id = $2 AND status = 'pending'
+			ORDER BY queued_at ASC, id ASC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, entity_id, task_id, trigger_id, triggering_event_id,
+		          status, COALESCE(skip_reason, ''), queued_at, drained_at, fired_run_id
 	`, orgID, entityID)
 	return scanPgPendingFiring(row)
+}
+
+func (s *pendingFiringsStore) Release(ctx context.Context, orgID string, firingID int64) error {
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE pending_firings
+		SET status = 'pending'
+		WHERE org_id = $1 AND id = $2 AND status = 'draining'
+	`, orgID, firingID)
+	return err
 }
 
 func (s *pendingFiringsStore) MarkFired(ctx context.Context, orgID string, firingID int64, runID string) error {
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE pending_firings
 		SET status = 'fired', drained_at = now(), fired_run_id = $1
-		WHERE org_id = $2 AND id = $3 AND status = 'pending'
+		WHERE org_id = $2 AND id = $3 AND status = 'draining'
 	`, runID, orgID, firingID)
 	return err
 }
@@ -96,7 +118,7 @@ func (s *pendingFiringsStore) MarkSkipped(ctx context.Context, orgID string, fir
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE pending_firings
 		SET status = 'skipped_stale', drained_at = now(), skip_reason = $1
-		WHERE org_id = $2 AND id = $3 AND status = 'pending'
+		WHERE org_id = $2 AND id = $3 AND status = 'draining'
 	`, reason, orgID, firingID)
 	return err
 }

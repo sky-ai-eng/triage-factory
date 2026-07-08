@@ -54,7 +54,7 @@ var _ db.EntityStore = (*entityStore)(nil)
 // when it needs structured data.
 const pgEntitySelectCols = `id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
        COALESCE(snapshot_json::text, ''), COALESCE(description, ''), state, project_id,
-       COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at`
+       COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at, poll_seq`
 
 // --- Lookup ---
 
@@ -379,6 +379,28 @@ func updateEntitySnapshot(ctx context.Context, q queryer, orgID, id, snapshotJSO
 	return err
 }
 
+// UpdateSnapshotCASSystem is UpdateSnapshotSystem with a poll_seq CAS
+// (TFAC-579): the WHERE clause pins expectedPollSeq alongside org_id/id, so
+// a straggler ex-leader's late write (its expectedPollSeq is stale by the
+// time it lands) affects zero rows instead of overwriting a newer
+// snapshot. poll_seq bumps by 1 on every successful write so the caller's
+// next-read-then-write cycle has a fresh value to CAS against.
+func (s *entityStore) UpdateSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (bool, error) {
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE entities
+		SET snapshot_json = $1::jsonb, last_polled_at = $2, poll_seq = poll_seq + 1
+		WHERE org_id = $3 AND id = $4 AND poll_seq = $5
+	`, snapshotJSON, time.Now(), orgID, id, expectedPollSeq)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) error {
 	_, err := s.q.ExecContext(ctx, `UPDATE entities SET snapshot_json = $1::jsonb WHERE org_id = $2 AND id = $3`, snapshotJSON, orgID, id)
 	return err
@@ -530,7 +552,7 @@ func scanEntityRow(row *sql.Row) (*domain.Entity, error) {
 	var projectID sql.NullString
 	err := row.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
 		&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.ClassificationRationale,
-		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt)
+		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -550,7 +572,7 @@ func scanEntityList(rows *sql.Rows) ([]domain.Entity, error) {
 		var projectID sql.NullString
 		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
 			&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.ClassificationRationale,
-			&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt); err != nil {
+			&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq); err != nil {
 			return nil, err
 		}
 		if projectID.Valid {

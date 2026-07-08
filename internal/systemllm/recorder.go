@@ -81,6 +81,15 @@ func (r *Recorder) Record(ctx context.Context, c Call, outcome *agentproc.Outcom
 		Model:       c.Model,
 		StartedAt:   c.StartedAt,
 		CompletedAt: time.Now().UTC(),
+		// TraceID (TFAC-579) is the idempotency key backing the store's
+		// duplicate-insert no-op. Sourced from the subprocess's own Claude
+		// Code session id, NOT the caller-supplied Call.Job-shaped
+		// TraceID agentproc.Options takes (that one's a per-job-type
+		// label like "scorer-batch", reused across every invocation — it
+		// can't identify a single call). Empty when the subprocess never
+		// got far enough to mint a session; the store treats that as "no
+		// idempotency check" rather than colliding every such row.
+		TraceID: outcome.SessionID,
 	}
 	if usage != nil {
 		row.InputTokens = usage.InputTokens

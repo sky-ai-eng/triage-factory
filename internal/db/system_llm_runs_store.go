@@ -24,5 +24,11 @@ type SystemLLMRunStore interface {
 	// a uuid). row.CompletedAt defaults to now when zero. Callers own the
 	// "never break the job on a recording failure" contract; this method
 	// just returns the insert error for the caller to log and swallow.
+	//
+	// row.TraceID (TFAC-579) is the idempotency key: a duplicate Record()
+	// call for the same invocation (retry, double-call) is a no-op rather
+	// than double-counting spend, enforced by a partial unique index on
+	// trace_id in both backends. Empty TraceID never collides with itself
+	// (the index excludes NULL/empty) — every insert with no id just lands.
 	Record(ctx context.Context, row domain.SystemLLMRun) error
 }

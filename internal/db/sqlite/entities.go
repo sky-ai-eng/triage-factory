@@ -39,7 +39,7 @@ const entityIDInChunkSize = 500
 
 const entitySelectCols = `id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
        COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id,
-       COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at`
+       COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at, poll_seq`
 
 // --- Lookup ---
 
@@ -391,6 +391,29 @@ func (s *entityStore) UpdateSnapshotSystem(ctx context.Context, orgID, id, snaps
 	return s.UpdateSnapshot(ctx, orgID, id, snapshotJSON)
 }
 
+// UpdateSnapshotCASSystem mirrors the Postgres impl's poll_seq CAS
+// (TFAC-579) for interface conformance — real CAS semantics even though
+// SQLite/local is single-connection N=1 and has no concurrent-leader race
+// for it to guard against.
+func (s *entityStore) UpdateSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE entities
+		SET snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1
+		WHERE id = ? AND poll_seq = ?
+	`, snapshotJSON, time.Now(), id, expectedPollSeq)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) error {
 	return s.UpdateTitle(ctx, orgID, id, title)
 }
@@ -494,7 +517,7 @@ func scanEntityRow(row *sql.Row) (*domain.Entity, error) {
 	var projectID sql.NullString
 	err := row.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
 		&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.ClassificationRationale,
-		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt)
+		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -512,7 +535,7 @@ func scanEntityFromRows(rows *sql.Rows) (*domain.Entity, error) {
 	var projectID sql.NullString
 	if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
 		&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.ClassificationRationale,
-		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt); err != nil {
+		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq); err != nil {
 		return nil, err
 	}
 	if projectID.Valid {
