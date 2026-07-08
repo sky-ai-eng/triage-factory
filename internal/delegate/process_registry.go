@@ -205,9 +205,31 @@ func (s *Spawner) stampExecutor(orgID, runID string) {
 	if s.agentRuns == nil {
 		return
 	}
-	if err := s.agentRuns.SetExecutorSystem(context.Background(), orgID, runID, s.executorID); err != nil {
-		delegateLog.Warn("stamp executor on run failed", "executor", s.executorID, "run_id", runID, "error", err)
+	executorID, _ := s.executorIdentity()
+	if err := s.agentRuns.SetExecutorSystem(context.Background(), orgID, runID, executorID); err != nil {
+		delegateLog.Warn("stamp executor on run failed", "executor", executorID, "run_id", runID, "error", err)
 	}
+}
+
+// SetExecutorID overrides this spawner's executor identity with the
+// persistent instance-registry id + boot epoch main resolved at startup,
+// replacing the constructor's random per-boot uuid fallback. Call once at
+// startup, before RunDispatcher / RunInstanceHeartbeat start; tests that
+// never call this keep NewSpawner's random default.
+func (s *Spawner) SetExecutorID(id string, bootEpoch int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.executorID = id
+	s.bootEpoch = bootEpoch
+}
+
+// executorIdentity returns the current (executorID, bootEpoch) pair under
+// lock — the read side of SetExecutorID, used by stampExecutor and the
+// instance heartbeat loop.
+func (s *Spawner) executorIdentity() (string, int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.executorID, s.bootEpoch
 }
 
 // SetMaxConcurrentRuns resizes the off-dispatcher concurrency cap. Call

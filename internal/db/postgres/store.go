@@ -328,6 +328,12 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// and its read spans every team's runs in the org, so it can't run
 		// under any single caller's RLS view. See TFAC-535 / TFAC-540.
 		Marketplace: newMarketplaceStore(app, admin),
+		// Instances is admin-pool only: a fleet member isn't tenant data, so
+		// there's no org to scope an app-pool policy on — same admin-only
+		// shape as SystemLLMRuns/PendingFirings/EventQueue/RunQueue. Fleet
+		// membership registry every TF process registers into at boot and
+		// refreshes via periodic heartbeat.
+		Instances: newInstanceStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),
@@ -409,6 +415,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Spend:           newSpendStore(tx, tx),
 		AuthEvents:      newAuthEventStore(tx),
 		Marketplace:     newMarketplaceStore(tx, tx),
+		Instances:       newInstanceStore(tx),
 		Ext:             db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

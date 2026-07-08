@@ -8211,5 +8211,58 @@ GRANT ALL ON TABLE public.marketplace_listing_stats TO service_role;
 GRANT SELECT ON TABLE public.marketplace_listing_stats TO tf_app;
 
 
+-- instances: the fleet membership registry every TF process registers
+-- into at boot and refreshes via periodic heartbeat. Role-neutral name on
+-- purpose — every TF process registers (control pods too, for
+-- deployment-wide visibility: versions, lease holder, health), not just
+-- executors; "executor" stays the *role* name everywhere else
+-- (runs.executor_id keeps its shipped meaning: the id of the instance
+-- acting as a run's executor).
+--
+-- id is text, not uuid: it is minted OUTSIDE Postgres, by a file under
+-- <TF_STATE_ROOT>/instance-id (internal/instance) read/created once per
+-- state root and re-read on every boot — identity travels with the state
+-- root/volume, not the host or the process. Register is the atomic
+-- boot-registration upsert (INSERT ... ON CONFLICT (id) DO UPDATE SET
+-- boot_epoch = instances.boot_epoch + 1 ...) so a restart with the same id
+-- keeps the id and bumps the epoch monotonically regardless of volume
+-- snapshot/restore/clone weirdness.
+--
+-- max_runs / active_runs / mem_total_mb / mem_available_mb / dispatch_gated
+-- move capacity + admission state that used to be process-local onto this
+-- heartbeat row. Meaningful only for executor-capable roles; NULL on
+-- pure-control rows.
+--
+-- Admin-pool-only / system table, same posture as auth_events /
+-- system_llm_runs: no org_id (a fleet member isn't tenant data), so an
+-- org-scoped RLS policy can't gate it and there's nothing for the app pool
+-- to read here anyway. RLS enabled with NO policy (deny-by-default to
+-- non-BYPASSRLS roles) + REVOKE ALL from PUBLIC + the app roles; the
+-- superuser/admin pool bypasses RLS and does all I/O.
+CREATE TABLE public.instances (
+    id                 text NOT NULL,
+    role               text NOT NULL,
+    version            text NOT NULL,
+    boot_epoch         bigint NOT NULL,
+    started_at         timestamp with time zone NOT NULL,
+    last_heartbeat_at  timestamp with time zone NOT NULL,
+    draining           boolean NOT NULL DEFAULT false,
+    max_runs           integer,
+    active_runs        integer,
+    mem_total_mb       integer,
+    mem_available_mb   integer,
+    dispatch_gated     boolean,
+    labels             jsonb
+);
+
+ALTER TABLE ONLY public.instances
+    ADD CONSTRAINT instances_pkey PRIMARY KEY (id);
+
+ALTER TABLE public.instances ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.instances FROM PUBLIC;
+REVOKE ALL ON public.instances FROM anon, authenticated, service_role;
+
+
 -- +goose Down
 SELECT 'down not supported';
