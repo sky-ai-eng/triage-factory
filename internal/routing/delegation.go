@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -151,6 +152,21 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		}
 	}
 	if hasActive || hasPending {
+		// Additive events (TFAC-594): a second firing of a type declared
+		// Additive against an entity with an already-active auto run is a
+		// follow-up to the conversation in progress, not a request for a
+		// second one — inject into the live run via the staged-injection
+		// seam instead of deferring. hasPending-only (no active run) always
+		// keeps the deferral: injection needs a live target to fold into.
+		if hasActive && events.AdditiveFor(trigger.EventType) {
+			if r.tryAdditiveInjection(gateCtx, orgID, entityID, task, trigger, triggeringEventID) {
+				return
+			}
+			// Resolution failed, or the active run went terminal in the
+			// race between the gate read and the injection attempt — fall
+			// through to the normal deferral so the firing is never
+			// silently dropped.
+		}
 		// System-actor firing rows have no human author. Empty user
 		// here lets the Postgres impl's COALESCE walk to the org-
 		// owner fallback (creator_user_id is NOT NULL but the table
@@ -217,6 +233,62 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	// doesn't leave a phantom bot claim on a task that's back in the
 	// human-triage queue.
 	r.stampAgentClaim(orgID, task, actingTeamID, agentID)
+}
+
+// tryAdditiveInjection folds an additive event into the entity's already-
+// active auto run via the staged-injection seam, instead of deferring a
+// second run onto pending_firings (TFAC-594). Returns true when the caller
+// should treat the firing as handled (injected, or durably staged onto a
+// resumable run); false when the caller must fall through to the normal
+// deferral so the firing is never silently dropped — either because the
+// active run couldn't be resolved to an ID (the busy-gate read raced the
+// run going terminal), or because StageOrDeliverInjection could only stage
+// (not deliver live) and the run has already gone fully terminal, so the
+// staged row would never flush.
+func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string) bool {
+	runID, err := r.agentRuns.ActiveAutoRunIDForEntitySystem(ctx, orgID, entityID)
+	if err != nil || runID == "" {
+		return false
+	}
+
+	// Best-effort: an empty metadataJSON still renders a body naming the
+	// event type alone, so a lookup failure degrades rather than drops the
+	// injection.
+	metadataJSON, err := r.events.GetMetadataSystem(ctx, orgID, triggeringEventID)
+	if err != nil {
+		metadataJSON = ""
+	}
+	body := domain.AdditiveEventInjection(trigger.EventType, metadataJSON)
+
+	if delivered := r.spawner.StageOrDeliverInjection(orgID, runID, trigger.EventType, body); !delivered {
+		run, rerr := r.agentRuns.GetSystem(ctx, orgID, runID)
+		if rerr != nil || run == nil || !runIsResumable(run.Status, run.Outcome) {
+			return false
+		}
+	}
+
+	if err := r.tasks.RecordEventSystem(ctx, orgID, task.ID, triggeringEventID, "injected"); err != nil {
+		routerLog.Error("failed to record injected task_event", "task_id", task.ID, "run_id", runID, "error", err)
+	}
+	routerLog.Info("injected additive event into active run",
+		"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
+	return true
+}
+
+// runIsResumable mirrors internal/delegate's unexported resumableState
+// predicate: every non-finish parked/terminal state a later resume can
+// wake — `open`, or `completed` with outcome `abort`. Duplicated here
+// (rather than exported from internal/delegate) to keep the routing→
+// delegate dependency narrowed to the Delegator interface.
+func runIsResumable(status, outcome string) bool {
+	switch status {
+	case "open":
+		return true
+	case "completed":
+		return outcome == string(domain.RunOutcomeAbort)
+	default:
+		return false
+	}
 }
 
 // stampAgentClaim writes claimed_by_agent_id on a task AND broadcasts the

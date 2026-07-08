@@ -21,13 +21,21 @@ type Scorer interface {
 }
 
 // Delegator is the minimal interface the router needs from the delegate
-// spawner — kicking off a run, plus cancelling one. Narrowed from
-// *delegate.Spawner so tests can stub the spawn surface without bringing
-// up a worktree, the agent subprocess, etc. Production wiring passes a
-// *delegate.Spawner.
+// spawner — kicking off a run, cancelling one, and injecting into a live
+// one. Narrowed from *delegate.Spawner so tests can stub the spawn surface
+// without bringing up a worktree, the agent subprocess, etc. Production
+// wiring passes a *delegate.Spawner.
 type Delegator interface {
 	Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error)
 	Cancel(orgID, runID, userID string) error
+	// StageOrDeliverInjection routes one agent-facing injection for a run by
+	// its live state — steered in immediately if the process is warm
+	// (delivered=true), else staged to the durable queue for the run's next
+	// resume (delivered=false). Signature matches *delegate.Spawner's
+	// method exactly. Used by tryAutoDelegate's additive-event branch to
+	// fold a follow-up event into an entity's already-active auto run
+	// instead of deferring a second one.
+	StageOrDeliverInjection(orgID, runID, producer, body string) (delivered bool)
 }
 
 // Router is the central eventbus subscriber that replaces the old auto-
