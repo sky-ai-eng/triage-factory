@@ -187,8 +187,14 @@ export function EventTag({ eventType }: { eventType?: string }) {
 // SourceTag is the source marker, detuned to a monospace uppercase glyph (no
 // blue Jira pill) so it sits quietly in the warm field as a HUD readout.
 export function SourceTag({ task }: { task: Task }) {
-  const isGitHub = task.source === 'github'
-  const label = isGitHub ? (task.entity_kind === 'pr' ? 'PR' : 'GH') : 'JIRA'
+  const label =
+    task.source === 'github'
+      ? task.entity_kind === 'pr'
+        ? 'PR'
+        : 'GH'
+      : task.source === 'slack'
+        ? 'SLACK'
+        : 'JIRA'
   return (
     <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-text-tertiary/80">
       {label}

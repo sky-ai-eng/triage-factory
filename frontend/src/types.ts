@@ -1,4 +1,4 @@
-export type TaskSource = 'github' | 'jira'
+export type TaskSource = 'github' | 'jira' | 'slack'
 export type EntityKind = 'pr' | 'issue' | 'epic' | 'message'
 
 export interface Task {
@@ -153,7 +153,7 @@ export interface AgentRun {
 // narrowing. A server value outside this set is handled defensively at the
 // render layer (a fallback icon/label), it just isn't part of the documented
 // contract.
-export type ArtifactKind = 'branch' | 'pull_request' | 'review' | 'issue' | 'comment'
+export type ArtifactKind = 'branch' | 'pull_request' | 'review' | 'issue' | 'comment' | 'message'
 
 // Artifact mirrors the GET /api/agent/runs/{id}/artifacts wire shape
 // (internal/server/agent.go artifactJSON, TFAC-465). One row per real external

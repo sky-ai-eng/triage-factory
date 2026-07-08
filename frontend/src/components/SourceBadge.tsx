@@ -1,16 +1,28 @@
 import type { Task } from '../types'
 
 /**
- * Displays a source badge ("PR", "GH", "Jira") with entity_kind-aware text
- * and consistent styling. Use size="lg" for the Cards swipe card, default
+ * Displays a source badge ("PR", "GH", "Jira", "Slack") with entity_kind-aware
+ * text and consistent styling. Use size="lg" for the Cards swipe card, default
  * "sm" for TaskCard / Board sidebar / AgentCard.
  */
 export default function SourceBadge({ task, size = 'sm' }: { task: Task; size?: 'sm' | 'lg' }) {
   const isGitHub = task.source === 'github'
-  const label = isGitHub ? (task.entity_kind === 'pr' ? 'PR' : 'GH') : 'Jira'
-  const labelLg = isGitHub ? (task.entity_kind === 'pr' ? 'Pull Request' : 'GitHub') : 'Jira'
+  const isSlack = task.source === 'slack'
+  const label = isGitHub ? (task.entity_kind === 'pr' ? 'PR' : 'GH') : isSlack ? 'Slack' : 'Jira'
+  const labelLg = isGitHub
+    ? task.entity_kind === 'pr'
+      ? 'Pull Request'
+      : 'GitHub'
+    : isSlack
+      ? 'Slack'
+      : 'Jira'
 
-  const colorCls = isGitHub ? 'bg-black/[0.04] text-text-secondary' : 'bg-blue-500/10 text-blue-600'
+  // Slack aubergine (#4A154B) at the same tint treatment as the Jira pill.
+  const colorCls = isGitHub
+    ? 'bg-black/[0.04] text-text-secondary'
+    : isSlack
+      ? 'bg-[#4A154B]/10 text-[#4A154B]'
+      : 'bg-blue-500/10 text-blue-600'
 
   if (size === 'lg') {
     return (

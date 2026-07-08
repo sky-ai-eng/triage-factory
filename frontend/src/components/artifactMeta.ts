@@ -2,6 +2,7 @@ import {
   CircleDot,
   GitBranch,
   GitPullRequest,
+  MessageCircle,
   MessageSquare,
   Eye,
   type LucideIcon,
@@ -28,6 +29,7 @@ export const KIND_META: Record<ArtifactKind, KindMeta> = {
   review: { icon: Eye, label: 'review', text: 'text-snooze' },
   issue: { icon: CircleDot, label: 'issue', text: 'text-accent' },
   comment: { icon: MessageSquare, label: 'comment', text: 'text-text-tertiary' },
+  message: { icon: MessageCircle, label: 'message', text: 'text-text-tertiary' },
 }
 
 export const FALLBACK_META: KindMeta = {
@@ -50,11 +52,12 @@ export function metaForKind(kind: string): KindMeta {
 // ARTIFACT_PROVIDERS / PROVIDER_LABEL back the feed's provider filter — the
 // external systems the bot acts in (internal/domain ArtifactProvider*). 'git' is
 // the push-layer provider branches carry; the rest are the API providers.
-export const ARTIFACT_PROVIDERS = ['github', 'jira', 'git', 'linear'] as const
+export const ARTIFACT_PROVIDERS = ['github', 'jira', 'slack', 'git', 'linear'] as const
 
 export const PROVIDER_LABEL: Record<string, string> = {
   github: 'GitHub',
   jira: 'Jira',
+  slack: 'Slack',
   git: 'Git',
   linear: 'Linear',
 }
