@@ -472,6 +472,54 @@ actually touches), no DDL — and point executor pods' "admin" pool at
 it. Control keeps a migration-capable role. Hardening ticket, not a
 blocker for the split itself.
 
+### 4.5 Elasticity (autoscaling-ready, autoscaling-agnostic)
+
+Executor scaling has nothing to do with a load balancer, because
+executors receive no traffic — **the queue is the load balancer for
+the execution tier.** That makes both directions trivially safe:
+
+- **Scale-out is "boot a pod."** A new executor registers, heartbeats,
+  and starts claiming — no routing change, no scheduler registration,
+  no rebalance step. Time-to-first-claim ≈ container boot: the rootfs
+  ships baked into the image, and repo caches warm lazily per claim.
+- **Scale-in is "drain, then retire"** (§4.3) — and even ungraceful
+  loss is just the reaper path. Scale-to-*zero* executors merely
+  queues work; the control plane and every admission gate hold.
+- **Churn is absorbed, not resisted.** Membership changes reshuffle
+  only the affected rendezvous keys, and a wrong/stale preference
+  costs cache warmth, never correctness (§6). Ephemeral instances
+  tombstone out via the registry GC.
+
+What the product deliberately does **not** ship is the control loop
+that decides *when* to add or remove machines. Three reasons:
+
+1. **Actuation is 100 % platform-specific.** "Add an executor" means
+   a compose command, a Fly Machines API call, an ASG desired-count
+   bump, or an enterprise infra team racking a hardened host — the
+   §5.0 second-service argument applies to owning N platform
+   integrations in the deploy path.
+2. **The primary self-host segment can't autoscale anyway.** An
+   isolated-network deployment has a fixed, security-reviewed host
+   pool; its "autoscaling" is a capacity-planning conversation, which
+   the §0 arithmetic (memory-bound, known per-run budget) and the
+   fleet dashboard serve directly.
+3. **Under-capacity degrades gracefully by construction.** Because
+   gating never mutates queue state (TFAC-552 → §4.2), a saturated
+   fleet means longer queue waits — visible as dashboard percentiles —
+   not dropped work. Autoscalers are urgent where under-capacity
+   drops requests; here it just queues minutes-long, dollars-costing
+   jobs a little longer.
+
+What the product *does* ship is the *contract an autoscaler needs*:
+instant safe join, drain-or-die-safe leave, and the decision signal
+(queue depth, wait percentiles, headroom, gated flags) queryable from
+the registry/stats tables and `/api/fleet`. A SaaS autoscaler is then
+a ~hundred-line ops-side loop — read the signal, call the platform's
+machines API, respect drain — living in the private ops tooling, not
+in this binary. Give it hysteresis: rendezvous cache warmth rewards
+calm fleets, and the aging claim already covers the burst in the
+meantime.
+
 ---
 
 ## 5. Coordination fabric (Postgres is the bus)
@@ -1055,7 +1103,8 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
   per-channel crossover points are §5.0. Revisit only with evidence.
 - Cross-region fleets, geo-placement.
 - Autoscaling automation (operators add/drain machines; the dashboard
-  tells them when).
+  tells them when — the join/leave/signal contract an external scaler
+  needs is deliberately shipped anyway, §4.5).
 - Per-sandbox scale-out (the executor is the unit, §2.2).
 - Changing local mode in any way.
 
