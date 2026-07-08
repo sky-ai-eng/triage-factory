@@ -39,8 +39,8 @@ func (s *fenceStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOp
 
 func (s *fenceStubDelegator) Cancel(orgID, runID, userID string) error { return nil }
 
-func (s *fenceStubDelegator) StageOrDeliverInjection(orgID, runID, producer, body string) bool {
-	return false
+func (s *fenceStubDelegator) StageOrDeliverInjectionResult(orgID, runID, producer, body string) (delivered, staged bool) {
+	return false, false
 }
 
 // setupFenceScenario seeds entity + prompt + an immediate-fire trigger

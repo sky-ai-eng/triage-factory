@@ -28,14 +28,19 @@ type Scorer interface {
 type Delegator interface {
 	Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error)
 	Cancel(orgID, runID, userID string) error
-	// StageOrDeliverInjection routes one agent-facing injection for a run by
-	// its live state — steered in immediately if the process is warm
-	// (delivered=true), else staged to the durable queue for the run's next
-	// resume (delivered=false). Signature matches *delegate.Spawner's
-	// method exactly. Used by tryAutoDelegate's additive-event branch to
-	// fold a follow-up event into an entity's already-active auto run
-	// instead of deferring a second one.
-	StageOrDeliverInjection(orgID, runID, producer, body string) (delivered bool)
+	// StageOrDeliverInjectionResult routes one agent-facing injection for a
+	// run by its live state, with a disambiguated return: delivered=true
+	// means steered into a live process; delivered=false, staged=true means
+	// durably queued for the run's next resume; both false means dropped
+	// (no live process, and the durable append itself failed — store
+	// unwired or a transient error). Signature matches
+	// *delegate.Spawner's method exactly. Used by tryAutoDelegate's
+	// additive-event branch to fold a follow-up event into an entity's
+	// already-active auto run instead of deferring a second one — the
+	// staged/dropped distinction decides whether that's safe (a staged row
+	// will flush on resume) or the firing must fall through to the normal
+	// deferral instead (a drop has no durable row to fall back on).
+	StageOrDeliverInjectionResult(orgID, runID, producer, body string) (delivered, staged bool)
 }
 
 // Router is the central eventbus subscriber that replaces the old auto-
