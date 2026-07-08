@@ -282,7 +282,7 @@ Mechanically:
    each boot; its prior lives' rows are never self-swept, but the
    leader reaper collects them by heartbeat staleness like any dead
    executor's (§4.3), and a registry GC tombstones rows whose
-   heartbeat is days stale. Persistent volumes are the recommendation
+   heartbeat is 7+ days stale (default). Persistent volumes are the recommendation
    for executors regardless (they carry the caches); correctness
    never depends on them.
 
@@ -357,8 +357,9 @@ claim → execute); three additions to the claim:
 - **Executor dies**: leader reaper requeues its claimed/running rows.
   A re-claimed *mid-flight* run restarts its step from the beginning on
   the new executor (fresh self-contained clone; the crashed attempt's
-  session transcript died with the host). `attempts` caps this (default
-  2). Residual risk, accepted and documented: a run that had already
+  session transcript died with the host). `attempts` caps this
+  (`TF_RUN_MAX_ATTEMPTS`, default 2). Residual risk, accepted and
+  documented: a run that had already
   performed external writes (pushed a branch, posted a comment) before
   the crash will redo them — artifact upserts and branch-push semantics
   absorb most of it, and `failure_kind='executor_lost'` makes the rest
@@ -416,7 +417,7 @@ is the lever for large fleets, never a requirement for small ones.
 | Channel | Producer → consumer | Payload |
 | --- | --- | --- |
 | `tf_wake` | control (enqueue) → executors | `{kind: run\|event, org}` — claim nudges |
-| `tf_ws` | anyone → every control pod | WS event envelope `{origin_pod, event}`; if > ~7.5 KB, a `ws_outbox` row ref instead (agent messages regularly exceed the limit) |
+| `tf_ws` | anyone → every control pod | WS event envelope `{origin_pod, event}`; over the inline threshold (default 6 KB; NOTIFY caps at 8 KB and agent messages regularly exceed it), a `ws_outbox` row ref instead — 60 s TTL reaper on the outbox |
 | `tf_ctl` | control ↔ executors, control ↔ control | `{signal_id}` / `{kick_user}` / `{trigger: subsystem, org}` — see below |
 
 One rule governs every channel: **NOTIFY is a doorbell — never the
@@ -563,7 +564,8 @@ resume path rehydrates, spawns with `--resume <session_id>`, and
 delivers the recorded message as the turn input. No second runs row,
 and — keeping the standing invariant — no new run status.
 
-Stale signals expire harmlessly (the reaper owns the run's fate if the
+Acked signal rows are purged after 24 h (audit convenience window);
+stale unacked signals expire harmlessly (the reaper owns the run's fate if the
 owner died mid-signal).
 
 ### 5.3 Trigger relay
@@ -721,6 +723,16 @@ multi-executor deployment, land budget admission, the
 eligibility-constrained claim, and `instance_variants` with an
 eviction budget (the §9 P4 item).
 
+Keying, settled 2026-07-07: **two-layer, name → recipe → hash.** A
+profile binds a *named* catalog entry; the entry is a recipe (base +
+package set) resolving to a `rootfsCacheKey` content hash; executors
+bake, cache, dedupe, and advertise by **hash**
+(`instance_variants.rootfs_key`), while authoring, rule-binding, and
+pool labels speak **names**. Editing a recipe under a name mints a
+new hash, so the physical layer never holds ambiguous bytes. The v1
+catalog is curated ("base", "browser"); org-authored entries are
+later catalog rows with authorship — same mechanism, more authors.
+
 These are deliberately **not** pre-added to the registry schema, and
 the reasons are specific, not reflexive YAGNI: `reserved_mb` is
 identically `active_runs ×` the uniform budget until budgets are
@@ -746,8 +758,10 @@ process runs them, and nothing about their (already replica-tolerant:
 last-writer-wins, delegation-fenced) writes changes. The cost: control
 pods keep the privileged container caps to jail Haiku — and in the HA
 shape that means *every* control pod, since any of them can become
-leader (one more reason a deployment that wants an unprivileged
-control tier pulls the job-classes below forward; open question §11.3).
+leader. Settled (§11): the interim is accepted and job-classes stay
+P4 — the epic ships as one release, so no intermediate release ever
+exposes the interim; the reopening trigger is a fleet customer
+requiring an unprivileged or managed-k8s control tier.
 
 The endgame (P4, when wanted): generalize the run queue with a **job
 class** so system jobs become claimable work on executors like any
@@ -835,23 +849,41 @@ admission and mis-reports capacity today.
 - **Org-scoped subset** on `/usage` for org admins (their queue waits,
   run durations, active runs) — visible on SaaS without exposing other
   tenants' machine truth.
+- **Operator identity (settled)**: a CLI-managed user flag —
+  `triagefactory operator add|remove|list <email>` — recorded in the
+  access-change log. Bootstrap is shell access to the deployment,
+  which is already the operator trust boundary (same as `jwk-init`);
+  the flag merely reflects it into the product. Rejected: env
+  allowlists (rotation = redeploy, no audit entry, drifts under SSO
+  renames) and org-owner auto-grant (wrong on shared SaaS).
 - `GET /api/system/capacity` (TFAC-555) ships early and reads the same
   registry — at N=1 it's the one-row special case of the fleet view.
 - Per-role health: control keeps `/api/health` + gains readiness (LB
   rotation); executors expose local healthz; both already log
   structured JSON in multi-mode.
 
-### 8.4 Packaging (decision for the epic owner)
+### 8.4 Packaging (settled 2026-07-07)
 
-Recommendation: mechanics + registry + capacity read-out + org-scoped
-usage additions are **core**; the multi-executor **fleet
-administration** surface (machines list, drain/pin controls, history
-charts, `/api/fleet`) is the EE feature the entitlements package
-already names ("sandbox-fleet administration") — the audience for
-N-executor fleets is the enterprise segment by construction. Follows
-the `docs/ee-feature-packaging.md` module shape (routes via
-`RegisterExtension`, gate per-request, schema in shared migrations).
-Final call deliberately left open in this spec.
+**Console EE, operability core.** Core: the registry, the capacity
+read-out (TFAC-555), drain + operator CLI verbs, and the org-scoped
+usage additions — an unlicensed N-executor deployment stays fully
+operable from the shell. EE: the **fleet console** (the Fleet page
+and the rich `/api/fleet` surfaces — timeseries, placement explainer,
+drain controls in the UI) as the "sandbox-fleet administration"
+feature the entitlements package already names, module shape per
+`docs/ee-feature-packaging.md`. Never gate operability; gate the
+console.
+
+One scoping rule the split surfaced: **fleet administration is a
+deployment-scoped feature, so it resolves through the
+deployment-scoped entitlement path** — the license-backed
+`entitlements.Active()` — **never the per-org resolver.** The per-org
+path (SaaS Stripe entitlements, `entitlements.For(orgID)`) governs
+org-facing surfaces only; it could not even name an org for a
+cross-org console. The two gates compose: `is_operator` (identity,
+§8.3) AND `Active().Has(FeatureFleet)` (deployment entitlement). On
+the shared SaaS deployment the operator is the vendor, which simply
+runs its own licensed deployment — no special case.
 
 ---
 
@@ -928,21 +960,34 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
 - Per-sandbox scale-out (the executor is the unit, §2.2).
 - Changing local mode in any way.
 
-## 11. Open questions
+## 11. Decision log
 
-1. **EE boundary** for the fleet-administration surface (§8.4) —
-   recommendation recorded, decision open.
-2. **Operator identity mechanism** — leaning CLI-managed user flag
-   (`triagefactory operator add <email>`) over env allowlists (SSO-
-   compatible, auditable via the access-change log).
-3. **Privileged control pods** in P1–P3 (they still jail system jobs):
-   acceptable interim, or pull P4's job-classes forward for the first
-   fleet customer if their control tier must be unprivileged?
-4. **Requeue attempt budget + duplicate-external-action tolerance**
-   (§4.3): default `attempts=2`, `failure_kind='executor_lost'` —
-   validate against real failure modes once the first fleet runs.
-5. NOTIFY envelope threshold + `ws_outbox` TTL tuning under real agent
-   message volume.
+Every question this spec originally left open was settled with the
+epic owner on 2026-07-07. Reopening conditions noted per entry.
+
+1. **EE boundary** — console EE, operability core, with the
+   deployment-scope entitlement rule (§8.4). Reopens only with a
+   packaging-strategy change.
+2. **Operator identity** — CLI-managed user flag,
+   `triagefactory operator add|remove|list <email>`, recorded in the
+   access-change log (§8.3).
+3. **Privileged control pods** — interim accepted; job-classes stay
+   P4. The epic ships as one release, so no intermediate release
+   exposes the interim. Reopens if a fleet customer requires an
+   unprivileged / managed-k8s control tier (§7).
+4. **Executor-loss retry** — `TF_RUN_MAX_ATTEMPTS` default 2;
+   duplicate external writes on retry are accepted (upsert semantics
+   absorb them; `failure_kind='executor_lost'` audits the rest); no
+   compensation logic. Retried token spend is bounded by the attempt
+   cap and the org daily cost cap. Reopens only on evidence from a
+   real fleet (§4.3).
+5. **Fabric knobs** — defaults, all env-tunable: NOTIFY inline
+   payload ≤ 6 KB, larger via outbox ref; `ws_outbox` TTL 60 s; acked
+   `run_signals` purged after 24 h; registry tombstone GC at 7 days
+   heartbeat-stale. Tuning under real load is routine ops, not open
+   design (§5).
+6. **TFAC-408 image keying** — two-layer, name → recipe → content
+   hash; `instance_variants` keys on the hash (§6.4).
 
 ## Related
 

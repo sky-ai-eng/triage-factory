@@ -200,6 +200,16 @@ Cost note from that doc: a browser variant adds ~400–700 MB; pre-bake variants
 into the published image (`docker/Dockerfile`) so an autoscaled Machine doesn't
 pay a cold extract on first use.
 
+Keying (settled 2026-07-07, jointly with the TFAC-71 design): **two-layer,
+name → recipe → hash.** A profile binds a *named* catalog entry; the entry is
+a recipe (base + package set) resolving to a `rootfsCacheKey` content hash;
+executors bake, cache, and share by **hash** (org-blind — see
+`docs/specs/horizontal-scaling/` §6.4 for the cross-tenant invariant), while
+authoring and rule-binding speak **names**. Editing a recipe under a name
+mints a new hash, so the physical layer never holds ambiguous bytes. The v1
+catalog is curated ("base", "browser"); org-authored entries are later catalog
+rows with authorship — same mechanism, more authors.
+
 ---
 
 ## 5. Resources dimension + horizontal scaling
