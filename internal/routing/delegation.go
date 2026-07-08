@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -159,6 +160,33 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		}
 	}
 	if hasActive || hasPending {
+		// Additive events (TFAC-594): a second firing of a type declared
+		// Additive against an entity with an already-active auto run is a
+		// follow-up to the conversation in progress, not a request for a
+		// second one — inject into the live run via the staged-injection
+		// seam instead of deferring. hasPending-only (no active run) always
+		// keeps the deferral: injection needs a live target to fold into.
+		if hasActive && events.AdditiveFor(trigger.EventType) {
+			if r.tryAdditiveInjection(gateCtx, orgID, entityID, task, trigger, triggeringEventID) {
+				// The gate is entity-wide, not task-scoped (see
+				// HasActiveAutoRunForEntitySystem's doc comment) — the
+				// active run's task may differ from THIS task (e.g. a
+				// ci_check_failed-derived task owns the live run while a
+				// separate slack:mention-derived task on the same entity
+				// additively fires). Commit the claim on task here
+				// exactly like the deferral path does post-Enqueue: the
+				// bot has taken responsibility for this task by folding
+				// its event into the live conversation, even though the
+				// run belongs to another task. A same-task repeat firing
+				// makes this a no-op (bot already owns it).
+				r.stampAgentClaim(orgID, task, actingTeamID, agentID)
+				return
+			}
+			// Resolution failed, or the active run went terminal in the
+			// race between the gate read and the injection attempt — fall
+			// through to the normal deferral so the firing is never
+			// silently dropped.
+		}
 		// System-actor firing rows have no human author. Empty user
 		// here lets the Postgres impl's COALESCE walk to the org-
 		// owner fallback (creator_user_id is NOT NULL but the table
@@ -225,11 +253,84 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	return true
 }
 
+// tryAdditiveInjection folds an additive event into the entity's already-
+// active auto run via the staged-injection seam, instead of deferring a
+// second run onto pending_firings (TFAC-594). Returns true when the caller
+// should treat the firing as handled (delivered live, or durably staged
+// onto a resumable run); false when the caller must fall through to the
+// normal deferral so the firing is never silently dropped. Three distinct
+// cases fall through:
+//
+//   - the active run couldn't be resolved to an ID (the busy-gate read
+//     raced the run going terminal);
+//   - StageOrDeliverInjectionResult reports the injection was dropped
+//     outright (delivered=false, staged=false — no live process, AND the
+//     durable append itself failed: store unwired or a transient error).
+//     There's no durable row to fall back on here, regardless of the run's
+//     current status, so this always defers;
+//   - it was durably staged (staged=true) but the run has since gone fully
+//     terminal (not parked/open) — a staged row only flushes on the run's
+//     next resume, so a run that can never resume would silently lose it.
+func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string) bool {
+	runID, err := r.agentRuns.ActiveAutoRunIDForEntitySystem(ctx, orgID, entityID)
+	if err != nil || runID == "" {
+		return false
+	}
+
+	// Best-effort: an empty metadataJSON still renders a body naming the
+	// event type alone, so a lookup failure degrades rather than drops the
+	// injection.
+	metadataJSON, err := r.events.GetMetadataSystem(ctx, orgID, triggeringEventID)
+	if err != nil {
+		metadataJSON = ""
+	}
+	body := domain.AdditiveEventInjection(trigger.EventType, metadataJSON)
+
+	delivered, staged := r.spawner.StageOrDeliverInjectionResult(orgID, runID, trigger.EventType, body)
+	if !delivered {
+		if !staged {
+			// Dropped outright — nothing durable to flush later. Never
+			// treat this as handled no matter the run's status.
+			return false
+		}
+		run, rerr := r.agentRuns.GetSystem(ctx, orgID, runID)
+		if rerr != nil || run == nil || !runIsResumable(run.Status, run.Outcome) {
+			return false
+		}
+	}
+
+	if err := r.tasks.RecordEventSystem(ctx, orgID, task.ID, triggeringEventID, "injected"); err != nil {
+		routerLog.Error("failed to record injected task_event", "task_id", task.ID, "run_id", runID, "error", err)
+	}
+	routerLog.Info("injected additive event into active run",
+		"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
+	return true
+}
+
+// runIsResumable mirrors internal/delegate's unexported resumableState
+// predicate: every non-finish parked/terminal state a later resume can
+// wake — `open`, or `completed` with outcome `abort`. Duplicated here
+// (rather than exported from internal/delegate) to keep the routing→
+// delegate dependency narrowed to the Delegator interface.
+func runIsResumable(status, outcome string) bool {
+	switch status {
+	case "open":
+		return true
+	case "completed":
+		return outcome == string(domain.RunOutcomeAbort)
+	default:
+		return false
+	}
+}
+
 // stampAgentClaim writes claimed_by_agent_id on a task AND broadcasts the
 // task_claimed event so listeners (Board) can re-render the
-// per-claim lanes. Called from the two commitment points in tryAutoDelegate
-// (post-fireDelegate success, post-EnqueuePendingFiring success). Both paths
-// converge on "the bot has committed to this task."
+// per-claim lanes. Called from the three commitment points in
+// tryAutoDelegate (post-fireDelegate success, post-EnqueuePendingFiring
+// success, post-tryAdditiveInjection success). All three converge on "the
+// bot has committed to this task" — including the additive-injection case,
+// where the task committed to may not be the task that owns the run the
+// event got folded into (the busy gate is entity-wide, not task-scoped).
 //
 // agentID is the org agent resolved ONCE by the caller (tryAutoDelegate) — the
 // same id frozen onto the run's blueprint_run actor — so the claim and the run's

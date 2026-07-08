@@ -41,6 +41,14 @@ type EventSchema struct {
 	// schema built without setting it explicitly falls to the
 	// handler-team-grouping default.
 	Ownership OwnershipModel `json:"-"`
+	// Additive classifies whether a second firing of this event type against
+	// an entity that already has an active auto run is a follow-up to that
+	// conversation (inject into the live run) rather than a request for a
+	// separate one (defer to pending_firings). Per-type DATA, same pattern as
+	// Ownership: zero value is false, so a schema built without setting it
+	// explicitly keeps today's defer-always behavior. internal/routing's
+	// tryAutoDelegate is the sole consumer, via AdditiveFor.
+	Additive bool `json:"-"`
 }
 
 // FieldSchema describes one predicate field for the frontend editor.
@@ -87,6 +95,16 @@ func Get(eventType string) (EventSchema, bool) {
 	defer mu.RUnlock()
 	s, ok := registry[eventType]
 	return s, ok
+}
+
+// Reset removes eventType's schema from the registry. Test-only: lets a test
+// call Register with a synthetic schema and clean it up via t.Cleanup without
+// leaking into sibling tests. Production code registers schemas once at
+// init() and never unregisters them — there's no legitimate non-test caller.
+func Reset(eventType string) {
+	mu.Lock()
+	defer mu.Unlock()
+	delete(registry, eventType)
 }
 
 // All returns a copy of the registry map, keyed by event type.

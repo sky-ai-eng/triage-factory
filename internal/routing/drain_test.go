@@ -99,6 +99,10 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 
 func (s *stubDelegator) Cancel(orgID, runID, userID string) error { return nil }
 
+func (s *stubDelegator) StageOrDeliverInjectionResult(orgID, runID, producer, body string) (delivered, staged bool) {
+	return false, false
+}
+
 // setupDrainScenario seeds entity + prompt + event + task + trigger so a
 // pending firing can be enqueued and drained against a realistic FK graph.
 func setupDrainScenario(t *testing.T, database *sql.DB) (entityID, taskID, triggerID, eventID string) {

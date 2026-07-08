@@ -39,6 +39,10 @@ func (s *fenceStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOp
 
 func (s *fenceStubDelegator) Cancel(orgID, runID, userID string) error { return nil }
 
+func (s *fenceStubDelegator) StageOrDeliverInjectionResult(orgID, runID, producer, body string) (delivered, staged bool) {
+	return false, false
+}
+
 // setupFenceScenario seeds entity + prompt + an immediate-fire trigger
 // (min_autonomy=0) so HandleEvent reaches the immediate auto-delegate path.
 // No claim is pre-stamped and agents/teamAgents are left nil in fenceRouter,
