@@ -32,29 +32,39 @@ func (s *instanceStore) Register(ctx context.Context, id, role, version string) 
 			role              = excluded.role,
 			version           = excluded.version,
 			started_at        = excluded.started_at,
-			last_heartbeat_at = excluded.last_heartbeat_at
+			last_heartbeat_at = excluded.last_heartbeat_at,
+			-- Clear the prior boot's capacity/admission snapshot (dead
+			-- state); the first heartbeat repopulates it. draining and
+			-- labels survive on purpose — operator intent outlives a
+			-- restart. Mirrors the Postgres store.
+			max_runs          = NULL,
+			active_runs       = NULL,
+			mem_total_mb      = NULL,
+			mem_available_mb  = NULL,
+			dispatch_gated    = NULL
 		RETURNING boot_epoch
 	`, id, role, version, now, now).Scan(&bootEpoch)
 	return bootEpoch, err
 }
 
 func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int64, hb domain.InstanceHeartbeat) (bool, error) {
+	// draining and labels_json are deliberately not in the SET list — they
+	// hold operator/control-plane intent and the heartbeat must not clobber
+	// them (see domain.InstanceHeartbeat).
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE instances SET
 			last_heartbeat_at = ?,
-			draining          = ?,
 			max_runs          = ?,
 			active_runs       = ?,
 			mem_total_mb      = ?,
 			mem_available_mb  = ?,
-			dispatch_gated    = ?,
-			labels_json       = ?
+			dispatch_gated    = ?
 		WHERE id = ? AND boot_epoch = ?
 	`,
-		time.Now().UTC(), hb.Draining,
+		time.Now().UTC(),
 		sqliteNullInt(hb.MaxRuns), sqliteNullInt(hb.ActiveRuns),
 		sqliteNullInt(hb.MemTotalMB), sqliteNullInt(hb.MemAvailableMB),
-		sqliteNullBool(hb.DispatchGated), nullIfEmpty(hb.LabelsJSON),
+		sqliteNullBool(hb.DispatchGated),
 		id, bootEpoch,
 	)
 	if err != nil {

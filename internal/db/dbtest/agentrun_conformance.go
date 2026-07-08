@@ -592,20 +592,35 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("MarkResuming_FromResumableStates", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
+		const resumeExec = "instance-resume-test"
 
 		// running → refused (not a parked/terminal resumable state).
 		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
-		if ok, err := store.MarkResuming(ctx, orgID, runID); err != nil || ok {
+		if ok, err := store.MarkResuming(ctx, orgID, runID, resumeExec, 3); err != nil || ok {
 			t.Errorf("Resuming on running: ok=%v err=%v, want false", ok, err)
 		}
-		// open → ok; the second call (now running) is refused.
+		// A refused resume must not have stamped ownership either.
+		if run, err := store.GetSystem(ctx, orgID, runID); err != nil {
+			t.Fatalf("get after refused resume: %v", err)
+		} else if run.ExecutorID == resumeExec {
+			t.Errorf("refused resume stamped executor_id anyway")
+		}
+		// open → ok; the second call (now running) is refused. The flip and
+		// the ownership stamp are one statement (TFAC-578 review fix): a
+		// resumed row must carry the resuming instance's identity for the
+		// whole rehydrate+spawn window, not the previous owner's.
 		if _, err := store.MarkOpen(ctx, orgID, runID); err != nil {
 			t.Fatalf("open: %v", err)
 		}
-		if ok, err := store.MarkResuming(ctx, orgID, runID); err != nil || !ok {
+		if ok, err := store.MarkResuming(ctx, orgID, runID, resumeExec, 3); err != nil || !ok {
 			t.Fatalf("Resuming from open: ok=%v err=%v", ok, err)
 		}
-		if ok, _ := store.MarkResuming(ctx, orgID, runID); ok {
+		if run, err := store.GetSystem(ctx, orgID, runID); err != nil {
+			t.Fatalf("get after resume: %v", err)
+		} else if run.ExecutorID != resumeExec {
+			t.Errorf("resume did not stamp ownership: executor_id=%q, want %q", run.ExecutorID, resumeExec)
+		}
+		if ok, _ := store.MarkResuming(ctx, orgID, runID, resumeExec, 3); ok {
 			t.Errorf("double-resume from running succeeded; want refused")
 		}
 
@@ -614,7 +629,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human", ""); err != nil {
 			t.Fatalf("complete+abort: %v", err)
 		}
-		if ok, err := store.MarkResuming(ctx, orgID, abortRun); err != nil || !ok {
+		if ok, err := store.MarkResuming(ctx, orgID, abortRun, resumeExec, 3); err != nil || !ok {
 			t.Errorf("Resuming from completed+abort: ok=%v err=%v, want true", ok, err)
 		}
 
@@ -624,7 +639,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "", "shipped", "finish", "", ""); err != nil {
 			t.Fatalf("complete+finish: %v", err)
 		}
-		if ok, _ := store.MarkResuming(ctx, orgID, finishRun); ok {
+		if ok, _ := store.MarkResuming(ctx, orgID, finishRun, resumeExec, 3); ok {
 			t.Errorf("Resuming from completed+finish succeeded; want refused (finish excluded)")
 		}
 	})

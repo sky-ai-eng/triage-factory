@@ -65,12 +65,23 @@ func EnsureIdentity(stateRoot string) (*Identity, error) {
 // readOrMintID reads the id already in f, or — when f is empty — mints a
 // fresh uuid and writes it. f is already positioned at offset 0 (just
 // opened); callers must not have read from or written to it yet.
+//
+// Non-empty content must parse as a UUID. Accepting arbitrary bytes here
+// would silently mint a NEW permanent identity out of a torn write or a
+// stray edit — orphaning every row stamped with the real id, with nothing
+// to collect them — so corrupt content is a loud boot failure instead:
+// the operator restores the file (or deletes it to knowingly re-mint).
+// Only a truly empty file re-mints, because empty is unambiguous
+// first-boot state (the O_CREATE above just made it).
 func readOrMintID(f *os.File) (string, error) {
 	raw, err := io.ReadAll(f)
 	if err != nil {
 		return "", fmt.Errorf("read: %w", err)
 	}
 	if id := strings.TrimSpace(string(raw)); id != "" {
+		if _, err := uuid.Parse(id); err != nil {
+			return "", fmt.Errorf("%w: content %q is not a UUID — restore the file from the volume it belongs to, or delete it to mint a fresh identity (orphaning any rows stamped with the old id)", ErrCorruptIDFile, truncateForErr(id))
+		}
 		return id, nil
 	}
 
@@ -106,3 +117,17 @@ func (i *Identity) Close() error {
 // identity file is already held by another process. Exposed for tests;
 // production callers surface the wrapping error message directly.
 var ErrLocked = errors.New("instance identity file is locked")
+
+// ErrCorruptIDFile is wrapped into the error EnsureIdentity returns when
+// the identity file exists but its content does not parse as a UUID.
+var ErrCorruptIDFile = errors.New("instance identity file is corrupt")
+
+// truncateForErr bounds how much of a corrupt id file's content an error
+// message echoes — the file could be arbitrarily large garbage.
+func truncateForErr(s string) string {
+	const max = 64
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -55,6 +56,12 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 	if creatorBind == runmode.LocalDefaultUserID {
 		creatorBind = ""
 	}
+	// The dedup target includes 'draining': a firing mid-drain is still
+	// queued intent for (task, trigger), and a duplicate enqueued during
+	// the drain window would fire a second run for the same intent as
+	// soon as the first one's run terminates. The predicate must stay
+	// textually equivalent to idx_pending_firings_dedup for conflict
+	// inference.
 	res, err := s.q.ExecContext(ctx, `
 		INSERT INTO pending_firings
 		  (org_id, creator_user_id, entity_id, task_id, trigger_id, triggering_event_id, status)
@@ -62,7 +69,7 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 		  ($1,
 		   COALESCE(NULLIF($2, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $1)),
 		   $3, $4, $5, $6, 'pending')
-		ON CONFLICT (task_id, trigger_id) WHERE status = 'pending' DO NOTHING
+		ON CONFLICT (task_id, trigger_id) WHERE status IN ('pending', 'draining') DO NOTHING
 	`, orgID, creatorBind, entityID, taskID, triggerID, triggeringEventID)
 	if err != nil {
 		return false, err
@@ -82,7 +89,7 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 func (s *pendingFiringsStore) PopForEntity(ctx context.Context, orgID, entityID string) (*domain.PendingFiring, error) {
 	row := s.q.QueryRowContext(ctx, `
 		UPDATE pending_firings
-		SET status = 'draining'
+		SET status = 'draining', claimed_at = now()
 		WHERE id = (
 			SELECT id FROM pending_firings
 			WHERE org_id = $1 AND entity_id = $2 AND status = 'pending'
@@ -99,10 +106,27 @@ func (s *pendingFiringsStore) PopForEntity(ctx context.Context, orgID, entityID 
 func (s *pendingFiringsStore) Release(ctx context.Context, orgID string, firingID int64) error {
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE pending_firings
-		SET status = 'pending'
+		SET status = 'pending', claimed_at = NULL
 		WHERE org_id = $1 AND id = $2 AND status = 'draining'
 	`, orgID, firingID)
 	return err
+}
+
+// RequeueStaleDraining is the claiming pop's crash recovery — see the
+// interface doc. NULL claimed_at 'draining' rows (claimed before the
+// column existed) are recovered unconditionally.
+func (s *pendingFiringsStore) RequeueStaleDraining(ctx context.Context, orgID string, before time.Time) (int, error) {
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE pending_firings
+		SET status = 'pending', claimed_at = NULL
+		WHERE org_id = $1 AND status = 'draining'
+		  AND (claimed_at IS NULL OR claimed_at < $2)
+	`, orgID, before)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 func (s *pendingFiringsStore) MarkFired(ctx context.Context, orgID string, firingID int64, runID string) error {
@@ -124,10 +148,13 @@ func (s *pendingFiringsStore) MarkSkipped(ctx context.Context, orgID string, fir
 }
 
 func (s *pendingFiringsStore) HasPendingForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
+	// 'draining' counts as queued intent (see the interface doc): a drain
+	// mid-flight must keep the entity gate closed or a fresh event in
+	// that window jumps the queue.
 	var count int
 	err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM pending_firings
-		WHERE org_id = $1 AND entity_id = $2 AND status = 'pending'
+		WHERE org_id = $1 AND entity_id = $2 AND status IN ('pending', 'draining')
 	`, orgID, entityID).Scan(&count)
 	return count > 0, err
 }

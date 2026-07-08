@@ -110,7 +110,16 @@ type AgentRunStore interface {
 	// + outcome='finish') is
 	// deliberately excluded. Clears parked_at on the wake (the run is no longer
 	// parked) so an open run's next park stamps a fresh timestamp.
-	MarkResuming(ctx context.Context, orgID, runID string) (bool, error)
+	//
+	// Stamps (executor_id, boot_epoch) in the same statement: the flip to
+	// 'running' and the ownership claim must be atomic, because a parked
+	// run resumes on any instance — its row still carries the identity of
+	// whichever instance LAST ran it, and a 'running' row wearing a stale
+	// owner is exactly what a boot self-sweep (or the future reaper)
+	// requeues. Stamping later, at process go-live, leaves the whole
+	// rehydrate+spawn window misattributed. An empty executorID writes
+	// NULL for both columns (the un-wired test-spawner path).
+	MarkResuming(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error)
 
 	// SetSession stores the Claude Code session_id captured from
 	// the agent's init event. Persisted mid-run, before any
@@ -122,18 +131,18 @@ type AgentRunStore interface {
 	// SetExecutorSystem stamps runs.executor_id + runs.boot_epoch with the
 	// identity of the executor that owns this run's live process. Called
 	// when a run goes live (an unguarded write, like SetStatus); pass "" to
-	// clear the pointer. This is largely a re-stamp of what
-	// RunQueueStore.ClaimNextRun already wrote atomically at claim
-	// (TFAC-578) — cheap and harmless on that path — but it is the ONLY
-	// stamp on the resume path (ResumeOpenRun flips a parked run straight to
-	// 'running' via MarkResuming, bypassing the claim), so both columns must
-	// be written together here too, not just executor_id, to keep the
-	// invariant "boot_epoch always reflects the most recent boot that
-	// touched this row" true everywhere rather than relying on
-	// boot_epoch's monotonicity across restarts to save an unrefreshed
-	// value. The admin pool is the right door because the run goroutine
-	// that stamps it holds no JWT claims. No app-pool variant — ownership is
-	// a system concern, never request-scoped.
+	// clear the pointer. Belt-and-suspenders by construction: both paths
+	// into 'running' already stamp atomically at the flip —
+	// RunQueueStore.ClaimNextRun at claim, MarkResuming at resume — so
+	// this go-live re-stamp is a cheap idempotent confirmation, kept
+	// because it is the one write that runs after the process actually
+	// exists (the strongest possible "this identity holds the live
+	// handle" statement). Both columns always travel together — never
+	// just executor_id — to keep the invariant "boot_epoch always
+	// reflects the most recent boot that touched this row" true
+	// everywhere. The admin pool is the right door because the run
+	// goroutine that stamps it holds no JWT claims. No app-pool variant —
+	// ownership is a system concern, never request-scoped.
 	SetExecutorSystem(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) error
 
 	// SetStatus writes runs.status without a guard. Used by the
@@ -352,7 +361,7 @@ type AgentRunStore interface {
 	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
 	AddPartialTotalsSystem(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error
 	MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error)
-	MarkResumingSystem(ctx context.Context, orgID, runID string) (bool, error)
+	MarkResumingSystem(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error)
 	SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error
 	SetStatusSystem(ctx context.Context, orgID, runID, status string) error
 	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error

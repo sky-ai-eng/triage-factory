@@ -269,12 +269,12 @@ func markOpen(ctx context.Context, q queryer, orgID, runID string) (bool, error)
 	return n > 0, err
 }
 
-func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID string) (bool, error) {
-	return markResuming(ctx, s.q, orgID, runID)
+func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error) {
+	return markResuming(ctx, s.q, orgID, runID, executorID, bootEpoch)
 }
 
-func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID string) (bool, error) {
-	return markResuming(ctx, s.admin, orgID, runID)
+func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error) {
+	return markResuming(ctx, s.admin, orgID, runID, executorID, bootEpoch)
 }
 
 func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {
@@ -308,18 +308,27 @@ func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cuto
 	return keys, rows.Err()
 }
 
-func markResuming(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+func markResuming(ctx context.Context, q queryer, orgID, runID, executorID string, bootEpoch int64) (bool, error) {
 	// Wake any non-finish parked/terminal state: open, or an aborted run
 	// (completed + outcome='abort'). Keyed on (status, outcome) so a finish run
 	// (completed + outcome='finish') is excluded and a racing resume that already
 	// moved the row loses this compare-and-swap. pending_approval is gone
 	// Runs never park for approval.
+	//
+	// The ownership stamp rides the same statement: a parked row still
+	// wears the identity of whichever instance last ran it, and flipping
+	// it 'running' without re-stamping would leave the whole
+	// rehydrate+spawn window attributed to that instance — whose next
+	// boot (or the reaper) would sweep a run this process is live-resuming.
+	// Empty executorID → NULL for both columns (un-wired test spawner).
 	res, err := q.ExecContext(ctx, `
-		UPDATE runs SET status = 'running', parked_at = NULL
+		UPDATE runs SET status = 'running', parked_at = NULL,
+			executor_id = NULLIF($3, ''),
+			boot_epoch  = CASE WHEN $3 = '' THEN NULL ELSE $4::bigint END
 		WHERE org_id = $1 AND id = $2
 		  AND (status = 'open'
 		       OR (status = 'completed' AND outcome = 'abort'))
-	`, orgID, runID)
+	`, orgID, runID, executorID, bootEpoch)
 	if err != nil {
 		return false, err
 	}

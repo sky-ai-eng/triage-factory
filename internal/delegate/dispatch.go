@@ -141,13 +141,19 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		// Memory guardrail: when host MemAvailable is below the floor,
+		// Memory guardrail: when available memory (cgroup-aware) is below the floor,
 		// stop claiming — runs stay queued and the next scan tick (or a
 		// wake) re-checks. Checked per iteration, not per drain, because
 		// each claimed run consumes memory as it spawns. Deliberately
 		// BEFORE the semaphore acquire so a gated host parks with no
 		// slot held.
 		if s.dispatchMemGated() {
+			return
+		}
+		// Identity fence: a superseded instance identity (another process
+		// re-registered this id — see fenceIdentity) must not stamp new
+		// claims. Sticky until restart; in-flight runs finish untouched.
+		if s.IdentityFenced() {
 			return
 		}
 		// Acquire a concurrency slot BEFORE claiming, so we never flip a run to

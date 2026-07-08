@@ -6,7 +6,21 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
+
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
+
+var hostmemLog = logging.Component("hostmem")
+
+// ambiguousWarned latches the degraded-figures warning so a probe that
+// polls every few seconds doesn't spam it — one line per transition into
+// the ambiguous state (reset on any clean read), not one per tick. The
+// warning matters because Unknown doesn't just blur the numbers: the
+// dispatch memory floor treats Unknown as "no gating", so an unreadable
+// cgroup file silently DISARMS a guardrail that was armed the moment
+// before.
+var ambiguousWarned atomic.Bool
 
 // Cgroup v2 unified-hierarchy paths this package reads when the
 // process is confined by a memory limit anywhere in its own cgroup
@@ -88,7 +102,20 @@ func availableMBFrom(read readFileFunc) int {
 			minHeadroom = headroom
 		}
 	}
-	return int(minHeadroom / (1024 * 1024))
+	// Cross-clamp against the host: a cgroup allowance is a ceiling, not
+	// a reservation — a limit set above physical RAM (systemd
+	// MemoryMax=1T on a 64 GB box), or plain overcommit (siblings eating
+	// the host while our slice looks roomy), leaves cgroup headroom the
+	// machine cannot actually deliver, and allocating into it swaps/OOMs
+	// the HOST — the exact outcome the dispatch floor exists to prevent,
+	// and one the pre-cgroup meminfo path caught. The truthful figure is
+	// the tighter of the two; an unreadable meminfo just skips the clamp
+	// (the confirmed cgroup figure is still the best available answer).
+	result := int(minHeadroom / (1024 * 1024))
+	if host := meminfoMB(read, "MemAvailable:"); host != Unknown && host < result {
+		result = host
+	}
+	return result
 }
 
 // totalMBFrom is TotalMB with an injectable reader.
@@ -106,7 +133,15 @@ func totalMBFrom(read readFileFunc) int {
 			minMax = lvl.maxBytes
 		}
 	}
-	return int(minMax / (1024 * 1024))
+	// Cross-clamp against physical RAM — see availableMBFrom: a limit
+	// above MemTotal can never be delivered, and reporting it would
+	// overstate capacity everywhere this figure flows (boot log, derived
+	// capacity, the registry heartbeat, the fleet view).
+	result := int(minMax / (1024 * 1024))
+	if host := meminfoMB(read, "MemTotal:"); host != Unknown && host < result {
+		result = host
+	}
+	return result
 }
 
 // cgroupMemLimitedLevels walks every cgroup from this process's own
@@ -128,13 +163,14 @@ func totalMBFrom(read readFileFunc) int {
 // toward Unknown instead of trusting whatever levels DID resolve.
 func cgroupMemLimitedLevels(read readFileFunc) (levels []cgroupMemLevel, limited, ambiguous bool) {
 	selfPath, _ := selfCgroupPath(read)
+	var ambiguousDir string
 	for _, dir := range cgroupAncestorDirs(selfPath) {
 		data, err := read(dir + "/" + cgroupMemMaxFile)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
-			ambiguous = true
+			ambiguous, ambiguousDir = true, dir
 			continue
 		}
 		s := strings.TrimSpace(string(data))
@@ -143,10 +179,18 @@ func cgroupMemLimitedLevels(read readFileFunc) (levels []cgroupMemLevel, limited
 		}
 		n, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
-			ambiguous = true
+			ambiguous, ambiguousDir = true, dir
 			continue
 		}
 		levels = append(levels, cgroupMemLevel{dir: dir, maxBytes: n})
+	}
+	if ambiguous {
+		if ambiguousWarned.CompareAndSwap(false, true) {
+			hostmemLog.Warn("cgroup memory.max unreadable/unparseable on an ancestor — memory figures degrade to Unknown and the dispatch memory floor is DISARMED until this resolves",
+				"cgroup_dir", ambiguousDir)
+		}
+	} else {
+		ambiguousWarned.Store(false)
 	}
 	return levels, len(levels) > 0, ambiguous
 }

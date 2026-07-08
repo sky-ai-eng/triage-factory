@@ -363,15 +363,11 @@ func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, sourceID,
 }
 
 func (s *entityStore) UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSON string) error {
-	return updateEntitySnapshot(ctx, s.q, orgID, id, snapshotJSON)
-}
-
-func (s *entityStore) UpdateSnapshotSystem(ctx context.Context, orgID, id, snapshotJSON string) error {
-	return updateEntitySnapshot(ctx, s.admin, orgID, id, snapshotJSON)
-}
-
-func updateEntitySnapshot(ctx context.Context, q queryer, orgID, id, snapshotJSON string) error {
-	_, err := q.ExecContext(ctx, `
+	// The blind-write system variant was removed with TFAC-579: every
+	// tracker snapshot write goes through UpdateSnapshotCASSystem. This
+	// app-pool variant survives for non-tracker writers with no poll_seq
+	// read-then-write cycle to protect.
+	_, err := s.q.ExecContext(ctx, `
 		UPDATE entities
 		SET snapshot_json = $1::jsonb, last_polled_at = $2
 		WHERE org_id = $3 AND id = $4
@@ -379,12 +375,12 @@ func updateEntitySnapshot(ctx context.Context, q queryer, orgID, id, snapshotJSO
 	return err
 }
 
-// UpdateSnapshotCASSystem is UpdateSnapshotSystem with a poll_seq CAS
-// (TFAC-579): the WHERE clause pins expectedPollSeq alongside org_id/id, so
-// a straggler ex-leader's late write (its expectedPollSeq is stale by the
-// time it lands) affects zero rows instead of overwriting a newer
-// snapshot. poll_seq bumps by 1 on every successful write so the caller's
-// next-read-then-write cycle has a fresh value to CAS against.
+// UpdateSnapshotCASSystem is the tracker's snapshot write with a poll_seq
+// CAS (TFAC-579): the WHERE clause pins expectedPollSeq alongside
+// org_id/id, so a straggler ex-leader's late write (its expectedPollSeq is
+// stale by the time it lands) affects zero rows instead of overwriting a
+// newer snapshot. poll_seq bumps by 1 on every successful write so the
+// caller's next-read-then-write cycle has a fresh value to CAS against.
 func (s *entityStore) UpdateSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (bool, error) {
 	res, err := s.admin.ExecContext(ctx, `
 		UPDATE entities

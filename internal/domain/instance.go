@@ -43,12 +43,17 @@ const (
 // heartbeat renewal writes onto the caller's instances row. Pointer fields
 // left nil write SQL NULL — the "not applicable / not yet known" state, not
 // zero.
+//
+// Deliberately absent: draining and labels. Those columns hold operator /
+// control-plane intent (a drain verb, placement labels), and the heartbeat
+// must never overwrite them — a 4s liveness loop that resets draining=false
+// would silently cancel a drain within one tick of the operator setting it.
+// The heartbeat owns liveness + capacity; intent columns are written only
+// by the surfaces that own them.
 type InstanceHeartbeat struct {
-	Draining       bool
 	MaxRuns        *int
 	ActiveRuns     *int
 	MemTotalMB     *int
 	MemAvailableMB *int
 	DispatchGated  *bool
-	LabelsJSON     string
 }

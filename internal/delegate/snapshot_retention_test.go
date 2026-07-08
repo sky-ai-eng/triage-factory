@@ -209,7 +209,7 @@ func TestMarkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
 		t.Error("MarkOpen did not stamp parked_at")
 	}
 
-	if _, err := s.agentRuns.MarkResuming(ctx, runmode.LocalDefaultOrgID, run); err != nil {
+	if _, err := s.agentRuns.MarkResuming(ctx, runmode.LocalDefaultOrgID, run, "test-instance", 1); err != nil {
 		t.Fatalf("MarkResuming: %v", err)
 	}
 	if parkedAtSet(t, database, run) {

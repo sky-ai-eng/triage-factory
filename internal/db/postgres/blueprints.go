@@ -700,6 +700,15 @@ func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID stri
 			(SELECT entity_id FROM tasks WHERE id = $4 AND org_id = $2)
 		)
 	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan); err != nil {
+		// Same one-active-per-entity translation as the fenced insert:
+		// production event runs route through CreateRunIfNotFiredSystem
+		// today, but any caller reaching this path (tests seeding event
+		// runs, a future direct CreateRun user) deserves the documented
+		// sentinel, not a raw unique_violation.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blueprintRunsOneActivePerEntityConstraint {
+			return "", db.ErrEntityBusyActiveAutoRun
+		}
 		return "", fmt.Errorf("insert blueprint_run (event): %w", err)
 	}
 	return br.ID, nil
@@ -749,7 +758,9 @@ const blueprintRunsOneActivePerEntityConstraint = "blueprint_runs_one_active_aut
 //     while another auto run is still active there. A single INSERT's ON
 //     CONFLICT can only target one arbiter index, so this second case
 //     isn't inference-eligible — it surfaces as a raw unique_violation,
-//     which is translated to the identical inserted=false contract.
+//     translated to db.ErrEntityBusyActiveAutoRun. NOT the inserted=false
+//     contract: a replay is permanently satisfied, entity-busy is a
+//     deferral — the caller must queue the intent, not drop it.
 func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun) (bool, error) {
 	if br.TriggeringEventID == "" || br.TriggerID == "" {
 		return false, db.ErrBlueprintRunFenceRequiresEventAndTrigger
@@ -779,7 +790,7 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blueprintRunsOneActivePerEntityConstraint {
-			return false, nil
+			return false, db.ErrEntityBusyActiveAutoRun
 		}
 		return false, fmt.Errorf("insert blueprint_run (fenced): %w", err)
 	}

@@ -32,29 +32,41 @@ func (s *instanceStore) Register(ctx context.Context, id, role, version string) 
 			role              = EXCLUDED.role,
 			version           = EXCLUDED.version,
 			started_at        = EXCLUDED.started_at,
-			last_heartbeat_at = EXCLUDED.last_heartbeat_at
+			last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+			-- The prior boot's capacity/admission snapshot is dead state
+			-- (e.g. a dispatch_gated=true from the crashed life); clear it
+			-- so readers never see a new epoch wearing old admission data.
+			-- The first heartbeat repopulates within one interval. draining
+			-- and labels survive on purpose — operator intent outlives a
+			-- restart (a drained instance stays drained until un-drained).
+			max_runs          = NULL,
+			active_runs       = NULL,
+			mem_total_mb      = NULL,
+			mem_available_mb  = NULL,
+			dispatch_gated    = NULL
 		RETURNING boot_epoch
 	`, id, role, version).Scan(&bootEpoch)
 	return bootEpoch, err
 }
 
 func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int64, hb domain.InstanceHeartbeat) (bool, error) {
+	// draining and labels are deliberately not in the SET list — they hold
+	// operator/control-plane intent and the heartbeat must not clobber them
+	// (see domain.InstanceHeartbeat).
 	res, err := s.admin.ExecContext(ctx, `
 		UPDATE instances SET
 			last_heartbeat_at = now(),
-			draining          = $3,
-			max_runs          = $4,
-			active_runs       = $5,
-			mem_total_mb      = $6,
-			mem_available_mb  = $7,
-			dispatch_gated    = $8,
-			labels            = NULLIF($9, '')::jsonb
+			max_runs          = $3,
+			active_runs       = $4,
+			mem_total_mb      = $5,
+			mem_available_mb  = $6,
+			dispatch_gated    = $7
 		WHERE id = $1 AND boot_epoch = $2
 	`,
-		id, bootEpoch, hb.Draining,
+		id, bootEpoch,
 		intPtrAny(hb.MaxRuns), intPtrAny(hb.ActiveRuns),
 		intPtrAny(hb.MemTotalMB), intPtrAny(hb.MemAvailableMB),
-		boolPtrAny(hb.DispatchGated), hb.LabelsJSON,
+		boolPtrAny(hb.DispatchGated),
 	)
 	if err != nil {
 		return false, err

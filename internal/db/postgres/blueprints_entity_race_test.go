@@ -2,11 +2,13 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -104,13 +106,22 @@ func TestBlueprintStore_Postgres_OneActiveAutoRunPerEntity(t *testing.T) {
 	close(start)
 	wg.Wait()
 
+	// Exactly one racer inserts; every loser must come back as the
+	// DISTINCT entity-busy sentinel (a deferral — the caller queues the
+	// intent), never as inserted=false (which means "replay, permanently
+	// satisfied" and would silently drop the loser's intent) and never as
+	// a raw unique_violation.
 	winners := 0
 	for i, ins := range insertedFlags {
-		if errs[i] != nil {
-			t.Fatalf("racer %d: CreateRunIfNotFiredSystem should be a clean skip, not an error: %v", i, errs[i])
-		}
 		if ins {
+			if errs[i] != nil {
+				t.Fatalf("racer %d: winner returned an error: %v", i, errs[i])
+			}
 			winners++
+			continue
+		}
+		if !errors.Is(errs[i], db.ErrEntityBusyActiveAutoRun) {
+			t.Fatalf("racer %d: loser must surface ErrEntityBusyActiveAutoRun (defer, don't drop), got inserted=false err=%v", i, errs[i])
 		}
 	}
 	if winners != 1 {

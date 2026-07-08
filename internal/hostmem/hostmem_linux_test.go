@@ -95,6 +95,50 @@ func TestAvailableTotal_CgroupLimited(t *testing.T) {
 	}
 }
 
+// TestAvailableTotal_CgroupLimitAboveHostClampsToMeminfo pins the
+// cross-clamp: a cgroup limit set ABOVE physical RAM (systemd
+// MemoryMax=1T on a 64 GB box, or plain overcommit) is a ceiling the
+// machine can't deliver — reporting it would leave the dispatch floor
+// comparing against memory that doesn't exist (the pre-cgroup meminfo
+// path caught exactly this). Both figures must clamp to the host's
+// meminfo truth: total to MemTotal (65472 MiB here), available to
+// MemAvailable (57344 MiB), not the 1 TiB fantasy.
+func TestAvailableTotal_CgroupLimitAboveHostClampsToMeminfo(t *testing.T) {
+	read := fakeFS(map[string]string{
+		procSelfCgroupPath:                      "0::/\n",
+		cgroupRoot + "/" + cgroupMemMaxFile:     "1099511627776", // 1 TiB — far above host RAM
+		cgroupRoot + "/" + cgroupMemCurrentFile: "2147483648",
+		cgroupRoot + "/" + cgroupMemStatFile:    "inactive_file 0\n",
+		procMeminfoPath:                         fakeMeminfo,
+	})
+	if got, want := totalMBFrom(read), 67043328/1024; got != want {
+		t.Errorf("totalMBFrom() = %d, want host MemTotal %d (clamped)", got, want)
+	}
+	if got, want := availableMBFrom(read), 58720256/1024; got != want {
+		t.Errorf("availableMBFrom() = %d, want host MemAvailable %d (clamped)", got, want)
+	}
+}
+
+// TestAvailableTotal_CgroupLimitedNoMeminfo pins that the cross-clamp
+// degrades gracefully: with a confirmed cgroup limit but an unreadable
+// /proc/meminfo, the cgroup figures stand un-clamped (the best
+// available answer) rather than collapsing to Unknown.
+func TestAvailableTotal_CgroupLimitedNoMeminfo(t *testing.T) {
+	read := fakeFS(map[string]string{
+		procSelfCgroupPath:                      "0::/\n",
+		cgroupRoot + "/" + cgroupMemMaxFile:     "8589934592",
+		cgroupRoot + "/" + cgroupMemCurrentFile: "2147483648",
+		cgroupRoot + "/" + cgroupMemStatFile:    "inactive_file 536870912\n",
+		// no procMeminfoPath entry — reads ErrNotExist
+	})
+	if got := totalMBFrom(read); got != 8192 {
+		t.Errorf("totalMBFrom() = %d, want 8192 (unclamped when meminfo unreadable)", got)
+	}
+	if got := availableMBFrom(read); got != 6656 {
+		t.Errorf("availableMBFrom() = %d, want 6656 (unclamped when meminfo unreadable)", got)
+	}
+}
+
 // TestAvailableTotal_CgroupUnlimited covers memory.max == "max" (no
 // real ceiling, e.g. an unrestricted container): both figures must
 // fall back to /proc/meminfo rather than treating "max" as a number.

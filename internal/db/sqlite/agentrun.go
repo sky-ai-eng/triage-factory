@@ -178,7 +178,7 @@ func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool
 	return n > 0, err
 }
 
-func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID string) (bool, error) {
+func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
@@ -187,12 +187,20 @@ func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID string) (
 	// (completed + outcome='finish') is excluded and a racing resume that already
 	// moved the row loses this compare-and-swap. pending_approval is gone
 	// Runs never park for approval.
+	//
+	// The ownership stamp rides the same statement — see the Postgres
+	// twin's comment; at N=1 the practical effect is that a resumed row
+	// always carries the CURRENT boot's epoch, so a same-boot reconcile
+	// never mistakes it for a prior boot's orphan. Empty executorID →
+	// NULL for both columns.
 	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'running', parked_at = NULL
+		UPDATE runs SET status = 'running', parked_at = NULL,
+			executor_id = NULLIF(?, ''),
+			boot_epoch  = CASE WHEN ? = '' THEN NULL ELSE ? END
 		WHERE id = ?
 		  AND (status = 'open'
 		       OR (status = 'completed' AND outcome = 'abort'))
-	`, runID)
+	`, executorID, executorID, bootEpoch, runID)
 	if err != nil {
 		return false, err
 	}
@@ -630,8 +638,8 @@ func (s *agentRunStore) MarkOpenSystem(ctx context.Context, orgID, runID string)
 	return s.MarkOpen(ctx, orgID, runID)
 }
 
-func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID string) (bool, error) {
-	return s.MarkResuming(ctx, orgID, runID)
+func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error) {
+	return s.MarkResuming(ctx, orgID, runID, executorID, bootEpoch)
 }
 
 func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {

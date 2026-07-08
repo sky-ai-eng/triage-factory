@@ -187,30 +187,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			// through to the normal deferral so the firing is never
 			// silently dropped.
 		}
-		// System-actor firing rows have no human author. Empty user
-		// here lets the Postgres impl's COALESCE walk to the org-
-		// owner fallback (creator_user_id is NOT NULL but the table
-		// has no separate "actor" column); SQLite ignores the column
-		// entirely.
-		inserted, err := r.firings.Enqueue(context.Background(), orgID, "", entityID, task.ID, trigger.ID, triggeringEventID)
-		if err != nil {
-			routerLog.Error("enqueue firing failed",
-				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "error", err)
-			return false
-		}
-		if !inserted {
-			routerLog.Debug("firing collapsed, duplicate already queued",
-				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
-			return false
-		}
-		routerLog.Info("queued firing, entity busy",
-			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
-		// Pending firing landed in the queue, commit the task to the
-		// org's agent. Stamp here (after EnqueuePendingFiring
-		// succeeded) so a failed enqueue doesn't leave a phantom claim
-		// on an otherwise queued task.
-		r.stampAgentClaim(orgID, task, actingTeamID, agentID)
-		return true
+		return r.enqueueBusyFiring(orgID, entityID, task, trigger, triggeringEventID, actingTeamID, agentID)
 	}
 
 	// Consolidate the owner team to the acting team BEFORE firing. An
@@ -241,6 +218,16 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 				"task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
 			return false
 		}
+		// The gate read said idle, but a DIFFERENT (event, trigger) went
+		// active on this entity before our insert — the one-active index
+		// is the authority, the gate just a fast-path (TFAC-579). The
+		// intent is still valid: defer it onto pending_firings exactly as
+		// the gate's busy branch would have, instead of dropping it.
+		if errors.Is(err, delegate.ErrEntityBusy) {
+			routerLog.Info("auto-delegate deferred: entity went busy under the fire (gate race)",
+				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
+			return r.enqueueBusyFiring(orgID, entityID, task, trigger, triggeringEventID, actingTeamID, agentID)
+		}
 		routerLog.Error("fire failed", "task_id", task.ID, "trigger", trigger.ID, "error", err)
 		return false
 	}
@@ -249,6 +236,41 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	// so a fireDelegate that fails + reverts to status='queued'
 	// doesn't leave a phantom bot claim on a task that's back in the
 	// human-triage queue.
+	r.stampAgentClaim(orgID, task, actingTeamID, agentID)
+	return true
+}
+
+// enqueueBusyFiring defers a valid firing onto pending_firings because the
+// entity is busy, and commits the task's agent claim on success. Called
+// from both places that discover busyness: the gate's fast-path read, and
+// the ErrEntityBusy loser of the fenced insert (the gate race — the DB
+// index is the authority, the gate an optimization). Returns true when the
+// intent was queued and the claim stamped; false when the enqueue failed
+// or collapsed onto an already-queued (task, trigger) duplicate (whose own
+// enqueue already stamped the claim).
+func (r *Router) enqueueBusyFiring(orgID, entityID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID, actingTeamID, agentID string) bool {
+	// System-actor firing rows have no human author. Empty user
+	// here lets the Postgres impl's COALESCE walk to the org-
+	// owner fallback (creator_user_id is NOT NULL but the table
+	// has no separate "actor" column); SQLite ignores the column
+	// entirely.
+	inserted, err := r.firings.Enqueue(context.Background(), orgID, "", entityID, task.ID, trigger.ID, triggeringEventID)
+	if err != nil {
+		routerLog.Error("enqueue firing failed",
+			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "error", err)
+		return false
+	}
+	if !inserted {
+		routerLog.Debug("firing collapsed, duplicate already queued",
+			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
+		return false
+	}
+	routerLog.Info("queued firing, entity busy",
+		"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
+	// Pending firing landed in the queue, commit the task to the
+	// org's agent. Stamp here (after EnqueuePendingFiring
+	// succeeded) so a failed enqueue doesn't leave a phantom claim
+	// on an otherwise queued task.
 	r.stampAgentClaim(orgID, task, actingTeamID, agentID)
 	return true
 }
@@ -500,8 +522,16 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 				routerLog.Error("release firing after transient drain error failed",
 					"firing_id", firing.ID, "entity", entityID, "error", err)
 			}
-			routerLog.Warn("drain transient error, released firing for retry",
-				"firing_id", firing.ID, "entity", entityID, "error", transientErr)
+			if errors.Is(transientErr, errDrainEntityBusy) {
+				// Routine gate race, not a failure: another run went active
+				// between the pop and the fire; the release above re-queues
+				// the intent for the busy run's own terminal drain.
+				routerLog.Info("drain deferred: entity busy, firing released for retry",
+					"firing_id", firing.ID, "entity", entityID)
+			} else {
+				routerLog.Warn("drain transient error, released firing for retry",
+					"firing_id", firing.ID, "entity", entityID, "error", transientErr)
+			}
 			return
 		}
 		if runID != "" {
@@ -602,11 +632,29 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// drainingStaleAfter is how old a 'draining' claim must be before the
+// sweeper treats its drainer as dead and requeues the firing. A drain is
+// a handful of DB round-trips (spawner.Delegate is a pure enqueue — no
+// process spawn, no network beyond Postgres), so minutes of staleness is
+// a crashed drainer, not a slow one; generous enough that a live drain
+// can never be stolen mid-flight.
+const drainingStaleAfter = 2 * time.Minute
+
 // sweepOrg drains every entity in a single org that has at least one
 // pending firing. Factored out of RunDrainSweeper so the per-org loop
 // reads as one statement and per-org errors don't bail the whole
 // cycle.
 func (r *Router) sweepOrg(ctx context.Context, orgID string) {
+	// Crash recovery first: requeue firings stuck in 'draining' past the
+	// staleness cutoff (their drainer died between pop and resolve), so
+	// the pass below sees and drains them like any queued intent.
+	if n, err := r.firings.RequeueStaleDraining(ctx, orgID, time.Now().Add(-drainingStaleAfter)); err != nil {
+		routerLog.Error("drain sweeper: requeue stale draining failed", "org", orgID, "error", err)
+	} else if n > 0 {
+		routerLog.Warn("drain sweeper: requeued firings orphaned in 'draining' (drainer died mid-drain?)",
+			"count", n, "org", orgID)
+	}
+
 	ids, err := r.firings.ListEntitiesWithPending(ctx, orgID)
 	if err != nil {
 		routerLog.Error("drain sweeper: list entities with pending failed", "org", orgID, "error", err)
@@ -708,10 +756,24 @@ func (r *Router) attemptDrainOne(orgID string, firing *domain.PendingFiring) (ru
 		if errors.Is(err, delegate.ErrAlreadyFired) {
 			return "", domain.PendingFiringSkipAlreadyFired, nil
 		}
+		// A different (event, trigger) went active on the entity between
+		// this drain's pop and the fenced insert (a fresh immediate fire,
+		// or a racing drainer). NOT a skip: the queued intent is still
+		// valid — surface it transient-shaped so the caller releases the
+		// firing back to 'pending'; the busy run's own terminal drain (or
+		// the sweeper) retries it.
+		if errors.Is(err, delegate.ErrEntityBusy) {
+			return "", "", errDrainEntityBusy
+		}
 		return "", "", fmt.Errorf("fire delegate: %w", err)
 	}
 	return id, "", nil
 }
+
+// errDrainEntityBusy marks the drain-time entity-busy race for DrainEntity's
+// transient branch: same release-and-retry handling, but logged as routine
+// (Info) rather than as a Warn-worthy transient failure.
+var errDrainEntityBusy = errors.New("routing: entity busy at drain fire; firing released for retry")
 
 // revertTaskStatus moves a task's lifecycle axis back to the given
 // status and broadcasts the change so the frontend doesn't get stuck
