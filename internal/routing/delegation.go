@@ -26,7 +26,15 @@ import (
 // the gate is closed (active auto run, or older firings already queued
 // for FIFO fairness), the firing enqueues onto pending_firings instead of
 // being dropped silently.
-func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string, actingTeamID string) {
+//
+// Returns fired=true iff this call actually committed the bot to the task —
+// an immediate fireDelegate success, or a new row landed in pending_firings
+// (queued because the entity was busy; the commitment is real even though
+// the run hasn't started yet). Every other exit — already claimed by
+// another team, a store/lookup error, the bot disabled for the team, the
+// breaker tripped, a duplicate already queued, or a replay hitting
+// ErrAlreadyFired — returns false: nothing new happened on this call.
+func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string, actingTeamID string) (fired bool) {
 	// Exclusive claim: one task, one owner. If the bot has already
 	// claimed this task on behalf of a different team (an earlier
 	// matched team won the CAS), this team's trigger must not pile on a
@@ -37,7 +45,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	if task.ClaimedByAgentID != "" && actingTeamID != "" && teamIDValue(task) != actingTeamID {
 		routerLog.Info("auto-trigger skipped: task already claimed by the bot for another team",
 			"task_id", task.ID, "claimed_team", teamIDValue(task), "acting_team", actingTeamID)
-		return
+		return false
 	}
 	// Resolve the org's agent ONCE here. It's the single source for three
 	// consumers that must agree: the bot-disabled-team gate, the run's actor
@@ -56,7 +64,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		a, err := r.agents.GetForOrgSystem(context.Background(), orgID)
 		if err != nil {
 			routerLog.Warn("auto-trigger skipped: agent lookup failed", "error", err)
-			return
+			return false
 		}
 		if a != nil {
 			agentID = a.ID
@@ -74,7 +82,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 				// startup, so this shouldn't reach us in practice.
 				// Log + bail rather than crashing the goroutine.
 				routerLog.Warn("auto-trigger skipped: no agent bootstrapped", "task_id", task.ID)
-				return
+				return false
 			}
 			// Read the bot-enabled flag for the FIRING team — the team
 			// whose trigger routed the bot here — not the task's owner
@@ -93,11 +101,11 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			ta, err := r.teamAgents.GetForTeamSystem(context.Background(), orgID, teamID, a.ID)
 			if err != nil {
 				routerLog.Warn("auto-trigger skipped: team_agents lookup failed", "task_id", task.ID, "error", err)
-				return
+				return false
 			}
 			if ta == nil || !ta.Enabled {
 				routerLog.Info("auto-trigger skipped: bot disabled for team", "task_id", task.ID, "team", teamID)
-				return
+				return false
 			}
 		}
 	}
@@ -112,7 +120,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	failures, err := r.tasks.CountConsecutiveFailedRunsSystem(context.Background(), orgID, entityID, breakerPromptID)
 	if err != nil {
 		routerLog.Error("breaker query failed", "entity", entityID, "prompt", breakerPromptID, "error", err)
-		return
+		return false
 	}
 	if failures >= breakerThreshold {
 		routerLog.Info("breaker tripped",
@@ -128,7 +136,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			promptName = "prompt"
 		}
 		toast.Warning(r.ws, orgID, fmt.Sprintf("Auto-delegation paused: %s tripped the breaker (%d consecutive failures on this entity)", promptName, failures))
-		return
+		return false
 	}
 
 	// Per-entity gate. Closed if any auto run is active on the entity OR
@@ -140,14 +148,14 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	hasActive, err := r.agentRuns.HasActiveAutoRunForEntitySystem(gateCtx, orgID, entityID)
 	if err != nil {
 		routerLog.Error("entity gate active-run query failed", "entity", entityID, "error", err)
-		return
+		return false
 	}
 	hasPending := false
 	if !hasActive {
 		hasPending, err = r.firings.HasPendingForEntity(gateCtx, orgID, entityID)
 		if err != nil {
 			routerLog.Error("entity gate pending query failed", "entity", entityID, "error", err)
-			return
+			return false
 		}
 	}
 	if hasActive || hasPending {
@@ -160,24 +168,21 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		if err != nil {
 			routerLog.Error("enqueue firing failed",
 				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "error", err)
-			return
+			return false
 		}
-		if inserted {
-			routerLog.Info("queued firing, entity busy",
-				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
-			// Pending firing landed in the queue,
-			// commit the task to the org's agent. Stamp here (after
-			// EnqueuePendingFiring succeeded) so a failed enqueue
-			// doesn't leave a phantom claim on an otherwise queued
-			// task. !inserted means a duplicate firing already in the
-			// queue — the original enqueue already stamped, no re-
-			// stamp needed.
-			r.stampAgentClaim(orgID, task, actingTeamID, agentID)
-		} else {
+		if !inserted {
 			routerLog.Debug("firing collapsed, duplicate already queued",
 				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
+			return false
 		}
-		return
+		routerLog.Info("queued firing, entity busy",
+			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
+		// Pending firing landed in the queue, commit the task to the
+		// org's agent. Stamp here (after EnqueuePendingFiring
+		// succeeded) so a failed enqueue doesn't leave a phantom claim
+		// on an otherwise queued task.
+		r.stampAgentClaim(orgID, task, actingTeamID, agentID)
+		return true
 	}
 
 	// Consolidate the owner team to the acting team BEFORE firing. An
@@ -206,10 +211,10 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		if errors.Is(err, delegate.ErrAlreadyFired) {
 			routerLog.Info("auto-delegate skipped: event already fired this trigger (replay)",
 				"task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
-			return
+			return false
 		}
 		routerLog.Error("fire failed", "task_id", task.ID, "trigger", trigger.ID, "error", err)
-		return
+		return false
 	}
 	// fireDelegate succeeded (run inserted + spawner
 	// goroutine launched) — stamp the agent claim. Done AFTER success
@@ -217,6 +222,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	// doesn't leave a phantom bot claim on a task that's back in the
 	// human-triage queue.
 	r.stampAgentClaim(orgID, task, actingTeamID, agentID)
+	return true
 }
 
 // stampAgentClaim writes claimed_by_agent_id on a task AND broadcasts the
