@@ -744,6 +744,14 @@ Control-pod handler logic (`message` / `interrupt` / `cancel` /
 3. No live owner → today's DB-only paths (`MarkCancelledIfActive`, 409
    for steer/interrupt), unchanged semantics.
 
+For the record, this round-trip is a named pattern, not an invention:
+asynchronous [Request–Reply](https://www.enterpriseintegrationpatterns.com/patterns/messaging/RequestReply.html)
+with a [Correlation Identifier](https://www.enterpriseintegrationpatterns.com/patterns/messaging/CorrelationIdentifier.html)
+(Hohpe & Woolf, *Enterprise Integration Patterns*) carried over
+pub/sub — the same shape as CI approval gates, Temporal signals, and
+multi-server websocket backplanes. The permission `request_id` and
+`run_signals.id` are the correlation identifiers.
+
 **Parked/open runs stop being a control-plane special case entirely**:
 `ResumeOpenRun` becomes *resume-by-enqueue* — a message to a hibernated
 run enqueues its continuation as ordinary claimable work (preferred to
