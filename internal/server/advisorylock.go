@@ -31,14 +31,19 @@ import (
 // per-process keyed mutex — the same protection this RMW had before,
 // unchanged.
 //
-// Returns a release func the caller must call exactly once (typically via
-// defer) to end the critical section.
+// Returns a release func the caller must call at least once (typically via
+// defer) to end the critical section — it's safe to call earlier and let a
+// deferred call fire again as a no-op (e.g. to narrow the held window: release
+// as soon as the guarded work is done, keep the defer as the safety net for
+// every other early-return path), since the returned func is idempotent in
+// both modes.
 func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64, key string) (release func(), err error) {
 	if runmode.Current() != runmode.ModeMulti {
 		v, _ := mu.LoadOrStore(key, &sync.Mutex{})
 		m := v.(*sync.Mutex)
 		m.Lock()
-		return m.Unlock, nil
+		var once sync.Once
+		return func() { once.Do(m.Unlock) }, nil
 	}
 
 	conn, err := s.db.Conn(ctx)

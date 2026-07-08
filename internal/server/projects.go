@@ -837,6 +837,16 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The row is gone — any concurrent PATCH/upload racing in from here
+	// will do its own existence check and 404 cleanly, so the lock has
+	// nothing left to guard. Release now rather than holding it (a
+	// Postgres connection, in multi mode) through the best-effort disk
+	// cleanup and worktree prune below, which can be slow for a large
+	// knowledge-base dir or a big pinned-repo list. release is
+	// idempotent, so the deferred call above still fires safely as a
+	// no-op on every return path.
+	release()
+
 	// Best-effort on-disk cleanup. The DB delete is the source of
 	// truth and a stale on-disk dir is recoverable (next run that
 	// needs that path will recreate or surface the issue), so a
@@ -1537,6 +1547,36 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	}
 	id := r.PathValue("id")
 
+	// Parse the multipart body BEFORE taking the per-project lock.
+	// ParseMultipartForm reads the whole request off the wire — the
+	// slow, client-bandwidth-bound part of this handler — and doesn't
+	// touch the project row or its on-disk directory, so it doesn't
+	// need the lock. Acquiring the lock only after this point means a
+	// slow uploader doesn't hold a Postgres connection (and, in multi
+	// mode, the advisory lock's session) idle for the duration of the
+	// network transfer; see the lock acquisition below for what it
+	// does need to cover. MaxBytesReader caps the WHOLE request,
+	// including form fields and per-file streams; per-file caps are
+	// enforced separately during the copy below so a single oversize
+	// file doesn't poison siblings that were within budget.
+	r.Body = http.MaxBytesReader(w, r.Body, knowledgeMaxRequestBytes)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart parse: " + err.Error()})
+		return
+	}
+	defer func() {
+		if r.MultipartForm != nil {
+			if err := r.MultipartForm.RemoveAll(); err != nil {
+				projectsLog.Warn("knowledge upload: cleanup multipart form failed", "project", id, "error", err)
+			}
+		}
+	}()
+	files := r.MultipartForm.File["file"]
+	if len(files) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no files in upload (use form field 'file')"})
+		return
+	}
+
 	// Take the same per-project lock that PATCH and DELETE use.
 	// Without it, an upload that has just verified the project
 	// exists could race a DELETE: DELETE drops the row and
@@ -1545,7 +1585,9 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	// longer exists in the DB — leaving orphaned on-disk state
 	// after a successful delete. Holding the lock across the
 	// existence check + write makes the upload visibly atomic
-	// to a concurrent delete.
+	// to a concurrent delete. Acquired here, after the body is
+	// already fully read above, so the held connection only spans
+	// the DB check + local disk writes below, not the upload itself.
 	release, err := s.acquireKeyedLock(r.Context(), &s.projectMutexes, projectRMWLockSalt, id)
 	if err != nil {
 		internalError(w, "projects", err)
@@ -1578,28 +1620,6 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
 		projectsLog.Error("knowledge upload: mkdir failed", "dir", kbDir, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create knowledge dir"})
-		return
-	}
-
-	// MaxBytesReader caps the WHOLE request, including form fields
-	// and per-file streams. Per-file caps are enforced separately
-	// during the copy below so a single oversize file doesn't poison
-	// siblings that were within budget.
-	r.Body = http.MaxBytesReader(w, r.Body, knowledgeMaxRequestBytes)
-	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart parse: " + err.Error()})
-		return
-	}
-	defer func() {
-		if r.MultipartForm != nil {
-			if err := r.MultipartForm.RemoveAll(); err != nil {
-				projectsLog.Warn("knowledge upload: cleanup multipart form failed", "project", id, "error", err)
-			}
-		}
-	}()
-	files := r.MultipartForm.File["file"]
-	if len(files) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no files in upload (use form field 'file')"})
 		return
 	}
 
