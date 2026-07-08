@@ -50,7 +50,10 @@ type cgroupMemLevel struct {
 
 // availableMBFrom is AvailableMB with an injectable reader.
 func availableMBFrom(read readFileFunc) int {
-	levels, limited := cgroupMemLimitedLevels(read)
+	levels, limited, ambiguous := cgroupMemLimitedLevels(read)
+	if ambiguous {
+		return Unknown
+	}
 	if !limited {
 		return meminfoMB(read, "MemAvailable:")
 	}
@@ -90,7 +93,10 @@ func availableMBFrom(read readFileFunc) int {
 
 // totalMBFrom is TotalMB with an injectable reader.
 func totalMBFrom(read readFileFunc) int {
-	levels, limited := cgroupMemLimitedLevels(read)
+	levels, limited, ambiguous := cgroupMemLimitedLevels(read)
+	if ambiguous {
+		return Unknown
+	}
 	if !limited {
 		return meminfoMB(read, "MemTotal:")
 	}
@@ -109,12 +115,26 @@ func totalMBFrom(read readFileFunc) int {
 // level in the chain does — every level is either unlimited or has no
 // memory.max file at all (not cgrouped: bare metal, or a cgroup
 // v1-only host) — so callers fall back to /proc/meminfo.
-func cgroupMemLimitedLevels(read readFileFunc) ([]cgroupMemLevel, bool) {
+//
+// A file that genuinely doesn't exist (os.IsNotExist) is the expected
+// shape for the literal mount root under a shared/host cgroup
+// namespace — nothing sits above the true kernel root to limit it —
+// and is skipped silently. Any OTHER failure (permission denied, a
+// transient I/O error, unparseable content) is ambiguous: that level
+// might carry a real, possibly tighter, limit we simply couldn't
+// read, and treating it as "no limit here" could understate a real
+// constraint — the same class of mistake as falling back to
+// host-wide /proc/meminfo. ambiguous=true tells the caller to fail
+// toward Unknown instead of trusting whatever levels DID resolve.
+func cgroupMemLimitedLevels(read readFileFunc) (levels []cgroupMemLevel, limited, ambiguous bool) {
 	selfPath, _ := selfCgroupPath(read)
-	var levels []cgroupMemLevel
 	for _, dir := range cgroupAncestorDirs(selfPath) {
 		data, err := read(dir + "/" + cgroupMemMaxFile)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			ambiguous = true
 			continue
 		}
 		s := strings.TrimSpace(string(data))
@@ -123,11 +143,12 @@ func cgroupMemLimitedLevels(read readFileFunc) ([]cgroupMemLevel, bool) {
 		}
 		n, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
+			ambiguous = true
 			continue
 		}
 		levels = append(levels, cgroupMemLevel{dir: dir, maxBytes: n})
 	}
-	return levels, len(levels) > 0
+	return levels, len(levels) > 0, ambiguous
 }
 
 // selfCgroupPath reads this process's own cgroup v2 path from

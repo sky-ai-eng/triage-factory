@@ -4,6 +4,7 @@ package hostmem
 
 import (
 	"errors"
+	"io/fs"
 	"testing"
 )
 
@@ -26,26 +27,43 @@ func TestMeminfoFigures(t *testing.T) {
 	}
 }
 
-// errUnreadable is the fake filesystem's stand-in for os.ReadFile's
-// error return (permission denied, ENOENT, whatever) — callers only
-// branch on err != nil, so a plain sentinel is enough.
+// errUnreadable stands in for a real read failure other than "file
+// doesn't exist" — permission denied, a transient I/O error, whatever
+// — the class of failure cgroupMemLimitedLevels must NOT treat as "no
+// limit here" (see TestAvailableTotal_CgroupAncestorUnreadable). It
+// deliberately does not satisfy os.IsNotExist, unlike fakeFS's default
+// "path not in the map" error below.
 var errUnreadable = errors.New("unreadable")
 
 // fakeFS builds a readFileFunc backed by an in-memory path->content
-// map; any path not present reports errUnreadable, standing in for a
-// missing or permission-denied file without touching the real
-// filesystem — the injected-reader seam the acceptance criteria calls
-// for so cgrouped/uncgrouped/unreadable hosts, and hosts where our own
-// cgroup sits several levels under the mount root, are all reachable
-// from one test binary regardless of what this host actually looks
-// like.
+// map; any path not present reports fs.ErrNotExist — matching a real
+// os.ReadFile on a genuinely missing file (e.g. the true cgroup root's
+// absent memory.max) — without touching the real filesystem. This is
+// the injected-reader seam the acceptance criteria calls for so
+// cgrouped/uncgrouped/unreadable hosts, and hosts where our own cgroup
+// sits several levels under the mount root, are all reachable from one
+// test binary regardless of what this host actually looks like.
 func fakeFS(files map[string]string) readFileFunc {
 	return func(path string) ([]byte, error) {
 		content, ok := files[path]
 		if !ok {
-			return nil, errUnreadable
+			return nil, fs.ErrNotExist
 		}
 		return []byte(content), nil
+	}
+}
+
+// fakeFSWithErrors layers specific errors (typically errUnreadable) at
+// chosen paths over an otherwise-normal fakeFS — for pinning the
+// "ambiguous read failure" behavior distinctly from "file doesn't
+// exist" at a path that would otherwise resolve normally.
+func fakeFSWithErrors(files map[string]string, errs map[string]error) readFileFunc {
+	base := fakeFS(files)
+	return func(path string) ([]byte, error) {
+		if err, ok := errs[path]; ok {
+			return nil, err
+		}
+		return base(path)
 	}
 }
 
@@ -138,6 +156,54 @@ func TestAvailableMB_CgroupLimitedUsageUnreadable(t *testing.T) {
 	}
 	if got := availableMBFrom(read); got != Unknown {
 		t.Errorf("availableMBFrom() = %d, want Unknown (must not fall back to host-wide meminfo)", got)
+	}
+}
+
+// TestAvailableTotal_CgroupAncestorUnreadable pins the asymmetry fix:
+// an ancestor's memory.max that fails to read for a reason OTHER than
+// "doesn't exist" (permission denied, a transient I/O error) must not
+// be silently treated as unlimited — that ancestor might carry a real,
+// possibly tighter, limit this process simply couldn't read. Both
+// figures must report Unknown rather than compute from the one level
+// that WAS readable, even though that level itself has a perfectly
+// valid, generous limit.
+func TestAvailableTotal_CgroupAncestorUnreadable(t *testing.T) {
+	const parent = "/sys/fs/cgroup/system.slice"
+	const leaf = parent + "/docker-abc123.scope"
+	read := fakeFSWithErrors(map[string]string{
+		procSelfCgroupPath:                "0::/system.slice/docker-abc123.scope\n",
+		leaf + "/" + cgroupMemMaxFile:     "8589934592", // 8 GiB — perfectly readable
+		leaf + "/" + cgroupMemCurrentFile: "1073741824",
+		leaf + "/" + cgroupMemStatFile:    "inactive_file 0\n",
+		procMeminfoPath:                   fakeMeminfo,
+	}, map[string]error{
+		// The parent slice's memory.max exists but can't be read for
+		// some reason other than absence.
+		parent + "/" + cgroupMemMaxFile: errUnreadable,
+	})
+	if got := totalMBFrom(read); got != Unknown {
+		t.Errorf("totalMBFrom() = %d, want Unknown (an unreadable ancestor limit must not be treated as unlimited)", got)
+	}
+	if got := availableMBFrom(read); got != Unknown {
+		t.Errorf("availableMBFrom() = %d, want Unknown (an unreadable ancestor limit must not be treated as unlimited)", got)
+	}
+}
+
+// TestAvailableTotal_CgroupAncestorGarbage covers the other ambiguous
+// path: a memory.max file that reads fine but holds unparseable
+// content (not "max", not a valid integer — a corrupt or
+// unexpectedly-formatted file). Same Unknown outcome as an unreadable
+// file: this is not "unlimited", it's "we don't know".
+func TestAvailableTotal_CgroupAncestorGarbage(t *testing.T) {
+	read := fakeFS(map[string]string{
+		cgroupRoot + "/" + cgroupMemMaxFile: "not-a-number\n",
+		procMeminfoPath:                     fakeMeminfo,
+	})
+	if got := totalMBFrom(read); got != Unknown {
+		t.Errorf("totalMBFrom() = %d, want Unknown (unparseable memory.max must not be treated as unlimited)", got)
+	}
+	if got := availableMBFrom(read); got != Unknown {
+		t.Errorf("availableMBFrom() = %d, want Unknown", got)
 	}
 }
 
