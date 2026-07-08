@@ -28,6 +28,20 @@ func TestSlackMentionSchema_Registered(t *testing.T) {
 	}
 }
 
+// TestSlackMentionSchema_Additive pins the TFAC-597 flip: a re-mention on an
+// entity with an already-active auto run injects into that run
+// (internal/routing's tryAutoDelegate, via events.AdditiveFor) instead of
+// deferring to pending_firings.
+func TestSlackMentionSchema_Additive(t *testing.T) {
+	sc, ok := events.Get(domain.EventSlackMention)
+	if !ok {
+		t.Fatal("events.Get(slack:mention) = not found; want the schema registered by ee/slack's init()")
+	}
+	if !sc.Additive {
+		t.Error("Additive = false; want true (a re-mention on a live run should inject, not defer)")
+	}
+}
+
 // TestSlackMentionPredicate_MatchesAll pins the empty-predicate case: an
 // empty (or absent) channel_in list means "no filter," matching everything
 // — the *_in convention shared with GitHubPRCICheckFailedPredicate.AuthorIn.
