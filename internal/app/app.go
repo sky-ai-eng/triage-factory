@@ -100,7 +100,15 @@ type App struct {
 // ready to Run. Each step is one named method; the local/multi-mode forks
 // live inside the step that owns them, so this sequence reads the same in
 // both modes.
-func New(ctx context.Context, cfg Config, static fs.FS) (*App, error) {
+//
+// Named returns + the deferred cleanup below: ensureIdentity acquires (and
+// holds) the instance identity file's exclusive lock for the process
+// lifetime, but a failure on any LATER step must still release it — an
+// error return here isn't process exit (retries, or a test calling New
+// more than once against the same state root, would otherwise find the
+// lock already held and fail confusingly). Every `if err = ...` below
+// assigns the named return so the deferred check sees it.
+func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	a := &App{cfg: cfg, announce: newAnnouncer()}
 
 	// Resolve this process's persistent instance identity before anything
@@ -108,9 +116,16 @@ func New(ctx context.Context, cfg Config, static fs.FS) (*App, error) {
 	// lock is the two-process-on-one-state-root guard, so it's most
 	// valuable held as early in boot as possible — even before the local
 	// bind guardrail below.
-	if err := a.ensureIdentity(); err != nil {
+	if err = a.ensureIdentity(); err != nil {
 		return nil, fmt.Errorf("instance identity: %w", err)
 	}
+	defer func() {
+		if err != nil {
+			if cerr := a.identity.Close(); cerr != nil {
+				appLog.Error("release instance identity lock failed", "error", cerr)
+			}
+		}
+	}()
 
 	if a.local() {
 		// Local-mode public-exposure guardrail (TFAC-409 item 1): local mode
@@ -119,7 +134,7 @@ func New(ctx context.Context, cfg Config, static fs.FS) (*App, error) {
 		// operator explicitly acknowledges via TF_ALLOW_PUBLIC_LOCAL. Checked
 		// first, before any store/secret wiring, so a misconfigured public bind
 		// fails fast and cheap.
-		if err := a.checkLocalBind(); err != nil {
+		if err = a.checkLocalBind(); err != nil {
 			return nil, err
 		}
 
@@ -128,28 +143,28 @@ func New(ctx context.Context, cfg Config, static fs.FS) (*App, error) {
 		// TF_SECRET_ENCRYPTION_KEY or an undecryptable secrets file fails the
 		// server at boot rather than on the first credential read. Multi mode
 		// uses the Postgres secret store and never touches internal/auth.
-		if err := auth.InitLocalSecretBackend(); err != nil {
+		if err = auth.InitLocalSecretBackend(); err != nil {
 			return nil, fmt.Errorf("secret backend: %w", err)
 		}
 	}
 
-	if err := a.openStores(ctx); err != nil { // DB pool(s) + store bundle
+	if err = a.openStores(ctx); err != nil { // DB pool(s) + store bundle
 		return nil, err
 	}
-	if err := a.registerInstance(ctx); err != nil { // fleet registry boot-registration upsert
+	if err = a.registerInstance(ctx); err != nil { // fleet registry boot-registration upsert
 		return nil, err
 	}
-	if err := a.buildServer(ctx, static); err != nil { // HTTP handlers + auth + static; owns the websocket hub
+	if err = a.buildServer(ctx, static); err != nil { // HTTP handlers + auth + static; owns the websocket hub
 		return nil, err
 	}
 	// TFAC-573: openStores' db.Migrate already ran to completion above (New
 	// would have returned its error otherwise) — record that for GET
 	// /readyz's "migrations" check now that the server exists to hold it.
 	a.srv.SetMigrationsOK(true)
-	a.buildInfra()                             // event bus
-	a.buildRunCredentials()                    // ghResolver / runSecrets / modelFor
-	a.buildAI()                                // scorer + project classifier
-	if err := a.buildExecution(); err != nil { // delegation spawner + curator runtime
+	a.buildInfra()                            // event bus
+	a.buildRunCredentials()                   // ghResolver / runSecrets / modelFor
+	a.buildAI()                               // scorer + project classifier
+	if err = a.buildExecution(); err != nil { // delegation spawner + curator runtime
 		return nil, err
 	}
 	a.buildRouting()        // ingestor + poller manager + event router

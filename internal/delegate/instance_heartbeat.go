@@ -25,6 +25,11 @@ const DefaultInstanceHeartbeatInterval = 4 * time.Second
 // test / no-seam path) makes this a logged no-op; production always calls
 // SetExecutorID before starting this loop. Purely observational: it never
 // mutates dispatch/admission state, only reports it.
+//
+// A non-positive interval falls back to DefaultInstanceHeartbeatInterval
+// rather than reaching time.NewTicker directly — NewTicker panics on a
+// non-positive duration, and this is a background loop a caller could
+// plausibly start with a zero-value or misconfigured interval.
 func (s *Spawner) RunInstanceHeartbeat(ctx context.Context, interval time.Duration) {
 	if s.instances == nil {
 		dispatchLog.Warn("instance heartbeat not started: no InstanceStore wired")
@@ -33,6 +38,11 @@ func (s *Spawner) RunInstanceHeartbeat(ctx context.Context, interval time.Durati
 	if id, _ := s.executorIdentity(); id == "" {
 		dispatchLog.Warn("instance heartbeat not started: no executor identity set (SetExecutorID was never called)")
 		return
+	}
+	if interval <= 0 {
+		dispatchLog.Warn("instance heartbeat interval must be positive; using the default",
+			"requested", interval, "default", DefaultInstanceHeartbeatInterval)
+		interval = DefaultInstanceHeartbeatInterval
 	}
 
 	ticker := time.NewTicker(interval)

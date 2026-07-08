@@ -51,6 +51,9 @@ func TestEnsureIdentity_RereadsSameIDAcrossBoots(t *testing.T) {
 }
 
 func TestEnsureIdentity_SecondProcessFailsFast(t *testing.T) {
+	if !flockEnforced {
+		t.Skip("this platform's flockExclusive is a no-op — a second opener never fails fast, see lock_other.go")
+	}
 	root := t.TempDir()
 
 	first, err := EnsureIdentity(root)
@@ -69,6 +72,9 @@ func TestEnsureIdentity_SecondProcessFailsFast(t *testing.T) {
 }
 
 func TestEnsureIdentity_LockReleasedAfterClose(t *testing.T) {
+	if !flockEnforced {
+		t.Skip("this platform's flockExclusive is a no-op — there is no real lock to release, see lock_other.go")
+	}
 	root := t.TempDir()
 
 	first, err := EnsureIdentity(root)
