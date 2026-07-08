@@ -121,6 +121,16 @@ const (
 	EventSystemTaskAutoSuspended             = "system:task:auto_suspended"   // deprecated, per-task
 	EventSystemPromptAutoSuspended           = "system:prompt:auto_suspended" // per-(entity, prompt) breaker trip
 	EventSystemTaskDelegationBlockedSubtasks = "system:task:delegation_blocked_by_subtasks"
+
+	// EventSystemRunStatus / EventSystemRunActivity are EE-observable run
+	// lifecycle sentinels (TFAC-592): mirrors of the two websocket choke
+	// points in internal/delegate/spawner.go (broadcastRunUpdate/
+	// broadcastRunFailed and broadcastMessage) onto the bus, so an EE
+	// subscriber (ExtensionAPI.Bus()) can observe run activity without a
+	// websocket connection. See internal/domain/events/system.go for the
+	// metadata shapes.
+	EventSystemRunStatus   = "system:run:status"
+	EventSystemRunActivity = "system:run:activity"
 )
 
 // AllEventTypes returns the canonical seed catalog for the per-action
@@ -175,5 +185,7 @@ func AllEventTypes() []EventType {
 		{ID: EventSystemDelegationFailed, Source: "system", Category: "delegation", Label: "Delegation Failed", Description: "Agent delegation run failed"},
 		{ID: EventSystemPromptAutoSuspended, Source: "system", Category: "delegation", Label: "Prompt Auto-suspended", Description: "Per-(entity, prompt) breaker tripped after repeated failures"},
 		{ID: EventSystemTaskDelegationBlockedSubtasks, Source: "system", Category: "delegation", Label: "Delegation Blocked: Subtasks", Description: "Auto-delegation skipped because parent has open subtasks"},
+		{ID: EventSystemRunStatus, Source: "system", Category: "delegation", Label: "Run Status", Description: "A delegated run's status changed"},
+		{ID: EventSystemRunActivity, Source: "system", Category: "delegation", Label: "Run Activity", Description: "A delegated run invoked a tool"},
 	}
 }
