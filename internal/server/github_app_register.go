@@ -14,7 +14,6 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -484,10 +483,14 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	// Serialize per-org so two concurrent callbacks can't both pass
 	// the existence check, both call GitHub's conversion endpoint,
 	// and leave an orphan App. The unique constraint is the durable
-	// fallback; this mutex prevents the common case.
-	regMu, _ := s.githubAppRegMu.LoadOrStore(orgID, &sync.Mutex{})
-	regMu.(*sync.Mutex).Lock()
-	defer regMu.(*sync.Mutex).Unlock()
+	// fallback; this closes the common case — across every control pod
+	// in multi mode, not just this process (TFAC-579).
+	release, err := s.acquireKeyedLock(r.Context(), &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	defer release()
 
 	var existing *domain.OrgGitHubApp
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {

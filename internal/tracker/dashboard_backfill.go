@@ -132,7 +132,10 @@ func (t *Tracker) seedBackfillEntity(ctx context.Context, d ghclient.DiscoveredP
 	if err != nil {
 		return false, err
 	}
-	if err := t.entities.UpdateSnapshotSystem(ctx, t.orgID, entity.ID, string(snapJSON)); err != nil {
+	// CAS against entity.PollSeq (0 for a just-created row). A miss means a
+	// concurrent seed of the same brand-new entity already landed a
+	// snapshot — harmless, nothing to retry.
+	if _, err := t.entities.UpdateSnapshotCASSystem(ctx, t.orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 		return false, err
 	}
 	if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {

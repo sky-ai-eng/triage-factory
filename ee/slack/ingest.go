@@ -61,6 +61,10 @@ type ingestPipeline struct {
 	// resolveChannelName. Both nil-safe for the same reason as identity.
 	channels    slackstore.ChannelRegistryStore
 	channelName *ChannelResolver
+	// permalink resolves a freshly-created thread entity's chat.getPermalink
+	// URL into entities.url (TFAC-595), best-effort and detached — see
+	// PermalinkResolver.dispatch. Nil-safe for the same reason as identity.
+	permalink *PermalinkResolver
 }
 
 // handleEventCallback is the one function both transports call for an
@@ -107,13 +111,19 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 	}
 	sourceID := domain.SlackSourceID(ev.Channel, root)
 
-	entity, _, err := p.entities.FindOrCreateSystem(ctx, ws.OrgID, "slack", sourceID, "message", mentionTitle(ev.Text), "")
+	entity, created, err := p.entities.FindOrCreateSystem(ctx, ws.OrgID, "slack", sourceID, "message", mentionTitle(ev.Text), "")
 	if err != nil {
 		return fmt.Errorf("find or create slack entity: %w", err)
+	}
+	// Only on create: the thread-root permalink is stable once minted, and
+	// repeat mentions on an already-known thread shouldn't re-resolve it.
+	if created && p.permalink != nil {
+		p.permalink.dispatch(ws, entity.ID, ev.Channel, root)
 	}
 
 	metaJSON, err := json.Marshal(SlackMentionMetadata{
 		WorkspaceID: ws.WorkspaceID,
+		APIAppID:    ws.APIAppID,
 		Channel:     ev.Channel,
 		TS:          ev.TS,
 		ThreadTS:    ev.ThreadTS,

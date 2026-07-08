@@ -219,8 +219,32 @@ type EntityStore interface {
 	ListUnclassifiedSystem(ctx context.Context, orgID string) ([]domain.Entity, error)
 	FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
 	UpdateSnapshotSystem(ctx context.Context, orgID, id, snapshotJSON string) error
+
+	// UpdateSnapshotCASSystem is UpdateSnapshotSystem with a
+	// compare-and-swap on poll_seq (TFAC-579): the write only lands when
+	// the row's current poll_seq still equals expectedPollSeq (the value
+	// the caller last read the entity with), and it bumps poll_seq by 1
+	// on success. Leadership (P1) is the primary guarantee that only one
+	// process polls a given (org, source) at a time; this CAS is the
+	// belt-and-suspenders — a straggler ex-leader's late write (stale
+	// expectedPollSeq, e.g. mid-poll during a lease handoff) becomes a
+	// harmless ok=false no-op instead of silently overwriting a newer
+	// snapshot and losing a transition. Returns ok=false (no error) on a
+	// CAS miss; the caller drops the write and lets the next poll cycle
+	// reconcile — there is nothing to retry inline since a fresher
+	// snapshot already won.
+	UpdateSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (ok bool, err error)
 	UpdateTitleSystem(ctx context.Context, orgID, id, title string) error
 	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error
+
+	// UpdateURLSystem sets the entity's url. Admin pool; no-op update
+	// semantics (row must exist). Added for detached external-link
+	// enrichment (first consumer: Slack thread permalinks — TFAC-595) —
+	// entities.url is otherwise written only at insert (FindOrCreate*),
+	// with no prior update path. System-only by design: the only caller,
+	// ee/slack's permalink resolver, runs detached from any request
+	// (best-effort, off context.Background()) with no JWT claims context.
+	UpdateURLSystem(ctx context.Context, orgID, id, url string) error
 	AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) error
 	MarkClosedSystem(ctx context.Context, orgID, id string) error
 	CloseSystem(ctx context.Context, orgID, id string) error

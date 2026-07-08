@@ -61,6 +61,7 @@ const (
 	ArtifactProviderJira   = "jira"
 	ArtifactProviderLinear = "linear"
 	ArtifactProviderGit    = "git"
+	ArtifactProviderSlack  = "slack"
 )
 
 // Artifact kind discriminators.
@@ -70,6 +71,7 @@ const (
 	ArtifactKindReview      = "review"
 	ArtifactKindIssue       = "issue"
 	ArtifactKindComment     = "comment"
+	ArtifactKindMessage     = "message"
 )
 
 // Artifact state lifecycle values, grouped by kind. App-validated only —
@@ -118,6 +120,11 @@ const (
 	// retiring a comment never drops its artifact).
 	ArtifactStateCommentPosted  = "posted"
 	ArtifactStateCommentDeleted = "deleted"
+
+	// message (Slack): 'posted' once chat.postMessage lands, and stays
+	// 'posted' through an in-place chat.update edit — Slack has no delete verb
+	// in this ticket's scope, so there is no terminal state to add yet.
+	ArtifactStateMessagePosted = "posted"
 )
 
 // ArtifactDedupKey builds the stable, provider-natural key Upsert

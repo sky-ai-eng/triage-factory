@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -26,7 +27,15 @@ import (
 // the gate is closed (active auto run, or older firings already queued
 // for FIFO fairness), the firing enqueues onto pending_firings instead of
 // being dropped silently.
-func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string, actingTeamID string) {
+//
+// Returns fired=true iff this call actually committed the bot to the task —
+// an immediate fireDelegate success, or a new row landed in pending_firings
+// (queued because the entity was busy; the commitment is real even though
+// the run hasn't started yet). Every other exit — already claimed by
+// another team, a store/lookup error, the bot disabled for the team, the
+// breaker tripped, a duplicate already queued, or a replay hitting
+// ErrAlreadyFired — returns false: nothing new happened on this call.
+func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string, actingTeamID string) (fired bool) {
 	// Exclusive claim: one task, one owner. If the bot has already
 	// claimed this task on behalf of a different team (an earlier
 	// matched team won the CAS), this team's trigger must not pile on a
@@ -37,7 +46,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	if task.ClaimedByAgentID != "" && actingTeamID != "" && teamIDValue(task) != actingTeamID {
 		routerLog.Info("auto-trigger skipped: task already claimed by the bot for another team",
 			"task_id", task.ID, "claimed_team", teamIDValue(task), "acting_team", actingTeamID)
-		return
+		return false
 	}
 	// Resolve the org's agent ONCE here. It's the single source for three
 	// consumers that must agree: the bot-disabled-team gate, the run's actor
@@ -56,7 +65,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		a, err := r.agents.GetForOrgSystem(context.Background(), orgID)
 		if err != nil {
 			routerLog.Warn("auto-trigger skipped: agent lookup failed", "error", err)
-			return
+			return false
 		}
 		if a != nil {
 			agentID = a.ID
@@ -74,7 +83,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 				// startup, so this shouldn't reach us in practice.
 				// Log + bail rather than crashing the goroutine.
 				routerLog.Warn("auto-trigger skipped: no agent bootstrapped", "task_id", task.ID)
-				return
+				return false
 			}
 			// Read the bot-enabled flag for the FIRING team — the team
 			// whose trigger routed the bot here — not the task's owner
@@ -93,11 +102,11 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			ta, err := r.teamAgents.GetForTeamSystem(context.Background(), orgID, teamID, a.ID)
 			if err != nil {
 				routerLog.Warn("auto-trigger skipped: team_agents lookup failed", "task_id", task.ID, "error", err)
-				return
+				return false
 			}
 			if ta == nil || !ta.Enabled {
 				routerLog.Info("auto-trigger skipped: bot disabled for team", "task_id", task.ID, "team", teamID)
-				return
+				return false
 			}
 		}
 	}
@@ -112,7 +121,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	failures, err := r.tasks.CountConsecutiveFailedRunsSystem(context.Background(), orgID, entityID, breakerPromptID)
 	if err != nil {
 		routerLog.Error("breaker query failed", "entity", entityID, "prompt", breakerPromptID, "error", err)
-		return
+		return false
 	}
 	if failures >= breakerThreshold {
 		routerLog.Info("breaker tripped",
@@ -128,7 +137,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			promptName = "prompt"
 		}
 		toast.Warning(r.ws, orgID, fmt.Sprintf("Auto-delegation paused: %s tripped the breaker (%d consecutive failures on this entity)", promptName, failures))
-		return
+		return false
 	}
 
 	// Per-entity gate. Closed if any auto run is active on the entity OR
@@ -140,17 +149,44 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	hasActive, err := r.agentRuns.HasActiveAutoRunForEntitySystem(gateCtx, orgID, entityID)
 	if err != nil {
 		routerLog.Error("entity gate active-run query failed", "entity", entityID, "error", err)
-		return
+		return false
 	}
 	hasPending := false
 	if !hasActive {
 		hasPending, err = r.firings.HasPendingForEntity(gateCtx, orgID, entityID)
 		if err != nil {
 			routerLog.Error("entity gate pending query failed", "entity", entityID, "error", err)
-			return
+			return false
 		}
 	}
 	if hasActive || hasPending {
+		// Additive events (TFAC-594): a second firing of a type declared
+		// Additive against an entity with an already-active auto run is a
+		// follow-up to the conversation in progress, not a request for a
+		// second one — inject into the live run via the staged-injection
+		// seam instead of deferring. hasPending-only (no active run) always
+		// keeps the deferral: injection needs a live target to fold into.
+		if hasActive && events.AdditiveFor(trigger.EventType) {
+			if r.tryAdditiveInjection(gateCtx, orgID, entityID, task, trigger, triggeringEventID) {
+				// The gate is entity-wide, not task-scoped (see
+				// HasActiveAutoRunForEntitySystem's doc comment) — the
+				// active run's task may differ from THIS task (e.g. a
+				// ci_check_failed-derived task owns the live run while a
+				// separate slack:mention-derived task on the same entity
+				// additively fires). Commit the claim on task here
+				// exactly like the deferral path does post-Enqueue: the
+				// bot has taken responsibility for this task by folding
+				// its event into the live conversation, even though the
+				// run belongs to another task. A same-task repeat firing
+				// makes this a no-op (bot already owns it).
+				r.stampAgentClaim(orgID, task, actingTeamID, agentID)
+				return
+			}
+			// Resolution failed, or the active run went terminal in the
+			// race between the gate read and the injection attempt — fall
+			// through to the normal deferral so the firing is never
+			// silently dropped.
+		}
 		// System-actor firing rows have no human author. Empty user
 		// here lets the Postgres impl's COALESCE walk to the org-
 		// owner fallback (creator_user_id is NOT NULL but the table
@@ -160,24 +196,21 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		if err != nil {
 			routerLog.Error("enqueue firing failed",
 				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "error", err)
-			return
+			return false
 		}
-		if inserted {
-			routerLog.Info("queued firing, entity busy",
-				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
-			// Pending firing landed in the queue,
-			// commit the task to the org's agent. Stamp here (after
-			// EnqueuePendingFiring succeeded) so a failed enqueue
-			// doesn't leave a phantom claim on an otherwise queued
-			// task. !inserted means a duplicate firing already in the
-			// queue — the original enqueue already stamped, no re-
-			// stamp needed.
-			r.stampAgentClaim(orgID, task, actingTeamID, agentID)
-		} else {
+		if !inserted {
 			routerLog.Debug("firing collapsed, duplicate already queued",
 				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
+			return false
 		}
-		return
+		routerLog.Info("queued firing, entity busy",
+			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
+		// Pending firing landed in the queue, commit the task to the
+		// org's agent. Stamp here (after EnqueuePendingFiring
+		// succeeded) so a failed enqueue doesn't leave a phantom claim
+		// on an otherwise queued task.
+		r.stampAgentClaim(orgID, task, actingTeamID, agentID)
+		return true
 	}
 
 	// Consolidate the owner team to the acting team BEFORE firing. An
@@ -206,10 +239,10 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		if errors.Is(err, delegate.ErrAlreadyFired) {
 			routerLog.Info("auto-delegate skipped: event already fired this trigger (replay)",
 				"task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
-			return
+			return false
 		}
 		routerLog.Error("fire failed", "task_id", task.ID, "trigger", trigger.ID, "error", err)
-		return
+		return false
 	}
 	// fireDelegate succeeded (run inserted + spawner
 	// goroutine launched) — stamp the agent claim. Done AFTER success
@@ -217,13 +250,87 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	// doesn't leave a phantom bot claim on a task that's back in the
 	// human-triage queue.
 	r.stampAgentClaim(orgID, task, actingTeamID, agentID)
+	return true
+}
+
+// tryAdditiveInjection folds an additive event into the entity's already-
+// active auto run via the staged-injection seam, instead of deferring a
+// second run onto pending_firings (TFAC-594). Returns true when the caller
+// should treat the firing as handled (delivered live, or durably staged
+// onto a resumable run); false when the caller must fall through to the
+// normal deferral so the firing is never silently dropped. Three distinct
+// cases fall through:
+//
+//   - the active run couldn't be resolved to an ID (the busy-gate read
+//     raced the run going terminal);
+//   - StageOrDeliverInjectionResult reports the injection was dropped
+//     outright (delivered=false, staged=false — no live process, AND the
+//     durable append itself failed: store unwired or a transient error).
+//     There's no durable row to fall back on here, regardless of the run's
+//     current status, so this always defers;
+//   - it was durably staged (staged=true) but the run has since gone fully
+//     terminal (not parked/open) — a staged row only flushes on the run's
+//     next resume, so a run that can never resume would silently lose it.
+func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string) bool {
+	runID, err := r.agentRuns.ActiveAutoRunIDForEntitySystem(ctx, orgID, entityID)
+	if err != nil || runID == "" {
+		return false
+	}
+
+	// Best-effort: an empty metadataJSON still renders a body naming the
+	// event type alone, so a lookup failure degrades rather than drops the
+	// injection.
+	metadataJSON, err := r.events.GetMetadataSystem(ctx, orgID, triggeringEventID)
+	if err != nil {
+		metadataJSON = ""
+	}
+	body := domain.AdditiveEventInjection(trigger.EventType, metadataJSON)
+
+	delivered, staged := r.spawner.StageOrDeliverInjectionResult(orgID, runID, trigger.EventType, body)
+	if !delivered {
+		if !staged {
+			// Dropped outright — nothing durable to flush later. Never
+			// treat this as handled no matter the run's status.
+			return false
+		}
+		run, rerr := r.agentRuns.GetSystem(ctx, orgID, runID)
+		if rerr != nil || run == nil || !runIsResumable(run.Status, run.Outcome) {
+			return false
+		}
+	}
+
+	if err := r.tasks.RecordEventSystem(ctx, orgID, task.ID, triggeringEventID, "injected"); err != nil {
+		routerLog.Error("failed to record injected task_event", "task_id", task.ID, "run_id", runID, "error", err)
+	}
+	routerLog.Info("injected additive event into active run",
+		"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
+	return true
+}
+
+// runIsResumable mirrors internal/delegate's unexported resumableState
+// predicate: every non-finish parked/terminal state a later resume can
+// wake — `open`, or `completed` with outcome `abort`. Duplicated here
+// (rather than exported from internal/delegate) to keep the routing→
+// delegate dependency narrowed to the Delegator interface.
+func runIsResumable(status, outcome string) bool {
+	switch status {
+	case "open":
+		return true
+	case "completed":
+		return outcome == string(domain.RunOutcomeAbort)
+	default:
+		return false
+	}
 }
 
 // stampAgentClaim writes claimed_by_agent_id on a task AND broadcasts the
 // task_claimed event so listeners (Board) can re-render the
-// per-claim lanes. Called from the two commitment points in tryAutoDelegate
-// (post-fireDelegate success, post-EnqueuePendingFiring success). Both paths
-// converge on "the bot has committed to this task."
+// per-claim lanes. Called from the three commitment points in
+// tryAutoDelegate (post-fireDelegate success, post-EnqueuePendingFiring
+// success, post-tryAdditiveInjection success). All three converge on "the
+// bot has committed to this task" — including the additive-injection case,
+// where the task committed to may not be the task that owns the run the
+// event got folded into (the busy gate is entity-wide, not task-scoped).
 //
 // agentID is the org agent resolved ONCE by the caller (tryAutoDelegate) — the
 // same id frozen onto the run's blueprint_run actor — so the claim and the run's
@@ -380,12 +487,20 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 
 		runID, skipReason, transientErr := r.attemptDrainOne(orgID, firing)
 		if transientErr != nil {
-			// Transient failure (DB read, Delegate). Leave the firing in
-			// 'pending' state and bail the drain loop — marking
+			// Transient failure (DB read, Delegate). PopForEntity already
+			// claimed this row into 'draining' (TFAC-579), so release it
+			// back to 'pending' rather than leaving it stuck — marking
 			// 'skipped_stale' here would permanently drop a queued intent
-			// over a temporary problem. The periodic sweeper or the next
-			// run-terminal will retry.
-			routerLog.Warn("drain transient error, leaving firing pending for retry",
+			// over a temporary problem, and a 'draining' row left
+			// unresolved is invisible to HasPendingForEntity /
+			// ListEntitiesWithPending and would never be retried. The
+			// periodic sweeper or the next run-terminal will retry once
+			// released.
+			if err := r.firings.Release(context.Background(), orgID, firing.ID); err != nil {
+				routerLog.Error("release firing after transient drain error failed",
+					"firing_id", firing.ID, "entity", entityID, "error", err)
+			}
+			routerLog.Warn("drain transient error, released firing for retry",
 				"firing_id", firing.ID, "entity", entityID, "error", transientErr)
 			return
 		}
@@ -393,18 +508,22 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 			if err := r.firings.MarkFired(context.Background(), orgID, firing.ID, runID); err != nil {
 				// Durability race: the run was created (side-effect
 				// committed inside the spawner goroutine) but the UPDATE
-				// that records the firing→run association failed. The
-				// firing row is still 'pending' — a later DrainEntity
-				// would pop the same row and fire again, duplicating.
+				// that records the firing→run association failed.
 				//
 				// Roll the side-effect chain back in reverse: Cancel the
 				// run we just spawned, then revert the task to 'queued'
 				// so the limbo state (task=delegated + no live run) is
 				// not externally visible. Mirrors what fireDelegate
-				// already does when spawner.Delegate itself fails. The
-				// firing stays 'pending' and the next drain re-fires
-				// fresh; until then the task reads as queued, which is
-				// honest.
+				// already does when spawner.Delegate itself fails.
+				//
+				// PopForEntity already claimed this row into 'draining'
+				// (TFAC-579) — release it back to 'pending' so a later
+				// drain retries it fresh, mirroring the transientErr
+				// branch above. Without this the row is stuck in
+				// 'draining' forever: PopForEntity only ever claims
+				// 'pending' rows, and HasPendingForEntity /
+				// ListEntitiesWithPending don't see 'draining' rows
+				// either, so nothing would ever pick it up again.
 				routerLog.Error("mark firing fired failed, rolling back: cancelling run + reverting task to queued",
 					"firing_id", firing.ID, "run_id", runID, "error", err)
 				if r.spawner != nil {
@@ -414,12 +533,24 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 					}
 				}
 				r.revertTaskStatus(orgID, firing.TaskID, "queued")
+				if rerr := r.firings.Release(context.Background(), orgID, firing.ID); rerr != nil {
+					routerLog.Error("release firing after mark-fired failure failed",
+						"firing_id", firing.ID, "error", rerr)
+				}
 			}
 			return // one fire per drain — the new run gates the rest
 		}
 		// Skipped or fire failed; record reason and continue draining.
 		if err := r.firings.MarkSkipped(context.Background(), orgID, firing.ID, skipReason); err != nil {
+			// Same stuck-in-'draining' risk as the MarkFired branch above:
+			// the skip decision itself is definitive (attemptDrainOne only
+			// reaches here with a non-empty skipReason), but persisting it
+			// failed, so release the claim rather than strand the row.
 			routerLog.Error("mark firing skipped failed", "firing_id", firing.ID, "skip_reason", skipReason, "error", err)
+			if rerr := r.firings.Release(context.Background(), orgID, firing.ID); rerr != nil {
+				routerLog.Error("release firing after mark-skipped failure failed",
+					"firing_id", firing.ID, "error", rerr)
+			}
 			return
 		}
 		routerLog.Debug("skipped firing", "firing_id", firing.ID, "entity", entityID, "skip_reason", skipReason)

@@ -93,9 +93,19 @@ func OpenAt(dbPath string) (*sql.DB, error) {
 // the value through avoids brittle driver-type reflection inside the
 // runner. SQLite callers pass "sqlite3"; Postgres callers pass
 // "postgres". See migrations.go for the runner.
+//
+// A TF_ROLE=executor process skips SeedEventTypes too, not just
+// goose.Up: it's DML rather than DDL and harmless if it did run, but
+// only the control plane (where the router lives) has any use for
+// events_catalog, and skipping it avoids an old executor build
+// stomping a label/description a newer control-plane build already
+// updated.
 func Migrate(db *sql.DB, dialect string) error {
 	if err := runMigrations(db, dialect); err != nil {
 		return err
+	}
+	if dialect == "postgres" && isExecutorRole() {
+		return nil
 	}
 	return SeedEventTypes(db, dialect)
 }

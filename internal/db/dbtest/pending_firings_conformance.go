@@ -55,12 +55,17 @@ type PendingFiringsSeeder struct {
 //   - Enqueue inserts a row in 'pending' status and returns inserted=true.
 //   - Enqueue with the same (task_id, trigger_id) while one is pending
 //     collapses via ON CONFLICT DO NOTHING and returns inserted=false.
-//   - PopForEntity returns the oldest pending row and leaves it
-//     'pending' (no implicit reservation).
-//   - PopForEntity returns nil on empty queue and ignores non-pending.
-//   - MarkFired flips 'pending' → 'fired' with run_id; idempotent
-//     against already-terminal rows (guarded by status='pending').
-//   - MarkSkipped flips 'pending' → 'skipped_stale' with reason;
+//   - PopForEntity is a CLAIMING pop: it returns the oldest pending row
+//     and atomically flips it to 'draining' in the same statement (no
+//     window for a second concurrent pop to observe and claim the same
+//     row).
+//   - PopForEntity returns nil on empty queue and ignores non-pending
+//     (including already-'draining') rows.
+//   - Release reverts a 'draining' row back to 'pending'; no-op against
+//     a row that's since reached a terminal state.
+//   - MarkFired flips 'draining' → 'fired' with run_id; idempotent
+//     against already-terminal rows (guarded by status='draining').
+//   - MarkSkipped flips 'draining' → 'skipped_stale' with reason;
 //     same idempotency guard.
 //   - HasPendingForEntity tracks presence of 'pending' rows.
 //   - ListEntitiesWithPending returns distinct entity ids that have
@@ -121,7 +126,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 
-	t.Run("PopForEntity_returns_oldest_pending", func(t *testing.T) {
+	t.Run("PopForEntity_claims_oldest_pending", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup1 := seed.Tuple(t) // same entity, distinct task+trigger
 		tup2 := seed.Tuple(t)
@@ -146,19 +151,75 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if got.TaskID != tup1.TaskID {
 			t.Errorf("Pop returned task %q, want oldest %q", got.TaskID, tup1.TaskID)
 		}
-		// Non-mutating: the row should still be pending.
-		if got.Status != domain.PendingFiringStatusPending {
-			t.Errorf("popped row status = %q, want pending (Pop is non-mutating)", got.Status)
+		// Claiming: the popped row is atomically reserved as 'draining' so
+		// a concurrent drain can't also claim it.
+		if got.Status != domain.PendingFiringStatusDraining {
+			t.Errorf("popped row status = %q, want draining (Pop is a claiming pop)", got.Status)
 		}
 		rows, _ := s.ListForEntity(ctx, orgID, tup1.EntityID)
-		pendingCount := 0
+		pendingCount, drainingCount := 0, 0
 		for _, r := range rows {
-			if r.Status == domain.PendingFiringStatusPending {
+			switch r.Status {
+			case domain.PendingFiringStatusPending:
 				pendingCount++
+			case domain.PendingFiringStatusDraining:
+				drainingCount++
 			}
 		}
-		if pendingCount != 2 {
-			t.Errorf("queue should still have 2 pending after Pop, got %d", pendingCount)
+		if pendingCount != 1 {
+			t.Errorf("queue should have 1 still-pending row after Pop, got %d", pendingCount)
+		}
+		if drainingCount != 1 {
+			t.Errorf("queue should have 1 draining (claimed) row after Pop, got %d", drainingCount)
+		}
+		// A second Pop must NOT return the already-claimed row — it should
+		// skip straight to the next pending one.
+		got2, err := s.PopForEntity(ctx, orgID, tup1.EntityID)
+		if err != nil || got2 == nil {
+			t.Fatalf("second Pop: got=%v err=%v", got2, err)
+		}
+		if got2.TaskID != tup2.TaskID {
+			t.Errorf("second Pop returned task %q, want %q (the still-pending one)", got2.TaskID, tup2.TaskID)
+		}
+		if got2.ID == got.ID {
+			t.Errorf("second Pop returned the same row as the first claim — double-pop")
+		}
+	})
+
+	t.Run("Release_reverts_draining_to_pending", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		row, err := s.PopForEntity(ctx, orgID, tup.EntityID)
+		if err != nil || row == nil {
+			t.Fatalf("Pop: row=%v err=%v", row, err)
+		}
+		if err := s.Release(ctx, orgID, row.ID); err != nil {
+			t.Fatalf("Release: %v", err)
+		}
+		has, err := s.HasPendingForEntity(ctx, orgID, tup.EntityID)
+		if err != nil {
+			t.Fatalf("HasPending: %v", err)
+		}
+		if !has {
+			t.Errorf("released row should be pending again")
+		}
+		// Release against an already-terminal row is a no-op.
+		row2, _ := s.PopForEntity(ctx, orgID, tup.EntityID)
+		if row2 == nil {
+			t.Fatalf("expected the released row to be poppable again")
+		}
+		if err := s.MarkSkipped(ctx, orgID, row2.ID, domain.PendingFiringSkipTaskClosed); err != nil {
+			t.Fatalf("MarkSkipped: %v", err)
+		}
+		if err := s.Release(ctx, orgID, row2.ID); err != nil {
+			t.Fatalf("Release on terminal row should not error: %v", err)
+		}
+		rows, _ := s.ListForEntity(ctx, orgID, tup.EntityID)
+		if len(rows) != 1 || rows[0].Status != domain.PendingFiringStatusSkippedStale {
+			t.Errorf("Release must not resurrect a terminal row, got %+v", rows)
 		}
 	})
 

@@ -697,6 +697,25 @@ func (s *agentRunStore) ActiveIDsForTaskSystem(ctx context.Context, orgID, taskI
 	return activeRunIDsForTask(ctx, s.admin, orgID, taskID)
 }
 
+func (s *agentRunStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgID, entityID string) (string, error) {
+	var id string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT r.id FROM runs r
+		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
+		WHERE r.org_id = $1
+		  AND t.entity_id = $2
+		  AND r.trigger_type = 'event'
+		  AND r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
+		                       'pending_approval')
+		ORDER BY r.started_at DESC
+		LIMIT 1
+	`, orgID, entityID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return id, err
+}
+
 func activeRunIDsForTask(ctx context.Context, q queryer, orgID, taskID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM runs

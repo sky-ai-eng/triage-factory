@@ -336,6 +336,28 @@ type TaskStore interface {
 	GetSystem(ctx context.Context, orgID, taskID string) (*domain.Task, error)
 	FindActiveByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Task, error)
 	FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error)
+
+	// FindOrCreateAtUnlessEntityActiveSystem is FindOrCreateAtSystem's
+	// twin for the became_atomic belated-discovery path (TFAC-579):
+	// suppress minting a new card if the entity already has ANY active
+	// task, regardless of event type — otherwise an atomic ticket that
+	// gained and then lost subtasks ends up with two cards. That
+	// cross-event-type invariant can't be expressed as a partial unique
+	// index the way the standard (entity_id, event_type, dedup_key) dedup
+	// is, because the general product model deliberately allows several
+	// concurrently-active tasks of different event types on one entity —
+	// became_atomic's suppression is narrower ("don't pile on top of
+	// something already there"), not a general per-entity uniqueness rule.
+	//
+	// The Postgres impl backs this with a real DB guarantee instead of a
+	// bare check-then-act: FindOrCreateAtSystem's underlying select-or-
+	// insert runs under the SAME per-entity pg_advisory_xact_lock this
+	// method takes for its active-check, so a normal event's task creation
+	// on the entity can never land in the window between this method's
+	// active-check and its own insert. suppressed=true means the check
+	// found an active task and no row was created or returned (task is
+	// nil); suppressed=false behaves exactly like FindOrCreateAtSystem.
+	FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (task *domain.Task, created, suppressed bool, err error)
 	SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error
 	VisibilityTeamsSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 	SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) error

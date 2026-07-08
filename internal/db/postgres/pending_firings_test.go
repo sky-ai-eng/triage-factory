@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -137,6 +138,102 @@ func TestPendingFiringsStore_Postgres_EnqueueWithLocalSentinelUser(t *testing.T)
 	if creator != ownerUserID {
 		t.Errorf("creator_user_id = %q, want org owner %q (sentinel should fall through COALESCE to org-owner)",
 			creator, ownerUserID)
+	}
+}
+
+// TestPendingFiringsStore_Postgres_ConcurrentPopNeverDoublePops is the
+// pgtest acceptance criterion for TFAC-579 item 1: concurrently draining an
+// entity from several goroutines (simulating separate DrainEntity calls —
+// different processes, or a leader-failover overlap within one) must never
+// hand the same pending_firings row to two callers. The claiming pop (UPDATE
+// ... FOR UPDATE SKIP LOCKED ... RETURNING) is what makes this safe; a bare
+// SELECT would let two concurrent drains observe and each act on the same
+// row.
+func TestPendingFiringsStore_Postgres_ConcurrentPopNeverDoublePops(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID, _ := seedPgPendingFiringsOrg(t, h)
+	seed := newPgPendingFiringsSeeder(h, orgID, userID)
+
+	const rows = 6
+	var entityID string
+	for i := 0; i < rows; i++ {
+		tup := seed.Tuple(t)
+		if i == 0 {
+			entityID = tup.EntityID
+		}
+		if _, err := stores.PendingFirings.Enqueue(ctx, orgID, tup.UserID, entityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+
+	// More concurrent poppers than rows, so every row gets claimed and the
+	// excess poppers reliably observe an empty queue (got == nil) rather
+	// than the test being sensitive to goroutine scheduling luck.
+	const poppers = 12
+	var wg sync.WaitGroup
+	claimed := make([]int64, poppers)
+	gotErr := make([]error, poppers)
+	var ready sync.WaitGroup
+	ready.Add(poppers)
+	start := make(chan struct{})
+	for i := 0; i < poppers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ready.Done()
+			<-start
+			row, err := stores.PendingFirings.PopForEntity(ctx, orgID, entityID)
+			if err != nil {
+				gotErr[i] = err
+				return
+			}
+			if row == nil {
+				claimed[i] = 0
+				return
+			}
+			claimed[i] = row.ID
+		}(i)
+	}
+	ready.Wait()
+	close(start)
+	wg.Wait()
+
+	seen := map[int64]int{}
+	for i, id := range claimed {
+		if gotErr[i] != nil {
+			t.Fatalf("popper %d: %v", i, gotErr[i])
+		}
+		if id != 0 {
+			seen[id]++
+		}
+	}
+	if len(seen) != rows {
+		t.Fatalf("expected %d distinct rows claimed, got %d (claimed=%v)", rows, len(seen), claimed)
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("firing %d was popped by %d poppers, want exactly 1 (double-pop)", id, n)
+		}
+	}
+
+	// Every claimed row must have been atomically flipped to 'draining' —
+	// not left 'pending' (which would mean the pop wasn't a real claim).
+	all, err := stores.PendingFirings.ListForEntity(ctx, orgID, entityID)
+	if err != nil {
+		t.Fatalf("ListForEntity: %v", err)
+	}
+	draining := 0
+	for _, r := range all {
+		if r.Status == "draining" {
+			draining++
+		}
+	}
+	if draining != rows {
+		t.Errorf("expected all %d rows draining after the claim race, got %d", rows, draining)
 	}
 }
 

@@ -21,13 +21,36 @@ type Scorer interface {
 }
 
 // Delegator is the minimal interface the router needs from the delegate
-// spawner — kicking off a run, plus cancelling one. Narrowed from
-// *delegate.Spawner so tests can stub the spawn surface without bringing
-// up a worktree, the agent subprocess, etc. Production wiring passes a
-// *delegate.Spawner.
+// spawner — kicking off a run, cancelling one, and injecting into a live
+// one. Narrowed from *delegate.Spawner so tests can stub the spawn surface
+// without bringing up a worktree, the agent subprocess, etc. Production
+// wiring passes a *delegate.Spawner.
 type Delegator interface {
 	Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error)
 	Cancel(orgID, runID, userID string) error
+	// StageOrDeliverInjectionResult routes one agent-facing injection for a
+	// run by its live state, with a disambiguated return: delivered=true
+	// means steered into a live process; delivered=false, staged=true means
+	// durably queued for the run's next resume; both false means dropped
+	// (no live process, and the durable append itself failed — store
+	// unwired or a transient error). Signature matches
+	// *delegate.Spawner's method exactly. Used by tryAutoDelegate's
+	// additive-event branch to fold a follow-up event into an entity's
+	// already-active auto run instead of deferring a second one — the
+	// staged/dropped distinction decides whether that's safe (a staged row
+	// will flush on resume) or the firing must fall through to the normal
+	// deferral instead (a drop has no durable row to fall back on).
+	StageOrDeliverInjectionResult(orgID, runID, producer, body string) (delivered, staged bool)
+}
+
+// EventPublisher is the bus-publish seam the router uses to mirror the
+// per-event routing disposition sentinel (TFAC-593) onto the event bus, so
+// an async event source (e.g. Slack) can learn synchronously-unavailable
+// routing outcomes. Same minimal shape as internal/tracker's Publisher and
+// delegate.Spawner's EventPublisher; the plain *eventbus.Bus satisfies it
+// directly.
+type EventPublisher interface {
+	Publish(evt domain.Event)
 }
 
 // Router is the central eventbus subscriber that replaces the old auto-
@@ -64,6 +87,7 @@ type Router struct {
 	spawner      Delegator
 	scorer       Scorer
 	ws           *websocket.Hub
+	publisher    EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors the per-event routing disposition sentinel onto the bus (TFAC-593)
 
 	// executorID/bootEpoch are this process's persistent instance-registry
 	// identity (TFAC-577), set post-construction via SetExecutorID before
@@ -169,6 +193,17 @@ func (r *Router) breakerPromptID(orgID, blueprintID string) string {
 // the ~30 existing test constructions don't have to thread it.
 func (r *Router) SetEventQueue(q dbpkg.EventQueueStore) {
 	r.eventQueue = q
+}
+
+// SetEventPublisher wires the bus publisher the router mirrors the
+// per-event routing disposition sentinel onto (TFAC-593), same
+// post-construction injection pattern as SetEventQueue — the bus is built
+// before the router in app composition, but the setter keeps
+// internal/routing decoupled from internal/eventbus's concrete type. Safe
+// to call once at startup; nil publisher (the default) disables the bus
+// mirror entirely — routing behavior is unaffected either way.
+func (r *Router) SetEventPublisher(p EventPublisher) {
+	r.publisher = p
 }
 
 // SetExecutorID wires this router's persistent instance-registry identity

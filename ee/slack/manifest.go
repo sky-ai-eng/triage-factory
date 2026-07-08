@@ -20,6 +20,8 @@ import "fmt"
 //	channels:join       - bot self-joins a public channel when a team tracks it (private channels always need a human /invite)
 //	files:read          - read files shared in a thread (attachments as agent context)
 //	files:write         - upload files (agent-produced artifacts back into the thread)
+//	links:read          - see TF URLs shared in a message (future link-unfurl feature)
+//	links:write         - unfurl TF URLs shared in a message (future link-unfurl feature)
 var slackBotScopes = []string{
 	"app_mentions:read",
 	"chat:write",
@@ -33,6 +35,8 @@ var slackBotScopes = []string{
 	"channels:join",
 	"files:read",
 	"files:write",
+	"links:read",
+	"links:write",
 }
 
 // slackManifest is the subset of Slack's app-manifest schema this leaf

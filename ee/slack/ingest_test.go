@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -176,7 +177,7 @@ func TestHandleEventCallback_PublishesCorrectEventShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(got.MetadataJSON), &meta); err != nil {
 		t.Fatalf("metadata did not round-trip into SlackMentionMetadata: %v", err)
 	}
-	if meta.WorkspaceID != "T0PIPE001" || meta.Channel != "C1" || meta.SenderID != "U1" || meta.EventID != "Ev1" || meta.ThreadTS != "1599999999.000001" {
+	if meta.WorkspaceID != "T0PIPE001" || meta.APIAppID != "A0PIPE001" || meta.Channel != "C1" || meta.SenderID != "U1" || meta.EventID != "Ev1" || meta.ThreadTS != "1599999999.000001" {
 		t.Errorf("metadata = %+v; want fields carried over from ev/ws", meta)
 	}
 }
@@ -475,6 +476,114 @@ func TestHandleEventCallback_DispatchesChannelNameResolutionOnCreated(t *testing
 	row := channels.rows[channelKey("org-1", "C1")]
 	if row == nil || row.Name != "general" {
 		t.Fatalf("row = %+v; want name resolved to general", row)
+	}
+}
+
+// TestHandleEventCallback_DispatchesPermalinkResolutionOnCreated is the
+// TFAC-595 call-site wiring test for permalink enrichment: a fresh
+// (first-sighted) thread entity dispatches resolvePermalink, which writes
+// the resolved permalink into the entity's url. Runs a real
+// PermalinkResolver against fakes rather than a nil permalink (every other
+// test in this file), so this is an end-to-end check of the wiring itself
+// — mirrors TestHandleEventCallback_DispatchesChannelNameResolutionOnCreated's
+// shape.
+func TestHandleEventCallback_DispatchesPermalinkResolutionOnCreated(t *testing.T) {
+	hits := 0
+	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if got := r.URL.Query().Get("channel"); got != "C1" {
+			t.Errorf("channel query param = %q; want C1", got)
+		}
+		if got := r.URL.Query().Get("message_ts"); got != "1600000000.000100" {
+			t.Errorf("message_ts query param = %q; want the thread root ts", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "permalink": "https://acme.slack.com/archives/C1/p1600000000000100",
+		})
+	})
+	entities := newFakeEntities()
+	entityURLs := newFakeEntityURLUpdater()
+	entityURLs.done = make(chan struct{}, 1)
+	resolver := &PermalinkResolver{secrets: &fakeSecrets{token: "xoxb-test"}, entities: entityURLs, client: srv.Client()}
+	p := &ingestPipeline{
+		entities:   entities,
+		deliveries: newFakeDeliveries(),
+		publish:    func(domain.Event) {},
+		permalink:  resolver,
+	}
+	ws := testWorkspaceRow("org-1")
+	// Root-message mention (no ThreadTS): the resolved thread root is the
+	// message's own ts, "1600000000.000100".
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", TS: "1600000000.000100"}
+
+	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+
+	select {
+	case <-entityURLs.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolvePermalink never completed — handleEventCallback did not dispatch it")
+	}
+
+	if hits != 1 {
+		t.Errorf("chat.getPermalink hits = %d; want 1 (resolvePermalink should have called it)", hits)
+	}
+	entityID := "entity-org-1/slack/C1/1600000000.000100"
+	if got := entityURLs.get(entityID); got != "https://acme.slack.com/archives/C1/p1600000000000100" {
+		t.Errorf("url = %q; want the resolved permalink", got)
+	}
+}
+
+// TestHandleEventCallback_DoesNotDispatchPermalinkResolutionOnReMention pins
+// the "only on create" rule: a second mention on an already-known thread
+// (created=false) must not re-dispatch resolvePermalink — the thread-root
+// permalink is stable once minted.
+func TestHandleEventCallback_DoesNotDispatchPermalinkResolutionOnReMention(t *testing.T) {
+	var hits int32
+	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "permalink": "https://acme.slack.com/archives/C1/p1"})
+	})
+	entities := newFakeEntities()
+	entityURLs := newFakeEntityURLUpdater()
+	entityURLs.done = make(chan struct{}, 1)
+	resolver := &PermalinkResolver{secrets: &fakeSecrets{token: "xoxb-test"}, entities: entityURLs, client: srv.Client()}
+	p := &ingestPipeline{
+		entities:   entities,
+		deliveries: newFakeDeliveries(),
+		publish:    func(domain.Event) {},
+		permalink:  resolver,
+	}
+	ws := testWorkspaceRow("org-1")
+
+	// First mention creates the thread entity and dispatches resolution.
+	first := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", TS: "1600000000.000100"}
+	if err := p.handleEventCallback(context.Background(), ws, first); err != nil {
+		t.Fatalf("first handleEventCallback: %v", err)
+	}
+	// Wait for the first dispatch to fully complete via the resolver's own
+	// deterministic completion signal — NOT a sleep/poll on shared state
+	// (which would itself race the detached goroutine, and risks a
+	// still-running goroutine reading slackAPIBase out from under
+	// withFakeSlackAPI's t.Cleanup restore once this test returns).
+	select {
+	case <-entityURLs.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first mention never dispatched resolvePermalink")
+	}
+
+	// Second mention on the SAME thread (same channel/thread_ts) re-resolves
+	// the same entity (created=false), so handleEventCallback never calls
+	// dispatch again — no new goroutine, nothing further to wait for before
+	// checking hits below.
+	second := inboundMention{Type: "app_mention", EventID: "Ev2", Channel: "C1", User: "U2", TS: "1600000000.000200", ThreadTS: "1600000000.000100"}
+	if err := p.handleEventCallback(context.Background(), ws, second); err != nil {
+		t.Fatalf("second handleEventCallback: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("chat.getPermalink hits = %d; want 1 (no re-dispatch on re-mention)", got)
 	}
 }
 

@@ -73,7 +73,7 @@ func assertFullScopeSet(t *testing.T, got []string) {
 	want := []string{
 		"app_mentions:read", "chat:write", "reactions:write", "users:read", "users:read.email",
 		"channels:history", "groups:history", "channels:read", "groups:read", "channels:join",
-		"files:read", "files:write",
+		"files:read", "files:write", "links:read", "links:write",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("scopes = %v (%d); want %d scopes", got, len(got), len(want))

@@ -32,18 +32,22 @@ func (s *systemLLMRunStore) Record(ctx context.Context, row domain.SystemLLMRun)
 	}
 	// A caller-supplied row.ID is honored (parity with the SQLite impl); an
 	// empty row.ID falls back to gen_random_uuid() server-side. metadata_json
-	// '' → NULL.
+	// '' → NULL. trace_id '' → NULL too (TFAC-579) — the partial unique index
+	// excludes NULL, so a caller with no session id never collides with any
+	// other row; ON CONFLICT DO NOTHING makes a genuine duplicate TraceID a
+	// no-op instead of double-counting spend.
 	_, err := s.admin.ExecContext(ctx, `
 		INSERT INTO system_llm_runs
 			(id, org_id, job, model, total_cost_usd,
 			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-			 duration_ms, num_turns, is_error, metadata_json, started_at, completed_at)
-		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULLIF($13, ''), $14, $15)
+			 duration_ms, num_turns, is_error, metadata_json, started_at, completed_at, trace_id)
+		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULLIF($13, ''), $14, $15, NULLIF($16, ''))
+		ON CONFLICT (trace_id) WHERE trace_id IS NOT NULL DO NOTHING
 	`,
 		row.ID, row.OrgID, row.Job, row.Model, row.TotalCostUSD,
 		row.InputTokens, row.OutputTokens, row.CacheReadTokens, row.CacheCreationTokens,
 		row.DurationMs, row.NumTurns, row.IsError, row.MetadataJSON,
-		row.StartedAt, completedAt,
+		row.StartedAt, completedAt, row.TraceID,
 	)
 	return err
 }
