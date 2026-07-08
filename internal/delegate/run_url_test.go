@@ -41,3 +41,18 @@ func TestRunURLFor_MultiMode(t *testing.T) {
 		t.Errorf("runURLFor(multi) = %q, want %q", got, want)
 	}
 }
+
+// TestSetPublicURL_TrimsTrailingSlash pins parity with Server.SetDeployConfig
+// (internal/server/auth_handlers.go), which also trims trailing slashes: a
+// TF_PUBLIC_URL configured with a trailing "/" must not produce a
+// double-slash in the concatenated {{RUN_URL}} ("...com//runs/...").
+func TestSetPublicURL_TrimsTrailingSlash(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := &Spawner{}
+	s.SetPublicURL("http://localhost:3000/")
+
+	want := "http://localhost:3000/runs/run-1"
+	if got := s.runURLFor("org-1", "run-1"); got != want {
+		t.Errorf("runURLFor after trailing-slash publicURL = %q, want %q", got, want)
+	}
+}

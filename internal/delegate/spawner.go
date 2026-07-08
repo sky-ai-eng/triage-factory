@@ -378,10 +378,15 @@ func (s *Spawner) awaitClassification(ctx context.Context, orgID, entityID strin
 // with the same value handed to Server.SetDeployConfig — both call sites in
 // internal/app/httpserver.go. Nil-safe to leave unset: runURLFor then
 // renders the placeholder empty, never a fabricated localhost link.
+//
+// Trailing slashes are trimmed, mirroring Server.SetDeployConfig
+// (internal/server/auth_handlers.go) — without this, a TF_PUBLIC_URL (or
+// BrowserURL) configured with a trailing "/" would produce "//orgs/..." /
+// "//runs/..." in runURLFor's concatenation.
 func (s *Spawner) SetPublicURL(url string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.publicURL = url
+	s.publicURL = strings.TrimRight(url, "/")
 }
 
 // runURLFor computes the {{RUN_URL}} placeholder value — a deep link back to
