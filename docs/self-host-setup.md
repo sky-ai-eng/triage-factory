@@ -54,6 +54,8 @@ This brings up the full stack: Postgres, GoTrue, SeaweedFS (the durable-workspac
 
 On first boot, the `postgres-postinit` sidecar reconciles the `supabase_auth_admin` and `authenticator` role passwords, the `seaweedfs-postinit` sidecar creates the workspace bucket (idempotent — `head-bucket || create-bucket` via aws-cli), then the `triagefactory` container's entrypoint runs `triagefactory migrate up` against the admin DSN before starting the server.
 
+> **The TF data volume is an identity, not just a cache.** The `tf-data` volume holds `instance-id` — the persistent identity this process registers into the fleet registry and stamps onto the runs it executes; crash recovery keys on it. Keep the volume persistent across restarts (the compose file already does), and **never run two TF containers off copies of one data volume** (a cloned volume, a restored snapshot started alongside the original): the second boot supersedes the first's identity, and the superseded process fences itself — it stops claiming new runs and logs an error telling you to restart it. If you ever need to duplicate a machine, delete `instance-id` from the copy so it mints a fresh identity.
+
 Smoke-check the stack came up:
 
 ```sh

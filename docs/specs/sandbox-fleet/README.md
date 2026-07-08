@@ -200,6 +200,16 @@ Cost note from that doc: a browser variant adds ~400–700 MB; pre-bake variants
 into the published image (`docker/Dockerfile`) so an autoscaled Machine doesn't
 pay a cold extract on first use.
 
+Keying (settled 2026-07-07, jointly with the TFAC-71 design): **two-layer,
+name → recipe → hash.** A profile binds a *named* catalog entry; the entry is
+a recipe (base + package set) resolving to a `rootfsCacheKey` content hash;
+executors bake, cache, and share by **hash** (org-blind — see
+`docs/specs/horizontal-scaling/` §6.4 for the cross-tenant invariant), while
+authoring and rule-binding speak **names**. Editing a recipe under a name
+mints a new hash, so the physical layer never holds ambiguous bytes. The v1
+catalog is curated ("base", "browser"); org-authored entries are later catalog
+rows with authorship — same mechanism, more authors.
+
 ---
 
 ## 5. Resources dimension + horizontal scaling
@@ -214,7 +224,10 @@ At horizontal scale the profile becomes the **scheduling unit**: a heavy/browser
 profile routes to a large-Machine pool, a cheap profile to small ones. That same
 sizing is the natural **metering/billing hook** — "this profile's runs cost this
 much and go there." On shared SaaS, larger/browser profiles are the upcharge
-lever; on self-host, the operator sizes their own pools.
+lever; on self-host, the operator sizes their own pools. The fleet-side
+mechanics — budget-based admission, the eligibility-vs-affinity split in the
+run claim, warm-variant tracking, and the cross-org recipe-sharing invariant —
+are specified in `docs/specs/horizontal-scaling/` §6.4.
 
 ---
 
@@ -295,6 +308,9 @@ proxy + denylist are shipped and reviewed.
 
 ## Related
 
+- `docs/specs/horizontal-scaling/` — §6.4: how profiles interact with the
+  executor fleet (eligibility vs affinity in the claim, budget admission,
+  cross-org variant sharing).
 - `docs/specs/playwright-chromium-sandbox/` — the browser profile; the first
   worked instance of the image dimension.
 - `docs/isolation-tiers.md` — the tier ladder the egress power-dial and the
