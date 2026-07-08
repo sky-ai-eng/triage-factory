@@ -508,18 +508,22 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 			if err := r.firings.MarkFired(context.Background(), orgID, firing.ID, runID); err != nil {
 				// Durability race: the run was created (side-effect
 				// committed inside the spawner goroutine) but the UPDATE
-				// that records the firing→run association failed. The
-				// firing row is still 'pending' — a later DrainEntity
-				// would pop the same row and fire again, duplicating.
+				// that records the firing→run association failed.
 				//
 				// Roll the side-effect chain back in reverse: Cancel the
 				// run we just spawned, then revert the task to 'queued'
 				// so the limbo state (task=delegated + no live run) is
 				// not externally visible. Mirrors what fireDelegate
-				// already does when spawner.Delegate itself fails. The
-				// firing stays 'pending' and the next drain re-fires
-				// fresh; until then the task reads as queued, which is
-				// honest.
+				// already does when spawner.Delegate itself fails.
+				//
+				// PopForEntity already claimed this row into 'draining'
+				// (TFAC-579) — release it back to 'pending' so a later
+				// drain retries it fresh, mirroring the transientErr
+				// branch above. Without this the row is stuck in
+				// 'draining' forever: PopForEntity only ever claims
+				// 'pending' rows, and HasPendingForEntity /
+				// ListEntitiesWithPending don't see 'draining' rows
+				// either, so nothing would ever pick it up again.
 				routerLog.Error("mark firing fired failed, rolling back: cancelling run + reverting task to queued",
 					"firing_id", firing.ID, "run_id", runID, "error", err)
 				if r.spawner != nil {
@@ -529,12 +533,24 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 					}
 				}
 				r.revertTaskStatus(orgID, firing.TaskID, "queued")
+				if rerr := r.firings.Release(context.Background(), orgID, firing.ID); rerr != nil {
+					routerLog.Error("release firing after mark-fired failure failed",
+						"firing_id", firing.ID, "error", rerr)
+				}
 			}
 			return // one fire per drain — the new run gates the rest
 		}
 		// Skipped or fire failed; record reason and continue draining.
 		if err := r.firings.MarkSkipped(context.Background(), orgID, firing.ID, skipReason); err != nil {
+			// Same stuck-in-'draining' risk as the MarkFired branch above:
+			// the skip decision itself is definitive (attemptDrainOne only
+			// reaches here with a non-empty skipReason), but persisting it
+			// failed, so release the claim rather than strand the row.
 			routerLog.Error("mark firing skipped failed", "firing_id", firing.ID, "skip_reason", skipReason, "error", err)
+			if rerr := r.firings.Release(context.Background(), orgID, firing.ID); rerr != nil {
+				routerLog.Error("release firing after mark-skipped failure failed",
+					"firing_id", firing.ID, "error", rerr)
+			}
 			return
 		}
 		routerLog.Debug("skipped firing", "firing_id", firing.ID, "entity", entityID, "skip_reason", skipReason)

@@ -281,20 +281,13 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serialize per-org against the manifest callback + concurrent imports so two
-	// requests can't both pass the one-slot check and race to CreateForOrg. The
-	// unique constraint is the durable fallback (handled below); this closes the
-	// common case — across every control pod in multi mode, not just this
-	// process (TFAC-579). Same lock the register callback uses.
-	release, err := s.acquireKeyedLock(ctx, &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
-	if err != nil {
-		internalError(w, "github-app", err)
-		return
-	}
-	defer release()
-
-	// One-slot rule. A staged app occupies the slot too — the discard endpoint
-	// frees it. System read: the admin gate already authorized orgID.
+	// One-slot rule, checked unlocked here as a fast bail-out for the common
+	// case (resubmitting against an org that's already registered) before
+	// spending a PEM parse and several GitHub API round-trips on a request
+	// that's going to be rejected anyway. Non-authoritative — a concurrent
+	// registration racing this read is still caught below. A staged app
+	// occupies the slot too — the discard endpoint frees it. System read:
+	// the admin gate already authorized orgID.
 	existing, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -451,6 +444,23 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	// leaves it 0 → NULL → the plain noreply form, self-healing on re-import, and
 	// never blocks the import.
 	botUserID := s.fetchBotUserID(ctx, base, app.Slug, orgID)
+
+	// Serialize per-org against the manifest callback + concurrent imports so two
+	// requests can't both pass the one-slot check and race to CreateForOrg. The
+	// unique constraint is the durable fallback (handled below via
+	// db.ErrGitHubAppExists) — this closes the common case — across every
+	// control pod in multi mode, not just this process (TFAC-579). Same lock
+	// the register callback uses. Acquired here, after every GitHub API
+	// round-trip above has already completed, so the held connection (in
+	// multi mode) only spans the DB write below rather than the whole
+	// validation sequence — a slow/rate-limited GitHub API window shouldn't
+	// pin a pool connection for its duration.
+	release, err := s.acquireKeyedLock(ctx, &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	defer release()
 
 	// Persist exactly as the manifest callback does, including the staging rule:
 	// an org PAT still live ⇒ active=false (staged, the PAT stays live until a

@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -16,11 +17,14 @@ import (
 // two different (event, trigger) pairs racing to auto-fire on the SAME
 // entity could both pass the check and each mint an active blueprint_run —
 // the blueprint_runs_one_active_auto_run_per_entity partial unique index is
-// the DB-enforced backstop. Two tasks on one entity, two distinct
-// (trigger, triggering_event) pairs — only one CreateRunIfNotFiredSystem
-// call may land; the loser reports inserted=false with no error (the same
-// "clean skip" contract as the existing event/trigger fence), not a raw
-// unique-violation error.
+// the DB-enforced backstop. Several distinct (trigger, triggering_event)
+// pairs on one entity fire CreateRunIfNotFiredSystem CONCURRENTLY (real
+// goroutines behind a start barrier, racing genuinely simultaneous
+// transactions — not sequential calls, which a unique index would trivially
+// survive regardless of whether the constraint or its entity_id backfill
+// subquery is actually correct): exactly one may land; every loser reports
+// inserted=false with no error (the same "clean skip" contract as the
+// existing event/trigger fence), not a raw unique-violation error.
 func TestBlueprintStore_Postgres_OneActiveAutoRunPerEntity(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -36,10 +40,10 @@ func TestBlueprintStore_Postgres_OneActiveAutoRunPerEntity(t *testing.T) {
 	`, entityID, orgID, "owner/repo#race-"+entityID[:8]); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	// Two distinct tasks on the SAME entity, each with its own blueprint
+	// Several distinct tasks on the SAME entity, each with its own blueprint
 	// (event_handlers_one_trigger_per_blueprint means each trigger needs
-	// its own blueprint), trigger, and triggering event — the two
-	// independent "firing attempts" that must not both mint an active run.
+	// its own blueprint), trigger, and triggering event — independent
+	// "firing attempts" that must not all mint an active run.
 	mkFiring := func(i int) domain.BlueprintRun {
 		blueprintID := uuid.New().String()
 		seedPgBlueprint(t, h, orgID, userID, blueprintID)
@@ -75,22 +79,42 @@ func TestBlueprintStore_Postgres_OneActiveAutoRunPerEntity(t *testing.T) {
 		}
 	}
 
-	first := mkFiring(1)
-	inserted1, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, orgID, first)
-	if err != nil {
-		t.Fatalf("first CreateRunIfNotFiredSystem: %v", err)
-	}
-	if !inserted1 {
-		t.Fatal("first firing on a clean entity should insert")
+	const racers = 6
+	firings := make([]domain.BlueprintRun, racers)
+	for i := range firings {
+		firings[i] = mkFiring(i)
 	}
 
-	second := mkFiring(2)
-	inserted2, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, orgID, second)
-	if err != nil {
-		t.Fatalf("second CreateRunIfNotFiredSystem should be a clean skip, not an error: %v", err)
+	insertedFlags := make([]bool, racers)
+	errs := make([]error, racers)
+	var wg sync.WaitGroup
+	var ready sync.WaitGroup
+	ready.Add(racers)
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ready.Done()
+			<-start
+			insertedFlags[i], errs[i] = stores.Blueprints.CreateRunIfNotFiredSystem(ctx, orgID, firings[i])
+		}(i)
 	}
-	if inserted2 {
-		t.Fatal("second firing on the SAME entity while the first is still active should NOT insert (one-active-auto-run-per-entity)")
+	ready.Wait()
+	close(start)
+	wg.Wait()
+
+	winners := 0
+	for i, ins := range insertedFlags {
+		if errs[i] != nil {
+			t.Fatalf("racer %d: CreateRunIfNotFiredSystem should be a clean skip, not an error: %v", i, errs[i])
+		}
+		if ins {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("expected exactly 1 racer to insert under concurrency, got %d (double-mint or all-lost)", winners)
 	}
 
 	var count int
@@ -104,17 +128,20 @@ func TestBlueprintStore_Postgres_OneActiveAutoRunPerEntity(t *testing.T) {
 		t.Fatalf("expected exactly 1 active auto run on the entity, got %d", count)
 	}
 
-	// Once the first run terminates, a new firing is allowed again — the
-	// index only excludes status='running'.
-	if _, err := h.AdminDB.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE task_id = $1`, first.TaskID); err != nil {
-		t.Fatalf("complete first run: %v", err)
+	// Once the (single winning) run terminates, a new firing is allowed
+	// again — the index only excludes status='running'.
+	if _, err := h.AdminDB.Exec(`
+		UPDATE blueprint_runs SET status = 'completed'
+		WHERE org_id = $1 AND entity_id = $2 AND status = 'running'
+	`, orgID, entityID); err != nil {
+		t.Fatalf("complete winning run: %v", err)
 	}
-	third := mkFiring(3)
-	inserted3, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, orgID, third)
+	next := mkFiring(racers)
+	insertedNext, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, orgID, next)
 	if err != nil {
-		t.Fatalf("third CreateRunIfNotFiredSystem: %v", err)
+		t.Fatalf("CreateRunIfNotFiredSystem after termination: %v", err)
 	}
-	if !inserted3 {
+	if !insertedNext {
 		t.Fatal("firing after the entity's active run terminated should insert")
 	}
 }
