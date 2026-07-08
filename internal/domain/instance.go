@@ -7,8 +7,7 @@ import "time"
 // periodic heartbeat. Role-neutral by design: control pods register here
 // too (for deployment-wide visibility — versions, lease holder, health),
 // not just executors; the capacity/admission fields are meaningful only
-// for executor-capable roles and stay nil on pure-control rows. See
-// docs/specs/horizontal-scaling/README.md §4.1.
+// for executor-capable roles and stay nil on pure-control rows.
 type Instance struct {
 	ID              string
 	Role            string
@@ -32,8 +31,8 @@ type Instance struct {
 }
 
 // Instance roles. "all" is the only role that exists today — TF_ROLE (the
-// control/executor split) is a later phase of the same epic (TFAC-582) — so
-// every process registers as InstanceRoleAll until that split lands.
+// control/executor split) is a later phase of the same epic — so every
+// process registers as InstanceRoleAll until that split lands.
 const (
 	InstanceRoleAll      = "all"
 	InstanceRoleControl  = "control"

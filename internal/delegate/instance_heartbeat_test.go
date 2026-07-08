@@ -11,8 +11,8 @@ import (
 
 // TestSetExecutorID_OverridesConstructorDefault pins that SetExecutorID
 // replaces NewSpawner's random per-boot uuid default, and that
-// stampExecutor picks up the override — the "stamp the real persistent id
-// into runs.executor_id on claim" acceptance criterion (TFAC-577).
+// stampExecutor picks up the override — runs.executor_id on claim must
+// equal the registry id, not a per-boot random uuid.
 func TestSetExecutorID_OverridesConstructorDefault(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
@@ -45,8 +45,8 @@ func TestSetExecutorID_OverridesConstructorDefault(t *testing.T) {
 
 // TestHeartbeatOnce_WritesLiveCapacitySnapshot pins that heartbeatOnce
 // writes the semaphore occupancy/cap and the memory gate state onto the
-// registry row — the "heartbeat row visibly tracks gated/headroom
-// transitions" acceptance criterion (TFAC-577 / the TFAC-552 follow-up).
+// registry row — the row must visibly track gated/headroom transitions,
+// not just a snapshot frozen at boot.
 func TestHeartbeatOnce_WritesLiveCapacitySnapshot(t *testing.T) {
 	database := newDelegateTestDB(t)
 	stores := testSpawnerStores(database)

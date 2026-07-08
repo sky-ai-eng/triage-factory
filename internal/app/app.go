@@ -48,8 +48,8 @@ import (
 type App struct {
 	cfg Config
 
-	// identity is this process's persistent instance identity (TFAC-577) —
-	// resolved first thing in New, held for the process lifetime via an
+	// identity is this process's persistent instance identity — resolved
+	// first thing in New, held for the process lifetime via an
 	// exclusive file lock, released in Close. bootEpoch is the fleet
 	// registry's monotonic per-boot counter for that id, minted by
 	// registerInstance once stores is live.
@@ -112,7 +112,7 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	a := &App{cfg: cfg, announce: newAnnouncer()}
 
 	// Resolve this process's persistent instance identity before anything
-	// else touches the state root (TFAC-577): the identity file's exclusive
+	// else touches the state root: the identity file's exclusive
 	// lock is the two-process-on-one-state-root guard, so it's most
 	// valuable held as early in boot as possible — even before the local
 	// bind guardrail below.

@@ -1,6 +1,6 @@
 // Package instance resolves this process's persistent instance identity —
-// the id the fleet registry (internal/db InstanceStore, TFAC-577) keys
-// every instances row on. See docs/specs/horizontal-scaling/README.md §4.1.
+// the id the fleet registry (internal/db InstanceStore) keys every
+// instances row on.
 package instance
 
 import (

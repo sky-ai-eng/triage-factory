@@ -283,8 +283,8 @@ var orgScopedTables = []string{
 	// CASCADE would reach them even unlisted; listed explicitly anyway,
 	// matching the team_github_repos / team_github_groups convention above.
 	"slack_channels", "team_slack_channels",
-	// instances (TFAC-577): carries no org_id column and no FK at all (a
-	// fleet member isn't tenant data) — TRUNCATE CASCADE from orgs would
+	// instances: carries no org_id column and no FK at all (a fleet
+	// member isn't tenant data) — TRUNCATE CASCADE from orgs would
 	// never reach it, so it must be listed explicitly or Reset would leak
 	// registered-instance rows across tests sharing this container.
 	"instances",

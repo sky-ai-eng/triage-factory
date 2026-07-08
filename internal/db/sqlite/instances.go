@@ -10,9 +10,9 @@ import (
 )
 
 // instanceStore is the SQLite impl of db.InstanceStore — the fleet
-// membership registry (TFAC-577). SQLite is N=1: one process, one row,
-// boot_epoch bumping per restart. No RLS concept, so every method runs
-// against the single connection.
+// membership registry. SQLite is N=1: one process, one row, boot_epoch
+// bumping per restart. No RLS concept, so every method runs against the
+// single connection.
 type instanceStore struct{ q queryer }
 
 func newInstanceStore(q queryer) db.InstanceStore {

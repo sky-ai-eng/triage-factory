@@ -340,10 +340,10 @@ type Stores struct {
 
 	// Instances owns the instances table — the fleet membership registry
 	// every TF process registers into at boot and refreshes via periodic
-	// heartbeat (TFAC-577). Admin-pool-only in Postgres: no org_id (a
-	// fleet member isn't tenant data), so there's no app-pool counterpart
-	// and no "...System" suffix, same shape as RunQueueStore/
-	// EventQueueStore. SQLite is N=1: one row, epoch bumping per restart.
+	// heartbeat. Admin-pool-only in Postgres: no org_id (a fleet member
+	// isn't tenant data), so there's no app-pool counterpart and no
+	// "...System" suffix, same shape as RunQueueStore/EventQueueStore.
+	// SQLite is N=1: one row, epoch bumping per restart.
 	Instances InstanceStore
 
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in

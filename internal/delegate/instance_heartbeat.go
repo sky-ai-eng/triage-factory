@@ -1,9 +1,8 @@
-// The instance-registry heartbeat loop (TFAC-577; docs/specs/
-// horizontal-scaling/README.md §4.1). Every ~4s it renews this instance's
-// row in the fleet membership registry and refreshes the capacity +
-// admission snapshot the TFAC-552 dispatch guardrail otherwise kept
-// process-local: host memory headroom, the dispatch memory gate, and the
-// off-dispatcher concurrency semaphore's occupancy/cap.
+// The instance-registry heartbeat loop. Every ~4s it renews this
+// instance's row in the fleet membership registry and refreshes the
+// capacity + admission snapshot the dispatch memory guardrail otherwise
+// kept process-local: host memory headroom, the dispatch memory gate, and
+// the off-dispatcher concurrency semaphore's occupancy/cap.
 
 package delegate
 
@@ -59,7 +58,7 @@ func (s *Spawner) RunInstanceHeartbeat(ctx context.Context, interval time.Durati
 
 // heartbeatOnce renews the current instance row once: last_heartbeat_at
 // plus a fresh capacity + admission snapshot. draining is always false
-// today — the drain flag lands with the fleet reaper (TFAC-586).
+// today — the drain flag lands with a later fleet-reaper phase.
 func (s *Spawner) heartbeatOnce(ctx context.Context) {
 	id, bootEpoch := s.executorIdentity()
 	if id == "" {

@@ -11,7 +11,7 @@ import (
 // TestInstanceStore_SQLite_RegisterMintsAndBumpsEpoch pins the acceptance
 // criterion directly: a first Register mints boot_epoch=1, and a second
 // Register against the SAME id (simulating a restart) bumps it to 2 while
-// refreshing role/version — never minting a second row. TFAC-577.
+// refreshing role/version — never minting a second row.
 func TestInstanceStore_SQLite_RegisterMintsAndBumpsEpoch(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
@@ -60,8 +60,8 @@ func TestInstanceStore_SQLite_RegisterMintsAndBumpsEpoch(t *testing.T) {
 
 // TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot pins that
 // Heartbeat renews last_heartbeat_at and writes the full capacity +
-// admission snapshot (the TFAC-552 follow-up), and that nil pointer fields
-// read back as nil (not a spurious zero). TFAC-577.
+// admission snapshot, and that nil pointer fields read back as nil (not a
+// spurious zero).
 func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
@@ -144,9 +144,9 @@ func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) 
 	}
 }
 
-// TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch pins the split-identity
-// fence (§4.1 point 4): a heartbeat carrying a STALE boot_epoch (superseded
-// by a later Register) matches no row. TFAC-577.
+// TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch pins the
+// split-identity fence: a heartbeat carrying a STALE boot_epoch
+// (superseded by a later Register) matches no row.
 func TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)

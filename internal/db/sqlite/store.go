@@ -139,7 +139,7 @@ func New(conn *sql.DB) db.Stores {
 		Marketplace: newMarketplaceStore(conn, conn),
 		// Instances is admin-pool only in Postgres; SQLite collapses to the
 		// one connection (N=1, no RLS). Fleet membership registry — one
-		// row, epoch bumping per restart. See TFAC-577.
+		// row, epoch bumping per restart.
 		Instances: newInstanceStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).

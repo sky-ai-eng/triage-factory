@@ -14,7 +14,7 @@ import (
 // criterion directly: a first Register mints boot_epoch=1, and a second
 // Register against the SAME id (simulating a restart) bumps it to 2 while
 // refreshing role/version — never minting a second row. Admin-pool only
-// (no org to scope, so no RLS to exercise). TFAC-577.
+// (no org to scope, so no RLS to exercise).
 func TestInstanceStore_Postgres_RegisterMintsAndBumpsEpoch(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -64,9 +64,9 @@ func TestInstanceStore_Postgres_RegisterMintsAndBumpsEpoch(t *testing.T) {
 
 // TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot pins that
 // Heartbeat renews last_heartbeat_at and writes the full capacity +
-// admission snapshot (the TFAC-552 follow-up), and that nil pointer fields
-// read back as nil (not a spurious zero) — including a wholesale clear on a
-// second all-nil heartbeat. TFAC-577.
+// admission snapshot, and that nil pointer fields read back as nil (not a
+// spurious zero) — including a wholesale clear on a second all-nil
+// heartbeat.
 func TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -146,8 +146,8 @@ func TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot(t *testing.T
 }
 
 // TestInstanceStore_Postgres_HeartbeatFencedOnBootEpoch pins the
-// split-identity fence (§4.1 point 4): a heartbeat carrying a STALE
-// boot_epoch (superseded by a later Register) matches no row. TFAC-577.
+// split-identity fence: a heartbeat carrying a STALE boot_epoch
+// (superseded by a later Register) matches no row.
 func TestInstanceStore_Postgres_HeartbeatFencedOnBootEpoch(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

@@ -212,10 +212,10 @@ func (s *Spawner) stampExecutor(orgID, runID string) {
 }
 
 // SetExecutorID overrides this spawner's executor identity with the
-// persistent instance-registry id + boot epoch main resolved at startup
-// (TFAC-577), replacing the constructor's random per-boot uuid fallback.
-// Call once at startup, before RunDispatcher / RunInstanceHeartbeat start;
-// tests that never call this keep NewSpawner's random default.
+// persistent instance-registry id + boot epoch main resolved at startup,
+// replacing the constructor's random per-boot uuid fallback. Call once at
+// startup, before RunDispatcher / RunInstanceHeartbeat start; tests that
+// never call this keep NewSpawner's random default.
 func (s *Spawner) SetExecutorID(id string, bootEpoch int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

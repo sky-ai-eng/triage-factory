@@ -8,9 +8,8 @@ import (
 
 // InstanceStore owns the instances table — the fleet membership registry
 // every TF process registers into at boot and refreshes via periodic
-// heartbeat (TFAC-577; docs/specs/horizontal-scaling/README.md §4.1). This
-// is the substrate ownership-scoped recovery, placement, and the fleet
-// dashboard read from later in the epic.
+// heartbeat. This is the substrate ownership-scoped recovery, placement,
+// and the fleet dashboard read from later in the horizontal-scaling epic.
 //
 // The table is deliberately NOT org-scoped — a fleet member isn't tenant
 // data — so every method here is admin-pool-only in Postgres (no app-pool
@@ -28,12 +27,12 @@ type InstanceStore interface {
 	// Heartbeat renews last_heartbeat_at and overwrites the capacity +
 	// admission snapshot, fenced on (id, boot_epoch) so a stale/superseded
 	// boot of the same id can't clobber a newer boot's row. matched is
-	// false when the fence matched no row — the split-identity signal §4.1
-	// describes (a later boot of this same id has already re-registered);
-	// callers log that as a warning, not an error.
+	// false when the fence matched no row — a later boot of this same id
+	// has already re-registered (the split-identity signal); callers log
+	// that as a warning, not an error.
 	Heartbeat(ctx context.Context, id string, bootEpoch int64, hb domain.InstanceHeartbeat) (matched bool, err error)
 
 	// Get returns one instance row, or nil if id is unknown. For tests and
-	// the deferred fleet-dashboard read (TFAC-555/589).
+	// the deferred fleet-dashboard read.
 	Get(ctx context.Context, id string) (*domain.Instance, error)
 }

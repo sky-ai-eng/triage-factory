@@ -72,8 +72,8 @@ func (a *App) startWorkers(ctx context.Context) {
 	// Run-queue dispatcher: drains the run queue the spawner enqueues
 	// blueprint steps onto, reconciling crash-stranded runs on boot.
 	go a.spawner.RunDispatcher(ctx, delegate.DefaultRunScanInterval)
-	// Instance-registry heartbeat (TFAC-577): renews this instance's fleet
-	// registry row + capacity/admission snapshot on a timer.
+	// Instance-registry heartbeat: renews this instance's fleet registry
+	// row + capacity/admission snapshot on a timer.
 	go a.spawner.RunInstanceHeartbeat(ctx, delegate.DefaultInstanceHeartbeatInterval)
 
 	// Bounded bare+worktree cache reaper (TFAC-60). One mechanism, policy

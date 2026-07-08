@@ -9,8 +9,8 @@ import (
 )
 
 // instanceStore is the Postgres impl of db.InstanceStore — the fleet
-// membership registry (TFAC-577). Wired against the ADMIN (BYPASSRLS) pool
-// in postgres.New: instances is a system-only table (RLS deny-by-default,
+// membership registry. Wired against the ADMIN (BYPASSRLS) pool in
+// postgres.New: instances is a system-only table (RLS deny-by-default,
 // REVOKEd from the app roles, exactly like public.auth_events) — a fleet
 // member isn't tenant data, so there's no org to scope an app-pool policy
 // on. The superuser pool does all I/O.

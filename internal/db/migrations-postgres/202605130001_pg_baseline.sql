@@ -8211,14 +8211,13 @@ GRANT ALL ON TABLE public.marketplace_listing_stats TO service_role;
 GRANT SELECT ON TABLE public.marketplace_listing_stats TO tf_app;
 
 
--- instances (TFAC-577): the fleet membership registry every TF process
--- registers into at boot and refreshes via periodic heartbeat. Role-neutral
--- name on purpose — every TF process registers (control pods too, for
+-- instances: the fleet membership registry every TF process registers
+-- into at boot and refreshes via periodic heartbeat. Role-neutral name on
+-- purpose — every TF process registers (control pods too, for
 -- deployment-wide visibility: versions, lease holder, health), not just
 -- executors; "executor" stays the *role* name everywhere else
 -- (runs.executor_id keeps its shipped meaning: the id of the instance
--- acting as a run's executor). See docs/specs/horizontal-scaling/README.md
--- §4.1.
+-- acting as a run's executor).
 --
 -- id is text, not uuid: it is minted OUTSIDE Postgres, by a file under
 -- <TF_STATE_ROOT>/instance-id (internal/instance) read/created once per
@@ -8230,9 +8229,9 @@ GRANT SELECT ON TABLE public.marketplace_listing_stats TO tf_app;
 -- snapshot/restore/clone weirdness.
 --
 -- max_runs / active_runs / mem_total_mb / mem_available_mb / dispatch_gated
--- are the TFAC-552 follow-up: capacity + admission state that used to be
--- process-local now lands on this heartbeat row. Meaningful only for
--- executor-capable roles; NULL on pure-control rows.
+-- move capacity + admission state that used to be process-local onto this
+-- heartbeat row. Meaningful only for executor-capable roles; NULL on
+-- pure-control rows.
 --
 -- Admin-pool-only / system table, same posture as auth_events /
 -- system_llm_runs: no org_id (a fleet member isn't tenant data), so an

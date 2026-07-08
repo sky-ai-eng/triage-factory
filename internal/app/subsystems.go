@@ -154,7 +154,7 @@ func (a *App) buildExecution() error {
 	// process-global hot-swap.
 	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "")
 	// Replace the constructor's random per-boot uuid with the persistent
-	// instance-registry identity registerInstance minted above (TFAC-577) —
+	// instance-registry identity registerInstance minted above —
 	// runs.executor_id on claimed rows must equal the registry id, and
 	// RunInstanceHeartbeat's fenced renewal needs the matching boot_epoch.
 	a.spawner.SetExecutorID(a.identity.ID, a.bootEpoch)

@@ -332,7 +332,7 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// there's no org to scope an app-pool policy on — same admin-only
 		// shape as SystemLLMRuns/PendingFirings/EventQueue/RunQueue. Fleet
 		// membership registry every TF process registers into at boot and
-		// refreshes via periodic heartbeat. See TFAC-577.
+		// refreshes via periodic heartbeat.
 		Instances: newInstanceStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
