@@ -134,13 +134,14 @@ const (
 
 	// EventSystemRoutingDisposition is the per-event sentinel
 	// Router.HandleEvent publishes after it finishes handling one event
-	// (TFAC-593): frozen, taskless (no handler/owner/unroutable), or task
-	// created/bumped. Routing is async (event_queue → worker), so this is
-	// how a source that published an event synchronously learns what
-	// became of it — the Slack adapter's ack-reaction / no-match-reply
-	// (TFAC-511) is the first consumer, but any subscriber (EE or core)
-	// can listen. See internal/domain/events/system.go for the metadata
-	// shape and disposition values.
+	// (TFAC-593): frozen, taskless (no handler/owner/unroutable), task
+	// created/bumped, or an internal error. Routing is async (event_queue →
+	// worker), so this is how a source that published an event
+	// synchronously learns what became of it — the Slack adapter's
+	// ack-reaction / no-match-reply (TFAC-511) is the first consumer, but
+	// any subscriber (EE or core) can listen. See
+	// internal/domain/events/system.go for the metadata shape and
+	// disposition values.
 	EventSystemRoutingDisposition = "system:routing:disposition"
 )
 
@@ -198,6 +199,6 @@ func AllEventTypes() []EventType {
 		{ID: EventSystemTaskDelegationBlockedSubtasks, Source: "system", Category: "delegation", Label: "Delegation Blocked: Subtasks", Description: "Auto-delegation skipped because parent has open subtasks"},
 		{ID: EventSystemRunStatus, Source: "system", Category: "delegation", Label: "Run Status", Description: "A delegated run's status changed"},
 		{ID: EventSystemRunActivity, Source: "system", Category: "delegation", Label: "Run Activity", Description: "A delegated run invoked a tool"},
-		{ID: EventSystemRoutingDisposition, Source: "system", Category: "routing", Label: "Routing Disposition", Description: "The router finished handling an event (frozen, taskless, task created/bumped)"},
+		{ID: EventSystemRoutingDisposition, Source: "system", Category: "routing", Label: "Routing Disposition", Description: "The router finished handling an event (frozen, taskless, task created/bumped, or error)"},
 	}
 }
