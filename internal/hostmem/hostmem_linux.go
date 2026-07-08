@@ -8,86 +8,166 @@ import (
 	"strings"
 )
 
-// Cgroup v2 unified-hierarchy files this package reads when the process
-// is confined by a memory limit. Read at the mount root deliberately —
-// modern container runtimes (Docker 20.10+, containerd, Fly Machines)
-// give each container its own cgroup namespace, so the container's
-// delegated subtree already appears as the root of /sys/fs/cgroup; no
-// self-cgroup path resolution (/proc/self/cgroup) is needed.
+// Cgroup v2 unified-hierarchy paths this package reads when the
+// process is confined by a memory limit anywhere in its own cgroup
+// ancestry. cgroupRoot is the standard mount point; the actual
+// per-process cgroup underneath it is resolved via /proc/self/cgroup
+// rather than assumed to be the mount root itself — under a private
+// cgroup namespace (the default for Docker 20.10+/containerd/Fly
+// Machines) the two coincide, so this degrades to a single read
+// exactly as before. Under a shared/host cgroup namespace they don't:
+// /sys/fs/cgroup is the real kernel root, which typically has no
+// memory.max of its own, while the container's actual limit lives
+// several levels down (e.g. /system.slice/docker-<id>.scope). Reading
+// only the mount root in that shape would see "not limited" and leak
+// host-wide /proc/meminfo figures — exactly the bug this package
+// exists to avoid.
 const (
-	cgroupMemMaxPath     = "/sys/fs/cgroup/memory.max"
-	cgroupMemCurrentPath = "/sys/fs/cgroup/memory.current"
-	cgroupMemStatPath    = "/sys/fs/cgroup/memory.stat"
+	cgroupRoot           = "/sys/fs/cgroup"
+	cgroupMemMaxFile     = "memory.max"
+	cgroupMemCurrentFile = "memory.current"
+	cgroupMemStatFile    = "memory.stat"
+	procSelfCgroupPath   = "/proc/self/cgroup"
 	procMeminfoPath      = "/proc/meminfo"
 )
 
 // readFileFunc abstracts a file read so tests can inject a fake
 // filesystem (fixed content, or an error) instead of the real /proc
 // and /sys/fs/cgroup trees, which vary by host and can't represent
-// "unlimited" or "unreadable" on demand.
+// "unlimited", "nested under a shared namespace", or "unreadable" on
+// demand.
 type readFileFunc func(path string) ([]byte, error)
 
 func availableMB() int { return availableMBFrom(os.ReadFile) }
 
 func totalMB() int { return totalMBFrom(os.ReadFile) }
 
+// cgroupMemLevel is one ancestor cgroup's memory.max, in bytes.
+type cgroupMemLevel struct {
+	dir      string
+	maxBytes int64
+}
+
 // availableMBFrom is AvailableMB with an injectable reader.
 func availableMBFrom(read readFileFunc) int {
-	maxBytes, limited := cgroupMemMax(read)
+	levels, limited := cgroupMemLimitedLevels(read)
 	if !limited {
 		return meminfoMB(read, "MemAvailable:")
 	}
-	// Cgrouped: never fall back to /proc/meminfo from here even if a
-	// sibling file can't be read — that would silently hand back the
-	// host-wide number this package exists to avoid. A broken read
-	// inside a confirmed cgroup limit fails open to Unknown instead.
-	current, ok := readMemoryBytes(read, cgroupMemCurrentPath)
-	if !ok {
-		return Unknown
+	// Cgroup v2 enforces memory.max hierarchically: any ancestor
+	// hitting its own ceiling throttles/OOMs the whole subtree, even
+	// if our own leaf looks fine (a shared parent slice can be
+	// starved by sibling cgroups). The true headroom is the tightest
+	// of every limited level's own (max - used), not just the leaf's.
+	minHeadroom := int64(-1)
+	for _, lvl := range levels {
+		current, ok := readMemoryBytes(read, lvl.dir+"/"+cgroupMemCurrentFile)
+		if !ok {
+			// Never fall back to /proc/meminfo once a real limit is
+			// confirmed somewhere in the chain — that would silently
+			// hand back the host-wide numbers this package exists to
+			// avoid. Fail open to Unknown instead.
+			return Unknown
+		}
+		inactiveFile, ok := readMemoryStatField(read, lvl.dir+"/"+cgroupMemStatFile, "inactive_file")
+		if !ok {
+			return Unknown
+		}
+		used := current - inactiveFile
+		if used < 0 {
+			used = 0
+		}
+		headroom := lvl.maxBytes - used
+		if headroom < 0 {
+			headroom = 0
+		}
+		if minHeadroom == -1 || headroom < minHeadroom {
+			minHeadroom = headroom
+		}
 	}
-	inactiveFile, ok := readMemoryStatField(read, cgroupMemStatPath, "inactive_file")
-	if !ok {
-		return Unknown
-	}
-	used := current - inactiveFile
-	if used < 0 {
-		used = 0
-	}
-	avail := maxBytes - used
-	if avail < 0 {
-		avail = 0
-	}
-	return int(avail / (1024 * 1024))
+	return int(minHeadroom / (1024 * 1024))
 }
 
 // totalMBFrom is TotalMB with an injectable reader.
 func totalMBFrom(read readFileFunc) int {
-	maxBytes, limited := cgroupMemMax(read)
+	levels, limited := cgroupMemLimitedLevels(read)
 	if !limited {
 		return meminfoMB(read, "MemTotal:")
 	}
-	return int(maxBytes / (1024 * 1024))
+	minMax := levels[0].maxBytes
+	for _, lvl := range levels[1:] {
+		if lvl.maxBytes < minMax {
+			minMax = lvl.maxBytes
+		}
+	}
+	return int(minMax / (1024 * 1024))
 }
 
-// cgroupMemMax reads memory.max and reports the limit in bytes plus
-// whether this process is actually confined by it. Both "not cgrouped"
-// (file missing — bare host, or a cgroup v1-only host) and "unlimited"
-// (content "max") report limited=false, so callers fall back to
-// /proc/meminfo exactly as the pre-cgroup-aware behavior did.
-func cgroupMemMax(read readFileFunc) (limitBytes int64, limited bool) {
-	data, err := read(cgroupMemMaxPath)
+// cgroupMemLimitedLevels walks every cgroup from this process's own
+// leaf up to the mount root and returns every level that carries a
+// real memory.max (parseable, not "max"). limited is false when no
+// level in the chain does — every level is either unlimited or has no
+// memory.max file at all (not cgrouped: bare metal, or a cgroup
+// v1-only host) — so callers fall back to /proc/meminfo.
+func cgroupMemLimitedLevels(read readFileFunc) ([]cgroupMemLevel, bool) {
+	selfPath, _ := selfCgroupPath(read)
+	var levels []cgroupMemLevel
+	for _, dir := range cgroupAncestorDirs(selfPath) {
+		data, err := read(dir + "/" + cgroupMemMaxFile)
+		if err != nil {
+			continue
+		}
+		s := strings.TrimSpace(string(data))
+		if s == "max" || s == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			continue
+		}
+		levels = append(levels, cgroupMemLevel{dir: dir, maxBytes: n})
+	}
+	return levels, len(levels) > 0
+}
+
+// selfCgroupPath reads this process's own cgroup v2 path from
+// /proc/self/cgroup's unified-hierarchy line, which always starts
+// with "0::" regardless of whether any v1 named hierarchies are also
+// present (a hybrid mount). Reports ok=false when the file can't be
+// read or carries no "0::" line (a cgroup v1-only host).
+func selfCgroupPath(read readFileFunc) (string, bool) {
+	data, err := read(procSelfCgroupPath)
 	if err != nil {
-		return 0, false
+		return "", false
 	}
-	s := strings.TrimSpace(string(data))
-	if s == "max" || s == "" {
-		return 0, false
+	for _, line := range strings.Split(string(data), "\n") {
+		if rest, ok := strings.CutPrefix(line, "0::"); ok {
+			return strings.TrimSpace(rest), true
+		}
 	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, false
+	return "", false
+}
+
+// cgroupAncestorDirs returns every cgroup directory from the mount
+// root down to this process's own leaf cgroup (root first). An empty
+// or "/" selfPath — a private cgroup namespace, or a self-cgroup read
+// that failed — yields just [cgroupRoot], identical to reading the
+// mount root directly.
+func cgroupAncestorDirs(selfPath string) []string {
+	selfPath = strings.Trim(selfPath, "/")
+	dirs := []string{cgroupRoot}
+	if selfPath == "" {
+		return dirs
 	}
-	return n, true
+	dir := cgroupRoot
+	for _, seg := range strings.Split(selfPath, "/") {
+		if seg == "" {
+			continue
+		}
+		dir += "/" + seg
+		dirs = append(dirs, dir)
+	}
+	return dirs
 }
 
 // readMemoryBytes reads a single plain-integer-bytes cgroup file (e.g.
