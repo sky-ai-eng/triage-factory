@@ -621,7 +621,7 @@ func (h *slackExecHandler) viewMessages(ctx context.Context, token string, msgs 
 		}
 		view := slackMessageView{TS: m.TS, ThreadTS: m.ThreadTS, SenderID: senderID, SenderName: senderName, Text: m.Text}
 		for _, f := range m.Files {
-			view.Files = append(view.Files, slackFileRefView{ID: f.ID, Name: f.Name})
+			view.Files = append(view.Files, slackFileRefView(f))
 		}
 		out = append(out, view)
 	}

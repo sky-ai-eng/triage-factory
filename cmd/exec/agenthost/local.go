@@ -1655,11 +1655,14 @@ func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifac
 // is the kicking-off user (empty → NULL for an event-triggered run, an
 // autonomous system action).
 //
-// stampActionIdentity / recordActionSystem / resolveTouchedEntity / recordTouch
-// are thin LocalClient-bound wrappers over the free functions in record.go —
-// kept here so the several other call sites in this file (UpsertArtifact,
+// stampActionIdentity / recordActionSystem / resolveTouchedEntity are thin
+// LocalClient-bound wrappers over the free functions in record.go — kept here
+// so the several other call sites in this file (UpsertArtifact,
 // RecordGitDenied, RecordGitPushFailed, branchPushAction) don't have to thread
-// c.stores/c.info through by hand.
+// c.stores/c.info through by hand. Touch-recording itself
+// (recordTouchInfo) has no LocalClient-bound wrapper: RecordExternalWrite
+// (record.go) is the only caller, and it already holds (stores, info)
+// directly.
 
 // stampActionIdentity fills the run/org/team/actor common to every
 // bot-attributed action from this client's RunInfo.
@@ -1686,13 +1689,6 @@ func (c *LocalClient) recordBotAction(ctx context.Context, act *domain.ExternalA
 // see resolveTouchedEntityInfo (record.go) for the full rationale.
 func (c *LocalClient) resolveTouchedEntity(ctx context.Context, act *domain.ExternalAction) (string, error) {
 	return resolveTouchedEntityInfo(ctx, c.stores, c.info, act)
-}
-
-// recordTouch resolves-or-creates the touched entity as a best-effort side
-// step in the recording funnels — see recordTouchInfo (record.go) for the
-// ordering contract (must run after withWrite returns).
-func (c *LocalClient) recordTouch(ctx context.Context, act *domain.ExternalAction) {
-	recordTouchInfo(ctx, c.stores, c.info, act)
 }
 
 // RecordGitDenied appends a git_denied external-action audit row for a git op
