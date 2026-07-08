@@ -279,7 +279,12 @@ func NewInstance(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() {
 		_ = adminDB.Close()
-		_ = pg.Terminate(context.Background())
+		// Bounded, not context.Background(): an unbounded context here
+		// would let a stuck Docker daemon or testcontainers/ryuk hang
+		// this cleanup — and with it the whole test run — indefinitely.
+		termCtx, termCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer termCancel()
+		_ = pg.Terminate(termCtx)
 	})
 	return adminDB
 }

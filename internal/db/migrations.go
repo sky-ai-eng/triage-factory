@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"embed"
 	"errors"
 	"fmt"
@@ -151,15 +152,26 @@ const postgresMigrationLockText = "triagefactory:goose-migrate"
 // what makes a session lock usable here — a bare db.ExecContext call
 // could hand the lock and unlock statements two different physical
 // connections from the pool, silently failing to serialize anything.
-// Closing the conn drops the session lock as a backstop even if the
-// explicit unlock below errors.
+//
+// (*sql.Conn).Close alone is NOT a backstop for the lock: it only
+// returns the connection to the pool, it doesn't end the backend
+// session — so if the explicit pg_advisory_unlock below ever failed,
+// a plain Close would leave the lock held on a connection sitting in
+// the pool, possibly reused for unrelated queries, until the pool
+// happens to evict it. conn.Raw + driver.ErrBadConn tells database/sql
+// to physically close the connection instead of pooling it, so the
+// backend session — and with it the lock — always ends here,
+// regardless of whether the unlock statement succeeded.
 func runPostgresMigrationLocked(database *sql.DB, treeDir string) error {
 	ctx := context.Background()
 	conn, err := database.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire migration-lock connection: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() {
+		_ = conn.Raw(func(driverConn any) error { return driver.ErrBadConn })
+		_ = conn.Close()
+	}()
 
 	if _, err := conn.ExecContext(ctx,
 		`SELECT pg_advisory_lock(hashtextextended($1, 0))`, postgresMigrationLockText,
@@ -242,19 +254,27 @@ func headMigrationVersion(treeDir string) (int64, error) {
 // exist yet, which an executor must never trigger. tracked is false
 // when the table doesn't exist at all.
 //
+// The existence probe uses to_regclass rather than pg_tables +
+// schemaname = 'public': goose itself never schema-qualifies the
+// tracking table (TableName() is the bare "goose_db_version", resolved
+// through whatever the connection's search_path finds), so hardcoding
+// 'public' here could report "missing" for a table goose would
+// otherwise happily see. to_regclass performs the same unqualified,
+// search_path-driven lookup goose's own dialect queries rely on, so
+// this can't disagree with what goose considers "the" tracking table.
+//
 // MAX(version_id) over is_applied rows is sufficient here — rather
 // than re-deriving goose's own descending-scan is_applied/rollback
 // logic — because TF's migrations never expose Down (see CLAUDE.md's
 // goose conventions: Down blocks are no-ops), so version_id is
 // monotonically inserted and never rolled back.
 func currentPostgresSchemaVersion(database *sql.DB) (version int64, tracked bool, err error) {
-	var n int
 	if err := database.QueryRow(
-		`SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public' AND tablename = 'goose_db_version'`,
-	).Scan(&n); err != nil {
+		`SELECT to_regclass('goose_db_version') IS NOT NULL`,
+	).Scan(&tracked); err != nil {
 		return 0, false, fmt.Errorf("probe goose_db_version: %w", err)
 	}
-	if n == 0 {
+	if !tracked {
 		return 0, false, nil
 	}
 	if err := database.QueryRow(
