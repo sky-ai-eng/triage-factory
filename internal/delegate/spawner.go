@@ -135,6 +135,13 @@ type Spawner struct {
 	mu       sync.Mutex
 	ghClient *ghclient.Client
 	model    string
+	// publicURL is the deployment's externally-visible base URL, used to
+	// compute the {{RUN_URL}} prompt placeholder (TFAC-591) — the "view
+	// this run in TF" deep link. Wired post-construction via SetPublicURL
+	// with the same value handed to Server.SetDeployConfig (internal/app/
+	// httpserver.go, both call sites). Empty disables the placeholder
+	// (renders "") rather than fabricating a localhost link in multi mode.
+	publicURL string
 	// Per-org run-credential seam, wired once at startup via
 	// SetRunCredentialResolvers. When set (both modes in production) these
 	// supersede the process-global ghClient/model above; tests leave them
@@ -377,6 +384,41 @@ func (s *Spawner) awaitClassification(ctx context.Context, orgID, entityID strin
 	if fn != nil {
 		fn(ctx, orgID, entityID)
 	}
+}
+
+// SetPublicURL wires the deployment's externally-visible base URL, used by
+// runURLFor to compute the {{RUN_URL}} prompt placeholder (TFAC-591). Call
+// with the same value handed to Server.SetDeployConfig — both call sites in
+// internal/app/httpserver.go. Nil-safe to leave unset: runURLFor then
+// renders the placeholder empty, never a fabricated localhost link.
+//
+// Trailing slashes are trimmed, mirroring Server.SetDeployConfig
+// (internal/server/auth_handlers.go) — without this, a TF_PUBLIC_URL (or
+// BrowserURL) configured with a trailing "/" would produce "//orgs/..." /
+// "//runs/..." in runURLFor's concatenation.
+func (s *Spawner) SetPublicURL(url string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publicURL = strings.TrimRight(url, "/")
+}
+
+// runURLFor computes the {{RUN_URL}} placeholder value — a deep link back to
+// this run in the TF UI. Empty publicURL degrades to "" (no wrong fallbacks:
+// never fabricate a localhost link when the deployment has no configured
+// public URL). Local mode's run route has no org segment
+// (frontend/src/main.tsx "/runs/:runID"); multi mode nests every route under
+// "/orgs/:org_id" ("/orgs/:org_id/runs/:runID").
+func (s *Spawner) runURLFor(orgID, runID string) string {
+	s.mu.Lock()
+	publicURL := s.publicURL
+	s.mu.Unlock()
+	if publicURL == "" {
+		return ""
+	}
+	if runmode.Current() == runmode.ModeMulti {
+		return publicURL + "/orgs/" + orgID + "/runs/" + runID
+	}
+	return publicURL + "/runs/" + runID
 }
 
 // notifyDrainer fires the QueueDrainer hook for an entity if a drainer is
