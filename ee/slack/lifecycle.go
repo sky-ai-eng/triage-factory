@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -81,13 +82,16 @@ var (
 // contract that subscriber handlers must return fast.
 const slackLifecycleEventBuffer = 256
 
-// slackLifecycleCacheMaxEntries / TTL bound the per-run verdict cache
-// (runEntry) so a long-lived process doesn't grow it unboundedly across
-// every run it has ever seen — pruned lazily (checked on insert), never for
-// an entry with a live worker.
+// slackLifecycleCacheMaxEntries bounds the per-run verdict cache (runEntry)
+// so a long-lived process doesn't grow it unboundedly across every run it
+// has ever seen. slackLifecycleCachePruneTarget is where a prune pass brings
+// the cache back down to — deliberately below the cap, not equal to it, so
+// pruning doesn't re-trigger on the very next insert: the O(n log n) sort in
+// pruneRunCache is amortized over the (max-target) inserts between prune
+// passes instead of paid on every single insert once the cache is full.
 var (
-	slackLifecycleCacheMaxEntries = 2000
-	slackLifecycleCacheTTL        = 24 * time.Hour
+	slackLifecycleCacheMaxEntries  = 2000
+	slackLifecycleCachePruneTarget = 1800
 )
 
 // lifecycleAdapter is the TFAC-597 background worker: constructed at
@@ -446,23 +450,37 @@ func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, runID str
 }
 
 // pruneRunCache bounds the cache once it exceeds slackLifecycleCacheMaxEntries:
-// drop entries older than slackLifecycleCacheTTL that have no live worker.
+// evict the oldest (by cachedAt) entries with no live worker until the cache
+// is back at slackLifecycleCachePruneTarget. This is a genuine size cap, not
+// a staleness-only sweep — even entries seen moments ago are evicted if
+// that's what it takes to stay under the target, so the map can never grow
+// past max regardless of how much traffic arrives within any given window.
 // An entry with a live worker is never evicted regardless of age — losing it
 // would leak the worker (the dispatcher would no longer know to route its
-// run's future sentinels to it) — cheap in practice since a live worker
-// implies recent (and ongoing) activity anyway.
+// run's future sentinels to it); if every entry has a live worker, eviction
+// legitimately can't bring the count down further (bounded in practice by
+// concurrent live runs, not total history).
 func pruneRunCache(runs map[string]*runEntry) {
 	if len(runs) <= slackLifecycleCacheMaxEntries {
 		return
 	}
-	cutoff := slackLifecycleNow().Add(-slackLifecycleCacheTTL)
+	type candidate struct {
+		id       string
+		cachedAt time.Time
+	}
+	candidates := make([]candidate, 0, len(runs))
 	for id, entry := range runs {
-		if entry.worker != nil {
-			continue
+		if entry.worker == nil {
+			candidates = append(candidates, candidate{id: id, cachedAt: entry.cachedAt})
 		}
-		if entry.cachedAt.Before(cutoff) {
-			delete(runs, id)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].cachedAt.Before(candidates[j].cachedAt) })
+
+	for _, c := range candidates {
+		if len(runs) <= slackLifecycleCachePruneTarget {
+			return
 		}
+		delete(runs, c.id)
 	}
 }
 
@@ -537,9 +555,14 @@ type runStatusWorker struct {
 	done        chan struct{}
 }
 
-// newRunStatusWorker constructs and starts a worker: the initial setStatus
-// call happens synchronously in loop's first statement (before any select),
-// so by the time this returns a Slack call is already in flight.
+// newRunStatusWorker constructs and starts a worker: loop's first statement
+// (before it ever selects on the command channels) is the initial setStatus
+// call, so it's always the first Slack call this worker makes — ordered
+// ahead of any activity/keepAlive/stop command sent afterward. That
+// ordering is internal to the worker only: go w.loop() returns immediately,
+// so newRunStatusWorker itself returns with no guarantee the initial call
+// has started (or even been scheduled) yet — callers that need to observe
+// it must poll, not assume synchronous completion.
 func newRunStatusWorker(ctx context.Context, client *http.Client, publicURL func() string, orgID, runID, channel, threadTS, botToken string) *runStatusWorker {
 	w := &runStatusWorker{
 		ctx: ctx, client: client, publicURL: publicURL,
@@ -624,6 +647,16 @@ func (w *runStatusWorker) loop() {
 	var debounceC <-chan time.Time
 	var pendingText string
 	var hasPending bool
+	// debounce is reassigned throughout the loop (nil between windows); this
+	// defer closes over the variable itself, so it stops whatever timer is
+	// currently pending at whichever exit path returns — otherwise a debounce
+	// window open at ctx-cancel/stop/idle-reap time would leak until it fires
+	// on its own.
+	defer func() {
+		if debounce != nil {
+			debounce.Stop()
+		}
+	}()
 
 	for {
 		select {
