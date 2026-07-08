@@ -1,12 +1,17 @@
 package db
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"embed"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
+	"strings"
+	"sync"
 
 	"github.com/pressly/goose/v3"
 )
@@ -44,12 +49,64 @@ var ErrPreV1110Install = errors.New(
 		"(installed users) or `./scripts/clean-slate.sh` (developers working from source)",
 )
 
-// runMigrations brings the on-disk schema up to head via goose.
+// tfRoleExecutorEnv is the TF_ROLE value runMigrations gates goose.Up
+// on. The full TF_ROLE plumbing — subsystem wiring, per-role pool
+// defaults, the N-executor compose profile — lands separately. Reading
+// the env var directly here (rather than standing up a stub in
+// internal/runmode) keeps this migration-coordination assert self-
+// contained rather than partially building a config surface that
+// belongs elsewhere.
+const tfRoleExecutorEnv = "executor"
+
+// isExecutorRole reports whether this process is TF_ROLE=executor.
+// Case-insensitive and whitespace-trimmed, mirroring internal/runmode's
+// env-parsing conventions even though this doesn't route through that
+// package (see tfRoleExecutorEnv).
+func isExecutorRole() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("TF_ROLE")), tfRoleExecutorEnv)
+}
+
+// ErrExecutorSchemaBehind and ErrExecutorSchemaAhead are returned by
+// Migrate when a TF_ROLE=executor process's connected Postgres schema
+// doesn't match what its own embedded migration tree expects. Neither
+// resolves in-process: every existing Migrate caller already treats a
+// non-nil error as fatal at boot (main.go, cmd/migrate, openStores), so
+// the process exits and the deployment's restart/backoff policy is
+// what retries — "wait" here means an external process restart, not an
+// in-process sleep loop. See assertExecutorSchemaCompatible.
+var (
+	ErrExecutorSchemaBehind = errors.New("connected schema is behind this executor build's expected version")
+	ErrExecutorSchemaAhead  = errors.New("connected schema is ahead of this executor build's expected version")
+)
+
+// gooseMu guards every call into the goose package below. goose.SetBaseFS
+// / goose.SetDialect are plain package-level globals with no
+// synchronization of their own — goose.Up, goose.CollectMigrations, and
+// goose.GetDBVersion all read them internally over their full
+// execution, not just at entry. In production this is moot (each
+// process calls Migrate exactly once, synchronously, at boot); it only
+// matters if something in-process ever called Migrate/MigrationStatus
+// concurrently from multiple goroutines, which would otherwise race on
+// goose's shared state regardless of anything the pg_advisory_lock
+// below does — that lock coordinates separate OS processes over the
+// shared database, it says nothing about two goroutines sharing one
+// process's copy of goose's package globals.
+var gooseMu sync.Mutex
+
+// runMigrations brings the on-disk schema up to head via goose — or,
+// for a TF_ROLE=executor process on Postgres, refuses to and instead
+// asserts the already-migrated schema matches what this build expects.
+// Executors never migrate.
 //
 // Sequence:
 //  1. assertFreshOrCurrent gates entry — pre-v1.11.0 installs refuse
 //     here before any DDL runs.
-//  2. Hand the routed embed.FS to goose and call goose.Up.
+//  2. Route to the embedded tree for dialect and configure goose.
+//  3. SQLite (single process by construction) and Postgres
+//     control/all-role processes call goose.Up — Postgres wrapped in a
+//     session-level advisory lock so M concurrently-booting pods
+//     serialize cleanly. A Postgres executor-role process instead
+//     calls assertExecutorSchemaCompatible and never touches DDL.
 //
 // Failures roll back at the per-migration boundary goose owns; the
 // next launch retries any unapplied migration.
@@ -61,14 +118,188 @@ func runMigrations(db *sql.DB, dialect string) error {
 	if err != nil {
 		return err
 	}
+
+	gooseMu.Lock()
+	defer gooseMu.Unlock()
+
 	goose.SetBaseFS(treeFS)
 	if err := goose.SetDialect(dialect); err != nil {
 		return fmt.Errorf("set dialect %s: %w", dialect, err)
 	}
-	if err := goose.Up(db, treeDir); err != nil {
+
+	if dialect != "postgres" {
+		// SQLite: internal/db.Open caps the pool at one connection, so
+		// there is no cross-process race to coordinate, and TF_ROLE is
+		// a multi-mode-only concept.
+		if err := goose.Up(db, treeDir); err != nil {
+			return fmt.Errorf("goose up: %w", err)
+		}
+		return nil
+	}
+
+	if isExecutorRole() {
+		return assertExecutorSchemaCompatible(db, treeDir)
+	}
+	return runPostgresMigrationLocked(db, treeDir)
+}
+
+// postgresMigrationLockText seeds the fixed session-level advisory
+// lock every migrating Postgres process acquires before calling
+// goose.Up. hashtextextended over a literal keeps this lock's key
+// space separate from the org/user-keyed xact-locks elsewhere
+// (internal/server/auth_provision.go, internal/db/postgres/
+// team_github_repos.go) without either family needing to agree on a
+// shared key scheme — those lock one entity for the duration of a
+// transaction; this locks the entire migration run for the whole
+// process.
+const postgresMigrationLockText = "triagefactory:goose-migrate"
+
+// runPostgresMigrationLocked wraps goose.Up in a session-level
+// pg_advisory_lock so M concurrently-booting control pods serialize
+// their migration attempt. goose has no cross-process coordination of
+// its own — two processes racing to apply the same pending migration
+// can both observe "not yet applied" and either double-run DDL or
+// corrupt the goose_db_version bookkeeping.
+//
+// The lock is session-scoped (tied to one physical backend
+// connection), not transaction-scoped: goose.Up runs each migration in
+// its own transaction internally, so an *xact_lock held only for the
+// first of those transactions would release long before the rest ran.
+// A dedicated *sql.Conn checked out of the pool for the duration is
+// what makes a session lock usable here — a bare db.ExecContext call
+// could hand the lock and unlock statements two different physical
+// connections from the pool, silently failing to serialize anything.
+//
+// (*sql.Conn).Close alone is NOT a backstop for the lock: it only
+// returns the connection to the pool, it doesn't end the backend
+// session — so if the explicit pg_advisory_unlock below ever failed,
+// a plain Close would leave the lock held on a connection sitting in
+// the pool, possibly reused for unrelated queries, until the pool
+// happens to evict it. conn.Raw + driver.ErrBadConn tells database/sql
+// to physically close the connection instead of pooling it, so the
+// backend session — and with it the lock — always ends here,
+// regardless of whether the unlock statement succeeded.
+func runPostgresMigrationLocked(database *sql.DB, treeDir string) error {
+	ctx := context.Background()
+	conn, err := database.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration-lock connection: %w", err)
+	}
+	defer func() {
+		_ = conn.Raw(func(driverConn any) error { return driver.ErrBadConn })
+		_ = conn.Close()
+	}()
+
+	if _, err := conn.ExecContext(ctx,
+		`SELECT pg_advisory_lock(hashtextextended($1, 0))`, postgresMigrationLockText,
+	); err != nil {
+		return fmt.Errorf("acquire migration advisory lock: %w", err)
+	}
+	defer func() {
+		if _, err := conn.ExecContext(ctx,
+			`SELECT pg_advisory_unlock(hashtextextended($1, 0))`, postgresMigrationLockText,
+		); err != nil {
+			migrateLog.Warn("release migration advisory lock", "error", err)
+		}
+	}()
+
+	if err := goose.Up(database, treeDir); err != nil {
 		return fmt.Errorf("goose up: %w", err)
 	}
 	return nil
+}
+
+// assertExecutorSchemaCompatible implements the executor half of the
+// role split: TF_ROLE=executor never runs goose.Up, so instead it
+// compares the connected schema's current goose version against the
+// highest version this build's embedded migration tree carries and
+// refuses to boot on any mismatch rather than guessing:
+//
+//   - behind (current < expected): a sibling control pod hasn't
+//     finished migrating yet, or none has been deployed. See
+//     ErrExecutorSchemaBehind for why this "waits" via process exit +
+//     external restart rather than an in-process retry loop.
+//   - ahead (current > expected): the control plane has already rolled
+//     the schema forward past what this binary understands. Never
+//     self-resolves — the fix is deploying a newer executor build
+//     first (spec §5.5's drain-first-on-schema-change contract, so a
+//     stale executor never runs against DDL it doesn't recognize).
+//   - equal: proceed.
+func assertExecutorSchemaCompatible(database *sql.DB, treeDir string) error {
+	expected, err := headMigrationVersion(treeDir)
+	if err != nil {
+		return fmt.Errorf("collect embedded migration tree: %w", err)
+	}
+	current, tracked, err := currentPostgresSchemaVersion(database)
+	if err != nil {
+		return fmt.Errorf("read goose_db_version: %w", err)
+	}
+	if !tracked {
+		return fmt.Errorf("%w: no goose_db_version table found — this database has never been migrated by a control-plane process (this build expects version %d)",
+			ErrExecutorSchemaBehind, expected)
+	}
+	switch {
+	case current < expected:
+		return fmt.Errorf("%w: schema at %d, this build expects %d — waiting on a control-plane pod to finish migrating",
+			ErrExecutorSchemaBehind, current, expected)
+	case current > expected:
+		return fmt.Errorf("%w: schema at %d, this build only understands up to %d — deploy a newer executor build",
+			ErrExecutorSchemaAhead, current, expected)
+	default:
+		return nil
+	}
+}
+
+// headMigrationVersion returns the highest version in the embedded
+// migration tree at treeDir — this build's "expected" schema head.
+// Read-only against the FS goose.SetBaseFS already points at; never
+// touches the DB.
+func headMigrationVersion(treeDir string) (int64, error) {
+	migrations, err := goose.CollectMigrations(treeDir, 0, goose.MaxVersion)
+	if err != nil {
+		return 0, err
+	}
+	if len(migrations) == 0 {
+		return 0, nil
+	}
+	return migrations[len(migrations)-1].Version, nil
+}
+
+// currentPostgresSchemaVersion reads the connected DB's current goose
+// version without the side effects goose.GetDBVersion carries — it
+// creates goose_db_version (stamping version 0) if the table doesn't
+// exist yet, which an executor must never trigger. tracked is false
+// when the table doesn't exist at all.
+//
+// The existence probe uses to_regclass rather than pg_tables +
+// schemaname = 'public': goose itself never schema-qualifies the
+// tracking table (TableName() is the bare "goose_db_version", resolved
+// through whatever the connection's search_path finds), so hardcoding
+// 'public' here could report "missing" for a table goose would
+// otherwise happily see. to_regclass performs the same unqualified,
+// search_path-driven lookup goose's own dialect queries rely on, so
+// this can't disagree with what goose considers "the" tracking table.
+//
+// MAX(version_id) over is_applied rows is sufficient here — rather
+// than re-deriving goose's own descending-scan is_applied/rollback
+// logic — because TF's migrations never expose Down (see CLAUDE.md's
+// goose conventions: Down blocks are no-ops), so version_id is
+// monotonically inserted and never rolled back.
+func currentPostgresSchemaVersion(database *sql.DB) (version int64, tracked bool, err error) {
+	if err := database.QueryRow(
+		`SELECT to_regclass('goose_db_version') IS NOT NULL`,
+	).Scan(&tracked); err != nil {
+		return 0, false, fmt.Errorf("probe goose_db_version: %w", err)
+	}
+	if !tracked {
+		return 0, false, nil
+	}
+	if err := database.QueryRow(
+		`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied`,
+	).Scan(&version); err != nil {
+		return 0, false, fmt.Errorf("read goose_db_version: %w", err)
+	}
+	return version, true, nil
 }
 
 // migrationsFor returns the embedded migration tree for a goose
@@ -166,6 +397,10 @@ func MigrationStatus(db *sql.DB, dialect string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+
+	gooseMu.Lock()
+	defer gooseMu.Unlock()
+
 	goose.SetBaseFS(treeFS)
 	if err := goose.SetDialect(dialect); err != nil {
 		return fmt.Errorf("set dialect %s: %w", dialect, err)
