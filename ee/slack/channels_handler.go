@@ -644,14 +644,20 @@ func teamHasSlackMentionTrigger(ctx context.Context, tx db.TxStores, orgID, team
 
 // slackMentionPromptName/Body are the shipped-content for the default
 // slack:mention blueprint TFAC-543 seeds on a team's first tracked channel.
-// The agent-runtime epic refines this and adds the reply path; content
-// quality is not this leaf's bar.
+// Body interpolates the literal {{EVENT_METADATA_JSON}} placeholder
+// (TFAC-596) — the mention's channel/thread_ts/sender/text otherwise never
+// reach the run, since a task carries only its title. Greenfield: pre-
+// release, existing seeded rows are dogfood-only and are not migrated.
 const (
 	slackMentionPromptName = "Slack mention assistant"
-	slackMentionPromptBody = "A teammate @mentioned the agent in a Slack thread. The task's entity is the thread; " +
-		"the event metadata carries the channel, thread timestamp, sender, and message text. Read the request in " +
-		"the mention text, gather what you need from the linked entity and any referenced repos/issues, and do " +
-		"the work using the triagefactory exec subcommands available to you. Keep output concise and thread-appropriate."
+	slackMentionPromptBody = "A teammate @mentioned the agent in a Slack thread. The task's entity is the thread. " +
+		"Parse the channel, thread_ts, sender, and message text out of this event's metadata:\n\n" +
+		"{{EVENT_METADATA_JSON}}\n\n" +
+		"Read the thread (`exec slack read thread --channel <channel> --ts <thread_ts>`, or `--ts <ts>` when " +
+		"thread_ts is empty — a root-message mention) to see the full request in context, gather what you need " +
+		"from the linked entity and any referenced repos/issues, do the work using the triagefactory exec " +
+		"subcommands available to you, and reply in that same thread with `exec slack send` — your stdout is not " +
+		"visible to the user, so the send is the only way they see your answer."
 )
 
 // slackMentionTriggerBreakerThreshold / MinAutonomySuitability match the

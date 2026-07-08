@@ -40,8 +40,13 @@ var reservedExtensionNamespaces = map[string]bool{
 
 // RegisterExtension registers a handler for a verb namespace (the exec
 // subcommand name, e.g. "slack"), gated by feature. Called from an ee
-// package's init(); panics on empty/duplicate/reserved namespace or nil
-// handler (wiring bug — fail at boot).
+// package's init() or extension install() — a handler that needs db.Stores
+// (which init() doesn't have) registers from its install() closure instead;
+// the registry is a process-global map and install() runs during server boot
+// before the agenthost daemon serves any run, so the timing is equally safe
+// either way (see e.g. ee/slack/exec_host.go's registerSlackExec). Panics on
+// empty/duplicate/reserved namespace or nil handler (wiring bug — fail at
+// boot).
 func RegisterExtension(namespace string, feature entitlements.Feature, h ExtensionHandler) {
 	if namespace == "" {
 		panic("agenthost.RegisterExtension: namespace must not be empty")
