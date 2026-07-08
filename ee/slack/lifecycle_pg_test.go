@@ -42,9 +42,10 @@ type fakeLifecycleSlack struct {
 	reactionError string // if set, reactions.add responds {"ok":false,"error":reactionError}
 	// statusClearDelay, when set, makes a setStatus("") call (a clearing
 	// call — status=="") sleep before this fake records/answers it —
-	// TestLifecycleAdapter_RunStatus_TerminalJoin_PreventsResumeInterleaving's
-	// way of forcing the old-worker-still-mid-flight window the join fix
-	// closes.
+	// TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker's way of
+	// forcing the retiring-worker-still-mid-flight window the predecessor
+	// gate closes. Only clears are delayed; a non-empty set answers
+	// instantly.
 	statusClearDelay time.Duration
 }
 
@@ -343,27 +344,26 @@ func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 }
 
-// stopAllLifecycleWorkers stops every live worker in runs — test cleanup so
-// a worker's ticker doesn't keep firing (into a closed httptest server)
-// after the test itself has ended. worker.stop already blocks until the
-// worker has fully quiesced (see its doc); this just runs each stop off the
-// test goroutine so a regression that hangs stop() fails with a t.Error
-// instead of hanging the whole test.
+// stopAllLifecycleWorkers stops every live worker in runs and joins both it
+// and any still-retiring predecessor (stop is fire-and-forget, so the join
+// is explicit here) — test cleanup so a worker goroutine doesn't keep
+// calling into a closed httptest server after the test itself has ended.
 func stopAllLifecycleWorkers(t *testing.T, runs map[string]*runEntry) {
 	t.Helper()
-	for _, e := range runs {
-		if e.worker == nil {
-			continue
-		}
-		done := make(chan struct{})
-		go func(w *runStatusWorker) {
-			w.stop(false)
-			close(done)
-		}(e.worker)
+	joinWorkerDone := func(done chan struct{}, what string) {
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
-			t.Error("worker did not stop within 2s of stop()")
+			t.Errorf("%s did not finish within 2s", what)
+		}
+	}
+	for _, e := range runs {
+		if e.worker != nil {
+			e.worker.stop(false)
+			joinWorkerDone(e.worker.done, "worker")
+		}
+		if e.prevDone != nil {
+			joinWorkerDone(e.prevDone, "retiring predecessor worker")
 		}
 	}
 }
@@ -690,23 +690,28 @@ func TestLifecycleAdapter_RunStatus_Parked_ClearsWithoutFailureReply(t *testing.
 	}
 }
 
-// TestLifecycleAdapter_RunStatus_TerminalJoin_PreventsResumeInterleaving is
-// the direct regression test for the park→resume ordering fix: worker.stop
-// now blocks until the retiring worker's trailing setStatus("") has
-// actually resolved, so a fast-following "running" for the SAME run can't
-// start a new worker whose initial status then gets clobbered by the old
-// worker's late-arriving clear.
+// TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker is the
+// direct regression test for the park→resume ordering guarantee, and pins
+// BOTH halves of the design at once:
 //
-// The fake's setStatusClearDelay makes the OLD worker's clearing call slow
-// (simulating it being mid-flight on a real Slack round trip when "open"
-// dispatches) — long enough that, under the pre-fix non-blocking stop, the
-// resumed run's new "is working on it…" call would complete and get
-// recorded FIRST, with the stale clear landing after it and wiping the
-// indicator right back to blank. Recording happens after each call resolves
-// (see the fake's setStatus handler), so the LAST entry in statusCalls()
-// always reflects the indicator's actual final state — asserting it here is
-// exactly what would have failed against the old non-blocking stop.
-func TestLifecycleAdapter_RunStatus_TerminalJoin_PreventsResumeInterleaving(t *testing.T) {
+//  1. Ordering: a resumed run's successor worker must not make its initial
+//     setStatus call until the retiring worker's trailing setStatus("") has
+//     fully resolved (the predecessor gate in runStatusWorker.loop) — else
+//     the stale clear can land last and wipe the fresh indicator.
+//  2. Non-blocking dispatch: the terminal sentinel's dispatch must NOT be
+//     the thing enforcing that ordering — the dispatcher is process-wide
+//     (all orgs), so it must return immediately even while the retiring
+//     worker is stuck mid-flight on a slow Slack call.
+//
+// The fake's setStatusClearDelay makes the retiring worker's clearing call
+// slow (simulating a real Slack round trip / 429 wait in progress when
+// "open" dispatches) and stays set for the whole test — only clears are
+// delayed, so the successor's non-empty set answers instantly the moment
+// the gate opens. Recording happens as each call RESOLVES (see the fake's
+// setStatus handler), so the last entry in statusCalls() is the indicator's
+// actual final state: without the gate, the instant set would record first
+// and the delayed stale clear last.
+func TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker(t *testing.T) {
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
@@ -720,21 +725,51 @@ func TestLifecycleAdapter_RunStatus_TerminalJoin_PreventsResumeInterleaving(t *t
 	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 
-	fake.setStatusClearDelay(150 * time.Millisecond)
+	fake.setStatusClearDelay(400 * time.Millisecond)
+	start := time.Now()
 	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "open"), runs) // parked — resumable
-	// No wait needed: dispatch() itself must not return until the old
-	// worker's delayed clear has already resolved (that's the fix).
-	fake.setStatusClearDelay(0)
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Errorf("terminal-status dispatch blocked %v on the retiring worker's Slack call; the dispatcher must never wait on Slack for a teardown", elapsed)
+	}
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs) // resumes immediately
+	// Resume immediately, and give the successor a DISTINGUISHABLE status
+	// via an activity probe — both workers' plain lifecycle texts are
+	// identical ("is working on it…"), so ordering the retiring clear
+	// against "a successor call" needs a text only the successor can emit.
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.RunActivityTool{{Name: "resumed_probe"}}), runs)
+
+	const probe = "is running: resumed probe"
 	waitForCondition(t, 2*time.Second, func() bool {
-		calls := fake.statusCalls()
-		return len(calls) > 0 && calls[len(calls)-1].Status == slackLifecycleInitialStatusText
+		for _, c := range fake.statusCalls() {
+			if c.Status == probe {
+				return true
+			}
+		}
+		return false
 	})
 
-	last := fake.statusCalls()[len(fake.statusCalls())-1]
-	if last.Status != slackLifecycleInitialStatusText {
-		t.Errorf("final indicator state = %q, want %q (the resumed run's new worker, not the old worker's stale clear)", last.Status, slackLifecycleInitialStatusText)
+	// Resolve-order assertion (the fake records each call as it RESOLVES):
+	// the retiring worker's delayed clear must have resolved before any of
+	// the successor's calls — the probe is strictly after the successor's
+	// initial set, so clear-before-probe proves clear-before-successor.
+	// Under a broken gate the successor's instant calls resolve first and
+	// the 400ms-delayed clear records after the probe.
+	calls := fake.statusCalls()
+	clearIdx, probeIdx := -1, -1
+	for i, c := range calls {
+		if c.Status == "" && clearIdx == -1 {
+			clearIdx = i
+		}
+		if c.Status == probe && probeIdx == -1 {
+			probeIdx = i
+		}
+	}
+	if clearIdx == -1 {
+		t.Fatalf("the retiring worker's clear never resolved: %+v", calls)
+	}
+	if clearIdx > probeIdx {
+		t.Errorf("stale clear resolved AFTER the successor's status (clear at %d, probe at %d) — the successor did not gate on its predecessor: %+v", clearIdx, probeIdx, calls)
 	}
 }
 

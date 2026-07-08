@@ -155,17 +155,26 @@ func (a *lifecycleAdapter) run(ctx context.Context) {
 // ctx cancellation and finish its own cleanup (each worker watches the same
 // ctx directly and clears its status on the way out — see runStatusWorker.loop)
 // before run returns, mirroring the socket manager's stopAll join discipline.
+// Joins prevDone too: a worker retired by a terminal sentinel (stop is
+// fire-and-forget) may still be mid-teardown at shutdown with no live
+// successor to imply it finished; a long-closed prevDone costs nothing.
 func drainLifecycleWorkers(runs map[string]*runEntry) {
 	var wg sync.WaitGroup
-	for _, entry := range runs {
-		if entry.worker == nil {
-			continue
+	join := func(done chan struct{}) {
+		if done == nil {
+			return
 		}
 		wg.Add(1)
-		go func(done chan struct{}) {
+		go func() {
 			defer wg.Done()
 			<-done
-		}(entry.worker.done)
+		}()
+	}
+	for _, entry := range runs {
+		if entry.worker != nil {
+			join(entry.worker.done)
+		}
+		join(entry.prevDone)
 	}
 	wg.Wait()
 }
@@ -310,7 +319,16 @@ type runEntry struct {
 	channel, threadTS string
 	botToken          string
 	worker            *runStatusWorker
-	cachedAt          time.Time
+	// prevDone is the most recently retired worker's done channel — the
+	// per-run ordering handoff for a resumed run. A successor worker gates
+	// on it before its first Slack call (runStatusWorker.predecessor), so a
+	// retiring worker's trailing setStatus("") can never land after the
+	// successor's initial status and wipe it. Deliberately NOT cleared when
+	// a successor starts: drainLifecycleWorkers also joins it (a retiring
+	// worker may have no successor at shutdown), and receiving from an
+	// already-closed channel is free.
+	prevDone chan struct{}
+	cachedAt time.Time
 }
 
 // isTerminalRunStatus reports whether status is one of the run-lifecycle
@@ -333,15 +351,18 @@ func isTerminalRunStatus(status string) bool {
 // is a deliberate no-op: nothing meaningful to show via the assistant status
 // before the agent is actually running.
 //
-// The terminal branch's worker.stop call blocks (see stop's doc) — this
-// dispatcher goroutine stalls for that worker's final Slack call(s) before
-// moving on to the next queued sentinel. That's deliberate: "open" (parked/
-// awaiting-input) is one of the terminal statuses here, and a parked run is
-// resumable — its NEXT sentinel for the same runID can legitimately be
-// another "running". Blocking here guarantees the old worker's trailing
-// setStatus("") has actually landed before a resumed run's new worker can
-// send its own initial setStatus, closing an interleaving race that would
-// otherwise only show up on a very fast park→resume turnaround.
+// Terminal statuses here are not necessarily final for the runID: a parked
+// ("open") run is resumable, and so is a completed+abort run
+// (internal/delegate/resume.go rebroadcasts "running" for the same runID on
+// resume). So terminal→running for one run is a legitimate sequence, and
+// the retiring worker's trailing setStatus("") must not race the successor's
+// initial status call. That ordering is enforced per run, in the worker
+// succession itself — the terminal branch records the retiring worker's
+// done channel on the entry, and the successor gates its first Slack call
+// on it (runStatusWorker.predecessor) — NEVER by blocking this dispatcher
+// goroutine on a Slack round trip: it is process-wide (one adapter for all
+// orgs), and stalling it on a slow/429'd teardown call would head-of-line
+// block every other org's sentinels behind one run's cleanup.
 func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event, runs map[string]*runEntry) {
 	var meta events.SystemRunStatusMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
@@ -362,7 +383,7 @@ func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event
 	switch {
 	case meta.Status == "running":
 		if entry.worker == nil {
-			entry.worker = newRunStatusWorker(ctx, a.client, a.publicURL, evt.OrgID, meta.RunID, entry.channel, entry.threadTS, entry.botToken)
+			entry.worker = newRunStatusWorker(ctx, a.client, a.publicURL, evt.OrgID, meta.RunID, entry.channel, entry.threadTS, entry.botToken, entry.prevDone)
 		} else {
 			entry.worker.keepAlive()
 		}
@@ -370,6 +391,7 @@ func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event
 		failed := meta.Status == "failed"
 		if entry.worker != nil {
 			entry.worker.stop(failed)
+			entry.prevDone = entry.worker.done
 			entry.worker = nil
 		} else if failed {
 			// The run never reached "running" (failed during setup) — still
@@ -558,6 +580,12 @@ type runStatusWorker struct {
 	publicURL                   func() string
 	orgID, runID                string
 	channel, threadTS, botToken string
+	// predecessor, when non-nil, is the retiring previous worker's done
+	// channel for the SAME run (park → resume) — loop gates on it before its
+	// first Slack call, so the predecessor's trailing setStatus("") always
+	// resolves before this worker's initial status. nil for a run's first
+	// worker.
+	predecessor <-chan struct{}
 
 	activityCh  chan string // latest-wins (sendActivity drains-then-pushes)
 	keepAliveCh chan struct{}
@@ -565,18 +593,20 @@ type runStatusWorker struct {
 	done        chan struct{}
 }
 
-// newRunStatusWorker constructs and starts a worker: loop's first statement
-// (before it ever selects on the command channels) is the initial setStatus
-// call, so it's always the first Slack call this worker makes — ordered
-// ahead of any activity/keepAlive/stop command sent afterward. That
-// ordering is internal to the worker only: go w.loop() returns immediately,
-// so newRunStatusWorker itself returns with no guarantee the initial call
-// has started (or even been scheduled) yet — callers that need to observe
-// it must poll, not assume synchronous completion.
-func newRunStatusWorker(ctx context.Context, client *http.Client, publicURL func() string, orgID, runID, channel, threadTS, botToken string) *runStatusWorker {
+// newRunStatusWorker constructs and starts a worker. Its initial setStatus
+// is the first Slack call it makes — after the predecessor gate, before it
+// ever selects on the command channels — so it's ordered ahead of any
+// activity/keepAlive/stop command sent afterward AND behind everything a
+// retiring predecessor still had in flight. That ordering is internal to
+// the worker only: go w.loop() returns immediately, so newRunStatusWorker
+// itself returns with no guarantee the initial call has started (or even
+// been scheduled) yet — callers that need to observe it must poll, not
+// assume synchronous completion.
+func newRunStatusWorker(ctx context.Context, client *http.Client, publicURL func() string, orgID, runID, channel, threadTS, botToken string, predecessor <-chan struct{}) *runStatusWorker {
 	w := &runStatusWorker{
 		ctx: ctx, client: client, publicURL: publicURL,
 		orgID: orgID, runID: runID, channel: channel, threadTS: threadTS, botToken: botToken,
+		predecessor: predecessor,
 		activityCh:  make(chan string, 1),
 		keepAliveCh: make(chan struct{}, 1),
 		stopCh:      make(chan bool, 1),
@@ -619,26 +649,21 @@ func (w *runStatusWorker) keepAlive() {
 }
 
 // stop signals the worker to clear its status (and, if failed, post the
-// failure reply) and exit, then BLOCKS until it actually has (joining
-// w.done) — deliberately synchronous, unlike keepAlive/sendActivity.
-// Without the join, a resumed run's next "running" could start a brand-new
-// worker while this one's own goroutine is still mid-flight on its trailing
-// setStatus("") (e.g. it was blocked inside a slow Slack call when stop was
-// sent): the two calls can then land out of order, clobbering the new
-// worker's initial status right back to cleared. Joining here — the only
-// call site, since a run transitions to a terminal status once — makes that
-// interleaving structurally impossible: handleRunStatus's terminal branch
-// doesn't return (and therefore can't process a later "running" for the
-// same runID) until this worker's final Slack call has actually completed.
-// Safe to call more than once on the same worker: a second stopCh send is a
-// harmless no-op (buffered, and by then nothing is reading it), and
-// receiving from an already-closed w.done returns immediately.
+// failure reply) and exit. Fire-and-forget — the teardown Slack calls run
+// on the worker's own goroutine, never the dispatcher's: blocking here
+// would stall the process-wide dispatch loop (one adapter serves every
+// org) on a single run's Slack round trip, up to the 429 Retry-After wait.
+// The ordering hazard that fire-and-forget would otherwise open — a
+// resumed run's successor worker setting its initial status while this
+// worker's trailing clear is still in flight, then the stale clear landing
+// last and wiping it — is closed on the successor's side instead: the
+// dispatcher records w.done as the entry's prevDone, and the successor
+// gates its first Slack call on it (see runStatusWorker.predecessor).
 func (w *runStatusWorker) stop(failed bool) {
 	select {
 	case w.stopCh <- failed:
 	default:
 	}
-	<-w.done
 }
 
 // loop is the worker's whole lifecycle. ctx cancellation (adapter shutdown)
@@ -656,6 +681,28 @@ func (w *runStatusWorker) stop(failed bool) {
 // keeps arriving faster than the window can never starve it into silence.
 func (w *runStatusWorker) loop() {
 	defer close(w.done)
+
+	// Predecessor gate: on a resumed run, wait for the retiring worker's
+	// goroutine to fully finish (its trailing setStatus("") resolved, its
+	// failure reply posted if any) before making this worker's first Slack
+	// call — the per-run ordering guarantee that lets stop() stay
+	// fire-and-forget on the dispatcher. A stop or ctx cancel arriving while
+	// still gated exits without touching Slack at all: this worker never set
+	// anything, so there is nothing to clear (a failed-while-gated stop still
+	// owes the failure reply — a message, not a status, so it can't be
+	// clobbered by the predecessor's in-flight clear).
+	if w.predecessor != nil {
+		select {
+		case <-w.predecessor:
+		case failed := <-w.stopCh:
+			if failed {
+				w.postFailureReply()
+			}
+			return
+		case <-w.ctx.Done():
+			return
+		}
+	}
 
 	text := slackLifecycleInitialStatusText
 	w.setStatus(text)
