@@ -77,13 +77,21 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// non-empty incoming value still overwrites (the intentional-change /
 	// migration path). state/details_json stay last-writer-wins by design
 	// (state tracks the latest action).
+	//
+	// run_id is preserved-on-conflict, NOT last-writer-wins: the artifact
+	// belongs to its CREATING run (domain.Artifact's doc), so a later writer
+	// touching the same dedup key (e.g. a different run editing a Slack
+	// message, or a re-delegate updating a GitHub comment) must not reassign
+	// attribution to itself. team_id still tracks excluded — it's denormalized
+	// off the acting run's team, which can't legitimately disagree across
+	// writers for the same logical object.
 	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, run_id, org_id, team_id, provider, kind, target,
 			 external_id, url, state, dedup_key, details_json, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(org_id, dedup_key) DO UPDATE SET
-			run_id       = excluded.run_id,
+			run_id       = artifacts.run_id,
 			team_id      = excluded.team_id,
 			target       = COALESCE(NULLIF(excluded.target, ''), artifacts.target),
 			external_id  = COALESCE(excluded.external_id, artifacts.external_id),

@@ -776,6 +776,14 @@ type slackMessage struct {
 	Text     string
 	TS       string
 	ThreadTS string
+	Files    []slackMessageFile
+}
+
+// slackMessageFile is one entry of a message's "files" array — just enough
+// to name the file and let the agent fetch it via `exec slack download`.
+type slackMessageFile struct {
+	ID   string
+	Name string
 }
 
 // slackConversationsRepliesCap bounds how many messages a single
@@ -816,6 +824,10 @@ func slackConversationsReplies(ctx context.Context, client *http.Client, botToke
 				Text     string `json:"text"`
 				TS       string `json:"ts"`
 				ThreadTS string `json:"thread_ts"`
+				Files    []struct {
+					ID   string `json:"id"`
+					Name string `json:"name"`
+				} `json:"files"`
 			} `json:"messages"`
 			HasMore          bool `json:"has_more"`
 			ResponseMetadata struct {
@@ -829,7 +841,10 @@ func slackConversationsReplies(ctx context.Context, client *http.Client, botToke
 			return nil, false, fmt.Errorf("slack conversations.replies: %s", nonEmpty(resp.Error, "not ok"))
 		}
 		for _, m := range resp.Messages {
-			messages = append(messages, slackMessage{User: m.User, BotID: m.BotID, Text: m.Text, TS: m.TS, ThreadTS: m.ThreadTS})
+			messages = append(messages, slackMessage{
+				User: m.User, BotID: m.BotID, Text: m.Text, TS: m.TS, ThreadTS: m.ThreadTS,
+				Files: slackMessageFilesFrom(m.Files),
+			})
 			if len(messages) >= slackConversationsRepliesCap {
 				return messages, resp.ResponseMetadata.NextCursor != "" || resp.HasMore, nil
 			}
@@ -888,6 +903,10 @@ func slackConversationsHistory(ctx context.Context, client *http.Client, botToke
 			Text     string `json:"text"`
 			TS       string `json:"ts"`
 			ThreadTS string `json:"thread_ts"`
+			Files    []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"files"`
 		} `json:"messages"`
 	}
 	if err := doSlackJSON(ctx, client, req, &resp); err != nil {
@@ -898,9 +917,31 @@ func slackConversationsHistory(ctx context.Context, client *http.Client, botToke
 	}
 	out := make([]slackMessage, 0, len(resp.Messages))
 	for _, m := range resp.Messages {
-		out = append(out, slackMessage{User: m.User, BotID: m.BotID, Text: m.Text, TS: m.TS, ThreadTS: m.ThreadTS})
+		out = append(out, slackMessage{
+			User: m.User, BotID: m.BotID, Text: m.Text, TS: m.TS, ThreadTS: m.ThreadTS,
+			Files: slackMessageFilesFrom(m.Files),
+		})
 	}
 	return out, nil
+}
+
+// slackMessageFilesFrom converts a message's raw "files" array (the shared
+// anonymous shape both conversations.replies and conversations.history
+// decode into) to the public slackMessageFile slice. Returns nil for no
+// files, so a message with none serializes without an empty "files":[] noise
+// field (slackMessageFile is only ever surfaced with omitempty).
+func slackMessageFilesFrom(files []struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}) []slackMessageFile {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]slackMessageFile, len(files))
+	for i, f := range files {
+		out[i] = slackMessageFile{ID: f.ID, Name: f.Name}
+	}
+	return out
 }
 
 // slackChatGetPermalink resolves a message's shareable URL via
