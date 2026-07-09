@@ -2,7 +2,6 @@ package agentproc
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -350,16 +349,14 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	// cleanup bundles every teardown (sandbox, agenthost daemon, scratch
 	// dir, proxies); deferring it here fires it on every exit, including the
 	// StdoutPipe / Start error returns in the shared tail below.
-	var cmd *exec.Cmd
-	var oomKilled func() bool
+	var proc runProc
 	if shouldSandbox() {
-		sandboxCmd, cleanup, oom, serr := newSandboxCommand(runCtx, opts, wrapperPath)
+		sandboxProc, cleanup, serr := newSandboxCommand(runCtx, opts, wrapperPath)
 		if serr != nil {
 			return nil, serr
 		}
 		defer cleanup()
-		cmd = sandboxCmd
-		oomKilled = oom
+		proc = sandboxProc
 	} else {
 		nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
 		// Local-mode TF_CLAUDE_BINARY override (non-sandbox path only): point the
@@ -377,38 +374,34 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 		if derr != nil {
 			return nil, derr
 		}
-		cmd = directCmd
+		directProc, perr := newExecProc(directCmd)
+		if perr != nil {
+			return nil, perr
+		}
+		proc = directProc
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stdout pipe: %w", err)
-	}
-
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-
-	if err := cmd.Start(); err != nil {
-		return &Outcome{Stderr: stderrBuf.String()}, fmt.Errorf("start agent runtime: %w", err)
+	if err := proc.Start(); err != nil {
+		return &Outcome{Stderr: proc.Stderr()}, fmt.Errorf("start agent runtime: %w", err)
 	}
 
 	stream := NewStreamState()
-	result, streamErr := consumeStream(stdout, sink, stream, opts.TraceID)
+	result, streamErr := consumeStream(proc.Stdout(), sink, stream, opts.TraceID)
 
 	// If the stream reader bailed before a terminal result, the
 	// subprocess is likely still running and may have more data to
-	// write. Kill the process group now so cmd.Wait below doesn't
+	// write. Kill the process (via ctx cancel) now so Wait below doesn't
 	// block forever on a stuck pipe write.
 	if streamErr != nil && result == nil {
 		cancel()
 	}
 
-	waitErr := cmd.Wait()
+	waitErr := proc.Wait()
 
 	outcome := &Outcome{
 		Result:    result,
 		SessionID: stream.SessionID(),
-		Stderr:    stderrBuf.String(),
+		Stderr:    proc.Stderr(),
 	}
 
 	// Stream-level malformation with no terminal result is the
@@ -425,7 +418,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 		if ctx.Err() != nil {
 			return outcome, ctx.Err()
 		}
-		if oomKilled != nil && oomKilled() {
+		if proc.OOMKilled() {
 			return outcome, fmt.Errorf("agent runtime killed: %w (%d MB; tune TF_RUN_MEMORY_LIMIT_MB): %v",
 				ErrRunMemoryLimit, runMemoryLimitMB(), waitErr)
 		}
@@ -459,7 +452,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 // URL + a per-run placeholder credential; the real key lives in the proxy
 // process on the host and is injected into the upstream HTTP request right
 // before it leaves the box.
-func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath string) (*exec.Cmd, func(), func() bool, error) {
+func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath string) (runProc, func(), error) {
 	// Teardown state, accumulated as each setup step below succeeds. cleanup
 	// runs the undos in LIFO order and is single-shot via once, so the error
 	// paths can invoke it eagerly and the caller can still defer it safely.
@@ -468,10 +461,17 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		scratchCwd string
 		ahCloser   io.Closer
 		sb         *sandbox.Sandbox
+		run        sandbox.LaunchedRun
 		once       sync.Once
 	)
 	cleanup := func() {
 		once.Do(func() {
+			// The run process + its memory cgroup first: kill the runtime (or
+			// reclaim the cgroup on an abandoned bring-up) before its netns is
+			// torn down below.
+			if run != nil {
+				_ = run.Close()
+			}
 			if sb != nil {
 				_ = sb.Close()
 			}
@@ -499,7 +499,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID)
 	if err != nil {
 		cleanup()
-		return nil, cleanup, nil, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
+		return nil, cleanup, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
 	}
 
 	// Some callers (scorer, classifier stage1, profiler) are prompt-only —
@@ -512,7 +512,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		scratch, mkErr := os.MkdirTemp("", "agentproc-scratch-")
 		if mkErr != nil {
 			cleanup()
-			return nil, cleanup, nil, fmt.Errorf("sandbox: scratch cwd: %w", mkErr)
+			return nil, cleanup, fmt.Errorf("sandbox: scratch cwd: %w", mkErr)
 		}
 		scratchCwd = scratch
 		workCwd = scratch
@@ -525,11 +525,11 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	// whole point — TFAC-61).
 	if err := ensureRepoMountPoints(workCwd, opts.ReadOnlyRepoMounts); err != nil {
 		cleanup()
-		return nil, cleanup, nil, fmt.Errorf("sandbox: %w", err)
+		return nil, cleanup, fmt.Errorf("sandbox: %w", err)
 	}
 	if err := chownWorktreeForSandbox(workCwd); err != nil {
 		cleanup()
-		return nil, cleanup, nil, fmt.Errorf("sandbox: chown worktree: %w", err)
+		return nil, cleanup, fmt.Errorf("sandbox: chown worktree: %w", err)
 	}
 
 	// Translate any host-path env values (e.g. TRIAGE_FACTORY_RUN_ROOT) to
@@ -604,7 +604,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		mount, closer, ahErr := opts.StartAgentHost()
 		if ahErr != nil {
 			cleanup()
-			return nil, cleanup, nil, fmt.Errorf("sandbox: start agenthost daemon: %w", ahErr)
+			return nil, cleanup, fmt.Errorf("sandbox: start agenthost daemon: %w", ahErr)
 		}
 		extraMounts = append(extraMounts, mount)
 		ahCloser = closer
@@ -647,7 +647,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		return proxyEnv, nil
 	}
 
-	sandboxCmd, sboxObj, err := sandbox.Wrap(runCtx, sandbox.Config{
+	sandboxRun, sboxObj, err := sandbox.Wrap(runCtx, sandbox.Config{
 		RunID:            opts.TraceID,
 		Worktree:         workCwd,
 		SDKDir:           sdkDir,
@@ -662,11 +662,15 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		// have started the proxies before a later Wrap step failed — cleanup
 		// shuts them down (plus the agenthost daemon + scratch dir).
 		cleanup()
-		return nil, cleanup, nil, fmt.Errorf("sandbox: %w", err)
+		return nil, cleanup, fmt.Errorf("sandbox: %w", err)
 	}
 	sb = sboxObj
+	run = sandboxRun
 
-	return sandboxCmd, cleanup, func() bool { return sboxObj.OOMKilled() }, nil
+	// The LaunchedRun satisfies runProc (Start/Stdin/Stdout/Stderr/Wait/
+	// OOMKilled); cleanup closes it (kill + cgroup) alongside the rest of
+	// the bring-up.
+	return sandboxRun, cleanup, nil
 }
 
 // newDirectCommand builds the direct (non-sandbox) `node wrapper.mjs`

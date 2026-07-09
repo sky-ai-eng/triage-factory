@@ -100,6 +100,28 @@ func requireApk(t *testing.T) {
 	}
 }
 
+// runToCompletion starts the launched run, drains its stdout, waits for
+// exit, and returns the combined stdout+stderr — the P2 replacement for the
+// pre-split *exec.Cmd.CombinedOutput the Wrap tests used before Wrap returned
+// a LaunchedRun. Draining before Wait mirrors CombinedOutput's ordering so a
+// chatty payload never blocks on a full pipe.
+func runToCompletion(t *testing.T, run LaunchedRun) ([]byte, error) {
+	t.Helper()
+	if err := run.Start(); err != nil {
+		return nil, err
+	}
+	out, readErr := io.ReadAll(run.Stdout())
+	waitErr := run.Wait()
+	combined := append(out, []byte(run.Stderr())...)
+	// The exit error is the primary signal (mirrors CombinedOutput); surface
+	// a stdout read failure only when the run otherwise exited cleanly, so a
+	// truncated/broken stream isn't masked by a zero exit.
+	if waitErr != nil {
+		return combined, waitErr
+	}
+	return combined, readErr
+}
+
 // minimalConfig builds a Config for tests with sensible defaults +
 // a unique RunID. Caller can mutate Argv to choose the payload.
 func minimalConfig(t *testing.T) Config {
@@ -131,15 +153,16 @@ func TestIntegration_BootBusyboxPayload(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd, sb, err := Wrap(ctx, cfg)
+	run, sb, err := Wrap(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Wrap: %v", err)
 	}
 	defer sb.Close()
+	defer run.Close()
 
-	out, err := cmd.CombinedOutput()
+	out, err := runToCompletion(t, run)
 	if err != nil {
-		t.Fatalf("cmd.CombinedOutput: %v (output: %s)", err, out)
+		t.Fatalf("run: %v (output: %s)", err, out)
 	}
 	if !strings.Contains(string(out), "hello") {
 		t.Errorf("output missing 'hello': %s", out)
@@ -162,15 +185,16 @@ func TestIntegration_PropertyB_NoCredentialsInEnv(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd, sb, err := Wrap(ctx, cfg)
+	run, sb, err := Wrap(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Wrap: %v", err)
 	}
 	defer sb.Close()
+	defer run.Close()
 
-	out, err := cmd.CombinedOutput()
+	out, err := runToCompletion(t, run)
 	if err != nil {
-		t.Fatalf("cmd.CombinedOutput: %v (output: %s)", err, out)
+		t.Fatalf("run: %v (output: %s)", err, out)
 	}
 	for _, sentinel := range []string{
 		"sk-ant-MUST-NOT-LEAK",
@@ -194,15 +218,16 @@ func TestIntegration_NonRootUID(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd, sb, err := Wrap(ctx, cfg)
+	run, sb, err := Wrap(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Wrap: %v", err)
 	}
 	defer sb.Close()
+	defer run.Close()
 
-	out, err := cmd.CombinedOutput()
+	out, err := runToCompletion(t, run)
 	if err != nil {
-		t.Fatalf("cmd.CombinedOutput: %v (output: %s)", err, out)
+		t.Fatalf("run: %v (output: %s)", err, out)
 	}
 	got := strings.TrimSpace(string(out))
 	want := "10000"
@@ -228,13 +253,14 @@ func TestIntegration_WorktreeIsolation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd, sb, err := Wrap(ctx, cfg)
+	run, sb, err := Wrap(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Wrap: %v", err)
 	}
 	defer sb.Close()
+	defer run.Close()
 
-	out, _ := cmd.CombinedOutput()
+	out, _ := runToCompletion(t, run)
 	if strings.Contains(string(out), "must-not-be-readable") {
 		t.Errorf("filesystem isolation broken: sandbox read host sentinel\n--- output ---\n%s", out)
 	}
@@ -249,12 +275,13 @@ func TestIntegration_CleanupRemovesNetns(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd, sb, err := Wrap(ctx, cfg)
+	run, sb, err := Wrap(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Wrap: %v", err)
 	}
+	defer run.Close()
 	netnsPath := sb.NetnsPath
-	_ = cmd.Run() // run + finish
+	_, _ = runToCompletion(t, run) // run + finish
 
 	if _, err := os.Stat(netnsPath); err != nil {
 		t.Errorf("netns gone before Close — that's wrong, runsc shouldn't auto-clean")
@@ -277,12 +304,14 @@ func TestIntegration_ReapOrphans(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, sb, err := Wrap(ctx, cfg)
+	run, sb, err := Wrap(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Wrap: %v", err)
 	}
+	defer run.Close()
 	netnsPath := sb.NetnsPath
-	// Skip Close — leave an orphan.
+	// Skip sb.Close — leave an orphan netns for ReapOrphans. run.Close only
+	// reclaims the run's pipes/cgroup, not the netns.
 
 	if err := ReapOrphans(ctx); err != nil {
 		t.Fatalf("ReapOrphans: %v", err)
@@ -311,13 +340,14 @@ func toolchainTest(t *testing.T, argv []string, wantSubstring string, extraEnv .
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	cmd, sb, err := Wrap(ctx, cfg)
+	run, sb, err := Wrap(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Wrap: %v", err)
 	}
 	defer sb.Close()
+	defer run.Close()
 
-	out, err := cmd.CombinedOutput()
+	out, err := runToCompletion(t, run)
 	if err != nil {
 		t.Fatalf("%v inside sandbox failed: %v (output: %s)", argv, err, out)
 	}
@@ -390,11 +420,12 @@ func TestIntegration_ConfigureProxies_InjectsEnv(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd, sb, err := Wrap(ctx, cfg)
+	run, sb, err := Wrap(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Wrap: %v", err)
 	}
 	defer sb.Close()
+	defer run.Close()
 
 	if observedHostIP == "" {
 		t.Fatal("ConfigureProxies invoked but HostIP empty; network setup must complete before callback")
@@ -403,7 +434,7 @@ func TestIntegration_ConfigureProxies_InjectsEnv(t *testing.T) {
 		t.Errorf("callback saw HostIP %q, Sandbox reports %q; mismatch", observedHostIP, sb.HostIP)
 	}
 
-	out, err := cmd.CombinedOutput()
+	out, err := runToCompletion(t, run)
 	if err != nil {
 		t.Fatalf("env in sandbox: %v (output: %s)", err, out)
 	}
@@ -436,7 +467,7 @@ func TestIntegration_ConfigureProxies_ErrorAborts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd, sb, err := Wrap(ctx, cfg)
+	run, sb, err := Wrap(ctx, cfg)
 	if err == nil {
 		if sb != nil {
 			_ = sb.Close()
@@ -446,8 +477,8 @@ func TestIntegration_ConfigureProxies_ErrorAborts(t *testing.T) {
 	if !strings.Contains(err.Error(), wantErr) {
 		t.Errorf("err = %v; want it to wrap %q", err, wantErr)
 	}
-	if cmd != nil {
-		t.Error("Wrap returned non-nil cmd on error path; caller would mistakenly try to Start")
+	if run != nil {
+		t.Error("Wrap returned non-nil run on error path; caller would mistakenly try to Start")
 	}
 	if sb != nil {
 		t.Error("Wrap returned non-nil Sandbox on error path; caller's defer Close would target a torn-down state")
@@ -571,13 +602,14 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd, sb, err := Wrap(ctx, cfg)
+	run, sb, err := Wrap(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Wrap: %v", err)
 	}
 	defer sb.Close()
+	defer run.Close()
 
-	out, err := cmd.CombinedOutput()
+	out, err := runToCompletion(t, run)
 	if err != nil {
 		t.Fatalf("stub exec: %v (output: %s)", err, out)
 	}

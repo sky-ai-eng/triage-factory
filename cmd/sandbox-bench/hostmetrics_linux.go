@@ -125,11 +125,12 @@ func totalTreeRSSMB(live []*handle) int {
 	pageSize := os.Getpagesize()
 	var totalBytes int64
 	for _, h := range live {
-		if h.cmd.Process == nil {
+		pid := h.run.Pid()
+		if pid == 0 {
 			continue
 		}
-		for _, pid := range descendantPIDs(h.cmd.Process.Pid) {
-			totalBytes += rssBytes(pid, pageSize)
+		for _, p := range descendantPIDs(pid) {
+			totalBytes += rssBytes(p, pageSize)
 		}
 	}
 	return int(totalBytes / (1024 * 1024))
@@ -141,11 +142,12 @@ func totalTreeRSSMB(live []*handle) int {
 func totalTreePSSMB(live []*handle) int {
 	var totalKB int64
 	for _, h := range live {
-		if h.cmd.Process == nil {
+		pid := h.run.Pid()
+		if pid == 0 {
 			continue
 		}
-		for _, pid := range descendantPIDs(h.cmd.Process.Pid) {
-			totalKB += pssKB(pid)
+		for _, p := range descendantPIDs(pid) {
+			totalKB += pssKB(p)
 		}
 	}
 	return int(totalKB / 1024)

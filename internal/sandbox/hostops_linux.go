@@ -130,10 +130,7 @@ func (hostOps) EnsureRootfs(ctx context.Context, _ RootfsSelector) (string, erro
 }
 
 func (hostOps) SetupRunCgroup(name string, limitMB int) (string, *os.File, error) {
-	if err := setupRunCgroups(); err != nil {
-		return "", nil, err
-	}
-	return newRunCgroup(name, limitMB)
+	return setupAndCreateRunCgroup(name, limitMB)
 }
 
 func (hostOps) RemoveRunCgroup(dir string) error {

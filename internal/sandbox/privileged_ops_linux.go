@@ -25,11 +25,10 @@ import (
 // wrap(), Close(), and reapOrphansImpl() — the three entry points the
 // PS-P0 audit named — call only through this interface for every
 // privileged operation. hostOps (hostops_linux.go) is the sole
-// implementation today and runs each method in-process with exactly
-// the code that lived directly in those entry points before this seam
-// existed. The runsc launch itself (newRunscCommand + runsc run +
-// stdio) is explicitly out of scope here — see spec §3.1 — and stays
-// caller-side in wrap() until PS-P2.
+// in-process implementation; the cap-broker's socket client is the
+// out-of-process one. The runsc launch is LaunchRun: the in-process
+// implementation execs runsc with ordinary pipes; the broker execs and
+// supervises it with its stdio wired to a passed-through socket.
 type PrivilegedOps interface {
 	// SetupNetwork creates the per-run netns + veth pair, applies the
 	// MASQUERADE + egress-allowlist iptables rules, and ensures
@@ -51,14 +50,24 @@ type PrivilegedOps interface {
 	// can grow without changing this signature later.
 	EnsureRootfs(ctx context.Context, selector RootfsSelector) (rootfsPath string, err error)
 
+	// LaunchRun execs+supervises the gVisor runtime for one prepared
+	// bundle and returns a LaunchedRun the caller drives. The in-process
+	// implementation (hostOps) builds the runsc command with ordinary
+	// pipes for stdio and creates the memory cgroup locally; the broker
+	// implementation execs+supervises runsc in the broker process with its
+	// stdio wired to a passed-through socket, so the run's bytes never
+	// enter the (unprivileged) orchestrator's peer holder. The per-run
+	// memory cgroup is created and torn down by whichever side execs the
+	// runtime — the cgroup fd is needed only at that side's clone3 and
+	// never crosses the interface.
+	LaunchRun(ctx context.Context, p LaunchParams) (LaunchedRun, error)
+
 	// SetupRunCgroup creates the per-run memory-ceiling cgroup and
 	// returns its directory plus an open dir-fd for exec.Cmd's
-	// CgroupFD. The fd is the one documented exception to "no live
-	// *os.File crosses the interface": it is only usable by a caller
-	// that Starts the runsc process in the same address space as this
-	// call — exactly what wrap() does today. PS-P2 folds cgroup
-	// creation into the broker's own LaunchRun, at which point the fd
-	// never needs to leave the implementation at all.
+	// CgroupFD. Retained from the P1 seam; the runsc launch path now
+	// creates its cgroup inside LaunchRun (the fd stays on whichever side
+	// execs the runtime), so this is exercised by the P1 conformance tests
+	// rather than the live launch path.
 	SetupRunCgroup(name string, limitMB int) (dir string, cgroupFD *os.File, err error)
 
 	// RemoveRunCgroup tears down the group SetupRunCgroup created.
@@ -99,4 +108,31 @@ type NetworkState struct {
 // (spec §8) grows past one entry.
 type RootfsSelector struct {
 	Name string
+}
+
+// LaunchParams is the serializable input to LaunchRun: everything the
+// runtime launcher needs to exec `runsc run` against an already-prepared
+// bundle. Every field is a plain string/int so it round-trips as JSON
+// over the broker RPC unchanged — no live *exec.Cmd, no *os.File, no
+// io.Writer. Stdio does not appear here: the in-process launcher wires
+// pipes internally, and the broker learns the per-run stdio socket path
+// from its own client (which owns the listener), not from this struct.
+type LaunchParams struct {
+	// BundleDir is the on-disk OCI bundle `runsc run --bundle` targets.
+	// The bundle's config.json already references the pre-created netns, so
+	// runsc joins it without any separate netns parameter.
+	BundleDir string
+
+	// ContainerID is the runsc container id — unique per live Wrap (a fresh
+	// subnet index is folded into it), and grep-friendly (it embeds a RunID
+	// fragment). It is the sole per-run identifier the launcher needs: the
+	// runsc container id, the per-run cgroup name, and the broker's
+	// lifecycle key for wait/kill. The (non-unique) RunID deliberately does
+	// NOT appear here — keying anything off it would collide across
+	// concurrent runs that share a fixed TraceID.
+	ContainerID string
+
+	// MemoryLimitMB, when > 0, caps the run via a per-run memory cgroup the
+	// launcher creates (fail-open, as before). Zero disables.
+	MemoryLimitMB int
 }

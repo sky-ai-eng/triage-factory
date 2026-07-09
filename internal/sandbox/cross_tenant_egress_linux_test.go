@@ -92,11 +92,12 @@ func TestIntegration_CrossTenantEgressBlocked(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd, sb, err := Wrap(ctx, cfg)
+	run, sb, err := Wrap(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Wrap: %v", err)
 	}
 	defer sb.Close()
+	defer run.Close()
 
 	// Guard the documented assumption: if the allocator ever handed this
 	// run the same idx our sibling stand-in occupies (only possible at
@@ -119,7 +120,7 @@ func TestIntegration_CrossTenantEgressBlocked(t *testing.T) {
 	defer ownLn.Close()
 	acceptEcho(t, ownLn)
 
-	out, err := cmd.CombinedOutput()
+	out, err := runToCompletion(t, run)
 	if err != nil {
 		t.Fatalf("run payload: %v (output: %s)", err, out)
 	}

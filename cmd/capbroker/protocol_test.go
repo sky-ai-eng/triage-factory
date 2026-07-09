@@ -23,6 +23,7 @@ type fakeOps struct {
 	teardownNetworkFn func(ctx context.Context, state sandbox.NetworkState) error
 	ensureRootfsFn    func(ctx context.Context, selector sandbox.RootfsSelector) (string, error)
 	setupRunCgroupFn  func(name string, limitMB int) (string, *os.File, error)
+	launchRunFn       func(ctx context.Context, p sandbox.LaunchParams) (sandbox.LaunchedRun, error)
 	removeRunCgroupFn func(dir string) error
 	reapOrphansFn     func(ctx context.Context) error
 }
@@ -38,6 +39,12 @@ func (f *fakeOps) EnsureRootfs(ctx context.Context, selector sandbox.RootfsSelec
 }
 func (f *fakeOps) SetupRunCgroup(name string, limitMB int) (string, *os.File, error) {
 	return f.setupRunCgroupFn(name, limitMB)
+}
+func (f *fakeOps) LaunchRun(ctx context.Context, p sandbox.LaunchParams) (sandbox.LaunchedRun, error) {
+	if f.launchRunFn == nil {
+		return nil, nil
+	}
+	return f.launchRunFn(ctx, p)
 }
 func (f *fakeOps) RemoveRunCgroup(dir string) error {
 	return f.removeRunCgroupFn(dir)

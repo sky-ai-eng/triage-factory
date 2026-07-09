@@ -8,13 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"syscall"
 )
 
 // teardownState collects everything Close needs to undo. Populated
 // incrementally during wrap so partial-failure paths can still call
 // Close() and have it Just Work via the per-step ENOENT/ESRCH-tolerant
-// helpers below.
+// helpers below. The per-run memory cgroup is NOT here — it is owned by
+// the LaunchedRun wrap returns (created at its launch, torn down by its
+// Close), so a caller that abandons the run before Close still reclaims it.
 type teardownState struct {
 	subnetIdx uint8
 	// netSt is the network state defaultOps.SetupNetwork returned —
@@ -22,12 +23,6 @@ type teardownState struct {
 	// through. Passed back to defaultOps.TeardownNetwork verbatim.
 	netSt     NetworkState
 	bundleDir string
-	// cgroupDir / cgroupFD hold the per-run memory-ceiling cgroup
-	// (empty/nil when no limit was configured or setup failed open).
-	// The fd must outlive cmd.Start (clone3 reads it); Close closes
-	// the handle and removes the group.
-	cgroupDir string
-	cgroupFD  *os.File
 }
 
 // iptablesRule names a single MASQUERADE rule so teardown can
@@ -47,18 +42,17 @@ type iptablesRule struct {
 }
 
 // wrap is the Linux-only implementation of the public Wrap entry
-// point. Orchestrates the 12-step pipeline —
-// subnet allocation, netns + veth + iptables, rootfs cache, OCI
-// bundle on disk, runsc command construction.
+// point. Orchestrates the pipeline — subnet allocation, netns + veth +
+// iptables, rootfs cache, OCI bundle on disk — then launches the runtime.
 //
-// Every privileged step (network, rootfs, cgroup) is reached only
-// through defaultOps (PrivilegedOps) — see privileged_ops_linux.go.
-// The runsc command construction below stays direct/in-process per
-// the PS-P0 scope note (spec §3.1); that boundary is PS-P2.
+// Every privileged step (network, rootfs, cgroup, the runtime launch) is
+// reached only through defaultOps (PrivilegedOps) — see
+// privileged_ops_linux.go. LaunchRun execs runsc in process by default, or
+// across the socket in the cap-broker when TF_PRIVSEP is on.
 //
 // Error paths trigger a partial-state Close() before returning so
 // the caller doesn't need to defer Close when err != nil.
-func wrap(ctx context.Context, cfg Config) (*exec.Cmd, *Sandbox, error) {
+func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// Fail fast if runsc is missing rather than letting the
 	// subsequent exec.CommandContext succeed and then mysteriously
 	// fail on Start with "file not found".
@@ -138,40 +132,33 @@ func wrap(ctx context.Context, cfg Config) (*exec.Cmd, *Sandbox, error) {
 	}
 	td.bundleDir = bundleDir
 
-	// Step 11: construct the runsc command. Caller runs it via
-	// Start + Wait; cmd.Cancel handles ctx cancellation.
+	// Step 11: launch the runtime, routed through defaultOps. In process
+	// this builds the runsc command and clone3s it into a per-run memory
+	// cgroup (runsc keeps --ignore-cgroups; TF owns the group, so the whole
+	// sandbox tree — sentry + gofer + app memfd — is under the ceiling from
+	// the first instruction). Under TF_PRIVSEP this instead crosses to the
+	// cap-broker, which execs+supervises runsc with its stdio wired to a
+	// passed-through socket. Either way the returned LaunchedRun owns the
+	// run process and its cgroup; the caller drives Start → stream → Wait →
+	// Close.
 	//
-	// Container ID must be unique per Wrap or runsc rejects the
-	// second concurrent start. RunID isn't unique on its own (some
-	// callers pass fixed TraceIDs like "scorer-batch"), but the
-	// subnet idx is — the allocator gives a fresh idx for every live
-	// Wrap. Pair them so the ID stays grep-friendly while being
-	// uniquely distinguishable.
+	// Container ID must be unique per Wrap or runsc rejects the second
+	// concurrent start. RunID isn't unique on its own (some callers pass
+	// fixed TraceIDs like "scorer-batch"), but the subnet idx is — the
+	// allocator gives a fresh idx for every live Wrap. Pair them so the ID
+	// stays grep-friendly while being uniquely distinguishable.
 	containerID := fmt.Sprintf("tf-%s-%d", truncate(cfg.RunID, 11), idx)
-	cmd := newRunscCommand(ctx, bundleDir, containerID)
-
-	// Step 12: per-run memory ceiling, routed through defaultOps.
-	// runsc keeps --ignore-cgroups; TF owns the group and clone3s
-	// runsc directly into it, so the whole sandbox tree (sentry +
-	// gofer + app memfd) is under the limit from the first
-	// instruction. Fail-open by design: a host that can't complete the
-	// cgroup setup runs without ceilings and says so once, because "no
-	// limit" degrades gracefully while "no runs" is an outage.
-	if cfg.MemoryLimitMB > 0 {
-		if dir, f, cgErr := defaultOps.SetupRunCgroup(containerID, cfg.MemoryLimitMB); cgErr != nil {
-			logCgroupFailOpenOnce(cgErr)
-		} else {
-			td.cgroupDir = dir
-			td.cgroupFD = f
-			cmd.SysProcAttr = &syscall.SysProcAttr{
-				UseCgroupFD: true,
-				CgroupFD:    int(f.Fd()),
-			}
-		}
+	run, err := defaultOps.LaunchRun(ctx, LaunchParams{
+		BundleDir:     bundleDir,
+		ContainerID:   containerID,
+		MemoryLimitMB: cfg.MemoryLimitMB,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("sandbox: %w", err)
 	}
 
 	releaseOnError = false
-	return cmd, sb, nil
+	return run, sb, nil
 }
 
 // logCgroupFailOpenOnce warns exactly once per process that memory
@@ -183,21 +170,6 @@ func logCgroupFailOpenOnce(err error) {
 	cgroupFailOpenOnce.Do(func() {
 		sandboxLog.Warn("per-run memory ceiling unavailable; runs continue without limits", "error", err)
 	})
-}
-
-// OOMKilled reports whether this run's memory-ceiling cgroup recorded
-// an OOM kill. Callers check it after the runsc process exits and
-// BEFORE Close (teardown removes the group). Always false when no
-// limit was configured.
-func (s *Sandbox) OOMKilled() bool {
-	if s == nil || s.teardown == nil {
-		return false
-	}
-	t, ok := s.teardown.(*teardownState)
-	if !ok || t == nil {
-		return false
-	}
-	return cgroupOOMKilled(t.cgroupDir)
 }
 
 // truncate cuts s to maxLen chars. Used for container IDs that
@@ -234,14 +206,6 @@ func (s *Sandbox) Close() error {
 	}
 	if err := cleanupBundle(t.bundleDir); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: cleanup bundle: %v\n", err)
-	}
-	if t.cgroupFD != nil {
-		_ = t.cgroupFD.Close()
-		t.cgroupFD = nil
-	}
-	if err := defaultOps.RemoveRunCgroup(t.cgroupDir); err != nil {
-		// Non-fatal: the boot-time reaper sweeps stragglers.
-		fmt.Fprintf(os.Stderr, "sandbox: %v\n", err)
 	}
 	defaultAllocator().Release(t.subnetIdx)
 	s.teardown = nil // mark closed so re-Close is a no-op

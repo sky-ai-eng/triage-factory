@@ -17,9 +17,11 @@ import (
 
 // callTimeout bounds one dispatch — network/rootfs/cgroup setup can touch
 // the network stack or the filesystem but never blocks on anything
-// user-controlled (no agent I/O crosses this socket in P1), so a generous
-// fixed budget is enough; anything longer is a wedged host operation.
-const callTimeout = 60 * time.Second
+// user-controlled, so a generous fixed budget is enough; anything longer is
+// a wedged host operation. WaitRun is the deliberate exception (it blocks
+// until the run exits) and opts out of this budget on both sides. A var
+// only so tests can shrink it to prove that opt-out without a 60s wait.
+var callTimeout = 60 * time.Second
 
 // connIOTimeout bounds a single frame's read/write. A client that never
 // sends a frame, or never drains the reply, is confused or malicious;
@@ -45,6 +47,14 @@ type Server struct {
 	mu       sync.Mutex
 	closed   bool
 	inflight sync.WaitGroup
+
+	// runs is the registry of in-flight supervised runtimes, keyed by run
+	// id, so a KillRun/WaitRun on a later connection can reach the runsc
+	// child a LaunchRun started on an earlier one. Unlike the stateless
+	// P1 methods, the runtime launch makes the broker stateful for the
+	// lifetime of each run.
+	runsMu sync.Mutex
+	runs   map[string]*runEntry
 }
 
 // NewServer constructs a Server dispatching onto ops. Production callers
@@ -52,7 +62,13 @@ type Server struct {
 // defaultOps uses when TF_PRIVSEP is off.
 func NewServer(ops sandbox.PrivilegedOps) *Server {
 	baseCtx, cancel := context.WithCancel(context.Background())
-	return &Server{ops: ops, baseCtx: baseCtx, cancelBase: cancel, shutdown: make(chan struct{})}
+	return &Server{
+		ops:        ops,
+		baseCtx:    baseCtx,
+		cancelBase: cancel,
+		shutdown:   make(chan struct{}),
+		runs:       make(map[string]*runEntry),
+	}
 }
 
 // Serve accepts connections on l and dispatches each one's first frame as
@@ -134,8 +150,17 @@ func (s *Server) handleConn(conn net.Conn) {
 	// trip the per-frame I/O deadline.
 	_ = conn.SetReadDeadline(time.Time{})
 
-	ctx, cancel := context.WithTimeout(s.baseCtx, callTimeout)
-	defer cancel()
+	// WaitRun blocks until the supervised run exits — potentially the whole
+	// agent run (minutes, idle hibernation), far past callTimeout — so it
+	// runs on baseCtx directly, bounded by the run itself and unwound only
+	// on broker Shutdown (which cancels baseCtx). Every other method is a
+	// bounded host operation and keeps the callTimeout budget.
+	ctx := s.baseCtx
+	if req.Method != methodWaitRun {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(s.baseCtx, callTimeout)
+		defer cancel()
+	}
 
 	result, err := s.dispatch(ctx, req.Method, req.Args)
 	resp := response{}
@@ -232,6 +257,27 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 
 	case methodReapOrphans:
 		return emptyResult{}, s.ops.ReapOrphans(ctx)
+
+	case methodLaunchRun:
+		var a launchRunArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return s.launchRun(a)
+
+	case methodWaitRun:
+		var a waitRunArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return s.waitRun(ctx, a)
+
+	case methodKillRun:
+		var a killRunArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return s.killRun(a)
 
 	default:
 		return nil, fmt.Errorf("capbroker: unknown method %q", method)
