@@ -34,11 +34,14 @@ func (s *stubRuntime) Kill() error {
 
 // withStubRuntime points launchRuntime at a stand-in built by mkCmd
 // (e.g. cat for a bidirectional echo, or sleep for a run that ignores its
-// stdio and only ends on Kill).
+// stdio and only ends on Kill). It also stubs prepareBundle so the broker's
+// spec/bundle construction (which needs a real baked rootfs + root) is
+// skipped while the RPC, validation, semaphore, registry, and
+// socket-passthrough wiring are exercised.
 func withStubRuntime(t *testing.T, mkCmd func(ctx context.Context) *exec.Cmd) {
 	t.Helper()
 	orig := launchRuntime
-	launchRuntime = func(ctx context.Context, _ sandbox.LaunchParams, stdio *os.File, stderr io.Writer) (supervisedRuntime, error) {
+	launchRuntime = func(ctx context.Context, _, _ string, _ int, stdio *os.File, stderr io.Writer) (supervisedRuntime, error) {
 		cmd := mkCmd(ctx)
 		cmd.Stdin = stdio
 		cmd.Stdout = stdio
@@ -51,6 +54,36 @@ func withStubRuntime(t *testing.T, mkCmd func(ctx context.Context) *exec.Cmd) {
 		return &stubRuntime{cmd: cmd}, nil
 	}
 	t.Cleanup(func() { launchRuntime = orig })
+	withStubPrepareBundle(t)
+}
+
+// withStubPrepareBundle replaces the broker's real spec/bundle construction
+// with a throwaway temp dir, so tests exercise the launch RPC path without a
+// baked rootfs or root.
+func withStubPrepareBundle(t *testing.T) {
+	t.Helper()
+	orig := prepareBundle
+	prepareBundle = func(ctx context.Context, p sandbox.LaunchParams) (string, error) {
+		return t.TempDir(), nil
+	}
+	t.Cleanup(func() { prepareBundle = orig })
+}
+
+// validLaunchParams returns params that pass sandbox.ValidateLaunchParams,
+// so the broker's boundary gate admits the launch and the test exercises the
+// RPC/registry/socket wiring rather than a validation rejection. The netns
+// name matches the broker's tf-<hex>-<idx> shape the validator requires.
+func validLaunchParams(containerID string) sandbox.LaunchParams {
+	return sandbox.LaunchParams{
+		RunID:       "run",
+		ContainerID: containerID,
+		Worktree:    "/data/worktrees/run",
+		SDKDir:      "/opt/tf/sdk",
+		Args:        []string{"/usr/bin/node", "/sdk/wrapper.mjs", "-p", "hi"},
+		// The netns name must be the one RunID derives — the ownership check
+		// binds it to the run, not just the tf-<hex>-<idx> shape.
+		NetnsPath: "/var/run/netns/" + sandbox.NetnsNameForRun("run", 1),
+	}
 }
 
 // withTempStdioSocketDir redirects the per-run stdio socket path off the
@@ -75,7 +108,7 @@ func TestBrokerRun_RoundTripAndWait(t *testing.T) {
 	withTempStdioSocketDir(t)
 	client := serveTestBroker(t, &fakeOps{})
 
-	run, err := client.LaunchRun(context.Background(), sandbox.LaunchParams{ContainerID: "c1"})
+	run, err := client.LaunchRun(context.Background(), validLaunchParams("c1"))
 	if err != nil {
 		t.Fatalf("LaunchRun: %v", err)
 	}
@@ -120,7 +153,7 @@ func TestBrokerRun_KillViaContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	run, err := client.LaunchRun(ctx, sandbox.LaunchParams{ContainerID: "c2"})
+	run, err := client.LaunchRun(ctx, validLaunchParams("c2"))
 	if err != nil {
 		t.Fatalf("LaunchRun: %v", err)
 	}
@@ -154,7 +187,7 @@ func TestBrokerRun_ConcurrentRunsAreIndependent(t *testing.T) {
 	withTempStdioSocketDir(t)
 	client := serveTestBroker(t, &fakeOps{})
 
-	runA, err := client.LaunchRun(context.Background(), sandbox.LaunchParams{ContainerID: "cA"})
+	runA, err := client.LaunchRun(context.Background(), validLaunchParams("cA"))
 	if err != nil {
 		t.Fatalf("LaunchRun A: %v", err)
 	}
@@ -163,7 +196,7 @@ func TestBrokerRun_ConcurrentRunsAreIndependent(t *testing.T) {
 		t.Fatalf("Start A: %v", err)
 	}
 
-	runB, err := client.LaunchRun(context.Background(), sandbox.LaunchParams{ContainerID: "cB"})
+	runB, err := client.LaunchRun(context.Background(), validLaunchParams("cB"))
 	if err != nil {
 		t.Fatalf("LaunchRun B: %v", err)
 	}
@@ -214,7 +247,7 @@ func TestBrokerRun_WaitOutlastsCallTimeout(t *testing.T) {
 	t.Cleanup(func() { callTimeout = origTimeout })
 
 	client := serveTestBroker(t, &fakeOps{})
-	run, err := client.LaunchRun(context.Background(), sandbox.LaunchParams{ContainerID: "cSlow"})
+	run, err := client.LaunchRun(context.Background(), validLaunchParams("cSlow"))
 	if err != nil {
 		t.Fatalf("LaunchRun: %v", err)
 	}
@@ -229,6 +262,118 @@ func TestBrokerRun_WaitOutlastsCallTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < callTimeout {
 		t.Errorf("Wait returned in %s, under the call budget — it did not actually wait for the run", elapsed)
+	}
+}
+
+// TestBrokerRun_InFlightCapQueues pins the abuse-resistance cap: with the
+// broker's in-flight LaunchRun limit shrunk to one, a second launch does not
+// pile on privileged setup — it QUEUES on the semaphore until the first
+// run's slot is freed, then proceeds. This is DoS resistance (a runaway
+// caller degrades to queueing instead of exhausting the subnet pool), not a
+// capability boundary. It also proves release: ending the first run frees
+// the slot the second was waiting on.
+func TestBrokerRun_InFlightCapQueues(t *testing.T) {
+	prev := maxInflightLaunches
+	maxInflightLaunches = 1
+	t.Cleanup(func() { maxInflightLaunches = prev })
+
+	withStubRuntime(t, func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, "cat") })
+	withTempStdioSocketDir(t)
+	client := serveTestBroker(t, &fakeOps{})
+
+	// Run A takes the only slot and holds it: its cat blocks reading stdin,
+	// so the supervising goroutine (which releases the slot on exit) doesn't
+	// run until A ends.
+	runA, err := client.LaunchRun(context.Background(), validLaunchParams("capA"))
+	if err != nil {
+		t.Fatalf("LaunchRun A: %v", err)
+	}
+	defer runA.Close()
+	if err := runA.Start(); err != nil {
+		t.Fatalf("Start A: %v", err)
+	}
+
+	// Run B must queue: its Start issues the launch RPC, which blocks in the
+	// broker's acquireLaunchSlot until A frees the one slot.
+	runB, err := client.LaunchRun(context.Background(), validLaunchParams("capB"))
+	if err != nil {
+		t.Fatalf("LaunchRun B: %v", err)
+	}
+	defer runB.Close()
+
+	startedB := make(chan error, 1)
+	go func() { startedB <- runB.Start() }()
+
+	select {
+	case err := <-startedB:
+		t.Fatalf("Start B returned (%v) while the in-flight cap was held; want it queued", err)
+	case <-time.After(300 * time.Millisecond):
+		// Still queued behind A — the cap is doing its job.
+	}
+
+	// Free the slot by ending A (its cat EOFs on stdin close and exits, so
+	// the supervising goroutine releases the slot). B must then proceed.
+	_ = runA.Stdin().Close()
+	select {
+	case err := <-startedB:
+		if err != nil {
+			t.Fatalf("Start B after the slot was freed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start B never proceeded after the in-flight slot was freed — release is broken")
+	}
+}
+
+// TestBrokerRun_SDKDirOverriddenByBroker pins that the broker resolves the
+// SDK source itself and DISCARDS whatever SDKDir the orchestrator sent. The
+// pinned argv execs /sdk/wrapper.mjs and /sdk is bound from the SDK dir, so
+// an honored orchestrator SDKDir would let a compromised caller point the
+// pinned entrypoint at an attacker-authored wrapper — this is what makes
+// "the broker owns the command" true.
+func TestBrokerRun_SDKDirOverriddenByBroker(t *testing.T) {
+	origRT := launchRuntime
+	launchRuntime = func(ctx context.Context, _, _ string, _ int, stdio *os.File, stderr io.Writer) (supervisedRuntime, error) {
+		cmd := exec.CommandContext(ctx, "cat")
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = stdio, stdio, stderr
+		err := cmd.Start()
+		_ = stdio.Close()
+		if err != nil {
+			return nil, err
+		}
+		return &stubRuntime{cmd: cmd}, nil
+	}
+	t.Cleanup(func() { launchRuntime = origRT })
+
+	// Capture the params the broker actually hands to prepareBundle.
+	var gotSDKDir string
+	origPB := prepareBundle
+	prepareBundle = func(ctx context.Context, p sandbox.LaunchParams) (string, error) {
+		gotSDKDir = p.SDKDir
+		return t.TempDir(), nil
+	}
+	t.Cleanup(func() { prepareBundle = origPB })
+
+	withTempStdioSocketDir(t)
+	client := serveTestBroker(t, &fakeOps{})
+
+	p := validLaunchParams("sdkc")
+	p.SDKDir = "/tmp/evil-sdk" // a compromised orchestrator's forged SDK source
+	run, err := client.LaunchRun(context.Background(), p)
+	if err != nil {
+		t.Fatalf("LaunchRun: %v", err)
+	}
+	defer run.Close()
+	if err := run.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	_ = run.Stdin().Close()
+	_ = run.Wait()
+
+	if gotSDKDir == "/tmp/evil-sdk" {
+		t.Fatal("broker honored the orchestrator-supplied SDK dir — a forged wrapper.mjs would execute")
+	}
+	if want := sandbox.TrustedSDKDir(); gotSDKDir != want {
+		t.Errorf("broker built the spec with SDK dir %q; want the broker-owned %q", gotSDKDir, want)
 	}
 }
 

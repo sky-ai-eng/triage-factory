@@ -21,8 +21,12 @@ type teardownState struct {
 	// netSt is the network state defaultOps.SetupNetwork returned —
 	// possibly only a partial prefix of it if setup failed partway
 	// through. Passed back to defaultOps.TeardownNetwork verbatim.
-	netSt     NetworkState
-	bundleDir string
+	netSt NetworkState
+	// The per-run OCI bundle is NOT tracked here: since PS-P3 moved spec
+	// ownership into LaunchRun, the bundle is built by whoever holds
+	// capabilities (in-process hostOps, or the broker) and is owned by the
+	// LaunchedRun that launch returns — its Close removes the bundle, so a
+	// caller that abandons the run before Sandbox.Close still reclaims it.
 }
 
 // iptablesRule names a single MASQUERADE rule so teardown can
@@ -117,30 +121,30 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 		}
 	}
 
-	// Step 10: rootfs + OCI bundle.
-	rootfsPath, err := defaultOps.EnsureRootfs(ctx, RootfsSelector{})
-	if err != nil {
+	// Step 10: pre-warm the curated rootfs. The privileged bake (download +
+	// chroot apk) stays a distinct op with its own budget — as it was before
+	// spec ownership moved — so a cold-cache first launch doesn't have to
+	// finish the bake AND the launch inside one RPC window. LaunchRun's
+	// spec build then hits the warm cache (a single stat). The selector must
+	// match the one LaunchRun resolves (the default → "base").
+	rootfsSel := RootfsSelector{}
+	if _, err := defaultOps.EnsureRootfs(ctx, rootfsSel); err != nil {
 		return nil, nil, fmt.Errorf("sandbox: %w", err)
 	}
-	spec, err := buildSpec(specCfg, netSt.NetnsPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("sandbox: %w", err)
-	}
-	bundleDir, err := writeBundle(cfg, spec, rootfsPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("sandbox: %w", err)
-	}
-	td.bundleDir = bundleDir
 
-	// Step 11: launch the runtime, routed through defaultOps. In process
-	// this builds the runsc command and clone3s it into a per-run memory
-	// cgroup (runsc keeps --ignore-cgroups; TF owns the group, so the whole
-	// sandbox tree — sentry + gofer + app memfd — is under the ceiling from
-	// the first instruction). Under TF_PRIVSEP this instead crosses to the
-	// cap-broker, which execs+supervises runsc with its stdio wired to a
-	// passed-through socket. Either way the returned LaunchedRun owns the
-	// run process and its cgroup; the caller drives Start → stream → Wait →
-	// Close.
+	// Step 11: launch the runtime, routed through defaultOps. PS-P3 moved
+	// OCI-spec ownership into LaunchRun: the orchestrator no longer resolves
+	// the rootfs, builds the spec, or writes the bundle — it hands the launch
+	// only the validated DATA below (a rootfs SELECTOR, an env ALLOWLIST,
+	// numeric limits, the netns it was given, the mounts, the pinned argv).
+	// In process, hostOps builds the spec from that data and clone3s runsc
+	// into a per-run memory cgroup. Under TF_PRIVSEP the same data crosses to
+	// the cap-broker, which VALIDATES it, builds the spec from its own fixed
+	// template, and execs+supervises runsc with stdio wired to a passed-through
+	// socket — so a compromised orchestrator can never make the broker exec
+	// arbitrary code with capabilities. Either way the returned LaunchedRun
+	// owns the run process, its cgroup, and its bundle; the caller drives
+	// Start → stream → Wait → Close.
 	//
 	// Container ID must be unique per Wrap or runsc rejects the second
 	// concurrent start. RunID isn't unique on its own (some callers pass
@@ -149,9 +153,18 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// stays grep-friendly while being uniquely distinguishable.
 	containerID := fmt.Sprintf("tf-%s-%d", truncate(cfg.RunID, 11), idx)
 	run, err := defaultOps.LaunchRun(ctx, LaunchParams{
-		BundleDir:     bundleDir,
-		ContainerID:   containerID,
-		MemoryLimitMB: cfg.MemoryLimitMB,
+		RunID:           cfg.RunID,
+		ContainerID:     containerID,
+		Rootfs:          rootfsSel,
+		Env:             stringsToEnvVars(specCfg.Env),
+		Args:            cfg.Argv,
+		Worktree:        cfg.Worktree,
+		SDKDir:          cfg.SDKDir,
+		Mounts:          cfg.ExtraMounts,
+		Rlimits:         cfg.Rlimits,
+		MemoryLimitMB:   cfg.MemoryLimitMB,
+		NetnsPath:       netSt.NetnsPath,
+		ExtraEgressCIDR: cfg.ExtraEgressCIDR,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("sandbox: %w", err)
@@ -197,15 +210,14 @@ func (s *Sandbox) Close() error {
 	}
 	ctx := context.Background()
 
-	// Order matters: tear down the network BEFORE removing the bundle
-	// dir + releasing the subnet idx. If we freed the idx first, a
-	// concurrent allocate could pick it before our teardown finished,
-	// and the new run would conflict with our still-lingering veth.
+	// Order matters: tear down the network BEFORE releasing the subnet
+	// idx. If we freed the idx first, a concurrent allocate could pick it
+	// before our teardown finished, and the new run would conflict with our
+	// still-lingering veth. The per-run OCI bundle is torn down by the
+	// LaunchedRun (its Close removes it) — Sandbox no longer owns it, since
+	// PS-P3 moved spec/bundle construction into the launch.
 	if err := defaultOps.TeardownNetwork(ctx, t.netSt); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: teardown network: %v\n", err)
-	}
-	if err := cleanupBundle(t.bundleDir); err != nil {
-		fmt.Fprintf(os.Stderr, "sandbox: cleanup bundle: %v\n", err)
 	}
 	defaultAllocator().Release(t.subnetIdx)
 	s.teardown = nil // mark closed so re-Close is a no-op

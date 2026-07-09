@@ -144,17 +144,18 @@ type removeRunCgroupArgs struct {
 	Dir string `json:"dir"`
 }
 
-// launchRunArgs carries everything the broker needs to exec+supervise the
-// runtime for one prepared bundle, plus the path of the per-run stdio
-// socket the orchestrator is already listening on. The broker dials that
-// path and hands its fd to the runtime; the bytes never enter the broker.
-// ContainerID is the run's unique lifecycle key (see LaunchParams) — the
-// broker registers, waits, and kills by it, never by the non-unique RunID.
+// launchRunArgs carries the narrow, validated launch data the broker folds
+// into the OCI spec IT owns (Params.StdioSocketPath names the per-run stdio
+// socket the orchestrator is already listening on). Deliberately NO bundle
+// dir, config.json, rootfs path, or free command: the broker resolves the
+// rootfs by catalog name, builds the spec from a fixed template, and
+// validates every field (sandbox.ValidateLaunchParams) before it touches
+// anything — so a compromised orchestrator can supply data the sandbox sees
+// but cannot make the broker exec arbitrary code with capabilities.
+// Params.ContainerID is the run's unique lifecycle key — the broker
+// registers, waits, and kills by it, never by the non-unique RunID.
 type launchRunArgs struct {
-	ContainerID     string `json:"container_id"`
-	BundleDir       string `json:"bundle_dir"`
-	MemoryLimitMB   int    `json:"memory_limit_mb"`
-	StdioSocketPath string `json:"stdio_socket_path"`
+	Params sandbox.LaunchParams `json:"params"`
 }
 
 type waitRunArgs struct {

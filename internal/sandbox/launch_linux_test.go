@@ -52,7 +52,7 @@ func TestLaunchSupervised_SocketPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("File: %v", err)
 	}
-	sr, err := LaunchSupervised(context.Background(), LaunchParams{ContainerID: "cid"}, f, io.Discard)
+	sr, err := LaunchSupervised(context.Background(), "", "cid", 0, f, io.Discard)
 	_ = dialConn.Close() // broker holds no stdio fd now (f closed by LaunchSupervised)
 	if err != nil {
 		t.Fatalf("LaunchSupervised: %v", err)
@@ -112,7 +112,7 @@ func TestLaunchSupervised_Kill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("File: %v", err)
 	}
-	sr, err := LaunchSupervised(context.Background(), LaunchParams{ContainerID: "cid"}, f, io.Discard)
+	sr, err := LaunchSupervised(context.Background(), "", "cid", 0, f, io.Discard)
 	_ = dialConn.Close()
 	if err != nil {
 		t.Fatalf("LaunchSupervised: %v", err)

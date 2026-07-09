@@ -72,14 +72,14 @@ type brokerRun struct {
 }
 
 func (r *brokerRun) Start() error {
-	// Ask the broker to launch runsc wired to our socket. The RPC returns
-	// once runsc has been exec'd and the broker has dropped its stdio fd.
-	if err := r.client.call(r.ctx, methodLaunchRun, launchRunArgs{
-		ContainerID:     r.params.ContainerID,
-		BundleDir:       r.params.BundleDir,
-		MemoryLimitMB:   r.params.MemoryLimitMB,
-		StdioSocketPath: r.socketPath,
-	}, nil); err != nil {
+	// Ask the broker to launch runsc wired to our socket. The RPC carries
+	// only the validated launch DATA (the broker builds the spec from it);
+	// stamp in the per-run stdio socket path we're listening on so the
+	// broker knows where to dial. The RPC returns once runsc has been exec'd
+	// and the broker has dropped its stdio fd.
+	params := r.params
+	params.StdioSocketPath = r.socketPath
+	if err := r.client.call(r.ctx, methodLaunchRun, launchRunArgs{Params: params}, nil); err != nil {
 		r.cleanupListener()
 		return err
 	}

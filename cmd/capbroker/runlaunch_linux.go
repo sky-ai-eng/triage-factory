@@ -32,10 +32,20 @@ type supervisedRuntime interface {
 // launchRuntime is the seam the broker execs the runtime through. The
 // default hands the socket fd to sandbox.LaunchSupervised, which wires it
 // as runsc's stdin+stdout and closes the broker's copy — the bytes never
-// enter this process. A var so tests can swap in a stand-in runtime.
-var launchRuntime = func(ctx context.Context, p sandbox.LaunchParams, stdio *os.File, stderr io.Writer) (supervisedRuntime, error) {
-	return sandbox.LaunchSupervised(ctx, p, stdio, stderr)
+// enter this process. A var so tests can swap in a stand-in runtime. It
+// takes the broker-built bundle dir (from prepareBundle), never a
+// caller-supplied one.
+var launchRuntime = func(ctx context.Context, bundleDir, containerID string, memoryLimitMB int, stdio *os.File, stderr io.Writer) (supervisedRuntime, error) {
+	return sandbox.LaunchSupervised(ctx, bundleDir, containerID, memoryLimitMB, stdio, stderr)
 }
+
+// prepareBundle is the seam the broker builds the OCI spec + bundle
+// through. The default is sandbox.PrepareBundle (resolve rootfs by catalog
+// name, build the spec from the fixed template, write the bundle). A var so
+// tests can stub bundle construction — which needs a real baked rootfs and
+// root — while still exercising the RPC, validation, semaphore, and
+// socket-passthrough wiring.
+var prepareBundle = sandbox.PrepareBundle
 
 // runEntry is one in-flight supervised run. done is closed once the
 // supervising goroutine has reaped the child; oom/waitErr are written
@@ -48,7 +58,10 @@ type runEntry struct {
 	waitErr error
 }
 
-// launchRun dials the orchestrator's per-run stdio socket, hands its fd to
+// launchRun is the broker's spec-owning launch. It VALIDATES the params at
+// the RPC boundary, acquires an in-flight slot (queueing under load rather
+// than exhausting host resources), builds the OCI bundle from its own fixed
+// template, dials the orchestrator's per-run stdio socket, hands its fd to
 // the runtime as stdin+stdout, execs+supervises runsc, and registers the
 // run so a later WaitRun/KillRun can reach it. It returns as soon as runsc
 // is started — the RPC is short; the supervision runs in a goroutine and
@@ -58,14 +71,74 @@ type runEntry struct {
 // closed (the dialed conn here, plus the dup inside LaunchSupervised) so
 // the run's bytes never enter the broker — there is no read on the socket
 // anywhere on this path.
-func (s *Server) launchRun(a launchRunArgs) (any, error) {
-	conn, err := net.DialTimeout("unix", a.StdioSocketPath, dialStdioTimeout)
+func (s *Server) launchRun(ctx context.Context, a launchRunArgs) (any, error) {
+	p := a.Params
+
+	// Boundary gate: this is the broker's real attack surface (the RPC from
+	// the hostile-input-exposed orchestrator). Reject anything outside the
+	// allowlist — a path/command-shaped param, an unknown rootfs name, a
+	// non-allowlisted env key, a denylisted egress CIDR — BEFORE building or
+	// execing anything, so a compromised orchestrator gets no path to
+	// capabilities.
+	if err := sandbox.ValidateLaunchParams(p); err != nil {
+		return nil, err
+	}
+
+	// The broker owns the command: the pinned argv execs /sdk/wrapper.mjs, and
+	// /sdk is bind-mounted from the SDK dir — so the SDK source is part of the
+	// executed program, not run data. Resolve it broker-side and DISCARD the
+	// orchestrator's value, exactly as the rootfs is resolved by catalog name,
+	// so a compromised orchestrator can't point /sdk at an attacker-authored
+	// wrapper.
+	p.SDKDir = sandbox.TrustedSDKDir()
+
+	// Abuse resistance (DoS, NOT a capability boundary — a validated caller
+	// still cannot escalate). One orchestrator maps to one broker, so this
+	// bounds a runaway caller's in-flight launches to the subnet pool size:
+	// it QUEUES here rather than exhausting the /16→/24 allocator or the
+	// privileged setup each launch costs. The slot is released when the run
+	// is reaped, below. ctx carries the dispatch budget, so a caller that
+	// jams the queue eventually times out instead of blocking forever.
+	if err := s.acquireLaunchSlot(ctx); err != nil {
+		return nil, err
+	}
+	slotReleased := false
+	releaseSlot := func() {
+		if !slotReleased {
+			slotReleased = true
+			s.releaseLaunchSlot()
+		}
+	}
+	defer func() {
+		// Release on every early-return path below; the success path clears
+		// this by handing ownership to the supervising goroutine.
+		if !slotReleased {
+			releaseSlot()
+		}
+	}()
+
+	// Build the bundle the broker owns (rootfs by catalog name → hash,
+	// fixed-template spec). The bundle's lifetime is now the broker's: the
+	// supervising goroutine removes it when the run is reaped, and every
+	// error path below removes it before returning.
+	bundleDir, err := prepareBundle(ctx, p)
 	if err != nil {
-		return nil, fmt.Errorf("capbroker: dial stdio socket %s: %w", a.StdioSocketPath, err)
+		return nil, fmt.Errorf("capbroker: prepare bundle: %w", err)
+	}
+
+	// DialContext (not DialTimeout) so the dial stays responsive to the call
+	// budget / broker shutdown carried by ctx, while dialStdioTimeout still
+	// bounds a stale/misconfigured socket path.
+	dialer := net.Dialer{Timeout: dialStdioTimeout}
+	conn, err := dialer.DialContext(ctx, "unix", p.StdioSocketPath)
+	if err != nil {
+		_ = sandbox.RemoveBundle(bundleDir)
+		return nil, fmt.Errorf("capbroker: dial stdio socket %s: %w", p.StdioSocketPath, err)
 	}
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		_ = conn.Close()
+		_ = sandbox.RemoveBundle(bundleDir)
 		return nil, fmt.Errorf("capbroker: stdio socket is not a unix conn")
 	}
 	// File() returns a dup of the connection's fd; the runtime inherits it
@@ -75,21 +148,19 @@ func (s *Server) launchRun(a launchRunArgs) (any, error) {
 	f, err := uc.File()
 	if err != nil {
 		_ = conn.Close()
+		_ = sandbox.RemoveBundle(bundleDir)
 		return nil, fmt.Errorf("capbroker: take stdio fd: %w", err)
 	}
 
 	// baseCtx (not a per-call ctx) ties the runtime's lifetime to the
 	// broker: a broker Shutdown cancels it and SIGKILLs the child; explicit
 	// cancellation still goes through KillRun.
-	rt, err := launchRuntime(s.baseCtx, sandbox.LaunchParams{
-		BundleDir:     a.BundleDir,
-		ContainerID:   a.ContainerID,
-		MemoryLimitMB: a.MemoryLimitMB,
-	}, f, os.Stderr)
+	rt, err := launchRuntime(s.baseCtx, bundleDir, p.ContainerID, p.MemoryLimitMB, f, os.Stderr)
 	// The runtime now holds its own inherited dup (on success); drop the
 	// broker's remaining reference to the socket regardless of outcome.
 	_ = conn.Close()
 	if err != nil {
+		_ = sandbox.RemoveBundle(bundleDir)
 		return nil, fmt.Errorf("capbroker: launch runtime: %w", err)
 	}
 
@@ -98,20 +169,26 @@ func (s *Server) launchRun(a launchRunArgs) (any, error) {
 	// run's wait/kill hit another's runtime).
 	entry := &runEntry{rt: rt, done: make(chan struct{})}
 	s.runsMu.Lock()
-	s.runs[a.ContainerID] = entry
+	s.runs[p.ContainerID] = entry
 	s.runsMu.Unlock()
 
-	// Supervise in a goroutine so the child is reaped (and its cgroup
-	// removed) even if the orchestrator never calls WaitRun. WaitRun just
-	// fetches the recorded result. Deliberately NOT tracked by s.inflight
-	// (the connection-drain WaitGroup): a run can outlive many RPC
-	// connections, and Shutdown must not block on the whole run. On
+	// Ownership of the in-flight slot + bundle passes to the supervising
+	// goroutine; the deferred release above must not also fire.
+	slotReleased = true
+
+	// Supervise in a goroutine so the child is reaped (and its cgroup +
+	// bundle removed) even if the orchestrator never calls WaitRun. WaitRun
+	// just fetches the recorded result. Deliberately NOT tracked by
+	// s.inflight (the connection-drain WaitGroup): a run can outlive many
+	// RPC connections, and Shutdown must not block on the whole run. On
 	// Shutdown baseCtx is canceled, which SIGKILLs runsc (cmd.Cancel), so
 	// this goroutine unwinds on its own.
 	go func() {
 		oom, werr := rt.Wait()
 		entry.oom = oom
 		entry.waitErr = werr
+		_ = sandbox.RemoveBundle(bundleDir)
+		s.releaseLaunchSlot()
 		close(entry.done)
 	}()
 

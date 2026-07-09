@@ -51,6 +51,11 @@ type localRun struct {
 	stdout io.Reader
 	stderr *syncBuf
 
+	// bundleDir is the per-run OCI bundle this launch built (PrepareBundle);
+	// the in-process launcher owns it now that the bundle is constructed
+	// here rather than by wrap, so Close removes it.
+	bundleDir string
+
 	// cgroupDir is the per-run memory cgroup (empty when no limit); cgroupFD
 	// is its dir-fd, needed only for the child's clone3 at Start and closed
 	// immediately after.
@@ -62,13 +67,19 @@ type localRun struct {
 	closeOnce sync.Once
 }
 
-// LaunchRun (in-process) builds the runsc command for the prepared bundle,
-// sets up the per-run memory cgroup (fail-open, as wrap did before this
+// LaunchRun (in-process) builds the OCI bundle from the validated launch
+// params (PrepareBundle — the broker-owned spec construction, run here in
+// the single-trust-domain non-privsep path), builds the runsc command for
+// it, sets up the per-run memory cgroup (fail-open, as wrap did before this
 // split), wires ordinary pipes for stdio, and returns a not-yet-started
 // localRun. Start begins execution.
 func (hostOps) LaunchRun(ctx context.Context, p LaunchParams) (LaunchedRun, error) {
-	cmd := buildRuntimeCmd(ctx, p.BundleDir, p.ContainerID)
-	lr := &localRun{cmd: cmd, stderr: &syncBuf{}}
+	bundleDir, err := PrepareBundle(ctx, p)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: prepare bundle: %w", err)
+	}
+	cmd := buildRuntimeCmd(ctx, bundleDir, p.ContainerID)
+	lr := &localRun{cmd: cmd, stderr: &syncBuf{}, bundleDir: bundleDir}
 
 	// Per-run memory ceiling. Fail-open by design (a host that can't
 	// complete cgroup setup runs without a ceiling and says so once),
@@ -89,12 +100,14 @@ func (hostOps) LaunchRun(ctx context.Context, p LaunchParams) (LaunchedRun, erro
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		lr.removeCgroup()
+		_ = cleanupBundle(lr.bundleDir)
 		return nil, fmt.Errorf("sandbox: stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
 		lr.removeCgroup()
+		_ = cleanupBundle(lr.bundleDir)
 		return nil, fmt.Errorf("sandbox: stdout pipe: %w", err)
 	}
 	lr.stdin = stdin
@@ -139,12 +152,13 @@ func (l *localRun) OOMKilled() bool {
 	return l.oom
 }
 
-// Close tears down the per-run cgroup and the stdio pipes. The runsc child
-// itself is killed by cmd.Cancel (the run context) when the orchestrator
-// cancels; Close covers the abandoned-bring-up path (Start never ran, so
-// cmd.Wait never closed the pipes) and reclaims the cgroup created at
-// construction. Only ever called before Start or after Wait, so closing the
-// pipes never races an in-flight read. Idempotent.
+// Close tears down the per-run cgroup, the stdio pipes, and the OCI bundle
+// this launch built. The runsc child itself is killed by cmd.Cancel (the
+// run context) when the orchestrator cancels; Close covers the
+// abandoned-bring-up path (Start never ran, so cmd.Wait never closed the
+// pipes) and reclaims the cgroup + bundle created at construction. Only
+// ever called before Start or after Wait, so closing the pipes never races
+// an in-flight read. Idempotent.
 func (l *localRun) Close() error {
 	l.closeOnce.Do(func() {
 		if l.stdin != nil {
@@ -154,6 +168,7 @@ func (l *localRun) Close() error {
 			_ = c.Close()
 		}
 		l.removeCgroup()
+		_ = cleanupBundle(l.bundleDir)
 	})
 	return nil
 }
@@ -188,11 +203,14 @@ type SupervisedRuntime struct {
 }
 
 // LaunchSupervised is the cap-broker's runtime launcher. It builds the
-// runsc command for the prepared bundle, sets up the per-run memory cgroup
+// runsc command for the broker-built bundle (bundleDir, from PrepareBundle
+// — the broker owns the spec), sets up the per-run memory cgroup
 // (fail-open), wires the provided socket file as the runtime's stdin AND
 // stdout, points the runtime's stderr at the broker's own stderr (gVisor
 // boot logs, surfaced to logs — never the agent's payload channel), starts
-// runsc, and returns a SupervisedRuntime.
+// runsc, and returns a SupervisedRuntime. The bundle's lifetime is the
+// caller's (the broker's launchRun removes it when the run is reaped);
+// LaunchSupervised does not touch it.
 //
 // It takes OWNERSHIP of stdio: after Start the child has inherited a dup,
 // so LaunchSupervised closes the caller's *os.File. Combined with the
@@ -201,13 +219,13 @@ type SupervisedRuntime struct {
 // socket fd anywhere on this path, and every broker-side copy is closed
 // after the exec. ctx ties the runtime's lifetime to the broker (cancel →
 // SIGKILL of the runsc parent).
-func LaunchSupervised(ctx context.Context, p LaunchParams, stdio *os.File, stderr io.Writer) (*SupervisedRuntime, error) {
-	cmd := buildRuntimeCmd(ctx, p.BundleDir, p.ContainerID)
+func LaunchSupervised(ctx context.Context, bundleDir, containerID string, memoryLimitMB int, stdio *os.File, stderr io.Writer) (*SupervisedRuntime, error) {
+	cmd := buildRuntimeCmd(ctx, bundleDir, containerID)
 	sr := &SupervisedRuntime{cmd: cmd}
 
 	var cgroupFD *os.File
-	if p.MemoryLimitMB > 0 {
-		if dir, f, err := setupAndCreateRunCgroup(p.ContainerID, p.MemoryLimitMB); err != nil {
+	if memoryLimitMB > 0 {
+		if dir, f, err := setupAndCreateRunCgroup(containerID, memoryLimitMB); err != nil {
 			logCgroupFailOpenOnce(err)
 		} else {
 			sr.cgroupDir = dir
