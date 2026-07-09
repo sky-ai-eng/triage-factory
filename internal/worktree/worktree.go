@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -627,7 +628,13 @@ func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...stri
 		// mkdir that would have claimed it didn't survive), so a retry is
 		// safe — it just repeats the same not-yet-started add.
 		worktreeLog.Warn("worktree add hit transient locked-marker race, retrying", "dir", dir, "attempt", attempt, "error", runErr)
-		time.Sleep(worktreeAddLockRaceBackoff)
+		// ctx-aware wait: a plain time.Sleep would keep a cancelled/timed-out
+		// caller blocked for the full backoff instead of returning promptly.
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("cancelled")
+		case <-time.After(worktreeAddLockRaceBackoff):
+		}
 	}
 }
 
@@ -637,8 +644,19 @@ const worktreeAddLockRaceMaxAttempts = 3
 
 // worktreeAddLockRaceBackoff is the pause between retries — long enough to
 // let whatever transient condition caused the race clear, short enough that
-// three attempts add negligible latency to the common (non-racing) path.
-const worktreeAddLockRaceBackoff = 50 * time.Millisecond
+// three attempts add negligible latency to the common (non-racing) path. A
+// var, not a const, so tests can lengthen it to deterministically exercise
+// the ctx-cancellation-during-backoff path without a real multi-second wait.
+var worktreeAddLockRaceBackoff = 50 * time.Millisecond
+
+// worktreeAddLockRaceRe matches git's exact locked-marker failure text —
+// "could not open '<path ending in /locked>' for writing: No such file or
+// directory" — as ONE contiguous phrase, not two independent substrings.
+// Requiring contiguity (rather than separately checking for "locked' for
+// writing" and "No such file or directory" anywhere in the output) rules out
+// an unrelated `worktree add` failure that happens to mention some other
+// locked file in one sentence and a missing directory in another.
+var worktreeAddLockRaceRe = regexp.MustCompile(`could not open '[^']*locked' for writing: No such file or directory`)
 
 // isWorktreeAddLockRace reports whether args/out match the narrow
 // `worktree add` failure signature described in gitRunCtxAuth: git's own
@@ -650,8 +668,7 @@ func isWorktreeAddLockRace(args []string, out []byte) bool {
 	if len(args) < 2 || args[0] != "worktree" || args[1] != "add" {
 		return false
 	}
-	msg := string(out)
-	return strings.Contains(msg, "locked' for writing") && strings.Contains(msg, "No such file or directory")
+	return worktreeAddLockRaceRe.Match(out)
 }
 
 func gitRun(dir string, args ...string) error {

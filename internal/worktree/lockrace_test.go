@@ -7,7 +7,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
 // TestIsWorktreeAddLockRace_MatchesOnlyTheNarrowSignature pins the matcher
@@ -31,6 +33,17 @@ func TestIsWorktreeAddLockRace_MatchesOnlyTheNarrowSignature(t *testing.T) {
 		{"worktree add, unrelated failure", []string{"worktree", "add", "/wt", "HEAD"}, []byte("fatal: '/wt' already exists"), false},
 		{"worktree add, already registered", []string{"worktree", "add", "/wt", "HEAD"}, []byte("fatal: '/wt' is already registered as a linked worktree"), false},
 		{"too few args", []string{"worktree"}, raceMsg, false},
+		{
+			// Both trigger phrases appear, but in two unrelated sentences —
+			// not git's actual contiguous "could not open '...locked' for
+			// writing: No such file or directory" message. A matcher that
+			// checked the two phrases independently (rather than as one
+			// contiguous pattern) would wrongly retry this.
+			"unrelated locked file and unrelated missing directory, not contiguous",
+			[]string{"worktree", "add", "/wt", "HEAD"},
+			[]byte("warning: stale 'other/locked' for writing (harmless, ignored)\nfatal: some/other/path/file: No such file or directory"),
+			false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -80,7 +93,7 @@ exec %q "$@"
 		if err != nil {
 			return 0
 		}
-		n, _ := strconv.Atoi(string(data[:len(data)-1])) // trim trailing newline
+		n, _ := strconv.Atoi(strings.TrimSpace(string(data)))
 		return n
 	}
 }
@@ -129,5 +142,45 @@ func TestGitRunCtxAuth_GivesUpAfterMaxAttempts(t *testing.T) {
 	}
 	if got, want := attempts(), worktreeAddLockRaceMaxAttempts; got != want {
 		t.Errorf("shim saw %d worktree-add invocations, want exactly %d (the retry cap)", got, want)
+	}
+}
+
+// TestGitRunCtxAuth_CancelledDuringBackoffReturnsPromptly pins the
+// ctx-aware wait: a caller whose context is cancelled while gitRunCtxAuth is
+// paused between retries must get control back promptly, not after sleeping
+// out the full backoff. Lengthens the backoff to a value a real caller would
+// never wait out, so a non-ctx-aware wait (plain time.Sleep) would make this
+// test itself run for that long — a wide, non-flaky margin to detect the
+// regression without timing the fix precisely.
+func TestGitRunCtxAuth_CancelledDuringBackoffReturnsPromptly(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+	bareDir, err := EnsureBareClone(context.Background(), "acme", "retry-cancel", upstream)
+	if err != nil {
+		t.Fatalf("seed bare: %v", err)
+	}
+
+	prevBackoff := worktreeAddLockRaceBackoff
+	worktreeAddLockRaceBackoff = 5 * time.Second
+	t.Cleanup(func() { worktreeAddLockRaceBackoff = prevBackoff })
+
+	writeFakeGit(t, worktreeAddLockRaceMaxAttempts+5) // always hits the race
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	start := time.Now()
+	err = gitRunCtxAuth(ctx, bareDir, CloneAuth{}, "worktree", "add", "--detach", wt, "main")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error once the context is cancelled mid-backoff")
+	}
+	// Generous relative to both the 20ms ctx timeout and process-spawn
+	// overhead, but two full orders of magnitude under the 5s backoff — only
+	// a caller that ignored ctx during the wait could take this long.
+	if elapsed > time.Second {
+		t.Errorf("gitRunCtxAuth took %v to return after ctx cancellation, want well under the %v backoff (ctx-aware wait must interrupt the pause)", elapsed, worktreeAddLockRaceBackoff)
 	}
 }
