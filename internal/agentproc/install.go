@@ -195,13 +195,27 @@ func parseNodeMajor(version string) (int, error) {
 // transitive dependency tree, and `npm ci` refuses to drift if the
 // lockfile is out of sync with package.json — bugs in user environments
 // won't be papered over by silent dependency upgrades.
+//
+// --ignore-scripts disables lifecycle scripts (preinstall/install/
+// postinstall) for every package in the tree. This install runs on the
+// host in the (currently privileged) process's context, so a malicious
+// or compromised transitive dependency can't ride a postinstall hook to
+// execute arbitrary code at install time — npm postinstall is the most
+// commonly abused supply-chain channel. Verified against the pinned
+// tree (package-lock.json): none of its 110 packages set
+// hasInstallScript, and the SDK's per-platform native binaries
+// (@anthropic-ai/claude-agent-sdk-<os>-<arch>) ship prebuilt, selected
+// by npm via optionalDependencies os/cpu fields — no build step to lose.
+// If a future sdkVersion bump pulls in a dependency that genuinely
+// needs a lifecycle script, that's a signal to vendor/prebuild it, not
+// to drop this flag.
 func installSDKIfNeeded(sdkDir string) error {
 	pkgFile := filepath.Join(sdkDir, "node_modules", "@anthropic-ai", "claude-agent-sdk", "package.json")
 	if installed, err := readInstalledSDKVersion(pkgFile); err == nil && installed == sdkVersion {
 		return nil
 	}
 
-	cmd := exec.Command("npm", "ci", "--no-audit", "--no-fund", "--silent")
+	cmd := exec.Command("npm", "ci", "--no-audit", "--no-fund", "--silent", "--ignore-scripts")
 	cmd.Dir = sdkDir
 	cmd.Env = os.Environ()
 	combined, err := cmd.CombinedOutput()

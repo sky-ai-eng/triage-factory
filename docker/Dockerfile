@@ -56,6 +56,9 @@ WORKDIR /sdk-install
 # constant moves or changes shape, which is the right failure mode:
 # better a loud build break than a silent runtime SDK reinstall
 # attempt against a runtime layer that has no node/npm.
+# --ignore-scripts mirrors installSDKIfNeeded in install.go: this bakes
+# the same pinned tree into the shipped image, so it gets the same
+# supply-chain hardening against a malicious postinstall hook.
 COPY internal/agentproc/package-lock.json ./package-lock.json
 COPY internal/agentproc/wrapper.mjs ./wrapper.mjs
 COPY internal/agentproc/install.go /tmp/install.go
@@ -67,7 +70,7 @@ RUN set -eu; \
     fi; \
     echo "Using sdkVersion=${SDK_VERSION} (from internal/agentproc/install.go)"; \
     printf '{\n  "name": "triagefactory-sdk-runtime",\n  "private": true,\n  "type": "module",\n  "dependencies": {\n    "@anthropic-ai/claude-agent-sdk": "%s"\n  }\n}\n' "$SDK_VERSION" > package.json; \
-    npm ci --no-audit --no-fund --omit=dev; \
+    npm ci --no-audit --no-fund --omit=dev --ignore-scripts; \
     rm -f /tmp/install.go
 
 # --- stage 3: static Go binary ----------------------------------------------
