@@ -33,7 +33,7 @@ events at the tracker's publish boundary.
 ## Running it
 
 ```bash
-./scripts/poll-bench.sh --shape dp1                 # the design-partner shape
+./scripts/poll-bench.sh --shape dp1                 # the large-org GHES shape
 ./scripts/poll-bench.sh --shape smoke --latency 0   # fast local sanity run
 ./scripts/poll-bench.sh --shape dp1 --rate-limit 200 --rate-limit-window 60s
 ./scripts/poll-bench.sh --repos 100 --prs-mean 30 --files-mean 20 --seed 7
@@ -71,10 +71,10 @@ mean (~70% of repos below the mean, ~25% up to 3×, ~5% pathological at
 exceed the 100-PR page size.
 
 > The `dp1` numbers are placeholders approximating a large single-org GHES
-> deployment (~700 developers). Replace them with the partner's real repo /
-> open-PR counts when provided, and record their GHES rate-limit
-> configuration here alongside — GHES admins control those limits, so the
-> `--rate-limit` value worth testing is deployment-specific.
+> deployment (several hundred to a few thousand developers). Replace them with a
+> real deployment's repo / open-PR counts when available, and record that
+> deployment's GHES rate-limit configuration here alongside — GHES admins control
+> those limits, so the `--rate-limit` value worth testing is deployment-specific.
 
 ## What the report shows
 
