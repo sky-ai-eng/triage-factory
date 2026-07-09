@@ -142,13 +142,86 @@ func TestValidateLaunchParams_RejectsForgedNetns(t *testing.T) {
 	}
 }
 
-// TestValidateLaunchParams_RejectsBadRlimit pins that only the closed set of
-// rlimit types is accepted.
+// TestValidateLaunchParams_RejectsBadRlimit pins the rlimit boundary: an
+// unlisted type, a soft limit above the hard limit, and a duplicated type
+// are all rejected.
 func TestValidateLaunchParams_RejectsBadRlimit(t *testing.T) {
+	cases := map[string][]Rlimit{
+		"unlisted type": {{Type: "RLIMIT_MEMLOCK", Soft: 1, Hard: 1}},
+		"soft > hard":   {{Type: "RLIMIT_NOFILE", Soft: 2048, Hard: 1024}},
+		"duplicate type": {
+			{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 1024},
+			{Type: "RLIMIT_NOFILE", Soft: 512, Hard: 512},
+		},
+	}
+	for name, rl := range cases {
+		p := validParams()
+		p.Rlimits = rl
+		if err := ValidateLaunchParams(p); err == nil {
+			t.Errorf("%s: accepted a bad rlimit set; want rejection", name)
+		}
+	}
+}
+
+// TestValidateLaunchParams_RejectsNonAbsolutePaths pins that the paths the
+// broker binds (worktree, sdk, mount source/destination) must be clean
+// absolute paths — caught at the boundary, not late inside runsc.
+func TestValidateLaunchParams_RejectsNonAbsolutePaths(t *testing.T) {
+	worktree := validParams()
+	worktree.Worktree = "relative/worktree"
+	if err := ValidateLaunchParams(worktree); err == nil {
+		t.Error("accepted a relative worktree; want rejection")
+	}
+
+	unclean := validParams()
+	unclean.SDKDir = "/opt/tf/../tf/sdk"
+	if err := ValidateLaunchParams(unclean); err == nil {
+		t.Error("accepted a non-clean sdk dir; want rejection")
+	}
+
+	relSource := validParams()
+	relSource.Mounts = []Mount{{Source: "rel/src", Destination: "/work/x"}}
+	if err := ValidateLaunchParams(relSource); err == nil {
+		t.Error("accepted a relative mount source; want rejection")
+	}
+}
+
+// TestValidateLaunchParams_RejectsBadMountOption pins that a mount option
+// outside the honored ro/rw set is rejected, so a caller can't slip a
+// surprising mount flag into the broker-built spec.
+func TestValidateLaunchParams_RejectsBadMountOption(t *testing.T) {
 	p := validParams()
-	p.Rlimits = []Rlimit{{Type: "RLIMIT_MEMLOCK", Soft: 1, Hard: 1}}
+	p.Mounts = []Mount{{Source: "/host/x", Destination: "/work/x", Options: []string{"suid"}}}
 	if err := ValidateLaunchParams(p); err == nil {
-		t.Fatal("accepted an unlisted rlimit type; want rejection")
+		t.Fatal("accepted an unsupported mount option; want rejection")
+	}
+	// ro/rw (and no options) are honored.
+	for _, opts := range [][]string{nil, {"ro"}, {"rw"}} {
+		ok := validParams()
+		ok.Mounts = []Mount{{Source: "/host/x", Destination: "/work/x", Options: opts}}
+		if err := ValidateLaunchParams(ok); err != nil {
+			t.Errorf("mount options %v rejected: %v", opts, err)
+		}
+	}
+}
+
+// TestValidateLaunchParams_RejectsMalformedEnvEntry pins the env-entry
+// boundary beyond the allowlist: an empty key, a key carrying '=' or NUL,
+// and a value carrying NUL are all rejected so the broker never folds a
+// misparsing entry into the spec.
+func TestValidateLaunchParams_RejectsMalformedEnvEntry(t *testing.T) {
+	cases := map[string]EnvVar{
+		"empty key":   {Key: "", Value: "x"},
+		"key has =":   {Key: "HO=ME", Value: "x"},
+		"key has NUL": {Key: "HO\x00ME", Value: "x"},
+		"value NUL":   {Key: "HOME", Value: "a\x00b"},
+	}
+	for name, e := range cases {
+		p := validParams()
+		p.Env = append(p.Env, e)
+		if err := ValidateLaunchParams(p); err == nil {
+			t.Errorf("%s: accepted a malformed env entry; want rejection", name)
+		}
 	}
 }
 

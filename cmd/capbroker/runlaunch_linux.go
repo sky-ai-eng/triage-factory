@@ -118,7 +118,11 @@ func (s *Server) launchRun(ctx context.Context, a launchRunArgs) (any, error) {
 		return nil, fmt.Errorf("capbroker: prepare bundle: %w", err)
 	}
 
-	conn, err := net.DialTimeout("unix", p.StdioSocketPath, dialStdioTimeout)
+	// DialContext (not DialTimeout) so the dial stays responsive to the call
+	// budget / broker shutdown carried by ctx, while dialStdioTimeout still
+	// bounds a stale/misconfigured socket path.
+	dialer := net.Dialer{Timeout: dialStdioTimeout}
+	conn, err := dialer.DialContext(ctx, "unix", p.StdioSocketPath)
 	if err != nil {
 		_ = sandbox.RemoveBundle(bundleDir)
 		return nil, fmt.Errorf("capbroker: dial stdio socket %s: %w", p.StdioSocketPath, err)

@@ -301,7 +301,7 @@ func validateNetnsPath(p string) error {
 	}
 	dir, name := filepath.Split(p)
 	if filepath.Clean(dir) != "/var/run/netns" && filepath.Clean(dir) != "/run/netns" {
-		return fmt.Errorf("sandbox: netns path %q is not under /var/run/netns", p)
+		return fmt.Errorf("sandbox: netns path %q is not under /var/run/netns (or /run/netns)", p)
 	}
 	if _, ok := subnetIdxFromNetnsName(name); !ok {
 		return fmt.Errorf("sandbox: netns name %q is not a broker-created sandbox namespace", name)
@@ -344,24 +344,24 @@ func ValidateLaunchParams(p LaunchParams) error {
 	if _, ok := rootfsCatalog[orDefaultRootfs(p.Rootfs.Name)]; !ok {
 		return fmt.Errorf("sandbox: unknown rootfs variant %q (catalog: %s)", p.Rootfs.Name, catalogNames())
 	}
-	if p.Worktree == "" {
-		return fmt.Errorf("sandbox: worktree is required")
+	// Worktree (/work) and SDKDir (/sdk) become bind-mount SOURCES the
+	// privileged broker mounts; require clean absolute paths at the boundary
+	// so a relative or non-clean value can't resolve to an unintended host
+	// location or fail late inside runsc.
+	if err := validateAbsCleanPath("worktree", p.Worktree); err != nil {
+		return err
 	}
-	if p.SDKDir == "" {
-		return fmt.Errorf("sandbox: sdk dir is required")
+	if err := validateAbsCleanPath("sdk dir", p.SDKDir); err != nil {
+		return err
 	}
 	if err := validateArgv(p.Args); err != nil {
 		return err
 	}
-	for _, e := range p.Env {
-		if !envKeyAllowed(e.Key) {
-			return fmt.Errorf("sandbox: env key %q is not on the sandbox allowlist", e.Key)
-		}
+	if err := validateEnv(p.Env); err != nil {
+		return err
 	}
-	for _, r := range p.Rlimits {
-		if _, ok := allowedRlimitTypes[r.Type]; !ok {
-			return fmt.Errorf("sandbox: rlimit type %q is not allowed", r.Type)
-		}
+	if err := validateRlimits(p.Rlimits); err != nil {
+		return err
 	}
 	if err := validateMounts(p.Mounts); err != nil {
 		return err
@@ -382,18 +382,98 @@ func orDefaultRootfs(name string) string {
 	return name
 }
 
+// allowedMountOptions is the closed set of per-mount options the broker
+// honors. The run-data mounts the orchestrator sends only ever need
+// read-only vs read-write; restricting to this set stops a compromised
+// caller from slipping a surprising option (dev, suid, exec, …) into the
+// broker-built spec. "rbind" is added by the broker itself (mountsFromExtra)
+// and is not caller-supplied.
+var allowedMountOptions = map[string]struct{}{
+	"ro": {},
+	"rw": {},
+}
+
 // validateMounts is defense-in-depth on the run-data bind mounts. They are
 // not an escalation vector (they land in the already-unprivileged sandbox,
-// never the rootfs), but a mount destination must still be a clean
-// absolute path so a malformed descriptor can't produce a surprising spec.
+// never the rootfs), but the broker performs the bind with capabilities, so
+// require both Source and Destination to be clean absolute paths and the
+// Options to be within the small honored set — a malformed descriptor can't
+// then produce a surprising spec or an unexpected mount flag.
 func validateMounts(mounts []Mount) error {
 	for _, m := range mounts {
-		if m.Source == "" {
-			return fmt.Errorf("sandbox: mount for %q has no source", m.Destination)
+		if err := validateAbsCleanPath("mount source", m.Source); err != nil {
+			return err
 		}
-		if !filepath.IsAbs(m.Destination) || m.Destination != filepath.Clean(m.Destination) {
-			return fmt.Errorf("sandbox: mount destination %q must be a clean absolute path", m.Destination)
+		if err := validateAbsCleanPath("mount destination", m.Destination); err != nil {
+			return err
 		}
+		for _, o := range m.Options {
+			if _, ok := allowedMountOptions[o]; !ok {
+				return fmt.Errorf("sandbox: mount %q has unsupported option %q (only ro/rw)", m.Destination, o)
+			}
+		}
+	}
+	return nil
+}
+
+// validateAbsCleanPath rejects a path that is empty, not absolute, not
+// already cleaned, or that carries a NUL. Used for the paths the broker
+// binds (worktree, sdk, mount sources/destinations) so the RPC boundary —
+// not a late runsc failure — is where a bad path is caught.
+func validateAbsCleanPath(kind, p string) error {
+	if p == "" {
+		return fmt.Errorf("sandbox: %s is required", kind)
+	}
+	if strings.IndexByte(p, 0) >= 0 {
+		return fmt.Errorf("sandbox: %s contains NUL", kind)
+	}
+	if !filepath.IsAbs(p) || p != filepath.Clean(p) {
+		return fmt.Errorf("sandbox: %s %q must be a clean absolute path", kind, p)
+	}
+	return nil
+}
+
+// validateEnv checks every env entry against the allowlist AND rejects
+// malformed entries — an empty key, a key carrying '=' or NUL, or a value
+// carrying NUL — so the broker never folds an entry into the spec that
+// would misparse or fail at exec/syscall time. Values are otherwise
+// unrestricted (URLs, per-run placeholder tokens); only the key is
+// allowlisted.
+func validateEnv(env []EnvVar) error {
+	for _, e := range env {
+		if e.Key == "" {
+			return fmt.Errorf("sandbox: env entry has an empty key")
+		}
+		if strings.ContainsAny(e.Key, "=\x00") {
+			return fmt.Errorf("sandbox: env key %q contains '=' or NUL", e.Key)
+		}
+		if strings.IndexByte(e.Value, 0) >= 0 {
+			return fmt.Errorf("sandbox: env value for %q contains NUL", e.Key)
+		}
+		if !envKeyAllowed(e.Key) {
+			return fmt.Errorf("sandbox: env key %q is not on the sandbox allowlist", e.Key)
+		}
+	}
+	return nil
+}
+
+// validateRlimits checks the numeric resource shape: each type must be on
+// the allowlist, soft must not exceed hard, and a type must not repeat.
+// Catching this at the RPC boundary keeps runtime behavior predictable
+// rather than surfacing as a late, opaque runsc failure.
+func validateRlimits(rl []Rlimit) error {
+	seen := make(map[string]struct{}, len(rl))
+	for _, r := range rl {
+		if _, ok := allowedRlimitTypes[r.Type]; !ok {
+			return fmt.Errorf("sandbox: rlimit type %q is not allowed", r.Type)
+		}
+		if r.Soft > r.Hard {
+			return fmt.Errorf("sandbox: rlimit %s soft %d exceeds hard %d", r.Type, r.Soft, r.Hard)
+		}
+		if _, dup := seen[r.Type]; dup {
+			return fmt.Errorf("sandbox: rlimit type %q is set more than once", r.Type)
+		}
+		seen[r.Type] = struct{}{}
 	}
 	return nil
 }
@@ -411,10 +491,12 @@ func envVarsToStrings(env []EnvVar) []string {
 }
 
 // stringsToEnvVars splits a "K=V" slice into structured pairs at the first
-// '='. The orchestrator builds the sandbox env as "K=V" strings (base env
-// + proxy additions); this is the boundary conversion into the validated
-// wire shape. A malformed entry with no '=' becomes an all-key pair, which
-// the allowlist then rejects — the correct loud failure.
+// '='. The orchestrator builds the sandbox env as "K=V" strings (base env +
+// proxy additions), which always contain '='; this is the boundary
+// conversion into the validated wire shape. An entry with no '=' becomes a
+// key-only pair (empty value); the broker's validateEnv then rejects it
+// unless the whole string happens to be an allowlisted key, in which case it
+// folds to "KEY=" — harmless, and never produced by the real orchestrator env.
 func stringsToEnvVars(env []string) []EnvVar {
 	out := make([]EnvVar, 0, len(env))
 	for _, kv := range env {
