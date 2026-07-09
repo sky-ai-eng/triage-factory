@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/capbroker"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
 	"github.com/sky-ai-eng/triage-factory/cmd/hook"
 	"github.com/sky-ai-eng/triage-factory/cmd/install"
@@ -43,6 +44,15 @@ func dispatchCLI(args []string) (handled bool, err error) {
 		// capture's filter-honoring git never runs as root over agent-writable
 		// config. Undocumented in --help, like `hook`.
 		handleSnapshotCapture(args[1:])
+	case "cap-broker":
+		// Internal: the privilege-separation broker. Holds the host's
+		// netns/iptables/cgroup/rootfs capabilities in a process
+		// separate from the orchestrator; only spawned by the orchestrator
+		// itself (never by a delegated agent). Deliberately off the agent
+		// `exec` allowlist, same separation as `hook` / `snapshot-capture` —
+		// a sandboxed `Bash(<bin> exec *)` can never reach it. Undocumented
+		// in --help, like the others.
+		capbroker.Handle(args[1:])
 	case "install":
 		install.Handle(args[1:])
 	case "uninstall":

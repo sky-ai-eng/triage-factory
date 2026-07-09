@@ -10,11 +10,38 @@ import (
 
 // defaultOps is the PrivilegedOps implementation every entry point in
 // this package (wrap, Close, reapOrphansImpl) calls through. hostOps
-// is the only implementation today — every privileged operation runs
-// in-process with exactly the code that lived directly in those entry
-// points before this seam existed. A future PS-P1 broker client slots
-// in here without touching any call site.
+// is the default — every privileged operation runs in-process with
+// exactly the code that lived directly in those entry points before
+// this seam existed. SetPrivilegedOps swaps this for an IPC client when
+// TF_PRIVSEP=1, at zero call-site churn.
 var defaultOps PrivilegedOps = hostOps{}
+
+// SetPrivilegedOps replaces the package's PrivilegedOps implementation.
+// The orchestrator's cap-broker wiring (cmd/capbroker) calls this once at
+// boot — after starting and dialing the broker — to route every
+// subsequent wrap() / Close() / reapOrphansImpl() through the IPC client
+// instead of in-process hostOps. TF_PRIVSEP unset (the default) means
+// this is never called and defaultOps stays hostOps{}: today's behavior,
+// byte-identical.
+//
+// Not synchronized: it's a single boot-time call made before any Wrap or
+// ReapOrphans runs, exactly like defaultOps's own package-level
+// initialization above. Calling it after a sandbox is already live would
+// race; callers must not.
+func SetPrivilegedOps(ops PrivilegedOps) {
+	defaultOps = ops
+}
+
+// NewHostOps returns the in-process PrivilegedOps implementation — the
+// same one defaultOps uses by default. The cap-broker subcommand
+// (cmd/capbroker) constructs one of these to serve the real
+// netns/iptables/cgroup/rootfs operations over its RPC socket — the same
+// in-process implementation this package has always used, reached
+// through the exported constructor rather than the unexported hostOps
+// type.
+func NewHostOps() PrivilegedOps {
+	return hostOps{}
+}
 
 // hostOps implements PrivilegedOps by calling the existing in-process
 // helpers directly. It holds no state of its own — every method is a

@@ -153,3 +153,19 @@ func TestBuildAllowedTools_DangerousGoCommandsStillBlocked(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildAllowedTools_CapBrokerNotReachable pins the privilege-
+// separation boundary: cap-broker holds the host's
+// netns/iptables/cgroup/rootfs capabilities and must never be invocable
+// from inside a sandboxed run. It is wired in cli.go's dispatchCLI as its
+// own top-level case — like `hook` / `snapshot-capture` — never under
+// `exec`, so the allowlist's only TF-binary pattern
+// (`Bash(<selfBin> exec *)`) can never match `<selfBin> cap-broker ...`.
+// This test is the regression guard for that separation: the allowlist
+// must never name cap-broker directly either.
+func TestBuildAllowedTools_CapBrokerNotReachable(t *testing.T) {
+	base := BuildAllowedTools("/usr/local/bin/tf")
+	if strings.Contains(base, "cap-broker") {
+		t.Error("allowlist must not name cap-broker — that would let a sandboxed agent invoke the privileged broker subcommand")
+	}
+}
