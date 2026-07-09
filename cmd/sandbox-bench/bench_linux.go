@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/csv"
 	"fmt"
@@ -23,17 +22,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// handle is one live benchmark sandbox: the runsc cmd, the sandbox
+// handle is one live benchmark sandbox: the launched run, the sandbox
 // teardown state, and the cancel that SIGKILLs it.
 type handle struct {
 	id     int
 	sb     *sandbox.Sandbox
-	cmd    *exec.Cmd
+	run    sandbox.LaunchedRun
 	cancel context.CancelFunc
 
 	waitOnce sync.Once
 	waitErr  error
-	stderr   *bytes.Buffer
 	// closeMock shuts down the per-run mock LLM endpoint (claude
 	// profile only; nil otherwise).
 	closeMock func()
@@ -42,7 +40,7 @@ type handle struct {
 // wait reaps the runsc process exactly once; safe to call from both
 // the ready-watcher and teardown.
 func (h *handle) wait() error {
-	h.waitOnce.Do(func() { h.waitErr = h.cmd.Wait() })
+	h.waitOnce.Do(func() { h.waitErr = h.run.Wait() })
 	return h.waitErr
 }
 
@@ -361,7 +359,7 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int) (*handle, time.D
 
 	runCtx, cancel := context.WithCancel(ctx)
 	start := time.Now()
-	cmd, sb, err := sandbox.Wrap(runCtx, sandbox.Config{
+	run, sb, err := sandbox.Wrap(runCtx, sandbox.Config{
 		RunID:            fmt.Sprintf("bench-%04d", id),
 		Worktree:         worktree,
 		SDKDir:           sdkDir,
@@ -380,10 +378,11 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int) (*handle, time.D
 	}
 	spawnDur := time.Since(start)
 
-	h := &handle{id: id, sb: sb, cmd: cmd, cancel: cancel, stderr: &bytes.Buffer{}, closeMock: closeMock}
+	h := &handle{id: id, sb: sb, run: run, cancel: cancel, closeMock: closeMock}
 	fail := func(err error) (*handle, time.Duration, time.Duration, error) {
 		cancel()
 		_ = h.wait()
+		_ = run.Close()
 		_ = sb.Close()
 		if closeMock != nil {
 			closeMock()
@@ -391,35 +390,21 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int) (*handle, time.D
 		return nil, 0, 0, err
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
+	// LaunchedRun starts the run; its Stdin/Stdout are valid only after
+	// Start, and its stderr is captured internally (read via run.Stderr()).
+	if err := run.Start(); err != nil {
 		cancel()
+		_ = run.Close()
 		_ = sb.Close()
 		if closeMock != nil {
 			closeMock()
 		}
 		return nil, 0, 0, err
 	}
+	stdout := run.Stdout()
 	var stdin io.WriteCloser
 	if cfg.profile == "claude" {
-		stdin, err = cmd.StdinPipe()
-		if err != nil {
-			cancel()
-			_ = sb.Close()
-			if closeMock != nil {
-				closeMock()
-			}
-			return nil, 0, 0, err
-		}
-	}
-	cmd.Stderr = h.stderr
-	if err := cmd.Start(); err != nil {
-		cancel()
-		_ = sb.Close()
-		if closeMock != nil {
-			closeMock()
-		}
-		return nil, 0, 0, err
+		stdin = run.Stdin()
 	}
 
 	if cfg.profile == "claude" {
@@ -460,22 +445,25 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int) (*handle, time.D
 	case <-ready:
 		return h, spawnDur, time.Since(start), nil
 	case <-time.After(readyTimeout):
-		// Reap first so ProcessState reflects reality — an OOM-killed
-		// sandbox otherwise reads as "still running".
+		// Reap first so the exit reflects reality — an OOM-killed sandbox
+		// otherwise reads as "still running".
 		h.cancel()
-		_ = h.wait()
-		waitErr := "still running"
-		if cmd.ProcessState != nil {
-			waitErr = cmd.ProcessState.String()
+		waitErr := "exited"
+		if e := h.wait(); e != nil {
+			waitErr = e.Error()
+		}
+		if h.run.OOMKilled() {
+			waitErr += " (oom-killed)"
 		}
 		mockHits := int64(-1)
 		if mock != nil {
 			mockHits = mock.requests.Load()
 		}
 		return fail(fmt.Errorf("workload not ready after %s (proc: %s, mock hits: %d, stderr: %s)",
-			readyTimeout, waitErr, mockHits, lastLines(h.stderr, 5)))
+			readyTimeout, waitErr, mockHits, lastLines(h.run.Stderr(), 5)))
 	case <-runCtx.Done():
 		_ = h.wait()
+		_ = run.Close()
 		_ = sb.Close()
 		if closeMock != nil {
 			closeMock()
@@ -494,7 +482,7 @@ func runOneShot(ctx context.Context, cfg benchConfig, name string, argv []string
 	defer os.RemoveAll(worktree)
 	defer os.RemoveAll(sdkDir)
 
-	cmd, sb, err := sandbox.Wrap(ctx, sandbox.Config{
+	run, sb, err := sandbox.Wrap(ctx, sandbox.Config{
 		RunID:    name,
 		Worktree: worktree,
 		SDKDir:   sdkDir,
@@ -505,9 +493,17 @@ func runOneShot(ctx context.Context, cfg benchConfig, name string, argv []string
 		return err
 	}
 	defer func() { _ = sb.Close() }()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w (output: %s)", err, bytes.TrimSpace(out))
+	defer func() { _ = run.Close() }()
+
+	// Drive the run to completion: drain stdout (so the workload never
+	// blocks on a full pipe), then Wait, mirroring the old cmd.CombinedOutput.
+	if err := run.Start(); err != nil {
+		return err
+	}
+	out, _ := io.ReadAll(run.Stdout())
+	if err := run.Wait(); err != nil {
+		combined := strings.TrimSpace(string(out) + run.Stderr())
+		return fmt.Errorf("%w (output: %s)", err, combined)
 	}
 	return nil
 }
@@ -644,6 +640,7 @@ func teardownAll(live []*handle) {
 			defer func() { <-sem }()
 			h.cancel()
 			_ = h.wait()
+			_ = h.run.Close()
 			if err := h.sb.Close(); err != nil {
 				fmt.Printf("  close %d: %v\n", h.id, err)
 			}
@@ -671,12 +668,12 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 	}
 }
 
-func lastLines(buf *bytes.Buffer, n int) string {
-	lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}
-	return string(bytes.Join(lines, []byte(" | ")))
+	return strings.Join(lines, " | ")
 }
 
 func writeCSV(path, profile string, results []levelResult) error {

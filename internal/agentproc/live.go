@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os/exec"
 	"sync"
 	"time"
 )
@@ -171,19 +170,17 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 	// byte-identical. cmd.StdinPipe / cmd.StdoutPipe below are wired
 	// identically for both — the reader loop is transport-agnostic.
 	var (
-		cmd       *exec.Cmd
-		cleanup   = func() {}
-		oomKilled func() bool
+		proc    runProc
+		cleanup = func() {}
 	)
 	if shouldSandbox() {
-		sandboxCmd, sandboxCleanup, oom, serr := newSandboxCommand(runCtx, opts, wrapperPath)
+		sandboxProc, sandboxCleanup, serr := newSandboxCommand(runCtx, opts, wrapperPath)
 		if serr != nil {
 			cancel()
 			return nil, serr
 		}
-		cmd = sandboxCmd
+		proc = sandboxProc
 		cleanup = sandboxCleanup
-		oomKilled = oom
 	} else {
 		nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
 		directCmd, derr := newDirectCommand(runCtx, opts, nodeArgs)
@@ -191,53 +188,36 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 			cancel()
 			return nil, derr
 		}
-		cmd = directCmd
+		directProc, perr := newExecProc(directCmd)
+		if perr != nil {
+			cancel()
+			return nil, perr
+		}
+		proc = directProc
 	}
 
 	// From here a pre-launch failure must tear down the sandbox bring-up
 	// (cleanup) as well as release the derived ctx (cancel); cleanup is a
 	// no-op on the direct path. Once readLoop is running it owns cleanup, so
-	// there are no cleanup() calls past the go-statement below.
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		cleanup()
-		cancel()
-		return nil, fmt.Errorf("stdin pipe: %w", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		// StdinPipe already succeeded, but on this path neither Start nor
-		// Wait runs — and it's Wait that auto-closes the StdinPipe write end —
-		// so close the pipe we own explicitly to avoid leaking the fd. (The
-		// normal exit path needs no such close: readLoop always reaches
-		// cmd.Wait, which closes it.)
-		_ = stdin.Close()
-		cleanup()
-		cancel()
-		return nil, fmt.Errorf("stdout pipe: %w", err)
-	}
-
-	// Stderr is written by exec's copy goroutine and only read after the
-	// process exits (inside the reader loop, after cmd.Wait), so a plain
-	// buffer is safe here.
-	stderr := newSyncBuffer()
-	cmd.Stderr = stderr
-
-	if err := cmd.Start(); err != nil {
+	// there are no cleanup() calls past the go-statement below. The stdio
+	// pipes/socket + stderr capture are set up inside the runProc (execProc
+	// for the direct path, the sandbox LaunchedRun otherwise); Stdin/Stdout
+	// are valid only after Start.
+	if err := proc.Start(); err != nil {
 		cleanup()
 		cancel()
 		return nil, fmt.Errorf("start agent runtime: %w", err)
 	}
 
 	l := &LiveRun{
-		stdin:   stdin,
+		stdin:   proc.Stdin(),
 		cancel:  cancel,
 		cleanup: cleanup,
 		done:    make(chan struct{}),
 		ready:   make(chan struct{}),
 	}
 
-	go l.readLoop(runCtx, cmd, stdout, stderr, sink, perms, opts.OnResult, opts.TraceID, oomKilled)
+	go l.readLoop(runCtx, proc, sink, perms, opts.OnResult, opts.TraceID)
 
 	// Send the initial prompt once the wrapper is ready. Done in its own
 	// goroutine so RunInteractive returns immediately; Send blocks on the
@@ -389,34 +369,35 @@ func (l *LiveRun) writeControl(v map[string]any) error {
 // readLoop is the single goroutine that owns the sink and the
 // subprocess lifecycle: it consumes the stream until EOF/ctx, waits on
 // the process, and records the terminal state.
-func (l *LiveRun) readLoop(runCtx context.Context, cmd *exec.Cmd, stdout io.Reader, stderr *syncBuffer, sink Sink, perms PermissionHandler, onResult func(*Result), traceID string, oomKilled func() bool) {
+func (l *LiveRun) readLoop(runCtx context.Context, proc runProc, sink Sink, perms PermissionHandler, onResult func(*Result), traceID string) {
 	defer close(l.done)
 
 	stream := NewStreamState()
-	result, streamErr := l.consumeStreamInteractive(stdout, sink, stream, perms, onResult, traceID)
+	result, streamErr := l.consumeStreamInteractive(proc.Stdout(), sink, stream, perms, onResult, traceID)
 
 	// If the stream reader bailed before any terminal result, the
 	// subprocess may still be running with data to write — kill the
-	// process group so cmd.Wait doesn't block on a stuck pipe.
+	// process (via ctx cancel) so Wait doesn't block on a stuck pipe.
 	if streamErr != nil && result == nil {
 		l.cancel()
 	}
 
-	waitErr := cmd.Wait()
+	waitErr := proc.Wait()
 
 	l.mu.Lock()
 	l.result = result
 	l.sessionID = stream.SessionID()
-	l.stderr = stderr.String()
+	l.stderr = proc.Stderr()
 	switch {
 	case streamErr != nil && result == nil:
 		l.termErr = fmt.Errorf("stream: %w", streamErr)
 	case waitErr != nil && result == nil:
 		if runCtx.Err() != nil {
 			l.termErr = runCtx.Err()
-		} else if oomKilled != nil && oomKilled() {
-			// Read before the cleanup below removes the cgroup, so the
-			// attribution reads live memory.events state.
+		} else if proc.OOMKilled() {
+			// OOMKilled is read from the run's Wait result (in-process it is
+			// captured before the cgroup is torn down; brokered the broker
+			// reports it with the exit), so the attribution is stable here.
 			l.termErr = fmt.Errorf("agent runtime killed: %w (%d MB; tune TF_RUN_MEMORY_LIMIT_MB): %v",
 				ErrRunMemoryLimit, runMemoryLimitMB(), waitErr)
 		} else {

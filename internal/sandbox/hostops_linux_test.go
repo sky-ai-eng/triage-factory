@@ -25,6 +25,9 @@ func (f fakePrivilegedOps) EnsureRootfs(ctx context.Context, selector RootfsSele
 func (f fakePrivilegedOps) SetupRunCgroup(name string, limitMB int) (string, *os.File, error) {
 	return "", nil, nil
 }
+func (f fakePrivilegedOps) LaunchRun(ctx context.Context, p LaunchParams) (LaunchedRun, error) {
+	return nil, nil
+}
 func (f fakePrivilegedOps) RemoveRunCgroup(dir string) error      { return nil }
 func (f fakePrivilegedOps) ReapOrphans(ctx context.Context) error { return nil }
 

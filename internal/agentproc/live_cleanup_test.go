@@ -57,12 +57,10 @@ func TestLiveRun_CleanupRunsOncePerExitPath(t *testing.T) {
 			defer cancel()
 
 			cmd := c.build(runCtx)
-			stdout, err := cmd.StdoutPipe()
+			proc, err := newExecProc(cmd)
 			if err != nil {
-				t.Fatalf("StdoutPipe: %v", err)
+				t.Fatalf("newExecProc: %v", err)
 			}
-			stderr := newSyncBuffer()
-			cmd.Stderr = stderr
 
 			var calls int32
 			l := &LiveRun{
@@ -72,10 +70,10 @@ func TestLiveRun_CleanupRunsOncePerExitPath(t *testing.T) {
 				ready:   make(chan struct{}),
 			}
 
-			if err := cmd.Start(); err != nil {
+			if err := proc.Start(); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
-			go l.readLoop(runCtx, cmd, stdout, stderr, NoopSink{}, nil, nil, "t", nil)
+			go l.readLoop(runCtx, proc, NoopSink{}, nil, nil, "t")
 
 			if c.cancel {
 				// Let the reader settle into its blocking read, then cancel:

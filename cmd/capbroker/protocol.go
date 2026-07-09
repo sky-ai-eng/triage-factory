@@ -144,6 +144,34 @@ type removeRunCgroupArgs struct {
 	Dir string `json:"dir"`
 }
 
+// launchRunArgs carries everything the broker needs to exec+supervise the
+// runtime for one prepared bundle, plus the path of the per-run stdio
+// socket the orchestrator is already listening on. The broker dials that
+// path and hands its fd to the runtime; the bytes never enter the broker.
+type launchRunArgs struct {
+	RunID           string `json:"run_id"`
+	BundleDir       string `json:"bundle_dir"`
+	ContainerID     string `json:"container_id"`
+	MemoryLimitMB   int    `json:"memory_limit_mb"`
+	StdioSocketPath string `json:"stdio_socket_path"`
+}
+
+type waitRunArgs struct {
+	RunID string `json:"run_id"`
+}
+
+// waitRunResult reports how a supervised run ended. ExitError is the
+// runsc exit error rendered to a string (empty on clean exit); OOMKilled
+// mirrors the pre-split cgroupOOMKilled read the orchestrator did itself.
+type waitRunResult struct {
+	ExitError string `json:"exit_error,omitempty"`
+	OOMKilled bool   `json:"oom_killed,omitempty"`
+}
+
+type killRunArgs struct {
+	RunID string `json:"run_id"`
+}
+
 // methodCallNames are the wire-name constants shared by client and server.
 const (
 	methodPing            = "Ping"
@@ -153,4 +181,7 @@ const (
 	methodSetupRunCgroup  = "SetupRunCgroup"
 	methodRemoveRunCgroup = "RemoveRunCgroup"
 	methodReapOrphans     = "ReapOrphans"
+	methodLaunchRun       = "LaunchRun"
+	methodWaitRun         = "WaitRun"
+	methodKillRun         = "KillRun"
 )

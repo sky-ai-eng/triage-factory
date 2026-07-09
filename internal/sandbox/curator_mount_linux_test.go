@@ -73,12 +73,13 @@ func TestIntegration_SharedRORepoMount(t *testing.T) {
 	run := func(t *testing.T, cfg Config) string {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cmd, sb, err := Wrap(ctx, cfg)
+		run, sb, err := Wrap(ctx, cfg)
 		if err != nil {
 			t.Fatalf("Wrap: %v", err)
 		}
 		defer sb.Close()
-		out, _ := cmd.CombinedOutput()
+		defer run.Close()
+		out, _ := runToCompletion(t, run)
 		return string(out)
 	}
 

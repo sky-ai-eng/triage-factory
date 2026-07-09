@@ -4,14 +4,13 @@ package sandbox
 
 import (
 	"context"
-	"os/exec"
 )
 
 // wrap on non-Linux returns ErrUnsupportedPlatform. The agentproc
 // caller gates on runtime.GOOS == "linux" so this should never fire
 // in production — it's the safety net for misconfigured deployment
 // or developer-machine multi-mode testing.
-func wrap(_ context.Context, _ Config) (*exec.Cmd, *Sandbox, error) {
+func wrap(_ context.Context, _ Config) (LaunchedRun, *Sandbox, error) {
 	return nil, nil, ErrUnsupportedPlatform
 }
 
@@ -21,9 +20,4 @@ func wrap(_ context.Context, _ Config) (*exec.Cmd, *Sandbox, error) {
 // Sandbox.
 func (s *Sandbox) Close() error {
 	return nil
-}
-
-// OOMKilled on non-Linux is always false — no sandbox, no cgroup.
-func (s *Sandbox) OOMKilled() bool {
-	return false
 }
