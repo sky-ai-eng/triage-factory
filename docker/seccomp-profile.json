@@ -600,7 +600,7 @@
         "mount_setattr",
         "move_mount",
         "open_tree",
-        "quotactl_fd",
+        "pivot_root",
         "setdomainname",
         "sethostname",
         "setns",
@@ -613,7 +613,8 @@
         "caps": [
           "CAP_SYS_ADMIN"
         ]
-      }
+      },
+      "comment": "TFAC-608: pivot_root added to this group — the one syscall empirical validation (real runsc release-20260511, --platform=systrap) found missing from Docker's default profile for runsc to construct the per-run sandbox's mount namespace. Folded in here (not a separate unconditional allow) because pivot_root(2) requires CAP_SYS_ADMIN, same as mount/unshare/setns above. See docs/self-host-setup.md#tailored-seccomp-profile."
     },
     {
       "names": [
@@ -739,14 +740,6 @@
           "CAP_SYS_NICE"
         ]
       }
-    },
-    {
-      "comment": "TFAC-608: required by runsc (gVisor) to construct the per-run sandbox's mount namespace (--platform=systrap). Empirically the only syscall Docker's default allowlist was missing across the full validated lifecycle (spawn, agent execution incl. real network egress, teardown, orphan reap) plus the netns/veth/iptables/cgroup-remount/chroot+apk-rootfs-bake setup path. See docs/self-host-setup.md#tailored-seccomp-profile for the regeneration procedure.",
-      "names": [
-        "pivot_root"
-      ],
-      "action": "SCMP_ACT_ALLOW",
-      "args": []
     }
   ]
 }
