@@ -1116,7 +1116,13 @@ are exactly what "counts + memory" fails to capture:
   (uploaded blobs, private packages) breaks the invariant and would
   have to live as org-scoped artifacts with per-org disk accounting —
   out of sandbox-fleet v1's scope; credentials and egress policy stay
-  per-run in the proxies, never baked into an image.
+  per-run in the proxies, never baked into an image. And when
+  org-authored recipes do ship, the privilege-separation epic
+  (`docs/sandbox-security-architecture.md`) adds a hard constraint:
+  such a build executes customer-influenced package scripts, so it must
+  run in an isolated/unprivileged builder — never in the
+  capability-holding `cap-broker` — which then only mounts the
+  resulting rootfs read-only by verified hash.
 
 None of this is needed while only the "base" profile exists — P1–P3
 deliberately assume one variant and a uniform budget. The gate:

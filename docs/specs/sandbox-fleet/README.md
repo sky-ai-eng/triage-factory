@@ -210,6 +210,23 @@ mints a new hash, so the physical layer never holds ambiguous bytes. The v1
 catalog is curated ("base", "browser"); org-authored entries are later catalog
 rows with authorship — same mechanism, more authors.
 
+**Privilege-separation constraint (privsep epic).** Building a rootfs runs
+`apk add`, which executes each package's install scripts as root; the current
+builder does this via `chroot` (`internal/sandbox/rootfs_linux.go`), and a
+chroot is not a security boundary. For the **curated** v1 catalog this is
+acceptable — the packages are vetted by us and signature-verified against the
+pinned Alpine repo, the same trust surface as today's base rootfs, and the
+variants are pre-baked into the shipped image regardless. But once
+**org-authored recipes** ship (the later catalog rows above), the package set is
+customer-controlled, so the build *executes customer-influenced code*. That
+build must **not** run in the capability-holding `cap-broker` process: it runs in
+an isolated/unprivileged builder that emits an immutable, content-addressed
+image, and the broker only ever *mounts the result read-only by verified hash* —
+never `apk add <customer input>` with host capabilities. This keeps the broker's
+invariant intact (it resolves a name → hash and mounts; it never execs
+orchestrator- or customer-supplied content). See
+`docs/sandbox-security-architecture.md`.
+
 ---
 
 ## 5. Resources dimension + horizontal scaling
@@ -319,3 +336,7 @@ proxy + denylist are shipped and reviewed.
   mechanics (`ConfigureProxies`, `applyEgressPolicy`) this builds on.
 - `internal/sandbox/doc.go` — the Property-A/B credential invariants §7 lives
   inside.
+- `docs/sandbox-security-architecture.md` — the sandbox threat model, the exact
+  host capability requirements, and the privilege-separation (`cap-broker`)
+  design whose "resolve name → mount by hash, never exec supplied content" rule
+  the image dimension's build step must respect (§4).
