@@ -179,6 +179,18 @@ export TF_AGENT_JSC_JIT=1
 
 Applies on both the sandbox and direct/local spawn paths.
 
+### Privilege separation (multi mode, `TF_PRIVSEP`)
+
+Multi mode's per-run gVisor sandbox needs root-equivalent Linux capabilities (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`) to set up netns/veth/iptables, cgroups, and the curated rootfs. By default those operations run in-process, in the same executor that also resolves credentials and parses hostile input (agent output, webhook payloads).
+
+Set `TF_PRIVSEP=1` to route them instead through a separate `cap-broker` subprocess: the executor spawns it once at boot (re-exec of the same binary), and every subsequent sandbox setup/teardown/rootfs/cgroup operation is an RPC to that process over a host-only unix socket (`/run/tf/cap-broker.sock`, mode 0600). This is the first phase of a larger privilege-separation split — see `docs/specs/privsep/README.md` — that eventually drops capabilities from the executor entirely; in this phase both processes still hold them, so it narrows nothing on its own yet, but proves the mechanism ahead of that flip.
+
+```bash
+export TF_PRIVSEP=1
+```
+
+Boolean (case-insensitive: `1`/`true`/`yes`/`on`; unset or any other value is off). **Default off** — existing deployments see no behavior change. **Multi mode + Linux only**; local mode never sandboxes and ignores the flag entirely. If the broker fails to start, boot fails with a clear error rather than silently falling back to the in-process path.
+
 ## GitHub polling
 
 The poller tracks PRs across several categories:

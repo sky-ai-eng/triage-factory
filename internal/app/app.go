@@ -64,6 +64,12 @@ type App struct {
 	stores     db.Stores
 	storedPort int
 
+	// capBroker is the spawned cap-broker subprocess, non-nil only when
+	// TF_PRIVSEP=1 and this host sandboxes runs. nil otherwise — including
+	// every existing deployment, which keeps today's in-process
+	// privileged-ops behavior. Closed in Close().
+	capBroker capBrokerHandle
+
 	// Infra.
 	bus   *eventbus.Bus
 	wsHub *websocket.Hub
@@ -194,6 +200,11 @@ func (a *App) Run(ctx context.Context) error {
 // to call on a partially-built App (nil fields are skipped), so
 // `defer a.Close()` right after New is always correct.
 func (a *App) Close() error {
+	if a.capBroker != nil {
+		if err := a.capBroker.Close(); err != nil {
+			appLog.Error("close cap-broker failed", "error", err)
+		}
+	}
 	if err := a.identity.Close(); err != nil {
 		appLog.Error("release instance identity lock failed", "error", err)
 	}
