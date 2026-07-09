@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/install"
 	"github.com/sky-ai-eng/triage-factory/cmd/jwkinit"
 	"github.com/sky-ai-eng/triage-factory/cmd/migrate"
+	"github.com/sky-ai-eng/triage-factory/cmd/snapshotcapture"
 	"github.com/sky-ai-eng/triage-factory/cmd/uninstall"
 )
 
@@ -43,7 +44,7 @@ func dispatchCLI(args []string) (handled bool, err error) {
 		// JSON. Spawned by the delegate spawner as the sandbox uid so the
 		// capture's filter-honoring git never runs as root over agent-writable
 		// config. Undocumented in --help, like `hook`.
-		handleSnapshotCapture(args[1:])
+		snapshotcapture.Handle(args[1:])
 	case "cap-broker":
 		// Internal: the privilege-separation broker. Holds the host's
 		// netns/iptables/cgroup/rootfs capabilities in a process

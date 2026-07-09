@@ -1,4 +1,4 @@
-package main
+package snapshotcapture
 
 import (
 	"bytes"
@@ -12,11 +12,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// TestRunSnapshotCapture_EmitsDecodableDelta exercises the snapshot-capture
-// child body end to end: capture a real worktree's delta and JSON-encode it, as
-// the re-exec'd child does, and assert the parent can decode a delta carrying
+// TestRun_EmitsDecodableDelta exercises the snapshot-capture child body end
+// to end: capture a real worktree's delta and JSON-encode it, as the
+// re-exec'd child does, and assert the parent can decode a delta carrying
 // the branch, head, and the uncommitted change.
-func TestRunSnapshotCapture_EmitsDecodableDelta(t *testing.T) {
+func TestRun_EmitsDecodableDelta(t *testing.T) {
 	dir := t.TempDir()
 	git := func(args ...string) {
 		t.Helper()
@@ -39,8 +39,8 @@ func TestRunSnapshotCapture_EmitsDecodableDelta(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := runSnapshotCapture(context.Background(), dir, &buf); err != nil {
-		t.Fatalf("runSnapshotCapture: %v", err)
+	if err := Run(context.Background(), dir, &buf); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 	var delta worktree.GitDelta
 	if err := json.Unmarshal(buf.Bytes(), &delta); err != nil {
@@ -57,12 +57,12 @@ func TestRunSnapshotCapture_EmitsDecodableDelta(t *testing.T) {
 	}
 }
 
-// TestRunSnapshotCapture_NonGitRoot pins that a non-git run root emits the null
-// delta (which captureIsolated maps back to nil), not an error.
-func TestRunSnapshotCapture_NonGitRoot(t *testing.T) {
+// TestRun_NonGitRoot pins that a non-git run root emits the null delta
+// (which captureIsolated maps back to nil), not an error.
+func TestRun_NonGitRoot(t *testing.T) {
 	var buf bytes.Buffer
-	if err := runSnapshotCapture(context.Background(), t.TempDir(), &buf); err != nil {
-		t.Fatalf("runSnapshotCapture on a non-git dir: %v", err)
+	if err := Run(context.Background(), t.TempDir(), &buf); err != nil {
+		t.Fatalf("Run on a non-git dir: %v", err)
 	}
 	if got := bytes.TrimSpace(buf.Bytes()); string(got) != "null" {
 		t.Errorf("non-git root emitted %q, want null", got)
