@@ -80,7 +80,9 @@ func validLaunchParams(containerID string) sandbox.LaunchParams {
 		Worktree:    "/data/worktrees/run",
 		SDKDir:      "/opt/tf/sdk",
 		Args:        []string{"/usr/bin/node", "/sdk/wrapper.mjs", "-p", "hi"},
-		NetnsPath:   "/var/run/netns/tf-0badf00d-1",
+		// The netns name must be the one RunID derives — the ownership check
+		// binds it to the run, not just the tf-<hex>-<idx> shape.
+		NetnsPath: "/var/run/netns/" + sandbox.NetnsNameForRun("run", 1),
 	}
 }
 
@@ -319,6 +321,59 @@ func TestBrokerRun_InFlightCapQueues(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start B never proceeded after the in-flight slot was freed — release is broken")
+	}
+}
+
+// TestBrokerRun_SDKDirOverriddenByBroker pins that the broker resolves the
+// SDK source itself and DISCARDS whatever SDKDir the orchestrator sent. The
+// pinned argv execs /sdk/wrapper.mjs and /sdk is bound from the SDK dir, so
+// an honored orchestrator SDKDir would let a compromised caller point the
+// pinned entrypoint at an attacker-authored wrapper — this is what makes
+// "the broker owns the command" true.
+func TestBrokerRun_SDKDirOverriddenByBroker(t *testing.T) {
+	origRT := launchRuntime
+	launchRuntime = func(ctx context.Context, _, _ string, _ int, stdio *os.File, stderr io.Writer) (supervisedRuntime, error) {
+		cmd := exec.CommandContext(ctx, "cat")
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = stdio, stdio, stderr
+		err := cmd.Start()
+		_ = stdio.Close()
+		if err != nil {
+			return nil, err
+		}
+		return &stubRuntime{cmd: cmd}, nil
+	}
+	t.Cleanup(func() { launchRuntime = origRT })
+
+	// Capture the params the broker actually hands to prepareBundle.
+	var gotSDKDir string
+	origPB := prepareBundle
+	prepareBundle = func(ctx context.Context, p sandbox.LaunchParams) (string, error) {
+		gotSDKDir = p.SDKDir
+		return t.TempDir(), nil
+	}
+	t.Cleanup(func() { prepareBundle = origPB })
+
+	withTempStdioSocketDir(t)
+	client := serveTestBroker(t, &fakeOps{})
+
+	p := validLaunchParams("sdkc")
+	p.SDKDir = "/tmp/evil-sdk" // a compromised orchestrator's forged SDK source
+	run, err := client.LaunchRun(context.Background(), p)
+	if err != nil {
+		t.Fatalf("LaunchRun: %v", err)
+	}
+	defer run.Close()
+	if err := run.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	_ = run.Stdin().Close()
+	_ = run.Wait()
+
+	if gotSDKDir == "/tmp/evil-sdk" {
+		t.Fatal("broker honored the orchestrator-supplied SDK dir — a forged wrapper.mjs would execute")
+	}
+	if want := sandbox.TrustedSDKDir(); gotSDKDir != want {
+		t.Errorf("broker built the spec with SDK dir %q; want the broker-owned %q", gotSDKDir, want)
 	}
 }
 

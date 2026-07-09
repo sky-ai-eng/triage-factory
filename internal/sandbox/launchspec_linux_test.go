@@ -22,11 +22,13 @@ func validParams() LaunchParams {
 			{Key: "GIT_CONFIG_KEY_0", Value: "core.hooksPath"},
 			{Key: "GIT_CONFIG_VALUE_0", Value: "/hooks"},
 		},
-		Args:      []string{sandboxNodeBinary, sandboxWrapperEntry, "-p", "hi"},
-		Worktree:  "/data/worktrees/run-abc123",
-		SDKDir:    "/opt/tf/sdk",
-		Rlimits:   []Rlimit{{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 1024}},
-		NetnsPath: "/var/run/netns/tf-abc123-1",
+		Args:     []string{sandboxNodeBinary, sandboxWrapperEntry, "-p", "hi"},
+		Worktree: "/data/worktrees/run-abc123",
+		SDKDir:   "/opt/tf/sdk",
+		Rlimits:  []Rlimit{{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 1024}},
+		// The netns name must be the one this run's id derives — the ownership
+		// check binds it, not just the tf-<hex>-<idx> shape.
+		NetnsPath: "/var/run/netns/" + NetnsNameForRun("run-abc123", 1),
 	}
 }
 
@@ -123,9 +125,10 @@ func TestValidateLaunchParams_RejectsNonPinnedEntrypoint(t *testing.T) {
 }
 
 // TestValidateLaunchParams_RejectsForgedNetns pins that a netns path that is
-// not one of the broker's own per-run namespaces is rejected — closing the
-// escalation where a compromised orchestrator points the sandbox at the host
-// netns (bypassing the per-run egress allowlist).
+// not this run's own namespace is rejected — closing both the escalation
+// where a compromised orchestrator points the sandbox at the host netns
+// (bypassing the per-run egress allowlist) AND the netns-confusion case where
+// it passes a sibling run's still-broker-shaped namespace.
 func TestValidateLaunchParams_RejectsForgedNetns(t *testing.T) {
 	for _, path := range []string{
 		"",
@@ -133,6 +136,11 @@ func TestValidateLaunchParams_RejectsForgedNetns(t *testing.T) {
 		"/var/run/netns/hostnet",
 		"/etc/passwd",
 		"/var/run/netns/../../etc/shadow",
+		// Broker-shaped and a valid subnet idx, but derived from a DIFFERENT
+		// run id — the ownership binding must reject it even though the shape
+		// check passes (the netns-confusion case shape-only validation missed).
+		"/var/run/netns/" + NetnsNameForRun("some-other-run", 1),
+		"/var/run/netns/" + NetnsNameForRun("victim-run-xyz", 42),
 	} {
 		p := validParams()
 		p.NetnsPath = path
@@ -163,9 +171,11 @@ func TestValidateLaunchParams_RejectsBadRlimit(t *testing.T) {
 	}
 }
 
-// TestValidateLaunchParams_RejectsNonAbsolutePaths pins that the paths the
-// broker binds (worktree, sdk, mount source/destination) must be clean
-// absolute paths — caught at the boundary, not late inside runsc.
+// TestValidateLaunchParams_RejectsNonAbsolutePaths pins that the run-data
+// paths the broker binds (worktree, mount source/destination) must be clean
+// absolute paths — caught at the boundary, not late inside runsc. (SDKDir is
+// not checked here: the broker overrides it with TrustedSDKDir(), so the
+// orchestrator's value is discarded rather than validated.)
 func TestValidateLaunchParams_RejectsNonAbsolutePaths(t *testing.T) {
 	worktree := validParams()
 	worktree.Worktree = "relative/worktree"
@@ -173,16 +183,22 @@ func TestValidateLaunchParams_RejectsNonAbsolutePaths(t *testing.T) {
 		t.Error("accepted a relative worktree; want rejection")
 	}
 
-	unclean := validParams()
-	unclean.SDKDir = "/opt/tf/../tf/sdk"
-	if err := ValidateLaunchParams(unclean); err == nil {
-		t.Error("accepted a non-clean sdk dir; want rejection")
+	uncleanWorktree := validParams()
+	uncleanWorktree.Worktree = "/data/../data/worktrees/run"
+	if err := ValidateLaunchParams(uncleanWorktree); err == nil {
+		t.Error("accepted a non-clean worktree; want rejection")
 	}
 
 	relSource := validParams()
 	relSource.Mounts = []Mount{{Source: "rel/src", Destination: "/work/x"}}
 	if err := ValidateLaunchParams(relSource); err == nil {
 		t.Error("accepted a relative mount source; want rejection")
+	}
+
+	uncleanDest := validParams()
+	uncleanDest.Mounts = []Mount{{Source: "/host/x", Destination: "/work/../etc/x"}}
+	if err := ValidateLaunchParams(uncleanDest); err == nil {
+		t.Error("accepted a non-clean mount destination; want rejection")
 	}
 }
 

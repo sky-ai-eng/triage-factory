@@ -8,7 +8,22 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
+
+// TrustedSDKDir is the broker-owned agent-SDK install directory (where
+// EnsureSDK writes wrapper.mjs + node_modules). The broker resolves this
+// itself instead of trusting the SDKDir a caller sends over the RPC:
+// buildSpec bind-mounts /sdk from here and the pinned argv execs
+// /sdk/wrapper.mjs, so if the source were caller-supplied a compromised
+// orchestrator could point it at an attacker-authored wrapper and the
+// pinned entrypoint would run attacker code. Resolving it broker-side is
+// what makes "the broker owns the command" actually true — same principle
+// as resolving the rootfs by catalog name rather than accepting a path.
+func TrustedSDKDir() string {
+	return paths.SDKDir()
+}
 
 // This file is the load-bearing narrowing of the broker's attack surface:
 // the broker OWNS the OCI spec (built from a fixed template — empty
@@ -290,12 +305,26 @@ func validateRunID(kind, id string) error {
 	return nil
 }
 
-// validateNetnsPath rejects a netns path that is not one of the broker's
-// own per-run namespaces. Pinning the tf-<hex>-<idx> shape under
-// /var/run/netns closes the escalation where a compromised orchestrator
-// points the sandbox at the host netns (or any other namespace) to bypass
-// the per-run egress allowlist.
-func validateNetnsPath(p string) error {
+// validateNetnsPath rejects a netns path that is not the per-run namespace
+// this run's own netns MUST be. Two layers:
+//
+//   - Shape: it must live under /var/run/netns (or /run/netns) and match the
+//     tf-<hex>-<idx> naming — this alone stops the primary escalation, a
+//     compromised orchestrator pointing the sandbox at the host netns (or any
+//     non-sandbox namespace) to bypass the per-run egress allowlist.
+//   - Ownership: its name must equal NetnsNameForRun(runID, idx) — the name
+//     derived from THIS launch's run id. That binds the namespace to the run
+//     and rejects a sibling run's (still broker-created, so shape-valid)
+//     netns, which shape-only validation would wave through.
+//
+// Residual: a fully compromised orchestrator drives both SetupNetwork and
+// LaunchRun, so it can still make the two consistent by also lying about the
+// run id it targets. Airtight per-run ownership requires the broker to track
+// the netns it created for each run in its own state (the "broker-internal
+// network state" evolution the launch params anticipate); it is bounded even
+// so, because such an orchestrator already holds every host-side credential a
+// reachable sibling gateway's proxy would mediate.
+func validateNetnsPath(runID, p string) error {
 	if p == "" {
 		return fmt.Errorf("sandbox: netns path is required")
 	}
@@ -303,8 +332,12 @@ func validateNetnsPath(p string) error {
 	if filepath.Clean(dir) != "/var/run/netns" && filepath.Clean(dir) != "/run/netns" {
 		return fmt.Errorf("sandbox: netns path %q is not under /var/run/netns (or /run/netns)", p)
 	}
-	if _, ok := subnetIdxFromNetnsName(name); !ok {
+	idx, ok := subnetIdxFromNetnsName(name)
+	if !ok {
 		return fmt.Errorf("sandbox: netns name %q is not a broker-created sandbox namespace", name)
+	}
+	if name != NetnsNameForRun(runID, idx) {
+		return fmt.Errorf("sandbox: netns %q is not the namespace created for this run", name)
 	}
 	return nil
 }
@@ -344,14 +377,13 @@ func ValidateLaunchParams(p LaunchParams) error {
 	if _, ok := rootfsCatalog[orDefaultRootfs(p.Rootfs.Name)]; !ok {
 		return fmt.Errorf("sandbox: unknown rootfs variant %q (catalog: %s)", p.Rootfs.Name, catalogNames())
 	}
-	// Worktree (/work) and SDKDir (/sdk) become bind-mount SOURCES the
-	// privileged broker mounts; require clean absolute paths at the boundary
-	// so a relative or non-clean value can't resolve to an unintended host
-	// location or fail late inside runsc.
+	// Worktree (/work) is a bind-mount SOURCE the privileged broker mounts;
+	// require a clean absolute path at the boundary so a relative or
+	// non-clean value can't resolve to an unintended host location or fail
+	// late inside runsc. SDKDir is deliberately NOT trusted here — the broker
+	// overrides it with TrustedSDKDir() before building the spec, so whatever
+	// the orchestrator sends is discarded (see the launchRun override).
 	if err := validateAbsCleanPath("worktree", p.Worktree); err != nil {
-		return err
-	}
-	if err := validateAbsCleanPath("sdk dir", p.SDKDir); err != nil {
 		return err
 	}
 	if err := validateArgv(p.Args); err != nil {
@@ -366,7 +398,7 @@ func ValidateLaunchParams(p LaunchParams) error {
 	if err := validateMounts(p.Mounts); err != nil {
 		return err
 	}
-	if err := validateNetnsPath(p.NetnsPath); err != nil {
+	if err := validateNetnsPath(p.RunID, p.NetnsPath); err != nil {
 		return err
 	}
 	if err := validateEgressCIDR(p.ExtraEgressCIDR); err != nil {
@@ -399,6 +431,16 @@ var allowedMountOptions = map[string]struct{}{
 // require both Source and Destination to be clean absolute paths and the
 // Options to be within the small honored set — a malformed descriptor can't
 // then produce a surprising spec or an unexpected mount flag.
+//
+// Residual (accepted): the Source is only shape-checked, not pinned to the
+// run's own paths — the broker has no per-run notion of which host paths this
+// run owns (the orchestrator creates the worktree/checkouts), so a compromised
+// orchestrator could direct the broker to bind any path readable by the fixed
+// sandbox UID (10000), including a sibling run's worktree, into a new sandbox.
+// This is a data confidentiality/integrity residual bounded by host DAC at
+// that fixed UID (no user-namespace remapping) — NOT a capability escalation.
+// A real per-run source allowlist would need the broker to track each run's
+// owned paths; tracked with the broker-internal-state evolution.
 func validateMounts(mounts []Mount) error {
 	for _, m := range mounts {
 		if err := validateAbsCleanPath("mount source", m.Source); err != nil {

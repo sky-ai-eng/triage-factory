@@ -12,6 +12,26 @@ import (
 	"strings"
 )
 
+// netnsIDFrag derives the deterministic 8-hex-char fragment embedded in a
+// per-run netns name from the run id (sha1 of the runID). Extracted so the
+// launch-time netns ownership check re-derives the exact same fragment
+// setupNetwork used — keeping the two in lockstep by construction.
+func netnsIDFrag(runID string) string {
+	h := sha1.Sum([]byte(runID))
+	return hex.EncodeToString(h[:])[:8]
+}
+
+// NetnsNameForRun is the per-run network-namespace name for (runID,
+// subnetIdx): tf-<idFrag>-<idx>. It is deterministic in the run id, so the
+// broker can re-derive the name a given run's netns MUST have and reject a
+// LaunchRun that hands it any other (even a sibling run's) broker-created
+// namespace — closing the netns-confusion gap where a shape-only check
+// would accept any tf-shaped path. Exported so the launch validation and
+// its tests build the same name this package's setup produces.
+func NetnsNameForRun(runID string, subnetIdx uint8) string {
+	return fmt.Sprintf("tf-%s-%d", netnsIDFrag(runID), subnetIdx)
+}
+
 // setupNetwork creates the netns + veth pair + addressing matching
 // the validated recipe in docs/specs/sky-254-runsc-validation/
 // precns-test.sh (lines 7-33). Shells out to `ip` rather than using
@@ -35,9 +55,8 @@ func setupNetwork(ctx context.Context, runID string, subnetIdx uint8) (*netState
 	// runID to be hex (TraceID may be "live-smoke" or any free-form
 	// string), so derive a deterministic 8-hex-char fragment from a
 	// sha1 of the runID. Same runID → same fragment, every time.
-	h := sha1.Sum([]byte(runID))
-	idFrag := hex.EncodeToString(h[:])[:8]
-	netnsName := fmt.Sprintf("tf-%s-%d", idFrag, subnetIdx)
+	idFrag := netnsIDFrag(runID)
+	netnsName := NetnsNameForRun(runID, subnetIdx)
 	vethHost := fmt.Sprintf("vh-%s%d", idFrag[:min(len(idFrag), 4)], subnetIdx)
 	vethSandbox := fmt.Sprintf("vs-%s%d", idFrag[:min(len(idFrag), 4)], subnetIdx)
 	netnsPath := "/var/run/netns/" + netnsName
