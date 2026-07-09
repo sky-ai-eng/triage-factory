@@ -16,7 +16,12 @@
 # — no network races, succeeds immediately. So a plain `docker run`
 # boots a working single-tenant TF without any env wiring at all.
 # Local mode also never sandboxes (agentproc.WillSandbox is
-# multi-mode-only), so step 2 is inert there regardless of TF_PRIVSEP.
+# multi-mode-only) and has no broker to protect anything from — a
+# single trusted operator already holds whatever the process holds —
+# so step 2 is gated on TF_MODE=multi (not just TF_PRIVSEP): it's
+# skipped outright there, leaving local mode's default `docker run`
+# exactly as unaffected as it was before this split existed, including
+# uid and $HOME.
 #
 # Note on GoTrue keys: the entrypoint deliberately does NOT generate
 # the GoTrue RS256 keypair. GoTrue runs in a separate container and
@@ -131,9 +136,26 @@ privsep_enabled() {
     esac
 }
 
-if [ "$(uname -s)" = "Linux" ] && privsep_enabled; then
+# multi_mode mirrors internal/runmode.ModeFromEnv's own parsing exactly
+# (case-insensitive match against "multi"; empty/unset means local; NOT
+# whitespace-tolerant — runmode deliberately surfaces a stray-space typo
+# rather than silently accepting it, so this doesn't trim either) — the
+# same condition agentproc.WillSandbox() uses to decide whether this
+# host sandboxes runs at all. Privsep only protects the sandbox's
+# capabilities, so it has nothing to do in local mode: gating on this
+# (not just privsep_enabled) is what keeps the Dockerfile's own default
+# (`TF_MODE=local`, "a docker run without any env vars boots into a
+# working single-tenant binary") working exactly as before this split
+# existed — no uid switch, no $HOME change, full privilege, matching
+# every other single-operator local-mode deployment.
+multi_mode() {
+    [ "$(printf '%s' "${TF_MODE:-local}" | tr '[:upper:]' '[:lower:]')" = "multi" ]
+}
+
+if [ "$(uname -s)" = "Linux" ] && multi_mode && privsep_enabled; then
     TF_ORCHESTRATOR_UID="${TF_ORCHESTRATOR_UID:-10001}"
     TF_ORCHESTRATOR_GID="${TF_ORCHESTRATOR_GID:-10001}"
+    TF_ORCHESTRATOR_HOME="${TF_ORCHESTRATOR_HOME:-/home/tf-orchestrator}"
     TF_CAPBROKER_SOCKET="${TF_CAPBROKER_SOCKET:-/run/tf/cap-broker.sock}"
 
     # Own the persistent state mount points so the (now non-root)
@@ -168,6 +190,18 @@ if [ "$(uname -s)" = "Linux" ] && privsep_enabled; then
         sleep 1
     done
 
+    # setpriv switches uid/gid/capabilities but never touches environment
+    # variables, so HOME (inherited from this shell's own environment —
+    # /root, the container runtime's default for the root user) has to be
+    # overridden explicitly here. Without this, os.UserHomeDir() in the
+    # orchestrator (which Go resolves purely from $HOME on Linux, with no
+    # /etc/passwd fallback) would still resolve to /root — a directory
+    # the now-unprivileged orchestrator uid cannot read or write — for
+    # every path internal/paths.go documents as "must follow the real
+    # HOME even in multi mode" (Claude Code SDK session state: curator
+    # sessions, skills import, project-bundle export/import).
+    export HOME="$TF_ORCHESTRATOR_HOME"
+
     exec setpriv \
         --reuid="$TF_ORCHESTRATOR_UID" --regid="$TF_ORCHESTRATOR_GID" --clear-groups \
         --inh-caps=-all --bounding-set=-all --no-new-privs \
@@ -176,10 +210,11 @@ fi
 
 # --- 3. exec the binary -----------------------------------------------------
 #
-# The TF_PRIVSEP=0 / non-Linux path: exec replaces the shell with the Go
-# process directly (still fully privileged) so tini's signal forwarding
-# lands directly on triagefactory. Without the exec, a SIGTERM from
-# compose would hit this script and have to be relayed manually — losing
-# the chance for graceful shutdown.
+# The local-mode (default) / TF_PRIVSEP=0 / non-Linux path: exec replaces
+# the shell with the Go process directly (still fully privileged, uid
+# and $HOME untouched) so tini's signal forwarding lands directly on
+# triagefactory. Without the exec, a SIGTERM from compose would hit this
+# script and have to be relayed manually — losing the chance for
+# graceful shutdown.
 
 exec triagefactory "$@"

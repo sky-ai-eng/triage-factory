@@ -387,6 +387,7 @@ services:
       TF_PRIVSEP: ${TF_PRIVSEP:-}
       TF_ORCHESTRATOR_UID: ${TF_ORCHESTRATOR_UID:-}
       TF_ORCHESTRATOR_GID: ${TF_ORCHESTRATOR_GID:-}
+      TF_ORCHESTRATOR_HOME: ${TF_ORCHESTRATOR_HOME:-}
       TF_CAPBROKER_SOCKET: ${TF_CAPBROKER_SOCKET:-}
     # Required for the in-container gVisor sandbox to do its netns +
     # iptables + runsc work. Tightening these later is a hardening

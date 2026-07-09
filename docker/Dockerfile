@@ -138,16 +138,29 @@ RUN apk add --no-cache \
     openssh-client \
     setpriv
 
-# The unprivileged orchestrator identity the entrypoint drops into by
-# default (TF_PRIVSEP=1). A fixed, dedicated, non-root uid/gid — distinct
-# from internal/sandbox.WorktreeUID (10000, the uid *inside* the gVisor
-# sandbox the agent runs as) and from the cap-broker (which stays root) —
-# so the two host-level privsep processes are never the same uid: the
-# orchestrator, holding zero capabilities after the drop, cannot ptrace a
-# same-uid broker if it were ever the same identity. `-H` skips a home
-# dir (this identity never logs in or needs one); `-D` skips a password.
+# The unprivileged orchestrator identity the entrypoint drops into for
+# multi mode (TF_PRIVSEP=1, the default there). A fixed, dedicated,
+# non-root uid/gid — distinct from internal/sandbox.WorktreeUID (10000,
+# the uid *inside* the gVisor sandbox the agent runs as) and from the
+# cap-broker (which stays root) — so the two host-level privsep
+# processes are never the same uid: the orchestrator, holding zero
+# capabilities after the drop, cannot ptrace a same-uid broker if it
+# were ever the same identity. `-D` skips a password.
+#
+# Unlike a purely-service identity, this one DOES need a real, owned
+# home directory: internal/paths.go documents "~/.claude state — Claude
+# Code SDK session dirs, which must follow the real HOME even in multi
+# mode" (curator sessions, skills import, project-bundle export/import
+# all resolve os.UserHomeDir() from the orchestrator's own process). The
+# entrypoint's exec-time drop switches uid via setpriv, which does not
+# touch environment variables, so it also explicitly exports
+# HOME=/home/tf-orchestrator right before that exec — without both the
+# directory (owned by this uid) and the env var (setpriv won't derive it
+# from /etc/passwd), those code paths would try to read/write under the
+# root-owned $HOME inherited from the container's default environment,
+# which this uid cannot reach post-drop.
 RUN addgroup -g 10001 tf-orchestrator \
-    && adduser -D -H -u 10001 -G tf-orchestrator -s /sbin/nologin tf-orchestrator
+    && adduser -D -u 10001 -G tf-orchestrator -h /home/tf-orchestrator -s /sbin/nologin tf-orchestrator
 
 # Pull the per-arch runsc binary from a pinned gVisor release.
 #
