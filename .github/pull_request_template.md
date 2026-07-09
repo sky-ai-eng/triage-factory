@@ -26,7 +26,8 @@ bullets. Use code fences for new payloads / API shapes / data structures.
 Call out anything deliberately left OUT of scope.
 -->
 
-## Scope / verification
+<details>
+<summary><strong>Scope / verification</strong></summary>
 
 <!--
 Required. The exact commands you ran and what passed, then what the new tests
@@ -38,6 +39,26 @@ cover. Suggested baseline (matches ./scripts/lint.sh):
   pgtest testcontainer. A one-line note is fine in this case.
 CHANGELOG is left to release-please — don't hand-edit it.
 -->
+
+</details>
+
+<details>
+<summary><strong>Line breakdown</strong></summary>
+
+<!--
+Changed lines in this PR, split by kind. Exact counts when AI assistance was
+used (have the agent count them from the diff); a rough estimate is fine
+otherwise — say which it is.
+-->
+
+| Kind          | Added | Removed |
+| ------------- | ----- | ------- |
+| Code          |       |         |
+| Tests         |       |         |
+| Documentation |       |         |
+| Comments      |       |         |
+
+</details>
 
 <!-- ───────────────────────────────────────────────────────────────────────
 Optional sections — add any that apply, delete the rest:
