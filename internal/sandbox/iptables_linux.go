@@ -28,15 +28,15 @@ func applyMasquerade(ctx context.Context, subnet, upstreamIF string) (iptablesRu
 	}
 
 	rule := iptablesRule{
-		table: "nat",
-		chain: "POSTROUTING",
-		args: []string{
+		Table: "nat",
+		Chain: "POSTROUTING",
+		Args: []string{
 			"-s", subnet,
 			"-o", upstreamIF,
 			"-j", "MASQUERADE",
 		},
 	}
-	args := append([]string{"-t", rule.table, "-A", rule.chain}, rule.args...)
+	args := append([]string{"-t", rule.Table, "-A", rule.Chain}, rule.Args...)
 	if err := runIptables(ctx, args...); err != nil {
 		return iptablesRule{}, err
 	}
@@ -47,10 +47,10 @@ func applyMasquerade(ctx context.Context, subnet, upstreamIF string) (iptablesRu
 // missing rule errors with exit code 1 from iptables, which we
 // silence.
 func teardownIptables(ctx context.Context, rule iptablesRule) error {
-	if len(rule.args) == 0 {
+	if len(rule.Args) == 0 {
 		return nil
 	}
-	args := append([]string{"-t", rule.table, "-D", rule.chain}, rule.args...)
+	args := append([]string{"-t", rule.Table, "-D", rule.Chain}, rule.Args...)
 	cmd := exec.CommandContext(ctx, "iptables", args...)
 	_ = cmd.Run() // best-effort
 	return nil
@@ -121,15 +121,15 @@ func applyEgressPolicy(ctx context.Context, netnsName, vethHost, gatewayIP strin
 	var hostRules []iptablesRule
 	for _, chain := range []string{"INPUT", "FORWARD"} {
 		rule := iptablesRule{
-			table: "filter",
-			chain: chain,
-			args: []string{
+			Table: "filter",
+			Chain: chain,
+			Args: []string{
 				"-i", vethHost,
 				"!", "-d", gatewayIP,
 				"-j", "DROP",
 			},
 		}
-		args := append([]string{"-t", rule.table, "-I", rule.chain}, rule.args...)
+		args := append([]string{"-t", rule.Table, "-I", rule.Chain}, rule.Args...)
 		if err := runIptables(ctx, args...); err != nil {
 			// Roll back any host rules already installed before failing,
 			// so a partial apply doesn't leak a half-policy.

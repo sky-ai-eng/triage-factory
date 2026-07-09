@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"syscall"
 )
@@ -17,17 +16,12 @@ import (
 // Close() and have it Just Work via the per-step ENOENT/ESRCH-tolerant
 // helpers below.
 type teardownState struct {
-	subnetIdx       uint8
-	netnsPath       string
-	hostVethName    string
-	sandboxVethName string
-	iptablesRule    iptablesRule
-	// egressRules are the host-side Part B egress-allowlist
-	// rules (filter/INPUT + filter/FORWARD DROPs on the run's veth).
-	// The in-netns OUTPUT rules vanish with the netns and aren't
-	// tracked here.
-	egressRules []iptablesRule
-	bundleDir   string
+	subnetIdx uint8
+	// netSt is the network state defaultOps.SetupNetwork returned —
+	// possibly only a partial prefix of it if setup failed partway
+	// through. Passed back to defaultOps.TeardownNetwork verbatim.
+	netSt     NetworkState
+	bundleDir string
 	// cgroupDir / cgroupFD hold the per-run memory-ceiling cgroup
 	// (empty/nil when no limit was configured or setup failed open).
 	// The fd must outlive cmd.Start (clone3 reads it); Close closes
@@ -39,16 +33,28 @@ type teardownState struct {
 // iptablesRule names a single MASQUERADE rule so teardown can
 // remove exactly what we added. Stored as the literal -A arguments
 // so the teardown -D call mirrors the insertion verbatim.
+//
+// Fields are exported (despite the type itself being unexported)
+// because iptablesRule embeds into NetworkState, which
+// docs/specs/privsep/README.md §4 requires to round-trip as JSON over
+// a future broker RPC — encoding/json silently drops unexported
+// fields, which would make MasqueradeRule/EgressRules serialize to
+// "{}" and lose the teardown data.
 type iptablesRule struct {
-	table string // "nat"
-	chain string // "POSTROUTING"
-	args  []string
+	Table string // "nat"
+	Chain string // "POSTROUTING"
+	Args  []string
 }
 
 // wrap is the Linux-only implementation of the public Wrap entry
 // point. Orchestrates the 12-step pipeline —
 // subnet allocation, netns + veth + iptables, rootfs cache, OCI
 // bundle on disk, runsc command construction.
+//
+// Every privileged step (network, rootfs, cgroup) is reached only
+// through defaultOps (PrivilegedOps) — see privileged_ops_linux.go.
+// The runsc command construction below stays direct/in-process per
+// the PS-P0 scope note (spec §3.1); that boundary is PS-P2.
 //
 // Error paths trigger a partial-state Close() before returning so
 // the caller doesn't need to defer Close when err != nil.
@@ -80,43 +86,19 @@ func wrap(ctx context.Context, cfg Config) (*exec.Cmd, *Sandbox, error) {
 		}
 	}()
 
-	// Step 1-6: netns + veth + addressing inside the netns.
-	netSt, err := setupNetwork(ctx, cfg.RunID, idx)
-	if err != nil {
-		// netSt may be partially populated; record so Close cleans up.
-		if netSt != nil {
-			td.netnsPath = netSt.netnsPath
-			td.hostVethName = netSt.vethHost
-			td.sandboxVethName = netSt.vethSandbox
-		}
-		return nil, nil, fmt.Errorf("sandbox: %w", err)
-	}
-	td.netnsPath = netSt.netnsPath
-	td.hostVethName = netSt.vethHost
-	td.sandboxVethName = netSt.vethSandbox
-	sb.Subnet = netSt.subnet
-	sb.HostIP = hostIP(idx)
-	sb.NetnsPath = netSt.netnsPath
-
-	// Step 7-8 (resolv.conf is set up later inside writeBundle as
-	// part of the bundle dir; ip_forward + MASQUERADE here).
-	rule, err := applyMasquerade(ctx, netSt.subnet, netSt.upstreamIF)
+	// Step 1-9: netns + veth + addressing, MASQUERADE, ip_forward, and
+	// the Part B egress allowlist — the full "Network" privileged-op
+	// bucket (spec §5), routed through defaultOps. td.netSt is stored
+	// unconditionally so a partial failure still leaves Close() enough
+	// to clean up whatever prefix of setup succeeded.
+	netSt, err := defaultOps.SetupNetwork(ctx, cfg.RunID, idx)
+	td.netSt = netSt
 	if err != nil {
 		return nil, nil, fmt.Errorf("sandbox: %w", err)
 	}
-	td.iptablesRule = rule
-
-	// Step 9: egress allowlist (Part B). Restrict the sandbox
-	// to its own gateway IP only — closes the cross-tenant
-	// sibling-proxy reach and the direct-internet exfil path. Must run
-	// after the netns + veth exist (it installs both in-netns and
-	// host-side veth rules) and before the proxies bind in step 9.5, so
-	// the allowlist is in force the moment the sandbox can send packets.
-	egressRules, err := applyEgressPolicy(ctx, netSt.netnsName, netSt.vethHost, sb.HostIP)
-	if err != nil {
-		return nil, nil, fmt.Errorf("sandbox: egress policy: %w", err)
-	}
-	td.egressRules = egressRules
+	sb.Subnet = netSt.Subnet
+	sb.HostIP = netSt.HostIP
+	sb.NetnsPath = netSt.NetnsPath
 
 	// Step 9.5: invoke the proxy-configuration callback so
 	// the caller can bind per-run LLM / git proxies on sb.HostIP and
@@ -142,11 +124,11 @@ func wrap(ctx context.Context, cfg Config) (*exec.Cmd, *Sandbox, error) {
 	}
 
 	// Step 10: rootfs + OCI bundle.
-	rootfsPath, err := ensureRootfs(ctx)
+	rootfsPath, err := defaultOps.EnsureRootfs(ctx, RootfsSelector{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("sandbox: %w", err)
 	}
-	spec, err := buildSpec(specCfg, netSt.netnsPath)
+	spec, err := buildSpec(specCfg, netSt.NetnsPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sandbox: %w", err)
 	}
@@ -168,17 +150,15 @@ func wrap(ctx context.Context, cfg Config) (*exec.Cmd, *Sandbox, error) {
 	containerID := fmt.Sprintf("tf-%s-%d", truncate(cfg.RunID, 11), idx)
 	cmd := newRunscCommand(ctx, bundleDir, containerID)
 
-	// Step 12: per-run memory ceiling. runsc keeps --ignore-cgroups;
-	// TF owns the group and clone3s runsc directly into it, so the
-	// whole sandbox tree (sentry + gofer + app memfd) is under the
-	// limit from the first instruction. Fail-open by design: a host
-	// that can't complete the cgroup setup runs without ceilings and
-	// says so once, because "no limit" degrades gracefully while
-	// "no runs" is an outage.
+	// Step 12: per-run memory ceiling, routed through defaultOps.
+	// runsc keeps --ignore-cgroups; TF owns the group and clone3s
+	// runsc directly into it, so the whole sandbox tree (sentry +
+	// gofer + app memfd) is under the limit from the first
+	// instruction. Fail-open by design: a host that can't complete the
+	// cgroup setup runs without ceilings and says so once, because "no
+	// limit" degrades gracefully while "no runs" is an outage.
 	if cfg.MemoryLimitMB > 0 {
-		if err := setupRunCgroups(); err != nil {
-			logCgroupFailOpenOnce(err)
-		} else if dir, f, cgErr := newRunCgroup(containerID, cfg.MemoryLimitMB); cgErr != nil {
+		if dir, f, cgErr := defaultOps.SetupRunCgroup(containerID, cfg.MemoryLimitMB); cgErr != nil {
 			logCgroupFailOpenOnce(cgErr)
 		} else {
 			td.cgroupDir = dir
@@ -231,7 +211,8 @@ func truncate(s string, maxLen int) string {
 
 // Close tears down everything Wrap created. Idempotent — safe to
 // call multiple times, safe to call against a partial-init sandbox
-// (e.g., from wrap's own error path via the deferred closure).
+// (e.g., from wrap's own error path via the deferred closure). Every
+// privileged step is reached only through defaultOps.
 func (s *Sandbox) Close() error {
 	if s == nil || s.teardown == nil {
 		return nil
@@ -244,31 +225,11 @@ func (s *Sandbox) Close() error {
 	}
 	ctx := context.Background()
 
-	// Order matters: tear down the iptables rule + network BEFORE
-	// removing the bundle dir + releasing the subnet idx. If we
-	// freed the idx first, a concurrent allocate could pick it
-	// before our teardown finished, and the new run would conflict
-	// with our still-lingering veth.
-
-	if err := teardownIptables(ctx, t.iptablesRule); err != nil {
-		// Best-effort; log via stderr.
-		fmt.Fprintf(os.Stderr, "sandbox: teardown iptables: %v\n", err)
-	}
-	// Host-side egress-allowlist rules (Part B). The in-netns
-	// OUTPUT rules go away with the netns delete below, so only the
-	// host-side ones need explicit removal.
-	for _, r := range t.egressRules {
-		if err := teardownIptables(ctx, r); err != nil {
-			fmt.Fprintf(os.Stderr, "sandbox: teardown egress rule: %v\n", err)
-		}
-	}
-	netSt := &netState{
-		netnsName:   netnsNameFromPath(t.netnsPath),
-		netnsPath:   t.netnsPath,
-		vethHost:    t.hostVethName,
-		vethSandbox: t.sandboxVethName,
-	}
-	if err := teardownNetwork(ctx, netSt); err != nil {
+	// Order matters: tear down the network BEFORE removing the bundle
+	// dir + releasing the subnet idx. If we freed the idx first, a
+	// concurrent allocate could pick it before our teardown finished,
+	// and the new run would conflict with our still-lingering veth.
+	if err := defaultOps.TeardownNetwork(ctx, t.netSt); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: teardown network: %v\n", err)
 	}
 	if err := cleanupBundle(t.bundleDir); err != nil {
@@ -278,25 +239,11 @@ func (s *Sandbox) Close() error {
 		_ = t.cgroupFD.Close()
 		t.cgroupFD = nil
 	}
-	if err := removeRunCgroup(t.cgroupDir); err != nil {
+	if err := defaultOps.RemoveRunCgroup(t.cgroupDir); err != nil {
 		// Non-fatal: the boot-time reaper sweeps stragglers.
 		fmt.Fprintf(os.Stderr, "sandbox: %v\n", err)
 	}
 	defaultAllocator().Release(t.subnetIdx)
 	s.teardown = nil // mark closed so re-Close is a no-op
 	return nil
-}
-
-// netnsNameFromPath extracts "tf-abc-7" from
-// "/var/run/netns/tf-abc-7". Empty input returns empty.
-func netnsNameFromPath(path string) string {
-	if path == "" {
-		return ""
-	}
-	// Last path segment.
-	i := strings.LastIndex(path, "/")
-	if i < 0 {
-		return path
-	}
-	return path[i+1:]
 }
