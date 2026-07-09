@@ -101,38 +101,105 @@ type NetworkState struct {
 	EgressRules    []iptablesRule
 }
 
-// RootfsSelector names which curated rootfs variant EnsureRootfs
-// should build/return. v1 has exactly one variant (rootfs_linux.go's
-// alpine + apkPackages bake); Name is unused today and exists only so
-// the signature doesn't need to change when the broker's catalog
-// (spec §8) grows past one entry.
+// RootfsSelector names which curated rootfs variant the broker should
+// resolve and mount — a NAME, never a path. The broker maps it against a
+// catalog it owns (rootfsCatalog: name → recipe → content hash) and mounts
+// the result read-only, so a compromised orchestrator can select only a
+// vetted variant, never point the root at arbitrary host content. An empty
+// Name resolves to the "base" variant; v1's catalog is curated (base), and
+// additional named variants (browser, org-authored recipes) are later
+// catalog rows built by an isolated builder — never inside the broker.
 type RootfsSelector struct {
 	Name string
 }
 
-// LaunchParams is the serializable input to LaunchRun: everything the
-// runtime launcher needs to exec `runsc run` against an already-prepared
-// bundle. Every field is a plain string/int so it round-trips as JSON
-// over the broker RPC unchanged — no live *exec.Cmd, no *os.File, no
-// io.Writer. Stdio does not appear here: the in-process launcher wires
-// pipes internally, and the broker learns the per-run stdio socket path
-// from its own client (which owns the listener), not from this struct.
+// EnvVar is one entry of the sandbox environment allowlist. Structured
+// (a key and a value, never a raw "K=V" blob) precisely so the broker can
+// validate the Key against allowedSandboxEnvKeys before folding it into
+// the spec template. A compromised orchestrator can inject any *value* the
+// unprivileged agent will see (harmless — that is the agent's own reach),
+// but cannot introduce an env key outside the allowlist.
+type EnvVar struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// LaunchParams is the serializable, validated input to LaunchRun — the
+// data the broker folds into the OCI spec it owns. It deliberately
+// carries NO config.json, NO rootfs path, and NO free command: the
+// privileged frame (capabilities, uid/gid, seccomp, namespaces, the
+// content-addressed rootfs) is the broker's fixed template, and these
+// fields are only the narrow data that rides inside it. Every field is a
+// plain string/int/struct so it round-trips as JSON over the broker RPC
+// unchanged — no live *exec.Cmd, no *os.File, no io.Writer.
+//
+// The broker validates the whole struct (ValidateLaunchParams) at the RPC
+// boundary before building anything, so a compromised orchestrator cannot
+// steer the broker into running arbitrary code with capabilities — it can
+// only supply data the already-unprivileged sandbox sees.
 type LaunchParams struct {
-	// BundleDir is the on-disk OCI bundle `runsc run --bundle` targets.
-	// The bundle's config.json already references the pre-created netns, so
-	// runsc joins it without any separate netns parameter.
-	BundleDir string
+	// RunID is the caller's (possibly non-unique) run identifier, used only
+	// for the bundle dir's grep-friendly prefix. ContainerID is the unique
+	// key; RunID is descriptive.
+	RunID string
 
 	// ContainerID is the runsc container id — unique per live Wrap (a fresh
 	// subnet index is folded into it), and grep-friendly (it embeds a RunID
-	// fragment). It is the sole per-run identifier the launcher needs: the
-	// runsc container id, the per-run cgroup name, and the broker's
-	// lifecycle key for wait/kill. The (non-unique) RunID deliberately does
-	// NOT appear here — keying anything off it would collide across
-	// concurrent runs that share a fixed TraceID.
+	// fragment). It is the per-run lifecycle key: the runsc container id,
+	// the per-run cgroup name, and the broker's wait/kill key. The
+	// (non-unique) RunID deliberately is NOT that key.
 	ContainerID string
+
+	// Rootfs selects the curated rootfs variant by NAME; the broker
+	// resolves it against a catalog it owns (name → content hash → path)
+	// and mounts the result read-only. Never a path — the empty selector
+	// resolves to the "base" variant.
+	Rootfs RootfsSelector
+
+	// Env is the sandbox environment as validated key/value pairs. Every
+	// Key must be on allowedSandboxEnvKeys; the broker rejects the launch
+	// otherwise. The union the proxies + git identity + run metadata need
+	// is enumerated there.
+	Env []EnvVar
+
+	// Args is the sandbox process argv. Its first two elements MUST be the
+	// pinned entrypoint (sandboxNodeBinary + sandboxWrapperEntry); the rest
+	// are the wrapper's arguments. validateArgv enforces the pin so the
+	// orchestrator can vary arguments but never the executed program.
+	Args []string
+
+	// Worktree is the host path bind-mounted read-write at /work, SDKDir
+	// the host path bind-mounted read-only at /sdk. Mounts are additional
+	// run-data bind mounts (TF binary, agenthost socket, git hooks, shared
+	// read-only repo checkouts). These are bind SOURCES into the
+	// already-unprivileged sandbox, not the rootfs and not a spec — the
+	// broker applies its own fixed mount options.
+	Worktree string
+	SDKDir   string
+	Mounts   []Mount
+
+	// Rlimits is the numeric resource shape; empty uses defaultRlimits.
+	Rlimits []Rlimit
 
 	// MemoryLimitMB, when > 0, caps the run via a per-run memory cgroup the
 	// launcher creates (fail-open, as before). Zero disables.
 	MemoryLimitMB int
+
+	// NetnsPath is the network namespace the broker created for this run in
+	// SetupNetwork; the spec joins it instead of creating its own.
+	// Validated to the tf-netns naming so a compromised orchestrator cannot
+	// point the sandbox at the host netns (which would bypass the egress
+	// allowlist).
+	NetnsPath string
+
+	// StdioSocketPath is the per-run unix socket the orchestrator listens
+	// on and the broker dials to hand the runtime its stdio. Populated by
+	// the broker client (which owns the listener); the in-process launcher
+	// wires pipes and ignores it.
+	StdioSocketPath string
+
+	// ExtraEgressCIDR is the self-host-only additional egress destination
+	// (see Config.ExtraEgressCIDR). Validated against the internal denylist
+	// at the boundary; empty for every caller today.
+	ExtraEgressCIDR string
 }

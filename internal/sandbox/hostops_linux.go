@@ -125,8 +125,8 @@ func (hostOps) TeardownNetwork(ctx context.Context, state NetworkState) error {
 	return nil
 }
 
-func (hostOps) EnsureRootfs(ctx context.Context, _ RootfsSelector) (string, error) {
-	return ensureRootfs(ctx)
+func (hostOps) EnsureRootfs(ctx context.Context, selector RootfsSelector) (string, error) {
+	return resolveCatalogRootfs(ctx, selector)
 }
 
 func (hostOps) SetupRunCgroup(name string, limitMB int) (string, *os.File, error) {

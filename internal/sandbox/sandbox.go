@@ -62,6 +62,27 @@ type Config struct {
 	// attribute a killed run to the limit.
 	MemoryLimitMB int
 
+	// Rlimits, when non-empty, sets the sandboxed process's POSIX
+	// rlimits (RLIMIT_NOFILE / RLIMIT_NPROC). Numeric-only and folded
+	// into the broker-owned spec template; an empty slice uses the
+	// package's fixed defaults (defaultRlimits). A profile-specific
+	// resource shape (a browser sandbox needs more fds than a
+	// CI-triage one — sandbox-fleet §5) rides here.
+	Rlimits []Rlimit
+
+	// ExtraEgressCIDR, when non-empty, names an additional destination
+	// network the sandbox may reach directly at L3 — the self-host-only
+	// "raw-L3-to-private" egress variant (sandbox-fleet §3.5). It is a
+	// data parameter, not a path or command: validated against the
+	// immutable internal denylist (cloud metadata, control-plane subnet,
+	// private/link-local ranges, the sandbox subnet pool) before it could
+	// ever widen egress, so "validated" means *safe*, not merely
+	// well-formed. Empty in every shared-SaaS deployment and in every
+	// caller today; the validation gate lives here ahead of the feature
+	// that populates it so a compromised orchestrator can never smuggle a
+	// denylisted CIDR past the broker.
+	ExtraEgressCIDR string
+
 	// ConfigureProxies, if non-nil, is invoked after the network is
 	// set up (subnet allocated, netns + veth created, MASQUERADE
 	// applied) but before the OCI bundle is built. The caller
@@ -92,6 +113,17 @@ type Mount struct {
 	Source      string
 	Destination string
 	Options     []string
+}
+
+// Rlimit is one POSIX rlimit applied to the sandboxed process. Purely
+// numeric (a type name plus soft/hard values) so it crosses the broker
+// RPC as data — never a path or command — and folds into the
+// broker-owned spec template. Type is an RLIMIT_* name validated against
+// allowedRlimitTypes before it reaches the spec.
+type Rlimit struct {
+	Type string `json:"type"`
+	Soft uint64 `json:"soft"`
+	Hard uint64 `json:"hard"`
 }
 
 // Sandbox is the live state for one sandboxed run. Returned by Wrap

@@ -1,0 +1,481 @@
+//go:build linux
+
+package sandbox
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"path/filepath"
+	"strings"
+)
+
+// This file is the load-bearing narrowing of the broker's attack surface:
+// the broker OWNS the OCI spec (built from a fixed template — empty
+// capabilities, uid/gid 10000, seccomp, the namespace set, a
+// content-addressed read-only rootfs) and accepts over its RPC only the
+// narrow, validated DATA in LaunchParams. ValidateLaunchParams is the gate
+// every brokered launch passes before the broker builds or execs anything,
+// so a compromised (unprivileged) orchestrator can inject data the sandbox
+// sees but can never make the broker run arbitrary code with capabilities.
+//
+// The in-process path (privsep off) is a single trust domain — the
+// orchestrator IS the capability holder — so it skips the boundary
+// validation and goes straight to PrepareBundle; the checks here matter
+// precisely where LaunchParams cross from the untrusted orchestrator into
+// the privileged broker.
+
+// --- rootfs catalog (name → recipe → hash) ---
+//
+// The orchestrator names a variant; the broker resolves it against a
+// catalog IT owns and mounts the result read-only by content hash. It
+// never accepts a rootfs path. v1 is curated ("base"); additional named
+// variants ("browser", org-authored recipes) are later catalog rows built
+// by an isolated builder — never `apk add <input>` in the broker.
+
+// rootfsVariant is one curated catalog entry. resolve returns the on-disk
+// path of the content-addressed rootfs (baking it if the cache is cold).
+type rootfsVariant struct {
+	name    string
+	resolve func(ctx context.Context) (path string, err error)
+}
+
+// rootfsCatalog is the broker's curated variant set. "base" is today's
+// toolchain rootfs; its recipe (alpine sha + apkPackages + pnpm) resolves
+// to a content hash via rootfsCacheKey, exactly the name→recipe→hash
+// contract the sandbox-fleet image dimension consumes.
+var rootfsCatalog = map[string]rootfsVariant{
+	"base": {name: "base", resolve: ensureRootfs},
+}
+
+// defaultRootfsName is the variant an empty selector resolves to.
+const defaultRootfsName = "base"
+
+// resolveCatalogRootfs validates the selector against the catalog and
+// returns the resolved rootfs path. An empty Name means "base"; any other
+// name must be a known catalog entry. A path-shaped or unknown name is a
+// hard rejection — the broker never mounts an orchestrator-supplied path.
+func resolveCatalogRootfs(ctx context.Context, sel RootfsSelector) (string, error) {
+	name, err := validateRootfsName(sel.Name)
+	if err != nil {
+		return "", err
+	}
+	v, ok := rootfsCatalog[name]
+	if !ok {
+		return "", fmt.Errorf("sandbox: unknown rootfs variant %q (catalog: %s)", name, catalogNames())
+	}
+	return v.resolve(ctx)
+}
+
+// validateRootfsName normalizes and rejects a rootfs selector name. Empty
+// → the default. A name carrying any path structure (slash, backslash,
+// "..", NUL, leading dot) is rejected before the catalog lookup so a
+// path-shaped selector can never masquerade as a variant name.
+func validateRootfsName(name string) (string, error) {
+	if name == "" {
+		return defaultRootfsName, nil
+	}
+	if len(name) > 64 {
+		return "", fmt.Errorf("sandbox: rootfs variant name too long")
+	}
+	if strings.ContainsAny(name, "/\\\x00") || strings.Contains(name, "..") || name[0] == '.' {
+		return "", fmt.Errorf("sandbox: rootfs selector %q is path-shaped; expected a curated catalog name", name)
+	}
+	for _, r := range name {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+		if !ok {
+			return "", fmt.Errorf("sandbox: rootfs variant name %q has an illegal character", name)
+		}
+	}
+	return name, nil
+}
+
+func catalogNames() string {
+	names := make([]string, 0, len(rootfsCatalog))
+	for n := range rootfsCatalog {
+		names = append(names, n)
+	}
+	return strings.Join(names, ", ")
+}
+
+// --- environment allowlist ---
+//
+// The sandbox env is an allowlist, not a passthrough: a key not on this
+// set fails the launch loudly. The set is the UNION of what the sandbox
+// legitimately needs — enumerated here explicitly with each group tied to
+// its producer. internal/agentproc's secret_keys drift test asserts every
+// key the proxy/git wiring emits is covered here, so a new producer key
+// can't silently slip past validation.
+//
+// Values are unrestricted (URLs, per-run placeholder tokens, git identity)
+// — Property B holds because the orchestrator only ever puts non-secret /
+// per-run-scoped values here; the real credentials live in the host-side
+// proxies and never cross into the sandbox env.
+var allowedSandboxEnvKeys = map[string]struct{}{
+	// Base runtime floor (agentproc.buildSandboxEnv + agentRuntimeEnv).
+	"PATH":           {},
+	"HOME":           {},
+	"TERM":           {},
+	"BUN_JSC_useJIT": {},
+
+	// Run-scoped metadata (delegate/resume ExtraEnv + the git-hooks bin).
+	"TRIAGE_FACTORY_RUN_ID":               {},
+	"TRIAGE_FACTORY_RUN_ROOT":             {},
+	"TRIAGE_FACTORY_BLUEPRINT_RUN_ID":     {},
+	"TRIAGE_FACTORY_REPO":                 {},
+	"TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER": {},
+	"TRIAGE_FACTORY_BIN":                  {},
+
+	// Egress proxy routing (agentproc.sandboxEgressProxyEnv). Both spellings
+	// because curl reads only the lowercase forms.
+	"HTTPS_PROXY": {},
+	"https_proxy": {},
+	"HTTP_PROXY":  {},
+	"http_proxy":  {},
+	"NO_PROXY":    {},
+	"no_proxy":    {},
+
+	// LLM proxy placeholders (agentproc.buildSandboxProxyEnv). The API-key /
+	// AWS-key values here are per-run PLACEHOLDERS scoped to the run's own
+	// proxy, never the real provider credential (Property B).
+	"ANTHROPIC_BASE_URL":         {},
+	"ANTHROPIC_API_KEY":          {},
+	"ANTHROPIC_BEDROCK_BASE_URL": {},
+	"AWS_BEARER_TOKEN_BEDROCK":   {},
+	"CLAUDE_CODE_USE_BEDROCK":    {},
+	"AWS_ACCESS_KEY_ID":          {},
+	"AWS_SECRET_ACCESS_KEY":      {},
+	"AWS_REGION":                 {},
+
+	// Git routing config count + the push-capture hook toggle
+	// (agentproc.encodeGitConfigEnv, githooks.PushCaptureEnvVar). The
+	// numbered GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> entries are matched
+	// by prefix below.
+	"GIT_CONFIG_COUNT":    {},
+	"TF_GIT_PUSH_CAPTURE": {},
+}
+
+// allowedSandboxEnvPrefixes covers the dynamically-numbered env families
+// (git's indexed config form) whose exact key count isn't known ahead of
+// time. A key matching one of these prefixes is allowed.
+var allowedSandboxEnvPrefixes = []string{
+	"GIT_CONFIG_KEY_",
+	"GIT_CONFIG_VALUE_",
+}
+
+// EnvKeyAllowed reports whether an env key is on the sandbox allowlist —
+// exported so internal/agentproc (which produces the sandbox env and can
+// import this package without a cycle) can drift-test that every key its
+// proxy/git wiring emits is covered here. Without that guard a new producer
+// key would pass silently in the in-process path and only break once
+// privsep is enabled and the broker's ValidateLaunchParams rejects it.
+func EnvKeyAllowed(key string) bool {
+	return envKeyAllowed(key)
+}
+
+// envKeyAllowed reports whether key is on the allowlist (exact or prefix).
+func envKeyAllowed(key string) bool {
+	if _, ok := allowedSandboxEnvKeys[key]; ok {
+		return true
+	}
+	for _, p := range allowedSandboxEnvPrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// --- rlimits ---
+
+// allowedRlimitTypes is the closed set of POSIX rlimits a launch may set.
+// Numeric-only params, but the type NAME is still validated so a launch
+// can't request an unrelated (or nonsensical) limit.
+var allowedRlimitTypes = map[string]struct{}{
+	"RLIMIT_NOFILE": {},
+	"RLIMIT_NPROC":  {},
+}
+
+// --- egress CIDR denylist ---
+//
+// The self-host extra egress CIDR is validated against an IMMUTABLE
+// internal denylist before it could ever become an iptables permit;
+// "validated" means safe, not merely well-formed. The denylist is the
+// operator/tenant-protecting set from sandbox-fleet §3.1: the cloud
+// metadata endpoint, the sandbox subnet pool, and all private/link-local
+// space (which contains the control-plane subnet and every other tenant's
+// gateway on shared infra). A denylisted CIDR is rejected loudly.
+
+// internalEgressDenylist is the set of networks an extra egress CIDR may
+// never overlap. Parsed once at init.
+var internalEgressDenylist = mustParseCIDRs(
+	"169.254.0.0/16", // link-local — includes the cloud metadata endpoint 169.254.169.254
+	"10.42.0.0/16",   // the sandbox subnet pool (subnetBase) — reaching a sibling run's gateway
+	"10.0.0.0/8",     // RFC1918 — contains the control-plane subnet + operator internal network on shared infra
+	"172.16.0.0/12",  // RFC1918
+	"192.168.0.0/16", // RFC1918
+	"127.0.0.0/8",    // loopback
+	"::1/128",        // loopback (v6)
+	"fc00::/7",       // unique-local (v6)
+	"fe80::/10",      // link-local (v6)
+)
+
+func mustParseCIDRs(cidrs ...string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic("sandbox: bad internal denylist CIDR " + c + ": " + err.Error())
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// validateEgressCIDR rejects an extra egress CIDR that is malformed or
+// that overlaps the immutable internal denylist. An empty CIDR is a no-op
+// (no extra egress requested). This is the security gate the epic requires
+// "before any iptables permit is written"; the permit that would apply an
+// accepted CIDR is the self-host raw-L3-to-private variant tracked with
+// the sandbox fleet, not wired here — no caller populates the field today.
+func validateEgressCIDR(cidr string) error {
+	if cidr == "" {
+		return nil
+	}
+	// Accept both a bare IP and a CIDR; normalize a bare IP to a host route.
+	if !strings.Contains(cidr, "/") {
+		if ip := net.ParseIP(cidr); ip != nil {
+			if ip.To4() != nil {
+				cidr += "/32"
+			} else {
+				cidr += "/128"
+			}
+		}
+	}
+	_, reqNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return fmt.Errorf("sandbox: extra egress CIDR %q is malformed: %w", cidr, err)
+	}
+	for _, deny := range internalEgressDenylist {
+		if cidrsOverlap(reqNet, deny) {
+			return fmt.Errorf("sandbox: extra egress CIDR %q overlaps the internal denylist %s (metadata/control-plane/private ranges are never permitted)", cidr, deny)
+		}
+	}
+	return nil
+}
+
+// cidrsOverlap reports whether two networks intersect (either contains the
+// other's base address). Enough for denylist enforcement: a permitted CIDR
+// must not touch any denied range at all.
+func cidrsOverlap(a, b *net.IPNet) bool {
+	return a.Contains(b.IP) || b.Contains(a.IP)
+}
+
+// --- id / netns / argv validation ---
+
+// validateRunID rejects an id (run id or container id) that is empty,
+// over-long, or carries path structure. These ids seed the bundle dir
+// prefix, the netns name, and the cgroup name; a path-shaped id must never
+// be able to redirect any of those.
+func validateRunID(kind, id string) error {
+	if id == "" {
+		return fmt.Errorf("sandbox: %s is required", kind)
+	}
+	if len(id) > 128 {
+		return fmt.Errorf("sandbox: %s is too long", kind)
+	}
+	if strings.ContainsAny(id, "/\\\x00") || strings.Contains(id, "..") {
+		return fmt.Errorf("sandbox: %s %q is path-shaped", kind, id)
+	}
+	return nil
+}
+
+// validateNetnsPath rejects a netns path that is not one of the broker's
+// own per-run namespaces. Pinning the tf-<hex>-<idx> shape under
+// /var/run/netns closes the escalation where a compromised orchestrator
+// points the sandbox at the host netns (or any other namespace) to bypass
+// the per-run egress allowlist.
+func validateNetnsPath(p string) error {
+	if p == "" {
+		return fmt.Errorf("sandbox: netns path is required")
+	}
+	dir, name := filepath.Split(p)
+	if filepath.Clean(dir) != "/var/run/netns" && filepath.Clean(dir) != "/run/netns" {
+		return fmt.Errorf("sandbox: netns path %q is not under /var/run/netns", p)
+	}
+	if _, ok := subnetIdxFromNetnsName(name); !ok {
+		return fmt.Errorf("sandbox: netns name %q is not a broker-created sandbox namespace", name)
+	}
+	return nil
+}
+
+// validateArgv enforces the pinned entrypoint: the first two argv elements
+// must be exactly the node binary + wrapper. Everything after is the
+// wrapper's own arguments, which only steer the unprivileged agent.
+func validateArgv(argv []string) error {
+	if len(argv) < 2 {
+		return fmt.Errorf("sandbox: argv must start with the pinned entrypoint %s %s", sandboxNodeBinary, sandboxWrapperEntry)
+	}
+	if argv[0] != sandboxNodeBinary || argv[1] != sandboxWrapperEntry {
+		return fmt.Errorf("sandbox: argv entrypoint %q %q is not the pinned %q %q; the broker owns the command", argv[0], argv[1], sandboxNodeBinary, sandboxWrapperEntry)
+	}
+	return nil
+}
+
+// ValidateLaunchParams is the broker's RPC-boundary gate. It runs before
+// the broker resolves the rootfs, builds the spec, or execs anything, so
+// every rejection below denies a compromised orchestrator a way to steer
+// the privileged broker with hostile data. Each check maps to a documented
+// rejection: path-shaped ids, an unknown/path-shaped rootfs name, a
+// non-allowlisted env key, a non-pinned command, an unknown rlimit, a
+// forged netns, or a denylisted egress CIDR.
+func ValidateLaunchParams(p LaunchParams) error {
+	if err := validateRunID("container id", p.ContainerID); err != nil {
+		return err
+	}
+	if p.RunID != "" {
+		if err := validateRunID("run id", p.RunID); err != nil {
+			return err
+		}
+	}
+	if _, err := validateRootfsName(p.Rootfs.Name); err != nil {
+		return err
+	}
+	if _, ok := rootfsCatalog[orDefaultRootfs(p.Rootfs.Name)]; !ok {
+		return fmt.Errorf("sandbox: unknown rootfs variant %q (catalog: %s)", p.Rootfs.Name, catalogNames())
+	}
+	if p.Worktree == "" {
+		return fmt.Errorf("sandbox: worktree is required")
+	}
+	if p.SDKDir == "" {
+		return fmt.Errorf("sandbox: sdk dir is required")
+	}
+	if err := validateArgv(p.Args); err != nil {
+		return err
+	}
+	for _, e := range p.Env {
+		if !envKeyAllowed(e.Key) {
+			return fmt.Errorf("sandbox: env key %q is not on the sandbox allowlist", e.Key)
+		}
+	}
+	for _, r := range p.Rlimits {
+		if _, ok := allowedRlimitTypes[r.Type]; !ok {
+			return fmt.Errorf("sandbox: rlimit type %q is not allowed", r.Type)
+		}
+	}
+	if err := validateMounts(p.Mounts); err != nil {
+		return err
+	}
+	if err := validateNetnsPath(p.NetnsPath); err != nil {
+		return err
+	}
+	if err := validateEgressCIDR(p.ExtraEgressCIDR); err != nil {
+		return err
+	}
+	return nil
+}
+
+func orDefaultRootfs(name string) string {
+	if name == "" {
+		return defaultRootfsName
+	}
+	return name
+}
+
+// validateMounts is defense-in-depth on the run-data bind mounts. They are
+// not an escalation vector (they land in the already-unprivileged sandbox,
+// never the rootfs), but a mount destination must still be a clean
+// absolute path so a malformed descriptor can't produce a surprising spec.
+func validateMounts(mounts []Mount) error {
+	for _, m := range mounts {
+		if m.Source == "" {
+			return fmt.Errorf("sandbox: mount for %q has no source", m.Destination)
+		}
+		if !filepath.IsAbs(m.Destination) || m.Destination != filepath.Clean(m.Destination) {
+			return fmt.Errorf("sandbox: mount destination %q must be a clean absolute path", m.Destination)
+		}
+	}
+	return nil
+}
+
+// --- bundle preparation (broker-owned spec) ---
+
+// envVarsToStrings folds validated key/value pairs back into the "K=V"
+// slice buildSpec expects for spec.Process.Env, preserving order.
+func envVarsToStrings(env []EnvVar) []string {
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		out = append(out, e.Key+"="+e.Value)
+	}
+	return out
+}
+
+// stringsToEnvVars splits a "K=V" slice into structured pairs at the first
+// '='. The orchestrator builds the sandbox env as "K=V" strings (base env
+// + proxy additions); this is the boundary conversion into the validated
+// wire shape. A malformed entry with no '=' becomes an all-key pair, which
+// the allowlist then rejects — the correct loud failure.
+func stringsToEnvVars(env []string) []EnvVar {
+	out := make([]EnvVar, 0, len(env))
+	for _, kv := range env {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			out = append(out, EnvVar{Key: kv[:i], Value: kv[i+1:]})
+		} else {
+			out = append(out, EnvVar{Key: kv})
+		}
+	}
+	return out
+}
+
+// PrepareBundle is the broker-owned spec construction: from the validated
+// LaunchParams it resolves the rootfs against the catalog (name → hash →
+// read-only path), builds the OCI spec from the fixed template, and writes
+// the per-run bundle. This is the code the PS-P3 split moves off the
+// orchestrator: whoever holds capabilities (the in-process hostOps, or the
+// cap-broker) builds the spec here — the orchestrator only ever supplies
+// the validated data above.
+//
+// Callers on the broker path MUST call ValidateLaunchParams first (the
+// broker's dispatch does); the in-process path is a single trust domain
+// and calls PrepareBundle directly. Returns the bundle dir; the caller
+// (the LaunchedRun) owns removing it via cleanupBundle when the run ends.
+func PrepareBundle(ctx context.Context, p LaunchParams) (string, error) {
+	rootfsPath, err := resolveCatalogRootfs(ctx, p.Rootfs)
+	if err != nil {
+		return "", err
+	}
+	// RunID only seeds the bundle dir's grep prefix + buildSpec's
+	// required-field check; the unique key is ContainerID. Fall back to it
+	// so an empty (but otherwise valid) RunID doesn't fail the build.
+	runID := p.RunID
+	if runID == "" {
+		runID = p.ContainerID
+	}
+	cfg := Config{
+		RunID:         runID,
+		Worktree:      p.Worktree,
+		SDKDir:        p.SDKDir,
+		Argv:          p.Args,
+		Env:           envVarsToStrings(p.Env),
+		ExtraMounts:   p.Mounts,
+		MemoryLimitMB: p.MemoryLimitMB,
+		Rlimits:       p.Rlimits,
+	}
+	spec, err := buildSpec(cfg, p.NetnsPath)
+	if err != nil {
+		return "", err
+	}
+	bundleDir, err := writeBundle(cfg, spec, rootfsPath)
+	if err != nil {
+		return "", err
+	}
+	return bundleDir, nil
+}
+
+// RemoveBundle removes a bundle dir PrepareBundle created. Idempotent.
+// Exported so the cap-broker — which now owns the bundle it built for a
+// supervised run — can reclaim it when the run is reaped, without reaching
+// into the package's unexported bundle helpers.
+func RemoveBundle(bundleDir string) error {
+	return cleanupBundle(bundleDir)
+}

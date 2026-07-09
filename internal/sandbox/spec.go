@@ -19,6 +19,27 @@ const (
 	WorktreeGID = 10000
 )
 
+// sandboxNodeBinary / sandboxWrapperEntry are the fixed entrypoint of
+// every sandbox: the apk-installed nodejs in the cached rootfs running
+// the SDK wrapper bind-mounted at /sdk. The broker pins these two argv
+// elements so a compromised orchestrator can vary only the wrapper's
+// arguments (model, prompt, tool flags), never the executed program —
+// "the broker owns the command." validateArgv enforces the pin.
+const (
+	sandboxNodeBinary   = "/usr/bin/node"
+	sandboxWrapperEntry = "/sdk/wrapper.mjs"
+)
+
+// defaultRlimits is the fixed resource shape applied when a launch names
+// none. Kept here (not inlined in buildSpec) so both the default path and
+// the validation of a caller-supplied set reference one source of truth.
+func defaultRlimits() []specs.POSIXRlimit {
+	return []specs.POSIXRlimit{
+		{Type: "RLIMIT_NOFILE", Hard: 1024, Soft: 1024},
+		{Type: "RLIMIT_NPROC", Hard: 512, Soft: 512},
+	}
+}
+
 // buildSpec constructs the full OCI runtime spec for one sandbox
 // invocation. Returns *specs.Spec rather than the marshaled JSON so
 // the bundle writer can hash / validate / golden-test the structure.
@@ -87,10 +108,7 @@ func buildSpec(cfg Config, netnsPath string) (*specs.Spec, error) {
 				Inheritable: []string{},
 				Ambient:     []string{},
 			},
-			Rlimits: []specs.POSIXRlimit{
-				{Type: "RLIMIT_NOFILE", Hard: 1024, Soft: 1024},
-				{Type: "RLIMIT_NPROC", Hard: 512, Soft: 512},
-			},
+			Rlimits: rlimitsForSpec(cfg.Rlimits),
 		},
 		Root: &specs.Root{
 			Path:     "rootfs",
@@ -171,6 +189,22 @@ func buildSpec(cfg Config, netnsPath string) (*specs.Spec, error) {
 	// mount after calling buildSpec.
 
 	return spec, nil
+}
+
+// rlimitsForSpec maps the caller's numeric Rlimit set onto the OCI
+// spec type, falling back to defaultRlimits when the caller named none.
+// The values are already validated (validateRlimits) by the time a
+// brokered launch reaches here; the in-process path passes the fixed
+// defaults from the run config.
+func rlimitsForSpec(rl []Rlimit) []specs.POSIXRlimit {
+	if len(rl) == 0 {
+		return defaultRlimits()
+	}
+	out := make([]specs.POSIXRlimit, 0, len(rl))
+	for _, r := range rl {
+		out = append(out, specs.POSIXRlimit{Type: r.Type, Soft: r.Soft, Hard: r.Hard})
+	}
+	return out
 }
 
 // mountsFromExtra converts the public Mount type to specs.Mount.

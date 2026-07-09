@@ -55,7 +55,24 @@ type Server struct {
 	// lifetime of each run.
 	runsMu sync.Mutex
 	runs   map[string]*runEntry
+
+	// launchSem caps concurrent in-flight LaunchRuns. Buffered to
+	// maxInflightLaunches (the subnet-pool size); a full channel makes the
+	// next launchRun QUEUE on acquireLaunchSlot instead of piling on
+	// privileged setup and exhausting the /16→/24 allocator. Released when a
+	// run is reaped. DoS resistance, not a capability boundary — a validated
+	// caller still can't escalate; this just stops a runaway one from
+	// exhausting the host. One orchestrator maps to one broker, so this is
+	// the per-orchestrator cap.
+	launchSem chan struct{}
 }
+
+// maxInflightLaunches is the per-broker cap on concurrent LaunchRuns. Tied
+// to the subnet pool size (sandbox.MaxSandboxes) — the scarcest per-run
+// resource — so the broker never accepts more launches than the allocator
+// can back. A var so tests can shrink it to exercise the queueing behavior
+// without spinning up 256 stand-in runtimes.
+var maxInflightLaunches = sandbox.MaxSandboxes
 
 // NewServer constructs a Server dispatching onto ops. Production callers
 // pass sandbox.NewHostOps() — the same in-process implementation
@@ -68,6 +85,32 @@ func NewServer(ops sandbox.PrivilegedOps) *Server {
 		cancelBase: cancel,
 		shutdown:   make(chan struct{}),
 		runs:       make(map[string]*runEntry),
+		launchSem:  make(chan struct{}, maxInflightLaunches),
+	}
+}
+
+// acquireLaunchSlot takes one in-flight launch slot, blocking (queueing) if
+// the broker is already at capacity. It respects the dispatch ctx (the
+// call budget) and broker shutdown, so a caller that jams the queue is
+// eventually thrown a timeout rather than blocking a goroutine forever.
+func (s *Server) acquireLaunchSlot(ctx context.Context) error {
+	select {
+	case s.launchSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("capbroker: launch queue wait: %w", ctx.Err())
+	case <-s.baseCtx.Done():
+		return fmt.Errorf("capbroker: broker shutting down")
+	}
+}
+
+// releaseLaunchSlot returns one in-flight launch slot to the pool.
+func (s *Server) releaseLaunchSlot() {
+	select {
+	case <-s.launchSem:
+	default:
+		// Never happens (every release pairs an acquire); the default guards
+		// against a double-release wedging a goroutine on an empty channel.
 	}
 }
 
@@ -263,7 +306,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		return s.launchRun(a)
+		return s.launchRun(ctx, a)
 
 	case methodWaitRun:
 		var a waitRunArgs
