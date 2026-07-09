@@ -33,7 +33,7 @@ events at the tracker's publish boundary.
 ## Running it
 
 ```bash
-./scripts/poll-bench.sh --shape dp1                 # the design-partner shape
+./scripts/poll-bench.sh --shape dp1                 # the large-org GHES shape
 ./scripts/poll-bench.sh --shape smoke --latency 0   # fast local sanity run
 ./scripts/poll-bench.sh --shape dp1 --rate-limit 200 --rate-limit-window 60s
 ./scripts/poll-bench.sh --repos 100 --prs-mean 30 --files-mean 20 --seed 7

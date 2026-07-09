@@ -24,14 +24,14 @@ import (
 
 // shapes are the standard benchmark shapes. dp1 approximates the large
 // single-org GHES profile (hundreds of repos, thousands of open PRs);
-// numbers are placeholders until the partner's real counts replace them —
+// numbers are placeholders until a real deployment's counts replace them —
 // see docs/poll-bench.md.
 var shapes = map[string]struct {
 	repos   int
 	prsMean float64
 }{
 	"smoke":  {repos: 20, prsMean: 5},   // CI tripwire, ~100 PRs
-	"dp1":    {repos: 300, prsMean: 15}, // design-partner target, ~4,500 PRs
+	"dp1":    {repos: 300, prsMean: 15}, // large-org GHES target, ~4,500 PRs
 	"stress": {repos: 600, prsMean: 20}, // headroom check, ~12,000 PRs
 }
 

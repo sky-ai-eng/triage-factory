@@ -1,7 +1,7 @@
 // Package pollbench is the poll-scale benchmark harness: a deterministic
 // fake GitHub API server plus a driver that points a real poller.Manager +
 // tracker.Tracker at it and measures a cold-start sync at large-org shape
-// (hundreds of repos, thousands of open PRs — the GHES design-partner
+// (hundreds of repos, thousands of open PRs — the GHES large-org
 // profile). See docs/poll-bench.md for how to run it and cmd/pollbench for
 // the CLI entrypoint.
 //
