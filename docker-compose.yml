@@ -22,10 +22,12 @@
 #
 #   docker compose up -d
 #
-# The TF container needs SYS_ADMIN + NET_ADMIN + unconfined seccomp
-# for the in-container gVisor sandbox (netns + iptables + runsc); the
-# `cap_add` / `security_opt` block on the service below is what makes
-# self-host work on the same Docker engine that Fly Machines use
+# The TF container needs SYS_ADMIN + NET_ADMIN + a seccomp profile
+# permissive enough for the in-container gVisor sandbox (netns +
+# iptables + runsc) — a tailored allowlist as of TFAC-608, not
+# `unconfined`; see docs/self-host-setup.md#tailored-seccomp-profile.
+# The `cap_add` / `security_opt` block on the service below is what
+# makes self-host work on the same Docker engine that Fly Machines use
 # upstream. Managed-Kubernetes / Railway / Render block these
 # primitives and won't host TF — that's by design (the sandbox is
 # why the multi-tenant story is safe at all).
@@ -378,7 +380,9 @@ services:
       - NET_ADMIN
     security_opt:
       - apparmor=unconfined
-      - seccomp=unconfined
+      # Tailored allowlist (default-deny), not unconfined — see
+      # docs/self-host-setup.md#tailored-seccomp-profile (TFAC-608).
+      - seccomp=docker/seccomp-profile.json
     # Private cgroup namespace so per-run memory ceilings
     # (TF_RUN_MEMORY_LIMIT_MB) manage this container's own delegated
     # cgroup subtree. TF remounts its namespace's view of
