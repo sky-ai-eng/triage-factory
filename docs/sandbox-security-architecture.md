@@ -61,13 +61,13 @@ process inside the sandbox):
 
 **Adversary B — Triage Factory itself, as third-party code.** A security team
 on a "no privileged third-party code" posture is not (only) worried about the
-agent; they are worried that *our* binary holds `SYS_ADMIN`/`NET_ADMIN`, and
+agent; they are worried that *our* binary holds `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`, and
 that a bug in it — or a compromise of our supply chain — becomes their problem.
 This is a legitimate and separate threat, and §4 and §6 are the answer to it.
 
 Local mode (single user, single machine, SQLite) collapses adversary A's
 multi-tenant threats: it is single-tenant, and **the sandbox is skipped
-entirely** (`shouldSandbox = ModeMulti && GOOS==linux`), so it takes none of
+entirely** (`shouldSandbox()` = `runmode.Current() == runmode.ModeMulti && runtime.GOOS == "linux"`), so it takes none of
 the host privileges below. Everything in this document about capabilities and
 privilege separation concerns the multi-mode (self-host and SaaS) deployments.
 
@@ -131,7 +131,7 @@ and note they never overlap:
 | **orchestrator** | No (dropped at exec) | Yes | Yes |
 | **sandbox** (agent) | No | No | Yes (is the source) |
 
-- **cap-broker** — the only process that holds `SYS_ADMIN`/`NET_ADMIN`. It
+- **cap-broker** — the only process that holds `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`. It
   builds the netns/veth/iptables/cgroup, launches and supervises the gVisor
   runtime, tears everything down, and reaps orphans at boot. It holds **no
   credentials**, binds **no proxies**, and **reads no agent output**. Its only
@@ -170,7 +170,7 @@ network, an agent, or a repository.*
 ### 4.2 The runtime is held, and that is correct
 
 The gVisor runtime (`runsc run`) is a blocking child that lives for the whole
-run and must hold `SYS_ADMIN`/`NET_ADMIN` for its duration (it joins the netns
+run and must hold `CAP_SYS_ADMIN`/`CAP_NET_ADMIN` for its duration (it joins the netns
 and performs its own mounts). So the cap-broker supervises it rather than
 "handing it off." This adds no exposure: a gVisor escape (T4) already means host
 code execution regardless of which process is the runtime's parent. Crucially,

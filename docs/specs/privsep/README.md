@@ -14,7 +14,7 @@ composes with — does not replace — the horizontal-scaling fleet split
 (`docs/specs/horizontal-scaling/`, TFAC-71).
 
 Scope: multi-mode only. Local mode skips the sandbox entirely
-(`shouldSandbox = ModeMulti && GOOS==linux`, `internal/agentproc/sandbox_integration.go`),
+(`shouldSandbox()` = `runmode.Current() == runmode.ModeMulti && runtime.GOOS == "linux"`, `internal/agentproc/sandbox_integration.go`),
 so it holds no capabilities and this epic is a no-op there (§7).
 
 ---
@@ -74,7 +74,7 @@ container. Harnesses preserved under the epic's working notes.
 ### 3.1 The runtime is held by the cap-holder, not handed off
 
 `runsc run` is a single **blocking** child that lives for the whole agent run
-and needs `SYS_ADMIN`/`NET_ADMIN` for its full duration (setns into the pre-made
+and needs `CAP_SYS_ADMIN`/`CAP_NET_ADMIN` for its full duration (setns into the pre-made
 netns + gVisor's own mounts). So the cap-broker must **exec and supervise** the
 runtime; there is no "build a sandbox and return an unprivileged handle." This
 adds no exposure: a gVisor escape (T4) means host code execution regardless of
@@ -145,20 +145,20 @@ Handoff artifacts (from the privileged-op audit): netns crosses **by path**
 From the audit of `internal/sandbox` (all Linux-only):
 
 - **Network** (`netns_linux.go`, `iptables_linux.go`): `ip netns/link/addr/route`,
-  `iptables` MASQUERADE + egress allowlist, `ip_forward` procfs write. NET_ADMIN
-  (+SYS_ADMIN for the netns mount).
+  `iptables` MASQUERADE + egress allowlist, `ip_forward` procfs write. CAP_NET_ADMIN
+  (+CAP_SYS_ADMIN for the netns mount).
 - **Cgroup** (`cgroup_linux.go`): possible `mount` remount of cgroup2, mkdir +
-  `memory.max`/`memory.swap.max` writes, the run cgroup fd. SYS_ADMIN.
+  `memory.max`/`memory.swap.max` writes, the run cgroup fd. CAP_SYS_ADMIN.
 - **Runtime** (`runsc.go`, `sandbox_linux.go`): `runsc run` exec + supervise;
-  child `clone3`'d into the cgroup via `CgroupFD`. SYS_ADMIN+NET_ADMIN, whole run.
+  child `clone3`'d into the cgroup via `CgroupFD`. CAP_SYS_ADMIN+CAP_NET_ADMIN, whole run.
 - **Rootfs bake** (`rootfs_linux.go`): `chroot`+`apk` for curated variants.
-  SYS_CHROOT. Curated content only in the broker (§8).
+  CAP_SYS_CHROOT. Curated content only in the broker (§8).
 - **Teardown / boot reap** (`reaper*.go`, `Close`): `iptables -D`,
   `ip link/netns delete`, cgroup `rmdir`. Reconstructible from durable
   identifiers (the reaper already proves a *different* process can tear down).
 
 A **second** privileged caller exists outside `internal/sandbox`:
-`internal/delegate/capture_isolated_linux.go` uses `CLONE_NEWNET` (SYS_ADMIN) for
+`internal/delegate/capture_isolated_linux.go` uses `CLONE_NEWNET` (CAP_SYS_ADMIN) for
 screenshot capture — it must also route through the broker (phase PS-P5).
 
 Stays on the orchestrator (unprivileged): the proxies
