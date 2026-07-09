@@ -378,7 +378,9 @@ services:
       - NET_ADMIN
     security_opt:
       - apparmor=unconfined
-      - seccomp=unconfined
+      # Tailored allowlist (default-deny), not unconfined — see
+      # docs/self-host-setup.md#tailored-seccomp-profile (TFAC-608).
+      - seccomp=docker/seccomp-profile.json
     # Private cgroup namespace so per-run memory ceilings
     # (TF_RUN_MEMORY_LIMIT_MB) manage this container's own delegated
     # cgroup subtree. TF remounts its namespace's view of

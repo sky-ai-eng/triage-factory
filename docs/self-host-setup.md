@@ -215,6 +215,52 @@ Any `jwk-init --write-env` run (rotate or not) rewrites `.env` atomically and no
 
 **Caveat:** any access tokens still in flight that were signed by the old key will fail verification as soon as GoTrue restarts. GoTrue's default access-token lifetime is 1 hour, so the practical impact is "users with active sessions need to re-authenticate." For zero-downtime overlap rotation (publish both old and new keys, switch the signing kid, wait for the old to expire, drop the old) you'd need to maintain a multi-key `GOTRUE_JWT_KEYS` array by hand — our `jwk-init` doesn't currently support merge semantics. Planned for a future ticket; for now, rotate during low-traffic windows or treat each rotation as a forced re-auth event.
 
+## Tailored seccomp profile
+
+The `triagefactory` service in `docker-compose.yml` runs with `security_opt: seccomp=docker/seccomp-profile.json` — a default-deny allowlist, not `seccomp=unconfined`. This is TFAC-608 (part of the privilege-separation epic, `docs/specs/privsep/README.md` §9 hardening track; see `docs/sandbox-security-architecture.md` §3/§6 vector 2 for the threat-model framing).
+
+**Why a profile is needed at all.** Docker's own default seccomp profile blocks several syscalls that `runsc` (gVisor, `--platform=systrap`) needs to construct its own, far stricter, per-run sandbox — that's why the container previously ran fully unconfined. `unconfined` reads as "no syscall filtering at all" to a security reviewer, which overstates what's actually required: the gap turned out to be a single syscall.
+
+**Scope — this is the host-level profile, not the in-sandbox one.** `docker/seccomp-profile.json` constrains the `triagefactory` **container** as seen by the host kernel — i.e., the TF binary itself, `ip`/`iptables`/`sysctl`, the `chroot`+`apk` rootfs bake, and `runsc` (and everything `runsc` forks). It is unrelated to the OCI seccomp profile `internal/sandbox/spec.go` attaches to the *sandboxed agent's* OCI spec (`internal/sandbox/syscalls.go`'s `defaultAllowedSyscalls`) — that one is inert under gVisor (`runsc` doesn't enforce the app-facing OCI seccomp list at all; see TFAC-299 and the validation in `docs/specs/playwright-chromium-sandbox/README.md` §5.4/§8). Don't conflate the two: this profile is real host-kernel enforcement, the other is a no-op today.
+
+**What it allows.** `docker/seccomp-profile.json` starts from [Docker/Moby's own default seccomp profile](https://github.com/moby/moby/blob/master/profiles/seccomp/default.json) — a widely audited, default-deny (`SCMP_ACT_ERRNO`) allowlist, not a hand-rolled one — and applies two changes:
+
+1. **Removes** syscalls the executor has no legitimate use for and that are meaningfully dangerous if a compromised process ever reached them: `reboot`, `init_module`, `delete_module`, `iopl`, `ioperm`, `acct`, `quotactl`, `bpf`, `perf_event_open`, `fanotify_init`, `landlock_create_ruleset`, `landlock_add_rule`, `landlock_restrict_self`, `lookup_dcookie`, `syslog`, `vhangup`. None of these are exercised anywhere in the netns/veth/iptables/cgroup/chroot+apk/runsc lifecycle. Removing them is defense-in-depth on top of the capability gate: the container's `CAP_SYS_ADMIN`/`CAP_NET_ADMIN` grant would otherwise let the kernel's own capability check wave some of these through if seccomp didn't block them first.
+2. **Adds** `pivot_root` — the one syscall empirical validation found Docker's default profile missing for `runsc` to construct the per-run sandbox's mount namespace. Everything else `runsc`'s systrap platform needs (`mount`, `umount2`, `chroot`, `ptrace`, `unshare`, `setns`, `clone`/`clone3`, `capset`/`capget`, `process_vm_readv`/`process_vm_writev`, `seccomp`, `prctl`, `personality`, `memfd_create`, …) was already present in Docker's default allowlist — enforced there via the capability check (`CAP_SYS_ADMIN`/`CAP_NET_ADMIN`), same as production.
+
+The result is ~400 allowed syscalls (vs. Docker's default ~415, vs. effectively all ~450 under `unconfined`) — a real reduction, though the primary privilege boundary remains the two capabilities the container holds, not the syscall count. `userfaultfd` (a syscall we speculated `runsc` might also need) was tested and found **not** required — it stays out of the allowlist.
+
+### Validation
+
+Validated across the full run lifecycle on real `runsc` (release-20260511, matching the pin in `docker/Dockerfile`): sandbox spawn, agent execution (including real network egress from inside the gVisor sandbox through the netns/veth/NAT/egress-allowlist path — `internal/sandbox/netns_linux.go`, `iptables_linux.go`), teardown, and orphan reap (`internal/sandbox/reaper_linux.go`), plus the `chroot`+`apk` rootfs toolchain bake (`internal/sandbox/rootfs_linux.go`) and the agent-host IPC socket path (`cmd/exec/agenthost/`). No browser sandbox profile exists in the codebase yet (`docs/specs/playwright-chromium-sandbox/` is still proposal-stage — no `Config.Profile` field), so there was nothing browser-specific to validate.
+
+Harness: `go test -tags integration ./internal/sandbox/...` (the same suite `scripts/test-sandbox-linux.sh` runs) built as a static binary and run inside a container mirroring the compose service's exact privilege shape (`--cap-add SYS_ADMIN --cap-add NET_ADMIN --security-opt apparmor=unconfined --cgroupns=private`, no `--privileged`), with `--security-opt seccomp=docker/seccomp-profile.json` in place of `unconfined`. Run repeatedly (5+ iterations per candidate) to rule out flakiness before treating a pass as signal.
+
+### Regenerating / extending the profile
+
+A future `runsc` release, a new packaged tool, or a new privileged-operation code path in `internal/sandbox` may need an additional syscall. Two approaches, in order of preference:
+
+**1. Direct validation (what TFAC-608 used, and the more reliable method).** Apply a candidate profile via Docker's real enforcement and run the actual lifecycle against it — don't guess, and don't trust `strace` here (see the gotcha below):
+
+```sh
+# From the repo root, with runsc on PATH and a container runtime available:
+go test -tags integration -c -o /tmp/sandboxtest ./internal/sandbox/
+docker run --rm \
+  --cap-add SYS_ADMIN --cap-add NET_ADMIN \
+  --security-opt apparmor=unconfined --security-opt seccomp=docker/seccomp-profile.json \
+  --cgroupns=private \
+  -v /tmp/sandboxtest:/work/sandboxtest:ro \
+  -v "$(command -v runsc)":/usr/local/bin/runsc:ro \
+  -w /tmp <image-with-ip-iptables-chroot> \
+  sh -c 'cp /work/sandboxtest /tmp/t && chmod +x /tmp/t && /tmp/t -test.v -test.timeout=180s'
+```
+
+If a test fails, the error is usually specific enough to point at the missing syscall (a `mount`/`chroot`/`ptrace`-shaped "operation not permitted" from `ip`, `iptables`, `chroot`, or `runsc`'s own stderr). Add the syscall to `docker/seccomp-profile.json`'s `syscalls` array with a `comment` explaining why, then re-run to confirm — including several repeats, since a nested/virtualized test host can have its own unrelated startup flakiness (a `runsc` sentry that occasionally fails with "cannot read client sync file: waiting for sandbox to start: EOF" on a cold-started nested test container, unrelated to seccomp) that's easy to misattribute to the profile if you only run once.
+
+**Gotcha: don't wrap this in `strace -f`.** `runsc`'s systrap platform uses `ptrace` internally to attach to its own stub processes. `strace -f` auto-attaches to every forked child too, and Linux allows only one tracer per process — so `runsc`'s own attach loses the race and the sandbox fails to start (the same "waiting for sandbox to start: EOF" symptom, this time *caused* by the tracer, not by seccomp). This reproduces regardless of the seccomp profile in effect, including under `unconfined`, which is the tell that it's a tracer conflict, not a permissions problem. Diagnose failures via the error output and (if needed) `runsc --debug --debug-log=<path>`, not `strace -f` around the whole tree.
+
+**2. Audit-mode capture**, for a broader/from-scratch resurvey (e.g., a `runsc` platform change): apply a profile with `defaultAction: SCMP_ACT_LOG` (allow + log every syscall) instead of `SCMP_ACT_ERRNO`, run the lifecycle, and collect the `type=SECCOMP` entries from the kernel audit log (`ausearch -m SECCOMP`, or `dmesg` when no `auditd` is listening). This is non-intrusive (no ptrace, no conflict with `runsc`), but at real workload syscall volume the kernel's `printk` rate limiter can silently drop the majority of entries — treat it as a rough survey to generate hypotheses, then confirm each candidate syscall with approach 1 above.
+
 ## Verifying releases
 
 Every release artifact is signed keylessly via [cosign](https://docs.sigstore.dev/) and GitHub OIDC — there's no signing key for us to manage, rotate, or leak, and no key for you to fetch and pin before verifying. Each tagged release also carries an SPDX SBOM per archive, and the GHCR image carries an SBOM + SLSA provenance attestation alongside its signature.
