@@ -7,7 +7,17 @@
 # Sandbox:  the in-container gVisor runner needs SYS_ADMIN + NET_ADMIN
 #           and unconfined seccomp; Fly Machines grant these by default
 #           (validated against the SKY-254 runsc probe — see the parent
-#           epic for the platform-compatibility log).
+#           epic for the platform-compatibility log). TFAC-608 replaced
+#           unconfined seccomp with a tailored allowlist profile for
+#           self-host docker-compose (docker/seccomp-profile.json) —
+#           fly.toml has no security_opt-equivalent field to attach it
+#           to, so production Fly deployments stay unconfined here.
+#           Each Fly Machine is already its own Firecracker microVM (a
+#           per-tenant hardware boundary, not a shared kernel), which
+#           is a different and independently stronger isolation story
+#           than the self-host shared-Docker-engine case the tailored
+#           profile hardens; see
+#           docs/self-host-setup.md#tailored-seccomp-profile.
 #
 # Per-deployment secrets the TF process consumes — set via flyctl,
 # NOT committed here:

@@ -106,7 +106,6 @@
         "fadvise64",
         "fadvise64_64",
         "fallocate",
-        "fanotify_mark",
         "fchdir",
         "fchmod",
         "fchmodat",
