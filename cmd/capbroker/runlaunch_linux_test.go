@@ -197,6 +197,41 @@ func TestBrokerRun_ConcurrentRunsAreIndependent(t *testing.T) {
 	}
 }
 
+// TestBrokerRun_WaitOutlastsCallTimeout pins that WaitRun is not subject to
+// the client's bounded call budget: a run that stays alive past callTimeout
+// (then exits) must be waited out cleanly, not spuriously timed out. This is
+// the one-shot Run path, which calls Wait while the runsc child is still
+// exiting after emitting its terminal result. With a per-call cap on WaitRun
+// this would return an i/o timeout and drop the exit's OOM attribution.
+func TestBrokerRun_WaitOutlastsCallTimeout(t *testing.T) {
+	// A run that ignores its stdio and stays alive well past the shrunk call
+	// budget before exiting on its own.
+	withStubRuntime(t, func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, "sleep", "0.5") })
+	withTempStdioSocketDir(t)
+
+	origTimeout := callTimeout
+	callTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { callTimeout = origTimeout })
+
+	client := serveTestBroker(t, &fakeOps{})
+	run, err := client.LaunchRun(context.Background(), sandbox.LaunchParams{ContainerID: "cSlow"})
+	if err != nil {
+		t.Fatalf("LaunchRun: %v", err)
+	}
+	defer run.Close()
+	if err := run.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	start := time.Now()
+	if err := run.Wait(); err != nil {
+		t.Fatalf("Wait errored (spurious timeout past the %s call budget?): %v", callTimeout, err)
+	}
+	if elapsed := time.Since(start); elapsed < callTimeout {
+		t.Errorf("Wait returned in %s, under the call budget — it did not actually wait for the run", elapsed)
+	}
+}
+
 // TestBrokerServer_KillUnknownRunIsNoop pins that a KillRun for a run the
 // broker has already reaped (or never knew) is a harmless success, so a
 // cancel racing a natural exit doesn't error.

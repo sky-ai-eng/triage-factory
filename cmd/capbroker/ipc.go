@@ -53,6 +53,24 @@ func (c *IPCClient) Close() error {
 }
 
 func (c *IPCClient) call(ctx context.Context, method string, args, result any) error {
+	return c.callWithCap(ctx, method, args, result, callTimeout)
+}
+
+// callWithCap is call with an explicit connection-deadline budget. A budget
+// > 0 caps the round-trip at that duration — the default for the bounded
+// host operations (network/rootfs/cgroup). A budget <= 0 imposes NO client
+// cap: the call blocks until the broker replies, the caller's ctx deadline
+// (if any) fires, or the connection breaks.
+//
+// WaitRun uses the uncapped form. Its server side deliberately has no
+// timeout because it blocks until the supervised run exits (potentially the
+// whole run), and the one-shot Run path can invoke Wait before the runsc
+// child has actually exited (its stream reader returns on the terminal
+// result, not on EOF). A fixed client cap would spuriously time that out and
+// drop the exit's OOM attribution; matching the server's no-timeout design
+// keeps the wait bounded only by the run itself (which the cancellation
+// watcher kills when the caller's context ends).
+func (c *IPCClient) callWithCap(ctx context.Context, method string, args, result any, budget time.Duration) error {
 	if c.closed.Load() {
 		return errors.New("capbroker: client closed")
 	}
@@ -65,13 +83,20 @@ func (c *IPCClient) call(ctx context.Context, method string, args, result any) e
 	defer func() { _ = conn.Close() }()
 
 	deadline, ok := ctx.Deadline()
-	deadlineCap := time.Now().Add(callTimeout)
-	if !ok || deadlineCap.Before(deadline) {
-		deadline = deadlineCap
+	if budget > 0 {
+		capAt := time.Now().Add(budget)
+		if !ok || capAt.Before(deadline) {
+			deadline, ok = capAt, true
+		}
 	}
-	if err := conn.SetDeadline(deadline); err != nil {
-		return fmt.Errorf("capbroker: set deadline: %w", err)
+	if ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return fmt.Errorf("capbroker: set deadline: %w", err)
+		}
 	}
+	// budget <= 0 with no ctx deadline → leave the connection deadline unset:
+	// block until the broker replies or the connection breaks (e.g. broker
+	// exit), matching the server's no-timeout WaitRun dispatch.
 
 	argsJSON, err := json.Marshal(args)
 	if err != nil {

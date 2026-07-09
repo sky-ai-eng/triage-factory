@@ -140,7 +140,10 @@ func (r *brokerRun) Pid() int { return 0 }
 // need the exit status afterward.
 func (r *brokerRun) Wait() error {
 	var res waitRunResult
-	err := r.client.call(context.Background(), methodWaitRun, waitRunArgs{ContainerID: r.params.ContainerID}, &res)
+	// Uncapped (budget 0): WaitRun blocks server-side until the run exits;
+	// a fixed client deadline would spuriously time out a one-shot Run whose
+	// runsc child hasn't finished exiting after emitting its terminal result.
+	err := r.client.callWithCap(context.Background(), methodWaitRun, waitRunArgs{ContainerID: r.params.ContainerID}, &res, 0)
 	r.oom = res.OOMKilled
 	r.stopWatcher()
 	if r.conn != nil {

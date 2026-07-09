@@ -17,9 +17,11 @@ import (
 
 // callTimeout bounds one dispatch — network/rootfs/cgroup setup can touch
 // the network stack or the filesystem but never blocks on anything
-// user-controlled (no agent I/O crosses this socket in P1), so a generous
-// fixed budget is enough; anything longer is a wedged host operation.
-const callTimeout = 60 * time.Second
+// user-controlled, so a generous fixed budget is enough; anything longer is
+// a wedged host operation. WaitRun is the deliberate exception (it blocks
+// until the run exits) and opts out of this budget on both sides. A var
+// only so tests can shrink it to prove that opt-out without a 60s wait.
+var callTimeout = 60 * time.Second
 
 // connIOTimeout bounds a single frame's read/write. A client that never
 // sends a frame, or never drains the reply, is confused or malicious;
