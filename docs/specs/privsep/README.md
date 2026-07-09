@@ -130,13 +130,26 @@ RPC vocabulary (fixed, versioned; length-prefixed JSON per `agenthost` precedent
 | `EnsureRootfs` | rootfs selector (curated catalog only in v1) | hash |
 
 Params that are **data** (env values, numeric limits, a curated rootfs name, a
-validated CIDR) are safe; a path, a command, or a whole spec is never accepted.
+CIDR validated against the immutable internal denylist) are safe; a path, a
+command, or a whole spec is never accepted. The self-host-only egress CIDR is
+validated against the denylist (cloud metadata endpoint `169.254.169.254`, the
+control-plane subnet, private/link-local ranges — sandbox-fleet §3.1) before any
+iptables permit is written; "validated" means *safe*, not merely *well-formed*.
 A compromised orchestrator can inject an env var the *unprivileged* agent sees
 — harmless — but cannot make the broker run arbitrary code with capabilities.
 
 Handoff artifacts (from the privileged-op audit): netns crosses **by path**
 (reachable in the shared mount ns), the cgroup fd stays **broker-internal**
 (needed only at the broker's own `clone3`), credentials **never** cross.
+
+**Abuse resistance (DoS, not a capability boundary).** The RPC guards against
+capability *escalation*, not resource *exhaustion*: a compromised orchestrator
+can still spam well-formed `LaunchRun`s and exhaust the 256-slot subnet pool
+(`internal/sandbox/subnet.go`) or the privileged setup each launch costs. PS-P3
+adds a per-orchestrator-instance cap on in-flight `LaunchRun`s (one orchestrator
+maps to one broker) plus release enforcement, so a runaway caller degrades to
+queueing rather than host exhaustion. This is denial-of-service resistance, not a
+capability boundary — see `docs/sandbox-security-architecture.md` §6 vector 4.
 
 ---
 

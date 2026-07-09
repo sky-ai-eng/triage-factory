@@ -55,7 +55,7 @@ process inside the sandbox):
 | | Threat | Defense |
 | --- | --- | --- |
 | **T1** | Credential exfiltration | Property B (§5): no credential ever enters the sandbox environment. |
-| **T2** | In-run credential misuse | Bounded by run wall-clock + short-lived, narrowly-scoped credentials (§5). |
+| **T2** | In-run credential misuse | Bounded by run wall-clock + the short-lived, single-installation GitHub token; the upstream LLM key is long-lived (BYOK, customer-rotated), so this is **partial coverage in v1** (§5). |
 | **T3** | RCE in the agent SDK escaping the SDK process | gVisor + in-sandbox hardening (non-root uid, empty caps, seccomp, no-new-privs). |
 | **T4** | RCE escaping gVisor to the host kernel | gVisor's user-mode-kernel architecture — the reason gVisor is used at all. |
 
@@ -194,9 +194,11 @@ design rule is hard:
 > content-addressed rootfs it resolved, capabilities = empty, uid = 10000,
 > seccomp, namespaces) and accepts over RPC only narrow, validated parameters —
 > a run id, the netns/cgroup it created, an environment **allowlist**, numeric
-> resource limits, and (self-host only) an additional permitted egress CIDR. It
-> **never** execs an orchestrator-supplied `config.json`, command, or rootfs
-> path.
+> resource limits, and (self-host only) an additional permitted egress CIDR
+> **validated against the immutable internal denylist** (cloud metadata endpoint
+> `169.254.169.254`, the control-plane subnet, private/link-local ranges — see
+> sandbox-fleet §3.1) before any iptables permit is written. It **never** execs
+> an orchestrator-supplied `config.json`, command, or rootfs path.
 
 A compromised orchestrator can inject an environment variable the *sandboxed*
 (unprivileged) agent will see — harmless — but it can never make the broker run
@@ -286,6 +288,20 @@ skips the gVisor escape.
 - **[planned]** A least-privilege `tf_system` database role for executors (no
   superuser DSN on the most-exposed machine class).
 
+**Vector 4 — a compromised orchestrator abusing the broker RPC (resource
+exhaustion, not a capability leak).** Even fully deprivileged, a compromised
+orchestrator can call the broker's RPC as fast as it likes, and the broker
+faithfully executes well-formed requests. It cannot regain capabilities (§4) —
+but it can consume host resources: most concretely the fixed **256-slot**
+per-run subnet pool (`internal/sandbox/subnet.go`, a `/16`→`/24` allocator), plus
+the privileged netns/veth/iptables/cgroup setup and supervised runtime each
+`LaunchRun` costs.
+- **[planned]** The broker caps in-flight `LaunchRun`s per orchestrator instance
+  (one orchestrator maps to one broker) and enforces release, so a runaway caller
+  degrades to queueing rather than host exhaustion. This is denial-of-service
+  resistance, **not** a capability boundary — called out so the two are not
+  conflated.
+
 ---
 
 ## 7. Deployment guidance for security teams
@@ -357,7 +373,9 @@ holding surface to a small, auditable component.
 
 ## Related
 
-- `internal/sandbox/doc.go` — Property A/B and the T1–T4 threat model in code.
+- `internal/sandbox/doc.go` — Property B and the T1–T4 threat model in code
+  (Property A — the agent cannot read its own env/memory/FDs — is defined in the
+  sky-254 validation doc below).
 - `docs/specs/horizontal-scaling/` — the control/executor split; §2.1 on the
   k8s posture, §6.4 on the sandbox-fleet interplay.
 - `docs/specs/sandbox-fleet/` — TFAC-408 customizable sandboxes; §4's rootfs
