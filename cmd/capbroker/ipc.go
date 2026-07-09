@@ -10,7 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -25,12 +25,17 @@ const dialTimeout = 5 * time.Second
 // IPCClient is the unix-socket implementation of sandbox.PrivilegedOps.
 // Each call dials, sends one frame, reads one frame, and closes — the
 // broker's handleConn is one-shot, so reusing a connection across calls
-// would EOF on the second read. Mirrors agenthost.IPCClient's shape.
+// would EOF on the second read. There is exactly one broker (and so one
+// IPCClient) per executor — unlike agenthost's per-run client — so
+// multiple runs' concurrent SetupNetwork/EnsureRootfs/etc. calls share
+// this client and must not serialize against each other: closed is an
+// atomic.Bool rather than a mutex-guarded field precisely so concurrent
+// calls dial and round-trip independently (each owns its own net.Conn;
+// there is no shared mutable state to protect beyond this flag), and
+// Close never blocks behind an in-flight call.
 type IPCClient struct {
 	socketPath string
-
-	mu     sync.Mutex
-	closed bool
+	closed     atomic.Bool
 }
 
 // Dial returns an IPCClient bound to socketPath. No connection opens
@@ -40,18 +45,15 @@ func Dial(socketPath string) *IPCClient {
 }
 
 // Close marks the client closed so subsequent calls fail fast. There is no
-// persistent connection to release — every call dials fresh.
+// persistent connection to release — every call dials fresh — so this
+// never blocks on an in-flight call.
 func (c *IPCClient) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.closed = true
+	c.closed.Store(true)
 	return nil
 }
 
 func (c *IPCClient) call(ctx context.Context, method string, args, result any) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
+	if c.closed.Load() {
 		return errors.New("capbroker: client closed")
 	}
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 )
 
 // socketDir is the shared parent directory for TF's local unix sockets —
@@ -23,9 +24,12 @@ const DefaultSocketPath = socketDir + "/cap-broker.sock"
 // listen creates the broker's socket following the same anti-race
 // ordering as agenthost/socket_linux.go's Start:
 //
-//  1. MkdirAll 0700 — closes the race window between socket-create and
-//     chmod; no other host user can enumerate /run/tf for a
-//     not-yet-restricted socket.
+//  1. MkdirAll 0700 on the socket's parent directory — closes the race
+//     window between socket-create and chmod; no other host user can
+//     enumerate the directory for a not-yet-restricted socket. Takes the
+//     parent of socketPath (not the socketDir constant directly) so tests
+//     can point listen at an isolated temp directory; production always
+//     passes DefaultSocketPath, whose parent is exactly socketDir.
 //  2. net.Listen("unix", ...) — creates the socket file under the
 //     process umask (typically too permissive on its own; step 1 covers
 //     the gap, step 3 closes it for good).
@@ -34,8 +38,9 @@ const DefaultSocketPath = socketDir + "/cap-broker.sock"
 //     a sandbox — "the broker socket is host-only." Only the orchestrator
 //     process (same user that started the broker) can reach it.
 func listen(socketPath string) (net.Listener, error) {
-	if err := os.MkdirAll(socketDir, 0o700); err != nil {
-		return nil, fmt.Errorf("capbroker: mkdir %s: %w", socketDir, err)
+	dir := filepath.Dir(socketPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("capbroker: mkdir %s: %w", dir, err)
 	}
 	// Remove any stale socket file from a previous crash — net.Listen
 	// would otherwise EADDRINUSE on a path nothing is listening on.

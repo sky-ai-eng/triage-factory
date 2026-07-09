@@ -26,6 +26,14 @@ var readyTimeout = 10 * time.Second
 // serving.
 var readyPollInterval = 50 * time.Millisecond
 
+// brokerSocketPath is the socket path Start spawns the broker against.
+// Production always uses DefaultSocketPath (the one fixed, per-executor
+// path); a var — rather than reading DefaultSocketPath directly — so
+// tests can redirect it to an isolated temp path instead of binding the
+// real /run/tf/cap-broker.sock, which a non-root `go test` invocation
+// (e.g. CI) can't create.
+var brokerSocketPath = DefaultSocketPath
+
 // Process owns the spawned cap-broker child process's lifecycle. The
 // orchestrator holds exactly one per boot when TF_PRIVSEP=1 — "one broker
 // process per executor (long-lived)... not one per run."
@@ -60,7 +68,7 @@ var execSelfCommand = func(socketPath string) (*exec.Cmd, error) {
 // orchestrator's capabilities at exec time; this split only proves the
 // mechanism ahead of that.
 func Start(ctx context.Context) (*Process, sandbox.PrivilegedOps, error) {
-	socketPath := DefaultSocketPath
+	socketPath := brokerSocketPath
 	cmd, err := execSelfCommand(socketPath)
 	if err != nil {
 		return nil, nil, err

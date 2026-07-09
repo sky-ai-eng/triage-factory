@@ -53,11 +53,27 @@ func withHelperExecSelfCommand(t *testing.T) {
 	t.Cleanup(func() { execSelfCommand = orig })
 }
 
+// withTempBrokerSocketPath redirects Start's socket path to an isolated
+// temp directory instead of the production /run/tf/cap-broker.sock —
+// root-only on most distros, and unwritable to the unprivileged user a CI
+// `go test` runs as. listen()'s MkdirAll(filepath.Dir(socketPath)) makes
+// this path fully self-contained: nothing under /run is touched.
+func withTempBrokerSocketPath(t *testing.T) string {
+	t.Helper()
+	sockPath := filepath.Join(t.TempDir(), "cap-broker.sock")
+	orig := brokerSocketPath
+	brokerSocketPath = sockPath
+	t.Cleanup(func() { brokerSocketPath = orig })
+	return sockPath
+}
+
 // TestStart_SpawnsAndBecomesReady exercises the real Start/Process.Close
 // lifecycle against a subprocess (the re-exec'd test binary running the
 // actual runBroker), the same mechanism production uses — just with a
-// stand-in for the real `<bin> cap-broker` re-exec.
+// stand-in for the real `<bin> cap-broker` re-exec and an isolated socket
+// path so this doesn't need root.
 func TestStart_SpawnsAndBecomesReady(t *testing.T) {
+	sockPath := withTempBrokerSocketPath(t)
 	withHelperExecSelfCommand(t)
 
 	proc, client, err := Start(context.Background())
@@ -85,7 +101,7 @@ func TestStart_SpawnsAndBecomesReady(t *testing.T) {
 		t.Errorf("Close: %v", err)
 	}
 	// Removed on graceful shutdown (cli_linux.go's runBroker defer).
-	if _, err := os.Stat(DefaultSocketPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
 		t.Errorf("socket file should be removed after graceful shutdown, stat err = %v", err)
 	}
 }
@@ -96,6 +112,7 @@ func TestStart_SpawnsAndBecomesReady(t *testing.T) {
 // fast with a clear error rather than hanging for readyTimeout's full
 // duration or forever.
 func TestStart_BrokerNeverComesUp(t *testing.T) {
+	withTempBrokerSocketPath(t)
 	origCmd := execSelfCommand
 	origTimeout, origPoll := readyTimeout, readyPollInterval
 	readyTimeout = 300 * time.Millisecond
@@ -129,6 +146,7 @@ func TestProcess_CloseIsIdempotentAndNilSafe(t *testing.T) {
 		t.Errorf("nil Process Close() = %v, want nil", err)
 	}
 
+	withTempBrokerSocketPath(t)
 	withHelperExecSelfCommand(t)
 	proc, _, err := Start(context.Background())
 	if err != nil {
@@ -140,11 +158,4 @@ func TestProcess_CloseIsIdempotentAndNilSafe(t *testing.T) {
 	if err := proc.Close(); err != nil {
 		t.Errorf("second Close (idempotent) = %v, want nil", err)
 	}
-}
-
-func init() {
-	// Keep the socketDir clean across the package's test run — the helper
-	// process binds the real DefaultSocketPath (production's fixed,
-	// one-per-executor path) since Start doesn't parameterize it.
-	_ = os.RemoveAll(filepath.Join(socketDir, "cap-broker.sock"))
 }

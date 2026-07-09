@@ -12,10 +12,11 @@ import (
 // socket file. Unlike agenthost's per-run socket, there is no chown step
 // here — the broker socket is host-only and never bind-mounted into a
 // sandbox, so it stays owned by whichever user started the broker (the
-// orchestrator itself).
+// orchestrator itself). Uses an isolated temp directory rather than the
+// production socketDir (/run/tf, root-only on most distros) so this runs
+// on an unprivileged CI runner too.
 func TestListen_Permissions(t *testing.T) {
-	sockPath := filepath.Join(socketDir, "test-hygiene.sock")
-	t.Cleanup(func() { _ = os.Remove(sockPath) })
+	sockPath := filepath.Join(t.TempDir(), "tf-sock-dir", "test-hygiene.sock")
 
 	l, err := listen(sockPath)
 	if err != nil {
@@ -23,7 +24,7 @@ func TestListen_Permissions(t *testing.T) {
 	}
 	defer l.Close()
 
-	dirInfo, err := os.Stat(socketDir)
+	dirInfo, err := os.Stat(filepath.Dir(sockPath))
 	if err != nil {
 		t.Fatalf("stat socket dir: %v", err)
 	}
@@ -43,8 +44,7 @@ func TestListen_Permissions(t *testing.T) {
 // TestListen_RemovesStaleSocket pins that a leftover socket file from a
 // previous crashed process doesn't EADDRINUSE the next listen.
 func TestListen_RemovesStaleSocket(t *testing.T) {
-	sockPath := filepath.Join(socketDir, "test-stale.sock")
-	t.Cleanup(func() { _ = os.Remove(sockPath) })
+	sockPath := filepath.Join(t.TempDir(), "tf-sock-dir", "test-stale.sock")
 
 	l1, err := listen(sockPath)
 	if err != nil {
