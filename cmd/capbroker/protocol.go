@@ -148,16 +148,17 @@ type removeRunCgroupArgs struct {
 // runtime for one prepared bundle, plus the path of the per-run stdio
 // socket the orchestrator is already listening on. The broker dials that
 // path and hands its fd to the runtime; the bytes never enter the broker.
+// ContainerID is the run's unique lifecycle key (see LaunchParams) — the
+// broker registers, waits, and kills by it, never by the non-unique RunID.
 type launchRunArgs struct {
-	RunID           string `json:"run_id"`
-	BundleDir       string `json:"bundle_dir"`
 	ContainerID     string `json:"container_id"`
+	BundleDir       string `json:"bundle_dir"`
 	MemoryLimitMB   int    `json:"memory_limit_mb"`
 	StdioSocketPath string `json:"stdio_socket_path"`
 }
 
 type waitRunArgs struct {
-	RunID string `json:"run_id"`
+	ContainerID string `json:"container_id"`
 }
 
 // waitRunResult reports how a supervised run ended. ExitError is the
@@ -169,7 +170,7 @@ type waitRunResult struct {
 }
 
 type killRunArgs struct {
-	RunID string `json:"run_id"`
+	ContainerID string `json:"container_id"`
 }
 
 // methodCallNames are the wire-name constants shared by client and server.

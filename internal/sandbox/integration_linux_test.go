@@ -110,9 +110,16 @@ func runToCompletion(t *testing.T, run LaunchedRun) ([]byte, error) {
 	if err := run.Start(); err != nil {
 		return nil, err
 	}
-	out, _ := io.ReadAll(run.Stdout())
-	err := run.Wait()
-	return append(out, []byte(run.Stderr())...), err
+	out, readErr := io.ReadAll(run.Stdout())
+	waitErr := run.Wait()
+	combined := append(out, []byte(run.Stderr())...)
+	// The exit error is the primary signal (mirrors CombinedOutput); surface
+	// a stdout read failure only when the run otherwise exited cleanly, so a
+	// truncated/broken stream isn't masked by a zero exit.
+	if waitErr != nil {
+		return combined, waitErr
+	}
+	return combined, readErr
 }
 
 // minimalConfig builds a Config for tests with sensible defaults +

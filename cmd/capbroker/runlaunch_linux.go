@@ -82,7 +82,6 @@ func (s *Server) launchRun(a launchRunArgs) (any, error) {
 	// broker: a broker Shutdown cancels it and SIGKILLs the child; explicit
 	// cancellation still goes through KillRun.
 	rt, err := launchRuntime(s.baseCtx, sandbox.LaunchParams{
-		RunID:         a.RunID,
 		BundleDir:     a.BundleDir,
 		ContainerID:   a.ContainerID,
 		MemoryLimitMB: a.MemoryLimitMB,
@@ -94,9 +93,12 @@ func (s *Server) launchRun(a launchRunArgs) (any, error) {
 		return nil, fmt.Errorf("capbroker: launch runtime: %w", err)
 	}
 
+	// Key the registry by the unique container id, never the run id (which
+	// callers may share via a fixed TraceID — keying off it would let one
+	// run's wait/kill hit another's runtime).
 	entry := &runEntry{rt: rt, done: make(chan struct{})}
 	s.runsMu.Lock()
-	s.runs[a.RunID] = entry
+	s.runs[a.ContainerID] = entry
 	s.runsMu.Unlock()
 
 	// Supervise in a goroutine so the child is reaped (and its cgroup
@@ -123,10 +125,10 @@ func (s *Server) launchRun(a launchRunArgs) (any, error) {
 // closed or about to be.
 func (s *Server) waitRun(ctx context.Context, a waitRunArgs) (any, error) {
 	s.runsMu.Lock()
-	entry := s.runs[a.RunID]
+	entry := s.runs[a.ContainerID]
 	s.runsMu.Unlock()
 	if entry == nil {
-		return nil, fmt.Errorf("capbroker: waitrun: unknown run %q", a.RunID)
+		return nil, fmt.Errorf("capbroker: waitrun: unknown run %q", a.ContainerID)
 	}
 
 	select {
@@ -136,7 +138,7 @@ func (s *Server) waitRun(ctx context.Context, a waitRunArgs) (any, error) {
 	}
 
 	s.runsMu.Lock()
-	delete(s.runs, a.RunID)
+	delete(s.runs, a.ContainerID)
 	s.runsMu.Unlock()
 
 	res := waitRunResult{OOMKilled: entry.oom}
@@ -151,7 +153,7 @@ func (s *Server) waitRun(ctx context.Context, a waitRunArgs) (any, error) {
 // natural exit is harmless.
 func (s *Server) killRun(a killRunArgs) (any, error) {
 	s.runsMu.Lock()
-	entry := s.runs[a.RunID]
+	entry := s.runs[a.ContainerID]
 	s.runsMu.Unlock()
 	if entry == nil {
 		return emptyResult{}, nil

@@ -75,7 +75,7 @@ func TestBrokerRun_RoundTripAndWait(t *testing.T) {
 	withTempStdioSocketDir(t)
 	client := serveTestBroker(t, &fakeOps{})
 
-	run, err := client.LaunchRun(context.Background(), sandbox.LaunchParams{RunID: "r1", ContainerID: "c1"})
+	run, err := client.LaunchRun(context.Background(), sandbox.LaunchParams{ContainerID: "c1"})
 	if err != nil {
 		t.Fatalf("LaunchRun: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestBrokerRun_KillViaContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	run, err := client.LaunchRun(ctx, sandbox.LaunchParams{RunID: "r2", ContainerID: "c2"})
+	run, err := client.LaunchRun(ctx, sandbox.LaunchParams{ContainerID: "c2"})
 	if err != nil {
 		t.Fatalf("LaunchRun: %v", err)
 	}
@@ -143,12 +143,66 @@ func TestBrokerRun_KillViaContext(t *testing.T) {
 	}
 }
 
+// TestBrokerRun_ConcurrentRunsAreIndependent pins that two concurrently
+// registered runs are keyed independently by their unique container ids:
+// ending one does not disturb the other, and neither is left
+// unwaitable. The broker keys its registry by the container id (unique per
+// live Wrap) precisely so runs that share a fixed, non-unique TraceID can't
+// collide and steal each other's wait/kill.
+func TestBrokerRun_ConcurrentRunsAreIndependent(t *testing.T) {
+	withStubRuntime(t, func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, "cat") })
+	withTempStdioSocketDir(t)
+	client := serveTestBroker(t, &fakeOps{})
+
+	runA, err := client.LaunchRun(context.Background(), sandbox.LaunchParams{ContainerID: "cA"})
+	if err != nil {
+		t.Fatalf("LaunchRun A: %v", err)
+	}
+	defer runA.Close()
+	if err := runA.Start(); err != nil {
+		t.Fatalf("Start A: %v", err)
+	}
+
+	runB, err := client.LaunchRun(context.Background(), sandbox.LaunchParams{ContainerID: "cB"})
+	if err != nil {
+		t.Fatalf("LaunchRun B: %v", err)
+	}
+	defer runB.Close()
+	if err := runB.Start(); err != nil {
+		t.Fatalf("Start B: %v", err)
+	}
+
+	// B round-trips independently — proving B's registration didn't clobber
+	// A's entry (and vice versa).
+	line := "ping\n"
+	if _, err := io.WriteString(runB.Stdin(), line); err != nil {
+		t.Fatalf("write B: %v", err)
+	}
+	got, err := bufio.NewReader(runB.Stdout()).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read B: %v", err)
+	}
+	if got != line {
+		t.Errorf("B round-trip = %q, want %q", got, line)
+	}
+
+	// End A, then B — both remain independently waitable.
+	_ = runA.Stdin().Close()
+	if err := runA.Wait(); err != nil {
+		t.Errorf("Wait A: %v", err)
+	}
+	_ = runB.Stdin().Close()
+	if err := runB.Wait(); err != nil {
+		t.Errorf("Wait B: %v", err)
+	}
+}
+
 // TestBrokerServer_KillUnknownRunIsNoop pins that a KillRun for a run the
 // broker has already reaped (or never knew) is a harmless success, so a
 // cancel racing a natural exit doesn't error.
 func TestBrokerServer_KillUnknownRunIsNoop(t *testing.T) {
 	client := serveTestBroker(t, &fakeOps{})
-	if err := client.call(context.Background(), methodKillRun, killRunArgs{RunID: "nope"}, nil); err != nil {
+	if err := client.call(context.Background(), methodKillRun, killRunArgs{ContainerID: "nope"}, nil); err != nil {
 		t.Errorf("KillRun for unknown run = %v, want nil", err)
 	}
 }

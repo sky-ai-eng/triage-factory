@@ -149,7 +149,6 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// stays grep-friendly while being uniquely distinguishable.
 	containerID := fmt.Sprintf("tf-%s-%d", truncate(cfg.RunID, 11), idx)
 	run, err := defaultOps.LaunchRun(ctx, LaunchParams{
-		RunID:         cfg.RunID,
 		BundleDir:     bundleDir,
 		ContainerID:   containerID,
 		MemoryLimitMB: cfg.MemoryLimitMB,

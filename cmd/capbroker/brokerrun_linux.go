@@ -75,9 +75,8 @@ func (r *brokerRun) Start() error {
 	// Ask the broker to launch runsc wired to our socket. The RPC returns
 	// once runsc has been exec'd and the broker has dropped its stdio fd.
 	if err := r.client.call(r.ctx, methodLaunchRun, launchRunArgs{
-		RunID:           r.params.RunID,
-		BundleDir:       r.params.BundleDir,
 		ContainerID:     r.params.ContainerID,
+		BundleDir:       r.params.BundleDir,
 		MemoryLimitMB:   r.params.MemoryLimitMB,
 		StdioSocketPath: r.socketPath,
 	}, nil); err != nil {
@@ -95,13 +94,13 @@ func (r *brokerRun) Start() error {
 	if err != nil {
 		// The broker started a child but we can't wire its stdio — tell it
 		// to kill the run so it doesn't leak.
-		_ = r.client.call(context.Background(), methodKillRun, killRunArgs{RunID: r.params.RunID}, nil)
+		_ = r.client.call(context.Background(), methodKillRun, killRunArgs{ContainerID: r.params.ContainerID}, nil)
 		return fmt.Errorf("capbroker: accept runtime stdio: %w", err)
 	}
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		_ = conn.Close()
-		_ = r.client.call(context.Background(), methodKillRun, killRunArgs{RunID: r.params.RunID}, nil)
+		_ = r.client.call(context.Background(), methodKillRun, killRunArgs{ContainerID: r.params.ContainerID}, nil)
 		return fmt.Errorf("capbroker: accepted stdio is not a unix conn")
 	}
 	r.conn = uc
@@ -115,7 +114,7 @@ func (r *brokerRun) Start() error {
 	go func() {
 		select {
 		case <-r.ctx.Done():
-			_ = r.client.call(context.Background(), methodKillRun, killRunArgs{RunID: r.params.RunID}, nil)
+			_ = r.client.call(context.Background(), methodKillRun, killRunArgs{ContainerID: r.params.ContainerID}, nil)
 		case <-watchCtx.Done():
 		}
 	}()
@@ -141,7 +140,7 @@ func (r *brokerRun) Pid() int { return 0 }
 // need the exit status afterward.
 func (r *brokerRun) Wait() error {
 	var res waitRunResult
-	err := r.client.call(context.Background(), methodWaitRun, waitRunArgs{RunID: r.params.RunID}, &res)
+	err := r.client.call(context.Background(), methodWaitRun, waitRunArgs{ContainerID: r.params.ContainerID}, &res)
 	r.oom = res.OOMKilled
 	r.stopWatcher()
 	if r.conn != nil {
@@ -167,7 +166,7 @@ func (r *brokerRun) Close() error {
 	r.closeOnce.Do(func() {
 		r.stopWatcher()
 		if r.started {
-			_ = r.client.call(context.Background(), methodKillRun, killRunArgs{RunID: r.params.RunID}, nil)
+			_ = r.client.call(context.Background(), methodKillRun, killRunArgs{ContainerID: r.params.ContainerID}, nil)
 		}
 		if r.conn != nil {
 			_ = r.conn.Close()

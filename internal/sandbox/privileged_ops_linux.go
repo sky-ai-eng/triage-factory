@@ -118,17 +118,18 @@ type RootfsSelector struct {
 // pipes internally, and the broker learns the per-run stdio socket path
 // from its own client (which owns the listener), not from this struct.
 type LaunchParams struct {
-	// RunID identifies the run (telemetry + the broker's run registry key
-	// for wait/kill).
-	RunID string
-
 	// BundleDir is the on-disk OCI bundle `runsc run --bundle` targets.
 	// The bundle's config.json already references the pre-created netns, so
 	// runsc joins it without any separate netns parameter.
 	BundleDir string
 
-	// ContainerID is the runsc container id (unique per Wrap) and the
-	// per-run cgroup name.
+	// ContainerID is the runsc container id — unique per live Wrap (a fresh
+	// subnet index is folded into it), and grep-friendly (it embeds a RunID
+	// fragment). It is the sole per-run identifier the launcher needs: the
+	// runsc container id, the per-run cgroup name, and the broker's
+	// lifecycle key for wait/kill. The (non-unique) RunID deliberately does
+	// NOT appear here — keying anything off it would collide across
+	// concurrent runs that share a fixed TraceID.
 	ContainerID string
 
 	// MemoryLimitMB, when > 0, caps the run via a per-run memory cgroup the
