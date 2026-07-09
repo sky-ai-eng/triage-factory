@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -279,5 +280,62 @@ func TestServer_VersionMismatch(t *testing.T) {
 	}
 	if resp.Error == "" {
 		t.Error("expected an error response for a mismatched protocol version")
+	}
+}
+
+// TestServer_ShutdownCancelsInFlightDispatch pins that Shutdown actually
+// unwinds an in-flight, ctx-aware privileged op rather than just waiting
+// out its full callTimeout budget — otherwise a broker asked to shut down
+// mid-RPC can blow past runBroker's bounded shutdownDrain.
+func TestServer_ShutdownCancelsInFlightDispatch(t *testing.T) {
+	unblocked := make(chan struct{})
+	ops := &fakeOps{
+		reapOrphansFn: func(ctx context.Context) error {
+			<-ctx.Done()
+			close(unblocked)
+			return ctx.Err()
+		},
+	}
+	sockPath := filepath.Join(t.TempDir(), "test.sock")
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := NewServer(ops)
+	go func() { _ = srv.Serve(l) }()
+
+	// Fire a ReapOrphans RPC that blocks inside the fake op until Shutdown
+	// cancels its dispatch context.
+	go func() {
+		conn, err := net.Dial("unix", sockPath)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = writeFrame(conn, request{Version: ProtocolVersion, Method: methodReapOrphans})
+		var resp response
+		_ = readFrame(conn, &resp)
+	}()
+
+	// Give the dispatch goroutine time to actually enter the blocking op
+	// before shutting down, so this test exercises real in-flight
+	// cancellation rather than racing Shutdown against dial.
+	select {
+	case <-unblocked:
+		t.Fatal("ops unblocked before Shutdown ran — the fake fired early")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	_ = l.Close()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	select {
+	case <-unblocked:
+	default:
+		t.Error("Shutdown returned but the in-flight dispatch's context was never canceled")
 	}
 }

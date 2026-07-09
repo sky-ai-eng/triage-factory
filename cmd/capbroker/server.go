@@ -33,6 +33,14 @@ const connIOTimeout = 10 * time.Second
 type Server struct {
 	ops sandbox.PrivilegedOps
 
+	// baseCtx is the parent of every in-flight dispatch's context;
+	// cancelBase cancels it. Shutdown calls cancelBase so a long-running,
+	// ctx-aware op (SetupNetwork/TeardownNetwork/EnsureRootfs/ReapOrphans
+	// all take ctx) unwinds promptly on shutdown instead of running to its
+	// full callTimeout budget.
+	baseCtx    context.Context
+	cancelBase context.CancelFunc
+
 	shutdown chan struct{}
 	mu       sync.Mutex
 	closed   bool
@@ -43,7 +51,8 @@ type Server struct {
 // pass sandbox.NewHostOps() — the same in-process implementation
 // defaultOps uses when TF_PRIVSEP is off.
 func NewServer(ops sandbox.PrivilegedOps) *Server {
-	return &Server{ops: ops, shutdown: make(chan struct{})}
+	baseCtx, cancel := context.WithCancel(context.Background())
+	return &Server{ops: ops, baseCtx: baseCtx, cancelBase: cancel, shutdown: make(chan struct{})}
 }
 
 // Serve accepts connections on l and dispatches each one's first frame as
@@ -72,9 +81,10 @@ func (s *Server) Serve(l net.Listener) error {
 	}
 }
 
-// Shutdown signals in-flight handlers to wind down and waits up to
-// ctx's deadline for them to finish. Caller closes the listener separately
-// (unblocks Serve's Accept).
+// Shutdown cancels every in-flight dispatch's context (unwinding any
+// ctx-aware privileged op that's still running) and waits up to ctx's
+// deadline for in-flight handlers to finish. Caller closes the listener
+// separately (unblocks Serve's Accept).
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	if s.closed {
@@ -84,6 +94,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.closed = true
 	close(s.shutdown)
 	s.mu.Unlock()
+
+	s.cancelBase()
 
 	done := make(chan struct{})
 	go func() {
@@ -122,7 +134,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	// trip the per-frame I/O deadline.
 	_ = conn.SetReadDeadline(time.Time{})
 
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	ctx, cancel := context.WithTimeout(s.baseCtx, callTimeout)
 	defer cancel()
 
 	result, err := s.dispatch(ctx, req.Method, req.Args)

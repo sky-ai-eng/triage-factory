@@ -28,7 +28,16 @@ var defaultOps PrivilegedOps = hostOps{}
 // ReapOrphans runs, exactly like defaultOps's own package-level
 // initialization above. Calling it after a sandbox is already live would
 // race; callers must not.
+//
+// Panics on a nil ops: this is a boot-wiring call with exactly one
+// production call site, which only ever passes a client it has already
+// nil/error-checked. A nil defaultOps would otherwise fail confusingly —
+// a nil-interface panic deep inside the first real Wrap — so a
+// misconfigured caller finds out immediately, at the call site, instead.
 func SetPrivilegedOps(ops PrivilegedOps) {
+	if ops == nil {
+		panic("sandbox: SetPrivilegedOps called with a nil PrivilegedOps")
+	}
 	defaultOps = ops
 }
 

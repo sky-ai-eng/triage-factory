@@ -137,6 +137,39 @@ func TestStart_BrokerNeverComesUp(t *testing.T) {
 	}
 }
 
+// TestStart_ContextCanceledDuringWait pins that waitReady honors ctx
+// cancellation instead of always riding out the full readyTimeout: a
+// caller giving up early (e.g. its own request context expiring) must not
+// be stuck waiting behind a broker that's slow to come up.
+func TestStart_ContextCanceledDuringWait(t *testing.T) {
+	withTempBrokerSocketPath(t)
+	origCmd := execSelfCommand
+	origTimeout := readyTimeout
+	readyTimeout = 5 * time.Second // long enough that only cancellation, not the timeout, could explain a fast return
+	execSelfCommand = func(socketPath string) (*exec.Cmd, error) {
+		// Never creates the socket — stands in for a broker that's slow
+		// (not crashed) to come up, so only ctx cancellation ends the wait.
+		return exec.Command("sleep", "30"), nil
+	}
+	t.Cleanup(func() {
+		execSelfCommand = origCmd
+		readyTimeout = origTimeout
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already canceled before Start begins waiting
+
+	start := time.Now()
+	_, _, err := Start(ctx)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected an error for an already-canceled context")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("Start took %s with an already-canceled context, want a near-immediate return (readyTimeout is %s)", elapsed, readyTimeout)
+	}
+}
+
 // TestProcess_CloseIsIdempotentAndNilSafe pins that Close never panics on
 // a nil Process or a double call — the orchestrator's App.Close() calls
 // this unconditionally.

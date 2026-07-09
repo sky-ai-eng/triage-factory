@@ -42,9 +42,21 @@ func listen(socketPath string) (net.Listener, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("capbroker: mkdir %s: %w", dir, err)
 	}
-	// Remove any stale socket file from a previous crash — net.Listen
-	// would otherwise EADDRINUSE on a path nothing is listening on.
-	_ = os.Remove(socketPath)
+	// Remove a stale socket file left by a previous crash — net.Listen
+	// would otherwise EADDRINUSE on a path nothing is listening on. Only
+	// ever removes an actual unix socket: --socket is operator/test
+	// supplied, so a misconfigured path pointing at an unrelated file
+	// must error rather than silently delete it.
+	if info, err := os.Lstat(socketPath); err == nil {
+		if info.Mode().Type() != os.ModeSocket {
+			return nil, fmt.Errorf("capbroker: %s exists and is not a socket; refusing to remove it", socketPath)
+		}
+		if err := os.Remove(socketPath); err != nil {
+			return nil, fmt.Errorf("capbroker: remove stale socket %s: %w", socketPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("capbroker: stat %s: %w", socketPath, err)
+	}
 
 	l, err := net.Listen("unix", socketPath)
 	if err != nil {

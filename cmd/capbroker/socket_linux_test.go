@@ -58,3 +58,26 @@ func TestListen_RemovesStaleSocket(t *testing.T) {
 	}
 	defer l2.Close()
 }
+
+// TestListen_RefusesNonSocketFile pins that a misconfigured --socket path
+// pointing at an unrelated file is rejected rather than silently deleted.
+// listen only ever removes an actual leftover unix socket.
+func TestListen_RefusesNonSocketFile(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "not-a-socket")
+	if err := os.WriteFile(sockPath, []byte("not a socket"), 0o600); err != nil {
+		t.Fatalf("seed non-socket file: %v", err)
+	}
+
+	if _, err := listen(sockPath); err == nil {
+		t.Fatal("expected listen to refuse a socketPath pointing at a non-socket file")
+	}
+
+	// The file must survive untouched.
+	data, err := os.ReadFile(sockPath)
+	if err != nil {
+		t.Fatalf("read back %s: %v", sockPath, err)
+	}
+	if string(data) != "not a socket" {
+		t.Error("listen must not have modified or removed the non-socket file, but its contents changed")
+	}
+}

@@ -89,18 +89,28 @@ func Start(ctx context.Context) (*Process, sandbox.PrivilegedOps, error) {
 	return &Process{cmd: cmd, socketPath: socketPath}, client, nil
 }
 
-// waitReady polls Ping until it succeeds or readyTimeout elapses.
+// waitReady polls Ping until it succeeds, readyTimeout elapses, or ctx is
+// canceled — checked both before each Ping and during the poll sleep, so
+// a caller that cancels ctx (e.g. Start's own caller giving up early)
+// unwinds immediately rather than riding out the full readyTimeout.
 func waitReady(ctx context.Context, client *IPCClient) error {
 	deadline := time.Now().Add(readyTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("capbroker: waiting for broker: %w", err)
+		}
 		pingCtx, cancel := context.WithTimeout(ctx, readyPollInterval)
 		lastErr = client.Ping(pingCtx)
 		cancel()
 		if lastErr == nil {
 			return nil
 		}
-		time.Sleep(readyPollInterval)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("capbroker: waiting for broker: %w", ctx.Err())
+		case <-time.After(readyPollInterval):
+		}
 	}
 	return fmt.Errorf("capbroker: broker did not become ready within %s: %w", readyTimeout, lastErr)
 }
