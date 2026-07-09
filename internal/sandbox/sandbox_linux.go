@@ -33,10 +33,17 @@ type teardownState struct {
 // iptablesRule names a single MASQUERADE rule so teardown can
 // remove exactly what we added. Stored as the literal -A arguments
 // so the teardown -D call mirrors the insertion verbatim.
+//
+// Fields are exported (despite the type itself being unexported)
+// because iptablesRule embeds into NetworkState, which
+// docs/specs/privsep/README.md §4 requires to round-trip as JSON over
+// a future broker RPC — encoding/json silently drops unexported
+// fields, which would make MasqueradeRule/EgressRules serialize to
+// "{}" and lose the teardown data.
 type iptablesRule struct {
-	table string // "nat"
-	chain string // "POSTROUTING"
-	args  []string
+	Table string // "nat"
+	Chain string // "POSTROUTING"
+	Args  []string
 }
 
 // wrap is the Linux-only implementation of the public Wrap entry
