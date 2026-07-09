@@ -76,25 +76,30 @@ func hasCap(caps []string, name string) bool {
 // silently erode."
 //
 // Skipped unless running as a process that already holds at least
-// CAP_SYS_ADMIN and CAP_NET_ADMIN in its own capability bounding set (the
-// container's granted ceiling in the real deployment) and setpriv is on
-// PATH — neither is true for a typical unprivileged `go test` run; this
-// is meant to run inside a container configured to mirror the compose
-// service's exact capability grant (cap_drop: ALL, cap_add: [SYS_ADMIN,
-// NET_ADMIN]), the same shape docs/self-host-setup.md's sandbox
-// integration-test harness already uses.
+// CAP_SYS_ADMIN and CAP_NET_ADMIN in its own EFFECTIVE capability set
+// (the container's granted ceiling, actually wielded — not just named in
+// the capability *bounding* set, which stays "everything" on most hosts
+// and CI runners regardless of the calling uid's actual privilege, since
+// it only ever shrinks via an explicit prctl(PR_CAPBSET_DROP); checking
+// it alone would false-pass on an unprivileged CI runner whose bounding
+// set still lists these names) and setpriv is on PATH — neither is true
+// for a typical unprivileged `go test` run; this is meant to run inside a
+// container configured to mirror the compose service's exact capability
+// grant (cap_drop: ALL, cap_add: [SYS_ADMIN, NET_ADMIN]), the same shape
+// docs/self-host-setup.md's sandbox integration-test harness already
+// uses.
 func TestCapabilityDrop_BrokerKeepsExactPairOrchestratorEndsEmpty(t *testing.T) {
 	setprivPath, err := exec.LookPath("setpriv")
 	if err != nil {
 		t.Skip("setpriv not found on PATH")
 	}
 
-	bounding, err := capinfo.Bounding()
+	effective, err := capinfo.Effective()
 	if err != nil {
-		t.Fatalf("read own capability bounding set: %v", err)
+		t.Fatalf("read own effective capability set: %v", err)
 	}
-	if !hasCap(bounding, "cap_sys_admin") || !hasCap(bounding, "cap_net_admin") {
-		t.Skipf("this process's own capability bounding set (%v) doesn't include both cap_sys_admin and cap_net_admin; run inside a container configured with cap_drop: ALL, cap_add: [SYS_ADMIN, NET_ADMIN] to exercise this test", bounding)
+	if !hasCap(effective, "cap_sys_admin") || !hasCap(effective, "cap_net_admin") {
+		t.Skipf("this process's own effective capability set (%v) doesn't include both cap_sys_admin and cap_net_admin; run inside a container configured with cap_drop: ALL, cap_add: [SYS_ADMIN, NET_ADMIN] to exercise this test", effective)
 	}
 
 	// The broker: bounding set trimmed to exactly the container's granted

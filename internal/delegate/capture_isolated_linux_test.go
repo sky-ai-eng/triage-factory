@@ -150,9 +150,23 @@ func TestCaptureIsolated_DropsPrivilegeAndNetns(t *testing.T) {
 // CLONE_NEWNET rather than fail the whole capture on a privileged syscall
 // it can never make. The uid/gid drop — the primary boundary — still
 // applies regardless.
+//
+// Asserts via /proc/self/ns/net identity (a symlink to "net:[<inode>]",
+// unique per network namespace on the host) rather than comparing
+// interface *counts*: a fresh netns also starts with only "lo", so on a
+// host that itself has only "lo" (a minimal/isolated CI runner), a
+// count-based comparison would pass whether or not CLONE_NEWNET was
+// actually (wrongly) still applied. Namespace identity has no such
+// false-pass — it directly answers "is this the same network namespace
+// as the parent," independent of the host's own interface topology.
 func TestCaptureIsolated_SkipsNetnsWithoutSysAdmin(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root to setuid/setgroups the child")
+	}
+
+	wantNetns, err := os.Readlink("/proc/self/ns/net")
+	if err != nil {
+		t.Fatalf("readlink /proc/self/ns/net: %v", err)
 	}
 
 	origHasSysAdmin := hasSysAdmin
@@ -170,15 +184,9 @@ func TestCaptureIsolated_SkipsNetnsWithoutSysAdmin(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(diagPath) })
 
-	hostIfaces, err := os.ReadFile("/proc/net/dev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantIfaces := parseProcNetDevIfaces(string(hostIfaces))
-
 	orig := captureCommand
 	captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error) {
-		script := "{ id; echo ==NET==; cat /proc/net/dev; } > " + diagPath + " 2>&1; echo null"
+		script := "{ id; echo ==NETNS==; readlink /proc/self/ns/net; } > " + diagPath + " 2>&1; echo null"
 		return exec.CommandContext(ctx, "/bin/sh", "-c", script), nil
 	}
 	t.Cleanup(func() { captureCommand = orig })
@@ -192,18 +200,17 @@ func TestCaptureIsolated_SkipsNetnsWithoutSysAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := string(b)
-	idLine, netPart := out, ""
-	if i := strings.Index(out, "==NET=="); i >= 0 {
-		idLine, netPart = out[:i], out[i:]
+	idLine, gotNetns := out, ""
+	if i := strings.Index(out, "==NETNS=="); i >= 0 {
+		idLine, gotNetns = out[:i], strings.TrimSpace(out[i+len("==NETNS=="):])
 	}
 
 	if !strings.Contains(idLine, "uid=10000") || !strings.Contains(idLine, "gid=10000") {
 		t.Errorf("child did not drop to uid/gid 10000 even without CAP_SYS_ADMIN:\n%s", idLine)
 	}
 
-	gotIfaces := parseProcNetDevIfaces(netPart)
-	if len(gotIfaces) != len(wantIfaces) {
-		t.Errorf("child network namespace was isolated (interfaces %v) even though hasSysAdmin() = false; want the host's own interfaces %v (no netns created)", gotIfaces, wantIfaces)
+	if gotNetns != wantNetns {
+		t.Errorf("child network namespace = %q, want %q (the parent's own — hasSysAdmin() = false should mean no new netns was created)", gotNetns, wantNetns)
 	}
 }
 

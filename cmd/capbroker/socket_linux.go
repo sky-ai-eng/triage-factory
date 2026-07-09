@@ -11,8 +11,11 @@ import (
 
 // socketDir is the shared parent directory for TF's local unix sockets —
 // the same directory cmd/exec/agenthost uses for its per-run sockets.
-// Reusing it is fine: MkdirAll is idempotent and both are owner-only
-// (0700) directories created by the same process.
+// Reusing it is fine: MkdirAll is idempotent, and listen's own explicit
+// Chmod (see below) pins the directory's final mode to 0711 regardless
+// of which package's MkdirAll call happens to create it first —
+// agenthost's own request for 0700 there is a no-op once this directory
+// already exists.
 const socketDir = "/run/tf"
 
 // DefaultSocketPath is the broker's fixed socket path. Unlike agenthost's
@@ -24,19 +27,23 @@ const DefaultSocketPath = socketDir + "/cap-broker.sock"
 // listen creates the broker's socket following the same anti-race
 // ordering as agenthost/socket_linux.go's Start:
 //
-//  1. MkdirAll 0700 on the socket's parent directory — closes the race
-//     window between socket-create and chmod; no other host user can
-//     enumerate the directory for a not-yet-restricted socket. Takes the
-//     parent of socketPath (not the socketDir constant directly) so tests
-//     can point listen at an isolated temp directory; production always
-//     passes DefaultSocketPath, whose parent is exactly socketDir.
+//  1. MkdirAll + Chmod 0711 on the socket's parent directory — see the
+//     chmod call below for why 0711 rather than agenthost's 0700. Takes
+//     the parent of socketPath (not the socketDir constant directly) so
+//     tests can point listen at an isolated temp directory; production
+//     always passes DefaultSocketPath, whose parent is exactly socketDir.
 //  2. net.Listen("unix", ...) — creates the socket file under the
 //     process umask (typically too permissive on its own; step 1 covers
 //     the gap, step 3 closes it for good).
 //  3. Chmod 0600 — owner-only. Unlike agenthost's per-run socket, this
 //     one is NEVER chowned to the sandbox UID and never bind-mounted into
-//     a sandbox — "the broker socket is host-only." Only the orchestrator
-//     process (same user that started the broker) can reach it.
+//     a sandbox — "the broker socket is host-only." Its owner starts as
+//     whichever uid ran listen (root, in production) and, when the
+//     caller passes --orchestrator-uid, runBroker chowns it afterward to
+//     the orchestrator's (different, unprivileged) uid so that process
+//     can still reach it post-drop; the broker itself keeps reaching it
+//     regardless of file ownership via CAP_DAC_OVERRIDE. No other uid
+//     can reach it either way.
 func listen(socketPath string) (net.Listener, error) {
 	dir := filepath.Dir(socketPath)
 	if err := os.MkdirAll(dir, 0o711); err != nil {

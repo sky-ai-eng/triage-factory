@@ -118,7 +118,14 @@ done
 # orchestrator needing to track a process it no longer has the
 # privilege to signal-manage anyway.
 privsep_enabled() {
-    case "$(printf '%s' "${TF_PRIVSEP:-}" | tr '[:upper:]' '[:lower:]')" in
+    # Trim leading/trailing whitespace before lowercasing, matching
+    # cmd/capbroker.Enabled()'s strings.TrimSpace: without this, a value
+    # like " false " would disable privsep in the Go binary but still
+    # read as enabled here, making the rollback unexpectedly ineffective.
+    v="${TF_PRIVSEP:-}"
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
         0 | false | f | no | n | off) return 1 ;;
         *) return 0 ;;
     esac
