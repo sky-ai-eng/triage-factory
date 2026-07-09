@@ -71,10 +71,10 @@ mean (~70% of repos below the mean, ~25% up to 3×, ~5% pathological at
 exceed the 100-PR page size.
 
 > The `dp1` numbers are placeholders approximating a large single-org GHES
-> deployment (~700 developers). Replace them with the partner's real repo /
-> open-PR counts when provided, and record their GHES rate-limit
-> configuration here alongside — GHES admins control those limits, so the
-> `--rate-limit` value worth testing is deployment-specific.
+> deployment (several hundred to a few thousand developers). Replace them with a
+> real deployment's repo / open-PR counts when available, and record that
+> deployment's GHES rate-limit configuration here alongside — GHES admins control
+> those limits, so the `--rate-limit` value worth testing is deployment-specific.
 
 ## What the report shows
 
