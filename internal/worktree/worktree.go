@@ -594,24 +594,64 @@ func gitRunCtx(ctx context.Context, dir string, args ...string) error {
 // spawns) whether or not auth is active; an inert auth uses that base alone,
 // behaving identically to before aside from the now-explicit prompt disable.
 func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	base := gitBaseEnv()
-	if env, ok := auth.gitConfigEnviron(base); ok {
-		cmd.Env = env
-	} else {
-		cmd.Env = base
-	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
+	for attempt := 1; ; attempt++ {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		if dir != "" {
+			cmd.Dir = dir
+		}
+		base := gitBaseEnv()
+		if env, ok := auth.gitConfigEnviron(base); ok {
+			cmd.Env = env
+		} else {
+			cmd.Env = base
+		}
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
 		if ctx.Err() != nil {
 			return fmt.Errorf("cancelled")
 		}
-		return fmt.Errorf("%s: %s", err, string(out))
+		runErr := fmt.Errorf("%s: %s", err, string(out))
+		if attempt >= worktreeAddLockRaceMaxAttempts || !isWorktreeAddLockRace(args, out) {
+			return runErr
+		}
+		// `worktree add` writes its own transient worktrees/<id>/locked
+		// marker (to keep a concurrent `worktree prune` off the entry while
+		// checkout populates) immediately after mkdir-ing worktrees/<id>/ —
+		// two syscalls apart, no window for OUR code to interleave. Under
+		// heavy parallel disk I/O this has still been observed to fail with
+		// "could not open '...locked' for writing: No such file or
+		// directory", i.e. git's own mkdir-then-open raced with something
+		// outside our control. Nothing was registered under this id (the
+		// mkdir that would have claimed it didn't survive), so a retry is
+		// safe — it just repeats the same not-yet-started add.
+		worktreeLog.Warn("worktree add hit transient locked-marker race, retrying", "dir", dir, "attempt", attempt, "error", runErr)
+		time.Sleep(worktreeAddLockRaceBackoff)
 	}
-	return nil
+}
+
+// worktreeAddLockRaceMaxAttempts bounds the retry in gitRunCtxAuth for the
+// transient `worktree add` locked-marker race documented there.
+const worktreeAddLockRaceMaxAttempts = 3
+
+// worktreeAddLockRaceBackoff is the pause between retries — long enough to
+// let whatever transient condition caused the race clear, short enough that
+// three attempts add negligible latency to the common (non-racing) path.
+const worktreeAddLockRaceBackoff = 50 * time.Millisecond
+
+// isWorktreeAddLockRace reports whether args/out match the narrow
+// `worktree add` failure signature described in gitRunCtxAuth: git's own
+// transient locked-marker write failing with a missing-directory error.
+// Matched narrowly (both the subcommand and the exact error shape) so this
+// never masks a real `worktree add` failure — a bad ref, an already
+// registered worktree, an auth failure — which all produce different text.
+func isWorktreeAddLockRace(args []string, out []byte) bool {
+	if len(args) < 2 || args[0] != "worktree" || args[1] != "add" {
+		return false
+	}
+	msg := string(out)
+	return strings.Contains(msg, "locked' for writing") && strings.Contains(msg, "No such file or directory")
 }
 
 func gitRun(dir string, args ...string) error {
