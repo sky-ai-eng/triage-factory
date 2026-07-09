@@ -2,8 +2,9 @@
 // docs/specs/privsep/README.md: a `cap-broker` subcommand that holds the
 // host's netns/iptables/cgroup/rootfs capabilities in a process separate
 // from the orchestrator, reached over a local unix-socket RPC. Gated
-// behind TF_PRIVSEP (default off — see Enabled); off, the orchestrator's
-// behavior is byte-identical to before this package existed.
+// behind TF_PRIVSEP (default **on** — see Enabled); with it off (a
+// temporary rollback escape hatch), the orchestrator's behavior is
+// byte-identical to before this package existed.
 //
 // cli.go's dispatchCLI wires the subcommand as its own top-level case,
 // deliberately never under `exec` — the agent's Bash allowlist only ever
@@ -35,16 +36,18 @@ func Handle(args []string) {
 	}
 }
 
-// Enabled reports whether TF_PRIVSEP is on. Off by default: every
-// existing multi-mode deployment keeps today's in-process privileged-ops
-// behavior until this is explicitly opted into. Accepts the same boolean
-// spellings as the rest of the codebase's TF_* flags (see
-// runmode.ParsePreventOrgCreation).
+// Enabled reports whether TF_PRIVSEP is on. Default **on**: the split is
+// the executor's default posture, and TF_PRIVSEP=0 is a temporary
+// rollback escape hatch back to the prior in-process behavior, meant to
+// be removed once operators have had a release to adjust. Accepts the
+// same boolean spellings as the rest of the codebase's TF_* flags (see
+// runmode.ParsePreventOrgCreation); unset or unrecognized is on, only a
+// recognized falsy spelling turns it off.
 func Enabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("TF_PRIVSEP"))) {
-	case "1", "true", "t", "yes", "y", "on":
-		return true
-	default:
+	case "0", "false", "f", "no", "n", "off":
 		return false
+	default:
+		return true
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -37,6 +38,17 @@ var captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error)
 // uid with no network — not as the host root — which is the whole point; and
 // the reader's uid matching the tree owner means git's own capture commands
 // (rev-parse/bundle/diff) no longer fail dubious-ownership.
+//
+// The network namespace is defense in depth on top of the uid drop, not
+// the primary boundary — that's the uid drop itself (see below) — so it
+// is applied only when this process actually holds CAP_SYS_ADMIN
+// (creating a network namespace needs it). An orchestrator running with
+// its capabilities dropped at exec (the default; see
+// docker/entrypoint.sh) has none, so it skips CLONE_NEWNET entirely
+// rather than failing the whole capture on a privileged syscall it can
+// never make. Routing this through the cap-broker instead, so the
+// network isolation applies unconditionally again, is tracked
+// separately.
 //
 // Dropping to the sandbox uid is SUFFICIENT for the whole capture only because
 // a multi-mode delegated run's worktree is always a SELF-CONTAINED clone: its
@@ -69,7 +81,13 @@ func captureIsolated(ctx context.Context, wtPath string) (*worktree.GitDelta, er
 			// access it must not have.
 			Groups: []uint32{},
 		},
-		Cloneflags: syscall.CLONE_NEWNET, // empty network namespace: capture is local-only
+	}
+	if hasSysAdmin() {
+		// Empty network namespace: capture is local-only. Skipped entirely
+		// when this process has no CAP_SYS_ADMIN (see the doc above) —
+		// creating a netns without it fails the clone, not just the
+		// isolation.
+		cmd.SysProcAttr.Cloneflags = syscall.CLONE_NEWNET
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -116,4 +134,25 @@ func captureChildEnv() []string {
 		"GIT_CONFIG_KEY_0=core.fsmonitor", "GIT_CONFIG_VALUE_0=",
 		"GIT_CONFIG_KEY_1=diff.external", "GIT_CONFIG_VALUE_1=",
 	}
+}
+
+// hasSysAdmin reports whether this process's own effective capability set
+// includes CAP_SYS_ADMIN — needed to create the capture child's network
+// namespace. A package var (like captureCommand above) so a test can
+// substitute it without needing to actually run with (or without) the
+// capability. Read fresh each call rather than cached: cheap (one small
+// /proc/self/status read) and correct even if a future caller somehow
+// changes this process's capability set between calls, which caching
+// would silently miss.
+var hasSysAdmin = func() bool {
+	names, err := capinfo.Effective()
+	if err != nil {
+		return false
+	}
+	for _, n := range names {
+		if n == "cap_sys_admin" {
+			return true
+		}
+	}
+	return false
 }

@@ -85,3 +85,47 @@ func TestSetOutputRedirects(t *testing.T) {
 		t.Fatalf("output still captured after restore: %q", buf.String())
 	}
 }
+
+// TestSetProcessTagsRecords verifies SetProcess's "proc" attribute is
+// injected live by the shared handler — including onto a logger obtained via
+// Component *before* SetProcess was called, which is the normal case in
+// production: package-level `var xLog = logging.Component("x")` vars run at
+// package-init time, before main() gets a chance to call SetProcess.
+func TestSetProcessTagsRecords(t *testing.T) {
+	t.Cleanup(func() { SetProcess("") })
+
+	var buf bytes.Buffer
+	restore := SetOutput(&buf)
+	defer restore()
+
+	preexisting := Component("sandbox")
+
+	SetProcess("cap-broker")
+	preexisting.Info("hello")
+	out := buf.String()
+	if !strings.Contains(out, "proc=cap-broker") {
+		t.Fatalf("missing proc=cap-broker on a pre-existing Component logger: %q", out)
+	}
+	if !strings.Contains(out, "component=sandbox") {
+		t.Fatalf("missing component=sandbox: %q", out)
+	}
+
+	// Changing the process tag takes effect immediately on the same logger.
+	buf.Reset()
+	SetProcess("orchestrator")
+	preexisting.Info("world")
+	out = buf.String()
+	if !strings.Contains(out, "proc=orchestrator") {
+		t.Fatalf("proc tag did not update live: %q", out)
+	}
+
+	// No process set (the common case: most binaries never call SetProcess)
+	// → no proc attribute at all, not an empty one.
+	buf.Reset()
+	SetProcess("")
+	preexisting.Info("no proc")
+	out = buf.String()
+	if strings.Contains(out, "proc=") {
+		t.Fatalf("unexpected proc attribute with no process set: %q", out)
+	}
+}

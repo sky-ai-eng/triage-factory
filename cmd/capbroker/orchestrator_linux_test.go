@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
 )
 
 // helperProcessEnv gates TestMain's re-exec branch below — the standard
@@ -19,6 +21,13 @@ import (
 // instead of the test suite, so Start/Process.Close are exercised against
 // an actual subprocess without needing the full triagefactory binary.
 const helperProcessEnv = "CAPBROKER_TEST_HELPER_PROCESS"
+
+// capReportEnv gates a second TestMain re-exec branch (privsep_capdrop_linux_test.go):
+// instead of running the broker, the re-invoked test binary reports its own
+// uid and effective capability set and exits — the thing a real setpriv
+// invocation is applied *around*, so the test can observe the actual kernel
+// state a real exec-time capability drop produces.
+const capReportEnv = "CAPBROKER_TEST_CAPREPORT"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(helperProcessEnv) == "1" {
@@ -33,6 +42,15 @@ func TestMain(m *testing.M) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		os.Exit(0)
+	}
+	if os.Getenv(capReportEnv) == "1" {
+		names, err := capinfo.Effective()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Printf("uid=%d CapEff=%s\n", os.Getuid(), capinfo.Describe(names))
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
@@ -103,6 +121,62 @@ func TestStart_SpawnsAndBecomesReady(t *testing.T) {
 	// Removed on graceful shutdown (cli_linux.go's runBroker defer).
 	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
 		t.Errorf("socket file should be removed after graceful shutdown, stat err = %v", err)
+	}
+}
+
+// TestStart_DialsExistingBrokerInsteadOfSpawning pins the default
+// container-deployment path: when docker/entrypoint.sh has already
+// spawned a broker before exec'ing this (capability-dropped) process
+// into existence, Start must dial it rather than trying (and,
+// post-drop, failing) to spawn a second one — and the returned Process
+// must not try to kill a broker it never started.
+func TestStart_DialsExistingBrokerInsteadOfSpawning(t *testing.T) {
+	sockPath := withTempBrokerSocketPath(t)
+	withHelperExecSelfCommand(t)
+
+	// Simulate the container entrypoint: spawn a broker directly,
+	// bypassing Start entirely, standing in for "some other ancestor
+	// process already started it."
+	preexisting, err := execSelfCommand(sockPath)
+	if err != nil {
+		t.Fatalf("spawn pre-existing broker: %v", err)
+	}
+	if err := preexisting.Start(); err != nil {
+		t.Fatalf("start pre-existing broker: %v", err)
+	}
+	defer func() {
+		_ = preexisting.Process.Kill()
+		_ = preexisting.Wait()
+	}()
+	if err := waitReady(context.Background(), Dial(sockPath)); err != nil {
+		t.Fatalf("pre-existing broker never became ready: %v", err)
+	}
+
+	// Make a second spawn attempt fail the test loudly — proving Start
+	// took the dial-first path instead of falling through to spawn.
+	execSelfCommand = func(socketPath string) (*exec.Cmd, error) {
+		t.Fatal("Start spawned a second broker instead of dialing the existing one")
+		return nil, nil
+	}
+
+	proc, client, err := Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if proc.cmd != nil {
+		t.Error("Process.cmd = non-nil, want nil: a dial-only Process never spawned the broker and must not try to manage its lifecycle")
+	}
+	if err := client.(*IPCClient).Ping(context.Background()); err != nil {
+		t.Errorf("Ping against the dialed broker: %v", err)
+	}
+
+	// Close must be a safe no-op here: it must NOT kill the pre-existing
+	// broker, which this Process doesn't own.
+	if err := proc.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+	if err := Dial(sockPath).Ping(context.Background()); err != nil {
+		t.Errorf("pre-existing broker should still be reachable after proc.Close(): %v", err)
 	}
 }
 

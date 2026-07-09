@@ -39,8 +39,28 @@ const DefaultSocketPath = socketDir + "/cap-broker.sock"
 //     process (same user that started the broker) can reach it.
 func listen(socketPath string) (net.Listener, error) {
 	dir := filepath.Dir(socketPath)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o711); err != nil {
 		return nil, fmt.Errorf("capbroker: mkdir %s: %w", dir, err)
+	}
+	// Explicit Chmod, not just MkdirAll's mode: MkdirAll is a no-op on an
+	// already-existing directory (e.g. agenthost's HostDaemon.Start also
+	// creates this same shared dir, at 0700, for its own per-run sockets),
+	// so relying on the create-mode alone would leave the directory at
+	// whichever mode whoever created it first happened to request.
+	//
+	// 0711 (owner rwx, group/other --x only) is deliberately still not
+	// 0700: the orchestrator dials this socket as a
+	// *different, non-root* uid than the broker (see the
+	// --orchestrator-uid chown below), and reaching a file by path
+	// requires search (x) permission on every parent directory component
+	// — a 0700 dir would EACCES that connect regardless of the socket
+	// file's own ownership. The missing read bit still blocks readdir/`ls`
+	// for non-owners, so a uid that doesn't already know a specific
+	// socket's filename still can't enumerate this directory to find
+	// one — the same anti-enumeration property agenthost's own per-run
+	// sockets rely on, preserved here.
+	if err := os.Chmod(dir, 0o711); err != nil {
+		return nil, fmt.Errorf("capbroker: chmod %s: %w", dir, err)
 	}
 	// Remove a stale socket file left by a previous crash — net.Listen
 	// would otherwise EADDRINUSE on a path nothing is listening on. Only

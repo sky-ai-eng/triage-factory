@@ -119,6 +119,14 @@ FROM alpine:3.20 AS runtime
 #   git that internal/sandbox/rootfs.go installs for the jailed agent.
 # - openssh-client: the worktree layer has an SSH path
 #   (internal/worktree/ssh.go) used for SSH clone URLs / GHE remotes.
+# - setpriv: the entrypoint's exec-time capability drop — clears the
+#   orchestrator's capability bounding set and switches it to a
+#   different uid at the exec boundary, before the Go runtime ever
+#   starts a thread. Never done in-process (capset/prctl from Go only
+#   affects one thread and would leave others still privileged), so
+#   this small, single-purpose, single-threaded C tool is a hard
+#   runtime dependency of docker/entrypoint.sh's default (TF_PRIVSEP=1)
+#   path.
 RUN apk add --no-cache \
     iptables \
     iproute2 \
@@ -127,7 +135,19 @@ RUN apk add --no-cache \
     tzdata \
     curl \
     git \
-    openssh-client
+    openssh-client \
+    setpriv
+
+# The unprivileged orchestrator identity the entrypoint drops into by
+# default (TF_PRIVSEP=1). A fixed, dedicated, non-root uid/gid — distinct
+# from internal/sandbox.WorktreeUID (10000, the uid *inside* the gVisor
+# sandbox the agent runs as) and from the cap-broker (which stays root) —
+# so the two host-level privsep processes are never the same uid: the
+# orchestrator, holding zero capabilities after the drop, cannot ptrace a
+# same-uid broker if it were ever the same identity. `-H` skips a home
+# dir (this identity never logs in or needs one); `-D` skips a password.
+RUN addgroup -g 10001 tf-orchestrator \
+    && adduser -D -H -u 10001 -G tf-orchestrator -s /sbin/nologin tf-orchestrator
 
 # Pull the per-arch runsc binary from a pinned gVisor release.
 #

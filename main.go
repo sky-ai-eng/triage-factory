@@ -9,6 +9,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/ee"
 	"github.com/sky-ai-eng/triage-factory/internal/app"
+	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"github.com/sky-ai-eng/triage-factory/internal/procname"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 
 	// Enterprise Edition SSO: registers its store factories, route installer,
@@ -54,10 +57,23 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// Server mode. Verify any Enterprise license token (TF_LICENSE) and
-	// register the entitlements checker before wiring subsystems, so
-	// feature gates see the right answer from first boot. No/invalid token
-	// → community default (every enterprise feature off). Never fatal.
+	// Server mode. Set this process's kernel-visible name and the "proc"
+	// log tag: `ps`/`/proc/<pid>/comm` reads tf-orchestrator, and every
+	// subsequent log line carries proc=orchestrator — distinguishing this
+	// process from a concurrently-running cap-broker whose stdout
+	// interleaves into the same container log stream. No-op-safe on
+	// every platform/mode: local mode and non-Linux hosts still get the
+	// title/tag, just with an empty (rather than absent) capability set
+	// reported below, since they never spawn a cap-broker to compare
+	// against anyway.
+	procname.SetTitle("tf-orchestrator")
+	logging.SetProcess("orchestrator")
+	logBootLine()
+
+	// Verify any Enterprise license token (TF_LICENSE) and register the
+	// entitlements checker before wiring subsystems, so feature gates see
+	// the right answer from first boot. No/invalid token → community
+	// default (every enterprise feature off). Never fatal.
 	ee.Install()
 
 	// Translate SIGINT/SIGTERM into context cancellation so the
@@ -91,4 +107,23 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	return a.Run(ctx)
+}
+
+var bootLog = logging.Component("boot")
+
+// logBootLine emits one legibility boot line: this process's uid and
+// effective capability set, so a security reviewer can check the
+// cap-broker/orchestrator split is real by reading logs / /proc/<pid>/status
+// instead of trusting the code.
+// Expected to read "CapEff=(empty)" whenever the exec-time capability drop
+// applied (the default, multi-mode, Linux path) — the drop happens before
+// this Go binary's own code ever runs, so there is nothing left to
+// enumerate but the confirmation.
+func logBootLine() {
+	names, err := capinfo.Effective()
+	if err != nil {
+		bootLog.Warn("boot: failed to read own effective capabilities", "error", err)
+		return
+	}
+	bootLog.Info("boot", "uid", os.Getuid(), "CapEff", capinfo.Describe(names))
 }

@@ -215,6 +215,33 @@ Any `jwk-init --write-env` run (rotate or not) rewrites `.env` atomically and no
 
 **Caveat:** any access tokens still in flight that were signed by the old key will fail verification as soon as GoTrue restarts. GoTrue's default access-token lifetime is 1 hour, so the practical impact is "users with active sessions need to re-authenticate." For zero-downtime overlap rotation (publish both old and new keys, switch the signing kid, wait for the old to expire, drop the old) you'd need to maintain a multi-key `GOTRUE_JWT_KEYS` array by hand — our `jwk-init` doesn't currently support merge semantics. Planned for a future ticket; for now, rotate during low-traffic windows or treat each rotation as a forced re-auth event.
 
+## Privilege separation: process model
+
+The `triagefactory` container grants `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` (see `docker-compose.yml`'s `cap_add` comment) because the per-run gVisor sandbox needs them to set up netns/veth/iptables, cgroups, and the curated rootfs. That grant is a *ceiling* on the container, not a promise that the whole TF process wields it: as of TFAC-605, `docker/entrypoint.sh` splits the container into two processes at boot, and only one of them ever touches those capabilities.
+
+| Process | Holds capabilities | Holds credentials | Parses hostile input | Listens for connections |
+| --- | --- | --- | --- | --- |
+| **cap-broker** (`tf-cap-broker`) | **Yes** — `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` | No | No | Yes — but only a host-only unix socket (`/run/tf/cap-broker.sock`, mode 0600), reachable only by the orchestrator |
+| **orchestrator** (`tf-orchestrator`) | **No** — empty effective set, capability bounding set cleared | Yes — GitHub/Jira tokens, the GitHub App key, DB credentials | Yes — webhook payloads, agent output, the HTTP API | Yes — the public HTTP API / websocket |
+| **sandbox** (the delegated agent) | No | No | Yes — it's the source of the hostile input | No — outbound only, through the orchestrator's egress proxy |
+
+How to read this against a running deployment:
+
+- `docker compose exec triagefactory ps aux` (or `ps -ef` inside the container's PID namespace) shows two `triagefactory`-derived processes named `tf-cap-broker` and `tf-orchestrator` — not two processes both named `triagefactory`.
+- `cat /proc/<cap-broker pid>/status | grep ^Cap` and the same for the orchestrator's pid: the broker's `CapEff` decodes to `cap_sys_admin,cap_net_admin` (via `capsh --decode=<hex>` or by eye against `include/uapi/linux/capability.h`'s bit numbers); the orchestrator's `CapEff` is all zeroes, and — the stronger property — its `CapBnd` (bounding set) is all zeroes too, meaning it cannot regain a capability even by executing a setuid-root helper later.
+- `cat /proc/<cap-broker pid>/status | grep ^Uid` vs. the orchestrator's: different real uids (broker is `0`, orchestrator is `10001` by default — see `TF_ORCHESTRATOR_UID` in `.env.example`). Different uids is what makes the orchestrator's zero capabilities meaningful: even a `CAP_SYS_PTRACE`-holding attacker (which the orchestrator isn't, but hypothetically) can't `ptrace` a different-uid process without it.
+- Every log line the container emits carries a `proc=cap-broker` or `proc=orchestrator` attribute, and each process logs exactly one boot line reporting its own uid and effective capability set — see the example in [usage.md](usage.md#privilege-separation-multi-mode-tf_privsep).
+
+**Rollback.** `TF_PRIVSEP=0` disables the split entirely: `docker/entrypoint.sh` execs the TF binary directly, as a single fully-privileged process, matching every deployment's behavior before TFAC-605. This is meant as a short-lived escape hatch for a deployment that hits a regression, not a supported long-term configuration.
+
+**Upgrading an existing deployment.** The orchestrator now runs as uid `10001` instead of root. Files created under the `tf-data` (`/data`) and `tf-rootfs` (`/opt/triagefactory/sandbox`) volumes by a pre-TFAC-605 (root) orchestrator stay root-owned — the entrypoint only `chown`s the top-level mount points, not existing content recursively, to keep every boot fast. If the orchestrator logs permission errors reading or writing under `/data` after upgrading, run a one-time recursive fix from the host:
+
+```sh
+docker compose run --rm --user root triagefactory chown -R 10001:10001 /data /opt/triagefactory/sandbox
+```
+
+A fresh deployment (empty volumes) needs no such step.
+
 ## Tailored seccomp profile
 
 The `triagefactory` service in `docker-compose.yml` runs with `security_opt: seccomp=docker/seccomp-profile.json` — a default-deny allowlist, not `seccomp=unconfined`. This is TFAC-608 (part of the privilege-separation epic, `docs/specs/privsep/README.md` §9 hardening track; see `docs/sandbox-security-architecture.md` §3/§6 vector 2 for the threat-model framing).

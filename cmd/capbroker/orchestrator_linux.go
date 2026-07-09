@@ -36,7 +36,13 @@ var brokerSocketPath = DefaultSocketPath
 
 // Process owns the spawned cap-broker child process's lifecycle. The
 // orchestrator holds exactly one per boot when TF_PRIVSEP=1 — "one broker
-// process per executor (long-lived)... not one per run."
+// process per executor (long-lived)... not one per run." cmd is nil when
+// Start found (and dialed) a broker some other ancestor already spawned
+// — the default container path — in which case Close is correctly a
+// no-op: this process was never the broker's parent and, post-drop, no
+// longer has the privilege to manage its lifecycle anyway. That process
+// gets torn down via the container's own signal propagation instead (see
+// docker/entrypoint.sh).
 type Process struct {
 	cmd        *exec.Cmd
 	socketPath string
@@ -56,19 +62,31 @@ var execSelfCommand = func(socketPath string) (*exec.Cmd, error) {
 	return exec.Command(self, "cap-broker", "--socket", socketPath), nil
 }
 
-// Start spawns the cap-broker subprocess and blocks until it answers a
-// Ping (or readyTimeout elapses). Returns a Process to close at shutdown
-// and an IPCClient satisfying sandbox.PrivilegedOps, ready for
-// sandbox.SetPrivilegedOps.
+// Start connects this process to a cap-broker and returns an IPCClient
+// satisfying sandbox.PrivilegedOps, ready for sandbox.SetPrivilegedOps.
 //
-// Both processes stay privileged for now — the broker keeps capabilities,
-// and the orchestrator does not drop them yet — so Start does not adjust
-// the child's credentials or capability set; it inherits the
-// orchestrator's own. A future phase flips the default on and drops the
-// orchestrator's capabilities at exec time; this split only proves the
-// mechanism ahead of that.
+// In the default (TF_PRIVSEP on) container deployment,
+// docker/entrypoint.sh already spawned the broker — still fully
+// privileged — before it exec'd this (now capability-dropped) process
+// into existence, so Start's first move is to check whether a broker is
+// already listening at socketPath and, if so, just dial it: this process
+// has no capabilities left to spawn a broker that could do anything
+// privileged anyway, post-drop.
+//
+// If nothing answers, Start falls back to spawning the broker itself —
+// the original behavior, kept for the dev/bare-metal path that runs the
+// binary directly instead of through the provided container image. That
+// fallback leaves both processes privileged (the spawning process's own
+// capabilities are inherited unchanged by the child); only the container
+// entrypoint's exec-time drop actually narrows anything — see
+// docs/usage.md's privilege-separation section.
 func Start(ctx context.Context) (*Process, sandbox.PrivilegedOps, error) {
 	socketPath := brokerSocketPath
+
+	if client := Dial(socketPath); client.Ping(ctx) == nil {
+		return &Process{socketPath: socketPath}, client, nil
+	}
+
 	cmd, err := execSelfCommand(socketPath)
 	if err != nil {
 		return nil, nil, err

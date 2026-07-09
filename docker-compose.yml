@@ -31,6 +31,16 @@
 # upstream. Managed-Kubernetes / Railway / Render block these
 # primitives and won't host TF — that's by design (the sandbox is
 # why the multi-tenant story is safe at all).
+#
+# This grant is a ceiling on the container, not a promise that the whole
+# TF process wields it. Inside the container, docker/entrypoint.sh spawns
+# a small `cap-broker` process that is the only thing holding
+# SYS_ADMIN/NET_ADMIN, then execs the main TF binary (the "orchestrator" —
+# the one parsing webhook payloads, agent output, and holding
+# credentials) into an empty capability set, a different unprivileged
+# uid, and a cleared capability bounding set, before that process runs a
+# single line of Go. See docs/self-host-setup.md for the process-model
+# table and docs/usage.md for the TF_PRIVSEP escape hatch.
 
 services:
   postgres:
@@ -371,6 +381,13 @@ services:
       TF_PREVENT_ORG_CREATION: ${TF_PREVENT_ORG_CREATION:-}
       TF_TRUSTED_PROXY_CIDR: ${TF_TRUSTED_PROXY_CIDR:-}
       TF_CAPTURE_CLIENT_IP: ${TF_CAPTURE_CLIENT_IP:-}
+      # Privilege separation (docker/entrypoint.sh, see .env.example):
+      # empty/unset means the default (on) — only a falsy value here
+      # actually disables it, so this is safe to leave unset.
+      TF_PRIVSEP: ${TF_PRIVSEP:-}
+      TF_ORCHESTRATOR_UID: ${TF_ORCHESTRATOR_UID:-}
+      TF_ORCHESTRATOR_GID: ${TF_ORCHESTRATOR_GID:-}
+      TF_CAPBROKER_SOCKET: ${TF_CAPBROKER_SOCKET:-}
     # Required for the in-container gVisor sandbox to do its netns +
     # iptables + runsc work. Tightening these later is a hardening
     # follow-up (SKY-336); the initial release ships the well-known

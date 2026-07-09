@@ -7,17 +7,22 @@ func TestEnabled(t *testing.T) {
 		val  string
 		want bool
 	}{
-		{"", false},
-		{"0", false},
-		{"false", false},
-		{"off", false},
-		{"bogus", false},
+		// Default-on: unset, and anything not a recognized falsy spelling,
+		// is enabled.
+		{"", true},
+		{"bogus", true},
 		{"1", true},
 		{"true", true},
 		{"TRUE", true},
 		{"on", true},
 		{"yes", true},
 		{" true ", true},
+		// The rollback escape hatch: only these spellings turn it off.
+		{"0", false},
+		{"false", false},
+		{"off", false},
+		{"no", false},
+		{" FALSE ", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.val, func(t *testing.T) {

@@ -181,15 +181,27 @@ Applies on both the sandbox and direct/local spawn paths.
 
 ### Privilege separation (multi mode, `TF_PRIVSEP`)
 
-Multi mode's per-run gVisor sandbox needs root-equivalent Linux capabilities (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`) to set up netns/veth/iptables, cgroups, and the curated rootfs. By default those operations run in-process, in the same executor that also resolves credentials and parses hostile input (agent output, webhook payloads).
+Multi mode's per-run gVisor sandbox needs root-equivalent Linux capabilities (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`) to set up netns/veth/iptables, cgroups, and the curated rootfs. Those operations run in a separate `cap-broker` process — every sandbox setup/teardown/rootfs/cgroup operation is an RPC to it over a host-only unix socket (`/run/tf/cap-broker.sock`, mode 0600) — so the main TF process (the "orchestrator": the one resolving credentials and parsing hostile input — agent output, webhook payloads) never holds those capabilities at all.
 
-Set `TF_PRIVSEP=1` to route them instead through a separate `cap-broker` subprocess: the executor spawns it once at boot (re-exec of the same binary), and every subsequent sandbox setup/teardown/rootfs/cgroup operation is an RPC to that process over a host-only unix socket (`/run/tf/cap-broker.sock`, mode 0600). This is the first phase of a larger privilege-separation split — see `docs/specs/privsep/README.md` — that eventually drops capabilities from the executor entirely; in this phase both processes still hold them, so it narrows nothing on its own yet, but proves the mechanism ahead of that flip.
+The provided container image (`docker/entrypoint.sh`) is what makes this a real boundary rather than just a code-level split: it holds the container's granted capabilities only long enough to spawn the cap-broker, then execs the orchestrator through `setpriv`, which clears its capability bounding set, drops inheritable capabilities, sets `no_new_privs`, and switches it to a dedicated unprivileged uid — all before the orchestrator's Go runtime starts a single thread. Capabilities are per-thread in Linux and the Go runtime starts threads before `main()` runs, so dropping them from *inside* a running Go process would only ever affect the one calling thread and silently leave others privileged; `setpriv` avoids that by dropping them in a small external tool before the orchestrator binary is even loaded. The cap-broker and the orchestrator end up as different uids, so the (now capability-less) orchestrator cannot `ptrace` the broker.
 
 ```bash
-export TF_PRIVSEP=1
+export TF_PRIVSEP=1     # the default; set for clarity or to un-set a prior override
+export TF_PRIVSEP=0     # rollback: single in-process, fully-privileged executor, as before
 ```
 
-Boolean (case-insensitive: `1`/`true`/`yes`/`on`; unset or any other value is off). **Default off** — existing deployments see no behavior change. **Multi mode + Linux only**; local mode never sandboxes and ignores the flag entirely. If the broker fails to start, boot fails with a clear error rather than silently falling back to the in-process path.
+Boolean (case-insensitive: `0`/`false`/`no`/`off` disables it; unset or any other value is on). **Default on.** `TF_PRIVSEP=0` is a temporary rollback escape hatch to the prior single-process behavior (no cap-broker, no capability drop) for deployments that hit a regression — it is not meant to be a long-term configuration and will eventually be removed. **Multi mode + Linux only**; local mode never sandboxes and ignores the flag entirely. If the broker fails to start, boot fails with a clear error rather than silently falling back to the in-process path.
+
+**Legibility.** Both processes are identifiable without reading source: `ps` / `/proc/<pid>/comm` shows `tf-cap-broker` and `tf-orchestrator` (rather than both sharing the binary's basename), every log line carries a `proc=cap-broker` or `proc=orchestrator` attribute (distinct from `component`, which names the subsystem within a process), and each process logs one boot line with its uid and effective capability set, e.g.:
+
+```
+level=INFO msg=boot component=cap-broker uid=0 CapEff=cap_net_admin,cap_sys_admin socket=/run/tf/cap-broker.sock proc=cap-broker
+level=INFO msg=boot component=boot uid=10001 CapEff=(empty) proc=orchestrator
+```
+
+A `CapEff=(empty)` orchestrator boot line is the confirmation the drop applied; anything else there is a bug, not a variant configuration.
+
+See the process-model table in [self-host-setup.md](self-host-setup.md#privilege-separation-process-model) for what each process holds and how to cross-check it against `/proc/<pid>/status` on a running deployment.
 
 ## GitHub polling
 

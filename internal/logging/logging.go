@@ -23,14 +23,22 @@
 //
 //	routerLog.Info("task bumped", "task", taskID, "events", n)
 //	  → level=INFO msg="task bumped" component=router task=... events=...
+//
+// A binary that calls SetProcess (the cap-broker/orchestrator privilege
+// split) additionally gets a "proc" attribute on every record, so a
+// broker's and an orchestrator's interleaved stdout stay distinguishable
+// after boot even though every "component" tag they emit (router,
+// sandbox, ...) can otherwise overlap between the two processes.
 package logging
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -58,9 +66,48 @@ var levelVar = new(slog.LevelVar)
 // redirect — which is what makes log output capturable in tests.
 var output = &swapWriter{w: os.Stderr}
 
+// processName is the process-scoped "proc" tag SetProcess installs. Package
+// vars like `var routerLog = logging.Component("router")` run at package-init
+// time, before main() has a chance to call SetProcess — so, like levelVar and
+// output above, this has to be a live reference the shared handler re-reads
+// per record (via procHandler.Handle), not a value baked into Component's
+// call-time `.With(...)`. Empty until SetProcess is called; readers see "" as
+// "no process tag" (see procHandler.Handle).
+var processName atomic.Value
+
 func init() {
+	processName.Store("")
 	levelVar.Set(ParseLevel(os.Getenv(envLevel)))
-	slog.SetDefault(slog.New(newHandler(output)))
+	slog.SetDefault(slog.New(procHandler{newHandler(output)}))
+}
+
+// SetProcess binds a process-scoped "proc" attribute onto every subsequent
+// log record from this binary — cap-broker vs. orchestrator legibility,
+// at zero per-call-site cost: existing `component`-tagged loggers created
+// before this call still pick it up, because procHandler injects it at
+// Handle time rather than at Logger construction time. Call once, early
+// at each entrypoint. Distinct from TF_ROLE (control/executor) — this
+// names the privilege-separation component, not the horizontal-scaling
+// role.
+func SetProcess(name string) { processName.Store(name) }
+
+// procHandler wraps the configured handler to inject the current proc
+// attribute (if any) into every record, live — see processName's doc.
+type procHandler struct{ slog.Handler }
+
+func (h procHandler) Handle(ctx context.Context, r slog.Record) error {
+	if p, _ := processName.Load().(string); p != "" {
+		r.AddAttrs(slog.String("proc", p))
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h procHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return procHandler{h.Handler.WithAttrs(attrs)}
+}
+
+func (h procHandler) WithGroup(name string) slog.Handler {
+	return procHandler{h.Handler.WithGroup(name)}
 }
 
 // swapWriter is an io.Writer whose underlying destination can be replaced
