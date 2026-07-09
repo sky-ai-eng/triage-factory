@@ -86,7 +86,10 @@ func run(ctx context.Context, args []string) error {
 	}()
 
 	fmt.Printf("Triage Factory running at %s\n", cfg.BrowserURL)
-	if !cfg.NoBrowser {
+	// Multi-mode is a headless multi-tenant server — never worth a browser
+	// launch attempt, regardless of whether the operator remembered
+	// --no-browser. Local mode still respects the flag.
+	if !cfg.NoBrowser && runmode.Current() == runmode.ModeLocal {
 		openBrowser(cfg.BrowserURL)
 	}
 
