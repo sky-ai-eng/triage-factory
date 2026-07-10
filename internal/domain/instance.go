@@ -30,9 +30,12 @@ type Instance struct {
 	LabelsJSON string
 }
 
-// Instance roles. "all" is the only role that exists today — TF_ROLE (the
-// control/executor split) is a later phase of the same epic — so every
-// process registers as InstanceRoleAll until that split lands.
+// Instance roles — the value app.registerInstance stamps here from
+// runmode.Role() (TFAC-582). "all" is the single-process default (and what
+// local mode always is); "control" and "executor" are the two halves of the
+// control/executor split. These string values MUST match runmode's
+// DeployRole constants (RoleAll / RoleControl / RoleExecutor) — registration
+// passes string(runmode.Role()) straight through.
 const (
 	InstanceRoleAll      = "all"
 	InstanceRoleControl  = "control"
