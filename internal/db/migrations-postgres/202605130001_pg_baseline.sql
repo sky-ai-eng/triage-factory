@@ -8387,9 +8387,18 @@ REVOKE ALL ON public.ws_outbox FROM anon, authenticated, service_role;
 -- can never collide on this key even though the id itself is only unique
 -- within one process. A row is "live" iff last_seen is within the last 45 s
 -- (TF_WS_PRESENCE_TTL_SECONDS) — checked at read time, not enforced by a DB
--- constraint. No delete on disconnect and no reaper: a dead pod's (or closed
--- connection's) rows simply age out of that live window and every live-read
--- query already filters on it, so there is nothing to clean up.
+-- constraint; no delete on disconnect, so a dead pod's (or closed
+-- connection's) rows simply age out of every live-read query's filter
+-- without needing an explicit cleanup step for READ correctness. That's
+-- necessary but not sufficient for STORAGE bounding, though: conn_id is
+-- minted from a per-boot monotonic counter (websocket.Hub.connSeq) that's
+-- never reused, so every reconnect (tab refresh, network blip, a
+-- RevalidateSessions kick) mints a brand-new row nothing will ever
+-- overwrite. A periodic reaper (RunPresenceReaper, mirroring ws_outbox's
+-- own) deletes rows past a separate, longer TTL (TF_WS_PRESENCE_ROW_TTL_SECONDS,
+-- default well above the live window) purely for that storage bound — it
+-- has zero effect on PresentFor's answer, which the live-window filter
+-- alone already determines.
 --
 -- Admin-pool-only / system table, same posture as instances/ws_outbox: not
 -- genuinely tenant business data (org_id here is a read-time filter on

@@ -118,6 +118,12 @@ func (a *App) startWorkers(ctx context.Context) {
 		// number of pods racing it. Every wsBackplane-wired pod runs it,
 		// executors included (they publish to tf_ws too).
 		go a.wsBackplane.RunOutboxReaper(ctx, wsbackplane.DefaultOutboxReapInterval, wsbackplane.OutboxTTLFromEnv())
+		// ws_presence row TTL reaper: same not-leader-gated rationale as
+		// the outbox reaper above, and needed for the same reason — every
+		// reconnect mints a brand-new conn_id nothing will ever overwrite,
+		// so without this the table grows unbounded under ordinary
+		// reconnect churn (see the migration comment on ws_presence).
+		go a.wsBackplane.RunPresenceReaper(ctx, wsbackplane.DefaultPresenceReapInterval, wsbackplane.PresenceRowTTLFromEnv())
 	}
 
 	// Bounded bare+worktree cache reaper (TFAC-60). Every role keeps a

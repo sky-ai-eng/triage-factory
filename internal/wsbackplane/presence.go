@@ -36,6 +36,14 @@ func (b *Backplane) RunPresenceHeartbeat(ctx context.Context, interval time.Dura
 	}
 }
 
+// heartbeatOnce upserts every locally-connected socket in one round trip
+// via unnest()-based array binding (the same idiom
+// internal/db/postgres/team_github_repos.go uses), rather than one
+// ExecContext per connection inside a held-open transaction — a pod with
+// thousands of live sockets would otherwise turn every heartbeat tick
+// into thousands of sequential round trips serialized behind one
+// long-lived transaction. A single multi-row INSERT is already atomic on
+// its own, so no explicit transaction is needed here at all.
 func (b *Backplane) heartbeatOnce(ctx context.Context) {
 	snap := b.hub.Snapshot()
 	if len(snap) == 0 {
@@ -44,43 +52,38 @@ func (b *Backplane) heartbeatOnce(ctx context.Context) {
 	writeCtx, cancel := context.WithTimeout(ctx, presenceWriteTimeout)
 	defer cancel()
 
-	tx, err := b.db.BeginTx(writeCtx, nil)
-	if err != nil {
-		backplaneLog.Warn("ws_presence: begin heartbeat tx failed", "error", err)
-		return
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	for _, c := range snap {
+	userIDs := make([]string, len(snap))
+	connIDs := make([]string, len(snap))
+	orgIDs := make([]string, len(snap))
+	viewings := make([]string, len(snap))
+	visibles := make([]bool, len(snap))
+	for i, c := range snap {
+		userIDs[i] = c.UserID
 		// connID is only unique within this process — qualify with our
 		// instance id so two pods' connections can never collide on the
 		// (user_id, conn_id) primary key even if their local sequence
 		// counters happen to match.
-		connID := b.originID + ":" + c.ConnID
-		if _, err := tx.ExecContext(writeCtx, `
-			INSERT INTO ws_presence (user_id, conn_id, org_id, instance_id, viewing, visible, last_seen)
-			VALUES ($1, $2, $3, $4, $5, $6, now())
-			ON CONFLICT (user_id, conn_id) DO UPDATE SET
-				org_id = EXCLUDED.org_id,
-				instance_id = EXCLUDED.instance_id,
-				viewing = EXCLUDED.viewing,
-				visible = EXCLUDED.visible,
-				last_seen = now()
-		`, c.UserID, connID, c.OrgID, b.originID, c.Viewing, c.Visible); err != nil {
-			backplaneLog.Warn("ws_presence: upsert failed", "user", c.UserID, "error", err)
-			return
-		}
+		connIDs[i] = b.originID + ":" + c.ConnID
+		orgIDs[i] = c.OrgID
+		viewings[i] = c.Viewing
+		visibles[i] = c.Visible
 	}
-	if err := tx.Commit(); err != nil {
-		backplaneLog.Warn("ws_presence: commit heartbeat tx failed", "error", err)
+
+	if _, err := b.db.ExecContext(writeCtx, `
+		INSERT INTO ws_presence (user_id, conn_id, org_id, instance_id, viewing, visible, last_seen)
+		SELECT t.user_id, t.conn_id, t.org_id, $1, t.viewing, t.visible, now()
+		FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::bool[])
+			AS t(user_id, conn_id, org_id, viewing, visible)
+		ON CONFLICT (user_id, conn_id) DO UPDATE SET
+			org_id = EXCLUDED.org_id,
+			instance_id = EXCLUDED.instance_id,
+			viewing = EXCLUDED.viewing,
+			visible = EXCLUDED.visible,
+			last_seen = now()
+	`, b.originID, userIDs, connIDs, orgIDs, viewings, visibles); err != nil {
+		backplaneLog.Warn("ws_presence: batch upsert failed", "connections", len(snap), "error", err)
 		return
 	}
-	committed = true
 }
 
 // PresentFor reports whether anyone is present for a prompt raised by

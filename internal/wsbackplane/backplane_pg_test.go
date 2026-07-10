@@ -47,6 +47,9 @@ func TestBackplane_Postgres(t *testing.T) {
 	t.Run("OutboxReaper_RemovesStaleRows", func(t *testing.T) {
 		testOutboxReaper(t, adminDB)
 	})
+	t.Run("PresenceReaper_RemovesStaleRowsWithoutTouchingLiveOnes", func(t *testing.T) {
+		testPresenceReaper(t, adminDB)
+	})
 	t.Run("Kick_CrossPodClosesRemoteConnection", func(t *testing.T) {
 		testKickCrossPod(t, adminDB, dsn)
 	})
@@ -297,6 +300,62 @@ func testOutboxReaper(t *testing.T, adminDB *sql.DB) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("stale ws_outbox row was never reaped")
+}
+
+// testPresenceReaper pins the storage-bounding half of ws_presence's
+// lifecycle (distinct from PresentFor's read-time live-window filter,
+// which testPresenceCrossPod already covers): a row past the reaper's
+// TTL gets physically deleted, while a fresh row — well inside both the
+// live window AND the reap TTL — survives untouched. Without this, every
+// reconnect (a new conn_id nothing ever overwrites) would accumulate
+// forever.
+func testPresenceReaper(t *testing.T, adminDB *sql.DB) {
+	if _, err := adminDB.Exec(`
+		INSERT INTO ws_presence (user_id, conn_id, org_id, instance_id, viewing, visible, last_seen)
+		VALUES ('user-stale', 'conn-stale', 'org-presence-reaper', 'pod-x', 'board', true, now() - interval '10 minutes')
+	`); err != nil {
+		t.Fatalf("seed stale presence row: %v", err)
+	}
+	if _, err := adminDB.Exec(`
+		INSERT INTO ws_presence (user_id, conn_id, org_id, instance_id, viewing, visible, last_seen)
+		VALUES ('user-fresh', 'conn-fresh', 'org-presence-reaper', 'pod-x', 'board', true, now())
+	`); err != nil {
+		t.Fatalf("seed fresh presence row: %v", err)
+	}
+
+	hub := websocket.NewHub()
+	bp := wsbackplane.New(adminDB, "", "pod-reaper", hub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go bp.RunPresenceReaper(ctx, 50*time.Millisecond, 1*time.Second)
+	t.Cleanup(cancel)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var stale bool
+		if err := adminDB.QueryRow(`SELECT EXISTS (SELECT 1 FROM ws_presence WHERE user_id = 'user-stale')`).Scan(&stale); err != nil {
+			t.Fatalf("check stale row: %v", err)
+		}
+		if !stale {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var stale bool
+	if err := adminDB.QueryRow(`SELECT EXISTS (SELECT 1 FROM ws_presence WHERE user_id = 'user-stale')`).Scan(&stale); err != nil {
+		t.Fatalf("check stale row: %v", err)
+	}
+	if stale {
+		t.Fatal("stale ws_presence row was never reaped")
+	}
+
+	var fresh bool
+	if err := adminDB.QueryRow(`SELECT EXISTS (SELECT 1 FROM ws_presence WHERE user_id = 'user-fresh')`).Scan(&fresh); err != nil {
+		t.Fatalf("check fresh row: %v", err)
+	}
+	if !fresh {
+		t.Fatal("reaper deleted a fresh row it should never have touched")
+	}
 }
 
 func testKickCrossPod(t *testing.T, adminDB *sql.DB, dsn string) {

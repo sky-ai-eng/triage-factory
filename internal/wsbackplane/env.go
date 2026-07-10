@@ -40,6 +40,15 @@ const (
 
 	DefaultPresenceHeartbeatInterval = 15 * time.Second
 	DefaultPresenceLiveWindow        = 45 * time.Second
+	DefaultPresenceReapInterval      = 60 * time.Second
+	// DefaultPresenceRowTTL is deliberately much larger than
+	// DefaultPresenceLiveWindow: the live window governs whether a row
+	// counts as "present" for reads (PresentFor), the row TTL governs
+	// when the reaper physically deletes it for storage hygiene — a row
+	// this old has been unambiguously dead (and unreachable by any future
+	// heartbeat, since a reconnect always mints a fresh conn_id) for a
+	// comfortable margin past when it stopped mattering to any read.
+	DefaultPresenceRowTTL = 5 * time.Minute
 
 	DefaultRevalidateInterval = 60 * time.Second
 
@@ -110,6 +119,15 @@ func PresenceHeartbeatIntervalFromEnv() time.Duration {
 // ws_presence row younger than this is considered live.
 func PresenceLiveWindowFromEnv() time.Duration {
 	return durationSecondsFromEnv("TF_WS_PRESENCE_TTL_SECONDS", DefaultPresenceLiveWindow)
+}
+
+// PresenceRowTTLFromEnv resolves TF_WS_PRESENCE_ROW_TTL_SECONDS — how
+// long RunPresenceReaper keeps a ws_presence row before deleting it.
+// Deliberately a separate knob from TF_WS_PRESENCE_TTL_SECONDS (the
+// read-time live window): this one only bounds storage growth from
+// reconnect churn, never PresentFor's answer — see DefaultPresenceRowTTL.
+func PresenceRowTTLFromEnv() time.Duration {
+	return durationSecondsFromEnv("TF_WS_PRESENCE_ROW_TTL_SECONDS", DefaultPresenceRowTTL)
 }
 
 // RevalidateIntervalFromEnv resolves TF_WS_SESSION_REVALIDATE_SECONDS —
