@@ -247,6 +247,36 @@ func TestCrossPodController_Steer_CarriesTextInPayload(t *testing.T) {
 	}
 }
 
+// TestCrossPodController_Steer_StaleAckSurfacesAsNoLiveProcess: a "stale"
+// ack (e.g. the owner couldn't apply the payload) must surface as
+// ErrNoLiveProcess exactly like "gone" — routeControlSignal only treats an
+// explicit "ok" as success, so no ack_result other than ok is ever silently
+// reported as a successful steer/interrupt.
+func TestCrossPodController_Steer_StaleAckSurfacesAsNoLiveProcess(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-remote-stale", "sess", "/tmp/wt")
+	if _, err := database.Exec(`UPDATE runs SET executor_id = 'executor-2' WHERE id = 'r-remote-stale'`); err != nil {
+		t.Fatalf("stamp executor: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	fakeSignals := newFakeRunSignalStore()
+	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
+		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
+	}}
+	s.SetRunSignals(fakeSignals, nil)
+	s.SetSignalAckTimeout(2 * time.Second)
+
+	go func() {
+		sig := fakeSignals.findUnacked(t, "executor-2")
+		_ = fakeSignals.Ack(context.Background(), sig.ID, domain.RunSignalAckStale)
+	}()
+
+	err := s.Steer(context.Background(), "r-remote-stale", "keep going")
+	if !errors.Is(err, ErrNoLiveProcess) {
+		t.Errorf("err = %v, want ErrNoLiveProcess for a stale ack", err)
+	}
+}
+
 // TestCrossPodController_Interrupt_TimesOutWhenOwnerNeverAcks: no ack
 // arrives before the deadline -> ErrSignalAckTimeout.
 func TestCrossPodController_Interrupt_TimesOutWhenOwnerNeverAcks(t *testing.T) {
@@ -346,6 +376,42 @@ func TestCancel_SignalsRemoteOwnerBestEffort(t *testing.T) {
 	sig := fakeSignals.findUnacked(t, "executor-2")
 	if sig.Kind != domain.RunSignalCancel {
 		t.Errorf("hastening signal kind = %q, want cancel", sig.Kind)
+	}
+}
+
+// TestCancel_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic:
+// signalCancelBestEffort must not dereference a nil s.instances — a
+// deployment can wire runSignals without an instance store (e.g. a
+// misconfigured role), and the fire-and-forget hastening path must simply
+// no-op rather than panic in its own goroutine.
+func TestCancel_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-cancel-noinst", "sess", "/tmp/wt")
+	if _, err := database.Exec(`UPDATE runs SET executor_id = 'executor-2' WHERE id = 'r-cancel-noinst'`); err != nil {
+		t.Fatalf("stamp executor: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	fakeSignals := newFakeRunSignalStore()
+	s.instances = nil
+	s.SetRunSignals(fakeSignals, nil)
+
+	if err := s.Cancel(runmode.LocalDefaultOrgID, "r-cancel-noinst", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	var status string
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id = 'r-cancel-noinst'`).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "cancelled" {
+		t.Errorf("status = %q, want cancelled", status)
+	}
+	// Give the fire-and-forget goroutine a beat to run (and not panic); it
+	// must never insert a signal without an instance store to confirm
+	// liveness against.
+	time.Sleep(50 * time.Millisecond)
+	sigs, _ := fakeSignals.ListUnackedForTarget(context.Background(), "executor-2")
+	if len(sigs) != 0 {
+		t.Errorf("expected no hastening signal without an instance store, got %d", len(sigs))
 	}
 }
 

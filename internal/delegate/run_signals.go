@@ -198,7 +198,10 @@ type ctlNotification struct {
 // live process here, so resolve a live remote owner, insert the signal,
 // and wait for its ack up to the reply-leg timeout. Returns
 // ErrNoLiveProcess (409) when no live owner exists anywhere or the owner
-// reports the run gone, ErrSignalAckTimeout (504) on a timed-out wait.
+// acks anything other than ok — gone (lost the race) or stale (e.g. a
+// malformed payload, which should never happen same-version but must not
+// be reported as success across a rolling deploy) both count as "did not
+// apply" — ErrSignalAckTimeout (504) on a timed-out wait.
 func (s *Spawner) routeControlSignal(ctx context.Context, runID string, kind domain.RunSignalKind, text string) error {
 	orgID, err := s.agentRuns.LookupOrgForRunSystem(ctx, runID)
 	if err != nil || orgID == "" {
@@ -218,7 +221,7 @@ func (s *Spawner) routeControlSignal(ctx context.Context, runID string, kind dom
 	if err != nil {
 		return fmt.Errorf("%s run %s: %w", kind, runID, err)
 	}
-	if !live || result == domain.RunSignalAckGone {
+	if !live || result != domain.RunSignalAckOK {
 		return fmt.Errorf("%s run %s: %w", kind, runID, ErrNoLiveProcess)
 	}
 	return nil
@@ -234,7 +237,7 @@ func (s *Spawner) signalCancelBestEffort(orgID, runID, executorID string) {
 	s.mu.Lock()
 	runSignals := s.runSignals
 	s.mu.Unlock()
-	if runSignals == nil || executorID == "" {
+	if runSignals == nil || s.instances == nil || executorID == "" {
 		return
 	}
 	go func() {
