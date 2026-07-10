@@ -85,24 +85,28 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 		return false
 	}
 
-	sem := s.semaphore()
-	maxRuns, activeRuns := cap(sem), len(sem)
-	gated := s.dispatchMemGated()
-
-	hb := domain.InstanceHeartbeat{
-		MaxRuns:       &maxRuns,
-		ActiveRuns:    &activeRuns,
-		DispatchGated: &gated,
-	}
-	if total := hostmem.TotalMB(); total != hostmem.Unknown {
-		hb.MemTotalMB = &total
-	}
-	s.mu.Lock()
-	probe := s.memAvailMB
-	s.mu.Unlock()
-	if probe != nil {
-		if avail := probe(); avail != hostmem.Unknown {
-			hb.MemAvailableMB = &avail
+	// Capacity + admission snapshot — written only when this role backs
+	// the numbers with a real dispatcher (executor/all). A pure-control
+	// pod (SetReportCapacity(false)) heartbeats liveness alone, leaving
+	// those executor-only columns NULL.
+	var hb domain.InstanceHeartbeat
+	if s.reportCapacity.Load() {
+		sem := s.semaphore()
+		maxRuns, activeRuns := cap(sem), len(sem)
+		gated := s.dispatchMemGated()
+		hb.MaxRuns = &maxRuns
+		hb.ActiveRuns = &activeRuns
+		hb.DispatchGated = &gated
+		if total := hostmem.TotalMB(); total != hostmem.Unknown {
+			hb.MemTotalMB = &total
+		}
+		s.mu.Lock()
+		probe := s.memAvailMB
+		s.mu.Unlock()
+		if probe != nil {
+			if avail := probe(); avail != hostmem.Unknown {
+				hb.MemAvailableMB = &avail
+			}
 		}
 	}
 
@@ -115,6 +119,9 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 		s.fenceIdentity(id, bootEpoch)
 		return false
 	}
+	// Record the successful write time for the executor healthz probe
+	// (last_heartbeat_write_age_sec).
+	s.lastHeartbeatWriteNanos.Store(time.Now().UnixNano())
 	return true
 }
 

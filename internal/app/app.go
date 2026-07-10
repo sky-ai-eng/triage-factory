@@ -48,6 +48,11 @@ import (
 type App struct {
 	cfg Config
 
+	// plan is the per-role subsystem inventory (runmode.Role), computed once
+	// in New. Every build/worker branch reads it instead of re-deriving role
+	// predicates; the executor exclusion test asserts against it.
+	plan subsystemPlan
+
 	// identity is this process's persistent instance identity — resolved
 	// first thing in New, held for the process lifetime via an
 	// exclusive file lock, released in Close. bootEpoch is the fleet
@@ -69,6 +74,13 @@ type App struct {
 	// and non-Linux never sandbox, so there's nothing for a broker to
 	// protect. Closed in Close().
 	capBroker capBrokerHandle
+	// brokerPing round-trips a Ping against the cap-broker's IPC socket,
+	// non-nil whenever capBroker is (Linux). The executor healthz's
+	// broker_ok check calls it: a broker that stops answering flips an
+	// executor's probe to 503, since it can no longer launch sandboxes —
+	// its whole job. nil when this host runs no broker (the check then
+	// reports ok, there being nothing to verify).
+	brokerPing func(context.Context) error
 
 	// Infra.
 	bus   *eventbus.Bus
@@ -122,7 +134,8 @@ type App struct {
 // lock already held and fail confusingly). Every `if err = ...` below
 // assigns the named return so the deferred check sees it.
 func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
-	a := &App{cfg: cfg, announce: newAnnouncer()}
+	a := &App{cfg: cfg, announce: newAnnouncer(), plan: planForRole(runmode.Role())}
+	appLog.Info("boot role", "role", a.plan.role, "mode", runmode.Current())
 
 	// Resolve this process's persistent instance identity before anything
 	// else touches the state root: the identity file's exclusive
@@ -167,33 +180,55 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	if err = a.registerInstance(ctx); err != nil { // fleet registry boot-registration upsert
 		return nil, err
 	}
-	if err = a.buildServer(ctx, static); err != nil { // HTTP handlers + auth + static; owns the websocket hub
+	// HTTP server + websocket hub — control/all only. An executor serves no
+	// user routes; it exposes a localhost-only healthz (see Run) and owns a
+	// standalone hub so the spawner's broadcasts are safe no-ops.
+	if a.plan.serveHTTP {
+		if err = a.buildServer(ctx, static); err != nil { // HTTP handlers + auth + static; owns the websocket hub
+			return nil, err
+		}
+		// TFAC-573: openStores' db.Migrate already ran to completion above (New
+		// would have returned its error otherwise) — record that for GET
+		// /readyz's "migrations" check now that the server exists to hold it.
+		a.srv.SetMigrationsOK(true)
+	} else {
+		a.buildExecutorRuntime() // standalone hub + public URL; no HTTP listener
+	}
+	a.buildInfra()          // event bus (SetEventBus only when a server exists)
+	a.buildRunCredentials() // ghResolver / runSecrets / modelFor
+	if a.plan.brain {
+		a.buildAI() // scorer + project classifier + profiler + reconciler
+	}
+	if err = a.buildExecution(); err != nil { // delegation spawner (+ curator on serveHTTP roles)
 		return nil, err
 	}
-	// TFAC-573: openStores' db.Migrate already ran to completion above (New
-	// would have returned its error otherwise) — record that for GET
-	// /readyz's "migrations" check now that the server exists to hold it.
-	a.srv.SetMigrationsOK(true)
-	a.buildInfra()                            // event bus
-	a.buildRunCredentials()                   // ghResolver / runSecrets / modelFor
-	a.buildAI()                               // scorer + project classifier
-	if err = a.buildExecution(); err != nil { // delegation spawner + curator runtime
-		return nil, err
+	if a.plan.brain {
+		a.buildRouting() // ingestor + poller manager + event router
 	}
-	a.buildRouting()        // ingestor + poller manager + event router
 	a.wire()                // connect the cycles (spawner↔router, config-change hooks)
-	a.registerSubscribers() // event-bus subscribers
+	a.registerSubscribers() // event-bus subscribers (brain only)
 	return a, nil
 }
 
 // Run performs one-time boot side effects, starts the background workers,
-// kicks the first poll cycle, and serves HTTP until ctx is cancelled.
+// kicks the first poll cycle (brain roles), and blocks until ctx is
+// cancelled — serving user HTTP on control/all, or the localhost-only
+// healthz on an executor.
 func (a *App) Run(ctx context.Context) error {
 	a.runStartupTasks(ctx)
 	a.startWorkers(ctx)
-	a.srv.StartExtensionWorkers(ctx)
-	a.startPolling()
-	return a.srv.ListenAndServeContext(ctx, a.cfg.Addr)
+	if a.plan.serveHTTP {
+		a.srv.StartExtensionWorkers(ctx)
+	}
+	if a.plan.brain {
+		a.startPolling()
+	}
+	if a.plan.serveHTTP {
+		return a.srv.ListenAndServeContext(ctx, a.cfg.Addr)
+	}
+	// Executor: no user HTTP. Serve the localhost healthz and block until
+	// shutdown; the dispatcher + heartbeat + reapers run as workers.
+	return a.runExecutorHealthz(ctx)
 }
 
 // Close releases the database pools and the instance identity lock. Safe
@@ -224,17 +259,29 @@ func (a *App) Close() error {
 // credential-change callbacks need the whole graph. Keeping these in one
 // place is what lets buildRouting/buildExecution stay acyclic.
 func (a *App) wire() {
-	// spawner.Delegate ← router (construction arg); router.DrainEntity ←
-	// spawner (post-construction). The latter closes the cycle.
-	a.spawner.SetQueueDrainer(a.router)
 	// {{RUN_URL}} prompt placeholder (TFAC-591) — the value captured in
-	// buildServer from whichever branch ran (local a.cfg.BrowserURL / multi
-	// TF_PUBLIC_URL), same as SetDeployConfig received.
+	// buildServer (local a.cfg.BrowserURL / multi TF_PUBLIC_URL) or, on an
+	// executor, buildExecutorRuntime (TF_PUBLIC_URL). Every role's spawner
+	// renders run deep links, so this is unconditional.
 	a.spawner.SetPublicURL(a.deployPublicURL)
 
-	a.reloader = newReloader(a)
-	a.srv.SetOnGitHubChanged(a.reloader.onGitHubChanged)
-	a.srv.SetOnJiraChanged(a.reloader.onJiraChanged)
+	// The router and reloader are brain components. spawner.Delegate ←
+	// router (construction arg); router.DrainEntity ← spawner
+	// (post-construction) — the latter closes the cycle. An executor has
+	// neither: its spawner's queue drainer stays nil (nil-safe), and it
+	// runs no poller for the reloader to nudge.
+	if a.plan.brain {
+		a.spawner.SetQueueDrainer(a.router)
+		a.reloader = newReloader(a)
+	}
+
+	// Config-change callbacks land on the server, which only exists on
+	// serveHTTP roles (which, today, are exactly the brain roles — so the
+	// reloader wired above is non-nil here).
+	if a.plan.serveHTTP {
+		a.srv.SetOnGitHubChanged(a.reloader.onGitHubChanged)
+		a.srv.SetOnJiraChanged(a.reloader.onJiraChanged)
+	}
 }
 
 // local reports whether the binary is running in single-tenant local mode.

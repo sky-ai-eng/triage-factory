@@ -50,6 +50,21 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("runmode: %w", err)
 	}
 
+	// Resolve the deployment role (TF_ROLE, default all) right after the
+	// mode and before the argv dispatch, so the `migrate` subcommand and
+	// every subsystem see the same role. An invalid value fails boot
+	// loudly; local mode coerces any split role to all (it is structurally
+	// single-process) and we log the coercion rather than brick a laptop
+	// over a stray env var.
+	coerced, requested, err := runmode.InitRoleFromEnv()
+	if err != nil {
+		return fmt.Errorf("runmode role: %w", err)
+	}
+	if coerced {
+		bootLog.Warn("TF_ROLE ignored in local mode: local is single-process and always runs as role=all",
+			"requested", requested, "effective", runmode.Role())
+	}
+
 	// CLI subcommands short-circuit before any server wiring: exec/status
 	// are used by delegated Claude Code agents; install/uninstall/
 	// migrate/jwk-init are user-facing.

@@ -29,10 +29,15 @@ import (
 )
 
 // buildInfra wires the in-process event bus and lets the GitHub webhook
-// receiver publish verified deliveries onto it.
+// receiver publish verified deliveries onto it. The bus is built in every
+// role (the spawner's run-sentinel publisher and the router both attach to
+// it); the server hook only fires on serveHTTP roles, where a server exists
+// to receive webhook deliveries.
 func (a *App) buildInfra() {
 	a.bus = eventbus.New()
-	a.srv.SetEventBus(a.bus)
+	if a.srv != nil {
+		a.srv.SetEventBus(a.bus)
+	}
 }
 
 // buildAI constructs the three background-LLM Managers — the scorer, the
@@ -208,11 +213,24 @@ func (a *App) buildExecution() error {
 	// deployment concern, and a laptop's numbers are just noise.
 	if runmode.Current() == runmode.ModeMulti {
 		if total := hostmem.TotalMB(); total != hostmem.Unknown {
-			derived := delegate.DerivedRunCapacity(total)
+			// Platform reserve is role-aware: a dedicated executor pod hosts
+			// none of the co-resident platform stack (Postgres/GoTrue/object
+			// store) the all-in-one default models, so it reserves far less —
+			// otherwise a normal ~8 GB executor derives an advisory capacity of
+			// 0. Env-tunable via TF_PLATFORM_RESERVE_MB.
+			roleReserve := delegate.DefaultPlatformReserveMB
+			if a.plan.role == runmode.RoleExecutor {
+				roleReserve = delegate.DefaultExecutorPlatformReserveMB
+			}
+			reserve, rerr := delegate.ParsePlatformReserveMB(os.Getenv("TF_PLATFORM_RESERVE_MB"), roleReserve)
+			if rerr != nil {
+				appLog.Warn("platform reserve", "error", rerr)
+			}
+			derived := delegate.DerivedRunCapacityWithReserve(total, reserve)
 			appLog.Info("host run capacity",
 				"mem_total_mb", total,
 				"budget_per_run_mb", delegate.DefaultRunMemoryBudgetMB,
-				"platform_reserve_mb", delegate.DefaultPlatformReserveMB,
+				"platform_reserve_mb", reserve,
 				"derived_capacity", derived)
 			if capRuns > derived {
 				msg := "max concurrent runs exceeds derived host capacity; the host may not have enough RAM to run the cap concurrently"
@@ -245,13 +263,32 @@ func (a *App) buildExecution() error {
 		return fmt.Errorf("storage init: %w", err)
 	}
 	a.spawner.SetStorage(blobStore)
-	a.srv.SetSpawner(a.spawner)
+
+	// Control pods build the spawner (the router enqueues runs through it,
+	// and the run-control HTTP endpoints reach live runs through it) but
+	// never run the dispatcher, so their registry row must not advertise
+	// dispatcher capacity — leave those executor-only columns NULL.
+	if !a.plan.dispatcher {
+		a.spawner.SetReportCapacity(false)
+	}
 
 	// Before reading entity.project_id for KB injection, the spawner blocks
-	// until classified_at is set (or the timeout elapses).
-	a.spawner.SetWaitForClassification(func(ctx context.Context, orgID, entityID string) {
-		projectclassify.WaitFor(ctx, a.classifier, orgID, entityID, projectclassify.DefaultWaitTimeout)
-	})
+	// until classified_at is set (or the timeout elapses). Only wired when
+	// the classifier exists (brain roles); an executor proceeds without the
+	// wait, reading whatever project_id the brain has already classified.
+	if a.classifier != nil {
+		a.spawner.SetWaitForClassification(func(ctx context.Context, orgID, entityID string) {
+			projectclassify.WaitFor(ctx, a.classifier, orgID, entityID, projectclassify.DefaultWaitTimeout)
+		})
+	}
+
+	// The server + curator handles below only exist on serveHTTP roles. An
+	// executor has no server to hand the spawner to and runs no curator
+	// chat, so it stops here with just the dispatcher-ready spawner.
+	if !a.plan.serveHTTP {
+		return nil
+	}
+	a.srv.SetSpawner(a.spawner)
 
 	// Curator runtime — per-project chat sessions. Sweep stranded
 	// turns from a previous process first: a binary restart killed every

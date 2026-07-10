@@ -41,6 +41,44 @@
 # uid, and a cleared capability bounding set, before that process runs a
 # single line of Go. See docs/self-host-setup.md for the process-model
 # table and docs/usage.md for the privilege-separation model.
+#
+# ── Scaling out (TFAC-582) ────────────────────────────────────────────
+# The default `docker compose up` runs the single all-in-one
+# `triagefactory` service (TF_ROLE unset → all) — one box, no LB, exactly
+# as before. To split the execution plane across a control pod + N sandbox
+# workers, set TF_ROLE=control in .env and start the `scale` profile:
+#
+#   TF_ROLE=control docker compose --profile scale up -d --scale executor=2
+#
+# That yields 1 control (the published entrypoint — executors take no
+# inbound traffic, so there is NO load balancer in this shape) plus 2
+# executors, each on its own TF_STATE_ROOT volume. Both roles run the same
+# image and the same entrypoint (broker-then-drop privilege separation),
+# and BOTH carry the sandbox caps: control pods sandbox curator chats,
+# executors sandbox delegated runs. See docs/self-host-setup.md for the
+# N-executor profile, the max_connections arithmetic, and the M≥2-control
+# (HA) reference reverse-proxy config.
+
+# Shared, security-critical container hardening for every TF role. Anchored
+# so the control and executor services can never drift on the caps + seccomp
+# + cgroup shape (the ticket's "both compose services carry the caps"):
+#   - SYS_ADMIN + NET_ADMIN: the in-container gVisor sandbox's netns +
+#     iptables + runsc work. Held ONLY by the cap-broker inside the
+#     container; the orchestrator execs capless (see the header above).
+#   - seccomp: a tailored default-deny allowlist (TFAC-608), NOT unconfined —
+#     see docs/self-host-setup.md#tailored-seccomp-profile.
+#   - cgroup: private — a private cgroup-v2 namespace so per-run memory
+#     ceilings (TF_RUN_MEMORY_LIMIT_MB) manage this container's own delegated
+#     subtree and can never reach host cgroups. Fails open without it.
+# Tightening the caps further is a hardening follow-up (SKY-336).
+x-tf-hardening: &tf-hardening
+  cap_add:
+    - SYS_ADMIN
+    - NET_ADMIN
+  security_opt:
+    - apparmor=unconfined
+    - seccomp=docker/seccomp-profile.json
+  cgroup: private
 
 services:
   postgres:
@@ -335,6 +373,18 @@ services:
       seaweedfs-postinit: { condition: service_completed_successfully }
     environment:
       TF_MODE: multi
+      # Deployment role (TFAC-582). Unset → all (the single all-in-one box,
+      # today's shape). Set TF_ROLE=control in .env when scaling out with the
+      # `scale` profile so this service becomes the API + brain and the
+      # `executor` service(s) claim the delegated runs. Invalid values fail
+      # boot loudly; local mode would force all (moot here — this is multi).
+      TF_ROLE: ${TF_ROLE:-}
+      # Per-role Postgres pool ceiling (per pool) + advisory platform reserve.
+      # Empty → the role default (control/all: 25 conns/pool, 12 GB reserve;
+      # executor: 6 conns/pool, 2 GB reserve). See the max_connections
+      # arithmetic in docs/self-host-setup.md.
+      TF_DB_MAX_OPEN_CONNS: ${TF_DB_MAX_OPEN_CONNS:-}
+      TF_PLATFORM_RESERVE_MB: ${TF_PLATFORM_RESERVE_MB:-}
       # supabase_admin is the real superuser in the supabase/postgres
       # image; the `postgres` role is demoted by the image's bundled
       # migrations and supautils blocks reserved-role ALTERs from it.
@@ -390,26 +440,9 @@ services:
       TF_ORCHESTRATOR_HOME: ${TF_ORCHESTRATOR_HOME:-}
       TF_CAPBROKER_SOCKET: ${TF_CAPBROKER_SOCKET:-}
       TF_SANDBOX_GID: ${TF_SANDBOX_GID:-}
-    # Required for the in-container gVisor sandbox to do its netns +
-    # iptables + runsc work. Tightening these later is a hardening
-    # follow-up (SKY-336); the initial release ships the well-known
-    # gVisor permission shape so the sandbox boots reliably.
-    cap_add:
-      - SYS_ADMIN
-      - NET_ADMIN
-    security_opt:
-      - apparmor=unconfined
-      # Tailored allowlist (default-deny), not unconfined — see
-      # docs/self-host-setup.md#tailored-seccomp-profile (TFAC-608).
-      - seccomp=docker/seccomp-profile.json
-    # Private cgroup namespace so per-run memory ceilings
-    # (TF_RUN_MEMORY_LIMIT_MB) manage this container's own delegated
-    # cgroup subtree. TF remounts its namespace's view of
-    # /sys/fs/cgroup read-write at first use (runc mounts it ro); with
-    # a private namespace that can never reach host cgroups. Without
-    # this the ceiling feature fails open: runs work, just without a
-    # per-run memory limit.
-    cgroup: private
+    # Sandbox caps + seccomp + private cgroup — see the x-tf-hardening
+    # anchor above (shared with the executor service so they can't drift).
+    <<: *tf-hardening
     volumes:
       # Host-global toolchain cache: the runtime-extracted sandbox rootfs
       # (~hundreds of MB). Kept warm across `docker compose down/up` so a
@@ -432,6 +465,99 @@ services:
       timeout: 5s
       retries: 6
       start_period: 30s
+
+  # ── Sandbox worker (TFAC-582) ─────────────────────────────────────────
+  # Only started with the `scale` profile:
+  #
+  #   TF_ROLE=control docker compose --profile scale up -d --scale executor=2
+  #
+  # Same image + entrypoint as the control pod (broker-then-drop privilege
+  # separation), TF_ROLE=executor. It runs the delegated-run dispatcher +
+  # sandboxes + per-run proxies + reapers and NOTHING else — no user HTTP,
+  # no pollers, no router, no AI managers, no migrations (it asserts the
+  # schema in-process at boot, refusing a behind/ahead mismatch). It accepts
+  # NO inbound traffic (no published ports); the control pod is the single
+  # entrypoint, so there is no load balancer in this shape.
+  #
+  # Shared-nothing: each replica gets its OWN anonymous /data
+  # (TF_STATE_ROOT) and /opt/triagefactory/sandbox (rootfs cache) volume —
+  # a NAMED volume shared across replicas would collide on the instance
+  # identity flock (two processes, one state root → the second refuses to
+  # boot) and violate the shared-nothing model. The tradeoff is each
+  # replica re-extracts the sandbox rootfs once on first boot (~minutes,
+  # cold) and anonymous volumes accumulate until `docker compose down -v`.
+  executor:
+    profiles: ["scale"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    # image: ghcr.io/sky-ai-eng/triage-factory:latest
+    depends_on:
+      postgres: { condition: service_healthy }
+      # postgres-postinit reconciles the role passwords; the executor's
+      # admin-pool connection needs them set.
+      postgres-postinit: { condition: service_completed_successfully }
+      # Wait for the control pod to be serving — by then it has migrated the
+      # schema, so the executor's in-process assert passes on the first try
+      # instead of riding out the entrypoint's behind-schema retry loop.
+      triagefactory: { condition: service_healthy }
+      # The bucket must exist before the first workspace snapshot.
+      seaweedfs-postinit: { condition: service_completed_successfully }
+    environment:
+      TF_MODE: multi
+      TF_ROLE: executor
+      # Localhost-only liveness endpoint (the container HEALTHCHECK target).
+      # Pinned to match the healthcheck below.
+      TF_HEALTHZ_PORT: "3001"
+      # Admin superuser pool (same as the control pod). The executor runs no
+      # RLS request handlers, so its app pool is effectively idle; both pools
+      # ship much smaller ceilings than the API tier (see TF_DB_MAX_OPEN_CONNS
+      # and the max_connections arithmetic in docs/self-host-setup.md).
+      TF_DATABASE_URL: postgres://supabase_admin:${POSTGRES_PASSWORD:?missing POSTGRES_PASSWORD (see .env.example)}@postgres:5432/postgres
+      TF_AUTHENTICATOR_PASSWORD: ${TF_AUTHENTICATOR_PASSWORD:?missing TF_AUTHENTICATOR_PASSWORD (see .env.example)}
+      # App-encrypted org/user integration secrets (per-run GitHub/LLM creds).
+      TF_SECRET_ENCRYPTION_KEY: ${TF_SECRET_ENCRYPTION_KEY:?missing TF_SECRET_ENCRYPTION_KEY (see .env.example)}
+      # Durable-workspace object store (per-run snapshots + cross-host rehydrate).
+      TF_BLOB_ENDPOINT: ${TF_BLOB_ENDPOINT:-http://seaweedfs:8333}
+      TF_BLOB_BUCKET: ${TF_BLOB_BUCKET:-tf-workspaces}
+      TF_BLOB_ACCESS_KEY: ${TF_BLOB_ACCESS_KEY:?missing TF_BLOB_ACCESS_KEY (see .env.example)}
+      TF_BLOB_SECRET_KEY: ${TF_BLOB_SECRET_KEY:?missing TF_BLOB_SECRET_KEY (see .env.example)}
+      TF_BLOB_REGION: ${TF_BLOB_REGION:-us-east-1}
+      # Public base URL of the control pod — executors take no inbound
+      # traffic, but the {{RUN_URL}} prompt deep link points here.
+      TF_PUBLIC_URL: ${TF_PUBLIC_URL:?missing TF_PUBLIC_URL (see .env.example)}
+      # Smaller per-role pool + reserve defaults apply automatically; override
+      # here only if the executor pods are far larger/smaller than typical.
+      TF_DB_MAX_OPEN_CONNS: ${TF_DB_MAX_OPEN_CONNS:-}
+      TF_PLATFORM_RESERVE_MB: ${TF_PLATFORM_RESERVE_MB:-}
+      # Privilege separation (docker/entrypoint.sh): the executor sandboxes
+      # every delegated run, so the cap-broker is spawned unconditionally,
+      # exactly as on the control pod. These only tune the orchestrator
+      # uid/gid, $HOME, and broker socket path.
+      TF_ORCHESTRATOR_UID: ${TF_ORCHESTRATOR_UID:-}
+      TF_ORCHESTRATOR_GID: ${TF_ORCHESTRATOR_GID:-}
+      TF_ORCHESTRATOR_HOME: ${TF_ORCHESTRATOR_HOME:-}
+      TF_CAPBROKER_SOCKET: ${TF_CAPBROKER_SOCKET:-}
+      TF_SANDBOX_GID: ${TF_SANDBOX_GID:-}
+    # Same sandbox caps + seccomp + private cgroup as the control pod — an
+    # executor's whole job is launching sandboxes.
+    <<: *tf-hardening
+    volumes:
+      # Anonymous, per-replica (see the shared-nothing note above).
+      - /opt/triagefactory/sandbox
+      - /data
+    # No published ports: executors accept no inbound traffic.
+    healthcheck:
+      # The localhost-only executor healthz (127.0.0.1:3001). curl -f fails on
+      # a 503 (dispatcher dead / heartbeat stale / broker down); a fenced pod
+      # stays 200 so the check doesn't kill it before the drain ticket lands.
+      test: ["CMD", "curl", "-fsS", "http://localhost:3001/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      # Room for the broker start + first heartbeat, plus any behind-schema
+      # retry while the control pod finishes migrating.
+      start_period: 45s
 
 volumes:
   pg-data:

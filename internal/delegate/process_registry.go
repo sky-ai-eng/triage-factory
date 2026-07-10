@@ -69,26 +69,64 @@ func ParseMaxConcurrentRuns(raw string) (n int, clamped bool, err error) {
 const DefaultRunMemoryBudgetMB = 256
 
 // DefaultPlatformReserveMB is the instance memory the capacity rule sets
-// aside for everything that isn't a run: the TF binary, Postgres,
-// GoTrue, the object store, and safety headroom the dispatcher's
-// memory floor defends at runtime.
+// aside for everything that isn't a run on an all-in-one box: the TF
+// binary, Postgres, GoTrue, the object store, and safety headroom the
+// dispatcher's memory floor defends at runtime. It models a co-resident
+// platform stack — right for TF_ROLE=all, too large for a dedicated
+// executor pod that hosts none of those services.
 const DefaultPlatformReserveMB = 12288
 
-// DerivedRunCapacity applies the sizing rule to this instance's total
-// memory (hostmem.TotalMB — the cgroup limit when confined, host
-// MemTotal otherwise):
-// runs ≈ (RAM − reserve) ÷ budget, clamped to [0, ceiling]. This is
-// advisory (boot log + over-provision warning) — the runtime
-// protections are the concurrency cap and the dispatch memory floor.
+// DefaultExecutorPlatformReserveMB is the reserve for a dedicated
+// TF_ROLE=executor pod (TFAC-582). An executor hosts none of the
+// co-resident platform stack the all-in-one reserve models — just the
+// orchestrator + cap-broker + OS headroom — so with the 12 GB all-in-one
+// reserve a normal ~8 GB executor pod would derive advisory capacity 0.
+// Env-tunable via TF_PLATFORM_RESERVE_MB (ParsePlatformReserveMB).
+const DefaultExecutorPlatformReserveMB = 2048
+
+// DerivedRunCapacity applies the sizing rule against the all-in-one
+// platform reserve. Kept as the DefaultPlatformReserveMB-pinned form for
+// existing callers/tests; DerivedRunCapacityWithReserve is the role-aware
+// variant.
 func DerivedRunCapacity(totalMB int) int {
-	if totalMB <= DefaultPlatformReserveMB {
+	return DerivedRunCapacityWithReserve(totalMB, DefaultPlatformReserveMB)
+}
+
+// DerivedRunCapacityWithReserve applies the sizing rule to this instance's
+// total memory (hostmem.TotalMB — the cgroup limit when confined, host
+// MemTotal otherwise) against a caller-supplied reserve:
+// runs ≈ (RAM − reserve) ÷ budget, clamped to [0, ceiling]. This is
+// advisory (boot log + over-provision warning) — the runtime protections
+// are the concurrency cap and the dispatch memory floor.
+func DerivedRunCapacityWithReserve(totalMB, reserveMB int) int {
+	if totalMB <= reserveMB {
 		return 0
 	}
-	n := (totalMB - DefaultPlatformReserveMB) / DefaultRunMemoryBudgetMB
+	n := (totalMB - reserveMB) / DefaultRunMemoryBudgetMB
 	if n > MaxConcurrentRunsCeiling {
 		return MaxConcurrentRunsCeiling
 	}
 	return n
+}
+
+// ParsePlatformReserveMB interprets the TF_PLATFORM_RESERVE_MB env value,
+// falling back to roleDefault (DefaultPlatformReserveMB for all, or
+// DefaultExecutorPlatformReserveMB for an executor pod) when empty. A
+// negative or non-numeric value returns roleDefault plus an error the
+// caller logs — a bad value must not brick boot, and the reserve only
+// tunes an advisory number anyway.
+func ParsePlatformReserveMB(raw string, roleDefault int) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return roleDefault, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return roleDefault, fmt.Errorf(
+			"invalid TF_PLATFORM_RESERVE_MB %q (want an integer >= 0); using default %d",
+			raw, roleDefault)
+	}
+	return n, nil
 }
 
 // DefaultDispatchMemFloorMB is the default MemAvailable floor below

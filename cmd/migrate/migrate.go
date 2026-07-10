@@ -14,6 +14,7 @@ package migrate
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 
@@ -22,6 +23,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// ExitSchemaAhead is the distinct exit code `migrate up` returns when a
+// TF_ROLE=executor process finds the connected schema AHEAD of what its
+// build understands (db.ErrExecutorSchemaAhead). Unlike Behind — a sibling
+// control pod still migrating, which a restart resolves — Ahead never
+// self-resolves: the fix is deploying a newer executor build first (spec
+// §5.5's drain-first-on-schema-change). The container entrypoint keys its
+// retry loop on this code to fail fast instead of burning its retry budget
+// waiting for a condition that can't clear.
+const ExitSchemaAhead = 3
 
 // openTarget returns the (db, dialect) pair for the current runmode.
 // Local mode opens the same SQLite file the server uses; multi mode
@@ -84,9 +95,20 @@ func runUp() {
 	defer database.Close()
 	if err := db.Migrate(database, dialect); err != nil {
 		fmt.Fprintf(os.Stderr, "migrate up: %v\n", err)
-		os.Exit(1)
+		os.Exit(migrateExitCode(err))
 	}
 	fmt.Println("migrations applied (schema at head)")
+}
+
+// migrateExitCode maps a db.Migrate error to a process exit code. A
+// never-self-resolving Ahead (an executor against a newer schema — deploy a
+// newer executor first) gets the distinct ExitSchemaAhead so the entrypoint
+// fails fast; a transient Behind / connection failure gets the retryable 1.
+func migrateExitCode(err error) int {
+	if errors.Is(err, db.ErrExecutorSchemaAhead) {
+		return ExitSchemaAhead
+	}
+	return 1
 }
 
 func runStatus() {

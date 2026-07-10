@@ -22,8 +22,8 @@ func TestStartCapBrokerIfSandboxing_FailClosed(t *testing.T) {
 	orig := startCapBrokerFn
 	t.Cleanup(func() { startCapBrokerFn = orig })
 	wantErr := errors.New("broker refused to start")
-	startCapBrokerFn = func(context.Context) (capBrokerHandle, error) {
-		return nil, wantErr
+	startCapBrokerFn = func(context.Context) (capBrokerHandle, func(context.Context) error, error) {
+		return nil, nil, wantErr
 	}
 
 	a := &App{}
@@ -47,9 +47,9 @@ func TestStartCapBrokerIfSandboxing_NoOpWhenNotSandboxing(t *testing.T) {
 	orig := startCapBrokerFn
 	t.Cleanup(func() { startCapBrokerFn = orig })
 	called := false
-	startCapBrokerFn = func(context.Context) (capBrokerHandle, error) {
+	startCapBrokerFn = func(context.Context) (capBrokerHandle, func(context.Context) error, error) {
 		called = true
-		return nil, errors.New("should not be called")
+		return nil, nil, errors.New("should not be called")
 	}
 
 	a := &App{}

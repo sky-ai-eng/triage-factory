@@ -51,6 +51,34 @@ func SetForTest(t TestT, m Mode) {
 	})
 }
 
+// SetRoleForTest swaps the process deployment role for the duration of t
+// and restores the previous (currentRole, roleInitialized) pair via
+// t.Cleanup. Sets roleInitialized=true so Role() returns the injected
+// value rather than falling back to a live TF_ROLE parse. Same caveats as
+// SetForTest — data-race-free but not safe for overlapping parallel tests
+// that mutate the same global.
+//
+// Lives here (not a _test.go file) so consumers' test packages (internal/
+// app's exclusion test, internal/db's migration-gate tests) can force a
+// role without threading TF_ROLE through the environment.
+func SetRoleForTest(t TestT, r DeployRole) {
+	t.Helper()
+	if r != RoleAll && r != RoleControl && r != RoleExecutor {
+		t.Fatalf("runmode.SetRoleForTest: unknown role %q", r)
+	}
+	roleMu.Lock()
+	prevRole, prevInit := currentRole, roleInitialized
+	currentRole = r
+	roleInitialized = true
+	roleMu.Unlock()
+	t.Cleanup(func() {
+		roleMu.Lock()
+		currentRole = prevRole
+		roleInitialized = prevInit
+		roleMu.Unlock()
+	})
+}
+
 // SetOrgCreationEnabledForTest swaps the process org-creation toggle
 // for the duration of t and restores the previous (orgCreationPrevented,
 // orgCreationInitialized) pair via t.Cleanup. Same caveats as SetForTest

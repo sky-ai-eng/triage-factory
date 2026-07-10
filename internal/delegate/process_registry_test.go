@@ -269,3 +269,51 @@ func TestDerivedRunCapacity(t *testing.T) {
 		})
 	}
 }
+
+// TestExecutorReserve_RescuesSmallPodCapacity pins the executor-role
+// platform reserve (TFAC-582): an ~8 GB executor pod derives 0 advisory
+// capacity under the all-in-one 12 GB reserve, but a real, non-zero capacity
+// under the much smaller executor reserve — the whole reason the smaller
+// reserve exists.
+func TestExecutorReserve_RescuesSmallPodCapacity(t *testing.T) {
+	const smallPodMB = 8 * 1024
+
+	if DerivedRunCapacityWithReserve(smallPodMB, DefaultPlatformReserveMB) != 0 {
+		t.Fatalf("precondition: an %dMB host under the all-in-one reserve should derive 0", smallPodMB)
+	}
+	got := DerivedRunCapacityWithReserve(smallPodMB, DefaultExecutorPlatformReserveMB)
+	want := (smallPodMB - DefaultExecutorPlatformReserveMB) / DefaultRunMemoryBudgetMB
+	if got != want {
+		t.Errorf("DerivedRunCapacityWithReserve(%d, executor reserve) = %d, want %d", smallPodMB, got, want)
+	}
+	if got == 0 {
+		t.Error("the executor reserve must derive a non-zero capacity on a normal executor pod")
+	}
+	if DefaultExecutorPlatformReserveMB >= DefaultPlatformReserveMB {
+		t.Error("the executor reserve must be smaller than the all-in-one reserve")
+	}
+}
+
+func TestParsePlatformReserveMB(t *testing.T) {
+	cases := []struct {
+		raw     string
+		def     int
+		want    int
+		wantErr bool
+	}{
+		{"", DefaultExecutorPlatformReserveMB, DefaultExecutorPlatformReserveMB, false},
+		{"4096", DefaultExecutorPlatformReserveMB, 4096, false},
+		{"0", DefaultPlatformReserveMB, 0, false},
+		{"-1", DefaultPlatformReserveMB, DefaultPlatformReserveMB, true},
+		{"nope", DefaultPlatformReserveMB, DefaultPlatformReserveMB, true},
+	}
+	for _, tc := range cases {
+		got, err := ParsePlatformReserveMB(tc.raw, tc.def)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("ParsePlatformReserveMB(%q) err = %v, wantErr %v", tc.raw, err, tc.wantErr)
+		}
+		if got != tc.want {
+			t.Errorf("ParsePlatformReserveMB(%q, %d) = %d, want %d", tc.raw, tc.def, got, tc.want)
+		}
+	}
+}

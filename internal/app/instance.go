@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
@@ -29,15 +28,17 @@ func (a *App) ensureIdentity() error {
 
 // registerInstance performs the boot-registration upsert against the fleet
 // registry: mint boot_epoch=1 on a fresh id, or bump it on a restart of the
-// same id. Called once openStores has a live db.Stores bundle. TF_ROLE (the
-// control/executor split) doesn't exist yet — every process registers as
-// InstanceRoleAll until that split lands.
+// same id. Called once openStores has a live db.Stores bundle. Every role
+// registers (the registry is fleet-wide deployment visibility, not just an
+// executor concern); the role + build version it stamps here are what make
+// version skew and the control/executor split visible in the registry.
 func (a *App) registerInstance(ctx context.Context) error {
-	epoch, err := a.stores.Instances.Register(ctx, a.identity.ID, domain.InstanceRoleAll, a.cfg.Version)
+	role := string(a.plan.role)
+	epoch, err := a.stores.Instances.Register(ctx, a.identity.ID, role, a.cfg.Version)
 	if err != nil {
 		return fmt.Errorf("register instance: %w", err)
 	}
 	a.bootEpoch = epoch
-	appLog.Info("instance registered", "id", a.identity.ID, "boot_epoch", epoch, "version", a.cfg.Version)
+	appLog.Info("instance registered", "id", a.identity.ID, "role", role, "boot_epoch", epoch, "version", a.cfg.Version)
 	return nil
 }

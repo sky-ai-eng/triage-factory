@@ -13,12 +13,17 @@ import (
 // client as internal/sandbox's PrivilegedOps implementation, so every
 // subsequent sandbox.Wrap / Close / ReapOrphans on this process routes
 // its netns/iptables/cgroup/rootfs operations through the broker instead
-// of running them in-process.
-func startCapBroker(ctx context.Context) (capBrokerHandle, error) {
+// of running them in-process. It also returns a Ping seam over the same
+// client for the executor healthz's broker_ok probe.
+func startCapBroker(ctx context.Context) (capBrokerHandle, func(context.Context) error, error) {
 	handle, client, err := capbroker.Start(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	sandbox.SetPrivilegedOps(client)
-	return handle, nil
+	var ping func(context.Context) error
+	if p, ok := client.(interface{ Ping(context.Context) error }); ok {
+		ping = p.Ping
+	}
+	return handle, ping, nil
 }
