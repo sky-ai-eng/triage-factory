@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 )
 
@@ -206,6 +207,17 @@ func renderBranchTemplate(tmpl string, task domain.Task) string {
 }
 
 func (s *Spawner) cachedAgentTools() string {
+	// Local mode only. The scan reads the TF process's own
+	// ~/.claude/agents — in local mode that's the single trusted user's
+	// machine, so their agent-declared tools are theirs to grant. In
+	// multi mode the process is shared infrastructure: whatever agent
+	// files exist on the orchestrator host belong to the operator, not
+	// any tenant, and merging them here would silently widen
+	// --allowedTools for every org's runs. Multi-mode runs get extra
+	// tools only from the prompt's own allowed_tools column.
+	if runmode.Current() != runmode.ModeLocal {
+		return ""
+	}
 	s.agentToolsOnce.Do(func() {
 		s.agentToolsCache = skills.ScanAgentTools()
 	})
