@@ -25,10 +25,15 @@
 // this package; a forbidigo rule (.golangci.yml) plus a lint.sh grep
 // guard keep every other package routing through these resolvers. The
 // one documented exception is ~/.claude state — Claude Code SDK session
-// dirs, which must follow the real HOME even in multi mode where TF
-// state diverges onto a mounted volume. (The curator runtime resolved
-// its own home until it was routed through
-// ProjectKBDir/ProjectsRoot here.)
+// dirs, which follow the HOME of the process that RAN the agent. For
+// direct runs (local mode, or multi on non-Linux) that is this
+// process's real HOME; for sandboxed runs (multi + Linux) the agent
+// executes with HOME=/work and its session state lands INSIDE the
+// run's own org-scoped directory — never the orchestrator's home.
+// worktree.ClaudeProjectDir owns that branch (TFAC-109); the nolint'd
+// os.UserHomeDir sites under internal/worktree serve only the
+// direct-run half. (The curator runtime resolved its own home until it
+// was routed through ProjectKBDir/ProjectsRoot here.)
 package paths
 
 import (

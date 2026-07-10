@@ -184,10 +184,14 @@ if [ "$(uname -s)" = "Linux" ] && multi_mode; then
     # overridden explicitly here. Without this, os.UserHomeDir() in the
     # orchestrator (which Go resolves purely from $HOME on Linux, with no
     # /etc/passwd fallback) would still resolve to /root — a directory
-    # the now-unprivileged orchestrator uid cannot read or write — for
-    # every path internal/paths.go documents as "must follow the real
-    # HOME even in multi mode" (Claude Code SDK session state: curator
-    # sessions, skills import, project-bundle export/import).
+    # the now-unprivileged orchestrator uid cannot read or write.
+    #
+    # Note this HOME carries NO tenant content: sandboxed agents run
+    # with HOME=/work (their ~/.claude session state lives inside each
+    # run's org-scoped directory, resolved host-side via
+    # worktree.ClaudeProjectDir — TFAC-109), and the filesystem skill
+    # scan is local-mode-only. This export exists for incidental $HOME
+    # lookups (git defaults, toolchain caches, libraries).
     export HOME="$TF_ORCHESTRATOR_HOME"
 
     # --groups (not --clear-groups): sets the supplementary groups to
