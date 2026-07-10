@@ -371,11 +371,11 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 	if sessionID == "" {
 		return "", fmt.Errorf("claude session path: empty session id")
 	}
-	home, err := claudeHome()
+	dir, err := ClaudeProjectDir(resolvedCwd)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, claudeProjectsDir, encodeClaudeProjectDir(resolvedCwd), sessionID+".jsonl"), nil
+	return filepath.Join(dir, sessionID+".jsonl"), nil
 }
 
 // gitCapture runs git and returns its stdout (only) so a `git diff` /

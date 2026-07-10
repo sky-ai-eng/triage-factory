@@ -4,22 +4,54 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 )
 
 // claudeProjectsDir is where Claude Code auto-creates per-cwd session history.
 const claudeProjectsDir = ".claude/projects"
 
-// claudeHome resolves the user's real home directory for ~/.claude
+// claudeHome resolves this process's home directory for ~/.claude
 // access. Claude Code SDK session state (the per-cwd JSONL transcripts
-// under claudeProjectsDir) is keyed to the agent's real HOME, not to TF
-// state — in the jail HOME=/work handles it, on the host it's the
-// user's ~/.claude. It therefore stays home-relative even in multi mode
-// (where TF state diverges onto a mounted volume) and does NOT route
-// through internal/paths. The single nolint here is the documented
-// exception to the forbidigo guard for every ~/.claude site in this
-// file.
+// under claudeProjectsDir) is keyed to the HOME of the process that ran
+// the agent — which is this process's HOME only for DIRECT runs (local
+// mode, or multi on non-Linux). Sandboxed runs execute with HOME=/work
+// and never touch this process's home; ClaudeProjectDir owns that
+// branch. This helper must only be called on the direct-run branch, and
+// the nolint below is the documented exception to the forbidigo guard
+// for every ~/.claude site in this file.
 func claudeHome() (string, error) {
 	return os.UserHomeDir() //nolint:forbidigo // Claude Code SDK session state, not TF state (see internal/paths doc).
+}
+
+// ClaudeProjectDir returns the host-side directory Claude Code wrote (or
+// will write) its per-cwd session state into — the dir holding
+// `<sessionID>.jsonl` plus the `<sessionID>/subagents` and
+// `<sessionID>/tool-results` trees — for a run whose symlink-resolved
+// host cwd is resolvedCwd.
+//
+// Direct runs (local mode, or multi on non-Linux) inherit this process's
+// HOME, so the tree is ~/.claude/projects/<encode(resolvedCwd)>.
+//
+// Sandboxed runs (multi + Linux) execute with HOME=/work and cwd=/work,
+// where /work bind-mounts resolvedCwd. The agent therefore writes
+// /work/.claude/projects/<encode("/work")>/... — which on the host is
+// <resolvedCwd>/.claude/projects/-work/... . Tenant scoping there is
+// structural: the transcript lives inside the run's own (org-scoped)
+// directory, and the orchestrator's $HOME is never involved. Host-side
+// consumers (project bundle export/import, delegate snapshot/resume)
+// MUST resolve through this function rather than assuming the
+// home-relative layout, or they silently miss every sandboxed
+// transcript.
+func ClaudeProjectDir(resolvedCwd string) (string, error) {
+	if agentproc.WillSandbox() {
+		return filepath.Join(resolvedCwd, claudeProjectsDir, encodeClaudeProjectDir(agentproc.SandboxWorkRoot)), nil
+	}
+	home, err := claudeHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, claudeProjectsDir, encodeClaudeProjectDir(resolvedCwd)), nil
 }
 
 // encodeClaudeProjectDir returns the directory name Claude Code uses
@@ -85,6 +117,14 @@ func ResolveClaudeProjectCwd(cwd string) string {
 // misuse can never nuke a real project's interactive session history.
 func RemoveClaudeProjectDir(cwd string) {
 	if cwd == "" {
+		return
+	}
+
+	// Sandboxed runs write their session tree INSIDE the run root
+	// (<cwd>/.claude/projects/-work — see ClaudeProjectDir), so it is
+	// deleted with the worktree itself and no host-side ~/.claude entry
+	// ever exists to clean up.
+	if agentproc.WillSandbox() {
 		return
 	}
 
