@@ -449,6 +449,234 @@ func (s *curatorStore) CancelOrphanedNonTerminalRequests(ctx context.Context) (i
 	return int(n), nil
 }
 
+func (s *curatorStore) ListRequestsByProject(ctx context.Context, orgID, projectID string) ([]domain.CuratorRequest, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id::text, project_id::text, status, user_input, error_msg,
+		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+		       started_at, finished_at, created_at, creator_user_id::text
+		FROM curator_requests
+		WHERE org_id = $1 AND project_id = $2
+		ORDER BY created_at ASC, id ASC
+	`, orgID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []domain.CuratorRequest{}
+	for rows.Next() {
+		req, err := scanPgCuratorRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		if req != nil {
+			out = append(out, *req)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *curatorStore) ListMessagesByRequestIDs(ctx context.Context, orgID string, requestIDs []string) (map[string][]domain.CuratorMessage, error) {
+	out := make(map[string][]domain.CuratorMessage)
+	if len(requestIDs) == 0 {
+		return out, nil
+	}
+	// request_id is a uuid column, so the id list goes through
+	// pgUUIDArray (a Postgres array literal) rather than a raw
+	// []string bind — same reasoning as ArtifactStore.CountByRunIDs.
+	// One query, no chunking: the whole list is a single array bind.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id, request_id::text, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
+		       model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at
+		FROM curator_messages
+		WHERE org_id = $1 AND request_id = ANY($2)
+		ORDER BY created_at ASC, id ASC
+	`, orgID, pgUUIDArray(requestIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		m, err := scanPgCuratorMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[m.RequestID] = append(out[m.RequestID], m)
+	}
+	return out, rows.Err()
+}
+
+func (s *curatorStore) InFlightRequestForProject(ctx context.Context, orgID, projectID string) (*domain.CuratorRequest, error) {
+	row := s.q.QueryRowContext(ctx, `
+		SELECT id::text, project_id::text, status, user_input, error_msg,
+		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+		       started_at, finished_at, created_at, creator_user_id::text
+		FROM curator_requests
+		WHERE org_id = $1 AND project_id = $2 AND status IN ('queued', 'running')
+		ORDER BY (status = 'running') DESC, created_at ASC, id ASC
+		LIMIT 1
+	`, orgID, projectID)
+	return scanPgCuratorRequest(row)
+}
+
+// ResetForProject: the in-flight guard reads via the ADMIN pool on
+// purpose — the reset tears down the project's SHARED curator session,
+// and the modify/select policies are self-only, so an app-pool count
+// could not see a teammate's live turn (exactly the turn the guard
+// exists to protect). The read stays org+project-scoped in the WHERE.
+// The deletes then run on the claims-bound queryer, so a caller only
+// ever destroys their own history rows under RLS; other users' rows
+// survive and the next turn starts a fresh session.
+//
+// Unlike the SQLite impl, the guard runs on a different connection
+// than the deletes (the admin pool is never the in-flight tx), so the
+// check-then-wipe is best-effort rather than atomic — acceptable
+// because the curator runtime serializes same-project turns and the
+// 409 is a UX courtesy, not a correctness gate.
+func (s *curatorStore) ResetForProject(ctx context.Context, orgID, projectID string) error {
+	var inflight int
+	if err := s.admin.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM curator_requests
+		 WHERE org_id = $1 AND project_id = $2 AND status IN ('queued', 'running')
+	`, orgID, projectID).Scan(&inflight); err != nil {
+		return fmt.Errorf("count inflight: %w", err)
+	}
+	if inflight > 0 {
+		return db.ErrCuratorInFlight
+	}
+	if _, err := s.q.ExecContext(ctx, `
+		UPDATE projects SET curator_session_id = NULL, updated_at = now()
+		 WHERE org_id = $1 AND id = $2
+	`, orgID, projectID); err != nil {
+		return fmt.Errorf("clear session id: %w", err)
+	}
+	if _, err := s.q.ExecContext(ctx, `
+		DELETE FROM curator_pending_context WHERE org_id = $1 AND project_id = $2
+	`, orgID, projectID); err != nil {
+		return fmt.Errorf("delete pending context: %w", err)
+	}
+	if _, err := s.q.ExecContext(ctx, `
+		DELETE FROM curator_requests WHERE org_id = $1 AND project_id = $2
+	`, orgID, projectID); err != nil {
+		return fmt.Errorf("delete requests: %w", err)
+	}
+	return nil
+}
+
+// ImportRequest preserves the bundle row's id/status/accounting/
+// timestamps verbatim. creator_user_id stamps to tf.current_user_id()
+// (the importing user — the original creator is not a user here), so
+// the curator_requests_modify WITH CHECK passes under the importer's
+// claims. team_id snapshots from the destination project row per the
+// TFAC-476 invariant ($2 reused for the correlated lookup).
+func (s *curatorStore) ImportRequest(ctx context.Context, orgID string, req domain.CuratorRequest) error {
+	_, err := s.q.ExecContext(ctx, `
+		INSERT INTO curator_requests (
+			id, org_id, project_id, team_id, creator_user_id, status, user_input, error_msg,
+			cost_usd, duration_ms, num_turns,
+			input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+			started_at, finished_at, created_at
+		) VALUES ($1, $3, $2, (SELECT team_id FROM projects WHERE id = $2), tf.current_user_id(),
+		          $4, $5, NULLIF($6, ''), $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+	`,
+		req.ID, req.ProjectID, orgID,
+		req.Status, req.UserInput, req.ErrorMsg,
+		req.CostUSD, req.DurationMs, req.NumTurns,
+		req.InputTokens, req.OutputTokens, req.CacheReadTokens, req.CacheCreationTokens,
+		timePtrAny(req.StartedAt), timePtrAny(req.FinishedAt), req.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("import curator_request %s: %w", req.ID, err)
+	}
+	return nil
+}
+
+// ImportPendingContext preserves consumed state + created_at, unlike
+// InsertPendingContext (which queues a fresh unconsumed delta).
+func (s *curatorStore) ImportPendingContext(ctx context.Context, orgID string, row domain.CuratorPendingContext) error {
+	var consumedBy any
+	if row.ConsumedByRequestID != "" {
+		consumedBy = row.ConsumedByRequestID
+	}
+	_, err := s.q.ExecContext(ctx, `
+		INSERT INTO curator_pending_context (
+			org_id, creator_user_id, project_id, curator_session_id, change_type, baseline_value,
+			consumed_at, consumed_by_request_id, created_at
+		) VALUES ($1, tf.current_user_id(), $2, $3, $4, $5, $6, $7, $8)
+	`,
+		orgID, row.ProjectID, row.CuratorSessionID, row.ChangeType, row.BaselineValue,
+		timePtrAny(row.ConsumedAt), consumedBy, row.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("import pending context row: %w", err)
+	}
+	return nil
+}
+
+// scanPgCuratorMessage mirrors the SQLite scanCuratorMessageRowSqlite
+// column ordering (see ListMessagesByRequestIDs' SELECT list).
+func scanPgCuratorMessage(rows *sql.Rows) (domain.CuratorMessage, error) {
+	var (
+		m             domain.CuratorMessage
+		toolCallsJSON sql.NullString
+		metadataJSON  sql.NullString
+		toolCallID    sql.NullString
+		model         sql.NullString
+		inputTokens   sql.NullInt64
+		outputTokens  sql.NullInt64
+		cacheRead     sql.NullInt64
+		cacheCreation sql.NullInt64
+	)
+	if err := rows.Scan(
+		&m.ID, &m.RequestID, &m.Role, &m.Content, &m.Subtype,
+		&toolCallsJSON, &toolCallID, &m.IsError, &metadataJSON,
+		&model, &inputTokens, &outputTokens, &cacheRead, &cacheCreation,
+		&m.CreatedAt,
+	); err != nil {
+		return domain.CuratorMessage{}, err
+	}
+	if toolCallsJSON.Valid {
+		if err := json.Unmarshal([]byte(toolCallsJSON.String), &m.ToolCalls); err != nil {
+			return domain.CuratorMessage{}, fmt.Errorf("unmarshal tool_calls: %w", err)
+		}
+	}
+	if metadataJSON.Valid {
+		if err := json.Unmarshal([]byte(metadataJSON.String), &m.Metadata); err != nil {
+			return domain.CuratorMessage{}, fmt.Errorf("unmarshal metadata: %w", err)
+		}
+	}
+	m.ToolCallID = toolCallID.String
+	m.Model = model.String
+	if inputTokens.Valid {
+		v := int(inputTokens.Int64)
+		m.InputTokens = &v
+	}
+	if outputTokens.Valid {
+		v := int(outputTokens.Int64)
+		m.OutputTokens = &v
+	}
+	if cacheRead.Valid {
+		v := int(cacheRead.Int64)
+		m.CacheReadTokens = &v
+	}
+	if cacheCreation.Valid {
+		v := int(cacheCreation.Int64)
+		m.CacheCreationTokens = &v
+	}
+	return m, nil
+}
+
+// timePtrAny maps a *time.Time to a bind-compatible value (nil for
+// NULL). Sibling of intPtrAny below.
+func timePtrAny(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return *t
+}
+
 // intPtrAny maps an *int to a bind-compatible value (nil for NULL,
 // int otherwise). Postgres-side variant of the package-db nullInt
 // helper — kept local to avoid widening the package-db helpers'

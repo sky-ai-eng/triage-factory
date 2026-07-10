@@ -675,3 +675,209 @@ func newSQLiteForCuratorTest(t *testing.T) *sql.DB {
 	}
 	return conn
 }
+
+// TestCuratorStore_SQLite_HistoryAndInFlightReads covers the store
+// methods the curator HTTP handlers + project-bundle export moved onto
+// (TFAC-109): ListRequestsByProject ordering, ListMessagesByRequestIDs
+// grouping (+ empty-input contract), and InFlightRequestForProject's
+// running-over-queued preference.
+func TestCuratorStore_SQLite_HistoryAndInFlightReads(t *testing.T) {
+	conn := newSQLiteForCuratorTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	user := runmode.LocalDefaultUserID
+
+	projectID, err := stores.Projects.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Project{Name: "history"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	var first, second string
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		var e error
+		if first, e = ts.Curator.CreateRequest(ctx, org, projectID, user, "first"); e != nil {
+			return e
+		}
+		if e = ts.Curator.MarkRequestRunning(ctx, org, first); e != nil {
+			return e
+		}
+		if _, e = ts.Curator.CompleteRequest(ctx, org, first, "done", "", 0.01, 10, 1); e != nil {
+			return e
+		}
+		if _, e = ts.Curator.InsertMessage(ctx, org, &domain.CuratorMessage{RequestID: first, Role: "assistant", Subtype: "text", Content: "a1"}); e != nil {
+			return e
+		}
+		if _, e = ts.Curator.InsertMessage(ctx, org, &domain.CuratorMessage{RequestID: first, Role: "assistant", Subtype: "text", Content: "a2"}); e != nil {
+			return e
+		}
+		if second, e = ts.Curator.CreateRequest(ctx, org, projectID, user, "second"); e != nil {
+			return e
+		}
+		_, e = ts.Curator.InsertMessage(ctx, org, &domain.CuratorMessage{RequestID: second, Role: "assistant", Subtype: "text", Content: "b1"})
+		return e
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		reqs, e := ts.Curator.ListRequestsByProject(ctx, org, projectID)
+		if e != nil {
+			return e
+		}
+		if len(reqs) != 2 || reqs[0].ID != first || reqs[1].ID != second {
+			t.Fatalf("ListRequestsByProject order/content wrong: %+v", reqs)
+		}
+		if reqs[0].CreatorUserID != user {
+			t.Errorf("creator_user_id = %q, want %q", reqs[0].CreatorUserID, user)
+		}
+
+		byReq, e := ts.Curator.ListMessagesByRequestIDs(ctx, org, []string{first, second})
+		if e != nil {
+			return e
+		}
+		if len(byReq[first]) != 2 || len(byReq[second]) != 1 {
+			t.Fatalf("ListMessagesByRequestIDs grouping wrong: first=%d second=%d", len(byReq[first]), len(byReq[second]))
+		}
+
+		empty, e := ts.Curator.ListMessagesByRequestIDs(ctx, org, nil)
+		if e != nil {
+			return e
+		}
+		if empty == nil || len(empty) != 0 {
+			t.Fatalf("empty input must return empty non-nil map, got %#v", empty)
+		}
+
+		// second is still queued — it is the in-flight row.
+		inFlight, e := ts.Curator.InFlightRequestForProject(ctx, org, projectID)
+		if e != nil {
+			return e
+		}
+		if inFlight == nil || inFlight.ID != second {
+			t.Fatalf("InFlightRequestForProject = %+v, want queued row %s", inFlight, second)
+		}
+
+		// A running row outranks the queued one.
+		third, e := ts.Curator.CreateRequest(ctx, org, projectID, user, "third")
+		if e != nil {
+			return e
+		}
+		if e = ts.Curator.MarkRequestRunning(ctx, org, third); e != nil {
+			return e
+		}
+		inFlight, e = ts.Curator.InFlightRequestForProject(ctx, org, projectID)
+		if e != nil {
+			return e
+		}
+		if inFlight == nil || inFlight.ID != third {
+			t.Fatalf("InFlightRequestForProject with running row = %+v, want %s", inFlight, third)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("reads: %v", err)
+	}
+
+	// No in-flight rows → (nil, nil).
+	otherProject, err := stores.Projects.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Project{Name: "idle"})
+	if err != nil {
+		t.Fatalf("create idle project: %v", err)
+	}
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		got, e := ts.Curator.InFlightRequestForProject(ctx, org, otherProject)
+		if e != nil {
+			return e
+		}
+		if got != nil {
+			t.Fatalf("expected nil in-flight for idle project, got %+v", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("idle read: %v", err)
+	}
+}
+
+// TestCuratorStore_SQLite_ResetForProject pins the reset contract the
+// handler moved onto (TFAC-109): refuses while any request is
+// in-flight, then wipes requests (cascading messages), pending-context
+// rows, and the project's curator_session_id.
+func TestCuratorStore_SQLite_ResetForProject(t *testing.T) {
+	conn := newSQLiteForCuratorTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	user := runmode.LocalDefaultUserID
+
+	projectID, err := stores.Projects.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Project{Name: "reset", CuratorSessionID: "sess-1"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	var reqID string
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		var e error
+		if reqID, e = ts.Curator.CreateRequest(ctx, org, projectID, user, "wipe me"); e != nil {
+			return e
+		}
+		if _, e = ts.Curator.InsertMessage(ctx, org, &domain.CuratorMessage{RequestID: reqID, Role: "assistant", Subtype: "text", Content: "x"}); e != nil {
+			return e
+		}
+		return ts.Curator.InsertPendingContext(ctx, org, projectID, "sess-1", domain.ChangeTypePinnedRepos, `["a/b"]`)
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Queued row in flight → refuse.
+	err = stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		return ts.Curator.ResetForProject(ctx, org, projectID)
+	})
+	if !errors.Is(err, db.ErrCuratorInFlight) {
+		t.Fatalf("reset with queued row: err = %v, want ErrCuratorInFlight", err)
+	}
+
+	// Terminal → reset proceeds.
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		_, e := ts.Curator.CompleteRequest(ctx, org, reqID, "done", "", 0, 1, 1)
+		return e
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		return ts.Curator.ResetForProject(ctx, org, projectID)
+	}); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		reqs, e := ts.Curator.ListRequestsByProject(ctx, org, projectID)
+		if e != nil {
+			return e
+		}
+		if len(reqs) != 0 {
+			t.Errorf("requests survived reset: %+v", reqs)
+		}
+		pending, e := ts.Curator.ListPendingContext(ctx, org, projectID)
+		if e != nil {
+			return e
+		}
+		if len(pending) != 0 {
+			t.Errorf("pending context survived reset: %+v", pending)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("post-reset reads: %v", err)
+	}
+	var sessionID sql.NullString
+	if err := conn.QueryRow(`SELECT curator_session_id FROM projects WHERE id = ?`, projectID).Scan(&sessionID); err != nil {
+		t.Fatalf("read session id: %v", err)
+	}
+	if sessionID.Valid {
+		t.Errorf("curator_session_id = %q after reset, want NULL", sessionID.String)
+	}
+	var msgs int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM curator_messages`).Scan(&msgs); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if msgs != 0 {
+		t.Errorf("curator_messages survived reset: %d rows", msgs)
+	}
+}

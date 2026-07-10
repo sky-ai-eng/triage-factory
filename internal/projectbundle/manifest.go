@@ -81,6 +81,12 @@ type Manifest struct {
 	ExportedAt    time.Time        `yaml:"exported_at"`
 	Project       ManifestProject  `yaml:"project"`
 	Session       *ManifestSession `yaml:"session,omitempty"`
+	// Warnings records non-fatal gaps in the export (for example a
+	// session transcript that existed but was unreadable by the
+	// exporting server process) so a bundle that ships without
+	// something says so instead of silently omitting it. Informational
+	// only — import ignores it.
+	Warnings []string `yaml:"warnings,omitempty"`
 }
 
 type ManifestProject struct {

@@ -180,7 +180,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 
 func exportFixtureBundle(t *testing.T, database *sql.DB, projectID string) []byte {
 	t.Helper()
-	reader, err := Export(context.Background(), database, sqlitestore.New(database).Projects, sqlitestore.New(database).Curator, runmode.LocalDefaultOrgID, projectID)
+	reader, err := Export(context.Background(), sqlitestore.New(database).Tx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, projectID)
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -231,8 +231,7 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	targetDB := newBundleTestDB(t)
 	imported, warnings, err := Import(
 		context.Background(),
-		targetDB,
-		sqlitestore.New(targetDB).Projects,
+		sqlitestore.New(targetDB).Tx,
 		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
 		bytes.NewReader(bundleBytes),
 		int64(len(bundleBytes)),
@@ -302,7 +301,7 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 		t.Fatalf("tool result did not rewrite old session/cwd: %s", string(toolBody))
 	}
 
-	reqs, err := db.ListCuratorRequestsByProject(targetDB, imported.ID)
+	reqs, err := sqlitestore.New(targetDB).Curator.ListRequestsByProject(t.Context(), runmode.LocalDefaultOrgID, imported.ID)
 	if err != nil {
 		t.Fatalf("list imported requests: %v", err)
 	}
@@ -356,8 +355,7 @@ func TestImport_MissingReposAbortsWithoutWrites(t *testing.T) {
 	targetDB := newBundleTestDB(t)
 	_, _, err := Import(
 		context.Background(),
-		targetDB,
-		sqlitestore.New(targetDB).Projects,
+		sqlitestore.New(targetDB).Tx,
 		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
 		bytes.NewReader(bundleBytes),
 		int64(len(bundleBytes)),
@@ -393,8 +391,7 @@ func TestImport_DuplicateNameAborts(t *testing.T) {
 	}
 	_, _, err := Import(
 		context.Background(),
-		targetDB,
-		sqlitestore.New(targetDB).Projects,
+		sqlitestore.New(targetDB).Tx,
 		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
 		bytes.NewReader(bundleBytes),
 		int64(len(bundleBytes)),

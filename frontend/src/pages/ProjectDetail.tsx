@@ -1413,6 +1413,14 @@ function ProjectExportModal({
                 {formatBytes(preview?.total_size || 0)}
               </span>
             </div>
+            {(preview?.warnings || []).map((warning) => (
+              <div
+                key={warning}
+                className="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-700"
+              >
+                {warning}
+              </div>
+            ))}
           </div>
         )}
 

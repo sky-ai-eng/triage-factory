@@ -93,6 +93,15 @@ type RepoStore interface {
 	// could pass the gate yet silently affect 0 rows here.
 	UpdateBaseBranch(ctx context.Context, orgID, repoID, baseBranch string) error
 
+	// SeedCloneURL sets clone_url for a configured repo ONLY when the
+	// stored value is NULL/empty — the project-bundle import's
+	// warm-cache seed (the URL was discovered during import preflight
+	// via the importing org's own GitHub client). Never clobbers a URL
+	// the profiler/clone hooks already wrote; no-ops silently when the
+	// repo isn't configured. repoID is "owner/repo", matched
+	// case-insensitively like UpdateBaseBranch. TFAC-109.
+	SeedCloneURL(ctx context.Context, orgID, repoID, cloneURL string) error
+
 	// Get returns a single repo profile by "owner/repo" id, or nil
 	// if not configured.
 	Get(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error)

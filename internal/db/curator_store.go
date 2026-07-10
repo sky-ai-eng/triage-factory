@@ -170,6 +170,63 @@ type CuratorStore interface {
 	// transitions the new agent never witnessed.
 	DeletePendingContextForSession(ctx context.Context, orgID, projectID, sessionID string) error
 
+	// ListRequestsByProject returns the project's curator requests in
+	// chronological order — the chat-history read. Claims-bound: call
+	// inside WithTx. In Postgres the curator_requests_select policy is
+	// deliberately self-only (creator_user_id = tf.current_user_id()),
+	// so a multi-mode caller sees their own turns, not teammates'; the
+	// local single user sees everything. TFAC-109 (replaces the raw
+	// package-level ListCuratorRequestsByProject helper).
+	ListRequestsByProject(ctx context.Context, orgID, projectID string) ([]domain.CuratorRequest, error)
+
+	// ListMessagesByRequestIDs returns the agent-side stream rows for a
+	// batch of request ids, grouped by request_id — the batched half of
+	// the chat-history read (avoids an N+1 over the request list).
+	// Same claims-bound / self-only visibility contract as
+	// ListRequestsByProject. Empty input returns an empty map, not nil.
+	ListMessagesByRequestIDs(ctx context.Context, orgID string, requestIDs []string) (map[string][]domain.CuratorMessage, error)
+
+	// InFlightRequestForProject returns the queued or running request
+	// for a project, or (nil, nil) if none — the cancel endpoint's
+	// lookup. Claims-bound / self-only in Postgres: a user can locate
+	// (and therefore cancel) only their own in-flight turn.
+	InFlightRequestForProject(ctx context.Context, orgID, projectID string) (*domain.CuratorRequest, error)
+
+	// ResetForProject wipes the caller-visible curator artifacts for a
+	// project so the next message starts a brand-new Claude Code
+	// session: clears curator_session_id on the project row, deletes
+	// pending-context rows, and deletes curator_request rows (cascading
+	// to messages). Returns ErrCuratorInFlight if any user has a
+	// queued/running request.
+	//
+	// Claims-bound — call inside WithTx so the deletes run under the
+	// caller's RLS. In Postgres the modify policies are self-only, so a
+	// reset removes the RESETTING user's history and clears the shared
+	// session id; other users' history rows survive (they cannot be
+	// destroyed by someone else) and the next turn simply starts a new
+	// session. The in-flight guard intentionally checks across ALL
+	// users in the org (org-scoped, admin-pool read in Postgres):
+	// resetting the shared session under a teammate's live turn is the
+	// race the guard exists to prevent, and a self-only check couldn't
+	// see it.
+	ResetForProject(ctx context.Context, orgID, projectID string) error
+
+	// ImportRequest restores one historical curator_request row from a
+	// project bundle: caller-supplied id, terminal status, accounting,
+	// and timestamps are preserved verbatim; creator_user_id is stamped
+	// to the importing user (the original creator is not a user in the
+	// destination install); team_id snapshots from the destination
+	// project row per the TFAC-476 invariant. Claims-bound — call
+	// inside WithTx after the project row exists in the same tx.
+	ImportRequest(ctx context.Context, orgID string, req domain.CuratorRequest) error
+
+	// ImportPendingContext restores one historical pending-context row
+	// from a project bundle, preserving consumed_at /
+	// consumed_by_request_id / created_at (unlike InsertPendingContext,
+	// which queues a fresh unconsumed delta). creator_user_id stamps to
+	// the importing user. Claims-bound — call inside WithTx.
+	ImportPendingContext(ctx context.Context, orgID string, row domain.CuratorPendingContext) error
+
 	// CancelOrphanedNonTerminalRequests sweeps every queued/running
 	// curator_request row across every org in the database, flipping
 	// them to cancelled with finished_at stamped to now. Called once

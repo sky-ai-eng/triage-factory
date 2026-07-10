@@ -58,7 +58,7 @@ func TestCurator_SendMessage_RejectsAfterShutdown(t *testing.T) {
 	// The row that SendMessage persisted before the closed check
 	// must not be left in `queued` — otherwise it would dangle
 	// forever (no goroutine ever picks it up).
-	requests, err := db.ListCuratorRequestsByProject(database, projectID)
+	requests, err := sqlitestore.New(database).Curator.ListRequestsByProject(t.Context(), runmode.LocalDefaultOrgID, projectID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

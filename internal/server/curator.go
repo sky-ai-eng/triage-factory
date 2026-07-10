@@ -1,7 +1,6 @@
 package server
 
 import (
-	"database/sql"
 	"errors"
 	"net/http"
 	"strings"
@@ -15,8 +14,13 @@ import (
 // curatorHandler serves the per-project curator chat endpoints. runtime is read
 // through a getter so the handler always sees the current curator runtime,
 // which is wired onto the server after construction.
+//
+// All DB access goes through tx (WithTx → tx.Curator), never a raw
+// *sql.DB: in multi mode the raw handle is the ADMIN pool, and the
+// curator RLS policies are deliberately self-only
+// (creator_user_id = tf.current_user_id()) — history/cancel/reset act
+// on the requesting user's own rows (TFAC-109).
 type curatorHandler struct {
-	db      *sql.DB
 	tx      db.TxRunner
 	ws      *websocket.Hub
 	runtime func() *curator.Curator
@@ -106,10 +110,30 @@ func (ch *curatorHandler) handleCuratorHistory(w http.ResponseWriter, r *http.Re
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	projectID := r.PathValue("id")
-	var project *domain.Project
+	var (
+		project           *domain.Project
+		requests          []domain.CuratorRequest
+		messagesByRequest map[string][]domain.CuratorMessage
+	)
 	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
+		if e != nil || project == nil {
+			return e
+		}
+		requests, e = tx.Curator.ListRequestsByProject(r.Context(), orgID, projectID)
+		if e != nil {
+			return e
+		}
+		// Batch the message fetch into one IN-list query keyed by every
+		// request id rather than looping per-request — a project with a
+		// long chat history would otherwise pay an N+1 round-trip per
+		// page load.
+		requestIDs := make([]string, len(requests))
+		for i, req := range requests {
+			requestIDs[i] = req.ID
+		}
+		messagesByRequest, e = tx.Curator.ListMessagesByRequestIDs(r.Context(), orgID, requestIDs)
 		return e
 	}); err != nil {
 		internalError(w, "curator", err)
@@ -117,26 +141,6 @@ func (ch *curatorHandler) handleCuratorHistory(w http.ResponseWriter, r *http.Re
 	}
 	if project == nil {
 		notFound(w, "project")
-		return
-	}
-
-	requests, err := db.ListCuratorRequestsByProject(ch.db, projectID)
-	if err != nil {
-		internalError(w, "curator", err)
-		return
-	}
-
-	// Batch the message fetch into one IN-list query keyed by every
-	// request id rather than looping per-request — a project with a
-	// long chat history would otherwise pay an N+1 round-trip per
-	// page load.
-	requestIDs := make([]string, len(requests))
-	for i, req := range requests {
-		requestIDs[i] = req.ID
-	}
-	messagesByRequest, err := db.ListCuratorMessagesByRequestIDs(ch.db, requestIDs)
-	if err != nil {
-		internalError(w, "curator", err)
 		return
 	}
 
@@ -170,10 +174,19 @@ func (ch *curatorHandler) handleCuratorCancel(w http.ResponseWriter, r *http.Req
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	projectID := r.PathValue("id")
-	var project *domain.Project
+	var (
+		project  *domain.Project
+		inFlight *domain.CuratorRequest
+	)
 	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
+		if e != nil || project == nil {
+			return e
+		}
+		// Self-only under Postgres RLS: a user locates (and cancels)
+		// their own in-flight turn, not a teammate's.
+		inFlight, e = tx.Curator.InFlightRequestForProject(r.Context(), orgID, projectID)
 		return e
 	}); err != nil {
 		internalError(w, "curator", err)
@@ -181,12 +194,6 @@ func (ch *curatorHandler) handleCuratorCancel(w http.ResponseWriter, r *http.Req
 	}
 	if project == nil {
 		notFound(w, "project")
-		return
-	}
-
-	inFlight, err := db.InFlightCuratorRequestForProject(ch.db, projectID)
-	if err != nil {
-		internalError(w, "curator", err)
 		return
 	}
 	if inFlight == nil {
@@ -199,10 +206,12 @@ func (ch *curatorHandler) handleCuratorCancel(w http.ResponseWriter, r *http.Req
 	// DB level so a queued (not-yet-running) request is also handled.
 	// The runtime's session goroutine writes the same terminal
 	// status when it observes ctx.Err(); the status filter in
-	// MarkCuratorRequestCancelledIfActive makes the second write
-	// a no-op.
+	// MarkRequestCancelledIfActive makes the second write a no-op.
 	cur.Cancel(projectID)
-	if _, err := db.MarkCuratorRequestCancelledIfActive(ch.db, inFlight.ID, "user cancelled"); err != nil {
+	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		_, e := tx.Curator.MarkRequestCancelledIfActive(r.Context(), orgID, inFlight.ID, "user cancelled")
+		return e
+	}); err != nil {
 		internalError(w, "curator", err)
 		return
 	}
@@ -240,7 +249,9 @@ func (ch *curatorHandler) handleCuratorReset(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := db.ResetCuratorForProject(ch.db, projectID); err != nil {
+	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		return tx.Curator.ResetForProject(r.Context(), orgID, projectID)
+	}); err != nil {
 		if errors.Is(err, db.ErrCuratorInFlight) {
 			writeJSON(w, http.StatusConflict, map[string]string{
 				"error": "in-flight curator request — cancel it before resetting",
