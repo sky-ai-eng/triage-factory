@@ -3,6 +3,7 @@ package wsbackplane_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify"
 	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -366,7 +368,20 @@ func testKickCrossPod(t *testing.T, adminDB *sql.DB, dsn string) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go bpB.RunPublicListener(ctx)
+	// Pod B's tf_ctl consumer: since the tf_ctl consolidation, kicks no
+	// longer ride RunPublicListener (tf_ws-only) — in production the
+	// app's unified tf_ctl dispatcher (internal/app/ctl.go) LISTENs via a
+	// pgnotify.Listener and routes kind:"kick" payloads to HandleCtlKick.
+	// This listener is that dispatcher's kick branch, minimally.
+	kickListener := pgnotify.NewListener(dsn, wsbackplane.ChannelCtl, func(payload string) {
+		var probe struct {
+			Kind string `json:"kind"`
+		}
+		if json.Unmarshal([]byte(payload), &probe) == nil && probe.Kind == "kick" {
+			bpB.HandleCtlKick(payload)
+		}
+	})
+	go kickListener.Run(ctx)
 
 	connB := dialTestClient(t, hubB, "user-kick", "org-kick", "sid-b")
 	waitClientCount(t, hubB, 1)
