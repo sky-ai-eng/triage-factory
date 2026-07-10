@@ -644,6 +644,57 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("MarkQueuedForResume_CASGuard", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		// running → refused (same resumable set as MarkResuming's guard).
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, runID); err != nil || ok {
+			t.Errorf("on running: ok=%v err=%v, want false/nil", ok, err)
+		}
+		// open → ok, flips to queued. Unlike MarkResuming, this flip must
+		// NOT stamp resume-time ownership — the row goes back through
+		// ClaimNextRun, which stamps whichever executor actually claims it.
+		if _, err := store.MarkOpen(ctx, orgID, runID); err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, runID); err != nil || !ok {
+			t.Fatalf("from open: ok=%v err=%v, want true", ok, err)
+		}
+		run, err := store.GetSystem(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("get after requeue: %v", err)
+		}
+		if run.Status != "queued" {
+			t.Errorf("status = %q, want queued", run.Status)
+		}
+		// The CAS loser: a second flip on the now-queued row finds no
+		// resumable state and refuses — this is the guard that makes two
+		// concurrent ResumeOpenRun calls resolve to exactly one requeue
+		// (the loser surfaces ErrRunNotResumable at the delegate layer).
+		if ok, _ := store.MarkQueuedForResume(ctx, orgID, runID); ok {
+			t.Errorf("second flip on a queued row succeeded; want refused (CAS loser)")
+		}
+
+		// completed + outcome=abort → ok (message-resumable).
+		abortRun := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human", ""); err != nil {
+			t.Fatalf("complete+abort: %v", err)
+		}
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, abortRun); err != nil || !ok {
+			t.Errorf("from completed+abort: ok=%v err=%v, want true", ok, err)
+		}
+		// completed + outcome=finish → refused (finish excluded).
+		finishRun := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "", "shipped", "finish", "", ""); err != nil {
+			t.Fatalf("complete+finish: %v", err)
+		}
+		if ok, _ := store.MarkQueuedForResume(ctx, orgID, finishRun); ok {
+			t.Errorf("from completed+finish succeeded; want refused")
+		}
+	})
+
 	t.Run("MarkFailedIfActive_FailsOpen_RefusesTerminalAndPendingApproval", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
