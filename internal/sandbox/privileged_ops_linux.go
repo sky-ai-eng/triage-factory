@@ -76,6 +76,43 @@ type PrivilegedOps interface {
 	// ReapOrphans sweeps leftover netns/veth/iptables/cgroup state left
 	// by a previous, hard-crashed process. Called once at TF startup.
 	ReapOrphans(ctx context.Context) error
+
+	// ChownRunTree hands a run tree's ownership to the sandbox identity
+	// (WorktreeUID/GID) so the jailed agent can write its own worktree —
+	// the op that used to be agentproc's in-process recursive Lchown,
+	// which requires CAP_CHOWN and so must live on the privileged side
+	// once the orchestrator's capabilities are dropped at exec. With
+	// subpath == "" the whole root is chowned recursively (run start);
+	// a non-empty subpath is the mid-run `workspace add` case — the
+	// intermediate directories between root and subpath are chowned
+	// shallowly and the subpath tree recursively, exactly
+	// ChownWorkspaceCheckoutForSandbox's contract. Validated at this
+	// boundary (see validateRunTreeRoot): a compromised orchestrator
+	// must not be able to point a CAP_CHOWN-holding broker at /etc.
+	ChownRunTree(ctx context.Context, root, subpath string) error
+
+	// RemoveRunTree removes a run tree (run root, scratch cwd, parked
+	// worktree) and everything under it. After a sandboxed run the tree
+	// is owned by WorktreeUID — files the agent created arrive via the
+	// (privileged) gofer with modes the unprivileged orchestrator cannot
+	// unlink through — so removal, like the chown above, is a privileged
+	// op. Missing path is a no-op success (idempotent, matching the
+	// os.RemoveAll callers it replaces). Same boundary validation as
+	// ChownRunTree, on the tree's top level only: the contents must be
+	// removed regardless of what uids the run left inside.
+	RemoveRunTree(ctx context.Context, path string) error
+
+	// CaptureRunDelta runs the parked-run git-delta capture
+	// (`snapshot-capture <worktree>`) in a child dropped to the sandbox
+	// uid/gid inside an empty network namespace, and returns the child's
+	// raw JSON stdout (a worktree.GitDelta; decoded by the caller so
+	// this package doesn't import internal/worktree). Both halves of
+	// that child's confinement — the setuid away from the calling
+	// identity and the CLONE_NEWNET — need capabilities the orchestrator
+	// no longer holds, so the exec moves to the privileged side whole
+	// (spec §5's PS-P5). Empty output means "not a git worktree, no
+	// delta".
+	CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error)
 }
 
 // NetworkState is the serializable per-run network state SetupNetwork

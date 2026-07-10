@@ -159,8 +159,21 @@ RUN apk add --no-cache \
 # from /etc/passwd), those code paths would try to read/write under the
 # root-owned $HOME inherited from the container's default environment,
 # which this uid cannot reach post-drop.
-RUN addgroup -g 10001 tf-orchestrator \
-    && adduser -D -u 10001 -G tf-orchestrator -h /home/tf-orchestrator -s /sbin/nologin tf-orchestrator
+#
+# tf-sandbox (gid 10000 — internal/sandbox.WorktreeGID) exists so the
+# orchestrator can grant the sandbox identity access to per-run agenthost
+# sockets WITHOUT CAP_CHOWN: giving a file away to another uid always
+# needs that capability, but an owner may chgrp its own file to any group
+# it is a member of. Making tf-orchestrator a member (and having the
+# entrypoint's setpriv carry exactly this one supplementary group through
+# the drop) turns the socket hand-off into an owner-legal chgrp + 0660 —
+# see cmd/exec/agenthost/socket_linux.go's grantSocketToSandbox. No host
+# process runs AS this gid; it exists purely as the grant target matching
+# the in-sandbox agent's gid.
+RUN addgroup -g 10000 tf-sandbox \
+    && addgroup -g 10001 tf-orchestrator \
+    && adduser -D -u 10001 -G tf-orchestrator -h /home/tf-orchestrator -s /sbin/nologin tf-orchestrator \
+    && adduser tf-orchestrator tf-sandbox
 
 # Pull the per-arch runsc binary from a pinned gVisor release.
 #

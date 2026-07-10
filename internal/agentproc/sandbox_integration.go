@@ -1,6 +1,7 @@
 package agentproc
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,37 +192,24 @@ func buildSandboxEnv(extraEnv []string) []string {
 	return out
 }
 
-// chownWorktreeForSandbox recursively chowns the worktree to the
-// uid/gid the sandboxed agent runs as. Without this, the agent
-// can't write to its own worktree (EACCES). Idempotent — chowning
-// already-correctly-owned files is a no-op at the kernel level.
+// chownWorktreeForSandbox hands the worktree's ownership to the uid/gid
+// the sandboxed agent runs as. Without this, the agent can't write to
+// its own worktree (EACCES). Idempotent — chowning already-correctly-
+// owned files is a no-op at the kernel level.
 //
-// On non-Linux this is a no-op; the sandbox path isn't reachable
-// off Linux per shouldSandbox.
-//
-// SECURITY: uses os.Lchown (not os.Chown) so a symlink inside the
-// repo can't redirect the chown to a host file outside the worktree.
-// filepath.Walk does not follow symlinks during the walk itself, so
-// the recursion stays inside the worktree; the per-entry Lchown
-// ensures we change the link's own owner rather than the target's.
-// Without this, a repo containing `link -> /etc/passwd` would chown
-// the host's passwd file when this runs as root in multi mode.
-func chownWorktreeForSandbox(worktree string) error {
+// Routed through sandbox.ChownRunTree rather than chowning in-process:
+// changing a file's owner needs CAP_CHOWN, which the default (TF_PRIVSEP
+// on) orchestrator no longer holds after its exec-time capability drop —
+// the op executes in the cap-broker there, in-process hostOps otherwise
+// (byte-identical to the recursive Lchown that used to live here,
+// including the symlink-safety and ownership-precondition properties —
+// see that implementation's doc). No-op off Linux; the sandbox path
+// isn't reachable there per shouldSandbox.
+func chownWorktreeForSandbox(ctx context.Context, worktree string) error {
 	if worktree == "" {
 		return nil
 	}
-	if runtime.GOOS != "linux" {
-		return nil
-	}
-	return filepath.Walk(worktree, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if cerr := os.Lchown(path, sandbox.WorktreeUID, sandbox.WorktreeGID); cerr != nil {
-			return fmt.Errorf("lchown %s: %w", path, cerr)
-		}
-		return nil
-	})
+	return sandbox.ChownRunTree(ctx, worktree, "")
 }
 
 // ChownWorkspaceCheckoutForSandbox chowns a checkout materialized into the run
@@ -234,10 +222,12 @@ func chownWorktreeForSandbox(worktree string) error {
 // be traversable-and-ours so the agent can later add sibling checkouts' mount
 // paths, remove its tree, etc.
 //
-// Same contract as chownWorktreeForSandbox: no-op off Linux, Lchown throughout
-// so a symlinked repo entry can't redirect the chown outside the run root.
-// wtDir outside runRoot is a caller bug and is rejected rather than walked.
-func ChownWorkspaceCheckoutForSandbox(runRoot, wtDir string) error {
+// Same privileged routing as chownWorktreeForSandbox (the subpath form of
+// sandbox.ChownRunTree — shallow intermediates, recursive final tree).
+// The escape check here is a fast caller-bug guard; the privileged side
+// re-validates independently, since this boundary is exactly what a
+// compromised orchestrator would try to steer.
+func ChownWorkspaceCheckoutForSandbox(ctx context.Context, runRoot, wtDir string) error {
 	if runtime.GOOS != "linux" {
 		return nil
 	}
@@ -245,16 +235,7 @@ func ChownWorkspaceCheckoutForSandbox(runRoot, wtDir string) error {
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("checkout %q is not inside run root %q", wtDir, runRoot)
 	}
-	// Intermediate directories, shallow: runRoot/<owner>, runRoot/<owner>/<repo>, ...
-	dir := runRoot
-	segs := strings.Split(rel, string(filepath.Separator))
-	for _, seg := range segs[:len(segs)-1] {
-		dir = filepath.Join(dir, seg)
-		if err := os.Lchown(dir, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
-			return fmt.Errorf("lchown %s: %w", dir, err)
-		}
-	}
-	return chownWorktreeForSandbox(wtDir)
+	return sandbox.ChownRunTree(ctx, runRoot, rel)
 }
 
 // translateEnvForSandbox rewrites absolute host paths embedded in env

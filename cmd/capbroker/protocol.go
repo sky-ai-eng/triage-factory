@@ -16,11 +16,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// maxFrameSize caps one wire frame. Every payload here is a handful of
-// strings/ints (run ids, subnet indices, iptables rule bookkeeping) — far
-// under this ceiling; it exists to protect the broker from a malformed
+// maxFrameSize caps one REQUEST frame. Every request payload is a handful
+// of strings/ints (run ids, subnet indices, iptables rule bookkeeping) —
+// far under this ceiling; it exists to protect the broker from a malformed
 // client sending a bogus multi-GB length header.
 const maxFrameSize = 1 * 1024 * 1024 // 1 MiB
+
+// responseFrameSize caps one RESPONSE frame — read by the orchestrator,
+// authored by the broker it already trusts, so the cap is a sanity rail
+// rather than a defense. Larger than maxFrameSize for exactly one method:
+// CaptureRunDelta's result embeds a git bundle of the run's local-only
+// commits plus a binary patch of everything uncommitted, which a run that
+// generated large artifacts can push far past 1 MiB. A capture larger than
+// this fails with a clear frame-size error (the park degrades to
+// snapshot-less) instead of ballooning broker memory without bound.
+const responseFrameSize = 512 * 1024 * 1024 // 512 MiB
 
 // ProtocolVersion is the wire-format version. The broker rejects a
 // mismatching client version so an old binary talking to a new broker (or
@@ -48,14 +58,15 @@ type response struct {
 	Error  string          `json:"e,omitempty"`
 }
 
-// writeFrame serializes msg as a length-prefixed JSON frame on w.
-func writeFrame(w io.Writer, msg any) error {
+// writeFrame serializes msg as a length-prefixed JSON frame on w, capped
+// at maxSize (maxFrameSize for requests, responseFrameSize for responses).
+func writeFrame(w io.Writer, msg any, maxSize int) error {
 	body, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("capbroker: marshal frame: %w", err)
 	}
-	if len(body) > maxFrameSize {
-		return fmt.Errorf("capbroker: frame %d bytes exceeds cap %d", len(body), maxFrameSize)
+	if len(body) > maxSize {
+		return fmt.Errorf("capbroker: frame %d bytes exceeds cap %d", len(body), maxSize)
 	}
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(body)))
@@ -69,10 +80,12 @@ func writeFrame(w io.Writer, msg any) error {
 }
 
 // readFrame reads one length-prefixed JSON frame from r and decodes it
-// into dst. EOF on the header read is returned verbatim so callers (the
-// broker's accept loop) can tell a clean connection close apart from a
-// malformed frame.
-func readFrame(r io.Reader, dst any) error {
+// into dst, capped at maxSize (maxFrameSize when the broker reads a
+// request from an untrusted-post-compromise client; responseFrameSize
+// when the client reads the trusted broker's response). EOF on the
+// header read is returned verbatim so callers (the broker's accept loop)
+// can tell a clean connection close apart from a malformed frame.
+func readFrame(r io.Reader, dst any, maxSize int) error {
 	var header [4]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		if errors.Is(err, io.EOF) {
@@ -81,8 +94,8 @@ func readFrame(r io.Reader, dst any) error {
 		return fmt.Errorf("capbroker: read frame header: %w", err)
 	}
 	length := binary.BigEndian.Uint32(header[:])
-	if length > maxFrameSize {
-		return fmt.Errorf("capbroker: frame %d bytes exceeds cap %d", length, maxFrameSize)
+	if int64(length) > int64(maxSize) {
+		return fmt.Errorf("capbroker: frame %d bytes exceeds cap %d", length, maxSize)
 	}
 	body := make([]byte, length)
 	if _, err := io.ReadFull(r, body); err != nil {
@@ -174,6 +187,29 @@ type killRunArgs struct {
 	ContainerID string `json:"container_id"`
 }
 
+type chownRunTreeArgs struct {
+	Root    string `json:"root"`
+	Subpath string `json:"subpath,omitempty"`
+}
+
+type removeRunTreeArgs struct {
+	Path string `json:"path"`
+}
+
+type captureRunDeltaArgs struct {
+	Worktree string `json:"worktree"`
+}
+
+// captureRunDeltaResult carries the capture child's raw JSON stdout — a
+// worktree.GitDelta the ORCHESTRATOR decodes (the broker never interprets
+// it). Delta can embed a git bundle plus a binary patch of everything
+// uncommitted, so unlike every other result here it is not "a handful of
+// strings" — the client reads this response under captureFrameSize, not
+// maxFrameSize.
+type captureRunDeltaResult struct {
+	Delta []byte `json:"delta,omitempty"`
+}
+
 // methodCallNames are the wire-name constants shared by client and server.
 const (
 	methodPing            = "Ping"
@@ -186,4 +222,7 @@ const (
 	methodLaunchRun       = "LaunchRun"
 	methodWaitRun         = "WaitRun"
 	methodKillRun         = "KillRun"
+	methodChownRunTree    = "ChownRunTree"
+	methodRemoveRunTree   = "RemoveRunTree"
+	methodCaptureRunDelta = "CaptureRunDelta"
 )

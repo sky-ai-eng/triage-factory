@@ -227,6 +227,10 @@ This split applies **only when `TF_MODE=multi`** — the same condition that dec
 | **orchestrator** (`tf-orchestrator`) | **No** — empty effective set, capability bounding set cleared | Yes — GitHub/Jira tokens, the GitHub App key, DB credentials | Yes — webhook payloads, agent output, the HTTP API | Yes — the public HTTP API / websocket |
 | **sandbox** (the delegated agent) | No | No | Yes — it's the source of the hostile input | No — outbound only, through the orchestrator's egress proxy |
 
+The broker serves two families of operations over that socket, both behind boundary validation (`internal/sandbox`'s `ValidateLaunchParams` and `validateRunTreeRoot`) so a compromised orchestrator cannot steer them at arbitrary host state: the sandbox infrastructure itself (netns/veth/iptables, cgroups, the curated rootfs, the `runsc` launch), and the **run-tree ownership lifecycle** — handing a freshly-cloned run tree to the sandbox identity (uid 10000) at run start, running the park-time git-delta capture in a dropped-privilege child, and destroying the tree at teardown. The lifecycle family exists because all three are privileged once the orchestrator's capabilities are gone: changing a file's owner needs `CAP_CHOWN`, the capture child's setuid/netns need `CAP_SETUID`/`CAP_SYS_ADMIN`, and removing a tree the sandbox wrote into means unlinking through modes the orchestrator can't. The chown/remove ops additionally require the target tree to already be owned by the orchestrator or the sandbox identity — a validly-shaped path pointing at `/etc` is refused by ownership, not just by shape. One deliberate exception stays orchestrator-side with no capability at all: the per-run agenthost socket is *chgrp'd* (not chowned) to the sandbox group — an owner-legal group grant, possible because the image makes `tf-orchestrator` a member of `tf-sandbox` (gid 10000) and the entrypoint's `setpriv` carries exactly that one supplementary group through the drop.
+
+**Broker lifetime.** After the entrypoint's `exec`, the broker is a child of the orchestrator, but the orchestrator neither supervises nor restarts it (post-drop it lacks the privilege to manage a root process anyway) — if the broker ever dies, subsequent sandbox operations fail with a clear dial error and the fix is a container restart; a crashed broker may also linger as one `<defunct>` zombie entry in `ps` until then, which is cosmetic. Shutdown needs no supervision either way: tini's `-g` signal fan-out reaches both processes directly.
+
 How to read this against a running deployment:
 
 - `docker compose exec triagefactory ps aux` (or `ps -ef` inside the container's PID namespace) shows two `triagefactory`-derived processes named `tf-cap-broker` and `tf-orchestrator` — not two processes both named `triagefactory`.
@@ -245,6 +249,8 @@ docker compose run --rm --user root triagefactory chown -R 10001:10001 /data /op
 ```
 
 A fresh deployment (empty volumes) needs no such step.
+
+One more upgrade wrinkle, only if you persisted the container's `/root` across upgrades (no stock volume does): Claude Code SDK session state a pre-TFAC-605 deployment wrote under `/root/.claude` (curator session resume, primarily) is orphaned once `$HOME` moves to `/home/tf-orchestrator` — the orchestrator won't find it, and parked curator sessions from before the upgrade rehydrate from their snapshots instead of resuming warm. If keeping warm resume matters, copy `/root/.claude` into `/home/tf-orchestrator/.claude` (and `chown -R 10001:10001` it) before the first post-upgrade boot; otherwise nothing needs doing — the state regenerates.
 
 ## Tailored seccomp profile
 

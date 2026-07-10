@@ -214,5 +214,37 @@ case "$gv" in
   *) pass "migrations applied (goose_db_version has $gv rows)" ;;
 esac
 
+# 6. Privilege-separation posture (TFAC-605). The failure class this catches
+#    is invisible to the health probe: the container boots green while the
+#    split is silently degraded (one process, or an orchestrator that kept
+#    its capabilities, or a /run/tf the unprivileged orchestrator can't
+#    create per-run agenthost sockets in — every delegated run would then
+#    fail at its first sandbox setup, long after "healthy"). The smoke's
+#    generated .env never sets TF_PRIVSEP, and the compose stack pins
+#    TF_MODE=multi, so the split is unconditionally expected here.
+posture=$(dc exec -T triagefactory sh -c '
+  broker=""; orch=""
+  for c in /proc/[0-9]*/comm; do
+    read -r name < "$c" 2>/dev/null || continue
+    pid=${c#/proc/}; pid=${pid%%/*}
+    case "$name" in
+      tf-cap-broker)    broker=$pid ;;
+      tf-orchestrator)  orch=$pid ;;
+    esac
+  done
+  [ -n "$broker" ] || { echo "no tf-cap-broker process found"; exit 1; }
+  [ -n "$orch" ]   || { echo "no tf-orchestrator process found"; exit 1; }
+  eff=$(awk "/^CapEff/{print \$2}" "/proc/$orch/status")
+  bnd=$(awk "/^CapBnd/{print \$2}" "/proc/$orch/status")
+  [ "$eff" = "0000000000000000" ] || { echo "orchestrator CapEff=$eff, want all-zero"; exit 1; }
+  [ "$bnd" = "0000000000000000" ] || { echo "orchestrator CapBnd=$bnd, want all-zero (bounding set must be cleared)"; exit 1; }
+  ouid=$(awk "/^Uid/{print \$2}" "/proc/$orch/status")
+  [ "$ouid" != "0" ] || { echo "orchestrator runs as root; the uid switch did not apply"; exit 1; }
+  duid=$(stat -c %u /run/tf)
+  [ "$duid" = "$ouid" ] || { echo "/run/tf owned by uid $duid, want the orchestrator uid $ouid (agenthost sockets are created there unprivileged)"; exit 1; }
+  echo "broker pid $broker (root, caps); orchestrator pid $orch (uid $ouid, CapEff/CapBnd zero); /run/tf owned by $ouid"
+' 2>&1) || fail "privsep posture: $posture"
+pass "privsep posture: $posture"
+
 echo ""
 echo "compose-smoke: ALL CHECKS PASSED ✓"

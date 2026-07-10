@@ -389,6 +389,7 @@ services:
       TF_ORCHESTRATOR_GID: ${TF_ORCHESTRATOR_GID:-}
       TF_ORCHESTRATOR_HOME: ${TF_ORCHESTRATOR_HOME:-}
       TF_CAPBROKER_SOCKET: ${TF_CAPBROKER_SOCKET:-}
+      TF_SANDBOX_GID: ${TF_SANDBOX_GID:-}
     # Required for the in-container gVisor sandbox to do its netns +
     # iptables + runsc work. Tightening these later is a hardening
     # follow-up (SKY-336); the initial release ships the well-known

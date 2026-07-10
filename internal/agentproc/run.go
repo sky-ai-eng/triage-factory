@@ -479,7 +479,12 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 				_ = ahCloser.Close()
 			}
 			if scratchCwd != "" {
-				_ = os.RemoveAll(scratchCwd)
+				// Via the privileged seam, not os.RemoveAll: the scratch
+				// cwd was handed to the sandbox identity at run start, and
+				// the run may have left files inside that the post-drop
+				// orchestrator cannot unlink itself. Background context —
+				// this is teardown; the run's own ctx may be canceled.
+				_ = sandbox.RemoveRunTree(context.Background(), scratchCwd)
 			}
 			if proxies != nil {
 				// Detached context so a cancelled run still gets a clean
@@ -527,7 +532,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		cleanup()
 		return nil, cleanup, fmt.Errorf("sandbox: %w", err)
 	}
-	if err := chownWorktreeForSandbox(workCwd); err != nil {
+	if err := chownWorktreeForSandbox(runCtx, workCwd); err != nil {
 		cleanup()
 		return nil, cleanup, fmt.Errorf("sandbox: chown worktree: %w", err)
 	}

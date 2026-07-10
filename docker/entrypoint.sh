@@ -157,6 +157,13 @@ if [ "$(uname -s)" = "Linux" ] && multi_mode && privsep_enabled; then
     TF_ORCHESTRATOR_GID="${TF_ORCHESTRATOR_GID:-10001}"
     TF_ORCHESTRATOR_HOME="${TF_ORCHESTRATOR_HOME:-/home/tf-orchestrator}"
     TF_CAPBROKER_SOCKET="${TF_CAPBROKER_SOCKET:-/run/tf/cap-broker.sock}"
+    # The sandbox group (internal/sandbox.WorktreeGID). Carried through
+    # the drop as the orchestrator's ONE supplementary group so it can
+    # chgrp per-run agenthost sockets to the sandbox identity without
+    # CAP_CHOWN — an owner-legal group grant; see grantSocketToSandbox in
+    # cmd/exec/agenthost/socket_linux.go and the tf-sandbox group in
+    # docker/Dockerfile.
+    TF_SANDBOX_GID="${TF_SANDBOX_GID:-10000}"
 
     # Own the persistent state mount points so the (now non-root)
     # orchestrator can read/write its own data. Top-level only, not
@@ -202,8 +209,12 @@ if [ "$(uname -s)" = "Linux" ] && multi_mode && privsep_enabled; then
     # sessions, skills import, project-bundle export/import).
     export HOME="$TF_ORCHESTRATOR_HOME"
 
+    # --groups (not --clear-groups): sets the supplementary groups to
+    # EXACTLY the sandbox group — still shedding root's group set like
+    # --clear-groups did, while keeping the one membership the
+    # orchestrator's owner-legal socket chgrp depends on.
     exec setpriv \
-        --reuid="$TF_ORCHESTRATOR_UID" --regid="$TF_ORCHESTRATOR_GID" --clear-groups \
+        --reuid="$TF_ORCHESTRATOR_UID" --regid="$TF_ORCHESTRATOR_GID" --groups="$TF_SANDBOX_GID" \
         --inh-caps=-all --bounding-set=-all --no-new-privs \
         -- triagefactory "$@"
 fi

@@ -15,6 +15,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // GitDelta is the non-recoverable git state of a delegated worktree at a
@@ -240,8 +242,10 @@ func RestoreWorkspaceGit(ctx context.Context, owner, repo, wtDir string, d *GitD
 	if err := WithRepoLock(owner, repo, func() error {
 		// Clear any stale dir + worktree registration FIRST, so the branch ref
 		// isn't "checked out" when we update it below (a surviving bare still
-		// has the pre-loss worktree registered until this prune).
-		_ = os.RemoveAll(wtDir)
+		// has the pre-loss worktree registered until this prune). Privileged
+		// seam (see RemoveAt's doc): a stale dir surviving from a sandboxed
+		// run is owned by the sandbox identity.
+		_ = sandbox.RemoveRunTree(ctx, wtDir)
 		if err := gitRunCtx(ctx, bareDir, "worktree", "prune"); err != nil {
 			return fmt.Errorf("prune worktrees: %w", err)
 		}

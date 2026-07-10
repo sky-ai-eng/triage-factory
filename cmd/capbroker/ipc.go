@@ -103,12 +103,12 @@ func (c *IPCClient) callWithCap(ctx context.Context, method string, args, result
 		return fmt.Errorf("capbroker: marshal %s args: %w", method, err)
 	}
 	req := request{Version: ProtocolVersion, Method: method, Args: argsJSON}
-	if err := writeFrame(conn, req); err != nil {
+	if err := writeFrame(conn, req, maxFrameSize); err != nil {
 		return err
 	}
 
 	var resp response
-	if err := readFrame(conn, &resp); err != nil {
+	if err := readFrame(conn, &resp, responseFrameSize); err != nil {
 		if errors.Is(err, io.EOF) {
 			return fmt.Errorf("capbroker: broker closed connection during %s: %w", method, err)
 		}
@@ -194,4 +194,24 @@ func (c *IPCClient) RemoveRunCgroup(dir string) error {
 
 func (c *IPCClient) ReapOrphans(ctx context.Context) error {
 	return c.call(ctx, methodReapOrphans, emptyArgs{}, nil)
+}
+
+func (c *IPCClient) ChownRunTree(ctx context.Context, root, subpath string) error {
+	return c.call(ctx, methodChownRunTree, chownRunTreeArgs{Root: root, Subpath: subpath}, nil)
+}
+
+func (c *IPCClient) RemoveRunTree(ctx context.Context, path string) error {
+	return c.call(ctx, methodRemoveRunTree, removeRunTreeArgs{Path: path}, nil)
+}
+
+// CaptureRunDelta uses captureTimeout (not callTimeout) as its budget,
+// mirroring the server-side dispatch exception: git bundling a large
+// worktree is legitimately slower than any of the bounded host
+// operations the default budget is sized for.
+func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
+	var res captureRunDeltaResult
+	if err := c.callWithCap(ctx, methodCaptureRunDelta, captureRunDeltaArgs{Worktree: worktree}, &res, captureTimeout); err != nil {
+		return nil, err
+	}
+	return res.Delta, nil
 }

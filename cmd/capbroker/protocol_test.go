@@ -26,6 +26,9 @@ type fakeOps struct {
 	launchRunFn       func(ctx context.Context, p sandbox.LaunchParams) (sandbox.LaunchedRun, error)
 	removeRunCgroupFn func(dir string) error
 	reapOrphansFn     func(ctx context.Context) error
+	chownRunTreeFn    func(ctx context.Context, root, subpath string) error
+	removeRunTreeFn   func(ctx context.Context, path string) error
+	captureRunDeltaFn func(ctx context.Context, worktree string) ([]byte, error)
 }
 
 func (f *fakeOps) SetupNetwork(ctx context.Context, runID string, subnetIdx uint8) (sandbox.NetworkState, error) {
@@ -51,6 +54,15 @@ func (f *fakeOps) RemoveRunCgroup(dir string) error {
 }
 func (f *fakeOps) ReapOrphans(ctx context.Context) error {
 	return f.reapOrphansFn(ctx)
+}
+func (f *fakeOps) ChownRunTree(ctx context.Context, root, subpath string) error {
+	return f.chownRunTreeFn(ctx, root, subpath)
+}
+func (f *fakeOps) RemoveRunTree(ctx context.Context, path string) error {
+	return f.removeRunTreeFn(ctx, path)
+}
+func (f *fakeOps) CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
+	return f.captureRunDeltaFn(ctx, worktree)
 }
 
 var _ sandbox.PrivilegedOps = (*fakeOps)(nil)
@@ -250,11 +262,11 @@ func TestServer_UnknownMethod(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	if err := writeFrame(conn, request{Version: ProtocolVersion, Method: "NotAMethod"}); err != nil {
+	if err := writeFrame(conn, request{Version: ProtocolVersion, Method: "NotAMethod"}, maxFrameSize); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	var resp response
-	if err := readFrame(conn, &resp); err != nil {
+	if err := readFrame(conn, &resp, responseFrameSize); err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	if resp.Error == "" {
@@ -278,11 +290,11 @@ func TestServer_VersionMismatch(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	if err := writeFrame(conn, request{Version: ProtocolVersion + 1, Method: methodPing}); err != nil {
+	if err := writeFrame(conn, request{Version: ProtocolVersion + 1, Method: methodPing}, maxFrameSize); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	var resp response
-	if err := readFrame(conn, &resp); err != nil {
+	if err := readFrame(conn, &resp, responseFrameSize); err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	if resp.Error == "" {
@@ -319,9 +331,9 @@ func TestServer_ShutdownCancelsInFlightDispatch(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		_ = writeFrame(conn, request{Version: ProtocolVersion, Method: methodReapOrphans})
+		_ = writeFrame(conn, request{Version: ProtocolVersion, Method: methodReapOrphans}, maxFrameSize)
 		var resp response
-		_ = readFrame(conn, &resp)
+		_ = readFrame(conn, &resp, responseFrameSize)
 	}()
 
 	// Give the dispatch goroutine time to actually enter the blocking op

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -53,6 +54,12 @@ func runBroker(args []string) error {
 	defer func() { _ = os.Remove(*socketPath) }()
 
 	if *orchestratorUID >= 0 {
+		// Accept the orchestrator's uid as a legitimate run-tree owner for
+		// the ChownRunTree/RemoveRunTree/CaptureRunDelta boundary
+		// validation: this process (root) serves those ops against trees
+		// the orchestrator created.
+		sandbox.SetRunTreeOwnerUID(*orchestratorUID)
+
 		// The socket is created owner-only (listen()'s chmod 0600) by
 		// whichever uid this process runs as — root, in the default
 		// deployment. Once the orchestrator drops to a different,
@@ -63,6 +70,23 @@ func runBroker(args []string) error {
 		// ownership, so both sides keep working; no other uid can.
 		if err := os.Chown(*socketPath, *orchestratorUID, -1); err != nil {
 			return fmt.Errorf("capbroker: chown socket to orchestrator uid %d: %w", *orchestratorUID, err)
+		}
+
+		// Hand the socket DIRECTORY to the orchestrator too, tightened to
+		// 0700: the same /run/tf holds the agenthost daemon's per-run
+		// sockets, which the (now unprivileged) orchestrator creates
+		// itself and so needs write+search here for. Owner-only is
+		// strictly tighter than listen()'s 0711 default — the only two
+		// parties that belong in this directory are the orchestrator
+		// (owner) and this process (root, DAC-override); the 0711
+		// traverse-by-path concession existed for the orchestrator
+		// reaching a root-owned dir, which ownership now makes moot.
+		dir := filepath.Dir(*socketPath)
+		if err := os.Chown(dir, *orchestratorUID, -1); err != nil {
+			return fmt.Errorf("capbroker: chown socket dir to orchestrator uid %d: %w", *orchestratorUID, err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("capbroker: chmod socket dir: %w", err)
 		}
 	}
 

@@ -21,11 +21,15 @@ import (
 // scanning /run for sockets to dial while a sandbox is mid-construction
 // (between net.Listen and chown/chmod).
 //
-// `/run/` requires root to create on most distros; the multi-mode TF
-// container already runs as root for netns/iptables (CAP_SYS_ADMIN +
-// CAP_NET_ADMIN), so this is the natural choice. A deployment running
-// unprivileged would need $XDG_RUNTIME_DIR/triagefactory/<run_id>.sock
-// instead — left as a follow-up if/when that deployment shape lands.
+// `/run/` requires root to create on most distros. In the TF_PRIVSEP=0
+// rollback deployment this daemon's process runs as root and creates it
+// itself; in the default privsep deployment the cap-broker (root)
+// creates this same shared directory for its own control socket and
+// hands its ownership to the orchestrator's uid at boot
+// (cmd/capbroker's runBroker), so this process — unprivileged after the
+// exec-time capability drop — finds it already writable-by-owner. The
+// two arrangements are why the MkdirAll below tolerates the directory
+// already existing with either owner.
 const hostSocketRoot = "/run/tf"
 
 // HostDaemon is the per-run socket + server lifecycle the spawner
@@ -48,15 +52,15 @@ type HostDaemon struct {
 	doneCh   chan struct{}
 }
 
-// Start creates the per-run unix socket, chowns it to the sandbox UID,
-// chmod's it 0600, and spawns the daemon goroutine. The agent in the
+// Start creates the per-run unix socket, grants the sandbox identity
+// access to it, and spawns the daemon goroutine. The agent in the
 // sandbox sees the socket at /run/tf.sock by way of the returned bind
 // mount.
 //
 // Property B / fs-permissions invariant (load-bearing):
 //
 //  1. Parent dir mkdir 0700 — any race window between socket-create
-//     and chown is unreachable from a second tenant (the dir is
+//     and the grant is unreachable from a second tenant (the dir is
 //     owner-only). Without this, an attacker on the host could
 //     enumerate /run for sockets that haven't been chmod'd yet.
 //
@@ -65,12 +69,21 @@ type HostDaemon struct {
 //     permissive on its own, but step 1 locks the parent so nobody
 //     can reach it yet.
 //
-//  3. Chown to sandbox.WorktreeUID — the sandbox process runs as UID
-//     10000; without this it can't connect (EACCES on connect).
-//
-//  4. Chmod 0600 — owner-only RW. Other host UIDs can't connect even
-//     if they somehow learn the path. The sandbox UID can both read
-//     (accept the bind-mounted socket via veth) and write (send RPCs).
+//  3. The sandbox-identity grant, shaped by what this process may do:
+//     running as root (TF_PRIVSEP=0 rollback), chown the socket to
+//     sandbox.WorktreeUID and chmod 0600 — owner-only RW, exactly the
+//     original arrangement. Running unprivileged (the default: the
+//     orchestrator post-exec-drop holds no CAP_CHOWN and can never
+//     give a file away to another uid), keep ownership and instead
+//     chgrp the socket to sandbox.WorktreeGID + chmod 0660 — an
+//     owner-legal group grant, possible because the container image
+//     makes the orchestrator user a member of the sandbox group
+//     (tf-sandbox, gid 10000) and the entrypoint's setpriv carries
+//     exactly that supplementary group through the drop. The connect
+//     check passes for the sandbox process the same way (uid 10000
+//     runs with gid 10000); every other unprivileged host uid is
+//     still excluded by the missing other-bits and the 0700/0-search
+//     parent directory.
 //
 // Caller MUST invoke .Close() exactly once (typically via defer)
 // regardless of how the surrounding sandbox terminates — the listener
@@ -95,15 +108,10 @@ func Start(stores db.Stores, info RunInfo) (*HostDaemon, sandbox.Mount, error) {
 	if err != nil {
 		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: listen %s: %w", sockPath, err)
 	}
-	if err := os.Chown(sockPath, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
+	if err := grantSocketToSandbox(sockPath); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(sockPath)
-		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: chown %s to uid=%d: %w", sockPath, sandbox.WorktreeUID, err)
-	}
-	if err := os.Chmod(sockPath, 0o600); err != nil {
-		_ = listener.Close()
-		_ = os.Remove(sockPath)
-		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: chmod %s: %w", sockPath, err)
+		return nil, sandbox.Mount{}, err
 	}
 
 	server := NewServer(stores, info)
@@ -128,6 +136,38 @@ func Start(stores db.Stores, info RunInfo) (*HostDaemon, sandbox.Mount, error) {
 		// socket). No `ro` here.
 	}
 	return hd, mount, nil
+}
+
+// grantSocketToSandbox makes the freshly-listened socket connectable by
+// the sandbox identity (uid/gid 10000) — step 3 of Start's invariant.
+// Two shapes, by what this process is allowed to do:
+//
+//   - root (TF_PRIVSEP=0 rollback): chown to WorktreeUID + chmod 0600.
+//     Byte-identical to the original arrangement.
+//   - unprivileged (the default post-exec-drop orchestrator, which holds
+//     no CAP_CHOWN and cannot give a file away to another uid): chgrp to
+//     WorktreeGID + chmod 0660. An owner-legal group change — valid only
+//     because this process is a member of the sandbox group (the image's
+//     tf-sandbox, gid 10000, carried through the drop by the
+//     entrypoint's setpriv --groups) — so a clear, actionable error
+//     names that requirement when the chgrp is refused.
+func grantSocketToSandbox(sockPath string) error {
+	if os.Getuid() == 0 {
+		if err := os.Chown(sockPath, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
+			return fmt.Errorf("agenthost: chown %s to uid=%d: %w", sockPath, sandbox.WorktreeUID, err)
+		}
+		if err := os.Chmod(sockPath, 0o600); err != nil {
+			return fmt.Errorf("agenthost: chmod %s: %w", sockPath, err)
+		}
+		return nil
+	}
+	if err := os.Chown(sockPath, -1, sandbox.WorktreeGID); err != nil {
+		return fmt.Errorf("agenthost: chgrp %s to gid=%d: %w (an unprivileged orchestrator must be a member of the sandbox group — the provided image's tf-sandbox — for this owner-legal group grant)", sockPath, sandbox.WorktreeGID, err)
+	}
+	if err := os.Chmod(sockPath, 0o660); err != nil {
+		return fmt.Errorf("agenthost: chmod %s: %w", sockPath, err)
+	}
+	return nil
 }
 
 // Close shuts down the daemon goroutine and removes the socket file.
