@@ -1,11 +1,15 @@
 package lease
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
 // fakeStore is an in-process simulation of the Postgres row semantics —
@@ -151,6 +155,106 @@ func TestManager_RecoversFromTransientEnsureRowFailure(t *testing.T) {
 	m.tick(context.Background())
 	if !m.IsHolder() {
 		t.Fatal("expected the manager to recover and acquire once EnsureRow is retried and succeeds")
+	}
+}
+
+// TestManager_LogsWarnWhenOnAcquireEatsDeadlineMargin pins the
+// observability net for the onAcquire/renewal-loop coupling documented on
+// the Manager.onAcquire field: a synchronous onAcquire that runs past
+// half the demote deadline (but under the full deadline) logs a WARN,
+// without affecting acquisition itself.
+func TestManager_LogsWarnWhenOnAcquireEatsDeadlineMargin(t *testing.T) {
+	var logbuf bytes.Buffer
+	restore := logging.SetOutput(&logbuf)
+	defer restore()
+
+	store := newFakeStore(time.Now())
+	const demoteDeadline = 100 * time.Millisecond
+	ran := false
+	m, err := NewManager(store, "x", "pod-a", time.Hour, 500*time.Millisecond, demoteDeadline, nil,
+		func(term int64) {
+			ran = true
+			time.Sleep(demoteDeadline * 6 / 10) // > half, < full deadline
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m.tick(context.Background())
+	if !ran {
+		t.Fatal("onAcquire never ran")
+	}
+	if !m.IsHolder() {
+		t.Fatal("expected acquisition to succeed despite the slow onAcquire")
+	}
+	if !strings.Contains(logbuf.String(), "eating into the demote-deadline margin") {
+		t.Errorf("expected a WARN log about the margin, got:\n%s", logbuf.String())
+	}
+	if strings.Contains(logbuf.String(), "MUST stay non-blocking") {
+		t.Errorf("must not log the ERROR-level 'exceeded deadline' message yet, got:\n%s", logbuf.String())
+	}
+}
+
+// TestManager_LogsErrorWhenOnAcquireExceedsDeadline pins the louder half
+// of the same net: onAcquire running longer than the FULL demote deadline
+// logs at ERROR (the case that would actually cause a spurious
+// self-demote on return, per the field doc), still without changing
+// acquisition itself.
+func TestManager_LogsErrorWhenOnAcquireExceedsDeadline(t *testing.T) {
+	var logbuf bytes.Buffer
+	restore := logging.SetOutput(&logbuf)
+	defer restore()
+
+	store := newFakeStore(time.Now())
+	const demoteDeadline = 50 * time.Millisecond
+	m, err := NewManager(store, "x", "pod-a", time.Hour, 500*time.Millisecond, demoteDeadline, nil,
+		func(term int64) {
+			time.Sleep(demoteDeadline + 40*time.Millisecond)
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m.tick(context.Background())
+	if !m.IsHolder() {
+		t.Fatal("expected acquisition to succeed despite the slow onAcquire")
+	}
+	if !strings.Contains(logbuf.String(), "MUST stay non-blocking") {
+		t.Errorf("expected an ERROR log about exceeding the demote deadline, got:\n%s", logbuf.String())
+	}
+}
+
+// TestManager_LogsWarnWhenOnDemoteEatsDeadlineMargin mirrors the
+// onAcquire tests for onDemote (symmetry — see warnIfCallbackAteDeadlineMargin).
+func TestManager_LogsWarnWhenOnDemoteEatsDeadlineMargin(t *testing.T) {
+	var logbuf bytes.Buffer
+	restore := logging.SetOutput(&logbuf)
+	defer restore()
+
+	store := newFakeStore(time.Now())
+	const demoteDeadline = 100 * time.Millisecond
+	m, err := NewManager(store, "x", "pod-a", time.Hour, 500*time.Millisecond, demoteDeadline, nil, nil,
+		func(reason string) { time.Sleep(demoteDeadline * 6 / 10) },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.tick(context.Background()) // acquire first
+	if !m.IsHolder() {
+		t.Fatal("expected acquisition to succeed")
+	}
+	logbuf.Reset()
+
+	m.demote("test-induced demotion")
+	if m.IsHolder() {
+		t.Fatal("expected demotion to take effect")
+	}
+	if !strings.Contains(logbuf.String(), "eating into the demote-deadline margin") {
+		t.Errorf("expected a WARN log about the margin, got:\n%s", logbuf.String())
 	}
 }
 

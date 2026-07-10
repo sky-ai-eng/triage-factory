@@ -39,6 +39,26 @@ type Manager struct {
 	// Never nil (NewManager defaults it to "never fenced").
 	fenced func() bool
 
+	// onAcquire/onDemote run SYNCHRONOUSLY on Run's own goroutine — the
+	// same one that services renewTicker/deadlineTicker (see Run/tick).
+	// This is deliberate, not an oversight: making these async would let
+	// a fast-following demote's onDemote race a stale promote's onAcquire
+	// goroutine (e.g. a flapping lease), risking the brain ending up
+	// "started" after this instance has already demoted — the exact
+	// double-brain hazard this whole mechanism exists to prevent. A safe
+	// async version would need its own term-fencing, which is more
+	// machinery than warranted unless a caller actually needs to block.
+	//
+	// The cost of staying synchronous: onAcquire MUST be non-blocking
+	// (fire off goroutines for anything that isn't a fast, synchronous
+	// kickoff — see internal/app's startBrain). While onAcquire runs,
+	// NOTHING renews and NOTHING re-checks the demote deadline; if it
+	// ever ran longer than demoteDeadline, the very next deadline check
+	// would self-demote this instance immediately on return, even though
+	// its last DB-confirmed renewal (stamped at promote, just before
+	// onAcquire runs — see promote) was perfectly healthy. promote/demote
+	// time these calls and log loudly if one eats into that margin, as an
+	// early-warning net rather than a behavior change.
 	onAcquire func(term int64)
 	onDemote  func(reason string)
 
@@ -227,8 +247,29 @@ func (m *Manager) promote(term int64) {
 	m.lastSuccessfulRenewal = time.Now()
 	m.mu.Unlock()
 	leaseLog.Info("lease acquired", "name", m.name, "holder", m.holderID, "term", term)
-	if m.onAcquire != nil {
-		m.onAcquire(term)
+	if m.onAcquire == nil {
+		return
+	}
+	start := time.Now()
+	m.onAcquire(term)
+	m.warnIfCallbackAteDeadlineMargin("onAcquire", term, time.Since(start))
+}
+
+// warnIfCallbackAteDeadlineMargin logs when a synchronous onAcquire/
+// onDemote call took long enough to threaten the demote-deadline
+// guarantee — see the onAcquire/onDemote field doc for why these run
+// synchronously on Run's own goroutine, and therefore why their duration
+// directly competes with the renewal cadence that keeps a genuinely
+// healthy holder from self-demoting. Pure observability: never changes
+// behavior, never itself demotes anything.
+func (m *Manager) warnIfCallbackAteDeadlineMargin(which string, term int64, elapsed time.Duration) {
+	switch {
+	case elapsed >= m.demoteDeadline:
+		leaseLog.Error(which+" ran longer than the demote deadline; nothing renewed while it was running — the next deadline check may self-demote a perfectly healthy holder. This callback MUST stay non-blocking.",
+			"name", m.name, "term", term, "elapsed", elapsed, "demote_deadline", m.demoteDeadline)
+	case elapsed >= m.demoteDeadline/2:
+		leaseLog.Warn(which+" is eating into the demote-deadline margin",
+			"name", m.name, "term", term, "elapsed", elapsed, "demote_deadline", m.demoteDeadline)
 	}
 }
 
@@ -248,9 +289,17 @@ func (m *Manager) demote(reason string) {
 		return
 	}
 	leaseLog.Warn("lease lost; demoting", "name", m.name, "term", term, "reason", reason)
-	if m.onDemote != nil {
-		m.onDemote(reason)
+	if m.onDemote == nil {
+		return
 	}
+	start := time.Now()
+	m.onDemote(reason)
+	// A slow onDemote doesn't risk a spurious self-demotion the way a
+	// slow onAcquire does (this instance already reports IsHolder=false
+	// before onDemote runs) — it only delays this goroutine's next
+	// acquisition attempt. Timed anyway for symmetry and because a slow
+	// stopBrain is still worth knowing about.
+	m.warnIfCallbackAteDeadlineMargin("onDemote", term, time.Since(start))
 }
 
 // refreshObservedStatus keeps a standby's Status()'s HolderID/Term fresh

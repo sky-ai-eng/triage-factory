@@ -17,6 +17,22 @@ import (
 // elector's OnAcquire callback (role=control, on every acquisition
 // including a re-acquisition after an earlier demotion).
 //
+// MUST STAY NON-BLOCKING. At role=control this runs SYNCHRONOUSLY on the
+// lease.Manager's own renewal goroutine — deliberately, see
+// internal/lease's onAcquire field doc for why an async version isn't
+// safe without term-fencing this doesn't have. While this function is
+// running, nothing renews and nothing checks the self-demote deadline; if
+// it ever took longer than TF_LEASE_DEMOTE_SEC, this pod would self-demote
+// on return even though it never actually lost the lease. Every step
+// below is already a goroutine spawn (go ...) or a call that itself
+// spawns one (RestartAll, ctlbus.Listen) for exactly this reason — a
+// future addition here must keep that shape; do NOT add a synchronous DB
+// call, network round-trip, or anything else that can block for more
+// than a few milliseconds directly in this function's body. (lease.Manager
+// logs a WARN/ERROR if this ever regresses — see its
+// warnIfCallbackAteDeadlineMargin — but that's an early-warning net, not
+// a substitute for keeping this function fast.)
+//
 // Idempotent under brainMu: a redundant call is a no-op, guarding against
 // (in principle) a lease manager promoting twice without an intervening
 // demotion, which shouldn't happen but costs nothing to guard.
