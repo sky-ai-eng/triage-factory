@@ -23,13 +23,15 @@ import (
 // only so tests can shrink it to prove that opt-out without a 60s wait.
 var callTimeout = 60 * time.Second
 
-// captureTimeout bounds one CaptureRunDelta dispatch. Unlike the other
-// host operations it shells out to git (a bundle of local-only commits
-// plus a full binary diff) against a worktree whose size the run
-// dictates, so it gets a budget sized for a large tree rather than a
-// wedged syscall. Mirrored by the client-side budget in
-// IPCClient.CaptureRunDelta.
-const captureTimeout = 5 * time.Minute
+// captureTimeout bounds one CaptureRunDelta dispatch, AND (mirrored) the
+// client-side budget IPCClient.CaptureRunDelta gives the whole streamed
+// round trip — the RPC itself, the socket accept, and the capped read all
+// share this one budget. Unlike the other host operations it shells out to
+// git (a bundle of local-only commits plus a full binary diff) against a
+// worktree whose size the run dictates, so it gets a budget sized for a
+// large tree rather than a wedged syscall. A var (like callTimeout above)
+// so tests can shrink it.
+var captureTimeout = 5 * time.Minute
 
 // connIOTimeout bounds a single frame's read/write. A client that never
 // sends a frame, or never drains the reply, is confused or malicious;
@@ -236,19 +238,20 @@ func (s *Server) handleConn(conn net.Conn) {
 	if err := conn.SetWriteDeadline(time.Now().Add(connIOTimeout)); err != nil {
 		return
 	}
-	_ = writeFrame(conn, resp, responseFrameSize)
+	_ = writeFrame(conn, resp, maxFrameSize)
 }
 
 func (s *Server) sendError(conn net.Conn, msg string) {
 	if err := conn.SetWriteDeadline(time.Now().Add(connIOTimeout)); err != nil {
 		return
 	}
-	_ = writeFrame(conn, response{Error: msg}, responseFrameSize)
+	_ = writeFrame(conn, response{Error: msg}, maxFrameSize)
 }
 
-// dispatch routes one method to s.ops (the privileged operations) or to the
-// broker's own run-launch handlers (launchRun/waitRun/killRun, which own the
-// supervised runtime state rather than delegating to s.ops).
+// dispatch routes one method to s.ops (the privileged operations) or to one
+// of the broker's own handlers (launchRun/waitRun/killRun, which own the
+// supervised runtime state, and captureRunDelta, which streams via a
+// passed-through socket) — neither delegates to s.ops.
 func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMessage) (any, error) {
 	dec := func(dst any) error {
 		if len(rawArgs) == 0 {
@@ -333,11 +336,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		delta, err := s.ops.CaptureRunDelta(ctx, a.Worktree)
-		if err != nil {
-			return nil, err
-		}
-		return captureRunDeltaResult{Delta: delta}, nil
+		return s.captureRunDelta(ctx, a)
 
 	default:
 		return nil, fmt.Errorf("capbroker: unknown method %q", method)

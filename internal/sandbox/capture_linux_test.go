@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -160,6 +161,80 @@ func TestCaptureRunDelta_SkipsNetnsWithoutSysAdmin(t *testing.T) {
 
 	if gotNetns != wantNetns {
 		t.Errorf("child network namespace = %q, want %q (the parent's own — hasSysAdmin() = false should mean no new netns was created)", gotNetns, wantNetns)
+	}
+}
+
+// TestCaptureRunDeltaTo_StdoutIsTheSocketBackedFile pins the one
+// implementation trap this ticket exists to avoid: the child's stdout must
+// be the caller-supplied *os.File itself, assigned directly to cmd.Stdout —
+// never wrapped in another io.Writer. os/exec special-cases *os.File (a
+// direct dup2 into the child at exec time, no copy in this process);
+// anything else makes os/exec silently fall back to an os.Pipe() plus a
+// copy goroutine IN THIS PROCESS, reintroducing every byte of the delta
+// into the caller's (in production, the broker's) memory and defeating the
+// whole point of CaptureRunDeltaTo.
+//
+// Uses a nonexistent binary so cmd.Start() fails fast (no such file) without
+// ever needing to setuid — the point here is only what cmd.Stdout was set
+// to before Start was attempted, not whether the child actually ran.
+func TestCaptureRunDeltaTo_StdoutIsTheSocketBackedFile(t *testing.T) {
+	orig := captureCommand
+	var gotCmd *exec.Cmd
+	captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error) {
+		gotCmd = exec.CommandContext(ctx, "/nonexistent-tf-capture-pin-test-binary")
+		return gotCmd, nil
+	}
+	t.Cleanup(func() { captureCommand = orig })
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pr.Close() })
+
+	// The child can never actually start (no such binary) — irrelevant here;
+	// CaptureRunDeltaTo still closes pw regardless of outcome.
+	_, _ = CaptureRunDeltaTo(context.Background(), captureTestTree(t), pw)
+
+	if gotCmd == nil {
+		t.Fatal("captureCommand was never invoked")
+	}
+	if gotCmd.Stdout != pw {
+		t.Errorf("cmd.Stdout = %#v, want the exact *os.File %v passed to CaptureRunDeltaTo", gotCmd.Stdout, pw)
+	}
+}
+
+// TestReadCapturedDelta_UnderCapByteIdentical pins the happy path of the
+// shared cap both capture paths enforce: data at or under CaptureMaxBytes
+// round-trips byte-identical.
+func TestReadCapturedDelta_UnderCapByteIdentical(t *testing.T) {
+	origCap := CaptureMaxBytes
+	CaptureMaxBytes = 1024
+	t.Cleanup(func() { CaptureMaxBytes = origCap })
+
+	want := bytes.Repeat([]byte{0xAB}, 1024)
+	got, err := ReadCapturedDelta(bytes.NewReader(want))
+	if err != nil {
+		t.Fatalf("ReadCapturedDelta: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("got %d bytes, want %d identical bytes", len(got), len(want))
+	}
+}
+
+// TestReadCapturedDelta_OverCapErrors pins the loss-contract half of the cap:
+// data exceeding CaptureMaxBytes by even one byte is rejected outright
+// rather than silently truncated — a truncated-but-otherwise-valid-looking
+// bundle would be worse than no delta at all (the park degrades to
+// snapshot-less either way, but a truncated one could look intact).
+func TestReadCapturedDelta_OverCapErrors(t *testing.T) {
+	origCap := CaptureMaxBytes
+	CaptureMaxBytes = 1024
+	t.Cleanup(func() { CaptureMaxBytes = origCap })
+
+	over := bytes.Repeat([]byte{0xCD}, 1025)
+	if _, err := ReadCapturedDelta(bytes.NewReader(over)); err == nil {
+		t.Error("expected an over-cap error, got nil")
 	}
 }
 

@@ -403,6 +403,19 @@ func ValidateLaunchParams(p LaunchParams) error {
 	return nil
 }
 
+// ValidateCaptureStdoutSocketPath validates the per-capture stdout socket
+// path the orchestrator sends over the CaptureRunDelta RPC — the same
+// clean-absolute-path treatment ValidateLaunchParams gives Worktree, since
+// it is the same kind of value: a bind SOURCE / dial TARGET the privileged
+// broker touches on the orchestrator's say-so. Dialing this path carries no
+// privilege delta (the broker and orchestrator share a uid; a compromised
+// orchestrator could dial anything itself from its own process), so
+// path-shape validation is sufficient here — unlike the rootfs/env/mount
+// checks above, there is no allowlist to invent.
+func ValidateCaptureStdoutSocketPath(path string) error {
+	return validateAbsCleanPath("capture stdout socket path", path)
+}
+
 func orDefaultRootfs(name string) string {
 	if name == "" {
 		return defaultRootfsName

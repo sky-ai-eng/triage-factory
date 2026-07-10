@@ -4,11 +4,14 @@ package capbroker
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
@@ -107,7 +110,7 @@ func (c *IPCClient) callWithCap(ctx context.Context, method string, args, result
 	}
 
 	var resp response
-	if err := readFrame(conn, &resp, responseFrameSize); err != nil {
+	if err := readFrame(conn, &resp, maxFrameSize); err != nil {
 		if errors.Is(err, io.EOF) {
 			return fmt.Errorf("capbroker: broker closed connection during %s: %w", method, err)
 		}
@@ -172,14 +175,95 @@ func (c *IPCClient) RemoveRunTree(ctx context.Context, path string) error {
 	return c.call(ctx, methodRemoveRunTree, removeRunTreeArgs{Path: path}, nil)
 }
 
-// CaptureRunDelta uses captureTimeout (not callTimeout) as its budget,
-// mirroring the server-side dispatch exception: git bundling a large
-// worktree is legitimately slower than any of the bounded host
-// operations the default budget is sized for.
+// captureSocketDir is the parent directory for per-capture stdout sockets —
+// the same shared socket directory the launch path's per-run stdio sockets
+// live under. A var (like stdioSocketPath's directory) so tests can
+// redirect it to a writable temp dir instead of the root-only production
+// /run/tf.
+var captureSocketDir = socketDir
+
+// captureSocketPath mints a fresh, unique per-capture stdout socket path.
+// Unlike the per-run stdio socket (keyed by the run's unique container id),
+// a capture has no natural unique key at this layer, so this generates one.
+func captureSocketPath() (string, error) {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("capbroker: generate capture socket name: %w", err)
+	}
+	return filepath.Join(captureSocketDir, fmt.Sprintf("capture-%x.sock", raw)), nil
+}
+
+// CaptureRunDelta streams the capture child's stdout directly from the
+// broker to this process over a per-capture unix socket — the fd-passthrough
+// pattern LaunchRun uses for the run's live stdio (brokerrun_linux.go),
+// applied here so the park-time git-delta capture's (potentially large)
+// result never enters the broker's address space either.
+//
+// It opens the listener the broker will dial, issues the RPC carrying the
+// socket path, and concurrently accepts + reads the stream while awaiting
+// the RPC response. Bytes are returned only once BOTH signals hold: a
+// successful RPC response, AND the stream's EOF — a response without EOF
+// (the stream wedged) or EOF without a response (the RPC is still the
+// authoritative outcome, e.g. it may yet report a child failure) are each
+// insufficient alone. captureTimeout bounds the whole round trip on both
+// sides: the RPC call, the accept, and the capped read.
 func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
-	var res captureRunDeltaResult
-	if err := c.callWithCap(ctx, methodCaptureRunDelta, captureRunDeltaArgs{Worktree: worktree}, &res, captureTimeout); err != nil {
+	sockPath, err := captureSocketPath()
+	if err != nil {
 		return nil, err
 	}
-	return res.Delta, nil
+	l, err := listen(sockPath)
+	if err != nil {
+		return nil, fmt.Errorf("capbroker: listen capture stdout socket: %w", err)
+	}
+	defer func() {
+		_ = l.Close()
+		_ = os.Remove(sockPath)
+	}()
+
+	ctx, cancel := context.WithTimeout(ctx, captureTimeout)
+	defer cancel()
+
+	type streamResult struct {
+		buf []byte
+		err error
+	}
+	streamDone := make(chan streamResult, 1)
+	go func() {
+		deadline, _ := ctx.Deadline()
+		if ul, ok := l.(*net.UnixListener); ok {
+			_ = ul.SetDeadline(deadline)
+		}
+		conn, err := l.Accept()
+		if err != nil {
+			streamDone <- streamResult{nil, fmt.Errorf("accept capture stream: %w", err)}
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_ = conn.SetDeadline(deadline)
+		buf, err := sandbox.ReadCapturedDelta(conn)
+		streamDone <- streamResult{buf, err}
+	}()
+
+	var res captureRunDeltaResult
+	args := captureRunDeltaArgs{Worktree: worktree, StdoutSocketPath: sockPath}
+	if err := c.callWithCap(ctx, methodCaptureRunDelta, args, &res, captureTimeout); err != nil {
+		// The RPC is authoritative on failure (dial failure, child failure) —
+		// discard whatever, if anything, crossed the stream. Returning now
+		// runs the deferred l.Close()/os.Remove() above, which unblocks a
+		// still-pending Accept in the goroutine (it errors on the closed
+		// listener) so it sends to the buffered streamDone and exits — no
+		// goroutine leak even though nothing here reads that value.
+		return nil, err
+	}
+
+	select {
+	case stream := <-streamDone:
+		if stream.err != nil {
+			return nil, fmt.Errorf("capbroker: capture stream: %w", stream.err)
+		}
+		return stream.buf, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("capbroker: capture stream: %w", ctx.Err())
+	}
 }

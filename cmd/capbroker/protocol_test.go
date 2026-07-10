@@ -194,7 +194,7 @@ func TestServer_UnknownMethod(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	var resp response
-	if err := readFrame(conn, &resp, responseFrameSize); err != nil {
+	if err := readFrame(conn, &resp, maxFrameSize); err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	if resp.Error == "" {
@@ -222,7 +222,7 @@ func TestServer_VersionMismatch(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	var resp response
-	if err := readFrame(conn, &resp, responseFrameSize); err != nil {
+	if err := readFrame(conn, &resp, maxFrameSize); err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	if resp.Error == "" {
@@ -261,7 +261,7 @@ func TestServer_ShutdownCancelsInFlightDispatch(t *testing.T) {
 		defer conn.Close()
 		_ = writeFrame(conn, request{Version: ProtocolVersion, Method: methodReapOrphans}, maxFrameSize)
 		var resp response
-		_ = readFrame(conn, &resp, responseFrameSize)
+		_ = readFrame(conn, &resp, maxFrameSize)
 	}()
 
 	// Give the dispatch goroutine time to actually enter the blocking op
