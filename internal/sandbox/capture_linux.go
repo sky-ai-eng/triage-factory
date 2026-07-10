@@ -18,8 +18,8 @@ import (
 // package var so tests can point it at a helper process instead of re-execing
 // the real binary. Production re-invokes this same binary's internal
 // `snapshot-capture` subcommand — os.Executable() resolves to the same
-// triagefactory binary whether this runs in-process (TF_PRIVSEP=0) or inside
-// the cap-broker (which is itself a re-exec of that binary).
+// triagefactory binary; this capture runs inside the cap-broker, which is
+// itself a re-exec of that binary.
 var captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -42,11 +42,10 @@ var captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error)
 // The network namespace is defense in depth on top of the uid drop, not the
 // primary boundary — that's the uid drop itself (see below) — so it is
 // applied only when this process actually holds CAP_SYS_ADMIN (creating a
-// network namespace needs it). In the default deployment this method runs in
-// the cap-broker, which always does; the in-process TF_PRIVSEP=0 path runs
-// as root and does too. The gate survives for the unprivileged bare-metal
-// dev case, where it skips CLONE_NEWNET rather than failing the whole
-// capture on a syscall it can never make.
+// network namespace needs it). This method runs in the cap-broker, which
+// holds CAP_SYS_ADMIN in the container deployment. The gate survives for
+// the unprivileged bare-metal dev case, where it skips CLONE_NEWNET rather
+// than failing the whole capture on a syscall it can never make.
 //
 // Dropping to the sandbox uid is SUFFICIENT for the whole capture only
 // because a multi-mode delegated run's worktree is always a SELF-CONTAINED

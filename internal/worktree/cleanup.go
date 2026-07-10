@@ -24,12 +24,13 @@ func RemoveAt(path, runID string) error {
 	if path == "" {
 		return nil
 	}
-	// Via the privileged seam, not os.RemoveAll: a multi-mode run tree is
-	// owned by the sandbox identity by the time it's removed, with
-	// agent-created modes the post-drop orchestrator cannot unlink
-	// through — the removal executes in the cap-broker there. Local mode
-	// and TF_PRIVSEP=0 route to the in-process implementation, which is
-	// the plain RemoveAll this call used to be.
+	// Via the privileged seam, not os.RemoveAll: on a host that sandboxes
+	// (multi mode + Linux) a run tree is owned by the sandbox identity by the
+	// time it's removed, with agent-created modes the post-drop orchestrator
+	// cannot unlink through — so the removal executes in the cap-broker. On a
+	// non-sandboxing host (local mode, or non-Linux) no sandbox ever took
+	// ownership, so the seam resolves to an ordinary in-process removal — the
+	// plain RemoveAll this call used to be.
 	if err := sandbox.RemoveRunTree(context.Background(), path); err != nil {
 		return fmt.Errorf("remove worktree dir %s: %w", path, err)
 	}

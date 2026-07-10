@@ -6,9 +6,8 @@
 #      failure so a not-yet-ready Postgres doesn't hard-fail the
 #      container before compose/Fly finishes wiring DNS. Idempotent
 #      and safe to re-run on every restart.
-#   2. Privilege separation (TF_PRIVSEP, default on — see below): spawn
-#      the cap-broker, then exec into the orchestrator with its
-#      capabilities dropped.
+#   2. Privilege separation (multi mode only): spawn the cap-broker,
+#      then exec into the orchestrator with its capabilities dropped.
 #   3. exec the binary so tini/the container sees its signals
 #      directly (no shell intermediary swallowing SIGTERM).
 #
@@ -18,10 +17,9 @@
 # Local mode also never sandboxes (agentproc.WillSandbox is
 # multi-mode-only) and has no broker to protect anything from — a
 # single trusted operator already holds whatever the process holds —
-# so step 2 is gated on TF_MODE=multi (not just TF_PRIVSEP): it's
-# skipped outright there, leaving local mode's default `docker run`
-# exactly as unaffected as it was before this split existed, including
-# uid and $HOME.
+# so step 2 is gated on TF_MODE=multi: it's skipped outright there,
+# leaving local mode's default `docker run` exactly as unaffected as
+# it was before this split existed, including uid and $HOME.
 #
 # Note on GoTrue keys: the entrypoint deliberately does NOT generate
 # the GoTrue RS256 keypair. GoTrue runs in a separate container and
@@ -86,12 +84,9 @@ done
 
 # --- 2. Privilege separation: exec-time capability drop --------------------
 #
-# TF_PRIVSEP defaults to ON; TF_PRIVSEP=0 is a temporary rollback escape
-# hatch back to the prior behavior (single process, capabilities kept,
-# cap-broker never spawned). See docs/usage.md.
-#
-# When on (Linux only — this container's sandbox is Linux-only and this
-# whole mechanism exists to protect it), this entrypoint:
+# In multi mode on Linux — this container's sandbox is Linux-only and this
+# whole mechanism exists to protect it — privilege separation is the only
+# sandbox launch path. This entrypoint:
 #
 #   1. Spawns the cap-broker in the background. It stays root, holding
 #      whatever this container was granted (SYS_ADMIN + NET_ADMIN on
@@ -122,37 +117,23 @@ done
 # the ENTRYPOINT below) reaches both for shutdown without the
 # orchestrator needing to track a process it no longer has the
 # privilege to signal-manage anyway.
-privsep_enabled() {
-    # Trim leading/trailing whitespace before lowercasing, matching
-    # cmd/capbroker.Enabled()'s strings.TrimSpace: without this, a value
-    # like " false " would disable privsep in the Go binary but still
-    # read as enabled here, making the rollback unexpectedly ineffective.
-    v="${TF_PRIVSEP:-}"
-    v="${v#"${v%%[![:space:]]*}"}"
-    v="${v%"${v##*[![:space:]]}"}"
-    case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
-        0 | false | f | no | n | off) return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
 # multi_mode mirrors internal/runmode.ModeFromEnv's own parsing exactly
 # (case-insensitive match against "multi"; empty/unset means local; NOT
 # whitespace-tolerant — runmode deliberately surfaces a stray-space typo
 # rather than silently accepting it, so this doesn't trim either) — the
 # same condition agentproc.WillSandbox() uses to decide whether this
 # host sandboxes runs at all. Privsep only protects the sandbox's
-# capabilities, so it has nothing to do in local mode: gating on this
-# (not just privsep_enabled) is what keeps the Dockerfile's own default
-# (`TF_MODE=local`, "a docker run without any env vars boots into a
-# working single-tenant binary") working exactly as before this split
-# existed — no uid switch, no $HOME change, full privilege, matching
-# every other single-operator local-mode deployment.
+# capabilities, so it has nothing to do in local mode: gating on this is
+# what keeps the Dockerfile's own default (`TF_MODE=local`, "a docker run
+# without any env vars boots into a working single-tenant binary") working
+# exactly as before this split existed — no uid switch, no $HOME change,
+# full privilege, matching every other single-operator local-mode
+# deployment.
 multi_mode() {
     [ "$(printf '%s' "${TF_MODE:-local}" | tr '[:upper:]' '[:lower:]')" = "multi" ]
 }
 
-if [ "$(uname -s)" = "Linux" ] && multi_mode && privsep_enabled; then
+if [ "$(uname -s)" = "Linux" ] && multi_mode; then
     TF_ORCHESTRATOR_UID="${TF_ORCHESTRATOR_UID:-10001}"
     TF_ORCHESTRATOR_GID="${TF_ORCHESTRATOR_GID:-10001}"
     TF_ORCHESTRATOR_HOME="${TF_ORCHESTRATOR_HOME:-/home/tf-orchestrator}"
@@ -221,11 +202,10 @@ fi
 
 # --- 3. exec the binary -----------------------------------------------------
 #
-# The local-mode (default) / TF_PRIVSEP=0 / non-Linux path: exec replaces
-# the shell with the Go process directly (still fully privileged, uid
-# and $HOME untouched) so tini's signal forwarding lands directly on
-# triagefactory. Without the exec, a SIGTERM from compose would hit this
-# script and have to be relayed manually — losing the chance for
-# graceful shutdown.
+# The local-mode (default) / non-Linux path: exec replaces the shell with
+# the Go process directly (still fully privileged, uid and $HOME untouched)
+# so tini's signal forwarding lands directly on triagefactory. Without the
+# exec, a SIGTERM from compose would hit this script and have to be relayed
+# manually — losing the chance for graceful shutdown.
 
 exec triagefactory "$@"

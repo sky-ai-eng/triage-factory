@@ -152,11 +152,11 @@ type Sandbox struct {
 }
 
 // LaunchedRun is a started (or startable) agent-runtime process — the
-// gVisor runsc child. Wrap returns one instead of a bare *exec.Cmd so the
-// launch can cross a process boundary: with the in-process launcher it
-// wraps a local *exec.Cmd whose stdio are ordinary pipes; under the
-// cap-broker it is a proxy whose Stdin/Stdout are the orchestrator's end
-// of a passed-through socket while the broker execs+supervises runsc.
+// gVisor runsc child. Wrap returns one instead of a bare *exec.Cmd because
+// the launch crosses a process boundary: it is a proxy for the
+// cap-broker-supervised runsc child, whose Stdin/Stdout are the
+// orchestrator's end of a passed-through socket while the broker
+// execs+supervises runsc.
 //
 // Lifecycle: Start the run, then Stdin/Stdout are valid; drive the NDJSON
 // stream; Wait blocks until the runtime exits; OOMKilled is valid after
@@ -207,9 +207,9 @@ type LaunchedRun interface {
 // LaunchedRun the caller drives (Start → stream → Wait → Close) plus the
 // *Sandbox that owns the network/bundle/subnet teardown.
 //
-// The launch itself is routed through the injected PrivilegedOps: in
-// process by default, or across the socket to the cap-broker when
-// TF_PRIVSEP is on — the caller sees the same LaunchedRun either way.
+// The launch itself is routed across the socket to the cap-broker (the
+// installed RunLauncher), which execs+supervises runsc with the run's
+// stdio wired to a passed-through socket.
 //
 // PROPERTY B INVARIANT: Wrap does NOT inject credentials into
 // cfg.Env, does NOT read os.Environ for ANTHROPIC_*/AWS_*, and does

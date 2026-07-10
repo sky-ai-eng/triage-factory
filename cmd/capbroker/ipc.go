@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"sync/atomic"
 	"time"
 
@@ -136,8 +135,10 @@ func (c *IPCClient) Ping(ctx context.Context) error {
 }
 
 // --- sandbox.PrivilegedOps implementation ---
-
-var _ sandbox.PrivilegedOps = (*IPCClient)(nil)
+//
+// The IPCClient is the full sandbox.SandboxOps the orchestrator installs:
+// the privileged operations below plus LaunchRun (brokerrun_linux.go).
+var _ sandbox.SandboxOps = (*IPCClient)(nil)
 
 func (c *IPCClient) SetupNetwork(ctx context.Context, runID string, subnetIdx uint8) (sandbox.NetworkState, error) {
 	var res setupNetworkResult
@@ -157,39 +158,6 @@ func (c *IPCClient) EnsureRootfs(ctx context.Context, selector sandbox.RootfsSel
 		return "", err
 	}
 	return res.Path, nil
-}
-
-// SetupRunCgroup RPCs the broker to create the cgroup (the privileged
-// mkdir + memory.max/memory.swap.max writes) and gets back the directory
-// path — never the fd, which can't cross the wire (see setupRunCgroupResult's
-// doc). It then opens that same path itself, exactly how hostOps's own
-// newRunCgroup obtains its fd (os.OpenFile, no elevated privilege needed to
-// open a directory the caller can already see). This works today because
-// the orchestrator still holds capabilities too — the broker keeps them,
-// and the orchestrator does not drop them yet — and both processes see the
-// same cgroupfs. The fd is then usable for THIS process's own
-// exec.Cmd.CgroupFD, matching the documented contract that it's "only
-// usable by a caller that Starts the runsc process in the same address
-// space as this call" — still true here since runsc launch hasn't moved
-// to the broker yet (a later phase of this split).
-func (c *IPCClient) SetupRunCgroup(name string, limitMB int) (string, *os.File, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
-	defer cancel()
-	var res setupRunCgroupResult
-	if err := c.call(ctx, methodSetupRunCgroup, setupRunCgroupArgs{Name: name, LimitMB: limitMB}, &res); err != nil {
-		return "", nil, err
-	}
-	f, err := os.OpenFile(res.Dir, os.O_RDONLY, 0)
-	if err != nil {
-		return "", nil, fmt.Errorf("capbroker: open cgroup dir fd: %w", err)
-	}
-	return res.Dir, f, nil
-}
-
-func (c *IPCClient) RemoveRunCgroup(dir string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
-	defer cancel()
-	return c.call(ctx, methodRemoveRunCgroup, removeRunCgroupArgs{Dir: dir}, nil)
 }
 
 func (c *IPCClient) ReapOrphans(ctx context.Context) error {

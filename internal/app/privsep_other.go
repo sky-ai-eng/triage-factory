@@ -8,7 +8,7 @@ import (
 )
 
 // startCapBroker on non-Linux always errors. Never actually reached in
-// practice — startCapBrokerIfEnabled's agentproc.WillSandbox() gate is
+// practice — startCapBrokerIfSandboxing's agentproc.WillSandbox() gate is
 // always false off Linux — but kept symmetric with the Linux
 // implementation so the build doesn't need a call-site branch.
 func startCapBroker(_ context.Context) (capBrokerHandle, error) {

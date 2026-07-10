@@ -4,31 +4,24 @@ package sandbox
 
 import (
 	"context"
-	"os"
 )
 
-// PrivilegedOps is the seam between sandbox orchestration and every
-// operation in this package that needs root-equivalent Linux
+// PrivilegedOps is the set of operations that need root-equivalent Linux
 // capabilities (CAP_NET_ADMIN, CAP_SYS_ADMIN, CAP_SYS_CHROOT): network
-// setup/teardown, cgroup create/remove, rootfs bake, and boot-time
-// orphan reap.
+// setup/teardown, rootfs bake, boot-time orphan reap, and the run-tree
+// ownership/capture ops. The cap-broker holds those capabilities and
+// serves this interface over its socket RPC; hostOps (hostops_linux.go)
+// is the in-process implementation the broker process dispatches onto.
 //
-// Every method mirrors the RPC vocabulary in
-// docs/specs/privsep/README.md §4 so a future out-of-process cap-broker
-// (PS-P1) can implement this same interface over a socket client at
-// zero call-site churn. Parameters and returns are therefore restricted
-// to serializable values (strings, ints, structs) that can cross an
-// eventual JSON RPC unchanged — no live *exec.Cmd, no *os.File — with
-// one documented exception: SetupRunCgroup's returned fd, which is only
-// meaningful to a caller in the same process (see its doc).
+// Every method's parameters and returns are serializable values (strings,
+// ints, structs) that cross the JSON RPC unchanged — no live *exec.Cmd, no
+// *os.File. The run launch is a separate concern (RunLauncher below): it
+// crosses a passed-through socket rather than the request/response RPC,
+// because the run's stdio must never enter the broker's address space.
 //
-// wrap(), Close(), and reapOrphansImpl() — the three entry points the
-// PS-P0 audit named — call only through this interface for every
-// privileged operation. hostOps (hostops_linux.go) is the sole
-// in-process implementation; the cap-broker's socket client is the
-// out-of-process one. The runsc launch is LaunchRun: the in-process
-// implementation execs runsc with ordinary pipes; the broker execs and
-// supervises it with its stdio wired to a passed-through socket.
+// wrap(), Close(), reapOrphansImpl(), and the run-tree helpers reach the
+// broker through this interface; the orchestrator installs the broker's
+// IPC client via SetPrivilegedOps at boot.
 type PrivilegedOps interface {
 	// SetupNetwork creates the per-run netns + veth pair, applies the
 	// MASQUERADE + egress-allowlist iptables rules, and ensures
@@ -46,32 +39,9 @@ type PrivilegedOps interface {
 
 	// EnsureRootfs idempotently bakes (or returns the cached path to)
 	// the curated rootfs matching selector. v1 has exactly one curated
-	// variant; selector exists now so a broker-owned catalog (spec §8)
-	// can grow without changing this signature later.
+	// variant; selector exists now so a broker-owned catalog can grow
+	// without changing this signature later.
 	EnsureRootfs(ctx context.Context, selector RootfsSelector) (rootfsPath string, err error)
-
-	// LaunchRun execs+supervises the gVisor runtime for one prepared
-	// bundle and returns a LaunchedRun the caller drives. The in-process
-	// implementation (hostOps) builds the runsc command with ordinary
-	// pipes for stdio and creates the memory cgroup locally; the broker
-	// implementation execs+supervises runsc in the broker process with its
-	// stdio wired to a passed-through socket, so the run's bytes never
-	// enter the (unprivileged) orchestrator's peer holder. The per-run
-	// memory cgroup is created and torn down by whichever side execs the
-	// runtime — the cgroup fd is needed only at that side's clone3 and
-	// never crosses the interface.
-	LaunchRun(ctx context.Context, p LaunchParams) (LaunchedRun, error)
-
-	// SetupRunCgroup creates the per-run memory-ceiling cgroup and
-	// returns its directory plus an open dir-fd for exec.Cmd's
-	// CgroupFD. Retained from the P1 seam; the runsc launch path now
-	// creates its cgroup inside LaunchRun (the fd stays on whichever side
-	// execs the runtime), so this is exercised by the P1 conformance tests
-	// rather than the live launch path.
-	SetupRunCgroup(name string, limitMB int) (dir string, cgroupFD *os.File, err error)
-
-	// RemoveRunCgroup tears down the group SetupRunCgroup created.
-	RemoveRunCgroup(dir string) error
 
 	// ReapOrphans sweeps leftover netns/veth/iptables/cgroup state left
 	// by a previous, hard-crashed process. Called once at TF startup.
@@ -109,10 +79,32 @@ type PrivilegedOps interface {
 	// this package doesn't import internal/worktree). Both halves of
 	// that child's confinement — the setuid away from the calling
 	// identity and the CLONE_NEWNET — need capabilities the orchestrator
-	// no longer holds, so the exec moves to the privileged side whole
-	// (spec §5's PS-P5). Empty output means "not a git worktree, no
-	// delta".
+	// no longer holds, so the exec runs on the privileged side whole.
+	// Empty output means "not a git worktree, no delta".
 	CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error)
+}
+
+// RunLauncher launches (and cross-process supervises) one prepared run.
+// It is deliberately NOT part of PrivilegedOps: the request/response RPC
+// that backs PrivilegedOps carries only serializable data, but a launch
+// hands the runtime a passed-through stdio socket the broker never reads,
+// so the run's bytes never enter the broker's address space. The only
+// implementation is the cap-broker's IPC client (brokerrun_linux.go) — the
+// launch is always brokered; there is no in-process launcher.
+type RunLauncher interface {
+	// LaunchRun asks the broker to build the OCI bundle from the validated
+	// params, exec+supervise runsc with its stdio wired to a socket this
+	// process listens on, and hand back a LaunchedRun the caller drives.
+	LaunchRun(ctx context.Context, p LaunchParams) (LaunchedRun, error)
+}
+
+// SandboxOps is the full set the orchestrator installs at boot via
+// SetPrivilegedOps: the broker-served privileged operations plus the
+// always-brokered run launch. The cap-broker IPC client is the sole
+// implementation.
+type SandboxOps interface {
+	PrivilegedOps
+	RunLauncher
 }
 
 // NetworkState is the serializable per-run network state SetupNetwork
@@ -231,8 +223,7 @@ type LaunchParams struct {
 
 	// StdioSocketPath is the per-run unix socket the orchestrator listens
 	// on and the broker dials to hand the runtime its stdio. Populated by
-	// the broker client (which owns the listener); the in-process launcher
-	// wires pipes and ignores it.
+	// the broker client (which owns the listener) at launch time.
 	StdioSocketPath string
 
 	// ExtraEgressCIDR is the self-host-only additional egress destination

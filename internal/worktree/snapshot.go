@@ -402,8 +402,9 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 // Precisely BECAUSE that containment lives in the caller, this path must still
 // NOT be made ownership-tolerant against a chowned run root in-process: doing
 // so would move filter execution back to whatever privilege the in-process
-// caller holds (root under TF_PRIVSEP=0, or a local-mode operator). Keep it
-// strict; the isolation is the dropped-privilege child, not any check here.
+// caller holds (a local-mode operator, or a dev running the binary directly).
+// Keep it strict; the isolation is the dropped-privilege child, not any check
+// here.
 func gitCapture(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {

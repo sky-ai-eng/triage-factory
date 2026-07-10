@@ -11,8 +11,9 @@ import (
 //
 //   - the direct (local / non-sandbox) subprocess — *execProc below;
 //   - the gVisor sandbox run — a sandbox.LaunchedRun, which the sandbox
-//     package returns already satisfying this method set (in process by
-//     default, or a cap-broker proxy under TF_PRIVSEP).
+//     package returns already satisfying this method set (a cap-broker
+//     proxy: the runsc child runs in the broker, this end drives its
+//     stdio).
 //
 // The contract mirrors the pre-split *exec.Cmd dance: Start, then
 // Stdin/Stdout are valid; drive the NDJSON stream; Wait; then Stderr and

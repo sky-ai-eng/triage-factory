@@ -29,16 +29,11 @@ func TrustedSDKDir() string {
 // the broker OWNS the OCI spec (built from a fixed template — empty
 // capabilities, uid/gid 10000, seccomp, the namespace set, a
 // content-addressed read-only rootfs) and accepts over its RPC only the
-// narrow, validated DATA in LaunchParams. ValidateLaunchParams is the gate
-// every brokered launch passes before the broker builds or execs anything,
-// so a compromised (unprivileged) orchestrator can inject data the sandbox
-// sees but can never make the broker run arbitrary code with capabilities.
-//
-// The in-process path (privsep off) is a single trust domain — the
-// orchestrator IS the capability holder — so it skips the boundary
-// validation and goes straight to PrepareBundle; the checks here matter
-// precisely where LaunchParams cross from the untrusted orchestrator into
-// the privileged broker.
+// narrow, validated DATA in LaunchParams. The broker is the only launch
+// path, so ValidateLaunchParams is unconditional: it is the gate every
+// launch passes before the broker builds or execs anything, so a
+// compromised (unprivileged) orchestrator can inject data the sandbox sees
+// but can never make the broker run arbitrary code with capabilities.
 
 // --- rootfs catalog (name → recipe → hash) ---
 //
@@ -182,8 +177,9 @@ var allowedSandboxEnvPrefixes = []string{
 // exported so internal/agentproc (which produces the sandbox env and can
 // import this package without a cycle) can drift-test that every key its
 // proxy/git wiring emits is covered here. Without that guard a new producer
-// key would pass silently in the in-process path and only break once
-// privsep is enabled and the broker's ValidateLaunchParams rejects it.
+// key would break every sandboxed run at launch — the broker's
+// ValidateLaunchParams rejects an unlisted key — instead of being caught at
+// test time by the drift test.
 func EnvKeyAllowed(key string) bool {
 	return envKeyAllowed(key)
 }
@@ -554,15 +550,14 @@ func stringsToEnvVars(env []string) []EnvVar {
 // PrepareBundle is the broker-owned spec construction: from the validated
 // LaunchParams it resolves the rootfs against the catalog (name → hash →
 // read-only path), builds the OCI spec from the fixed template, and writes
-// the per-run bundle. This is the code the PS-P3 split moves off the
-// orchestrator: whoever holds capabilities (the in-process hostOps, or the
-// cap-broker) builds the spec here — the orchestrator only ever supplies
-// the validated data above.
+// the per-run bundle. It runs on the privileged (cap-broker) side, which
+// holds the capabilities; the orchestrator only ever supplies the validated
+// data above.
 //
-// Callers on the broker path MUST call ValidateLaunchParams first (the
-// broker's dispatch does); the in-process path is a single trust domain
-// and calls PrepareBundle directly. Returns the bundle dir; the caller
-// (the LaunchedRun) owns removing it via cleanupBundle when the run ends.
+// The broker's launch dispatch MUST call ValidateLaunchParams before this —
+// the boundary check that keeps a compromised orchestrator from steering the
+// spec construction. Returns the bundle dir; the caller (the LaunchedRun)
+// owns removing it via cleanupBundle when the run ends.
 func PrepareBundle(ctx context.Context, p LaunchParams) (string, error) {
 	rootfsPath, err := resolveCatalogRootfs(ctx, p.Rootfs)
 	if err != nil {

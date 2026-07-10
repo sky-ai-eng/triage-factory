@@ -125,8 +125,8 @@ FROM alpine:3.20 AS runtime
 #   starts a thread. Never done in-process (capset/prctl from Go only
 #   affects one thread and would leave others still privileged), so
 #   this small, single-purpose, single-threaded C tool is a hard
-#   runtime dependency of docker/entrypoint.sh's default (TF_PRIVSEP=1)
-#   path.
+#   runtime dependency of docker/entrypoint.sh's multi-mode
+#   privilege-separation path.
 RUN apk add --no-cache \
     iptables \
     iproute2 \
@@ -139,7 +139,7 @@ RUN apk add --no-cache \
     setpriv
 
 # The unprivileged orchestrator identity the entrypoint drops into for
-# multi mode (TF_PRIVSEP=1, the default there). A fixed, dedicated,
+# multi mode. A fixed, dedicated,
 # non-root uid/gid — distinct from internal/sandbox.WorktreeUID (10000,
 # the uid *inside* the gVisor sandbox the agent runs as) and from the
 # cap-broker (which stays root) — so the two host-level privsep

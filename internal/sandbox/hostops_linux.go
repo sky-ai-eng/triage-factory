@@ -8,21 +8,27 @@ import (
 	"os"
 )
 
-// defaultOps is the PrivilegedOps implementation every entry point in
-// this package (wrap, Close, reapOrphansImpl) calls through. hostOps
-// is the default — every privileged operation runs in-process with
-// exactly the code that lived directly in those entry points before
-// this seam existed. SetPrivilegedOps swaps this for an IPC client when
-// TF_PRIVSEP=1, at zero call-site churn.
+// defaultOps is the PrivilegedOps implementation the package's
+// privileged-op entry points (wrap, Close, reapOrphansImpl, the run-tree
+// helpers) call through. hostOps is the placeholder default; on any host
+// that actually sandboxes (multi + Linux) the orchestrator installs the
+// cap-broker IPC client via SetPrivilegedOps at boot, before any run, so
+// every privileged op crosses to the broker.
 var defaultOps PrivilegedOps = hostOps{}
 
-// SetPrivilegedOps replaces the package's PrivilegedOps implementation.
-// The orchestrator's cap-broker wiring (cmd/capbroker) calls this once at
-// boot — after starting and dialing the broker — to route every
-// subsequent wrap() / Close() / reapOrphansImpl() through the IPC client
-// instead of in-process hostOps. TF_PRIVSEP unset (the default) means
-// this is never called and defaultOps stays hostOps{}: today's behavior,
-// byte-identical.
+// runLauncher is the run-launch seam — nil until the broker is installed.
+// The launch is always brokered (there is no in-process launcher), so a
+// wrap() reached before SetPrivilegedOps ran is a boot-order bug that
+// fails loudly rather than silently launching in a less-isolated way.
+var runLauncher RunLauncher
+
+// SetPrivilegedOps installs the cap-broker IPC client as BOTH the
+// package's privileged-op implementation and its run launcher. The
+// orchestrator's cap-broker wiring (cmd/capbroker) calls this once at boot
+// — after starting and dialing the broker — so every subsequent wrap() /
+// Close() / reapOrphansImpl() / run-tree op and every run launch routes
+// through the broker. The launch is always brokered, so ops must satisfy
+// RunLauncher too (the IPC client does).
 //
 // Not synchronized: it's a single boot-time call made before any Wrap or
 // ReapOrphans runs, exactly like defaultOps's own package-level
@@ -31,23 +37,22 @@ var defaultOps PrivilegedOps = hostOps{}
 //
 // Panics on a nil ops: this is a boot-wiring call with exactly one
 // production call site, which only ever passes a client it has already
-// nil/error-checked. A nil defaultOps would otherwise fail confusingly —
-// a nil-interface panic deep inside the first real Wrap — so a
-// misconfigured caller finds out immediately, at the call site, instead.
-func SetPrivilegedOps(ops PrivilegedOps) {
+// nil/error-checked. A nil install would otherwise fail confusingly — a
+// nil-interface panic deep inside the first real Wrap — so a misconfigured
+// caller finds out immediately, at the call site, instead.
+func SetPrivilegedOps(ops SandboxOps) {
 	if ops == nil {
-		panic("sandbox: SetPrivilegedOps called with a nil PrivilegedOps")
+		panic("sandbox: SetPrivilegedOps called with a nil SandboxOps")
 	}
 	defaultOps = ops
+	runLauncher = ops
 }
 
-// NewHostOps returns the in-process PrivilegedOps implementation — the
-// same one defaultOps uses by default. The cap-broker subcommand
-// (cmd/capbroker) constructs one of these to serve the real
-// netns/iptables/cgroup/rootfs operations over its RPC socket — the same
-// in-process implementation this package has always used, reached
-// through the exported constructor rather than the unexported hostOps
-// type.
+// NewHostOps returns the in-process PrivilegedOps implementation. The
+// cap-broker subcommand (cmd/capbroker) constructs one of these to serve
+// the real netns/iptables/rootfs/run-tree operations over its RPC socket,
+// reached through the exported constructor rather than the unexported
+// hostOps type.
 func NewHostOps() PrivilegedOps {
 	return hostOps{}
 }
@@ -127,14 +132,6 @@ func (hostOps) TeardownNetwork(ctx context.Context, state NetworkState) error {
 
 func (hostOps) EnsureRootfs(ctx context.Context, selector RootfsSelector) (string, error) {
 	return resolveCatalogRootfs(ctx, selector)
-}
-
-func (hostOps) SetupRunCgroup(name string, limitMB int) (string, *os.File, error) {
-	return setupAndCreateRunCgroup(name, limitMB)
-}
-
-func (hostOps) RemoveRunCgroup(dir string) error {
-	return removeRunCgroup(dir)
 }
 
 // ReapOrphans walks /var/run/netns for tf-<id>-<idx> entries and tears

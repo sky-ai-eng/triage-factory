@@ -64,10 +64,10 @@ type App struct {
 	stores     db.Stores
 	storedPort int
 
-	// capBroker is the spawned cap-broker subprocess, non-nil only when
-	// TF_PRIVSEP=1 and this host sandboxes runs. nil otherwise — including
-	// every existing deployment, which keeps today's in-process
-	// privileged-ops behavior. Closed in Close().
+	// capBroker is the spawned cap-broker subprocess, non-nil only on a host
+	// that sandboxes runs (multi mode + Linux). nil otherwise — local mode
+	// and non-Linux never sandbox, so there's nothing for a broker to
+	// protect. Closed in Close().
 	capBroker capBrokerHandle
 
 	// Infra.

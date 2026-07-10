@@ -13,12 +13,12 @@ import (
 )
 
 // captureViaSandbox is the seam to the privileged capture op —
-// sandbox.CaptureRunDelta routes through the PrivilegedOps
-// implementation (in-process hostOps under TF_PRIVSEP=0; the cap-broker
-// client otherwise, since both halves of the capture child's confinement
-// — the setuid away from the orchestrator's identity and the CLONE_NEWNET
-// — need capabilities the post-drop orchestrator no longer holds). A
-// package var so tests can pin routing without a real privileged child.
+// sandbox.CaptureRunDelta routes through the PrivilegedOps implementation
+// (the cap-broker client, since both halves of the capture child's
+// confinement — the setuid away from the orchestrator's identity and the
+// CLONE_NEWNET — need capabilities the post-drop orchestrator no longer
+// holds). A package var so tests can pin routing without a real privileged
+// child.
 var captureViaSandbox = sandbox.CaptureRunDelta
 
 // captureIsolated captures wtPath's git delta via the privileged capture
