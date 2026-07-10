@@ -16,21 +16,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// maxFrameSize caps one REQUEST frame. Every request payload is a handful
-// of strings/ints (run ids, subnet indices, iptables rule bookkeeping) —
-// far under this ceiling; it exists to protect the broker from a malformed
-// client sending a bogus multi-GB length header.
+// maxFrameSize caps every request AND response frame. Every payload that
+// crosses this RPC is a handful of strings/ints (run ids, subnet indices,
+// iptables rule bookkeeping, a bounded stderr tail) — far under this
+// ceiling; it exists to protect either side from a malformed peer sending a
+// bogus multi-GB length header. Until ProtocolVersion 2 this was two
+// different caps (a 512 MiB responseFrameSize existed solely for
+// CaptureRunDelta's result, which used to embed the whole delta). That
+// result now crosses as a passed-through socket stream, never as an RPC
+// frame, so nothing on this RPC needs more than one small, uniform cap.
 const maxFrameSize = 1 * 1024 * 1024 // 1 MiB
-
-// responseFrameSize caps one RESPONSE frame — read by the orchestrator,
-// authored by the broker it already trusts, so the cap is a sanity rail
-// rather than a defense. Larger than maxFrameSize for exactly one method:
-// CaptureRunDelta's result embeds a git bundle of the run's local-only
-// commits plus a binary patch of everything uncommitted, which a run that
-// generated large artifacts can push far past 1 MiB. A capture larger than
-// this fails with a clear frame-size error (the park degrades to
-// snapshot-less) instead of ballooning broker memory without bound.
-const responseFrameSize = 512 * 1024 * 1024 // 512 MiB
 
 // ProtocolVersion is the wire-format version. The broker rejects a
 // mismatching client version so an old binary talking to a new broker (or
@@ -38,7 +33,12 @@ const responseFrameSize = 512 * 1024 * 1024 // 512 MiB
 // same defensive handshake agenthost uses, load-bearing here too because
 // the broker is a long-lived process that can outlive a binary upgrade
 // until the next restart.
-const ProtocolVersion = 1
+//
+// Bumped to 2 for CaptureRunDelta's wire-shape change: the args gained
+// StdoutSocketPath and the result dropped Delta (see below) — an old
+// client/broker pairing across that change must surface the version
+// mismatch rather than silently misinterpreting the new shape.
+const ProtocolVersion = 2
 
 // request is the envelope for every RPC. Method identifies the operation;
 // Args is the method-specific payload (JSON-encoded).
@@ -58,8 +58,9 @@ type response struct {
 	Error  string          `json:"e,omitempty"`
 }
 
-// writeFrame serializes msg as a length-prefixed JSON frame on w, capped
-// at maxSize (maxFrameSize for requests, responseFrameSize for responses).
+// writeFrame serializes msg as a length-prefixed JSON frame on w, capped at
+// maxSize (maxFrameSize for both requests and responses — see maxFrameSize's
+// doc for why one cap now covers both directions).
 func writeFrame(w io.Writer, msg any, maxSize int) error {
 	body, err := json.Marshal(msg)
 	if err != nil {
@@ -79,12 +80,11 @@ func writeFrame(w io.Writer, msg any, maxSize int) error {
 	return nil
 }
 
-// readFrame reads one length-prefixed JSON frame from r and decodes it
-// into dst, capped at maxSize (maxFrameSize when the broker reads a
-// request from an untrusted-post-compromise client; responseFrameSize
-// when the client reads the trusted broker's response). EOF on the
-// header read is returned verbatim so callers (the broker's accept loop)
-// can tell a clean connection close apart from a malformed frame.
+// readFrame reads one length-prefixed JSON frame from r and decodes it into
+// dst, capped at maxSize (maxFrameSize on both sides of this RPC — see
+// maxFrameSize's doc). EOF on the header read is returned verbatim so
+// callers (the broker's accept loop) can tell a clean connection close
+// apart from a malformed frame.
 func readFrame(r io.Reader, dst any, maxSize int) error {
 	var header [4]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
@@ -177,18 +177,26 @@ type removeRunTreeArgs struct {
 	Path string `json:"path"`
 }
 
+// captureRunDeltaArgs carries the fd-passthrough data for the streamed
+// capture: StdoutSocketPath names the per-capture unix socket the
+// orchestrator-side IPCClient is already listening on (validated with
+// sandbox.ValidateCaptureStdoutSocketPath before the broker dials it) — the
+// capture child's raw stdout streams straight to it over a passed-through
+// fd, exactly like LaunchRun's StdioSocketPath, so the delta's bytes never
+// ride this RPC's request/response frames at all.
 type captureRunDeltaArgs struct {
-	Worktree string `json:"worktree"`
+	Worktree         string `json:"worktree"`
+	StdoutSocketPath string `json:"stdout_socket_path"`
 }
 
-// captureRunDeltaResult carries the capture child's raw JSON stdout — a
-// worktree.GitDelta the ORCHESTRATOR decodes (the broker never interprets
-// it). Delta can embed a git bundle plus a binary patch of everything
-// uncommitted, so unlike every other result here it is not "a handful of
-// strings" — the client reads this response under captureFrameSize, not
-// maxFrameSize.
+// captureRunDeltaResult carries only success/error plus a bounded stderr
+// tail — diagnostics, never run data. The delta itself (a worktree.GitDelta
+// the ORCHESTRATOR decodes; the broker never interprets it) crosses over
+// the passed-through socket named in captureRunDeltaArgs, not this result,
+// so unlike the pre-v2 shape this fits comfortably under maxFrameSize like
+// every other method's result.
 type captureRunDeltaResult struct {
-	Delta []byte `json:"delta,omitempty"`
+	StderrTail string `json:"stderr_tail,omitempty"`
 }
 
 // methodCallNames are the wire-name constants shared by client and server.

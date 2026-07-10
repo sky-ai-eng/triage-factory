@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -160,6 +161,151 @@ func TestCaptureRunDelta_SkipsNetnsWithoutSysAdmin(t *testing.T) {
 
 	if gotNetns != wantNetns {
 		t.Errorf("child network namespace = %q, want %q (the parent's own — hasSysAdmin() = false should mean no new netns was created)", gotNetns, wantNetns)
+	}
+}
+
+// TestTailBuffer_SingleLargeWriteNeverExceedsMax pins that a single Write
+// bigger than max never transiently holds more than max bytes: the naive
+// "append then trim" approach would briefly allocate len(t.buf)+len(p),
+// defeating the point of a hard cap against a hostile child dumping a large
+// chunk to stderr in one write.
+func TestTailBuffer_SingleLargeWriteNeverExceedsMax(t *testing.T) {
+	tb := &tailBuffer{max: 16}
+	big := bytes.Repeat([]byte{'x'}, 1<<20) // 1 MiB in a single Write call
+	n, err := tb.Write(big)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(big) {
+		t.Errorf("Write returned n=%d, want %d", n, len(big))
+	}
+	if len(tb.buf) != tb.max {
+		t.Errorf("tb.buf len = %d, want exactly max=%d", len(tb.buf), tb.max)
+	}
+	if !tb.truncated {
+		t.Error("truncated flag not set for an over-cap single write")
+	}
+}
+
+// TestTailBuffer_AccumulatesAcrossWritesWithinMax pins the untruncated
+// happy path: multiple writes that together fit within max concatenate in
+// order with no truncation marker.
+func TestTailBuffer_AccumulatesAcrossWritesWithinMax(t *testing.T) {
+	tb := &tailBuffer{max: 8}
+	_, _ = tb.Write([]byte("abcd"))
+	_, _ = tb.Write([]byte("efgh"))
+	if got := tb.String(); got != "abcdefgh" {
+		t.Errorf("String() = %q, want %q", got, "abcdefgh")
+	}
+	if tb.truncated {
+		t.Error("truncated flag set when total writes exactly fill max")
+	}
+}
+
+// TestTailBuffer_KeepsOnlyLastMaxBytes pins the "tail" half of the name: once
+// writes exceed max, only the most recent max bytes survive.
+func TestTailBuffer_KeepsOnlyLastMaxBytes(t *testing.T) {
+	tb := &tailBuffer{max: 4}
+	_, _ = tb.Write([]byte("abcdefgh"))
+	if got := tb.String(); !strings.HasSuffix(got, "efgh") {
+		t.Errorf("String() = %q, want it to end with tail %q", got, "efgh")
+	}
+	if !tb.truncated {
+		t.Error("truncated flag not set")
+	}
+}
+
+// TestCaptureRunDelta_ErrorHasNoTrailingColonWhenStderrEmpty pins that a
+// capture failure with no stderr output at all (the child never started)
+// surfaces a plain error, not one formatted with an always-appended,
+// now-empty ": %s" stderr suffix.
+func TestCaptureRunDelta_ErrorHasNoTrailingColonWhenStderrEmpty(t *testing.T) {
+	orig := captureCommand
+	captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error) {
+		return exec.CommandContext(ctx, "/nonexistent-tf-capture-errfmt-test-binary"), nil
+	}
+	t.Cleanup(func() { captureCommand = orig })
+
+	_, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t))
+	if err == nil {
+		t.Fatal("expected an error for a nonexistent capture binary")
+	}
+	if strings.HasSuffix(err.Error(), ": ") {
+		t.Errorf("error = %q, want no trailing empty-stderr suffix", err.Error())
+	}
+}
+
+// TestCaptureRunDeltaTo_StdoutIsTheSocketBackedFile pins the one
+// implementation trap this ticket exists to avoid: the child's stdout must
+// be the caller-supplied *os.File itself, assigned directly to cmd.Stdout —
+// never wrapped in another io.Writer. os/exec special-cases *os.File (a
+// direct dup2 into the child at exec time, no copy in this process);
+// anything else makes os/exec silently fall back to an os.Pipe() plus a
+// copy goroutine IN THIS PROCESS, reintroducing every byte of the delta
+// into the caller's (in production, the broker's) memory and defeating the
+// whole point of CaptureRunDeltaTo.
+//
+// Uses a nonexistent binary so cmd.Start() fails fast (no such file) without
+// ever needing to setuid — the point here is only what cmd.Stdout was set
+// to before Start was attempted, not whether the child actually ran.
+func TestCaptureRunDeltaTo_StdoutIsTheSocketBackedFile(t *testing.T) {
+	orig := captureCommand
+	var gotCmd *exec.Cmd
+	captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error) {
+		gotCmd = exec.CommandContext(ctx, "/nonexistent-tf-capture-pin-test-binary")
+		return gotCmd, nil
+	}
+	t.Cleanup(func() { captureCommand = orig })
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pr.Close() })
+
+	// The child can never actually start (no such binary) — irrelevant here;
+	// CaptureRunDeltaTo still closes pw regardless of outcome.
+	_, _ = CaptureRunDeltaTo(context.Background(), captureTestTree(t), pw)
+
+	if gotCmd == nil {
+		t.Fatal("captureCommand was never invoked")
+	}
+	if gotCmd.Stdout != pw {
+		t.Errorf("cmd.Stdout = %#v, want the exact *os.File %v passed to CaptureRunDeltaTo", gotCmd.Stdout, pw)
+	}
+}
+
+// TestReadCapturedDelta_UnderCapByteIdentical pins the happy path of the
+// shared cap both capture paths enforce: data at or under CaptureMaxBytes
+// round-trips byte-identical.
+func TestReadCapturedDelta_UnderCapByteIdentical(t *testing.T) {
+	origCap := CaptureMaxBytes
+	CaptureMaxBytes = 1024
+	t.Cleanup(func() { CaptureMaxBytes = origCap })
+
+	want := bytes.Repeat([]byte{0xAB}, 1024)
+	got, err := ReadCapturedDelta(bytes.NewReader(want))
+	if err != nil {
+		t.Fatalf("ReadCapturedDelta: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("got %d bytes, want %d identical bytes", len(got), len(want))
+	}
+}
+
+// TestReadCapturedDelta_OverCapErrors pins the loss-contract half of the cap:
+// data exceeding CaptureMaxBytes by even one byte is rejected outright
+// rather than silently truncated — a truncated-but-otherwise-valid-looking
+// bundle would be worse than no delta at all (the park degrades to
+// snapshot-less either way, but a truncated one could look intact).
+func TestReadCapturedDelta_OverCapErrors(t *testing.T) {
+	origCap := CaptureMaxBytes
+	CaptureMaxBytes = 1024
+	t.Cleanup(func() { CaptureMaxBytes = origCap })
+
+	over := bytes.Repeat([]byte{0xCD}, 1025)
+	if _, err := ReadCapturedDelta(bytes.NewReader(over)); err == nil {
+		t.Error("expected an over-cap error, got nil")
 	}
 }
 
