@@ -93,6 +93,134 @@ An org absent from `rate_limit.github` has no observation yet this process (neve
 
 Alert on `age_seconds > 3 × interval_seconds` for whichever source/org you care about — that threshold is yours to pick; `/readyz` reports the raw numbers rather than guessing at your alerting policy (its own top-level `status` field applies that same 3x default and surfaces it as `"degraded"`, purely as a quick-glance dashboard signal, never as a 503). `/readyz` is unauthenticated by design, same as `/api/health` — the response carries only opaque org IDs, never repo names, usernames, or other tenant data, so there is no `?verbose=` mode and none is needed.
 
+## Scaling out: control + N executors
+
+The default `docker compose up` runs one all-in-one `triagefactory` container (`TF_ROLE` unset → `all`) — HTTP + pollers + brain + the delegated-run dispatcher in a single process. That goes a long way (memory-bound; budget ~0.25 GB RAM per concurrent run). When you outgrow one box, or want the sandbox fleet to fail independently of the API, split the process into a **control** pod and **N executor** pods with the `scale` compose profile.
+
+`TF_ROLE` names the role each container plays:
+
+| Role | Serves user HTTP/WS | Pollers + router + AI brain | Runs migrations | Claims + executes delegated runs | Sandboxes |
+|------|:---:|:---:|:---:|:---:|:---:|
+| `all` (default) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `control` | ✅ | ✅ | ✅ | ❌ | ✅ (curator chat) |
+| `executor` | ❌ | ❌ | ❌ (asserts schema) | ✅ | ✅ (delegated runs) |
+
+Bring up 1 control + 2 executors:
+
+```sh
+# In .env, flip the main service to the control role:
+echo 'TF_ROLE=control' >> .env
+
+# Start the control pod (the published entrypoint) plus 2 executor pods:
+docker compose --profile scale up -d --scale executor=2
+```
+
+That's the whole topology — **there is no load balancer.** Executors accept no inbound traffic (no published ports; their only listener is a localhost-only healthz), so the single control pod stays the single entrypoint exactly as the all-in-one did. Verify a run flows end-to-end:
+
+```sh
+docker compose --profile scale ps                 # 1 triagefactory (control) + 2 executor, all healthy
+# Enqueue a manual delegation through the control pod's API, then watch an
+# executor claim it (run_messages land, the run completes):
+docker compose --profile scale logs -f executor
+```
+
+Both roles run the **same image and entrypoint** (the broker-then-drop privilege separation), and **both carry the sandbox caps** — control pods sandbox curator chat sessions on the request path, executors sandbox delegated runs. Each executor replica gets its **own** `TF_STATE_ROOT` (`/data`) and rootfs-cache volume: the fleet is shared-nothing, and two processes sharing one state root would collide on the instance-identity flock (the second refuses to boot). See the header of `docker-compose.yml` for the volume details.
+
+### Executor health
+
+Each executor exposes a localhost-only `GET /healthz` (default `127.0.0.1:3001`, `TF_HEALTHZ_PORT`) — the container HEALTHCHECK target. It reports:
+
+```json
+{
+  "dispatcher_alive": true,
+  "last_heartbeat_write_age_sec": 3,
+  "heartbeat_ever_written": true,
+  "broker_ok": true,
+  "active_runs": 2,
+  "draining": false,
+  "fenced": false
+}
+```
+
+It returns **503** when the dispatcher loop has stopped, the last fleet-registry heartbeat write is older than 3× the heartbeat interval, **or** the cap-broker stops answering (`broker_ok:false` — an executor that can't launch sandboxes is useless). `draining` and `fenced` are informational and never flip the code: a fenced executor stays `200`-but-`fenced:true` so the HEALTHCHECK doesn't kill it before it can quiesce. The instance registry (`instances` table) carries each pod's role and build version, so version skew across a rolling deploy is visible there.
+
+### Per-role DB pools and `max_connections`
+
+Every pod opens two Postgres pools (an admin pool and an app/RLS pool). The API tier (`control`/`all`) keeps 25 connections per pool; an **executor ships much smaller ceilings** — its dispatcher, heartbeat, and run sinks need a fraction of the API tier's request concurrency, and its app pool is effectively idle (no RLS request handlers run on an executor). At the defaults:
+
+| Role | Per-pool ceiling | Pools | Per-pod worst case |
+|------|:---:|:---:|:---:|
+| `control` / `all` | 25 | 2 | 50 |
+| `executor` | 6 | 2 | 12 |
+
+So the 1-control + 2-executor profile demands at most **25×2 + 2×(6×2) = 74** connections — comfortably inside a stock `supabase/postgres` `max_connections=100` with headroom. Sizing your own fleet: `Σ pods (per-pool ceiling × 2)` must fit `max_connections` minus what GoTrue and any admin tooling reserve. Three executors + two control pods at the defaults is `2×50 + 3×12 = 136` — past a default 100, so either raise `max_connections` (and Postgres' memory) or lower `TF_DB_MAX_OPEN_CONNS`. Override the per-pool ceiling with `TF_DB_MAX_OPEN_CONNS` (floored at 2). A dedicated transaction-mode pooler in front of Postgres stays a large-fleet option (TFAC-307), not a requirement for this profile.
+
+### Multiple control pods (HA) — reference reverse-proxy config
+
+> **One control pod needs no proxy.** The single-control shape above already works with zero extra infrastructure. Running **M ≥ 2 control pods** for HA additionally requires the leader-lease work (TFAC-583) so exactly one pod runs the background brain at a time — until that lands, run a single control pod. The config below is the reverse-proxy half you'll put in front of M control pods once you do.
+
+We ship configuration as a worked example, never proxy software. Any stock reverse proxy works; the load-bearing requirements are: **WebSocket upgrade passthrough** (TF streams run activity over `/api/ws`), **generous idle timeouts** (those connections are long-lived), **readiness-aware rotation** (poll `GET /readyz` and pull a pod that 503s out of rotation), and **`X-Forwarded-For` set to the real client** paired with `TF_TRUSTED_PROXY_CIDR` (see the *Client IP & trusted proxies* section below — TF only trusts XFF from a proxy in that allowlist).
+
+Caddy:
+
+```caddy
+triagefactory.yourcompany.com {
+	reverse_proxy control-1:3000 control-2:3000 {
+		lb_policy round_robin
+		# Readiness-aware rotation: a control pod that 503s /readyz is
+		# pulled until it recovers.
+		health_uri  /readyz
+		health_interval 10s
+		health_status 200
+		# Long-lived WS + streaming responses.
+		transport http {
+			read_timeout  1h
+			write_timeout 1h
+		}
+	}
+	# Caddy forwards X-Forwarded-For by default; keep the edge stripping any
+	# client-supplied XFF so only the proxy's value reaches TF.
+}
+```
+
+nginx:
+
+```nginx
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+
+upstream tf_control {
+	server control-1:3000 max_fails=3 fail_timeout=10s;
+	server control-2:3000 max_fails=3 fail_timeout=10s;
+}
+
+server {
+	listen 443 ssl;
+	server_name triagefactory.yourcompany.com;
+
+	location / {
+		proxy_pass http://tf_control;
+
+		# WebSocket upgrade passthrough (/api/ws).
+		proxy_http_version 1.1;
+		proxy_set_header Upgrade    $http_upgrade;
+		proxy_set_header Connection $connection_upgrade;
+
+		# Long-lived streams: don't cut the connection mid-run.
+		proxy_read_timeout  1h;
+		proxy_send_timeout  1h;
+		proxy_buffering     off;
+
+		# Set (don't append) XFF to just the real peer, then set
+		# TF_TRUSTED_PROXY_CIDR to this proxy's egress CIDR so TF honors it.
+		proxy_set_header Host              $host;
+		proxy_set_header X-Forwarded-For   $remote_addr;
+		proxy_set_header X-Forwarded-Proto $scheme;
+	}
+}
+```
+
+Then set `TF_TRUSTED_PROXY_CIDR` on the control pods to the proxy's egress CIDR(s) so `X-Forwarded-For` is honored (see the next section).
+
 ## 5. Verify the GitHub OAuth flow
 
 Drive the full OAuth roundtrip end-to-end in a browser:

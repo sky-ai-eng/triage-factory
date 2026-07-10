@@ -266,6 +266,27 @@ type Spawner struct {
 	// fenceIdentity / IdentityFenced (instance_heartbeat.go).
 	identityFenced atomic.Bool
 
+	// --- executor healthz signals (TFAC-582) ---
+	//
+	// The localhost-only executor healthz listener (internal/app) reads
+	// these through the accessors in health.go to build its liveness body.
+	// dispatcherRunning latches true while RunDispatcher's loop is live
+	// (set at loop entry, cleared on return); lastHeartbeatWriteNanos is
+	// the UnixNano of the last successful instance-registry heartbeat write
+	// (0 = never); draining latches when the drain verb (TFAC-586) asks
+	// this executor to quiesce (informational until that ticket consumes
+	// it).
+	dispatcherRunning       atomic.Bool
+	lastHeartbeatWriteNanos atomic.Int64
+	draining                atomic.Bool
+	// reportCapacity gates whether the heartbeat writes the capacity +
+	// admission snapshot. True for executor/all (a real dispatcher backs
+	// the numbers); a pure-control pod sets it false via SetReportCapacity
+	// so its registry row leaves those fields NULL — they're "meaningful
+	// only for executor-capable roles" (domain.Instance). Defaults true in
+	// NewSpawner so existing all-role behavior is unchanged.
+	reportCapacity atomic.Bool
+
 	agentToolsOnce  sync.Once
 	agentToolsCache string
 
@@ -322,6 +343,10 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		memAvailMB:       hostmem.AvailableMB,
 	}
 	s.controller = inProcessController{s: s}
+	// Report capacity by default (executor/all); a pure-control pod flips
+	// this off via SetReportCapacity so its registry row carries no
+	// misleading dispatcher-capacity numbers.
+	s.reportCapacity.Store(true)
 	return s
 }
 

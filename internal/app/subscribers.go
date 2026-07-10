@@ -16,6 +16,14 @@ import (
 // publish onto the bus rather than invoking callbacks directly, so a poll
 // cycle, a scorer run, and a UI push all stay decoupled.
 func (a *App) registerSubscribers() {
+	// Brain-only: every subscriber below either forwards to the websocket
+	// hub (control/all) or kicks a brain manager (scorer/classifier/
+	// profiler/reconciler/marketplace) that an executor never builds. An
+	// executor publishes run sentinels onto the bus for the cross-pod relay
+	// (TFAC-584) but subscribes to nothing locally.
+	if !a.plan.brain {
+		return
+	}
 	// Forward every event to the frontend over the websocket.
 	a.bus.Subscribe(eventbus.Subscriber{
 		Name:   "ws-broadcast",

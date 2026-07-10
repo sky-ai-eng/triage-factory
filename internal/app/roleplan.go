@@ -1,0 +1,76 @@
+package app
+
+import "github.com/sky-ai-eng/triage-factory/internal/runmode"
+
+// subsystemPlan is the exclusion-based inventory of which subsystem groups
+// this process's deployment role (runmode.Role) starts. It is computed once
+// in New from the resolved role; every boot/worker branch reads it rather
+// than re-deriving role predicates ad hoc.
+//
+// The design is deliberately exclusion-based (spec §0 / the ticket's
+// "verified by test" decision): rather than hand-list what an executor
+// starts, the wiring asserts what it must NOT — so a new subsystem added to
+// app.Run later defaults onto the brain/HTTP side, and the executor
+// exclusion test (roleplan_test.go) fails if it leaks onto executors. This
+// is the guard against the "every replica runs every background job" hazard
+// re-growing.
+//
+// Two subsystem groups are deliberately NOT represented here because they
+// are gated on something other than role:
+//
+//   - The cap-broker + sandbox substrate is gated on agentproc.WillSandbox()
+//     (multi + Linux), not role — EVERY role sandboxes in multi mode
+//     (executors run delegated runs; control pods run curator chats). See
+//     internal/app/privsep.go and the ticket's "do NOT role-gate the
+//     cap-broker" decision.
+//   - The instance registry (Register + heartbeat), the worktree cache
+//     reaper, git-hooks materialization, and orphaned-worktree cleanup run
+//     in every role: registry membership is fleet-wide, and both control
+//     (curator worktrees) and executor (run worktrees) keep a per-pod
+//     worktree cache under their own TF_STATE_ROOT.
+type subsystemPlan struct {
+	role runmode.DeployRole
+
+	// serveHTTP starts the user-facing HTTP/API/WS server on the main port,
+	// plus everything that only exists alongside it: auth wiring, the
+	// embedded SPA, server extension workers, the dashboard backfiller, the
+	// curator chat runtime, and the spawner/reconciler/curator server
+	// handles. control + all. An executor serves no user routes (its only
+	// listener is the localhost healthz).
+	serveHTTP bool
+
+	// brain starts the leader-elected background brain: pollers + tracker,
+	// the event router + its drain workers, the AI managers
+	// (scorer/profiler/classifier/reconciler/marketplace-stats), the
+	// knowledge-base watcher, the poll-completion bus subscribers, and the
+	// initial poll kick. control + all. (Leader gating is TFAC-583; until it
+	// lands, control always-runs the brain — single-control only.)
+	brain bool
+
+	// dispatcher starts the delegated-run dispatcher (claims + executes
+	// queued runs) and the workspace-snapshot retention reaper. executor +
+	// all. A control pod never claims or executes delegated runs — that
+	// absence is the executor/control split.
+	dispatcher bool
+
+	// executorHealthz starts the localhost-only executor healthz listener.
+	// executor only: control + all already expose /api/health and /readyz
+	// on the main HTTP port, so a second listener would be redundant there.
+	executorHealthz bool
+}
+
+// planForRole resolves the subsystem inventory for a deployment role.
+//
+// The derivations, stated positively for the reader:
+//   - all      = everything (today's single-process shape, byte-identical).
+//   - control  = serve HTTP + brain, but NO run dispatcher.
+//   - executor = run dispatcher + healthz, but NO HTTP, NO brain.
+func planForRole(role runmode.DeployRole) subsystemPlan {
+	return subsystemPlan{
+		role:            role,
+		serveHTTP:       role == runmode.RoleAll || role == runmode.RoleControl,
+		brain:           role == runmode.RoleAll || role == runmode.RoleControl,
+		dispatcher:      role == runmode.RoleAll || role == runmode.RoleExecutor,
+		executorHealthz: role == runmode.RoleExecutor,
+	}
+}

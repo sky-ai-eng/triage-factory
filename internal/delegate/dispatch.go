@@ -61,6 +61,12 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 		return
 	}
 
+	// Mark the dispatcher live for the executor healthz probe
+	// (dispatcher_alive) for as long as this loop runs; clear it on return
+	// (ctx cancel / shutdown).
+	s.dispatcherRunning.Store(true)
+	defer s.dispatcherRunning.Store(false)
+
 	s.reconcileRunQueue(ctx)
 
 	scan := time.NewTicker(scanInterval)

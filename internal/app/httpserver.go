@@ -14,13 +14,29 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
+
+// buildExecutorRuntime is the executor role's stand-in for buildServer: an
+// executor serves no user HTTP, so there is no server.Server, no auth
+// stack, and no embedded SPA. It still needs two things the server would
+// otherwise have provided — a websocket hub for the spawner's run-status
+// broadcasts (a standalone, client-less Hub, so those broadcasts are safe
+// no-ops until TFAC-584 relays them cross-pod), and the deployment's
+// public base URL for the {{RUN_URL}} prompt placeholder (executors take no
+// inbound traffic, so this points at the control pod's URL; best-effort —
+// an unset value just renders the placeholder empty).
+func (a *App) buildExecutorRuntime() {
+	a.wsHub = websocket.NewHub()
+	a.deployPublicURL = os.Getenv("TF_PUBLIC_URL")
+}
 
 // buildServer constructs the HTTP server, wires mode-specific deployment
 // identity (local HMAC key / multi-mode GoTrue auth stack), serves the
 // embedded frontend, and exposes the websocket hub the rest of the graph
 // broadcasts through. Must run after openStores (it needs the stores +
-// the boot-time port).
+// the boot-time port). Control/all only — an executor uses
+// buildExecutorRuntime instead.
 func (a *App) buildServer(ctx context.Context, static fs.FS) error {
 	a.srv = server.New(a.database, a.stores, a.storedPort)
 	a.wsHub = a.srv.WSHub()

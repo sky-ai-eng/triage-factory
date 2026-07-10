@@ -62,32 +62,42 @@ func (a *App) runStartupTasks(ctx context.Context) {
 // that lazy-starts a runner on first Trigger, matching the
 // scorer/profiler which are likewise never explicitly started.
 func (a *App) startWorkers(ctx context.Context) {
-	a.startKnowledgeWatcher()
+	// Brain workers (control/all): the knowledge-base watcher (curator KB)
+	// and the event router's drain workers.
+	if a.plan.brain {
+		a.startKnowledgeWatcher()
+		// Drain sweeper: safety net for queues stuck on transient fire errors.
+		go a.router.RunDrainSweeper(ctx, 30*time.Second)
+		// Durable event-queue drain worker: claims github:/jira: events the
+		// ingestor enqueued, routes them, and marks them done.
+		go a.router.RunEventQueue(ctx, a.eventWake, routing.DefaultEventScanInterval, routing.DefaultEventPruneInterval, routing.DefaultEventPruneAge)
+	}
 
-	// Drain sweeper: safety net for queues stuck on transient fire errors.
-	go a.router.RunDrainSweeper(ctx, 30*time.Second)
-	// Durable event-queue drain worker: claims github:/jira: events the
-	// ingestor enqueued, routes them, and marks them done.
-	go a.router.RunEventQueue(ctx, a.eventWake, routing.DefaultEventScanInterval, routing.DefaultEventPruneInterval, routing.DefaultEventPruneAge)
-	// Run-queue dispatcher: drains the run queue the spawner enqueues
-	// blueprint steps onto, reconciling crash-stranded runs on boot.
-	go a.spawner.RunDispatcher(ctx, delegate.DefaultRunScanInterval)
-	// Instance-registry heartbeat: renews this instance's fleet registry
-	// row + capacity/admission snapshot on a timer.
+	// Dispatcher workers (executor/all): the run-queue dispatcher (claims +
+	// executes queued runs, reconciling crash-stranded runs on boot) and the
+	// workspace-snapshot retention reaper (bounds durable parked/aborted-run
+	// snapshot blobs by TTL; a no-op when no blob store is wired). A control
+	// pod builds the spawner but never claims delegated runs, so neither
+	// runs there.
+	if a.plan.dispatcher {
+		go a.spawner.RunDispatcher(ctx, delegate.DefaultRunScanInterval)
+		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
+	}
+
+	// Instance-registry heartbeat: every role renews its fleet registry row
+	// on a timer (liveness + version/role visibility; capacity fields only
+	// on executor-capable roles — see SetReportCapacity).
 	go a.spawner.RunInstanceHeartbeat(ctx, delegate.DefaultInstanceHeartbeatInterval)
 
-	// Bounded bare+worktree cache reaper (TFAC-60). One mechanism, policy
-	// per mode: started in both modes so the eviction path is exercised in
-	// local dev daily, but DefaultPolicy hands local an unbounded budget so
-	// every sweep is a cheap no-op (no silent eviction of the user's own
-	// repos). Multi gets a real per-pod disk budget + cold-bare TTL,
-	// bounding at-rest storage across tenants.
+	// Bounded bare+worktree cache reaper (TFAC-60). Every role keeps a
+	// per-pod worktree cache under its own TF_STATE_ROOT — run worktrees on
+	// an executor, curator worktrees on control — so the reaper runs
+	// everywhere. One mechanism, policy per mode: started in both modes so
+	// the eviction path is exercised in local dev daily, but DefaultPolicy
+	// hands local an unbounded budget so every sweep is a cheap no-op (no
+	// silent eviction of the user's own repos). Multi gets a real per-pod
+	// disk budget + cold-bare TTL, bounding at-rest storage across tenants.
 	worktree.StartReaper(ctx, worktree.DefaultPolicy(), 0)
-
-	// Workspace-snapshot retention reaper: bounds the durable parked/aborted-run
-	// snapshot blobs by a TTL (default 14 days), sweeping at startup then hourly.
-	// A no-op when no blob store is wired.
-	go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
 }
 
 // startPolling kicks the first poll cycle. The logic lives on the reloader

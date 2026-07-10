@@ -9,11 +9,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
-	"strings"
 	"sync"
 
 	"github.com/pressly/goose/v3"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 //go:embed migrations-sqlite/*.sql
@@ -49,21 +48,16 @@ var ErrPreV1110Install = errors.New(
 		"(installed users) or `./scripts/clean-slate.sh` (developers working from source)",
 )
 
-// tfRoleExecutorEnv is the TF_ROLE value runMigrations gates goose.Up
-// on. The full TF_ROLE plumbing — subsystem wiring, per-role pool
-// defaults, the N-executor compose profile — lands separately. Reading
-// the env var directly here (rather than standing up a stub in
-// internal/runmode) keeps this migration-coordination assert self-
-// contained rather than partially building a config surface that
-// belongs elsewhere.
-const tfRoleExecutorEnv = "executor"
-
-// isExecutorRole reports whether this process is TF_ROLE=executor.
-// Case-insensitive and whitespace-trimmed, mirroring internal/runmode's
-// env-parsing conventions even though this doesn't route through that
-// package (see tfRoleExecutorEnv).
+// isExecutorRole reports whether this process is TF_ROLE=executor, the
+// role that never runs goose.Up and asserts the schema instead. Reads the
+// resolved role from internal/runmode (TFAC-582 landed the full TF_ROLE
+// plumbing this gate was waiting on). In production the role is
+// initialized at boot; in a bare test that never called InitRoleFromEnv,
+// runmode.Role() falls back to a live TF_ROLE parse, so the existing
+// t.Setenv("TF_ROLE", "executor") migration-gate tests keep working
+// unchanged.
 func isExecutorRole() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("TF_ROLE")), tfRoleExecutorEnv)
+	return runmode.Role() == runmode.RoleExecutor
 }
 
 // ErrExecutorSchemaBehind and ErrExecutorSchemaAhead are returned by
@@ -182,7 +176,8 @@ const postgresMigrationLockText = "triagefactory:goose-migrate"
 // lock) while goose.Up checks out others for the DDL — a caller whose
 // pool is capped at MaxOpenConns(1) would self-deadlock waiting for a
 // second connection that can never free. Every current caller is fine
-// (cmd/migrate and pgtest are uncapped; applyPGPoolDefaults sets 25);
+// (cmd/migrate and pgtest are uncapped; applyPGPoolDefaultsForRole floors
+// the ceiling at 2, and only control/all — never an executor — migrate);
 // keep it that way.
 func runPostgresMigrationLocked(database *sql.DB, treeDir string) error {
 	ctx := context.Background()

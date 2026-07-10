@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/aead"
@@ -65,7 +67,7 @@ func (a *App) openStores(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("open admin DB: %w", err)
 		}
-		applyPGPoolDefaults(adminDB)
+		applyPGPoolDefaultsForRole(adminDB, a.plan.role)
 		if err := adminDB.Ping(); err != nil {
 			adminDB.Close()
 			return fmt.Errorf("ping admin DB: %w", err)
@@ -80,7 +82,7 @@ func (a *App) openStores(ctx context.Context) error {
 			adminDB.Close()
 			return fmt.Errorf("open app DB: %w", err)
 		}
-		applyPGPoolDefaults(appDB)
+		applyPGPoolDefaultsForRole(appDB, a.plan.role)
 		if err := appDB.Ping(); err != nil {
 			appDB.Close()
 			adminDB.Close()
@@ -100,6 +102,20 @@ func (a *App) openStores(ctx context.Context) error {
 		a.database = adminDB
 		a.appDB = appDB
 		a.stores = pgstore.New(adminDB, appDB, secretKey)
+
+		// Schema handling, in-process at boot (not just via the container
+		// entrypoint's `migrate up`, which a k8s command: override / systemd
+		// unit / multi-mode-dev.sh run would skip). db.Migrate routes by role:
+		// a control/all process runs goose.Up under the advisory lock (M
+		// booting pods serialize); a TF_ROLE=executor process runs NO DDL and
+		// instead asserts the connected schema matches its build, refusing to
+		// boot on a behind/ahead mismatch (TFAC-580). Runs against the admin
+		// pool, before ReapOrphans needs the schema to exist.
+		if err := db.Migrate(adminDB, "postgres"); err != nil {
+			appDB.Close()
+			adminDB.Close()
+			return fmt.Errorf("migrate/assert schema: %w", err)
+		}
 
 		// Start the cap-broker BEFORE ReapOrphans below, on any host that
 		// sandboxes, so the boot-time reap sweep — like every other
@@ -155,15 +171,61 @@ func (a *App) readInstanceConfig(ctx context.Context) error {
 	return nil
 }
 
-// applyPGPoolDefaults sets connection-pool ceilings on a Postgres *sql.DB.
-// database/sql's default MaxOpenConns is unlimited, which can exhaust
-// Postgres' max_connections under load — and multi-mode opens two pools
-// against the same server, so the budget per pool must leave room for the
-// other. These are conservative defaults that fit a default
-// supabase/postgres install; operators tuning production should raise them
+// Per-role Postgres pool ceilings (per pool; multi mode opens two — the
+// admin and app pools — against the same server). database/sql's default
+// MaxOpenConns is unlimited, which can exhaust Postgres' max_connections
+// under load, so every pool is capped.
+//
+// The API tier (control/all) keeps the historical 25×2; an executor ships
+// much smaller ceilings — its dispatcher claim loop, heartbeat, and run
+// sinks need a fraction of what the API tier's request concurrency does,
+// and its app pool is effectively idle (no RLS request handlers run on an
+// executor). This is what keeps total fleet connection demand fitting a
+// documented max_connections: at these defaults a 1-control + 2-executor
+// profile is 25×2 + 2×(6×2) = 74 connections. See TF_DB_MAX_OPEN_CONNS in
+// .env.example and the max_connections arithmetic in
+// docs/self-host-setup.md.
+const (
+	defaultPoolMaxConns         = 25
+	defaultExecutorPoolMaxConns = 6
+	// minPoolMaxConns floors the ceiling at 2. runPostgresMigrationLocked
+	// holds one pool connection (the advisory lock) while goose.Up checks
+	// out another for DDL, so a control/all pool of 1 would self-deadlock at
+	// migrate time; 2 is the smallest safe value even for an executor.
+	minPoolMaxConns = 2
+)
+
+// poolMaxConnsForRole resolves this pool's MaxOpenConns ceiling: the role
+// default, overridden by TF_DB_MAX_OPEN_CONNS when set to a non-negative
+// integer, and floored at minPoolMaxConns (so 0 or 1 select the minimum, 2 —
+// deliberately NOT the database/sql "0 = unlimited" convention, which is the
+// opposite of the capping this exists to do). A negative or non-numeric value
+// logs and falls back to the role default rather than bricking boot.
+func poolMaxConnsForRole(role runmode.DeployRole) int {
+	def := defaultPoolMaxConns
+	if role == runmode.RoleExecutor {
+		def = defaultExecutorPoolMaxConns
+	}
+	n := def
+	if raw := strings.TrimSpace(os.Getenv("TF_DB_MAX_OPEN_CONNS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 0 {
+			n = parsed
+		} else {
+			appLog.Warn("invalid TF_DB_MAX_OPEN_CONNS (want a non-negative integer); using role default", "value", raw, "default", def)
+		}
+	}
+	if n < minPoolMaxConns {
+		n = minPoolMaxConns
+	}
+	return n
+}
+
+// applyPGPoolDefaultsForRole sets the per-role connection-pool ceilings on
+// a Postgres *sql.DB. Operators tuning production raise TF_DB_MAX_OPEN_CONNS
 // alongside Postgres' max_connections.
-func applyPGPoolDefaults(d *sql.DB) {
-	d.SetMaxOpenConns(25)
-	d.SetMaxIdleConns(25)
+func applyPGPoolDefaultsForRole(d *sql.DB, role runmode.DeployRole) {
+	n := poolMaxConnsForRole(role)
+	d.SetMaxOpenConns(n)
+	d.SetMaxIdleConns(n)
 	d.SetConnMaxLifetime(5 * time.Minute)
 }

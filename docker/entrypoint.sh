@@ -66,19 +66,34 @@ mkdir -p "$TF_HOME"
 # Goose's forward migrations are idempotent — re-running once pg is
 # up is safe.
 
+# Exit code 3 (cmd/migrate.ExitSchemaAhead) is special: a TF_ROLE=executor
+# process found the schema AHEAD of what its build understands. That never
+# self-resolves by waiting — the fix is deploying a newer executor image
+# first (drain-first-on-schema-change) — so we fail fast on it instead of
+# burning the whole retry budget. Every other non-zero exit (a Behind
+# schema while a control pod is still migrating, or a not-yet-ready
+# Postgres) is transient and retried.
 attempts=30
 sleep_s=1
 attempt=0
 while :; do
     attempt=$((attempt + 1))
-    if triagefactory migrate up; then
+    # `|| rc=$?` keeps `set -e` from tripping on the expected failure and
+    # captures migrate's real exit code (an `if ...; then` would reset $?).
+    rc=0
+    triagefactory migrate up || rc=$?
+    if [ "$rc" -eq 0 ]; then
         break
+    fi
+    if [ "$rc" -eq 3 ]; then
+        echo "migrate up: connected schema is AHEAD of this build — an executor cannot run against a newer schema. Deploy a newer executor image first (drain-first). Not retrying." >&2
+        exit 1
     fi
     if [ "$attempt" -ge "$attempts" ]; then
         echo "migrate up failed after ${attempts} attempts; giving up." >&2
         exit 1
     fi
-    echo "migrate up failed (attempt ${attempt}/${attempts}); retrying in ${sleep_s}s..." >&2
+    echo "migrate up failed (attempt ${attempt}/${attempts}, exit ${rc}); retrying in ${sleep_s}s..." >&2
     sleep "$sleep_s"
 done
 

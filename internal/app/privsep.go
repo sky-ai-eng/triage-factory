@@ -21,7 +21,9 @@ type capBrokerHandle interface {
 
 // startCapBrokerFn is the broker-spawn seam — the platform startCapBroker
 // (privsep_linux.go / privsep_other.go) by default, overridable in tests to
-// exercise the fail-closed path without a real broker.
+// exercise the fail-closed path without a real broker. It returns the
+// broker handle plus a Ping seam (nil off Linux / when unsupported) the
+// executor healthz's broker_ok check round-trips against the socket.
 var startCapBrokerFn = startCapBroker
 
 // startCapBrokerIfSandboxing starts the cap-broker subprocess and routes
@@ -40,11 +42,12 @@ func (a *App) startCapBrokerIfSandboxing(ctx context.Context) error {
 	if !agentproc.WillSandbox() {
 		return nil
 	}
-	handle, err := startCapBrokerFn(ctx)
+	handle, ping, err := startCapBrokerFn(ctx)
 	if err != nil {
 		return fmt.Errorf("start cap-broker: %w", err)
 	}
 	a.capBroker = handle
+	a.brokerPing = ping
 	appLog.Info("cap-broker started; privileged sandbox ops now route through it")
 	return nil
 }
