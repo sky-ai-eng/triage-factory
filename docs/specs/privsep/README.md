@@ -232,7 +232,9 @@ hash-addressed image — **never** `apk add <customer input>` in the broker. See
 
 ## 9. Phase plan (children)
 
-Each PR independently mergeable; the split defaults **off** until PS-P4.
+Each PR independently mergeable; the split defaulted **off** until PS-P4
+flipped it on, and PS-P6 then removed the flag and the dual path entirely —
+the cap-broker is now the only sandbox launch path.
 
 **Core split (sequential):**
 - **PS-P0** — Extract every privileged sandbox op behind a Go interface;
@@ -257,6 +259,14 @@ Each PR independently mergeable; the split defaults **off** until PS-P4.
 - **PS-P5** — ~~route `capture_isolated` through the broker~~ folded into
   PS-P4 (see above): the capture's *setuid* half broke the moment P4's drop
   landed, not just its netns half, so it could not wait.
+- **PS-P6** — retire the rollback flag and the dual (in-process vs. brokered)
+  launch path. The cap-broker starts unconditionally whenever the host
+  sandboxes and is the only launch path; a broker that can't start is fatal
+  at boot (no silent fallback to a less-isolated in-process launch). The
+  in-process direct launch (`hostOps.LaunchRun` / the pipe-based `localRun`)
+  and the leftover P1-seam surface (`SetupRunCgroup` / `RemoveRunCgroup` on
+  the ops interface, now that the launch owns its cgroup) are removed; the
+  broker still serves `hostOps` and uses `PrepareBundle` / `LaunchSupervised`.
 
 **Hardening track (parallel, independent of the split):**
 - **PS-H1** — `npm ci --ignore-scripts`.

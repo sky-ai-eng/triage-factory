@@ -83,8 +83,8 @@ type Server struct {
 var maxInflightLaunches = sandbox.MaxSandboxes
 
 // NewServer constructs a Server dispatching onto ops. Production callers
-// pass sandbox.NewHostOps() — the same in-process implementation
-// defaultOps uses when TF_PRIVSEP is off.
+// pass sandbox.NewHostOps() — the in-process implementation of the
+// privileged operations the broker holds capabilities for.
 func NewServer(ops sandbox.PrivilegedOps) *Server {
 	baseCtx, cancel := context.WithCancel(context.Background())
 	return &Server{
@@ -246,11 +246,9 @@ func (s *Server) sendError(conn net.Conn, msg string) {
 	_ = writeFrame(conn, response{Error: msg}, responseFrameSize)
 }
 
-// dispatch routes one method to s.ops. SetupRunCgroup is the one method
-// whose in-process return (a *os.File dir-fd) can't cross the wire — the
-// server closes its own copy after extracting the directory path; see
-// setupRunCgroupResult's doc in protocol.go and IPCClient.SetupRunCgroup
-// in ipc.go, which reopens that same path locally.
+// dispatch routes one method to s.ops (the privileged operations) or to the
+// broker's own run-launch handlers (launchRun/waitRun/killRun, which own the
+// supervised runtime state rather than delegating to s.ops).
 func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMessage) (any, error) {
 	dec := func(dst any) error {
 		if len(rawArgs) == 0 {
@@ -291,27 +289,6 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 			return nil, err
 		}
 		return ensureRootfsResult{Path: path}, nil
-
-	case methodSetupRunCgroup:
-		var a setupRunCgroupArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		dir, f, err := s.ops.SetupRunCgroup(a.Name, a.LimitMB)
-		if f != nil {
-			_ = f.Close()
-		}
-		if err != nil {
-			return nil, err
-		}
-		return setupRunCgroupResult{Dir: dir}, nil
-
-	case methodRemoveRunCgroup:
-		var a removeRunCgroupArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		return emptyResult{}, s.ops.RemoveRunCgroup(a.Dir)
 
 	case methodReapOrphans:
 		return emptyResult{}, s.ops.ReapOrphans(ctx)

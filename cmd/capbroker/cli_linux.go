@@ -29,13 +29,13 @@ var brokerLog = logging.Component("cap-broker")
 // hostOps implementation from P0" — until SIGTERM/SIGINT, then drain and
 // clean up. Blocks for the process lifetime.
 //
-// In the default (TF_PRIVSEP on) container path, docker/entrypoint.sh
-// spawns this process directly, before it execs the capability-dropped
-// orchestrator into existence — the "container entrypoint holds caps
-// only long enough to spawn the cap-broker" half of the exec-time
-// capability drop. The dev/bare-metal fallback path (orchestrator_linux.go's
-// Start, when nothing is already listening on the socket) still spawns
-// it as a plain child too.
+// In the container path, docker/entrypoint.sh spawns this process
+// directly, before it execs the capability-dropped orchestrator into
+// existence — the "container entrypoint holds caps only long enough to
+// spawn the cap-broker" half of the exec-time capability drop. The
+// dev/bare-metal fallback path (orchestrator_linux.go's Start, when
+// nothing is already listening on the socket) still spawns it as a plain
+// child too.
 func runBroker(args []string) error {
 	fs := flag.NewFlagSet("cap-broker", flag.ContinueOnError)
 	socketPath := fs.String("socket", DefaultSocketPath, "unix socket path to serve on")

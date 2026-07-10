@@ -40,7 +40,7 @@
 # credentials) into an empty capability set, a different unprivileged
 # uid, and a cleared capability bounding set, before that process runs a
 # single line of Go. See docs/self-host-setup.md for the process-model
-# table and docs/usage.md for the TF_PRIVSEP escape hatch.
+# table and docs/usage.md for the privilege-separation model.
 
 services:
   postgres:
@@ -381,10 +381,10 @@ services:
       TF_PREVENT_ORG_CREATION: ${TF_PREVENT_ORG_CREATION:-}
       TF_TRUSTED_PROXY_CIDR: ${TF_TRUSTED_PROXY_CIDR:-}
       TF_CAPTURE_CLIENT_IP: ${TF_CAPTURE_CLIENT_IP:-}
-      # Privilege separation (docker/entrypoint.sh, see .env.example):
-      # empty/unset means the default (on) — only a falsy value here
-      # actually disables it, so this is safe to leave unset.
-      TF_PRIVSEP: ${TF_PRIVSEP:-}
+      # Privilege separation (docker/entrypoint.sh, see .env.example): in
+      # multi mode the cap-broker is the only sandbox launch path, spawned
+      # unconditionally. These knobs only tune the orchestrator uid/gid,
+      # $HOME, and the broker socket path.
       TF_ORCHESTRATOR_UID: ${TF_ORCHESTRATOR_UID:-}
       TF_ORCHESTRATOR_GID: ${TF_ORCHESTRATOR_GID:-}
       TF_ORCHESTRATOR_HOME: ${TF_ORCHESTRATOR_HOME:-}

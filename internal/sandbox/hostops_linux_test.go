@@ -4,13 +4,15 @@ package sandbox
 
 import (
 	"context"
-	"os"
+	"errors"
 	"testing"
 )
 
-// fakePrivilegedOps is a minimal PrivilegedOps double distinguishable from
+// fakePrivilegedOps is a minimal SandboxOps double distinguishable from
 // hostOps by its EnsureRootfs return value, so SetPrivilegedOps's effect on
-// defaultOps is observable rather than assumed.
+// defaultOps is observable rather than assumed. It also implements the
+// RunLauncher half so it satisfies the SandboxOps that SetPrivilegedOps
+// installs.
 type fakePrivilegedOps struct{ tag string }
 
 func (f fakePrivilegedOps) SetupNetwork(ctx context.Context, runID string, subnetIdx uint8) (NetworkState, error) {
@@ -22,13 +24,13 @@ func (f fakePrivilegedOps) TeardownNetwork(ctx context.Context, state NetworkSta
 func (f fakePrivilegedOps) EnsureRootfs(ctx context.Context, selector RootfsSelector) (string, error) {
 	return f.tag, nil
 }
-func (f fakePrivilegedOps) SetupRunCgroup(name string, limitMB int) (string, *os.File, error) {
-	return "", nil, nil
-}
 func (f fakePrivilegedOps) LaunchRun(ctx context.Context, p LaunchParams) (LaunchedRun, error) {
-	return nil, nil
+	// Present only to satisfy SandboxOps (SetPrivilegedOps installs this as
+	// both defaultOps and runLauncher). No test drives a launch through it;
+	// return an error rather than a nil LaunchedRun so an accidental use
+	// fails loudly instead of nil-panicking in the caller.
+	return nil, errors.New("fakePrivilegedOps.LaunchRun: not implemented for this test double")
 }
-func (f fakePrivilegedOps) RemoveRunCgroup(dir string) error      { return nil }
 func (f fakePrivilegedOps) ReapOrphans(ctx context.Context) error { return nil }
 func (f fakePrivilegedOps) ChownRunTree(ctx context.Context, root, subpath string) error {
 	return nil
@@ -38,7 +40,7 @@ func (f fakePrivilegedOps) CaptureRunDelta(ctx context.Context, worktree string)
 	return nil, nil
 }
 
-var _ PrivilegedOps = fakePrivilegedOps{}
+var _ SandboxOps = fakePrivilegedOps{}
 
 // TestSetPrivilegedOps_NilPanics pins the defensive nil guard: a nil
 // defaultOps would otherwise fail confusingly later, as a nil-interface

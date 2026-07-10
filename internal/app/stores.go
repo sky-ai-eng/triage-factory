@@ -101,12 +101,13 @@ func (a *App) openStores(ctx context.Context) error {
 		a.appDB = appDB
 		a.stores = pgstore.New(adminDB, appDB, secretKey)
 
-		// Start the cap-broker BEFORE ReapOrphans below, when TF_PRIVSEP=1,
-		// so the boot-time reap sweep — like every other privileged sandbox
-		// op for the rest of this process's life — routes through the
-		// broker rather than running in-process. No-op (and no error) when
-		// the flag is off or this host never sandboxes.
-		if err := a.startCapBrokerIfEnabled(ctx); err != nil {
+		// Start the cap-broker BEFORE ReapOrphans below, on any host that
+		// sandboxes, so the boot-time reap sweep — like every other
+		// privileged sandbox op for the rest of this process's life —
+		// routes through the broker. Fatal if the broker can't start (the
+		// broker is the only sandbox path, so there is no in-process
+		// fallback); a no-op when this host never sandboxes.
+		if err := a.startCapBrokerIfSandboxing(ctx); err != nil {
 			appDB.Close()
 			adminDB.Close()
 			return fmt.Errorf("cap-broker: %w", err)

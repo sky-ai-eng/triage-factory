@@ -22,11 +22,11 @@ type teardownState struct {
 	// possibly only a partial prefix of it if setup failed partway
 	// through. Passed back to defaultOps.TeardownNetwork verbatim.
 	netSt NetworkState
-	// The per-run OCI bundle is NOT tracked here: since PS-P3 moved spec
-	// ownership into LaunchRun, the bundle is built by whoever holds
-	// capabilities (in-process hostOps, or the broker) and is owned by the
-	// LaunchedRun that launch returns — its Close removes the bundle, so a
-	// caller that abandons the run before Sandbox.Close still reclaims it.
+	// The per-run OCI bundle is NOT tracked here: spec ownership lives in the
+	// launch, so the bundle is built by the cap-broker (which holds the
+	// capabilities) and is owned by the LaunchedRun that launch returns — its
+	// Close removes the bundle, so a caller that abandons the run before
+	// Sandbox.Close still reclaims it.
 }
 
 // iptablesRule names a single MASQUERADE rule so teardown can
@@ -49,10 +49,11 @@ type iptablesRule struct {
 // point. Orchestrates the pipeline — subnet allocation, netns + veth +
 // iptables, rootfs cache, OCI bundle on disk — then launches the runtime.
 //
-// Every privileged step (network, rootfs, cgroup, the runtime launch) is
-// reached only through defaultOps (PrivilegedOps) — see
-// privileged_ops_linux.go. LaunchRun execs runsc in process by default, or
-// across the socket in the cap-broker when TF_PRIVSEP is on.
+// Every privileged step (network, rootfs) is reached only through
+// defaultOps (PrivilegedOps); the runtime launch crosses the same broker
+// via runLauncher (RunLauncher) — see privileged_ops_linux.go. Both are
+// installed by SetPrivilegedOps at boot, so the launch always runs in the
+// cap-broker with the run's stdio wired across a passed-through socket.
 //
 // Error paths trigger a partial-state Close() before returning so
 // the caller doesn't need to defer Close when err != nil.
@@ -62,6 +63,13 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// fail on Start with "file not found".
 	if _, err := exec.LookPath("runsc"); err != nil {
 		return nil, nil, ErrRunscMissing
+	}
+
+	// The launch is always brokered; a nil launcher means SetPrivilegedOps
+	// never ran (a boot-order bug). Fail before any privileged setup rather
+	// than after allocating a subnet + netns we'd only tear back down.
+	if runLauncher == nil {
+		return nil, nil, fmt.Errorf("sandbox: no run launcher installed (cap-broker not started)")
 	}
 
 	idx, err := defaultAllocator().Allocate()
@@ -132,19 +140,16 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 		return nil, nil, fmt.Errorf("sandbox: %w", err)
 	}
 
-	// Step 11: launch the runtime, routed through defaultOps. PS-P3 moved
-	// OCI-spec ownership into LaunchRun: the orchestrator no longer resolves
-	// the rootfs, builds the spec, or writes the bundle — it hands the launch
-	// only the validated DATA below (a rootfs SELECTOR, an env ALLOWLIST,
-	// numeric limits, the netns it was given, the mounts, the pinned argv).
-	// In process, hostOps builds the spec from that data and clone3s runsc
-	// into a per-run memory cgroup. Under TF_PRIVSEP the same data crosses to
-	// the cap-broker, which VALIDATES it, builds the spec from its own fixed
-	// template, and execs+supervises runsc with stdio wired to a passed-through
-	// socket — so a compromised orchestrator can never make the broker exec
-	// arbitrary code with capabilities. Either way the returned LaunchedRun
-	// owns the run process, its cgroup, and its bundle; the caller drives
-	// Start → stream → Wait → Close.
+	// Step 11: launch the runtime, routed through runLauncher (the cap-broker
+	// client). The orchestrator does not resolve the rootfs, build the spec,
+	// or write the bundle — it hands the launch only the validated DATA below
+	// (a rootfs SELECTOR, an env ALLOWLIST, numeric limits, the netns it was
+	// given, the mounts, the pinned argv). The broker VALIDATES it, builds the
+	// spec from its own fixed template, and execs+supervises runsc with stdio
+	// wired to a passed-through socket — so a compromised orchestrator can
+	// never make the broker exec arbitrary code with capabilities. The
+	// returned LaunchedRun owns the run process, its cgroup, and its bundle;
+	// the caller drives Start → stream → Wait → Close.
 	//
 	// Container ID must be unique per Wrap or runsc rejects the second
 	// concurrent start. RunID isn't unique on its own (some callers pass
@@ -152,7 +157,7 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// allocator gives a fresh idx for every live Wrap. Pair them so the ID
 	// stays grep-friendly while being uniquely distinguishable.
 	containerID := fmt.Sprintf("tf-%s-%d", truncate(cfg.RunID, 11), idx)
-	run, err := defaultOps.LaunchRun(ctx, LaunchParams{
+	run, err := runLauncher.LaunchRun(ctx, LaunchParams{
 		RunID:           cfg.RunID,
 		ContainerID:     containerID,
 		Rootfs:          rootfsSel,

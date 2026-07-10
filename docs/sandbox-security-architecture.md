@@ -373,17 +373,15 @@ basis.
 - Local mode takes none of the host privileges (sandbox skipped).
 - `npm ci --ignore-scripts` for the vendored Agent SDK.
 - Tailored seccomp profile replacing `seccomp=unconfined`.
-- **Privilege separation, core split:** privileged operations extracted
+- **Privilege separation, complete:** privileged operations extracted
   behind a broker interface; the `cap-broker` process + narrow RPC +
   socket-fd stdio boundary, owning the OCI spec from a fixed template;
-  exec-time capability drop on the orchestrator (default on); the run-tree
-  ownership lifecycle and the park-time git-delta capture (`CaptureRunDelta`)
-  routed through the broker too — see §4 and `docs/self-host-setup.md`'s
-  process-model table.
-
-**In progress — privilege separation (remaining):**
-- Retire the `TF_PRIVSEP` rollback flag once the split has had a release
-  to bake.
+  exec-time capability drop on the orchestrator; the run-tree ownership
+  lifecycle and the park-time git-delta capture (`CaptureRunDelta`) routed
+  through the broker too. The cap-broker is the **only** sandbox launch
+  path — spawned unconditionally whenever the host sandboxes, with no
+  rollback flag and no in-process fallback; a broker that can't start is
+  fatal at boot. See §4 and `docs/self-host-setup.md`'s process-model table.
 
 **In progress — hardening (parallel track):**
 - Control-plane GitHub App-token minting (executors never hold the App key).

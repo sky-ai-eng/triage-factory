@@ -8,11 +8,10 @@ import "context"
 // the orchestrator's capabilities are dropped at exec (CAP_CHOWN for
 // the ownership hand-off; unlinking through sandbox-owned directory
 // modes for the removal), so on Linux they route through the package's
-// PrivilegedOps seam — in-process hostOps by default, the cap-broker
-// IPC client under TF_PRIVSEP — exactly like Wrap/Close/ReapOrphans.
-// Off Linux they degrade to the unprivileged equivalents the previous
-// in-caller code used (no-op chown, plain os.RemoveAll), keeping
-// local-mode/dev behavior byte-identical.
+// PrivilegedOps seam — the cap-broker IPC client, exactly like
+// Wrap/Close/ReapOrphans. Off Linux they degrade to the unprivileged
+// equivalents the previous in-caller code used (no-op chown, plain
+// os.RemoveAll), keeping local-mode/dev behavior byte-identical.
 
 // ChownRunTree hands ownership of a run tree to the sandbox identity
 // (WorktreeUID/GID) so the jailed agent can write its own worktree.

@@ -198,12 +198,11 @@ func buildSandboxEnv(extraEnv []string) []string {
 // owned files is a no-op at the kernel level.
 //
 // Routed through sandbox.ChownRunTree rather than chowning in-process:
-// changing a file's owner needs CAP_CHOWN, which the default (TF_PRIVSEP
-// on) orchestrator no longer holds after its exec-time capability drop —
-// the op executes in the cap-broker there, in-process hostOps otherwise
-// (byte-identical to the recursive Lchown that used to live here,
-// including the symlink-safety and ownership-precondition properties —
-// see that implementation's doc). No-op off Linux; the sandbox path
+// changing a file's owner needs CAP_CHOWN, which the orchestrator no
+// longer holds after its exec-time capability drop — the op executes in
+// the cap-broker (byte-identical to the recursive Lchown that used to live
+// here, including the symlink-safety and ownership-precondition properties
+// — see that implementation's doc). No-op off Linux; the sandbox path
 // isn't reachable there per shouldSandbox.
 func chownWorktreeForSandbox(ctx context.Context, worktree string) error {
 	if worktree == "" {

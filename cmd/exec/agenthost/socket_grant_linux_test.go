@@ -15,7 +15,7 @@ import (
 // TestGrantSocketToSandbox pins step 3 of Start's fs-permissions
 // invariant in whichever shape this process is allowed to perform it:
 //
-//   - root (TF_PRIVSEP=0 rollback): the socket ends up
+//   - root (dev/bare-metal, no exec-time drop): the socket ends up
 //     WorktreeUID:WorktreeGID mode 0600 — the original arrangement.
 //   - unprivileged member of the sandbox group (the default post-drop
 //     orchestrator, as the setpriv non-root harness runs this test):

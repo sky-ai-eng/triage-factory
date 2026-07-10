@@ -46,6 +46,13 @@ import (
 // Best-effort: if runsc/chroot/root prereqs aren't met, the pre-warm
 // is skipped and individual tests still skip cleanly via require*.
 func TestMain(m *testing.M) {
+	// Production launches every run through the cap-broker; this package
+	// can't spin one up (import cycle), so the suite installs an in-process
+	// stand-in built from the same launch primitives the broker uses. Wrap()
+	// routes its launch through runLauncher, so this must be set before any
+	// test calls Wrap.
+	runLauncher = inProcessLauncher{}
+
 	if shouldPreWarmRootfs() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		if _, err := ensureRootfs(ctx); err != nil {

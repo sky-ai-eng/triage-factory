@@ -21,14 +21,14 @@ import (
 // scanning /run for sockets to dial while a sandbox is mid-construction
 // (between net.Listen and chown/chmod).
 //
-// `/run/` requires root to create on most distros. In the TF_PRIVSEP=0
-// rollback deployment this daemon's process runs as root and creates it
-// itself; in the default privsep deployment the cap-broker (root)
-// creates this same shared directory for its own control socket and
-// hands its ownership to the orchestrator's uid at boot
-// (cmd/capbroker's runBroker), so this process — unprivileged after the
-// exec-time capability drop — finds it already writable-by-owner. The
-// two arrangements are why the MkdirAll below tolerates the directory
+// `/run/` requires root to create on most distros. When this daemon's
+// process runs as root (the dev/bare-metal case where the binary is run
+// directly, no exec-time drop) it creates it itself; in the container
+// deployment the cap-broker (root) creates this same shared directory for
+// its own control socket and hands its ownership to the orchestrator's uid
+// at boot (cmd/capbroker's runBroker), so this process — unprivileged
+// after the exec-time capability drop — finds it already writable-by-owner.
+// The two arrangements are why the MkdirAll below tolerates the directory
 // already existing with either owner.
 const hostSocketRoot = "/run/tf"
 
@@ -70,11 +70,12 @@ type HostDaemon struct {
 //     can reach it yet.
 //
 //  3. The sandbox-identity grant, shaped by what this process may do:
-//     running as root (TF_PRIVSEP=0 rollback), chown the socket to
-//     sandbox.WorktreeUID and chmod 0600 — owner-only RW, exactly the
-//     original arrangement. Running unprivileged (the default: the
-//     orchestrator post-exec-drop holds no CAP_CHOWN and can never
-//     give a file away to another uid), keep ownership and instead
+//     running as root (dev/bare-metal, no exec-time drop), chown the
+//     socket to sandbox.WorktreeUID and chmod 0600 — owner-only RW,
+//     exactly the original arrangement. Running unprivileged (the
+//     container default: the orchestrator post-exec-drop holds no
+//     CAP_CHOWN and can never give a file away to another uid), keep
+//     ownership and instead
 //     chgrp the socket to sandbox.WorktreeGID + chmod 0660 — an
 //     owner-legal group grant, possible because the container image
 //     makes the orchestrator user a member of the sandbox group
@@ -142,11 +143,12 @@ func Start(stores db.Stores, info RunInfo) (*HostDaemon, sandbox.Mount, error) {
 // the sandbox identity (uid/gid 10000) — step 3 of Start's invariant.
 // Two shapes, by what this process is allowed to do:
 //
-//   - root (TF_PRIVSEP=0 rollback): chown to WorktreeUID + chmod 0600.
-//     Byte-identical to the original arrangement.
-//   - unprivileged (the default post-exec-drop orchestrator, which holds
-//     no CAP_CHOWN and cannot give a file away to another uid): chgrp to
-//     WorktreeGID + chmod 0660. An owner-legal group change — valid only
+//   - root (dev/bare-metal, no exec-time drop): chown to WorktreeUID +
+//     chmod 0600. Byte-identical to the original arrangement.
+//   - unprivileged (the container-default post-exec-drop orchestrator,
+//     which holds no CAP_CHOWN and cannot give a file away to another
+//     uid): chgrp to WorktreeGID + chmod 0660. An owner-legal group
+//     change — valid only
 //     because this process is a member of the sandbox group (the image's
 //     tf-sandbox, gid 10000, carried through the drop by the
 //     entrypoint's setpriv --groups) — so a clear, actionable error

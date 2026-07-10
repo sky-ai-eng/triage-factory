@@ -22,8 +22,8 @@ func captureTestTree(t *testing.T) string {
 // capture relies on: the capture child runs as the sandbox uid/gid with the
 // parent's supplementary groups shed, inside an empty network namespace.
 // That is what confines a filter a hostile .git/config could trigger to the
-// agent's own privilege instead of the privileged capture host (broker or
-// TF_PRIVSEP=0 orchestrator — the escape this capture path closes).
+// agent's own privilege instead of the privileged capture host (the
+// cap-broker — the escape this capture path closes).
 //
 // It overrides captureCommand with a shell that reports `id` and
 // /proc/net/dev to a side file (stdout stays clean — it echoes the "null"

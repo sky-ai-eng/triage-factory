@@ -63,10 +63,11 @@ func SetRunTreeOwnerUID(uid int) { runTreeOwnerExtraUID = uid }
 //     dial the broker socket — a root-privileged recursive-chown / RemoveAll
 //     primitive against host state, reopening exactly the boundary this
 //     validation exists to close.
-//   - In-process (runTreeOwnerExtraUID < 0, the TF_PRIVSEP=0 rollback):
-//     this process IS the one that creates run trees (as root, single
-//     privileged process), so "owned by me" is the correct legitimacy check
-//     and no separate orchestrator uid exists to register.
+//   - Same-uid (runTreeOwnerExtraUID < 0): the dev/bare-metal case where
+//     the broker was self-spawned without --orchestrator-uid, so it runs as
+//     the same uid as the orchestrator (no exec-time drop) and IS the one
+//     that creates run trees — "owned by me" is the correct legitimacy
+//     check, and no separate orchestrator uid exists to register.
 func allowedRunTreeOwner(uid uint32) bool {
 	if uid == WorktreeUID {
 		return true

@@ -65,8 +65,8 @@ var effectiveCaps = capinfo.Effective
 var brokerSocketPath = DefaultSocketPath
 
 // Process owns the spawned cap-broker child process's lifecycle. The
-// orchestrator holds exactly one per boot when TF_PRIVSEP=1 — "one broker
-// process per executor (long-lived)... not one per run." cmd is nil when
+// orchestrator holds exactly one per boot — one broker process per
+// executor (long-lived), not one per run. cmd is nil when
 // Start found (and dialed) a broker some other ancestor already spawned
 // — the default container path — in which case Close is correctly a
 // no-op: this process was never the broker's parent and, post-drop, no
@@ -93,15 +93,14 @@ var execSelfCommand = func(socketPath string) (*exec.Cmd, error) {
 }
 
 // Start connects this process to a cap-broker and returns an IPCClient
-// satisfying sandbox.PrivilegedOps, ready for sandbox.SetPrivilegedOps.
+// satisfying sandbox.SandboxOps, ready for sandbox.SetPrivilegedOps.
 //
-// In the default (TF_PRIVSEP on) container deployment,
-// docker/entrypoint.sh already spawned the broker — still fully
-// privileged — before it exec'd this (now capability-dropped) process
-// into existence, so Start's first move is to check whether a broker is
-// already listening at socketPath and, if so, just dial it: this process
-// has no capabilities left to spawn a broker that could do anything
-// privileged anyway, post-drop.
+// In the container deployment, docker/entrypoint.sh already spawned the
+// broker — still fully privileged — before it exec'd this (now
+// capability-dropped) process into existence, so Start's first move is to
+// check whether a broker is already listening at socketPath and, if so,
+// just dial it: this process has no capabilities left to spawn a broker
+// that could do anything privileged anyway, post-drop.
 //
 // That first check retries for dialRaceWindow — a short, dedicated
 // budget distinct from the spawn-and-wait path's readyTimeout below — not
@@ -132,7 +131,7 @@ var execSelfCommand = func(socketPath string) (*exec.Cmd, error) {
 // later, deep inside a sandboxed run, with nothing at boot to explain
 // why. Failing loudly here instead turns that into an immediate,
 // diagnosable boot error.
-func Start(ctx context.Context) (*Process, sandbox.PrivilegedOps, error) {
+func Start(ctx context.Context) (*Process, sandbox.SandboxOps, error) {
 	socketPath := brokerSocketPath
 
 	if client := Dial(socketPath); pollReady(ctx, client, dialRaceWindow, dialRacePollInterval) == nil {

@@ -214,14 +214,14 @@ case "$gv" in
   *) pass "migrations applied (goose_db_version has $gv rows)" ;;
 esac
 
-# 6. Privilege-separation posture (TFAC-605). The failure class this catches
-#    is invisible to the health probe: the container boots green while the
+# 6. Privilege-separation posture. The failure class this catches is
+#    invisible to the health probe: the container boots green while the
 #    split is silently degraded (one process, or an orchestrator that kept
 #    its capabilities, or a /run/tf the unprivileged orchestrator can't
 #    create per-run agenthost sockets in — every delegated run would then
-#    fail at its first sandbox setup, long after "healthy"). The smoke's
-#    generated .env never sets TF_PRIVSEP, and the compose stack pins
-#    TF_MODE=multi, so the split is unconditionally expected here.
+#    fail at its first sandbox setup, long after "healthy"). The compose
+#    stack pins TF_MODE=multi, and the cap-broker is the only sandbox launch
+#    path, so the split is unconditionally expected here.
 posture=$(dc exec -T triagefactory sh -c '
   broker=""; orch=""
   for c in /proc/[0-9]*/comm; do

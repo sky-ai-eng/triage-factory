@@ -109,10 +109,10 @@ func readFrame(r io.Reader, dst any, maxSize int) error {
 
 // --- per-method argv/result shapes ---
 //
-// One struct pair per sandbox.PrivilegedOps method, plus Ping (the
-// orchestrator's readiness probe — not part of the PrivilegedOps
-// interface). Adding a method = one pair here + one case in dispatch (server.go)
-// + one method on IPCClient (ipc.go).
+// One struct pair per RPC method (the sandbox.PrivilegedOps operations plus
+// the run-launch methods), plus Ping (the orchestrator's readiness probe —
+// not part of the interface). Adding a method = one pair here + one case in
+// dispatch (server.go) + one method on IPCClient (ipc.go).
 
 type emptyArgs struct{}
 type emptyResult struct{}
@@ -136,25 +136,6 @@ type ensureRootfsArgs struct {
 
 type ensureRootfsResult struct {
 	Path string `json:"path"`
-}
-
-type setupRunCgroupArgs struct {
-	Name    string `json:"name"`
-	LimitMB int    `json:"limit_mb"`
-}
-
-// setupRunCgroupResult carries only the directory path — the
-// sandbox.PrivilegedOps.SetupRunCgroup fd is meaningful only to a caller
-// in the same address space as the create (see that method's doc), and a
-// raw fd number crosses a process boundary as garbage without SCM_RIGHTS
-// (deliberately not introduced — spec §6). IPCClient reopens the returned
-// path locally instead; see ipc.go.
-type setupRunCgroupResult struct {
-	Dir string `json:"dir"`
-}
-
-type removeRunCgroupArgs struct {
-	Dir string `json:"dir"`
 }
 
 // launchRunArgs carries the narrow, validated launch data the broker folds
@@ -216,8 +197,6 @@ const (
 	methodSetupNetwork    = "SetupNetwork"
 	methodTeardownNetwork = "TeardownNetwork"
 	methodEnsureRootfs    = "EnsureRootfs"
-	methodSetupRunCgroup  = "SetupRunCgroup"
-	methodRemoveRunCgroup = "RemoveRunCgroup"
 	methodReapOrphans     = "ReapOrphans"
 	methodLaunchRun       = "LaunchRun"
 	methodWaitRun         = "WaitRun"

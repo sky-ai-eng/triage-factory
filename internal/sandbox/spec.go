@@ -193,9 +193,8 @@ func buildSpec(cfg Config, netnsPath string) (*specs.Spec, error) {
 
 // rlimitsForSpec maps the caller's numeric Rlimit set onto the OCI
 // spec type, falling back to defaultRlimits when the caller named none.
-// On a brokered launch the values have already passed validateRlimits
-// (the RPC-boundary gate in ValidateLaunchParams); the in-process path
-// passes the fixed defaults from the run config.
+// The values reach here having already passed validateRlimits at the
+// broker's RPC boundary (the gate in ValidateLaunchParams).
 func rlimitsForSpec(rl []Rlimit) []specs.POSIXRlimit {
 	if len(rl) == 0 {
 		return defaultRlimits()

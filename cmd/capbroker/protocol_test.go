@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -22,9 +21,6 @@ type fakeOps struct {
 	setupNetworkFn    func(ctx context.Context, runID string, subnetIdx uint8) (sandbox.NetworkState, error)
 	teardownNetworkFn func(ctx context.Context, state sandbox.NetworkState) error
 	ensureRootfsFn    func(ctx context.Context, selector sandbox.RootfsSelector) (string, error)
-	setupRunCgroupFn  func(name string, limitMB int) (string, *os.File, error)
-	launchRunFn       func(ctx context.Context, p sandbox.LaunchParams) (sandbox.LaunchedRun, error)
-	removeRunCgroupFn func(dir string) error
 	reapOrphansFn     func(ctx context.Context) error
 	chownRunTreeFn    func(ctx context.Context, root, subpath string) error
 	removeRunTreeFn   func(ctx context.Context, path string) error
@@ -39,18 +35,6 @@ func (f *fakeOps) TeardownNetwork(ctx context.Context, state sandbox.NetworkStat
 }
 func (f *fakeOps) EnsureRootfs(ctx context.Context, selector sandbox.RootfsSelector) (string, error) {
 	return f.ensureRootfsFn(ctx, selector)
-}
-func (f *fakeOps) SetupRunCgroup(name string, limitMB int) (string, *os.File, error) {
-	return f.setupRunCgroupFn(name, limitMB)
-}
-func (f *fakeOps) LaunchRun(ctx context.Context, p sandbox.LaunchParams) (sandbox.LaunchedRun, error) {
-	if f.launchRunFn == nil {
-		return nil, nil
-	}
-	return f.launchRunFn(ctx, p)
-}
-func (f *fakeOps) RemoveRunCgroup(dir string) error {
-	return f.removeRunCgroupFn(dir)
 }
 func (f *fakeOps) ReapOrphans(ctx context.Context) error {
 	return f.reapOrphansFn(ctx)
@@ -153,22 +137,6 @@ func TestIPCRoundTrip_EnsureRootfs(t *testing.T) {
 	}
 }
 
-func TestIPCRoundTrip_RemoveRunCgroup(t *testing.T) {
-	var gotDir string
-	client := serveTestBroker(t, &fakeOps{
-		removeRunCgroupFn: func(dir string) error {
-			gotDir = dir
-			return nil
-		},
-	})
-	if err := client.RemoveRunCgroup("/sys/fs/cgroup/tf-runs/run-1"); err != nil {
-		t.Fatalf("RemoveRunCgroup: %v", err)
-	}
-	if gotDir != "/sys/fs/cgroup/tf-runs/run-1" {
-		t.Errorf("broker saw dir %q", gotDir)
-	}
-}
-
 func TestIPCRoundTrip_ReapOrphans(t *testing.T) {
 	called := false
 	client := serveTestBroker(t, &fakeOps{
@@ -201,46 +169,6 @@ func TestIPCRoundTrip_ErrorPropagates(t *testing.T) {
 	}
 	if err.Error() != "rootfs bake failed: disk full" {
 		t.Errorf("error = %q, want the broker's message verbatim", err.Error())
-	}
-}
-
-// TestIPCRoundTrip_SetupRunCgroup pins the fd-crossing workaround: the
-// broker RPCs back only the directory path (a raw fd can't cross the
-// wire without SCM_RIGHTS, deliberately not introduced), and IPCClient
-// reopens that same path locally to hand a usable *os.File to its own
-// exec.Cmd.CgroupFD caller.
-func TestIPCRoundTrip_SetupRunCgroup(t *testing.T) {
-	dir := t.TempDir()
-	var gotName string
-	var gotLimit int
-	client := serveTestBroker(t, &fakeOps{
-		setupRunCgroupFn: func(name string, limitMB int) (string, *os.File, error) {
-			gotName, gotLimit = name, limitMB
-			f, err := os.Open(dir)
-			if err != nil {
-				return "", nil, err
-			}
-			return dir, f, nil
-		},
-	})
-
-	gotDir, f, err := client.SetupRunCgroup("run-1", 512)
-	if err != nil {
-		t.Fatalf("SetupRunCgroup: %v", err)
-	}
-	defer f.Close()
-	if gotDir != dir {
-		t.Errorf("dir = %q, want %q", gotDir, dir)
-	}
-	if gotName != "run-1" || gotLimit != 512 {
-		t.Errorf("broker saw name=%q limitMB=%d, want run-1/512", gotName, gotLimit)
-	}
-	fi, err := f.Stat()
-	if err != nil {
-		t.Fatalf("stat reopened fd: %v", err)
-	}
-	if !fi.IsDir() {
-		t.Error("reopened fd is not the cgroup directory")
 	}
 }
 
