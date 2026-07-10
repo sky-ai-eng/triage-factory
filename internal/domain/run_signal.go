@@ -22,7 +22,7 @@ const (
 	RunSignalPermission RunSignalKind = "permission"
 	// RunSignalInject delivers TFAC-594's additive-event injection into a
 	// live run executing on a remote executor. Payload:
-	// {"producer","body","task_id","triggering_event_id","creator_user_id"}.
+	// {"producer","body","entity_id","task_id","trigger_id","triggering_event_id"}.
 	RunSignalInject RunSignalKind = "inject"
 )
 
