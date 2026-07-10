@@ -10,11 +10,11 @@ import (
 
 // startBrain starts the leader-elected background brain as ONE UNIT
 // (TFAC-583 spec §3): the durable event-queue drain worker + its sweeper,
-// the poller scheduler, and brain-gated EE OnReady workers. Called either
-// directly from Run (role=all — always self-held, term is a moot
-// constant) or from the lease elector's OnAcquire callback (role=control,
-// on every acquisition including a re-acquisition after an earlier
-// demotion).
+// the poller scheduler, the tf_bus sentinel-relay LISTEN, and brain-gated
+// EE OnReady workers. Called either directly from Run (role=all — always
+// self-held, term is a moot constant) or from the lease elector's
+// OnAcquire callback (role=control, on every acquisition including a
+// re-acquisition after an earlier demotion).
 //
 // MUST STAY NON-BLOCKING. At role=control this runs SYNCHRONOUSLY on the
 // lease.Manager's own renewal goroutine — deliberately, see
@@ -72,6 +72,20 @@ func (a *App) startBrain(term int64) {
 	// due) — bounded/benign per the spec (mostly free 304s; GitHub cycles
 	// are budgeted/resumable from the durable cursor, TFAC-571).
 	a.reloader.initialPoll()
+	// Brain-bound sentinel relay LISTEN (tf_bus): "only the brain LISTENs
+	// on tf_bus" (spec §5.3) is enforced by SUBSCRIPTION scope — the
+	// listener holds with the lease, stopping via brainCtx on demotion —
+	// deliberately unlike tf_ctl's always-listen + dispatch-gate shape:
+	// sentinel volume tracks agent activity, and a standby consuming that
+	// stream only to hand it to a bus with zero system:run: subscribers
+	// (the sole consumer, the EE lifecycle adapter, subscribes inside the
+	// brain-gated OnReady worker below) would be exactly the waste §5.3
+	// splits the channel to avoid. nil check: role=all never builds a
+	// backplane (single-process — sentinels are already on the only bus
+	// there is), nor does a control pod whose backplane found no DSN.
+	if a.wsBackplane != nil {
+		go a.wsBackplane.RunBusListener(brainCtx, a.bus.Publish)
+	}
 	// The cross-process trigger/PollSoon relay is NOT started here: since
 	// TFAC-585's tf_ctl consolidation, relay messages arrive on the
 	// process-lifetime shared tf_ctl listener (startCtlListener, ctl.go —
@@ -92,11 +106,12 @@ func (a *App) startBrain(term int64) {
 // Per component (the "what demotion means" pre-made decision): the
 // poller stops STARTING new org cycles via StopAll — an in-flight org's
 // current batch may finish (bounded seconds), matching poller.Manager's
-// existing stop/restart contract. The drain worker, sweeper, and
-// brain-gated EE workers all stop via brainCtx cancellation — the drain
-// worker in particular re-checks ctx between claims (drainEventQueue's
-// ctx.Err() guard), so it stops claiming new rows promptly rather than
-// draining the whole queue first. Relay traffic needs no stopping: its
+// existing stop/restart contract. The drain worker, sweeper, tf_bus
+// listener, and brain-gated EE workers all stop via brainCtx cancellation
+// — the drain worker in particular re-checks ctx between claims
+// (drainEventQueue's ctx.Err() guard), so it stops claiming new rows
+// promptly rather than draining the whole queue first. Relay traffic
+// needs no stopping: its
 // dispatch gate (handleCtlMessage's isBrainHolder check) reads false the
 // moment the elector demotes. No component here starts a new unit of
 // work after this call returns.

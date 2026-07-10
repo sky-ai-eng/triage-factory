@@ -138,13 +138,11 @@ func (a *App) startWorkers(ctx context.Context) {
 			go a.wsBackplane.RunPresenceHeartbeat(ctx, wsbackplane.PresenceHeartbeatIntervalFromEnv())
 			go a.srv.RunSessionRevalidation(ctx, wsbackplane.RevalidateIntervalFromEnv())
 		}
-		// Brain-bound sentinel relay LISTEN (tf_bus): starts/stops with
-		// a.plan.brain, today's stand-in for TFAC-583's lease (see
-		// roleplan.go's brain field doc comment) — single-control-only
-		// until that lands, exactly like every other brain subsystem.
-		if a.plan.brain {
-			go a.wsBackplane.RunBusListener(ctx, a.bus.Publish)
-		}
+		// The brain-bound sentinel relay LISTEN (tf_bus) is NOT started
+		// here: it holds with the lease (startBrain/stopBrain, brain.go),
+		// per spec §5.3's "only the brain LISTENs on tf_bus" — a standby
+		// must not consume the fleet's sentinel stream just to fan it to a
+		// bus with no subscribers.
 		// ws_outbox TTL reaper: deliberately NOT gated on brain — spec
 		// §11 decision 5 calls this too trivial to route through the
 		// lease, and `DELETE WHERE created_at < cutoff` is safe under any

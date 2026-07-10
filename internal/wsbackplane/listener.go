@@ -30,10 +30,11 @@ func (b *Backplane) RunPublicListener(ctx context.Context) {
 // RunBusListener opens a SEPARATE dedicated LISTEN connection for tf_bus
 // and dispatches brain-bound run-sentinel envelopes until ctx is
 // cancelled — republishing each non-self-origin one onto localPublish
-// (the brain's own in-process eventbus). Only the brain calls this; its
-// caller starts/stops it alongside every other brain-gated subsystem
-// (today that's `a.plan.brain`, single-control-only until TFAC-583's
-// lease lands — see internal/app/startup.go).
+// (the brain's own in-process eventbus). Only the brain calls this: it
+// starts and stops with the background-brain lease (internal/app's
+// startBrain/stopBrain via brainCtx — spec §5.3's "only the brain LISTENs
+// on tf_bus"), so a standby control pod never consumes the sentinel
+// stream at all.
 //
 // A dedicated connection, not a shared one with RunPublicListener, is
 // the whole point: run-sentinel volume tracks agent activity and must
