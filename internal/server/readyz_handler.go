@@ -25,19 +25,41 @@ const readyzTimeout = 2 * time.Second
 // directly off those instead of this field.
 const readyzDegradedFactor = 3
 
-// readyzResponse is GET /readyz's body (TFAC-573). Every field is either
-// a boolean-ish check result or an opaque org ID + counters — no repo
-// names, usernames, or other tenant data, matching /readyz's no-verbose-
-// mode design (there is nothing more to disclose at any verbosity).
+// readyzResponse is GET /readyz's body (TFAC-573; the `lease` field added
+// by TFAC-583). Every field is either a boolean-ish check result or an
+// opaque org ID + counters — no repo names, usernames, or other tenant
+// data, matching /readyz's no-verbose-mode design (there is nothing more
+// to disclose at any verbosity).
 type readyzResponse struct {
 	Status     string            `json:"status"` // "ok" | "degraded" | "not_ready"
 	CheckedAt  int64             `json:"checked_at"`
 	Version    string            `json:"version"`
-	Checks     map[string]string `json:"checks"` // "ok" | "failed" per hard check
+	Checks     map[string]string `json:"checks"` // "ok" | "failed" | "standby" (poller_* only) per hard check
 	Sources    readyzSources     `json:"sources"`
 	RateLimit  readyzRateLimit   `json:"rate_limit"`
 	ActiveRuns int               `json:"active_runs"`
+	// Lease is the background-brain lease state (TFAC-583) — present on
+	// every control pod's response (holder or standby), omitted entirely
+	// at TF_ROLE=all / local, where s.leaseStatus is never wired (a
+	// single process always self-holds, so the field would be moot and
+	// its absence keeps that contract byte-identical to before this
+	// ticket).
+	Lease *readyzLease `json:"lease,omitempty"`
 }
+
+// readyzLease is GET /readyz's `lease` field (TFAC-583, spec §8.3).
+type readyzLease struct {
+	Name     string `json:"name"`
+	HolderID string `json:"holder_id"`
+	IsHolder bool   `json:"is_holder"`
+	Term     int64  `json:"term"`
+}
+
+// LeaseStatusFunc reports this pod's current view of the named lease —
+// the shape Server.SetLeaseStatus wires from internal/app's
+// leaseStatusForReadyz. A plain function tuple (not a struct) so
+// readyz_handler.go depends on nothing from internal/lease.
+type LeaseStatusFunc func() (name, holderID string, term int64, isHolder bool)
 
 type readyzSources struct {
 	GitHub map[string]readyzOrgSource `json:"github"`
@@ -72,19 +94,26 @@ type readyzOrgSource struct {
 	IntervalSeconds int   `json:"interval_seconds"`
 }
 
-// handleReadyz is the readiness probe (TFAC-573): DB reachability,
-// migrations-applied, and poller-heartbeat-alive are HARD checks — any
-// failure returns 503 so an LB/k8s readinessProbe pulls the instance out
-// of rotation. Poll staleness per org, per-org GitHub rate-limit budget,
-// and active_runs are SOFT signals, reported for the operator to alert on
-// but never flip the HTTP status — polling can be legitimately idle (no
-// orgs configured yet) or intentionally slow, and a low rate-limit budget
-// is informational (the client already backs off on its own), so a
-// staleness threshold beyond the endpoint's own default
-// (readyzDegradedFactor) is the operator's call, not this handler's.
-// Pre-auth, mirroring /api/health — see the doc-comment block above
-// routes() and the Design decisions in TFAC-573 for why there is no
-// verbose/admin mode.
+// handleReadyz is the readiness probe (TFAC-573; lease-conditionality
+// added by TFAC-583, spec §8.3): DB reachability and migrations-applied
+// are ALWAYS hard checks. The poller-heartbeat-alive hard check is
+// LEASE-CONDITIONAL: on the background-brain lease holder (or any pod
+// with no lease wired at all — TF_ROLE=all / local, byte-identical to the
+// original TFAC-573 contract) it behaves exactly as before; on a standby
+// control pod it is NOT a hard check at all — a standby runs no pollers
+// by design, and hard-failing it would pull every non-leader control pod
+// out of LB rotation and collapse the HA shape to leader-only serving.
+// poller_github/poller_jira report the literal string "standby" there
+// instead of "ok"/"failed". Poll staleness per org, per-org GitHub
+// rate-limit budget, and active_runs are SOFT signals on the holder,
+// reported for the operator to alert on but never flip the HTTP status —
+// polling can be legitimately idle (no orgs configured yet) or
+// intentionally slow, and a low rate-limit budget is informational (the
+// client already backs off on its own), so a staleness threshold beyond
+// the endpoint's own default (readyzDegradedFactor) is the operator's
+// call, not this handler's. Pre-auth, mirroring /api/health — see the
+// doc-comment block above routes() and the Design decisions in TFAC-573
+// for why there is no verbose/admin mode.
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), readyzTimeout)
 	defer cancel()
@@ -112,10 +141,30 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		hardOK = false
 	}
 
+	// isHolder defaults true — the byte-identical-to-TFAC-573 path — for
+	// every pod that never wires SetLeaseStatus: TF_ROLE=all, local mode,
+	// and bare test/dev Server constructions all fall here, and none of
+	// them ever populate resp.Lease.
+	isHolder := true
+	if s.leaseStatus != nil {
+		name, holderID, term, holds := s.leaseStatus()
+		resp.Lease = &readyzLease{Name: name, HolderID: holderID, Term: term, IsHolder: holds}
+		isHolder = holds
+	}
+
 	resp.RateLimit.GitHub = map[string]readyzOrgRateLimit{}
 
 	degraded := false
-	if s.pollerHealth != nil {
+	switch {
+	case !isHolder:
+		// Standby: no pollers running here by design — informational only,
+		// never a hard check. LB/readinessProbe must keep this pod in
+		// rotation regardless.
+		resp.Checks["poller_github"] = "standby"
+		resp.Checks["poller_jira"] = "standby"
+		resp.Sources.GitHub = map[string]readyzOrgSource{}
+		resp.Sources.Jira = map[string]readyzOrgSource{}
+	case s.pollerHealth != nil:
 		snap := s.pollerHealth(ctx)
 		ghAlive, ghSources, ghDegraded := readyzSourceCheck(snap.GitHub)
 		jiraAlive, jiraSources, jiraDegraded := readyzSourceCheck(snap.Jira)
@@ -133,7 +182,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 				Used:      st.Used,
 			}
 		}
-	} else {
+	default:
 		// Not wired (a bare test/dev Server construction that skipped
 		// SetPollerManager) — report the gap loudly rather than nil-
 		// dereffing or silently claiming "ok" for a check that never ran.

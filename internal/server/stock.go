@@ -130,7 +130,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.jiraPollReady() {
+	if !s.jiraPollReady(r.Context(), orgID) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "polling"})
 		return
 	}

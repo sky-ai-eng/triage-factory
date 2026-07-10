@@ -31,6 +31,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
+	"github.com/sky-ai-eng/triage-factory/internal/lease"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
@@ -69,6 +70,12 @@ type App struct {
 	appDB      *sql.DB
 	stores     db.Stores
 	storedPort int
+	// adminDSN is the raw multi-mode admin DSN (TF_DATABASE_URL) —
+	// captured alongside database in openStores because the tf_ctl relay
+	// listener (internal/ctlbus) needs a DEDICATED session-mode connection
+	// for LISTEN, which a pooled *sql.DB can't provide. Empty outside
+	// multi mode.
+	adminDSN string
 
 	// capBroker is the spawned cap-broker subprocess, non-nil only on a host
 	// that sandboxes runs (multi mode + Linux). nil otherwise — local mode
@@ -123,9 +130,33 @@ type App struct {
 	router           *routing.Router
 	srv              *server.Server
 
+	// leaseElector drives the background-brain lease election (TFAC-583).
+	// Non-nil only at role=control in multi mode — role=all/local never
+	// elects (see startBrain's direct call in Run and isBrainHolder).
+	leaseElector *lease.Manager
+
+	// runCtx is the ctx Run(ctx) was called with, captured so startBrain
+	// (invoked later, from a lease-manager callback or directly at
+	// role=all) can derive a cancellable brain-lifetime context from it
+	// without threading ctx through the lease callback signature.
+	runCtx context.Context
+
+	// brainMu guards brainRunning/brainCancel — the background brain's
+	// start/stop state (TFAC-583, brain.go). Transitions happen from the
+	// lease manager's own goroutine (Run's tick loop) or, at role=all,
+	// once synchronously from Run; the mutex makes concurrent
+	// start/stop calls (a demote racing a fresh acquire) safe regardless.
+	brainMu      sync.Mutex
+	brainRunning bool
+	// brainCancel cancels the brain-lifetime context handed to every
+	// lease-gated background-brain goroutine (the event-queue drain
+	// worker + sweeper, the tf_ctl relay listener, brain-gated EE OnReady
+	// workers) — stopBrain's actual stop mechanism. nil when the brain
+	// isn't running.
+	brainCancel context.CancelFunc
+
 	// Runtime helpers.
 	reloader *reloader
-	announce *announcer
 }
 
 // New builds the entire server graph in dependency order and returns it
@@ -141,7 +172,7 @@ type App struct {
 // lock already held and fail confusingly). Every `if err = ...` below
 // assigns the named return so the deferred check sees it.
 func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
-	a := &App{cfg: cfg, announce: newAnnouncer(), plan: planForRole(runmode.Role())}
+	a := &App{cfg: cfg, plan: planForRole(runmode.Role())}
 	appLog.Info("boot role", "role", a.plan.role, "mode", runmode.Current())
 
 	// Resolve this process's persistent instance identity before anything
@@ -210,6 +241,16 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	if err = a.buildExecution(); err != nil { // delegation spawner (+ curator on serveHTTP roles)
 		return nil, err
 	}
+	// The background-brain lease elector (TFAC-583) — control role in
+	// multi mode only. role=all never elects (startBrain runs directly,
+	// unconditionally, from Run); an executor is never brain-capable.
+	// Built after buildExecution so the spawner's identity-fence check
+	// (IdentityFenced) exists to wire in.
+	if a.plan.role == runmode.RoleControl {
+		if err = a.buildLease(); err != nil {
+			return nil, err
+		}
+	}
 	if a.plan.brain {
 		a.buildRouting() // ingestor + poller manager + event router
 	}
@@ -220,18 +261,34 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 }
 
 // Run performs one-time boot side effects, starts the background workers,
-// kicks the first poll cycle (brain roles), and blocks until ctx is
+// starts (or elects) the background brain, and blocks until ctx is
 // cancelled — serving user HTTP on control/all, or the localhost-only
 // healthz on an executor.
 func (a *App) Run(ctx context.Context) error {
+	// Captured for startBrain, invoked later from a lease-manager callback
+	// or (role=all) directly below — see the runCtx field doc.
+	a.runCtx = ctx
+
 	a.runStartupTasks(ctx)
 	a.startWorkers(ctx)
 	if a.plan.serveHTTP {
-		a.srv.StartExtensionWorkers(ctx)
+		a.srv.StartExtensionWorkers(ctx) // replica-safe EE hooks only; brain-gated ones start with the brain below
 	}
-	if a.plan.brain {
-		a.startPolling()
+
+	switch {
+	case a.plan.role == runmode.RoleControl:
+		// The lease manager's Run loop drives startBrain/stopBrain via its
+		// OnAcquire/OnDemote callbacks (buildLease) as this pod wins,
+		// loses, and re-wins the "background-brain" lease across its
+		// lifetime. Backgrounded — Run blocks on the HTTP listener below.
+		go a.leaseElector.Run(ctx)
+	case a.plan.brain: // role == all (includes every local-mode boot)
+		// Single process, always self-holds — zero lease I/O, brain starts
+		// once, unconditionally, exactly like every release before this
+		// ticket.
+		a.startBrain(1)
 	}
+
 	if a.plan.serveHTTP {
 		return a.srv.ListenAndServeContext(ctx, a.cfg.Addr)
 	}
@@ -304,31 +361,3 @@ func (a *App) wire() {
 
 // local reports whether the binary is running in single-tenant local mode.
 func (a *App) local() bool { return runmode.Current() == runmode.ModeLocal }
-
-// announcer tracks the per-source "announce the next poll completion as a
-// toast" flag. Set when a config change restarts a poller; cleared after
-// the first post-restart completion fires, so users get one confirmation
-// toast instead of every-cycle spam. Shared between the reloader (which
-// sets it) and the poll-tracker subscriber (which consumes it).
-type announcer struct {
-	mu      sync.Mutex
-	pending map[string]bool
-}
-
-func newAnnouncer() *announcer { return &announcer{pending: map[string]bool{}} }
-
-func (a *announcer) setPending(source string) {
-	a.mu.Lock()
-	a.pending[source] = true
-	a.mu.Unlock()
-}
-
-func (a *announcer) shouldAnnounce(source string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.pending[source] {
-		a.pending[source] = false
-		return true
-	}
-	return false
-}

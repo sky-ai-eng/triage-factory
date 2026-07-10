@@ -25,16 +25,24 @@ const pollInterval = 1 * time.Second
 
 // WaitFor blocks until the entity has been classified (classified_at
 // IS NOT NULL), the entity row vanishes, ctx is cancelled, or the
-// timeout elapses — whichever fires first. Triggers the org's classifier
-// runner once on entry (via the Manager) to ensure it wakes up even if no
-// post-poll trigger has fired for this entity yet.
+// timeout elapses — whichever fires first. Calls trigger(orgID) once on
+// entry to ensure the classifier wakes up even if no post-poll trigger has
+// fired for this entity yet.
 //
-// The classification read goes through the Manager's dialect-aware
-// EntityStore (ClassificationStatusSystem) rather than a raw *sql.DB —
-// the System (admin-pool) variant, because WaitFor runs in the
-// background spawner with no request JWT claims and the app pool would
-// RLS-deny the read in multi mode. orgID scopes both the read and the
-// Manager.Trigger to the run's tenant; the spawner call site supplies it
+// trigger is a caller-supplied kick rather than a bound *Manager.Trigger
+// so this works on every role (TFAC-583): a control pod that currently
+// holds the background-brain lease can trigger in-process, a standby
+// control pod or an EXECUTOR (which builds no local classifier Manager at
+// all) instead relays the trigger over tf_ctl to whichever pod IS the
+// holder — see internal/app's triggerClassifier. Either way, WaitFor
+// itself only ever POLLS the DB for the classification result; it never
+// assumes trigger's effect lands in this process.
+//
+// The classification read goes through the dialect-aware EntityStore's
+// ClassificationStatusSystem (the admin-pool variant), because WaitFor
+// runs in the background spawner with no request JWT claims and the app
+// pool would RLS-deny the read in multi mode. orgID scopes both the read
+// and the trigger to the run's tenant; the spawner call site supplies it
 // from the run config.
 //
 // Always returns — never propagates error to the caller. The caller
@@ -43,29 +51,30 @@ const pollInterval = 1 * time.Second
 //
 // Intended call site: spawner setup, just before reading
 // entity.project_id to inject project knowledge into the worktree.
-func WaitFor(ctx context.Context, manager *Manager, orgID, entityID string, timeout time.Duration) {
-	if entityID == "" || manager == nil {
+func WaitFor(ctx context.Context, entities db.EntityStore, trigger func(orgID string), orgID, entityID string, timeout time.Duration) {
+	if entityID == "" || entities == nil || trigger == nil {
 		return
 	}
 	// An empty orgID can never be classified: the probe below is org-scoped
-	// and Manager.Trigger drops an empty org, so without this guard WaitFor
-	// would poll the full timeout waiting for a kick that can never fire.
-	// Every call site has the run's orgID by construction, so an empty value
-	// is a caller bug worth surfacing rather than stalling on.
+	// and trigger is expected to drop an empty org (Manager.Trigger does),
+	// so without this guard WaitFor would poll the full timeout waiting for
+	// a kick that can never fire. Every call site has the run's orgID by
+	// construction, so an empty value is a caller bug worth surfacing
+	// rather than stalling on.
 	if orgID == "" {
 		classifyLog.Warn("waitfor called with empty org; cannot kick classification, returning early", "entity", entityID)
 		return
 	}
 	// Respect an already-cancelled context at entry: skip the doomed
-	// classification probe and the spurious Manager.Trigger() kick that
-	// would otherwise fire before the loop's <-ctx.Done() arm returns.
-	// (The kick is idempotent and harmless, but waking the classifier on
-	// a shutdown path is pointless work.) Mid-wait cancellation is still
-	// handled by the loop below.
+	// classification probe and the spurious trigger() kick that would
+	// otherwise fire before the loop's <-ctx.Done() arm returns. (The kick
+	// is idempotent and harmless, but waking the classifier on a shutdown
+	// path is pointless work.) Mid-wait cancellation is still handled by
+	// the loop below.
 	if ctx.Err() != nil {
 		return
 	}
-	done, gone := classificationState(ctx, manager.entities, orgID, entityID)
+	done, gone := classificationState(ctx, entities, orgID, entityID)
 	if gone {
 		classifyLog.Info("waitfor entity not found, returning early", "entity", entityID)
 		return
@@ -73,7 +82,7 @@ func WaitFor(ctx context.Context, manager *Manager, orgID, entityID string, time
 	if done {
 		return
 	}
-	manager.Trigger(orgID)
+	trigger(orgID)
 
 	// NewTimer + NewTicker rather than time.After in a loop so the
 	// timers stop cleanly on ctx-cancel (no garbage timers firing
@@ -92,7 +101,7 @@ func WaitFor(ctx context.Context, manager *Manager, orgID, entityID string, time
 			classifyLog.Warn("waitfor timed out, proceeding without project context", "entity", entityID, "timeout", timeout)
 			return
 		case <-ticker.C:
-			done, gone := classificationState(ctx, manager.entities, orgID, entityID)
+			done, gone := classificationState(ctx, entities, orgID, entityID)
 			if gone {
 				classifyLog.Info("waitfor entity vanished mid-wait, returning early", "entity", entityID)
 				return

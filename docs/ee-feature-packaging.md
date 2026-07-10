@@ -123,11 +123,22 @@ never inside the install closure itself.
 
 A feature that needs a long-lived background worker (a connection manager, a
 poller) registers it via `ExtensionAPI.OnReady` during install; core fires the
-hook once wiring is complete, in its own goroutine, with a context that
-cancels at process shutdown — by then `Bus()` and `PublishEvent` are safe to
-use. The worker is not exempt from the dormancy contract: it must gate its
-per-org work on `entitlements.For(orgID).Has(feature)` just like any handler,
-since `OnReady` fires unconditionally for every install.
+hook every time this pod's background-brain lease starts (TFAC-583) — at
+`TF_ROLE=all` / local mode that's once, at boot, indistinguishable from
+before this ticket; under the control/standby split it's gated to exactly one
+pod at a time, and fires again on a fresh ctx if this pod later re-acquires
+the lease after a demotion. The ctx cancels on EITHER process shutdown OR
+lease demotion — by the time the hook runs, `Bus()` and `PublishEvent` are
+safe to use. The worker is not exempt from the dormancy contract: it must
+gate its per-org work on `entitlements.For(orgID).Has(feature)` just like any
+handler, since `OnReady` fires unconditionally (across every entitled and
+unentitled org alike) for every install that currently holds the brain.
+
+A worker that is genuinely safe to run replicated across every pod
+(idempotent, no external side effects that would duplicate) opts into
+`ExtensionAPI.OnReadyReplicaSafe` instead — fired once, unconditionally, at
+boot, regardless of brain-lease state. This is an explicit opt-in with zero
+callers today; default to `OnReady`.
 
 ## Entitlement gating: two shapes, one contract
 
