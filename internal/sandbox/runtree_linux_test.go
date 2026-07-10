@@ -291,3 +291,46 @@ func TestSetRunTreeOwnerUID_WidensValidation(t *testing.T) {
 		t.Errorf("post-registration ChownRunTree: %v — the registered orchestrator uid should be an accepted owner", err)
 	}
 }
+
+// TestBrokeredMode_RejectsRootOwnedTree pins the security property the
+// ownership check exists for, and the exact hole a prior version had: once
+// brokered (SetRunTreeOwnerUID registered a non-root orchestrator uid),
+// this code runs inside the root cap-broker, and a ROOT-owned tree must be
+// rejected even though the broker process is itself root. Trusting the
+// broker's own uid==0 here would accept every root-owned directory in the
+// container image (≥2 components deep) as a legitimate "run tree" and hand
+// a compromised, capability-less orchestrator — which still owns and dials
+// the broker socket — a root-privileged recursive-chown / RemoveAll /
+// setuid-capture primitive against host state, reopening exactly the
+// boundary this validation exists to close.
+//
+// Runs only as root, because that is the posture that reproduces the bug:
+// os.Getuid() must be 0 (the broker) while a DIFFERENT uid is the
+// registered orchestrator. t.TempDir() is already root-owned there,
+// standing in for /usr/local/bin, /var/lib/..., etc.
+func TestBrokeredMode_RejectsRootOwnedTree(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root: the hole only exists when the broker process's own uid is 0")
+	}
+
+	orig := runTreeOwnerExtraUID
+	t.Cleanup(func() { runTreeOwnerExtraUID = orig })
+	// A non-root orchestrator uid, distinct from this (root) process — the
+	// production brokered posture.
+	SetRunTreeOwnerUID(foreignUID)
+
+	rootOwned := t.TempDir()
+	if uid, _ := statUIDGID(t, rootOwned); uid != 0 {
+		t.Fatalf("fixture: tree owned by uid %d, want 0 — this test is only meaningful run as root", uid)
+	}
+
+	if err := (hostOps{}).ChownRunTree(context.Background(), rootOwned, ""); err == nil {
+		t.Error("ChownRunTree accepted a root-owned tree in brokered mode; the broker's own root uid must not be a legitimate run-tree owner")
+	}
+	if err := (hostOps{}).RemoveRunTree(context.Background(), rootOwned); err == nil {
+		t.Error("RemoveRunTree accepted a root-owned tree in brokered mode; same hole via the destructive op")
+	}
+	if _, err := (hostOps{}).CaptureRunDelta(context.Background(), rootOwned); err == nil {
+		t.Error("CaptureRunDelta accepted a root-owned tree in brokered mode; same hole via the capture op")
+	}
+}

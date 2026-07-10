@@ -383,19 +383,27 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 // gitOutputCtx, which combines the two. env, when non-nil, replaces the
 // child's environment (used to point GIT_INDEX_FILE at a throwaway index).
 //
-// gitCapture runs git as the host (root, in multi mode) directly against the
-// worktree, and captureUncommitted's `git add -A` / `git diff` go through here.
-// Unlike the push-gate's metadata reads (a byte read of HEAD, and config read
-// from OUTSIDE any repository — neither of which lets an agent-writable config
-// run anything), add/diff DO consult the repository's own (agent-writable, once
+// captureUncommitted's `git add -A` / `git diff` go through here. Unlike the
+// push-gate's metadata reads (a byte read of HEAD, and config read from OUTSIDE
+// any repository — neither of which lets an agent-writable config run
+// anything), add/diff DO consult the repository's own (agent-writable, once
 // chowned to the sandbox uid) `.gitattributes` + `.git/config` to decide
-// whether to invoke an external clean/smudge filter or diff driver. So this
-// path must NOT be made ownership-tolerant against a chowned run root: doing so
-// would let a compromised sandboxed agent plant both halves of that pair and
-// get this host-side (root) capture to execute arbitrary code. Fixing the
-// parking-snapshot failure against a chowned worktree needs the capture to run
-// with no more privilege than the agent had (inside the jail), or to avoid
-// filter-honoring git entirely — its own follow-up, not this.
+// whether to invoke an external clean/smudge filter or diff driver.
+//
+// In multi mode this no longer runs as host root: captureWorkspaceGit's
+// dispatcher (internal/delegate/capture_isolated.go) routes every multi-mode
+// capture through sandbox.CaptureRunDelta, which runs the whole
+// CaptureWorkspaceGit — this included — inside a child dropped to the sandbox
+// uid/gid (WorktreeUID/WorktreeGID) in an empty network namespace
+// (internal/sandbox/capture_linux.go). So a clean/smudge/diff filter a hostile
+// `.gitattributes` + `.git/config` pair could trigger executes only at the
+// agent's own privilege, with no network — not as the privileged capture host.
+//
+// Precisely BECAUSE that containment lives in the caller, this path must still
+// NOT be made ownership-tolerant against a chowned run root in-process: doing
+// so would move filter execution back to whatever privilege the in-process
+// caller holds (root under TF_PRIVSEP=0, or a local-mode operator). Keep it
+// strict; the isolation is the dropped-privilege child, not any check here.
 func gitCapture(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {

@@ -23,33 +23,61 @@ func captureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
 	return defaultOps.CaptureRunDelta(ctx, worktree)
 }
 
-// runTreeOwnerExtraUID widens allowedRunTreeOwner beyond this process's
-// own uid: the broker runs as root but operates on trees the (different,
-// unprivileged) orchestrator created, so runBroker sets this from its
-// --orchestrator-uid flag at boot. -1 (the default, in-process case)
-// adds nothing — there, the tree creator IS this process.
+// runTreeOwnerExtraUID is the orchestrator's uid when this code runs
+// inside the broker, and the flag that puts allowedRunTreeOwner into its
+// brokered mode. The broker runs as root but operates only on trees the
+// (different, unprivileged) orchestrator created, so runBroker sets this
+// from its --orchestrator-uid flag at boot; once set, it REPLACES the
+// process's own (root) uid as the accepted owner rather than adding to it
+// — see allowedRunTreeOwner. -1 (the default, in-process case) leaves the
+// process's own uid as the accepted owner, because there the tree creator
+// IS this process.
 var runTreeOwnerExtraUID = -1
 
-// SetRunTreeOwnerUID registers the orchestrator's uid as an accepted
-// run-tree owner for the validation below. Called once by the cap-broker
-// subcommand at boot, before serving; never called in-process.
+// SetRunTreeOwnerUID registers the orchestrator's uid as the accepted
+// run-tree owner for the validation below, switching allowedRunTreeOwner
+// into brokered mode. Called once by the cap-broker subcommand at boot,
+// before serving; never called in-process.
 func SetRunTreeOwnerUID(uid int) { runTreeOwnerExtraUID = uid }
 
 // allowedRunTreeOwner is the ownership precondition on every run-tree
 // operation at this privileged boundary: the tree (and, for chown, every
 // entry in it) must already belong to an identity that legitimately
-// produces run trees — the process that created it (this uid in-process;
-// the registered orchestrator uid when brokered) or the sandbox identity
-// itself (idempotent re-chown after a resume; teardown of a tree a run
-// wrote into). Anything else — /etc, another service's state — fails
-// closed. This, not path shape, is the real teeth: even a validly-shaped
-// path can't make the privileged side touch a tree the orchestrator
-// doesn't already own.
+// produces run trees, or the sandbox identity itself (idempotent re-chown
+// after a resume; teardown of a tree a run wrote into). Anything else —
+// /etc/ssl, another service's state — fails closed. This, not path shape,
+// is the real teeth: even a validly-shaped path can't make the privileged
+// side touch a tree the orchestrator doesn't already own.
+//
+// Which identity "legitimately produces run trees" is deployment-shaped,
+// and the split matters for security:
+//
+//   - Brokered (runTreeOwnerExtraUID >= 0): this code runs inside the
+//     ROOT cap-broker, which never creates run trees itself — only the
+//     unprivileged orchestrator does, as runTreeOwnerExtraUID. So the
+//     accepted owners are exactly that uid and the sandbox identity;
+//     os.Getuid() (0, root) is deliberately NOT trusted here. Trusting it
+//     would accept every root-owned directory in the image (/usr/local/bin,
+//     /var/lib/..., anything ≥2 components deep) as a "run tree" and hand a
+//     compromised, capability-less orchestrator — which still owns and can
+//     dial the broker socket — a root-privileged recursive-chown / RemoveAll
+//     primitive against host state, reopening exactly the boundary this
+//     validation exists to close.
+//   - In-process (runTreeOwnerExtraUID < 0, the TF_PRIVSEP=0 rollback):
+//     this process IS the one that creates run trees (as root, single
+//     privileged process), so "owned by me" is the correct legitimacy check
+//     and no separate orchestrator uid exists to register.
 func allowedRunTreeOwner(uid uint32) bool {
-	if int(uid) == os.Getuid() || uid == WorktreeUID {
+	if uid == WorktreeUID {
 		return true
 	}
-	return runTreeOwnerExtraUID >= 0 && int(uid) == runTreeOwnerExtraUID
+	if runTreeOwnerExtraUID >= 0 {
+		// Brokered: only the registered orchestrator uid — never the
+		// broker's own root uid.
+		return int(uid) == runTreeOwnerExtraUID
+	}
+	// In-process: the creating process's own uid.
+	return int(uid) == os.Getuid()
 }
 
 // validateRunTreeShape is the string-only half of the run-tree path gate
