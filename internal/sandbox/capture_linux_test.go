@@ -164,6 +164,77 @@ func TestCaptureRunDelta_SkipsNetnsWithoutSysAdmin(t *testing.T) {
 	}
 }
 
+// TestTailBuffer_SingleLargeWriteNeverExceedsMax pins that a single Write
+// bigger than max never transiently holds more than max bytes: the naive
+// "append then trim" approach would briefly allocate len(t.buf)+len(p),
+// defeating the point of a hard cap against a hostile child dumping a large
+// chunk to stderr in one write.
+func TestTailBuffer_SingleLargeWriteNeverExceedsMax(t *testing.T) {
+	tb := &tailBuffer{max: 16}
+	big := bytes.Repeat([]byte{'x'}, 1<<20) // 1 MiB in a single Write call
+	n, err := tb.Write(big)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(big) {
+		t.Errorf("Write returned n=%d, want %d", n, len(big))
+	}
+	if len(tb.buf) != tb.max {
+		t.Errorf("tb.buf len = %d, want exactly max=%d", len(tb.buf), tb.max)
+	}
+	if !tb.truncated {
+		t.Error("truncated flag not set for an over-cap single write")
+	}
+}
+
+// TestTailBuffer_AccumulatesAcrossWritesWithinMax pins the untruncated
+// happy path: multiple writes that together fit within max concatenate in
+// order with no truncation marker.
+func TestTailBuffer_AccumulatesAcrossWritesWithinMax(t *testing.T) {
+	tb := &tailBuffer{max: 8}
+	_, _ = tb.Write([]byte("abcd"))
+	_, _ = tb.Write([]byte("efgh"))
+	if got := tb.String(); got != "abcdefgh" {
+		t.Errorf("String() = %q, want %q", got, "abcdefgh")
+	}
+	if tb.truncated {
+		t.Error("truncated flag set when total writes exactly fill max")
+	}
+}
+
+// TestTailBuffer_KeepsOnlyLastMaxBytes pins the "tail" half of the name: once
+// writes exceed max, only the most recent max bytes survive.
+func TestTailBuffer_KeepsOnlyLastMaxBytes(t *testing.T) {
+	tb := &tailBuffer{max: 4}
+	_, _ = tb.Write([]byte("abcdefgh"))
+	if got := tb.String(); !strings.HasSuffix(got, "efgh") {
+		t.Errorf("String() = %q, want it to end with tail %q", got, "efgh")
+	}
+	if !tb.truncated {
+		t.Error("truncated flag not set")
+	}
+}
+
+// TestCaptureRunDelta_ErrorHasNoTrailingColonWhenStderrEmpty pins that a
+// capture failure with no stderr output at all (the child never started)
+// surfaces a plain error, not one formatted with an always-appended,
+// now-empty ": %s" stderr suffix.
+func TestCaptureRunDelta_ErrorHasNoTrailingColonWhenStderrEmpty(t *testing.T) {
+	orig := captureCommand
+	captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error) {
+		return exec.CommandContext(ctx, "/nonexistent-tf-capture-errfmt-test-binary"), nil
+	}
+	t.Cleanup(func() { captureCommand = orig })
+
+	_, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t))
+	if err == nil {
+		t.Fatal("expected an error for a nonexistent capture binary")
+	}
+	if strings.HasSuffix(err.Error(), ": ") {
+		t.Errorf("error = %q, want no trailing empty-stderr suffix", err.Error())
+	}
+}
+
 // TestCaptureRunDeltaTo_StdoutIsTheSocketBackedFile pins the one
 // implementation trap this ticket exists to avoid: the child's stdout must
 // be the caller-supplied *os.File itself, assigned directly to cmd.Stdout —

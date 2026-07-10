@@ -61,7 +61,10 @@ func (s *Server) captureRunDelta(ctx context.Context, a captureRunDeltaArgs) (an
 
 	stderrTail, err := captureRunDeltaTo(ctx, a.Worktree, f)
 	if err != nil {
-		return nil, fmt.Errorf("capbroker: capture run delta: %w (stderr: %s)", err, stderrTail)
+		if stderrTail != "" {
+			return nil, fmt.Errorf("capbroker: capture run delta: %w (stderr: %s)", err, stderrTail)
+		}
+		return nil, fmt.Errorf("capbroker: capture run delta: %w", err)
 	}
 	return captureRunDeltaResult{StderrTail: stderrTail}, nil
 }

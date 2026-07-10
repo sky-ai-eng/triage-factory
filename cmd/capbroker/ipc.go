@@ -224,6 +224,12 @@ func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree string) ([]byt
 	ctx, cancel := context.WithTimeout(ctx, captureTimeout)
 	defer cancel()
 
+	// acceptedConn always receives exactly one value from the goroutine
+	// below — the accepted conn, or nil if Accept itself failed — kept
+	// separate from streamDone so an RPC failure can synchronously reach
+	// (and close) an already-accepted conn instead of leaving it to buffer
+	// toward CaptureMaxBytes, unread, for up to the full cap/deadline.
+	acceptedConn := make(chan net.Conn, 1)
 	type streamResult struct {
 		buf []byte
 		err error
@@ -236,9 +242,11 @@ func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree string) ([]byt
 		}
 		conn, err := l.Accept()
 		if err != nil {
+			acceptedConn <- nil
 			streamDone <- streamResult{nil, fmt.Errorf("accept capture stream: %w", err)}
 			return
 		}
+		acceptedConn <- conn
 		defer func() { _ = conn.Close() }()
 		_ = conn.SetDeadline(deadline)
 		buf, err := sandbox.ReadCapturedDelta(conn)
@@ -249,11 +257,20 @@ func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree string) ([]byt
 	args := captureRunDeltaArgs{Worktree: worktree, StdoutSocketPath: sockPath}
 	if err := c.callWithCap(ctx, methodCaptureRunDelta, args, &res, captureTimeout); err != nil {
 		// The RPC is authoritative on failure (dial failure, child failure) —
-		// discard whatever, if anything, crossed the stream. Returning now
-		// runs the deferred l.Close()/os.Remove() above, which unblocks a
-		// still-pending Accept in the goroutine (it errors on the closed
-		// listener) so it sends to the buffered streamDone and exits — no
-		// goroutine leak even though nothing here reads that value.
+		// discard whatever, if anything, crossed the stream, and stop it from
+		// continuing to read toward CaptureMaxBytes on a result nobody will
+		// use. Closing the listener first fails a still-pending Accept
+		// immediately; the receive below then resolves at once either way
+		// (Accept had already succeeded, or just failed because we closed
+		// the listener) and closes an already-accepted conn, unblocking a
+		// Read that would otherwise ride out the full cap or deadline. No
+		// goroutine leak: acceptedConn and streamDone are both buffered, so
+		// the goroutine's sends never block even though nothing here reads
+		// streamDone's value.
+		_ = l.Close()
+		if conn := <-acceptedConn; conn != nil {
+			_ = conn.Close()
+		}
 		return nil, err
 	}
 

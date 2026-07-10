@@ -69,15 +69,33 @@ type tailBuffer struct {
 	truncated bool
 }
 
+// Write never lets the transient allocation exceed max, even for a single
+// huge p: trimming AFTER an unconditional append (the naive approach) would
+// briefly hold len(t.buf)+len(p) bytes, defeating the point of a hard cap
+// against a hostile child that dumps a large chunk to stderr in one write.
 func (t *tailBuffer) Write(p []byte) (int, error) {
-	if len(t.buf)+len(p) > t.max {
+	n := len(p)
+	if n == 0 {
+		return 0, nil
+	}
+	if len(t.buf)+n > t.max {
 		t.truncated = true
 	}
-	t.buf = append(t.buf, p...)
-	if len(t.buf) > t.max {
-		t.buf = t.buf[len(t.buf)-t.max:]
+	if n >= t.max {
+		// p alone already fills (or overflows) the cap: keep only its own
+		// tail — a fresh copy, so this doesn't hold a reference into p's
+		// (possibly much larger) backing array — discarding everything
+		// buffered so far without ever appending past max.
+		t.buf = append([]byte(nil), p[n-t.max:]...)
+		return n, nil
 	}
-	return len(p), nil
+	// Make room for p first, then append — len(t.buf) never exceeds max at
+	// any point, including mid-call.
+	if keep := t.max - n; len(t.buf) > keep {
+		t.buf = t.buf[len(t.buf)-keep:]
+	}
+	t.buf = append(t.buf, p...)
+	return n, nil
 }
 
 func (t *tailBuffer) String() string {
@@ -210,7 +228,10 @@ func (hostOps) CaptureRunDelta(ctx context.Context, worktree string) ([]byte, er
 	stderrTail, runErr := CaptureRunDeltaTo(ctx, worktree, pw)
 	res := <-readDone
 	if runErr != nil {
-		return nil, fmt.Errorf("%w: %s", runErr, stderrTail)
+		if stderrTail != "" {
+			return nil, fmt.Errorf("%w: %s", runErr, stderrTail)
+		}
+		return nil, runErr
 	}
 	if res.err != nil {
 		return nil, fmt.Errorf("isolated capture: %w", res.err)

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -225,5 +226,61 @@ func TestIPCRoundTrip_CaptureRunDelta_WaitsForStreamAfterRPCSuccess(t *testing.T
 	}
 	if elapsed := time.Since(start); elapsed < captureTimeout {
 		t.Errorf("returned in %s, under the %s stream-wait budget — it did not actually wait for the stream", elapsed, captureTimeout)
+	}
+}
+
+// TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure pins
+// that an RPC failure closes an already-accepted stream connection right
+// away rather than leaving it to read (and buffer, toward
+// sandbox.CaptureMaxBytes) a result nobody will use. The stub never closes
+// its end of the stream itself — it blocks reading from it in the
+// background, so this test's success signal (the read unblocking) can only
+// come from the CLIENT side closing its accepted conn. A generous
+// captureTimeout (unmodified from production) with a much shorter assertion
+// window proves this happens promptly, not merely "eventually, on its own
+// timeout".
+func TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure(t *testing.T) {
+	withTempCaptureSocketDir(t)
+
+	peerClosed := make(chan struct{})
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree string, stdout *os.File) (string, error) {
+		t.Cleanup(func() { _ = stdout.Close() })
+		go func() {
+			buf := make([]byte, 16)
+			_, _ = stdout.Read(buf) // unblocks once the client closes its end
+			close(peerClosed)
+		}()
+		return "", errors.New("simulated child failure")
+	})
+	client := serveTestBroker(t, &fakeOps{})
+
+	if _, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-fail"); err == nil {
+		t.Fatal("expected the simulated RPC failure to propagate")
+	}
+
+	select {
+	case <-peerClosed:
+	case <-time.After(1 * time.Second):
+		t.Fatal("client did not close the accepted stream promptly after an RPC failure")
+	}
+}
+
+// TestIPCRoundTrip_CaptureRunDelta_ErrorHasNoEmptyStderrSuffix pins that a
+// capture failure with no stderr output doesn't surface an error string
+// with an always-appended, now-empty "(stderr: )" suffix.
+func TestIPCRoundTrip_CaptureRunDelta_ErrorHasNoEmptyStderrSuffix(t *testing.T) {
+	withTempCaptureSocketDir(t)
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree string, stdout *os.File) (string, error) {
+		_ = stdout.Close()
+		return "", errors.New("simulated capture failure")
+	})
+	client := serveTestBroker(t, &fakeOps{})
+
+	_, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-errfmt")
+	if err == nil {
+		t.Fatal("expected the simulated failure to propagate")
+	}
+	if strings.Contains(err.Error(), "(stderr: )") {
+		t.Errorf("error = %q, want no empty-stderr suffix when stderrTail is empty", err.Error())
 	}
 }
