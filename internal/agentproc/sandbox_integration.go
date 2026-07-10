@@ -26,10 +26,14 @@ func shouldSandbox() bool {
 	return runmode.Current() == runmode.ModeMulti && runtime.GOOS == "linux"
 }
 
-// sandboxWorkRoot is where the run's Cwd (the run-root) is bind-mounted
+// SandboxWorkRoot is where the run's Cwd (the run-root) is bind-mounted
 // inside the gVisor sandbox; mirrors sandbox/spec.go's Cwd="/work" mount and
-// the translateEnvForSandbox / translateAddDirsForSandbox rewrites.
-const sandboxWorkRoot = "/work"
+// the translateEnvForSandbox / translateAddDirsForSandbox rewrites. It is
+// also the sandboxed agent's HOME (buildSandboxEnv), which is why
+// worktree.ClaudeProjectDir keys the sandboxed session-transcript location
+// off it: the agent's ~/.claude lands inside the /work bind-mount, i.e.
+// inside the run's own host-side directory.
+const SandboxWorkRoot = "/work"
 
 // WillSandbox reports whether a Run on this host will route through the gVisor
 // sandbox (multi mode + Linux). Callers that must pre-stage sandbox-only
@@ -101,7 +105,7 @@ func readOnlyRepoMounts(mounts []ReadOnlyRepoMount) []sandbox.Mount {
 		}
 		out = append(out, sandbox.Mount{
 			Source:      m.Source,
-			Destination: filepath.Join(sandboxWorkRoot, rel),
+			Destination: filepath.Join(SandboxWorkRoot, rel),
 			// Only "ro" here — sandbox.mountsFromExtra auto-prepends "rbind" for
 			// every extra mount (asserted by TestBuildSpec_ReadOnlyRepoMountIsRO),
 			// so the final mount is a recursive read-only bind. Don't duplicate
@@ -125,7 +129,7 @@ func readOnlyRepoMounts(mounts []ReadOnlyRepoMount) []sandbox.Mount {
 // resolve identically whether the run is sandboxed or not.
 func AgentVisibleRoot(hostRoot string) string {
 	if shouldSandbox() {
-		return sandboxWorkRoot
+		return SandboxWorkRoot
 	}
 	return hostRoot
 }
