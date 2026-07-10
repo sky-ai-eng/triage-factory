@@ -243,7 +243,20 @@ Each PR independently mergeable; the split defaults **off** until PS-P4.
   execs+supervises the runtime; orchestrator drives via the socket).
 - **PS-P3** — broker owns the OCI spec; narrow validated RPC params (§4).
 - **PS-P4** — flip default on + exec-time capability drop on the orchestrator.
-- **PS-P5** — route `capture_isolated` (screenshot) through the broker.
+  Landed with an audit addendum: the §5 audit covered sandbox-infrastructure
+  syscalls but missed the file-ownership ops the drop also takes away —
+  worktree chown to the sandbox uid (CAP_CHOWN, agentproc), run-tree removal
+  at teardown (unlinking through sandbox-owned modes), the capture child's
+  setuid (CAP_SETUID, not just its CLONE_NEWNET), and the agenthost socket
+  chown + its /run/tf directory write. P4 therefore also brokered the
+  run-tree lifecycle (ChownRunTree / RemoveRunTree / CaptureRunDelta, with
+  path-shape + tree-ownership validation at the RPC boundary), absorbed
+  PS-P5, handed /run/tf to the orchestrator's uid at broker boot, and made
+  the agenthost socket grant an owner-legal chgrp via the image's
+  tf-sandbox group instead of a chown.
+- **PS-P5** — ~~route `capture_isolated` through the broker~~ folded into
+  PS-P4 (see above): the capture's *setuid* half broke the moment P4's drop
+  landed, not just its netns half, so it could not wait.
 
 **Hardening track (parallel, independent of the split):**
 - **PS-H1** — `npm ci --ignore-scripts`.

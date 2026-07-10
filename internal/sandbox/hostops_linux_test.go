@@ -30,6 +30,13 @@ func (f fakePrivilegedOps) LaunchRun(ctx context.Context, p LaunchParams) (Launc
 }
 func (f fakePrivilegedOps) RemoveRunCgroup(dir string) error      { return nil }
 func (f fakePrivilegedOps) ReapOrphans(ctx context.Context) error { return nil }
+func (f fakePrivilegedOps) ChownRunTree(ctx context.Context, root, subpath string) error {
+	return nil
+}
+func (f fakePrivilegedOps) RemoveRunTree(ctx context.Context, path string) error { return nil }
+func (f fakePrivilegedOps) CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
+	return nil, nil
+}
 
 var _ PrivilegedOps = fakePrivilegedOps{}
 

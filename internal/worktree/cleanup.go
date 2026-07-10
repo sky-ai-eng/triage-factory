@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // RemoveAt removes a worktree directory by path and prunes the bare's
@@ -22,7 +24,13 @@ func RemoveAt(path, runID string) error {
 	if path == "" {
 		return nil
 	}
-	if err := os.RemoveAll(path); err != nil {
+	// Via the privileged seam, not os.RemoveAll: a multi-mode run tree is
+	// owned by the sandbox identity by the time it's removed, with
+	// agent-created modes the post-drop orchestrator cannot unlink
+	// through — the removal executes in the cap-broker there. Local mode
+	// and TF_PRIVSEP=0 route to the in-process implementation, which is
+	// the plain RemoveAll this call used to be.
+	if err := sandbox.RemoveRunTree(context.Background(), path); err != nil {
 		return fmt.Errorf("remove worktree dir %s: %w", path, err)
 	}
 
@@ -105,7 +113,15 @@ func CleanupWithOptions(opts CleanupOptions) {
 					// (EvalSymlinks needs the dir to still exist to resolve).
 					RemoveClaudeProjectDir(fullPath)
 				}
-				os.RemoveAll(fullPath)
+				// Privileged seam (see RemoveAt): an orphan from a crashed
+				// sandboxed run is owned by the sandbox identity, which the
+				// post-drop orchestrator can't unlink itself. Errors are
+				// logged rather than swallowed — a leaked tree the sweep
+				// exists to reclaim should be visible, not silent.
+				if err := sandbox.RemoveRunTree(context.Background(), fullPath); err != nil {
+					worktreeLog.Warn("orphaned worktree not removed", "path", fullPath, "error", err)
+					continue
+				}
 				count++
 			}
 		}

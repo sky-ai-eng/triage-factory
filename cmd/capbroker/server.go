@@ -23,6 +23,14 @@ import (
 // only so tests can shrink it to prove that opt-out without a 60s wait.
 var callTimeout = 60 * time.Second
 
+// captureTimeout bounds one CaptureRunDelta dispatch. Unlike the other
+// host operations it shells out to git (a bundle of local-only commits
+// plus a full binary diff) against a worktree whose size the run
+// dictates, so it gets a budget sized for a large tree rather than a
+// wedged syscall. Mirrored by the client-side budget in
+// IPCClient.CaptureRunDelta.
+const captureTimeout = 5 * time.Minute
+
 // connIOTimeout bounds a single frame's read/write. A client that never
 // sends a frame, or never drains the reply, is confused or malicious;
 // there's no reason to hold the goroutine open past this.
@@ -175,7 +183,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 
 	var req request
-	if err := readFrame(conn, &req); err != nil {
+	if err := readFrame(conn, &req, maxFrameSize); err != nil {
 		if errors.Is(err, io.EOF) {
 			return
 		}
@@ -196,12 +204,19 @@ func (s *Server) handleConn(conn net.Conn) {
 	// WaitRun blocks until the supervised run exits — potentially the whole
 	// agent run (minutes, idle hibernation), far past callTimeout — so it
 	// runs on baseCtx directly, bounded by the run itself and unwound only
-	// on broker Shutdown (which cancels baseCtx). Every other method is a
-	// bounded host operation and keeps the callTimeout budget.
+	// on broker Shutdown (which cancels baseCtx). CaptureRunDelta shells
+	// out to git (bundle + full binary diff) against a worktree of
+	// arbitrary size, so it gets captureTimeout rather than the host-op
+	// budget. Every other method is a bounded host operation and keeps
+	// the callTimeout budget.
 	ctx := s.baseCtx
 	if req.Method != methodWaitRun {
+		budget := callTimeout
+		if req.Method == methodCaptureRunDelta {
+			budget = captureTimeout
+		}
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(s.baseCtx, callTimeout)
+		ctx, cancel = context.WithTimeout(s.baseCtx, budget)
 		defer cancel()
 	}
 
@@ -221,14 +236,14 @@ func (s *Server) handleConn(conn net.Conn) {
 	if err := conn.SetWriteDeadline(time.Now().Add(connIOTimeout)); err != nil {
 		return
 	}
-	_ = writeFrame(conn, resp)
+	_ = writeFrame(conn, resp, responseFrameSize)
 }
 
 func (s *Server) sendError(conn net.Conn, msg string) {
 	if err := conn.SetWriteDeadline(time.Now().Add(connIOTimeout)); err != nil {
 		return
 	}
-	_ = writeFrame(conn, response{Error: msg})
+	_ = writeFrame(conn, response{Error: msg}, responseFrameSize)
 }
 
 // dispatch routes one method to s.ops. SetupRunCgroup is the one method
@@ -321,6 +336,31 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 			return nil, err
 		}
 		return s.killRun(a)
+
+	case methodChownRunTree:
+		var a chownRunTreeArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, s.ops.ChownRunTree(ctx, a.Root, a.Subpath)
+
+	case methodRemoveRunTree:
+		var a removeRunTreeArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, s.ops.RemoveRunTree(ctx, a.Path)
+
+	case methodCaptureRunDelta:
+		var a captureRunDeltaArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		delta, err := s.ops.CaptureRunDelta(ctx, a.Worktree)
+		if err != nil {
+			return nil, err
+		}
+		return captureRunDeltaResult{Delta: delta}, nil
 
 	default:
 		return nil, fmt.Errorf("capbroker: unknown method %q", method)

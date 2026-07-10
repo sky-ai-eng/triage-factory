@@ -106,8 +106,8 @@ the executor itself reached out to or spawned.
 
 ## 4. Privilege separation: the trust-domain decomposition
 
-*(Target architecture — the privsep epic. Current state is a single process;
-see §8.)*
+*(The core split described below is shipped, on by default; §8 has the
+current-state detail and what's still in progress.)*
 
 There are two independent ways the system is decomposed, and conflating them
 causes confusion, so name both:
@@ -348,26 +348,35 @@ basis.
 - GitHub App installation tokens (short-lived, single-installation).
 - Executors accept no inbound traffic.
 - Local mode takes none of the host privileges (sandbox skipped).
+- `npm ci --ignore-scripts` for the vendored Agent SDK.
+- Tailored seccomp profile replacing `seccomp=unconfined`.
+- **Privilege separation, core split:** privileged operations extracted
+  behind a broker interface; the `cap-broker` process + narrow RPC +
+  socket-fd stdio boundary, owning the OCI spec from a fixed template;
+  exec-time capability drop on the orchestrator (default on) — see §4 and
+  `docs/self-host-setup.md`'s process-model table.
 
-**In progress — privilege separation (the privsep epic):**
-- Extract privileged operations behind a broker interface (refactor, no
-  behavior change).
-- The `cap-broker` process + narrow RPC + socket-fd stdio boundary.
-- Exec-time capability drop on the orchestrator.
-- Route the isolated-capture path through the broker.
+**In progress — privilege separation (remaining):**
+- Route the isolated-capture path (currently: skips its network-namespace
+  isolation, rather than failing, when the calling process has no
+  `CAP_SYS_ADMIN` — see `internal/delegate/capture_isolated_linux.go`)
+  through the broker so that isolation applies unconditionally again.
+- Retire the `TF_PRIVSEP` rollback flag once the split has had a release
+  to bake.
 
 **In progress — hardening (parallel track):**
-- `npm ci --ignore-scripts`.
-- Tailored seccomp profile replacing `seccomp=unconfined`.
 - Control-plane GitHub App-token minting (executors never hold the App key).
 - Least-privilege `tf_system` database role for executors.
 - Signed releases + SBOM.
 
-Until the privsep epic lands, an executor is a **single process** holding the
-capabilities, the credentials, and the hostile-input parsers together. The
-mitigations above (memory-safe Go, no inbound traffic, Property B, gVisor) bound
-that today; privilege separation is what shrinks the privileged, credential-
-holding surface to a small, auditable component.
+With the core privilege-separation split shipped, an executor's
+capabilities, credentials, and hostile-input parsers live in **separate
+processes**: the cap-broker holds `CAP_SYS_ADMIN`/`CAP_NET_ADMIN` and
+nothing else; the orchestrator holds the credentials and parses the
+hostile input, with an empty capability set. The isolated-capture gap
+above is the one place that separation is not yet complete — it degrades
+to a narrower (but still real, uid-drop-based) isolation rather than
+failing, pending the broker-routed fix.
 
 ---
 

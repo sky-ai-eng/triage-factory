@@ -119,6 +119,14 @@ FROM alpine:3.20 AS runtime
 #   git that internal/sandbox/rootfs.go installs for the jailed agent.
 # - openssh-client: the worktree layer has an SSH path
 #   (internal/worktree/ssh.go) used for SSH clone URLs / GHE remotes.
+# - setpriv: the entrypoint's exec-time capability drop — clears the
+#   orchestrator's capability bounding set and switches it to a
+#   different uid at the exec boundary, before the Go runtime ever
+#   starts a thread. Never done in-process (capset/prctl from Go only
+#   affects one thread and would leave others still privileged), so
+#   this small, single-purpose, single-threaded C tool is a hard
+#   runtime dependency of docker/entrypoint.sh's default (TF_PRIVSEP=1)
+#   path.
 RUN apk add --no-cache \
     iptables \
     iproute2 \
@@ -127,7 +135,45 @@ RUN apk add --no-cache \
     tzdata \
     curl \
     git \
-    openssh-client
+    openssh-client \
+    setpriv
+
+# The unprivileged orchestrator identity the entrypoint drops into for
+# multi mode (TF_PRIVSEP=1, the default there). A fixed, dedicated,
+# non-root uid/gid — distinct from internal/sandbox.WorktreeUID (10000,
+# the uid *inside* the gVisor sandbox the agent runs as) and from the
+# cap-broker (which stays root) — so the two host-level privsep
+# processes are never the same uid: the orchestrator, holding zero
+# capabilities after the drop, cannot ptrace a same-uid broker if it
+# were ever the same identity. `-D` skips a password.
+#
+# Unlike a purely-service identity, this one DOES need a real, owned
+# home directory: internal/paths.go documents "~/.claude state — Claude
+# Code SDK session dirs, which must follow the real HOME even in multi
+# mode" (curator sessions, skills import, project-bundle export/import
+# all resolve os.UserHomeDir() from the orchestrator's own process). The
+# entrypoint's exec-time drop switches uid via setpriv, which does not
+# touch environment variables, so it also explicitly exports
+# HOME=/home/tf-orchestrator right before that exec — without both the
+# directory (owned by this uid) and the env var (setpriv won't derive it
+# from /etc/passwd), those code paths would try to read/write under the
+# root-owned $HOME inherited from the container's default environment,
+# which this uid cannot reach post-drop.
+#
+# tf-sandbox (gid 10000 — internal/sandbox.WorktreeGID) exists so the
+# orchestrator can grant the sandbox identity access to per-run agenthost
+# sockets WITHOUT CAP_CHOWN: giving a file away to another uid always
+# needs that capability, but an owner may chgrp its own file to any group
+# it is a member of. Making tf-orchestrator a member (and having the
+# entrypoint's setpriv carry exactly this one supplementary group through
+# the drop) turns the socket hand-off into an owner-legal chgrp + 0660 —
+# see cmd/exec/agenthost/socket_linux.go's grantSocketToSandbox. No host
+# process runs AS this gid; it exists purely as the grant target matching
+# the in-sandbox agent's gid.
+RUN addgroup -g 10000 tf-sandbox \
+    && addgroup -g 10001 tf-orchestrator \
+    && adduser -D -u 10001 -G tf-orchestrator -h /home/tf-orchestrator -s /sbin/nologin tf-orchestrator \
+    && adduser tf-orchestrator tf-sandbox
 
 # Pull the per-arch runsc binary from a pinned gVisor release.
 #

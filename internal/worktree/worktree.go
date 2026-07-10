@@ -16,6 +16,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // claudeProjectsDir and claudeHome live in claude_session.go alongside the
@@ -351,7 +352,9 @@ func MakeRunRoot(runID string) (string, error) {
 // handled by RemoveAt + pruneAll for each individual worktree before
 // this is called; this is the final sweep of the parent dir itself.
 func RemoveRunRoot(runID string) {
-	os.RemoveAll(runDir(runID))
+	// Privileged seam (see RemoveAt's doc): the run root is sandbox-owned
+	// by teardown time in multi mode.
+	_ = sandbox.RemoveRunTree(context.Background(), runDir(runID))
 }
 
 // MakeRunCwd creates a throwaway cwd for delegated runs that have no worktree.
@@ -370,7 +373,7 @@ func MakeRunCwd(runID string) (string, error) {
 // RemoveRunCwd removes the throwaway cwd created by MakeRunCwd. Safe if missing.
 // Vestigial — see MakeRunCwd.
 func RemoveRunCwd(runID string) {
-	os.RemoveAll(filepath.Join(os.TempDir(), runsDir, runID+"-nocwd"))
+	_ = sandbox.RemoveRunTree(context.Background(), filepath.Join(os.TempDir(), runsDir, runID+"-nocwd"))
 }
 
 // EnsureBareClone is the exported entry point for callers that want a

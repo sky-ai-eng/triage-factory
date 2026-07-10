@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // strictlyWithin reports whether path is a strict descendant of root — not
@@ -415,9 +415,9 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		// failure mode is precisely "this path is not inside the run root"
 		// (a regressed create contract), and RemoveAll on an unverified path
 		// would turn that bug into deleting an arbitrary host directory.
-		if cerr := agentproc.ChownWorkspaceCheckoutForSandbox(hostRoot, path); cerr != nil {
+		if cerr := agentproc.ChownWorkspaceCheckoutForSandbox(ctx, hostRoot, path); cerr != nil {
 			if strictlyWithin(hostRoot, path) {
-				_ = os.RemoveAll(path)
+				_ = sandbox.RemoveRunTree(context.Background(), path)
 			} else {
 				agenthostLog.Warn("leaving un-chowned checkout in place; path is not verifiably inside the run root", "path", path, "host_root", hostRoot)
 			}
