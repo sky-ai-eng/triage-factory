@@ -320,20 +320,9 @@ func (s *Server) handleProjectExportPreview(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	// Same gate as handleProjectImport, same reason: projectbundle's
-	// curator reads are raw `?`-placeholder SQL on the raw *sql.DB —
-	// which in multi mode is the ADMIN pool (RLS bypassed), so porting
-	// must go through WithTx-bound store methods, not a placeholder
-	// rewrite. Until then, gate rather than 500 (or worse, silently
-	// export a transcript-less bundle — the sandboxed curator's
-	// transcript lives under the project KB dir, not this process's
-	// $HOME, so the session lookup below never finds it in multi).
-	if runmode.Current() != runmode.ModeLocal {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "project export is not yet supported in multi-mode deployments"})
-		return
-	}
+	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
-	preview, err := projectbundle.Preview(r.Context(), s.db, s.projects, s.curatorStore, orgID, id)
+	preview, err := projectbundle.Preview(r.Context(), s.tx, orgID, userID, id)
 	if err != nil {
 		if errors.Is(err, projectbundle.ErrProjectNotFound) {
 			notFound(w, "project")
@@ -348,11 +337,6 @@ func (s *Server) handleProjectExportPreview(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleProjectExport(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
-		return
-	}
-	// See handleProjectExportPreview — identical gate, identical reason.
-	if runmode.Current() != runmode.ModeLocal {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "project export is not yet supported in multi-mode deployments"})
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
@@ -370,7 +354,7 @@ func (s *Server) handleProjectExport(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "project")
 		return
 	}
-	stream, err := projectbundle.Export(r.Context(), s.db, s.projects, s.curatorStore, orgID, id)
+	stream, err := projectbundle.Export(r.Context(), s.tx, orgID, userID, id)
 	if err != nil {
 		if errors.Is(err, projectbundle.ErrProjectNotFound) {
 			notFound(w, "project")
@@ -391,16 +375,6 @@ func (s *Server) handleProjectExport(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
-		return
-	}
-	// projectbundle.Import is still SQLite-only — it opens its own
-	// *sql.Tx and writes via raw `?`-placeholder INSERTs that have no
-	// Postgres counterpart. Gate the endpoint until the bundle
-	// import/export path is ported to per-dialect store methods so a
-	// multi-mode tenant doesn't get a 500 the first time they try to
-	// import. Local-mode behavior is unchanged.
-	if runmode.Current() != runmode.ModeLocal {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "project import is not yet supported in multi-mode deployments"})
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, projectBundleMaxUploadBytes)
@@ -432,18 +406,17 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := ClaimsFrom(r.Context()).Subject
-	// Resolve the acting team inside WithTx so teams_select RLS gates the
-	// lookup under the user's claims. The downstream projectbundle.Import
-	// does its own DB work; we don't include it in this tx to keep import
-	// latency from holding a claims-bound connection. (Import is local-
-	// mode-only — gated above — so the acting team is always the sole
-	// team; resolveActingTeam keeps the choice centralized regardless.)
+	// Resolve the acting team inside WithTx so teams_select RLS gates
+	// the lookup under the user's claims. Import's own DB writes run in
+	// a separate WithTx inside projectbundle.Import, AFTER zip
+	// extraction — a multi-GiB extraction must not hold a claims-bound
+	// connection. A multi-team caller picks via the optional team_id
+	// form field (same contract as project create); a single-team
+	// caller (every local install) falls back to their sole team.
 	var teamID string
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		// Import is local-mode-only (gated above), so there's no picker
-		// and the sole-team fallback always applies — pass an empty pick.
-		teamID, e = teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, "")
+		teamID, e = teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, r.FormValue("team_id"))
 		return e
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {
@@ -455,8 +428,7 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 
 	project, warnings, err := projectbundle.Import(
 		r.Context(),
-		s.db,
-		s.projects,
+		s.tx,
 		orgID,
 		teamID,
 		userID,

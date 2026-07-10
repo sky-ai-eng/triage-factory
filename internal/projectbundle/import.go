@@ -3,7 +3,6 @@ package projectbundle
 import (
 	"archive/zip"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,10 +13,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -82,16 +81,17 @@ func (r *countingReader) Read(p []byte) (int, error) {
 // Import reads a .tfproject ZIP and materializes it into a new project
 // owned by orgID + teamID, with userID stamped as the creator. The
 // caller resolves all three from the request context (orgID + userID
-// from JWT claims, teamID from TeamsStore.GetDefaultForOrgSystem).
+// from JWT claims, teamID via teamscope.ResolveActing).
 //
-// SQLite-only today — the body opens its own *sql.Tx and writes via
-// raw `?`-placeholder INSERTs. handleProjectImport mode-gates the
-// endpoint to local-mode for that reason; porting to per-dialect store
-// methods is a follow-up.
+// Ordering: files are extracted to their final org-scoped locations
+// FIRST (they're invisible until the project row commits, and the
+// rollbackTracker removes them on any failure), then every DB write
+// runs inside ONE claims-bound WithTx — so Postgres RLS gates the
+// inserts under the importing user's identity, and the tx never holds
+// a claims-bound pool connection through multi-GiB zip extraction.
 func Import(
 	ctx context.Context,
-	database *sql.DB,
-	projects db.ProjectStore,
+	txr db.TxRunner,
 	orgID, teamID, userID string,
 	readerAt io.ReaderAt,
 	size int64,
@@ -113,9 +113,21 @@ func Import(
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := ensureUniqueProjectName(ctx, projects, orgID, manifest.Project.Name); err != nil {
+	// Cheap duplicate-name preflight before paying extraction. The
+	// authoritative check re-runs inside the write tx below — the name
+	// could be taken between this read and the commit.
+	if err := txr.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		return ensureUniqueProjectName(ctx, tx.Projects, orgID, manifest.Project.Name)
+	}); err != nil {
 		return nil, nil, err
 	}
+	// Preflight every pinned repo through the importing org's OWN
+	// GitHub client (probe wraps resolver.ClientForRepo(orgID, ...)).
+	// This is a tenant-isolation invariant, not just UX: the bare-clone
+	// cache is keyed org-globally by (owner, repo), so resolvability
+	// under the importer's credentials is what stops an org from
+	// pinning its way into a same-named repo it cannot actually access.
+	// Network I/O — deliberately before the DB tx.
 	cloneURLs, err := preflightPinnedRepos(ctx, manifest.Project.PinnedRepos, probe)
 	if err != nil {
 		return nil, nil, err
@@ -158,30 +170,8 @@ func Import(
 		}
 	}()
 
-	tx, err := database.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("begin import transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	if err := insertImportedProject(tx, newProjectID, newSessionID, orgID, teamID, userID, manifest.Project); err != nil {
-		return nil, nil, err
-	}
-
-	requestIDMap, err := importCuratorRequests(tx, newProjectID, entries[curatorRequestsPath])
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := importCuratorMessages(tx, requestIDMap, entries[curatorMessagesPath]); err != nil {
-		return nil, nil, err
-	}
-	if err := importPendingContext(tx, newProjectID, newSessionID, requestIDMap, entries[curatorPendingContextPath]); err != nil {
-		return nil, nil, err
-	}
-	if err := ensureRepoProfiles(tx, teamID, manifest.Project.PinnedRepos, cloneURLs); err != nil {
-		return nil, nil, err
-	}
-
+	// Files first (see the func doc). The tree is rooted under a
+	// fresh uuid, so nothing can observe it before the row commits.
 	cleanup.Add(projectRoot)
 	if err := os.MkdirAll(kbRoot, 0o755); err != nil {
 		return nil, nil, fmt.Errorf("mkdir knowledge root: %w", err)
@@ -189,26 +179,58 @@ func Import(
 	if err := materializeKnowledge(entries, kbRoot, extractionBudget); err != nil {
 		return nil, nil, err
 	}
-
 	if hasSession {
 		if err := materializeSession(entries, manifest.Session, projectRoot, newSessionID, extractionBudget, cleanup); err != nil {
 			return nil, nil, err
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, nil, fmt.Errorf("commit import transaction: %w", err)
+	var project *domain.Project
+	if err := txr.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		if err := ensureUniqueProjectName(ctx, tx.Projects, orgID, manifest.Project.Name); err != nil {
+			return err
+		}
+		pinned := cloneStrings(manifest.Project.PinnedRepos)
+		if _, err := tx.Projects.Create(ctx, orgID, teamID, domain.Project{
+			ID:               newProjectID,
+			Name:             strings.TrimSpace(manifest.Project.Name),
+			Description:      manifest.Project.Description,
+			CuratorSessionID: newSessionID,
+			PinnedRepos:      pinned,
+			JiraProjectKey:   manifest.Project.JiraProjectKey,
+			LinearProjectKey: manifest.Project.LinearProjectKey,
+		}); err != nil {
+			return fmt.Errorf("insert imported project: %w", err)
+		}
+
+		requestIDMap, err := importCuratorRequests(ctx, tx.Curator, orgID, newProjectID, entries[curatorRequestsPath])
+		if err != nil {
+			return err
+		}
+		if err := importCuratorMessages(ctx, tx.Curator, orgID, requestIDMap, entries[curatorMessagesPath]); err != nil {
+			return err
+		}
+		if err := importPendingContext(ctx, tx.Curator, orgID, newProjectID, newSessionID, requestIDMap, entries[curatorPendingContextPath]); err != nil {
+			return err
+		}
+		if err := trackImportedRepos(ctx, tx, orgID, teamID, manifest.Project.PinnedRepos, cloneURLs); err != nil {
+			return err
+		}
+
+		project, err = tx.Projects.Get(ctx, orgID, newProjectID)
+		if err != nil {
+			return fmt.Errorf("load imported project: %w", err)
+		}
+		if project == nil {
+			return errors.New("imported project row is missing inside its own tx")
+		}
+		return nil
+	}); err != nil {
+		return nil, nil, err
 	}
 	committed = true
 
 	warnings := clonePinnedRepos(ctx, manifest.Project.PinnedRepos, cloneURLs)
-	project, err := projects.Get(ctx, orgID, newProjectID)
-	if err != nil {
-		return nil, warnings, fmt.Errorf("load imported project: %w", err)
-	}
-	if project == nil {
-		return nil, warnings, errors.New("import committed but project row is missing")
-	}
 	return project, warnings, nil
 }
 
@@ -320,56 +342,11 @@ func preflightPinnedRepos(ctx context.Context, pinned []string, probe GitHubProb
 	return cloneURLs, nil
 }
 
-// insertImportedProject inserts a row into projects from a bundle
-// manifest. org_id, team_id, and creator_user_id are bound from the
-// request handler's resolved identity (orgID + userID from JWT claims;
-// teamID from TeamsStore.GetDefaultForOrgSystem) rather than left to
-// SQLite column defaults — that way `projects.List(ctx, orgID)` and
-// `Import(..., orgID, ...)` agree on the row's owning tenant even if
-// the caller ever passes a non-default value. SQLite-only SQL today;
-// see Import's docstring for the porting note.
-func insertImportedProject(tx *sql.Tx, projectID, curatorSessionID, orgID, teamID, userID string, manifestProject ManifestProject) error {
-	pinned := cloneStrings(manifestProject.PinnedRepos)
-	if pinned == nil {
-		pinned = []string{}
-	}
-	pinnedJSON, err := json.Marshal(pinned)
-	if err != nil {
-		return fmt.Errorf("marshal pinned repos: %w", err)
-	}
-	now := time.Now().UTC()
-	_, err = tx.Exec(`
-		INSERT INTO projects (
-			id, name, description,
-			curator_session_id, pinned_repos, jira_project_key,
-			linear_project_key, org_id, team_id, creator_user_id,
-			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		projectID,
-		strings.TrimSpace(manifestProject.Name),
-		manifestProject.Description,
-		nullIfEmptyString(curatorSessionID),
-		string(pinnedJSON),
-		nullIfEmptyString(manifestProject.JiraProjectKey),
-		nullIfEmptyString(manifestProject.LinearProjectKey),
-		orgID,
-		teamID,
-		userID,
-		now,
-		now,
-	)
-	if err != nil {
-		return fmt.Errorf("insert imported project: %w", err)
-	}
-	return nil
-}
-
-// importCuratorRequests restores curator history into the new project. team_id is
-// snapshotted from the destination project (inserted earlier in this same tx) via
-// the (SELECT team_id FROM projects WHERE id = ?) subquery — like every curator
-// INSERT — so imported spend rolls into the importing team's dashboard (TFAC-476).
-func importCuratorRequests(tx *sql.Tx, projectID string, zf *zip.File) (map[string]string, error) {
+// importCuratorRequests restores curator history into the new project.
+// Runs inside the caller's WithTx: creator_user_id stamps to the
+// importing user and team_id snapshots from the destination project row
+// (TFAC-476) inside CuratorStore.ImportRequest.
+func importCuratorRequests(ctx context.Context, curator db.CuratorStore, orgID, projectID string, zf *zip.File) (map[string]string, error) {
 	idMap := make(map[string]string)
 	err := decodeZipJSONLines(
 		zf,
@@ -385,27 +362,9 @@ func importCuratorRequests(tx *sql.Tx, projectID string, zf *zip.File) (map[stri
 				newID = uuid.New().String()
 				idMap[oldID] = newID
 			}
-			_, err := tx.Exec(`
-			INSERT INTO curator_requests (
-				id, project_id, team_id, status, user_input, error_msg,
-				cost_usd, duration_ms, num_turns, started_at,
-				finished_at, created_at
-			) VALUES (?, ?, (SELECT team_id FROM projects WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`,
-				newID,
-				projectID,
-				projectID,
-				row.Status,
-				row.UserInput,
-				nullIfEmptyString(row.ErrorMsg),
-				row.CostUSD,
-				row.DurationMs,
-				row.NumTurns,
-				nullIfNilTime(row.StartedAt),
-				nullIfNilTime(row.FinishedAt),
-				row.CreatedAt,
-			)
-			if err != nil {
+			row.ID = newID
+			row.ProjectID = projectID
+			if err := curator.ImportRequest(ctx, orgID, row); err != nil {
 				return fmt.Errorf("insert curator_request %s: %w", oldID, err)
 			}
 			return nil
@@ -417,7 +376,7 @@ func importCuratorRequests(tx *sql.Tx, projectID string, zf *zip.File) (map[stri
 	return idMap, nil
 }
 
-func importCuratorMessages(tx *sql.Tx, requestIDMap map[string]string, zf *zip.File) error {
+func importCuratorMessages(ctx context.Context, curator db.CuratorStore, orgID string, requestIDMap map[string]string, zf *zip.File) error {
 	err := decodeZipJSONLines(
 		zf,
 		maxImportJSONLEntryBytes,
@@ -427,37 +386,9 @@ func importCuratorMessages(tx *sql.Tx, requestIDMap map[string]string, zf *zip.F
 			if requestID == "" {
 				return fmt.Errorf("curator message references unknown request_id %q", row.RequestID)
 			}
-			toolCallsJSON, err := marshalNullableJSON(row.ToolCalls)
-			if err != nil {
-				return fmt.Errorf("marshal tool_calls for request %s: %w", row.RequestID, err)
-			}
-			metadataJSON, err := marshalNullableJSON(row.Metadata)
-			if err != nil {
-				return fmt.Errorf("marshal metadata for request %s: %w", row.RequestID, err)
-			}
-			_, err = tx.Exec(`
-			INSERT INTO curator_messages (
-				request_id, role, subtype, content, tool_calls, tool_call_id,
-				is_error, metadata, model, input_tokens, output_tokens,
-				cache_read_tokens, cache_creation_tokens, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`,
-				requestID,
-				row.Role,
-				row.Subtype,
-				row.Content,
-				toolCallsJSON,
-				nullIfEmptyString(row.ToolCallID),
-				row.IsError,
-				metadataJSON,
-				nullIfEmptyString(row.Model),
-				nullIfNilInt(row.InputTokens),
-				nullIfNilInt(row.OutputTokens),
-				nullIfNilInt(row.CacheReadTokens),
-				nullIfNilInt(row.CacheCreationTokens),
-				row.CreatedAt,
-			)
-			if err != nil {
+			row.RequestID = requestID
+			row.ID = 0 // let the destination DB assign the message id
+			if _, err := curator.InsertMessage(ctx, orgID, &row); err != nil {
 				return fmt.Errorf("insert curator_message for request %s: %w", row.RequestID, err)
 			}
 			return nil
@@ -470,7 +401,9 @@ func importCuratorMessages(tx *sql.Tx, requestIDMap map[string]string, zf *zip.F
 }
 
 func importPendingContext(
-	tx *sql.Tx,
+	ctx context.Context,
+	curator db.CuratorStore,
+	orgID string,
 	projectID string,
 	newSessionID string,
 	requestIDMap map[string]string,
@@ -484,29 +417,17 @@ func importPendingContext(
 			if strings.TrimSpace(newSessionID) == "" {
 				return errors.New("bundle has pending context rows but no session payload")
 			}
-			var consumedBy any
 			if row.ConsumedByRequestID != "" {
 				mapped := requestIDMap[row.ConsumedByRequestID]
 				if mapped == "" {
 					return fmt.Errorf("pending context references unknown consumed_by_request_id %q", row.ConsumedByRequestID)
 				}
-				consumedBy = mapped
+				row.ConsumedByRequestID = mapped
 			}
-			_, err := tx.Exec(`
-			INSERT INTO curator_pending_context (
-				project_id, curator_session_id, change_type, baseline_value,
-				consumed_at, consumed_by_request_id, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?)
-		`,
-				projectID,
-				newSessionID,
-				row.ChangeType,
-				row.BaselineValue,
-				nullIfNilTime(row.ConsumedAt),
-				consumedBy,
-				row.CreatedAt,
-			)
-			if err != nil {
+			row.ProjectID = projectID
+			row.CuratorSessionID = newSessionID
+			row.ID = 0
+			if err := curator.ImportPendingContext(ctx, orgID, row); err != nil {
 				return fmt.Errorf("insert pending context row: %w", err)
 			}
 			return nil
@@ -518,55 +439,65 @@ func importPendingContext(
 	return nil
 }
 
-// ensureRepoProfiles materializes the imported project's pinned repos.
-// It writes two rows per repo:
+// trackImportedRepos materializes the imported project's pinned repos —
+// the import behaves like a repo-selection save:
 //
 //   - team_github_repos — the per-team tracking selection that is the
 //     source of truth. Without this the router team↔repo gate
 //     (TracksRepoSystem) drops the importing team's handlers for the
 //     repo, so polled events from it never create tasks until the user
-//     re-saves the repo selection. repo_profiles is a *derived cache* of
-//     this table, so the tracking row must exist for the import to behave
-//     like a normal repo-selection save.
-//   - repo_profiles — the org-wide polled set (the cache), pre-seeded
-//     here with the clone_url discovered during preflight so the import's
-//     clone step + first poll don't have to re-resolve it.
+//     re-saves the repo selection. Written via ReplaceForTeam (current
+//     set ∪ pinned), which also reconciles the org-shared repo_profiles
+//     cache — skeleton rows for newly-tracked repos — atomically inside
+//     the caller's WithTx.
+//   - repo_profiles.clone_url — pre-seeded with the URL discovered
+//     during preflight (SeedCloneURL never clobbers an existing value),
+//     so the first poll doesn't have to re-resolve it.
 //
-// Import is SQLite-only (N=1, single default team), so teamID is the org
-// default team and no cross-team union reconcile is needed — the union is
-// trivially this team's rows.
-func ensureRepoProfiles(tx *sql.Tx, teamID string, pinned []string, cloneURLs map[string]string) error {
+// Under Postgres RLS the team-row write is gated like any repo-selection
+// save (team admin); a non-admin importing a bundle with pinned repos
+// gets that denial surfaced as the import error rather than a silently
+// untracked project.
+func trackImportedRepos(ctx context.Context, tx db.TxStores, orgID, teamID string, pinned []string, cloneURLs map[string]string) error {
+	if len(pinned) == 0 {
+		return nil
+	}
+	existing, err := tx.TeamGitHubRepos.ListForTeam(ctx, teamID)
+	if err != nil {
+		return fmt.Errorf("list tracked repos for team: %w", err)
+	}
+	seen := make(map[string]struct{}, len(existing))
+	merged := make([]domain.TeamGitHubRepo, 0, len(existing)+len(pinned))
+	for _, r := range existing {
+		seen[strings.ToLower(r.Owner)+"/"+strings.ToLower(r.Repo)] = struct{}{}
+		merged = append(merged, r)
+	}
+	added := false
 	for _, slug := range pinned {
 		owner, repo, ok := splitOwnerRepo(slug)
 		if !ok {
 			return fmt.Errorf("invalid pinned repo slug %q", slug)
 		}
-		// Track the repo for the importing team (the gate's source of
-		// truth). All pinned repos passed preflight, so they're all real.
-		if _, err := tx.Exec(`
-			INSERT INTO team_github_repos (team_id, owner, repo)
-			VALUES (?, ?, ?)
-			ON CONFLICT(team_id, owner, repo) DO NOTHING
-		`, teamID, owner, repo); err != nil {
-			return fmt.Errorf("track imported repo %s: %w", slug, err)
+		key := strings.ToLower(owner) + "/" + strings.ToLower(repo)
+		if _, dup := seen[key]; dup {
+			continue
 		}
+		seen[key] = struct{}{}
+		merged = append(merged, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
+		added = true
+	}
+	if added {
+		if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, merged); err != nil {
+			return fmt.Errorf("track imported repos (requires team-admin in multi mode): %w", err)
+		}
+	}
+	for _, slug := range pinned {
 		cloneURL := cloneURLs[slug]
 		if cloneURL == "" {
 			continue
 		}
-		_, err := tx.Exec(`
-			INSERT INTO repo_profiles (id, owner, repo, clone_url, updated_at)
-			VALUES (?, ?, ?, ?, datetime('now'))
-			ON CONFLICT(id) DO UPDATE SET
-				clone_url = CASE
-					WHEN repo_profiles.clone_url IS NULL OR repo_profiles.clone_url = ''
-					THEN excluded.clone_url
-					ELSE repo_profiles.clone_url
-				END,
-				updated_at = datetime('now')
-		`, slug, owner, repo, cloneURL)
-		if err != nil {
-			return fmt.Errorf("upsert repo profile %s: %w", slug, err)
+		if err := tx.Repos.SeedCloneURL(ctx, orgID, slug, cloneURL); err != nil {
+			return fmt.Errorf("seed clone url for %s: %w", slug, err)
 		}
 	}
 	return nil
@@ -605,15 +536,17 @@ func materializeSession(
 	cleanup *rollbackTracker,
 ) error {
 	newResolvedCwd := worktree.ResolveClaudeProjectCwd(projectRoot)
-	newEncoded := worktree.EncodeClaudeProjectDir(newResolvedCwd)
-	// ~/.claude/projects is Claude Code SDK session state keyed to the
-	// real HOME, not TF state — it stays home-relative even in multi mode
-	// and so does not route through internal/paths.
-	home, err := os.UserHomeDir() //nolint:forbidigo // Claude Code SDK session state, not TF state (see internal/paths doc).
+	// The session tree goes where the curator that later RESUMES this
+	// session will look for it: home-relative for direct (local) runs,
+	// inside the org-scoped project root for sandboxed (multi) runs —
+	// worktree.ClaudeProjectDir owns that branch. Writing to the
+	// orchestrator's $HOME in multi mode would be both a tenant-scoping
+	// violation and functionally dead (the sandboxed curator runs with
+	// HOME=/work and could never see it).
+	encodedRoot, err := worktree.ClaudeProjectDir(newResolvedCwd)
 	if err != nil {
-		return fmt.Errorf("resolve home dir for session import: %w", err)
+		return fmt.Errorf("resolve claude session dir for import: %w", err)
 	}
-	encodedRoot := filepath.Join(home, ".claude", "projects", newEncoded)
 	if err := os.MkdirAll(encodedRoot, 0o700); err != nil {
 		return fmt.Errorf("mkdir claude project root: %w", err)
 	}
@@ -623,11 +556,17 @@ func materializeSession(
 	cleanup.Add(sessionTreeRoot)
 	cleanup.Add(transcriptDest)
 
+	// Rewrite the transcript's embedded cwd strings to the path the
+	// resuming agent will actually observe — the host path for direct
+	// runs, "/work" for sandboxed runs (AgentVisibleRoot). The
+	// manifest's ResolvedCwd is likewise the exporting agent's OBSERVED
+	// cwd, so local↔multi round-trips rewrite correctly in both
+	// directions.
 	reps := buildSessionReplacements(
 		manifestSession.CuratorSessionID,
 		newSessionID,
 		manifestSession.ResolvedCwd,
-		newResolvedCwd,
+		agentproc.AgentVisibleRoot(newResolvedCwd),
 	)
 
 	transcript, ok := entries[sessionTranscriptPath]
@@ -678,6 +617,14 @@ func materializeSession(
 
 func clonePinnedRepos(ctx context.Context, pinned []string, cloneURLs map[string]string) []ImportWarning {
 	warnings := make([]ImportWarning, 0)
+	// Sandboxed (multi) deployments seed bare clones on demand with
+	// per-org auth (worktree.EnsureSharedCuratorWorktree passes the
+	// org's App token via WithCloneAuth); an eager ambient-credential
+	// clone here would just fail and emit a warning per repo. The eager
+	// warm-cache clone is a local-mode convenience.
+	if agentproc.WillSandbox() {
+		return warnings
+	}
 	for _, slug := range pinned {
 		owner, repo, ok := splitOwnerRepo(slug)
 		if !ok {
@@ -918,45 +865,4 @@ func splitOwnerRepo(slug string) (owner, repo string, ok bool) {
 		return "", "", false
 	}
 	return owner, repo, true
-}
-
-func marshalNullableJSON(v any) (any, error) {
-	switch t := v.(type) {
-	case nil:
-		return nil, nil
-	case []domain.ToolCall:
-		if len(t) == 0 {
-			return nil, nil
-		}
-	case map[string]any:
-		if len(t) == 0 {
-			return nil, nil
-		}
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
-	return string(b), nil
-}
-
-func nullIfEmptyString(v string) any {
-	if strings.TrimSpace(v) == "" {
-		return nil
-	}
-	return v
-}
-
-func nullIfNilInt(v *int) any {
-	if v == nil {
-		return nil
-	}
-	return *v
-}
-
-func nullIfNilTime(v *time.Time) any {
-	if v == nil {
-		return nil
-	}
-	return *v
 }

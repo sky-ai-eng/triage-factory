@@ -966,7 +966,7 @@ func (s *Server) routes() {
 	// Curator chat per project. The Curator package owns the
 	// long-lived CC session lifecycle; these endpoints are the API
 	// the Projects page will hit.
-	ch := &curatorHandler{db: s.db, tx: s.tx, ws: s.ws, runtime: func() *curator.Curator { return s.curator }}
+	ch := &curatorHandler{tx: s.tx, ws: s.ws, runtime: func() *curator.Curator { return s.curator }}
 	s.apiMutating("POST /api/projects/{id}/curator/messages", ch.handleCuratorSend)
 	s.api("GET /api/projects/{id}/curator/messages", ch.handleCuratorHistory)
 	s.apiMutating("DELETE /api/projects/{id}/curator/messages/in-flight", ch.handleCuratorCancel)

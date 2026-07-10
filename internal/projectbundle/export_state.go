@@ -3,7 +3,6 @@ package projectbundle
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -33,12 +33,48 @@ type exportState struct {
 	manifest     Manifest
 	artifacts    []bundleArtifact
 	sessionInZip bool
+	warnings     []string
 }
 
-func collectExportState(ctx context.Context, database *sql.DB, projects db.ProjectStore, curatorStore db.CuratorStore, orgID, projectID string) (*exportState, error) {
-	project, err := projects.Get(ctx, orgID, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("load project: %w", err)
+// collectExportState gathers everything Export/Preview serialize. DB
+// reads run inside one claims-bound WithTx so Postgres RLS scopes them
+// to the requesting user (the curator select policies are deliberately
+// self-only — a multi-mode export carries the exporting user's own chat
+// turns, the local single user's export carries everything). Filesystem
+// collection happens after the tx ends so disk walks never hold a
+// claims-bound connection.
+func collectExportState(ctx context.Context, txr db.TxRunner, orgID, userID, projectID string) (*exportState, error) {
+	var (
+		project  *domain.Project
+		requests []domain.CuratorRequest
+		msgByReq map[string][]domain.CuratorMessage
+		pending  []domain.CuratorPendingContext
+	)
+	if err := txr.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var e error
+		project, e = tx.Projects.Get(ctx, orgID, projectID)
+		if e != nil || project == nil {
+			return e
+		}
+		requests, e = tx.Curator.ListRequestsByProject(ctx, orgID, projectID)
+		if e != nil {
+			return fmt.Errorf("list curator requests: %w", e)
+		}
+		requestIDs := make([]string, 0, len(requests))
+		for _, req := range requests {
+			requestIDs = append(requestIDs, req.ID)
+		}
+		msgByReq, e = tx.Curator.ListMessagesByRequestIDs(ctx, orgID, requestIDs)
+		if e != nil {
+			return fmt.Errorf("list curator messages: %w", e)
+		}
+		pending, e = tx.Curator.ListPendingContext(ctx, orgID, projectID)
+		if e != nil {
+			return fmt.Errorf("list curator pending context: %w", e)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	if project == nil {
 		return nil, ErrProjectNotFound
@@ -72,22 +108,31 @@ func collectExportState(ctx context.Context, database *sql.DB, projects db.Proje
 		return nil, fmt.Errorf("collect knowledge files: %w", err)
 	}
 
-	sessionIncluded, err := appendSessionArtifacts(resolvedRoot, project.CuratorSessionID, &state.artifacts)
+	sessionIncluded, sessionWarning, err := appendSessionArtifacts(resolvedRoot, project.CuratorSessionID, &state.artifacts)
 	if err != nil {
 		return nil, err
+	}
+	if sessionWarning != "" {
+		state.warnings = append(state.warnings, sessionWarning)
 	}
 	state.sessionInZip = sessionIncluded
 	if sessionIncluded {
 		state.manifest.Session = &ManifestSession{
 			CuratorSessionID: project.CuratorSessionID,
-			ResolvedCwd:      resolvedRoot,
+			// ResolvedCwd is the cwd AS THE AGENT SAW IT — the value
+			// embedded in the transcript JSONL that import's
+			// search-replace rewrite must match. For a sandboxed
+			// (multi-mode) curator that is "/work", not the host-side
+			// project root the tree was located through.
+			ResolvedCwd: agentproc.AgentVisibleRoot(resolvedRoot),
 		}
 	}
 
-	if err := appendCuratorArtifacts(ctx, database, curatorStore, orgID, project.ID, &state.artifacts); err != nil {
+	if err := appendCuratorArtifacts(requests, msgByReq, pending, &state.artifacts); err != nil {
 		return nil, err
 	}
 
+	state.manifest.Warnings = cloneStrings(state.warnings)
 	manifestBytes, err := encodeManifest(state.manifest)
 	if err != nil {
 		return nil, err
@@ -159,29 +204,36 @@ func appendDirArtifacts(dir, bundlePrefix string, out *[]bundleArtifact) error {
 	})
 }
 
-func appendSessionArtifacts(resolvedProjectRoot, curatorSessionID string, out *[]bundleArtifact) (bool, error) {
+// appendSessionArtifacts locates the curator's Claude Code session tree
+// through worktree.ClaudeProjectDir — home-relative for direct (local)
+// runs, inside the org-scoped project root for sandboxed (multi) runs.
+// A missing transcript returns (false, "", nil) as before (project
+// never ran a curator session, or the tree was cleaned). A transcript
+// that EXISTS but is unreadable by this process — possible in multi
+// mode, where run trees are chowned to the sandbox uid — is surfaced as
+// a warning instead of being silently dropped, so a bundle that ships
+// without its session says so.
+func appendSessionArtifacts(resolvedProjectRoot, curatorSessionID string, out *[]bundleArtifact) (bool, string, error) {
 	if strings.TrimSpace(curatorSessionID) == "" {
-		return false, nil
+		return false, "", nil
 	}
-	// ~/.claude/projects is Claude Code SDK session state keyed to the
-	// real HOME, not TF state — it stays home-relative even in multi mode
-	// (where TF state diverges onto a mounted volume), so it does not
-	// route through internal/paths.
-	home, err := os.UserHomeDir() //nolint:forbidigo // Claude Code SDK session state, not TF state (see internal/paths doc).
+	sessionDir, err := worktree.ClaudeProjectDir(resolvedProjectRoot)
 	if err != nil {
-		return false, fmt.Errorf("resolve home dir for session export: %w", err)
+		return false, "", fmt.Errorf("resolve claude session dir for export: %w", err)
 	}
-	encoded := worktree.EncodeClaudeProjectDir(resolvedProjectRoot)
-	transcriptPath := filepath.Join(home, ".claude", "projects", encoded, curatorSessionID+".jsonl")
+	transcriptPath := filepath.Join(sessionDir, curatorSessionID+".jsonl")
 	st, err := os.Stat(transcriptPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return false, "", nil
 		}
-		return false, fmt.Errorf("stat session transcript: %w", err)
+		if os.IsPermission(err) {
+			return false, fmt.Sprintf("curator session transcript exists but is not readable by the server process (%s); the bundle was exported without the session", transcriptPath), nil
+		}
+		return false, "", fmt.Errorf("stat session transcript: %w", err)
 	}
 	if !st.Mode().IsRegular() {
-		return false, fmt.Errorf("session transcript is not a regular file: %s", transcriptPath)
+		return false, "", fmt.Errorf("session transcript is not a regular file: %s", transcriptPath)
 	}
 	*out = append(*out, bundleArtifact{
 		bundlePath: sessionTranscriptPath,
@@ -189,67 +241,46 @@ func appendSessionArtifacts(resolvedProjectRoot, curatorSessionID string, out *[
 		diskPath:   transcriptPath,
 	})
 
-	sessionRoot := filepath.Join(home, ".claude", "projects", encoded, curatorSessionID)
+	sessionRoot := filepath.Join(sessionDir, curatorSessionID)
 	if err := appendDirArtifacts(filepath.Join(sessionRoot, "subagents"), sessionSubagentsPrefix, out); err != nil {
-		return false, fmt.Errorf("collect subagent files: %w", err)
+		return false, "", fmt.Errorf("collect subagent files: %w", err)
 	}
 	if err := appendDirArtifacts(filepath.Join(sessionRoot, "tool-results"), sessionToolResultsPrefix, out); err != nil {
-		return false, fmt.Errorf("collect tool-result files: %w", err)
+		return false, "", fmt.Errorf("collect tool-result files: %w", err)
 	}
-	return true, nil
+	return true, "", nil
 }
 
-func appendCuratorArtifacts(ctx context.Context, database *sql.DB, curatorStore db.CuratorStore, orgID, projectID string, out *[]bundleArtifact) error {
-	requests, err := db.ListCuratorRequestsByProject(database, projectID)
-	if err != nil {
-		return fmt.Errorf("list curator requests: %w", err)
-	}
+// appendCuratorArtifacts serializes the already-collected curator rows.
+// Pure serialization — every DB read happened inside
+// collectExportState's WithTx.
+func appendCuratorArtifacts(
+	requests []domain.CuratorRequest,
+	msgByReq map[string][]domain.CuratorMessage,
+	pending []domain.CuratorPendingContext,
+	out *[]bundleArtifact,
+) error {
 	requestBytes, err := marshalJSONLines(requests)
 	if err != nil {
 		return fmt.Errorf("encode curator requests: %w", err)
 	}
-	*out = append(*out, bundleArtifact{
-		bundlePath: curatorRequestsPath,
-		size:       int64(len(requestBytes)),
-		content:    requestBytes,
-	})
-
-	requestIDs := make([]string, 0, len(requests))
-	for _, req := range requests {
-		requestIDs = append(requestIDs, req.ID)
-	}
-	msgByReq, err := db.ListCuratorMessagesByRequestIDs(database, requestIDs)
-	if err != nil {
-		return fmt.Errorf("list curator messages: %w", err)
-	}
 	flatMessages := make([]domain.CuratorMessage, 0)
-	for _, reqID := range requestIDs {
-		flatMessages = append(flatMessages, msgByReq[reqID]...)
+	for _, req := range requests {
+		flatMessages = append(flatMessages, msgByReq[req.ID]...)
 	}
 	messageBytes, err := marshalJSONLines(flatMessages)
 	if err != nil {
 		return fmt.Errorf("encode curator messages: %w", err)
 	}
-	*out = append(*out, bundleArtifact{
-		bundlePath: curatorMessagesPath,
-		size:       int64(len(messageBytes)),
-		content:    messageBytes,
-	})
-
-	pending, err := curatorStore.ListPendingContext(ctx, orgID, projectID)
-	if err != nil {
-		return fmt.Errorf("list curator pending context: %w", err)
-	}
 	pendingBytes, err := marshalJSONLines(pending)
 	if err != nil {
 		return fmt.Errorf("encode curator pending context: %w", err)
 	}
-	*out = append(*out, bundleArtifact{
-		bundlePath: curatorPendingContextPath,
-		size:       int64(len(pendingBytes)),
-		content:    pendingBytes,
-	})
-
+	*out = append(*out,
+		bundleArtifact{bundlePath: curatorRequestsPath, size: int64(len(requestBytes)), content: requestBytes},
+		bundleArtifact{bundlePath: curatorMessagesPath, size: int64(len(messageBytes)), content: messageBytes},
+		bundleArtifact{bundlePath: curatorPendingContextPath, size: int64(len(pendingBytes)), content: pendingBytes},
+	)
 	return nil
 }
 

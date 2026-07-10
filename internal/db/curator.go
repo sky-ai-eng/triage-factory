@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,7 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// ErrCuratorInFlight is returned by ResetCuratorForProject when a
+// ErrCuratorInFlight is returned by CuratorStore.ResetForProject when a
 // queued or running request exists at the moment of the reset call.
 // The HTTP handler maps this to 409 so the client can prompt the
 // user to cancel first.
@@ -107,34 +106,6 @@ func CompleteCuratorRequest(database *sql.DB, id, status, errMsg string, costUSD
 	return n > 0, err
 }
 
-// MarkCuratorRequestCancelledIfActive flips any non-terminal row to
-// cancelled. Returns true if the flip happened. Used by the cancel
-// endpoint and by the project-delete handler so an in-flight request
-// for a deleted project lands in the right terminal state. The
-// status-NOT-IN filter makes this safe to call from outside the
-// per-project goroutine — terminal rows are left alone.
-//
-// Refreshes the denormalized token columns from the curator_messages SUM,
-// same as CompleteCuratorRequest — a request cancelled mid-turn still
-// streamed (and paid for) messages, so the cache must reflect them rather
-// than strand at 0 (TFAC-473).
-func MarkCuratorRequestCancelledIfActive(database *sql.DB, id, errMsg string) (bool, error) {
-	res, err := database.Exec(`
-		UPDATE curator_requests
-		SET status = 'cancelled', error_msg = ?, finished_at = ?,
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = ?),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = ?),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = ?),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = ?)
-		WHERE id = ? AND status NOT IN ('done', 'cancelled', 'failed')
-	`, nullIfEmpty(errMsg), time.Now().UTC(), id, id, id, id, id)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
-}
-
 // GetCuratorRequest reads a single row, or returns (nil, nil) if not
 // found. The handler returns 404 on the nil case.
 func GetCuratorRequest(database *sql.DB, id string) (*domain.CuratorRequest, error) {
@@ -145,60 +116,6 @@ func GetCuratorRequest(database *sql.DB, id string) (*domain.CuratorRequest, err
 		       started_at, finished_at, created_at
 		FROM curator_requests WHERE id = ?
 	`, id)
-	return scanCuratorRequest(row)
-}
-
-// ListCuratorRequestsByProject returns all requests for a project in
-// chronological order. No pagination yet — chat history per project
-// is bounded by usage and a single SELECT is fine for v1. Caller
-// joins curator_messages separately for the agent-side stream.
-func ListCuratorRequestsByProject(database *sql.DB, projectID string) ([]domain.CuratorRequest, error) {
-	rows, err := database.Query(`
-		SELECT id, project_id, status, user_input, error_msg,
-		       cost_usd, duration_ms, num_turns,
-		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-		       started_at, finished_at, created_at
-		FROM curator_requests
-		WHERE project_id = ?
-		ORDER BY created_at ASC, id ASC
-	`, projectID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := []domain.CuratorRequest{}
-	for rows.Next() {
-		req, err := scanCuratorRequest(rows)
-		if err != nil {
-			return nil, err
-		}
-		if req != nil {
-			out = append(out, *req)
-		}
-	}
-	return out, rows.Err()
-}
-
-// InFlightCuratorRequestForProject returns the queued or running
-// request for a project, or (nil, nil) if there is none. The cancel
-// endpoint uses this to find the row to flip; the per-project
-// invariant (one row at a time enters running) means at most one
-// active row exists. If for some reason multiple non-terminal rows
-// exist (queued + running during a goroutine schedule), the caller
-// gets the oldest — running first if present, otherwise the head
-// of the queue.
-func InFlightCuratorRequestForProject(database *sql.DB, projectID string) (*domain.CuratorRequest, error) {
-	row := database.QueryRow(`
-		SELECT id, project_id, status, user_input, error_msg,
-		       cost_usd, duration_ms, num_turns,
-		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-		       started_at, finished_at, created_at
-		FROM curator_requests
-		WHERE project_id = ? AND status IN ('queued', 'running')
-		ORDER BY (status = 'running') DESC, created_at ASC, id ASC
-		LIMIT 1
-	`, projectID)
 	return scanCuratorRequest(row)
 }
 
@@ -353,58 +270,6 @@ func scanCuratorMessageRow(rows *sql.Rows) (domain.CuratorMessage, error) {
 	return m, nil
 }
 
-// ResetCuratorForProject wipes every curator artifact for a project so
-// the next user message starts a brand-new Claude Code session: clears
-// curator_session_id on the project row, deletes pending-context rows
-// for the project (any session), and deletes every curator_request for
-// the project (cascading to curator_messages via FK).
-//
-// Refuses if there's an in-flight (queued/running) request — the
-// caller should cancel first. The in-flight check + the deletes run
-// inside one TX so a concurrent SendMessage cannot slip a new request
-// into the gap between the check and the wipe.
-//
-// Atomic: either everything is wiped or nothing is. Empty-string
-// session id wouldn't satisfy the curator_pending_context partial
-// unique constraint, so we explicitly write NULL.
-func ResetCuratorForProject(database *sql.DB, projectID string) error {
-	tx, err := database.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	var inflight int
-	if err := tx.QueryRow(`
-		SELECT COUNT(*) FROM curator_requests
-		 WHERE project_id = ? AND status IN ('queued', 'running')
-	`, projectID).Scan(&inflight); err != nil {
-		return fmt.Errorf("count inflight: %w", err)
-	}
-	if inflight > 0 {
-		return ErrCuratorInFlight
-	}
-
-	now := time.Now().UTC()
-	if _, err := tx.Exec(`
-		UPDATE projects SET curator_session_id = NULL, updated_at = ?
-		 WHERE id = ?
-	`, now, projectID); err != nil {
-		return fmt.Errorf("clear session id: %w", err)
-	}
-	if _, err := tx.Exec(`
-		DELETE FROM curator_pending_context WHERE project_id = ?
-	`, projectID); err != nil {
-		return fmt.Errorf("delete pending context: %w", err)
-	}
-	if _, err := tx.Exec(`
-		DELETE FROM curator_requests WHERE project_id = ?
-	`, projectID); err != nil {
-		return fmt.Errorf("delete requests: %w", err)
-	}
-	return tx.Commit()
-}
-
 // DeleteCuratorMessagesBySubtype removes every curator_messages row
 // for a request with the given subtype. Used by the curator runtime
 // to drop a `context_change` audit row after a revert: the chat
@@ -447,68 +312,6 @@ func ListCuratorMessagesByRequest(database *sql.DB, requestID string) ([]domain.
 		out = append(out, m)
 	}
 	return out, rows.Err()
-}
-
-// ListCuratorMessagesByRequestIDs returns the agent-side stream rows
-// for a batch of request ids, grouped by request_id. The history
-// handler calls this with every request id from
-// ListCuratorRequestsByProject so the whole chat history loads in
-// two queries instead of the N+1 the per-request helper would
-// produce on a long-running project.
-//
-// Empty input returns an empty map (not nil) so callers can do a
-// uniform map lookup without a nil-check.
-//
-// Chunking matches ListRecentEventsByEntity: SQLite's default
-// SQLITE_LIMIT_VARIABLE_NUMBER is 999 on older builds, 32766 on
-// modern ones, but staying at 500 keeps the IN-list comfortably
-// inside both. Per-project chat counts are practically far below
-// the chunk size; the loop is here for safety, not load.
-func ListCuratorMessagesByRequestIDs(database *sql.DB, requestIDs []string) (map[string][]domain.CuratorMessage, error) {
-	out := make(map[string][]domain.CuratorMessage)
-	if len(requestIDs) == 0 {
-		return out, nil
-	}
-	const chunkSize = 500
-	for start := 0; start < len(requestIDs); start += chunkSize {
-		end := start + chunkSize
-		if end > len(requestIDs) {
-			end = len(requestIDs)
-		}
-		chunk := requestIDs[start:end]
-
-		placeholders := make([]string, len(chunk))
-		args := make([]any, len(chunk))
-		for i, id := range chunk {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-
-		query := `
-			SELECT ` + curatorMessageColumns + `
-			FROM curator_messages
-			WHERE request_id IN (` + strings.Join(placeholders, ",") + `)
-			ORDER BY created_at ASC, id ASC
-		`
-		rows, err := database.Query(query, args...)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			m, err := scanCuratorMessageRow(rows)
-			if err != nil {
-				rows.Close()
-				return nil, err
-			}
-			out[m.RequestID] = append(out[m.RequestID], m)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
-	}
-	return out, nil
 }
 
 func scanCuratorRequest(row rowScanner) (*domain.CuratorRequest, error) {

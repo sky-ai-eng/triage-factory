@@ -3,8 +3,12 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
@@ -618,4 +622,247 @@ func seedAdditionalUser(t *testing.T, h *pgtest.Harness, orgID, label string) st
 		t.Fatalf("seed team membership: %v", err)
 	}
 	return userID
+}
+
+// TestCuratorStore_Postgres_HistoryReads_SelfOnly pins the visibility
+// contract the curator history handler + project-bundle export moved
+// onto (TFAC-109): ListRequestsByProject / ListMessagesByRequestIDs
+// under a user's claims return only THAT user's turns —
+// curator_requests_select / curator_messages_select are deliberately
+// self-only (creator_user_id = tf.current_user_id()).
+func TestCuratorStore_Postgres_HistoryReads_SelfOnly(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, alice, _ := seedPgProjectOrg(t, h)
+	bob := seedAdditionalUser(t, h, orgID, "bob")
+	projectID := seedPgEntityProject(t, h, orgID, alice, "shared-history")
+
+	aliceReq, _ := runFullTurn(t, ctx, stores, orgID, alice, projectID)
+	bobReq, _ := runFullTurn(t, ctx, stores, orgID, bob, projectID)
+
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, alice, func(ts db.TxStores) error {
+		reqs, e := ts.Curator.ListRequestsByProject(ctx, orgID, projectID)
+		if e != nil {
+			return e
+		}
+		if len(reqs) != 1 || reqs[0].ID != aliceReq {
+			t.Errorf("alice's ListRequestsByProject = %+v, want only her request %s", reqs, aliceReq)
+		}
+		// Even when handed bob's request id explicitly, RLS filters
+		// his messages out of the batch read.
+		byReq, e := ts.Curator.ListMessagesByRequestIDs(ctx, orgID, []string{aliceReq, bobReq})
+		if e != nil {
+			return e
+		}
+		if len(byReq[aliceReq]) != 1 {
+			t.Errorf("alice's own messages missing: %+v", byReq)
+		}
+		if len(byReq[bobReq]) != 0 {
+			t.Errorf("bob's messages leaked into alice's read: %+v", byReq[bobReq])
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("alice reads: %v", err)
+	}
+}
+
+// TestCuratorStore_Postgres_InFlight_SelfOnly pins that a user can
+// locate (and therefore cancel) only their own in-flight turn.
+func TestCuratorStore_Postgres_InFlight_SelfOnly(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, alice, _ := seedPgProjectOrg(t, h)
+	bob := seedAdditionalUser(t, h, orgID, "bob")
+	projectID := seedPgEntityProject(t, h, orgID, alice, "inflight")
+
+	// Bob has a running turn.
+	var bobReq string
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, bob, func(ts db.TxStores) error {
+		id, e := ts.Curator.CreateRequest(ctx, orgID, projectID, bob, "bob's turn")
+		if e != nil {
+			return e
+		}
+		bobReq = id
+		return ts.Curator.MarkRequestRunning(ctx, orgID, bobReq)
+	}); err != nil {
+		t.Fatalf("seed bob's turn: %v", err)
+	}
+
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, alice, func(ts db.TxStores) error {
+		got, e := ts.Curator.InFlightRequestForProject(ctx, orgID, projectID)
+		if e != nil {
+			return e
+		}
+		if got != nil {
+			t.Errorf("alice sees bob's in-flight turn %+v; RLS should hide it", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("alice read: %v", err)
+	}
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, bob, func(ts db.TxStores) error {
+		got, e := ts.Curator.InFlightRequestForProject(ctx, orgID, projectID)
+		if e != nil {
+			return e
+		}
+		if got == nil || got.ID != bobReq {
+			t.Errorf("bob's own in-flight read = %+v, want %s", got, bobReq)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("bob read: %v", err)
+	}
+}
+
+// TestCuratorStore_Postgres_ResetForProject pins the two halves of the
+// reset contract under RLS (TFAC-109): the in-flight guard sees OTHER
+// users' live turns (admin-pool read — a self-only count couldn't
+// protect a teammate's running session from a reset), while the deletes
+// run claims-bound so a reset destroys only the resetting user's own
+// history rows.
+func TestCuratorStore_Postgres_ResetForProject(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, alice, _ := seedPgProjectOrg(t, h)
+	bob := seedAdditionalUser(t, h, orgID, "bob")
+	projectID := seedPgEntityProject(t, h, orgID, alice, "reset-rls")
+	setProjectSession(t, h, projectID, "sess-reset")
+
+	// Alice has a completed turn; bob has a RUNNING one.
+	aliceReq, _ := runFullTurn(t, ctx, stores, orgID, alice, projectID)
+	var bobReq string
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, bob, func(ts db.TxStores) error {
+		id, e := ts.Curator.CreateRequest(ctx, orgID, projectID, bob, "bob live")
+		if e != nil {
+			return e
+		}
+		bobReq = id
+		return ts.Curator.MarkRequestRunning(ctx, orgID, bobReq)
+	}); err != nil {
+		t.Fatalf("seed bob live: %v", err)
+	}
+
+	// Alice's reset must refuse: bob's turn is live even though
+	// alice's claims can't see it.
+	err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, alice, func(ts db.TxStores) error {
+		return ts.Curator.ResetForProject(ctx, orgID, projectID)
+	})
+	if !errors.Is(err, db.ErrCuratorInFlight) {
+		t.Fatalf("reset under bob's live turn: err = %v, want ErrCuratorInFlight", err)
+	}
+
+	// Bob's turn completes; alice resets. Her rows go; bob's survive
+	// (self-only modify policy); the shared session id clears.
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, bob, func(ts db.TxStores) error {
+		_, e := ts.Curator.CompleteRequest(ctx, orgID, bobReq, "done", "", 0.01, 10, 1)
+		return e
+	}); err != nil {
+		t.Fatalf("complete bob: %v", err)
+	}
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, alice, func(ts db.TxStores) error {
+		return ts.Curator.ResetForProject(ctx, orgID, projectID)
+	}); err != nil {
+		t.Fatalf("alice reset: %v", err)
+	}
+
+	var aliceRows, bobRows int
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM curator_requests WHERE project_id = $1 AND creator_user_id = $2`, projectID, alice).Scan(&aliceRows); err != nil {
+		t.Fatalf("count alice rows: %v", err)
+	}
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM curator_requests WHERE project_id = $1 AND creator_user_id = $2`, projectID, bob).Scan(&bobRows); err != nil {
+		t.Fatalf("count bob rows: %v", err)
+	}
+	if aliceRows != 0 {
+		t.Errorf("alice's rows survived her reset: %d", aliceRows)
+	}
+	if bobRows != 1 {
+		t.Errorf("bob's rows = %d after alice's reset, want 1 (self-only deletes)", bobRows)
+	}
+	var sessionID sql.NullString
+	if err := h.AdminDB.QueryRow(`SELECT curator_session_id FROM projects WHERE id = $1`, projectID).Scan(&sessionID); err != nil {
+		t.Fatalf("read session id: %v", err)
+	}
+	if sessionID.Valid {
+		t.Errorf("curator_session_id = %q after reset, want NULL", sessionID.String)
+	}
+	_ = aliceReq
+}
+
+// TestCuratorStore_Postgres_ImportRestoresHistoricalRows pins the
+// project-bundle import path (TFAC-109): ImportRequest preserves the
+// bundle row's terminal status/accounting/timestamps while stamping
+// creator_user_id to the importing user, and ImportPendingContext
+// preserves consumed state — both under the importer's claims.
+func TestCuratorStore_Postgres_ImportRestoresHistoricalRows(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, alice, _ := seedPgProjectOrg(t, h)
+	projectID := seedPgEntityProject(t, h, orgID, alice, "import-hist")
+	setProjectSession(t, h, projectID, "sess-imported")
+
+	created := time.Date(2025, 3, 1, 10, 0, 0, 0, time.UTC)
+	started := created.Add(time.Second)
+	finished := created.Add(time.Minute)
+	newReqID := uuid.New().String()
+
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, alice, func(ts db.TxStores) error {
+		if e := ts.Curator.ImportRequest(ctx, orgID, domain.CuratorRequest{
+			ID: newReqID, ProjectID: projectID, Status: "done", UserInput: "historic turn",
+			CostUSD: 0.5, DurationMs: 60000, NumTurns: 3,
+			InputTokens: 10, OutputTokens: 20, CacheReadTokens: 30, CacheCreationTokens: 40,
+			StartedAt: &started, FinishedAt: &finished, CreatedAt: created,
+		}); e != nil {
+			return e
+		}
+		if _, e := ts.Curator.InsertMessage(ctx, orgID, &domain.CuratorMessage{
+			RequestID: newReqID, Role: "assistant", Subtype: "text", Content: "historic", CreatedAt: created,
+		}); e != nil {
+			return e
+		}
+		return ts.Curator.ImportPendingContext(ctx, orgID, domain.CuratorPendingContext{
+			ProjectID: projectID, CuratorSessionID: "sess-imported",
+			ChangeType: domain.ChangeTypePinnedRepos, BaselineValue: `["a/b"]`,
+			ConsumedAt: &finished, ConsumedByRequestID: newReqID, CreatedAt: created,
+		})
+	}); err != nil {
+		t.Fatalf("import writes: %v", err)
+	}
+
+	var status, creator string
+	var gotCreated time.Time
+	var cost float64
+	if err := h.AdminDB.QueryRow(`
+		SELECT status, creator_user_id::text, created_at, cost_usd
+		FROM curator_requests WHERE id = $1
+	`, newReqID).Scan(&status, &creator, &gotCreated, &cost); err != nil {
+		t.Fatalf("read imported request: %v", err)
+	}
+	if status != "done" || creator != alice || !gotCreated.Equal(created) || cost != 0.5 {
+		t.Errorf("imported request = (status=%s creator=%s created=%v cost=%v), want (done, %s, %v, 0.5)",
+			status, creator, gotCreated, cost, alice, created)
+	}
+
+	var consumedBy sql.NullString
+	var consumedAt sql.NullTime
+	if err := h.AdminDB.QueryRow(`
+		SELECT consumed_by_request_id::text, consumed_at
+		FROM curator_pending_context WHERE project_id = $1
+	`, projectID).Scan(&consumedBy, &consumedAt); err != nil {
+		t.Fatalf("read imported pending: %v", err)
+	}
+	if !consumedBy.Valid || consumedBy.String != newReqID || !consumedAt.Valid {
+		t.Errorf("imported pending consumed state = (%v, %v), want (%s, non-null)", consumedBy, consumedAt, newReqID)
+	}
 }

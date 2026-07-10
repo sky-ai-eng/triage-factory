@@ -808,6 +808,10 @@ export interface ProjectExportPreviewFile {
 export interface ProjectExportPreview {
   files: ProjectExportPreviewFile[]
   total_size: number
+  // Non-fatal gaps: content that exists but couldn't be included (e.g.
+  // a session transcript unreadable by the server process). The bundle
+  // still exports; the user should know it ships without this.
+  warnings?: string[]
 }
 
 export interface ProjectImportWarning {

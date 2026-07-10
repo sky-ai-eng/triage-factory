@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -423,6 +424,263 @@ func (s *curatorStore) CancelOrphanedNonTerminalRequests(ctx context.Context) (i
 		return 0, err
 	}
 	return int(n), nil
+}
+
+func (s *curatorStore) ListRequestsByProject(ctx context.Context, orgID, projectID string) ([]domain.CuratorRequest, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id, project_id, status, user_input, error_msg,
+		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+		       started_at, finished_at, created_at, creator_user_id
+		FROM curator_requests
+		WHERE project_id = ?
+		ORDER BY created_at ASC, id ASC
+	`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []domain.CuratorRequest{}
+	for rows.Next() {
+		req, err := scanCuratorRequestWithUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		if req != nil {
+			out = append(out, *req)
+		}
+	}
+	return out, rows.Err()
+}
+
+// ListMessagesByRequestIDs chunks the IN-list at 500 ids — SQLite's
+// default SQLITE_LIMIT_VARIABLE_NUMBER is 999 on older builds, so 500
+// stays comfortably inside; per-project chat counts are practically far
+// below the chunk size.
+func (s *curatorStore) ListMessagesByRequestIDs(ctx context.Context, orgID string, requestIDs []string) (map[string][]domain.CuratorMessage, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	out := make(map[string][]domain.CuratorMessage)
+	if len(requestIDs) == 0 {
+		return out, nil
+	}
+	const chunkSize = 500
+	for start := 0; start < len(requestIDs); start += chunkSize {
+		end := min(start+chunkSize, len(requestIDs))
+		chunk := requestIDs[start:end]
+
+		placeholders := make([]string, len(chunk))
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		rows, err := s.q.QueryContext(ctx, `
+			SELECT `+sqliteCuratorMessageColumns+`
+			FROM curator_messages
+			WHERE request_id IN (`+strings.Join(placeholders, ",")+`)
+			ORDER BY created_at ASC, id ASC
+		`, args...)
+		if err != nil {
+			return nil, err
+		}
+		if err := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				m, err := scanCuratorMessageRowSqlite(rows)
+				if err != nil {
+					return err
+				}
+				out[m.RequestID] = append(out[m.RequestID], m)
+			}
+			return rows.Err()
+		}(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (s *curatorStore) InFlightRequestForProject(ctx context.Context, orgID, projectID string) (*domain.CuratorRequest, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	row := s.q.QueryRowContext(ctx, `
+		SELECT id, project_id, status, user_input, error_msg,
+		       cost_usd, duration_ms, num_turns,
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+		       started_at, finished_at, created_at, creator_user_id
+		FROM curator_requests
+		WHERE project_id = ? AND status IN ('queued', 'running')
+		ORDER BY (status = 'running') DESC, created_at ASC, id ASC
+		LIMIT 1
+	`, projectID)
+	return scanCuratorRequestWithUser(row)
+}
+
+// ResetForProject runs the in-flight guard + the three deletes through
+// inTx so the check-then-wipe is atomic whether the store is bound to
+// an outer WithTx tx or a bare *sql.DB — a concurrent SendMessage
+// cannot slip a new request into the gap.
+func (s *curatorStore) ResetForProject(ctx context.Context, orgID, projectID string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	return inTx(ctx, s.q, func(tx queryer) error {
+		var inflight int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM curator_requests
+			 WHERE project_id = ? AND status IN ('queued', 'running')
+		`, projectID).Scan(&inflight); err != nil {
+			return fmt.Errorf("count inflight: %w", err)
+		}
+		if inflight > 0 {
+			return db.ErrCuratorInFlight
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE projects SET curator_session_id = NULL, updated_at = ?
+			 WHERE id = ?
+		`, time.Now().UTC(), projectID); err != nil {
+			return fmt.Errorf("clear session id: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM curator_pending_context WHERE project_id = ?
+		`, projectID); err != nil {
+			return fmt.Errorf("delete pending context: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM curator_requests WHERE project_id = ?
+		`, projectID); err != nil {
+			return fmt.Errorf("delete requests: %w", err)
+		}
+		return nil
+	})
+}
+
+// ImportRequest preserves the bundle row's id/status/accounting/
+// timestamps verbatim; team_id snapshots from the destination project
+// (TFAC-476 — every curator INSERT keeps the correlated subquery).
+func (s *curatorStore) ImportRequest(ctx context.Context, orgID string, req domain.CuratorRequest) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		INSERT INTO curator_requests (
+			id, project_id, team_id, status, user_input, error_msg,
+			cost_usd, duration_ms, num_turns,
+			input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+			started_at, finished_at, created_at, creator_user_id
+		) VALUES (?, ?, (SELECT team_id FROM projects WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		req.ID, req.ProjectID, req.ProjectID,
+		req.Status, req.UserInput, nullStrSqlite(req.ErrorMsg),
+		req.CostUSD, req.DurationMs, req.NumTurns,
+		req.InputTokens, req.OutputTokens, req.CacheReadTokens, req.CacheCreationTokens,
+		nullTimeSqlite(req.StartedAt), nullTimeSqlite(req.FinishedAt), req.CreatedAt,
+		req.CreatorUserID,
+	)
+	if err != nil {
+		return fmt.Errorf("import curator_request %s: %w", req.ID, err)
+	}
+	return nil
+}
+
+// ImportPendingContext preserves consumed state + created_at, unlike
+// InsertPendingContext (which queues a fresh unconsumed delta).
+func (s *curatorStore) ImportPendingContext(ctx context.Context, orgID string, row domain.CuratorPendingContext) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	var consumedBy any
+	if row.ConsumedByRequestID != "" {
+		consumedBy = row.ConsumedByRequestID
+	}
+	_, err := s.q.ExecContext(ctx, `
+		INSERT INTO curator_pending_context (
+			project_id, curator_session_id, change_type, baseline_value,
+			consumed_at, consumed_by_request_id, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+	`,
+		row.ProjectID, row.CuratorSessionID, row.ChangeType, row.BaselineValue,
+		nullTimeSqlite(row.ConsumedAt), consumedBy, row.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("import pending context row: %w", err)
+	}
+	return nil
+}
+
+// sqliteCuratorMessageColumns + scanCuratorMessageRowSqlite mirror the
+// package-level curatorMessageColumns/scanCuratorMessageRow pair (the
+// legacy raw helpers) — duplicated locally because those are unexported
+// in package db and this dialect impl consumes db only through its
+// exported interfaces.
+const sqliteCuratorMessageColumns = `
+	id, request_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
+	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at
+`
+
+func scanCuratorMessageRowSqlite(rows *sql.Rows) (domain.CuratorMessage, error) {
+	var (
+		m             domain.CuratorMessage
+		toolCallsJSON sql.NullString
+		metadataJSON  sql.NullString
+		toolCallID    sql.NullString
+		model         sql.NullString
+		inputTokens   sql.NullInt64
+		outputTokens  sql.NullInt64
+		cacheRead     sql.NullInt64
+		cacheCreation sql.NullInt64
+	)
+	if err := rows.Scan(
+		&m.ID, &m.RequestID, &m.Role, &m.Content, &m.Subtype,
+		&toolCallsJSON, &toolCallID, &m.IsError, &metadataJSON,
+		&model, &inputTokens, &outputTokens, &cacheRead, &cacheCreation,
+		&m.CreatedAt,
+	); err != nil {
+		return domain.CuratorMessage{}, err
+	}
+	if toolCallsJSON.Valid {
+		if err := json.Unmarshal([]byte(toolCallsJSON.String), &m.ToolCalls); err != nil {
+			return domain.CuratorMessage{}, fmt.Errorf("unmarshal tool_calls: %w", err)
+		}
+	}
+	if metadataJSON.Valid {
+		if err := json.Unmarshal([]byte(metadataJSON.String), &m.Metadata); err != nil {
+			return domain.CuratorMessage{}, fmt.Errorf("unmarshal metadata: %w", err)
+		}
+	}
+	m.ToolCallID = toolCallID.String
+	m.Model = model.String
+	if inputTokens.Valid {
+		v := int(inputTokens.Int64)
+		m.InputTokens = &v
+	}
+	if outputTokens.Valid {
+		v := int(outputTokens.Int64)
+		m.OutputTokens = &v
+	}
+	if cacheRead.Valid {
+		v := int(cacheRead.Int64)
+		m.CacheReadTokens = &v
+	}
+	if cacheCreation.Valid {
+		v := int(cacheCreation.Int64)
+		m.CacheCreationTokens = &v
+	}
+	return m, nil
+}
+
+func nullTimeSqlite(t *time.Time) sql.NullTime {
+	if t == nil {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: *t, Valid: true}
 }
 
 // nullStrSqlite + nullIntSqlite mirror the package-level helpers used

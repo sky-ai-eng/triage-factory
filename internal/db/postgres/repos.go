@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -323,6 +324,20 @@ func (s *repoStore) UpdateBaseBranch(ctx context.Context, orgID, repoID, baseBra
 		   SET base_branch = NULLIF($1, '')
 		 WHERE org_id = $2 AND lower(owner) = lower($3) AND lower(repo) = lower($4)
 	`, baseBranch, orgID, owner, repo)
+	return err
+}
+
+func (s *repoStore) SeedCloneURL(ctx context.Context, orgID, repoID, cloneURL string) error {
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" || strings.TrimSpace(cloneURL) == "" {
+		return nil
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE repo_profiles
+		   SET clone_url = $1, updated_at = now()
+		 WHERE org_id = $2 AND lower(owner) = lower($3) AND lower(repo) = lower($4)
+		   AND (clone_url IS NULL OR clone_url = '')
+	`, cloneURL, orgID, owner, repo)
 	return err
 }
 

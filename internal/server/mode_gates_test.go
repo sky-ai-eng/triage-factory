@@ -10,39 +10,25 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// TestMultiModeGates_Return501 pins the local-only endpoints that read or
-// write the orchestrator process's own filesystem (skills scan-import) or
-// still run raw SQLite-shaped SQL (project bundle export/preview). Each
-// must refuse cleanly in multi mode instead of 500ing or silently
-// succeeding with wrong-tree reads.
+// TestMultiModeGates_Return501 pins the local-only endpoints that read
+// the orchestrator process's own filesystem. Skills scan-import walks
+// this process's ~/.claude/skills, which is only meaningful when the
+// process runs on the single trusted user's machine — multi mode must
+// refuse cleanly instead of scanning shared-infrastructure $HOME.
+// (Project bundle import/export were gated here too until the
+// store-layer port made them mode-agnostic.)
 func TestMultiModeGates_Return501(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	s := &Server{}
 	sk := &skillsHandler{}
 
-	cases := []struct {
-		name    string
-		handler http.HandlerFunc
-		method  string
-		target  string
-	}{
-		{"skills import", sk.handleSkillsImport, http.MethodPost, "/api/skills/import"},
-		{"project import", s.handleProjectImport, http.MethodPost, "/api/projects/import"},
-		{"project export", s.handleProjectExport, http.MethodGet, "/api/projects/p1/export"},
-		{"project export preview", s.handleProjectExportPreview, http.MethodGet, "/api/projects/p1/export/preview"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.target, nil)
-			ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: "user-1"})
-			ctx = httpx.WithOrgID(ctx, "org-1")
-			req = req.WithContext(ctx)
+	req := httptest.NewRequest(http.MethodPost, "/api/skills/import", nil)
+	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: "user-1"})
+	ctx = httpx.WithOrgID(ctx, "org-1")
+	req = req.WithContext(ctx)
 
-			rec := httptest.NewRecorder()
-			tc.handler(rec, req)
-			if rec.Code != http.StatusNotImplemented {
-				t.Fatalf("%s %s in multi mode = %d, want 501 (body: %s)", tc.method, tc.target, rec.Code, rec.Body.String())
-			}
-		})
+	rec := httptest.NewRecorder()
+	sk.handleSkillsImport(rec, req)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("POST /api/skills/import in multi mode = %d, want 501 (body: %s)", rec.Code, rec.Body.String())
 	}
 }

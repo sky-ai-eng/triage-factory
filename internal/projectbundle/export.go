@@ -3,7 +3,6 @@ package projectbundle
 import (
 	"archive/zip"
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"os"
@@ -11,11 +10,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-// Export builds a project bundle and streams it as a ZIP reader. orgID
-// scopes every store lookup performed inside the bundler so a multi-mode
-// caller cannot accidentally read another tenant's project state.
-func Export(ctx context.Context, database *sql.DB, projects db.ProjectStore, curatorStore db.CuratorStore, orgID, projectID string) (io.ReadCloser, error) {
-	state, err := collectExportState(ctx, database, projects, curatorStore, orgID, projectID)
+// Export builds a project bundle and streams it as a ZIP reader. DB
+// reads run claims-bound inside one WithTx (see collectExportState for
+// the RLS visibility contract); orgID scopes every lookup so a
+// multi-mode caller cannot read another tenant's project state.
+func Export(ctx context.Context, txr db.TxRunner, orgID, userID, projectID string) (io.ReadCloser, error) {
+	state, err := collectExportState(ctx, txr, orgID, userID, projectID)
 	if err != nil {
 		return nil, err
 	}
