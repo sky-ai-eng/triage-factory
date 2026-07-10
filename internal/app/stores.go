@@ -196,9 +196,11 @@ const (
 )
 
 // poolMaxConnsForRole resolves this pool's MaxOpenConns ceiling: the role
-// default, overridden by TF_DB_MAX_OPEN_CONNS when set to a valid integer.
-// A bad value logs and falls back to the role default rather than bricking
-// boot. Floored at minPoolMaxConns.
+// default, overridden by TF_DB_MAX_OPEN_CONNS when set to a non-negative
+// integer, and floored at minPoolMaxConns (so 0 or 1 select the minimum, 2 —
+// deliberately NOT the database/sql "0 = unlimited" convention, which is the
+// opposite of the capping this exists to do). A negative or non-numeric value
+// logs and falls back to the role default rather than bricking boot.
 func poolMaxConnsForRole(role runmode.DeployRole) int {
 	def := defaultPoolMaxConns
 	if role == runmode.RoleExecutor {
@@ -206,10 +208,10 @@ func poolMaxConnsForRole(role runmode.DeployRole) int {
 	}
 	n := def
 	if raw := strings.TrimSpace(os.Getenv("TF_DB_MAX_OPEN_CONNS")); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 1 {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 0 {
 			n = parsed
 		} else {
-			appLog.Warn("invalid TF_DB_MAX_OPEN_CONNS; using role default", "value", raw, "default", def)
+			appLog.Warn("invalid TF_DB_MAX_OPEN_CONNS (want a non-negative integer); using role default", "value", raw, "default", def)
 		}
 	}
 	if n < minPoolMaxConns {

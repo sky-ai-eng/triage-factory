@@ -20,8 +20,10 @@ func TestPoolMaxConnsForRole(t *testing.T) {
 		{"executor default is much smaller", runmode.RoleExecutor, "", defaultExecutorPoolMaxConns},
 		{"env override wins for executor", runmode.RoleExecutor, "40", 40},
 		{"env override wins for control", runmode.RoleControl, "50", 50},
-		{"floor applies", runmode.RoleExecutor, "1", minPoolMaxConns},
-		{"invalid env falls back to role default", runmode.RoleExecutor, "banana", defaultExecutorPoolMaxConns},
+		{"one floors to the minimum", runmode.RoleExecutor, "1", minPoolMaxConns},
+		{"zero floors to the minimum (not database/sql unlimited)", runmode.RoleExecutor, "0", minPoolMaxConns},
+		{"negative is invalid, falls back to role default", runmode.RoleExecutor, "-5", defaultExecutorPoolMaxConns},
+		{"non-numeric is invalid, falls back to role default", runmode.RoleExecutor, "banana", defaultExecutorPoolMaxConns},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

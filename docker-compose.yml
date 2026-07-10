@@ -548,10 +548,12 @@ services:
       - /data
     # No published ports: executors accept no inbound traffic.
     healthcheck:
-      # The localhost-only executor healthz (127.0.0.1:3001). curl -f fails on
-      # a 503 (dispatcher dead / heartbeat stale / broker down); a fenced pod
-      # stays 200 so the check doesn't kill it before the drain ticket lands.
-      test: ["CMD", "curl", "-fsS", "http://localhost:3001/healthz"]
+      # The localhost-only executor healthz. curl -f fails on a 503 (dispatcher
+      # dead / heartbeat stale / broker down); a fenced pod stays 200 so the
+      # check doesn't kill it before the drain ticket lands. Hit 127.0.0.1
+      # explicitly, not "localhost": the listener binds IPv4 loopback only, and
+      # "localhost" can resolve to ::1 first (curl would then fail to connect).
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3001/healthz"]
       interval: 10s
       timeout: 5s
       retries: 6
