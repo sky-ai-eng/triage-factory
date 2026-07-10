@@ -1004,8 +1004,9 @@ func (s *Server) routes() {
 	// AuthGate boot endpoint — is mounted pre-auth above; per-user
 	// identity that used to live on /api/config moved to /api/me.
 	s.api("GET /api/team/members", s.handleTeamMembers)
-	sk := &skillsHandler{db: s.db, prompts: s.prompts}
+	sk := &skillsHandler{db: s.db, prompts: s.prompts, tx: s.tx, az: s.az}
 	s.apiMutating("POST /api/skills/import", sk.handleSkillsImport)
+	s.apiMutating("POST /api/skills/upload", sk.handleSkillUpload)
 	s.api("GET /api/github/repos", s.handleGitHubRepos)
 	se := &settingsHandler{tx: s.tx}
 	s.apiMutating("POST /api/github/preflight-ssh", se.handleGitHubPreflightSSH)
