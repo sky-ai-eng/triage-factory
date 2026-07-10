@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -138,10 +139,12 @@ func (a *App) broadcastEvent(evt domain.Event) {
 	}
 }
 
-// handlePollCompleted reacts to poll-complete sentinels: it lets the server
-// know Jira snapshots are ready (gating /api/jira/stock) and surfaces a
-// one-shot "first poll complete after config change" toast so users see
-// their settings actually took effect.
+// handlePollCompleted reacts to poll-complete sentinels: it records Jira
+// readiness (gating /api/jira/stock — TFAC-583's org-scoped
+// poll_readiness table, read by whichever control pod's API serves that
+// endpoint, not just the one that ran this poll) and surfaces a one-shot
+// "first poll complete after config change" toast so users see their
+// settings actually took effect.
 func (a *App) handlePollCompleted(evt domain.Event) {
 	if evt.EventType != domain.EventSystemPollCompleted {
 		return
@@ -155,18 +158,26 @@ func (a *App) handlePollCompleted(evt domain.Event) {
 		pollTrackerLog.Warn("parse poll completion metadata failed", "error", err, "raw_metadata", evt.MetadataJSON)
 		return
 	}
+	ctx := context.Background()
 	if meta.Source == "jira" {
-		// Pass the poll's started_at so MarkJiraPollComplete can ignore
-		// stale sentinels from pre-restart poll goroutines that finish late.
-		// A missing field yields StartedAt=0 → a zero time.Time, which
-		// MarkJiraPollComplete treats as "unknown generation" and accepts.
+		// Pass the poll's started_at so MarkPollComplete can ignore stale
+		// sentinels from pre-restart poll goroutines that finish late. A
+		// missing field yields StartedAt=0 → a zero time.Time, which
+		// MarkPollComplete treats as "unknown generation" and accepts.
 		var startedAt time.Time
 		if meta.StartedAt != 0 {
 			startedAt = time.Unix(0, meta.StartedAt)
 		}
-		a.srv.MarkJiraPollComplete(startedAt)
+		if err := a.stores.PollReadiness.MarkPollComplete(ctx, evt.OrgID, "jira", startedAt); err != nil {
+			pollTrackerLog.Warn("mark jira poll complete failed", "org", evt.OrgID, "error", err)
+		}
 	}
-	if a.announce.shouldAnnounce(meta.Source) {
+	taken, err := a.stores.PollReadiness.TakeAnnouncePending(ctx, evt.OrgID, meta.Source)
+	if err != nil {
+		pollTrackerLog.Warn("take announce-pending flag failed", "org", evt.OrgID, "source", meta.Source, "error", err)
+		return
+	}
+	if taken {
 		label := "GitHub"
 		if meta.Source == "jira" {
 			label = "Jira"

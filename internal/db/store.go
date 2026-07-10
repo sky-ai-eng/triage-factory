@@ -360,6 +360,13 @@ type Stores struct {
 	// its own resumed runs through the identical queue path.
 	RunPendingInput RunPendingInputStore
 
+	// PollReadiness owns the poll_readiness table — the org-scoped
+	// readiness gate for /api/jira/stock and the one-shot "config took
+	// effect" announce toast (TFAC-583). Admin-pool-only, same shape as
+	// Instances: not a browsable RLS surface, callers already hold an
+	// authorized orgID.
+	PollReadiness PollReadinessStore
+
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
 	// core holds no SSO symbols.

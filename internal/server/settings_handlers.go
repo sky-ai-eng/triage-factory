@@ -340,7 +340,7 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 
 	if req.JiraProjects != nil && !jiraProjectsEqual(writtenProjects, prevProjects) {
 		if s.onJiraChanged != nil {
-			s.MarkJiraRestarted()
+			s.MarkJiraRestarted(r.Context(), orgID)
 			go s.onJiraChanged(orgID)
 		}
 	}
@@ -754,10 +754,10 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		req.JiraPAT != nil
 
 	if ghChanged && s.onGitHubChanged != nil {
-		s.MarkJiraRestarted()
+		s.MarkJiraRestarted(r.Context(), orgID)
 		go s.onGitHubChanged(orgID)
 	} else if jiraChanged && s.onJiraChanged != nil {
-		s.MarkJiraRestarted()
+		s.MarkJiraRestarted(r.Context(), orgID)
 		go s.onJiraChanged(orgID)
 	}
 

@@ -59,6 +59,12 @@ func TestHandleReadyz_Healthy(t *testing.T) {
 			t.Errorf("checks[%s]: got %q want %q", check, got, "ok")
 		}
 	}
+	// TFAC-583: a Server with no SetLeaseStatus call (every role=all /
+	// local boot, and this bare test construction) must omit `lease`
+	// entirely — the frozen single-process contract.
+	if resp.Lease != nil {
+		t.Errorf("lease: got %+v, want nil (SetLeaseStatus was never called)", resp.Lease)
+	}
 }
 
 // TestHandleReadyz_DBDown covers acceptance criterion 2: a dead DB pool
@@ -252,6 +258,105 @@ func TestHandleReadyz_RateLimitSurfaced(t *testing.T) {
 	}
 	if got.ResetUnix != resetAt.Unix() {
 		t.Errorf("reset_unix: got %d want %d", got.ResetUnix, resetAt.Unix())
+	}
+}
+
+// TestHandleReadyz_HolderLeaseFieldPresent pins the holder-side contract
+// (TFAC-583, spec §8.3): when SetLeaseStatus reports is_holder=true, the
+// `lease` field appears with the reported values AND the poller hard
+// checks behave exactly as an unwired (role=all) Server would — a holder
+// is byte-identical to today plus the added lease field.
+func TestHandleReadyz_HolderLeaseFieldPresent(t *testing.T) {
+	s := newTestServer(t)
+	s.SetMigrationsOK(true)
+	pm := newTestPollerManager(t, s)
+	now := time.Now()
+	pm.SetGitHubHeartbeatForTest(now)
+	pm.SetJiraHeartbeatForTest(now)
+	s.SetPollerManager(pm.Health)
+	s.SetLeaseStatus(func() (string, string, int64, bool) {
+		return "background-brain", "pod-a", 7, true
+	})
+
+	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp readyzResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Lease == nil {
+		t.Fatal("lease: expected a non-nil field on a control pod with SetLeaseStatus wired")
+	}
+	if resp.Lease.Name != "background-brain" || resp.Lease.HolderID != "pod-a" || resp.Lease.Term != 7 || !resp.Lease.IsHolder {
+		t.Errorf("lease: got %+v, want {background-brain pod-a true 7}", resp.Lease)
+	}
+	for _, check := range []string{"poller_github", "poller_jira"} {
+		if got := resp.Checks[check]; got != "ok" {
+			t.Errorf("checks[%s]: got %q want %q (holder must hard-check exactly like today)", check, got, "ok")
+		}
+	}
+}
+
+// TestHandleReadyz_StandbyIsAlwaysReady pins the standby contract (TFAC-573
+// shipped, TFAC-583 conditionality): a standby control pod hard-checks only
+// db + migrations, reports poller_github/poller_jira as the literal string
+// "standby" (not ok/failed), and MUST return 200 even though it runs no
+// pollers at all (SetPollerManager is never even called here) — an LB must
+// keep every standby in rotation.
+func TestHandleReadyz_StandbyIsAlwaysReady(t *testing.T) {
+	s := newTestServer(t)
+	s.SetMigrationsOK(true)
+	s.SetLeaseStatus(func() (string, string, int64, bool) {
+		return "background-brain", "pod-b", 7, false
+	})
+
+	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on a standby regardless of poller state, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp readyzResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" {
+		t.Errorf("status: got %q want %q", resp.Status, "ok")
+	}
+	if resp.Lease == nil || resp.Lease.IsHolder {
+		t.Fatalf("lease: got %+v, want a non-nil field with is_holder=false", resp.Lease)
+	}
+	if resp.Lease.HolderID != "pod-b" {
+		t.Errorf("lease.holder_id: got %q want %q", resp.Lease.HolderID, "pod-b")
+	}
+	for _, check := range []string{"poller_github", "poller_jira"} {
+		if got := resp.Checks[check]; got != "standby" {
+			t.Errorf("checks[%s]: got %q want %q", check, got, "standby")
+		}
+	}
+	if len(resp.Sources.GitHub) != 0 || len(resp.Sources.Jira) != 0 {
+		t.Errorf("sources: expected empty maps on a standby, got github=%v jira=%v", resp.Sources.GitHub, resp.Sources.Jira)
+	}
+}
+
+// TestHandleReadyz_StandbyIgnoresDeadPollerHealth pins that a standby's
+// 200 doesn't depend on pollerHealth being wired or healthy at all — the
+// poller-alive check is skipped entirely, not "checked and happens to
+// pass".
+func TestHandleReadyz_StandbyIgnoresDeadPollerHealth(t *testing.T) {
+	s := newTestServer(t)
+	s.SetMigrationsOK(true)
+	pm := newTestPollerManager(t, s)
+	// Heartbeats never set — Health() reports both sources dead, which
+	// would 503 a holder (see TestHandleReadyz_PollerHeartbeatStale).
+	s.SetPollerManager(pm.Health)
+	s.SetLeaseStatus(func() (string, string, int64, bool) {
+		return "background-brain", "pod-b", 3, false
+	})
+
+	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on a standby even with a dead poller snapshot, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

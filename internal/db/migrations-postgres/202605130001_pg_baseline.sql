@@ -8335,6 +8335,178 @@ ALTER TABLE public.instances ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.instances FROM PUBLIC;
 REVOKE ALL ON public.instances FROM anon, authenticated, service_role;
 
+-- leases (TFAC-583): the leader-election primitive for the horizontal-
+-- scaling control plane. One row today — name='background-brain' — but the
+-- schema is deliberately name-keyed (not a singleton) so per-org brain
+-- sharding (P4) is just more rows, not a migration.
+--
+-- term is the fencing token: +1 on every acquisition, never on a renewal.
+-- Acquisition is `UPDATE ... SET holder_id=me, term=term+1, acquired_at=now(),
+-- renewed_at=now() WHERE renewed_at < now() - TTL`; renewal is `UPDATE ...
+-- SET renewed_at=now() WHERE name=$1 AND holder_id=me AND term=$myterm` — a
+-- renewal matching 0 rows means the lease was taken by someone else, and the
+-- holder demotes immediately. All cross-node comparisons here run in DB time
+-- (renewed_at < now() - TTL); a holder's own self-demotion decision runs on
+-- its OWN monotonic clock instead (internal/lease), never compared against
+-- this table's timestamps.
+--
+-- Bootstrap race: the row may not exist on first boot. Callers INSERT ...
+-- ON CONFLICT (name) DO NOTHING first (seeding holder_id='', renewed_at far
+-- in the past so it's immediately acquirable), then run the normal
+-- acquisition UPDATE — two pods racing the insert converge on exactly one
+-- holder via the UPDATE's row lock, never a duplicate row.
+--
+-- Admin-pool-only / system table, same posture as instances: no org_id (a
+-- lease isn't tenant data), RLS enabled with NO policy (deny-by-default to
+-- non-BYPASSRLS roles) + REVOKE ALL from PUBLIC + the app roles. No
+-- SQLite counterpart — local mode (and TF_ROLE=all) never elects, the
+-- single process always self-holds (internal/lease's Static branch), so
+-- there is zero lease I/O to back with a table there.
+CREATE TABLE public.leases (
+    name         text NOT NULL,
+    holder_id    text NOT NULL,
+    term         bigint NOT NULL,
+    acquired_at  timestamp with time zone NOT NULL,
+    renewed_at   timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.leases
+    ADD CONSTRAINT leases_pkey PRIMARY KEY (name);
+
+ALTER TABLE public.leases ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.leases FROM PUBLIC;
+REVOKE ALL ON public.leases FROM anon, authenticated, service_role;
+
+-- poll_readiness (TFAC-583): the org-scoped, DB-backed replacement for what
+-- used to be two in-memory, leader-coupled Server fields — the "config took
+-- effect" one-shot announce toast and the /api/jira/stock readiness gate
+-- (internal/app's old `announcer` type + server.go's jiraPollMu/
+-- jiraRestartedAt/jiraLastPollAt). Both were process-local state written by
+-- whichever pod ran the poller; under the control/standby split that pod is
+-- not necessarily the one serving a given /api/jira/stock request, so the
+-- state has to live somewhere every control pod's API can read — this table.
+--
+-- One row per (org_id, source) — source is 'github' or 'jira'. restarted_at
+-- is stamped when a config change restarts that source's poller (clearing
+-- readiness until a fresh completion lands); last_poll_at is stamped on
+-- every completed cycle. Ready = last_poll_at IS NOT NULL AND (restarted_at
+-- IS NULL OR last_poll_at > restarted_at) — see
+-- internal/db/postgres/poll_readiness.go. announce_pending is the one-shot
+-- toast flag, consumed atomically (UPDATE ... WHERE announce_pending
+-- RETURNING) so a poll completion observed by two racing pods can't double-
+-- fire the toast.
+--
+-- App-pool readable: a control pod's /api/jira/stock handler reads this for
+-- an orgID it already resolved+authorized via session claims (not a
+-- browsable RLS surface), so the store methods take an explicit orgID and
+-- run on the admin pool like the instances table, rather than adding a new
+-- per-row RLS policy for what is operational state, not tenant content.
+CREATE TABLE public.poll_readiness (
+    org_id            text NOT NULL,
+    source            text NOT NULL,
+    restarted_at      timestamp with time zone,
+    last_poll_at      timestamp with time zone,
+    announce_pending  boolean NOT NULL DEFAULT false
+);
+
+ALTER TABLE ONLY public.poll_readiness
+    ADD CONSTRAINT poll_readiness_pkey PRIMARY KEY (org_id, source);
+
+ALTER TABLE public.poll_readiness ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.poll_readiness FROM PUBLIC;
+REVOKE ALL ON public.poll_readiness FROM anon, authenticated, service_role;
+
+
+-- ws_outbox: overflow storage for the tf_ws backplane (TFAC-584, spec
+-- §5.1/§5). websocket.Hub.Broadcast publishes an envelope on tf_ws for
+-- every control pod to fan into its own local sockets; NOTIFY caps a
+-- payload at ~8 KB and agent-message frames regularly exceed the
+-- configured inline threshold (default 6 KB, TF_WS_INLINE_MAX_B), so an
+-- oversized event lands here instead and the NOTIFY carries only a row
+-- ref. Row insert + NOTIFY happen in the same transaction (see
+-- internal/wsbackplane), so a reader can always fetch what the ref
+-- points to unless the tx rolled back after NOTIFY was already
+-- buffered — that race, and a TTL-reaped row, both resolve by dropping
+-- the event with a debug log, consistent with tf_ws's lossy-by-contract
+-- rule (a dropped frame costs a UI blip; the frontend already refetches
+-- on focus/poll). TTL 60 s (TF_WS_OUTBOX_TTL_SECONDS); any pod's slow
+-- timer may run the reaper (`DELETE WHERE created_at < now() - TTL` is
+-- concurrency-safe), so this is deliberately NOT leader-gated — reaping
+-- is too trivial to route through the brain lease.
+--
+-- Admin-pool-only / system table, same posture as instances: no org_id
+-- (an in-flight envelope isn't tenant data with an access-control
+-- question — the payload itself already carries whatever org scoping
+-- the original event had). RLS enabled with NO policy (deny-by-default
+-- to non-BYPASSRLS roles) + REVOKE ALL from PUBLIC + the app roles.
+CREATE TABLE public.ws_outbox (
+    id          bigserial NOT NULL,
+    payload     jsonb NOT NULL,
+    created_at  timestamp with time zone NOT NULL DEFAULT now()
+);
+
+ALTER TABLE ONLY public.ws_outbox
+    ADD CONSTRAINT ws_outbox_pkey PRIMARY KEY (id);
+
+CREATE INDEX ws_outbox_created_at_idx ON public.ws_outbox USING btree (created_at);
+
+ALTER TABLE public.ws_outbox ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.ws_outbox FROM PUBLIC;
+REVOKE ALL ON public.ws_outbox FROM anon, authenticated, service_role;
+
+
+-- ws_presence: cross-pod presence for the unattended-prompt fast-deny and
+-- the fleet dashboard's live-viewer count (TFAC-584, spec §5.1). Hub.PresentFor
+-- only ever saw this pod's own local sockets' viewing/visible state — a
+-- reviewer's tab connected to pod B is invisible to a permission check
+-- running on pod A's executor. Every control pod upserts one row per
+-- (user_id, conn_id) on a ~15 s heartbeat (TF_WS_PRESENCE_HEARTBEAT_SECONDS)
+-- mirroring its Hub's locally-connected, identified sockets (see
+-- websocket.Hub.Snapshot); conn_id is qualified with the owning pod's
+-- instance id by the writer (internal/wsbackplane) so two pods' connections
+-- can never collide on this key even though the id itself is only unique
+-- within one process. A row is "live" iff last_seen is within the last 45 s
+-- (TF_WS_PRESENCE_TTL_SECONDS) — checked at read time, not enforced by a DB
+-- constraint; no delete on disconnect, so a dead pod's (or closed
+-- connection's) rows simply age out of every live-read query's filter
+-- without needing an explicit cleanup step for READ correctness. That's
+-- necessary but not sufficient for STORAGE bounding, though: conn_id is
+-- minted from a per-boot monotonic counter (websocket.Hub.connSeq) that's
+-- never reused, so every reconnect (tab refresh, network blip, a
+-- RevalidateSessions kick) mints a brand-new row nothing will ever
+-- overwrite. A periodic reaper (RunPresenceReaper, mirroring ws_outbox's
+-- own) deletes rows past a separate, longer TTL (TF_WS_PRESENCE_ROW_TTL_SECONDS,
+-- default well above the live window) purely for that storage bound — it
+-- has zero effect on PresentFor's answer, which the live-window filter
+-- alone already determines.
+--
+-- Admin-pool-only / system table, same posture as instances/ws_outbox: not
+-- genuinely tenant business data (org_id here is a read-time filter on
+-- otherwise-plumbing rows, not something a tenant's own RLS-scoped session
+-- should read directly), so RLS is enabled with NO policy + REVOKE ALL.
+CREATE TABLE public.ws_presence (
+    user_id     text NOT NULL,
+    conn_id     text NOT NULL,
+    org_id      text NOT NULL,
+    instance_id text NOT NULL,
+    viewing     text NOT NULL DEFAULT ''::text,
+    visible     boolean NOT NULL DEFAULT false,
+    last_seen   timestamp with time zone NOT NULL DEFAULT now()
+);
+
+ALTER TABLE ONLY public.ws_presence
+    ADD CONSTRAINT ws_presence_pkey PRIMARY KEY (user_id, conn_id);
+
+CREATE INDEX ws_presence_org_last_seen_idx ON public.ws_presence USING btree (org_id, last_seen);
+
+ALTER TABLE public.ws_presence ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.ws_presence FROM PUBLIC;
+REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
+
 
 -- run_signals (TFAC-585): the cross-pod run-control outbox — a control pod's
 -- delivery of cancel/interrupt/steer/permission/inject to the executor that

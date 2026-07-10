@@ -149,6 +149,11 @@ func New(conn *sql.DB) db.Stores {
 		// dispatcher claims its own resumed runs through the identical
 		// queue path.
 		RunPendingInput: newRunPendingInputStore(conn),
+		// PollReadiness is admin-pool only in Postgres; SQLite collapses to
+		// the one connection (N=1, no RLS). Org-scoped readiness gate for
+		// /api/jira/stock + the one-shot "config took effect" announce
+		// toast — see the poll_readiness migration. See TFAC-583.
+		PollReadiness: newPollReadinessStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

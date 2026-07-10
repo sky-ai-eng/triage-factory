@@ -198,7 +198,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 	// synchronously so jiraPollReady flips false before the async callback
 	// starts, closing a race where carry-over reads stale snapshots.
 	if s.onGitHubChanged != nil {
-		s.MarkJiraRestarted()
+		s.MarkJiraRestarted(r.Context(), orgID)
 		go s.onGitHubChanged(orgID)
 	}
 
@@ -541,7 +541,7 @@ func (s *Server) handleIntegrationsDeleteJira(w http.ResponseWriter, r *http.Req
 	// Stop the Jira poller and clear the in-memory client so it doesn't
 	// keep polling with stale credentials.
 	if s.onJiraChanged != nil {
-		s.MarkJiraRestarted()
+		s.MarkJiraRestarted(r.Context(), orgID)
 		go s.onJiraChanged(orgID)
 	}
 	resp := map[string]any{"status": "cleared"}

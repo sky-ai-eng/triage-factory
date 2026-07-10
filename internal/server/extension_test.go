@@ -95,12 +95,15 @@ func TestExtensionAPI_OnReady_NilHookPanics(t *testing.T) {
 	api.OnReady(nil)
 }
 
-// TestExtensionAPI_OnReady_DoesNotFireUntilStarted pins that registering a
-// hook (the install-time action) is inert on its own — it must not run until
-// StartExtensionWorkers fires it, mirroring the real boot order where
-// OnReady is called during routes()/installExtensions, well before app
-// wiring (and therefore StartExtensionWorkers) completes.
-func TestExtensionAPI_OnReady_DoesNotFireUntilStarted(t *testing.T) {
+// TestExtensionAPI_OnReady_DoesNotFireUntilBrainStarts pins that
+// registering a hook (the install-time action) is inert on its own — it
+// must not run until StartBrainExtensionWorkers fires it, mirroring the
+// real boot order where OnReady is called during routes()/
+// installExtensions, well before app wiring AND this pod's first
+// background-brain acquisition. Plain StartExtensionWorkers (the
+// replica-safe path) must NOT fire a brain-gated OnReady hook either
+// (TFAC-583) — that's the whole point of the split.
+func TestExtensionAPI_OnReady_DoesNotFireUntilBrainStarts(t *testing.T) {
 	srv := &Server{}
 	api := serverExtensionAPI{srv}
 
@@ -109,23 +112,73 @@ func TestExtensionAPI_OnReady_DoesNotFireUntilStarted(t *testing.T) {
 
 	select {
 	case <-fired:
-		t.Fatal("hook fired on OnReady registration; it must wait for StartExtensionWorkers")
+		t.Fatal("hook fired on OnReady registration; it must wait for StartBrainExtensionWorkers")
 	case <-time.After(100 * time.Millisecond):
 	}
 
 	srv.StartExtensionWorkers(context.Background())
+	select {
+	case <-fired:
+		t.Fatal("a brain-gated OnReady hook must not fire from StartExtensionWorkers (the replica-safe path)")
+	case <-time.After(100 * time.Millisecond):
+	}
 
+	srv.StartBrainExtensionWorkers(context.Background())
 	select {
 	case <-fired:
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for StartExtensionWorkers to fire the hook")
+		t.Fatal("timed out waiting for StartBrainExtensionWorkers to fire the hook")
 	}
 }
 
-// TestServer_StartExtensionWorkers_HookSeesWiredBus pins the seam's core
-// ordering guarantee: by the time a hook fires, read-through accessors like
-// Bus() resolve to whatever app wiring set before StartExtensionWorkers ran.
-func TestServer_StartExtensionWorkers_HookSeesWiredBus(t *testing.T) {
+// TestExtensionAPI_OnReadyReplicaSafe_NilHookPanics mirrors OnReady's
+// fail-fast-at-registration contract for the replica-safe hatch.
+func TestExtensionAPI_OnReadyReplicaSafe_NilHookPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("OnReadyReplicaSafe(nil) did not panic")
+		}
+		if msg, ok := r.(string); !ok || !strings.Contains(msg, "OnReadyReplicaSafe") {
+			t.Errorf("panic value = %v, want a message naming OnReadyReplicaSafe", r)
+		}
+	}()
+
+	api := serverExtensionAPI{&Server{}}
+	api.OnReadyReplicaSafe(nil)
+}
+
+// TestExtensionAPI_OnReadyReplicaSafe_FiresFromStartExtensionWorkers pins
+// the escape hatch's contract: a replica-safe hook fires from the plain
+// (unconditional, brain-lease-agnostic) StartExtensionWorkers path, not
+// StartBrainExtensionWorkers.
+func TestExtensionAPI_OnReadyReplicaSafe_FiresFromStartExtensionWorkers(t *testing.T) {
+	srv := &Server{}
+	api := serverExtensionAPI{srv}
+
+	fired := make(chan struct{}, 1)
+	api.OnReadyReplicaSafe(func(ctx context.Context) { fired <- struct{}{} })
+
+	srv.StartBrainExtensionWorkers(context.Background())
+	select {
+	case <-fired:
+		t.Fatal("a replica-safe hook must not fire from StartBrainExtensionWorkers")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	srv.StartExtensionWorkers(context.Background())
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for StartExtensionWorkers to fire the replica-safe hook")
+	}
+}
+
+// TestServer_StartBrainExtensionWorkers_HookSeesWiredBus pins the seam's
+// core ordering guarantee: by the time a hook fires, read-through
+// accessors like Bus() resolve to whatever app wiring set before this
+// pod's brain started.
+func TestServer_StartBrainExtensionWorkers_HookSeesWiredBus(t *testing.T) {
 	srv := &Server{}
 	api := serverExtensionAPI{srv}
 
@@ -135,22 +188,24 @@ func TestServer_StartExtensionWorkers_HookSeesWiredBus(t *testing.T) {
 	got := make(chan *eventbus.Bus, 1)
 	api.OnReady(func(ctx context.Context) { got <- api.Bus() })
 
-	srv.StartExtensionWorkers(context.Background())
+	srv.StartBrainExtensionWorkers(context.Background())
 
 	select {
 	case b := <-got:
 		if b != bus {
-			t.Errorf("Bus() inside hook = %v, want the bus wired before StartExtensionWorkers (%v)", b, bus)
+			t.Errorf("Bus() inside hook = %v, want the bus wired before the brain started (%v)", b, bus)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the hook to observe Bus()")
 	}
 }
 
-// TestServer_StartExtensionWorkers_CtxCancelObservableInHook pins that the
-// context handed to a hook is the shutdown-cancelling context passed to
-// StartExtensionWorkers, not some detached background context.
-func TestServer_StartExtensionWorkers_CtxCancelObservableInHook(t *testing.T) {
+// TestServer_StartBrainExtensionWorkers_CtxCancelObservableInHook pins
+// that the context handed to a hook is the one passed to
+// StartBrainExtensionWorkers — internal/app passes a ctx that cancels on
+// EITHER process shutdown OR lease demotion, so a worker sees the same
+// signal either way.
+func TestServer_StartBrainExtensionWorkers_CtxCancelObservableInHook(t *testing.T) {
 	srv := &Server{}
 	api := serverExtensionAPI{srv}
 
@@ -163,7 +218,7 @@ func TestServer_StartExtensionWorkers_CtxCancelObservableInHook(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	srv.StartExtensionWorkers(ctx)
+	srv.StartBrainExtensionWorkers(ctx)
 
 	select {
 	case <-started:
@@ -180,15 +235,40 @@ func TestServer_StartExtensionWorkers_CtxCancelObservableInHook(t *testing.T) {
 	}
 }
 
-// TestServer_StartExtensionWorkers_SecondCallIsNoOp pins the idempotence
-// guard: a second StartExtensionWorkers call (e.g. a test or caller
-// double-invoking Run) must not fire hooks again.
-func TestServer_StartExtensionWorkers_SecondCallIsNoOp(t *testing.T) {
+// TestServer_StartBrainExtensionWorkers_RepeatCallsRestartHooks pins that,
+// unlike StartExtensionWorkers, StartBrainExtensionWorkers is NOT
+// Once-guarded — a second call (modeling a lease re-acquisition after an
+// earlier demotion) fires the hooks again. internal/app's brainMu-guarded
+// startBrain is what prevents a spurious double-call while already
+// holding; this method itself trusts the caller.
+func TestServer_StartBrainExtensionWorkers_RepeatCallsRestartHooks(t *testing.T) {
 	srv := &Server{}
 	api := serverExtensionAPI{srv}
 
 	calls := make(chan struct{}, 10)
 	api.OnReady(func(ctx context.Context) { calls <- struct{}{} })
+
+	srv.StartBrainExtensionWorkers(context.Background())
+	srv.StartBrainExtensionWorkers(context.Background())
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-calls:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for call %d", i+1)
+		}
+	}
+}
+
+// TestServer_StartExtensionWorkers_SecondCallIsNoOp pins the idempotence
+// guard on the replica-safe path: a second StartExtensionWorkers call
+// (e.g. a test or caller double-invoking Run) must not fire hooks again.
+func TestServer_StartExtensionWorkers_SecondCallIsNoOp(t *testing.T) {
+	srv := &Server{}
+	api := serverExtensionAPI{srv}
+
+	calls := make(chan struct{}, 10)
+	api.OnReadyReplicaSafe(func(ctx context.Context) { calls <- struct{}{} })
 
 	ctx := context.Background()
 	srv.StartExtensionWorkers(ctx)
@@ -207,10 +287,10 @@ func TestServer_StartExtensionWorkers_SecondCallIsNoOp(t *testing.T) {
 	}
 }
 
-// TestServer_StartExtensionWorkers_MultipleHooksAllFire pins that every
-// registered hook fires — the shape of two ee/ extensions each registering
-// their own OnReady worker off the same install pass.
-func TestServer_StartExtensionWorkers_MultipleHooksAllFire(t *testing.T) {
+// TestServer_StartBrainExtensionWorkers_MultipleHooksAllFire pins that
+// every registered hook fires — the shape of two ee/ extensions each
+// registering their own OnReady worker off the same install pass.
+func TestServer_StartBrainExtensionWorkers_MultipleHooksAllFire(t *testing.T) {
 	srv := &Server{}
 	api := serverExtensionAPI{srv}
 
@@ -219,7 +299,7 @@ func TestServer_StartExtensionWorkers_MultipleHooksAllFire(t *testing.T) {
 	api.OnReady(func(ctx context.Context) { fired1 <- struct{}{} })
 	api.OnReady(func(ctx context.Context) { fired2 <- struct{}{} })
 
-	srv.StartExtensionWorkers(context.Background())
+	srv.StartBrainExtensionWorkers(context.Background())
 
 	for _, ch := range []chan struct{}{fired1, fired2} {
 		select {

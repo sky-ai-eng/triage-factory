@@ -353,6 +353,15 @@ var orgScopedTables = []string{
 	// never reach it, so it must be listed explicitly or Reset would leak
 	// registered-instance rows across tests sharing this container.
 	"instances",
+	// leases (TFAC-583): same shape as instances — no org_id, no FK — so
+	// it must be listed explicitly or Reset would leak lease rows (and
+	// their fencing terms) across tests sharing this container.
+	"leases",
+	// poll_readiness (TFAC-583): carries an org_id column but deliberately
+	// no FK to orgs (admin-pool-only system state, same posture as
+	// instances) — TRUNCATE CASCADE from orgs would never reach it, so it
+	// must be listed explicitly too.
+	"poll_readiness",
 	// users last — most other tables FK into it.
 	"users",
 	// NOT INCLUDED explicitly: system_prompt_versions, events_catalog.

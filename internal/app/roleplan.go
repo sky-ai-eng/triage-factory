@@ -39,12 +39,24 @@ type subsystemPlan struct {
 	// listener is the localhost healthz).
 	serveHTTP bool
 
-	// brain starts the leader-elected background brain: pollers + tracker,
-	// the event router + its drain workers, the AI managers
-	// (scorer/profiler/classifier/reconciler/marketplace-stats), the
-	// knowledge-base watcher, the poll-completion bus subscribers, and the
-	// initial poll kick. control + all. (Leader gating is TFAC-583; until it
-	// lands, control always-runs the brain — single-control only.)
+	// brain marks this role as BRAIN-CAPABLE: control + all construct the
+	// leader-elected background brain's objects (pollers + tracker, the
+	// event router, the AI managers — scorer/profiler/classifier/
+	// reconciler/marketplace-stats —, the knowledge-base watcher, the
+	// poll-completion bus subscribers) and participate in the
+	// background-brain lease election. An executor never does.
+	//
+	// This does NOT mean the brain is currently running on this process —
+	// that's dynamic, driven by lease-holder state (TFAC-583,
+	// internal/app/brain.go): at role=all (and local, which forces all)
+	// the single process always self-holds and starts the brain once at
+	// boot, unconditionally, same as before this ticket; at role=control
+	// in multi mode, the brain starts only while this pod actually holds
+	// the "background-brain" lease, and stops on demotion. A standby
+	// control pod still builds every brain object (buildAI/buildRouting) —
+	// config-save handlers and the delegation spawner's classifier wait
+	// need them to relay Trigger/PollSoon calls to whichever pod IS the
+	// holder — it just never starts their background loops.
 	brain bool
 
 	// dispatcher starts the delegated-run dispatcher (claims + executes

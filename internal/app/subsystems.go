@@ -97,7 +97,15 @@ func (a *App) buildAI() {
 			toast.Error(a.wsHub, orgID, fmt.Sprintf("AI scoring cycle aborted: %v", err))
 		},
 	})
-	a.srv.SetScorerTrigger(a.scorer.Trigger)
+	// SetScorerTrigger wires the brain-lease-aware relay wrapper
+	// (relay.go), not a.scorer.Trigger directly: the config-save handler
+	// that calls this may run on a standby control pod, where a.scorer
+	// exists (buildAI runs on every brain-capable role) but Triggering it
+	// in-process would be silently pointless — this process's scorer
+	// Runner never receives poll-completion sentinels because its own
+	// poller isn't running. triggerScorer relays over tf_ctl instead when
+	// this pod isn't the holder (TFAC-583).
+	a.srv.SetScorerTrigger(a.triggerScorer)
 	aiLog.Info("scorer manager ready (per-org runners)", "model", "haiku")
 
 	// Repo-profiling manager: per-org Runners profiling configured repos off
@@ -114,7 +122,10 @@ func (a *App) buildAI() {
 			bootstrapBareClones(a.stores.Repos, a.stores.Secrets)
 		})
 	}
-	a.srv.SetProfilerTrigger(a.profiler.Trigger)
+	// SetProfilerTrigger: same relay-wrapper reasoning as SetScorerTrigger
+	// above — the re-profile button may be clicked against a standby
+	// control pod.
+	a.srv.SetProfilerTrigger(a.triggerProfiler)
 	repoprofileLog.Info("repo-profiling manager ready (per-org runners)", "model", "haiku")
 
 	// Project classifier: per-org Runners, classifying newly-
@@ -292,14 +303,19 @@ func (a *App) buildExecution() error {
 	}
 
 	// Before reading entity.project_id for KB injection, the spawner blocks
-	// until classified_at is set (or the timeout elapses). Only wired when
-	// the classifier exists (brain roles); an executor proceeds without the
-	// wait, reading whatever project_id the brain has already classified.
-	if a.classifier != nil {
-		a.spawner.SetWaitForClassification(func(ctx context.Context, orgID, entityID string) {
-			projectclassify.WaitFor(ctx, a.classifier, orgID, entityID, projectclassify.DefaultWaitTimeout)
-		})
-	}
+	// until classified_at is set (or the timeout elapses). Wired
+	// unconditionally on every role, including an executor (TFAC-583):
+	// WaitFor only ever needs a.stores.Entities (always present) and a
+	// trigger func — a.triggerClassifier relays the kick over tf_ctl to
+	// whichever pod currently holds the background-brain lease when this
+	// process has no local classifier Manager (an executor, or a standby
+	// control pod) to Trigger in-process. Previously this only ran on
+	// brain roles, so an executor's delegated runs proceeded without ever
+	// kicking a fresh classification — they just read whatever project_id
+	// already existed.
+	a.spawner.SetWaitForClassification(func(ctx context.Context, orgID, entityID string) {
+		projectclassify.WaitFor(ctx, a.stores.Entities, a.triggerClassifier, orgID, entityID, projectclassify.DefaultWaitTimeout)
+	})
 
 	// The server + curator handles below only exist on serveHTTP roles. An
 	// executor has no server to hand the spawner to and runs no curator

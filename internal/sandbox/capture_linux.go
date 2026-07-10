@@ -3,9 +3,9 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -28,8 +28,97 @@ var captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error)
 	return exec.CommandContext(ctx, self, "snapshot-capture", wtPath), nil
 }
 
-// CaptureRunDelta runs CaptureWorkspaceGit for worktree inside a
-// dropped-privilege, network-isolated child and returns its raw JSON stdout.
+// CaptureMaxBytes bounds how many raw bytes of a capture child's stdout
+// either capture path — the buffered in-process fallback below, or the
+// cap-broker's streamed RPC (cmd/capbroker) — will hold before giving up.
+// This is the true raw ceiling: the frame cap this replaces applied to the
+// JSON response AFTER base64 inflation, an effective ~384 MiB raw limit, so
+// this is never tighter than what shipped before. A var (not a const) only
+// so tests can shrink it rather than pushing real hundreds-of-MiB payloads.
+var CaptureMaxBytes int64 = 512 * 1024 * 1024
+
+// captureStderrTailBytes bounds how much of the capture child's stderr a
+// caller gets back. Diagnostics only — never run data — so a small fixed
+// tail is enough; the stdout stream is what needed the real cap above.
+const captureStderrTailBytes = 64 * 1024
+
+// ReadCapturedDelta reads r up to CaptureMaxBytes, erroring instead of
+// silently truncating if more arrives — the shared ceiling both capture
+// paths enforce on the same raw byte stream (decision: "one ceiling"),
+// applied by the reader in each case: hostOps.CaptureRunDelta's own pipe
+// below, and the orchestrator-side IPCClient reading the brokered stream.
+func ReadCapturedDelta(r io.Reader) ([]byte, error) {
+	buf, err := io.ReadAll(io.LimitReader(r, CaptureMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read captured delta: %w", err)
+	}
+	if int64(len(buf)) > CaptureMaxBytes {
+		return nil, fmt.Errorf("capture stream exceeds %d byte cap", CaptureMaxBytes)
+	}
+	return buf, nil
+}
+
+// tailBuffer retains only the last max bytes ever written to it — a bounded
+// diagnostic tail for the capture child's stderr, which is never run data
+// but is unbounded in principle (a hostile .git/config could make git chatty
+// on stderr), so it gets the same "bound it, don't trust it" treatment as
+// the stdout stream, just with a much smaller ceiling.
+type tailBuffer struct {
+	max       int
+	buf       []byte
+	truncated bool
+}
+
+// Write never lets the transient allocation exceed max, even for a single
+// huge p: trimming AFTER an unconditional append (the naive approach) would
+// briefly hold len(t.buf)+len(p) bytes, defeating the point of a hard cap
+// against a hostile child that dumps a large chunk to stderr in one write.
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if n == 0 {
+		return 0, nil
+	}
+	if len(t.buf)+n > t.max {
+		t.truncated = true
+	}
+	if n >= t.max {
+		// p alone already fills (or overflows) the cap: keep only its own
+		// tail — a fresh copy, so this doesn't hold a reference into p's
+		// (possibly much larger) backing array — discarding everything
+		// buffered so far without ever appending past max.
+		t.buf = append([]byte(nil), p[n-t.max:]...)
+		return n, nil
+	}
+	// Make room for p first, then append — len(t.buf) never exceeds max at
+	// any point, including mid-call.
+	if keep := t.max - n; len(t.buf) > keep {
+		t.buf = t.buf[len(t.buf)-keep:]
+	}
+	t.buf = append(t.buf, p...)
+	return n, nil
+}
+
+func (t *tailBuffer) String() string {
+	s := strings.TrimSpace(string(t.buf))
+	if t.truncated {
+		return "...(truncated)... " + s
+	}
+	return s
+}
+
+// CaptureRunDeltaTo runs CaptureWorkspaceGit for worktree inside a
+// dropped-privilege, network-isolated child exactly as the buffered
+// CaptureRunDelta below does, but streams the child's stdout directly into
+// the caller-supplied file instead of buffering it in this process.
+//
+// stdout MUST be a real *os.File assigned directly to cmd.Stdout, never
+// wrapped in another io.Writer: os/exec special-cases *os.File (dup2
+// straight into the child at exec time, no copy in this process); any other
+// io.Writer forces os/exec to fall back to an os.Pipe() plus a copy
+// goroutine RIGHT HERE, silently reintroducing every byte of the delta into
+// this process's memory and defeating the reason this function exists. This
+// is what lets the cap-broker call it with the orchestrator's
+// passed-through socket fd and never read a byte of the delta itself.
 //
 // The child drops to the sandbox uid/gid (matching the run tree's ownership
 // hand-off) and runs in a fresh, empty network namespace. So: any
@@ -62,14 +151,24 @@ var captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error)
 // broker's carries its flags), plus config overrides that neuter the two
 // attribute-free exec vectors (core.fsmonitor, diff.external) as defense in
 // depth on top of the uid drop.
-func (hostOps) CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
+//
+// Returns a bounded tail of the child's stderr (diagnostics, never run
+// data) regardless of outcome, plus the run's error if any.
+func CaptureRunDeltaTo(ctx context.Context, worktree string, stdout *os.File) (stderrTail string, err error) {
+	// stdout is this function's to close, whichever way it returns: on a
+	// validation or captureCommand failure below nobody else will ever hold
+	// a reference to it, and once the child is spawned its own inherited
+	// dup is what keeps the pipe/socket alive — this process's copy must
+	// drop regardless so a reader blocked on EOF is not held open by us.
+	defer func() { _ = stdout.Close() }()
+
 	if _, err := validateRunTreeRoot("capture run delta", worktree); err != nil {
-		return nil, err
+		return "", err
 	}
 
 	cmd, err := captureCommand(ctx, worktree)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	cmd.Dir = "/" // a neutral cwd; the child is passed the worktree path explicitly
 	cmd.Env = captureChildEnv()
@@ -92,13 +191,52 @@ func (hostOps) CaptureRunDelta(ctx context.Context, worktree string) ([]byte, er
 		cmd.SysProcAttr.Cloneflags = syscall.CLONE_NEWNET
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stderr := &tailBuffer{max: captureStderrTailBytes}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("isolated capture: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return stderr.String(), fmt.Errorf("isolated capture: %w", err)
 	}
-	return stdout.Bytes(), nil
+	return stderr.String(), nil
+}
+
+// CaptureRunDelta is the unprivileged, in-process fallback used only when
+// no broker exists (unprivileged bare-metal dev): a thin buffered wrapper
+// over CaptureRunDeltaTo. It pipes the streaming variant's stdout into
+// itself, reading concurrently with the child's Run (a pipe's kernel buffer
+// is a few tens of KiB — anything larger would deadlock a child that writes
+// before anyone drains it) and enforcing the same CaptureMaxBytes ceiling
+// the brokered path's client-side reader applies, via ReadCapturedDelta.
+func (hostOps) CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("isolated capture: create pipe: %w", err)
+	}
+
+	type readResult struct {
+		buf []byte
+		err error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		buf, err := ReadCapturedDelta(pr)
+		_ = pr.Close()
+		readDone <- readResult{buf, err}
+	}()
+
+	stderrTail, runErr := CaptureRunDeltaTo(ctx, worktree, pw)
+	res := <-readDone
+	if runErr != nil {
+		if stderrTail != "" {
+			return nil, fmt.Errorf("%w: %s", runErr, stderrTail)
+		}
+		return nil, runErr
+	}
+	if res.err != nil {
+		return nil, fmt.Errorf("isolated capture: %w", res.err)
+	}
+	return res.buf, nil
 }
 
 // captureChildEnv is the minimal environment for the capture child. It
