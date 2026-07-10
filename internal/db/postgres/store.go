@@ -334,6 +334,14 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// membership registry every TF process registers into at boot and
 		// refreshes via periodic heartbeat.
 		Instances: newInstanceStore(admin),
+		// RunSignals is admin-pool only, same posture as Instances: the
+		// cross-pod run-control outbox (TFAC-585), never read under a
+		// user's RLS context.
+		RunSignals: newRunSignalStore(admin),
+		// RunPendingInput is admin-pool only: the writer (SendMessage, past
+		// its own authz check) and the reader (the dispatcher's claim path)
+		// are both system-service callers, same shape as StagedInjections.
+		RunPendingInput: newRunPendingInputStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),

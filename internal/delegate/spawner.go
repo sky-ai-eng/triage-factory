@@ -130,8 +130,48 @@ type Spawner struct {
 	// instances is the fleet membership registry RunInstanceHeartbeat
 	// renews on a timer. A plain store ref like s.jiraRules; nil-safe (a nil
 	// store makes the heartbeat loop a logged no-op, same shape as RunQueue on
-	// RunDispatcher).
+	// RunDispatcher). Also the liveness read the cross-pod signal seam
+	// (TFAC-585) uses to decide whether a run's executor is still around.
 	instances db.InstanceStore
+	// pendingInput is the durable half of resume-by-enqueue (TFAC-585): the
+	// message recorded before a parked run's continuation is re-queued as
+	// ordinary claimable work. Wired unconditionally in NewSpawner — both
+	// dialects support it (local mode's dispatcher claims its own resumed
+	// runs the same way). Nil-safe (a partial test Stores{} skips it).
+	pendingInput db.RunPendingInputStore
+	// pendingFirings lets the owner's signal-apply loop compensate a cross-
+	// pod `inject` signal whose target run turned out dead by the time it
+	// was applied: it enqueues the pending_firing itself so the additive
+	// event's intent survives (TFAC-585's "gone" ack path). Wired
+	// unconditionally — both dialects support pending_firings.
+	pendingFirings db.PendingFiringsStore
+	// runSignals is the cross-pod run-control outbox (TFAC-585, Postgres
+	// only). Nil except when SetRunSignals wires it — always nil in local
+	// mode and in every test that doesn't opt in, which is what keeps
+	// s.controller as the plain inProcessController and every cross-pod
+	// code path (crossPodController, the apply loop, StageOrDeliverAdditiveEvent's
+	// remote branch) a no-op/never-reached by construction. Guarded by mu
+	// like the other post-construction seams.
+	runSignals db.RunSignalStore
+	// signalNotifyDB is the admin-pool *sql.DB SetRunSignals wires
+	// alongside runSignals — NOTIFY needs no session affinity (unlike
+	// LISTEN), so it rides whatever pooled connection is at hand. Nil
+	// exactly when runSignals is nil.
+	signalNotifyDB *sql.DB
+	// ackWaiters holds one wake channel per in-flight signal a control
+	// request on this pod is waiting to see acked, keyed by run_signals.id.
+	// The shared tf_ctl Listener's onNotify dispatch sends on the matching
+	// channel (non-blocking, 1-buffered) when it observes {"kind":"ack"};
+	// the waiter treats it as "check now", not as the data itself (the
+	// authoritative read is always AckStatus). Guarded by mu.
+	ackWaiters map[int64]chan struct{}
+	// signalApplyWake is the best-effort latency nudge for the owner's
+	// signal-apply loop, mirroring dispatchWake. Non-blocking send from the
+	// shared Listener's onNotify dispatch on {"kind":"new"}.
+	signalApplyWake chan struct{}
+	// signalAckTimeout overrides the interrupt/steer reply-leg timeout
+	// (TF_SIGNAL_ACK_TIMEOUT). Zero means use DefaultSignalAckTimeout.
+	signalAckTimeout time.Duration
 	// tx runs synthetic-claims write batches for manual runs (the
 	// run's creator_user_id is the synthetic claim subject, so RLS
 	// policies on the writes pass under tf_app). Event-triggered runs
@@ -331,6 +371,8 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		externalActions:  stores.ExternalActions,
 		teams:            stores.Teams,
 		instances:        stores.Instances,
+		pendingInput:     stores.RunPendingInput,
+		pendingFirings:   stores.PendingFirings,
 		tx:               stores.Tx,
 		ghClient:         ghClient,
 		wsHub:            wsHub,
@@ -339,6 +381,8 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		dispatchWake:     make(chan struct{}, 1),
 		procs:            make(map[string]*liveRunHandle),
 		permPending:      make(map[string]*pendingPermission),
+		ackWaiters:       make(map[int64]chan struct{}),
+		signalApplyWake:  make(chan struct{}, 1),
 		runSem:           make(chan struct{}, DefaultMaxConcurrentRuns),
 		memAvailMB:       hostmem.AvailableMB,
 	}

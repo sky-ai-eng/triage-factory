@@ -36,58 +36,62 @@ var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 // than seeing the run silently fail mid-resume. Callers map it to 410 Gone.
 var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired and can no longer be resumed")
 
-// ResumeOpenRun wakes a parked/terminal-but-resumable run (open or
-// completed+abort — see resumableState) with a new
-// message. This method:
-//  1. validates the run is resumable (session id, worktree path, task)
-//  2. registers a cancellation handle in s.cancels[runID]
-//  3. flips the run to running (a (status, outcome) compare-and-swap race
-//     guard), and — for a completed+abort run whose blueprint already
-//     terminated aborted — re-opens that blueprint in the same tx so the
-//     resumed step can re-finalize it
-//  4. spawns the goroutine that re-invokes Claude with the message and runs
-//     the resulting completion through the same processCompletion path the
-//     initial run uses
+// ResumeOpenRun is resume-by-enqueue (TFAC-585, decision log #7): a
+// message to a parked/terminal-but-resumable run (open or completed+abort
+// — see resumableState) records the message durably, then re-queues the
+// SAME runs row as ordinary claimable work — no in-process resume
+// goroutine spawns, in ANY mode (the previous in-process implementation
+// is retired entirely, TF_ROLE=all included). This method:
+//  1. validates the run is resumable (session id, worktree path, model)
+//  2. durably records agentMessage on run_pending_input, keyed by run_id
+//     (an idempotent upsert — a retried call after a failed flip just
+//     overwrites its own prior write)
+//  3. flips the run's status back to `queued` (a (status, outcome)
+//     compare-and-swap race guard, MarkQueuedForResume), and — for a
+//     completed+abort run whose blueprint already terminated aborted —
+//     re-opens that blueprint in the same tx, exactly like the retired
+//     goroutine did, so the eventual resumed step can re-finalize it
+//  4. nudges the dispatcher (a ~ms same-process wake at TF_ROLE=all; a
+//     cross-pod wake is out of scope here — the claiming executor's own
+//     scan-interval backstop picks the row up, per the ticket's accepted
+//     "wake latency traverses the queue" decision)
 //
-// agentMessage is the plain-text message to feed the resumed session (in P3,
-// the user's steering text).
+// The actual delivery — rehydrating the workspace and re-invoking Claude
+// with the recorded message — happens later, off the ordinary claim path
+// (Spawner.dispatchResumeClaim in dispatch.go), on whichever executor
+// claims the row. This is the split the ticket calls for: "operations on
+// live processes are routed; creation of work is queued" — a resume mints
+// work, so it goes through the same admission gates (memory floor,
+// concurrency cap, fair ordering) every other queued run does.
 //
-// Cancel-during-resume is closed by ordering: the cancel handle is in
-// place before the status flip, so any Cancel() arriving after the
-// flip finds the registered ctx and calls cancel() rather than
-// falling through to the DB-write path. The resume goroutine writes
-// its own terminal cancelled status when it observes ctx.Err() —
-// the registered-cancel path doesn't write to the DB itself, so
-// without that we'd leak a "cancelled but row says running" state.
+// agentMessage is the plain-text message to feed the resumed session (in
+// P3, the user's steering text).
 //
-// userID identifies the resuming user — the actor whose action woke the run.
-// All writes inside the resume goroutine route under this user's synthetic
-// claims regardless of the run's original trigger type (an event-triggered run
-// resumed by a teammate gets the teammate's identity on the resume writes,
-// which is the audit-honest outcome). Local mode passes
-// runmode.LocalDefaultUserID; multi-mode handlers extract it from JWT claims.
-func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error {
+// userID identifies the resuming user — the actor whose action woke the
+// run. Every write here (and, later, every write inside the delivering
+// claim) routes under this user's synthetic claims regardless of the
+// run's original trigger type (an event-triggered run resumed by a
+// teammate gets the teammate's identity on the resume writes, which is
+// the audit-honest outcome). Local mode passes runmode.LocalDefaultUserID;
+// multi-mode handlers extract it from JWT claims.
+func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage, userID string) error {
 	if userID == "" {
 		return fmt.Errorf("resume: empty user id")
 	}
-	// Identity fence: a superseded instance identity must not start new
-	// live work (the resume would stamp this process's dead identity onto
-	// the row). Same latch the dispatcher's claim loop honors.
-	if s.IdentityFenced() {
-		return fmt.Errorf("resume: this instance's identity was superseded by a newer boot (duplicated state root?); restart the process to re-register")
+	if s.pendingInput == nil {
+		return fmt.Errorf("resume: no pending-input store wired")
 	}
-	run, err := s.agentRuns.GetSystem(context.Background(), orgID, runID)
+	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
 	if err != nil {
 		return fmt.Errorf("load run: %w", err)
 	}
 	if run == nil {
 		return fmt.Errorf("run not found")
 	}
-	// Only a resumable run (open / completed+abort) can be
-	// woken; a finish/failed/cancelled or actively-running run is rejected up
-	// front so the workspace pre-flight below never mislabels a non-resumable run
-	// as "expired". The MarkResuming compare-and-swap re-checks under the row
-	// lock, so this early-out doesn't relax the race guard.
+	// Only a resumable run (open / completed+abort) can be woken. The
+	// MarkQueuedForResume compare-and-swap re-checks under the row lock,
+	// so this early-out doesn't relax the race guard — it just avoids
+	// recording an input row for a run that's obviously not resumable.
 	if !resumableState(run.Status, run.Outcome) {
 		return ErrRunNotResumable
 	}
@@ -97,117 +101,42 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 	if run.WorktreePath == "" {
 		return fmt.Errorf("run has no worktree path; cannot resume")
 	}
-	// A resume must reuse the model the run started with. run.Model is set
-	// at Delegate time (always non-empty for a real run); guard here so the
-	// resume fails with a clear message rather than tripping ResumeWithMessage's
-	// required-model check downstream.
 	if run.Model == "" {
 		return fmt.Errorf("run has no model; cannot resume")
 	}
-	task, err := s.tasks.GetSystem(context.Background(), orgID, run.TaskID)
-	if err != nil {
-		return fmt.Errorf("load task: %w", err)
-	}
-	if task == nil {
-		return fmt.Errorf("task not found for run")
+
+	// Step 1: durably record the input BEFORE the requeue flip. An
+	// idempotent upsert keyed by run_id — the documented crash-window
+	// contract: if the flip below fails (or this process crashes before
+	// reaching it), the caller's retry just re-upserts the same input,
+	// never accumulating a second row.
+	if err := s.pendingInput.Store(ctx, orgID, runID, userID, agentMessage); err != nil {
+		return fmt.Errorf("record pending input: %w", err)
 	}
 
-	// Resolve owner/repo for repoEnv. Best-effort: Jira-only runs have
-	// no resolvable repo and the resumed subprocess simply runs
-	// without TRIAGE_FACTORY_REPO, the same way Jira-no-match runs do
-	// today.
-	owner, repo := "", ""
-	entity, err := s.entities.GetSystem(context.Background(), orgID, task.EntityID)
-	if err == nil && entity != nil {
-		owner, repo = parseOwnerRepo(entity.SourceID)
-	}
-
-	// Resolve extra allowed tools from the prompt used for this run.
-	var extraTools string
-	if run.PromptID != "" {
-		if p, err := s.prompts.GetSystem(context.Background(), orgID, run.PromptID); err == nil && p != nil {
-			extraTools = s.collectExtraTools(p.AllowedTools)
-		}
-	}
-
-	// Capture state needed inside the goroutine.
-	sessionID := run.SessionID
-	cwd := run.WorktreePath
-	model := run.Model
-	taskCopy := *task
-	// The run's blueprint_run_id drives both the resumed env's memory namespace
-	// and processCompletion's namespacing + task disposition. Capture the raw
-	// value and derive the namespace (blueprint_run_id — every run is a blueprint
-	// step) so the resumed agent reads/writes the same _scratch/entity-memory/
-	// <namespace>/ folder as the initial invocation.
+	// A completed+abort run's blueprint already terminated (aborted) when
+	// the step stopped. Re-open it to running in the same tx as the run
+	// flip (below) so the eventual resumed step's new conclusion re-
+	// finalizes the blueprint through the normal post-resume disposition
+	// (ResumeBlueprintAfterResume, called from dispatchResumeClaim once
+	// delivery completes). An open resume leaves its still-running
+	// blueprint alone — ReopenRunForResume's CAS (status='aborted') is a
+	// no-op there. Reopening now (not at claim time) is required:
+	// ClaimNextRun only claims rows whose blueprint_run is 'running', so a
+	// still-'aborted' blueprint would make this row permanently
+	// unclaimable.
 	blueprintRunID := run.BlueprintRunID
-	namespace := memoryNamespace(blueprintRunID, runID)
-	// A completed+abort run's blueprint already terminated (aborted) when the
-	// step stopped. Re-open it to running in the same tx as the run flip (below)
-	// so the resumed step's new conclusion re-finalizes the blueprint through the
-	// normal post-resume disposition (ResumeBlueprintAfterResume). An
-	// An open resume leaves its still-running blueprint alone —
-	// ReopenRunForResume's CAS (status='aborted') is a no-op there.
 	reopenAbortedBlueprint := run.Status == "completed" && domain.RunOutcome(run.Outcome) == domain.RunOutcomeAbort
-	// trigger_type is non-null in the schema (the CHECK pairs it
-	// with creator_user_id nullability), so this fallback only
-	// defends against legacy / test fixture rows that left the
-	// column unset. Keeping it cheap and explicit rather than
-	// trusting the read.
-	// Resume is always user-initiated — the userID arg is the actor
-	// who woke the run. All writes inside the resume route under
-	// that user's synthetic claims regardless of the run's original
-	// trigger type: an event-triggered run resumed by a teammate
-	// still attributes the resume's writes to the teammate. The
-	// trigger_type captured here is only used for the drainer +
-	// pollDrainer hook on terminal exit (event runs still drive the
-	// per-entity firing queue).
-	triggerType := run.TriggerType
-	if triggerType == "" {
-		triggerType = "manual"
-	}
 
-	// Pre-flight the workspace before any side effect: a resume rebuilds from the
-	// warm worktree, or failing that the durable snapshot. If both are gone — the
-	// worktree was swept AND the snapshot was reaped by the retention TTL — the
-	// workspace has expired. Surface that as a clear error WITHOUT flipping the
-	// run (its status is unchanged at expiry), so the user learns the WIP is gone
-	// rather than watching the run flip to failed mid-resume.
-	if !s.workspaceRecoverable(context.Background(), orgID, run) {
-		return ErrWorkspaceExpired
-	}
-
-	// Step 1: register the cancel handle synchronously. Once this
-	// runs, a concurrent Cancel(runID) finds the entry and calls
-	// cancel() on the ctx instead of falling through to the
-	// MarkAgentRunCancelledIfActive DB-write path. The goroutine
-	// observes ctx.Err() and writes the terminal cancelled status
-	// itself.
-	ctx, cancel := context.WithCancel(context.Background())
-	s.mu.Lock()
-	if _, ok := s.cancels[runID]; ok {
-		s.mu.Unlock()
-		cancel()
-		// Should not happen for an open run (the initial goroutine exited when
-		// the run idle-closed); defend against a double-resume or a stale entry.
-		return fmt.Errorf("run already has an active goroutine")
-	}
-	s.cancels[runID] = cancel
-	s.mu.Unlock()
-
-	// Step 2: flip the run (from its resumable state) to running. This must
-	// happen AFTER cancel registration: if the order is reversed, a Cancel()
-	// arriving in the gap sees no goroutine, falls through to the DB path, and
-	// races the resume into the "row cancelled but goroutine still running"
-	// state. With the cancel handle already in place, any Cancel() now hits
-	// cancel(ctx) and the goroutine handles the terminal write. Routed under the
-	// resuming user's synthetic claims (resume is always user-initiated
-	// regardless of the run's original trigger).
-	bgCtx := context.Background()
+	// Step 2: flip the run (from its resumable state) back to `queued` —
+	// resume-by-enqueue re-queues the SAME row as ordinary claimable work
+	// rather than flipping straight to `running` the way the retired
+	// in-process implementation did. Routed under the resuming user's
+	// synthetic claims (resume is always user-initiated regardless of the
+	// run's original trigger).
 	var flipped bool
-	err = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, userID, func(ts db.TxStores) error {
-		resumeExecutorID, resumeBootEpoch := s.executorIdentity()
-		f, fErr := ts.AgentRuns.MarkResuming(bgCtx, orgID, runID, resumeExecutorID, resumeBootEpoch)
+	err = s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
+		f, fErr := ts.AgentRuns.MarkQueuedForResume(ctx, orgID, runID)
 		if fErr != nil {
 			return fErr
 		}
@@ -219,188 +148,55 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 		// rolls back the run flip too, so run + blueprint never split across the
 		// resumable/terminal boundary.
 		if reopenAbortedBlueprint && blueprintRunID != "" {
-			if _, rErr := ts.Blueprints.ReopenRunForResume(bgCtx, orgID, blueprintRunID); rErr != nil {
+			if _, rErr := ts.Blueprints.ReopenRunForResume(ctx, orgID, blueprintRunID); rErr != nil {
 				return rErr
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		s.mu.Lock()
-		delete(s.cancels, runID)
-		s.mu.Unlock()
-		cancel()
 		return fmt.Errorf("flip status: %w", err)
 	}
 	if !flipped {
-		s.mu.Lock()
-		delete(s.cancels, runID)
-		s.mu.Unlock()
-		cancel()
 		return ErrRunNotResumable
 	}
-	s.broadcastRunUpdate(orgID, runID, "running")
-	// The parked step is running again → bounce the aggregate board column back
-	// to in_progress (no-op if a sibling run is still parked).
-	s.recomputeTaskBoardColumn(orgID, taskCopy.ID)
-
-	go func() {
-		// disposed is set once the body reaches its post-resume disposition
-		// (processCompletion + the inline finalize/re-park below). It stays false
-		// on an early failure/cancel exit, which is the only case the defer's
-		// blueprint re-finalize has to cover.
-		var disposed bool
-		defer func() {
-			// An early exit (failure / cancel before processCompletion) leaves the
-			// step terminal but the blueprint un-finalized — for any resumable
-			// state, not just the re-opened abort case. Without finalizing here:
-			// the blueprint strands `running`, and its snapshot is orphaned (the
-			// reaper skips it once the run is cancelled/failed, i.e. no longer in a
-			// resumable state). So re-finalize for every blueprint step that didn't
-			// dispose. ResumeBlueprintAfterResume is the safe single authority: a
-			// cancelled/failed step maps to a terminal blueprint (terminateBlueprint
-			// discards the snapshot), a still-parked (open) step or
-			// an already-terminal blueprint early-returns. The success path set
-			// disposed=true, so this never doubles up.
-			if blueprintRunID != "" && !disposed {
-				s.ResumeBlueprintAfterResume(orgID, runID, userID)
-			}
-			s.mu.Lock()
-			delete(s.cancels, runID)
-			s.mu.Unlock()
-			cancel()
-			// Drain the per-entity firing queue on terminal exit —
-			// matches the initial-run defer in Delegate so a resume
-			// that lands the run terminal still flushes any
-			// queued auto-firings for the same entity.
-			s.notifyDrainer(orgID, triggerType, taskCopy.EntityID)
-		}()
-
-		// markCancelled writes the terminal cancelled status iff the
-		// run is still non-terminal. The registered-handle Cancel()
-		// path doesn't touch the DB; this goroutine owns the
-		// terminal write any time it observes ctx.Err().
-		markCancelled := func() {
-			cancelCtx := context.Background()
-			var ok bool
-			_ = s.tx.SyntheticClaimsWithTx(cancelCtx, orgID, userID, func(ts db.TxStores) error {
-				f, mErr := ts.AgentRuns.MarkCancelledIfActive(cancelCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
-				ok = f
-				return mErr
-			})
-			if ok {
-				s.broadcastRunUpdate(orgID, runID, "cancelled")
-				// Cancelled mid-resume: the run won't continue, so drop the
-				// snapshot taken when it parked. Same key/no-op semantics as
-				// failRun's discard (runID-keyed; harmless for a blueprint step,
-				// which terminateBlueprint cleans by blueprint_run_id).
-				s.discardWorkspaceSnapshot(cancelCtx, orgID, runID)
-			}
-		}
-
-		// Cancel raced before the goroutine scheduled. Write the
-		// cancelled status ourselves and exit without invoking
-		// Claude.
-		if ctx.Err() != nil {
-			markCancelled()
-			return
-		}
-
-		repoEnv := ""
-		if owner != "" && repo != "" {
-			repoEnv = owner + "/" + repo
-		}
-
-		// Ensure the worktree is on disk before re-invoking the agent. Warm
-		// path: the parked worktree survived (the dormancy guards kept it) →
-		// ensureWorkspace returns it and rehydrate is a no-op. Cold path: it was
-		// swept / the host was lost / `/tmp` was wiped → rebuild it from the
-		// durable snapshot. The returned cwd may differ from run.WorktreePath
-		// after a cold rebuild, so use it for both the resume and the
-		// completion. cloneURL is empty: the local reboot case reuses the
-		// persistent bare, which needs no seeding.
-		resumeCwd, werr := s.ensureWorkspace(ctx, orgID, run, owner, repo, "")
-		if werr != nil {
-			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "ensure workspace before resume failed: "+werr.Error(), domain.RunFailureUnclassified)
-			return
-		}
-		cwd = resumeCwd
-
-		// Resume routes every downstream write under the resuming
-		// user's synthetic claims regardless of the run's original
-		// trigger type: pass "manual" + userID so processCompletion /
-		// failRun / ResumeWithMessage / sink each pick the synth-claims
-		// arm. The captured triggerType local (above) stays in scope
-		// for the goroutine's notifyDrainer defer — event-triggered
-		// runs still drive the per-entity firing queue on terminal.
-		// run.TeamID (runs.team_id, NOT NULL) is the canonical owning team —
-		// no task hop, always populated — so it drives both the absent-auto-deny
-		// resolve and the resumed run's agenthost.RunInfo.TeamID (TFAC-458).
-		outcome, err := s.ResumeWithMessage(ctx, orgID, runID, sessionID, cwd, agentMessage, ResumeOptions{
-			Model:             model,
-			RepoEnv:           repoEnv,
-			ExtraAllowedTools: extraTools,
-			Namespace:         namespace,
-			TeamID:            run.TeamID,
-		}, "manual", userID)
-		if ctx.Err() != nil {
-			// User cancelled mid-resume. ResumeWithMessage SIGKILLed
-			// the subprocess via its own ctx.Done() watcher; we own
-			// the terminal status write.
-			markCancelled()
-			return
-		}
-		if err != nil {
-			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "resume failed: "+err.Error(), classifyFailureKind(err))
-			return
-		}
-		// ResumeWithMessage always returns a non-nil outcome (it returns the same
-		// &ResumeOutcome on every path); Completion is the field that's nil when
-		// the resume produced no terminal result.
-		if outcome.Completion == nil {
-			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "resume produced no completion", domain.RunFailureNoResult)
-			return
-		}
-
-		parked := s.processCompletion(ctx, orgID, runID, blueprintRunID, taskCopy, outcome.Completion, cwd, sessionID, "manual", userID)
-		// The resumed step reached a terminal state (it didn't go open again or
-		// queue an approval) → hand back to the blueprint orchestrator to
-		// finalize: for a 1-step / final step this terminates the blueprint
-		// (finish→close, abort→leave open). A non-final step's mid-blueprint
-		// advance is the epic's resume work and stays unimplemented (terminated
-		// with a clear reason).
-		if !parked {
-			s.ResumeBlueprintAfterResume(orgID, runID, userID)
-		}
-		// The body owns the disposition now (re-parked, or finalized above), so
-		// the defer's re-finalize must not fire on top of it.
-		disposed = true
-	}()
+	s.broadcastRunUpdate(orgID, runID, "queued")
+	// The parked step is queued for resume again → bounce the aggregate
+	// board column back to in_progress (no-op if a sibling run is still
+	// parked).
+	s.recomputeTaskBoardColumn(orgID, run.TaskID)
+	// Same-process fast path (TF_ROLE=all): the wake is a ~ms in-process
+	// dispatcher nudge. Cross-pod, there is no wake nudge here by design —
+	// the claiming executor's own scan-interval backstop
+	// (DefaultRunScanInterval) picks the row up; a cross-pod wake nudge
+	// (tf_wake) is TFAC-586's fleet-reaper scope, not this seam's.
+	s.wakeDispatcher()
 	return nil
 }
 
-// workspaceRecoverable reports whether a parked run can still be resumed: its
-// warm worktree survives on disk, or its durable snapshot is present to
-// cold-rehydrate from. False means the workspace expired — the retention reaper
-// dropped the snapshot after the warm worktree had already been swept. A
-// blob-store read error is treated as recoverable (logged, not fatal): a
-// transient storage hiccup must not strand a resumable run as "expired".
-func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *domain.AgentRun) bool {
-	if run.WorktreePath != "" {
-		if _, err := os.Stat(run.WorktreePath); err == nil {
-			return true // warm worktree on disk
-		}
+// markCancelledAfterResume writes the terminal cancelled status for a
+// run being resumed off the claim path (Spawner.dispatchResumeClaim) iff
+// the run is still non-terminal — the resume-by-enqueue counterpart of
+// the retired in-process goroutine's own markCancelled closure. A
+// registered s.cancels handle's Cancel() doesn't touch the DB itself; the
+// delivering claim owns the terminal write any time it observes its ctx
+// cancelled.
+func (s *Spawner) markCancelledAfterResume(orgID, runID, userID string) {
+	cancelCtx := context.Background()
+	var ok bool
+	_ = s.tx.SyntheticClaimsWithTx(cancelCtx, orgID, userID, func(ts db.TxStores) error {
+		f, mErr := ts.AgentRuns.MarkCancelledIfActive(cancelCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
+		ok = f
+		return mErr
+	})
+	if ok {
+		s.broadcastRunUpdate(orgID, runID, "cancelled")
+		// Cancelled mid-resume: the run won't continue, so drop the
+		// snapshot taken when it parked. Same key/no-op semantics as
+		// failRun's discard (runID-keyed; harmless for a blueprint step,
+		// which terminateBlueprint cleans by blueprint_run_id).
+		s.discardWorkspaceSnapshot(cancelCtx, orgID, runID)
 	}
-	blobs := s.Storage()
-	if blobs == nil {
-		return false
-	}
-	ok, err := blobs.Exists(ctx, snapshotKey(orgID, memoryNamespace(run.BlueprintRunID, run.ID)))
-	if err != nil {
-		delegateLog.Warn("resume: snapshot existence check failed", "run", run.ID, "error", err)
-		return true
-	}
-	return ok
 }
 
 // ResumeOptions configures a ResumeWithMessage invocation. Callers

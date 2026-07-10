@@ -28,19 +28,20 @@ type Scorer interface {
 type Delegator interface {
 	Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error)
 	Cancel(orgID, runID, userID string) error
-	// StageOrDeliverInjectionResult routes one agent-facing injection for a
-	// run by its live state, with a disambiguated return: delivered=true
-	// means steered into a live process; delivered=false, staged=true means
-	// durably queued for the run's next resume; both false means dropped
-	// (no live process, and the durable append itself failed — store
-	// unwired or a transient error). Signature matches
-	// *delegate.Spawner's method exactly. Used by tryAutoDelegate's
+	// StageOrDeliverAdditiveEvent routes one agent-facing additive-event
+	// injection for a run by its live state — local process, live remote
+	// executor (TFAC-585's `inject` run_signals kind), or the durable
+	// staged-injection fallback — returning a 4-way outcome. Signature
+	// matches *delegate.Spawner's method exactly. Used by tryAutoDelegate's
 	// additive-event branch to fold a follow-up event into an entity's
-	// already-active auto run instead of deferring a second one — the
-	// staged/dropped distinction decides whether that's safe (a staged row
-	// will flush on resume) or the firing must fall through to the normal
-	// deferral instead (a drop has no durable row to fall back on).
-	StageOrDeliverInjectionResult(orgID, runID, producer, body string) (delivered, staged bool)
+	// already-active auto run instead of deferring a second one:
+	// InjectNotDelivered means the firing must fall through to the normal
+	// deferral (no durable row to fall back on); InjectDeliveredRemote
+	// means a live remote executor now owns recording the outcome (the
+	// caller must NOT record task_events 'injected' itself); the other two
+	// outcomes are handled exactly like the pre-TFAC-585 delivered/staged
+	// cases.
+	StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome
 }
 
 // EventPublisher is the bus-publish seam the router uses to mirror the

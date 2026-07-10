@@ -1,10 +1,11 @@
 package delegate
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -16,15 +17,15 @@ import (
 // claims). No DB touched.
 func TestResumeOpenRun_EmptyUserID(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	if err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, "any", "msg", ""); err == nil {
+	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "any", "msg", ""); err == nil {
 		t.Fatal("expected an error for an empty user id")
 	}
 }
 
 // TestResumeOpenRun_ValidationGuards walks the field guards that reject a
-// resume before any goroutine / subprocess work — each returns a plain error
-// the caller surfaces. seedRun gives a complete row; each case blanks the one
-// field under test.
+// resume before the pending-input write / requeue flip — each returns a
+// plain error the caller surfaces. seedRun gives a complete row; each case
+// blanks the one field under test.
 func TestResumeOpenRun_ValidationGuards(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -47,7 +48,7 @@ func TestResumeOpenRun_ValidationGuards(t *testing.T) {
 			}
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-			err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, "r-guard", "msg", runmode.LocalDefaultUserID)
+			err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-guard", "msg", runmode.LocalDefaultUserID)
 			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
 				t.Errorf("err = %v, want one mentioning %q", err, tc.wantSub)
 			}
@@ -57,8 +58,7 @@ func TestResumeOpenRun_ValidationGuards(t *testing.T) {
 
 // TestResumeOpenRun_NotResumable pins the resumable-state guard: a finish
 // terminal (completed without an abort outcome) can't be woken — ResumeOpenRun
-// returns ErrRunNotResumable for the caller to map to 409, before any workspace
-// pre-flight runs.
+// returns ErrRunNotResumable for the caller to map to 409, before any DB write.
 func TestResumeOpenRun_NotResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-term", "sess", "/tmp/wt")
@@ -67,125 +67,179 @@ func TestResumeOpenRun_NotResumable(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, "r-term", "msg", runmode.LocalDefaultUserID)
+	err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-term", "msg", runmode.LocalDefaultUserID)
 	if !errors.Is(err, ErrRunNotResumable) {
 		t.Errorf("err = %v, want ErrRunNotResumable", err)
 	}
 }
 
-// TestResumeOpenRun_ExpiredWorkspace pins the retention-expiry semantics: a
-// resumable run whose warm worktree is gone AND whose snapshot was reaped can't
-// rebuild a workspace, so the resume returns ErrWorkspaceExpired and — crucially
-// — leaves the run's status UNCHANGED (no flip), so the user sees a clear
-// "expired" error rather than the run silently failing.
-func TestResumeOpenRun_ExpiredWorkspace(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-exp", "sess-exp", "/tmp/does-not-exist-exp")
-	if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-exp'`); err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	wireBlobStore(t, s) // store wired, but no snapshot for this run → expired
-
-	err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, "r-exp", "go on", runmode.LocalDefaultUserID)
-	if !errors.Is(err, ErrWorkspaceExpired) {
-		t.Fatalf("err = %v, want ErrWorkspaceExpired", err)
-	}
-	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-exp'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != "open" {
-		t.Errorf("status = %q, want open unchanged (status must not change at expiry)", status)
-	}
-}
-
-// TestResumeOpenRun_InitiatesResume proves the resume entry wakes an open run:
-// it flips open -> running and drives the run via the resume goroutine. The warm
-// worktree is absent but a durable snapshot is present (so the workspace
-// pre-flight passes); the goroutine then fails fast at the cold rehydrate of
-// this stub blob (no subprocess spawned) and the run lands terminal — what
-// matters is that it LEFT `open`, i.e. the resume was initiated. The full
-// "wakes as a new LiveRun resuming the session" path is covered by the live SDK
-// smokes.
-func TestResumeOpenRun_InitiatesResume(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
+// TestResumeOpenRun_EnqueuesRatherThanSpawning is resume-by-enqueue's core
+// contract (TFAC-585, decision log #7): ResumeOpenRun records the message
+// durably and flips the run's SAME row back to `queued` — no in-process
+// resume goroutine, no s.cancels registration, at any point during the
+// call. The message is only consumed later, by whichever executor claims
+// the row.
+func TestResumeOpenRun_EnqueuesRatherThanSpawning(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-wake", "sess-wake", "/tmp/does-not-exist-wake")
 	if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-wake'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	wireBlobStore(t, s)
-	putTestSnapshot(t, s, blueprintRunIDForRun(t, database, "r-wake"))
 
-	if err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, "r-wake", "the answer", runmode.LocalDefaultUserID); err != nil {
+	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-wake", "the answer", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("ResumeOpenRun: %v", err)
 	}
 
-	// Join the resume goroutine deterministically: it registers s.cancels on
-	// entry and deletes it in its terminal defer (after all DB writes), so
-	// waiting for that entry to clear avoids racing the in-memory DB close.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		s.mu.Lock()
-		_, active := s.cancels["r-wake"]
-		s.mu.Unlock()
-		if !active {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	s.mu.Lock()
-	_, stillActive := s.cancels["r-wake"]
-	s.mu.Unlock()
-	if stillActive {
-		t.Fatal("resume goroutine did not finish in time")
-	}
-
-	// The run left `open` — the resume was initiated and drove the run to a
-	// terminal state (failed here, for lack of a warm worktree/snapshot).
 	var status string
 	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-wake'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
-	if status == "open" {
-		t.Error("run stayed open — resume was not initiated")
+	if status != "queued" {
+		t.Errorf("status = %q, want queued (resume-by-enqueue re-queues the row rather than flipping to running)", status)
+	}
+
+	msg, userID, ok, err := s.pendingInput.Consume(context.Background(), runmode.LocalDefaultOrgID, "r-wake")
+	if err != nil {
+		t.Fatalf("consume pending input: %v", err)
+	}
+	if !ok || msg != "the answer" || userID != runmode.LocalDefaultUserID {
+		t.Errorf("pending input = (ok=%v msg=%q user=%q), want (true, %q, %q)", ok, msg, userID, "the answer", runmode.LocalDefaultUserID)
+	}
+
+	// No in-process resume goroutine — decision log #7's "no in-process
+	// resume variant survives, in any mode".
+	s.mu.Lock()
+	_, active := s.cancels["r-wake"]
+	s.mu.Unlock()
+	if active {
+		t.Error("ResumeOpenRun registered a cancel handle — an in-process resume goroutine must not spawn")
 	}
 }
 
-// TestResumeOpenRun_EarlyExitFinalizesBlueprint is the regression for the parked
-// resume strand: a resume that exits early (here a cold-rehydrate failure; a
-// mid-resume cancel shares the same non-disposed defer) must finalize the
-// blueprint and discard its snapshot — not strand the blueprint_run `running`
-// with a blob the reaper will never see (the run is no longer in a resumable
-// state). An `open` step under a still-running blueprint is the case that
-// regressed: it doesn't re-open a blueprint, so the old abort-only defer never
-// fired for it.
-func TestResumeOpenRun_EarlyExitFinalizesBlueprint(t *testing.T) {
+// TestResumeOpenRun_CompletedAbortReopensBlueprintAtomically: a
+// completed+abort run's blueprint (already terminal 'aborted') is reopened
+// to 'running' in the SAME tx as the requeue flip — required for
+// ClaimNextRun to ever claim the row (it only claims under a 'running'
+// blueprint_run).
+func TestResumeOpenRun_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-ab", "sess-ab", "/tmp/wt-ab")
+	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort' WHERE id='r-ab'`); err != nil {
+		t.Fatalf("completed+abort: %v", err)
+	}
+	bpr := blueprintRunIDForRun(t, database, "r-ab")
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status='aborted' WHERE id=?`, bpr); err != nil {
+		t.Fatalf("abort blueprint_run: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+
+	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-ab", "pick it back up", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("ResumeOpenRun: %v", err)
+	}
+
+	var bpStatus string
+	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id=?`, bpr).Scan(&bpStatus); err != nil {
+		t.Fatalf("read blueprint_run status: %v", err)
+	}
+	if bpStatus != "running" {
+		t.Errorf("blueprint_run status = %q, want running (reopened so ClaimNextRun can claim the resumed row)", bpStatus)
+	}
+}
+
+// claimAndDispatch claims the globally-oldest queued run (mirroring the
+// dispatcher's own ClaimNextRun call) and drives it synchronously through
+// dispatchClaimedRun — the same entry a real drainRunQueue goroutine would
+// call, minus the goroutine wrapper, so resume-claim tests don't need to
+// poll for completion.
+func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	run, err := s.runQueue.ClaimNextRun(ctx, "test-executor", 1)
+	if err != nil {
+		t.Fatalf("claim next run: %v", err)
+	}
+	if run == nil {
+		t.Fatal("claim next run: nothing claimable (is the row queued under a running blueprint_run?)")
+	}
+	run.OrgID = runmode.LocalDefaultOrgID
+	s.dispatchClaimedRun(ctx, run)
+}
+
+// TestDispatchResumeClaim_DeliversRecordedInput proves the delivery half of
+// resume-by-enqueue end to end: after ResumeOpenRun enqueues, claiming and
+// dispatching the row consumes the pending input exactly once (a second
+// consume finds nothing) and drives the resume — failing fast here for
+// lack of a warm worktree/snapshot (no subprocess), landing the run
+// terminal. What matters is that delivery was attempted off the ordinary
+// claim path, not an in-process goroutine.
+func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-deliver", "sess-deliver", "/tmp/does-not-exist-deliver")
+	if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-deliver'`); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+
+	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-deliver", "the answer", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("ResumeOpenRun: %v", err)
+	}
+
+	claimAndDispatch(t, s, database)
+
+	// The pending input was consumed exactly once.
+	if _, _, ok, err := s.pendingInput.Consume(context.Background(), runmode.LocalDefaultOrgID, "r-deliver"); err != nil || ok {
+		t.Errorf("pending input still present after dispatch: ok=%v err=%v", ok, err)
+	}
+
+	// The run left `queued`/`open` — delivery was attempted (and failed
+	// fast here for lack of a warm worktree/snapshot, landing terminal).
+	var status string
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-deliver'`).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status == "queued" || status == "open" {
+		t.Errorf("status = %q, want a terminal status (delivery was not attempted)", status)
+	}
+
+	// No cancel handle survives dispatch (deferred cleanup ran).
+	s.mu.Lock()
+	_, active := s.cancels["r-deliver"]
+	s.mu.Unlock()
+	if active {
+		t.Error("cancel handle leaked past dispatchResumeClaim's return")
+	}
+}
+
+// TestDispatchResumeClaim_WorkspaceFailureFinalizesBlueprint is the
+// resume-by-enqueue counterpart of the retired in-process goroutine's
+// early-exit regression test: a resume claim that fails at ensureWorkspace
+// (no warm worktree, no snapshot) must finalize the blueprint and discard
+// its snapshot — not strand the blueprint_run `running` with a blob the
+// reaper will never see.
+func TestDispatchResumeClaim_WorkspaceFailureFinalizesBlueprint(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, run, _ := setupAdvanceFixture(t, "open-strand")
 	bpr := blueprintRunIDForRun(t, database, run)
 	wireBlobStore(t, s)
-	// A snapshot passes the workspace pre-flight; the stub blob then fails the
-	// cold rehydrate (no subprocess), driving the early failure exit.
-	putTestSnapshot(t, s, bpr)
+	// A snapshot passes... no: deliberately NO snapshot AND no warm
+	// worktree, so ensureWorkspace fails inside dispatchResumeClaim.
 	if _, err := database.Exec(`UPDATE runs SET status='open', worktree_path='/tmp/does-not-exist-open-strand' WHERE id=?`, run); err != nil {
 		t.Fatalf("park open: %v", err)
 	}
 
-	if err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, run, "carry on", runmode.LocalDefaultUserID); err != nil {
+	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, run, "carry on", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("ResumeOpenRun: %v", err)
 	}
-	awaitResumeGoroutine(t, s, run)
+	claimAndDispatch(t, s, database)
 
 	var bpStatus string
 	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id=?`, bpr).Scan(&bpStatus); err != nil {
 		t.Fatalf("read blueprint_run status: %v", err)
 	}
 	if bpStatus == "running" {
-		t.Errorf("blueprint_run stranded 'running' after a failed resume; want finalized")
+		t.Errorf("blueprint_run stranded 'running' after a failed resume claim; want finalized")
 	}
 	assertSnapshotPresent(t, s, bpr, false) // discarded, not orphaned
 }

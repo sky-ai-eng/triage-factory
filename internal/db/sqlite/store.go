@@ -141,6 +141,14 @@ func New(conn *sql.DB) db.Stores {
 		// one connection (N=1, no RLS). Fleet membership registry — one
 		// row, epoch bumping per restart.
 		Instances: newInstanceStore(conn),
+		// RunSignals is Postgres-only (TFAC-585): this is a stub returning
+		// ErrNotApplicableInLocal from every method — local mode is always
+		// its own run's owner, so no code path may reach it.
+		RunSignals: newRunSignalStore(),
+		// RunPendingInput is dual-dialect (unlike RunSignals): local mode's
+		// dispatcher claims its own resumed runs through the identical
+		// queue path.
+		RunPendingInput: newRunPendingInputStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

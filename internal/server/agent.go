@@ -468,11 +468,16 @@ func (ag *agentHandler) handleAgentInterrupt(w http.ResponseWriter, r *http.Requ
 // the run's state. An expired workspace (ErrWorkspaceExpired) is 410 Gone: the
 // run's saved state was reaped after the retention window, so retrying won't
 // help — the client surfaces the clear error rather than a transient conflict.
-// Everything else is a server-side 500.
+// A cross-pod signal whose owning executor never acked (ErrSignalAckTimeout,
+// TFAC-585) is 504 Gateway Timeout — the reply-leg contract's "run owner did
+// not acknowledge; the run may be mid-teardown" case; the UI already
+// tolerates steer/interrupt failure. Everything else is a server-side 500.
 func steerErrorStatus(err error) int {
 	switch {
 	case errors.Is(err, delegate.ErrWorkspaceExpired):
 		return http.StatusGone
+	case errors.Is(err, delegate.ErrSignalAckTimeout):
+		return http.StatusGatewayTimeout
 	case errors.Is(err, delegate.ErrNoLiveProcess),
 		errors.Is(err, delegate.ErrRunNotSteerable),
 		errors.Is(err, delegate.ErrRunNotResumable):
@@ -536,6 +541,8 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	switch {
 	case errors.Is(err, delegate.ErrNoPendingPermission):
 		notFound(w, "permission request")
+	case errors.Is(err, delegate.ErrSignalAckTimeout):
+		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": err.Error()})
 	case err != nil:
 		internalError(w, "agent", err)
 	default:

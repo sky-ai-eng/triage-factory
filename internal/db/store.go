@@ -346,6 +346,20 @@ type Stores struct {
 	// SQLite is N=1: one row, epoch bumping per restart.
 	Instances InstanceStore
 
+	// RunSignals owns the run_signals table — the cross-pod run-control
+	// outbox (TFAC-585). Postgres only: the SQLite impl is a stub
+	// returning ErrNotApplicableInLocal from every method, mirroring
+	// MarketplaceStore/InvitesStore — local mode is always its own run's
+	// owner, so no code path may reach this store there.
+	RunSignals RunSignalStore
+
+	// RunPendingInput owns the run_pending_input table — the durable half
+	// of resume-by-enqueue (TFAC-585): the message recorded before a
+	// parked run's continuation is re-queued as ordinary claimable work.
+	// Both dialects (unlike RunSignals): local mode's dispatcher claims
+	// its own resumed runs through the identical queue path.
+	RunPendingInput RunPendingInputStore
+
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
 	// core holds no SSO symbols.

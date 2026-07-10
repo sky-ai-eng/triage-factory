@@ -208,6 +208,25 @@ func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID, executor
 	return n > 0, err
 }
 
+// MarkQueuedForResume is resume-by-enqueue's status flip (TFAC-585): see
+// the interface doc comment / the Postgres twin.
+func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE runs SET status = 'queued', parked_at = NULL, claimed_at = NULL
+		WHERE id = ?
+		  AND (status = 'open'
+		       OR (status = 'completed' AND outcome = 'abort'))
+	`, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 func (s *agentRunStore) SetSession(ctx context.Context, orgID, runID, sessionID string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err

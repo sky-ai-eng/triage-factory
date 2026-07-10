@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
@@ -82,6 +84,34 @@ func (a *App) startWorkers(ctx context.Context) {
 	if a.plan.dispatcher {
 		go a.spawner.RunDispatcher(ctx, delegate.DefaultRunScanInterval)
 		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
+	}
+
+	// Cross-pod run control (TFAC-585). Multi mode only: buildExecution
+	// never calls SetRunSignals in local mode, so
+	// RunSignalApplyLoop/-PurgeReaper are already no-ops there — this mode
+	// check just avoids opening a needless direct Postgres LISTEN
+	// connection. One shared tf_ctl Listener per process dispatches both
+	// "new signal for me" (wakes the apply loop) and "ack for my wait"
+	// (wakes an in-flight sendSignalAndAwaitAck) doorbells — see
+	// Spawner.HandleCtlNotification.
+	if runmode.Current() == runmode.ModeMulti {
+		listener := pgnotify.NewListener(os.Getenv("TF_DATABASE_URL"), "tf_ctl", a.spawner.HandleCtlNotification)
+		go listener.Run(ctx)
+		// The apply loop only makes sense on dispatcher-capable roles —
+		// only they can ever own a run's live process.
+		if a.plan.dispatcher {
+			go a.spawner.RunSignalApplyLoop(ctx, delegate.DefaultSignalApplyScanInterval)
+		}
+		// The purge reaper is system housekeeping, not tied to executor
+		// identity — runs on brain roles like the other reapers/sweepers
+		// (never on a plain executor, avoiding N-executor duplicate sweeps).
+		if a.plan.brain {
+			purgeAge, perr := delegate.ParseRunSignalPurgeAge(os.Getenv("TF_RUN_SIGNAL_PURGE_AFTER"))
+			if perr != nil {
+				appLog.Warn("run signal purge age", "error", perr)
+			}
+			go a.spawner.RunSignalPurgeReaper(ctx, delegate.DefaultRunSignalPurgeInterval, purgeAge)
+		}
 	}
 
 	// Instance-registry heartbeat: every role renews its fleet registry row

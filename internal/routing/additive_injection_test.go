@@ -56,22 +56,22 @@ func seedAdditiveTestEventCatalog(t *testing.T, database *sql.DB) {
 	}
 }
 
-// injectingStubDelegator is a Delegator fake for the additive-injection gate
-// tests: it never fires a new run (the busy-entity branch under test never
-// calls Delegate) and records every StageOrDeliverInjectionResult call so
-// tests can assert what got injected, where. delivered/staged control the
-// return value, mirroring *delegate.Spawner's three real outcomes:
-// delivered=true (steered live), delivered=false+staged=true (durably
-// queued), or both false (dropped — no live process AND the durable append
-// itself failed).
+// injectingStubDelegator is a Delegator fake for the additive-injection
+// gate tests: it never fires a new run (the busy-entity branch under test
+// never calls Delegate) and records every StageOrDeliverAdditiveEvent call
+// (including the firing ref) so tests can assert what got routed, where.
+// outcome controls the return value — tryAdditiveInjection's dispatch logic
+// is what these tests exercise; StageOrDeliverAdditiveEvent's own internal
+// decision-making (local/remote/staged/resumable) is covered directly in
+// internal/delegate.
 type injectingStubDelegator struct {
-	delivered bool
-	staged    bool
-	calls     []injectCall
+	outcome delegate.InjectOutcome
+	calls   []injectCall
 }
 
 type injectCall struct {
 	orgID, runID, producer, body string
+	firing                       delegate.AdditiveFiringRef
 }
 
 func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
@@ -80,9 +80,9 @@ func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.Delega
 
 func (s *injectingStubDelegator) Cancel(orgID, runID, userID string) error { return nil }
 
-func (s *injectingStubDelegator) StageOrDeliverInjectionResult(orgID, runID, producer, body string) (delivered, staged bool) {
-	s.calls = append(s.calls, injectCall{orgID, runID, producer, body})
-	return s.delivered, s.staged
+func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
+	s.calls = append(s.calls, injectCall{orgID, runID, producer, body, firing})
+	return s.outcome
 }
 
 // activeAutoRunIDOverrideStore wraps a real AgentRunStore, overriding
@@ -96,33 +96,6 @@ type activeAutoRunIDOverrideStore struct {
 
 func (activeAutoRunIDOverrideStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgID, entityID string) (string, error) {
 	return "", nil
-}
-
-// terminalGetOverrideStore wraps a real AgentRunStore, overriding GetSystem
-// to report the run as fully terminal (completed+finish, not
-// parked/resumable) regardless of its real row state — models the race
-// where the run goes terminal between the ID resolution and
-// StageOrDeliverInjectionResult's live-process check.
-type terminalGetOverrideStore struct {
-	db.AgentRunStore
-}
-
-func (terminalGetOverrideStore) GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
-	return &domain.AgentRun{ID: runID, Status: "completed", Outcome: string(domain.RunOutcomeFinish)}, nil
-}
-
-// resumableGetOverrideStore wraps a real AgentRunStore, overriding GetSystem
-// to report the run as parked `open` (resumable) regardless of its real row
-// state — used to isolate the staged/dropped distinction from the run's
-// terminal-ness: the seeded scenario run never actually leaves `running`
-// (runIsResumable("running", "") is false), so tests that want to assert
-// behavior specifically for a *resumable* run need this override.
-type resumableGetOverrideStore struct {
-	db.AgentRunStore
-}
-
-func (resumableGetOverrideStore) GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
-	return &domain.AgentRun{ID: runID, Status: "open"}, nil
 }
 
 // setupAdditiveScenario seeds entity + prompt + a trigger on
@@ -202,11 +175,21 @@ func setupAdditiveScenario(t *testing.T, database *sql.DB) (entityID string, tas
 	return
 }
 
+// newAdditiveTestRouter builds a Router wired for the additive-injection
+// gate tests, sharing the same store construction every test below needs.
+func newAdditiveTestRouter(database *sql.DB, agentRuns db.AgentRunStore, stub *injectingStubDelegator) *Router {
+	st := sqlitestore.New(database)
+	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
+		testTaskStore(database), agentRuns, st.Entities, st.PendingFirings,
+		st.Events, st.Orgs, st.Teams, nil, nil, nil,
+		stub, noopScorer{}, websocket.NewHub())
+}
+
 // TestTryAutoDelegate_AdditiveEvent_InjectsIntoActiveRun is the ticket's
 // primary acceptance: an Additive-flagged trigger firing against an entity
-// with an active auto run injects into that run via the staged-injection
-// seam instead of deferring — no pending_firings row lands, and the
-// injection carries the triggering event's type + metadata.
+// with an active auto run injects into that run (StageOrDeliverAdditiveEvent
+// reporting InjectDeliveredLocal) instead of deferring — no pending_firings
+// row lands, and the task_events row records the injection.
 func TestTryAutoDelegate_AdditiveEvent_InjectsIntoActiveRun(t *testing.T) {
 	database := newTestDB(t)
 	entityID, task, trigger, activeRunID := setupAdditiveScenario(t, database)
@@ -222,16 +205,13 @@ func TestTryAutoDelegate_AdditiveEvent_InjectsIntoActiveRun(t *testing.T) {
 		t.Fatalf("record second event: %v", err)
 	}
 
-	stub := &injectingStubDelegator{delivered: true}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
-		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil,
-		stub, noopScorer{}, websocket.NewHub())
+	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
+	router := newAdditiveTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
 
 	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
 
 	if len(stub.calls) != 1 {
-		t.Fatalf("expected exactly 1 StageOrDeliverInjectionResult call, got %d", len(stub.calls))
+		t.Fatalf("expected exactly 1 StageOrDeliverAdditiveEvent call, got %d", len(stub.calls))
 	}
 	got := stub.calls[0]
 	if got.runID != activeRunID {
@@ -242,6 +222,9 @@ func TestTryAutoDelegate_AdditiveEvent_InjectsIntoActiveRun(t *testing.T) {
 	}
 	if got.body == "" {
 		t.Error("injected body is empty")
+	}
+	if got.firing.EntityID != entityID || got.firing.TaskID != task.ID || got.firing.TriggerID != trigger.ID || got.firing.TriggeringEventID != secondEventID {
+		t.Errorf("firing ref not populated correctly: %+v", got.firing)
 	}
 
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
@@ -258,6 +241,111 @@ func TestTryAutoDelegate_AdditiveEvent_InjectsIntoActiveRun(t *testing.T) {
 	}
 	if kind != "injected" {
 		t.Errorf("task_events.kind = %q, want %q", kind, "injected")
+	}
+}
+
+// TestTryAutoDelegate_AdditiveEvent_StagedResumableRunHandled is the success
+// counterpart above for the "durably staged onto a resumable run" outcome —
+// StageOrDeliverAdditiveEvent reporting InjectStagedResumable must be
+// treated as handled exactly like InjectDeliveredLocal: task_events
+// recorded, no pending_firings row.
+func TestTryAutoDelegate_AdditiveEvent_StagedResumableRunHandled(t *testing.T) {
+	database := newTestDB(t)
+	entityID, task, trigger, activeRunID := setupAdditiveScenario(t, database)
+
+	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType:    additiveTestEventType,
+		EntityID:     &entityID,
+		MetadataJSON: `{"mention":"second"}`,
+		CreatedAt:    time.Now(),
+		OrgID:        runmode.LocalDefaultOrgID,
+	})
+	if err != nil {
+		t.Fatalf("record second event: %v", err)
+	}
+
+	stub := &injectingStubDelegator{outcome: delegate.InjectStagedResumable}
+	router := newAdditiveTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+
+	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+
+	if len(stub.calls) != 1 {
+		t.Fatalf("expected 1 StageOrDeliverAdditiveEvent attempt, got %d", len(stub.calls))
+	}
+	if stub.calls[0].runID != activeRunID {
+		t.Errorf("attempt targeted run_id = %q, want %q", stub.calls[0].runID, activeRunID)
+	}
+
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil {
+		t.Fatalf("list pending firings: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected no pending_firings row (durably staged onto a resumable run counts as handled), got %d", len(rows))
+	}
+
+	var kind string
+	if err := database.QueryRow(`SELECT kind FROM task_events WHERE task_id = ? AND event_id = ?`, task.ID, secondEventID).Scan(&kind); err != nil {
+		t.Fatalf("read task_events for injected bookkeeping: %v", err)
+	}
+	if kind != "injected" {
+		t.Errorf("task_events.kind = %q, want %q", kind, "injected")
+	}
+}
+
+// TestTryAutoDelegate_AdditiveEvent_DeliveredRemoteHandledWithoutRecording
+// pins TFAC-585's cross-pod outcome: InjectDeliveredRemote means a live
+// remote executor now owns recording task_events 'injected' (or
+// compensating with a pending_firing if the run turns out dead by apply
+// time) — the router must treat the firing as handled but must NOT record
+// the task_event itself, or a slow/failed remote apply could leave a
+// duplicate or premature bookkeeping row.
+func TestTryAutoDelegate_AdditiveEvent_DeliveredRemoteHandledWithoutRecording(t *testing.T) {
+	database := newTestDB(t)
+	entityID, task, trigger, activeRunID := setupAdditiveScenario(t, database)
+
+	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType:    additiveTestEventType,
+		EntityID:     &entityID,
+		MetadataJSON: `{"mention":"second"}`,
+		CreatedAt:    time.Now(),
+		OrgID:        runmode.LocalDefaultOrgID,
+	})
+	if err != nil {
+		t.Fatalf("record second event: %v", err)
+	}
+
+	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredRemote}
+	router := newAdditiveTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+
+	// tryAutoDelegate's `fired` return is a bare `return` (the named
+	// return's zero value) on every additive-injection branch — a
+	// pre-existing quirk this test doesn't re-litigate; "handled" is
+	// verified through the side effects below (no deferral, no local
+	// bookkeeping), matching the sibling InjectDeliveredLocal/
+	// InjectStagedResumable tests' convention.
+	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+	if len(stub.calls) != 1 {
+		t.Fatalf("expected 1 StageOrDeliverAdditiveEvent attempt, got %d", len(stub.calls))
+	}
+	if stub.calls[0].runID != activeRunID {
+		t.Errorf("attempt targeted run_id = %q, want %q", stub.calls[0].runID, activeRunID)
+	}
+
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil {
+		t.Fatalf("list pending firings: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected no pending_firings row (handed off, not deferred), got %d", len(rows))
+	}
+
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM task_events WHERE task_id = ? AND event_id = ?`, task.ID, secondEventID).Scan(&count); err != nil {
+		t.Fatalf("count task_events: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("router recorded task_events for a remote delivery — the owning executor must record it, got %d rows", count)
 	}
 }
 
@@ -291,16 +379,13 @@ func TestTryAutoDelegate_NonAdditiveEvent_StillDefers(t *testing.T) {
 		t.Fatalf("record second event: %v", err)
 	}
 
-	stub := &injectingStubDelegator{delivered: true}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
-		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil,
-		stub, noopScorer{}, websocket.NewHub())
+	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
+	router := newAdditiveTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
 
 	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
 
 	if len(stub.calls) != 0 {
-		t.Errorf("expected no StageOrDeliverInjectionResult call for a non-additive type, got %d", len(stub.calls))
+		t.Errorf("expected no StageOrDeliverAdditiveEvent call for a non-additive type, got %d", len(stub.calls))
 	}
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -332,17 +417,14 @@ func TestTryAutoDelegate_AdditiveEvent_RunIDRaceFallsThroughToDeferral(t *testin
 		t.Fatalf("record second event: %v", err)
 	}
 
-	stub := &injectingStubDelegator{delivered: true}
+	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
 	racedStore := activeAutoRunIDOverrideStore{AgentRunStore: sqlitestore.New(database).AgentRuns}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), racedStore, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
-		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil,
-		stub, noopScorer{}, websocket.NewHub())
+	router := newAdditiveTestRouter(database, racedStore, stub)
 
 	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
 
 	if len(stub.calls) != 0 {
-		t.Errorf("expected no StageOrDeliverInjectionResult call when the run ID can't be resolved, got %d", len(stub.calls))
+		t.Errorf("expected no StageOrDeliverAdditiveEvent call when the run ID can't be resolved, got %d", len(stub.calls))
 	}
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -353,113 +435,12 @@ func TestTryAutoDelegate_AdditiveEvent_RunIDRaceFallsThroughToDeferral(t *testin
 	}
 }
 
-// TestTryAutoDelegate_AdditiveEvent_StagedTerminalRunFallsThroughToDeferral
-// covers the load-bearing race: the injection was durably staged
-// (delivered=false, staged=true) because the run has no warm process, and
-// the run has ALSO already gone fully terminal by the time we re-check — a
-// run that never resumes would never flush the staged row. The firing must
-// fall through to the normal deferral rather than being silently dropped.
-func TestTryAutoDelegate_AdditiveEvent_StagedTerminalRunFallsThroughToDeferral(t *testing.T) {
-	database := newTestDB(t)
-	entityID, task, trigger, activeRunID := setupAdditiveScenario(t, database)
-
-	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EventType:    additiveTestEventType,
-		EntityID:     &entityID,
-		MetadataJSON: `{"mention":"second"}`,
-		CreatedAt:    time.Now(),
-		OrgID:        runmode.LocalDefaultOrgID,
-	})
-	if err != nil {
-		t.Fatalf("record second event: %v", err)
-	}
-
-	stub := &injectingStubDelegator{delivered: false, staged: true} // durably staged, not delivered live
-	racedStore := terminalGetOverrideStore{AgentRunStore: sqlitestore.New(database).AgentRuns}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), racedStore, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
-		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil,
-		stub, noopScorer{}, websocket.NewHub())
-
-	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
-
-	if len(stub.calls) != 1 {
-		t.Fatalf("expected 1 StageOrDeliverInjectionResult attempt (staged, not delivered), got %d", len(stub.calls))
-	}
-	if stub.calls[0].runID != activeRunID {
-		t.Errorf("staged attempt targeted run_id = %q, want %q", stub.calls[0].runID, activeRunID)
-	}
-	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
-	if err != nil {
-		t.Fatalf("list pending firings: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("expected the firing to fall through to the normal deferral, got %d pending_firings rows", len(rows))
-	}
-}
-
-// TestTryAutoDelegate_AdditiveEvent_StagedResumableRunHandled is the success
-// counterpart to the terminal-run race above: the injection was durably
-// staged (delivered=false, staged=true) and the run is still resumable
-// (parked `open`) — the firing must be treated as handled, exactly like the
-// delivered-live case, with no pending_firings row.
-func TestTryAutoDelegate_AdditiveEvent_StagedResumableRunHandled(t *testing.T) {
-	database := newTestDB(t)
-	entityID, task, trigger, activeRunID := setupAdditiveScenario(t, database)
-
-	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EventType:    additiveTestEventType,
-		EntityID:     &entityID,
-		MetadataJSON: `{"mention":"second"}`,
-		CreatedAt:    time.Now(),
-		OrgID:        runmode.LocalDefaultOrgID,
-	})
-	if err != nil {
-		t.Fatalf("record second event: %v", err)
-	}
-
-	stub := &injectingStubDelegator{delivered: false, staged: true} // durably staged, not delivered live
-	resumableStore := resumableGetOverrideStore{AgentRunStore: sqlitestore.New(database).AgentRuns}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), resumableStore, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
-		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil,
-		stub, noopScorer{}, websocket.NewHub())
-
-	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
-
-	if len(stub.calls) != 1 {
-		t.Fatalf("expected 1 StageOrDeliverInjectionResult attempt, got %d", len(stub.calls))
-	}
-	if stub.calls[0].runID != activeRunID {
-		t.Errorf("staged attempt targeted run_id = %q, want %q", stub.calls[0].runID, activeRunID)
-	}
-
-	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
-	if err != nil {
-		t.Fatalf("list pending firings: %v", err)
-	}
-	if len(rows) != 0 {
-		t.Errorf("expected no pending_firings row (durably staged onto a resumable run counts as handled), got %d", len(rows))
-	}
-
-	var kind string
-	if err := database.QueryRow(`SELECT kind FROM task_events WHERE task_id = ? AND event_id = ?`, task.ID, secondEventID).Scan(&kind); err != nil {
-		t.Fatalf("read task_events for injected bookkeeping: %v", err)
-	}
-	if kind != "injected" {
-		t.Errorf("task_events.kind = %q, want %q", kind, "injected")
-	}
-}
-
-// TestTryAutoDelegate_AdditiveEvent_DroppedStagingFallsThroughToDeferral
-// pins the fix for the real gap a bare bool return can't express: when
-// StageOrDeliverInjectionResult reports the injection was dropped outright
-// (delivered=false, staged=false — no live process AND the durable append
-// itself failed), there is no durable row anywhere to fall back on. This
-// must fall through to the normal deferral UNCONDITIONALLY — even when the
-// run's own status looks resumable, which a bare-bool caller could
-// mistake for "already handled" and silently lose the firing.
-func TestTryAutoDelegate_AdditiveEvent_DroppedStagingFallsThroughToDeferral(t *testing.T) {
+// TestTryAutoDelegate_AdditiveEvent_NotDeliveredFallsThroughToDeferral pins
+// that a StageOrDeliverAdditiveEvent report of InjectNotDelivered (dropped
+// outright, or staged onto a run that's since gone fully terminal — both
+// decided inside internal/delegate now) always falls through to the normal
+// deferral rather than being silently dropped.
+func TestTryAutoDelegate_AdditiveEvent_NotDeliveredFallsThroughToDeferral(t *testing.T) {
 	database := newTestDB(t)
 	entityID, task, trigger, _ := setupAdditiveScenario(t, database)
 
@@ -474,26 +455,22 @@ func TestTryAutoDelegate_AdditiveEvent_DroppedStagingFallsThroughToDeferral(t *t
 		t.Fatalf("record second event: %v", err)
 	}
 
-	stub := &injectingStubDelegator{delivered: false, staged: false} // dropped outright
-	// Deliberately make the run look resumable — proves the fall-through
-	// doesn't depend on (and isn't fooled by) the run's status.
-	resumableStore := resumableGetOverrideStore{AgentRunStore: sqlitestore.New(database).AgentRuns}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), resumableStore, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
-		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil,
-		stub, noopScorer{}, websocket.NewHub())
+	stub := &injectingStubDelegator{outcome: delegate.InjectNotDelivered}
+	router := newAdditiveTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
 
-	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
-
+	fired := router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+	if !fired {
+		t.Error("expected tryAutoDelegate to report handled via the normal deferral (enqueueBusyFiring)")
+	}
 	if len(stub.calls) != 1 {
-		t.Fatalf("expected 1 StageOrDeliverInjectionResult attempt, got %d", len(stub.calls))
+		t.Fatalf("expected 1 StageOrDeliverAdditiveEvent attempt, got %d", len(stub.calls))
 	}
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("list pending firings: %v", err)
 	}
 	if len(rows) != 1 {
-		t.Fatalf("expected the firing to fall through to the normal deferral on a genuine drop, got %d pending_firings rows", len(rows))
+		t.Fatalf("expected the firing to fall through to the normal deferral, got %d pending_firings rows", len(rows))
 	}
 }
 
@@ -531,7 +508,7 @@ func TestTryAutoDelegate_AdditiveEvent_StampsAgentClaimOnInjectedTask(t *testing
 	}
 
 	st := sqlitestore.New(database)
-	stub := &injectingStubDelegator{delivered: true}
+	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
 	// Agents wired (real store, a seeded agent to resolve) so agentID
 	// resolves to something non-empty; teamAgents left nil so the
 	// bot-disabled-team gate degrades to "proceed" and doesn't interfere.

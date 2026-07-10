@@ -99,8 +99,8 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 
 func (s *stubDelegator) Cancel(orgID, runID, userID string) error { return nil }
 
-func (s *stubDelegator) StageOrDeliverInjectionResult(orgID, runID, producer, body string) (delivered, staged bool) {
-	return false, false
+func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
+	return delegate.InjectNotDelivered
 }
 
 // setupDrainScenario seeds entity + prompt + event + task + trigger so a

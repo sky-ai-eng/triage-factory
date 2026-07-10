@@ -20,7 +20,9 @@ package delegate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -398,7 +400,36 @@ func (s *Spawner) AutoApprovePermissionHandler(runID string) agentproc.Permissio
 // buffered while the entry was registered, and the handler's timeout path —
 // which deregisters under the same mutex before its final drain — is
 // guaranteed to observe it. A 200-acknowledged decision is never dropped.
+// ResolvePermission answers a pending browser permission prompt, routing
+// through the same local-first / cross-pod seam as Interrupt/Steer
+// (TFAC-585): resolvePermissionLocal handles the case this process holds
+// the broker entry; on a local miss where this process also holds no live
+// handle for the run at all (getProc), it resolves a live remote owner and
+// signals it, waiting up to DefaultPermissionAckTimeout. A local miss
+// where THIS process DOES own the run's live process (the request_id
+// itself just isn't/no-longer pending — already answered, timed out, or
+// never existed) is genuinely stale/not-found, never a routing question,
+// so it short-circuits before ever trying remote.
 func (s *Spawner) ResolvePermission(orgID, runID, requestID string, d agentproc.PermissionDecision) error {
+	err := s.resolvePermissionLocal(orgID, runID, requestID, d)
+	if err == nil || !errors.Is(err, ErrNoPendingPermission) {
+		return err
+	}
+	if s.getProc(runID) != nil {
+		return ErrNoPendingPermission
+	}
+	s.mu.Lock()
+	runSignals := s.runSignals
+	s.mu.Unlock()
+	if runSignals == nil {
+		return ErrNoPendingPermission
+	}
+	return s.routePermission(orgID, runID, requestID, d)
+}
+
+// resolvePermissionLocal is ResolvePermission's original N=1 body: resolve
+// the in-memory broker entry and buffer the decision.
+func (s *Spawner) resolvePermissionLocal(orgID, runID, requestID string, d agentproc.PermissionDecision) error {
 	s.mu.Lock()
 	p, ok := s.permPending[permKey(runID, requestID)]
 	if !ok || p.orgID != orgID {
@@ -418,4 +449,34 @@ func (s *Spawner) ResolvePermission(orgID, runID, requestID string, d agentproc.
 		s.mu.Unlock()
 		return ErrNoPendingPermission
 	}
+}
+
+// routePermission is ResolvePermission's cross-pod path: marshal the
+// decision onto a run_signals row targeting the run's live remote owner
+// and wait for the ack, up to DefaultPermissionAckTimeout (longer than
+// interrupt/steer's TF_SIGNAL_ACK_TIMEOUT — the browser is synchronously
+// blocked on this response). A "gone" or "stale" ack both map to
+// ErrNoPendingPermission: gone means no live process to answer (the same
+// user-facing outcome as never having been pending), stale means the
+// request_id was already resolved on the owner.
+func (s *Spawner) routePermission(orgID, runID, requestID string, d agentproc.PermissionDecision) error {
+	payload, err := json.Marshal(permissionPayload{
+		RequestID:    requestID,
+		Behavior:     d.Behavior,
+		Message:      d.Message,
+		UpdatedInput: d.UpdatedInput,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal permission payload: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultPermissionAckTimeout)
+	defer cancel()
+	result, live, err := s.sendSignalAndAwaitAck(ctx, orgID, runID, domain.RunSignalPermission, string(payload))
+	if err != nil {
+		return err
+	}
+	if !live || result == domain.RunSignalAckGone || result == domain.RunSignalAckStale {
+		return ErrNoPendingPermission
+	}
+	return nil
 }

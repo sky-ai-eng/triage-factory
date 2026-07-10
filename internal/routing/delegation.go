@@ -276,23 +276,27 @@ func (r *Router) enqueueBusyFiring(orgID, entityID string, task *domain.Task, tr
 }
 
 // tryAdditiveInjection folds an additive event into the entity's already-
-// active auto run via the staged-injection seam, instead of deferring a
-// second run onto pending_firings (TFAC-594). Returns true when the caller
-// should treat the firing as handled (delivered live, or durably staged
-// onto a resumable run); false when the caller must fall through to the
-// normal deferral so the firing is never silently dropped. Three distinct
-// cases fall through:
+// active auto run via the cross-pod-aware injection seam (TFAC-594,
+// extended cross-pod by TFAC-585), instead of deferring a second run onto
+// pending_firings. Returns true when the caller should treat the firing as
+// handled; false when the caller must fall through to the normal deferral
+// so the firing is never silently dropped. Two distinct cases fall
+// through:
 //
 //   - the active run couldn't be resolved to an ID (the busy-gate read
 //     raced the run going terminal);
-//   - StageOrDeliverInjectionResult reports the injection was dropped
-//     outright (delivered=false, staged=false — no live process, AND the
-//     durable append itself failed: store unwired or a transient error).
-//     There's no durable row to fall back on here, regardless of the run's
-//     current status, so this always defers;
-//   - it was durably staged (staged=true) but the run has since gone fully
-//     terminal (not parked/open) — a staged row only flushes on the run's
-//     next resume, so a run that can never resume would silently lose it.
+//   - StageOrDeliverAdditiveEvent reports InjectNotDelivered — dropped
+//     outright (no live process anywhere, and the durable append itself
+//     failed), or durably staged onto a run that's since gone fully
+//     terminal (a staged row only flushes on the run's next resume, so a
+//     run that can never resume would silently lose it). Both cases have
+//     no durable row to fall back on, so this always defers.
+//
+// InjectDeliveredRemote is distinct from the other "handled" outcomes: a
+// live remote executor now owns recording task_events 'injected' (or
+// compensating with a pending_firing enqueue if the run turns out dead by
+// apply time) — this method must NOT record it here, or a slow/failed
+// remote apply could leave a duplicate or premature bookkeeping row.
 func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string) bool {
 	runID, err := r.agentRuns.ActiveAutoRunIDForEntitySystem(ctx, orgID, entityID)
 	if err != nil || runID == "" {
@@ -308,40 +312,26 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID strin
 	}
 	body := domain.AdditiveEventInjection(trigger.EventType, metadataJSON)
 
-	delivered, staged := r.spawner.StageOrDeliverInjectionResult(orgID, runID, trigger.EventType, body)
-	if !delivered {
-		if !staged {
-			// Dropped outright — nothing durable to flush later. Never
-			// treat this as handled no matter the run's status.
-			return false
-		}
-		run, rerr := r.agentRuns.GetSystem(ctx, orgID, runID)
-		if rerr != nil || run == nil || !runIsResumable(run.Status, run.Outcome) {
-			return false
-		}
-	}
-
-	if err := r.tasks.RecordEventSystem(ctx, orgID, task.ID, triggeringEventID, "injected"); err != nil {
-		routerLog.Error("failed to record injected task_event", "task_id", task.ID, "run_id", runID, "error", err)
-	}
-	routerLog.Info("injected additive event into active run",
-		"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
-	return true
-}
-
-// runIsResumable mirrors internal/delegate's unexported resumableState
-// predicate: every non-finish parked/terminal state a later resume can
-// wake — `open`, or `completed` with outcome `abort`. Duplicated here
-// (rather than exported from internal/delegate) to keep the routing→
-// delegate dependency narrowed to the Delegator interface.
-func runIsResumable(status, outcome string) bool {
-	switch status {
-	case "open":
-		return true
-	case "completed":
-		return outcome == string(domain.RunOutcomeAbort)
-	default:
+	outcome := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, runID, trigger.EventType, body, delegate.AdditiveFiringRef{
+		EntityID:          entityID,
+		TaskID:            task.ID,
+		TriggerID:         trigger.ID,
+		TriggeringEventID: triggeringEventID,
+	})
+	switch outcome {
+	case delegate.InjectNotDelivered:
 		return false
+	case delegate.InjectDeliveredRemote:
+		routerLog.Info("handed additive event to a live remote executor via run_signals",
+			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
+		return true
+	default: // InjectDeliveredLocal, InjectStagedResumable
+		if err := r.tasks.RecordEventSystem(ctx, orgID, task.ID, triggeringEventID, "injected"); err != nil {
+			routerLog.Error("failed to record injected task_event", "task_id", task.ID, "run_id", runID, "error", err)
+		}
+		routerLog.Info("injected additive event into active run",
+			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
+		return true
 	}
 }
 

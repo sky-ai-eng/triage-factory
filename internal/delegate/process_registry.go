@@ -377,14 +377,14 @@ func (c inProcessController) Cancel(runID string) bool {
 
 // Interrupt stops a live run's current turn through the control seam,
 // leaving the process alive for further input. The P3 message/pause
-// endpoints call this; routing through s.controller is what keeps the
-// horizontal-scaling swap additive.
+// endpoints call this; routing through s.controller (read via
+// getController) is what keeps the horizontal-scaling swap additive.
 func (s *Spawner) Interrupt(ctx context.Context, runID string) error {
-	return s.controller.Interrupt(ctx, runID)
+	return s.getController().Interrupt(ctx, runID)
 }
 
 // Steer delivers a free-form user message to a live run through the
 // control seam. The P3 message endpoint calls this.
 func (s *Spawner) Steer(ctx context.Context, runID, text string) error {
-	return s.controller.Steer(ctx, runID, text)
+	return s.getController().Steer(ctx, runID, text)
 }

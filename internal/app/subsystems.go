@@ -264,6 +264,25 @@ func (a *App) buildExecution() error {
 	}
 	a.spawner.SetStorage(blobStore)
 
+	// Cross-pod run control (TFAC-585): the run_signals outbox is Postgres-
+	// only, so this is the ONE gate that keeps local mode structurally free
+	// of run_signals writes — s.controller stays the plain
+	// inProcessController unless SetRunSignals is called, and it is only
+	// ever called here, behind this mode check. Wired for every role in
+	// multi mode (not just dispatcher-capable ones): a control pod's HTTP
+	// handlers need the cross-pod controller to reach a run living on an
+	// executor just as much as an executor needs it to apply signals
+	// targeting itself.
+	if runmode.Current() == runmode.ModeMulti {
+		a.spawner.SetRunSignals(a.stores.RunSignals, a.database)
+		if ackTimeout, terr := delegate.ParseSignalAckTimeout(os.Getenv("TF_SIGNAL_ACK_TIMEOUT")); terr != nil {
+			appLog.Warn("signal ack timeout", "error", terr)
+		} else if ackTimeout != delegate.DefaultSignalAckTimeout {
+			a.spawner.SetSignalAckTimeout(ackTimeout)
+			appLog.Info("signal ack timeout configured", "timeout", ackTimeout)
+		}
+	}
+
 	// Control pods build the spawner (the router enqueues runs through it,
 	// and the run-control HTTP endpoints reach live runs through it) but
 	// never run the dispatcher, so their registry row must not advertise
