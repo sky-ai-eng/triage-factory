@@ -321,9 +321,20 @@ func resetTimer(t *time.Timer, d time.Duration) {
 }
 
 // presentFor reports whether any answer-capable, focused tab in orgID is on the
-// board or this run's detail page (TFAC-392). Delegates to the hub, which is
-// nil-receiver-safe (the hub-less test spawner reads as "nobody present").
+// board or this run's detail page (TFAC-392). In multi mode, once
+// SetPresenceChecker has wired a fleet-wide checker (TFAC-584), this
+// consults it — local Hub state OR the ws_presence table — so a reviewer
+// connected to a different pod than the one running this run still
+// counts. Otherwise (local mode, or before wiring) it falls back to the
+// hub directly, which is nil-receiver-safe (the hub-less test spawner
+// reads as "nobody present").
 func (s *Spawner) presentFor(orgID, runID string) bool {
+	s.mu.Lock()
+	pc := s.presence
+	s.mu.Unlock()
+	if pc != nil {
+		return pc.PresentFor(context.Background(), orgID, runID)
+	}
 	return s.wsHub.PresentFor(orgID, runID)
 }
 

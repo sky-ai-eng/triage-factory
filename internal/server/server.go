@@ -78,8 +78,14 @@ type Server struct {
 	mux       *http.ServeMux
 	static    fs.FS
 	ws        *websocket.Hub
-	spawner   *delegate.Spawner
-	curator   *curator.Curator
+	// wsBackplane is the optional multi-mode cross-pod kick publisher
+	// (TFAC-584), wired via SetWSBackplane. Nil in local mode and before
+	// wiring; every call site nil-checks it, so a session revoke on a
+	// single-pod deployment behaves exactly as before this existed — only
+	// the local s.ws.CloseUserConnections closes anything.
+	wsBackplane WSKicker
+	spawner     *delegate.Spawner
+	curator     *curator.Curator
 	// reconciler backs the Tier-2 run-scoped artifact refresh endpoint
 	// (TFAC-464) — the same Reconciler the background Tier-1 Manager runs.
 	// Wired via SetReconciler after construction; nil until then, so the
@@ -820,6 +826,11 @@ func (s *Server) routes() {
 			}
 			return s.authDeps.sessions.RevokeForUserInOrgSystem(ctx, uid, oid)
 		},
+		publishKick: func(ctx context.Context, userID, sid, orgID string, code int, reason string) {
+			if s.wsBackplane != nil {
+				s.wsBackplane.PublishKick(ctx, userID, sid, orgID, code, reason)
+			}
+		},
 	}
 	s.api("GET /api/orgs/{org_id}/members", omh.handleOrgMembersList)
 	s.apiMutating("PATCH /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRoleChange)
@@ -1408,6 +1419,26 @@ func (s *Server) kickDashboardBackfill(orgID, userID, login, host string) {
 // main.go after the bus is created.
 func (s *Server) SetEventBus(bus *eventbus.Bus) {
 	s.bus = bus
+}
+
+// WSKicker is the multi-mode cross-pod session-kick publisher (TFAC-584):
+// the plain *wsbackplane.Backplane satisfies this directly. Every
+// CloseUserConnections call site closes THIS pod's local sockets first,
+// then calls PublishKick so every OTHER control pod does the same for
+// its own local sockets — see internal/wsbackplane's PublishKick doc
+// comment for why the ordering (local close, then publish) is what keeps
+// this from ever echoing.
+type WSKicker interface {
+	PublishKick(ctx context.Context, userID, sid, orgID string, code int, reason string)
+}
+
+// SetWSBackplane wires the multi-mode cross-pod kick publisher
+// (TFAC-584). Wired post-construction in internal/app, mirroring
+// SetEventBus; nil (the default, and always the case in local mode)
+// leaves every kick call site local-only, unchanged from before this
+// existed.
+func (s *Server) SetWSBackplane(b WSKicker) {
+	s.wsBackplane = b
 }
 
 // SetVersion records main.Version (the release tag, or "dev") for GET

@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
+	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -88,6 +89,36 @@ func (a *App) startWorkers(ctx context.Context) {
 	// on a timer (liveness + version/role visibility; capacity fields only
 	// on executor-capable roles — see SetReportCapacity).
 	go a.spawner.RunInstanceHeartbeat(ctx, delegate.DefaultInstanceHeartbeatInterval)
+
+	// WS backplane workers (TFAC-584) — nil in local mode / before
+	// buildWSBackplane wires it, so every branch below is a no-op there.
+	if a.wsBackplane != nil {
+		// Public listener (tf_ws fan-out + tf_ctl kick): every pod that
+		// holds user websocket connections. An executor holds none (its
+		// Hub is a standalone, client-less sink — buildExecutorRuntime),
+		// so it has nothing to fan into and never LISTENs here; it still
+		// PUBLISHES to tf_ws via the spawner's broadcasts on its
+		// client-less hub, which needs no LISTEN connection at all (NOTIFY
+		// rides the pooled admin connection).
+		if a.plan.serveHTTP {
+			go a.wsBackplane.RunPublicListener(ctx)
+			go a.wsBackplane.RunPresenceHeartbeat(ctx, wsbackplane.PresenceHeartbeatIntervalFromEnv())
+			go a.srv.RunSessionRevalidation(ctx, wsbackplane.RevalidateIntervalFromEnv())
+		}
+		// Brain-bound sentinel relay LISTEN (tf_bus): starts/stops with
+		// a.plan.brain, today's stand-in for TFAC-583's lease (see
+		// roleplan.go's brain field doc comment) — single-control-only
+		// until that lands, exactly like every other brain subsystem.
+		if a.plan.brain {
+			go a.wsBackplane.RunBusListener(ctx, a.bus.Publish)
+		}
+		// ws_outbox TTL reaper: deliberately NOT gated on brain — spec
+		// §11 decision 5 calls this too trivial to route through the
+		// lease, and `DELETE WHERE created_at < cutoff` is safe under any
+		// number of pods racing it. Every wsBackplane-wired pod runs it,
+		// executors included (they publish to tf_ws too).
+		go a.wsBackplane.RunOutboxReaper(ctx, wsbackplane.DefaultOutboxReapInterval, wsbackplane.OutboxTTLFromEnv())
+	}
 
 	// Bounded bare+worktree cache reaper (TFAC-60). Every role keeps a
 	// per-pod worktree cache under its own TF_STATE_ROOT — run worktrees on

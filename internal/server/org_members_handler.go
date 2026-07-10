@@ -44,6 +44,13 @@ type orgMembersHandler struct {
 	// field is belt-and-suspenders for a future caller that constructs the
 	// handler without it (e.g. a test). Returns the count of revoked rows.
 	revokeUserOrgSessions func(ctx context.Context, userID, orgID string) (int64, error)
+	// publishKick fans the removal's WS-kick to every OTHER control pod
+	// (TFAC-584), on top of the local ws.CloseUserConnections above. Same
+	// late-binding closure shape as revokeUserOrgSessions — SetWSBackplane
+	// runs after routes() — and the closure nil-checks wsBackplane itself
+	// (local mode, or before wiring), so a nil-field test/caller is still
+	// safe to omit this and get local-only behavior.
+	publishKick func(ctx context.Context, userID, sid, orgID string, code int, reason string)
 }
 
 // orgMemberRow is one roster row. github_username / jira_account_id are null
@@ -232,6 +239,11 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 	membershipLog.Info("kicked ws connections on membership removal",
 		"user", targetID, "org", orgID,
 		"code", int(websocket.CloseMembershipChanged), "n", n)
+	// Cross-pod (TFAC-584): see orgMembersHandler.publishKick's doc comment.
+	if h.publishKick != nil {
+		h.publishKick(r.Context(), targetID, "", orgID,
+			int(websocket.CloseMembershipChanged), "membership changed")
+	}
 	// Deprovisioning hygiene (TFAC-487): revoke the removed member's auth
 	// sessions scoped to THIS org, best-effort, mirroring the WS-kick's org
 	// filter (their sessions active in other orgs are untouched). Per-request
