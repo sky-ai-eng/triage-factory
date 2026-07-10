@@ -148,17 +148,21 @@ RUN apk add --no-cache \
 # were ever the same identity. `-D` skips a password.
 #
 # Unlike a purely-service identity, this one DOES need a real, owned
-# home directory: internal/paths.go documents "~/.claude state — Claude
-# Code SDK session dirs, which must follow the real HOME even in multi
-# mode" (curator sessions, skills import, project-bundle export/import
-# all resolve os.UserHomeDir() from the orchestrator's own process). The
-# entrypoint's exec-time drop switches uid via setpriv, which does not
-# touch environment variables, so it also explicitly exports
-# HOME=/home/tf-orchestrator right before that exec — without both the
-# directory (owned by this uid) and the env var (setpriv won't derive it
-# from /etc/passwd), those code paths would try to read/write under the
-# root-owned $HOME inherited from the container's default environment,
-# which this uid cannot reach post-drop.
+# home directory — but NOT for tenant content. In multi mode the
+# sandboxed agents (curator + delegated runs) execute with HOME=/work,
+# so their ~/.claude session state lands inside each run's own
+# org-scoped directory on the data volume; host-side consumers resolve
+# it via worktree.ClaudeProjectDir (TFAC-109), never this HOME. What
+# still needs a valid orchestrator HOME is process plumbing that
+# resolves os.UserHomeDir() incidentally (Go toolchain caches, git
+# defaults, any library that touches $HOME). The entrypoint's exec-time
+# drop switches uid via setpriv, which does not touch environment
+# variables, so it also explicitly exports HOME=/home/tf-orchestrator
+# right before that exec — without both the directory (owned by this
+# uid) and the env var (setpriv won't derive it from /etc/passwd),
+# those incidental lookups would point at the root-owned $HOME
+# inherited from the container's default environment, which this uid
+# cannot reach post-drop.
 #
 # tf-sandbox (gid 10000 — internal/sandbox.WorktreeGID) exists so the
 # orchestrator can grant the sandbox identity access to per-run agenthost

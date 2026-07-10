@@ -39,10 +39,10 @@
 - **Local purpose:** Synthesizes the local agent row + team_agents row.
 - **Multi-mode:** Already gated. DONE (per PR #226).
 
-### 6. `skills.ImportAll` is correctly gated
-- **Where:** `main.go:621-623`
+### 6. `skills.ImportAll` — boot path gated; the HTTP route needed its own gate (TFAC-109)
+- **Where:** boot: `internal/app/startup.go` `importLocalSkills` (moved out of main.go; double-gated on `a.local()` + the sentinel org existing). HTTP: `POST /api/skills/import` → `internal/server/skills_handler.go`.
 - **Local purpose:** Auto-imports SKILL.md prompts as `imported`-source rows.
-- **Multi-mode:** Already gated. DONE.
+- **Multi-mode:** The boot call was always gated, but this item originally examined only that call site — the HTTP route was reachable in multi with no mode check and returned its failures as a 200 with a swallowed errors array. TFAC-109 501-gated the route (the scan reads the orchestrator's own `~/.claude/skills`, which is not a tenant concept) and added the multi-mode replacement: `POST /api/skills/upload` imports pasted SKILL.md content as a claims-bound, org/team-scoped prompt. DONE.
 
 ### 7. `worktree.SetOnCloneResult` is correctly gated
 - **Where:** `main.go:645-702`
@@ -161,8 +161,17 @@ These are NOT startup, but worth flagging since they fire immediately after `Lis
 ### 28. `internal/server/server.go:179` hardcodes `LocalDefaultTeamID` on `TeamAgents.GetForTeam`
 - Per-request agent-enabled gate in `agentEnabledForOrg`. Wrong team in multi-mode.
 
-### 29. `internal/projectbundle/import.go:197,265,346` hardcodes sentinels
-- Per-request project-import handler (`POST /api/projects/import`). In multi mode would import every bundle into the sentinel org + team.
+### 29. `internal/projectbundle` — ported to the store layer (TFAC-109)
+- The sentinel hardcoding this item originally flagged was fixed by an earlier identity-threading pass (real orgID/teamID/userID parameters). TFAC-109 then completed the port: import/export/preview run every DB read/write through claims-bound `WithTx` store methods (the raw `?`-placeholder SQL — which in multi mode executed on the ADMIN pool, RLS bypassed — is deleted, along with the org-blind package-level curator helpers it shared with the curator HTTP handlers), and session transcripts resolve mode-aware via `worktree.ClaudeProjectDir` (sandboxed runs write them under the run's org-scoped directory, not the orchestrator's `$HOME`). Both endpoints now work in multi mode; the interim 501 gates are lifted. DONE.
+
+### 31. `GET /api/projects/{id}/export` + `/export/preview` were never gated (found + fixed by TFAC-109)
+- The original audit caught the import gate but not its export siblings: both endpoints were reachable in multi mode, 500ing on the un-elevated app pool — and, once past that, would have silently exported transcript-less bundles because `appendSessionArtifacts` looked under the orchestrator's `$HOME` while the sandboxed curator writes its transcript under the project KB dir (`HOME=/work`). Fixed by the same TFAC-109 port as #29; a transcript that exists but is unreadable now surfaces as a preview/manifest warning instead of a silent omission.
+
+### 32. `skills.ScanAgentTools` merged orchestrator-host agent files into every tenant's `--allowedTools` (found + fixed by TFAC-109)
+- `internal/skills/agents.go` reads the process's own `~/.claude/agents/*.md`; its only caller (`delegate/prompt.go` `cachedAgentTools`) merged the declared tools into every delegated run's `--allowedTools` in BOTH modes, unconditionally. Live behavior, not a fail-closed gap: host-level files silently widened every org's tool allowlist. Now gated to local mode.
+
+### 33. Delegate resume/snapshot resolved session transcripts from the orchestrator's `$HOME` (found + fixed by TFAC-109)
+- `sessionTranscriptExists`, `readSessionTranscript`/`restoreSessionTranscript`, and `RemoveClaudeProjectDir` all reconstructed the transcript path from host HOME + encoded host cwd — the direct-run layout. In sandboxed multi mode they silently missed (crash-reclaim never actually resumed; taken-over-run snapshots carried no transcript). All now route through the mode-aware `worktree.ClaudeProjectDir`.
 
 ### 30. `internal/agentmeta/footer.go:68,111` reads agent run + token totals from sentinel org
 - Per-request review/PR submit footer rendering, called from `cmd/exec` subcommands. Coupled to #19 — fixing `runident` to thread the real orgID lets this be passed through cleanly.

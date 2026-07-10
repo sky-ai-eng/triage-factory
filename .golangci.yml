@@ -27,11 +27,14 @@ linters:
       # so scripts/lint.sh carries a companion grep guard for it.
       #
       # Documented exceptions (see internal/paths package doc):
-      #   - ~/.claude sites (Claude Code SDK session/user state, which
-      #     follows the real HOME even in multi mode) carry a line-level
-      #     //nolint:forbidigo.
-      #   - internal/paths itself and the curator runtime (until SKY-402
-      #     routes it through paths) are path-excluded below.
+      #   - ~/.claude sites (Claude Code SDK session/user state) carry a
+      #     line-level //nolint:forbidigo. These serve DIRECT runs only
+      #     (local mode, or multi on non-Linux, where the agent inherits
+      #     this process's HOME). Sandboxed multi-mode runs execute with
+      #     HOME=/work, so their session state lives inside the run's
+      #     org-scoped directory — resolved via worktree.ClaudeProjectDir,
+      #     never a raw home lookup (TFAC-109).
+      #   - internal/paths itself is path-excluded below.
       #   - _test.go is excluded: live integration tests legitimately
       #     resolve the real HOME for subprocess env.
       forbid:
