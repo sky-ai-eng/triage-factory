@@ -334,6 +334,12 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// membership registry every TF process registers into at boot and
 		// refreshes via periodic heartbeat.
 		Instances: newInstanceStore(admin),
+		// PollReadiness is admin-pool only: callers already hold an
+		// authorized orgID (session claims or system context) by the time
+		// they reach it, same admin-only shape as Instances. Org-scoped
+		// readiness gate for /api/jira/stock + the one-shot "config took
+		// effect" announce toast. See TFAC-583.
+		PollReadiness: newPollReadinessStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),

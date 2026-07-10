@@ -76,18 +76,43 @@ type ExtensionAPI interface {
 	// — same install-closure caveat as PublishEvent.
 	Bus() *eventbus.Bus
 
-	// OnReady registers a hook to run once app wiring is complete — the seam
-	// for an extension's long-lived background workers (connection
-	// managers, pollers). Called during install; the hook fires later, in
-	// its own goroutine, with a context that cancels at process shutdown.
-	// By hook time every read-through accessor on this API (Bus,
-	// PublishEvent, ...) is wired and non-nil. The hook MAY block for the
-	// process lifetime (run the worker loop directly); respect ctx.Done()
-	// for graceful stop. Hooks are fired in registration order but run
-	// concurrently; there is no join on shutdown — a worker needing drain
-	// time handles it inside the hook before returning. Panics at
-	// registration time if hook is nil.
+	// OnReady registers a hook to run once app wiring is complete AND this
+	// process holds the background-brain lease — the seam for an
+	// extension's long-lived background worker that must run on exactly
+	// one pod (connection managers, adapters — e.g. the Slack liveness
+	// consumer of run sentinels; TFAC-583 spec §3). The hook fires in its
+	// own goroutine, with a context that cancels both at process shutdown
+	// AND on lease demotion — a worker that loses the brain gets the same
+	// ctx.Done() signal a process shutdown would give it, and is started
+	// fresh (a new goroutine, a new ctx) on a later re-acquisition. By
+	// hook time every read-through accessor on this API (Bus, PublishEvent,
+	// ...) is wired and non-nil. The hook MAY block for as long as this
+	// pod holds the brain (run the worker loop directly); respect
+	// ctx.Done() for graceful stop — a worker needing drain time handles
+	// it inside the hook before returning. Hooks are fired in registration
+	// order but run concurrently; there is no join on either shutdown or
+	// demotion. Panics at registration time if hook is nil.
+	//
+	// At TF_ROLE=all / local mode this pod always holds the lease, so
+	// OnReady hooks fire exactly once, indistinguishable from today.
+	// Ungated, every control pod would run every OnReady worker — the same
+	// hazard as running every core brain subsystem on every pod, wearing
+	// EE clothes (external writes like Slack posts duplicating ×M). A
+	// worker that is genuinely safe to run on every pod (idempotent,
+	// stateless, no external side effects) opts out via
+	// OnReadyReplicaSafe instead — never by default.
 	OnReady(hook func(ctx context.Context))
+
+	// OnReadyReplicaSafe registers a hook that runs once app wiring is
+	// complete, on EVERY control/all pod regardless of brain-lease state —
+	// the escape hatch for a worker that is genuinely safe to run
+	// replicated (idempotent, no external side effects that would
+	// duplicate). Fires exactly once per process lifetime (not re-fired on
+	// lease transitions, since it doesn't gate on them). As of TFAC-583
+	// this has zero callers — every existing OnReady worker is brain-
+	// gated by design; a worker opts into this only by explicit
+	// declaration. Panics at registration time if hook is nil.
+	OnReadyReplicaSafe(hook func(ctx context.Context))
 
 	// --- login seam (see login_ext.go) ---
 
@@ -164,17 +189,38 @@ func (s *Server) installExtensions() {
 	}
 }
 
-// StartExtensionWorkers fires every OnReady hook registered during
-// installExtensions, each in its own goroutine with ctx. Called once by
-// app.Run after wiring completes and before the HTTP listener starts.
-// Idempotent: a second call is a no-op, so a caller that double-invokes Run
-// can't double-start workers.
+// StartExtensionWorkers fires every OnReadyReplicaSafe hook registered
+// during installExtensions, each in its own goroutine with ctx. Called
+// once by app.Run after wiring completes and before the HTTP listener
+// starts — unconditionally, regardless of brain-lease state (that's the
+// point of the replica-safe hatch). Idempotent: a second call is a no-op,
+// so a caller that double-invokes Run can't double-start workers.
+//
+// Brain-gated OnReady hooks do NOT fire here — see
+// StartBrainExtensionWorkers, called by the brain start/stop unit instead.
 func (s *Server) StartExtensionWorkers(ctx context.Context) {
 	s.workersStarted.Do(func() {
-		for _, hook := range s.readyHooks {
+		for _, hook := range s.replicaSafeHooks {
 			go hook(ctx)
 		}
 	})
+}
+
+// StartBrainExtensionWorkers fires every brain-gated OnReady hook, each in
+// its own goroutine with ctx. Called by the App's brain start/stop unit
+// (internal/app) every time this pod acquires the background-brain
+// lease — including a re-acquisition after an earlier demotion — with a
+// fresh ctx each time. Unlike StartExtensionWorkers this is NOT
+// Once-guarded: the caller (internal/app's brainMu-guarded startBrain) is
+// the sole synchronization point, so calling this twice concurrently is a
+// caller bug, not a case this method defends against — matching the "no
+// join on shutdown" convention the hooks themselves already follow. ctx
+// cancellation (on demotion or process shutdown) is what stops the
+// started hooks; there's nothing to explicitly "stop" here.
+func (s *Server) StartBrainExtensionWorkers(ctx context.Context) {
+	for _, hook := range s.readyHooks {
+		go hook(ctx)
+	}
 }
 
 // serverExtensionAPI adapts *Server to ExtensionAPI. A thin value wrapper
@@ -221,6 +267,13 @@ func (a serverExtensionAPI) OnReady(hook func(ctx context.Context)) {
 		panic("ExtensionAPI.OnReady: hook must not be nil")
 	}
 	a.s.readyHooks = append(a.s.readyHooks, hook)
+}
+
+func (a serverExtensionAPI) OnReadyReplicaSafe(hook func(ctx context.Context)) {
+	if hook == nil {
+		panic("ExtensionAPI.OnReadyReplicaSafe: hook must not be nil")
+	}
+	a.s.replicaSafeHooks = append(a.s.replicaSafeHooks, hook)
 }
 
 func (a serverExtensionAPI) PublicURL() string {

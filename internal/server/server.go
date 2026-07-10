@@ -196,13 +196,6 @@ type Server struct {
 	// script-src as `'sha256-<hash>'` directives.
 	inlineScriptHashes []string
 
-	// Jira poll readiness — used by /api/jira/stock to decide whether the
-	// poller has completed its first cycle after a restart. Carry-over reads
-	// from the DB and needs snapshots to be populated before showing tickets.
-	jiraPollMu      sync.RWMutex
-	jiraRestartedAt time.Time
-	jiraLastPollAt  time.Time
-
 	// projectMutexes serializes PATCH-style read-merge-write
 	// operations per project ID so two concurrent autosaves from
 	// different widgets (e.g. pinned-repos editor and tracker
@@ -248,13 +241,19 @@ type Server struct {
 	// it's never nil; the wrapper no-ops in local mode. See ratelimit.go.
 	preAuthLimiter *ipRateLimiter
 
-	// readyHooks are OnReady hooks registered by extensions during
-	// installExtensions (routes()). Collected single-threaded at startup —
-	// same no-lock contract as registeredExtensions — then fired by
-	// StartExtensionWorkers once app wiring is complete.
+	// readyHooks are brain-gated OnReady hooks registered by extensions
+	// during installExtensions (routes()). Collected single-threaded at
+	// startup — same no-lock contract as registeredExtensions — then fired
+	// by StartBrainExtensionWorkers every time this pod's brain starts
+	// (TFAC-583; at TF_ROLE=all / local, that's once, at boot — same as
+	// before this ticket).
 	readyHooks []func(context.Context)
+	// replicaSafeHooks are OnReadyReplicaSafe hooks — the escape hatch for
+	// a worker that's safe to run on every pod regardless of brain-lease
+	// state. Fired once, unconditionally, by StartExtensionWorkers.
+	replicaSafeHooks []func(context.Context)
 	// workersStarted guards StartExtensionWorkers so a double call (e.g. a
-	// test double-invoking Run) can't fire readyHooks twice.
+	// test double-invoking Run) can't fire replicaSafeHooks twice.
 	workersStarted sync.Once
 
 	// version is main.Version (the release tag, or "dev" for an unreleased
@@ -281,6 +280,14 @@ type Server struct {
 	// (bare test constructions); the handler reports both poller checks
 	// failed rather than nil-dereffing.
 	pollerHealth func(ctx context.Context) poller.HealthSnapshot
+	// leaseStatus reports this pod's current view of the background-brain
+	// lease, wired via SetLeaseStatus — role=control in multi mode only
+	// (TFAC-583). nil at role=all / local (the single process always
+	// self-holds, so /readyz's poller hard-check stays byte-identical to
+	// the pre-TFAC-583 contract and omits the `lease` field entirely) and
+	// nil on an executor (no /readyz there — it serves a separate
+	// localhost healthz).
+	leaseStatus LeaseStatusFunc
 }
 
 // reachableRepoEntry is one cached picker enumeration: the lowercased
@@ -1437,6 +1444,17 @@ func (s *Server) SetPollerManager(healthFn func(ctx context.Context) poller.Heal
 	s.pollerHealth = healthFn
 }
 
+// SetLeaseStatus wires the background-brain lease elector's status into
+// GET /readyz (TFAC-583, spec §8.3): the `lease` field, and the switch
+// between the holder's byte-identical-to-TFAC-573 poller hard-check and a
+// standby's informational "standby" report. Called only for role=control
+// (internal/app); leaving it unset (role=all / local, or a bare test
+// construction) makes the handler treat this pod as the holder and omit
+// the `lease` field — the frozen single-process contract.
+func (s *Server) SetLeaseStatus(fn LeaseStatusFunc) {
+	s.leaseStatus = fn
+}
+
 // SetIngestor wires the durable ingest seam so ExtensionAPI.PublishEvent can
 // delegate to it. Wired in internal/app/subsystems.go immediately after
 // ingest.New — before that point (and in any test wiring that skips it),
@@ -1453,43 +1471,39 @@ func (s *Server) SetInstallationRemovedHook(fn func(orgID, installationID string
 	s.onInstallationRemoved = fn
 }
 
-// MarkJiraRestarted records the moment the Jira poller was restarted. Clears
-// the last-poll timestamp so jiraPollReady reports false until a completion
-// event arrives. Call this before kicking off a Jira poller restart.
-func (s *Server) MarkJiraRestarted() {
-	s.jiraPollMu.Lock()
-	defer s.jiraPollMu.Unlock()
-	s.jiraRestartedAt = time.Now()
-	s.jiraLastPollAt = time.Time{}
-}
-
-// MarkJiraPollComplete records a successful Jira poll cycle. Call from the
-// event-bus subscriber on system:poll:completed when source == "jira".
-// startedAt is the wall-clock time the poll cycle started; completions from
-// poll goroutines that started before the most recent MarkJiraRestarted are
-// ignored so an in-flight pre-restart poll can't incorrectly flip readiness
-// back to true.
+// MarkJiraRestarted records the moment orgID's Jira poller was restarted.
+// Clears readiness so jiraPollReady reports false until a completion event
+// arrives. Call this before kicking off a Jira poller restart.
 //
-// A zero startedAt means the emitter didn't supply a start time (metadata
-// field missing or the event came from a publisher unaware of the race
-// guard). Accept those completions so a malformed/future event can't leave
-// carry-over stuck on {status:"polling"} indefinitely — race protection
-// degrades gracefully rather than silently failing open.
-func (s *Server) MarkJiraPollComplete(startedAt time.Time) {
-	s.jiraPollMu.Lock()
-	defer s.jiraPollMu.Unlock()
-	if !startedAt.IsZero() && startedAt.Before(s.jiraRestartedAt) {
-		return
+// Backed by the org-scoped poll_readiness table (TFAC-583), not a
+// process-local field: the pod that restarts the poller (any control pod
+// handling the config-save request) is not necessarily the pod that runs
+// it, and is not necessarily the pod that later serves /api/jira/stock —
+// see jiraPollReady. Best-effort: a write failure is logged and the
+// request proceeds; the worst case is a stale readiness read, not a
+// broken save.
+func (s *Server) MarkJiraRestarted(ctx context.Context, orgID string) {
+	if err := s.allStores.PollReadiness.MarkRestarted(ctx, orgID, "jira"); err != nil {
+		serverLog.Warn("mark jira poll restarted failed", "org", orgID, "error", err)
 	}
-	s.jiraLastPollAt = time.Now()
 }
 
-// jiraPollReady returns true when the poller has completed at least one cycle
-// since the last restart. Used by /api/jira/stock to gate the list response.
-func (s *Server) jiraPollReady() bool {
-	s.jiraPollMu.RLock()
-	defer s.jiraPollMu.RUnlock()
-	return !s.jiraLastPollAt.IsZero() && s.jiraLastPollAt.After(s.jiraRestartedAt)
+// jiraPollReady returns true when orgID's Jira poller has completed at
+// least one cycle since its last restart. Used by /api/jira/stock to gate
+// the list response. Reads through the admin pool (same posture as the
+// instances table — an already-authorized orgID, not a browsable RLS
+// surface) so a standby control pod's API reflects readiness the leader's
+// poller produced, not just its own (this pod may never have run a Jira
+// poller at all). A read failure fails closed (not ready) — the caller
+// falls back to the existing {status:"polling"} response rather than
+// showing a possibly-incomplete list.
+func (s *Server) jiraPollReady(ctx context.Context, orgID string) bool {
+	ready, err := s.allStores.PollReadiness.Ready(ctx, orgID, "jira")
+	if err != nil {
+		serverLog.Warn("read jira poll readiness failed", "org", orgID, "error", err)
+		return false
+	}
+	return ready
 }
 
 // Prompt handlers are in prompts_handler.go

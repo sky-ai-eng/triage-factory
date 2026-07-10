@@ -10,7 +10,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
@@ -62,15 +61,17 @@ func (a *App) runStartupTasks(ctx context.Context) {
 // that lazy-starts a runner on first Trigger, matching the
 // scorer/profiler which are likewise never explicitly started.
 func (a *App) startWorkers(ctx context.Context) {
-	// Brain workers (control/all): the knowledge-base watcher (curator KB)
-	// and the event router's drain workers.
+	// Knowledge-base watcher (curator KB): brain-capable roles only
+	// (control/all — an executor runs no curator chat), but NOT gated on
+	// the background-brain lease itself. Every control pod (holder or
+	// standby) sandboxes its own curator chats and keeps its own
+	// per-project KB directory under its own TF_STATE_ROOT, so each pod
+	// independently watching ITS OWN projects root is correct regardless
+	// of lease state — unlike the event-queue drain worker and poller
+	// below, which are genuinely single-writer and move with the lease
+	// (see brain.go's startBrain/stopBrain).
 	if a.plan.brain {
 		a.startKnowledgeWatcher()
-		// Drain sweeper: safety net for queues stuck on transient fire errors.
-		go a.router.RunDrainSweeper(ctx, 30*time.Second)
-		// Durable event-queue drain worker: claims github:/jira: events the
-		// ingestor enqueued, routes them, and marks them done.
-		go a.router.RunEventQueue(ctx, a.eventWake, routing.DefaultEventScanInterval, routing.DefaultEventPruneInterval, routing.DefaultEventPruneAge)
 	}
 
 	// Dispatcher workers (executor/all): the run-queue dispatcher (claims +
@@ -98,14 +99,6 @@ func (a *App) startWorkers(ctx context.Context) {
 	// silent eviction of the user's own repos). Multi gets a real per-pod
 	// disk budget + cold-bare TTL, bounding at-rest storage across tenants.
 	worktree.StartReaper(ctx, worktree.DefaultPolicy(), 0)
-}
-
-// startPolling kicks the first poll cycle. The logic lives on the reloader
-// alongside the credential-change callbacks it shares the poller manager
-// with. First-boot profiling and scoring are driven by the poll-complete
-// subscribers, not wired here.
-func (a *App) startPolling() {
-	a.reloader.initialPoll()
 }
 
 // cleanupWorktrees removes orphaned worktrees from crashed runs. Parked

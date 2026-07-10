@@ -73,7 +73,7 @@ func TestWaitFor_ReturnsImmediatelyWhenAlreadyClassified(t *testing.T) {
 	defer m.Stop()
 
 	start := time.Now()
-	WaitFor(context.Background(), m, waitOrg, "e1", 5*time.Second)
+	WaitFor(context.Background(), w, m.Trigger, waitOrg, "e1", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if elapsed > 100*time.Millisecond {
@@ -96,7 +96,7 @@ func TestWaitFor_TriggersRunnerOnEntry(t *testing.T) {
 	// Cancellable ctx so the WaitFor goroutine doesn't outlive the test.
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go WaitFor(ctx, m, waitOrg, "e2", 200*time.Millisecond)
+	go WaitFor(ctx, w, m.Trigger, waitOrg, "e2", 200*time.Millisecond)
 
 	if !waitFor(time.Second, func() bool { return w.listCallCount() >= 1 }) {
 		t.Errorf("Manager.Trigger did not kick a runner cycle for the org")
@@ -111,7 +111,7 @@ func TestWaitFor_HonorsTimeout(t *testing.T) {
 	defer m.Stop()
 
 	start := time.Now()
-	WaitFor(context.Background(), m, waitOrg, "e3", 250*time.Millisecond)
+	WaitFor(context.Background(), w, m.Trigger, waitOrg, "e3", 250*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if elapsed < 200*time.Millisecond {
@@ -136,7 +136,7 @@ func TestWaitFor_WakesOnceClassificationLands(t *testing.T) {
 	}()
 
 	start := time.Now()
-	WaitFor(context.Background(), m, waitOrg, "e4", 5*time.Second)
+	WaitFor(context.Background(), w, m.Trigger, waitOrg, "e4", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if elapsed > 2*time.Second {
@@ -155,7 +155,7 @@ func TestWaitFor_ReturnsEarlyOnMissingEntity(t *testing.T) {
 	// UUID-shaped id mirrors the cross-backend convention; the row simply
 	// doesn't exist.
 	start := time.Now()
-	WaitFor(context.Background(), m, waitOrg, uuid.NewString(), 5*time.Second)
+	WaitFor(context.Background(), w, m.Trigger, waitOrg, uuid.NewString(), 5*time.Second)
 	elapsed := time.Since(start)
 
 	if elapsed > 100*time.Millisecond {
@@ -181,7 +181,7 @@ func TestWaitFor_ReturnsOnContextCancel(t *testing.T) {
 	}()
 
 	start := time.Now()
-	WaitFor(ctx, m, waitOrg, "e5", 5*time.Second)
+	WaitFor(ctx, w, m.Trigger, waitOrg, "e5", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if elapsed > 1*time.Second {
@@ -202,7 +202,7 @@ func TestWaitFor_PreCancelledCtxReturnsWithoutTrigger(t *testing.T) {
 	cancel() // cancelled before entry
 
 	start := time.Now()
-	WaitFor(ctx, m, waitOrg, "e6", 5*time.Second)
+	WaitFor(ctx, w, m.Trigger, waitOrg, "e6", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if elapsed > 100*time.Millisecond {
@@ -222,7 +222,7 @@ func TestWaitFor_EmptyOrgReturnsEarly(t *testing.T) {
 	defer m.Stop()
 
 	start := time.Now()
-	WaitFor(context.Background(), m, "", "e-empty", 5*time.Second)
+	WaitFor(context.Background(), w, m.Trigger, "", "e-empty", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if elapsed > 100*time.Millisecond {

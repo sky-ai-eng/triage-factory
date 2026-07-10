@@ -8335,6 +8335,89 @@ ALTER TABLE public.instances ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.instances FROM PUBLIC;
 REVOKE ALL ON public.instances FROM anon, authenticated, service_role;
 
+-- leases (TFAC-583): the leader-election primitive for the horizontal-
+-- scaling control plane. One row today — name='background-brain' — but the
+-- schema is deliberately name-keyed (not a singleton) so per-org brain
+-- sharding (P4) is just more rows, not a migration.
+--
+-- term is the fencing token: +1 on every acquisition, never on a renewal.
+-- Acquisition is `UPDATE ... SET holder_id=me, term=term+1, acquired_at=now(),
+-- renewed_at=now() WHERE renewed_at < now() - TTL`; renewal is `UPDATE ...
+-- SET renewed_at=now() WHERE name=$1 AND holder_id=me AND term=$myterm` — a
+-- renewal matching 0 rows means the lease was taken by someone else, and the
+-- holder demotes immediately. All cross-node comparisons here run in DB time
+-- (renewed_at < now() - TTL); a holder's own self-demotion decision runs on
+-- its OWN monotonic clock instead (internal/lease), never compared against
+-- this table's timestamps.
+--
+-- Bootstrap race: the row may not exist on first boot. Callers INSERT ...
+-- ON CONFLICT (name) DO NOTHING first (seeding holder_id='', renewed_at far
+-- in the past so it's immediately acquirable), then run the normal
+-- acquisition UPDATE — two pods racing the insert converge on exactly one
+-- holder via the UPDATE's row lock, never a duplicate row.
+--
+-- Admin-pool-only / system table, same posture as instances: no org_id (a
+-- lease isn't tenant data), RLS enabled with NO policy (deny-by-default to
+-- non-BYPASSRLS roles) + REVOKE ALL from PUBLIC + the app roles. No
+-- SQLite counterpart — local mode (and TF_ROLE=all) never elects, the
+-- single process always self-holds (internal/lease's Static branch), so
+-- there is zero lease I/O to back with a table there.
+CREATE TABLE public.leases (
+    name         text NOT NULL,
+    holder_id    text NOT NULL,
+    term         bigint NOT NULL,
+    acquired_at  timestamp with time zone NOT NULL,
+    renewed_at   timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.leases
+    ADD CONSTRAINT leases_pkey PRIMARY KEY (name);
+
+ALTER TABLE public.leases ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.leases FROM PUBLIC;
+REVOKE ALL ON public.leases FROM anon, authenticated, service_role;
+
+-- poll_readiness (TFAC-583): the org-scoped, DB-backed replacement for what
+-- used to be two in-memory, leader-coupled Server fields — the "config took
+-- effect" one-shot announce toast and the /api/jira/stock readiness gate
+-- (internal/app's old `announcer` type + server.go's jiraPollMu/
+-- jiraRestartedAt/jiraLastPollAt). Both were process-local state written by
+-- whichever pod ran the poller; under the control/standby split that pod is
+-- not necessarily the one serving a given /api/jira/stock request, so the
+-- state has to live somewhere every control pod's API can read — this table.
+--
+-- One row per (org_id, source) — source is 'github' or 'jira'. restarted_at
+-- is stamped when a config change restarts that source's poller (clearing
+-- readiness until a fresh completion lands); last_poll_at is stamped on
+-- every completed cycle. Ready = last_poll_at IS NOT NULL AND (restarted_at
+-- IS NULL OR last_poll_at > restarted_at) — see
+-- internal/db/postgres/poll_readiness.go. announce_pending is the one-shot
+-- toast flag, consumed atomically (UPDATE ... WHERE announce_pending
+-- RETURNING) so a poll completion observed by two racing pods can't double-
+-- fire the toast.
+--
+-- App-pool readable: a control pod's /api/jira/stock handler reads this for
+-- an orgID it already resolved+authorized via session claims (not a
+-- browsable RLS surface), so the store methods take an explicit orgID and
+-- run on the admin pool like the instances table, rather than adding a new
+-- per-row RLS policy for what is operational state, not tenant content.
+CREATE TABLE public.poll_readiness (
+    org_id            text NOT NULL,
+    source            text NOT NULL,
+    restarted_at      timestamp with time zone,
+    last_poll_at      timestamp with time zone,
+    announce_pending  boolean NOT NULL DEFAULT false
+);
+
+ALTER TABLE ONLY public.poll_readiness
+    ADD CONSTRAINT poll_readiness_pkey PRIMARY KEY (org_id, source);
+
+ALTER TABLE public.poll_readiness ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.poll_readiness FROM PUBLIC;
+REVOKE ALL ON public.poll_readiness FROM anon, authenticated, service_role;
+
 
 -- +goose Down
 SELECT 'down not supported';

@@ -33,7 +33,8 @@ startup (via a blank import from `package main`). Core asks
 | `server` route extension | mount enterprise HTTP routes | ee registers route installers; routes always mount, gated per-request on entitlements inside the handler |
 | `server` login hooks | SSO enforcement / JIT / test-callback inside the core login path | ee implements opaque hook interfaces |
 | event-source seams | let an ee feature ship its own event types: schema + ownership registration, routing hooks, durable publish, entitlement dormancy | ee registers types, source hooks, and a source→feature gate at install |
-| `ExtensionAPI.OnReady` | run a long-lived background worker (connection manager, poller) started post-wiring with a shutdown-cancelling context | ee registers a hook during install; core fires it once app wiring completes |
+| `ExtensionAPI.OnReady` | run a long-lived background worker (connection manager, poller) on exactly one pod — gated on the background-brain lease (TFAC-583) — with a ctx that cancels on shutdown OR demotion | ee registers a hook during install; core fires it every time this pod's brain starts, including re-acquisition after a demotion |
+| `ExtensionAPI.OnReadyReplicaSafe` | run a worker that's genuinely safe on every pod (idempotent, no duplicating side effects), unconditionally, once at boot | ee registers a hook during install; core fires it once, regardless of brain-lease state — zero callers today, opt in only by explicit declaration |
 | Agent CLI verbs | let an ee feature add delegated-agent CLI verbs executed host-side | ee registers an exec subcommand + an agenthost extension handler, entitlement-gated at dispatch |
 
 The full recipe — placement rubric, seam catalog, install anatomy, and the
