@@ -1,22 +1,30 @@
 package app
 
 import (
-	"os"
-	"strings"
-
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
 )
 
-// buildWSBackplane wires the multi-mode cross-pod fan-out (TFAC-584):
+// buildWSBackplane wires the cross-pod fan-out (TFAC-584):
 // websocket.Hub.Broadcast/CloseUserConnections gain a Postgres
 // LISTEN/NOTIFY relay, and the spawner/server get the presence/kick
-// hooks that ride it. Local mode and any pre-multi-mode boot path never
-// call this — a.wsBackplane stays nil, and every consumer (Hub,
-// Spawner, Server) already treats a nil backplane as "behave exactly as
-// before" (see their respective SetBackplane/SetPresenceChecker/
-// SetWSBackplane doc comments).
+// hooks that ride it. a.wsBackplane stays nil — and every consumer (Hub,
+// Spawner, Server) already treats that as "behave exactly as before"
+// (see their respective SetBackplane/SetPresenceChecker/SetWSBackplane
+// doc comments) — in two cases:
+//
+//   - local mode, obviously (no Postgres at all).
+//   - TF_ROLE=all, even under TF_MODE=multi: role=all is single-process
+//     by construction (none of the spec's deployment shapes run more
+//     than one role=all process against the same database — a fleet is
+//     always control+executor roles), so Broadcast's local delivery,
+//     CloseUserConnections, and PresentFor already reach every socket
+//     that will ever exist. Constructing the backplane there would only
+//     add idle LISTEN connections plus heartbeat/reaper goroutines for
+//     zero behavioral benefit, and silently contradict this package's
+//     own doc comment ("single-process TF_ROLE=all never constructs a
+//     Backplane") the moment someone actually checked.
 //
 // This never fails boot: the actual LISTEN connections open lazily
 // inside the RunPublicListener/RunBusListener goroutines startWorkers
@@ -24,10 +32,10 @@ import (
 // never reach Postgres just leaves every pod on local-only fan-out
 // (TFAC-584's "keep serving" contract), never crashes it.
 func (a *App) buildWSBackplane() {
-	if runmode.Current() != runmode.ModeMulti {
+	if runmode.Current() != runmode.ModeMulti || a.plan.role == runmode.RoleAll {
 		return
 	}
-	dsn := directDSN()
+	dsn := wsbackplane.DirectDSN()
 	if dsn == "" {
 		appLog.Warn("multi mode with no TF_DATABASE_URL/TF_DATABASE_DIRECT_URL; websocket backplane disabled, this pod runs local-only fan-out")
 		return
@@ -37,20 +45,6 @@ func (a *App) buildWSBackplane() {
 	if a.srv != nil {
 		a.srv.SetWSBackplane(a.wsBackplane)
 	}
-}
-
-// directDSN resolves the session-mode DSN the backplane's LISTEN
-// connections use — see wsbackplane.DirectDSN's doc comment for the
-// TFAC-307 pooler-split rationale. Duplicated here (rather than calling
-// wsbackplane.DirectDSN directly) only so the "multi mode with no DSN at
-// all" warning above can fire from app-level wiring without importing
-// wsbackplane just for that one string read; wsbackplane.New's own
-// callers elsewhere still resolve it via wsbackplane.DirectDSN.
-func directDSN() string {
-	if v := strings.TrimSpace(os.Getenv("TF_DATABASE_DIRECT_URL")); v != "" {
-		return v
-	}
-	return os.Getenv("TF_DATABASE_URL")
 }
 
 // registerSentinelRelay subscribes TFAC-592 run sentinels
