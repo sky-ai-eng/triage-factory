@@ -70,12 +70,6 @@ type App struct {
 	appDB      *sql.DB
 	stores     db.Stores
 	storedPort int
-	// adminDSN is the raw multi-mode admin DSN (TF_DATABASE_URL) —
-	// captured alongside database in openStores because the tf_ctl relay
-	// listener (internal/ctlbus) needs a DEDICATED session-mode connection
-	// for LISTEN, which a pooled *sql.DB can't provide. Empty outside
-	// multi mode.
-	adminDSN string
 
 	// capBroker is the spawned cap-broker subprocess, non-nil only on a host
 	// that sandboxes runs (multi mode + Linux). nil otherwise — local mode

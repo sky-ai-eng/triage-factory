@@ -14,9 +14,15 @@ const (
 	// ChannelWS carries websocket.Hub.Broadcast envelopes: every control
 	// pod LISTENs and fans a received event into its own local sockets.
 	ChannelWS = "tf_ws"
-	// ChannelCtl carries the cross-pod session kick (TFAC-584) today;
-	// TFAC-585's run_signals share it (both are low-volume by design —
-	// high-volume traffic must never ride this channel, see ChannelBus).
+	// ChannelCtl is the shared, kind-discriminated control-plane channel:
+	// session kicks (kind "kick", TFAC-584 — published by PublishKick
+	// here), run-signal doorbells (kinds "new"/"ack", TFAC-585 — published
+	// by internal/delegate), and brain trigger/PollSoon relays (kinds
+	// "trigger"/"pollsoon", TFAC-583 — published by internal/ctlbus). All
+	// low-volume by design — high-volume traffic must never ride this
+	// channel, see ChannelBus. Consumed by exactly ONE listener per pod:
+	// internal/app's unified tf_ctl dispatcher (internal/app/ctl.go), never
+	// by this package's own listeners — kicks arrive via HandleCtlKick.
 	ChannelCtl = "tf_ctl"
 	// ChannelBus carries brain-bound run-sentinel relay envelopes
 	// (TFAC-592). Only the brain LISTENs; deliberately separate from

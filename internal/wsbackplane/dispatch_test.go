@@ -16,7 +16,7 @@ import (
 
 // These tests exercise the dispatch/self-origin logic directly (no
 // Postgres involved — b.db is never touched by handleWSNotification's
-// inline path, handleCtlNotification, or handleBusNotification), which
+// inline path, HandleCtlKick, or handleBusNotification), which
 // is where the "no echo loops, by construction" invariant actually
 // lives. The Postgres transport itself (LISTEN/NOTIFY round-tripping a
 // payload) is covered separately by the pgtest-backed integration tests.
@@ -157,20 +157,21 @@ func TestHandleWSNotification_MalformedPayloadDropsSilently(t *testing.T) {
 	b.handleWSNotification("{not valid json")
 }
 
-// TestHandleCtlNotification_SkipsSelfOrigin mirrors the WS case for the
-// kick channel: this pod's own published kick, received back on its own
-// LISTEN loop, must not re-trigger a local close — the origin call site
-// already closed matching local sockets directly before publishing.
-func TestHandleCtlNotification_SkipsSelfOrigin(t *testing.T) {
+// TestHandleCtlKick_SkipsSelfOrigin mirrors the WS case for the
+// kick envelope: this pod's own published kick, received back via the
+// app's tf_ctl dispatcher, must not re-trigger a local close — the origin
+// call site already closed matching local sockets directly before
+// publishing.
+func TestHandleCtlKick_SkipsSelfOrigin(t *testing.T) {
 	hub := websocket.NewHub()
 	conn := dialTestClient(t, hub, "user-1", "org-1", "sid-1")
 	waitClientCount(t, hub, 1)
 
 	b := &Backplane{originID: "pod-a", hub: hub}
-	env := kickEnvelope{OriginInstanceID: "pod-a", UserID: "user-1", Code: int(websocket.CloseSessionRevoked), Reason: "session revoked"}
+	env := kickEnvelope{Kind: "kick", OriginInstanceID: "pod-a", UserID: "user-1", Code: int(websocket.CloseSessionRevoked), Reason: "session revoked"}
 	payload, _ := json.Marshal(env)
 
-	b.handleCtlNotification(string(payload))
+	b.HandleCtlKick(string(payload))
 
 	// The connection must stay open — prove it by sending it a broadcast
 	// and reading it back, rather than a bare timeout (which coder/websocket
@@ -181,19 +182,19 @@ func TestHandleCtlNotification_SkipsSelfOrigin(t *testing.T) {
 	}
 }
 
-// TestHandleCtlNotification_ClosesNonSelfOriginMatch is the receiving
+// TestHandleCtlKick_ClosesNonSelfOriginMatch is the receiving
 // pod's half: a remote pod's kick must close this pod's matching local
 // connection.
-func TestHandleCtlNotification_ClosesNonSelfOriginMatch(t *testing.T) {
+func TestHandleCtlKick_ClosesNonSelfOriginMatch(t *testing.T) {
 	hub := websocket.NewHub()
 	conn := dialTestClient(t, hub, "user-1", "org-1", "sid-1")
 	waitClientCount(t, hub, 1)
 
 	b := &Backplane{originID: "pod-b", hub: hub}
-	env := kickEnvelope{OriginInstanceID: "pod-a", UserID: "user-1", Code: int(websocket.CloseSessionRevoked), Reason: "session revoked"}
+	env := kickEnvelope{Kind: "kick", OriginInstanceID: "pod-a", UserID: "user-1", Code: int(websocket.CloseSessionRevoked), Reason: "session revoked"}
 	payload, _ := json.Marshal(env)
 
-	b.handleCtlNotification(string(payload))
+	b.HandleCtlKick(string(payload))
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

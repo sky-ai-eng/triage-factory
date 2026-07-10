@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/lease"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -125,15 +127,54 @@ func TestApp_DispatchManagerTrigger_NilManagersAreSafe(t *testing.T) {
 	}
 }
 
-// TestApp_HandleCtlMessage_RunSignalKindsAreSilentlyIgnored pins that
-// "new"/"ack" — TFAC-585's run_signals doorbell kinds, which legitimately
-// share the tf_ctl channel with ctlbus's trigger/pollsoon relay — never
-// reach the unknown-kind default branch. A lease-holding, HTTP-serving
-// pod's ctlbus listener receives every run_signals doorbell too (it's the
-// same Postgres NOTIFY channel), and must not panic or misroute on them.
-func TestApp_HandleCtlMessage_RunSignalKindsAreSilentlyIgnored(t *testing.T) {
-	a := &App{}
-	for _, kind := range []string{"new", "ack"} {
-		a.handleCtlMessage(ctlbus.Message{Kind: kind, OrgID: "org-1"})
+// TestApp_HandleCtlMessage_NonHolderDropsRelay pins the holder gate that
+// replaced TFAC-583's lease-scoped subscription after TFAC-585's tf_ctl
+// consolidation: the process-lifetime shared listener delivers relay
+// messages to every pod, so a non-holder (here: a control pod with no
+// elector, and an executor) must drop them at dispatch — proven by the
+// absence of a panic despite every downstream manager being nil AND
+// pollerMgr being nil (a broken gate would still be caught by
+// dispatchManagerTrigger's nil checks, so the real assertion is the
+// role=executor case where isBrainHolder is false by construction).
+func TestApp_HandleCtlMessage_NonHolderDropsRelay(t *testing.T) {
+	for _, role := range []runmode.DeployRole{runmode.RoleControl, runmode.RoleExecutor} {
+		a := &App{plan: subsystemPlan{role: role}}
+		a.handleCtlMessage(ctlbus.Message{Kind: "trigger", Manager: "scorer", OrgID: "org-1"})
+		a.handleCtlMessage(ctlbus.Message{Kind: "pollsoon", Source: "github", OrgID: "org-1"})
+	}
+}
+
+// TestApp_HandleCtlMessage_HolderDispatchesNilSafe: the holder path
+// (role=all always self-holds) dispatches through the same nil-checked
+// manager/poller branches TestApp_DispatchManagerTrigger_NilManagersAreSafe
+// pins.
+func TestApp_HandleCtlMessage_HolderDispatchesNilSafe(t *testing.T) {
+	a := &App{plan: subsystemPlan{role: runmode.RoleAll}}
+	a.handleCtlMessage(ctlbus.Message{Kind: "trigger", Manager: "scorer", OrgID: "org-1"})
+	a.handleCtlMessage(ctlbus.Message{Kind: "pollsoon", Source: "github", OrgID: "org-1"})
+	a.handleCtlMessage(ctlbus.Message{Kind: "bogus-kind"})
+}
+
+// TestApp_DispatchCtl_RoutesAllKindsNilSafe exercises the unified tf_ctl
+// dispatcher (ctl.go) across every kind plus the malformed/unknown paths,
+// with the minimum wiring each branch needs: a bare spawner for the
+// new/ack doorbells (its handlers are non-blocking channel/map touches),
+// a nil wsBackplane for kick (the TF_ROLE=all-in-multi shape — must
+// no-op), and role=executor so relay kinds hit the non-holder drop.
+func TestApp_DispatchCtl_RoutesAllKindsNilSafe(t *testing.T) {
+	a := &App{
+		plan:    subsystemPlan{role: runmode.RoleExecutor},
+		spawner: delegate.NewSpawner(nil, db.Stores{}, nil, nil, ""),
+	}
+	for _, payload := range []string{
+		`{"kind":"new","id":1}`,
+		`{"kind":"ack","id":1}`,
+		`{"kind":"trigger","manager":"scorer","org_id":"org-1"}`,
+		`{"kind":"pollsoon","source":"github","org_id":"org-1"}`,
+		`{"kind":"kick","origin_instance_id":"pod-a","user_id":"u1","code":4001,"reason":"revoked"}`,
+		`{"kind":"never-heard-of-it"}`,
+		`{not json`,
+	} {
+		a.dispatchCtl(payload)
 	}
 }

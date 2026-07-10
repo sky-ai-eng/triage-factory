@@ -11,7 +11,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/pgnotify"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
@@ -88,19 +87,20 @@ func (a *App) startWorkers(ctx context.Context) {
 		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
 	}
 
-	// Cross-pod run control (TFAC-585). Multi mode only: buildExecution
-	// never calls SetRunSignals in local mode, so
-	// RunSignalApplyLoop/-PurgeReaper are already no-ops there — this mode
-	// check just avoids opening a needless direct Postgres LISTEN
-	// connection. One shared tf_ctl Listener per process dispatches both
-	// "new signal for me" (wakes the apply loop) and "ack for my wait"
-	// (wakes an in-flight sendSignalAndAwaitAck) doorbells — see
-	// Spawner.HandleCtlNotification.
+	// The shared tf_ctl control-plane listener + the cross-pod run-control
+	// workers (TFAC-585). Multi mode only: local mode never wires
+	// SetRunSignals (so the apply loop / purge reaper below are no-ops
+	// there anyway), never builds a backplane, and role=all always
+	// self-holds the brain — nothing ever relays into a local process, so
+	// there is no reason to open a Postgres LISTEN connection at all.
+	// startCtlListener (ctl.go) is the ONE tf_ctl LISTEN per pod, every
+	// role: it routes run-signal doorbells to the spawner, session kicks to
+	// the WS backplane, and trigger/PollSoon relays to handleCtlMessage
+	// (which holder-gates them).
 	if runmode.Current() == runmode.ModeMulti {
-		listener := pgnotify.NewListener(os.Getenv("TF_DATABASE_URL"), "tf_ctl", a.spawner.HandleCtlNotification)
-		go listener.Run(ctx)
-		// The apply loop only makes sense on dispatcher-capable roles —
-		// only they can ever own a run's live process.
+		a.startCtlListener(ctx)
+		// The signal apply loop only makes sense on dispatcher-capable
+		// roles — only they can ever own a run's live process.
 		if a.plan.dispatcher {
 			go a.spawner.RunSignalApplyLoop(ctx, delegate.DefaultSignalApplyScanInterval)
 		}
@@ -124,13 +124,15 @@ func (a *App) startWorkers(ctx context.Context) {
 	// WS backplane workers (TFAC-584) — nil in local mode / before
 	// buildWSBackplane wires it, so every branch below is a no-op there.
 	if a.wsBackplane != nil {
-		// Public listener (tf_ws fan-out + tf_ctl kick): every pod that
-		// holds user websocket connections. An executor holds none (its
-		// Hub is a standalone, client-less sink — buildExecutorRuntime),
-		// so it has nothing to fan into and never LISTENs here; it still
-		// PUBLISHES to tf_ws via the spawner's broadcasts on its
-		// client-less hub, which needs no LISTEN connection at all (NOTIFY
-		// rides the pooled admin connection).
+		// Public listener (tf_ws fan-out): every pod that holds user
+		// websocket connections. An executor holds none (its Hub is a
+		// standalone, client-less sink — buildExecutorRuntime), so it has
+		// nothing to fan into and never LISTENs here; it still PUBLISHES
+		// to tf_ws via the spawner's broadcasts on its client-less hub,
+		// which needs no LISTEN connection at all (NOTIFY rides the pooled
+		// admin connection). The tf_ctl session kick no longer rides this
+		// connection — it arrives via the shared tf_ctl listener started
+		// above, routed to the backplane's HandleCtlKick.
 		if a.plan.serveHTTP {
 			go a.wsBackplane.RunPublicListener(ctx)
 			go a.wsBackplane.RunPresenceHeartbeat(ctx, wsbackplane.PresenceHeartbeatIntervalFromEnv())

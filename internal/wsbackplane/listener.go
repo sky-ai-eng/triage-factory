@@ -10,23 +10,21 @@ import (
 )
 
 // RunPublicListener opens a dedicated (session-mode, non-pooled) LISTEN
-// connection for tf_ws + tf_ctl and dispatches every notification until
-// ctx is cancelled. Every control pod runs this — it is what makes
-// Broadcast/CloseUserConnections cross-pod (TFAC-584).
+// connection for tf_ws and fans every received envelope into this pod's
+// local sockets until ctx is cancelled. Every control pod runs this — it
+// is what makes Broadcast cross-pod (TFAC-584).
 //
-// Both channels share one physical connection deliberately: they're
-// both low-volume-by-design (tf_ctl is a hard rule other channels must
-// never ride — see ChannelBus's doc comment; tf_ws's own volume is the
-// one real-volume channel in the fabric, but the FIFO cost of an
-// occasional tf_ctl kick sitting behind a burst of tf_ws notifications
-// is the ordering guarantee this scope, not tf_bus's — that separation
-// is what RunBusListener is for). Per-channel relative order is
-// preserved either way: a single connection's NOTIFY stream is a strict
-// FIFO regardless of how many channels are LISTENed on it, and this
+// tf_ws-only since TFAC-585's tf_ctl consolidation: the session kick
+// (like every other tf_ctl consumer) now arrives via internal/app's
+// single per-pod tf_ctl listener, which routes kind:"kick" payloads to
+// HandleCtlKick — so a tf_ws burst can never sit ahead of a kick in this
+// connection's NOTIFY FIFO at all. Per-channel order is preserved: this
 // function dispatches from one goroutine, never fanning a notification's
 // handling out to another (spec §5's ordering rule).
 func (b *Backplane) RunPublicListener(ctx context.Context) {
-	listenLoop(ctx, b.directDSN, []string{ChannelWS, ChannelCtl}, "public", b.dispatchPublic)
+	listenLoop(ctx, b.directDSN, []string{ChannelWS}, "public", func(_ string, payload string) {
+		b.handleWSNotification(payload)
+	})
 }
 
 // RunBusListener opens a SEPARATE dedicated LISTEN connection for tf_bus
@@ -45,17 +43,6 @@ func (b *Backplane) RunBusListener(ctx context.Context, localPublish func(domain
 	listenLoop(ctx, b.directDSN, []string{ChannelBus}, "brain", func(_ string, payload string) {
 		b.handleBusNotification(payload, localPublish)
 	})
-}
-
-func (b *Backplane) dispatchPublic(channel, payload string) {
-	switch channel {
-	case ChannelWS:
-		b.handleWSNotification(payload)
-	case ChannelCtl:
-		b.handleCtlNotification(payload)
-	default:
-		backplaneLog.Warn("public listener: notification on unexpected channel; dropping", "channel", channel)
-	}
 }
 
 // listenLoop opens a dedicated connection to dsn, LISTENs on every

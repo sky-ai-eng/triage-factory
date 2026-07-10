@@ -76,12 +76,20 @@ func (a *App) dispatchManagerTrigger(manager, orgID string, force bool) {
 	}
 }
 
-// handleCtlMessage is the tf_ctl LISTEN callback (brain.go's
-// startCtlListener). This process IS the brain whenever it fires — the
-// listener only runs while holding the lease — so every message
-// dispatches straight to the in-process manager/poller with no further
-// holder check.
+// handleCtlMessage dispatches a trigger/pollsoon relay message received
+// on tf_ctl (routed here by dispatchCtl, ctl.go). Since TFAC-585's tf_ctl
+// consolidation the listener is process-lifetime and role-wide — every
+// multi-mode pod hears every relay message — so "only the brain acts on
+// relay traffic" is enforced by the holder gate below, not by
+// subscription scope. publishCtl is only ever called by a non-holder and
+// NOTIFY fans out to every listener, so exactly the current holder acts
+// on each message; a message published in a holderless gap (mid-failover)
+// is dropped by every pod — the relay is lossy by contract (spec §3), and
+// the next system:poll:* sentinel re-kicks whatever it carried.
 func (a *App) handleCtlMessage(msg ctlbus.Message) {
+	if !a.isBrainHolder() {
+		return
+	}
 	switch msg.Kind {
 	case "trigger":
 		a.dispatchManagerTrigger(msg.Manager, msg.OrgID, msg.Force)
@@ -89,16 +97,8 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 		if a.pollerMgr != nil {
 			a.pollerMgr.PollSoon(msg.Source, msg.OrgID)
 		}
-	case "new", "ack":
-		// TFAC-585's run_signals doorbell kinds — tf_ctl is a shared channel
-		// (spec §5's table), and a lease-holding control pod that also
-		// serves HTTP LISTENs here AND on delegate.Spawner's own dedicated
-		// tf_ctl connection (HandleCtlNotification), so this pod legitimately
-		// receives every signal doorbell too. Not an error, just traffic
-		// this listener has nothing to do with — silently ignore rather than
-		// WARN on every cross-pod interrupt/steer/cancel/permission/inject.
 	default:
-		appLog.Warn("tf_ctl: unknown message kind", "kind", msg.Kind)
+		appLog.Warn("tf_ctl: unknown relay message kind", "kind", msg.Kind)
 	}
 }
 

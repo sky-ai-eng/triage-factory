@@ -35,26 +35,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify"
 )
 
-// tfCtlChannel is the shared control-plane doorbell channel: control pods
-// NOTIFY {"kind":"new",...} to wake an owner's apply loop, and owners
-// NOTIFY {"kind":"ack",...} to wake a control pod's ack wait. One channel,
-// payload-discriminated — see docs/specs/horizontal-scaling/README.md §5.
-//
-// This package LISTENs on tf_ctl through its own dedicated connection
-// (internal/pgnotify.Listener, wired in internal/app/startup.go against
-// HandleCtlNotification below), separate from wsbackplane's tf_ws+tf_ctl
-// connection and ctlbus's tf_ctl trigger-relay connection — a pod that
-// both serves HTTP and holds the background-brain lease ends up with all
-// three open on this same channel name. Each side already ignores
-// payload shapes it doesn't recognize (this file's switch below has no
-// default case; ctlbus's handleCtlMessage explicitly no-ops "new"/"ack";
-// wsbackplane's kick envelope no-ops on an empty user_id), so this is
-// inert cross-talk, not a correctness bug — but it does mean this
-// channel's connection count no longer fits the "1-2 dedicated
-// connections" budget spec §5 calls out on a pod running all three.
-// Consolidating onto a shared connection (or splitting run_signals onto
-// its own channel) is deferred, tracked alongside TFAC-586's other
-// cross-pod-control follow-ups.
+// tfCtlChannel is the shared, kind-discriminated control-plane doorbell
+// channel: control pods NOTIFY {"kind":"new",...} to wake an owner's
+// apply loop, and owners NOTIFY {"kind":"ack",...} to wake a control
+// pod's ack wait — see docs/specs/horizontal-scaling/README.md §5. This
+// package only PUBLISHES here (notifyCtl); consumption is internal/app's
+// single per-pod tf_ctl listener (internal/app/ctl.go), which routes
+// new/ack payloads to HandleCtlNotification below alongside the channel's
+// other kinds (wsbackplane's "kick", ctlbus's "trigger"/"pollsoon") — one
+// LISTEN connection serves every tf_ctl consumer on the pod, per spec
+// §5's connection budget. New kinds must stay disjoint across all three
+// publishers.
 const tfCtlChannel = "tf_ctl"
 
 // instanceStaleThreshold bounds how old an instance registry heartbeat may
@@ -388,13 +379,13 @@ func (s *Spawner) notifyCtl(ctx context.Context, kind string, id int64) error {
 	return pgnotify.Notify(ctx, notifyDB, tfCtlChannel, string(payload))
 }
 
-// HandleCtlNotification is the tf_ctl Listener's onNotify callback (wired
-// in internal/app against a shared pgnotify.Listener). It dispatches a
-// "new" doorbell to the signal-apply loop's wake channel and an "ack"
-// doorbell to the matching in-flight awaitAck's wake channel, if any is
-// registered here. Malformed payloads are logged and dropped — the
-// backstop polls on both sides mean a dropped doorbell only delays, never
-// loses, the underlying work.
+// HandleCtlNotification handles this package's tf_ctl kinds, invoked by
+// internal/app's unified tf_ctl dispatcher (ctl.go) for kind "new"/"ack"
+// payloads. It dispatches a "new" doorbell to the signal-apply loop's
+// wake channel and an "ack" doorbell to the matching in-flight awaitAck's
+// wake channel, if any is registered here. Malformed payloads are logged
+// and dropped — the backstop polls on both sides mean a dropped doorbell
+// only delays, never loses, the underlying work.
 func (s *Spawner) HandleCtlNotification(payload string) {
 	var env ctlNotification
 	if err := json.Unmarshal([]byte(payload), &env); err != nil {
