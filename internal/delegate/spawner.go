@@ -70,6 +70,15 @@ type EventPublisher interface {
 	Publish(evt domain.Event)
 }
 
+// PresenceChecker is the multi-mode fleet-wide presence check (TFAC-584):
+// the plain *wsbackplane.Backplane satisfies this directly, combining
+// this pod's local Hub state with the fleet-wide ws_presence table so a
+// reviewer connected to a different pod than the one running a
+// permission check still counts as present. See presentFor.
+type PresenceChecker interface {
+	PresentFor(ctx context.Context, orgID, runID string) bool
+}
+
 // Spawner manages delegated agent runs.
 type Spawner struct {
 	database   *sql.DB
@@ -141,6 +150,14 @@ type Spawner struct {
 	// (..., creatorUserID, fn) } else { s.x.MethodSystem(...) }`.
 	tx    db.TxRunner
 	wsHub *websocket.Hub
+	// presence is the optional multi-mode presence checker (TFAC-584),
+	// wired via SetPresenceChecker. When set, presentFor consults it
+	// (local Hub state OR the fleet-wide ws_presence table) instead of
+	// wsHub.PresentFor directly, so a reviewer connected to a different
+	// pod than the one running this run still counts as present. Nil in
+	// local mode and at TF_ROLE=all before wiring — presentFor falls back
+	// to wsHub.PresentFor unchanged in that case.
+	presence PresenceChecker
 
 	mu       sync.Mutex
 	ghClient *ghclient.Client
@@ -403,6 +420,17 @@ func (s *Spawner) SetQueueDrainer(d QueueDrainer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.drainer = d
+}
+
+// SetPresenceChecker wires the multi-mode fleet-wide presence check
+// (TFAC-584). Post-construction, same pattern as SetQueueDrainer/
+// SetEventPublisher. Safe to call once at startup; nil (the default,
+// always true in local mode) leaves presentFor reading wsHub.PresentFor
+// directly, unchanged from before this existed.
+func (s *Spawner) SetPresenceChecker(pc PresenceChecker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.presence = pc
 }
 
 // SetEventPublisher wires the bus publisher the spawner mirrors run

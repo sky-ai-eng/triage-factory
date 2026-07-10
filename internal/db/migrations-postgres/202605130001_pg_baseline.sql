@@ -8336,5 +8336,94 @@ REVOKE ALL ON public.instances FROM PUBLIC;
 REVOKE ALL ON public.instances FROM anon, authenticated, service_role;
 
 
+-- ws_outbox: overflow storage for the tf_ws backplane (TFAC-584, spec
+-- §5.1/§5). websocket.Hub.Broadcast publishes an envelope on tf_ws for
+-- every control pod to fan into its own local sockets; NOTIFY caps a
+-- payload at ~8 KB and agent-message frames regularly exceed the
+-- configured inline threshold (default 6 KB, TF_WS_INLINE_MAX_B), so an
+-- oversized event lands here instead and the NOTIFY carries only a row
+-- ref. Row insert + NOTIFY happen in the same transaction (see
+-- internal/wsbackplane), so a reader can always fetch what the ref
+-- points to unless the tx rolled back after NOTIFY was already
+-- buffered — that race, and a TTL-reaped row, both resolve by dropping
+-- the event with a debug log, consistent with tf_ws's lossy-by-contract
+-- rule (a dropped frame costs a UI blip; the frontend already refetches
+-- on focus/poll). TTL 60 s (TF_WS_OUTBOX_TTL_SECONDS); any pod's slow
+-- timer may run the reaper (`DELETE WHERE created_at < now() - TTL` is
+-- concurrency-safe), so this is deliberately NOT leader-gated — reaping
+-- is too trivial to route through the brain lease.
+--
+-- Admin-pool-only / system table, same posture as instances: no org_id
+-- (an in-flight envelope isn't tenant data with an access-control
+-- question — the payload itself already carries whatever org scoping
+-- the original event had). RLS enabled with NO policy (deny-by-default
+-- to non-BYPASSRLS roles) + REVOKE ALL from PUBLIC + the app roles.
+CREATE TABLE public.ws_outbox (
+    id          bigserial NOT NULL,
+    payload     jsonb NOT NULL,
+    created_at  timestamp with time zone NOT NULL DEFAULT now()
+);
+
+ALTER TABLE ONLY public.ws_outbox
+    ADD CONSTRAINT ws_outbox_pkey PRIMARY KEY (id);
+
+CREATE INDEX ws_outbox_created_at_idx ON public.ws_outbox USING btree (created_at);
+
+ALTER TABLE public.ws_outbox ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.ws_outbox FROM PUBLIC;
+REVOKE ALL ON public.ws_outbox FROM anon, authenticated, service_role;
+
+
+-- ws_presence: cross-pod presence for the unattended-prompt fast-deny and
+-- the fleet dashboard's live-viewer count (TFAC-584, spec §5.1). Hub.PresentFor
+-- only ever saw this pod's own local sockets' viewing/visible state — a
+-- reviewer's tab connected to pod B is invisible to a permission check
+-- running on pod A's executor. Every control pod upserts one row per
+-- (user_id, conn_id) on a ~15 s heartbeat (TF_WS_PRESENCE_HEARTBEAT_SECONDS)
+-- mirroring its Hub's locally-connected, identified sockets (see
+-- websocket.Hub.Snapshot); conn_id is qualified with the owning pod's
+-- instance id by the writer (internal/wsbackplane) so two pods' connections
+-- can never collide on this key even though the id itself is only unique
+-- within one process. A row is "live" iff last_seen is within the last 45 s
+-- (TF_WS_PRESENCE_TTL_SECONDS) — checked at read time, not enforced by a DB
+-- constraint; no delete on disconnect, so a dead pod's (or closed
+-- connection's) rows simply age out of every live-read query's filter
+-- without needing an explicit cleanup step for READ correctness. That's
+-- necessary but not sufficient for STORAGE bounding, though: conn_id is
+-- minted from a per-boot monotonic counter (websocket.Hub.connSeq) that's
+-- never reused, so every reconnect (tab refresh, network blip, a
+-- RevalidateSessions kick) mints a brand-new row nothing will ever
+-- overwrite. A periodic reaper (RunPresenceReaper, mirroring ws_outbox's
+-- own) deletes rows past a separate, longer TTL (TF_WS_PRESENCE_ROW_TTL_SECONDS,
+-- default well above the live window) purely for that storage bound — it
+-- has zero effect on PresentFor's answer, which the live-window filter
+-- alone already determines.
+--
+-- Admin-pool-only / system table, same posture as instances/ws_outbox: not
+-- genuinely tenant business data (org_id here is a read-time filter on
+-- otherwise-plumbing rows, not something a tenant's own RLS-scoped session
+-- should read directly), so RLS is enabled with NO policy + REVOKE ALL.
+CREATE TABLE public.ws_presence (
+    user_id     text NOT NULL,
+    conn_id     text NOT NULL,
+    org_id      text NOT NULL,
+    instance_id text NOT NULL,
+    viewing     text NOT NULL DEFAULT ''::text,
+    visible     boolean NOT NULL DEFAULT false,
+    last_seen   timestamp with time zone NOT NULL DEFAULT now()
+);
+
+ALTER TABLE ONLY public.ws_presence
+    ADD CONSTRAINT ws_presence_pkey PRIMARY KEY (user_id, conn_id);
+
+CREATE INDEX ws_presence_org_last_seen_idx ON public.ws_presence USING btree (org_id, last_seen);
+
+ALTER TABLE public.ws_presence ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.ws_presence FROM PUBLIC;
+REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
+
+
 -- +goose Down
 SELECT 'down not supported';

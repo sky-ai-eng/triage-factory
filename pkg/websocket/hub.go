@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -53,6 +54,23 @@ const (
 	CloseMembershipChanged ws.StatusCode = 4002
 )
 
+// Backplane is the optional cross-pod publish hook a multi-mode deployment
+// wires in (TFAC-584, docs/specs/horizontal-scaling/README.md §5.1):
+// Broadcast calls Publish after fanning to this pod's local sockets, so a
+// Postgres LISTEN/NOTIFY relay can mirror the event onto every other
+// control pod's Hub (via DeliverRemote there). A nil Backplane — the
+// default, and always the case in local mode — makes Broadcast behave
+// exactly as it always has: local-only fan-out, zero behavior change.
+//
+// Backplane implementations MUST NOT call Broadcast (or anything that
+// reaches it) when applying a received remote event — that would
+// re-publish it and echo it back onto the wire. Use DeliverRemote, which
+// only fans to local sockets. This is what makes "no echo loops" true by
+// construction rather than by a runtime origin check inside this package.
+type Backplane interface {
+	Publish(evt Event)
+}
+
 // Hub manages websocket connections and broadcasts events to all clients.
 type Hub struct {
 	mu      sync.RWMutex
@@ -65,6 +83,13 @@ type Hub struct {
 	// indexed: they carry no identity to target. Guarded by mu, same as
 	// clients.
 	byUser map[string]map[*client]struct{}
+	// backplane is the optional cross-pod publish hook (TFAC-584). Wired
+	// via SetBackplane in multi mode only; nil everywhere else, including
+	// every read of it in Broadcast is a plain nil-check.
+	backplane Backplane
+	// connSeq mints per-process-unique connection ids for Snapshot
+	// (TFAC-584's presence heartbeat) — see client.connID's doc comment.
+	connSeq uint64
 }
 
 type client struct {
@@ -95,6 +120,12 @@ type client struct {
 	// until it reports otherwise.
 	viewing string
 	visible bool
+	// connID is a per-process-unique identifier minted at connect time
+	// (TFAC-584), used only by the multi-mode presence heartbeat to key
+	// ws_presence rows (qualified with this pod's instance id there, since
+	// the sequence is only unique within one process). Never sent to the
+	// browser, never compared for anything other than that upsert key.
+	connID string
 }
 
 // presenceMsg is the inbound client→server control frame shape for presence
@@ -135,6 +166,8 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID, si
 		return
 	}
 
+	h.mu.Lock()
+	h.connSeq++
 	c := &client{
 		conn:   conn,
 		send:   make(chan []byte, 64),
@@ -142,9 +175,8 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID, si
 		userID: userID,
 		orgID:  orgID,
 		sid:    sid,
+		connID: strconv.FormatUint(h.connSeq, 10),
 	}
-
-	h.mu.Lock()
 	h.clients[c] = struct{}{}
 	h.indexLocked(c)
 	h.mu.Unlock()
@@ -193,7 +225,34 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID, si
 // Nil-receiver-safe: a nil *Hub silently drops the event so callers
 // that conditionally have a hub (tests, pre-wired packages) don't
 // have to guard every call site.
+//
+// Multi-mode cross-pod fan-out (TFAC-584): after delivering locally via
+// DeliverRemote, Broadcast publishes evt to the optional Backplane so
+// every other control pod's Hub mirrors it to its own local sockets. A
+// nil backplane (local mode, or before SetBackplane runs) makes this a
+// no-op — Broadcast is then exactly the local-only fan-out it always was.
 func (h *Hub) Broadcast(evt Event) {
+	if h == nil {
+		return
+	}
+	h.DeliverRemote(evt)
+	if h.backplane != nil {
+		h.backplane.Publish(evt)
+	}
+}
+
+// DeliverRemote fans evt to this pod's locally-connected sockets only,
+// applying the same per-connection (orgID, userID) scope as Broadcast —
+// see Broadcast's doc comment for the filter semantics. It never touches
+// the backplane.
+//
+// This is the local half Broadcast always performed, split out so a
+// multi-pod backplane's tf_ws LISTEN dispatcher can apply a REMOTE pod's
+// event to this pod's sockets without re-publishing it (TFAC-584: "no
+// echo loops, by construction" — a backplane must call this, never
+// Broadcast, when relaying a received envelope, or the republish would
+// bounce the event right back onto the wire).
+func (h *Hub) DeliverRemote(evt Event) {
 	if h == nil {
 		return
 	}
@@ -219,6 +278,17 @@ func (h *Hub) Broadcast(evt Event) {
 			wsLog.Warn("dropping message for slow client")
 		}
 	}
+}
+
+// SetBackplane wires the optional cross-pod publish hook (TFAC-584).
+// Multi-mode wiring only; called once at boot before any traffic flows.
+// Not safe to call concurrently with Broadcast — set it during startup,
+// not at runtime.
+func (h *Hub) SetBackplane(b Backplane) {
+	if h == nil {
+		return
+	}
+	h.backplane = b
 }
 
 // indexLocked adds c to the per-user index. Caller holds h.mu. Unscoped
@@ -395,4 +465,91 @@ func (h *Hub) ClientCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients)
+}
+
+// ConnSnapshot is one connection's presence-relevant state, returned by
+// Snapshot for the multi-mode presence heartbeat (TFAC-584).
+type ConnSnapshot struct {
+	ConnID  string
+	UserID  string
+	OrgID   string
+	Viewing string
+	Visible bool
+}
+
+// Snapshot returns one entry per currently-registered connection that
+// carries a userID — unscoped clients (pre-auth, test harness) are
+// skipped, since there's no identity to key a ws_presence row on.
+//
+// This is a deliberate pull: rather than instrumenting readPump's hot
+// path with a DB write on every presence frame, the multi-mode presence
+// heartbeat polls Snapshot on its own ~15s timer and upserts what it
+// sees. Nil-receiver-safe (returns nil), matching the rest of this type.
+func (h *Hub) Snapshot() []ConnSnapshot {
+	if h == nil {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := make([]ConnSnapshot, 0, len(h.clients))
+	for c := range h.clients {
+		if c.userID == "" {
+			continue
+		}
+		out = append(out, ConnSnapshot{
+			ConnID:  c.connID,
+			UserID:  c.userID,
+			OrgID:   c.orgID,
+			Viewing: c.viewing,
+			Visible: c.visible,
+		})
+	}
+	return out
+}
+
+// RevalidateSessions closes every locally-connected socket whose session
+// fails isValid — the cross-pod kick backstop (TFAC-584): a kick
+// travels over tf_ctl NOTIFY, which is lossy by contract, so this bounds
+// a missed kick at one revalidation interval (default 60s) and
+// independently covers sessions revoked while this pod's LISTEN
+// connection was reconnecting. This is the guarantee; the NOTIFY is
+// only the latency optimization.
+//
+// isValid is called once per DISTINCT sid, not once per connection — a
+// session backing several tabs/devices costs one lookup, and every
+// connection under an invalid sid closes together. Unscoped clients
+// (empty sid — pre-auth, local mode, test harness) are skipped: there is
+// no session to validate. Returns the number of connections closed.
+//
+// Nil-receiver-safe (returns 0), matching the rest of this type.
+func (h *Hub) RevalidateSessions(isValid func(sid string) bool) int {
+	if h == nil {
+		return 0
+	}
+	h.mu.RLock()
+	bySid := make(map[string][]*client)
+	for c := range h.clients {
+		if c.sid == "" {
+			continue
+		}
+		bySid[c.sid] = append(bySid[c.sid], c)
+	}
+	h.mu.RUnlock()
+
+	var closed int
+	for sid, clients := range bySid {
+		if isValid(sid) {
+			continue
+		}
+		for _, c := range clients {
+			go func(c *client) {
+				// Best-effort, same rationale as CloseUserConnections: the
+				// connection's own readPump-exit cleanup deindexes it either
+				// way, so an error here (already closing) isn't actionable.
+				_ = c.conn.Close(CloseSessionRevoked, "session revoked")
+			}(c)
+		}
+		closed += len(clients)
+	}
+	return closed
 }

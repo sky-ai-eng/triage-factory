@@ -498,6 +498,15 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 				authLog.Info("kicked ws connections on logout",
 					"user", sess.UserID, "sid", sessions.LogID(sid),
 					"code", int(websocket.CloseSessionRevoked), "n", n)
+				// Cross-pod (TFAC-584): this pod only just closed ITS OWN
+				// matching local sockets above — the same session's
+				// connections on another control pod need the same close,
+				// which only a fleet-wide publish can reach. No-op when
+				// wsBackplane is nil (local mode).
+				if s.wsBackplane != nil {
+					s.wsBackplane.PublishKick(r.Context(), sess.UserID.String(), sid.String(), "",
+						int(websocket.CloseSessionRevoked), "session revoked")
+				}
 				// Durable logout record (best-effort) — only when a live session
 				// was actually revoked (a double-logout no-ops with sess == nil).
 				// The session's active org scopes the event to the tenant.
@@ -586,6 +595,11 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 		websocket.CloseSessionRevoked, "session revoked")
 	authLog.Info("kicked ws connections on logout-all",
 		"user", userID, "code", int(websocket.CloseSessionRevoked), "n", kicked)
+	// Cross-pod (TFAC-584): see handleLogout's identical comment above.
+	if s.wsBackplane != nil {
+		s.wsBackplane.PublishKick(r.Context(), userID.String(), "", "",
+			int(websocket.CloseSessionRevoked), "session revoked")
+	}
 
 	// Clear the cookie on this response too — the caller's current
 	// session is one of the ones we just revoked.

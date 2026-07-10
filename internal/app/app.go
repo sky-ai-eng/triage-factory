@@ -39,6 +39,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
+	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -85,6 +86,12 @@ type App struct {
 	// Infra.
 	bus   *eventbus.Bus
 	wsHub *websocket.Hub
+	// wsBackplane is the multi-mode cross-pod fan-out for wsHub, the
+	// spawner's presence check, and the server's session kick (TFAC-584).
+	// nil in local mode and at TF_ROLE=all before buildWSBackplane runs —
+	// every consumer treats that as "behave exactly as before this
+	// existed" (see buildWSBackplane's doc comment).
+	wsBackplane *wsbackplane.Backplane
 
 	// deployPublicURL is the deployment's externally-visible base URL —
 	// the same value handed to Server.SetDeployConfig (local: a.cfg.BrowserURL;
@@ -195,6 +202,7 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 		a.buildExecutorRuntime() // standalone hub + public URL; no HTTP listener
 	}
 	a.buildInfra()          // event bus (SetEventBus only when a server exists)
+	a.buildWSBackplane()    // multi-mode cross-pod fan-out for wsHub (TFAC-584); no-op in local mode
 	a.buildRunCredentials() // ghResolver / runSecrets / modelFor
 	if a.plan.brain {
 		a.buildAI() // scorer + project classifier + profiler + reconciler
@@ -205,8 +213,9 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	if a.plan.brain {
 		a.buildRouting() // ingestor + poller manager + event router
 	}
-	a.wire()                // connect the cycles (spawner↔router, config-change hooks)
-	a.registerSubscribers() // event-bus subscribers (brain only)
+	a.wire()                  // connect the cycles (spawner↔router, config-change hooks)
+	a.registerSubscribers()   // event-bus subscribers (brain only)
+	a.registerSentinelRelay() // tf_bus run-sentinel relay (executor only, multi mode)
 	return a, nil
 }
 
@@ -264,6 +273,15 @@ func (a *App) wire() {
 	// executor, buildExecutorRuntime (TF_PUBLIC_URL). Every role's spawner
 	// renders run deep links, so this is unconditional.
 	a.spawner.SetPublicURL(a.deployPublicURL)
+
+	// Fleet-wide presence check (TFAC-584) — every role's spawner runs
+	// permission prompts (an executor most of all, post-split), so this is
+	// unconditional too. nil in local mode / before buildWSBackplane runs;
+	// SetPresenceChecker's nil branch then leaves presentFor reading
+	// wsHub.PresentFor directly, unchanged.
+	if a.wsBackplane != nil {
+		a.spawner.SetPresenceChecker(a.wsBackplane)
+	}
 
 	// The router and reloader are brain components. spawner.Delegate ←
 	// router (construction arg); router.DrainEntity ← spawner
