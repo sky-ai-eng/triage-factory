@@ -28,7 +28,7 @@
 // the org POST, but it's a footer all the same — the same one-button shape as
 // the GitHub PAT section.
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '../../../components/Toast/toastStore'
 import { readError } from '../../../lib/api'
 import {
@@ -814,13 +814,15 @@ export default function OrgSettings({
       {/* Filesystem skill import is local-only: it scans the server
           process's own ~/.claude/skills, which is only meaningful when
           that process runs on the user's machine (the backend 501s it
-          in multi mode). Multi mode imports skills by pasting/uploading
-          the markdown instead. */}
-      {isLocal && (
-        <SettingsSection title="Integrations" summary="Import Claude Code skills">
-          <SkillsImport />
-        </SettingsSection>
-      )}
+          in multi mode). Multi mode imports a skill by pasting or
+          uploading its SKILL.md — it becomes a prompt row scoped to the
+          org/team, the design of record for skills in multi mode. */}
+      <SettingsSection title="Integrations" summary="Import Claude Code skills">
+        <div className="space-y-5">
+          {isLocal && <SkillsImport />}
+          <SkillPasteImport />
+        </div>
+      </SettingsSection>
 
       <SettingsSection title="Danger zone" summary="Clear stored tokens">
         <DangerZone />
@@ -878,6 +880,87 @@ function SkillsImport() {
       >
         {importing ? 'Importing…' : 'Import Skills'}
       </button>
+    </div>
+  )
+}
+
+// SkillPasteImport — paste or upload a single SKILL.md; it becomes an
+// imported-source prompt scoped to the org/team, exactly like a
+// manually created prompt. Works in both modes (in multi it's the ONLY
+// import path — there is no per-tenant filesystem to scan).
+function SkillPasteImport() {
+  const [content, setContent] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const fileRef = useRef<HTMLInputElement | null>(null)
+
+  const readFile = async (file: File) => {
+    try {
+      setContent(await file.text())
+    } catch (err) {
+      toast.error(`Failed to read file: ${(err as Error).message}`)
+    }
+  }
+
+  const submit = async () => {
+    if (submitting || !content.trim()) return
+    setSubmitting(true)
+    try {
+      const res = await fetch('/api/skills/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      })
+      if (!res.ok) {
+        toast.error(await readError(res, 'Failed to import skill'))
+        return
+      }
+      const created = await res.json()
+      toast.success(`Imported "${created.name}" into the prompt library`)
+      setContent('')
+      if (fileRef.current) fileRef.current.value = ''
+    } catch (err) {
+      toast.error(`Failed to import skill: ${(err as Error).message}`)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <div>
+        <p className="text-[13px] text-text-primary">Add a skill from SKILL.md</p>
+        <p className="mt-0.5 text-[11px] text-text-tertiary">
+          Paste (or upload) a skill&apos;s markdown — it becomes a prompt in your library, named
+          from its <code>name:</code> frontmatter
+        </p>
+      </div>
+      <textarea
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        placeholder={'---\nname: my-skill\ndescription: …\n---\n\nInstructions…'}
+        rows={5}
+        className="w-full rounded-xl border border-border-subtle bg-white/60 px-3 py-2 font-mono text-[12px] text-text-primary placeholder:text-text-tertiary/60 focus:outline-none focus:border-accent/40"
+      />
+      <div className="flex items-center justify-between gap-4">
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".md,text/markdown"
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (f) void readFile(f)
+          }}
+          className="text-[11px] text-text-tertiary file:mr-3 file:rounded-lg file:border file:border-border-subtle file:bg-transparent file:px-3 file:py-1 file:text-[11px] file:text-text-secondary"
+        />
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={submitting || !content.trim()}
+          className="shrink-0 rounded-xl border border-accent/20 px-4 py-2 text-[13px] text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+        >
+          {submitting ? 'Importing…' : 'Import Skill'}
+        </button>
+      </div>
     </div>
   )
 }
