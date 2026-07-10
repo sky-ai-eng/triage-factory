@@ -71,6 +71,21 @@ func withHelperExecSelfCommand(t *testing.T) {
 	t.Cleanup(func() { execSelfCommand = orig })
 }
 
+// withPrivilegedEffectiveCaps stubs effectiveCaps to report a non-empty
+// capability set, standing in for the privileged bare-metal process Start's
+// self-spawn fallback is meant for — independent of whatever capabilities
+// the `go test` binary itself actually holds (CI's unprivileged runner user
+// has none). Tests that exercise the spawn-and-wait path via the
+// TestMain re-exec helper (not the real capabilities that would flow
+// through a genuine self-spawned broker) need this so effectiveCaps'
+// empty-set refusal in Start doesn't fire for the wrong reason.
+func withPrivilegedEffectiveCaps(t *testing.T) {
+	t.Helper()
+	orig := effectiveCaps
+	effectiveCaps = func() ([]string, error) { return []string{"cap_sys_admin", "cap_net_admin"}, nil }
+	t.Cleanup(func() { effectiveCaps = orig })
+}
+
 // withTempBrokerSocketPath redirects Start's socket path to an isolated
 // temp directory instead of the production /run/tf/cap-broker.sock —
 // root-only on most distros, and unwritable to the unprivileged user a CI
@@ -93,6 +108,7 @@ func withTempBrokerSocketPath(t *testing.T) string {
 func TestStart_SpawnsAndBecomesReady(t *testing.T) {
 	sockPath := withTempBrokerSocketPath(t)
 	withHelperExecSelfCommand(t)
+	withPrivilegedEffectiveCaps(t)
 
 	proc, client, err := Start(context.Background())
 	if err != nil {
@@ -187,10 +203,14 @@ func TestStart_DialsExistingBrokerInsteadOfSpawning(t *testing.T) {
 // duration or forever.
 func TestStart_BrokerNeverComesUp(t *testing.T) {
 	withTempBrokerSocketPath(t)
+	withPrivilegedEffectiveCaps(t)
 	origCmd := execSelfCommand
 	origTimeout, origPoll := readyTimeout, readyPollInterval
+	origDialWindow, origDialPoll := dialRaceWindow, dialRacePollInterval
 	readyTimeout = 300 * time.Millisecond
 	readyPollInterval = 10 * time.Millisecond
+	dialRaceWindow = 50 * time.Millisecond
+	dialRacePollInterval = 5 * time.Millisecond
 	execSelfCommand = func(socketPath string) (*exec.Cmd, error) {
 		// A command that exits immediately without ever listening —
 		// stands in for a broker that crashes on startup.
@@ -199,6 +219,7 @@ func TestStart_BrokerNeverComesUp(t *testing.T) {
 	t.Cleanup(func() {
 		execSelfCommand = origCmd
 		readyTimeout, readyPollInterval = origTimeout, origPoll
+		dialRaceWindow, dialRacePollInterval = origDialWindow, origDialPoll
 	})
 
 	start := time.Now()
@@ -244,6 +265,68 @@ func TestStart_ContextCanceledDuringWait(t *testing.T) {
 	}
 }
 
+// TestStart_RefusesToSpawnWithoutCapabilities pins the review finding this
+// package's dial-first fallback was missing a capability check for: when
+// no existing broker answers and this process itself holds no
+// capabilities (the post-exec-drop orchestrator, per docker/entrypoint.sh),
+// Start must refuse to self-spawn rather than silently produce an
+// equally capability-less "broker" that looks started but can never do
+// anything privileged. execSelfCommand fails the test loudly if called,
+// proving Start took the refuse-and-error path instead of spawning.
+func TestStart_RefusesToSpawnWithoutCapabilities(t *testing.T) {
+	withTempBrokerSocketPath(t)
+	origDialWindow, origDialPoll := dialRaceWindow, dialRacePollInterval
+	dialRaceWindow = 50 * time.Millisecond
+	dialRacePollInterval = 5 * time.Millisecond
+	origCaps := effectiveCaps
+	effectiveCaps = func() ([]string, error) { return nil, nil }
+	execSelfCommand = func(socketPath string) (*exec.Cmd, error) {
+		t.Fatal("Start self-spawned a broker despite holding no capabilities")
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		dialRaceWindow, dialRacePollInterval = origDialWindow, origDialPoll
+		effectiveCaps = origCaps
+	})
+
+	_, _, err := Start(context.Background())
+	if err == nil {
+		t.Fatal("expected Start to refuse to self-spawn without capabilities, got nil error")
+	}
+}
+
+// TestStart_FallsBackToSpawnQuicklyWhenNoBrokerExists pins that Start's
+// initial existing-broker check is bounded by dialRaceWindow, not the
+// much larger readyTimeout — the regression risk in giving that check a
+// retry budget at all: reusing readyTimeout there would mean the common
+// dev/bare-metal case (nothing listening yet, Start must spawn its own)
+// stalls for the full spawn-wait budget on a check that was never going
+// to succeed, before ever attempting to spawn.
+func TestStart_FallsBackToSpawnQuicklyWhenNoBrokerExists(t *testing.T) {
+	withTempBrokerSocketPath(t)
+	withHelperExecSelfCommand(t)
+	withPrivilegedEffectiveCaps(t)
+	origDialWindow, origDialPoll := dialRaceWindow, dialRacePollInterval
+	origReadyTimeout := readyTimeout
+	dialRaceWindow = 100 * time.Millisecond
+	dialRacePollInterval = 10 * time.Millisecond
+	readyTimeout = 5 * time.Second // deliberately large; a bug reusing this for the initial check would show up as a slow Start
+	t.Cleanup(func() {
+		dialRaceWindow, dialRacePollInterval = origDialWindow, origDialPoll
+		readyTimeout = origReadyTimeout
+	})
+
+	start := time.Now()
+	proc, _, err := Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer proc.Close()
+	if elapsed := time.Since(start); elapsed > readyTimeout/2 {
+		t.Errorf("Start took %s to fall back to spawning, want well under readyTimeout (%s) — the initial existing-broker check should be bounded by dialRaceWindow (%s), not readyTimeout", elapsed, readyTimeout, dialRaceWindow)
+	}
+}
+
 // TestProcess_CloseIsIdempotentAndNilSafe pins that Close never panics on
 // a nil Process or a double call — the orchestrator's App.Close() calls
 // this unconditionally.
@@ -255,6 +338,7 @@ func TestProcess_CloseIsIdempotentAndNilSafe(t *testing.T) {
 
 	withTempBrokerSocketPath(t)
 	withHelperExecSelfCommand(t)
+	withPrivilegedEffectiveCaps(t)
 	proc, _, err := Start(context.Background())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
