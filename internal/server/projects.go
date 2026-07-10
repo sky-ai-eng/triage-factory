@@ -320,6 +320,18 @@ func (s *Server) handleProjectExportPreview(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	// Same gate as handleProjectImport, same reason: projectbundle's
+	// curator reads are raw `?`-placeholder SQL on the raw *sql.DB —
+	// which in multi mode is the ADMIN pool (RLS bypassed), so porting
+	// must go through WithTx-bound store methods, not a placeholder
+	// rewrite. Until then, gate rather than 500 (or worse, silently
+	// export a transcript-less bundle — the sandboxed curator's
+	// transcript lives under the project KB dir, not this process's
+	// $HOME, so the session lookup below never finds it in multi).
+	if runmode.Current() != runmode.ModeLocal {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "project export is not yet supported in multi-mode deployments"})
+		return
+	}
 	id := r.PathValue("id")
 	preview, err := projectbundle.Preview(r.Context(), s.db, s.projects, s.curatorStore, orgID, id)
 	if err != nil {
@@ -336,6 +348,11 @@ func (s *Server) handleProjectExportPreview(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleProjectExport(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
+		return
+	}
+	// See handleProjectExportPreview — identical gate, identical reason.
+	if runmode.Current() != runmode.ModeLocal {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "project export is not yet supported in multi-mode deployments"})
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject

@@ -811,9 +811,16 @@ export default function OrgSettings({
         </SettingsSection>
       )}
 
-      <SettingsSection title="Integrations" summary="Import Claude Code skills">
-        <SkillsImport />
-      </SettingsSection>
+      {/* Filesystem skill import is local-only: it scans the server
+          process's own ~/.claude/skills, which is only meaningful when
+          that process runs on the user's machine (the backend 501s it
+          in multi mode). Multi mode imports skills by pasting/uploading
+          the markdown instead. */}
+      {isLocal && (
+        <SettingsSection title="Integrations" summary="Import Claude Code skills">
+          <SkillsImport />
+        </SettingsSection>
+      )}
 
       <SettingsSection title="Danger zone" summary="Clear stored tokens">
         <DangerZone />
@@ -835,11 +842,16 @@ function SkillsImport() {
         return
       }
       const result = await res.json()
+      if (result.errors?.length) {
+        toast.error(
+          `${result.errors.length} skill${result.errors.length !== 1 ? 's' : ''} failed to import: ${result.errors[0]}`,
+        )
+      }
       if (result.imported > 0) {
         toast.success(
           `Imported ${result.imported} skill${result.imported !== 1 ? 's' : ''} (${result.skipped} already imported)`,
         )
-      } else {
+      } else if (!result.errors?.length) {
         toast.info(
           `No new skills found (${result.scanned} scanned, ${result.skipped} already imported)`,
         )
