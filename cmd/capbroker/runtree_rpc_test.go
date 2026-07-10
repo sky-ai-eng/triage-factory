@@ -101,3 +101,28 @@ func TestIPCRoundTrip_CaptureRunDelta_EmptyMeansNoDelta(t *testing.T) {
 		t.Errorf("delta = %d bytes, want empty", len(delta))
 	}
 }
+
+// TestIPCRoundTrip_CaptureRunDelta_OpaqueBytes pins the §4.2 exception in
+// docs/sandbox-security-architecture.md: the capture delta transits the
+// broker as opaque bytes it never interprets. A payload that is deliberately
+// NOT valid JSON must still round-trip intact — proof that the broker
+// base64-forwards the bytes without parsing them. If the wire type were ever
+// changed to one the broker's encoder inspects (e.g. json.RawMessage, which
+// validates JSON syntax on marshal), this non-JSON payload would fail to
+// cross and this test would catch the regression against that invariant.
+func TestIPCRoundTrip_CaptureRunDelta_OpaqueBytes(t *testing.T) {
+	// Not valid JSON at any offset: a lone brace, raw NULs, invalid UTF-8.
+	opaque := []byte{'{', 0x00, 0xff, 0xfe, '"', ':'}
+	client := serveTestBroker(t, &fakeOps{
+		captureRunDeltaFn: func(ctx context.Context, worktree string) ([]byte, error) {
+			return opaque, nil
+		},
+	})
+	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-5")
+	if err != nil {
+		t.Fatalf("CaptureRunDelta: %v", err)
+	}
+	if !bytes.Equal(delta, opaque) {
+		t.Errorf("opaque payload not preserved: got %v, want %v", delta, opaque)
+	}
+}

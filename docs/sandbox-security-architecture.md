@@ -134,10 +134,13 @@ and note they never overlap:
 - **cap-broker** — the only process that holds `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`. It
   builds the netns/veth/iptables/cgroup, launches and supervises the gVisor
   runtime, tears everything down, and reaps orphans at boot. It holds **no
-  credentials**, binds **no proxies**, and **reads no agent output**. Its only
+  credentials**, binds **no proxies**, and **parses no agent output**. Its only
   input is a narrow, fixed RPC vocabulary from its parent plus, for the run's
-  I/O, a socket file descriptor it passes straight through to the runtime and
-  never reads.
+  live I/O, a socket file descriptor it passes straight through to the runtime
+  and never reads. The one place a byte of run-derived data crosses the broker
+  is the park-time git-delta capture, which it forwards to the orchestrator as
+  an **opaque `[]byte` it never interprets** (§4.2) — so *parses no hostile
+  input* holds even there, though *reads nothing* does not.
 - **orchestrator** — today's main process, with its capabilities **dropped at
   exec** (not in-process — see the note below). It runs the dispatcher, resolves
   and holds credentials, binds the LLM/git/egress proxies (which parse hostile
@@ -181,6 +184,26 @@ This is a structural property verifiable by inspection (no read call, descriptor
 closed), not a behavioral promise. *(Validated against real gVisor: the runtime
 faithfully proxies the newline-delimited-JSON agent protocol over a
 socket-backed stdio while the supervising process reads nothing.)*
+
+**One exception, precisely bounded.** That structural claim covers the run's
+*live* stdio, where it holds without qualification. A separate, later flow does
+put run-derived bytes in the broker's address space: the park-time git-delta
+capture (`CaptureRunDelta`, part of §4.3's run-tree lifecycle). The broker runs
+the dropped-privilege, netns-isolated capture child, reads its stdout, and
+returns it to the orchestrator — but as an **opaque `[]byte`, base64-forwarded
+through the JSON response and never interpreted**. The broker never unmarshals
+the `GitDelta`, never reads the bundle, never branches on the content; decoding
+and applying the delta happen only in the orchestrator, which is exposed to this
+class of input everywhere else regardless. So the property the §4 table turns on
+— *the broker parses no hostile input* — still holds; only the stronger phrasing
+(*no run bytes in the broker's address space at all*) is specific to the
+live-stdio path. The "never interpreted" half is pinned by a test in which a
+deliberately non-JSON payload round-trips intact (`cmd/capbroker`'s
+`TestIPCRoundTrip_CaptureRunDelta_OpaqueBytes`): a later change that made the
+broker inspect the bytes — e.g. retyping the field to something its encoder
+validates — would break there. What actually contains the hostile git
+operations is the capture child's own confinement (setuid to the sandbox uid,
+empty netns), not anything the broker does with the bytes (§4.3).
 
 ### 4.3 The broker's real attack surface is its RPC, and it is narrowed on purpose
 
@@ -353,14 +376,12 @@ basis.
 - **Privilege separation, core split:** privileged operations extracted
   behind a broker interface; the `cap-broker` process + narrow RPC +
   socket-fd stdio boundary, owning the OCI spec from a fixed template;
-  exec-time capability drop on the orchestrator (default on) — see §4 and
-  `docs/self-host-setup.md`'s process-model table.
+  exec-time capability drop on the orchestrator (default on); the run-tree
+  ownership lifecycle and the park-time git-delta capture (`CaptureRunDelta`)
+  routed through the broker too — see §4 and `docs/self-host-setup.md`'s
+  process-model table.
 
 **In progress — privilege separation (remaining):**
-- Route the isolated-capture path (currently: skips its network-namespace
-  isolation, rather than failing, when the calling process has no
-  `CAP_SYS_ADMIN` — see `internal/delegate/capture_isolated_linux.go`)
-  through the broker so that isolation applies unconditionally again.
 - Retire the `TF_PRIVSEP` rollback flag once the split has had a release
   to bake.
 
@@ -373,10 +394,11 @@ With the core privilege-separation split shipped, an executor's
 capabilities, credentials, and hostile-input parsers live in **separate
 processes**: the cap-broker holds `CAP_SYS_ADMIN`/`CAP_NET_ADMIN` and
 nothing else; the orchestrator holds the credentials and parses the
-hostile input, with an empty capability set. The isolated-capture gap
-above is the one place that separation is not yet complete — it degrades
-to a narrower (but still real, uid-drop-based) isolation rather than
-failing, pending the broker-routed fix.
+hostile input, with an empty capability set. The park-time git-delta
+capture runs on the privileged side too (brokered `CaptureRunDelta`), so its
+network-namespace isolation applies unconditionally in the default deployment
+rather than degrading to uid-drop-only; the bytes it returns cross the broker
+as opaque, never-interpreted data (§4.2).
 
 ---
 
