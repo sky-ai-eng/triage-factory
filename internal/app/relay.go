@@ -89,6 +89,14 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 		if a.pollerMgr != nil {
 			a.pollerMgr.PollSoon(msg.Source, msg.OrgID)
 		}
+	case "new", "ack":
+		// TFAC-585's run_signals doorbell kinds — tf_ctl is a shared channel
+		// (spec §5's table), and a lease-holding control pod that also
+		// serves HTTP LISTENs here AND on delegate.Spawner's own dedicated
+		// tf_ctl connection (HandleCtlNotification), so this pod legitimately
+		// receives every signal doorbell too. Not an error, just traffic
+		// this listener has nothing to do with — silently ignore rather than
+		// WARN on every cross-pod interrupt/steer/cancel/permission/inject.
 	default:
 		appLog.Warn("tf_ctl: unknown message kind", "kind", msg.Kind)
 	}

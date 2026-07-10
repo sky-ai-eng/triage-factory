@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/lease"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -121,5 +122,18 @@ func TestApp_DispatchManagerTrigger_NilManagersAreSafe(t *testing.T) {
 	a := &App{}
 	for _, m := range []string{"scorer", "classifier", "profiler", "reconciler", "unknown-manager"} {
 		a.dispatchManagerTrigger(m, "org-1", false)
+	}
+}
+
+// TestApp_HandleCtlMessage_RunSignalKindsAreSilentlyIgnored pins that
+// "new"/"ack" — TFAC-585's run_signals doorbell kinds, which legitimately
+// share the tf_ctl channel with ctlbus's trigger/pollsoon relay — never
+// reach the unknown-kind default branch. A lease-holding, HTTP-serving
+// pod's ctlbus listener receives every run_signals doorbell too (it's the
+// same Postgres NOTIFY channel), and must not panic or misroute on them.
+func TestApp_HandleCtlMessage_RunSignalKindsAreSilentlyIgnored(t *testing.T) {
+	a := &App{}
+	for _, kind := range []string{"new", "ack"} {
+		a.handleCtlMessage(ctlbus.Message{Kind: kind, OrgID: "org-1"})
 	}
 }
