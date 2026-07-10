@@ -21,8 +21,9 @@ type fakeStore struct {
 	exists   bool
 
 	// Injected failures, consumed once each (nil after firing).
-	acquireErr error
-	renewErr   error
+	acquireErr   error
+	renewErr     error
+	ensureRowErr error
 }
 
 // newFakeStore returns a store as if EnsureRow had already run: the row
@@ -31,6 +32,14 @@ type fakeStore struct {
 // directly without needing to call EnsureRow themselves.
 func newFakeStore(now time.Time) *fakeStore {
 	return &fakeStore{now: now, exists: true}
+}
+
+// newFakeStoreNoRow returns a store as if this were a genuinely fresh
+// leases table — no row for any name yet, exactly the state EnsureRow
+// exists to fix. Exercises the acquisition path's own EnsureRow retry
+// (tick calls it every not-holder attempt, not just once at boot).
+func newFakeStoreNoRow(now time.Time) *fakeStore {
+	return &fakeStore{now: now, exists: false}
 }
 
 func (s *fakeStore) advance(d time.Duration) {
@@ -42,6 +51,11 @@ func (s *fakeStore) advance(d time.Duration) {
 func (s *fakeStore) EnsureRow(ctx context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.ensureRowErr != nil {
+		err := s.ensureRowErr
+		s.ensureRowErr = nil
+		return err
+	}
 	if !s.exists {
 		s.exists = true
 		s.holderID = ""
@@ -102,6 +116,41 @@ func TestNewManager_RejectsDemoteDeadlineNotLessThanTTL(t *testing.T) {
 	}
 	if _, err := NewManager(store, "x", "me", time.Second, 20*time.Second, 15*time.Second, nil, nil, nil); err != nil {
 		t.Fatalf("expected no error for a valid deadline < ttl, got %v", err)
+	}
+}
+
+// TestManager_RecoversFromTransientEnsureRowFailure guards the exact stuck
+// state a transient EnsureRow failure used to cause: EnsureRow was only
+// ever called once, at Run's boot. If that single call failed (and no
+// other pod had raced in to create the row), every subsequent tick's
+// TryAcquire ran its UPDATE against a still-nonexistent row — which
+// matches zero rows and returns (acquired=false, err=nil), the SAME
+// signal as "someone else's lease is fresh" — so the manager span forever
+// without ever acquiring, and without even logging an error past the
+// first tick. Fixed by retrying EnsureRow on every not-holder tick (see
+// tick's doc comment); this test drives two ticks against a store that
+// starts with NO row at all, injects a failure on the first EnsureRow
+// call, and asserts the second tick (EnsureRow succeeding this time)
+// recovers and acquires.
+func TestManager_RecoversFromTransientEnsureRowFailure(t *testing.T) {
+	store := newFakeStoreNoRow(time.Now())
+	store.ensureRowErr = errors.New("transient connection blip")
+	m, err := NewManager(store, "x", "pod-a", time.Hour, 20*time.Second, 15*time.Second, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m.tick(context.Background())
+	if m.IsHolder() {
+		t.Fatal("must not acquire on a tick whose EnsureRow failed against a nonexistent row")
+	}
+	if store.exists {
+		t.Fatal("test setup invariant broken: the injected EnsureRow error should have prevented row creation")
+	}
+
+	m.tick(context.Background())
+	if !m.IsHolder() {
+		t.Fatal("expected the manager to recover and acquire once EnsureRow is retried and succeeds")
 	}
 }
 

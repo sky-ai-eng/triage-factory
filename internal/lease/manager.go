@@ -106,12 +106,11 @@ func deadlineCheckInterval(demoteDeadline time.Duration) time.Duration {
 
 // Run drives the election loop until ctx is cancelled. On cancellation, a
 // current holder demotes (best-effort — the process is shutting down
-// either way) before returning.
+// either way) before returning. Row bootstrap (EnsureRow) is NOT a
+// separate one-time step here — see tick, which retries it on every
+// not-holder attempt so a transient failure on the very first call can't
+// strand this manager never acquiring.
 func (m *Manager) Run(ctx context.Context) {
-	if err := m.store.EnsureRow(ctx, m.name); err != nil {
-		leaseLog.Warn("ensure lease row failed; will retry implicitly on the next acquisition attempt", "name", m.name, "error", err)
-	}
-
 	renewTicker := time.NewTicker(m.renewInterval)
 	defer renewTicker.Stop()
 	deadlineTicker := time.NewTicker(deadlineCheckInterval(m.demoteDeadline))
@@ -161,6 +160,28 @@ func (m *Manager) tick(ctx context.Context) {
 		m.lastSuccessfulRenewal = time.Now()
 		m.mu.Unlock()
 		return
+	}
+
+	// Not holder: make sure the row exists before attempting acquisition.
+	// Retried on EVERY tick here — not just once at Run's boot — because
+	// EnsureRow is a cheap, idempotent INSERT ... ON CONFLICT DO NOTHING,
+	// and skipping the retry is a real stuck state: if this is the first
+	// pod ever to boot against a fresh leases table and its one EnsureRow
+	// attempt hits a transient error, the row never gets created, and
+	// TryAcquire's UPDATE against a nonexistent row matches zero rows —
+	// returning (acquired=false, err=nil), indistinguishable from
+	// "someone else's lease is fresh". Without retrying EnsureRow, this
+	// manager would spin on that false signal forever, never acquiring
+	// and never logging anything more alarming than "not acquired" (not
+	// even an error) — silently stuck.
+	//
+	// TryAcquire always still runs below regardless of this call's
+	// outcome: on the overwhelmingly common path (the row already exists
+	// because some pod's EnsureRow succeeded before) this failure is
+	// irrelevant to it, and on the empty-table path it just means another
+	// harmless "not acquired" this tick, retried again next tick.
+	if err := m.store.EnsureRow(ctx, m.name); err != nil {
+		leaseLog.Warn("ensure lease row failed; retrying next tick", "name", m.name, "error", err)
 	}
 
 	term, acquired, err := m.store.TryAcquire(ctx, m.name, m.holderID, m.ttl)
