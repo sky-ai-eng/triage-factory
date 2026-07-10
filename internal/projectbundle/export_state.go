@@ -228,7 +228,12 @@ func appendSessionArtifacts(resolvedProjectRoot, curatorSessionID string, out *[
 			return false, "", nil
 		}
 		if os.IsPermission(err) {
-			return false, fmt.Sprintf("curator session transcript exists but is not readable by the server process (%s); the bundle was exported without the session", transcriptPath), nil
+			// The user-facing warning stays generic — the server-side
+			// absolute path is operator information, not something the
+			// API should leak into the UI. Log it here instead.
+			bundleLog.Warn("session transcript unreadable during export; bundle ships without the session",
+				"path", transcriptPath, "session", curatorSessionID, "error", err)
+			return false, "the project's curator session transcript exists but is not readable by the server; the bundle was exported without the session (server logs have details)", nil
 		}
 		return false, "", fmt.Errorf("stat session transcript: %w", err)
 	}

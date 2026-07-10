@@ -69,6 +69,12 @@ func (sk *skillsHandler) handleSkillUpload(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	// Bound the body BEFORE decoding — the content cap below is checked
+	// post-decode, so without this an oversized upload would still be
+	// allocated in full by the JSON decoder before rejection. 4x the
+	// content cap leaves room for JSON string escaping (worst-case
+	// \uXXXX inflation) plus the envelope fields.
+	r.Body = http.MaxBytesReader(w, r.Body, int64(maxSkillUploadBytes)*4)
 	var req skillUploadRequest
 	if !decodeJSON(w, r, &req, "") {
 		return

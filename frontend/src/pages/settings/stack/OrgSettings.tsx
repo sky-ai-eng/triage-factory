@@ -29,7 +29,9 @@
 // the GitHub PAT section.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import TeamPicker from '../../../components/TeamPicker'
 import { toast } from '../../../components/Toast/toastStore'
+import { noteWrittenTeam, useWriteTeam } from '../../../hooks/useTeams'
 import { readError } from '../../../lib/api'
 import {
   hostOf,
@@ -887,11 +889,16 @@ function SkillsImport() {
 // SkillPasteImport — paste or upload a single SKILL.md; it becomes an
 // imported-source prompt scoped to the org/team, exactly like a
 // manually created prompt. Works in both modes (in multi it's the ONLY
-// import path — there is no per-tenant filesystem to scan).
+// import path — there is no per-tenant filesystem to scan). The acting
+// team comes from useWriteTeam + TeamPicker (renders only at ≥2 teams;
+// single-team callers submit team_id='' and the server resolves the
+// sole team) so a multi-team user doesn't hit the backend's
+// team-selection 400.
 function SkillPasteImport() {
   const [content, setContent] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const fileRef = useRef<HTMLInputElement | null>(null)
+  const { team, setTeam, multi, ready } = useWriteTeam()
 
   const readFile = async (file: File) => {
     try {
@@ -902,19 +909,20 @@ function SkillPasteImport() {
   }
 
   const submit = async () => {
-    if (submitting || !content.trim()) return
+    if (submitting || !content.trim() || !ready) return
     setSubmitting(true)
     try {
       const res = await fetch('/api/skills/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, team_id: team }),
       })
       if (!res.ok) {
         toast.error(await readError(res, 'Failed to import skill'))
         return
       }
       const created = await res.json()
+      if (team) noteWrittenTeam(team)
       toast.success(`Imported "${created.name}" into the prompt library`)
       setContent('')
       if (fileRef.current) fileRef.current.value = ''
@@ -941,6 +949,7 @@ function SkillPasteImport() {
         rows={5}
         className="w-full rounded-xl border border-border-subtle bg-white/60 px-3 py-2 font-mono text-[12px] text-text-primary placeholder:text-text-tertiary/60 focus:outline-none focus:border-accent/40"
       />
+      <TeamPicker value={team} onChange={setTeam} className="max-w-xs" />
       <div className="flex items-center justify-between gap-4">
         <input
           ref={fileRef}
@@ -955,7 +964,7 @@ function SkillPasteImport() {
         <button
           type="button"
           onClick={() => void submit()}
-          disabled={submitting || !content.trim()}
+          disabled={submitting || !content.trim() || !ready || (multi && !team)}
           className="shrink-0 rounded-xl border border-accent/20 px-4 py-2 text-[13px] text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
         >
           {submitting ? 'Importing…' : 'Import Skill'}
