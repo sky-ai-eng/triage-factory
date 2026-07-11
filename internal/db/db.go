@@ -2,11 +2,14 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
@@ -78,6 +81,37 @@ func OpenAt(dbPath string) (*sql.DB, error) {
 	}
 
 	return db, nil
+}
+
+// OpenForCLI returns the (db, dialect) pair for the current runmode,
+// independent of the server's startup wiring (internal/app) — the shared
+// helper behind every operator-facing CLI subcommand that needs a live
+// connection to the same database the server uses without booting the
+// whole HTTP stack (`triagefactory migrate status`, `triagefactory
+// instance list/drain/undrain`, ...). Local mode opens the same SQLite
+// file the server uses; multi mode opens TF_DATABASE_URL via pgx. Callers
+// own closing the returned *sql.DB.
+func OpenForCLI() (*sql.DB, string, error) {
+	if runmode.Current() == runmode.ModeMulti {
+		dsn := os.Getenv("TF_DATABASE_URL")
+		if dsn == "" {
+			return nil, "", fmt.Errorf("TF_MODE=multi requires TF_DATABASE_URL")
+		}
+		conn, err := sql.Open("pgx", dsn)
+		if err != nil {
+			return nil, "", fmt.Errorf("open postgres: %w", err)
+		}
+		if err := conn.Ping(); err != nil {
+			conn.Close()
+			return nil, "", fmt.Errorf("ping postgres: %w", err)
+		}
+		return conn, "postgres", nil
+	}
+	conn, err := Open()
+	if err != nil {
+		return nil, "", fmt.Errorf("open database: %w", err)
+	}
+	return conn, "sqlite3", nil
 }
 
 // Migrate brings the schema to head by applying any pending forward

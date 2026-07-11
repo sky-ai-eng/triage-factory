@@ -19,6 +19,14 @@ func newInstanceStore(q queryer) db.InstanceStore {
 	return &instanceStore{q: q}
 }
 
+// NewInstanceStore builds a standalone db.InstanceStore against a pooled
+// *sql.DB — mirrors postgres.NewInstanceStore; the narrow constructor CLI
+// subcommands use (TFAC-586) instead of building the full db.Stores bundle
+// just to reach .Instances.
+func NewInstanceStore(conn *sql.DB) db.InstanceStore {
+	return newInstanceStore(conn)
+}
+
 var _ db.InstanceStore = (*instanceStore)(nil)
 
 func (s *instanceStore) Register(ctx context.Context, id, role, version string) (int64, error) {
@@ -47,11 +55,19 @@ func (s *instanceStore) Register(ctx context.Context, id, role, version string) 
 	return bootEpoch, err
 }
 
-func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int64, hb domain.InstanceHeartbeat) (bool, error) {
+func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int64, hb domain.InstanceHeartbeat) (bool, bool, error) {
 	// draining and labels_json are deliberately not in the SET list — they
 	// hold operator/control-plane intent and the heartbeat must not clobber
-	// them (see domain.InstanceHeartbeat).
-	res, err := s.q.ExecContext(ctx, `
+	// them (see domain.InstanceHeartbeat). draining IS read back via
+	// RETURNING (SQLite supports it, same as Register above and every
+	// other claim/UPDATE in this package) so the read is atomic with the
+	// (id, boot_epoch)-fenced UPDATE — a follow-up SELECT filtered on id
+	// alone would race a concurrent re-register of the same id (a second
+	// process/goroutine bumping boot_epoch between the UPDATE and the
+	// SELECT), reading the NEWER boot's draining value under the OLDER
+	// boot's identity.
+	var draining bool
+	err := s.q.QueryRowContext(ctx, `
 		UPDATE instances SET
 			last_heartbeat_at = ?,
 			max_runs          = ?,
@@ -60,13 +76,62 @@ func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int6
 			mem_available_mb  = ?,
 			dispatch_gated    = ?
 		WHERE id = ? AND boot_epoch = ?
+		RETURNING draining
 	`,
 		time.Now().UTC(),
 		sqliteNullInt(hb.MaxRuns), sqliteNullInt(hb.ActiveRuns),
 		sqliteNullInt(hb.MemTotalMB), sqliteNullInt(hb.MemAvailableMB),
 		sqliteNullBool(hb.DispatchGated),
 		id, bootEpoch,
-	)
+	).Scan(&draining)
+	if err == sql.ErrNoRows {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return true, draining, nil
+}
+
+func (s *instanceStore) List(ctx context.Context) ([]domain.Instance, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id, role, version, boot_epoch, started_at, last_heartbeat_at, draining,
+		       max_runs, active_runs, mem_total_mb, mem_available_mb, dispatch_gated, labels_json
+		FROM instances ORDER BY started_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.Instance
+	for rows.Next() {
+		var inst domain.Instance
+		var maxRuns, activeRuns, memTotal, memAvail sql.NullInt64
+		var dispatchGated sql.NullBool
+		var labels sql.NullString
+		if err := rows.Scan(
+			&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining,
+			&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels,
+		); err != nil {
+			return nil, err
+		}
+		inst.MaxRuns = intPtrFromNull(maxRuns)
+		inst.ActiveRuns = intPtrFromNull(activeRuns)
+		inst.MemTotalMB = intPtrFromNull(memTotal)
+		inst.MemAvailableMB = intPtrFromNull(memAvail)
+		if dispatchGated.Valid {
+			v := dispatchGated.Bool
+			inst.DispatchGated = &v
+		}
+		inst.LabelsJSON = labels.String
+		out = append(out, inst)
+	}
+	return out, rows.Err()
+}
+
+func (s *instanceStore) SetDraining(ctx context.Context, id string, draining bool) (bool, error) {
+	res, err := s.q.ExecContext(ctx, `UPDATE instances SET draining = ? WHERE id = ?`, draining, id)
 	if err != nil {
 		return false, err
 	}

@@ -72,6 +72,13 @@ const (
 	// RunFailureAgentError — the agent itself reported an error
 	// result (IsError terminal).
 	RunFailureAgentError RunFailureKind = "agent_error"
+	// RunFailureExecutorLost — the run's owning executor's registry
+	// heartbeat went stale past the leader reaper's threshold and the
+	// run had already exhausted TF_RUN_MAX_ATTEMPTS, so the reaper
+	// terminal-failed it instead of requeuing (TFAC-586, spec §4.3).
+	// A run that still had attempts left is requeued and re-claimed
+	// instead — this kind only marks the case that ran out of retries.
+	RunFailureExecutorLost RunFailureKind = "executor_lost"
 )
 
 // AgentRun represents a delegated agent execution.

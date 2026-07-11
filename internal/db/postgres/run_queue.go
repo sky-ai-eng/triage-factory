@@ -7,6 +7,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/wakebus"
 )
 
 // runQueueStore is the Postgres impl of db.RunQueueStore — the durable run
@@ -67,7 +68,11 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 		`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
 			nullIfEmpty(run.TriggerID), nullIfEmpty(run.ActorAgentID),
 			nullIfEmpty(run.BlueprintRunID), stepIdx)
-		return err
+		if err != nil {
+			return err
+		}
+		s.notifyWake(ctx, orgID)
+		return nil
 	}
 	// Manual: the local sentinel user has no FK target in multi-mode; filter it
 	// so the COALESCE walks to the org owner. There is no tf.current_user_id()
@@ -89,7 +94,21 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
 		nullIfEmpty(run.TriggerID), creatorBind, nullIfEmpty(run.ActorAgentID),
 		nullIfEmpty(run.BlueprintRunID), stepIdx)
-	return err
+	if err != nil {
+		return err
+	}
+	s.notifyWake(ctx, orgID)
+	return nil
+}
+
+// notifyWake fires the tf_wake doorbell (TFAC-586) after a row lands
+// claimable, so an idle executor claims within milliseconds instead of
+// waiting out its scan interval. Best-effort by contract (wakebus's "never
+// the only path" rule) — a notify failure is swallowed, never surfaced to
+// the caller, since the write it announces already committed successfully
+// and the scan-interval backstop covers a dropped doorbell.
+func (s *runQueueStore) notifyWake(ctx context.Context, orgID string) {
+	_ = wakebus.Publish(ctx, s.conn, wakebus.KindRun, orgID)
 }
 
 func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64) (*domain.AgentRun, error) {

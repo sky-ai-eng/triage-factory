@@ -322,6 +322,44 @@ type Spawner struct {
 	// dispatcher stops claiming and resumes are refused; see
 	// fenceIdentity / IdentityFenced (instance_heartbeat.go).
 	identityFenced atomic.Bool
+	// partitionFenced latches (NOT sticky — clears on the next successful
+	// heartbeat write) when this instance fails to WRITE its heartbeat for
+	// longer than selfFenceDeadline: the reaper can't tell a partitioned
+	// executor from a dead one, so the protocol makes them equivalent —
+	// stop claiming and kill live sandboxes, same reaction as
+	// identityFenced, but reversible (connectivity may return) and never
+	// exits the process (a restart would lose warm worktrees for
+	// nothing). See checkPartitionSelfFence / PartitionFenced
+	// (instance_heartbeat.go, TFAC-586).
+	partitionFenced atomic.Bool
+	// selfFenceDeadline is TF_SELF_FENCE_SEC (default DefaultSelfFenceDeadline):
+	// the own-monotonic-clock deadline since the last successful heartbeat
+	// write past which this instance self-fences the partition case. Zero
+	// (the NewSpawner default) falls back to DefaultSelfFenceDeadline —
+	// mirrors memFloorMB's "zero means use the default" shape. Set once at
+	// startup via SetSelfFenceDeadline; boot refuses a value >=
+	// TF_REAPER_STALE_SEC (internal/app cross-validates both).
+	selfFenceDeadline time.Duration
+	// onSupersessionFence is invoked once, synchronously, right after
+	// fenceIdentity kills this instance's live sandboxes on a supersession
+	// (identityFenced) — the second half of fence completion (spec
+	// §4.1(4)): the caller wires this to os.Exit with a distinct code
+	// (internal/app), keeping process-lifecycle decisions out of this
+	// package. nil is a safe no-op (tests, and any mode where supersession
+	// is structurally unreachable).
+	onSupersessionFence func()
+	// lastGoodContactAt is the partition self-fence's elapsed-time
+	// baseline (checkPartitionSelfFence, TFAC-586): this instance's last
+	// known-good contact with the registry — a successful heartbeat
+	// write, or RunInstanceHeartbeat's loop start when none has landed
+	// yet. A plain time.Time under mu, deliberately NOT an atomic.Int64 of
+	// UnixNano: time.Now() carries a monotonic-clock reading that
+	// time.Since keeps using as long as the value never round-trips
+	// through Unix/UnixNano — which an atomic.Int64 encoding would force.
+	// Round-tripping falls back to wall-clock subtraction, vulnerable to
+	// NTP steps / manual clock changes, defeating the "own monotonic
+	// clock" guarantee the self-fence deadline depends on.
+	lastGoodContactAt time.Time
 
 	// --- executor healthz signals (TFAC-582) ---
 	//

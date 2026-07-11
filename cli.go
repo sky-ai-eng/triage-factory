@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
 	"github.com/sky-ai-eng/triage-factory/cmd/hook"
 	"github.com/sky-ai-eng/triage-factory/cmd/install"
+	"github.com/sky-ai-eng/triage-factory/cmd/instance"
 	"github.com/sky-ai-eng/triage-factory/cmd/jwkinit"
 	"github.com/sky-ai-eng/triage-factory/cmd/migrate"
 	"github.com/sky-ai-eng/triage-factory/cmd/snapshotcapture"
@@ -62,6 +63,8 @@ func dispatchCLI(args []string) (handled bool, err error) {
 		migrate.Handle(args[1:])
 	case "jwk-init":
 		jwkinit.Handle(args[1:])
+	case "instance":
+		instance.Handle(args[1:])
 	case "-h", "--help", "help":
 		printTopLevelHelp()
 	case "-v", "--version", "version":
@@ -101,6 +104,9 @@ USER COMMANDS
                                            itself in place
   triagefactory migrate up                 bring the schema to head
   triagefactory migrate status             list applied + pending migrations
+  triagefactory instance list              show every registered fleet instance
+  triagefactory instance drain <id>        stop new claims, quiesce
+  triagefactory instance undrain <id>      resume claims
 
 AGENT COMMANDS
   Used by delegated Claude Code agents inside their worktree, not

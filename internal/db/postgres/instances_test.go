@@ -83,7 +83,7 @@ func TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot(t *testing.T
 
 	maxRuns, activeRuns, memTotal, memAvail := 4, 1, 8192, 6000
 	gated := true
-	matched, err := stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{
+	matched, draining, err := stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{
 		MaxRuns:        &maxRuns,
 		ActiveRuns:     &activeRuns,
 		MemTotalMB:     &memTotal,
@@ -95,6 +95,9 @@ func TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot(t *testing.T
 	}
 	if !matched {
 		t.Fatal("Heartbeat against the current boot_epoch should match the row")
+	}
+	if draining {
+		t.Fatal("a freshly-registered instance must not read back draining=true")
 	}
 
 	after, err := stores.Instances.Get(ctx, id)
@@ -127,13 +130,18 @@ func TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot(t *testing.T
 
 	// An all-nil heartbeat clears the capacity snapshot back to NULL
 	// (capacity is heartbeat-owned, overwritten wholesale) — while the
-	// intent columns survive untouched.
-	matched, err = stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{})
+	// intent columns survive untouched. draining is now true (seeded
+	// above), and Heartbeat must read it back — the mechanism the drain
+	// verb relies on for a running instance to learn it was drained.
+	matched, draining, err = stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{})
 	if err != nil {
 		t.Fatalf("Heartbeat (clear): %v", err)
 	}
 	if !matched {
 		t.Fatal("clearing heartbeat should still match the row")
+	}
+	if !draining {
+		t.Fatal("Heartbeat must read back the current draining value, not the stale one from registration")
 	}
 	cleared, err := stores.Instances.Get(ctx, id)
 	if err != nil {
@@ -157,7 +165,7 @@ func TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot(t *testing.T
 	// A restart (Register) bumps the epoch and clears the dead boot's
 	// capacity snapshot — but operator intent survives restarts too: a
 	// drained instance stays drained until explicitly un-drained.
-	if _, err := stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{MaxRuns: &maxRuns}); err != nil {
+	if _, _, err := stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{MaxRuns: &maxRuns}); err != nil {
 		t.Fatalf("Heartbeat (repopulate): %v", err)
 	}
 	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v2"); err != nil {
@@ -202,12 +210,83 @@ func TestInstanceStore_Postgres_HeartbeatFencedOnBootEpoch(t *testing.T) {
 		t.Fatalf("Register (boot 2): %v", err)
 	}
 
-	matched, err := stores.Instances.Heartbeat(ctx, id, staleEpoch, domain.InstanceHeartbeat{})
+	matched, _, err := stores.Instances.Heartbeat(ctx, id, staleEpoch, domain.InstanceHeartbeat{})
 	if err != nil {
 		t.Fatalf("Heartbeat (stale epoch): %v", err)
 	}
 	if matched {
 		t.Fatal("a heartbeat carrying a superseded boot_epoch must not match the row")
+	}
+}
+
+// TestInstanceStore_Postgres_SetDrainingAndList pins the CLI drain verb's
+// store-layer contract (TFAC-586): SetDraining flips the flag and reports
+// whether the id was known, and List surfaces every registered instance —
+// the substrate `triagefactory instance list/drain/undrain` reads and
+// writes.
+func TestInstanceStore_Postgres_SetDrainingAndList(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+	const idA = "44444444-4444-4444-4444-444444444444"
+	const idB = "55555555-5555-5555-5555-555555555555"
+
+	if _, err := stores.Instances.Register(ctx, idA, domain.InstanceRoleExecutor, "v1"); err != nil {
+		t.Fatalf("Register A: %v", err)
+	}
+	if _, err := stores.Instances.Register(ctx, idB, domain.InstanceRoleExecutor, "v1"); err != nil {
+		t.Fatalf("Register B: %v", err)
+	}
+
+	matched, err := stores.Instances.SetDraining(ctx, idA, true)
+	if err != nil {
+		t.Fatalf("SetDraining(true): %v", err)
+	}
+	if !matched {
+		t.Fatal("SetDraining should match a registered id")
+	}
+
+	rows, err := stores.Instances.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("List returned %d rows, want 2", len(rows))
+	}
+	byID := map[string]domain.Instance{}
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	if !byID[idA].Draining {
+		t.Errorf("instance %s: Draining = false, want true after SetDraining(true)", idA)
+	}
+	if byID[idB].Draining {
+		t.Errorf("instance %s: Draining = true, want false (never drained)", idB)
+	}
+
+	matched, err = stores.Instances.SetDraining(ctx, idA, false)
+	if err != nil {
+		t.Fatalf("SetDraining(false): %v", err)
+	}
+	if !matched {
+		t.Fatal("SetDraining(false) should match a registered id")
+	}
+	after, err := stores.Instances.Get(ctx, idA)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if after.Draining {
+		t.Error("expected Draining=false after SetDraining(false)")
+	}
+
+	matched, err = stores.Instances.SetDraining(ctx, "unknown-id", true)
+	if err != nil {
+		t.Fatalf("SetDraining(unknown): %v", err)
+	}
+	if matched {
+		t.Error("SetDraining against an unregistered id must report matched=false")
 	}
 }
 

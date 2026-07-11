@@ -104,6 +104,62 @@ func queuedStepRuns(t *testing.T, database *sql.DB, brID string) []int {
 	return out
 }
 
+// TestDrainRunQueue_DrainingSkipsClaim pins the drain verb's dispatcher-side
+// consequence (TFAC-586): drainRunQueue must not claim a queued row while
+// Draining() is true, and must resume claiming the moment it flips back —
+// proving the gate, not fixture setup, is what blocked the first attempt.
+func TestDrainRunQueue_DrainingSkipsClaim(t *testing.T) {
+	database := newDelegateTestDB(t)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
+	seedRun(t, database, "run-drain-skip", "sess-1", "/tmp/wt-run-drain-skip")
+	if _, err := database.Exec(`UPDATE runs SET status = 'queued', claimed_at = NULL, executor_id = NULL, boot_epoch = NULL WHERE id = ?`, "run-drain-skip"); err != nil {
+		t.Fatalf("force queued: %v", err)
+	}
+
+	s.SetDraining(true)
+	s.drainRunQueue(context.Background())
+
+	var status string
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id = ?`, "run-drain-skip").Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "queued" {
+		t.Errorf("status = %q, want queued — a draining instance must not claim", status)
+	}
+
+	s.SetDraining(false)
+	s.drainRunQueue(context.Background())
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id = ?`, "run-drain-skip").Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "running" {
+		t.Errorf("status = %q, want running once undrained", status)
+	}
+}
+
+// TestDrainRunQueue_PartitionFencedSkipsClaim mirrors the draining test for
+// the partition self-fence gate: a fenced instance must not claim either,
+// even though (unlike IdentityFenced) the fence isn't sticky.
+func TestDrainRunQueue_PartitionFencedSkipsClaim(t *testing.T) {
+	database := newDelegateTestDB(t)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
+	seedRun(t, database, "run-pfence-skip", "sess-1", "/tmp/wt-run-pfence-skip")
+	if _, err := database.Exec(`UPDATE runs SET status = 'queued', claimed_at = NULL, executor_id = NULL, boot_epoch = NULL WHERE id = ?`, "run-pfence-skip"); err != nil {
+		t.Fatalf("force queued: %v", err)
+	}
+
+	s.partitionFenced.Store(true)
+	s.drainRunQueue(context.Background())
+
+	var status string
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id = ?`, "run-pfence-skip").Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "queued" {
+		t.Errorf("status = %q, want queued — a partition-fenced instance must not claim", status)
+	}
+}
+
 // TestReconcileRunQueue_CancelsOrphanUnderTerminalBlueprint is the
 // boot-reconcile integration check: a child run left 'running' under an
 // already-terminal blueprint_run (the desync) must be cancelled by the boot

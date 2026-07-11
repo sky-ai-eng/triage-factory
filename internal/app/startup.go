@@ -100,9 +100,12 @@ func (a *App) startWorkers(ctx context.Context) {
 	if runmode.Current() == runmode.ModeMulti {
 		a.startCtlListener(ctx)
 		// The signal apply loop only makes sense on dispatcher-capable
-		// roles — only they can ever own a run's live process.
+		// roles — only they can ever own a run's live process. The tf_wake
+		// LISTEN (TFAC-586) is the same gate: only a dispatcher-capable
+		// role has a claim loop worth nudging.
 		if a.plan.dispatcher {
 			go a.spawner.RunSignalApplyLoop(ctx, delegate.DefaultSignalApplyScanInterval)
+			go a.startWakeListener(ctx)
 		}
 		// The purge reaper is system housekeeping, not tied to executor
 		// identity — runs on brain roles like the other reapers/sweepers

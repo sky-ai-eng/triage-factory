@@ -80,7 +80,7 @@ func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) 
 
 	maxRuns, activeRuns, memTotal, memAvail := 4, 1, 8192, 6000
 	gated := true
-	matched, err := stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{
+	matched, draining, err := stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{
 		MaxRuns:        &maxRuns,
 		ActiveRuns:     &activeRuns,
 		MemTotalMB:     &memTotal,
@@ -92,6 +92,9 @@ func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) 
 	}
 	if !matched {
 		t.Fatal("Heartbeat against the current boot_epoch should match the row")
+	}
+	if draining {
+		t.Fatal("a freshly-registered instance must not read back draining=true")
 	}
 
 	after, err := stores.Instances.Get(ctx, id)
@@ -130,13 +133,17 @@ func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) 
 
 	// A heartbeat with every pointer left nil clears the capacity snapshot
 	// back to NULL (capacity is heartbeat-owned and overwritten wholesale)
-	// — while the intent columns survive untouched.
-	matched, err = stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{})
+	// — while the intent columns survive untouched. draining is now true
+	// (seeded above), and Heartbeat must read it back.
+	matched, draining, err = stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{})
 	if err != nil {
 		t.Fatalf("Heartbeat (clear): %v", err)
 	}
 	if !matched {
 		t.Fatal("clearing heartbeat should still match the row")
+	}
+	if !draining {
+		t.Fatal("Heartbeat must read back the current draining value, not the stale one from registration")
 	}
 	cleared, err := stores.Instances.Get(ctx, id)
 	if err != nil {
@@ -157,7 +164,7 @@ func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) 
 	// capacity snapshot — but operator intent survives restarts too: a
 	// drained instance stays drained until explicitly un-drained.
 	freshHB := domain.InstanceHeartbeat{MaxRuns: &maxRuns}
-	if _, err := stores.Instances.Heartbeat(ctx, id, epoch, freshHB); err != nil {
+	if _, _, err := stores.Instances.Heartbeat(ctx, id, epoch, freshHB); err != nil {
 		t.Fatalf("Heartbeat (repopulate): %v", err)
 	}
 	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v2"); err != nil {
@@ -197,12 +204,90 @@ func TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch(t *testing.T) {
 		t.Fatalf("Register (boot 2): %v", err)
 	}
 
-	matched, err := stores.Instances.Heartbeat(ctx, id, staleEpoch, domain.InstanceHeartbeat{})
+	matched, _, err := stores.Instances.Heartbeat(ctx, id, staleEpoch, domain.InstanceHeartbeat{})
 	if err != nil {
 		t.Fatalf("Heartbeat (stale epoch): %v", err)
 	}
 	if matched {
 		t.Fatal("a heartbeat carrying a superseded boot_epoch must not match the row")
+	}
+}
+
+// TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch_DoesNotLeakNewerBootsDraining
+// pins the read-back-atomicity fix: Heartbeat's draining read must come
+// from the SAME (id, boot_epoch)-fenced row as the write, not a follow-up
+// query filtered on id alone — which could observe a NEWER boot's draining
+// value under an OLDER, already-superseded boot's identity if the two
+// statements weren't atomic. A stale-epoch call must report draining=false
+// (the zero value) alongside matched=false, never leak the current row's
+// real value.
+func TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch_DoesNotLeakNewerBootsDraining(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	const id = "77777777-7777-7777-7777-777777777777"
+	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	if err != nil {
+		t.Fatalf("Register (boot 1): %v", err)
+	}
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1"); err != nil {
+		t.Fatalf("Register (boot 2): %v", err)
+	}
+	// The NEW boot is drained — a value a buggy id-only read-back could leak
+	// to the stale-epoch heartbeat below.
+	if _, err := stores.Instances.SetDraining(ctx, id, true); err != nil {
+		t.Fatalf("SetDraining: %v", err)
+	}
+
+	matched, draining, err := stores.Instances.Heartbeat(ctx, id, staleEpoch, domain.InstanceHeartbeat{})
+	if err != nil {
+		t.Fatalf("Heartbeat (stale epoch): %v", err)
+	}
+	if matched {
+		t.Fatal("a heartbeat carrying a superseded boot_epoch must not match the row")
+	}
+	if draining {
+		t.Error("a stale-epoch heartbeat must not leak the current boot's draining value — it must report the zero value alongside matched=false")
+	}
+}
+
+// TestInstanceStore_SQLite_SetDrainingAndList pins the CLI drain verb's
+// store-layer contract (TFAC-586) in local mode: SetDraining flips the
+// flag and reports whether the id was known, and List surfaces every
+// registered instance (trivially one, at N=1).
+func TestInstanceStore_SQLite_SetDrainingAndList(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	const id = "66666666-6666-6666-6666-666666666666"
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	matched, err := stores.Instances.SetDraining(ctx, id, true)
+	if err != nil {
+		t.Fatalf("SetDraining(true): %v", err)
+	}
+	if !matched {
+		t.Fatal("SetDraining should match a registered id")
+	}
+
+	rows, err := stores.Instances.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 || !rows[0].Draining {
+		t.Fatalf("List = %+v, want exactly one drained row", rows)
+	}
+
+	matched, err = stores.Instances.SetDraining(ctx, "unknown-id", true)
+	if err != nil {
+		t.Fatalf("SetDraining(unknown): %v", err)
+	}
+	if matched {
+		t.Error("SetDraining against an unregistered id must report matched=false")
 	}
 }
 
