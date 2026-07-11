@@ -213,6 +213,45 @@ func TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch(t *testing.T) {
 	}
 }
 
+// TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch_DoesNotLeakNewerBootsDraining
+// pins the read-back-atomicity fix: Heartbeat's draining read must come
+// from the SAME (id, boot_epoch)-fenced row as the write, not a follow-up
+// query filtered on id alone — which could observe a NEWER boot's draining
+// value under an OLDER, already-superseded boot's identity if the two
+// statements weren't atomic. A stale-epoch call must report draining=false
+// (the zero value) alongside matched=false, never leak the current row's
+// real value.
+func TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch_DoesNotLeakNewerBootsDraining(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	const id = "77777777-7777-7777-7777-777777777777"
+	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	if err != nil {
+		t.Fatalf("Register (boot 1): %v", err)
+	}
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1"); err != nil {
+		t.Fatalf("Register (boot 2): %v", err)
+	}
+	// The NEW boot is drained — a value a buggy id-only read-back could leak
+	// to the stale-epoch heartbeat below.
+	if _, err := stores.Instances.SetDraining(ctx, id, true); err != nil {
+		t.Fatalf("SetDraining: %v", err)
+	}
+
+	matched, draining, err := stores.Instances.Heartbeat(ctx, id, staleEpoch, domain.InstanceHeartbeat{})
+	if err != nil {
+		t.Fatalf("Heartbeat (stale epoch): %v", err)
+	}
+	if matched {
+		t.Fatal("a heartbeat carrying a superseded boot_epoch must not match the row")
+	}
+	if draining {
+		t.Error("a stale-epoch heartbeat must not leak the current boot's draining value — it must report the zero value alongside matched=false")
+	}
+}
+
 // TestInstanceStore_SQLite_SetDrainingAndList pins the CLI drain verb's
 // store-layer contract (TFAC-586) in local mode: SetDraining flips the
 // flag and reports whether the id was known, and List surfaces every

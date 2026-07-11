@@ -58,11 +58,16 @@ func (s *instanceStore) Register(ctx context.Context, id, role, version string) 
 func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int64, hb domain.InstanceHeartbeat) (bool, bool, error) {
 	// draining and labels_json are deliberately not in the SET list — they
 	// hold operator/control-plane intent and the heartbeat must not clobber
-	// them (see domain.InstanceHeartbeat). SQLite has no UPDATE ... RETURNING
-	// story shared with the rest of this file's queries, so draining is read
-	// back with a follow-up SELECT inside the same call rather than a second
-	// round trip from the caller — N=1 makes the extra query immaterial.
-	res, err := s.q.ExecContext(ctx, `
+	// them (see domain.InstanceHeartbeat). draining IS read back via
+	// RETURNING (SQLite supports it, same as Register above and every
+	// other claim/UPDATE in this package) so the read is atomic with the
+	// (id, boot_epoch)-fenced UPDATE — a follow-up SELECT filtered on id
+	// alone would race a concurrent re-register of the same id (a second
+	// process/goroutine bumping boot_epoch between the UPDATE and the
+	// SELECT), reading the NEWER boot's draining value under the OLDER
+	// boot's identity.
+	var draining bool
+	err := s.q.QueryRowContext(ctx, `
 		UPDATE instances SET
 			last_heartbeat_at = ?,
 			max_runs          = ?,
@@ -71,26 +76,19 @@ func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int6
 			mem_available_mb  = ?,
 			dispatch_gated    = ?
 		WHERE id = ? AND boot_epoch = ?
+		RETURNING draining
 	`,
 		time.Now().UTC(),
 		sqliteNullInt(hb.MaxRuns), sqliteNullInt(hb.ActiveRuns),
 		sqliteNullInt(hb.MemTotalMB), sqliteNullInt(hb.MemAvailableMB),
 		sqliteNullBool(hb.DispatchGated),
 		id, bootEpoch,
-	)
-	if err != nil {
-		return false, false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, false, err
-	}
-	if n == 0 {
+	).Scan(&draining)
+	if err == sql.ErrNoRows {
 		return false, false, nil
 	}
-	var draining bool
-	if err := s.q.QueryRowContext(ctx, `SELECT draining FROM instances WHERE id = ?`, id).Scan(&draining); err != nil {
-		return true, false, err
+	if err != nil {
+		return false, false, err
 	}
 	return true, draining, nil
 }

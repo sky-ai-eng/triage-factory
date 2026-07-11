@@ -348,6 +348,18 @@ type Spawner struct {
 	// package. nil is a safe no-op (tests, and any mode where supersession
 	// is structurally unreachable).
 	onSupersessionFence func()
+	// lastGoodContactAt is the partition self-fence's elapsed-time
+	// baseline (checkPartitionSelfFence, TFAC-586): this instance's last
+	// known-good contact with the registry — a successful heartbeat
+	// write, or RunInstanceHeartbeat's loop start when none has landed
+	// yet. A plain time.Time under mu, deliberately NOT an atomic.Int64 of
+	// UnixNano: time.Now() carries a monotonic-clock reading that
+	// time.Since keeps using as long as the value never round-trips
+	// through Unix/UnixNano — which an atomic.Int64 encoding would force.
+	// Round-tripping falls back to wall-clock subtraction, vulnerable to
+	// NTP steps / manual clock changes, defeating the "own monotonic
+	// clock" guarantee the self-fence deadline depends on.
+	lastGoodContactAt time.Time
 
 	// --- executor healthz signals (TFAC-582) ---
 	//
@@ -361,16 +373,7 @@ type Spawner struct {
 	// it).
 	dispatcherRunning       atomic.Bool
 	lastHeartbeatWriteNanos atomic.Int64
-	// lastGoodContactNanos is the partition self-fence's elapsed-time
-	// baseline (checkPartitionSelfFence, TFAC-586): the UnixNano of this
-	// instance's last known-good contact with the registry — a successful
-	// heartbeat write, or RunInstanceHeartbeat's loop start when none has
-	// landed yet. Distinct from lastHeartbeatWriteNanos (which stays 0
-	// until the FIRST success and backs the healthz "ever written" signal)
-	// so a process partitioned from boot still has a well-defined deadline
-	// to measure against.
-	lastGoodContactNanos atomic.Int64
-	draining             atomic.Bool
+	draining                atomic.Bool
 	// reportCapacity gates whether the heartbeat writes the capacity +
 	// admission snapshot. True for executor/all (a real dispatcher backs
 	// the numbers); a pure-control pod sets it false via SetReportCapacity

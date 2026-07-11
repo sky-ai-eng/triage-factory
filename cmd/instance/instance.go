@@ -93,12 +93,19 @@ func runList() {
 }
 
 // heartbeatAge renders how long ago an instance last heartbeat, so an
-// operator can eyeball liveness without doing timestamp math.
+// operator can eyeball liveness without doing timestamp math. Clamps a
+// negative gap (last in the future — clock skew between the DB server and
+// this CLI's host, not a real state) to "just now" rather than printing a
+// confusing negative duration like "-5s ago".
 func heartbeatAge(last time.Time) string {
 	if last.IsZero() {
 		return "never"
 	}
-	return time.Since(last).Round(time.Second).String() + " ago"
+	age := time.Since(last)
+	if age < 0 {
+		return "just now"
+	}
+	return age.Round(time.Second).String() + " ago"
 }
 
 func runSetDraining(args []string, draining bool) {

@@ -43,11 +43,17 @@ type execer interface {
 }
 
 // Publish sends a wake doorbell for orgID via a single pg_notify() call
-// over db (the admin pool — the same connection the row-creating write just
-// used, so the notify is issued only once that write is durably
-// committed). Best-effort by contract: callers ignore a returned error
-// rather than fail the enqueue over it — see the package doc's "never the
-// only path" rule; the scan-interval backstop always still runs.
+// over db (the admin pool — NOTIFY needs no session affinity, so any
+// pooled connection works; database/sql gives no guarantee it's the same
+// physical connection the preceding row-creating write used, and none is
+// needed here). What DOES guarantee the notify follows the write durably:
+// callers issue the write as a plain autocommit statement and only call
+// Publish afterward, sequentially in Go — the write's ExecContext has
+// already returned (implying committed) by the time this runs, regardless
+// of which connection either statement rode. Best-effort by contract:
+// callers ignore a returned error rather than fail the enqueue over it —
+// see the package doc's "never the only path" rule; the scan-interval
+// backstop always still runs.
 func Publish(ctx context.Context, db execer, kind, orgID string) error {
 	payload, err := json.Marshal(Message{Kind: kind, OrgID: orgID})
 	if err != nil {

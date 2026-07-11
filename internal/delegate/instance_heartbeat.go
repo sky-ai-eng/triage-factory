@@ -27,6 +27,39 @@ const DefaultInstanceHeartbeatInterval = 4 * time.Second
 // numbers — 4s heartbeat < 15s self-fence < 30s reaper staleness).
 const DefaultSelfFenceDeadline = 15 * time.Second
 
+// defaultHeartbeatWriteTimeout caps how long a single heartbeat WRITE may
+// block before heartbeatOnce treats it as a failure — the bound that makes
+// the partition self-fence actually able to fire. Without it, a heartbeat
+// call carries the caller's ctx unmodified (no deadline of its own), so a
+// silently black-holed connection (a partition with no RST — packets just
+// vanish, as opposed to a refused/reset connection, which fails fast on its
+// own) can hang the call indefinitely: the ticker loop stalls, and
+// checkPartitionSelfFence never runs at all, defeating the whole mechanism
+// — the reaper can requeue this instance's claimed runs while it sits here
+// still "trying" forever. See heartbeatWriteTimeout for how this scales
+// with a configured TF_SELF_FENCE_SEC.
+const defaultHeartbeatWriteTimeout = 5 * time.Second
+
+// heartbeatWriteTimeout derives the per-call write timeout from the
+// configured self-fence deadline: capped at defaultHeartbeatWriteTimeout so
+// a single hung write can never block for minutes, and floored at 1s so an
+// aggressively short TF_SELF_FENCE_SEC (tests, or an unusually tight
+// deployment) doesn't shrink it to something that fails healthy-but-slow
+// writes. A third of the deadline leaves room for at least a couple of
+// timed-out attempts before the deadline itself elapses — a SINGLE timeout
+// consuming the whole deadline would let one hung write silently absorb
+// the entire tolerance window with no chance to retry.
+func (s *Spawner) heartbeatWriteTimeout() time.Duration {
+	d := s.selfFenceDeadlineOrDefault() / 3
+	if d > defaultHeartbeatWriteTimeout {
+		return defaultHeartbeatWriteTimeout
+	}
+	if d < time.Second {
+		return time.Second
+	}
+	return d
+}
+
 // ParseSelfFenceDeadline parses TF_SELF_FENCE_SEC. Empty maps to
 // DefaultSelfFenceDeadline; anything else must parse as a positive integer
 // second count. internal/app cross-validates the result against the
@@ -111,7 +144,9 @@ func (s *Spawner) RunInstanceHeartbeat(ctx context.Context, interval time.Durati
 	// (partitioned from birth) still self-fences at the deadline instead of
 	// never triggering (lastHeartbeatWriteNanos alone would stay 0 forever
 	// in that case, which is indistinguishable from "no deadline yet").
-	s.lastGoodContactNanos.Store(time.Now().UnixNano())
+	s.mu.Lock()
+	s.lastGoodContactAt = time.Now()
+	s.mu.Unlock()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -179,22 +214,45 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 		}
 	}
 
-	matched, draining, err := s.instances.Heartbeat(ctx, id, bootEpoch, hb)
+	// Bound the write itself — see defaultHeartbeatWriteTimeout for why
+	// this is load-bearing, not just hygiene: without it, a silently
+	// black-holed connection can hang this call indefinitely and the
+	// self-fence deadline below never gets evaluated at all.
+	hbCtx, cancel := context.WithTimeout(ctx, s.heartbeatWriteTimeout())
+	matched, draining, err := s.instances.Heartbeat(hbCtx, id, bootEpoch, hb)
+	cancel()
 	if err != nil {
 		dispatchLog.Warn("instance heartbeat failed", "instance", id, "error", err)
-		s.checkPartitionSelfFence(id)
+		s.mu.Lock()
+		elapsed := time.Since(s.lastGoodContactAt)
+		s.mu.Unlock()
+		s.checkPartitionSelfFence(id, elapsed)
 		return true // transient DB trouble is not evidence of supersession
 	}
 	if !matched {
 		s.fenceIdentity(id, bootEpoch)
 		return false
 	}
-	now := time.Now().UnixNano()
+
+	// A successful write is not, by itself, proof this instance was never
+	// partitioned: if the write took long enough to land AFTER the
+	// self-fence deadline had already elapsed since our last known-good
+	// contact (a slow-but-not-fully-severed connection, or this goroutine
+	// itself stalled for a while before the call returned), the reaper may
+	// already have requeued this instance's claimed runs while the write
+	// was still in flight. Measure the gap BEFORE overwriting the
+	// baseline, so a late success still gets caught and reacts exactly
+	// like a live-detected partition (kill sandboxes) instead of silently
+	// resuming as if nothing happened.
+	s.mu.Lock()
+	gap := time.Since(s.lastGoodContactAt)
+	s.lastGoodContactAt = time.Now()
+	s.mu.Unlock()
+	s.checkPartitionSelfFence(id, gap)
+
 	// Record the successful write time for the executor healthz probe
-	// (last_heartbeat_write_age_sec) and as the partition self-fence's
-	// elapsed-time baseline.
-	s.lastHeartbeatWriteNanos.Store(now)
-	s.lastGoodContactNanos.Store(now)
+	// (last_heartbeat_write_age_sec).
+	s.lastHeartbeatWriteNanos.Store(time.Now().UnixNano())
 	if s.partitionFenced.CompareAndSwap(true, false) {
 		dispatchLog.Warn("instance un-fenced: heartbeat write succeeded again after a partition — resuming claims", "instance", id)
 	}
@@ -242,19 +300,29 @@ func (s *Spawner) IdentityFenced() bool {
 	return s.identityFenced.Load()
 }
 
-// checkPartitionSelfFence reacts to a heartbeat WRITE failure: once the
-// elapsed time since this instance's last known-good contact with the
-// registry (lastGoodContactNanos — a successful write, or loop start)
-// crosses selfFenceDeadline, own monotonic clock, this instance
-// self-fences the partition case — same reaction as fenceIdentity (kill
-// live sandboxes, stop claiming), but reversible (heartbeatOnce un-fences
-// on the next successful write) and never exits: connectivity may return,
-// and a restart would lose warm worktrees for nothing. Idempotent per
-// episode via CompareAndSwap — a run of consecutive failures kills
-// sandboxes only once, not on every failed tick.
-func (s *Spawner) checkPartitionSelfFence(id string) {
+// checkPartitionSelfFence reacts once elapsed — the caller-computed time
+// since this instance's last known-good contact with the registry
+// (lastGoodContactAt: a successful write, or loop start) — crosses
+// selfFenceDeadline: this instance self-fences the partition case, same
+// reaction as fenceIdentity (kill live sandboxes, stop claiming), but
+// reversible (heartbeatOnce un-fences on the next successful write, often
+// the very next line after the call that triggered this) and never exits:
+// connectivity may return, and a restart would lose warm worktrees for
+// nothing. Idempotent per episode via CompareAndSwap — a burst of
+// deadline-crossing calls kills sandboxes only once, not on every one.
+//
+// elapsed is measured by the caller (heartbeatOnce) against
+// lastGoodContactAt — a plain time.Time under s.mu, deliberately NOT an
+// atomic.Int64 of UnixNano: time.Time obtained from time.Now() carries a
+// monotonic-clock reading, and time.Since keeps using it as long as
+// neither value round-trips through a wall-clock representation (Unix/
+// UnixNano) first. Round-tripping would silently fall back to wall-clock
+// subtraction — vulnerable to NTP steps and manual clock changes, exactly
+// the kind of "own monotonic clock, same discipline as leader demotion"
+// guarantee this deadline depends on (see internal/lease, which keeps its
+// own lastSuccessfulRenewal as a time.Time for the identical reason).
+func (s *Spawner) checkPartitionSelfFence(id string, elapsed time.Duration) {
 	deadline := s.selfFenceDeadlineOrDefault()
-	elapsed := time.Since(time.Unix(0, s.lastGoodContactNanos.Load()))
 	if elapsed < deadline {
 		return
 	}
@@ -262,7 +330,7 @@ func (s *Spawner) checkPartitionSelfFence(id string) {
 		return
 	}
 	killed := s.killAllLiveSandboxes()
-	dispatchLog.Error("instance heartbeat write partitioned past the self-fence deadline — fencing: no new runs will be claimed until connectivity recovers; live sandboxes killed",
+	dispatchLog.Error("instance heartbeat exceeded the self-fence deadline — fencing: live sandboxes killed to avoid a duplicate execution; the reaper may already have requeued this instance's claimed runs",
 		"instance", id, "self_fence_deadline", deadline, "elapsed_since_last_good_contact", elapsed, "sandboxes_killed", killed)
 }
 

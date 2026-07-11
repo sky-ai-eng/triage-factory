@@ -340,6 +340,126 @@ func (f *toggleableInstanceStore) setFail(v bool) {
 	f.mu.Unlock()
 }
 
+// delayedInstanceStore is a db.InstanceStore whose Heartbeat either blocks
+// until its ctx is done (mirroring a real driver aborting an in-flight
+// query once a context deadline/cancel fires — the shape a silently
+// black-holed connection takes) or sleeps a fixed delay before succeeding.
+// Used to prove (a) heartbeatOnce's per-call write timeout actually bounds
+// an otherwise-permanently-hung write, and (b) a write that succeeds only
+// AFTER the self-fence deadline has already elapsed still triggers the
+// fence (the "late success" case) instead of silently resuming as if
+// nothing happened.
+type delayedInstanceStore struct {
+	block bool
+	delay time.Duration
+}
+
+func (f *delayedInstanceStore) Register(context.Context, string, string, string) (int64, error) {
+	return 1, nil
+}
+func (f *delayedInstanceStore) Heartbeat(ctx context.Context, _ string, _ int64, _ domain.InstanceHeartbeat) (bool, bool, error) {
+	if f.block {
+		<-ctx.Done()
+		return false, false, ctx.Err()
+	}
+	select {
+	case <-time.After(f.delay):
+		return true, false, nil
+	case <-ctx.Done():
+		return false, false, ctx.Err()
+	}
+}
+func (f *delayedInstanceStore) Get(context.Context, string) (*domain.Instance, error) {
+	return nil, nil
+}
+func (f *delayedInstanceStore) List(context.Context) ([]domain.Instance, error) { return nil, nil }
+func (f *delayedInstanceStore) SetDraining(context.Context, string, bool) (bool, error) {
+	return false, nil
+}
+
+// TestHeartbeatOnce_WriteTimeoutBoundsAHungConnectionAndEventuallyFences is
+// the direct regression test for the bug this ticket's review found: a
+// heartbeat write against a silently black-holed connection (no RST —
+// packets just vanish) must NOT be able to block heartbeatOnce forever.
+// Without a per-call timeout, the ticker loop stalls and
+// checkPartitionSelfFence never runs at all, so the self-fence deadline is
+// never evaluated and the reaper could requeue this instance's claimed
+// runs while its sandboxes are still live — the exact double-external-
+// write hazard the self-fence exists to prevent. Run on a goroutine with a
+// test-level timeout so a regression fails this test within 5s instead of
+// hanging until the whole test binary's own (much longer) timeout.
+func TestHeartbeatOnce_WriteTimeoutBoundsAHungConnectionAndEventuallyFences(t *testing.T) {
+	database := newDelegateTestDB(t)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
+	s.instances = &delayedInstanceStore{block: true}
+	s.SetExecutorID("hung-instance", 1)
+	// A 2s self-fence deadline derives a 1s per-call write timeout
+	// (deadline/3, floored at 1s) — two bounded, timed-out calls are
+	// enough to cross the deadline, keeping this test's wall time small.
+	s.SetSelfFenceDeadline(2 * time.Second)
+	s.mu.Lock()
+	s.lastGoodContactAt = time.Now()
+	s.mu.Unlock()
+
+	killed := false
+	s.mu.Lock()
+	s.cancels["run-hung"] = func() { killed = true }
+	s.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for !s.PartitionFenced() {
+			if !s.heartbeatOnce(context.Background()) {
+				t.Error("a heartbeat write failure must keep the loop running")
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		if !killed {
+			t.Error("expected the self-fence to kill live sandboxes once it fired")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("partition self-fence never fired within 5s against a permanently hung heartbeat write — the per-call write timeout isn't actually bounding the call, defeating the whole self-fence mechanism")
+	}
+}
+
+// TestHeartbeatOnce_LateSuccessPastDeadlineStillFences pins the second
+// variant the review found: a write that eventually SUCCEEDS, but only
+// after taking long enough that the self-fence deadline had already
+// elapsed since the last known-good contact, must still react (kill live
+// sandboxes) — a bare "it succeeded" is not proof this instance was never
+// partitioned for long enough that the reaper could have already requeued
+// its claimed work while the write was still in flight.
+func TestHeartbeatOnce_LateSuccessPastDeadlineStillFences(t *testing.T) {
+	database := newDelegateTestDB(t)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
+	// The write itself takes 100ms — comfortably longer than the 30ms
+	// self-fence deadline below, so by the time it succeeds the deadline
+	// has already elapsed.
+	s.instances = &delayedInstanceStore{delay: 100 * time.Millisecond}
+	s.SetExecutorID("late-instance", 1)
+	s.SetSelfFenceDeadline(30 * time.Millisecond)
+	s.mu.Lock()
+	s.lastGoodContactAt = time.Now()
+	s.mu.Unlock()
+
+	killed := false
+	s.mu.Lock()
+	s.cancels["run-late"] = func() { killed = true }
+	s.mu.Unlock()
+
+	if !s.heartbeatOnce(context.Background()) {
+		t.Fatal("a successful heartbeat must keep the loop running")
+	}
+	if !killed {
+		t.Error("a write that succeeds only after the self-fence deadline already elapsed must still kill live sandboxes defensively")
+	}
+}
+
 // TestCheckPartitionSelfFence_KillsSandboxesReversibly pins the partition
 // self-fence (TFAC-586): a heartbeat WRITE FAILURE that persists past
 // selfFenceDeadline latches PartitionFenced and kills live sandboxes — the
@@ -353,7 +473,9 @@ func TestCheckPartitionSelfFence_KillsSandboxesReversibly(t *testing.T) {
 	s.instances = store
 	s.SetExecutorID("partition-instance", 1)
 	s.SetSelfFenceDeadline(30 * time.Millisecond)
-	s.lastGoodContactNanos.Store(time.Now().UnixNano())
+	s.mu.Lock()
+	s.lastGoodContactAt = time.Now()
+	s.mu.Unlock()
 
 	killed := false
 	s.mu.Lock()
