@@ -65,9 +65,16 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 	// a DB-signal to the executor that owns the run. A found handle SIGKILLs
 	// the live process (the goroutine then writes the terminal cancelled
 	// status when it observes ctx.Err()).
-	if s.controller.Cancel(runID) {
+	if s.getController().Cancel(runID) {
 		return nil
 	}
+
+	// No local handle. Per the reply-leg contract, cancel is fire-and-
+	// forget cross-pod: the DB-only write below is already the source of
+	// truth and already works cross-pod, so a best-effort signal to a live
+	// remote owner only HASTENS the kill — never waited on, never affects
+	// this call's outcome.
+	s.signalCancelBestEffort(orgID, runID, run.ExecutorID)
 
 	// No active goroutine — the run may be parked `open` with no subprocess to
 	// kill. Mark it cancelled directly via DB.

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -86,6 +87,35 @@ func (a *App) startWorkers(ctx context.Context) {
 		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
 	}
 
+	// The shared tf_ctl control-plane listener + the cross-pod run-control
+	// workers (TFAC-585). Multi mode only: local mode never wires
+	// SetRunSignals (so the apply loop / purge reaper below are no-ops
+	// there anyway), never builds a backplane, and role=all always
+	// self-holds the brain — nothing ever relays into a local process, so
+	// there is no reason to open a Postgres LISTEN connection at all.
+	// startCtlListener (ctl.go) is the ONE tf_ctl LISTEN per pod, every
+	// role: it routes run-signal doorbells to the spawner, session kicks to
+	// the WS backplane, and trigger/PollSoon relays to handleCtlMessage
+	// (which holder-gates them).
+	if runmode.Current() == runmode.ModeMulti {
+		a.startCtlListener(ctx)
+		// The signal apply loop only makes sense on dispatcher-capable
+		// roles — only they can ever own a run's live process.
+		if a.plan.dispatcher {
+			go a.spawner.RunSignalApplyLoop(ctx, delegate.DefaultSignalApplyScanInterval)
+		}
+		// The purge reaper is system housekeeping, not tied to executor
+		// identity — runs on brain roles like the other reapers/sweepers
+		// (never on a plain executor, avoiding N-executor duplicate sweeps).
+		if a.plan.brain {
+			purgeAge, perr := delegate.ParseRunSignalPurgeAge(os.Getenv("TF_RUN_SIGNAL_PURGE_AFTER"))
+			if perr != nil {
+				appLog.Warn("run signal purge age", "error", perr)
+			}
+			go a.spawner.RunSignalPurgeReaper(ctx, delegate.DefaultRunSignalPurgeInterval, purgeAge)
+		}
+	}
+
 	// Instance-registry heartbeat: every role renews its fleet registry row
 	// on a timer (liveness + version/role visibility; capacity fields only
 	// on executor-capable roles — see SetReportCapacity).
@@ -94,25 +124,25 @@ func (a *App) startWorkers(ctx context.Context) {
 	// WS backplane workers (TFAC-584) — nil in local mode / before
 	// buildWSBackplane wires it, so every branch below is a no-op there.
 	if a.wsBackplane != nil {
-		// Public listener (tf_ws fan-out + tf_ctl kick): every pod that
-		// holds user websocket connections. An executor holds none (its
-		// Hub is a standalone, client-less sink — buildExecutorRuntime),
-		// so it has nothing to fan into and never LISTENs here; it still
-		// PUBLISHES to tf_ws via the spawner's broadcasts on its
-		// client-less hub, which needs no LISTEN connection at all (NOTIFY
-		// rides the pooled admin connection).
+		// Public listener (tf_ws fan-out): every pod that holds user
+		// websocket connections. An executor holds none (its Hub is a
+		// standalone, client-less sink — buildExecutorRuntime), so it has
+		// nothing to fan into and never LISTENs here; it still PUBLISHES
+		// to tf_ws via the spawner's broadcasts on its client-less hub,
+		// which needs no LISTEN connection at all (NOTIFY rides the pooled
+		// admin connection). The tf_ctl session kick no longer rides this
+		// connection — it arrives via the shared tf_ctl listener started
+		// above, routed to the backplane's HandleCtlKick.
 		if a.plan.serveHTTP {
 			go a.wsBackplane.RunPublicListener(ctx)
 			go a.wsBackplane.RunPresenceHeartbeat(ctx, wsbackplane.PresenceHeartbeatIntervalFromEnv())
 			go a.srv.RunSessionRevalidation(ctx, wsbackplane.RevalidateIntervalFromEnv())
 		}
-		// Brain-bound sentinel relay LISTEN (tf_bus): starts/stops with
-		// a.plan.brain, today's stand-in for TFAC-583's lease (see
-		// roleplan.go's brain field doc comment) — single-control-only
-		// until that lands, exactly like every other brain subsystem.
-		if a.plan.brain {
-			go a.wsBackplane.RunBusListener(ctx, a.bus.Publish)
-		}
+		// The brain-bound sentinel relay LISTEN (tf_bus) is NOT started
+		// here: it holds with the lease (startBrain/stopBrain, brain.go),
+		// per spec §5.3's "only the brain LISTENs on tf_bus" — a standby
+		// must not consume the fleet's sentinel stream just to fan it to a
+		// bus with no subscribers.
 		// ws_outbox TTL reaper: deliberately NOT gated on brain — spec
 		// §11 decision 5 calls this too trivial to route through the
 		// lease, and `DELETE WHERE created_at < cutoff` is safe under any

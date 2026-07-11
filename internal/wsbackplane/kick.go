@@ -13,7 +13,7 @@ import (
 // connections themselves first, via websocket.Hub.CloseUserConnections
 // directly — PublishKick only carries the command to the rest of the
 // fleet, and deliberately never calls CloseUserConnections itself: doing
-// so would make the remote-dispatch path (handleCtlNotification, which
+// so would make the remote-dispatch path (HandleCtlKick, which
 // DOES call CloseUserConnections) re-publish on every receipt, echoing
 // the kick around the fleet forever. Keeping this method 100%
 // Hub-unaware is what makes that impossible by construction.
@@ -30,6 +30,7 @@ import (
 // the latency optimization").
 func (b *Backplane) PublishKick(ctx context.Context, userID, sid, orgID string, code int, reason string) {
 	env := kickEnvelope{
+		Kind:             "kick",
 		OriginInstanceID: b.originID,
 		UserID:           userID,
 		Sid:              sid,
@@ -42,11 +43,14 @@ func (b *Backplane) PublishKick(ctx context.Context, userID, sid, orgID string, 
 	}
 }
 
-// handleCtlNotification applies a received tf_ctl kick envelope: closes
-// this pod's matching local sockets via CloseUserConnections directly —
-// never PublishKick, which would re-broadcast it (see PublishKick's doc
-// comment).
-func (b *Backplane) handleCtlNotification(payload string) {
+// HandleCtlKick applies a received tf_ctl kick envelope: closes this
+// pod's matching local sockets via CloseUserConnections directly — never
+// PublishKick, which would re-broadcast it (see PublishKick's doc
+// comment). Exported for internal/app's unified tf_ctl dispatcher
+// (ctl.go), which owns the process's single tf_ctl LISTEN connection and
+// routes kind:"kick" payloads here — this package no longer LISTENs on
+// tf_ctl itself (RunPublicListener is tf_ws-only).
+func (b *Backplane) HandleCtlKick(payload string) {
 	var env kickEnvelope
 	if err := json.Unmarshal([]byte(payload), &env); err != nil {
 		backplaneLog.Warn("tf_ctl: malformed envelope; dropping", "error", err)

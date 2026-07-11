@@ -74,7 +74,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 	// A getProc-nil → GetSystem race (the run registers a process between the two
 	// reads) can't slip a message past: a now-running run reads as not resumable,
 	// and a concurrent resume/approval that already moved the row makes
-	// ResumeOpenRun's MarkResuming compare-and-swap lose the race →
+	// ResumeOpenRun's MarkQueuedForResume compare-and-swap lose the race →
 	// ErrRunNotResumable. Both map to 409, so the client just re-reads and retries.
 	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
 	if err != nil {
@@ -83,11 +83,15 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 	if run == nil || !resumableState(run.Status, run.Outcome) {
 		return ErrRunNotSteerable
 	}
-	// Resuming a terminal/paused run: prepend the out-of-band <system-note> blocks
-	// that accumulated while it wasn't running, ahead of the user's text. The live
-	// branch above needs none — a warm run was steered each event as it happened.
-	text = s.resumeSystemPrepends(ctx, orgID, run) + text
-	return s.ResumeOpenRun(orgID, runID, text, userID)
+	// Note: unlike the live-steer branch above, the out-of-band
+	// <system-note> prepends (staged injections + artifact ledger) are NOT
+	// composed here. Resume-by-enqueue (TFAC-585) defers actual delivery
+	// to whichever executor eventually claims the re-queued row — composing
+	// the prepend now would destructively flush the staged-injection queue
+	// at enqueue time, silently losing anything staged in the gap before
+	// the claim. Spawner.dispatchResumeClaim composes it immediately
+	// before delivery instead.
+	return s.ResumeOpenRun(ctx, orgID, runID, text, userID)
 }
 
 // resumeSystemPrepends assembles the out-of-band <system-note> blocks prepended

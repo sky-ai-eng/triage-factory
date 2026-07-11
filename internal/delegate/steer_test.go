@@ -5,11 +5,9 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -64,45 +62,33 @@ func TestSendMessage_LiveRoutesToSteer(t *testing.T) {
 }
 
 // TestSendMessage_OpenRoutesToResume: a run with no live process but status
-// `open` is woken via ResumeOpenRun. Proven by the run leaving `open` — a
-// durable snapshot satisfies the workspace pre-flight, then the resume goroutine
-// fails fast at the cold rehydrate of the stub blob (no subprocess), exactly as
-// in TestResumeOpenRun_InitiatesResume; what matters is that resume was entered.
+// `open` is woken via ResumeOpenRun — resume-by-enqueue (TFAC-585), so
+// "woken" means the row flips to `queued` and the message lands on
+// run_pending_input, not that a goroutine ran. Delivery is a separate,
+// later concern exercised by TestDispatchResumeClaim_DeliversRecordedInput.
 func TestSendMessage_OpenRoutesToResume(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-open", "sess-open", "/tmp/does-not-exist-open")
 	if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-open'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	wireBlobStore(t, s)
-	putTestSnapshot(t, s, blueprintRunIDForRun(t, database, "r-open"))
 
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-open", runmode.LocalDefaultUserID, "go on"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	// Join the resume goroutine: it clears its s.cancels entry in the terminal
-	// defer after all DB writes, so waiting on that avoids racing the DB close.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		s.mu.Lock()
-		_, active := s.cancels["r-open"]
-		s.mu.Unlock()
-		if !active {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 	var status string
 	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-open'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
-	if status == "open" {
-		t.Error("run stayed open — SendMessage did not route to ResumeOpenRun")
+	if status != "queued" {
+		t.Errorf("status = %q, want queued — SendMessage did not route to ResumeOpenRun's resume-by-enqueue", status)
 	}
-	t.Logf("final run status after open-resume: %s", status)
+	msg, _, ok, err := s.pendingInput.Consume(context.Background(), runmode.LocalDefaultOrgID, "r-open")
+	if err != nil || !ok || msg != "go on" {
+		t.Errorf("pending input = (ok=%v msg=%q err=%v), want (true, %q, nil)", ok, msg, err, "go on")
+	}
 }
 
 // TestSendMessage_TerminalNotSteerable: a terminal finish run (no live process,
@@ -162,7 +148,13 @@ func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	if errors.Is(err, ErrRunNotSteerable) {
 		t.Errorf("completed+abort run rejected at the steerable gate: %v", err)
 	}
-	awaitResumeGoroutine(t, s, "r-ab")
+	var status string
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-ab'`).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "queued" {
+		t.Errorf("status = %q, want queued (resume-by-enqueue)", status)
+	}
 }
 
 // TestSendMessage_CompletedFinishNotSteerable: a completed+finish run is NOT
@@ -179,25 +171,6 @@ func TestSendMessage_CompletedFinishNotSteerable(t *testing.T) {
 	if !errors.Is(err, ErrRunNotSteerable) {
 		t.Errorf("err = %v, want ErrRunNotSteerable (finish runs are excluded from resume)", err)
 	}
-}
-
-// awaitResumeGoroutine joins a resume goroutine deterministically: ResumeOpenRun
-// registers s.cancels[runID] before spawning and clears it in the terminal defer
-// (after all DB writes), so waiting for that entry to clear avoids racing the
-// in-memory DB close on cleanup. A no-op when no goroutine was spawned.
-func awaitResumeGoroutine(t *testing.T, s *Spawner, runID string) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		s.mu.Lock()
-		_, active := s.cancels[runID]
-		s.mu.Unlock()
-		if !active {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("resume goroutine for %s did not finish in time", runID)
 }
 
 // TestSendMessage_MissingRunNotSteerable: an unknown run id (no process, no

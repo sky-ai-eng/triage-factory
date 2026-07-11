@@ -76,12 +76,20 @@ func (a *App) dispatchManagerTrigger(manager, orgID string, force bool) {
 	}
 }
 
-// handleCtlMessage is the tf_ctl LISTEN callback (brain.go's
-// startCtlListener). This process IS the brain whenever it fires — the
-// listener only runs while holding the lease — so every message
-// dispatches straight to the in-process manager/poller with no further
-// holder check.
+// handleCtlMessage dispatches a trigger/pollsoon relay message received
+// on tf_ctl (routed here by dispatchCtl, ctl.go). Since TFAC-585's tf_ctl
+// consolidation the listener is process-lifetime and role-wide — every
+// multi-mode pod hears every relay message — so "only the brain acts on
+// relay traffic" is enforced by the holder gate below, not by
+// subscription scope. publishCtl is only ever called by a non-holder and
+// NOTIFY fans out to every listener, so exactly the current holder acts
+// on each message; a message published in a holderless gap (mid-failover)
+// is dropped by every pod — the relay is lossy by contract (spec §3), and
+// the next system:poll:* sentinel re-kicks whatever it carried.
 func (a *App) handleCtlMessage(msg ctlbus.Message) {
+	if !a.isBrainHolder() {
+		return
+	}
 	switch msg.Kind {
 	case "trigger":
 		a.dispatchManagerTrigger(msg.Manager, msg.OrgID, msg.Force)
@@ -90,7 +98,7 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 			a.pollerMgr.PollSoon(msg.Source, msg.OrgID)
 		}
 	default:
-		appLog.Warn("tf_ctl: unknown message kind", "kind", msg.Kind)
+		appLog.Warn("tf_ctl: unknown relay message kind", "kind", msg.Kind)
 	}
 }
 

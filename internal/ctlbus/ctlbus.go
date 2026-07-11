@@ -1,11 +1,19 @@
 // Package ctlbus is the cross-process trigger/PollSoon relay (TFAC-583,
 // spec §5.3): non-leader callers of a background-brain manager's
 // Trigger(orgID) or the poller's PollSoon(source, orgID) publish a
-// message on Postgres' tf_ctl NOTIFY channel; the lease holder LISTENs
-// and dispatches it to its in-process manager.
+// message on Postgres' tf_ctl NOTIFY channel; the pod currently running
+// the brain dispatches it to its in-process manager.
 //
-// This is deliberately lossy — the spec is explicit: "a dropped tf_ctl
-// trigger costs one deferred scoring pass (the next system:poll:*
+// This package owns only the PUBLISH half (plus the channel name and the
+// Message wire shape). The LISTEN half is internal/app's unified tf_ctl
+// dispatcher (internal/app/ctl.go) — one dedicated connection per pod
+// serving every tf_ctl consumer (relay messages, run-signal doorbells,
+// session kicks), with the "only the brain acts on relay traffic" rule
+// enforced by a holder gate at dispatch (internal/app/relay.go's
+// handleCtlMessage) rather than by lease-scoped subscription.
+//
+// The relay is deliberately lossy — the spec is explicit: "a dropped
+// tf_ctl trigger costs one deferred scoring pass (the next system:poll:*
 // sentinel re-kicks it). No outbox, no retry, no ordering guarantee. Do
 // not build reliability here." NOTIFY payloads are also not durable
 // across a LISTEN reconnect, which is the accepted cost of the simple
@@ -17,17 +25,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"time"
-
-	"github.com/jackc/pgx/v5"
-
-	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
-var ctlbusLog = logging.Component("ctlbus")
-
 // Channel is the Postgres NOTIFY/LISTEN channel name every relay message
-// rides.
+// rides. The same channel carries TFAC-584's session kicks and TFAC-585's
+// run-signal doorbells — payloads are discriminated by their JSON "kind"
+// field (see internal/app/ctl.go), so Message kinds must stay disjoint
+// from theirs ("kick", "new", "ack").
 const Channel = "tf_ctl"
 
 // Message is the relay payload. Kind selects which field group applies:
@@ -62,64 +66,4 @@ func Publish(ctx context.Context, db execer, msg Message) error {
 		return fmt.Errorf("ctlbus: publish: %w", err)
 	}
 	return nil
-}
-
-// Listen holds a dedicated session-mode connection LISTENing on Channel
-// and invokes handle for every message received, until ctx is cancelled.
-// Reconnects with exponential backoff on connection loss — per the
-// package doc, a reconnect gap is an accepted, self-healing loss (the
-// next system:poll:* sentinel re-kicks whatever a dropped trigger would
-// have), not a correctness bug. Blocks; callers run it in its own
-// goroutine.
-func Listen(ctx context.Context, dsn string, handle func(Message)) {
-	backoff := time.Second
-	const maxBackoff = 30 * time.Second
-	for ctx.Err() == nil {
-		err := listenOnce(ctx, dsn, handle)
-		if ctx.Err() != nil {
-			return
-		}
-		if err != nil {
-			ctlbusLog.Warn("tf_ctl listen connection lost; reconnecting", "error", err, "backoff", backoff)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-			}
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-			continue
-		}
-		backoff = time.Second
-	}
-}
-
-// listenOnce opens one dedicated connection, LISTENs, and processes
-// notifications until the connection errors or ctx is cancelled.
-func listenOnce(ctx context.Context, dsn string, handle func(Message)) error {
-	conn, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		return fmt.Errorf("connect: %w", err)
-	}
-	defer func() { _ = conn.Close(context.Background()) }()
-
-	if _, err := conn.Exec(ctx, "LISTEN "+Channel); err != nil {
-		return fmt.Errorf("listen: %w", err)
-	}
-	ctlbusLog.Info("tf_ctl listener ready")
-
-	for {
-		notif, err := conn.WaitForNotification(ctx)
-		if err != nil {
-			return err // ctx cancellation surfaces here too; the caller checks ctx.Err()
-		}
-		var msg Message
-		if err := json.Unmarshal([]byte(notif.Payload), &msg); err != nil {
-			ctlbusLog.Warn("tf_ctl: malformed message, dropping", "error", err, "payload", notif.Payload)
-			continue
-		}
-		handle(msg)
-	}
 }

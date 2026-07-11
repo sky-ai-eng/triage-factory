@@ -277,6 +277,25 @@ func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID, ex
 	return markResuming(ctx, s.admin, orgID, runID, executorID, bootEpoch)
 }
 
+// MarkQueuedForResume is resume-by-enqueue's status flip (TFAC-585): see
+// the interface doc comment. Always claims-scoped — resume is always
+// user-initiated, so there is no admin-pool "...System" variant, mirroring
+// how ResumeOpenRun already routes MarkResuming through
+// SyntheticClaimsWithTx exclusively.
+func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error) {
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE runs SET status = 'queued', parked_at = NULL, claimed_at = NULL
+		WHERE org_id = $1 AND id = $2
+		  AND (status = 'open'
+		       OR (status = 'completed' AND outcome = 'abort'))
+	`, orgID, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {
 	// Resumable-state runs (open / completed+abort) grouped by their shared
 	// snapshot key (org, blueprint_run_id); a key is reapable once its newest

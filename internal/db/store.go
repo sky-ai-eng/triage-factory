@@ -346,6 +346,20 @@ type Stores struct {
 	// SQLite is N=1: one row, epoch bumping per restart.
 	Instances InstanceStore
 
+	// RunSignals owns the run_signals table — the cross-pod run-control
+	// outbox (TFAC-585). Postgres only: the SQLite impl is a stub
+	// returning ErrNotApplicableInLocal from every method, mirroring
+	// MarketplaceStore/InvitesStore — local mode is always its own run's
+	// owner, so no code path may reach this store there.
+	RunSignals RunSignalStore
+
+	// RunPendingInput owns the run_pending_input table — the durable half
+	// of resume-by-enqueue (TFAC-585): the message recorded before a
+	// parked run's continuation is re-queued as ordinary claimable work.
+	// Both dialects (unlike RunSignals): local mode's dispatcher claims
+	// its own resumed runs through the identical queue path.
+	RunPendingInput RunPendingInputStore
+
 	// PollReadiness owns the poll_readiness table — the org-scoped
 	// readiness gate for /api/jira/stock and the one-shot "config took
 	// effect" announce toast (TFAC-583). Admin-pool-only, same shape as

@@ -59,10 +59,10 @@ func (a *App) openStores(ctx context.Context) error {
 		if adminDSN == "" {
 			return errors.New("TF_MODE=multi requires TF_DATABASE_URL")
 		}
-		// Retained for the tf_ctl relay's dedicated LISTEN connection
-		// (internal/ctlbus), which needs the raw DSN — a pooled *sql.DB
-		// can't hold a session-mode LISTEN. See leasewire.go/brain.go.
-		a.adminDSN = adminDSN
+		// The dedicated LISTEN connections (the shared tf_ctl listener in
+		// ctl.go, the WS backplane's tf_ws/tf_bus listeners) resolve their
+		// own session-mode DSN via wsbackplane.DirectDSN — a pooled *sql.DB
+		// can't hold a session-mode LISTEN, so no raw-DSN field is kept here.
 		authPassword := os.Getenv("TF_AUTHENTICATOR_PASSWORD")
 		if authPassword == "" {
 			return errors.New("TF_MODE=multi requires TF_AUTHENTICATOR_PASSWORD")

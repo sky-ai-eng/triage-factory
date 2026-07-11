@@ -27,10 +27,11 @@ import (
 //     Backplane") the moment someone actually checked.
 //
 // This never fails boot: the actual LISTEN connections open lazily
-// inside the RunPublicListener/RunBusListener goroutines startWorkers
-// starts, which reconnect with their own backoff — a Backplane that can
-// never reach Postgres just leaves every pod on local-only fan-out
-// (TFAC-584's "keep serving" contract), never crashes it.
+// inside the RunPublicListener (startWorkers) / RunBusListener
+// (startBrain, lease-scoped) goroutines, which reconnect with their own
+// backoff — a Backplane that can never reach Postgres just leaves every
+// pod on local-only fan-out (TFAC-584's "keep serving" contract), never
+// crashes it.
 func (a *App) buildWSBackplane() {
 	if runmode.Current() != runmode.ModeMulti || a.plan.role == runmode.RoleAll {
 		return

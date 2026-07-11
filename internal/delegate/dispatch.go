@@ -249,6 +249,23 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 		return
 	}
 
+	// Resume-by-enqueue (TFAC-585): a pending-input row means this claim is
+	// NOT a fresh/crash-reclaimed blueprint step — it's a parked/terminal-
+	// resumable run woken by a user message and re-queued onto its own
+	// row (ResumeOpenRun/SendMessage). Consume (destructive) before
+	// touching any step machinery below, so the input is delivered
+	// exactly once even across a crash-and-reclaim of this same row (the
+	// row is only deleted once this spawn assembly actually reads it —
+	// see the ticket's crash-window analysis).
+	if s.pendingInput != nil {
+		if msg, userID, ok, perr := s.pendingInput.Consume(ctx, orgID, run.ID); perr != nil {
+			dispatchLog.Warn("consume pending input failed; falling through to the blueprint-step path", "run", run.ID, "error", perr)
+		} else if ok {
+			s.dispatchResumeClaim(ctx, run, task, msg, userID)
+			return
+		}
+	}
+
 	// Sequence off the plan frozen at mint (br.StepPlan), not the live
 	// blueprint_steps/prompts — an edit to the blueprint mid-flight must not
 	// change what this run executes. The step + prompt are reconstructed from
@@ -368,6 +385,126 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	stepRun.CreatorUserID = run.CreatorUserID
 	stepRun.Model = run.Model
 	s.reactToStepTerminal(orgID, br, *stepRun, cfg, startTime)
+}
+
+// dispatchResumeClaim delivers a resume-by-enqueue claim's durably-recorded
+// message (TFAC-585): the delivery half of what ResumeOpenRun's in-process
+// goroutine used to do end-to-end. No blueprint-step machinery runs here —
+// a resumed run isn't advancing to a new step, it's continuing its
+// current one, so this bypasses the mission/skill/plan logic entirely and
+// goes straight to ResumeWithMessage, exactly like the retired goroutine
+// did. Any executor may run this — ensureWorkspace warm-reuses the
+// worktree if this IS the executor that parked it, else cold-rehydrates
+// from the durable S3 snapshot.
+func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.AgentRun, task *domain.Task, agentMessage, userID string) {
+	orgID := run.OrgID
+	blueprintRunID := run.BlueprintRunID
+
+	// disposed is set once processCompletion + the inline finalize/re-park
+	// below have run. It stays false on an early failure/cancel exit,
+	// which is the only case the defer's blueprint re-finalize has to
+	// cover — mirrors the retired in-process goroutine's own
+	// disposed/defer pair exactly (see git history), just relocated to
+	// the claim path.
+	var disposed bool
+	defer func() {
+		// An early exit (missing fields / workspace failure / cancel
+		// before processCompletion) leaves the step terminal but the
+		// blueprint un-finalized. Without this, the blueprint strands
+		// 'running' and its snapshot is orphaned (the reaper skips it
+		// once the run is no longer resumable). ResumeBlueprintAfterResume
+		// is the safe single authority: a cancelled/failed step maps to a
+		// terminal blueprint (terminateBlueprint discards the snapshot); a
+		// still-parked (open) step or an already-terminal blueprint
+		// early-returns. The success path sets disposed=true, so this
+		// never doubles up.
+		if blueprintRunID != "" && !disposed {
+			s.ResumeBlueprintAfterResume(orgID, run.ID, userID)
+		}
+	}()
+
+	if run.SessionID == "" || run.WorktreePath == "" || run.Model == "" {
+		s.failRun(orgID, run.ID, task.ID, "manual", userID, "resume: claimed run missing session/worktree/model", domain.RunFailureUnclassified)
+		return
+	}
+
+	owner, repo := "", ""
+	if entity, eerr := s.entities.GetSystem(ctx, orgID, task.EntityID); eerr == nil && entity != nil {
+		owner, repo = parseOwnerRepo(entity.SourceID)
+	}
+	var extraTools string
+	if run.PromptID != "" {
+		if p, perr := s.prompts.GetSystem(ctx, orgID, run.PromptID); perr == nil && p != nil {
+			extraTools = s.collectExtraTools(p.AllowedTools)
+		}
+	}
+	namespace := memoryNamespace(blueprintRunID, run.ID)
+
+	// Per-run cancel handle, mirroring dispatchClaimedRun's own — a
+	// Cancel() arriving in the narrow window before this registers falls
+	// to the DB-only path (the same pre-existing accepted race a fresh
+	// step claim has).
+	stepCtx, stepCancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.cancels[run.ID] = stepCancel
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.cancels, run.ID)
+		s.mu.Unlock()
+		stepCancel()
+	}()
+	if stepCtx.Err() != nil {
+		s.markCancelledAfterResume(orgID, run.ID, userID)
+		return
+	}
+
+	resumeCwd, werr := s.ensureWorkspace(stepCtx, orgID, run, owner, repo, "")
+	if werr != nil {
+		s.failRun(orgID, run.ID, task.ID, "manual", userID, "ensure workspace before resume failed: "+werr.Error(), domain.RunFailureUnclassified)
+		return
+	}
+
+	repoEnv := ""
+	if owner != "" && repo != "" {
+		repoEnv = owner + "/" + repo
+	}
+	// Prepend the out-of-band <system-note> blocks that accumulated while
+	// the run wasn't running — deferred to here (claim time), not the
+	// enqueue step, so injections staged AFTER the enqueue are still
+	// picked up (the flush is destructive, so composing it early would
+	// risk losing anything staged in the gap).
+	message := s.resumeSystemPrepends(stepCtx, orgID, run) + agentMessage
+
+	outcome, rerr := s.ResumeWithMessage(stepCtx, orgID, run.ID, run.SessionID, resumeCwd, message, ResumeOptions{
+		Model:             run.Model,
+		RepoEnv:           repoEnv,
+		ExtraAllowedTools: extraTools,
+		Namespace:         namespace,
+		TeamID:            run.TeamID,
+	}, "manual", userID)
+	if stepCtx.Err() != nil {
+		s.markCancelledAfterResume(orgID, run.ID, userID)
+		return
+	}
+	if rerr != nil {
+		s.failRun(orgID, run.ID, task.ID, "manual", userID, "resume failed: "+rerr.Error(), classifyFailureKind(rerr))
+		return
+	}
+	if outcome.Completion == nil {
+		s.failRun(orgID, run.ID, task.ID, "manual", userID, "resume produced no completion", domain.RunFailureNoResult)
+		return
+	}
+
+	parked := s.processCompletion(stepCtx, orgID, run.ID, blueprintRunID, *task, outcome.Completion, resumeCwd, run.SessionID, "manual", userID)
+	// The resumed step reached a terminal state (it didn't go open again)
+	// → hand back to the blueprint orchestrator to finalize.
+	if !parked {
+		s.ResumeBlueprintAfterResume(orgID, run.ID, userID)
+	}
+	// The body owns the disposition now (re-parked, or finalized above),
+	// so the defer's re-finalize must not fire on top of it.
+	disposed = true
 }
 
 // reactToStepTerminal is the blueprint state-machine reactor: given a step run

@@ -121,6 +121,23 @@ type AgentRunStore interface {
 	// NULL for both columns (the un-wired test-spawner path).
 	MarkResuming(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error)
 
+	// MarkQueuedForResume is resume-by-enqueue's (TFAC-585) status flip:
+	// the same (status, outcome) compare-and-swap gate as MarkResuming
+	// (every non-finish parked/terminal state — `open`, or `completed`
+	// with outcome `abort`), but the target is `queued`, not `running` —
+	// resume-by-enqueue re-queues the SAME row as ordinary claimable work
+	// instead of spawning an in-process goroutine (decision log #7: no
+	// in-process resume variant survives, in any mode). Deliberately does
+	// NOT stamp executor_id/boot_epoch — ClaimNextRun stamps ownership
+	// atomically at the actual claim, exactly like a fresh EnqueueRun'd
+	// row; stamping here would attribute the row to this pod even though
+	// any executor may claim it. Clears parked_at (mirrors MarkResuming)
+	// and claimed_at (this is a fresh claimable row again, not a stale
+	// claim). ok=false means the run is no longer resumable (a concurrent
+	// resume/cancel/claim already moved it) — the caller maps the miss to
+	// 409, same as MarkResuming.
+	MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error)
+
 	// SetSession stores the Claude Code session_id captured from
 	// the agent's init event. Persisted mid-run, before any
 	// terminal state, so the write-gate retry loop can

@@ -2,17 +2,21 @@ package ctlbus_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify"
 )
 
-// TestListenPublish_RoundTrip pins the real Postgres NOTIFY/LISTEN
-// round-trip: a message Published on the pooled admin connection reaches
-// a Listen()er on a dedicated connection, with its fields intact.
-func TestListenPublish_RoundTrip(t *testing.T) {
+// TestPublish_RoundTrip pins the real Postgres NOTIFY round-trip for
+// Publish's wire format: a Message Published on the pooled admin
+// connection reaches a tf_ctl listener — a pgnotify.Listener, the same
+// primitive internal/app's unified tf_ctl dispatcher consumes through —
+// with its fields intact after the JSON round-trip.
+func TestPublish_RoundTrip(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
@@ -28,8 +32,16 @@ func TestListenPublish_RoundTrip(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	received := make(chan ctlbus.Message, 1)
-	go ctlbus.Listen(ctx, dsn, func(m ctlbus.Message) { received <- m })
+	received := make(chan ctlbus.Message, 8)
+	listener := pgnotify.NewListener(dsn, ctlbus.Channel, func(payload string) {
+		var m ctlbus.Message
+		if err := json.Unmarshal([]byte(payload), &m); err != nil {
+			t.Errorf("received payload did not unmarshal as ctlbus.Message: %v (payload %q)", err, payload)
+			return
+		}
+		received <- m
+	})
+	go listener.Run(ctx)
 
 	// Give the listener a moment to establish its LISTEN before publishing
 	// — NOTIFY delivers only to sessions already listening.
@@ -54,12 +66,20 @@ listening:
 		t.Fatalf("publish: %v", err)
 	}
 
-	select {
-	case got := <-received:
-		if got != want {
-			t.Fatalf("received = %+v, want %+v", got, want)
+	// Drain any extra pings still in flight from the readiness loop before
+	// asserting on the trigger message.
+	for {
+		select {
+		case got := <-received:
+			if got.Kind == "ping" {
+				continue
+			}
+			if got != want {
+				t.Fatalf("received = %+v, want %+v", got, want)
+			}
+			return
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for the relayed message")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for the relayed message")
 	}
 }
