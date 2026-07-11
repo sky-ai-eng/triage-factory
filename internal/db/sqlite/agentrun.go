@@ -215,7 +215,8 @@ func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID st
 		return false, err
 	}
 	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', parked_at = NULL, claimed_at = NULL
+		UPDATE runs SET status = 'queued', parked_at = NULL, claimed_at = NULL,
+		                executor_id = NULL, boot_epoch = NULL
 		WHERE id = ?
 		  AND (status = 'open'
 		       OR (status = 'completed' AND outcome = 'abort'))

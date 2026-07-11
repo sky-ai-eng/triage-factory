@@ -215,16 +215,18 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 // TestDispatchResumeClaim_WorkspaceFailureFinalizesBlueprint is the
 // resume-by-enqueue counterpart of the retired in-process goroutine's
 // early-exit regression test: a resume claim that fails at ensureWorkspace
-// (no warm worktree, no snapshot) must finalize the blueprint and discard
-// its snapshot — not strand the blueprint_run `running` with a blob the
-// reaper will never see.
+// must finalize the blueprint and discard its snapshot — not strand the
+// blueprint_run `running` with a blob the reaper will never see. A snapshot
+// is seeded (garbage content) so the enqueue-time recoverability pre-flight
+// passes but the actual rehydrate fails at claim — the realistic
+// enqueue-then-workspace-lost race, not an already-expired workspace (which
+// ResumeOpenRun now refuses up front — see the sibling test).
 func TestDispatchResumeClaim_WorkspaceFailureFinalizesBlueprint(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, run, _ := setupAdvanceFixture(t, "open-strand")
 	bpr := blueprintRunIDForRun(t, database, run)
 	wireBlobStore(t, s)
-	// A snapshot passes... no: deliberately NO snapshot AND no warm
-	// worktree, so ensureWorkspace fails inside dispatchResumeClaim.
+	putTestSnapshot(t, s, bpr) // garbage blob: passes Exists, fails rehydrate
 	if _, err := database.Exec(`UPDATE runs SET status='open', worktree_path='/tmp/does-not-exist-open-strand' WHERE id=?`, run); err != nil {
 		t.Fatalf("park open: %v", err)
 	}
@@ -242,4 +244,48 @@ func TestDispatchResumeClaim_WorkspaceFailureFinalizesBlueprint(t *testing.T) {
 		t.Errorf("blueprint_run stranded 'running' after a failed resume claim; want finalized")
 	}
 	assertSnapshotPresent(t, s, bpr, false) // discarded, not orphaned
+}
+
+// TestResumeOpenRun_ExpiredWorkspaceRefusedAtEnqueue pins the workspace-expiry
+// contract: a wake whose workspace is gone for good (no warm worktree, no
+// durable snapshot) is refused with ErrWorkspaceExpired at enqueue, with NO
+// side effect — the run stays resumable, no pending-input row is recorded, and
+// the blueprint is left running. Without the pre-flight the flip succeeds and
+// the run is destroyed at claim time (a generic failRun) instead of the caller
+// seeing a clean 410.
+func TestResumeOpenRun_ExpiredWorkspaceRefusedAtEnqueue(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	s, database, run, _ := setupAdvanceFixture(t, "expired")
+	bpr := blueprintRunIDForRun(t, database, run)
+	wireBlobStore(t, s) // storage present but empty: no snapshot to recover from
+	if _, err := database.Exec(`UPDATE runs SET status='open', worktree_path='/tmp/does-not-exist-expired' WHERE id=?`, run); err != nil {
+		t.Fatalf("park open: %v", err)
+	}
+
+	err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, run, "carry on", runmode.LocalDefaultUserID)
+	if !errors.Is(err, ErrWorkspaceExpired) {
+		t.Fatalf("ResumeOpenRun err = %v, want ErrWorkspaceExpired", err)
+	}
+
+	var status string
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id=?`, run).Scan(&status); err != nil {
+		t.Fatalf("read run status: %v", err)
+	}
+	if status != "open" {
+		t.Errorf("run status = %q after refused wake; want unchanged 'open'", status)
+	}
+	var pending int
+	if err := database.QueryRow(`SELECT count(*) FROM run_pending_input WHERE run_id=?`, run).Scan(&pending); err != nil {
+		t.Fatalf("count pending input: %v", err)
+	}
+	if pending != 0 {
+		t.Errorf("run_pending_input rows = %d after refused wake; want 0 (no side effect)", pending)
+	}
+	var bpStatus string
+	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id=?`, bpr).Scan(&bpStatus); err != nil {
+		t.Fatalf("read blueprint_run status: %v", err)
+	}
+	if bpStatus != "running" {
+		t.Errorf("blueprint_run status = %q after refused wake; want untouched 'running'", bpStatus)
+	}
 }

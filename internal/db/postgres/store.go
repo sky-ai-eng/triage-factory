@@ -430,6 +430,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		AuthEvents:      newAuthEventStore(tx),
 		Marketplace:     newMarketplaceStore(tx, tx),
 		Instances:       newInstanceStore(tx),
+		RunPendingInput: newRunPendingInputStore(tx),
 		Ext:             db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }
