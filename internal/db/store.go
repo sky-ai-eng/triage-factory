@@ -433,6 +433,7 @@ type TxStores struct {
 	StagedInjections StagedInjectionStore
 	Marketplace      MarketplaceStore
 	Instances        InstanceStore
+	RunPendingInput  RunPendingInputStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same

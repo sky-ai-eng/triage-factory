@@ -279,12 +279,14 @@ func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID, ex
 
 // MarkQueuedForResume is resume-by-enqueue's status flip (TFAC-585): see
 // the interface doc comment. Always claims-scoped — resume is always
-// user-initiated, so there is no admin-pool "...System" variant, mirroring
-// how ResumeOpenRun already routes MarkResuming through
-// SyntheticClaimsWithTx exclusively.
+// user-initiated, so there is no admin-pool "...System" variant. It clears
+// executor_id/boot_epoch alongside the flip: a queued row has no owner, the
+// same invariant RequeueRun/ResetProcessingRuns hold, and the fleet reaper's
+// ownership sweep would otherwise mis-attribute this row to its prior owner.
 func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', parked_at = NULL, claimed_at = NULL
+		UPDATE runs SET status = 'queued', parked_at = NULL, claimed_at = NULL,
+		                executor_id = NULL, boot_epoch = NULL
 		WHERE org_id = $1 AND id = $2
 		  AND (status = 'open'
 		       OR (status = 'completed' AND outcome = 'abort'))

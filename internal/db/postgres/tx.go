@@ -267,6 +267,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// RLS for its cross-team aggregate, mirroring Spend/ExternalActions'
 		// split.
 		Marketplace: newMarketplaceStore(tx, s.admin),
+		// RunPendingInput: bound to the claims tx (not s.admin) so a resume
+		// wake's input write commits atomically with its status flip under the
+		// resuming user's claims — the RLS policy admits it via the run's own
+		// visibility. Consume (claim time) runs system-side off the top-level
+		// store, never this tx-bound handle.
+		RunPendingInput: newRunPendingInputStore(tx),
 		// Opaque extension bundles (the Enterprise Edition SSO stores) built
 		// from the same (app=tx, admin=s.admin) handles, so their app/admin
 		// pool split is identical to core's own stores — the login-time reads

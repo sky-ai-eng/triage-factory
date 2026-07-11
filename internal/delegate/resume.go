@@ -24,7 +24,7 @@ import (
 // ErrRunNotResumable is returned by ResumeOpenRun when the run can't be
 // resumed in its current state — typically a concurrent cancel, approval, or a
 // competing resume moved it between the caller's validation read and our status
-// flip (MarkResuming only flips a resumable run: open / completed+abort).
+// flip (MarkQueuedForResume only flips a resumable run: open / completed+abort).
 // Callers map this to 409 Conflict so the client can refresh and see the actual
 // state.
 var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
@@ -43,15 +43,15 @@ var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired a
 // goroutine spawns, in ANY mode (the previous in-process implementation
 // is retired entirely, TF_ROLE=all included). This method:
 //  1. validates the run is resumable (session id, worktree path, model)
-//  2. durably records agentMessage on run_pending_input, keyed by run_id
-//     (an idempotent upsert — a retried call after a failed flip just
-//     overwrites its own prior write)
-//  3. flips the run's status back to `queued` (a (status, outcome)
-//     compare-and-swap race guard, MarkQueuedForResume), and — for a
-//     completed+abort run whose blueprint already terminated aborted —
-//     re-opens that blueprint in the same tx, exactly like the retired
-//     goroutine did, so the eventual resumed step can re-finalize it
-//  4. nudges the dispatcher (a ~ms same-process wake at TF_ROLE=all; a
+//     and that its workspace can still be recovered — a warm worktree or a
+//     durable snapshot (else ErrWorkspaceExpired → 410, with no side effect)
+//  2. in ONE tx: flips the run's status back to `queued` (a (status,
+//     outcome) compare-and-swap race guard, MarkQueuedForResume), records
+//     agentMessage on run_pending_input, and — for a completed+abort run
+//     whose blueprint already terminated aborted — re-opens that blueprint.
+//     Binding the input write to the winning flip is what keeps concurrent
+//     wakes from persisting a loser's message for a later claim to deliver
+//  3. nudges the dispatcher (a ~ms same-process wake at TF_ROLE=all; a
 //     cross-pod wake is out of scope here — the claiming executor's own
 //     scan-interval backstop picks the row up, per the ticket's accepted
 //     "wake latency traverses the queue" decision)
@@ -104,14 +104,12 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 	if run.Model == "" {
 		return fmt.Errorf("run has no model; cannot resume")
 	}
-
-	// Step 1: durably record the input BEFORE the requeue flip. An
-	// idempotent upsert keyed by run_id — the documented crash-window
-	// contract: if the flip below fails (or this process crashes before
-	// reaching it), the caller's retry just re-upserts the same input,
-	// never accumulating a second row.
-	if err := s.pendingInput.Store(ctx, orgID, runID, userID, agentMessage); err != nil {
-		return fmt.Errorf("record pending input: %w", err)
+	// Refuse a wake whose workspace is gone for good with no side effect, so
+	// the caller sees 410 Gone. Without this the flip below succeeds and the
+	// run dies at claim time (a generic failRun) instead — turning an
+	// expected, recoverable "this workspace expired" into a destroyed run.
+	if !s.workspaceRecoverable(ctx, orgID, run) {
+		return ErrWorkspaceExpired
 	}
 
 	// A completed+abort run's blueprint already terminated (aborted) when
@@ -142,7 +140,14 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 		}
 		flipped = f
 		if !f {
-			return nil // lost the wake CAS — nothing to re-open
+			return nil // lost the wake CAS — no winner, so no input to record
+		}
+		// Record the input in the SAME tx as the winning flip. Binding the
+		// write to the CAS is what makes concurrent wakes safe: a loser rolls
+		// this back, so only the winner's message ever persists and no orphan
+		// row survives a lost race for a later claim to mis-deliver.
+		if sErr := ts.RunPendingInput.Store(ctx, orgID, runID, userID, agentMessage); sErr != nil {
+			return fmt.Errorf("record pending input: %w", sErr)
 		}
 		// Re-open the aborted blueprint atomically with the run flip. A failure
 		// rolls back the run flip too, so run + blueprint never split across the
@@ -172,6 +177,35 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 	// (tf_wake) is TFAC-586's fleet-reaper scope, not this seam's.
 	s.wakeDispatcher()
 	return nil
+}
+
+// workspaceRecoverable reports whether a parked run can still be resumed:
+// its warm worktree survives on disk, or its durable snapshot is present to
+// cold-rehydrate from. A check we can't complete (no storage wired, a blob
+// hiccup) counts as recoverable — a transient inability to verify must never
+// strand a resumable run as expired, and the claim path re-checks for real.
+func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *domain.AgentRun) bool {
+	if run.WorktreePath != "" {
+		if _, err := os.Stat(run.WorktreePath); err == nil {
+			return true
+		} else if !os.IsNotExist(err) {
+			// A stat we couldn't complete (permission, I/O) is not proof the
+			// worktree is gone — count it as recoverable rather than emit a
+			// false 410 on a transient error.
+			delegateLog.Warn("resume: worktree stat inconclusive; treating as recoverable", "run", run.ID, "path", run.WorktreePath, "error", err)
+			return true
+		}
+	}
+	blobs := s.Storage()
+	if blobs == nil {
+		return true
+	}
+	ok, err := blobs.Exists(ctx, snapshotKey(orgID, memoryNamespace(run.BlueprintRunID, run.ID)))
+	if err != nil {
+		delegateLog.Warn("resume: snapshot existence check failed", "run", run.ID, "error", err)
+		return true
+	}
+	return ok
 }
 
 // markCancelledAfterResume writes the terminal cancelled status for a

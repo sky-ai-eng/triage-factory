@@ -240,6 +240,13 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 		if _, mErr := s.agentRuns.MarkCancelledIfActiveSystem(context.Background(), orgID, run.ID, "user_cancelled", "Blueprint cancelled by user"); mErr != nil {
 			dispatchLog.Warn("mark raced-cancel step cancelled failed", "run", run.ID, "error", mErr)
 		}
+		// This claim won't run the agent, so a resume message staged for it
+		// must not survive to be mis-delivered on a later reclaim — discard it.
+		if s.pendingInput != nil {
+			if _, _, _, cErr := s.pendingInput.Consume(context.Background(), orgID, run.ID); cErr != nil {
+				dispatchLog.Warn("clear pending input for raced-cancel step failed", "run", run.ID, "error", cErr)
+			}
+		}
 		s.broadcastRunUpdate(orgID, run.ID, "cancelled")
 		if br.Status == domain.BlueprintRunStatusRunning {
 			cfg := runConfig{orgID: orgID, teamID: run.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != "" && task.EntitySource == "github"}
@@ -251,12 +258,9 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 
 	// Resume-by-enqueue (TFAC-585): a pending-input row means this claim is
 	// NOT a fresh/crash-reclaimed blueprint step — it's a parked/terminal-
-	// resumable run woken by a user message and re-queued onto its own
-	// row (ResumeOpenRun/SendMessage). Consume (destructive) before
-	// touching any step machinery below, so the input is delivered
-	// exactly once even across a crash-and-reclaim of this same row (the
-	// row is only deleted once this spawn assembly actually reads it —
-	// see the ticket's crash-window analysis).
+	// resumable run woken by a user message and re-queued onto its own row
+	// (ResumeOpenRun/SendMessage). A row here routes the claim to the resume
+	// path instead of the step machinery below.
 	if s.pendingInput != nil {
 		if msg, userID, ok, perr := s.pendingInput.Consume(ctx, orgID, run.ID); perr != nil {
 			dispatchLog.Warn("consume pending input failed; falling through to the blueprint-step path", "run", run.ID, "error", perr)

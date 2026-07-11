@@ -338,9 +338,11 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// cross-pod run-control outbox (TFAC-585), never read under a
 		// user's RLS context.
 		RunSignals: newRunSignalStore(admin),
-		// RunPendingInput is admin-pool only: the writer (SendMessage, past
-		// its own authz check) and the reader (the dispatcher's claim path)
-		// are both system-service callers, same shape as StagedInjections.
+		// RunPendingInput on the top-level store is the admin-pool handle the
+		// dispatcher's claim path uses for Consume (a goroutine with no request
+		// context). Store is reached through the claims-tx handle
+		// (TxStores.RunPendingInput, see tx.go) so the resume write commits
+		// atomically with the status flip.
 		RunPendingInput: newRunPendingInputStore(admin),
 		// PollReadiness is admin-pool only: callers already hold an
 		// authorized orgID (session claims or system context) by the time
@@ -430,6 +432,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		AuthEvents:      newAuthEventStore(tx),
 		Marketplace:     newMarketplaceStore(tx, tx),
 		Instances:       newInstanceStore(tx),
+		RunPendingInput: newRunPendingInputStore(tx),
 		Ext:             db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }
