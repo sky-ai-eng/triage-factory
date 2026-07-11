@@ -76,8 +76,16 @@ func assertLaunchParamsSafe(t *testing.T, p LaunchParams) {
 		t.Fatalf("accepted a relative/non-clean worktree %q", p.Worktree)
 	}
 
-	// Env is an allowlist (Property B keeps the VALUES safe; the KEY gate is
-	// here). No key may be empty, carry '=' / NUL, or fall off the allowlist.
+	// Env: this reuses envKeyAllowed on purpose — it is a WIRING check (that
+	// validateEnv still runs), NOT an allowlist-widening guard like the
+	// hardcoded mount options above. A widened env-key allowlist is not a
+	// security regression the way a dangerous mount option is: Property B is a
+	// VALUE property (values are per-run placeholders, never real credentials —
+	// the allowlist deliberately includes credential-NAMED keys like
+	// AWS_SECRET_ACCESS_KEY with placeholder values), and env keys land in an
+	// already-agent-controlled sandbox, so the key set is not an escalation
+	// surface. The independently-dangerous key properties ARE asserted: no key
+	// may be empty or carry '=' / NUL (which would misparse into the spec).
 	for _, e := range p.Env {
 		if e.Key == "" || strings.ContainsAny(e.Key, "=\x00") || !envKeyAllowed(e.Key) {
 			t.Fatalf("accepted an off-allowlist/malformed env key %q", e.Key)
@@ -127,14 +135,18 @@ func assertLaunchParamsSafe(t *testing.T, p LaunchParams) {
 		t.Fatalf("accepted netns %q not derived from run id %q", name, p.RunID)
 	}
 
-	// ExtraEgressCIDR (if any): must not overlap the internal denylist,
-	// re-derived here independently of validateEgressCIDR.
+	// ExtraEgressCIDR (if any): must parse AND not overlap the internal
+	// denylist, re-derived here independently of validateEgressCIDR. An
+	// accepted CIDR that doesn't parse is itself a validator bug (a divergence
+	// from validateEgressCIDR's own net.ParseCIDR) — fail, never skip.
 	if p.ExtraEgressCIDR != "" {
-		if reqNet := parseEgressForTest(p.ExtraEgressCIDR); reqNet != nil {
-			for _, deny := range internalEgressDenylist {
-				if deny.Contains(reqNet.IP) || reqNet.Contains(deny.IP) {
-					t.Fatalf("accepted egress CIDR %q overlapping denylist %s", p.ExtraEgressCIDR, deny)
-				}
+		reqNet := parseEgressForTest(p.ExtraEgressCIDR)
+		if reqNet == nil {
+			t.Fatalf("accepted ExtraEgressCIDR %q that does not parse as an IP/CIDR", p.ExtraEgressCIDR)
+		}
+		for _, deny := range internalEgressDenylist {
+			if deny.Contains(reqNet.IP) || reqNet.Contains(deny.IP) {
+				t.Fatalf("accepted egress CIDR %q overlapping denylist %s", p.ExtraEgressCIDR, deny)
 			}
 		}
 	}
