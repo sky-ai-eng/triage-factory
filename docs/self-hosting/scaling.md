@@ -48,6 +48,12 @@ the instance-identity flock (the second refuses to boot). See the header of
 Each executor's container HEALTHCHECK hits its localhost `GET /healthz` — see
 [Monitoring & health checks](monitoring.md#executor-health--get-healthz).
 
+## Executor database role (`tf_system`)
+
+An executor's admin database pool connects as `tf_system`, not `supabase_admin` — a least-privilege role (`BYPASSRLS`, no DDL, an enumerated grant list covering only the run-execution tables the dispatcher touches). Executors are the most-exposed machine class in the fleet (they run agent workloads and parse agent output), so a compromised executor holding `tf_system` never has superuser reach — no other org's rows outside the granted tables, no DDL, no server-wide surface. Control/`all` pods are unaffected; they keep the `supabase_admin` DSN because they run migrations.
+
+This is wired automatically by `docker compose --profile scale` (the `executor` service's `TF_DATABASE_URL` is templated from `TF_SYSTEM_PASSWORD`) — nothing to configure beyond filling in `.env`. If you're running an executor outside the shipped compose file (bare-metal, a custom orchestrator) and it ends up pointed at a superuser DSN — e.g. a dev box reusing the control pod's connection string — TF logs one `ERROR` at boot naming the misconfiguration and continues (it does not refuse to boot): compose, the supported deployment path, ships this correctly, so a hard failure there would be disproportionate; the warning is for exactly this kind of bare-metal drift. Fix it by pointing the executor's `TF_DATABASE_URL` at `tf_system` instead.
+
 ## Per-role DB pools and `max_connections`
 
 Every pod opens two Postgres pools (an admin pool and an app/RLS pool). The API

@@ -93,6 +93,7 @@ cat > "$ENV_FILE" <<EOF
 POSTGRES_PASSWORD=$PG_PASSWORD
 SUPABASE_AUTH_ADMIN_PASSWORD=$(openssl rand -hex 32)
 TF_AUTHENTICATOR_PASSWORD=$(openssl rand -hex 32)
+TF_SYSTEM_PASSWORD=$(openssl rand -hex 32)
 TF_PUBLIC_URL=$PUBLIC_URL
 GH_CLIENT_ID=smoke-test-no-real-oauth-app
 GH_CLIENT_SECRET=$(openssl rand -hex 16)
@@ -143,19 +144,41 @@ while :; do
 done
 pass "all services healthy (triagefactory up — implies postgres + gotrue healthy, sidecars completed, migrate-up ran)"
 
+# postgres-postinit-system (reconciles tf_system's password) deliberately
+# starts only AFTER triagefactory is healthy — tf_system doesn't exist
+# until triagefactory's entrypoint has migrated the schema, so this
+# sidecar can't run any earlier (see its comment in docker-compose.yml).
+# Unlike postgres-postinit/seaweedfs-postinit below, nothing gates on it
+# finishing, so it isn't guaranteed done just because triagefactory is
+# healthy — wait for it explicitly before asserting its exit code.
+echo "Waiting for postgres-postinit-system to complete..."
+pscid=$(dc ps -aq postgres-postinit-system | head -1)
+[ -n "$pscid" ] || fail "postgres-postinit-system container was not created"
+elapsed=0
+while :; do
+  status=$(docker inspect -f '{{.State.Status}}' "$pscid" 2>/dev/null || echo missing)
+  [ "$status" = "exited" ] && break
+  [ "$elapsed" -ge 60 ] && fail "postgres-postinit-system not exited after 60s (last status: $status)"
+  sleep 2
+  elapsed=$((elapsed + 2))
+done
+
 # --- Assert the deployment contract ----------------------------------------
 
 echo "Asserting the deployment contract..."
 
-# 1. One-shot sidecars exited 0. `up` already gates dependents on this, but
-#    assert it explicitly so a regression names the offending sidecar.
-for svc in postgres-postinit seaweedfs-postinit; do
+# 1. One-shot sidecars exited 0. `up` already gates dependents on this for
+#    postgres-postinit/seaweedfs-postinit (triagefactory depends_on them);
+#    postgres-postinit-system is gated by the explicit wait above instead,
+#    since nothing depends on it. Assert all three explicitly so a
+#    regression names the offending sidecar.
+for svc in postgres-postinit seaweedfs-postinit postgres-postinit-system; do
   scid=$(dc ps -aq "$svc" | head -1)
   [ -n "$scid" ] || fail "$svc container was not created"
   ec=$(docker inspect -f '{{.State.ExitCode}}' "$scid")
   [ "$ec" = "0" ] || fail "$svc exited $ec (expected 0)"
 done
-pass "postgres-postinit + seaweedfs-postinit exited 0"
+pass "postgres-postinit + seaweedfs-postinit + postgres-postinit-system exited 0"
 
 # 2. The workspace bucket exists and is reachable WITH credentials. head-bucket
 #    exits 0 only if the bucket is present and the request authenticated. Run

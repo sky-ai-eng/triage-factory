@@ -74,6 +74,23 @@ GRANT tf_app TO authenticator;
 
 GRANT USAGE ON SCHEMA public, tf TO tf_app;
 
+-- Least-privilege executor role. NOLOGIN like tf_app (the executor's
+-- admin-pool DSN authenticates directly as tf_system — LOGIN is added
+-- below, not on the role itself, mirroring how authenticator switches
+-- into tf_app via SET LOCAL ROLE). BYPASSRLS reproduces today's `*System`
+-- semantics (superuser RLS bypass) exactly; the enumerated GRANTs at the
+-- end of this file — not per-table policies — are the actual security
+-- boundary; bypass only matters on tables this role can reach at all.
+-- +goose StatementBegin
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'tf_system') THEN
+    CREATE ROLE tf_system NOLOGIN NOINHERIT BYPASSRLS;
+  END IF;
+END
+$$;
+-- +goose StatementEnd
+
 -- Defensive — the image already loads supabase_vault.
 CREATE EXTENSION IF NOT EXISTS supabase_vault WITH SCHEMA vault;
 
@@ -8688,6 +8705,115 @@ ALTER TABLE public.run_credentials ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.run_credentials FROM PUBLIC;
 REVOKE ALL ON public.run_credentials FROM anon, authenticated, service_role;
 
+
+-- tf_system: least-privilege executor role. Login mechanics mirror
+-- authenticator — the postgres-postinit-system sidecar ALTERs this role
+-- to LOGIN with TF_SYSTEM_PASSWORD once this migration has applied; see
+-- docker-compose.yml. No DDL grant of any kind, ever. This is an
+-- enumerated allowlist of exactly the tables the executor's dispatcher,
+-- cross-pod signal apply loop, and heartbeat touch —
+-- verified against code and pinned by the pgtest conformance suite
+-- (internal/db/pgtest/tf_system_test.go). Any future migration that adds a
+-- table to the executor's code path must add that table's tf_system grant
+-- in the SAME migration; the conformance test is the enforcement backstop.
+
+GRANT USAGE ON SCHEMA public, tf TO tf_system;
+
+-- Run lifecycle: claim CAS / requeue / complete / resume+executor stamps
+-- (SELECT, UPDATE) and the dispatcher's own queue inserts — both the
+-- initial blueprint-step enqueue and every subsequent step (SELECT,
+-- INSERT). No DELETE — runs are never removed, only status-terminated.
+GRANT SELECT, INSERT, UPDATE ON TABLE public.runs TO tf_system;
+GRANT SELECT, INSERT ON TABLE public.run_messages TO tf_system;
+GRANT USAGE, SELECT ON SEQUENCE public.run_messages_id_seq TO tf_system;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.artifacts TO tf_system;
+GRANT SELECT, INSERT, DELETE ON TABLE public.run_worktrees TO tf_system;
+-- Agent memory (TaskMemory.UpsertAgentMemorySystem / GetMemoriesForEntitySystem).
+GRANT SELECT, INSERT, UPDATE ON TABLE public.run_memory TO tf_system;
+-- External-credential write audit log (RecordExternalWrite / the Jira mirror).
+GRANT SELECT, INSERT ON TABLE public.external_actions TO tf_system;
+-- Touched-entity resolution.
+GRANT SELECT, INSERT, UPDATE ON TABLE public.entities TO tf_system;
+GRANT SELECT ON TABLE public.entity_links TO tf_system;
+-- Tasks.RecordEventSystem ('injected' etc.) + the dispatcher's own status
+-- flips (SetStatusSystem, CloseSystem on run completion).
+GRANT SELECT, INSERT ON TABLE public.task_events TO tf_system;
+GRANT SELECT, UPDATE ON TABLE public.tasks TO tf_system;
+-- Cross-run injection staging: AppendSystem (producer) + FlushPendingSystem
+-- (the resume path consuming it) both run executor-side.
+GRANT SELECT, INSERT, DELETE ON TABLE public.staged_agent_injections TO tf_system;
+-- The inject signal's gone-compensation enqueues a pending_firing from the
+-- executor's cross-pod apply loop. Claim/drain/requeue is router-side.
+GRANT SELECT, INSERT ON TABLE public.pending_firings TO tf_system;
+GRANT USAGE, SELECT ON SEQUENCE public.pending_firings_id_seq TO tf_system;
+-- run_signals (TFAC-585): SELECT for the owning executor's apply-loop scan,
+-- UPDATE for ack. Insert (cross-pod dispatch) and the purge reaper are
+-- brain-gated — control-side only.
+GRANT SELECT, UPDATE ON TABLE public.run_signals TO tf_system;
+-- run_pending_input (TFAC-585): the claim path Peeks then Consumes
+-- (destructively) right before delivery, both on the admin pool. The
+-- upsert-write rides the resume flip's app-pool claims tx and needs no
+-- grant here.
+GRANT SELECT, DELETE ON TABLE public.run_pending_input TO tf_system;
+-- ws_outbox (TFAC-584): INSERT to publish a websocket event over the
+-- backplane, plus SELECT + DELETE for the TTL reaper, which deliberately
+-- runs on every backplane-wired pod, executors included.
+GRANT SELECT, INSERT, DELETE ON TABLE public.ws_outbox TO tf_system;
+GRANT USAGE, SELECT ON SEQUENCE public.ws_outbox_id_seq TO tf_system;
+-- ws_presence (TFAC-584): SELECT for the PresentFor fast-deny fallback and
+-- the presence reaper's DELETE. Executors never INSERT presence — the
+-- heartbeat that upserts it runs only on HTTP-serving pods.
+GRANT SELECT, DELETE ON TABLE public.ws_presence TO tf_system;
+-- Fleet registry: this instance's own register + heartbeat + drain flag.
+GRANT SELECT, INSERT, UPDATE ON TABLE public.instances TO tf_system;
+
+-- Blueprint run-instance sequencing: the dispatcher's post-step reactor
+-- advances current_step_index, flips terminal status, and applies
+-- cross-pod cancel requests. The blueprint DEFINITION tables
+-- (blueprints/blueprint_steps) are read-only — a running blueprint_run
+-- executes off its own frozen step_plan snapshot, never a live re-read.
+GRANT SELECT, UPDATE ON TABLE public.blueprint_runs TO tf_system;
+GRANT SELECT ON TABLE public.blueprints TO tf_system;
+GRANT SELECT ON TABLE public.blueprint_steps TO tf_system;
+-- Prompts.IncrementUsageSystem bumps a usage counter after resolving the
+-- step prompt.
+GRANT SELECT, UPDATE ON TABLE public.prompts TO tf_system;
+GRANT SELECT ON TABLE public.agents TO tf_system;
+
+-- Read-only reference data the dispatcher resolves per run.
+GRANT SELECT ON TABLE public.orgs TO tf_system;
+GRANT SELECT ON TABLE public.org_settings TO tf_system;
+GRANT SELECT ON TABLE public.teams TO tf_system;
+GRANT SELECT ON TABLE public.team_settings TO tf_system;
+GRANT SELECT ON TABLE public.users TO tf_system;
+-- Users.GetGitHubLoginSystem (the manual-run co-author trailer) reads this,
+-- not the users table itself.
+GRANT SELECT ON TABLE public.user_github_identities TO tf_system;
+GRANT SELECT ON TABLE public.team_github_repos TO tf_system;
+-- repo_profiles: UpdateCloneStatusSystem is local-mode-only in the current
+-- call graph, granted ahead of the multi-mode bare-clone-cache path it's
+-- designed for.
+GRANT SELECT, UPDATE ON TABLE public.repo_profiles TO tf_system;
+GRANT SELECT ON TABLE public.org_github_apps TO tf_system;
+GRANT SELECT ON TABLE public.org_github_app_installations TO tf_system;
+GRANT SELECT ON TABLE public.events TO tf_system;
+GRANT SELECT ON TABLE public.jira_project_status_rules TO tf_system;
+-- llm_spend is security_invoker: reading it needs SELECT on its own base
+-- tables too (curator_requests, system_llm_runs), not just the view.
+GRANT SELECT ON TABLE public.llm_spend TO tf_system;
+GRANT SELECT ON TABLE public.curator_requests TO tf_system;
+GRANT SELECT ON TABLE public.system_llm_runs TO tf_system;
+-- Sealed per-run credential bundles (TFAC-614): the executor's
+-- awaiting-credentials wait polls this for the bundle the brain sealed to
+-- its published pubkey, then unseals it in-process — org_secrets itself
+-- is never read on the executor (TF_SECRET_ENCRYPTION_KEY never reaches
+-- this role at all; see internal/db/postgres/secrets_disabled.go). No
+-- INSERT/DELETE: only the brain provisions (Put) and only a future
+-- terminal-disposition cleanup would delete, neither of which runs here.
+GRANT SELECT ON TABLE public.run_credentials TO tf_system;
+-- The executor's schema-compatibility assert (internal/db/migrations.go)
+-- reads this and nothing else; no DDL, ever.
+GRANT SELECT ON TABLE public.goose_db_version TO tf_system;
 
 -- +goose Down
 SELECT 'down not supported';

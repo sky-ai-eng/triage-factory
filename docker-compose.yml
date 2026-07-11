@@ -88,22 +88,40 @@ services:
     #     (vault is what D5 / SKY-249 uses for per-org secrets)
     #   - the authenticator / anon / authenticated / service_role pattern
     #     for D9's RLS app pool to lean on
-    # Three distinct passwords by design:
+    # Four distinct passwords by design:
     #   POSTGRES_PASSWORD            -> shared by `postgres` AND
     #                                   `supabase_admin` (image initdb
     #                                   convention). `postgres` is
     #                                   demoted to non-superuser by the
     #                                   image's bundled migrations;
     #                                   `supabase_admin` is the effective
-    #                                   superuser TF connects as for
-    #                                   migrations + admin pool.
+    #                                   superuser control/all pods connect
+    #                                   as for migrations + their admin pool.
     #   SUPABASE_AUTH_ADMIN_PASSWORD -> GoTrue's DB user (auth.* CRUD only)
     #   TF_AUTHENTICATOR_PASSWORD    -> `authenticator` role, which TF's
     #                                   RLS-active app pool connects as
     #                                   (sets LOCAL ROLE tf_app per-tx).
-    # Three separate roles mean a GoTrue compromise doesn't surrender
-    # superuser credentials, and a tenant-side prompt-injection in the
-    # tf_app pool can't escalate to admin.
+    #   TF_SYSTEM_PASSWORD           -> `tf_system` role, which
+    #                                   executor pods' admin pool connects
+    #                                   as instead of `supabase_admin` —
+    #                                   BYPASSRLS but no DDL and a narrow,
+    #                                   enumerated table grant list (see
+    #                                   the tf_system section of the pg
+    #                                   baseline migration). Reconciled by
+    #                                   postgres-postinit-system, not this
+    #                                   service's own postgres-postinit —
+    #                                   see that service's comment for why.
+    #                                   Required on every `docker compose
+    #                                   up` regardless of `--profile
+    #                                   scale` (Compose interpolates every
+    #                                   service's env up front), but only
+    #                                   the `executor` service actually
+    #                                   connects as tf_system.
+    # Four separate roles mean a GoTrue compromise doesn't surrender
+    # superuser credentials, a tenant-side prompt-injection in the tf_app
+    # pool can't escalate to admin, and a compromised executor — the
+    # most-exposed machine class, running agent workloads — never holds
+    # a superuser DSN.
     image: supabase/postgres:15.14.1.121
     environment:
       # `${VAR:?msg}` makes compose fail-fast if .env wasn't filled in,
@@ -145,6 +163,9 @@ services:
     # Both ALTERs run as supabase_admin (the real superuser per the
     # supabase image's role-demotion init); supautils only blocks
     # reserved-role ALTERs from non-supers. Idempotent on re-run.
+    #
+    # tf_system's own password reconciliation is NOT here — see
+    # postgres-postinit-system below for why it has to run later.
     command:
       - |
         set -eu
@@ -153,6 +174,45 @@ services:
         \set authenticator_password `echo "$$AUTHENTICATOR_PASSWORD"`
         ALTER USER supabase_auth_admin WITH LOGIN PASSWORD :'auth_admin_password';
         ALTER USER authenticator WITH LOGIN PASSWORD :'authenticator_password';
+        SQL
+    restart: "no"
+
+  # Reconciles TF_SYSTEM_PASSWORD on the tf_system role — split out
+  # from postgres-postinit above deliberately, not merged in. tf_system is
+  # CREATEd by the pg baseline migration, which runs inside the
+  # `triagefactory` container's entrypoint (`migrate up`, before it starts
+  # serving) — and postgres-postinit is a DEPENDENCY of `triagefactory`,
+  # not a dependent, so on a fresh volume it runs BEFORE that migration
+  # has ever applied. An `ALTER ROLE tf_system ...` there would be
+  # ALTERing a role that doesn't exist yet and fail first boot. Waiting on
+  # `triagefactory: healthy` instead guarantees the migration already ran
+  # (the healthcheck only passes once the server is serving, which is
+  # strictly after `migrate up` succeeds — see docker/entrypoint.sh).
+  #
+  # Deliberately NOT profile-gated to `scale`, even though only the
+  # executor consumes tf_system: Compose interpolates every service's
+  # `${VAR:?}` guards up front, before it filters by active profile, so a
+  # profile-gated `:?` here would still block a profile-less
+  # `docker compose up` — the opposite of "optional for single-box." This
+  # runs (and TF_SYSTEM_PASSWORD is required) on every `docker compose up`
+  # regardless, same as the other three role passwords; on a single-box
+  # deployment it's a harmless no-op consumer (nothing else references
+  # tf_system) that keeps the role ready in case the operator scales out
+  # later without an extra `.env` step.
+  postgres-postinit-system:
+    image: supabase/postgres:15.14.1.121
+    depends_on:
+      triagefactory: { condition: service_healthy }
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?missing POSTGRES_PASSWORD (see .env.example)}
+      SYSTEM_PASSWORD: ${TF_SYSTEM_PASSWORD:?missing TF_SYSTEM_PASSWORD (see .env.example)}
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        psql -h postgres -U supabase_admin -d postgres -v ON_ERROR_STOP=1 <<-'SQL'
+        \set system_password `echo "$$SYSTEM_PASSWORD"`
+        ALTER ROLE tf_system WITH LOGIN PASSWORD :'system_password';
         SQL
     restart: "no"
 
@@ -168,7 +228,7 @@ services:
       #
       # NOTE: gobuffalo/pop (GoTrue's DB library) ONLY accepts URL form
       # here, not libpq key=value DSN. That means SUPABASE_AUTH_ADMIN_PASSWORD
-      # must use a URL-safe charset — see .env.example and self-host-setup.md
+      # must use a URL-safe charset — see .env.example and docs/self-hosting/install.md
       # for the recommended generator. Reserved URL characters (`/`, `?`, `#`,
       # `@`) in the password will break parsing.
       GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${SUPABASE_AUTH_ADMIN_PASSWORD:?missing SUPABASE_AUTH_ADMIN_PASSWORD (see .env.example)}@postgres:5432/postgres?search_path=auth
@@ -511,7 +571,14 @@ services:
       # Wait for the control pod to be serving — by then it has migrated the
       # schema, so the executor's in-process assert passes on the first try
       # instead of riding out the entrypoint's behind-schema retry loop.
+      # This is ALSO what makes postgres-postinit-system's ordering work —
+      # see that service's comment.
       triagefactory: { condition: service_healthy }
+      # Reconciles tf_system's password — the executor's admin pool
+      # authenticates as tf_system, not supabase_admin. Depends on
+      # triagefactory (above) internally too; listed explicitly here for
+      # the same belt-and-suspenders clarity as postgres-postinit/postgres.
+      postgres-postinit-system: { condition: service_completed_successfully }
       # The bucket must exist before the first workspace snapshot.
       seaweedfs-postinit: { condition: service_completed_successfully }
     environment:
@@ -520,11 +587,15 @@ services:
       # Localhost-only liveness endpoint (the container HEALTHCHECK target).
       # Pinned to match the healthcheck below.
       TF_HEALTHZ_PORT: "3001"
-      # Admin superuser pool (same as the control pod). The executor runs no
-      # RLS request handlers, so its app pool is effectively idle; both pools
-      # ship much smaller ceilings than the API tier (see TF_DB_MAX_OPEN_CONNS
-      # and the max_connections arithmetic in docs/self-hosting/scaling.md).
-      TF_DATABASE_URL: postgres://supabase_admin:${POSTGRES_PASSWORD:?missing POSTGRES_PASSWORD (see .env.example)}@postgres:5432/postgres
+      # Least-privilege admin pool: tf_system, NOT supabase_admin —
+      # BYPASSRLS but no DDL and a narrow, enumerated table grant list (see
+      # the tf_system section of the pg baseline migration). The executor
+      # runs no migrations and no RLS request handlers, so its app pool is
+      # effectively idle; both pools ship much smaller ceilings than the API
+      # tier (see TF_DB_MAX_OPEN_CONNS and the max_connections arithmetic in
+      # docs/self-hosting/scaling.md). Control/all pods keep the supabase_admin
+      # DSN unchanged — narrowing control is explicitly out of scope.
+      TF_DATABASE_URL: postgres://tf_system:${TF_SYSTEM_PASSWORD:?missing TF_SYSTEM_PASSWORD (see .env.example)}@postgres:5432/postgres
       TF_AUTHENTICATOR_PASSWORD: ${TF_AUTHENTICATOR_PASSWORD:?missing TF_AUTHENTICATOR_PASSWORD (see .env.example)}
       # Deliberately NOT set here (TFAC-614): an executor never holds the
       # secret-decryption key. Per-run GitHub/LLM/Jira credentials arrive
