@@ -80,7 +80,7 @@ Key invariants:
 - `classifier` reacts to `system:poll:*` sentinels and kicks the project classifier (rotates through orgs internally).
 - `profiler` reacts to `system:poll:*` GitHub completions and kicks the per-org `repoprofile.Manager.Trigger(orgID)` — a TTL-gated repo-profiling pass. This is what profiles new / stale / newly-reachable (App-only) repos with no "github changed" plumbing, in both run modes. The explicit "Re-profile" button (and a tracked-repo-set change) calls `Trigger(orgID, force=true)` to bypass the TTL.
 - `router` (`internal/routing/router.go`) consumes `github:*` / `jira:*` events, records them, creates/bumps tasks per task_rules, and fires matching prompt_triggers (auto-delegation). Also owns inline close checks and `ReDeriveAfterScoring` (post-scoring trigger pass for deferred `min_autonomy_suitability` thresholds).
-- `poll-tracker` gates `/api/jira/stock` on first-poll-after-restart and surfaces one-shot "config took effect" toasts (announce-pending flag, flipped off after one completion).
+- `poll-tracker` records poll completions into the durable, org-scoped `poll_readiness` table (both dialects) that gates `/api/jira/stock` and drives the one-shot "config took effect" toast (announce-pending, cleared after one completion). Because it is durable — not the former in-memory flag — the gate reflects the last synced state across a process restart; it is re-armed by a config change (`MarkRestarted`), not by boot.
 
 Pollers publish events to the bus rather than invoking callbacks directly. This is how a poll cycle, a scorer run, and a UI push all stay decoupled.
 
