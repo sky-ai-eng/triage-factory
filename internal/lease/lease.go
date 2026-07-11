@@ -91,9 +91,10 @@ func parseSecondsEnv(raw, name string, def time.Duration) (time.Duration, error)
 // KnobsFromEnv resolves the three lease timing knobs from
 // TF_LEASE_RENEW_SEC / TF_LEASE_TTL_SEC / TF_LEASE_DEMOTE_SEC, applying
 // defaults for unset vars. Returns an error on a malformed value or on a
-// demote deadline that isn't strictly less than the TTL — boot refuses to
-// start with a configuration that can't guarantee a demoted holder stops
-// before a successor is eligible to acquire.
+// demote deadline that doesn't clear the TTL with room for the deadline
+// check's own granularity (see demoteMarginError) — boot refuses to start
+// with a configuration that can't guarantee a demoted holder stops before a
+// successor is eligible to acquire.
 func KnobsFromEnv() (renewInterval, ttl, demoteDeadline time.Duration, err error) {
 	renewInterval, err = ParseRenewInterval(os.Getenv("TF_LEASE_RENEW_SEC"))
 	if err != nil {
@@ -107,8 +108,8 @@ func KnobsFromEnv() (renewInterval, ttl, demoteDeadline time.Duration, err error
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	if demoteDeadline >= ttl {
-		return 0, 0, 0, fmt.Errorf("lease demote deadline (%s) must be strictly less than the takeover TTL (%s)", demoteDeadline, ttl)
+	if err := demoteMarginError(demoteDeadline, ttl); err != nil {
+		return 0, 0, 0, err
 	}
 	return renewInterval, ttl, demoteDeadline, nil
 }

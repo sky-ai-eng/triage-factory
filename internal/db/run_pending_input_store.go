@@ -24,9 +24,18 @@ type RunPendingInputStore interface {
 	// request just overwrites its own prior write with an equal one).
 	Store(ctx context.Context, orgID, runID, userID, message string) error
 
+	// Peek reads the pending input for a run WITHOUT deleting it, or ok=false
+	// when none exists. It routes a claim to the resume path; the row is
+	// deleted only by Consume, called right before the message is actually
+	// delivered — so a crash between the claim and delivery (e.g. during a
+	// slow workspace rehydrate) leaves the row for the next claim to
+	// re-deliver, rather than losing the message and re-driving the run as an
+	// ordinary blueprint step.
+	Peek(ctx context.Context, orgID, runID string) (message, userID string, ok bool, err error)
+
 	// Consume atomically deletes and returns the pending input for a run
-	// (DELETE ... RETURNING), or ok=false when none exists. Called once, at
-	// the top of the claiming executor's resume path — exactly like
+	// (DELETE ... RETURNING), or ok=false when none exists. Called right
+	// before delivery on the claiming executor's resume path — exactly like
 	// staged_agent_injections' flush, delivered exactly once.
 	Consume(ctx context.Context, orgID, runID string) (message, userID string, ok bool, err error)
 }

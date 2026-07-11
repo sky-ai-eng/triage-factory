@@ -37,6 +37,23 @@ func (s *runPendingInputStore) Store(ctx context.Context, orgID, runID, userID, 
 	return err
 }
 
+func (s *runPendingInputStore) Peek(ctx context.Context, orgID, runID string) (string, string, bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", "", false, err
+	}
+	var message, userID string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT message, user_id FROM run_pending_input WHERE org_id = ? AND run_id = ?
+	`, orgID, runID).Scan(&message, &userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return message, userID, true, nil
+}
+
 func (s *runPendingInputStore) Consume(ctx context.Context, orgID, runID string) (string, string, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", "", false, err

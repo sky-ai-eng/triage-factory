@@ -178,6 +178,12 @@ type Spawner struct {
 	// signal-apply loop, mirroring dispatchWake. Non-blocking send from the
 	// shared Listener's onNotify dispatch on {"kind":"new"}.
 	signalApplyWake chan struct{}
+	// signalApplied tracks signal ids (int64) delivered by this process but
+	// whose ack write hasn't landed yet (id -> ack result string). A re-scan
+	// re-acks from here instead of re-delivering, giving exactly-once delivery
+	// per process for the non-idempotent kinds (steer, inject). Pruned on a
+	// successful ack. See applySignal.
+	signalApplied sync.Map
 	// signalAckTimeout overrides the interrupt/steer reply-leg timeout
 	// (TF_SIGNAL_ACK_TIMEOUT). Zero means use DefaultSignalAckTimeout.
 	signalAckTimeout time.Duration

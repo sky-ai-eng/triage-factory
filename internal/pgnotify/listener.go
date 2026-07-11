@@ -13,6 +13,7 @@ package pgnotify
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,6 +24,20 @@ import (
 const (
 	initialBackoff = time.Second
 	maxBackoff     = 30 * time.Second
+
+	// waitTimeout bounds one WaitForNotification so a silently dropped
+	// connection is detected within this window instead of blocking until the
+	// OS TCP keepalive fires. A black-holed link (packets vanish with no RST)
+	// yields no read error on its own, so an unbounded WaitForNotification
+	// would leave the pod deaf for minutes with nothing logging the
+	// degradation. On each idle window we actively Ping to tell a healthy idle
+	// link from a dead one. NOTIFY is still a doorbell; the caller's backstop
+	// poll covers the delivery gap while a dead conn reconnects.
+	waitTimeout = 60 * time.Second
+
+	// pingTimeout bounds the liveness Ping so a black-holed connection
+	// surfaces promptly rather than hanging the probe as well.
+	pingTimeout = 5 * time.Second
 )
 
 // Listener maintains one dedicated LISTEN connection to a single Postgres
@@ -99,13 +114,31 @@ func (l *Listener) runOnce(ctx context.Context) (connected bool, err error) {
 	}
 	pgnotifyLog.Info("listening", "channel", l.channel)
 	for {
-		notif, err := conn.WaitForNotification(ctx)
-		if err != nil {
-			return true, err
+		waitCtx, cancel := context.WithTimeout(ctx, waitTimeout)
+		notif, err := conn.WaitForNotification(waitCtx)
+		cancel()
+		if err == nil {
+			if l.onNotify != nil {
+				l.onNotify(notif.Payload)
+			}
+			continue
 		}
-		if l.onNotify != nil {
-			l.onNotify(notif.Payload)
+		if ctx.Err() != nil {
+			return true, nil // parent ctx done — clean shutdown, not a fault
 		}
+		// WaitForNotification failed while the parent ctx is still alive:
+		// either our per-wait deadline fired on an idle-but-healthy link, or
+		// the connection is actually gone. Ping to tell them apart — a
+		// healthy idle link answers (keep listening); a dead or black-holed
+		// one fails (drop to the reconnect loop, which logs the degradation)
+		// instead of re-blocking on a corpse until the OS keepalive fires.
+		pingCtx, pcancel := context.WithTimeout(ctx, pingTimeout)
+		perr := conn.Ping(pingCtx)
+		pcancel()
+		if perr == nil {
+			continue
+		}
+		return true, fmt.Errorf("listen liveness lost (%v); last wait: %w", perr, err)
 	}
 }
 

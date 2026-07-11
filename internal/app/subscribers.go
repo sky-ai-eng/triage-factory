@@ -34,7 +34,7 @@ func (a *App) registerSubscribers() {
 	a.bus.Subscribe(eventbus.Subscriber{
 		Name:   "scorer",
 		Filter: []string{"system:poll:"},
-		Handle: func(evt domain.Event) { a.scorer.Trigger(evt.OrgID) },
+		Handle: a.brainHolderOnly(func(evt domain.Event) { a.scorer.Trigger(evt.OrgID) }),
 	})
 	// Kick the per-org project classifier on poll-complete sentinels.
 	// evt.OrgID scopes the per-org Runner (like the scorer above); an empty
@@ -42,7 +42,7 @@ func (a *App) registerSubscribers() {
 	a.bus.Subscribe(eventbus.Subscriber{
 		Name:   "classifier",
 		Filter: []string{"system:poll:"},
-		Handle: func(evt domain.Event) { a.classifier.Trigger(evt.OrgID) },
+		Handle: a.brainHolderOnly(func(evt domain.Event) { a.classifier.Trigger(evt.OrgID) }),
 	})
 	// Kick the per-org repo profiler on GitHub poll-complete sentinels. The
 	// cycle is TTL-gated, so steady state is ~one staleness check per repo
@@ -52,7 +52,7 @@ func (a *App) registerSubscribers() {
 	a.bus.Subscribe(eventbus.Subscriber{
 		Name:   "profiler",
 		Filter: []string{"system:poll:"},
-		Handle: a.handleProfilerPoll,
+		Handle: a.brainHolderOnly(a.handleProfilerPoll),
 	})
 	// Kick the per-org artifact reconciler on GitHub poll-complete sentinels.
 	// Mirrors the profiler: gated to source=="github" (a Jira cycle can't
@@ -62,7 +62,7 @@ func (a *App) registerSubscribers() {
 	a.bus.Subscribe(eventbus.Subscriber{
 		Name:   "reconciler",
 		Filter: []string{"system:poll:"},
-		Handle: a.handleReconcilerPoll,
+		Handle: a.brainHolderOnly(a.handleReconcilerPoll),
 	})
 	// Track Jira/GitHub poll completions: gate /api/jira/stock and surface
 	// the one-shot "config took effect" toast.
@@ -81,7 +81,7 @@ func (a *App) registerSubscribers() {
 		a.bus.Subscribe(eventbus.Subscriber{
 			Name:   "marketplace-stats",
 			Filter: []string{"system:poll:"},
-			Handle: func(evt domain.Event) { a.marketplaceStats.Trigger(evt.OrgID) },
+			Handle: a.brainHolderOnly(func(evt domain.Event) { a.marketplaceStats.Trigger(evt.OrgID) }),
 		})
 	}
 	// New-commits review-freshness injection (TFAC-501): when a reviewed PR's head
@@ -95,6 +95,24 @@ func (a *App) registerSubscribers() {
 		Filter: []string{domain.EventGitHubPRNewCommits},
 		Handle: a.spawner.HandlePRNewCommits,
 	})
+}
+
+// brainHolderOnly wraps a subscriber handler so it fires only while this
+// process actually holds the brain lease. Subscribers are registered for the
+// process lifetime (control/all), but a demoted control standby must not kick
+// a per-org AI manager off a stray sentinel — e.g. one emitted by a poll
+// cycle that was still in flight at demotion — since the new leader is
+// already running that scoring/classify/profile/reconcile work. At
+// TF_ROLE=all and local, isBrainHolder is always true, so this is a no-op
+// there. Applied only to the sentinel-driven brain-manager kickers, not to
+// ws-broadcast or the poll-readiness tracker, which any control pod may serve.
+func (a *App) brainHolderOnly(h func(domain.Event)) func(domain.Event) {
+	return func(evt domain.Event) {
+		if !a.isBrainHolder() {
+			return
+		}
+		h(evt)
+	}
 }
 
 // handleReconcilerPoll kicks the per-org artifact reconciler for the org whose

@@ -539,6 +539,16 @@ func (s *Spawner) RunSignalApplyLoop(ctx context.Context, scanInterval time.Dura
 // executor, oldest id first (which, within one run, is the required apply
 // order — see the store's doc comment).
 func (s *Spawner) drainSignals(ctx context.Context) {
+	if s.IdentityFenced() || s.PartitionFenced() {
+		// A fenced instance must not apply signals — the same gate the claim
+		// loop uses (dispatch.go). Identity-fenced: this process's identity is
+		// superseded, so acting on a run races the replacement. Partition-
+		// fenced: it already killed its live sandboxes and its rows may have
+		// been requeued, so a late apply would double-write against the new
+		// owner. The next successful heartbeat clears the partition fence and
+		// the scan resumes.
+		return
+	}
 	executorID, _ := s.executorIdentity()
 	if executorID == "" {
 		return
@@ -553,42 +563,60 @@ func (s *Spawner) drainSignals(ctx context.Context) {
 	}
 }
 
-// applySignal applies one signal through the LOCAL RunController
-// (inProcessController — never s.controller/crossPodController: this
-// process IS the intended owner by construction of the scan's target
-// filter, so a local miss means the run is genuinely gone here, not "try
-// another pod") and acks the result. Idempotency: duplicate signals are
-// legal and harmless — the local ops below already never error on "target
-// state already reached" (a second Cancel/Interrupt of a dead proc simply
-// reports not-found).
+// applySignal delivers one signal, then acks the result — with exactly-once
+// delivery per process. If a signal was already delivered but its ack write
+// didn't land (leaving it in the unacked scan), the next drain re-acks with
+// the same result instead of re-delivering: re-delivery is harmless for
+// cancel/interrupt/permission (idempotent), but a re-sent steer or a
+// re-injected note would reach the agent twice, and inject's gone-
+// compensation would double-enqueue a pending_firing. signalApplied is
+// pruned on a successful ack (the row then leaves the unacked scan anyway).
 func (s *Spawner) applySignal(ctx context.Context, sig domain.RunSignal) {
+	if r, ok := s.signalApplied.Load(sig.ID); ok {
+		if s.ackSignal(ctx, sig.ID, r.(string)) {
+			s.signalApplied.Delete(sig.ID)
+		}
+		return
+	}
+	result := s.deliverSignal(ctx, sig)
+	s.signalApplied.Store(sig.ID, result)
+	if s.ackSignal(ctx, sig.ID, result) {
+		s.signalApplied.Delete(sig.ID)
+	}
+}
+
+// deliverSignal performs one signal's side effects through the LOCAL
+// RunController (inProcessController — never s.controller/crossPodController:
+// this process IS the intended owner by construction of the scan's target
+// filter, so a local miss means the run is genuinely gone here, not "try
+// another pod") and returns the ack result. It must be called at most once
+// per signal per process (applySignal's signalApplied guard enforces this),
+// because steer/inject delivery and inject's gone-compensation are not
+// idempotent.
+func (s *Spawner) deliverSignal(ctx context.Context, sig domain.RunSignal) string {
 	local := inProcessController{s: s}
 	switch sig.Kind {
 	case domain.RunSignalCancel:
 		if local.Cancel(sig.RunID) {
-			s.ackSignal(ctx, sig.ID, domain.RunSignalAckOK)
-		} else {
-			s.ackSignal(ctx, sig.ID, domain.RunSignalAckGone)
+			return domain.RunSignalAckOK
 		}
+		return domain.RunSignalAckGone
 	case domain.RunSignalInterrupt:
-		err := local.Interrupt(ctx, sig.RunID)
-		s.ackSignal(ctx, sig.ID, ackResultForControlErr(err))
+		return ackResultForControlErr(local.Interrupt(ctx, sig.RunID))
 	case domain.RunSignalSteer:
 		var p steerPayload
 		if err := json.Unmarshal([]byte(sig.Payload), &p); err != nil {
 			delegateLog.Warn("apply steer signal: malformed payload", "signal_id", sig.ID, "error", err)
-			s.ackSignal(ctx, sig.ID, domain.RunSignalAckStale)
-			return
+			return domain.RunSignalAckStale
 		}
-		err := local.Steer(ctx, sig.RunID, p.Text)
-		s.ackSignal(ctx, sig.ID, ackResultForControlErr(err))
+		return ackResultForControlErr(local.Steer(ctx, sig.RunID, p.Text))
 	case domain.RunSignalPermission:
-		s.applyPermissionSignal(ctx, sig)
+		return s.deliverPermissionSignal(sig)
 	case domain.RunSignalInject:
-		s.applyInjectSignal(ctx, sig)
+		return s.deliverInjectSignal(ctx, sig)
 	default:
 		delegateLog.Warn("apply signal: unknown kind", "signal_id", sig.ID, "kind", sig.Kind)
-		s.ackSignal(ctx, sig.ID, domain.RunSignalAckStale)
+		return domain.RunSignalAckStale
 	}
 }
 
@@ -607,16 +635,16 @@ func ackResultForControlErr(err error) string {
 	return domain.RunSignalAckGone
 }
 
-// applyPermissionSignal resolves a cross-pod permission decision through
-// this process's own permission broker. A stale/no-longer-pending request
-// (already answered, timed out, or never existed here) acks 'stale' — the
-// idempotency contract for a duplicate permission answer.
-func (s *Spawner) applyPermissionSignal(ctx context.Context, sig domain.RunSignal) {
+// deliverPermissionSignal resolves a cross-pod permission decision through
+// this process's own permission broker and returns the ack result. A
+// stale/no-longer-pending request (already answered, timed out, or never
+// existed here) returns 'stale' — the idempotency contract for a duplicate
+// permission answer.
+func (s *Spawner) deliverPermissionSignal(sig domain.RunSignal) string {
 	var p permissionPayload
 	if err := json.Unmarshal([]byte(sig.Payload), &p); err != nil {
 		delegateLog.Warn("apply permission signal: malformed payload", "signal_id", sig.ID, "error", err)
-		s.ackSignal(ctx, sig.ID, domain.RunSignalAckStale)
-		return
+		return domain.RunSignalAckStale
 	}
 	err := s.resolvePermissionLocal(sig.OrgID, sig.RunID, p.RequestID, agentproc.PermissionDecision{
 		Behavior:     p.Behavior,
@@ -625,27 +653,28 @@ func (s *Spawner) applyPermissionSignal(ctx context.Context, sig domain.RunSigna
 	})
 	switch {
 	case err == nil:
-		s.ackSignal(ctx, sig.ID, domain.RunSignalAckOK)
+		return domain.RunSignalAckOK
 	case errors.Is(err, ErrNoPendingPermission):
-		s.ackSignal(ctx, sig.ID, domain.RunSignalAckStale)
+		return domain.RunSignalAckStale
 	default:
 		delegateLog.Warn("apply permission signal failed", "signal_id", sig.ID, "error", err)
-		s.ackSignal(ctx, sig.ID, domain.RunSignalAckStale)
+		return domain.RunSignalAckStale
 	}
 }
 
-// applyInjectSignal delivers a cross-pod additive-event injection into
+// deliverInjectSignal delivers a cross-pod additive-event injection into
 // this process's live handle for the run, recording the task_event
-// 'injected' exactly as the local path does. If the run is no longer live
-// here by apply time, it acks 'gone' AND enqueues the pending_firing
-// itself (from the payload's firing-ref fields) so the additive event's
-// intent survives — the entity-busy-style loser rule the ticket specifies.
-func (s *Spawner) applyInjectSignal(ctx context.Context, sig domain.RunSignal) {
+// 'injected' exactly as the local path does, and returns the ack result. If
+// the run is no longer live here by apply time, it returns 'gone' AND
+// enqueues the pending_firing itself (from the payload's firing-ref fields)
+// so the additive event's intent survives — the entity-busy-style loser rule
+// the ticket specifies. Not idempotent (live delivery + the gone-path
+// enqueue), so applySignal guards it against re-delivery.
+func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.RunSignal) string {
 	var p injectPayload
 	if err := json.Unmarshal([]byte(sig.Payload), &p); err != nil {
 		delegateLog.Warn("apply inject signal: malformed payload", "signal_id", sig.ID, "error", err)
-		s.ackSignal(ctx, sig.ID, domain.RunSignalAckStale)
-		return
+		return domain.RunSignalAckStale
 	}
 	if s.getProc(sig.RunID) == nil {
 		if s.pendingFirings != nil && p.EntityID != "" && p.TaskID != "" && p.TriggerID != "" && p.TriggeringEventID != "" {
@@ -653,8 +682,7 @@ func (s *Spawner) applyInjectSignal(ctx context.Context, sig domain.RunSignal) {
 				delegateLog.Error("inject signal gone-compensation: enqueue pending_firing failed", "run", sig.RunID, "task_id", p.TaskID, "error", err)
 			}
 		}
-		s.ackSignal(ctx, sig.ID, domain.RunSignalAckGone)
-		return
+		return domain.RunSignalAckGone
 	}
 	s.deliverInjectionLive(sig.OrgID, sig.RunID, domain.WrapSystemNote(p.Body))
 	if s.tasks != nil && p.TaskID != "" && p.TriggeringEventID != "" {
@@ -662,20 +690,23 @@ func (s *Spawner) applyInjectSignal(ctx context.Context, sig domain.RunSignal) {
 			delegateLog.Error("record injected task_event for cross-pod inject failed", "task_id", p.TaskID, "run_id", sig.RunID, "error", err)
 		}
 	}
-	s.ackSignal(ctx, sig.ID, domain.RunSignalAckDelivered)
+	return domain.RunSignalAckDelivered
 }
 
 // ackSignal writes the ack and best-effort NOTIFYs tf_ctl so a waiting
 // control pod's ack-NOTIFY path wakes immediately instead of falling back
-// to its 250ms poll.
-func (s *Spawner) ackSignal(ctx context.Context, id int64, result string) {
+// to its 250ms poll. Reports whether the ack write itself landed — a false
+// return leaves the signal in the unacked scan, so applySignal keeps its
+// delivered-marker to re-ack (never re-deliver) on the next drain.
+func (s *Spawner) ackSignal(ctx context.Context, id int64, result string) bool {
 	if err := s.runSignals.Ack(ctx, id, result); err != nil {
 		delegateLog.Error("ack run_signal failed", "signal_id", id, "result", result, "error", err)
-		return
+		return false
 	}
 	if err := s.notifyCtl(ctx, "ack", id); err != nil {
 		delegateLog.Warn("notify tf_ctl for ack failed; the waiter's backstop poll still finds it", "signal_id", id, "error", err)
 	}
+	return true
 }
 
 // --- Acked-signal purge reaper ---
