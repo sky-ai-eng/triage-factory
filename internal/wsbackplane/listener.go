@@ -118,16 +118,32 @@ func listenOnce(ctx context.Context, dsn string, channels []string, handle func(
 			return fmt.Errorf("listen %s: %w", ch, err)
 		}
 	}
-	// Reset backoff bookkeeping happens in the caller on any successful
-	// dispatch loop entry — reaching here means LISTEN succeeded.
+	// Reaching here means LISTEN succeeded; the caller resets its backoff.
 	for {
-		notif, err := conn.WaitForNotification(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return fmt.Errorf("wait for notification: %w", err)
+		// Bound each wait so a silently dropped connection (a black-holed
+		// link: packets vanish with no RST, so the read never returns on its
+		// own) is caught within waitTimeout by an active Ping, instead of
+		// leaving this pod deaf for the OS TCP-keepalive timeout (minutes)
+		// with nothing logging the degradation.
+		waitCtx, cancel := context.WithTimeout(ctx, waitTimeout)
+		notif, err := conn.WaitForNotification(waitCtx)
+		cancel()
+		if err == nil {
+			handle(notif.Channel, notif.Payload)
+			continue
 		}
-		handle(notif.Channel, notif.Payload)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// Idle-deadline on a healthy link, or a genuinely dead one: Ping to
+		// distinguish. A healthy link answers (keep listening); a dead or
+		// black-holed one fails and drops to the reconnect loop (which logs).
+		pingCtx, pcancel := context.WithTimeout(ctx, pingTimeout)
+		perr := conn.Ping(pingCtx)
+		pcancel()
+		if perr == nil {
+			continue
+		}
+		return fmt.Errorf("listen liveness lost (%v); last wait: %w", perr, err)
 	}
 }

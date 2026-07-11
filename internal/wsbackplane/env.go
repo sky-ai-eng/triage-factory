@@ -63,6 +63,12 @@ const (
 	// after N consecutive failures").
 	initialListenBackoff = 1 * time.Second
 	maxListenBackoff     = 30 * time.Second
+	// waitTimeout bounds one WaitForNotification, and pingTimeout the liveness
+	// Ping issued when a wait returns nothing — together they catch a silently
+	// black-holed connection within ~waitTimeout instead of leaving the pod
+	// deaf until the OS TCP keepalive fires (minutes). See listenOnce.
+	waitTimeout = 60 * time.Second
+	pingTimeout = 5 * time.Second
 	// listenFailureLogThreshold is the consecutive-failure count at which
 	// the reconnect loop escalates from Warn to Error — "a pod that can't
 	// LISTEN is degraded... but must keep serving," so this is a loud

@@ -107,7 +107,10 @@ func (b *Backplane) PresentFor(ctx context.Context, orgID, runID string) bool {
 	defer cancel()
 
 	runView := "run:" + runID
-	liveSince := time.Now().Add(-PresenceLiveWindowFromEnv())
+	// The live window is measured against the DB clock (now()), not this
+	// pod's: last_seen is stamped with the server's now() on every heartbeat,
+	// so a pod whose clock runs ahead would otherwise judge genuinely-present
+	// reviewers absent and fire the unattended fast-deny with someone watching.
 	var exists bool
 	err := b.db.QueryRowContext(readCtx, `
 		SELECT EXISTS (
@@ -115,9 +118,9 @@ func (b *Backplane) PresentFor(ctx context.Context, orgID, runID string) bool {
 			WHERE org_id = $1
 			  AND visible
 			  AND (viewing = 'board' OR viewing = $2)
-			  AND last_seen > $3
+			  AND last_seen > now() - make_interval(secs => $3)
 		)
-	`, orgID, runView, liveSince).Scan(&exists)
+	`, orgID, runView, PresenceLiveWindowFromEnv().Seconds()).Scan(&exists)
 	if err != nil {
 		backplaneLog.Warn("ws_presence: read failed; treating as absent for this check", "org", orgID, "run", runID, "error", err)
 		return false

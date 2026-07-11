@@ -34,8 +34,10 @@ func (b *Backplane) RunOutboxReaper(ctx context.Context, interval, ttl time.Dura
 func (b *Backplane) reapOutboxOnce(ctx context.Context, ttl time.Duration) {
 	reapCtx, cancel := context.WithTimeout(ctx, presenceWriteTimeout)
 	defer cancel()
-	cutoff := time.Now().Add(-ttl)
-	res, err := b.db.ExecContext(reapCtx, `DELETE FROM ws_outbox WHERE created_at < $1`, cutoff)
+	// Cut off against the DB clock, not this pod's: the rows were stamped with
+	// the server's now(), and a pod whose clock drifts ahead would otherwise
+	// reap rows before their TTL (dropping live cross-pod frames).
+	res, err := b.db.ExecContext(reapCtx, `DELETE FROM ws_outbox WHERE created_at < now() - make_interval(secs => $1)`, ttl.Seconds())
 	if err != nil {
 		backplaneLog.Warn("ws_outbox: reap failed", "error", err)
 		return
@@ -81,8 +83,9 @@ func (b *Backplane) RunPresenceReaper(ctx context.Context, interval, ttl time.Du
 func (b *Backplane) reapPresenceOnce(ctx context.Context, ttl time.Duration) {
 	reapCtx, cancel := context.WithTimeout(ctx, presenceWriteTimeout)
 	defer cancel()
-	cutoff := time.Now().Add(-ttl)
-	res, err := b.db.ExecContext(reapCtx, `DELETE FROM ws_presence WHERE last_seen < $1`, cutoff)
+	// DB clock, not the pod's — same reason as the outbox reaper: last_seen is
+	// stamped with the server's now(), so a drifted pod must not reap early.
+	res, err := b.db.ExecContext(reapCtx, `DELETE FROM ws_presence WHERE last_seen < now() - make_interval(secs => $1)`, ttl.Seconds())
 	if err != nil {
 		backplaneLog.Warn("ws_presence: reap failed", "error", err)
 		return
