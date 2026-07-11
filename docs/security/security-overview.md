@@ -177,9 +177,9 @@ protective value equals the narrowness and validation of that RPC.
 > The broker **owns the OCI spec** from a fixed template (rootfs = the
 > content-addressed rootfs it resolved, capabilities = empty, uid = 10000,
 > seccomp, namespaces) and accepts over RPC only narrow, validated parameters —
-> a run id, the netns/cgroup it created, an environment **allowlist**, numeric
+> a run id, the netns/cgroup it created, an environment allowlist, numeric
 > resource limits, and (self-host only) an additional permitted egress CIDR
-> **validated against the immutable internal denylist** (cloud metadata endpoint
+> validated against the immutable internal denylist (cloud metadata endpoint
 > `169.254.169.254`, the control-plane subnet, private/link-local ranges — see
 > sandbox-fleet §3.1) before any iptables permit is written. It **never** execs
 > an orchestrator-supplied `config.json`, command, or rootfs path.
@@ -188,8 +188,7 @@ A compromised orchestrator can inject an environment variable the *sandboxed*
 (unprivileged) agent will see — harmless — but it can never make the broker run
 arbitrary code with capabilities.
 
-**Why this stays true as the code changes** — the narrowness is structural, not
-a property someone must remember to preserve per change:
+Why this stays true as the code changes:
 
 - **One unconditional choke point.** The broker is the only launch path, and
   every launch passes `ValidateLaunchParams` — every privileged run-tree
@@ -208,7 +207,7 @@ a property someone must remember to preserve per change:
   independently asserts the invariants the broker then trusts — catalog rootfs,
   pinned entrypoint, allowlisted env/mounts, a run-bound netns, a non-denylisted
   egress CIDR. A change that widens an allowlist or drops a check surfaces as a
-  failing test, not a shipped hole.
+  failing test.
 
 **The residuals are named, and none is a capability escalation.** Two are
 documented in the validators themselves: the broker shape-checks a mount *source*
@@ -295,8 +294,7 @@ software; the defense is provenance.
 - The agent SDK's npm tree is pinned by an embedded lockfile with
   integrity hashes; `npm ci` refuses drift.
 - `npm ci` runs with `--ignore-scripts`, so lifecycle scripts of
-  the (pinned) tree never execute at install time — the most-abused
-  supply-chain channel is closed.
+  the (pinned) tree never execute at install time.
 - Releases are signed keylessly (cosign + GitHub OIDC) with a per-artifact SBOM
   and SLSA build-provenance attestation — see
   [verifying-releases.md](verifying-releases.md).
@@ -311,9 +309,7 @@ skips the gVisor escape.
   proxies, agent-host socket, git, archive extraction — runs on the
   **unprivileged** orchestrator, so a parser flaw yields no capabilities.
 - A **tailored seccomp profile** (`docker/seccomp-profile.json`)
-  replaces `seccomp=unconfined`, turning the scariest line in the deployment
-  manifest into an auditable allowlist.
-
+  replaces `seccomp=unconfined` in the deployment manifest
 **Vector 3 — the resident credentials.** (See §5.)
 - Property B; App installation tokens (1h, single-installation); BYOK.
 - App-token minting runs on the control plane — executors never hold the App
@@ -339,30 +335,28 @@ privileged netns/veth/iptables/cgroup setup and supervised runtime each
 - The broker caps in-flight `LaunchRun`s per orchestrator instance
   (one orchestrator maps to one broker) at the subnet-pool size, releasing the
   slot when the run is reaped, so a runaway caller degrades to queueing rather
-  than host exhaustion. This is denial-of-service resistance, **not** a
-  capability boundary — called out so the two are not conflated.
+  than host exhaustion. This is really denial-of-service resistance,
+  not a capability boundary.
 
 ---
 
-## 7. Deployment guidance for security teams
+## 7. Deployment guidance
 
-The capability requirements do **not** force a privileged workload into a
-Kubernetes cluster. The recommended topology keeps the privileged part out of
-the cluster entirely:
+The *most* secure deployment pattern is as follows, and is particularly relevant
+when k8s is required. The capability requirements allow for privileged workloads
+to remain out of Kubernetes clusters entirely:
 
 - **Executors as dedicated VMs (or bare metal), outside the cluster.** They
   accept no inbound traffic and dial out to Postgres to claim work — exactly the
-  pattern enterprise teams already run for GitHub Actions / GitLab / Buildkite
-  runners. Root on a VM that was provisioned for this one purpose has a blast
-  radius of that one machine.
+  pattern used for GitHub Actions / GitLab / Buildkite runners.
 - **Control plane as ordinary web-service pods.** The API/websocket/polling tier
   is a normal web service. It carries the sandbox capabilities only to jail its
   own low-volume system jobs (e.g. curator chat sessions); delegated agent runs
   land on executors, not here.
 - **If executors must run in Kubernetes**, they run as privileged pods on a
   dedicated, tainted node pool with the cloud metadata endpoint blocked, a
-  minimal node role, and no other tenants' pods scheduled there. This is the
-  fallback, not the lead: a privileged pod is a standing admission-policy
+  minimal node role, and no other tenants' pods scheduled there. We do not
+  recommend this: a privileged pod is a standing admission-policy
   exception, and root on a k8s node reaches node credentials, the cluster API,
   the node's cloud identity, and the pod network — which is why "privileged on a
   VM" and "privileged on a shared k8s node" are genuinely different risks.
