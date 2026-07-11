@@ -11,11 +11,12 @@ import "context"
 //
 // Both dialects (unlike RunSignalStore): local mode's dispatcher claims its
 // own resumed runs through the identical queue path — resume-by-enqueue
-// applies in every mode, TF_ROLE=all included (decision log #7). Admin-pool
-// only, no claims-scoped variant: the writer (SendMessage, which already
-// authorized the request under the caller's org before reaching here) and
-// the reader (the dispatcher's claim path, a goroutine with no request
-// context) are both system-service callers.
+// applies in every mode, TF_ROLE=all included (decision log #7). Store runs
+// claims-scoped, bound to the resume flip's tx (TxStores.RunPendingInput), so
+// the input write commits atomically with the status flip under the resuming
+// user's claims and a losing concurrent wake rolls it back. Consume runs
+// system-side off the top-level (admin-pool in Postgres) store: the
+// dispatcher's claim path is a goroutine with no request context.
 type RunPendingInputStore interface {
 	// Store durably records the message to deliver on the run's next
 	// claim, replacing any not-yet-consumed prior input for the same run —

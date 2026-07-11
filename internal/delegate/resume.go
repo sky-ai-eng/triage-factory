@@ -147,7 +147,7 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 		// this back, so only the winner's message ever persists and no orphan
 		// row survives a lost race for a later claim to mis-deliver.
 		if sErr := ts.RunPendingInput.Store(ctx, orgID, runID, userID, agentMessage); sErr != nil {
-			return sErr
+			return fmt.Errorf("record pending input: %w", sErr)
 		}
 		// Re-open the aborted blueprint atomically with the run flip. A failure
 		// rolls back the run flip too, so run + blueprint never split across the
@@ -187,6 +187,12 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *domain.AgentRun) bool {
 	if run.WorktreePath != "" {
 		if _, err := os.Stat(run.WorktreePath); err == nil {
+			return true
+		} else if !os.IsNotExist(err) {
+			// A stat we couldn't complete (permission, I/O) is not proof the
+			// worktree is gone — count it as recoverable rather than emit a
+			// false 410 on a transient error.
+			delegateLog.Warn("resume: worktree stat inconclusive; treating as recoverable", "run", run.ID, "path", run.WorktreePath, "error", err)
 			return true
 		}
 	}

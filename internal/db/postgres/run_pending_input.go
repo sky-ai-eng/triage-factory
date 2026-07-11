@@ -9,11 +9,11 @@ import (
 )
 
 // runPendingInputStore is the Postgres impl of db.RunPendingInputStore —
-// the durable half of resume-by-enqueue (TFAC-585). Admin-pool only: the
-// writer (SendMessage, after it already authorized the request under the
-// caller's org) and the reader (the dispatcher's claim path, a goroutine
-// with no request context) are both system-service callers, same shape as
-// StagedInjectionStore.
+// the durable half of resume-by-enqueue (TFAC-585). Reachable two ways: the
+// resume flip binds it to the claims tx so Store commits atomically with the
+// status flip under the resuming user's claims (the RLS policy admits the
+// write via the run's own visibility); Consume runs off the admin pool from
+// the dispatcher's claim path, a goroutine with no request context.
 type runPendingInputStore struct{ admin queryer }
 
 func newRunPendingInputStore(admin queryer) db.RunPendingInputStore {
