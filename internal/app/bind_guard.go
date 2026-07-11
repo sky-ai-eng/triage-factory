@@ -58,7 +58,7 @@ func assertLocalBindSafe(host, publicURL, allowOverride string) error {
 		"refusing to start: local mode runs with NO authentication (every request is treated as the owner), "+
 			"but %s. Exposing this leaves the entire instance — all data and all delegated agent runs — open to "+
 			"anyone who can reach it. Run multi-tenant mode with real auth instead (set TF_MODE=multi; see "+
-			"docs/self-host-setup.md). If you genuinely want unauthenticated LAN access and accept the risk, set "+
+			"docs/self-hosting/install.md). If you genuinely want unauthenticated LAN access and accept the risk, set "+
 			"%s=true to override this guard",
 		strings.Join(reasons, " and "), envAllowPublicLocal)
 }

@@ -53,7 +53,7 @@ sboms:
 # transitively verifies every archive (each line is a sha256 of one
 # archive). Requires `cosign` on PATH and `id-token: write` permission on
 # the goreleaser job — see release.yml. See "Verifying releases" in
-# docs/self-host-setup.md for the consumer-facing verify commands.
+# docs/security/verifying-releases.md for the consumer-facing verify commands.
 signs:
   - cmd: cosign
     certificate: "${artifact}.pem"

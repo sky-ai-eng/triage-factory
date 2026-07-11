@@ -7,7 +7,7 @@ import "context"
 // is re-queued as ordinary claimable work, so a crash between "message
 // recorded" and "process spawned" is recoverable by the standard boot
 // sweep rather than an ad-hoc path. See
-// docs/specs/horizontal-scaling/README.md §5.2.
+// docs/for-agents/specs/horizontal-scaling/README.md §5.2.
 //
 // Both dialects (unlike RunSignalStore): local mode's dispatcher claims its
 // own resumed runs through the identical queue path — resume-by-enqueue

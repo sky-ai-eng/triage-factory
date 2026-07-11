@@ -2,7 +2,7 @@
 // per-resource store interfaces declared in package db. Local-mode
 // installs of triagefactory wire this implementation at startup
 // (multi-mode wires internal/db/postgres). See the D2 spec
-// at docs/specs/sky-246-d2-store-abstraction.html for the full
+// at docs/for-agents/specs/sky-246-d2-store-abstraction.html for the full
 // design.
 package sqlite
 

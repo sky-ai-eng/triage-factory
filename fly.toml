@@ -17,7 +17,7 @@
 #           is a different and independently stronger isolation story
 #           than the self-host shared-Docker-engine case the tailored
 #           profile hardens; see
-#           docs/self-host-setup.md#tailored-seccomp-profile.
+#           docs/security/seccomp-profile.md.
 #
 # Per-deployment secrets the TF process consumes — set via flyctl,
 # NOT committed here:

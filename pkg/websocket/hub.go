@@ -55,7 +55,7 @@ const (
 )
 
 // Backplane is the optional cross-pod publish hook a multi-mode deployment
-// wires in (TFAC-584, docs/specs/horizontal-scaling/README.md §5.1):
+// wires in (TFAC-584, docs/for-agents/specs/horizontal-scaling/README.md §5.1):
 // Broadcast calls Publish after fanning to this pod's local sockets, so a
 // Postgres LISTEN/NOTIFY relay can mirror the event onto every other
 // control pod's Hub (via DeliverRemote there). A nil Backplane — the

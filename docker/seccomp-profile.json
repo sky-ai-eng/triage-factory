@@ -613,7 +613,7 @@
           "CAP_SYS_ADMIN"
         ]
       },
-      "comment": "TFAC-608: pivot_root added to this group — the one syscall empirical validation (real runsc release-20260511, --platform=systrap) found missing from Docker's default profile for runsc to construct the per-run sandbox's mount namespace. Folded in here (not a separate unconditional allow) because pivot_root(2) requires CAP_SYS_ADMIN, same as mount/unshare/setns above. See docs/self-host-setup.md#tailored-seccomp-profile."
+      "comment": "TFAC-608: pivot_root added to this group — the one syscall empirical validation (real runsc release-20260511, --platform=systrap) found missing from Docker's default profile for runsc to construct the per-run sandbox's mount namespace. Folded in here (not a separate unconditional allow) because pivot_root(2) requires CAP_SYS_ADMIN, same as mount/unshare/setns above. See docs/security/seccomp-profile.md."
     },
     {
       "names": [

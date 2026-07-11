@@ -4,7 +4,7 @@
 -- re-queued as ordinary claimable work, so a crash between "message
 -- recorded" and "process spawned" is recoverable by the standard boot
 -- sweep instead of an ad-hoc path. See
--- docs/specs/horizontal-scaling/README.md §5.2 and the Postgres twin in
+-- docs/for-agents/specs/horizontal-scaling/README.md §5.2 and the Postgres twin in
 -- internal/db/migrations-postgres/202605130001_pg_baseline.sql.
 --
 -- Both dialects (unlike the Postgres-only run_signals outbox): local

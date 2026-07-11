@@ -32,7 +32,7 @@ Work flows through an automation engine drawn as a factory floor. A durable **en
 
 **Local (N=1)** — one developer, on your laptop. `brew install`, SQLite, credentials in the OS keychain (or an encrypted file when none is reachable, like a container or headless host). Agent runs execute in isolated git worktrees. No DevOps.
 
-**Self-hosted (multi-tenant)** — your whole org on a Linux host you control: Postgres, GoTrue sign-in (SSO/SAML via the [Enterprise Edition](ee/)), RLS-isolated tenants, and — on Linux — gVisor-sandboxed agent runs with a locked-down egress allowlist. Same binary, same schema, deployed with Docker Compose. See [docs/self-host-setup.md](docs/self-host-setup.md).
+**Self-hosted (multi-tenant)** — your whole org on a Linux host you control: Postgres, GoTrue sign-in (SSO/SAML via the [Enterprise Edition](ee/)), RLS-isolated tenants, and — on Linux — gVisor-sandboxed agent runs with a locked-down egress allowlist. Same binary, same schema, deployed with Docker Compose. See [docs/self-hosting/](docs/self-hosting/README.md).
 
 ## Install
 
@@ -50,9 +50,10 @@ For direct downloads, building from source, and platform notes, see [docs/INSTAL
 ## Documentation
 
 - [docs/INSTALLATION.md](docs/INSTALLATION.md) — install, build from source, prerequisites
-- [docs/usage.md](docs/usage.md) — CLI flags, configuration, polling, the delegation/takeover workflow
-- [docs/self-host-setup.md](docs/self-host-setup.md) — multi-tenant self-hosting
-- [docs/tracked-events.md](docs/tracked-events.md) — the GitHub/Jira event taxonomy
+- [docs/local-mode/](docs/local-mode/README.md) — local mode: CLI flags, configuration, secret storage, headless
+- [docs/self-hosting/](docs/self-hosting/README.md) — multi-tenant self-hosting (install, scaling, SSO, monitoring)
+- [docs/security/](docs/security/README.md) — isolation tiers, sandbox architecture, privilege separation
+- [docs/concepts/tracked-events.md](docs/concepts/tracked-events.md) — the GitHub/Jira event taxonomy
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribution terms
 
 ## License

@@ -4,7 +4,7 @@
 # + the TF binary as a service. Local-mode (SQLite, the default) doesn't
 # need any of this.
 #
-# Prerequisites — see docs/self-host-setup.md:
+# Prerequisites — see docs/self-hosting/install.md:
 #   1. Create a GitHub OAuth app with callback ${TF_PUBLIC_URL}/auth/v1/callback
 #   2. cp .env.example .env, fill in the placeholders
 #   3. ./triagefactory jwk-init --write-env .env   (writes GOTRUE_JWT_KEYS + GOTRUE_JWT_SECRET)
@@ -25,7 +25,7 @@
 # The TF container needs SYS_ADMIN + NET_ADMIN + a seccomp profile
 # permissive enough for the in-container gVisor sandbox (netns +
 # iptables + runsc) — a tailored allowlist as of TFAC-608, not
-# `unconfined`; see docs/self-host-setup.md#tailored-seccomp-profile.
+# `unconfined`; see docs/security/seccomp-profile.md.
 # The `cap_add` / `security_opt` block on the service below is what
 # makes self-host work on the same Docker engine that Fly Machines use
 # upstream. Managed-Kubernetes / Railway / Render block these
@@ -39,8 +39,8 @@
 # the one parsing webhook payloads, agent output, and holding
 # credentials) into an empty capability set, a different unprivileged
 # uid, and a cleared capability bounding set, before that process runs a
-# single line of Go. See docs/self-host-setup.md for the process-model
-# table and docs/usage.md for the privilege-separation model.
+# single line of Go. See docs/security/privilege-separation.md for the process-model
+# table (also documents the privilege-separation model).
 #
 # ── Scaling out (TFAC-582) ────────────────────────────────────────────
 # The default `docker compose up` runs the single all-in-one
@@ -55,7 +55,7 @@
 # executors, each on its own TF_STATE_ROOT volume. Both roles run the same
 # image and the same entrypoint (broker-then-drop privilege separation),
 # and BOTH carry the sandbox caps: control pods sandbox curator chats,
-# executors sandbox delegated runs. See docs/self-host-setup.md for the
+# executors sandbox delegated runs. See docs/self-hosting/scaling.md for the
 # N-executor profile, the max_connections arithmetic, and the M≥2-control
 # (HA) reference reverse-proxy config.
 
@@ -66,7 +66,7 @@
 #     iptables + runsc work. Held ONLY by the cap-broker inside the
 #     container; the orchestrator execs capless (see the header above).
 #   - seccomp: a tailored default-deny allowlist (TFAC-608), NOT unconfined —
-#     see docs/self-host-setup.md#tailored-seccomp-profile.
+#     see docs/security/seccomp-profile.md.
 #   - cgroup: private — a private cgroup-v2 namespace so per-run memory
 #     ceilings (TF_RUN_MEMORY_LIMIT_MB) manage this container's own delegated
 #     subtree and can never reach host cgroups. Fails open without it.
@@ -126,7 +126,7 @@ services:
   # is demoted by the image's migrations and supautils blocks non-supers
   # from modifying "reserved" roles like supabase_auth_admin).
   # supabase_admin shares POSTGRES_PASSWORD by image convention — set
-  # at initdb, NOT rotatable in-place. See docs/self-host-setup.md.
+  # at initdb, NOT rotatable in-place. See docs/self-hosting/install.md.
   postgres-postinit:
     image: supabase/postgres:15.14.1.121
     depends_on:
@@ -389,7 +389,7 @@ services:
       # Per-role Postgres pool ceiling (per pool) + advisory platform reserve.
       # Empty → the role default (control/all: 25 conns/pool, 12 GB reserve;
       # executor: 6 conns/pool, 2 GB reserve). See the max_connections
-      # arithmetic in docs/self-host-setup.md.
+      # arithmetic in docs/self-hosting/scaling.md.
       TF_DB_MAX_OPEN_CONNS: ${TF_DB_MAX_OPEN_CONNS:-}
       TF_PLATFORM_RESERVE_MB: ${TF_PLATFORM_RESERVE_MB:-}
       # supabase_admin is the real superuser in the supabase/postgres
@@ -523,7 +523,7 @@ services:
       # Admin superuser pool (same as the control pod). The executor runs no
       # RLS request handlers, so its app pool is effectively idle; both pools
       # ship much smaller ceilings than the API tier (see TF_DB_MAX_OPEN_CONNS
-      # and the max_connections arithmetic in docs/self-host-setup.md).
+      # and the max_connections arithmetic in docs/self-hosting/scaling.md).
       TF_DATABASE_URL: postgres://supabase_admin:${POSTGRES_PASSWORD:?missing POSTGRES_PASSWORD (see .env.example)}@postgres:5432/postgres
       TF_AUTHENTICATOR_PASSWORD: ${TF_AUTHENTICATOR_PASSWORD:?missing TF_AUTHENTICATOR_PASSWORD (see .env.example)}
       # Deliberately NOT set here (TFAC-614): an executor never holds the

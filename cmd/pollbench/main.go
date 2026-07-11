@@ -6,7 +6,7 @@
 // warm follow-up cycle cost.
 //
 // Standalone binary, like cmd/sandbox-bench — not wired into the root CLI
-// dispatch. See docs/poll-bench.md for usage and recorded baselines.
+// dispatch. See docs/benchmarks/poll-bench.md for usage and recorded baselines.
 package main
 
 import (
@@ -25,7 +25,7 @@ import (
 // shapes are the standard benchmark shapes. dp1 approximates the large
 // single-org GHES profile (hundreds of repos, thousands of open PRs);
 // numbers are placeholders until a real deployment's counts replace them —
-// see docs/poll-bench.md.
+// see docs/benchmarks/poll-bench.md.
 var shapes = map[string]struct {
 	repos   int
 	prsMean float64

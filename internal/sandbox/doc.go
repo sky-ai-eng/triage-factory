@@ -3,9 +3,18 @@
 // In multi mode on Linux, internal/agentproc.Run wraps the Node
 // subprocess via Wrap() so the agent sees only its worktree, a
 // scratched-from-empty env, and a netns with no route to host
-// services. See docs/specs/sky-254-runsc-validation/ for the
-// threat model + the validated shell-script equivalent that this
-// package mirrors in Go.
+// services.
+//
+// The capabilities that build this cell (netns, veth, iptables, cgroup,
+// and the runsc launch) are held by a separate cap-broker process —
+// never by the orchestrator that resolves credentials and parses agent
+// output. This package builds the OCI spec from a fixed template (empty
+// caps, uid 10000, seccomp) and validates the narrow, numeric parameters
+// the broker accepts over its RPC, so a compromised orchestrator cannot
+// steer sandbox construction. The deployment threat model and that split
+// live in docs/security/security-overview.md; the validated runsc/egress
+// mechanics that this package mirrors in Go live in
+// docs/for-agents/specs/sky-254-runsc-validation/.
 //
 // # Property B invariant
 //
@@ -27,9 +36,12 @@
 // # Threat model (T1–T4)
 //
 // T1: credential exfiltration — addressed by Property B above.
-// T2: in-run credential misuse — bounded by run wall-clock + per-run
+// T2: in-run credential misuse — strongly bounded: Property B keeps
 //
-//	policy. Partial coverage in v1.
+//	every real credential out of the sandbox, so the agent can reach
+//	one only through the host-side proxy/exec interface that mediates
+//	it, within the run's own authority and bounded by run wall-clock.
+//	See docs/security/security-overview.md §2.
 //
 // T3: RCE in the agent SDK escaping the SDK process — addressed by
 //

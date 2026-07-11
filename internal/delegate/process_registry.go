@@ -66,7 +66,7 @@ func ParseMaxConcurrentRuns(raw string) (n int, clamped bool, err error) {
 // run: the fleet-measured ~155MB marginal cost of the agent engine
 // (read-only engine pages are shared across sandboxes and amortize
 // per-host) plus the node supervisor and transcript-growth headroom.
-// See docs/sandbox-bench.md for the measurements behind it.
+// See docs/benchmarks/sandbox-bench.md for the measurements behind it.
 const DefaultRunMemoryBudgetMB = 256
 
 // DefaultPlatformReserveMB is the instance memory the capacity rule sets
@@ -133,7 +133,7 @@ func ParsePlatformReserveMB(raw string, roleDefault int) (int, error) {
 // DefaultDispatchMemFloorMB is the default MemAvailable floor below
 // which the dispatcher defers claiming queued runs. Sized to the
 // platform reserve the capacity sizing rule assumes (see
-// docs/sandbox-bench.md): enough headroom that in-flight runs finish
+// docs/benchmarks/sandbox-bench.md): enough headroom that in-flight runs finish
 // and the host never swaps, small enough not to strand capacity on
 // modest hosts.
 const DefaultDispatchMemFloorMB = 4096

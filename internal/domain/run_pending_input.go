@@ -8,7 +8,7 @@ import "time"
 // claiming executor's resume path consumes it (DELETE ... RETURNING) and
 // delivers it as the turn's input, exactly once. See
 // internal/db.RunPendingInputStore and
-// docs/specs/horizontal-scaling/README.md §5.2.
+// docs/for-agents/specs/horizontal-scaling/README.md §5.2.
 type RunPendingInput struct {
 	RunID     string
 	OrgID     string

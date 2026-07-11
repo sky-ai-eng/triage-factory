@@ -2,7 +2,7 @@
 // fake GitHub API server plus a driver that points a real poller.Manager +
 // tracker.Tracker at it and measures a cold-start sync at large-org shape
 // (hundreds of repos, thousands of open PRs — the GHES large-org
-// profile). See docs/poll-bench.md for how to run it and cmd/pollbench for
+// profile). See docs/benchmarks/poll-bench.md for how to run it and cmd/pollbench for
 // the CLI entrypoint.
 //
 // The harness exists to answer "what does the first full poll of a large
