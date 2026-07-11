@@ -44,3 +44,39 @@ func wrapAppPoolPermErr(err error, callsite string) error {
 	}
 	return err
 }
+
+// wrapAdminPoolPermErr turns a Postgres permission-denied error (SQLSTATE
+// 42501) from an admin-pool call into an actionable one, naming the table
+// (Postgres's own DETAIL already carries it, surfaced here via
+// pgErr.TableName) and pointing at the fix.
+//
+// Historically the admin pool never raised 42501 at all — it connected as
+// supabase_admin, the real superuser. PS-H4 changes that for executors:
+// their admin pool is tf_system, an enumerated-grant BYPASSRLS role (see
+// the tf_system section of internal/db/migrations-postgres/
+// 202605130001_pg_baseline.sql). A 42501 here means exactly one thing — a
+// table this call touches is missing from that grant list, most likely
+// because a later migration added an executor-path table without adding
+// its tf_system grant in the same migration (the forward-maintenance
+// rule the baseline's tf_system comment calls out). This wrapper is pure
+// diagnosis, applied only at the executor's highest-traffic admin-pool
+// call sites (the dispatcher's claim CAS, the fleet heartbeat) so a
+// production grant gap surfaces immediately and legibly instead of as a
+// bare pq error buried in a retry loop. The original *pgconn.PgError is
+// wrapped (%w), so callers that inspect SQLSTATE still see 42501.
+func wrapAdminPoolPermErr(err error, callsite string) error {
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "42501" {
+		table := pgErr.TableName
+		if table == "" {
+			table = "(unknown — see the wrapped error's DETAIL)"
+		}
+		return fmt.Errorf("%s: permission denied for tf_system on table %s — "+
+			"add its grant to the tf_system section of the pg baseline migration: %w",
+			callsite, table, err)
+	}
+	return err
+}

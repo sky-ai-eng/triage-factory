@@ -136,7 +136,8 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 			LIMIT 1
 		)
 		RETURNING `+runQueueClaimCols, executorID, bootEpoch)
-	return scanPgClaimedRun(row)
+	run, err := scanPgClaimedRun(row)
+	return run, wrapAdminPoolPermErr(err, "run_queue.ClaimNextRun")
 }
 
 func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr string) error {

@@ -88,22 +88,31 @@ services:
     #     (vault is what D5 / SKY-249 uses for per-org secrets)
     #   - the authenticator / anon / authenticated / service_role pattern
     #     for D9's RLS app pool to lean on
-    # Three distinct passwords by design:
+    # Four distinct passwords by design:
     #   POSTGRES_PASSWORD            -> shared by `postgres` AND
     #                                   `supabase_admin` (image initdb
     #                                   convention). `postgres` is
     #                                   demoted to non-superuser by the
     #                                   image's bundled migrations;
     #                                   `supabase_admin` is the effective
-    #                                   superuser TF connects as for
-    #                                   migrations + admin pool.
+    #                                   superuser control/all pods connect
+    #                                   as for migrations + their admin pool.
     #   SUPABASE_AUTH_ADMIN_PASSWORD -> GoTrue's DB user (auth.* CRUD only)
     #   TF_AUTHENTICATOR_PASSWORD    -> `authenticator` role, which TF's
     #                                   RLS-active app pool connects as
     #                                   (sets LOCAL ROLE tf_app per-tx).
-    # Three separate roles mean a GoTrue compromise doesn't surrender
-    # superuser credentials, and a tenant-side prompt-injection in the
-    # tf_app pool can't escalate to admin.
+    #   TF_SYSTEM_PASSWORD           -> `tf_system` role (PS-H4), which
+    #                                   executor pods' admin pool connects
+    #                                   as instead of `supabase_admin` —
+    #                                   BYPASSRLS but no DDL and a narrow,
+    #                                   enumerated table grant list (see
+    #                                   the tf_system section of the pg
+    #                                   baseline migration).
+    # Four separate roles mean a GoTrue compromise doesn't surrender
+    # superuser credentials, a tenant-side prompt-injection in the tf_app
+    # pool can't escalate to admin, and a compromised executor — the
+    # most-exposed machine class, running agent workloads — never holds
+    # a superuser DSN.
     image: supabase/postgres:15.14.1.121
     environment:
       # `${VAR:?msg}` makes compose fail-fast if .env wasn't filled in,
@@ -135,6 +144,7 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:?missing POSTGRES_PASSWORD (see .env.example)}
       SUPABASE_AUTH_ADMIN_PASSWORD: ${SUPABASE_AUTH_ADMIN_PASSWORD:?missing SUPABASE_AUTH_ADMIN_PASSWORD (see .env.example)}
       AUTHENTICATOR_PASSWORD: ${TF_AUTHENTICATOR_PASSWORD:?missing TF_AUTHENTICATOR_PASSWORD (see .env.example)}
+      SYSTEM_PASSWORD: ${TF_SYSTEM_PASSWORD:?missing TF_SYSTEM_PASSWORD (see .env.example)}
     entrypoint: ["sh", "-c"]
     # The heredoc with a quoted delimiter ('SQL') skips outer-shell
     # expansion; psql sees the raw \set + backtick-echo, runs the echo
@@ -142,17 +152,22 @@ services:
     # the role passwords), and :'<var>' applies SQL-safe quoting.
     # Equivalent to the official supabase roles.sql.
     #
-    # Both ALTERs run as supabase_admin (the real superuser per the
+    # All three ALTERs run as supabase_admin (the real superuser per the
     # supabase image's role-demotion init); supautils only blocks
-    # reserved-role ALTERs from non-supers. Idempotent on re-run.
+    # reserved-role ALTERs from non-supers. tf_system is created NOLOGIN
+    # by the pg baseline migration (it has no password until this ALTER
+    # grants it LOGIN); the other two roles are image-provisioned. All
+    # three are idempotent on re-run.
     command:
       - |
         set -eu
         psql -h postgres -U supabase_admin -d postgres -v ON_ERROR_STOP=1 <<-'SQL'
         \set auth_admin_password `echo "$$SUPABASE_AUTH_ADMIN_PASSWORD"`
         \set authenticator_password `echo "$$AUTHENTICATOR_PASSWORD"`
+        \set system_password `echo "$$SYSTEM_PASSWORD"`
         ALTER USER supabase_auth_admin WITH LOGIN PASSWORD :'auth_admin_password';
         ALTER USER authenticator WITH LOGIN PASSWORD :'authenticator_password';
+        ALTER ROLE tf_system WITH LOGIN PASSWORD :'system_password';
         SQL
     restart: "no"
 
@@ -520,11 +535,15 @@ services:
       # Localhost-only liveness endpoint (the container HEALTHCHECK target).
       # Pinned to match the healthcheck below.
       TF_HEALTHZ_PORT: "3001"
-      # Admin superuser pool (same as the control pod). The executor runs no
-      # RLS request handlers, so its app pool is effectively idle; both pools
-      # ship much smaller ceilings than the API tier (see TF_DB_MAX_OPEN_CONNS
-      # and the max_connections arithmetic in docs/self-host-setup.md).
-      TF_DATABASE_URL: postgres://supabase_admin:${POSTGRES_PASSWORD:?missing POSTGRES_PASSWORD (see .env.example)}@postgres:5432/postgres
+      # Least-privilege admin pool (PS-H4): tf_system, NOT supabase_admin —
+      # BYPASSRLS but no DDL and a narrow, enumerated table grant list (see
+      # the tf_system section of the pg baseline migration). The executor
+      # runs no migrations and no RLS request handlers, so its app pool is
+      # effectively idle; both pools ship much smaller ceilings than the API
+      # tier (see TF_DB_MAX_OPEN_CONNS and the max_connections arithmetic in
+      # docs/self-host-setup.md). Control/all pods keep the supabase_admin
+      # DSN unchanged — narrowing control is explicitly out of scope.
+      TF_DATABASE_URL: postgres://tf_system:${TF_SYSTEM_PASSWORD:?missing TF_SYSTEM_PASSWORD (see .env.example)}@postgres:5432/postgres
       TF_AUTHENTICATOR_PASSWORD: ${TF_AUTHENTICATOR_PASSWORD:?missing TF_AUTHENTICATOR_PASSWORD (see .env.example)}
       # App-encrypted org/user integration secrets (per-run GitHub/LLM creds).
       TF_SECRET_ENCRYPTION_KEY: ${TF_SECRET_ENCRYPTION_KEY:?missing TF_SECRET_ENCRYPTION_KEY (see .env.example)}

@@ -84,7 +84,7 @@ func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int6
 		return false, false, nil
 	}
 	if err != nil {
-		return false, false, err
+		return false, false, wrapAdminPoolPermErr(err, "instances.Heartbeat")
 	}
 	return true, draining, nil
 }
