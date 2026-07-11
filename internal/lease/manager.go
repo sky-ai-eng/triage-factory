@@ -11,13 +11,19 @@ import (
 // Store. Construct with NewManager and run it with Run(ctx) — Run blocks
 // until ctx is cancelled, so callers start it in its own goroutine.
 //
-// Two independent tickers, deliberately decoupled:
+// Two tickers, serviced by Run's single goroutine:
 //   - renew ticks every renewInterval and does the DB work (attempt
 //     acquisition when not holder, renew when holder).
 //   - deadline ticks at a finer grain and ONLY checks the holder's own
 //     monotonic clock against demoteDeadline — so a DB partition (Renew
 //     erroring, not just returning renewed=false) is caught close to the
 //     deadline itself, not up to one whole renewInterval late.
+//
+// The deadline ticker can only stay this responsive because every store
+// call in tick is bounded by storeCallTimeout: sharing one goroutine, a
+// renewal blocked on a black-holed connection would otherwise stall the
+// select and the deadline check with it — the very partition the deadline
+// exists to catch (see storeCallTimeout).
 //
 // A renewal that explicitly reports "0 rows matched" (someone else's
 // TryAcquire already won) demotes immediately, on the spot — that's a
@@ -75,8 +81,8 @@ type Manager struct {
 // semantics). onAcquire/onDemote may be nil (a Manager with no brain to
 // drive, useful for pure election tests).
 func NewManager(store Store, name, holderID string, renewInterval, ttl, demoteDeadline time.Duration, fenced func() bool, onAcquire func(term int64), onDemote func(reason string)) (*Manager, error) {
-	if demoteDeadline >= ttl {
-		return nil, fmt.Errorf("lease demote deadline (%s) must be strictly less than the takeover TTL (%s)", demoteDeadline, ttl)
+	if err := demoteMarginError(demoteDeadline, ttl); err != nil {
+		return nil, err
 	}
 	if fenced == nil {
 		fenced = func() bool { return false }
@@ -124,6 +130,44 @@ func deadlineCheckInterval(demoteDeadline time.Duration) time.Duration {
 	return d
 }
 
+// demoteMarginError rejects a demote deadline that leaves too little room
+// under ttl. The self-demote fires at the first deadline tick AFTER the
+// deadline elapses — up to deadlineCheckInterval late — and a standby may
+// acquire at ttl, so demoteDeadline + deadlineCheckInterval must stay
+// strictly under ttl or a demoting holder and its successor can overlap
+// (double-brain). Shared by NewManager and KnobsFromEnv so direct
+// construction and the env path refuse the identical unsafe configs; a bare
+// demoteDeadline < ttl check (the prior guard) missed the tick granularity.
+func demoteMarginError(demoteDeadline, ttl time.Duration) error {
+	if demoteDeadline+deadlineCheckInterval(demoteDeadline) >= ttl {
+		return fmt.Errorf("lease demote deadline (%s) plus its check granularity (%s) must stay strictly under the takeover TTL (%s); raise TF_LEASE_TTL_SEC or lower TF_LEASE_DEMOTE_SEC", demoteDeadline, deadlineCheckInterval(demoteDeadline), ttl)
+	}
+	return nil
+}
+
+// storeCallTimeout bounds a single DB call inside tick. It is what makes the
+// deadline ticker actually independent: tick and checkDemoteDeadline share
+// Run's one goroutine, so an UNBOUNDED store call (a silently black-holed
+// connection — packets vanish, no RST, so the driver never returns on its
+// own) would block the whole select and starve the deadline check entirely,
+// letting a partitioned holder keep the lease past TTL while a standby
+// acquires (double-brain). Bounding each call means a blocked renewal fails
+// within this budget and the pending deadline tick is serviced right after,
+// so the worst-case self-demote is demoteDeadline + one timeout — kept under
+// ttl by sizing this at half the demote-vs-ttl margin, capped at
+// demoteDeadline/3, floored at 1s so a healthy-but-slow renewal isn't
+// false-failed.
+func (m *Manager) storeCallTimeout() time.Duration {
+	d := (m.ttl - m.demoteDeadline) / 2
+	if cap := m.demoteDeadline / 3; d > cap {
+		d = cap
+	}
+	if d < time.Second {
+		d = time.Second
+	}
+	return d
+}
+
 // Run drives the election loop until ctx is cancelled. On cancellation, a
 // current holder demotes (best-effort — the process is shutting down
 // either way) before returning. Row bootstrap (EnsureRow) is NOT a
@@ -164,7 +208,16 @@ func (m *Manager) tick(ctx context.Context) {
 	}
 
 	if m.IsHolder() {
-		renewed, err := m.store.Renew(ctx, m.name, m.holderID, m.currentTerm())
+		// Stamp the ISSUE time, not the post-return time: the row's renewed_at
+		// is set when the UPDATE executes (at most one round-trip after this),
+		// and a successor keys off renewed_at — so recording when we ISSUED the
+		// renewal keeps our monotonic deadline conservative (never later than
+		// the DB's own view) rather than letting a slow-but-successful renewal
+		// quietly erode the demote-before-takeover margin.
+		issuedAt := time.Now()
+		rctx, cancel := context.WithTimeout(ctx, m.storeCallTimeout())
+		renewed, err := m.store.Renew(rctx, m.name, m.holderID, m.currentTerm())
+		cancel()
 		if err != nil {
 			leaseLog.Warn("lease renewal failed (transient?)", "name", m.name, "error", err)
 			return
@@ -177,7 +230,7 @@ func (m *Manager) tick(ctx context.Context) {
 			return
 		}
 		m.mu.Lock()
-		m.lastSuccessfulRenewal = time.Now()
+		m.lastSuccessfulRenewal = issuedAt
 		m.mu.Unlock()
 		return
 	}
@@ -200,11 +253,16 @@ func (m *Manager) tick(ctx context.Context) {
 	// because some pod's EnsureRow succeeded before) this failure is
 	// irrelevant to it, and on the empty-table path it just means another
 	// harmless "not acquired" this tick, retried again next tick.
-	if err := m.store.EnsureRow(ctx, m.name); err != nil {
-		leaseLog.Warn("ensure lease row failed; retrying next tick", "name", m.name, "error", err)
+	ensureCtx, ensureCancel := context.WithTimeout(ctx, m.storeCallTimeout())
+	ensureErr := m.store.EnsureRow(ensureCtx, m.name)
+	ensureCancel()
+	if ensureErr != nil {
+		leaseLog.Warn("ensure lease row failed; retrying next tick", "name", m.name, "error", ensureErr)
 	}
 
-	term, acquired, err := m.store.TryAcquire(ctx, m.name, m.holderID, m.ttl)
+	acquireCtx, acquireCancel := context.WithTimeout(ctx, m.storeCallTimeout())
+	term, acquired, err := m.store.TryAcquire(acquireCtx, m.name, m.holderID, m.ttl)
+	acquireCancel()
 	if err != nil {
 		leaseLog.Warn("lease acquisition attempt failed", "name", m.name, "error", err)
 		return
@@ -307,7 +365,9 @@ func (m *Manager) demote(reason string) {
 // signal for "who holds it right now". Best-effort — a read failure just
 // leaves the last-known values in place.
 func (m *Manager) refreshObservedStatus(ctx context.Context) {
-	holderID, term, err := m.store.Read(ctx, m.name)
+	readCtx, cancel := context.WithTimeout(ctx, m.storeCallTimeout())
+	holderID, term, err := m.store.Read(readCtx, m.name)
+	cancel()
 	if err != nil {
 		return
 	}

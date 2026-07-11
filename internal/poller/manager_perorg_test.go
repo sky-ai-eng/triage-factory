@@ -27,7 +27,7 @@ func TestManager_RunGitHubCycle_IteratesActiveOrgs(t *testing.T) {
 	users := &emptyUsersStore{} // GetGitHubLoginSystem unused — repo path exits first
 
 	m := &Manager{orgs: orgs, repos: repos, users: users}
-	m.runGitHubCycle()
+	m.runGitHubCycle(nil)
 
 	if got := orgs.callCount(); got != 1 {
 		t.Errorf("ListActiveSystem called %d times; want 1 per cycle", got)
@@ -41,6 +41,27 @@ func TestManager_RunGitHubCycle_IteratesActiveOrgs(t *testing.T) {
 		if got != orgs.ids[i] {
 			t.Errorf("visit[%d] = %s; want %s (per-org iteration must preserve ListActiveSystem order)", i, got, orgs.ids[i])
 		}
+	}
+}
+
+// TestManager_RunGitHubCycle_StopHaltsMidCycle pins D4: a closed stop
+// channel (a lease demotion / RestartAll) keeps the per-org loop from
+// starting new batches, rather than polling the whole fleet after this
+// holder has been torn down.
+func TestManager_RunGitHubCycle_StopHaltsMidCycle(t *testing.T) {
+	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b", "org-c"}}
+	repos := &recordingRepoStore{}
+	users := &emptyUsersStore{}
+	m := &Manager{orgs: orgs, repos: repos, users: users}
+
+	stop := make(chan struct{})
+	close(stop) // torn down before the loop starts
+	m.runGitHubCycle(stop)
+
+	repos.mu.Lock()
+	defer repos.mu.Unlock()
+	if len(repos.visited) != 0 {
+		t.Errorf("polled %d orgs (%v) after stop was closed; want 0 — a torn-down holder must not start new per-org batches", len(repos.visited), repos.visited)
 	}
 }
 
@@ -61,7 +82,7 @@ func TestManager_RunGitHubCycle_IteratesActiveOrgs(t *testing.T) {
 func TestManager_RunJiraCycle_OrgsStoreError(t *testing.T) {
 	orgs := &fakeOrgsStore{err: errOrgsDown}
 	m := &Manager{orgs: orgs}
-	m.runJiraCycle()
+	m.runJiraCycle(nil)
 
 	if got := orgs.callCount(); got != 1 {
 		t.Errorf("ListActiveSystem called %d times; want 1 even on error", got)
@@ -77,7 +98,7 @@ func TestManager_RunGitHubCycle_OrgsStoreErrorAbortsCycle(t *testing.T) {
 	orgs := &fakeOrgsStore{err: errOrgsDown}
 	repos := &recordingRepoStore{}
 	m := &Manager{orgs: orgs, repos: repos}
-	m.runGitHubCycle()
+	m.runGitHubCycle(nil)
 
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
@@ -159,8 +180,8 @@ func TestManager_RunGitHubCycle_SkipsOrgNotYetDue(t *testing.T) {
 	repos := &recordingRepoStore{}
 	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
 
-	m.runGitHubCycle() // org-a due → polled, scheduled ~5m out
-	m.runGitHubCycle() // immediately again → not due → skipped
+	m.runGitHubCycle(nil) // org-a due → polled, scheduled ~5m out
+	m.runGitHubCycle(nil) // immediately again → not due → skipped
 
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
@@ -179,9 +200,9 @@ func TestManager_RunGitHubCycle_RepollsAfterSlotElapses(t *testing.T) {
 	repos := &recordingRepoStore{}
 	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
 
-	m.runGitHubCycle()
+	m.runGitHubCycle(nil)
 	m.schedulePoll("github", "org-a", time.Now().Add(-time.Second)) // pretend the interval elapsed
-	m.runGitHubCycle()
+	m.runGitHubCycle(nil)
 
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
@@ -202,9 +223,9 @@ func TestManager_PollSoon_ReduesOnlyTargetOrg(t *testing.T) {
 	repos := &recordingRepoStore{}
 	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
 
-	m.runGitHubCycle() // both due → polled once each, both scheduled ~5m out
+	m.runGitHubCycle(nil) // both due → polled once each, both scheduled ~5m out
 	m.PollSoon("github", "org-a")
-	m.runGitHubCycle() // org-a re-due; org-b still on cadence → skipped
+	m.runGitHubCycle(nil) // org-a re-due; org-b still on cadence → skipped
 
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
@@ -231,11 +252,11 @@ func TestManager_StartGitHub_DoesNotRepollScheduledOrg(t *testing.T) {
 	repos := &recordingRepoStore{}
 	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
 
-	m.runGitHubCycle() // org-a polled, scheduled ~5m out
+	m.runGitHubCycle(nil) // org-a polled, scheduled ~5m out
 
 	// Simulate the post-restart initial cycle directly (startGitHub's goroutine
 	// runs exactly this); the org's existing slot must still gate it.
-	m.runGitHubCycle()
+	m.runGitHubCycle(nil)
 
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
@@ -256,10 +277,10 @@ func TestManager_PollSoon_AppliesConfigChangeImmediately(t *testing.T) {
 	repos := &recordingRepoStore{}
 	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
 
-	m.runGitHubCycle() // polled, scheduled ~5m out
-	m.runGitHubCycle() // still on cadence → skipped (proves the slot gates)
+	m.runGitHubCycle(nil) // polled, scheduled ~5m out
+	m.runGitHubCycle(nil) // still on cadence → skipped (proves the slot gates)
 	m.PollSoon("github", runmode.LocalDefaultOrgID)
-	m.runGitHubCycle() // PollSoon cleared the slot → re-polled now
+	m.runGitHubCycle(nil) // PollSoon cleared the slot → re-polled now
 
 	repos.mu.Lock()
 	defer repos.mu.Unlock()

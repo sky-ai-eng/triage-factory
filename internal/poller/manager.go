@@ -367,14 +367,14 @@ func (m *Manager) startGitHub() {
 		// Initial poll. Orgs with no slot yet (cold boot: all of them) are due
 		// and polled once; orgs already on a cadence keep it, so a restart
 		// doesn't re-poll the fleet. PollSoon re-dues a single org on demand.
-		m.runGitHubCycle()
+		m.runGitHubCycle(stop)
 
 		ticker := time.NewTicker(basePollInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				m.runGitHubCycle()
+				m.runGitHubCycle(stop)
 			case <-stop:
 				return
 			}
@@ -391,7 +391,7 @@ func (m *Manager) startGitHub() {
 // poll without a restart. Per-org failures are logged and reported via
 // OnError but do not abort the remaining orgs in the cycle — a transient
 // failure on org A shouldn't starve orgs B..N of polls.
-func (m *Manager) runGitHubCycle() {
+func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 	m.stampGitHubHeartbeat()
 	ctx := context.Background()
 	now := time.Now()
@@ -402,6 +402,16 @@ func (m *Manager) runGitHubCycle() {
 		return
 	}
 	for _, orgID := range orgIDs {
+		// Stop starting NEW per-org batches the moment this loop is torn down
+		// (a lease demotion or RestartAll closes stop) — otherwise a demoted
+		// holder keeps polling the rest of the fleet, double-spending the API
+		// budget and emitting poll-complete sentinels that would kick a fresh
+		// scoring/classify cycle on a pod that no longer holds the brain.
+		select {
+		case <-stop:
+			return
+		default:
+		}
 		if !m.pollDue("github", orgID, now) {
 			continue
 		}
@@ -850,14 +860,14 @@ func (m *Manager) startJira() {
 
 	go func() {
 		// Initial poll. Same cold-boot-vs-cadence semantics as startGitHub.
-		m.runJiraCycle()
+		m.runJiraCycle(stop)
 
 		ticker := time.NewTicker(basePollInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				m.runJiraCycle()
+				m.runJiraCycle(stop)
 			case <-stop:
 				return
 			}
@@ -875,7 +885,7 @@ func (m *Manager) startJira() {
 // once settings load. Orgs not configured for Jira are skipped silently;
 // per-org failures are logged + reported via OnError but do not abort the
 // remaining orgs in the cycle.
-func (m *Manager) runJiraCycle() {
+func (m *Manager) runJiraCycle(stop <-chan struct{}) {
 	m.stampJiraHeartbeat()
 	ctx := context.Background()
 	now := time.Now()
@@ -891,6 +901,13 @@ func (m *Manager) runJiraCycle() {
 	// one place alongside the per-user write path.
 	sysResolver := jiraclient.NewResolver(m.secrets, m.orgs)
 	for _, orgID := range orgIDs {
+		// Stop starting NEW per-org batches once this loop is torn down (a
+		// lease demotion or RestartJira closes stop) — see runGitHubCycle.
+		select {
+		case <-stop:
+			return
+		default:
+		}
 		if !m.pollDue("jira", orgID, now) {
 			continue
 		}

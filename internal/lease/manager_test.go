@@ -28,6 +28,12 @@ type fakeStore struct {
 	acquireErr   error
 	renewErr     error
 	ensureRowErr error
+
+	// renewBlock, when non-nil, makes Renew block until it is closed OR the
+	// call's ctx is cancelled — models a silently black-holed connection (the
+	// call hangs rather than erroring fast). Renew returns ctx.Err() on
+	// cancellation, the way a ctx-respecting driver (pgx) does.
+	renewBlock chan struct{}
 }
 
 // newFakeStore returns a store as if EnsureRow had already run: the row
@@ -91,6 +97,16 @@ func (s *fakeStore) TryAcquire(ctx context.Context, name, holderID string, ttl t
 
 func (s *fakeStore) Renew(ctx context.Context, name, holderID string, term int64) (bool, error) {
 	s.mu.Lock()
+	block := s.renewBlock
+	s.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.renewErr != nil {
 		err := s.renewErr
@@ -120,6 +136,12 @@ func TestNewManager_RejectsDemoteDeadlineNotLessThanTTL(t *testing.T) {
 	}
 	if _, err := NewManager(store, "x", "me", time.Second, 20*time.Second, 15*time.Second, nil, nil, nil); err != nil {
 		t.Fatalf("expected no error for a valid deadline < ttl, got %v", err)
+	}
+	// demote < ttl but the deadline-check granularity closes the gap: 19s +
+	// deadlineCheckInterval(19s)=3.8s = 22.8s >= 20s must be refused, even
+	// though 19 < 20 (the bare demote<ttl check would have let it through).
+	if _, err := NewManager(store, "x", "me", time.Second, 20*time.Second, 19*time.Second, nil, nil, nil); err == nil {
+		t.Fatal("expected an error when demote + check-granularity exceeds ttl")
 	}
 }
 
@@ -171,7 +193,7 @@ func TestManager_LogsWarnWhenOnAcquireEatsDeadlineMargin(t *testing.T) {
 	store := newFakeStore(time.Now())
 	const demoteDeadline = 100 * time.Millisecond
 	ran := false
-	m, err := NewManager(store, "x", "pod-a", time.Hour, 500*time.Millisecond, demoteDeadline, nil,
+	m, err := NewManager(store, "x", "pod-a", time.Hour, 2*time.Second, demoteDeadline, nil,
 		func(term int64) {
 			ran = true
 			time.Sleep(demoteDeadline * 6 / 10) // > half, < full deadline
@@ -209,7 +231,7 @@ func TestManager_LogsErrorWhenOnAcquireExceedsDeadline(t *testing.T) {
 
 	store := newFakeStore(time.Now())
 	const demoteDeadline = 50 * time.Millisecond
-	m, err := NewManager(store, "x", "pod-a", time.Hour, 500*time.Millisecond, demoteDeadline, nil,
+	m, err := NewManager(store, "x", "pod-a", time.Hour, 2*time.Second, demoteDeadline, nil,
 		func(term int64) {
 			time.Sleep(demoteDeadline + 40*time.Millisecond)
 		},
@@ -237,7 +259,7 @@ func TestManager_LogsWarnWhenOnDemoteEatsDeadlineMargin(t *testing.T) {
 
 	store := newFakeStore(time.Now())
 	const demoteDeadline = 100 * time.Millisecond
-	m, err := NewManager(store, "x", "pod-a", time.Hour, 500*time.Millisecond, demoteDeadline, nil, nil,
+	m, err := NewManager(store, "x", "pod-a", time.Hour, 2*time.Second, demoteDeadline, nil, nil,
 		func(reason string) { time.Sleep(demoteDeadline * 6 / 10) },
 	)
 	if err != nil {
@@ -402,6 +424,63 @@ func TestManager_DemoteDeadlineFiresOnPersistentRenewError(t *testing.T) {
 	a.checkDemoteDeadline()
 	if a.IsHolder() {
 		t.Fatal("expected self-demotion once the monotonic deadline elapsed with no successful renewal")
+	}
+}
+
+// TestManager_BlockingRenewIsBoundedSoTheDeadlineCanFire pins the silent-
+// partition fix: a Renew that BLOCKS (a black-holed connection, not a fast
+// error) must not hang tick indefinitely. The per-call timeout bounds it so
+// Run's shared goroutine returns to service the deadline ticker; without the
+// bound, checkDemoteDeadline never runs and a partitioned holder keeps the
+// lease past TTL (double-brain). Distinct from
+// TestManager_DemoteDeadlineFiresOnPersistentRenewError, which only covers a
+// Renew that errors immediately.
+func TestManager_BlockingRenewIsBoundedSoTheDeadlineCanFire(t *testing.T) {
+	store := newFakeStore(time.Now())
+	// demote 5s / ttl 7s: D3-valid (5 + deadlineCheckInterval(5s)=1s < 7) and
+	// storeCallTimeout = (7-5)/2 = 1s, so the blocked tick returns in ~1s.
+	a, err := NewManager(store, "x", "pod-a", time.Hour, 7*time.Second, 5*time.Second, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.tick(context.Background())
+	if !a.IsHolder() {
+		t.Fatal("expected pod-a to acquire")
+	}
+
+	// Every subsequent Renew blocks until its ctx is cancelled.
+	block := make(chan struct{})
+	defer close(block)
+	store.mu.Lock()
+	store.renewBlock = block
+	store.mu.Unlock()
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		a.tick(context.Background())
+		done <- time.Since(start)
+	}()
+	select {
+	case d := <-done:
+		if d > 2500*time.Millisecond {
+			t.Fatalf("tick with a blocked Renew took %s; the per-call timeout should bound it near storeCallTimeout (~1s)", d)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("tick hung on a blocked Renew — the store-call timeout is not bounding it, so the deadline check is starved")
+	}
+	if !a.IsHolder() {
+		t.Fatal("a timed-out renewal is an error, not an explicit loss — must not itself demote")
+	}
+
+	// The deadline check still fires once the monotonic deadline elapses with
+	// only blocked/timed-out renewals in between.
+	a.mu.Lock()
+	a.lastSuccessfulRenewal = time.Now().Add(-6 * time.Second)
+	a.mu.Unlock()
+	a.checkDemoteDeadline()
+	if a.IsHolder() {
+		t.Fatal("expected self-demotion once the deadline elapsed with no successful renewal")
 	}
 }
 
