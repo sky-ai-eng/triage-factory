@@ -25,6 +25,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -64,6 +66,16 @@ type App struct {
 	// registerInstance once stores is live.
 	identity  *instance.Identity
 	bootEpoch int64
+
+	// sealingKey is this process's ephemeral X25519 keypair (TFAC-614),
+	// minted once in ensureIdentity, in-memory only, never persisted — a
+	// restart mints a fresh one. Non-nil only at TF_ROLE=executor in multi
+	// mode (buildSealingKey); nil elsewhere, since only an executor ever
+	// claims a run and needs a bundle sealed to it. The public half is
+	// published on this instance's Register call; the private half never
+	// leaves this process and is what unseals a run_credentials bundle
+	// addressed to it (see internal/delegate's awaiting-credentials wait).
+	sealingKey *credseal.KeyPair
 
 	// Persistence. database is the primary pool (SQLite in local mode,
 	// the admin Postgres pool in multi mode); appDB is the multi-mode
@@ -140,6 +152,15 @@ type App struct {
 	reaperStore          reaper.Store
 	reaperStaleThreshold time.Duration
 	reaperMaxAttempts    int
+
+	// credProvisioner is the brain-side sealed-credential-bundle
+	// provisioner (TFAC-614, spec's "channel") — resolves a run's LLM/
+	// GitHub/Jira credentials, seals them to the claiming executor's
+	// published pubkey, and writes run_credentials. Non-nil only for
+	// brain-capable roles in multi mode (buildCredProvisioner), started/
+	// stopped alongside the rest of the brain in startBrain/stopBrain,
+	// nil-checked the same way a.reaperStore is.
+	credProvisioner *credprovision.Manager
 
 	// runCtx is the ctx Run(ctx) was called with, captured so startBrain
 	// (invoked later, from a lease-manager callback or directly at
@@ -252,6 +273,13 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	// partition self-fence deadline and supersession exit hook, both of
 	// which need a.spawner to exist.
 	if err = a.buildReaper(); err != nil {
+		return nil, err
+	}
+	// Brain-side sealed-credential-bundle provisioner (TFAC-614) — same
+	// brain-capable-roles-in-multi-mode gate as buildReaper, and must run
+	// after it exists so the run-signal/instance/run-queue stores it reads
+	// (a.stores) are already the real bundle.
+	if err = a.buildCredProvisioner(); err != nil {
 		return nil, err
 	}
 	// The background-brain lease elector (TFAC-583) — control role in

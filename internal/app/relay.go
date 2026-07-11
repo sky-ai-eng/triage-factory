@@ -97,6 +97,25 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 		if a.pollerMgr != nil {
 			a.pollerMgr.PollSoon(msg.Source, msg.OrgID)
 		}
+	case "cred_request":
+		// nil at TF_ROLE=executor (buildCredProvisioner never constructs
+		// a.credProvisioner there) and in local mode — an executor is
+		// never the brain holder, so it can't reach this branch anyway;
+		// the nil check is defense in depth. Detached context: this
+		// dispatches off the shared LISTEN connection's read loop and
+		// must not block it, but the actual DB work (resolve + seal +
+		// write) is a handful of short queries, not a long-lived
+		// operation, so a bounded background call is fine here — unlike
+		// a.dispatchManagerTrigger's fire-and-forget Trigger() channel
+		// send, ProvisionForRun does real work and its error is worth
+		// logging.
+		if a.credProvisioner != nil {
+			go func() {
+				if err := a.credProvisioner.ProvisionForRun(context.Background(), msg.OrgID, msg.RunID); err != nil {
+					appLog.Warn("tf_ctl: cred_request provision failed", "run", msg.RunID, "error", err)
+				}
+			}()
+		}
 	default:
 		appLog.Warn("tf_ctl: unknown relay message kind", "kind", msg.Kind)
 	}

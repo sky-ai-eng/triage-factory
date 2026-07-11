@@ -74,7 +74,7 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, attempts int) reaperFixt
 	`, blueprintRunID, orgID, userID, blueprintID, taskID, "/tmp/wt-"+blueprintRunID)
 
 	executorID := "reaper-executor-" + uuid.New().String()[:8]
-	if _, err := stores.Instances.Register(ctx, executorID, domain.InstanceRoleExecutor, "v1"); err != nil {
+	if _, err := stores.Instances.Register(ctx, executorID, domain.InstanceRoleExecutor, "v1", ""); err != nil {
 		t.Fatalf("register executor: %v", err)
 	}
 
@@ -289,7 +289,7 @@ func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID(t *test
 
 	freshID := "reaper-fresh-" + uuid.New().String()[:8]
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	if _, err := stores.Instances.Register(ctx, freshID, domain.InstanceRoleExecutor, "v1"); err != nil {
+	if _, err := stores.Instances.Register(ctx, freshID, domain.InstanceRoleExecutor, "v1", ""); err != nil {
 		t.Fatalf("register fresh instance: %v", err)
 	}
 
@@ -320,7 +320,7 @@ func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID(t *test
 	// A GC'd id that comes back alive simply re-registers at boot_epoch 1
 	// (the epoch counter has no memory of the deleted row) — harmless per
 	// the ticket's decision log.
-	epoch, err := stores.Instances.Register(ctx, fx.executorID, domain.InstanceRoleExecutor, "v2")
+	epoch, err := stores.Instances.Register(ctx, fx.executorID, domain.InstanceRoleExecutor, "v2", "")
 	if err != nil {
 		t.Fatalf("re-register a GC'd id: %v", err)
 	}

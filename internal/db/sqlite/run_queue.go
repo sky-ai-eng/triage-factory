@@ -118,6 +118,107 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	return err
 }
 
+// MarkAwaitingCredentials mirrors the Postgres impl's status flip. No
+// ctlbus doorbell — the tf_ctl fabric is Postgres-only (local mode has no
+// LISTEN/NOTIFY), and never reached in practice anyway: local mode is
+// always role=all, which never parks a run in this status.
+func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE runs SET status = 'awaiting_credentials'
+		WHERE id = ? AND status = 'running'
+	`, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.AwaitingCredentialsRun, bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.AwaitingCredentialsRun{}, false, err
+	}
+	var r db.AwaitingCredentialsRun
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT id, org_id, team_id, task_id, COALESCE(executor_id, ''),
+		       COALESCE(boot_epoch, 0), COALESCE(claimed_at, started_at)
+		FROM runs WHERE org_id = ? AND id = ?
+	`, orgID, runID).Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt)
+	if err == sql.ErrNoRows {
+		return db.AwaitingCredentialsRun{}, false, nil
+	}
+	if err != nil {
+		return db.AwaitingCredentialsRun{}, false, err
+	}
+	return r, true, nil
+}
+
+// RequeueAwaitingCredentials mirrors the Postgres impl (TFAC-614): releases
+// a run parked in status='awaiting_credentials' back to 'queued', clearing
+// ownership. Never reached in practice — local mode is always role=all,
+// which never parks a run in this status — but implemented for
+// store-interface + conformance-test symmetry.
+func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, runID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE runs SET status = 'queued', claimed_at = NULL,
+			executor_id = NULL, boot_epoch = NULL
+		WHERE id = ? AND status = 'awaiting_credentials'
+	`, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (s *runQueueStore) ListAwaitingCredentials(ctx context.Context) ([]db.AwaitingCredentialsRun, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT id, org_id, team_id, task_id, COALESCE(executor_id, ''),
+		       COALESCE(boot_epoch, 0), COALESCE(claimed_at, started_at)
+		FROM runs WHERE status = 'awaiting_credentials'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAwaitingCredentialsRuns(rows)
+}
+
+func (s *runQueueStore) ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan time.Time) ([]db.AwaitingCredentialsRun, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT r.id, r.org_id, r.team_id, r.task_id, COALESCE(r.executor_id, ''),
+		       COALESCE(r.boot_epoch, 0), COALESCE(r.claimed_at, r.started_at)
+		FROM runs r
+		JOIN run_credentials rc ON rc.run_id = r.id
+		WHERE r.status NOT IN ('queued', 'awaiting_credentials', `+runTerminalStatusesSQL+`, 'open')
+		  AND r.executor_id IS NOT NULL
+		  AND rc.created_at < ?
+	`, olderThan)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAwaitingCredentialsRuns(rows)
+}
+
+func scanAwaitingCredentialsRuns(rows *sql.Rows) ([]db.AwaitingCredentialsRun, error) {
+	var out []db.AwaitingCredentialsRun
+	for rows.Next() {
+		var r db.AwaitingCredentialsRun
+		if err := rows.Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
 	// Mid-flight runs left by a crash (claimed/running/setup statuses) go back
 	// to 'queued' for re-claim. Terminal + dormant + already-queued rows are

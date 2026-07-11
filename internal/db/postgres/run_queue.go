@@ -3,7 +3,10 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -151,6 +154,103 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 		WHERE org_id = $1 AND id = $2 AND status = 'running'
 	`, orgID, runID, lastErr)
 	return err
+}
+
+func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runID string) (bool, error) {
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE runs SET status = 'awaiting_credentials'
+		WHERE org_id = $1 AND id = $2 AND status = 'running'
+	`, orgID, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		_ = ctlbus.Publish(ctx, s.conn, ctlbus.Message{Kind: "cred_request", OrgID: orgID, RunID: runID})
+	}
+	return n > 0, nil
+}
+
+func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.AwaitingCredentialsRun, bool, error) {
+	var r db.AwaitingCredentialsRun
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT id::text, org_id::text, team_id::text, task_id::text, COALESCE(executor_id, ''),
+		       COALESCE(boot_epoch, 0), COALESCE(claimed_at, started_at)
+		FROM runs WHERE org_id = $1 AND id = $2
+	`, orgID, runID).Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.AwaitingCredentialsRun{}, false, nil
+	}
+	if err != nil {
+		return db.AwaitingCredentialsRun{}, false, err
+	}
+	return r, true, nil
+}
+
+// RequeueAwaitingCredentials releases a run parked in status=
+// 'awaiting_credentials' back to 'queued', clearing ownership — the
+// executor-side timeout path (TFAC-614): the brain never responded to this
+// run's cred_request within the awaiting-credentials deadline, so the claim
+// is released for the next dispatcher (this instance or a sibling) to
+// re-claim and re-request. Guarded on 'awaiting_credentials' so a stale/
+// duplicate timeout can't resurrect a row that already moved on (bundle
+// arrived just after the deadline check, or the run was reaped).
+func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, runID string) (bool, error) {
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE runs SET status = 'queued', claimed_at = NULL,
+			executor_id = NULL, boot_epoch = NULL
+		WHERE org_id = $1 AND id = $2 AND status = 'awaiting_credentials'
+	`, orgID, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (s *runQueueStore) ListAwaitingCredentials(ctx context.Context) ([]db.AwaitingCredentialsRun, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT id::text, org_id::text, team_id::text, task_id::text, COALESCE(executor_id, ''),
+		       COALESCE(boot_epoch, 0), COALESCE(claimed_at, started_at)
+		FROM runs WHERE status = 'awaiting_credentials'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAwaitingCredentialsRuns(rows)
+}
+
+func (s *runQueueStore) ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan time.Time) ([]db.AwaitingCredentialsRun, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT r.id::text, r.org_id::text, r.team_id::text, r.task_id::text, COALESCE(r.executor_id, ''),
+		       COALESCE(r.boot_epoch, 0), COALESCE(r.claimed_at, r.started_at)
+		FROM runs r
+		JOIN run_credentials rc ON rc.run_id = r.id
+		WHERE r.status NOT IN ('queued', 'awaiting_credentials', `+runTerminalStatusesSQL+`, 'open')
+		  AND r.executor_id IS NOT NULL
+		  AND rc.created_at < $1
+	`, olderThan)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAwaitingCredentialsRuns(rows)
+}
+
+func scanAwaitingCredentialsRuns(rows *sql.Rows) ([]db.AwaitingCredentialsRun, error) {
+	var out []db.AwaitingCredentialsRun
+	for rows.Next() {
+		var r db.AwaitingCredentialsRun
+		if err := rows.Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID string, bootEpoch int64) (int, error) {

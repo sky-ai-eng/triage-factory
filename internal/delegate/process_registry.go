@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -278,6 +279,24 @@ func (s *Spawner) executorIdentity() (string, int64) {
 	return s.executorID, s.bootEpoch
 }
 
+// SetSealingKey wires this process's ephemeral X25519 keypair (TFAC-614),
+// minted once at boot by app.registerInstance for TF_ROLE=executor only.
+// nil everywhere else (RoleAll/RoleControl/local) — the awaiting-
+// credentials wait is gated on runmode.Role() == RoleExecutor, so a nil
+// key is never read.
+func (s *Spawner) SetSealingKey(kp *credseal.KeyPair) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sealingKey = kp
+}
+
+// sealingKeyPair returns the wired sealing keypair under lock.
+func (s *Spawner) sealingKeyPair() *credseal.KeyPair {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sealingKey
+}
+
 // SetMaxConcurrentRuns resizes the off-dispatcher concurrency cap. Call
 // once at startup before RunDispatcher runs; the in-flight goroutines
 // close over the channel they acquired from, so a startup-time resize is
@@ -318,6 +337,34 @@ func (s *Spawner) idleTimeout() time.Duration {
 		return s.idleHibernateTimeout
 	}
 	return DefaultIdleHibernateTimeout
+}
+
+// SetAwaitingCredentialsTimeout overrides the awaiting-credentials wait's
+// deadline and poll cadence (TFAC-614). Tests inject short values to drive
+// the timeout/requeue path deterministically without waiting out the real
+// 2-minute default; pollInterval <= 0 leaves the poll cadence at its
+// default.
+func (s *Spawner) SetAwaitingCredentialsTimeout(timeout, pollInterval time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.awaitingCredentialsTimeoutOverride = timeout
+	s.awaitingCredentialsPollIntervalOverride = pollInterval
+}
+
+// awaitingCredentialsKnobs returns the effective (timeout, pollInterval)
+// pair, falling back to the package defaults when unset.
+func (s *Spawner) awaitingCredentialsKnobs() (time.Duration, time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	timeout := awaitingCredentialsTimeout
+	if s.awaitingCredentialsTimeoutOverride > 0 {
+		timeout = s.awaitingCredentialsTimeoutOverride
+	}
+	poll := awaitingCredentialsPollInterval
+	if s.awaitingCredentialsPollIntervalOverride > 0 {
+		poll = s.awaitingCredentialsPollIntervalOverride
+	}
+	return timeout, poll
 }
 
 // RunController routes a live-process control op to wherever the run's

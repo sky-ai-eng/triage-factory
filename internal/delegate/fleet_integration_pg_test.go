@@ -93,7 +93,7 @@ func seedFleetFixture(t *testing.T, h *pgtest.Harness) fleetFixture {
 func newFleetSpawner(t *testing.T, h *pgtest.Harness, fx fleetFixture, executorID string) *Spawner {
 	t.Helper()
 	s := NewSpawner(h.AdminDB, fx.stores, nil, nil, "")
-	epoch, err := fx.stores.Instances.Register(context.Background(), executorID, domain.InstanceRoleExecutor, "v1")
+	epoch, err := fx.stores.Instances.Register(context.Background(), executorID, domain.InstanceRoleExecutor, "v1", "")
 	if err != nil {
 		t.Fatalf("register %s: %v", executorID, err)
 	}
@@ -124,11 +124,11 @@ func TestFleet_BootOverlap_TwoInstancesRegisterConcurrently(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		epochA, errA = fx.stores.Instances.Register(context.Background(), idA, domain.InstanceRoleExecutor, "v1")
+		epochA, errA = fx.stores.Instances.Register(context.Background(), idA, domain.InstanceRoleExecutor, "v1", "")
 	}()
 	go func() {
 		defer wg.Done()
-		epochB, errB = fx.stores.Instances.Register(context.Background(), idB, domain.InstanceRoleExecutor, "v1")
+		epochB, errB = fx.stores.Instances.Register(context.Background(), idB, domain.InstanceRoleExecutor, "v1", "")
 	}()
 	wg.Wait()
 
@@ -233,7 +233,7 @@ func TestFleet_Fence_SupersededInstanceStopsClaimingAndKillsSandboxes(t *testing
 
 	// A duplicated state root boots a second copy under A's own id — the
 	// registry has no way to know it isn't A restarting normally.
-	if _, err := fx.stores.Instances.Register(ctx, idA, domain.InstanceRoleExecutor, "v1"); err != nil {
+	if _, err := fx.stores.Instances.Register(ctx, idA, domain.InstanceRoleExecutor, "v1", ""); err != nil {
 		t.Fatalf("duplicate register of A's id: %v", err)
 	}
 

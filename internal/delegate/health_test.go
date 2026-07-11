@@ -51,7 +51,7 @@ func TestHeartbeatOnce_StampsWriteTime(t *testing.T) {
 
 	ctx := context.Background()
 	const id = "hb-write-time"
-	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleExecutor, "v")
+	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleExecutor, "v", "")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestHeartbeatOnce_ReportCapacityFalse_LeavesCapacityNil(t *testing.T) {
 
 	ctx := context.Background()
 	const id = "hb-control"
-	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleControl, "v")
+	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleControl, "v", "")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}

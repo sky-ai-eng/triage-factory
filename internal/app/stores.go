@@ -93,19 +93,31 @@ func (a *App) openStores(ctx context.Context) error {
 			return fmt.Errorf("ping app DB: %w", err)
 		}
 		// App-layer AES-256-GCM key for org/user integration secrets
-		// (TFAC-402). Required in multi mode — fail fast on a missing or
-		// malformed key, mirroring the session-key load in httpserver.go.
-		secretKey, err := aead.LoadKeyFromEnv(pgstore.EnvSecretEncryptionKey)
-		if err != nil {
-			appDB.Close()
-			adminDB.Close()
-			return fmt.Errorf("load secret encryption key: %w", err)
-		}
-		// Legacy *sql.DB consumers route to the admin pool for
-		// system-service reads (no JWT-claims context). Close closes both.
+		// (TFAC-402). Required in every role EXCEPT executor (TFAC-614):
+		// an executor never holds the secret-decryption key — all per-run
+		// credential material arrives pre-resolved via sealed
+		// run_credentials bundles instead (see internal/credprovision and
+		// the awaiting-credentials wait in internal/delegate). If the var
+		// is set on an executor anyway (a stale compose file, an operator
+		// override) it is logged once and ignored, never loaded — the
+		// property this exists to guarantee is "the key never enters this
+		// process," not "the key is unused."
 		a.database = adminDB
 		a.appDB = appDB
-		a.stores = pgstore.New(adminDB, appDB, secretKey)
+		if a.plan.role == runmode.RoleExecutor {
+			if os.Getenv(pgstore.EnvSecretEncryptionKey) != "" {
+				appLog.Warn("TF_SECRET_ENCRYPTION_KEY is set but ignored on TF_ROLE=executor — executors never hold the secret-decryption key; per-run credentials arrive via sealed bundles instead (TFAC-614)")
+			}
+			a.stores = pgstore.NewWithoutSecrets(adminDB, appDB)
+		} else {
+			secretKey, err := aead.LoadKeyFromEnv(pgstore.EnvSecretEncryptionKey)
+			if err != nil {
+				appDB.Close()
+				adminDB.Close()
+				return fmt.Errorf("load secret encryption key: %w", err)
+			}
+			a.stores = pgstore.New(adminDB, appDB, secretKey)
+		}
 
 		// Schema handling, in-process at boot (not just via the container
 		// entrypoint's `migrate up`, which a k8s command: override / systemd

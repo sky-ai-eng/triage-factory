@@ -28,22 +28,27 @@ import (
 )
 
 // Channel is the Postgres NOTIFY/LISTEN channel name every relay message
-// rides. The same channel carries TFAC-584's session kicks and TFAC-585's
-// run-signal doorbells — payloads are discriminated by their JSON "kind"
-// field (see internal/app/ctl.go), so Message kinds must stay disjoint
-// from theirs ("kick", "new", "ack").
+// rides. The same channel carries TFAC-584's session kicks, TFAC-585's
+// run-signal doorbells, and TFAC-614's cred_request doorbell — payloads are
+// discriminated by their JSON "kind" field (see internal/app/ctl.go), so
+// Message kinds must stay disjoint from theirs ("kick", "new", "ack",
+// "cred_request").
 const Channel = "tf_ctl"
 
 // Message is the relay payload. Kind selects which field group applies:
 // "trigger" uses Manager/OrgID/Force (a scorer/classifier/profiler/
 // reconciler Manager.Trigger call); "pollsoon" uses Source/OrgID (a
-// poller.Manager.PollSoon call).
+// poller.Manager.PollSoon call); "cred_request" uses OrgID/RunID (TFAC-614:
+// an executor parked in status='awaiting_credentials' nudging the brain's
+// credential provisioner — see internal/credprovision and
+// internal/app/ctl.go's dispatch case).
 type Message struct {
 	Kind    string `json:"kind"`
 	Manager string `json:"manager,omitempty"`
 	OrgID   string `json:"org_id"`
 	Source  string `json:"source,omitempty"`
 	Force   bool   `json:"force,omitempty"`
+	RunID   string `json:"run_id,omitempty"`
 }
 
 // execer is the minimal *sql.DB surface Publish needs — a pooled
