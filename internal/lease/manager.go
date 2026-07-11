@@ -153,10 +153,12 @@ func demoteMarginError(demoteDeadline, ttl time.Duration) error {
 // letting a partitioned holder keep the lease past TTL while a standby
 // acquires (double-brain). Bounding each call means a blocked renewal fails
 // within this budget and the pending deadline tick is serviced right after,
-// so the worst-case self-demote is demoteDeadline + one timeout — kept under
-// ttl by sizing this at half the demote-vs-ttl margin, capped at
-// demoteDeadline/3, floored at 1s so a healthy-but-slow renewal isn't
-// false-failed.
+// so the worst-case self-demote is demoteDeadline + one timeout. Sized at half
+// the demote-vs-ttl margin and no more than demoteDeadline/3 — but never below
+// a 1s floor, which takes PRECEDENCE for a very tight demote deadline (where
+// demoteDeadline/3 would fall under 1s) so a healthy-but-slow renewal isn't
+// false-failed. D3's boot check guarantees the margin exceeds 1s, so even the
+// floored value stays under ttl.
 func (m *Manager) storeCallTimeout() time.Duration {
 	d := (m.ttl - m.demoteDeadline) / 2
 	if cap := m.demoteDeadline / 3; d > cap {
@@ -208,12 +210,15 @@ func (m *Manager) tick(ctx context.Context) {
 	}
 
 	if m.IsHolder() {
-		// Stamp the ISSUE time, not the post-return time: the row's renewed_at
-		// is set when the UPDATE executes (at most one round-trip after this),
-		// and a successor keys off renewed_at — so recording when we ISSUED the
-		// renewal keeps our monotonic deadline conservative (never later than
-		// the DB's own view) rather than letting a slow-but-successful renewal
-		// quietly erode the demote-before-takeover margin.
+		// Stamp the ISSUE time, not the post-return time. lastSuccessfulRenewal
+		// feeds only time.Since (a local monotonic elapsed) — it is never
+		// compared against the DB clock — so it just needs to be a conservative
+		// LOWER bound on when this renewal took effect. The UPDATE executes
+		// after we issue it, so measuring elapsed from issue-time can only
+		// over-count, never under-count. Stamping post-return instead would
+		// push the baseline later by the round-trip latency, letting a slow-
+		// but-successful renewal make this holder look fresher than it is and
+		// erode the demote-before-takeover margin.
 		issuedAt := time.Now()
 		rctx, cancel := context.WithTimeout(ctx, m.storeCallTimeout())
 		renewed, err := m.store.Renew(rctx, m.name, m.holderID, m.currentTerm())
