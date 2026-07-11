@@ -8651,11 +8651,12 @@ GRANT ALL ON TABLE public.run_pending_input TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.run_pending_input TO tf_app;
 
 
--- tf_system: least-privilege executor role (PS-H4). Login mechanics mirror
--- authenticator — the postgres-postinit sidecar ALTERs this role to LOGIN
--- with TF_SYSTEM_PASSWORD; see docker-compose.yml. No DDL grant of any
--- kind, ever. This is an enumerated allowlist of exactly the tables the
--- executor's dispatcher, cross-pod signal apply loop, and heartbeat touch —
+-- tf_system: least-privilege executor role. Login mechanics mirror
+-- authenticator — the postgres-postinit-system sidecar ALTERs this role
+-- to LOGIN with TF_SYSTEM_PASSWORD once this migration has applied; see
+-- docker-compose.yml. No DDL grant of any kind, ever. This is an
+-- enumerated allowlist of exactly the tables the executor's dispatcher,
+-- cross-pod signal apply loop, and heartbeat touch —
 -- verified against code and pinned by the pgtest conformance suite
 -- (internal/db/pgtest/tf_system_test.go). Any future migration that adds a
 -- table to the executor's code path must add that table's tf_system grant
@@ -8749,8 +8750,9 @@ GRANT SELECT ON TABLE public.curator_requests TO tf_system;
 GRANT SELECT ON TABLE public.system_llm_runs TO tf_system;
 -- Per-org/per-user integration secrets: GetSystem (Jira/GitHub credential
 -- resolution) + GetUserSystem/PutUserSystem (the write-actor's per-user
--- Jira client, the Cloud OAuth refresh-token rotation write-back). PS-H5
--- later revokes this — sequenced, not conflicting; grant here, revoke there.
+-- Jira client, the Cloud OAuth refresh-token rotation write-back). A
+-- later executor-secret-diet ticket is expected to narrow this further —
+-- sequenced, not conflicting; grant here, tighten there.
 GRANT SELECT, INSERT, UPDATE ON TABLE public.org_secrets TO tf_system;
 -- The executor's schema-compatibility assert (internal/db/migrations.go)
 -- reads this and nothing else; no DDL, ever.

@@ -46,24 +46,42 @@ func wrapAppPoolPermErr(err error, callsite string) error {
 }
 
 // wrapAdminPoolPermErr turns a Postgres permission-denied error (SQLSTATE
-// 42501) from an admin-pool call into an actionable one, naming the table
-// (Postgres's own DETAIL already carries it, surfaced here via
-// pgErr.TableName) and pointing at the fix.
+// 42501) from an admin-pool call into a legible one, naming the table
+// Postgres reports (surfaced here via pgErr.TableName) instead of leaving
+// a bare pq error for whoever reads the logs.
 //
 // Historically the admin pool never raised 42501 at all — it connected as
-// supabase_admin, the real superuser. PS-H4 changes that for executors:
-// their admin pool is tf_system, an enumerated-grant BYPASSRLS role (see
+// supabase_admin, the real superuser. That changed for executors: their
+// admin pool is now tf_system, an enumerated-grant BYPASSRLS role (see
 // the tf_system section of internal/db/migrations-postgres/
-// 202605130001_pg_baseline.sql). A 42501 here means exactly one thing — a
-// table this call touches is missing from that grant list, most likely
-// because a later migration added an executor-path table without adding
-// its tf_system grant in the same migration (the forward-maintenance
-// rule the baseline's tf_system comment calls out). This wrapper is pure
-// diagnosis, applied only at the executor's highest-traffic admin-pool
-// call sites (the dispatcher's claim CAS, the fleet heartbeat) so a
-// production grant gap surfaces immediately and legibly instead of as a
-// bare pq error buried in a retry loop. The original *pgconn.PgError is
-// wrapped (%w), so callers that inspect SQLSTATE still see 42501.
+// 202605130001_pg_baseline.sql). A 42501 here means one specific thing —
+// a table this call touches is missing from that grant list — and it is
+// ALWAYS a Triage Factory bug, never a mistake the person running the
+// executor made. The likely cause is a later migration adding an
+// executor-path table without adding its tf_system grant in the same
+// migration (the forward-maintenance rule the baseline's tf_system
+// comment calls out).
+//
+// The wrapped message is written for whoever is actually staring at this
+// log line — for a shipped release, that's a self-hosting operator, not
+// a Triage Factory engineer. It deliberately does NOT tell them to edit
+// a migration or the pg baseline: self-hosters run the binary we
+// distribute, not a checkout of this repo, and this baseline is
+// fresh-install-only (see its own "NEVER edit this baseline" header) —
+// once it has shipped in a release, the real fix can only land as a NEW
+// migration in a future release, authored by us. So the actionable step
+// for the reader is "upgrade, or tell us" — never "go patch this
+// yourself." (For whoever on our side picks up that report: the fix is a
+// migration adding the missing grant, landed and shipped normally —
+// never a hand-edit of an operator's already-running database, and,
+// post-ship, never an edit to this baseline file either — see the
+// forward-maintenance note next to the tf_system grant block.)
+//
+// This is pure diagnosis, applied at the executor's highest-traffic
+// admin-pool call sites (the dispatcher's claim CAS, the fleet
+// heartbeat) so a grant gap surfaces immediately instead of buried in a
+// retry loop. The original *pgconn.PgError is wrapped (%w), so callers
+// that inspect SQLSTATE still see 42501.
 func wrapAdminPoolPermErr(err error, callsite string) error {
 	if err == nil {
 		return nil
@@ -74,9 +92,10 @@ func wrapAdminPoolPermErr(err error, callsite string) error {
 		if table == "" {
 			table = "(unknown — see the wrapped error's DETAIL)"
 		}
-		return fmt.Errorf("%s: permission denied for tf_system on table %s — "+
-			"add its grant to the tf_system section of the pg baseline migration: %w",
-			callsite, table, err)
+		return fmt.Errorf("%s: permission denied on table %s — this is a Triage Factory bug "+
+			"(a missing database grant), not a local misconfiguration; upgrade to the latest "+
+			"release or file an issue at https://github.com/sky-ai-eng/triage-factory/issues "+
+			"with this table name: %w", callsite, table, err)
 	}
 	return err
 }

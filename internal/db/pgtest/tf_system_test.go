@@ -43,7 +43,7 @@ func TestTfSystem_RoleShape(t *testing.T) {
 	}
 }
 
-// TestTfSystem_DDLDenied pins decision #3: tf_system's migration path is
+// TestTfSystem_DDLDenied pins that tf_system's migration path is
 // SELECT-only against goose_db_version. Any DDL — even a throwaway table
 // in the test's own transaction — must be rejected.
 func TestTfSystem_DDLDenied(t *testing.T) {
@@ -57,10 +57,10 @@ func TestTfSystem_DDLDenied(t *testing.T) {
 	assertPgCode(t, err, "42501", "tf_system CREATE TABLE")
 }
 
-// TestTfSystem_OffSurfaceReadDenied pins decision #6: a table entirely
-// outside the executor's enumerated surface (sso_connections — SSO
-// config is a control-plane-only concern) must be unreachable, even for
-// a plain SELECT that would return zero rows.
+// TestTfSystem_OffSurfaceReadDenied pins that a table entirely outside
+// the executor's enumerated surface (sso_connections — SSO config is a
+// control-plane-only concern) must be unreachable, even for a plain
+// SELECT that would return zero rows.
 func TestTfSystem_OffSurfaceReadDenied(t *testing.T) {
 	h := Shared(t)
 
@@ -72,8 +72,9 @@ func TestTfSystem_OffSurfaceReadDenied(t *testing.T) {
 	assertPgCode(t, err, "42501", "tf_system SELECT sso_connections")
 }
 
-// TestTfSystem_CrossOrgSystemReadSucceeds pins decision #6's other half:
-// BYPASSRLS is REQUIRED semantics for a granted table, not accidental —
+// TestTfSystem_CrossOrgSystemReadSucceeds pins the other half of the
+// off-surface-read test above: BYPASSRLS is REQUIRED semantics for a
+// granted table, not accidental —
 // Secrets.GetSystem for one org must succeed when called with a
 // different org's context bound (there is no session/claims concept on
 // the admin pool at all; the caller-supplied orgID is trusted, exactly
@@ -121,13 +122,16 @@ func TestTfSystem_CrossOrgSystemReadSucceeds(t *testing.T) {
 	}
 }
 
-// TestTfSystem_ExecutorSurfaceConformance is the authoritative grant
-// list per decision #5: it points the postgres store's admin half at
-// SystemDB (tf_system) and exercises the enumerated executor surface —
-// claim, heartbeat, messages/artifacts/worktrees/memory/external-
-// actions, cross-pod signals, the blueprint-run reactor, and the schema
-// assert. Any SQLSTATE 42501 here means a missing grant in the pg
-// baseline; fix the baseline, not this test.
+// TestTfSystem_ExecutorSurfaceConformance is the authoritative source of
+// truth for tf_system's grant list — more authoritative than the pg
+// baseline's own comments, which can drift. It points the postgres
+// store's admin half at SystemDB (tf_system) and exercises the
+// enumerated executor surface — claim, heartbeat, messages/artifacts/
+// worktrees/memory/external-actions, cross-pod signals, the
+// blueprint-run reactor, and the schema assert. Any SQLSTATE 42501 here
+// means a missing grant: add it to the tf_system section of the pg
+// baseline while that file is still pre-release and freely editable: a
+// new migration granting the table once it is not.
 func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
