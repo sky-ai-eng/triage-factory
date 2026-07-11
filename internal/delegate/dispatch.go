@@ -330,9 +330,11 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	step := planStep.Step(br.BlueprintID)
 	stepPrompt := planStep.Prompt()
 
-	// Resolve the run's GitHub client (per-org/owner seam). model is already on
-	// the claimed row (captured at Delegate time, stable across the blueprint).
-	gh := s.resolveGHClient(ctx, orgID, ownerForTask(*task), repoForTask(*task))
+	// Resolve the run's GitHub client (per-org/owner/repo seam). model is
+	// already on the claimed row (captured at Delegate time, stable across
+	// the blueprint).
+	owner, repo := ownerRepoForTask(*task)
+	gh := s.resolveGHClient(ctx, orgID, owner, repo)
 
 	// The blueprint_run is live on this step → place the task in_progress before
 	// any (possibly slow) workspace setup, so the board reflects the work
