@@ -281,11 +281,13 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	// Resume-by-enqueue (TFAC-585): a pending-input row means this claim is
 	// NOT a fresh/crash-reclaimed blueprint step — it's a parked/terminal-
 	// resumable run woken by a user message and re-queued onto its own row
-	// (ResumeOpenRun/SendMessage). A row here routes the claim to the resume
-	// path instead of the step machinery below.
+	// (ResumeOpenRun/SendMessage). Peek (not Consume) routes the claim to the
+	// resume path — dispatchResumeClaim deletes the row only once it is about
+	// to deliver, so a crash during the intervening workspace rehydrate leaves
+	// the row for the next claim rather than losing the message.
 	if s.pendingInput != nil {
-		if msg, userID, ok, perr := s.pendingInput.Consume(ctx, orgID, run.ID); perr != nil {
-			dispatchLog.Warn("consume pending input failed; falling through to the blueprint-step path", "run", run.ID, "error", perr)
+		if msg, userID, ok, perr := s.pendingInput.Peek(ctx, orgID, run.ID); perr != nil {
+			dispatchLog.Warn("peek pending input failed; falling through to the blueprint-step path", "run", run.ID, "error", perr)
 		} else if ok {
 			s.dispatchResumeClaim(ctx, run, task, msg, userID)
 			return
@@ -486,6 +488,19 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.AgentRun,
 	}
 
 	resumeCwd, werr := s.ensureWorkspace(stepCtx, orgID, run, owner, repo, "")
+	// Delete the pending-input row now that the rehydrate has RETURNED (either
+	// way). Routing only peeked it (dispatchClaimedRun), so a crash DURING the
+	// rehydrate above left the row intact for the next claim to re-deliver.
+	// Past this point the claim is committed to a terminal outcome here
+	// (deliver on success, failRun on error), so draining the row avoids an
+	// orphan on the failure path while still surviving the rehydrate-crash
+	// window. We already hold agentMessage/userID from the peek, so this is a
+	// plain delete; a failure here logs and proceeds.
+	if s.pendingInput != nil {
+		if _, _, _, cErr := s.pendingInput.Consume(ctx, orgID, run.ID); cErr != nil {
+			dispatchLog.Warn("consume pending input before delivery failed", "run", run.ID, "error", cErr)
+		}
+	}
 	if werr != nil {
 		s.failRun(orgID, run.ID, task.ID, "manual", userID, "ensure workspace before resume failed: "+werr.Error(), domain.RunFailureUnclassified)
 		return

@@ -66,6 +66,32 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 		}
 	})
 
+	t.Run("Peek_returns_without_draining_then_Consume_deletes", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		runID := seed.Run(t, "peek")
+
+		if err := store.Store(ctx, orgID, runID, userID, "still here"); err != nil {
+			t.Fatalf("store: %v", err)
+		}
+		// Peek twice: both return the row (non-destructive).
+		for i := 0; i < 2; i++ {
+			msg, gotUser, ok, err := store.Peek(ctx, orgID, runID)
+			if err != nil {
+				t.Fatalf("peek %d: %v", i, err)
+			}
+			if !ok || msg != "still here" || gotUser != userID {
+				t.Fatalf("peek %d = (%q, %q, %v); want (%q, %q, true) — peek must not drain", i, msg, gotUser, ok, "still here", userID)
+			}
+		}
+		// Consume then drains it, and a following Peek finds nothing.
+		if _, _, ok, err := store.Consume(ctx, orgID, runID); err != nil || !ok {
+			t.Fatalf("consume after peek = (ok=%v, err=%v); want ok=true", ok, err)
+		}
+		if _, _, ok, err := store.Peek(ctx, orgID, runID); err != nil || ok {
+			t.Fatalf("peek after consume = (ok=%v, err=%v); want ok=false", ok, err)
+		}
+	})
+
 	t.Run("Consume_absent_is_ok_false_not_an_error", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		runID := seed.Run(t, "empty")
