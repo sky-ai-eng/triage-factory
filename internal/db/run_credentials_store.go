@@ -25,6 +25,17 @@ type RunCredentialsStore interface {
 	// sealed for — the boot_epoch travels in cleartext specifically so a
 	// reader can compare it against its own current epoch BEFORE calling
 	// credseal.Open (see Get's doc).
+	//
+	// Guarded on boot_epoch (never regresses it): if an existing row
+	// already carries a STRICTLY NEWER boot_epoch than this write's, the
+	// write is a silent no-op rather than an overwrite. This closes the
+	// window where a slow provision for an older claim (timed out and
+	// reclaimed by a different executor/boot while still in flight) would
+	// otherwise land after, and clobber, the fresher claim's bundle —
+	// self-healing either way via Get's epoch check and the backstop
+	// sweep, but the guard means it never happens at all. <=, not <, so a
+	// same-epoch refresh (re-minted tokens for the SAME still-live claim)
+	// still applies normally.
 	Put(ctx context.Context, orgID, runID, executorID string, bootEpoch int64, sealed []byte) error
 
 	// Get returns the sealed bundle for runID, or ok=false when none has

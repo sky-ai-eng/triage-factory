@@ -20,6 +20,10 @@ func newRunCredentialsStore(q queryer) db.RunCredentialsStore {
 
 var _ db.RunCredentialsStore = (*runCredentialsStore)(nil)
 
+// Put is guarded on boot_epoch, mirroring the Postgres impl: a slow
+// provision must never clobber a fresher one written for a later claim of
+// the same run_id. See the Postgres Put's doc comment for the full
+// reasoning; <=, not <, so a same-epoch refresh still applies.
 func (s *runCredentialsStore) Put(ctx context.Context, orgID, runID, executorID string, bootEpoch int64, sealed []byte) error {
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO run_credentials (run_id, org_id, executor_id, boot_epoch, sealed, created_at)
@@ -30,6 +34,7 @@ func (s *runCredentialsStore) Put(ctx context.Context, orgID, runID, executorID 
 			boot_epoch  = excluded.boot_epoch,
 			sealed      = excluded.sealed,
 			created_at  = excluded.created_at
+		WHERE run_credentials.boot_epoch <= excluded.boot_epoch
 	`, runID, orgID, executorID, bootEpoch, sealed)
 	return err
 }

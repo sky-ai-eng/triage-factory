@@ -21,6 +21,20 @@ func newRunCredentialsStore(admin queryer) db.RunCredentialsStore {
 
 var _ db.RunCredentialsStore = (*runCredentialsStore)(nil)
 
+// Put is guarded on boot_epoch so a slow provision can never clobber a
+// fresher one: if run X times out under executor A (boot_epoch 1) and is
+// reclaimed by executor B (boot_epoch 2) before A's in-flight resolve
+// finishes, A's write must not overwrite B's once it lands. The WHERE
+// clause makes the UPDATE a no-op whenever the row already carries a
+// STRICTLY NEWER boot_epoch than this write's — <=, not <, so a same-epoch
+// refresh (the brain's periodic GitHub-token re-mint for the SAME still-
+// live claim) still applies. Without this a stale write landing after a
+// fresh one would leave run_credentials pointing at a bundle sealed to a
+// keypair the current claimant doesn't hold the private half of;
+// tryUnsealBundle's epoch check on the READ side means this is self-
+// healing either way (the executor just keeps polling), but closing the
+// window here means it never happens at all rather than relying on the
+// backstop sweep's retry cadence.
 func (s *runCredentialsStore) Put(ctx context.Context, orgID, runID, executorID string, bootEpoch int64, sealed []byte) error {
 	_, err := s.admin.ExecContext(ctx, `
 		INSERT INTO run_credentials (run_id, org_id, executor_id, boot_epoch, sealed, created_at)
@@ -31,6 +45,7 @@ func (s *runCredentialsStore) Put(ctx context.Context, orgID, runID, executorID 
 			boot_epoch  = EXCLUDED.boot_epoch,
 			sealed      = EXCLUDED.sealed,
 			created_at  = EXCLUDED.created_at
+		WHERE run_credentials.boot_epoch <= EXCLUDED.boot_epoch
 	`, runID, orgID, executorID, bootEpoch, sealed)
 	return err
 }
