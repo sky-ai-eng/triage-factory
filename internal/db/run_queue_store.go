@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -84,6 +85,48 @@ type RunQueueStore interface {
 	// still-live process owns. Returns the count reset.
 	ResetProcessingRuns(ctx context.Context, executorID string, bootEpoch int64) (int, error)
 
+	// MarkAwaitingCredentials flips a freshly-claimed run (status=
+	// 'running', stamped by ClaimNextRun) to status='awaiting_credentials'
+	// and — Postgres only — fires the tf_ctl cred_request doorbell so the
+	// brain's credential provisioner (internal/credprovision) resolves and
+	// seals this run's bundle without waiting for the backstop sweep.
+	// Guarded on 'running' so a stale/duplicate call can't reopen a run
+	// that already moved past this gate. matched is false when the guard
+	// didn't hold.
+	MarkAwaitingCredentials(ctx context.Context, orgID, runID string) (matched bool, err error)
+
+	// GetClaim returns the run's current claim identity (team, claiming
+	// executor, boot epoch) regardless of status — the brain's targeted,
+	// single-run read on a cred_request notification (TFAC-614): the
+	// notification carries only (org, run) IDs, so the brain re-reads the
+	// live claim rather than trusting a payload that could be stale by
+	// the time it's handled. Returns ok=false when runID is unknown.
+	GetClaim(ctx context.Context, orgID, runID string) (claim AwaitingCredentialsRun, ok bool, err error)
+
+	// RequeueAwaitingCredentials releases a run parked in status=
+	// 'awaiting_credentials' back to 'queued', clearing ownership — the
+	// executor-side timeout path (TFAC-614). Guarded on
+	// 'awaiting_credentials' so a stale/duplicate timeout can't resurrect
+	// a row that already moved on. Returns matched=false when the guard
+	// didn't hold (bundle arrived just after the deadline check, or the
+	// run was reaped in the meantime).
+	RequeueAwaitingCredentials(ctx context.Context, orgID, runID string) (matched bool, err error)
+
+	// ListAwaitingCredentials returns every run currently parked in
+	// status='awaiting_credentials' (TFAC-614) — the brain-side
+	// provisioner's backstop-sweep input. Primary provisioning happens
+	// synchronously off the executor's cred_request tf_ctl notification;
+	// this recovers any run whose notification the lossy relay dropped.
+	ListAwaitingCredentials(ctx context.Context) ([]AwaitingCredentialsRun, error)
+
+	// ListActiveNeedingCredentialRefresh returns every non-terminal,
+	// actively-running (claimed, not awaiting_credentials) run whose
+	// sealed bundle is older than olderThan (TFAC-614) — the brain-side
+	// refresh sweep's input: GitHub installation tokens are hour-lived,
+	// runs aren't, so a long-running run's git token needs periodic
+	// re-minting.
+	ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan time.Time) ([]AwaitingCredentialsRun, error)
+
 	// ReconcileOrphanedRuns is the boot self-heal mirror of ResetProcessingRuns:
 	// every child run left non-terminal (queued/claimed/running/
 	// open/pending_approval/...) under a blueprint_run that is already terminal
@@ -97,4 +140,20 @@ type RunQueueStore interface {
 	// this heals rows already broken at boot. Cross-org system sweep; returns the
 	// count cancelled.
 	ReconcileOrphanedRuns(ctx context.Context) (int, error)
+}
+
+// AwaitingCredentialsRun is one row from ListAwaitingCredentials /
+// ListActiveNeedingCredentialRefresh (TFAC-614) — the narrow shape the
+// brain's credential provisioner needs to resolve and seal a run's bundle:
+// enough to look up the org's credentials, the run's authorized repo set
+// (via TeamID), and the claiming executor's published pubkey (via
+// ExecutorID).
+type AwaitingCredentialsRun struct {
+	RunID      string
+	OrgID      string
+	TeamID     string
+	TaskID     string
+	ExecutorID string
+	BootEpoch  int64
+	ClaimedAt  time.Time
 }

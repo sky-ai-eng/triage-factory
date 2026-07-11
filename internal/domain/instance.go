@@ -28,6 +28,12 @@ type Instance struct {
 	// LabelsJSON is a raw JSON object (future: sandbox-fleet profile
 	// classes for placement). Empty string when unset.
 	LabelsJSON string
+
+	// PubKey is this boot's ephemeral X25519 public key (base64), minted
+	// in-memory at process start and never persisted — a restart mints a
+	// fresh one (TFAC-614). Written only by Register, never the
+	// heartbeat; empty on a control/all row that never claims runs.
+	PubKey string
 }
 
 // Instance roles — the value app.registerInstance stamps here from

@@ -121,7 +121,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// stays the real admin pool so GetSystem / GetUserSystem /
 		// PutUserSystem route around RLS. secretKey carries the same
 		// app-layer encryption key New was built with.
-		Secrets:       newSecretStore(tx, s.admin, s.secretKey),
+		Secrets:       s.buildSecrets(tx, s.admin),
 		EventHandlers: newTxEventHandlerStore(tx),
 		// Blueprints: composed half is tx; admin half stays the real
 		// admin pool so event-triggered CreateRun + the `...System`
@@ -220,7 +220,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// app half is the claims-set tx (GetForOrg / CreateForOrg);
 		// admin half stays the real admin pool so installation writes +
 		// GetForOrgSystem / backfill route outside the tx.
-		GitHubApps: newGitHubAppsStore(tx, s.admin, newSecretStore(tx, s.admin, s.secretKey)),
+		GitHubApps: newGitHubAppsStore(tx, s.admin, s.buildSecrets(tx, s.admin)),
 		// JiraApps: app half is the claims-set tx (GetForOrg / UpsertForOrg /
 		// DeleteForOrg); admin half stays the real admin pool so the resolver's
 		// GetForOrgSystem routes outside the tx.

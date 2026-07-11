@@ -8324,7 +8324,18 @@ CREATE TABLE public.instances (
     mem_total_mb       integer,
     mem_available_mb   integer,
     dispatch_gated     boolean,
-    labels             jsonb
+    labels             jsonb,
+    -- pubkey (TFAC-614): this boot's ephemeral X25519 public key (base64),
+    -- minted in-memory at process start and never persisted — a restart
+    -- mints a fresh one. Written ONLY by Register's initial INSERT and its
+    -- ON CONFLICT re-stamp (every restart gets a new key alongside the new
+    -- boot_epoch); the heartbeat never touches it, same non-write rule as
+    -- draining/labels, but for the opposite reason — those survive a
+    -- restart on purpose, this one must NOT (an old-epoch key sealing a
+    -- bundle nobody can decrypt anymore is exactly the crash window
+    -- TFAC-614's epoch check exists to catch). NULL for a control/all row
+    -- that never provisions or claims runs.
+    pubkey             text
 );
 
 ALTER TABLE ONLY public.instances
@@ -8632,6 +8643,50 @@ GRANT ALL ON TABLE public.run_pending_input TO anon;
 GRANT ALL ON TABLE public.run_pending_input TO authenticated;
 GRANT ALL ON TABLE public.run_pending_input TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.run_pending_input TO tf_app;
+
+
+-- run_credentials (TFAC-614): the sealed per-run credential bundle channel.
+-- An executor claims a run and parks it in status='awaiting_credentials';
+-- the brain resolves the run's LLM/GitHub/Jira credentials, seals them
+-- (credseal, an X25519 sealed box) to the claimant's instances.pubkey, and
+-- writes exactly one row here. One row per run (PK run_id), replaced
+-- wholesale on every write — never merged — so a refresh (re-minted git
+-- tokens for a long-running run) or a re-claim after a crash simply
+-- overwrites the prior bundle.
+--
+-- boot_epoch is the CLAIMING EXECUTOR's boot epoch at seal time, carried in
+-- cleartext alongside the sealed blob specifically so the executor can
+-- compare it against its own current epoch BEFORE attempting to unseal — a
+-- restart mints a fresh ephemeral keypair, and a bundle sealed for an
+-- earlier boot must never be handed to credseal.Open (it would just fail
+-- the box auth tag, but the contract is stronger than "fails safe": never
+-- attempt it at all, so a resume path can't even try).
+--
+-- Admin-pool only, no RLS policy (deny-by-default) — same posture as
+-- instances/leases/run_signals: this table never serves a request handler,
+-- and unlike run_pending_input its payload is credential-bearing sealed
+-- ciphertext, so there is deliberately no app-pool grant at all.
+CREATE TABLE public.run_credentials (
+    run_id      uuid NOT NULL,
+    org_id      uuid NOT NULL,
+    executor_id text NOT NULL,
+    boot_epoch  bigint NOT NULL,
+    sealed      bytea NOT NULL,
+    created_at  timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.run_credentials
+    ADD CONSTRAINT run_credentials_pkey PRIMARY KEY (run_id);
+
+ALTER TABLE ONLY public.run_credentials
+    ADD CONSTRAINT run_credentials_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.run_credentials
+    ADD CONSTRAINT run_credentials_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
+
+ALTER TABLE public.run_credentials ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.run_credentials FROM PUBLIC;
+REVOKE ALL ON public.run_credentials FROM anon, authenticated, service_role;
 
 
 -- +goose Down

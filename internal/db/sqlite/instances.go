@@ -29,29 +29,32 @@ func NewInstanceStore(conn *sql.DB) db.InstanceStore {
 
 var _ db.InstanceStore = (*instanceStore)(nil)
 
-func (s *instanceStore) Register(ctx context.Context, id, role, version string) (int64, error) {
+func (s *instanceStore) Register(ctx context.Context, id, role, version, pubkey string) (int64, error) {
 	now := time.Now().UTC()
 	var bootEpoch int64
 	err := s.q.QueryRowContext(ctx, `
-		INSERT INTO instances (id, role, version, boot_epoch, started_at, last_heartbeat_at)
-		VALUES (?, ?, ?, 1, ?, ?)
+		INSERT INTO instances (id, role, version, boot_epoch, started_at, last_heartbeat_at, pubkey)
+		VALUES (?, ?, ?, 1, ?, ?, NULLIF(?, ''))
 		ON CONFLICT(id) DO UPDATE SET
 			boot_epoch        = instances.boot_epoch + 1,
 			role              = excluded.role,
 			version           = excluded.version,
 			started_at        = excluded.started_at,
 			last_heartbeat_at = excluded.last_heartbeat_at,
+			-- pubkey re-stamps every restart alongside boot_epoch (TFAC-614)
+			-- — a fresh ephemeral keypair each boot, never preserved.
 			-- Clear the prior boot's capacity/admission snapshot (dead
 			-- state); the first heartbeat repopulates it. draining and
 			-- labels survive on purpose — operator intent outlives a
 			-- restart. Mirrors the Postgres store.
+			pubkey            = excluded.pubkey,
 			max_runs          = NULL,
 			active_runs       = NULL,
 			mem_total_mb      = NULL,
 			mem_available_mb  = NULL,
 			dispatch_gated    = NULL
 		RETURNING boot_epoch
-	`, id, role, version, now, now).Scan(&bootEpoch)
+	`, id, role, version, now, now, pubkey).Scan(&bootEpoch)
 	return bootEpoch, err
 }
 
@@ -96,7 +99,7 @@ func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int6
 func (s *instanceStore) List(ctx context.Context) ([]domain.Instance, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id, role, version, boot_epoch, started_at, last_heartbeat_at, draining,
-		       max_runs, active_runs, mem_total_mb, mem_available_mb, dispatch_gated, labels_json
+		       max_runs, active_runs, mem_total_mb, mem_available_mb, dispatch_gated, labels_json, pubkey
 		FROM instances ORDER BY started_at DESC
 	`)
 	if err != nil {
@@ -109,10 +112,10 @@ func (s *instanceStore) List(ctx context.Context) ([]domain.Instance, error) {
 		var inst domain.Instance
 		var maxRuns, activeRuns, memTotal, memAvail sql.NullInt64
 		var dispatchGated sql.NullBool
-		var labels sql.NullString
+		var labels, pubkey sql.NullString
 		if err := rows.Scan(
 			&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining,
-			&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels,
+			&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels, &pubkey,
 		); err != nil {
 			return nil, err
 		}
@@ -125,6 +128,7 @@ func (s *instanceStore) List(ctx context.Context) ([]domain.Instance, error) {
 			inst.DispatchGated = &v
 		}
 		inst.LabelsJSON = labels.String
+		inst.PubKey = pubkey.String
 		out = append(out, inst)
 	}
 	return out, rows.Err()
@@ -143,15 +147,15 @@ func (s *instanceStore) Get(ctx context.Context, id string) (*domain.Instance, e
 	var inst domain.Instance
 	var maxRuns, activeRuns, memTotal, memAvail sql.NullInt64
 	var dispatchGated sql.NullBool
-	var labels sql.NullString
+	var labels, pubkey sql.NullString
 
 	err := s.q.QueryRowContext(ctx, `
 		SELECT id, role, version, boot_epoch, started_at, last_heartbeat_at, draining,
-		       max_runs, active_runs, mem_total_mb, mem_available_mb, dispatch_gated, labels_json
+		       max_runs, active_runs, mem_total_mb, mem_available_mb, dispatch_gated, labels_json, pubkey
 		FROM instances WHERE id = ?
 	`, id).Scan(
 		&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining,
-		&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels,
+		&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels, &pubkey,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -168,6 +172,7 @@ func (s *instanceStore) Get(ctx context.Context, id string) (*domain.Instance, e
 		inst.DispatchGated = &v
 	}
 	inst.LabelsJSON = labels.String
+	inst.PubKey = pubkey.String
 	return &inst, nil
 }
 

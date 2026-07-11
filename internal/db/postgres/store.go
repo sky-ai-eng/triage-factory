@@ -45,10 +45,26 @@ type Store struct {
 	// secretKey is the app-layer AES-256-GCM key the SecretStore
 	// encrypts org/user integration secrets with (TFAC-402). Held on
 	// the Store so txStoresFromTx can rebuild a tx-bound SecretStore
-	// with the same key inside WithTx.
-	secretKey aead.Key
+	// with the same key inside WithTx. nil on TF_ROLE=executor
+	// (NewWithoutSecrets, TFAC-614) — buildSecrets returns the disabled
+	// store in that case, so every tx-bound rebuild stays gated too, not
+	// just the top-level Stores.Secrets field.
+	secretKey *aead.Key
 
 	stores db.Stores
+}
+
+// buildSecrets returns the real SecretStore bound to (app, admin) when this
+// Store holds a key, or the disabled store (TFAC-614) when it doesn't. Every
+// SecretStore construction in this package — the top-level bundle and both
+// tx-bound rebuilds in tx.go — routes through this so an executor-role
+// Store can never end up holding a real, if pointlessly zero-keyed,
+// decrypting store via some internal call site that forgot to check.
+func (s *Store) buildSecrets(app, admin queryer) db.SecretStore {
+	if s.secretKey == nil {
+		return newDisabledSecretStore()
+	}
+	return newSecretStore(app, admin, *s.secretKey)
 }
 
 // New wires a db.Stores bundle backed by Postgres. Wave 0 ships only
@@ -65,11 +81,29 @@ type Store struct {
 // org/user integration secrets with (TFAC-402); multi-mode boot loads it
 // from TF_SECRET_ENCRYPTION_KEY in internal/app/stores.go.
 func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
+	return newStoreBundle(admin, app, &secretKey)
+}
+
+// NewWithoutSecrets builds the same Stores bundle as New, but wires
+// db.ErrSecretStoreUnavailable's disabled SecretStore instead of a real
+// decrypting one (TFAC-614). For TF_ROLE=executor only: an executor never
+// holds TF_SECRET_ENCRYPTION_KEY at boot — all per-run credential material
+// arrives pre-resolved via sealed run_credentials bundles instead — so it
+// must never construct a real, key-bearing SecretStore, not even one
+// pointed at a throwaway key.
+func NewWithoutSecrets(admin, app *sql.DB) db.Stores {
+	return newStoreBundle(admin, app, nil)
+}
+
+// newStoreBundle is the shared body New and NewWithoutSecrets wire against;
+// secretKey nil selects the disabled SecretStore (buildSecrets) throughout,
+// including both tx-bound rebuilds in tx.go.
+func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 	s := &Store{admin: admin, app: app, secretKey: secretKey}
 	// Built once and shared: GitHubApps.BackfillInstallationsFromAPI reads
 	// the App PEM via the same SecretStore the bundle exposes (GetSystem,
 	// admin pool).
-	secrets := newSecretStore(app, admin, secretKey)
+	secrets := s.buildSecrets(app, admin)
 	s.stores = db.Stores{
 		Scores: newScoreStore(admin),
 		// PromptStore needs both pools: SeedOrUpdate writes to
@@ -350,6 +384,10 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// readiness gate for /api/jira/stock + the one-shot "config took
 		// effect" announce toast. See TFAC-583.
 		PollReadiness: newPollReadinessStore(admin),
+		// RunCredentials is admin-pool only, same posture as Instances/
+		// RunSignals: the sealed per-run credential bundle channel
+		// (TFAC-614) never serves a request handler.
+		RunCredentials: newRunCredentialsStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),

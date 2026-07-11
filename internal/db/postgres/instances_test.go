@@ -23,7 +23,7 @@ func TestInstanceStore_Postgres_RegisterMintsAndBumpsEpoch(t *testing.T) {
 	ctx := context.Background()
 	const id = "11111111-1111-1111-1111-111111111111"
 
-	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1.0.0")
+	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1.0.0", "")
 	if err != nil {
 		t.Fatalf("Register (first boot): %v", err)
 	}
@@ -31,7 +31,7 @@ func TestInstanceStore_Postgres_RegisterMintsAndBumpsEpoch(t *testing.T) {
 		t.Fatalf("first boot epoch = %d, want 1", epoch)
 	}
 
-	epoch, err = stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1.0.1")
+	epoch, err = stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1.0.1", "")
 	if err != nil {
 		t.Fatalf("Register (restart): %v", err)
 	}
@@ -76,7 +76,7 @@ func TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot(t *testing.T
 	ctx := context.Background()
 	const id = "22222222-2222-2222-2222-222222222222"
 
-	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", "")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestInstanceStore_Postgres_HeartbeatRoundTripsCapacitySnapshot(t *testing.T
 	if _, _, err := stores.Instances.Heartbeat(ctx, id, epoch, domain.InstanceHeartbeat{MaxRuns: &maxRuns}); err != nil {
 		t.Fatalf("Heartbeat (repopulate): %v", err)
 	}
-	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v2"); err != nil {
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v2", ""); err != nil {
 		t.Fatalf("Register (restart): %v", err)
 	}
 	rebooted, err := stores.Instances.Get(ctx, id)
@@ -200,13 +200,13 @@ func TestInstanceStore_Postgres_HeartbeatFencedOnBootEpoch(t *testing.T) {
 	ctx := context.Background()
 	const id = "33333333-3333-3333-3333-333333333333"
 
-	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", "")
 	if err != nil {
 		t.Fatalf("Register (boot 1): %v", err)
 	}
 	// A second boot of the same id (e.g. a duplicated state root) bumps the
 	// epoch out from under the first boot's in-memory copy.
-	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1"); err != nil {
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", ""); err != nil {
 		t.Fatalf("Register (boot 2): %v", err)
 	}
 
@@ -233,10 +233,10 @@ func TestInstanceStore_Postgres_SetDrainingAndList(t *testing.T) {
 	const idA = "44444444-4444-4444-4444-444444444444"
 	const idB = "55555555-5555-5555-5555-555555555555"
 
-	if _, err := stores.Instances.Register(ctx, idA, domain.InstanceRoleExecutor, "v1"); err != nil {
+	if _, err := stores.Instances.Register(ctx, idA, domain.InstanceRoleExecutor, "v1", ""); err != nil {
 		t.Fatalf("Register A: %v", err)
 	}
-	if _, err := stores.Instances.Register(ctx, idB, domain.InstanceRoleExecutor, "v1"); err != nil {
+	if _, err := stores.Instances.Register(ctx, idB, domain.InstanceRoleExecutor, "v1", ""); err != nil {
 		t.Fatalf("Register B: %v", err)
 	}
 

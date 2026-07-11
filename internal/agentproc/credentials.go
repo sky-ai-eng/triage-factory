@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -230,7 +231,31 @@ var credentialEnvKeys = []string{
 //   - orgID set, no credentials configured →
 //     ErrNoCredentialsConfigured. Caller surfaces however its UX
 //     dictates; we don't fall back to the parent env.
+//
+// ResolveCredentialsForBundle is resolveCredentials, exported for TFAC-614's
+// brain-side credential provisioner: it needs the exact same LLM env-var map
+// this package injects into the sandbox subprocess, but resolved BY the
+// brain (which still holds the real secret store) and sealed into a run's
+// credential bundle rather than read by the executor directly.
+func ResolveCredentialsForBundle(ctx context.Context, secrets SecretsReader, orgID string) (map[string]string, error) {
+	return resolveCredentials(ctx, secrets, orgID)
+}
+
 func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string) (map[string]string, error) {
+	// TF_ROLE=executor (TFAC-614): the run's LLM credential was already
+	// resolved by the brain (which still holds the real secret store) and
+	// sealed into this run's bundle — read it back instead of calling
+	// through to secrets, which on this role is the disabled store that
+	// would just return db.ErrSecretStoreUnavailable. Every other role
+	// (RoleAll/RoleControl/local) never carries a bundle on ctx, so this
+	// is a no-op there — zero behavior change.
+	if bundle, ok := credbundle.FromContext(ctx); ok {
+		if len(bundle.LLM) == 0 {
+			return nil, fmt.Errorf("%w: org %s", ErrNoCredentialsConfigured, orgID)
+		}
+		return bundle.LLM, nil
+	}
+
 	multi := runmode.Current() == runmode.ModeMulti
 
 	if orgID == "" {

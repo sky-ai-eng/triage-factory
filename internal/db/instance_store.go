@@ -20,9 +20,13 @@ type InstanceStore interface {
 	// Register performs the atomic boot-registration upsert: insert a fresh
 	// row with boot_epoch=1, or — on a restart with the same id — bump
 	// boot_epoch by one and refresh role/version/started_at/
-	// last_heartbeat_at. Returns the minted/bumped boot_epoch. Called once
-	// at process boot, before the heartbeat loop starts.
-	Register(ctx context.Context, id, role, version string) (bootEpoch int64, err error)
+	// last_heartbeat_at. pubkey is this boot's ephemeral X25519 public key
+	// (TFAC-614, base64) — re-stamped on every Register call exactly like
+	// role/version, never preserved across a restart the way draining/
+	// labels are; empty when the caller has no bundle-sealing key to
+	// publish (control/all roles). Returns the minted/bumped boot_epoch.
+	// Called once at process boot, before the heartbeat loop starts.
+	Register(ctx context.Context, id, role, version, pubkey string) (bootEpoch int64, err error)
 
 	// Heartbeat renews last_heartbeat_at and overwrites the capacity +
 	// admission snapshot, fenced on (id, boot_epoch) so a stale/superseded
