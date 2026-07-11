@@ -159,7 +159,7 @@ func TestResolveRunCredentials_MultiSeam(t *testing.T) {
 		return "claude-resolved-model"
 	})
 
-	gotClient, gotModel := s.resolveRunCredentials(context.Background(), orgID, owner, teamID)
+	gotClient, gotModel := s.resolveRunCredentials(context.Background(), orgID, owner, "widgets", teamID)
 
 	if gotClient != wantClient {
 		t.Errorf("resolveRunCredentials returned the wrong GitHub client (got the fallback, not the resolver's per-org client)")
@@ -191,7 +191,7 @@ func TestResolveRunCredentials_FallbackWithoutSeam(t *testing.T) {
 	fallbackClient := ghclient.NewClient("https://fallback", "fallback-tok")
 	s := NewSpawner(nil, db.Stores{}, fallbackClient, nil, "fallback-model")
 
-	gotClient, gotModel := s.resolveRunCredentials(context.Background(), "org", "owner", "team")
+	gotClient, gotModel := s.resolveRunCredentials(context.Background(), "org", "owner", "repo", "team")
 	if gotClient != fallbackClient {
 		t.Errorf("without a resolver, expected the constructor client")
 	}
@@ -212,7 +212,7 @@ func TestResolveGHClient_ResolveErrorReturnsNil(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, ghclient.NewClient("https://fallback", "fallback-tok"), nil, "m")
 	s.SetRunCredentialResolvers(resolver, nil, nil)
 
-	if got := s.resolveGHClient(context.Background(), "org", "owner"); got != nil {
+	if got := s.resolveGHClient(context.Background(), "org", "owner", "repo"); got != nil {
 		t.Errorf("resolveGHClient on resolver error = %v; want nil", got)
 	}
 }
@@ -273,7 +273,7 @@ func TestResolveCloneToken(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeMulti)
 		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 		s.SetRunCredentialResolvers(&fakeResolver{token: githubapp.Token{Value: "ghs_clone"}}, nil, nil)
-		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "ghs_clone" {
+		if got := s.resolveCloneToken(context.Background(), orgID, owner, "widgets"); got != "ghs_clone" {
 			t.Errorf("resolveCloneToken = %q, want %q", got, "ghs_clone")
 		}
 	})
@@ -281,7 +281,7 @@ func TestResolveCloneToken(t *testing.T) {
 	t.Run("multi: no resolver returns empty", func(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeMulti)
 		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "" {
+		if got := s.resolveCloneToken(context.Background(), orgID, owner, "widgets"); got != "" {
 			t.Errorf("resolveCloneToken with no resolver = %q, want empty", got)
 		}
 	})
@@ -290,7 +290,7 @@ func TestResolveCloneToken(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeMulti)
 		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 		s.SetRunCredentialResolvers(&fakeResolver{err: errors.New("vault down")}, nil, nil)
-		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "" {
+		if got := s.resolveCloneToken(context.Background(), orgID, owner, "widgets"); got != "" {
 			t.Errorf("resolveCloneToken on error = %q, want empty (clone proceeds unauthenticated)", got)
 		}
 	})
@@ -299,7 +299,7 @@ func TestResolveCloneToken(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeLocal)
 		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 		s.SetRunCredentialResolvers(&fakeResolver{token: githubapp.Token{Value: "ghs_clone"}}, nil, nil)
-		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "" {
+		if got := s.resolveCloneToken(context.Background(), orgID, owner, "widgets"); got != "" {
 			t.Errorf("resolveCloneToken in local mode = %q, want empty (local clones unchanged)", got)
 		}
 	})

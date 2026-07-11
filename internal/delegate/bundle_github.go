@@ -15,25 +15,45 @@ import (
 )
 
 // bundleRepoToken resolves the GitHub credential a bundle carries for
-// (owner, repo) — an exact repo-scoped installation token when repo is
-// known, the single org-wide PAT otherwise (a PAT can't be narrowed, so it
-// answers for every repo), or ok=false when the bundle has neither (no
-// GitHub credential configured for the org). repo == "" matches any
-// RepoTokens entry under owner — the shape resolveGHClient/resolveCloneToken
-// need (an account-level lookup, no single repo in view).
+// (owner, repo): an exact repo-scoped installation token when repo is
+// known, falling through to the single org-wide PAT (a PAT can't be
+// narrowed, so it answers for every repo) if no repo-scoped entry matches.
+//
+// repo == "" (the caller has no specific repo in view) resolves ONLY when
+// owner has exactly one RepoTokens entry — mirroring the production
+// resolver's installationFor ambiguity rule ("an empty target only
+// resolves when there's exactly one installation"). Map iteration order is
+// otherwise undefined, and a bundle's RepoTokens are scoped per-repo
+// (unlike the live resolver's account-wide App installation token), so
+// picking an arbitrary sibling repo's token when the run's authorized set
+// covers more than one repo under owner would 403 every call it's used
+// for. Every real caller passes a concrete repo (see ownerRepoForTask); the
+// ambiguous-repo case only falls through to the PAT, never to a wrong
+// App token.
 func bundleRepoToken(gh *credbundle.GitHubCreds, owner, repo string) (token string, expiresAt time.Time, ok bool) {
 	if gh == nil {
 		return "", time.Time{}, false
 	}
-	for repoID, rt := range gh.RepoTokens {
-		o, r, cut := strings.Cut(repoID, "/")
-		if !cut || !strings.EqualFold(o, owner) {
-			continue
+	if repo != "" {
+		for repoID, rt := range gh.RepoTokens {
+			o, r, cut := strings.Cut(repoID, "/")
+			if cut && strings.EqualFold(o, owner) && strings.EqualFold(r, repo) {
+				return rt.Token, rt.ExpiresAt, true
+			}
 		}
-		if repo != "" && !strings.EqualFold(r, repo) {
-			continue
+	} else {
+		var match credbundle.RepoToken
+		matches := 0
+		for repoID, rt := range gh.RepoTokens {
+			o, _, cut := strings.Cut(repoID, "/")
+			if cut && strings.EqualFold(o, owner) {
+				matches++
+				match = rt
+			}
 		}
-		return rt.Token, rt.ExpiresAt, true
+		if matches == 1 {
+			return match.Token, match.ExpiresAt, true
+		}
 	}
 	if gh.PAT != "" {
 		return gh.PAT, time.Time{}, true
@@ -45,9 +65,9 @@ func bundleRepoToken(gh *credbundle.GitHubCreds, owner, repo string) (token stri
 // GitHub credential — the TF_ROLE=executor mirror of resolveGHClient's
 // resolver.ClientFor path, with no secret-store read: the token was
 // already minted host-side by the brain and sealed into this run's
-// bundle.
-func bundleGHClient(gh *credbundle.GitHubCreds, owner string) *ghclient.Client {
-	token, _, ok := bundleRepoToken(gh, owner, "")
+// bundle. repo disambiguates exactly like bundleRepoToken's.
+func bundleGHClient(gh *credbundle.GitHubCreds, owner, repo string) *ghclient.Client {
+	token, _, ok := bundleRepoToken(gh, owner, repo)
 	if !ok {
 		return nil
 	}

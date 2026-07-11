@@ -328,7 +328,7 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID, owner, repo,
 		// public clones — only a multi-mode HTTPS private repo gets the token,
 		// which authenticates both the on-demand re-clone and the checkout's lazy
 		// promisor fetch inside RestoreWorkspaceGit.
-		auth := worktree.CloneAuthFor(cloneURL, s.resolveCloneToken(ctx, orgID, owner))
+		auth := worktree.CloneAuthFor(cloneURL, s.resolveCloneToken(ctx, orgID, owner, repo))
 		if err := worktree.RestoreWorkspaceGit(ctx, owner, repo, wtDir, delta, cloneURL, auth); err != nil {
 			return fmt.Errorf("rehydrate: restore git: %w", err)
 		}

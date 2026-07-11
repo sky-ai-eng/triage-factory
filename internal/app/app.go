@@ -68,13 +68,14 @@ type App struct {
 	bootEpoch int64
 
 	// sealingKey is this process's ephemeral X25519 keypair (TFAC-614),
-	// minted once in ensureIdentity, in-memory only, never persisted — a
-	// restart mints a fresh one. Non-nil only at TF_ROLE=executor in multi
-	// mode (buildSealingKey); nil elsewhere, since only an executor ever
-	// claims a run and needs a bundle sealed to it. The public half is
-	// published on this instance's Register call; the private half never
-	// leaves this process and is what unseals a run_credentials bundle
-	// addressed to it (see internal/delegate's awaiting-credentials wait).
+	// minted once in registerInstance (internal/app/instance.go), in-memory
+	// only, never persisted — a restart mints a fresh one. Non-nil only at
+	// TF_ROLE=executor in multi mode; nil elsewhere, since only an executor
+	// ever claims a run and needs a bundle sealed to it. The public half is
+	// published on that same Register call; the private half never leaves
+	// this process and is what unseals a run_credentials bundle addressed
+	// to it (see internal/delegate's awaiting-credentials wait, wired via
+	// Spawner.SetSealingKey in subsystems.go).
 	sealingKey *credseal.KeyPair
 
 	// Persistence. database is the primary pool (SQLite in local mode,

@@ -61,11 +61,37 @@ func TestResolveGHClient_UsesBundleOnExecutorRole(t *testing.T) {
 	ctx := credbundle.WithBundle(context.Background(), &credbundle.Bundle{GitHub: gh})
 
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	if c := s.resolveGHClient(ctx, "org-1", "acme"); c == nil {
+	if c := s.resolveGHClient(ctx, "org-1", "acme", "widgets"); c == nil {
 		t.Fatal("resolveGHClient with a matching bundle returned nil")
 	}
-	if c := s.resolveGHClient(ctx, "org-1", "someone-else"); c != nil {
+	if c := s.resolveGHClient(ctx, "org-1", "someone-else", "whatever"); c != nil {
 		t.Fatal("resolveGHClient with no matching bundle entry and no PAT returned a non-nil client")
+	}
+}
+
+// TestResolveGHClient_AmbiguousOwnerWithoutRepoDoesNotPickAnArbitraryToken
+// pins the fix for the map-iteration-order bug: an owner with MULTIPLE
+// repo-scoped tokens and no repo in view must never resolve to an
+// arbitrary sibling repo's token (which would 403 whatever call it's used
+// for) — only an exact repo match, or a single unambiguous candidate, may
+// resolve.
+func TestResolveGHClient_AmbiguousOwnerWithoutRepoDoesNotPickAnArbitraryToken(t *testing.T) {
+	gh := &credbundle.GitHubCreds{RepoTokens: map[string]credbundle.RepoToken{
+		"acme/widgets": {Token: "ghs_widgets"},
+		"acme/gadgets": {Token: "ghs_gadgets"},
+	}}
+	ctx := credbundle.WithBundle(context.Background(), &credbundle.Bundle{GitHub: gh})
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+
+	if c := s.resolveGHClient(ctx, "org-1", "acme", ""); c != nil {
+		t.Fatal("resolveGHClient with an ambiguous owner (2 repos, no repo given, no PAT) returned a non-nil client")
+	}
+	if got := s.resolveCloneToken(ctx, "org-1", "acme", ""); got != "" {
+		t.Errorf("resolveCloneToken with an ambiguous owner = %q, want empty", got)
+	}
+	// A concrete repo resolves unambiguously even with a sibling present.
+	if got := s.resolveCloneToken(ctx, "org-1", "acme", "gadgets"); got != "ghs_gadgets" {
+		t.Errorf("resolveCloneToken(repo=gadgets) = %q, want %q", got, "ghs_gadgets")
 	}
 }
 
@@ -74,7 +100,7 @@ func TestResolveCloneToken_UsesBundleOnExecutorRole(t *testing.T) {
 	ctx := credbundle.WithBundle(context.Background(), &credbundle.Bundle{GitHub: gh})
 
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	if got := s.resolveCloneToken(ctx, "org-1", "acme"); got != "ghs_clone" {
+	if got := s.resolveCloneToken(ctx, "org-1", "acme", "widgets"); got != "ghs_clone" {
 		t.Errorf("resolveCloneToken = %q, want %q", got, "ghs_clone")
 	}
 }

@@ -726,11 +726,13 @@ func (s *Spawner) Storage() storage.Storage {
 // mode-awareness lives inside the resolver (App token vs PAT) and the
 // secrets reader (system door vs nil), not at the call site. owner is the
 // GitHub account the run targets — empty for Jira runs, which don't
-// pre-clone. teamID is the task's owning team, so a multi-team org honors
-// each team's model choice; empty falls back to the
+// pre-clone. repo disambiguates a bundle-backed lookup (TFAC-614) when the
+// run's authorized set covers more than one repo under owner; empty when
+// the caller has none in view. teamID is the task's owning team, so a
+// multi-team org honors each team's model choice; empty falls back to the
 // org default team.
-func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, teamID string) (*ghclient.Client, string) {
-	return s.resolveGHClient(ctx, orgID, owner), s.resolveModel(ctx, orgID, teamID)
+func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo, teamID string) (*ghclient.Client, string) {
+	return s.resolveGHClient(ctx, orgID, owner, repo), s.resolveModel(ctx, orgID, teamID)
 }
 
 // resolveGHClient resolves the per-(org, owner) GitHub client via the
@@ -739,13 +741,22 @@ func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, teamI
 // setupGitHub surfaces "GitHub credentials not configured" for GitHub
 // tasks, and Jira runs don't need a client. The error is logged so a real
 // backend failure (e.g. vault outage) isn't silent.
-func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner string) *ghclient.Client {
+//
+// repo is the specific repo the call concerns, when the caller has one in
+// view (every real caller does — see ownerRepoForTask). It disambiguates
+// the TF_ROLE=executor bundle lookup below: unlike the live resolver's
+// account-wide App installation token, a bundle's RepoTokens are scoped
+// per-repo, so an owner alone is ambiguous whenever a run's authorized set
+// covers more than one repo under the same account — passing "" there
+// would let bundleRepoToken's map iteration pick an arbitrary sibling
+// repo's token, which then 403s every call it's used for.
+func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string) *ghclient.Client {
 	// TF_ROLE=executor (TFAC-614): the token was already minted host-side
 	// by the brain and sealed into this run's bundle — build the client
 	// straight from it, no resolver/secret-store call. Every other role
 	// never carries a bundle on ctx (zero behavior change there).
 	if bundle, ok := credbundle.FromContext(ctx); ok {
-		return bundleGHClient(bundle.GitHub, owner)
+		return bundleGHClient(bundle.GitHub, owner, repo)
 	}
 
 	s.mu.Lock()
@@ -781,11 +792,15 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner string) *ghc
 // resolution fails — the clone then proceeds with no injected credential. A
 // resolve failure is logged so a real backend outage (e.g. vault down) isn't
 // silent; the clone itself surfaces the auth error if the repo is private.
-func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner string) string {
+//
+// repo disambiguates the TF_ROLE=executor bundle lookup exactly like
+// resolveGHClient's — required, not optional, whenever the caller has a
+// specific repo in view (every real caller does).
+func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner, repo string) string {
 	// TF_ROLE=executor (TFAC-614): same bundle-first check as
 	// resolveGHClient — the token was pre-minted by the brain.
 	if bundle, ok := credbundle.FromContext(ctx); ok {
-		token, _, _ := bundleRepoToken(bundle.GitHub, owner, "")
+		token, _, _ := bundleRepoToken(bundle.GitHub, owner, repo)
 		return token
 	}
 
