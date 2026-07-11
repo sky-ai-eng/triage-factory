@@ -597,8 +597,12 @@ services:
       # DSN unchanged — narrowing control is explicitly out of scope.
       TF_DATABASE_URL: postgres://tf_system:${TF_SYSTEM_PASSWORD:?missing TF_SYSTEM_PASSWORD (see .env.example)}@postgres:5432/postgres
       TF_AUTHENTICATOR_PASSWORD: ${TF_AUTHENTICATOR_PASSWORD:?missing TF_AUTHENTICATOR_PASSWORD (see .env.example)}
-      # App-encrypted org/user integration secrets (per-run GitHub/LLM creds).
-      TF_SECRET_ENCRYPTION_KEY: ${TF_SECRET_ENCRYPTION_KEY:?missing TF_SECRET_ENCRYPTION_KEY (see .env.example)}
+      # Deliberately NOT set here (TFAC-614): an executor never holds the
+      # secret-decryption key. Per-run GitHub/LLM/Jira credentials arrive
+      # pre-resolved via sealed run_credentials bundles from the control
+      # pod's brain instead — see internal/credprovision. openStores warns
+      # and ignores this var if it's set on an executor anyway.
+      # TF_SECRET_ENCRYPTION_KEY intentionally omitted.
       # Durable-workspace object store (per-run snapshots + cross-host rehydrate).
       TF_BLOB_ENDPOINT: ${TF_BLOB_ENDPOINT:-http://seaweedfs:8333}
       TF_BLOB_BUCKET: ${TF_BLOB_BUCKET:-tf-workspaces}

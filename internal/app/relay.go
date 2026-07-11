@@ -2,9 +2,17 @@ package app
 
 import (
 	"context"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 )
+
+// credRequestProvisionTimeout bounds a single cred_request handler's
+// ProvisionForRun call (TFAC-614) — well inside the executor's own
+// 2-minute awaiting-credentials deadline, so a stalled DB/GitHub
+// round-trip degrades to one deferred backstop-sweep retry instead of
+// leaking a goroutine per dropped notification.
+const credRequestProvisionTimeout = 30 * time.Second
 
 // pollSoon relays poller.Manager.PollSoon(source, orgID): in-process when
 // this pod runs the brain (role=all, or a control pod currently holding
@@ -96,6 +104,31 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 	case "pollsoon":
 		if a.pollerMgr != nil {
 			a.pollerMgr.PollSoon(msg.Source, msg.OrgID)
+		}
+	case "cred_request":
+		// nil at TF_ROLE=executor (buildCredProvisioner never constructs
+		// a.credProvisioner there) and in local mode — an executor is
+		// never the brain holder, so it can't reach this branch anyway;
+		// the nil check is defense in depth. Detached but BOUNDED context:
+		// this dispatches off the shared LISTEN connection's read loop and
+		// must not block it, but an unbounded context.Background() call
+		// could hang indefinitely on a stalled DB/GitHub round-trip and
+		// leak one goroutine per dropped cred_request under repeated
+		// notifications. credRequestProvisionTimeout caps it well inside
+		// the executor's own 2-minute awaiting-credentials deadline, so a
+		// timeout here just costs one deferred pass — the backstop sweep
+		// (internal/credprovision.RunAwaitingSweep) retries it. Unlike
+		// a.dispatchManagerTrigger's fire-and-forget Trigger() channel
+		// send, ProvisionForRun does real work and its error is worth
+		// logging.
+		if a.credProvisioner != nil {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), credRequestProvisionTimeout)
+				defer cancel()
+				if err := a.credProvisioner.ProvisionForRun(ctx, msg.OrgID, msg.RunID); err != nil {
+					appLog.Warn("tf_ctl: cred_request provision failed", "run", msg.RunID, "error", err)
+				}
+			}()
 		}
 	default:
 		appLog.Warn("tf_ctl: unknown relay message kind", "kind", msg.Kind)

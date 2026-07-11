@@ -2,7 +2,18 @@ package db
 
 import (
 	"context"
+	"errors"
 )
+
+// ErrSecretStoreUnavailable is returned by every SecretStore method on a
+// process that was never handed the secret-decryption key (TFAC-614):
+// TF_ROLE=executor in multi mode, which never loads TF_SECRET_ENCRYPTION_KEY
+// at boot — all per-run credential material arrives pre-resolved via sealed
+// run_credentials bundles instead. A distinct, greppable sentinel rather
+// than a generic auth/decrypt failure, so a consumer that was missed when
+// converting to the bundle path fails loudly at the first call instead of
+// silently misbehaving.
+var ErrSecretStoreUnavailable = errors.New("secret store not available on this role (executor role never holds the secret-decryption key)")
 
 //go:generate go run github.com/vektra/mockery/v2 --name=SecretStore --output=./mocks --case=underscore --with-expecter
 

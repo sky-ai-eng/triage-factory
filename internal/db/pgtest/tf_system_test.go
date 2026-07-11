@@ -2,7 +2,6 @@ package pgtest
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -57,68 +56,69 @@ func TestTfSystem_DDLDenied(t *testing.T) {
 	assertPgCode(t, err, "42501", "tf_system CREATE TABLE")
 }
 
-// TestTfSystem_OffSurfaceReadDenied pins that a table entirely outside
-// the executor's enumerated surface (sso_connections — SSO config is a
-// control-plane-only concern) must be unreachable, even for a plain
-// SELECT that would return zero rows.
+// TestTfSystem_OffSurfaceReadDenied pins that tables entirely outside the
+// executor's enumerated surface must be unreachable, even for a plain
+// SELECT that would return zero rows: sso_connections (SSO config is a
+// control-plane-only concern) and org_secrets (an executor never holds
+// TF_SECRET_ENCRYPTION_KEY at all as of TFAC-614 — its per-run credential
+// material arrives pre-resolved via sealed run_credentials bundles
+// instead, so the org_secrets grant this ticket originally shipped is
+// dead weight and was removed; this pins that it stays removed).
 func TestTfSystem_OffSurfaceReadDenied(t *testing.T) {
 	h := Shared(t)
 
-	var n int
-	err := h.SystemDB.QueryRow(`SELECT COUNT(*) FROM sso_connections`).Scan(&n)
-	if err == nil {
-		t.Fatalf("tf_system SELECT sso_connections succeeded, want permission denied")
+	for _, table := range []string{"sso_connections", "org_secrets"} {
+		var n int
+		err := h.SystemDB.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n)
+		if err == nil {
+			t.Errorf("tf_system SELECT %s succeeded, want permission denied", table)
+			continue
+		}
+		assertPgCode(t, err, "42501", "tf_system SELECT "+table)
 	}
-	assertPgCode(t, err, "42501", "tf_system SELECT sso_connections")
 }
 
-// TestTfSystem_CrossOrgSystemReadSucceeds pins the other half of the
-// off-surface-read test above: BYPASSRLS is REQUIRED semantics for a
-// granted table, not accidental —
-// Secrets.GetSystem for one org must succeed when called with a
-// different org's context bound (there is no session/claims concept on
-// the admin pool at all; the caller-supplied orgID is trusted, exactly
-// like today's supabase_admin behavior).
+// TestTfSystem_CrossOrgSystemReadSucceeds pins that BYPASSRLS is REQUIRED
+// semantics for a granted table, not accidental — a *System read for one
+// org must succeed when called with a different org's context bound
+// (there is no session/claims concept on the admin pool at all; the
+// caller-supplied orgID is trusted, exactly like today's supabase_admin
+// behavior). Uses Tasks.GetSystem as the vehicle — any granted table with
+// an org-scoped *System(ctx, orgID, id) read would do; tasks is simplest
+// to seed.
 func TestTfSystem_CrossOrgSystemReadSucceeds(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
 	orgA, userA, _ := SeedOrgWithUser(t, h, "cross-org-a")
 	orgB, _, _ := SeedOrgWithUser(t, h, "cross-org-b")
-	_ = userA
+
+	entityA := seedEntity(t, h, orgA, "github", "octo/cross-org#1")
+	taskA := seedTask(t, h, orgA, userA, entityA, "github:pr:opened")
 
 	stores := pgstore.New(h.SystemDB, h.AppDB, SecretKey)
 	ctx := context.Background()
 
-	// Seed via the real app-pool claims tx (same SecretKey) so the value is
-	// genuinely decryptable — GetSystem below exercises the real
-	// encrypt/decrypt round-trip, not just the table grant.
-	if err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx, SecretKey).Secrets.Put(ctx, orgA, "probe_key", "probe_value", "")
-	}); err != nil {
-		t.Fatalf("seed org secret: %v", err)
+	// Read orgA's task while correctly scoped to orgA — BYPASSRLS + a
+	// trusted orgID argument means this must resolve regardless of the
+	// admin pool having no session claims at all (there is nothing to
+	// "act as orgB" here; the point is that no claims context is needed).
+	task, err := stores.Tasks.GetSystem(ctx, orgA, taskA)
+	if err != nil {
+		t.Fatalf("GetSystem(orgA, taskA) as tf_system: %v", err)
+	}
+	if task == nil {
+		t.Fatalf("GetSystem(orgA, taskA) returned nil, want the seeded task")
 	}
 
-	// Read orgA's secret while "acting as" orgB — BYPASSRLS + a trusted
-	// orgID argument means this must still resolve orgA's row (there is
-	// no cross-org leak here: the caller passed orgA's id explicitly,
-	// exactly as production system code does).
-	val, err := stores.Secrets.GetSystem(ctx, orgA, "probe_key")
+	// And the same id under orgB's id resolves to nothing — proves the
+	// read is scoped by the argument, not a blanket cross-org leak.
+	taskUnderB, err := stores.Tasks.GetSystem(ctx, orgB, taskA)
 	if err != nil {
-		t.Fatalf("GetSystem(orgA) as tf_system: %v", err)
+		t.Fatalf("GetSystem(orgB, taskA) as tf_system: %v", err)
 	}
-	if val == "" {
-		t.Errorf("GetSystem(orgA) returned empty, want the seeded ciphertext value")
-	}
-
-	// And orgB genuinely sees nothing under its own id — proves the read
-	// is org-scoped by argument, not a blanket cross-org leak.
-	valB, err := stores.Secrets.GetSystem(ctx, orgB, "probe_key")
-	if err != nil {
-		t.Fatalf("GetSystem(orgB) as tf_system: %v", err)
-	}
-	if valB != "" {
-		t.Errorf("GetSystem(orgB) = %q, want empty (no such row)", valB)
+	if taskUnderB != nil {
+		t.Errorf("GetSystem(orgB, taskA) = %+v, want nil (no such row under orgB)", taskUnderB)
 	}
 }
 
@@ -337,7 +337,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("instances", func(t *testing.T) {
-		epoch, err := stores.Instances.Register(ctx, executorID, "executor", "test-build")
+		epoch, err := stores.Instances.Register(ctx, executorID, "executor", "test-build", "test-pubkey")
 		if err != nil {
 			t.Fatalf("Instances.Register: %v", err)
 		}
@@ -438,12 +438,22 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 	})
 
-	t.Run("org_secrets", func(t *testing.T) {
-		if err := stores.Secrets.PutUserSystem(ctx, orgID, userID, "jira_token/example.atlassian.net", "secret-value", ""); err != nil {
-			t.Fatalf("Secrets.PutUserSystem: %v", err)
+	t.Run("run_credentials", func(t *testing.T) {
+		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
+		// The brain seals + writes bundles on its own pool (supabase_admin,
+		// never tf_system); seed directly via AdminDB so this subtest
+		// isolates the executor's read side — RunCredentials.Get, which the
+		// awaiting-credentials wait polls.
+		MustExec(t, h.AdminDB, `
+			INSERT INTO run_credentials (run_id, org_id, executor_id, boot_epoch, sealed)
+			VALUES ($1, $2, $3, 1, $4)
+		`, runID, orgID, executorID, []byte("sealed-bytes"))
+		_, _, _, ok, err := stores.RunCredentials.Get(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("RunCredentials.Get: %v", err)
 		}
-		if _, err := stores.Secrets.GetUserSystem(ctx, orgID, userID, "jira_token/example.atlassian.net"); err != nil {
-			t.Errorf("Secrets.GetUserSystem: %v", err)
+		if !ok {
+			t.Errorf("RunCredentials.Get: ok=false, want the seeded bundle")
 		}
 	})
 

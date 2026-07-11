@@ -1,0 +1,327 @@
+// Package credprovision is the brain-side half of TFAC-614's sealed
+// per-run credential channel: it resolves a claimed run's LLM/GitHub/Jira
+// credentials (using the real, key-bearing secret store only the brain
+// holds), seals them to the claiming executor's published X25519 public
+// key (credseal), and writes the result to run_credentials for that
+// executor to unseal.
+//
+// Manager is brain-unit member the same way the fleet reaper and drain
+// sweeper are (internal/app's startBrain/stopBrain): constructed only for
+// brain-capable roles in multi mode, nil-checked everywhere else.
+package credprovision
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/credseal"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
+)
+
+var log = slog.Default().With("component", "credprovision")
+
+// DefaultAwaitingSweepInterval is the backstop-sweep cadence for runs
+// parked in status='awaiting_credentials' — the fast path is the
+// executor's cred_request tf_ctl notification; this recovers anything that
+// notification dropped (the relay is lossy by design). Short, because it
+// gates run START latency.
+const DefaultAwaitingSweepInterval = 5 * time.Second
+
+// DefaultRefreshSweepInterval is the cadence the refresh sweep runs at.
+const DefaultRefreshSweepInterval = 5 * time.Minute
+
+// DefaultRefreshAfter is how old an active run's sealed bundle must be
+// before the refresh sweep re-mints its GitHub tokens. GitHub installation
+// tokens are hour-lived; this refreshes well within that window.
+const DefaultRefreshAfter = 30 * time.Minute
+
+// jiraSystemResolver is a structural (unexported, anonymous-interface-
+// compatible) view of jira.Resolver's optional ResolveSystemCredential
+// extension — mirrors internal/github's ScopedResolver pattern. Declared
+// locally so this package can type-assert without jira exporting its own
+// interface name.
+type jiraSystemResolver interface {
+	ResolveSystemCredential(ctx context.Context, orgID string) (jira.SystemCredential, error)
+}
+
+// Manager resolves and seals per-run credential bundles. Holds the real,
+// key-bearing db.Stores (brain-side only) plus the GitHub/Jira resolvers
+// built against it.
+type Manager struct {
+	stores       db.Stores
+	ghResolver   ghclient.Resolver
+	jiraResolver jira.Resolver
+}
+
+// NewManager builds a Manager against stores — a brain-capable role's
+// normal (secret-bearing) db.Stores, never the disabled-secrets bundle an
+// executor holds.
+func NewManager(stores db.Stores) *Manager {
+	return &Manager{
+		stores:       stores,
+		ghResolver:   ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil),
+		jiraResolver: jira.NewResolver(stores.Secrets, stores.Orgs),
+	}
+}
+
+// ProvisionForRun resolves runID's credentials and seals them to its
+// current claimant's published pubkey, writing run_credentials. Called
+// synchronously off the executor's cred_request notification (the fast
+// path) and by both sweeps (the backstop / refresh paths) — idempotent and
+// safe to call repeatedly for the same run.
+//
+// A no-op (nil error, no write) when the run isn't currently claimed by
+// anyone, or the claiming instance hasn't published a pubkey — there is
+// nothing to seal to. Not an error: the claim may have just been released
+// (reaped, requeued) between the notification firing and this handler
+// running; the executor's own timeout/requeue path is what recovers that
+// window, not this function surfacing an error.
+func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) error {
+	claim, ok, err := m.stores.RunQueue.GetClaim(ctx, orgID, runID)
+	if err != nil {
+		return fmt.Errorf("credprovision: read claim for run %s: %w", runID, err)
+	}
+	if !ok || claim.ExecutorID == "" {
+		return nil
+	}
+
+	inst, err := m.stores.Instances.Get(ctx, claim.ExecutorID)
+	if err != nil {
+		return fmt.Errorf("credprovision: read claiming instance %s: %w", claim.ExecutorID, err)
+	}
+	if inst == nil || inst.PubKey == "" {
+		log.Warn("claiming instance has no published pubkey; skipping (not yet registered, or not an executor)",
+			"run", runID, "executor", claim.ExecutorID)
+		return nil
+	}
+	if inst.BootEpoch != claim.BootEpoch {
+		// The claiming executor has restarted since it claimed this run —
+		// a new boot, a new ephemeral keypair, a new epoch. Nothing in
+		// this boot is waiting on this run_id; the reaper's stale-
+		// heartbeat sweep is what recovers it (TFAC-586), not this
+		// function. Sealing against the new epoch here would be wrong:
+		// the executor compares a bundle's epoch against its OWN current
+		// one, and inst.BootEpoch (the pubkey's owner) is authoritative,
+		// but writing it under a claim that names an EARLIER epoch would
+		// desync the executor's understanding of which claim this bundle
+		// answers. Skip and let the reaper requeue.
+		log.Warn("claiming executor's boot epoch has moved on since this run was claimed; skipping (reaper will requeue)",
+			"run", runID, "executor", claim.ExecutorID, "claim_epoch", claim.BootEpoch, "instance_epoch", inst.BootEpoch)
+		return nil
+	}
+
+	pubBytes, err := base64.StdEncoding.DecodeString(inst.PubKey)
+	if err != nil || len(pubBytes) != 32 {
+		return fmt.Errorf("credprovision: instance %s has a malformed pubkey", claim.ExecutorID)
+	}
+	var pub [32]byte
+	copy(pub[:], pubBytes)
+
+	bundle := &credbundle.Bundle{BootEpoch: inst.BootEpoch}
+
+	llm, err := agentproc.ResolveCredentialsForBundle(ctx, agentproc.NewSystemSecretsReader(m.stores.Secrets), orgID)
+	if err != nil && !errors.Is(err, agentproc.ErrNoCredentialsConfigured) {
+		return fmt.Errorf("credprovision: resolve LLM credentials for org %s: %w", orgID, err)
+	}
+	bundle.LLM = llm
+
+	if gh, err := m.resolveGitHub(ctx, orgID, claim.TeamID, claim.TaskID, runID); err != nil {
+		return fmt.Errorf("credprovision: resolve github credentials for run %s: %w", runID, err)
+	} else {
+		bundle.GitHub = gh
+	}
+
+	if jc, err := m.resolveJira(ctx, orgID); err != nil {
+		return fmt.Errorf("credprovision: resolve jira credentials for org %s: %w", orgID, err)
+	} else {
+		bundle.Jira = jc
+	}
+
+	plaintext, err := bundle.Marshal()
+	if err != nil {
+		return fmt.Errorf("credprovision: marshal bundle for run %s: %w", runID, err)
+	}
+	sealed, err := credseal.Seal(pub, plaintext)
+	if err != nil {
+		return fmt.Errorf("credprovision: seal bundle for run %s: %w", runID, err)
+	}
+	if err := m.stores.RunCredentials.Put(ctx, orgID, runID, claim.ExecutorID, inst.BootEpoch, sealed); err != nil {
+		return fmt.Errorf("credprovision: write bundle for run %s: %w", runID, err)
+	}
+	log.Debug("provisioned run credential bundle", "run", runID, "org", orgID, "executor", claim.ExecutorID, "boot_epoch", inst.BootEpoch)
+	return nil
+}
+
+// resolveGitHub resolves the run's GitHub credential: nil when the org has
+// no usable GitHub credential at all (a Jira-only org — no regression, its
+// runs do no git). Otherwise mints a repo-scoped installation token (an
+// active App) — or the org PAT, unscoped (a PAT can't be narrowed) — for
+// every repo in the run's authorized set (the same team-tracked ∩
+// run_worktrees intersection the git proxy's live authorize gate uses, see
+// gitAuthorizeDecision in internal/delegate/spawner.go).
+func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runID string) (*credbundle.GitHubCreds, error) {
+	scoped, ok := m.ghResolver.(ghclient.ScopedResolver)
+	if !ok {
+		return nil, nil
+	}
+	has, err := scoped.HasAnyCredential(ctx, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("probe github credential: %w", err)
+	}
+	if !has {
+		return nil, nil
+	}
+
+	repoIDs, err := m.authorizedRepos(ctx, orgID, teamID, taskID, runID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve authorized repo set: %w", err)
+	}
+
+	gh := &credbundle.GitHubCreds{Mode: "app", RepoTokens: map[string]credbundle.RepoToken{}}
+	if base, err := m.ghResolver.BaseURLFor(ctx, orgID); err == nil {
+		gh.BaseURL = base
+	}
+	if name, email, ok := m.ghResolver.OrgIdentityFor(ctx, orgID); ok {
+		gh.IdentityName = name
+		gh.IdentityEmail = email
+	}
+
+	// nil permissions = inherit the App installation's full granted set,
+	// scoped to just this repo — narrower than today's ClientFor (which
+	// mints across every repo the installation covers) while still
+	// covering both the API-client uses (PR comments/reviews) and the git
+	// proxy's contents-only push, a strict subset of whatever the
+	// installation grants.
+	for _, repoID := range repoIDs {
+		owner, repo, ok := strings.Cut(repoID, "/")
+		if !ok {
+			continue
+		}
+		tok, err := scoped.TokenForRepoScoped(ctx, orgID, owner, repo, nil)
+		if err != nil {
+			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+				continue
+			}
+			return nil, fmt.Errorf("mint token for %s: %w", repoID, err)
+		}
+		if tok.ExpiresAt.IsZero() {
+			gh.Mode = "pat"
+			gh.PAT = tok.Value
+		}
+		gh.RepoTokens[repoID] = credbundle.RepoToken{Token: tok.Value, ExpiresAt: tok.ExpiresAt}
+	}
+	return gh, nil
+}
+
+// authorizedRepos returns the run's authorized repo set as "owner/repo"
+// strings: every distinct repo in the run's run_worktrees ledger, PLUS the
+// task's own primary repo — both filtered to what the team tracks. The
+// run_worktrees half is the credential-minting mirror of
+// gitAuthorizeDecision (internal/delegate/spawner.go), which enforces the
+// same intersection live at the git proxy; minting outside that set would
+// be pointless (the proxy would 403 it anyway). The task-repo half exists
+// because provisioning happens BEFORE the run's very first clone —
+// run_worktrees has no rows yet for a fresh claim, only for a resumed run
+// or one that already cloned before a refresh — so without it, a fresh
+// run's initial host-side clone (setupGitHub's resolveCloneToken, before
+// any worktree exists) would get no token at all.
+func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, runID string) ([]string, error) {
+	if m.stores.TeamGitHubRepos == nil {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(repoID string) {
+		key := strings.ToLower(repoID)
+		if seen[key] {
+			return
+		}
+		owner, repo, ok := strings.Cut(repoID, "/")
+		if !ok {
+			return
+		}
+		tracks, err := m.stores.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, owner, repo)
+		if err != nil || !tracks {
+			return
+		}
+		seen[key] = true
+		out = append(out, repoID)
+	}
+
+	if repoID := m.taskPrimaryRepo(ctx, orgID, taskID); repoID != "" {
+		add(repoID)
+	}
+	if m.stores.RunWorktrees != nil {
+		rows, err := m.stores.RunWorktrees.ListSystem(ctx, orgID, runID)
+		if err != nil {
+			return nil, err
+		}
+		for _, w := range rows {
+			add(w.RepoID)
+		}
+	}
+	return out, nil
+}
+
+// taskPrimaryRepo resolves a GitHub task's own target repo as "owner/repo"
+// from its entity source id ("owner/repo#42" for a PR/issue task) — the
+// same parse delegate.ownerForTask/setupGitHub use, duplicated here rather
+// than exported since it's a two-line string split and importing
+// internal/delegate from here would be a layering inversion (delegate is
+// the executor-side consumer, not something the brain-side provisioner
+// should depend on). "" for a non-GitHub task (e.g. Jira) or a malformed id.
+func (m *Manager) taskPrimaryRepo(ctx context.Context, orgID, taskID string) string {
+	if m.stores.Tasks == nil || taskID == "" {
+		return ""
+	}
+	task, err := m.stores.Tasks.GetSystem(ctx, orgID, taskID)
+	if err != nil || task == nil || task.EntitySource != "github" {
+		return ""
+	}
+	repoStr := task.EntitySourceID
+	if idx := strings.LastIndex(repoStr, "#"); idx >= 0 {
+		repoStr = repoStr[:idx]
+	}
+	owner, repo, ok := strings.Cut(repoStr, "/")
+	if !ok || owner == "" || repo == "" {
+		return ""
+	}
+	return repoStr
+}
+
+// resolveJira resolves the org's Jira service credential to its raw,
+// serializable fields — nil when the org has no Jira configured (not an
+// error: most orgs are GitHub-only).
+func (m *Manager) resolveJira(ctx context.Context, orgID string) (*credbundle.JiraCreds, error) {
+	r, ok := m.jiraResolver.(jiraSystemResolver)
+	if !ok {
+		return nil, nil
+	}
+	cred, err := r.ResolveSystemCredential(ctx, orgID)
+	if err != nil {
+		if errors.Is(err, jira.ErrNoJiraSystemCredential) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	authMethod := "datacenter"
+	if cred.Deployment == jira.DeploymentCloud {
+		authMethod = "cloud"
+	}
+	return &credbundle.JiraCreds{
+		URL:        cred.URL,
+		AuthMethod: authMethod,
+		Email:      cred.Email,
+		APIToken:   cred.APIToken,
+		PAT:        cred.PAT,
+	}, nil
+}

@@ -20,6 +20,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -86,10 +88,27 @@ type Spawner struct {
 	agents     db.AgentStore // resolves actor for run.actor_agent_id stamping
 	blueprints db.BlueprintStore
 	runQueue   db.RunQueueStore // the run queue the dispatcher drains: enqueue a step, claim it, run it, react
-	tasks      db.TaskStore     // re-read tasks for run lifecycle handlers
-	agentRuns  db.AgentRunStore // run lifecycle + transcript
-	entities   db.EntityStore   // entity reads for project lookup + resume context
-	artifacts  db.ArtifactStore // review + draft-PR artifact lookup on processCompletion park check
+	// runCredentials is the sealed per-run credential bundle channel
+	// (TFAC-614) — TF_ROLE=executor's awaiting-credentials wait reads it;
+	// nil-safe (RoleAll/local never gate on it, since they resolve
+	// credentials directly instead).
+	runCredentials db.RunCredentialsStore
+	// sealingKey is this process's ephemeral X25519 keypair (TFAC-614),
+	// wired via SetSealingKey once main mints it (TF_ROLE=executor only;
+	// nil everywhere else). Unseals a run_credentials bundle addressed to
+	// this instance's published public half.
+	sealingKey *credseal.KeyPair
+	// awaitingCredentialsTimeout overrides awaitingCredentialsTimeout (the
+	// package default) when > 0 — tests inject a short value via
+	// SetAwaitingCredentialsTimeout, mirroring idleHibernateTimeout.
+	awaitingCredentialsTimeoutOverride time.Duration
+	// awaitingCredentialsPollInterval overrides the package default poll
+	// cadence when > 0, same override shape.
+	awaitingCredentialsPollIntervalOverride time.Duration
+	tasks                                   db.TaskStore     // re-read tasks for run lifecycle handlers
+	agentRuns                               db.AgentRunStore // run lifecycle + transcript
+	entities                                db.EntityStore   // entity reads for project lookup + resume context
+	artifacts                               db.ArtifactStore // review + draft-PR artifact lookup on processCompletion park check
 	// stagedInjections is the durable, producer-agnostic "stage for next resume"
 	// agent-injection queue (TFAC-501). The generic staged-injection API (StageOrDeliverInjection
 	// / stagedInjectionsForResume) appends here when a target run has no warm process
@@ -418,6 +437,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		agents:           stores.Agents,
 		blueprints:       stores.Blueprints,
 		runQueue:         stores.RunQueue,
+		runCredentials:   stores.RunCredentials,
 		tasks:            stores.Tasks,
 		agentRuns:        stores.AgentRuns,
 		entities:         stores.Entities,
@@ -706,11 +726,13 @@ func (s *Spawner) Storage() storage.Storage {
 // mode-awareness lives inside the resolver (App token vs PAT) and the
 // secrets reader (system door vs nil), not at the call site. owner is the
 // GitHub account the run targets — empty for Jira runs, which don't
-// pre-clone. teamID is the task's owning team, so a multi-team org honors
-// each team's model choice; empty falls back to the
+// pre-clone. repo disambiguates a bundle-backed lookup (TFAC-614) when the
+// run's authorized set covers more than one repo under owner; empty when
+// the caller has none in view. teamID is the task's owning team, so a
+// multi-team org honors each team's model choice; empty falls back to the
 // org default team.
-func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, teamID string) (*ghclient.Client, string) {
-	return s.resolveGHClient(ctx, orgID, owner), s.resolveModel(ctx, orgID, teamID)
+func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo, teamID string) (*ghclient.Client, string) {
+	return s.resolveGHClient(ctx, orgID, owner, repo), s.resolveModel(ctx, orgID, teamID)
 }
 
 // resolveGHClient resolves the per-(org, owner) GitHub client via the
@@ -719,7 +741,24 @@ func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, teamI
 // setupGitHub surfaces "GitHub credentials not configured" for GitHub
 // tasks, and Jira runs don't need a client. The error is logged so a real
 // backend failure (e.g. vault outage) isn't silent.
-func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner string) *ghclient.Client {
+//
+// repo is the specific repo the call concerns, when the caller has one in
+// view (every real caller does — see ownerRepoForTask). It disambiguates
+// the TF_ROLE=executor bundle lookup below: unlike the live resolver's
+// account-wide App installation token, a bundle's RepoTokens are scoped
+// per-repo, so an owner alone is ambiguous whenever a run's authorized set
+// covers more than one repo under the same account — passing "" there
+// would let bundleRepoToken's map iteration pick an arbitrary sibling
+// repo's token, which then 403s every call it's used for.
+func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string) *ghclient.Client {
+	// TF_ROLE=executor (TFAC-614): the token was already minted host-side
+	// by the brain and sealed into this run's bundle — build the client
+	// straight from it, no resolver/secret-store call. Every other role
+	// never carries a bundle on ctx (zero behavior change there).
+	if bundle, ok := credbundle.FromContext(ctx); ok {
+		return bundleGHClient(bundle.GitHub, owner, repo)
+	}
+
 	s.mu.Lock()
 	resolver := s.ghResolver
 	fallback := s.ghClient
@@ -753,7 +792,18 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner string) *ghc
 // resolution fails — the clone then proceeds with no injected credential. A
 // resolve failure is logged so a real backend outage (e.g. vault down) isn't
 // silent; the clone itself surfaces the auth error if the repo is private.
-func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner string) string {
+//
+// repo disambiguates the TF_ROLE=executor bundle lookup exactly like
+// resolveGHClient's — required, not optional, whenever the caller has a
+// specific repo in view (every real caller does).
+func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner, repo string) string {
+	// TF_ROLE=executor (TFAC-614): same bundle-first check as
+	// resolveGHClient — the token was pre-minted by the brain.
+	if bundle, ok := credbundle.FromContext(ctx); ok {
+		token, _, _ := bundleRepoToken(bundle.GitHub, owner, repo)
+		return token
+	}
+
 	if runmode.Current() == runmode.ModeLocal {
 		return ""
 	}
@@ -801,6 +851,15 @@ func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner string) st
 // lock as resolveCloneToken so a startup-time credential hot-swap can't
 // race it.
 func (s *Spawner) gitProxyConfigFor(ctx context.Context, info agenthost.RunInfo, stores db.Stores) *agentproc.GitProxyConfig {
+	// TF_ROLE=executor (TFAC-614): every credential-needing closure
+	// re-reads run_credentials live on each call (bundleGitProxyConfigFor),
+	// rather than closing over the static ctx-carried bundle — that's what
+	// lets the brain's refresh sweep (re-minted GitHub tokens for a
+	// long-running run) actually reach a run already past its setup gate.
+	if _, ok := credbundle.FromContext(ctx); ok {
+		return s.bundleGitProxyConfigFor(ctx, info, stores)
+	}
+
 	if runmode.Current() == runmode.ModeLocal {
 		return nil
 	}

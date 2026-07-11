@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -108,6 +109,15 @@ func (a *App) startBrain(term int64) {
 		go reaper.RunReaper(brainCtx, a.reaperStore, reaper.DefaultReapInterval, a.reaperStaleThreshold, a.reaperMaxAttempts)
 		go reaper.RunRegistryGC(brainCtx, a.reaperStore, reaper.DefaultGCInterval, reaper.DefaultGCStaleAfter)
 	}
+	// Sealed-credential-bundle provisioner sweeps (TFAC-614): the backstop
+	// for a dropped cred_request notification, and the periodic refresh of
+	// hour-lived GitHub tokens on long-running runs. nil in local mode and
+	// at TF_ROLE=executor (buildCredProvisioner never constructs
+	// a.credProvisioner there) — RunAwaitingSweep/RunRefreshSweep are
+	// themselves nil-safe no-ops too, matching every other brain-unit
+	// member's defensive shape.
+	go credprovision.RunAwaitingSweep(brainCtx, a.credProvisioner, credprovision.DefaultAwaitingSweepInterval)
+	go credprovision.RunRefreshSweep(brainCtx, a.credProvisioner, credprovision.DefaultRefreshSweepInterval, credprovision.DefaultRefreshAfter)
 }
 
 // stopBrain stops the background brain. Idempotent under brainMu.

@@ -233,6 +233,19 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	orgID := run.OrgID
 	startTime := time.Now()
 
+	// TF_ROLE=executor only (TFAC-614): park the claim in
+	// 'awaiting_credentials' until the brain seals this run's credential
+	// bundle, then carry it on ctx for every downstream credential seam
+	// (resolveCredentials, the git proxy TokenSource, the GitHub/Jira
+	// resolvers) to read via credbundle.FromContext. A pure passthrough on
+	// every other role. !ok means the wait timed out and the claim was
+	// already released back to 'queued' — nothing left to do here.
+	var credOK bool
+	ctx, credOK = s.awaitCredentials(ctx, orgID, run)
+	if !credOK {
+		return
+	}
+
 	br, err := s.blueprints.GetRunSystem(ctx, orgID, run.BlueprintRunID)
 	if err != nil || br == nil {
 		if ctx.Err() != nil {
@@ -317,9 +330,11 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	step := planStep.Step(br.BlueprintID)
 	stepPrompt := planStep.Prompt()
 
-	// Resolve the run's GitHub client (per-org/owner seam). model is already on
-	// the claimed row (captured at Delegate time, stable across the blueprint).
-	gh := s.resolveGHClient(ctx, orgID, ownerForTask(*task))
+	// Resolve the run's GitHub client (per-org/owner/repo seam). model is
+	// already on the claimed row (captured at Delegate time, stable across
+	// the blueprint).
+	owner, repo := ownerRepoForTask(*task)
+	gh := s.resolveGHClient(ctx, orgID, owner, repo)
 
 	// The blueprint_run is live on this step → place the task in_progress before
 	// any (possibly slow) workspace setup, so the board reflects the work

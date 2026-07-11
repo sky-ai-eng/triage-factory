@@ -367,6 +367,13 @@ type Stores struct {
 	// authorized orgID.
 	PollReadiness PollReadinessStore
 
+	// RunCredentials owns the run_credentials table — the sealed per-run
+	// credential bundle channel (TFAC-614). Admin-pool-only, same shape as
+	// Instances/RunSignals: never a request-handler surface, and unlike
+	// RunPendingInput its payload is credential-bearing ciphertext, so
+	// there is no app-pool grant at all.
+	RunCredentials RunCredentialsStore
+
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
 	// core holds no SSO symbols.

@@ -271,6 +271,77 @@ func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error)
 	return NewClient(DataCenterPAT(host, pat)), nil
 }
 
+// SystemCredential is the org's Jira service credential in raw, serializable
+// form — the fields ForSystem would otherwise build directly into a live
+// *Client. It exists for TFAC-614's brain-side credential provisioner, which
+// needs to seal the credential into a run's bundle rather than hold a live
+// client, and for the executor-side bundle-backed resolver, which
+// reconstructs a *Client from these fields with no further secret-store
+// read (jira.NewClient(CloudAPIToken(...)) or jira.NewClient(DataCenterPAT(...))).
+type SystemCredential struct {
+	URL        string
+	Deployment Deployment
+	Email      string
+	APIToken   string
+	PAT        string
+}
+
+// systemCredentialResolver is the optional Resolver extension the
+// production resolver implements — a type assertion, mirroring
+// internal/github's ScopedResolver pattern, so this stays additive and
+// doesn't touch the Resolver interface (and therefore no existing fake
+// needs a new method to keep compiling).
+type systemCredentialResolver interface {
+	ResolveSystemCredential(ctx context.Context, orgID string) (SystemCredential, error)
+}
+
+// ResolveSystemCredential resolves the org's Jira service credential to its
+// raw fields — the same resolution ForSystem uses (including the
+// Cloud-vs-Data-Center dispatch), stopping short of building a live
+// *Client. See SystemCredential's doc for why this exists alongside
+// ForSystem rather than replacing it.
+func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (SystemCredential, error) {
+	rawURL, err := r.secrets.GetSystem(ctx, orgID, keyJiraURL)
+	if err != nil {
+		return SystemCredential{}, fmt.Errorf("resolve jira url for org %s: %w", orgID, err)
+	}
+	host, ok := CanonicalHost(rawURL)
+	if !ok {
+		return SystemCredential{}, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
+	}
+
+	method, err := r.secrets.GetSystem(ctx, orgID, keyJiraAuthMethod)
+	if err != nil {
+		return SystemCredential{}, fmt.Errorf("resolve jira auth method for org %s: %w", orgID, err)
+	}
+
+	if DeploymentForMarker(AuthMethod(method), host) == DeploymentCloud {
+		email, err := r.secrets.GetSystem(ctx, orgID, keyJiraEmail)
+		if err != nil {
+			return SystemCredential{}, fmt.Errorf("resolve jira email for org %s: %w", orgID, err)
+		}
+		token, err := r.secrets.GetSystem(ctx, orgID, keyJiraAPIToken)
+		if err != nil {
+			return SystemCredential{}, fmt.Errorf("resolve jira api token for org %s: %w", orgID, err)
+		}
+		if email == "" || token == "" {
+			return SystemCredential{}, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
+		}
+		return SystemCredential{URL: host, Deployment: DeploymentCloud, Email: email, APIToken: token}, nil
+	}
+
+	pat, err := r.secrets.GetSystem(ctx, orgID, keyJiraPAT)
+	if err != nil {
+		return SystemCredential{}, fmt.Errorf("resolve jira pat for org %s: %w", orgID, err)
+	}
+	if pat == "" {
+		return SystemCredential{}, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
+	}
+	return SystemCredential{URL: host, Deployment: DeploymentDataCenter, PAT: pat}, nil
+}
+
+var _ systemCredentialResolver = (*resolver)(nil)
+
 // ForUser resolves the acting user's own Jira credential into an authenticated
 // client, keyed under and talking to the org's Jira host. The stored secret is
 // a UserCredential envelope whose method marker selects the scheme: a Cloud API

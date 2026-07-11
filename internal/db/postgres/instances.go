@@ -30,30 +30,33 @@ func NewInstanceStore(admin *sql.DB) db.InstanceStore {
 
 var _ db.InstanceStore = (*instanceStore)(nil)
 
-func (s *instanceStore) Register(ctx context.Context, id, role, version string) (int64, error) {
+func (s *instanceStore) Register(ctx context.Context, id, role, version, pubkey string) (int64, error) {
 	var bootEpoch int64
 	err := s.admin.QueryRowContext(ctx, `
-		INSERT INTO instances (id, role, version, boot_epoch, started_at, last_heartbeat_at)
-		VALUES ($1, $2, $3, 1, now(), now())
+		INSERT INTO instances (id, role, version, boot_epoch, started_at, last_heartbeat_at, pubkey)
+		VALUES ($1, $2, $3, 1, now(), now(), NULLIF($4, ''))
 		ON CONFLICT (id) DO UPDATE SET
 			boot_epoch        = instances.boot_epoch + 1,
 			role              = EXCLUDED.role,
 			version           = EXCLUDED.version,
 			started_at        = EXCLUDED.started_at,
 			last_heartbeat_at = EXCLUDED.last_heartbeat_at,
-			-- The prior boot's capacity/admission snapshot is dead state
-			-- (e.g. a dispatch_gated=true from the crashed life); clear it
-			-- so readers never see a new epoch wearing old admission data.
-			-- The first heartbeat repopulates within one interval. draining
-			-- and labels survive on purpose — operator intent outlives a
+			-- pubkey re-stamps every restart alongside boot_epoch (TFAC-614)
+			-- — a fresh ephemeral keypair each boot, never preserved. The
+			-- prior boot's capacity/admission snapshot is dead state (e.g. a
+			-- dispatch_gated=true from the crashed life); clear it so
+			-- readers never see a new epoch wearing old admission data. The
+			-- first heartbeat repopulates within one interval. draining and
+			-- labels survive on purpose — operator intent outlives a
 			-- restart (a drained instance stays drained until un-drained).
+			pubkey            = EXCLUDED.pubkey,
 			max_runs          = NULL,
 			active_runs       = NULL,
 			mem_total_mb      = NULL,
 			mem_available_mb  = NULL,
 			dispatch_gated    = NULL
 		RETURNING boot_epoch
-	`, id, role, version).Scan(&bootEpoch)
+	`, id, role, version, pubkey).Scan(&bootEpoch)
 	return bootEpoch, err
 }
 
@@ -93,7 +96,7 @@ func (s *instanceStore) List(ctx context.Context) ([]domain.Instance, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT id, role, version, boot_epoch, started_at, last_heartbeat_at, draining,
 		       max_runs, active_runs, mem_total_mb, mem_available_mb, dispatch_gated,
-		       COALESCE(labels::text, '')
+		       COALESCE(labels::text, ''), COALESCE(pubkey, '')
 		FROM instances ORDER BY started_at DESC
 	`)
 	if err != nil {
@@ -106,10 +109,10 @@ func (s *instanceStore) List(ctx context.Context) ([]domain.Instance, error) {
 		var inst domain.Instance
 		var maxRuns, activeRuns, memTotal, memAvail sql.NullInt64
 		var dispatchGated sql.NullBool
-		var labels string
+		var labels, pubkey string
 		if err := rows.Scan(
 			&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining,
-			&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels,
+			&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels, &pubkey,
 		); err != nil {
 			return nil, err
 		}
@@ -122,6 +125,7 @@ func (s *instanceStore) List(ctx context.Context) ([]domain.Instance, error) {
 			inst.DispatchGated = &v
 		}
 		inst.LabelsJSON = labels
+		inst.PubKey = pubkey
 		out = append(out, inst)
 	}
 	return out, rows.Err()
@@ -140,16 +144,16 @@ func (s *instanceStore) Get(ctx context.Context, id string) (*domain.Instance, e
 	var inst domain.Instance
 	var maxRuns, activeRuns, memTotal, memAvail sql.NullInt64
 	var dispatchGated sql.NullBool
-	var labels string
+	var labels, pubkey string
 
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT id, role, version, boot_epoch, started_at, last_heartbeat_at, draining,
 		       max_runs, active_runs, mem_total_mb, mem_available_mb, dispatch_gated,
-		       COALESCE(labels::text, '')
+		       COALESCE(labels::text, ''), COALESCE(pubkey, '')
 		FROM instances WHERE id = $1
 	`, id).Scan(
 		&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining,
-		&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels,
+		&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels, &pubkey,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -166,6 +170,7 @@ func (s *instanceStore) Get(ctx context.Context, id string) (*domain.Instance, e
 		inst.DispatchGated = &v
 	}
 	inst.LabelsJSON = labels
+	inst.PubKey = pubkey
 	return &inst, nil
 }
 

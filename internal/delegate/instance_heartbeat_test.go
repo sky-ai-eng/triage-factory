@@ -60,7 +60,7 @@ func TestHeartbeatOnce_WritesLiveCapacitySnapshot(t *testing.T) {
 
 	ctx := context.Background()
 	const id = "hb-instance"
-	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "test-version")
+	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "test-version", "")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestHeartbeatOnce_TracksGateTransition(t *testing.T) {
 
 	ctx := context.Background()
 	const id = "hb-gate-instance"
-	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "test-version")
+	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "test-version", "")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestHeartbeatOnce_SupersededIdentityFences(t *testing.T) {
 
 	ctx := context.Background()
 	const id = "fence-instance"
-	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", "")
 	if err != nil {
 		t.Fatalf("Register (boot 1): %v", err)
 	}
@@ -192,7 +192,7 @@ func TestHeartbeatOnce_SupersededIdentityFences(t *testing.T) {
 
 	// A second boot of the same id (duplicated state root) bumps the epoch
 	// out from under this process.
-	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1"); err != nil {
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", ""); err != nil {
 		t.Fatalf("Register (boot 2): %v", err)
 	}
 
@@ -221,7 +221,7 @@ func TestFenceIdentity_KillsSandboxesAndInvokesExitHook(t *testing.T) {
 
 	ctx := context.Background()
 	const id = "fence-kill-instance"
-	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", "")
 	if err != nil {
 		t.Fatalf("Register (boot 1): %v", err)
 	}
@@ -241,7 +241,7 @@ func TestFenceIdentity_KillsSandboxesAndInvokesExitHook(t *testing.T) {
 		exitMu.Unlock()
 	})
 
-	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1"); err != nil {
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", ""); err != nil {
 		t.Fatalf("Register (boot 2): %v", err)
 	}
 	s.heartbeatOnce(ctx)
@@ -279,7 +279,7 @@ func TestHeartbeatOnce_ReadsBackDrainingFlag(t *testing.T) {
 
 	ctx := context.Background()
 	const id = "drain-flag-instance"
-	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", "")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -316,7 +316,7 @@ type toggleableInstanceStore struct {
 	fail bool
 }
 
-func (f *toggleableInstanceStore) Register(context.Context, string, string, string) (int64, error) {
+func (f *toggleableInstanceStore) Register(context.Context, string, string, string, string) (int64, error) {
 	return 1, nil
 }
 func (f *toggleableInstanceStore) Heartbeat(context.Context, string, int64, domain.InstanceHeartbeat) (bool, bool, error) {
@@ -354,7 +354,7 @@ type delayedInstanceStore struct {
 	delay time.Duration
 }
 
-func (f *delayedInstanceStore) Register(context.Context, string, string, string) (int64, error) {
+func (f *delayedInstanceStore) Register(context.Context, string, string, string, string) (int64, error) {
 	return 1, nil
 }
 func (f *delayedInstanceStore) Heartbeat(ctx context.Context, _ string, _ int64, _ domain.InstanceHeartbeat) (bool, bool, error) {

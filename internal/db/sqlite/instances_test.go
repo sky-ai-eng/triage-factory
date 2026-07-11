@@ -19,7 +19,7 @@ func TestInstanceStore_SQLite_RegisterMintsAndBumpsEpoch(t *testing.T) {
 
 	const id = "11111111-1111-1111-1111-111111111111"
 
-	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1.0.0")
+	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1.0.0", "")
 	if err != nil {
 		t.Fatalf("Register (first boot): %v", err)
 	}
@@ -27,7 +27,7 @@ func TestInstanceStore_SQLite_RegisterMintsAndBumpsEpoch(t *testing.T) {
 		t.Fatalf("first boot epoch = %d, want 1", epoch)
 	}
 
-	epoch, err = stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1.0.1")
+	epoch, err = stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1.0.1", "")
 	if err != nil {
 		t.Fatalf("Register (restart): %v", err)
 	}
@@ -68,7 +68,7 @@ func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) 
 	ctx := context.Background()
 
 	const id = "22222222-2222-2222-2222-222222222222"
-	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", "")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) 
 	if _, _, err := stores.Instances.Heartbeat(ctx, id, epoch, freshHB); err != nil {
 		t.Fatalf("Heartbeat (repopulate): %v", err)
 	}
-	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v2"); err != nil {
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v2", ""); err != nil {
 		t.Fatalf("Register (restart): %v", err)
 	}
 	rebooted, err := stores.Instances.Get(ctx, id)
@@ -194,13 +194,13 @@ func TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch(t *testing.T) {
 	ctx := context.Background()
 
 	const id = "33333333-3333-3333-3333-333333333333"
-	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", "")
 	if err != nil {
 		t.Fatalf("Register (boot 1): %v", err)
 	}
 	// A second boot of the same id (e.g. a duplicated state root) bumps the
 	// epoch out from under the first boot's in-memory copy.
-	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1"); err != nil {
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", ""); err != nil {
 		t.Fatalf("Register (boot 2): %v", err)
 	}
 
@@ -227,11 +227,11 @@ func TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch_DoesNotLeakNewerBootsDr
 	ctx := context.Background()
 
 	const id = "77777777-7777-7777-7777-777777777777"
-	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", "")
 	if err != nil {
 		t.Fatalf("Register (boot 1): %v", err)
 	}
-	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1"); err != nil {
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", ""); err != nil {
 		t.Fatalf("Register (boot 2): %v", err)
 	}
 	// The NEW boot is drained — a value a buggy id-only read-back could leak
@@ -262,7 +262,7 @@ func TestInstanceStore_SQLite_SetDrainingAndList(t *testing.T) {
 	ctx := context.Background()
 
 	const id = "66666666-6666-6666-6666-666666666666"
-	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1"); err != nil {
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1", ""); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 

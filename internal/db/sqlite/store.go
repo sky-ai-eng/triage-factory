@@ -154,6 +154,11 @@ func New(conn *sql.DB) db.Stores {
 		// /api/jira/stock + the one-shot "config took effect" announce
 		// toast — see the poll_readiness migration. See TFAC-583.
 		PollReadiness: newPollReadinessStore(conn),
+		// RunCredentials is admin-pool only in Postgres; SQLite collapses
+		// to the one connection. Never populated in local mode (forced
+		// role=all, the bundle path is executor-role-only) — exists for
+		// store-interface + conformance-test symmetry. See TFAC-614.
+		RunCredentials: newRunCredentialsStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

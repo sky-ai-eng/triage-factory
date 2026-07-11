@@ -203,7 +203,8 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// model is captured here and stamped onto every enqueued step so the whole
 	// blueprint runs on one model; the GitHub client is resolved per-claim by the
 	// dispatcher (the queue path defers all workspace setup off this call).
-	_, defaultModel := s.resolveRunCredentials(context.Background(), orgID, ownerForTask(task), teamID)
+	owner, repo := ownerRepoForTask(task)
+	_, defaultModel := s.resolveRunCredentials(context.Background(), orgID, owner, repo, teamID)
 
 	// Compute trigger type + creator user up front so resolvePrompt
 	// can route by them (manual delegations must honor prompts_select
@@ -375,22 +376,24 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	return blueprintRunID, nil
 }
 
-// ownerForTask extracts the GitHub account a task targets, for the
-// per-(org, owner) credential resolution at Delegate entry.
-// GitHub PR tasks carry "owner/repo#N" in EntitySourceID; Jira (and any
-// non-github source) has no single owner, so the resolver receives "" and
-// resolves the org's sole App installation, falling through to PAT when
-// ambiguous.
-func ownerForTask(task domain.Task) string {
+// ownerRepoForTask parses "owner/repo" out of a GitHub task's EntitySourceID
+// ("owner/repo#N" for a PR/issue task); ("", "") for Jira (and any
+// non-github source), which has no single owner/repo — the live resolver
+// then resolves the org's sole App installation, falling through to PAT
+// when ambiguous. Every call site needs both halves (the repo disambiguates
+// a bundle-backed credential lookup, TFAC-614, since unlike the live
+// resolver's account-wide App installation token, a bundle's RepoTokens are
+// scoped per-repo), so this returns the pair rather than splitting into
+// separate owner-only/repo-only helpers nobody calls independently.
+func ownerRepoForTask(task domain.Task) (owner, repo string) {
 	if task.EntitySource != "github" {
-		return ""
+		return "", ""
 	}
 	repoStr := task.EntitySourceID
 	if idx := strings.LastIndex(repoStr, "#"); idx >= 0 {
 		repoStr = repoStr[:idx]
 	}
-	owner, _ := parseOwnerRepo(repoStr)
-	return owner
+	return parseOwnerRepo(repoStr)
 }
 
 // setupGitHub prepares a worktree for a GitHub PR task.
@@ -473,7 +476,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 	// SSH URL or an empty token, so this is inert in local SSH mode and for
 	// public/anonymous clones — only a multi-mode HTTPS private clone gets the
 	// App installation token injected (per-invocation env, never persisted).
-	cloneToken := s.resolveCloneToken(ctx, orgID, owner)
+	cloneToken := s.resolveCloneToken(ctx, orgID, owner, repo)
 	wtPath, err := worktree.CreateForPR(ctx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, runID,
 		worktree.WithCloneAuth(worktree.CloneAuthFor(upstreamCloneURL, cloneToken)),
 		// Refresh origin/<base> at materialization so `pr diff` frames against a

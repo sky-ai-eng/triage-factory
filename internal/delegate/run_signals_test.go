@@ -116,7 +116,7 @@ type fakeInstanceStore struct {
 	insts map[string]*domain.Instance
 }
 
-func (f *fakeInstanceStore) Register(context.Context, string, string, string) (int64, error) {
+func (f *fakeInstanceStore) Register(context.Context, string, string, string, string) (int64, error) {
 	return 1, nil
 }
 func (f *fakeInstanceStore) Heartbeat(context.Context, string, int64, domain.InstanceHeartbeat) (bool, bool, error) {
