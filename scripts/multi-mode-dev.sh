@@ -92,6 +92,7 @@ cmd_up() {
 POSTGRES_PASSWORD=$(openssl rand -hex 32)
 SUPABASE_AUTH_ADMIN_PASSWORD=$(openssl rand -hex 32)
 TF_AUTHENTICATOR_PASSWORD=$(openssl rand -hex 32)
+TF_SYSTEM_PASSWORD=$(openssl rand -hex 32)
 TF_PUBLIC_URL=$PUBLIC_URL
 GH_CLIENT_ID=multi-dev-no-real-oauth-app
 GH_CLIENT_SECRET=$(openssl rand -hex 16)
@@ -164,6 +165,7 @@ cmd_down() {
 POSTGRES_PASSWORD=unused
 SUPABASE_AUTH_ADMIN_PASSWORD=unused
 TF_AUTHENTICATOR_PASSWORD=unused
+TF_SYSTEM_PASSWORD=unused
 TF_PUBLIC_URL=$PUBLIC_URL
 GH_CLIENT_ID=unused
 GH_CLIENT_SECRET=unused

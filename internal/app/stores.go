@@ -76,6 +76,9 @@ func (a *App) openStores(ctx context.Context) error {
 			adminDB.Close()
 			return fmt.Errorf("ping admin DB: %w", err)
 		}
+		if a.plan.role == runmode.RoleExecutor {
+			warnIfExecutorAdminDBIsSuperuser(ctx, adminDB)
+		}
 		appDSN, err := db.RewriteDSNCreds(adminDSN, "authenticator", authPassword)
 		if err != nil {
 			adminDB.Close()
@@ -157,6 +160,32 @@ func (a *App) openStores(ctx context.Context) error {
 	}
 
 	return a.readInstanceConfig(ctx)
+}
+
+// warnIfExecutorAdminDBIsSuperuser checks whether this executor's admin
+// pool authenticated as a Postgres superuser (rolsuper) — the posture the
+// least-privilege tf_system role exists to avoid. It never fails boot: the
+// supported deployment path (docker-compose.yml's `scale` profile) always
+// wires an executor's TF_DATABASE_URL to tf_system, so this only fires for
+// a bare-metal / custom-orchestrator executor whose operator pointed it at
+// a superuser DSN (e.g. reusing a dev control pod's connection string).
+// That's a real misconfiguration worth flagging loudly, but not one this
+// process should brick over — hence one ERROR log with remediation,
+// then continue. Control/all pods are unaffected: connecting as
+// supabase_admin there is by design (they run migrations).
+func warnIfExecutorAdminDBIsSuperuser(ctx context.Context, adminDB *sql.DB) {
+	var isSuperuser bool
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT rolsuper FROM pg_roles WHERE rolname = current_user`,
+	).Scan(&isSuperuser); err != nil {
+		appLog.Warn("executor DB posture check failed; continuing", "error", err)
+		return
+	}
+	if isSuperuser {
+		appLog.Error("executor admin DB pool is connected as a Postgres superuser — " +
+			"executor should connect as tf_system, the least-privilege role, not a superuser DSN; " +
+			"see docs/self-host-setup.md#executor-database-role-tf_system")
+	}
 }
 
 // readInstanceConfig loads the small remainder of process-wide boot state

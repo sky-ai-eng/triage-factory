@@ -63,12 +63,19 @@ const Image = "supabase/postgres:15.1.0.147"
 // LOGIN/NOINHERIT with no password; we set one for AppDB.
 const authPassword = "auth_test_pw"
 
-// Harness is the shared per-process testcontainer + two connections.
+// systemPassword is the password the harness ALTERs onto tf_system
+// (baseline-created NOLOGIN) so SystemDB can connect. Mirrors
+// authPassword's role — see the tf_system section of the pg baseline
+// migration for why the role ships without LOGIN by default.
+const systemPassword = "system_test_pw"
+
+// Harness is the shared per-process testcontainer + three connections.
 // All tests that touch Postgres acquire it via Shared(t).
 type Harness struct {
 	Container *postgres.PostgresContainer
 	AdminDB   *sql.DB // supabase_admin; bypasses RLS
 	AppDB     *sql.DB // authenticator; use WithUser for RLS-active txns
+	SystemDB  *sql.DB // tf_system; least-privilege executor role, BYPASSRLS
 }
 
 var (
@@ -244,7 +251,37 @@ func boot() {
 		return
 	}
 
-	shared = &Harness{Container: pg, AdminDB: adminDB, AppDB: appDB}
+	// tf_system ships NOLOGIN in the baseline (production LOGIN comes from
+	// the postgres-postinit sidecar's ALTER, driven by TF_SYSTEM_PASSWORD —
+	// see docker-compose.yml). Mirror that here so SystemDB can connect.
+	escapedSystemPassword := strings.ReplaceAll(systemPassword, "'", "''")
+	if _, err := adminDB.ExecContext(ctx,
+		fmt.Sprintf("ALTER ROLE tf_system WITH LOGIN PASSWORD '%s'", escapedSystemPassword),
+	); err != nil {
+		_ = appDB.Close()
+		_ = adminDB.Close()
+		_ = pg.Terminate(ctx)
+		sharedErr = fmt.Errorf("set tf_system password: %w", err)
+		return
+	}
+	systemDSN, err := rewriteUser(pgDSN, "tf_system", systemPassword)
+	if err != nil {
+		_ = appDB.Close()
+		_ = adminDB.Close()
+		_ = pg.Terminate(ctx)
+		sharedErr = fmt.Errorf("build system dsn: %w", err)
+		return
+	}
+	systemDB, err := sql.Open("pgx", systemDSN)
+	if err != nil {
+		_ = appDB.Close()
+		_ = adminDB.Close()
+		_ = pg.Terminate(ctx)
+		sharedErr = fmt.Errorf("open system db: %w", err)
+		return
+	}
+
+	shared = &Harness{Container: pg, AdminDB: adminDB, AppDB: appDB, SystemDB: systemDB}
 }
 
 // NewInstance boots a dedicated, independent supabase/postgres
