@@ -48,9 +48,9 @@ Triage Factory is a **single Go binary** (HTTP server + pollers + delegated-agen
 - **Server mode** (default) — HTTP API + websocket hub + pollers + scorer + event router + delegation spawner.
 - **CLI mode** (`exec`, `status`) — invoked _by delegated Claude Code agents_ inside a worktree. `cmd/exec/` provides scoped GitHub/Jira subcommands the agent uses instead of calling those APIs directly, so credentials stay in the keychain and activity is auditable via `runs` / `run_artifacts`.
 
-### Core data model (target state)
+### Core data model
 
-The product vision and direction live in `docs/where-tf-is-going.html`. Four levels, each with its own lifecycle:
+The core data model is four levels, each with its own lifecycle:
 
 ```
 Entity (PR #18 / Jira SKY-123)     ← long-lived, from first poll until closed/merged
@@ -126,7 +126,6 @@ React 19 + Vite + TypeScript + Tailwind v4. Router routes live in `frontend/src/
 
 ## Reference docs
 
-- `docs/where-tf-is-going.html` — product vision + direction for the entity/event/task/run model.
 - `docs/concepts/tracked-events.md` — GitHub/Jira event taxonomy + snapshot field list.
 - `docs/local-mode/` — local-mode usage: CLI flags, configuration, secret storage, headless, polling.
 - `docs/self-hosting/` — multi-mode operator guides (install, scaling, SSO, monitoring).
