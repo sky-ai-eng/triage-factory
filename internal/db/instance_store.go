@@ -29,10 +29,25 @@ type InstanceStore interface {
 	// boot of the same id can't clobber a newer boot's row. matched is
 	// false when the fence matched no row — a later boot of this same id
 	// has already re-registered (the split-identity signal); callers log
-	// that as a warning, not an error.
-	Heartbeat(ctx context.Context, id string, bootEpoch int64, hb domain.InstanceHeartbeat) (matched bool, err error)
+	// that as a warning, not an error. draining is the row's CURRENT
+	// operator-intent flag, read back in the same statement (matched=true
+	// only) so the drain verb (TFAC-586) needs no separate poll: the
+	// existing heartbeat cadence is also how a running instance learns an
+	// operator drained it. draining is meaningless when matched is false.
+	Heartbeat(ctx context.Context, id string, bootEpoch int64, hb domain.InstanceHeartbeat) (matched bool, draining bool, err error)
 
 	// Get returns one instance row, or nil if id is unknown. For tests and
 	// the deferred fleet-dashboard read.
 	Get(ctx context.Context, id string) (*domain.Instance, error)
+
+	// List returns every instance row, newest-registered first. Backs the
+	// `triagefactory instance list` CLI verb (TFAC-586) and, later, the
+	// fleet dashboard. Not org-scoped — see the package doc.
+	List(ctx context.Context) ([]domain.Instance, error)
+
+	// SetDraining writes the operator-intent drain flag directly (the
+	// `triagefactory instance drain|undrain` CLI verb, TFAC-586) — a
+	// write the heartbeat deliberately never performs (see
+	// domain.InstanceHeartbeat). matched is false when id is unknown.
+	SetDraining(ctx context.Context, id string, draining bool) (matched bool, err error)
 }

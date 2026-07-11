@@ -119,13 +119,19 @@ type fakeInstanceStore struct {
 func (f *fakeInstanceStore) Register(context.Context, string, string, string) (int64, error) {
 	return 1, nil
 }
-func (f *fakeInstanceStore) Heartbeat(context.Context, string, int64, domain.InstanceHeartbeat) (bool, error) {
-	return true, nil
+func (f *fakeInstanceStore) Heartbeat(context.Context, string, int64, domain.InstanceHeartbeat) (bool, bool, error) {
+	return true, false, nil
 }
 func (f *fakeInstanceStore) Get(_ context.Context, id string) (*domain.Instance, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.insts[id], nil
+}
+func (f *fakeInstanceStore) List(context.Context) ([]domain.Instance, error) {
+	return nil, nil
+}
+func (f *fakeInstanceStore) SetDraining(context.Context, string, bool) (bool, error) {
+	return false, nil
 }
 
 // taskIDForRun reads the task_id a seedRun fixture's run row belongs to.

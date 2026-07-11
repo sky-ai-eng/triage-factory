@@ -362,6 +362,13 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     # image: ghcr.io/sky-ai-eng/triage-factory:latest
+    # Auto-restart on any exit. Load-bearing for the fleet's identity-
+    # supersession fence (TFAC-586): a process that boots off a duplicated
+    # tf-data volume exits with code 3 by design (see the volume-identity
+    # note below) — the visible crash-loop that follows IS the operator
+    # signal, not a bug, and depends on this policy actually bringing the
+    # container back for the loop to be visible at all.
+    restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
       gotrue: { condition: service_healthy }
@@ -492,6 +499,10 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     # image: ghcr.io/sky-ai-eng/triage-factory:latest
+    # See the `triagefactory` service's identical restart policy comment —
+    # same identity-supersession crash-loop-is-the-alarm rationale applies
+    # to every role, executors included.
+    restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
       # postgres-postinit reconciles the role passwords; the executor's

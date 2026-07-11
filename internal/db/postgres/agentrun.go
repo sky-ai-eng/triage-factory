@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/wakebus"
 )
 
 // agentRunStore is the Postgres impl of db.AgentRunStore. Holds two
@@ -293,7 +294,18 @@ func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID st
 		return false, err
 	}
 	n, err := res.RowsAffected()
-	return n > 0, err
+	if err != nil {
+		return false, err
+	}
+	flipped := n > 0
+	if flipped {
+		// tf_wake doorbell (TFAC-586): resume-by-enqueue re-queues an
+		// EXISTING row rather than inserting one, so it needs its own
+		// notify — RunQueueStore.EnqueueRun's doesn't fire for this path.
+		// Best-effort, same "never the only path" contract as there.
+		_ = wakebus.Publish(ctx, s.q, wakebus.KindEvent, orgID)
+	}
+	return flipped, nil
 }
 
 func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {

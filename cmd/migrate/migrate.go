@@ -13,15 +13,11 @@
 package migrate
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // ExitSchemaAhead is the distinct exit code `migrate up` returns when a
@@ -33,35 +29,6 @@ import (
 // retry loop on this code to fail fast instead of burning its retry budget
 // waiting for a condition that can't clear.
 const ExitSchemaAhead = 3
-
-// openTarget returns the (db, dialect) pair for the current runmode.
-// Local mode opens the same SQLite file the server uses; multi mode
-// opens TF_DATABASE_URL via pgx. The migrate subcommand opens its own
-// handle independent of the server's startup wiring (internal/app) so
-// the Docker image's entrypoint can bring the schema to head before
-// the server process starts.
-func openTarget() (*sql.DB, string, error) {
-	if runmode.Current() == runmode.ModeMulti {
-		dsn := os.Getenv("TF_DATABASE_URL")
-		if dsn == "" {
-			return nil, "", fmt.Errorf("TF_MODE=multi requires TF_DATABASE_URL")
-		}
-		conn, err := sql.Open("pgx", dsn)
-		if err != nil {
-			return nil, "", fmt.Errorf("open postgres: %w", err)
-		}
-		if err := conn.Ping(); err != nil {
-			conn.Close()
-			return nil, "", fmt.Errorf("ping postgres: %w", err)
-		}
-		return conn, "postgres", nil
-	}
-	conn, err := db.Open()
-	if err != nil {
-		return nil, "", fmt.Errorf("open database: %w", err)
-	}
-	return conn, "sqlite3", nil
-}
 
 // Handle is the entrypoint dispatched from main.go on
 // `triagefactory migrate ...`. The first argv after `migrate` is the
@@ -87,7 +54,7 @@ func Handle(args []string) {
 }
 
 func runUp() {
-	database, dialect, err := openTarget()
+	database, dialect, err := db.OpenForCLI()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -112,7 +79,7 @@ func migrateExitCode(err error) int {
 }
 
 func runStatus() {
-	database, dialect, err := openTarget()
+	database, dialect, err := db.OpenForCLI()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

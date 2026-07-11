@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -98,6 +99,14 @@ func (a *App) startBrain(term int64) {
 	// gate on serveHTTP since that's when a.srv exists at all.
 	if a.plan.serveHTTP {
 		a.srv.StartBrainExtensionWorkers(brainCtx)
+	}
+	// Fleet reaper (dead-executor requeue/fail/cancel-finalize) + registry
+	// GC (TFAC-586, spec §4.3/§4.1(5)) — leader-only, singleton sweeps
+	// exactly like the drain sweeper above. nil in local mode and at
+	// TF_ROLE=executor (buildReaper never constructs a.reaperStore there).
+	if a.reaperStore != nil {
+		go reaper.RunReaper(brainCtx, a.reaperStore, reaper.DefaultReapInterval, a.reaperStaleThreshold, a.reaperMaxAttempts)
+		go reaper.RunRegistryGC(brainCtx, a.reaperStore, reaper.DefaultGCInterval, reaper.DefaultGCStaleAfter)
 	}
 }
 

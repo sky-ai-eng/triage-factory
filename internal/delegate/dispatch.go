@@ -38,6 +38,14 @@ const maxRunAttempts = 5
 // only defers a claim to the next tick); the wake channel is the latency nudge.
 const DefaultRunScanInterval = 2 * time.Second
 
+// WakeDispatcher is the exported form of wakeDispatcher, for callers outside
+// this package — the tf_wake NOTIFY listener (internal/app, TFAC-586) nudges
+// the dispatcher the moment a cross-process EnqueueRun/resume-enqueue lands,
+// instead of waiting out the scan interval backstop.
+func (s *Spawner) WakeDispatcher() {
+	s.wakeDispatcher()
+}
+
 // wakeDispatcher nudges the dispatcher to drain now rather than wait for the
 // next scan tick. Best-effort, non-blocking: a full buffer means a wake is
 // already pending, so dropping this one loses nothing.
@@ -160,6 +168,20 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 		// re-registered this id — see fenceIdentity) must not stamp new
 		// claims. Sticky until restart; in-flight runs finish untouched.
 		if s.IdentityFenced() {
+			return
+		}
+		// Partition self-fence: a heartbeat WRITE failure past the
+		// self-fence deadline (checkPartitionSelfFence) — reversible, un-
+		// fences on the next successful write; in-flight runs at the
+		// moment of fencing were already killed by killAllLiveSandboxes.
+		if s.PartitionFenced() {
+			return
+		}
+		// Drain: an operator asked this instance to quiesce (the CLI drain
+		// verb flips instances.draining; the next heartbeat reads it back —
+		// see heartbeatOnce). Live runs finish or hibernate-on-idle; no new
+		// claims start.
+		if s.Draining() {
 			return
 		}
 		// Acquire a concurrency slot BEFORE claiming, so we never flip a run to

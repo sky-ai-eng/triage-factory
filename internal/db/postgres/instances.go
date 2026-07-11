@@ -20,6 +20,14 @@ func newInstanceStore(admin queryer) db.InstanceStore {
 	return &instanceStore{admin: admin}
 }
 
+// NewInstanceStore builds a standalone db.InstanceStore against a pooled
+// *sql.DB — the narrow constructor CLI subcommands use (`triagefactory
+// instance list/drain/undrain`, TFAC-586) instead of building the full
+// db.Stores bundle (New) just to reach .Instances.
+func NewInstanceStore(admin *sql.DB) db.InstanceStore {
+	return newInstanceStore(admin)
+}
+
 var _ db.InstanceStore = (*instanceStore)(nil)
 
 func (s *instanceStore) Register(ctx context.Context, id, role, version string) (int64, error) {
@@ -49,11 +57,14 @@ func (s *instanceStore) Register(ctx context.Context, id, role, version string) 
 	return bootEpoch, err
 }
 
-func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int64, hb domain.InstanceHeartbeat) (bool, error) {
+func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int64, hb domain.InstanceHeartbeat) (bool, bool, error) {
 	// draining and labels are deliberately not in the SET list — they hold
 	// operator/control-plane intent and the heartbeat must not clobber them
-	// (see domain.InstanceHeartbeat).
-	res, err := s.admin.ExecContext(ctx, `
+	// (see domain.InstanceHeartbeat). draining IS read back via RETURNING
+	// so a running instance learns an operator drained it on its very
+	// next heartbeat, with no separate poll (TFAC-586).
+	var draining bool
+	err := s.admin.QueryRowContext(ctx, `
 		UPDATE instances SET
 			last_heartbeat_at = now(),
 			max_runs          = $3,
@@ -62,12 +73,62 @@ func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int6
 			mem_available_mb  = $6,
 			dispatch_gated    = $7
 		WHERE id = $1 AND boot_epoch = $2
+		RETURNING draining
 	`,
 		id, bootEpoch,
 		intPtrAny(hb.MaxRuns), intPtrAny(hb.ActiveRuns),
 		intPtrAny(hb.MemTotalMB), intPtrAny(hb.MemAvailableMB),
 		boolPtrAny(hb.DispatchGated),
-	)
+	).Scan(&draining)
+	if err == sql.ErrNoRows {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return true, draining, nil
+}
+
+func (s *instanceStore) List(ctx context.Context) ([]domain.Instance, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT id, role, version, boot_epoch, started_at, last_heartbeat_at, draining,
+		       max_runs, active_runs, mem_total_mb, mem_available_mb, dispatch_gated,
+		       COALESCE(labels::text, '')
+		FROM instances ORDER BY started_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.Instance
+	for rows.Next() {
+		var inst domain.Instance
+		var maxRuns, activeRuns, memTotal, memAvail sql.NullInt64
+		var dispatchGated sql.NullBool
+		var labels string
+		if err := rows.Scan(
+			&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining,
+			&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels,
+		); err != nil {
+			return nil, err
+		}
+		inst.MaxRuns = intPtrFromNull(maxRuns)
+		inst.ActiveRuns = intPtrFromNull(activeRuns)
+		inst.MemTotalMB = intPtrFromNull(memTotal)
+		inst.MemAvailableMB = intPtrFromNull(memAvail)
+		if dispatchGated.Valid {
+			v := dispatchGated.Bool
+			inst.DispatchGated = &v
+		}
+		inst.LabelsJSON = labels
+		out = append(out, inst)
+	}
+	return out, rows.Err()
+}
+
+func (s *instanceStore) SetDraining(ctx context.Context, id string, draining bool) (bool, error) {
+	res, err := s.admin.ExecContext(ctx, `UPDATE instances SET draining = $2 WHERE id = $1`, id, draining)
 	if err != nil {
 		return false, err
 	}

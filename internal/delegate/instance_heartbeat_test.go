@@ -2,7 +2,10 @@ package delegate
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -203,5 +206,195 @@ func TestHeartbeatOnce_SupersededIdentityFences(t *testing.T) {
 	// the fence holds without further heartbeats.
 	if !s.IdentityFenced() {
 		t.Fatal("fence must be sticky")
+	}
+}
+
+// TestFenceIdentity_KillsSandboxesAndInvokesExitHook pins fence completion
+// (spec §4.1(4) second half, TFAC-586): a supersession must kill every live
+// sandbox via the existing cancel machinery AND invoke the wired
+// onSupersessionFence hook exactly once, even under repeated supersession
+// evidence (the sticky CompareAndSwap guard).
+func TestFenceIdentity_KillsSandboxesAndInvokesExitHook(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := testSpawnerStores(database)
+	s := NewSpawner(database, stores, nil, nil, "")
+
+	ctx := context.Background()
+	const id = "fence-kill-instance"
+	staleEpoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	if err != nil {
+		t.Fatalf("Register (boot 1): %v", err)
+	}
+	s.SetExecutorID(id, staleEpoch)
+
+	killedA, killedB := false, false
+	s.mu.Lock()
+	s.cancels["run-a"] = func() { killedA = true }
+	s.cancels["run-b"] = func() { killedB = true }
+	s.mu.Unlock()
+
+	var exitCalls int
+	var exitMu sync.Mutex
+	s.SetOnSupersessionFence(func() {
+		exitMu.Lock()
+		exitCalls++
+		exitMu.Unlock()
+	})
+
+	if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1"); err != nil {
+		t.Fatalf("Register (boot 2): %v", err)
+	}
+	s.heartbeatOnce(ctx)
+
+	if !killedA || !killedB {
+		t.Errorf("expected every registered cancel to fire: killedA=%v killedB=%v", killedA, killedB)
+	}
+	exitMu.Lock()
+	got := exitCalls
+	exitMu.Unlock()
+	if got != 1 {
+		t.Fatalf("onSupersessionFence called %d times, want exactly 1", got)
+	}
+
+	// A second (still-superseded) heartbeat must not re-fire the hook or
+	// re-kill anything — fenceIdentity's CompareAndSwap makes this once
+	// per process life.
+	s.heartbeatOnce(ctx)
+	exitMu.Lock()
+	got = exitCalls
+	exitMu.Unlock()
+	if got != 1 {
+		t.Fatalf("onSupersessionFence called %d times after a second fenced heartbeat, want still 1", got)
+	}
+}
+
+// TestHeartbeatOnce_ReadsBackDrainingFlag pins the mechanism the drain CLI
+// verb relies on: an operator-set draining flag (written out-of-band via
+// InstanceStore.SetDraining, e.g. by `triagefactory instance drain`) is
+// visible on this Spawner within one heartbeat, in both directions.
+func TestHeartbeatOnce_ReadsBackDrainingFlag(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := testSpawnerStores(database)
+	s := NewSpawner(database, stores, nil, nil, "")
+
+	ctx := context.Background()
+	const id = "drain-flag-instance"
+	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleAll, "v1")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	s.SetExecutorID(id, epoch)
+
+	if s.Draining() {
+		t.Fatal("must not report draining before any operator action")
+	}
+
+	if _, err := stores.Instances.SetDraining(ctx, id, true); err != nil {
+		t.Fatalf("SetDraining(true): %v", err)
+	}
+	s.heartbeatOnce(ctx)
+	if !s.Draining() {
+		t.Fatal("heartbeatOnce must read back the operator-set draining flag")
+	}
+
+	if _, err := stores.Instances.SetDraining(ctx, id, false); err != nil {
+		t.Fatalf("SetDraining(false): %v", err)
+	}
+	s.heartbeatOnce(ctx)
+	if s.Draining() {
+		t.Fatal("heartbeatOnce must read back an un-drain too")
+	}
+}
+
+// toggleableInstanceStore is an in-memory db.InstanceStore whose Heartbeat
+// can be told to fail on demand — the partition self-fence needs a
+// heartbeat WRITE FAILURE (distinct from the supersession "matched=false"
+// case a real sqlite-backed store produces via a second Register), which
+// nothing else in this test file can manufacture on command.
+type toggleableInstanceStore struct {
+	mu   sync.Mutex
+	fail bool
+}
+
+func (f *toggleableInstanceStore) Register(context.Context, string, string, string) (int64, error) {
+	return 1, nil
+}
+func (f *toggleableInstanceStore) Heartbeat(context.Context, string, int64, domain.InstanceHeartbeat) (bool, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fail {
+		return false, false, errors.New("simulated heartbeat write failure")
+	}
+	return true, false, nil
+}
+func (f *toggleableInstanceStore) Get(context.Context, string) (*domain.Instance, error) {
+	return nil, nil
+}
+func (f *toggleableInstanceStore) List(context.Context) ([]domain.Instance, error) { return nil, nil }
+func (f *toggleableInstanceStore) SetDraining(context.Context, string, bool) (bool, error) {
+	return false, nil
+}
+func (f *toggleableInstanceStore) setFail(v bool) {
+	f.mu.Lock()
+	f.fail = v
+	f.mu.Unlock()
+}
+
+// TestCheckPartitionSelfFence_KillsSandboxesReversibly pins the partition
+// self-fence (TFAC-586): a heartbeat WRITE FAILURE that persists past
+// selfFenceDeadline latches PartitionFenced and kills live sandboxes — the
+// same reaction as identity supersession — but, unlike IdentityFenced,
+// un-fences automatically the moment a heartbeat write succeeds again, and
+// never invokes the supersession exit hook.
+func TestCheckPartitionSelfFence_KillsSandboxesReversibly(t *testing.T) {
+	database := newDelegateTestDB(t)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
+	store := &toggleableInstanceStore{}
+	s.instances = store
+	s.SetExecutorID("partition-instance", 1)
+	s.SetSelfFenceDeadline(30 * time.Millisecond)
+	s.lastGoodContactNanos.Store(time.Now().UnixNano())
+
+	killed := false
+	s.mu.Lock()
+	s.cancels["run-live"] = func() { killed = true }
+	s.mu.Unlock()
+
+	var exitCalls int
+	s.SetOnSupersessionFence(func() { exitCalls++ })
+
+	store.setFail(true)
+	ctx := context.Background()
+
+	if !s.heartbeatOnce(ctx) {
+		t.Fatal("a heartbeat write failure must keep the loop running (not evidence of supersession)")
+	}
+	if s.PartitionFenced() {
+		t.Fatal("must not fence before the self-fence deadline elapses")
+	}
+	if killed {
+		t.Fatal("must not kill sandboxes before the deadline elapses")
+	}
+
+	time.Sleep(40 * time.Millisecond)
+	if !s.heartbeatOnce(ctx) {
+		t.Fatal("a partition self-fence must not stop the heartbeat loop — it is reversible")
+	}
+	if !s.PartitionFenced() {
+		t.Fatal("expected the partition self-fence to latch past the deadline")
+	}
+	if !killed {
+		t.Error("expected killAllLiveSandboxes to have cancelled the registered run")
+	}
+	if exitCalls != 0 {
+		t.Errorf("onSupersessionFence called %d times, want 0 — a partition must never exit the process", exitCalls)
+	}
+
+	store.setFail(false)
+	if !s.heartbeatOnce(ctx) {
+		t.Fatal("a successful heartbeat must keep the loop running")
+	}
+	if s.PartitionFenced() {
+		t.Error("a successful heartbeat write must un-fence the partition case")
 	}
 }

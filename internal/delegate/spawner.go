@@ -322,6 +322,32 @@ type Spawner struct {
 	// dispatcher stops claiming and resumes are refused; see
 	// fenceIdentity / IdentityFenced (instance_heartbeat.go).
 	identityFenced atomic.Bool
+	// partitionFenced latches (NOT sticky — clears on the next successful
+	// heartbeat write) when this instance fails to WRITE its heartbeat for
+	// longer than selfFenceDeadline: the reaper can't tell a partitioned
+	// executor from a dead one, so the protocol makes them equivalent —
+	// stop claiming and kill live sandboxes, same reaction as
+	// identityFenced, but reversible (connectivity may return) and never
+	// exits the process (a restart would lose warm worktrees for
+	// nothing). See checkPartitionSelfFence / PartitionFenced
+	// (instance_heartbeat.go, TFAC-586).
+	partitionFenced atomic.Bool
+	// selfFenceDeadline is TF_SELF_FENCE_SEC (default DefaultSelfFenceDeadline):
+	// the own-monotonic-clock deadline since the last successful heartbeat
+	// write past which this instance self-fences the partition case. Zero
+	// (the NewSpawner default) falls back to DefaultSelfFenceDeadline —
+	// mirrors memFloorMB's "zero means use the default" shape. Set once at
+	// startup via SetSelfFenceDeadline; boot refuses a value >=
+	// TF_REAPER_STALE_SEC (internal/app cross-validates both).
+	selfFenceDeadline time.Duration
+	// onSupersessionFence is invoked once, synchronously, right after
+	// fenceIdentity kills this instance's live sandboxes on a supersession
+	// (identityFenced) — the second half of fence completion (spec
+	// §4.1(4)): the caller wires this to os.Exit with a distinct code
+	// (internal/app), keeping process-lifecycle decisions out of this
+	// package. nil is a safe no-op (tests, and any mode where supersession
+	// is structurally unreachable).
+	onSupersessionFence func()
 
 	// --- executor healthz signals (TFAC-582) ---
 	//
@@ -335,7 +361,16 @@ type Spawner struct {
 	// it).
 	dispatcherRunning       atomic.Bool
 	lastHeartbeatWriteNanos atomic.Int64
-	draining                atomic.Bool
+	// lastGoodContactNanos is the partition self-fence's elapsed-time
+	// baseline (checkPartitionSelfFence, TFAC-586): the UnixNano of this
+	// instance's last known-good contact with the registry — a successful
+	// heartbeat write, or RunInstanceHeartbeat's loop start when none has
+	// landed yet. Distinct from lastHeartbeatWriteNanos (which stays 0
+	// until the FIRST success and backs the healthz "ever written" signal)
+	// so a process partitioned from boot still has a well-defined deadline
+	// to measure against.
+	lastGoodContactNanos atomic.Int64
+	draining             atomic.Bool
 	// reportCapacity gates whether the heartbeat writes the capacity +
 	// admission snapshot. True for executor/all (a real dispatcher backs
 	// the numbers); a pure-control pod sets it false via SetReportCapacity

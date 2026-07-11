@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
@@ -35,6 +36,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
+	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
@@ -128,6 +130,16 @@ type App struct {
 	// Non-nil only at role=control in multi mode — role=all/local never
 	// elects (see startBrain's direct call in Run and isBrainHolder).
 	leaseElector *lease.Manager
+
+	// reaperStore is the fleet reaper's Postgres store (TFAC-586, spec
+	// §4.3) — non-nil only for brain-capable roles in multi mode (buildReaper).
+	// startBrain/stopBrain start/stop RunReaper + RunRegistryGC against it,
+	// nil-checked the same way a.wsBackplane is. reaperStaleThreshold /
+	// reaperMaxAttempts are the resolved TF_REAPER_STALE_SEC /
+	// TF_RUN_MAX_ATTEMPTS knobs those loops run with.
+	reaperStore          reaper.Store
+	reaperStaleThreshold time.Duration
+	reaperMaxAttempts    int
 
 	// runCtx is the ctx Run(ctx) was called with, captured so startBrain
 	// (invoked later, from a lease-manager callback or directly at
@@ -233,6 +245,13 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 		a.buildAI() // scorer + project classifier + profiler + reconciler
 	}
 	if err = a.buildExecution(); err != nil { // delegation spawner (+ curator on serveHTTP roles)
+		return nil, err
+	}
+	// Fleet reaper knobs + (brain roles, multi mode) the reaper Store
+	// (TFAC-586). Runs after buildExecution: it wires the spawner's
+	// partition self-fence deadline and supersession exit hook, both of
+	// which need a.spawner to exist.
+	if err = a.buildReaper(); err != nil {
 		return nil, err
 	}
 	// The background-brain lease elector (TFAC-583) — control role in
