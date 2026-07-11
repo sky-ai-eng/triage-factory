@@ -181,7 +181,7 @@ protective value equals the narrowness and validation of that RPC.
 > resource limits, and (self-host only) an additional permitted egress CIDR
 > validated against the immutable internal denylist (cloud metadata endpoint
 > `169.254.169.254`, the control-plane subnet, private/link-local ranges — see
-> sandbox-fleet §3.1) before any iptables permit is written. It **never** execs
+> [sandbox-fleet](../for-agents/specs/sandbox-fleet/) §3.1) before any iptables permit is written. It **never** execs
 > an orchestrator-supplied `config.json`, command, or rootfs path.
 
 A compromised orchestrator can inject an environment variable the *sandboxed*
@@ -194,13 +194,16 @@ Why this stays true as the code changes:
   every launch passes `ValidateLaunchParams` — every privileged run-tree
   chown/remove passes `validateRunTreeRoot` — before the broker builds a spec,
   execs anything, or touches a file. There is no second entry that skips the gate.
-- **Allowlist, not denylist, so new inputs fail closed.** Rootfs is chosen by
-  catalog *name* (unknown → rejected); the SDK path is resolved by the broker
-  (the orchestrator's is discarded); the command's first two argv are pinned; env
-  keys are an allowlist; mount options are the closed set `{ro, rw}`; rlimit types
-  are allowlisted; the run-tree ops touch only trees owned by the sandbox or
-  orchestrator uid, **never** root. A *new* dangerous value a future change might
-  introduce is refused by default rather than accepted until someone blocks it.
+- **Allowlist, not denylist, so new inputs fail closed.** A *new* dangerous value
+  a future change might introduce is refused by default rather than accepted until
+  someone blocks it:
+    - rootfs is chosen by catalog *name* (unknown → rejected);
+    - the SDK path is resolved by the broker (the orchestrator's is discarded);
+    - the command's first two argv are pinned;
+    - env keys are an allowlist, and mount options the closed set `{ro, rw}`;
+    - rlimit types are allowlisted;
+    - the run-tree ops touch only trees owned by the sandbox or orchestrator uid,
+      **never** root.
 - **The gate is fuzzed for "accepted ⇒ safe."** `internal/sandbox`'s
   `FuzzValidateLaunchParams` (plus the run-tree and egress fuzzers) feeds
   arbitrary RPC input to the validator and, for every input it *accepts*,
@@ -222,13 +225,12 @@ the launch parameters already anticipate.
 
 ### 4.4 A note on dropping capabilities
 
-Capabilities are dropped **at exec** (via a `setpriv`/`capsh`-style wrapper that
-launches the orchestrator with an emptied capability set), not in-process.
-Linux capabilities are per-thread, and the Go runtime spawns threads before
-`main()` runs, so an in-process drop affects only one thread and silently leaves
-others privileged — a control that *looks* applied but is not. The exec-time
-drop is kernel-enforced from the first instruction. After an exec-time drop of
-`CAP_NET_ADMIN`, a privileged network operation returns `EPERM`.
+Capabilities are dropped by a small `setpriv` wrapper **before the orchestrator
+binary even loads** — not from inside the running process, where Go's threading
+model makes an in-process drop unreliable (it would silently leave some threads
+privileged). So the orchestrator starts with an empty, kernel-enforced capability
+set from its first instruction: any privileged operation it attempts is refused
+by the kernel.
 
 ---
 
@@ -349,10 +351,10 @@ to remain out of Kubernetes clusters entirely:
 - **Executors as dedicated VMs (or bare metal), outside the cluster.** They
   accept no inbound traffic and dial out to Postgres to claim work — exactly the
   pattern used for GitHub Actions / GitLab / Buildkite runners.
-- **Control plane as ordinary web-service pods.** The API/websocket/polling tier
-  is a normal web service. It carries the sandbox capabilities only to jail its
-  own low-volume system jobs (e.g. curator chat sessions); delegated agent runs
-  land on executors, not here.
+- **Control plane as ordinary, fully-unprivileged pods.** The API/websocket/polling
+  tier is a normal web service that holds **no** sandbox capabilities: every
+  sandboxed workload — delegated runs and curator sessions alike — runs on
+  executors, and the scorer/profiler are brain-side LLM calls that never sandbox.
 - **If executors must run in Kubernetes**, they run as privileged pods on a
   dedicated, tainted node pool with the cloud metadata endpoint blocked, a
   minimal node role, and no other tenants' pods scheduled there. We do not
@@ -365,9 +367,7 @@ What Triage Factory deliberately does **not** do is run each sandbox as a pod
 (`runtimeClass: gvisor`). A run is not a pod: one executor hosts ~a hundred
 sandboxes sharing a warm rootfs page-cache, a subnet pool, and per-run proxies;
 run-per-pod forfeits all three and trades a ~200 ms sandbox spawn for
-pod-startup seconds. gVisor is *permitted* as an executor substrate where a team
-already runs self-managed k8s; it is never *required*, and never the design
-basis.
+pod-startup seconds.
 
 ---
 
