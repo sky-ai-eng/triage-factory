@@ -124,10 +124,8 @@ it holds and the *hostile input* it is exposed to never overlap:
   runtime, tears everything down, and reaps orphans at boot. It holds **no
   credentials**, binds **no proxies**, and **parses no agent output**. Its only
   input is a narrow, fixed RPC vocabulary from its parent plus, for the run's
-  I/O, a socket file descriptor it passes straight through to the runtime (or,
-  for the park-time git-delta capture, to the capture child) and never reads —
-  the run's bytes never enter the broker's address space, full stop, for
-  either path (§4.2).
+  I/O, a socket file descriptor it passes straight through to the runtime and
+  never reads — the run's bytes never enter the broker's address space (§4.2).
 - **orchestrator** — today's main process, with its capabilities **dropped at
   exec** (not in-process — see the note below). It runs the dispatcher, resolves
   and holds credentials, binds the LLM/git/egress proxies (which parse hostile
@@ -168,38 +166,6 @@ This is a structural property verifiable by inspection (no read call, descriptor
 closed), not a behavioral promise. *(Validated against real gVisor: the runtime
 faithfully proxies the newline-delimited-JSON agent protocol over a
 socket-backed stdio while the supervising process reads nothing.)*
-
-**The same structural property holds for the park-time capture, too.** The
-park-time git-delta capture (`CaptureRunDelta`, part of §4.3's run-tree
-lifecycle) used to be the one place a byte of run-derived data crossed into the
-broker's address space: the broker ran the dropped-privilege, netns-isolated
-capture child, read its stdout into a buffer, and returned that buffer to the
-orchestrator inside the RPC response. That buffering had no bound, so a run
-that wrote a large enough file before parking could grow the broker's memory
-by the size of its own delta — a resource-exhaustion path (§6 Vector 4), not a
-capability leak, but still a way a single well-formed call could threaten the
-process every live run depends on.
-
-The fix applies the exact live-stdio pattern above to capture instead of
-carving out an exception for it: the orchestrator opens a per-capture
-listener, the broker dials it, and the capture child's stdout is wired
-directly to that passed-through socket fd — the broker never reads a byte of
-the delta, exactly as it never reads a byte of the run's live I/O. The
-orchestrator, not the broker, now enforces the size ceiling by capping how
-much it reads off the stream; a capture over that cap fails cleanly (the park
-degrades to snapshot-less, as it always did on any capture failure) with the
-broker's own memory never growing to hold it. This is pinned by a test in
-which a deliberately non-JSON payload (`cmd/capbroker`'s
-`TestIPCRoundTrip_CaptureRunDelta_StreamsByteIdentical`) round-trips
-byte-identical over the socket, plus a test asserting the capture child's
-stdout is the passed-through `*os.File` itself rather than something wrapped —
-the one implementation mistake that would silently reintroduce a copy of the
-delta into the broker's memory (`os/exec` inserts its own pipe-and-copy
-goroutine for any `io.Writer` that isn't a bare `*os.File`). What actually
-contains the hostile git operations remains the capture child's own
-confinement (setuid to the sandbox uid, empty netns), not anything the broker
-does with the bytes (§4.3) — that was always a separate property from the
-address-space question this section is about.
 
 ### 4.3 The broker's real attack surface is its RPC, and it is narrowed on purpose
 
@@ -369,20 +335,12 @@ faithfully executes well-formed requests. It cannot regain capabilities (§4) �
 but it can consume host resources: most concretely the fixed **256-slot**
 per-run subnet pool (`internal/sandbox/subnet.go`, a `/16`→`/24` allocator), the
 privileged netns/veth/iptables/cgroup setup and supervised runtime each
-`LaunchRun` costs, or — before the fix below — the broker's own memory via an
-unbounded `CaptureRunDelta` response.
+`LaunchRun` costs.
 - The broker caps in-flight `LaunchRun`s per orchestrator instance
   (one orchestrator maps to one broker) at the subnet-pool size, releasing the
   slot when the run is reaped, so a runaway caller degrades to queueing rather
   than host exhaustion. This is denial-of-service resistance, **not** a
   capability boundary — called out so the two are not conflated.
-- `CaptureRunDelta`'s park-time delta used to be the one call on
-  this RPC whose result size a run fully controlled (write a large file, then
-  park) with no ceiling before it reached the broker's memory. It now streams
-  through a passed-through socket exactly like the run's live stdio (§4.2), so
-  the broker never buffers it at all, and the orchestrator — the side that
-  already owns this class of ceiling — enforces the size cap on its own read of
-  the stream.
 
 ---
 
