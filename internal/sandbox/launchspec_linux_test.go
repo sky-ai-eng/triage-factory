@@ -3,15 +3,84 @@
 package sandbox
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
+
+// ensureRunTreeFixture creates the on-disk directory RunTreeRoot(runID)
+// resolves to. The worktree/mount-scope check now requires a launch's
+// Worktree to actually exist (realPath resolves symlinks, which needs the
+// path to be there) — in production internal/worktree.CreateForPR /
+// MakeRunRoot always materialize it before agentproc.Run ever issues the
+// launch RPC, so tests that want an ACCEPTED launch must do the same.
+func ensureRunTreeFixture(t *testing.T, runID string) string {
+	t.Helper()
+	dir := RunTreeRoot(runID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir run-tree fixture %q: %v", dir, err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// ensureGitHooksFixture points paths.HooksDir() at a throwaway root (via
+// paths.SetForTest) and creates it on disk, so TrustedGitHooksDir()'s
+// existence-checked resolution succeeds without a real githooks.Ensure()
+// having run.
+func ensureGitHooksFixture(t *testing.T) {
+	t.Helper()
+	paths.SetForTest(t, t.TempDir())
+	if err := os.MkdirAll(paths.HooksDir(), 0o755); err != nil {
+		t.Fatalf("mkdir git-hooks fixture: %v", err)
+	}
+}
+
+// ensureAgentHostSocketFixture creates a placeholder file at
+// TrustedAgentHostSocketPath(runID) — the fixed host path
+// cmd/exec/agenthost.Start binds a real unix socket to — so tests can
+// exercise the existence-checked per-run socket pinning without a real
+// HostDaemon running. realPath only needs the path to exist (any file
+// type; it doesn't dial or care about the socket protocol), and a plain
+// file — unlike net.Listen — is safe to create redundantly from Go's
+// fuzzing engine's multiple worker processes, which each re-run this
+// package's fuzz seed setup independently against the SAME fixed path.
+//
+// Redirects trustedAgentHostSocketRoot to a per-test temp dir first: the
+// real root is /run/tf, which only root (or whoever the container
+// entrypoint hands it to) can create — mirrors cmd/capbroker's
+// brokerSocketPath test redirection for the same reason.
+func ensureAgentHostSocketFixture(t *testing.T, runID string) string {
+	t.Helper()
+	orig := trustedAgentHostSocketRoot
+	trustedAgentHostSocketRoot = t.TempDir()
+	t.Cleanup(func() { trustedAgentHostSocketRoot = orig })
+
+	sockPath := TrustedAgentHostSocketPath(runID)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		t.Fatalf("mkdir agenthost socket dir: %v", err)
+	}
+	if err := os.WriteFile(sockPath, nil, 0o600); err != nil {
+		t.Fatalf("create agenthost socket fixture %q: %v", sockPath, err)
+	}
+	t.Cleanup(func() { _ = os.Remove(sockPath) })
+	return sockPath
+}
 
 // validParams returns a LaunchParams that passes ValidateLaunchParams, so
 // each rejection test can mutate exactly one field and prove that field's
 // gate — the boundary the broker enforces before it builds or execs
-// anything from an orchestrator's request.
+// anything from an orchestrator's request. The worktree is a package-wide
+// fixed path (RunTreeRoot("run-abc123")); tests don't need per-test
+// isolation on it (nothing writes into it), so it's created idempotently
+// here rather than threading *testing.T through every one of this
+// function's many call sites.
 func validParams() LaunchParams {
+	_ = os.MkdirAll(RunTreeRoot("run-abc123"), 0o755)
 	return LaunchParams{
 		RunID:       "run-abc123",
 		ContainerID: "tf-abc123-1",
@@ -23,7 +92,7 @@ func validParams() LaunchParams {
 			{Key: "GIT_CONFIG_VALUE_0", Value: "/hooks"},
 		},
 		Args:     []string{sandboxNodeBinary, sandboxWrapperEntry, "-p", "hi"},
-		Worktree: "/data/worktrees/run-abc123",
+		Worktree: RunTreeRoot("run-abc123"),
 		SDKDir:   "/opt/tf/sdk",
 		Rlimits:  []Rlimit{{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 1024}},
 		// The netns name must be the one this run's id derives — the ownership
@@ -206,18 +275,253 @@ func TestValidateLaunchParams_RejectsNonAbsolutePaths(t *testing.T) {
 // outside the honored ro/rw set is rejected, so a caller can't slip a
 // surprising mount flag into the broker-built spec.
 func TestValidateLaunchParams_RejectsBadMountOption(t *testing.T) {
+	// The mount source must ALSO be one this run legitimately owns (the
+	// worktree/mount-scope check runs regardless of Options), so use this
+	// run's own agenthost socket — a recognized, per-run mount shape — to
+	// isolate the option check from the scope check.
+	trustedSource := ensureAgentHostSocketFixture(t, "run-abc123")
 	p := validParams()
-	p.Mounts = []Mount{{Source: "/host/x", Destination: "/work/x", Options: []string{"suid"}}}
+	p.Mounts = []Mount{{Source: trustedSource, Destination: TrustedAgentHostSocketDestination, Options: []string{"suid"}}}
 	if err := ValidateLaunchParams(p); err == nil {
 		t.Fatal("accepted an unsupported mount option; want rejection")
 	}
 	// ro/rw (and no options) are honored.
 	for _, opts := range [][]string{nil, {"ro"}, {"rw"}} {
 		ok := validParams()
-		ok.Mounts = []Mount{{Source: "/host/x", Destination: "/work/x", Options: opts}}
+		ok.Mounts = []Mount{{Source: trustedSource, Destination: TrustedAgentHostSocketDestination, Options: opts}}
 		if err := ValidateLaunchParams(ok); err != nil {
 			t.Errorf("mount options %v rejected: %v", opts, err)
 		}
+	}
+}
+
+// TestValidateLaunchParams_RejectsCrossOrgMountSource is acceptance case
+// (a): a mount source under a DIFFERENT org's tree than the worktree is
+// rejected, even though both are shape-valid, broker-created-looking
+// paths — the core cross-tenant residual this ticket closes.
+func TestValidateLaunchParams_RejectsCrossOrgMountSource(t *testing.T) {
+	root := t.TempDir()
+	paths.SetForTest(t, root)
+
+	worktree := filepath.Join(root, "orgs", "org-a", "projects", "proj-1")
+	mountSource := filepath.Join(root, "orgs", "org-b", "curator-repos", "acme", "widgets")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir worktree fixture: %v", err)
+	}
+	if err := os.MkdirAll(mountSource, 0o755); err != nil {
+		t.Fatalf("mkdir mount source fixture: %v", err)
+	}
+
+	p := validParams()
+	p.Worktree = worktree
+	p.Mounts = []Mount{{
+		Source:      mountSource,
+		Destination: "/work/repos/acme/widgets",
+		Options:     []string{"ro"},
+	}}
+	if err := ValidateLaunchParams(p); err == nil {
+		t.Fatal("accepted a mount source under a different org's tree than the worktree; want rejection")
+	}
+}
+
+// TestValidateLaunchParams_AcceptsSameOrgMountSource is the positive half
+// of the same case: a mount source under the SAME org as the worktree
+// (the curator's shared read-only repo mount shape) is accepted.
+func TestValidateLaunchParams_AcceptsSameOrgMountSource(t *testing.T) {
+	root := t.TempDir()
+	paths.SetForTest(t, root)
+
+	worktree := filepath.Join(root, "orgs", "org-a", "projects", "proj-1")
+	mountSource := filepath.Join(root, "orgs", "org-a", "curator-repos", "acme", "widgets")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir worktree fixture: %v", err)
+	}
+	if err := os.MkdirAll(mountSource, 0o755); err != nil {
+		t.Fatalf("mkdir mount source fixture: %v", err)
+	}
+
+	p := validParams()
+	p.Worktree = worktree
+	p.Mounts = []Mount{{
+		Source:      mountSource,
+		Destination: "/work/repos/acme/widgets",
+		Options:     []string{"ro"},
+	}}
+	if err := ValidateLaunchParams(p); err != nil {
+		t.Errorf("rejected a mount source under the SAME org as the worktree: %v", err)
+	}
+}
+
+// TestValidateLaunchParams_RejectsSymlinkedMountSourceEscape pins the
+// symlink-resolution half of case (a): a mount source that is LEXICALLY
+// under the worktree's own org tree, but is (or transits) a symlink whose
+// REAL target is another org's tree, must still be rejected. Org A
+// legitimately owns and writes its own curator-repos subtree, so it can
+// plant this symlink itself — a purely lexical filepath.Rel check would
+// have waved it through; realPath's resolution is what closes it.
+func TestValidateLaunchParams_RejectsSymlinkedMountSourceEscape(t *testing.T) {
+	root := t.TempDir()
+	paths.SetForTest(t, root)
+
+	worktree := filepath.Join(root, "orgs", "org-a", "projects", "proj-1")
+	orgBSecret := filepath.Join(root, "orgs", "org-b", "curator-repos", "acme", "widgets")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir worktree fixture: %v", err)
+	}
+	if err := os.MkdirAll(orgBSecret, 0o755); err != nil {
+		t.Fatalf("mkdir org-b secret fixture: %v", err)
+	}
+	// A symlink living INSIDE org A's own curator-repos tree — lexically
+	// under org A's prefix — whose real target is org B's data.
+	symlinkSource := filepath.Join(root, "orgs", "org-a", "curator-repos", "acme", "widgets")
+	if err := os.MkdirAll(filepath.Dir(symlinkSource), 0o755); err != nil {
+		t.Fatalf("mkdir symlink parent: %v", err)
+	}
+	if err := os.Symlink(orgBSecret, symlinkSource); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	p := validParams()
+	p.Worktree = worktree
+	p.Mounts = []Mount{{
+		Source:      symlinkSource,
+		Destination: "/work/repos/acme/widgets",
+		Options:     []string{"ro"},
+	}}
+	if err := ValidateLaunchParams(p); err == nil {
+		t.Fatal("accepted a mount source that lexically matched org A but resolved into org B via a symlink; want rejection")
+	}
+}
+
+// TestValidateLaunchParams_RejectsSymlinkedWorktreeEscape is the same
+// resolution requirement applied to the worktree itself: a worktree path
+// that is lexically under the state-root org tree but is (or transits) a
+// symlink whose real target is OUTSIDE that tree entirely must be
+// rejected, not silently accepted because the claimed path looked
+// in-scope. (A worktree that resolves into a DIFFERENT but genuine org
+// subtree is not a bypass — per worktreeScope's documented ceiling, that
+// just makes the run scoped as that org outright, which the orchestrator
+// could always do directly. The violation this guards is escaping the org
+// tree's shape altogether.)
+func TestValidateLaunchParams_RejectsSymlinkedWorktreeEscape(t *testing.T) {
+	root := t.TempDir()
+	paths.SetForTest(t, root)
+
+	orgAProjects := filepath.Join(root, "orgs", "org-a", "projects")
+	if err := os.MkdirAll(orgAProjects, 0o755); err != nil {
+		t.Fatalf("mkdir org-a projects fixture: %v", err)
+	}
+	// A symlink at what looks like org A's project dir, really pointing
+	// outside the org tree altogether.
+	symlinkedWorktree := filepath.Join(orgAProjects, "proj-1")
+	if err := os.Symlink("/etc", symlinkedWorktree); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	p := validParams()
+	p.Worktree = symlinkedWorktree
+	if err := ValidateLaunchParams(p); err == nil {
+		t.Fatal("accepted a worktree that lexically matched org A but resolved outside the org tree via a symlink; want rejection")
+	}
+}
+
+// TestValidateLaunchParams_RejectsWorktreeOutsideOrgTree is acceptance
+// case (c): a worktree that is neither this run's own ephemeral tree nor
+// under the state-root org tree (e.g. /etc) is rejected outright.
+func TestValidateLaunchParams_RejectsWorktreeOutsideOrgTree(t *testing.T) {
+	root := t.TempDir()
+	paths.SetForTest(t, root)
+	orgsRoot := filepath.Join(root, "orgs")
+	if err := os.MkdirAll(orgsRoot, 0o755); err != nil {
+		t.Fatalf("mkdir orgs-root fixture: %v", err)
+	}
+
+	for _, wt := range []string{"/etc", "/etc/passwd", orgsRoot} {
+		p := validParams()
+		p.Worktree = wt
+		if err := ValidateLaunchParams(p); err == nil {
+			t.Errorf("accepted worktree %q outside both legitimate shapes; want rejection", wt)
+		}
+	}
+}
+
+// TestValidateLaunchParams_RejectsForeignGlobalMountSource is acceptance
+// case (b): a caller-supplied source for the TF-binary / git-hooks
+// destinations that does not match the broker's own resolution is
+// rejected — these two destinations are broker-resolved, never
+// caller-trusted, mirroring TrustedSDKDir.
+func TestValidateLaunchParams_RejectsForeignGlobalMountSource(t *testing.T) {
+	attackerWrapper := filepath.Join(t.TempDir(), "attacker-wrapper")
+	if err := os.WriteFile(attackerWrapper, []byte("evil"), 0o644); err != nil {
+		t.Fatalf("write attacker-wrapper fixture: %v", err)
+	}
+	p := validParams()
+	p.Mounts = []Mount{{Source: attackerWrapper, Destination: TrustedTFBinaryDestination, Options: []string{"ro"}}}
+	if err := ValidateLaunchParams(p); err == nil {
+		t.Fatal("accepted a foreign source for the TF-binary destination; want rejection")
+	}
+
+	attackerHooks := filepath.Join(t.TempDir(), "attacker-hooks")
+	if err := os.MkdirAll(attackerHooks, 0o755); err != nil {
+		t.Fatalf("mkdir attacker-hooks fixture: %v", err)
+	}
+	p = validParams()
+	p.Mounts = []Mount{{Source: attackerHooks, Destination: githooks.SandboxDir, Options: []string{"ro"}}}
+	if err := ValidateLaunchParams(p); err == nil {
+		t.Fatal("accepted a foreign source for the git-hooks destination; want rejection")
+	}
+
+	// The genuinely trusted sources pass.
+	ensureGitHooksFixture(t)
+	tfBin, err := TrustedTFBinaryPath()
+	if err != nil {
+		t.Fatalf("resolve trusted TF binary path: %v", err)
+	}
+	ok := validParams()
+	ok.Mounts = []Mount{
+		{Source: tfBin, Destination: TrustedTFBinaryDestination, Options: []string{"ro"}},
+		{Source: TrustedGitHooksDir(), Destination: githooks.SandboxDir, Options: []string{"ro"}},
+	}
+	if err := ValidateLaunchParams(ok); err != nil {
+		t.Errorf("rejected the genuinely trusted global mount sources: %v", err)
+	}
+}
+
+// TestValidateLaunchParams_RejectsForeignAgentHostSocket is acceptance case
+// (e)'s negative half: an agenthost-socket mount whose source names a
+// DIFFERENT run (a sibling's, still broker-shaped) is rejected.
+func TestValidateLaunchParams_RejectsForeignAgentHostSocket(t *testing.T) {
+	siblingSocket := ensureAgentHostSocketFixture(t, "some-other-run")
+	p := validParams()
+	p.Mounts = []Mount{{
+		Source:      siblingSocket,
+		Destination: TrustedAgentHostSocketDestination,
+	}}
+	if err := ValidateLaunchParams(p); err == nil {
+		t.Fatal("accepted a sibling run's agenthost socket; want rejection")
+	}
+}
+
+// TestValidateLaunchParams_AcceptsRealisticMountSet is acceptance case (d):
+// the actual mount set a normal delegated run assembles (TF binary,
+// git-hooks, the run's own agenthost socket — mirroring
+// internal/agentproc's extraMounts assembly, no curator mounts) against
+// the ephemeral worktree shape is accepted unchanged.
+func TestValidateLaunchParams_AcceptsRealisticMountSet(t *testing.T) {
+	ensureGitHooksFixture(t)
+	tfBin, err := TrustedTFBinaryPath()
+	if err != nil {
+		t.Fatalf("resolve trusted TF binary path: %v", err)
+	}
+	p := validParams()
+	agentSocket := ensureAgentHostSocketFixture(t, p.RunID)
+	p.Mounts = []Mount{
+		{Source: tfBin, Destination: TrustedTFBinaryDestination, Options: []string{"ro"}},
+		{Source: TrustedGitHooksDir(), Destination: githooks.SandboxDir, Options: []string{"ro"}},
+		{Source: agentSocket, Destination: TrustedAgentHostSocketDestination},
+	}
+	if err := ValidateLaunchParams(p); err != nil {
+		t.Errorf("rejected a normal run's real mount set: %v", err)
 	}
 }
 

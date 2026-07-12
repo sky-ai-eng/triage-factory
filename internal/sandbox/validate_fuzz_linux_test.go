@@ -5,9 +5,12 @@ package sandbox
 import (
 	"encoding/json"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 )
 
 // The cap-broker RPC's whole security value equals the narrowness and
@@ -109,6 +112,60 @@ func assertLaunchParamsSafe(t *testing.T, p LaunchParams) {
 		}
 	}
 
+	// Worktree + mount-source scoping: an accepted worktree must be either
+	// this run's own ephemeral tree or an org-scoped state-root subtree, and
+	// every mount's source must be either a broker-resolved global, this
+	// run's own agenthost socket, or (only when the worktree carried an org
+	// scope) under that same org prefix. Re-uses the real trusted-value
+	// functions (RunTreeRoot / TrustedTFBinaryPath / TrustedGitHooksDir /
+	// TrustedAgentHostSocketPath) rather than re-deriving them — same as the
+	// netns check below reusing NetnsNameForRun — since these ARE the
+	// broker's own resolutions, not a parallel implementation to agree with.
+	orgPrefix, hasScope, scopeErr := worktreeScope(p.RunID, p.Worktree)
+	if scopeErr != nil {
+		t.Fatalf("accepted worktree %q that fails its own scope re-check: %v", p.Worktree, scopeErr)
+	}
+	for _, m := range p.Mounts {
+		// realPath, not the raw string: the production check resolves
+		// symlinks before comparing (see realPath's doc), so an accepted
+		// mount may lexically sit outside its trusted/org path yet still be
+		// safe because it RESOLVES into it — re-deriving with the raw
+		// string here would false-positive on exactly that case.
+		realSource, srcErr := realPath(m.Source)
+		if srcErr != nil {
+			t.Fatalf("accepted mount %q source %q that fails its own real-path re-check: %v", m.Destination, m.Source, srcErr)
+		}
+		switch m.Destination {
+		case TrustedTFBinaryDestination:
+			trusted, tfErr := TrustedTFBinaryPath()
+			if tfErr != nil {
+				t.Fatalf("resolve trusted TF binary path: %v", tfErr)
+			}
+			realTrusted, rErr := realPath(trusted)
+			if rErr != nil || realSource != realTrusted {
+				t.Fatalf("accepted mount %q source %q not the trusted TF binary path", m.Destination, m.Source)
+			}
+		case githooks.SandboxDir:
+			realTrusted, rErr := realPath(TrustedGitHooksDir())
+			if rErr != nil || realSource != realTrusted {
+				t.Fatalf("accepted mount %q source %q not the trusted git-hooks dir", m.Destination, m.Source)
+			}
+		case TrustedAgentHostSocketDestination:
+			realTrusted, rErr := realPath(TrustedAgentHostSocketPath(p.RunID))
+			if rErr != nil || realSource != realTrusted {
+				t.Fatalf("accepted mount %q source %q not this run's own agenthost socket", m.Destination, m.Source)
+			}
+		default:
+			if !hasScope {
+				t.Fatalf("accepted mount %q source %q with no org scope to authorize it", m.Destination, m.Source)
+			}
+			rel, relErr := filepath.Rel(orgPrefix, realSource)
+			if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				t.Fatalf("accepted mount %q source %q outside the run's own org tree %q", m.Destination, m.Source, orgPrefix)
+			}
+		}
+	}
+
 	// Rlimits: allowlisted type, soft <= hard, no repeats.
 	seen := make(map[string]struct{}, len(p.Rlimits))
 	for _, r := range p.Rlimits {
@@ -158,6 +215,26 @@ func assertLaunchParamsSafe(t *testing.T, p LaunchParams) {
 // never panic, and must never accept an input that violates an invariant
 // the broker then trusts.
 func FuzzValidateLaunchParams(f *testing.F) {
+	// realPath now requires the seed's Worktree/Mounts sources to actually
+	// exist (see realPath's doc), so materialize them here — the same
+	// on-disk fixtures a real "run-1" launch would have by RPC time. Plain
+	// files/dirs, not a live net.Listen: Go's fuzzing engine re-runs this
+	// setup independently in each of several worker PROCESSES against the
+	// SAME fixed path, and a second Listen on an already-bound socket path
+	// would fail (realPath only needs the path to exist, not be dialable).
+	if err := os.MkdirAll(RunTreeRoot("run-1"), 0o755); err != nil {
+		f.Fatalf("mkdir seed worktree fixture: %v", err)
+	}
+	// Redirect the agenthost socket root to a per-process temp dir: the real
+	// root is /run/tf, which only root (or whoever the container entrypoint
+	// hands it to) can create — mirrors cmd/capbroker's brokerSocketPath
+	// test redirection for the same reason.
+	trustedAgentHostSocketRoot = f.TempDir()
+	seedSocket := TrustedAgentHostSocketPath("run-1")
+	if err := os.WriteFile(seedSocket, nil, 0o600); err != nil {
+		f.Fatalf("create seed socket fixture: %v", err)
+	}
+
 	valid := LaunchParams{
 		ContainerID: "tf-run1frag-3",
 		RunID:       "run-1",
@@ -166,8 +243,8 @@ func FuzzValidateLaunchParams(f *testing.F) {
 			{Key: "ANTHROPIC_BASE_URL", Value: "http://127.0.0.1:9"},
 		},
 		Args:      []string{sandboxNodeBinary, sandboxWrapperEntry, "run"},
-		Worktree:  "/work/run-1",
-		Mounts:    []Mount{{Source: "/run/tf/a.sock", Destination: "/tf/a.sock", Options: []string{"ro"}}},
+		Worktree:  RunTreeRoot("run-1"),
+		Mounts:    []Mount{{Source: seedSocket, Destination: TrustedAgentHostSocketDestination, Options: []string{"ro"}}},
 		Rlimits:   []Rlimit{{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 4096}},
 		NetnsPath: "/var/run/netns/" + NetnsNameForRun("run-1", 3),
 	}
