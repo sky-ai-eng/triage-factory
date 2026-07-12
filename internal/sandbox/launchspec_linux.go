@@ -551,6 +551,39 @@ var allowedMountOptions = map[string]struct{}{
 	"rw": {},
 }
 
+// realPath resolves p to its fully symlink-free, canonical form so the
+// prefix/equality comparisons below operate on the actual path a bind
+// mount would read, not the caller's possibly-symlinked claim. Without
+// this, a compromised orchestrator — which legitimately owns and writes
+// its own org's tree (worktrees, curator-repos) — could plant a symlink
+// INSIDE its own org's subtree pointing at another org's data (or
+// anywhere else) and pass the lexically-in-scope symlink path as a mount
+// source or worktree; a purely lexical filepath.Rel/== check would wave
+// it through, and the broker would then bind-mount whatever it actually
+// resolves to. Requires p to exist, which every real mount source and
+// worktree does by launch time (the orchestrator materializes the
+// worktree, and cmd/exec/agenthost creates its socket, before ever issuing
+// the launch RPC) — a caller-supplied path that doesn't exist yet is
+// rejected here rather than failing later inside runsc.
+//
+// Residual: this closes the STATIONARY case — a symlink already in place
+// when the broker validates. It does not close a race where a compromised
+// orchestrator swaps a resolved component for a symlink in the narrow
+// window between this check and the broker's later bind-mount syscall;
+// airtight closure of that would need the mount to resolve via
+// openat2(RESOLVE_NO_SYMLINKS) into a stable fd, the same kernel-level
+// technique tracked for the run-tree chown/remove TOCTOU. Bounded the same
+// way as this file's other residuals: winning that race requires the
+// orchestrator to already be compromised, at which point it holds every
+// credential its own org's data would expose anyway.
+func realPath(p string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return "", fmt.Errorf("resolve real path of %q: %w", p, err)
+	}
+	return resolved, nil
+}
+
 // worktreeScope classifies Config.Worktree into the shape it must be one
 // of, and returns the org-tree prefix every OTHER mount's source must
 // share. This is internal consistency, not tenant authentication: the
@@ -580,15 +613,24 @@ var allowedMountOptions = map[string]struct{}{
 // shallow to name an org, a symlink-clean but out-of-tree path — is
 // rejected outright.
 func worktreeScope(runID, worktree string) (orgPrefix string, hasScope bool, err error) {
-	if runID != "" && worktree == RunTreeRoot(runID) {
-		return "", false, nil
+	realWorktree, err := realPath(worktree)
+	if err != nil {
+		return "", false, fmt.Errorf("sandbox: worktree %q: %w", worktree, err)
+	}
+	if runID != "" {
+		if realRunTree, rtErr := realPath(RunTreeRoot(runID)); rtErr == nil && realWorktree == realRunTree {
+			return "", false, nil
+		}
 	}
 	root, err := paths.StateRootErr()
 	if err != nil {
 		return "", false, fmt.Errorf("sandbox: resolve state root: %w", err)
 	}
-	orgsRoot := filepath.Join(root, "orgs")
-	rel, relErr := filepath.Rel(orgsRoot, worktree)
+	orgsRoot, err := realPath(filepath.Join(root, "orgs"))
+	if err != nil {
+		return "", false, fmt.Errorf("sandbox: worktree %q is neither this run's own tree nor under the state-root org tree: %w", worktree, err)
+	}
+	rel, relErr := filepath.Rel(orgsRoot, realWorktree)
 	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", false, fmt.Errorf("sandbox: worktree %q is neither this run's own tree nor under the state-root org tree", worktree)
 	}
@@ -596,6 +638,10 @@ func worktreeScope(runID, worktree string) (orgPrefix string, hasScope bool, err
 	if orgID == "" || orgID == "." || !found || rest == "" {
 		return "", false, fmt.Errorf("sandbox: worktree %q does not resolve to a per-org subtree", worktree)
 	}
+	// orgsRoot is already fully resolved (realPath above) and orgID is a
+	// literal path segment taken from realWorktree — also fully resolved —
+	// so this reconstruction is itself a real, symlink-free path; no
+	// further resolution needed by callers that compare against it.
 	return filepath.Join(orgsRoot, orgID), true, nil
 }
 
@@ -638,28 +684,52 @@ func validateWorktreeAndMounts(runID, worktree string, mounts []Mount) error {
 			}
 		}
 
+		// Resolve the caller's claimed source to what it actually is before
+		// comparing — see realPath's doc for why a lexical-only compare here
+		// would let an orchestrator that plants a symlink inside its own
+		// org's tree point the bind mount at another org's data (or
+		// anywhere else) while still passing a prefix/equality check.
+		realSource, err := realPath(m.Source)
+		if err != nil {
+			return fmt.Errorf("sandbox: mount %q source %q: %w", m.Destination, m.Source, err)
+		}
+
 		switch m.Destination {
 		case TrustedTFBinaryDestination:
 			trusted, tfErr := TrustedTFBinaryPath()
 			if tfErr != nil {
 				return fmt.Errorf("sandbox: resolve trusted TF binary path: %w", tfErr)
 			}
-			if m.Source != trusted {
+			realTrusted, rErr := realPath(trusted)
+			if rErr != nil {
+				return fmt.Errorf("sandbox: resolve trusted TF binary path: %w", rErr)
+			}
+			if realSource != realTrusted {
 				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved TF binary path %q", m.Destination, m.Source, trusted)
 			}
 		case githooks.SandboxDir:
-			if trusted := TrustedGitHooksDir(); m.Source != trusted {
+			trusted := TrustedGitHooksDir()
+			realTrusted, rErr := realPath(trusted)
+			if rErr != nil {
+				return fmt.Errorf("sandbox: resolve trusted git-hooks dir: %w", rErr)
+			}
+			if realSource != realTrusted {
 				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved git-hooks dir %q", m.Destination, m.Source, trusted)
 			}
 		case TrustedAgentHostSocketDestination:
-			if trusted := TrustedAgentHostSocketPath(runID); m.Source != trusted {
+			trusted := TrustedAgentHostSocketPath(runID)
+			realTrusted, rErr := realPath(trusted)
+			if rErr != nil {
+				return fmt.Errorf("sandbox: resolve this run's agenthost socket: %w", rErr)
+			}
+			if realSource != realTrusted {
 				return fmt.Errorf("sandbox: mount %q source %q is not this run's own agenthost socket (want %q)", m.Destination, m.Source, trusted)
 			}
 		default:
 			if !hasScope {
 				return fmt.Errorf("sandbox: mount %q source %q is not a recognized broker-global/per-run mount, and this run's worktree carries no org scope to authorize it", m.Destination, m.Source)
 			}
-			rel, relErr := filepath.Rel(orgPrefix, m.Source)
+			rel, relErr := filepath.Rel(orgPrefix, realSource)
 			if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return fmt.Errorf("sandbox: mount %q source %q is outside this run's own org tree %q", m.Destination, m.Source, orgPrefix)
 			}

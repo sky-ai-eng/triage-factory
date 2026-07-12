@@ -73,7 +73,12 @@ func withStubPrepareBundle(t *testing.T) {
 // so the broker's boundary gate admits the launch and the test exercises the
 // RPC/registry/socket wiring rather than a validation rejection. The netns
 // name matches the broker's tf-<hex>-<idx> shape the validator requires.
+// The worktree must also actually exist on disk (the validator resolves
+// symlinks, which requires the path to be there) — idempotently created
+// here rather than threading *testing.T through this function's several
+// call sites, since nothing writes into it.
 func validLaunchParams(containerID string) sandbox.LaunchParams {
+	_ = os.MkdirAll(sandbox.RunTreeRoot("run"), 0o755)
 	return sandbox.LaunchParams{
 		RunID:       "run",
 		ContainerID: containerID,
