@@ -84,6 +84,54 @@ type PrivilegedOps interface {
 	CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error)
 }
 
+// SidecarLaunchParams is the serializable, validated input to
+// SidecarLauncher.LaunchSidecar — the narrow RPC-shaped translation of the
+// cross-platform SidecarConfig, exactly as LaunchParams is Config's
+// RPC-shaped translation. UID/GID are computed orchestrator-side
+// (SidecarUID(cfg.SubnetIdx)) but are NOT trusted merely for arriving: the
+// broker re-validates them fall inside the reserved sidecar band
+// (ValidateSidecarLaunchParams) before ever handing them to a setuid
+// Credential, so a compromised orchestrator cannot ask the broker to start
+// the sidecar as root, as the orchestrator's own uid, or as an arbitrary
+// uid outside the reserved band.
+type SidecarLaunchParams struct {
+	// ContainerID is this sidecar's unique registry key in the broker's run
+	// table — distinct from the run's own ContainerID (LaunchRun's), so the
+	// two can never collide keying the same map.
+	ContainerID string
+
+	// UID and GID are the uid/gid the broker execs the sidecar as via
+	// syscall.Credential. Always equal (see SidecarUID's doc); carried as
+	// two fields anyway so the wire shape says exactly what a Credential
+	// needs, with no implicit "gid mirrors uid" the broker has to assume.
+	UID, GID int
+
+	// StdioSocketPath is the per-run unix socket the orchestrator listens
+	// on and the broker dials to hand the sidecar its stdio — the same
+	// fd-passthrough pattern LaunchRun's StdioSocketPath uses, so the
+	// sidecar's bytes never enter the broker's address space. Like
+	// LaunchRun's field, this crosses the RPC unvalidated: dialing a
+	// caller-chosen local path costs the broker nothing a compromised
+	// orchestrator couldn't already do from its own process (see
+	// ValidateCaptureStdoutSocketPath's doc for the identical reasoning).
+	StdioSocketPath string
+}
+
+// SidecarLauncher launches (and cross-process supervises) one run's
+// credential-sidecar process — the sibling of RunLauncher for the per-run
+// sidecar harness. Deliberately its own interface, not a second
+// method bolted onto RunLauncher: the two launch entirely different
+// programs (a gVisor-jailed runsc child vs. a plain capless host process at
+// a per-run uid) through different broker RPCs, and keeping them distinct
+// interfaces keeps that difference visible at the type level.
+type SidecarLauncher interface {
+	// LaunchSidecar asks the broker to exec the run-sidecar subcommand as
+	// the validated per-run uid, with its stdio wired to a socket this
+	// process listens on, and hand back a LaunchedSidecar the caller closes
+	// when the run ends.
+	LaunchSidecar(ctx context.Context, p SidecarLaunchParams) (LaunchedSidecar, error)
+}
+
 // RunLauncher launches (and cross-process supervises) one prepared run.
 // It is deliberately NOT part of PrivilegedOps: the request/response RPC
 // that backs PrivilegedOps carries only serializable data, but a launch
@@ -100,11 +148,12 @@ type RunLauncher interface {
 
 // SandboxOps is the full set the orchestrator installs at boot via
 // SetPrivilegedOps: the broker-served privileged operations plus the
-// always-brokered run launch. The cap-broker IPC client is the sole
-// implementation.
+// always-brokered run launch and the always-brokered sidecar launch. The
+// cap-broker IPC client is the sole implementation.
 type SandboxOps interface {
 	PrivilegedOps
 	RunLauncher
+	SidecarLauncher
 }
 
 // NetworkState is the serializable per-run network state SetupNetwork

@@ -141,6 +141,13 @@ type Sandbox struct {
 	HostIP    string // host-side veth IP, e.g. "10.42.7.1" — proxies bind here
 	NetnsPath string // /var/run/netns/tf-<runID>-<idx>
 
+	// SubnetIdx is the allocator index Wrap claimed for this run (the same
+	// index Subnet/HostIP/NetnsPath are all derived from). Exposed so a
+	// caller can derive the run's credential-sidecar uid from the exact
+	// same per-run index (see SidecarUID / LaunchSidecar) rather than
+	// re-parsing it out of Subnet or HostIP.
+	SubnetIdx uint8
+
 	// teardown holds the platform-specific cleanup state. On Linux
 	// it's a *teardownState (defined in sandbox_linux.go); on
 	// non-Linux it's always nil because Wrap returns early with

@@ -31,6 +31,12 @@ func (f fakePrivilegedOps) LaunchRun(ctx context.Context, p LaunchParams) (Launc
 	// fails loudly instead of nil-panicking in the caller.
 	return nil, errors.New("fakePrivilegedOps.LaunchRun: not implemented for this test double")
 }
+func (f fakePrivilegedOps) LaunchSidecar(ctx context.Context, p SidecarLaunchParams) (LaunchedSidecar, error) {
+	// Present only to satisfy SandboxOps (SetPrivilegedOps installs this as
+	// both defaultOps and sidecarLauncher too). Same not-implemented
+	// contract as LaunchRun above.
+	return nil, errors.New("fakePrivilegedOps.LaunchSidecar: not implemented for this test double")
+}
 func (f fakePrivilegedOps) ReapOrphans(ctx context.Context) error { return nil }
 func (f fakePrivilegedOps) ChownRunTree(ctx context.Context, root, subpath string) error {
 	return nil

@@ -461,6 +461,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		ahCloser   io.Closer
 		sb         *sandbox.Sandbox
 		run        sandbox.LaunchedRun
+		sidecar    sandbox.LaunchedSidecar
 		once       sync.Once
 	)
 	cleanup := func() {
@@ -470,6 +471,13 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 			// torn down below.
 			if run != nil {
 				_ = run.Close()
+			}
+			// The credential sidecar next, BEFORE sb.Close() below releases the
+			// subnet index its uid was derived from — a concurrent new run must
+			// never be handed that uid while this run's sidecar might still be
+			// exiting.
+			if sidecar != nil {
+				_ = sidecar.Close()
 			}
 			if sb != nil {
 				_ = sb.Close()
@@ -670,6 +678,24 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	}
 	sb = sboxObj
 	run = sandboxRun
+
+	// Broker-spawn this run's capless credential-sidecar process (an inert
+	// skeleton today; nothing here changes the run's behavior). Positioned
+	// right after Wrap returns, alongside where
+	// StartAgentHost/ConfigureProxies ran above, so it lives beside the
+	// other per-run bring-up seams a later phase (proxy + agenthost
+	// relocation) will extend. sb.SubnetIdx is the same index Wrap just
+	// allocated for the run's own netns, so the sidecar's uid can never
+	// collide with a concurrently live run's.
+	sidecarHandle, serr := sandbox.LaunchSidecar(runCtx, sandbox.SidecarConfig{
+		RunID:     opts.TraceID,
+		SubnetIdx: sb.SubnetIdx,
+	})
+	if serr != nil {
+		cleanup()
+		return nil, cleanup, fmt.Errorf("sandbox: launch credential sidecar: %w", serr)
+	}
+	sidecar = sidecarHandle
 
 	// The LaunchedRun satisfies runProc (Start/Stdin/Stdout/Stderr/Wait/
 	// OOMKilled); cleanup closes it (kill + cgroup) alongside the rest of

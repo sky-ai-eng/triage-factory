@@ -82,8 +82,9 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// doesn't drag Linux-only types into other builds.
 	td := &teardownState{subnetIdx: idx}
 	sb := &Sandbox{
-		RunID:    cfg.RunID,
-		teardown: td,
+		RunID:     cfg.RunID,
+		SubnetIdx: idx,
+		teardown:  td,
 	}
 	releaseOnError := true
 	defer func() {

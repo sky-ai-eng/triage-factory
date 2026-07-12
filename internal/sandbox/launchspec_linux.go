@@ -403,6 +403,36 @@ func ValidateLaunchParams(p LaunchParams) error {
 	return nil
 }
 
+// ValidateSidecarLaunchParams is the broker's RPC-boundary gate for
+// LaunchSidecar — the sidecar analog of ValidateLaunchParams. The
+// load-bearing check is the uid/gid band: the orchestrator computes
+// SidecarUID(subnetIdx) itself and sends the result, so the broker must
+// independently confirm it falls inside the reserved sidecar range before
+// ever handing it to a setuid Credential — otherwise a compromised
+// orchestrator could ask the broker to exec the sidecar as uid 0, as its
+// own uid, or as any other uid on the host.
+//
+// Residual (accepted, same shape as validateNetnsPath's documented one): a
+// fully compromised orchestrator could still request a uid inside the band
+// that's already in use by another live sidecar, by lying about which
+// subnet index it belongs to — airtight per-run uid ownership would need
+// the broker to track which index it handed out for which run, the same
+// broker-internal-state evolution validateNetnsPath's doc anticipates. It's
+// bounded even so: such an orchestrator already holds every host-side
+// credential a reachable sibling sidecar would mediate.
+func ValidateSidecarLaunchParams(p SidecarLaunchParams) error {
+	if err := validateRunID("sidecar container id", p.ContainerID); err != nil {
+		return err
+	}
+	if p.UID != p.GID {
+		return fmt.Errorf("sandbox: sidecar uid %d and gid %d must match", p.UID, p.GID)
+	}
+	if p.UID < SidecarUIDBase || p.UID >= SidecarUIDBase+MaxSandboxes {
+		return fmt.Errorf("sandbox: sidecar uid %d outside the reserved band [%d, %d)", p.UID, SidecarUIDBase, SidecarUIDBase+MaxSandboxes)
+	}
+	return nil
+}
+
 // ValidateCaptureStdoutSocketPath validates the per-capture stdout socket
 // path the orchestrator sends over the CaptureRunDelta RPC — the same
 // clean-absolute-path treatment ValidateLaunchParams gives Worktree, since

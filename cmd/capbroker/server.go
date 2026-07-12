@@ -338,6 +338,30 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return s.captureRunDelta(ctx, a)
 
+	case methodLaunchSidecar:
+		var a launchSidecarArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return s.launchSidecar(ctx, a)
+
+	case methodWaitSidecar:
+		// Reuses waitRun's registry logic outright — a sidecar entry lives
+		// in the same s.runs map as a run entry, keyed by its own distinct
+		// ContainerID, and waiting/draining it needs nothing sidecar-specific.
+		var a waitSidecarArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return s.waitRun(ctx, waitRunArgs(a))
+
+	case methodKillSidecar:
+		var a killSidecarArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return s.killRun(killRunArgs(a))
+
 	default:
 		return nil, fmt.Errorf("capbroker: unknown method %q", method)
 	}
