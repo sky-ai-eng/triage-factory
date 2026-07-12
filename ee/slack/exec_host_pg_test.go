@@ -53,6 +53,11 @@ type fakeExecSlack struct {
 	historyCalls  int
 	repliesCalls  int
 	lastRepliesTS string
+	// repliesNextCursor, when set, makes every conversations.replies response
+	// claim a further page exists (a non-empty next_cursor) — simulates a
+	// long thread with more replies beyond page 1, for the pagination-
+	// avoidance regression test: resolveMessageRootTS must never follow it.
+	repliesNextCursor string
 
 	// userNames maps a Slack user id to the display name users.info answers
 	// with — backs the sender-name resolution test.
@@ -113,7 +118,11 @@ func newFakeExecSlack(t *testing.T) *fakeExecSlack {
 		case strings.HasSuffix(r.URL.Path, "/conversations.replies"):
 			f.repliesCalls++
 			f.lastRepliesTS = r.URL.Query().Get("ts")
-			writeSlackFakeJSON(w, map[string]any{"ok": true, "messages": f.repliesMessages})
+			resp := map[string]any{"ok": true, "messages": f.repliesMessages}
+			if f.repliesNextCursor != "" {
+				resp["response_metadata"] = map[string]any{"next_cursor": f.repliesNextCursor}
+			}
+			writeSlackFakeJSON(w, resp)
 		case strings.HasSuffix(r.URL.Path, "/files.getUploadURLExternal"):
 			writeSlackFakeJSON(w, map[string]any{"ok": true, "upload_url": slackAPIBase + "/fake-upload-target", "file_id": "F-ATTACH"})
 		case strings.HasSuffix(r.URL.Path, "/fake-upload-target"):
@@ -624,6 +633,45 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies_ChannelRootFallback(t *te
 		t.Fatalf("react: %v", err)
 	}
 	wantTarget := domain.SlackSourceID("C1", ts)
+	acts := r.actionsForRun(orgID, runID)
+	if len(acts) != 1 || acts[0].Target != wantTarget {
+		t.Fatalf("external_actions = %+v, want one action targeting %q", acts, wantTarget)
+	}
+}
+
+// TestSlackExecHandler_ResolvesRootViaThreadReplies_NeverFollowsCursor pins
+// the perf-regression fix on top of the endpoint fix: resolveMessageRootTS
+// must make exactly ONE conversations.replies request, never following
+// Slack's cursor even when the fake reports more pages exist (a non-empty
+// next_cursor — standing in for a real thread with hundreds of replies).
+// Calling the full-pagination slackConversationsReplies with limit=1 (the
+// first cut of this fix) would have cost one HTTP request per reply just to
+// reach cursor exhaustion, for a root ts that's already known after page 1
+// — resolveMessageRootTS only ever reads msgs[0]. A fake that ignores
+// cursors entirely (as the other root-resolution tests' fakes do) can't
+// catch that regression, since it would also report only 1 call; this test
+// exists specifically to make a second (or Nth) call observable.
+func TestSlackExecHandler_ResolvesRootViaThreadReplies_NeverFollowsCursor(t *testing.T) {
+	const rootTS = "1700000000.000000"
+	const replyTS = "1700000005.000200"
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-root-nocursor")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	r.fake.repliesMessages = []map[string]any{{"ts": rootTS, "user": "U1", "text": "root message"}}
+	r.fake.repliesNextCursor = "dGVhbTpD" // a non-empty cursor: "there's another page"
+
+	if _, err := r.hdl.react(context.Background(), info, slackReactArgs{Channel: "C1", TS: replyTS, Emoji: "eyes"}); err != nil {
+		t.Fatalf("react: %v", err)
+	}
+	if r.fake.repliesCalls != 1 {
+		t.Errorf("conversations.replies was called %d time(s), want exactly 1 (must not follow next_cursor)", r.fake.repliesCalls)
+	}
+	wantTarget := domain.SlackSourceID("C1", rootTS)
 	acts := r.actionsForRun(orgID, runID)
 	if len(acts) != 1 || acts[0].Target != wantTarget {
 		t.Fatalf("external_actions = %+v, want one action targeting %q", acts, wantTarget)

@@ -471,16 +471,21 @@ func (h *slackExecHandler) permalinkBestEffort(ctx context.Context, token, chann
 	return link
 }
 
-// resolveMessageRootTS best-effort resolves ts's thread root via
-// conversations.replies: Slack accepts either a thread's root ts or any
-// reply's ts in the `ts` param and returns the thread's messages with the
-// root first — conversations.history (channel-level messages only) can
-// never see this, since a reply isn't a channel-level message. Falls back to
-// ts itself (a channel-root message with no thread, or a lookup failure)
-// rather than erroring — an edit/react's recording is best-effort and must
-// not fail the already-applied Slack write over a cosmetic Target grouping.
+// resolveMessageRootTS best-effort resolves ts's thread root via a SINGLE
+// conversations.replies request (slackConversationsRepliesPage, not the
+// full-pagination slackConversationsReplies): Slack accepts either a
+// thread's root ts or any reply's ts in the `ts` param and returns the
+// thread's messages with the root first, on every page regardless of the
+// thread's total reply count — conversations.history (channel-level
+// messages only) can never see this, since a reply isn't a channel-level
+// message. One page is enough since only msgs[0] is ever read; following
+// the cursor would cost one HTTP request per reply in a long thread for no
+// benefit. Falls back to ts itself (a channel-root message with no thread,
+// or a lookup failure) rather than erroring — an edit/react's recording is
+// best-effort and must not fail the already-applied Slack write over a
+// cosmetic Target grouping.
 func (h *slackExecHandler) resolveMessageRootTS(ctx context.Context, token, channel, ts string) string {
-	msgs, _, err := slackConversationsReplies(ctx, h.client, token, channel, ts, 1)
+	msgs, _, _, err := slackConversationsRepliesPage(ctx, h.client, token, channel, ts, 1, "")
 	if err != nil || len(msgs) == 0 {
 		return ts
 	}

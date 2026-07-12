@@ -793,6 +793,63 @@ type slackMessageFile struct {
 // test can lower it.
 var slackConversationsRepliesCap = 1000
 
+// slackConversationsRepliesPage is a SINGLE conversations.replies request —
+// no cursor following. Slack always returns a thread's root message first,
+// on every page regardless of the thread's total reply count, so a caller
+// that only needs the root (resolveMessageRootTS) must call this directly
+// rather than the full-pagination slackConversationsReplies below: with
+// limit=1, that loop would cost one HTTP request PER REPLY (each potentially
+// blocking on a 429 Retry-After) just to reach cursor exhaustion, for a
+// value already known after this one page.
+func slackConversationsRepliesPage(ctx context.Context, client *http.Client, botToken, channel, ts string, limit int, cursor string) (messages []slackMessage, nextCursor string, hasMore bool, err error) {
+	q := url.Values{"channel": {channel}, "ts": {ts}}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, slackAPIBase+"/conversations.replies?"+q.Encode(), nil)
+	if err != nil {
+		return nil, "", false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+
+	var resp struct {
+		OK       bool   `json:"ok"`
+		Error    string `json:"error"`
+		Messages []struct {
+			User     string `json:"user"`
+			BotID    string `json:"bot_id"`
+			Text     string `json:"text"`
+			TS       string `json:"ts"`
+			ThreadTS string `json:"thread_ts"`
+			Files    []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"files"`
+		} `json:"messages"`
+		HasMore          bool `json:"has_more"`
+		ResponseMetadata struct {
+			NextCursor string `json:"next_cursor"`
+		} `json:"response_metadata"`
+	}
+	if err := doSlackJSON(ctx, client, req, &resp); err != nil {
+		return nil, "", false, err
+	}
+	if !resp.OK {
+		return nil, "", false, fmt.Errorf("slack conversations.replies: %s", nonEmpty(resp.Error, "not ok"))
+	}
+	out := make([]slackMessage, 0, len(resp.Messages))
+	for _, m := range resp.Messages {
+		out = append(out, slackMessage{
+			User: m.User, BotID: m.BotID, Text: m.Text, TS: m.TS, ThreadTS: m.ThreadTS,
+			Files: slackMessageFilesFrom(m.Files),
+		})
+	}
+	return out, resp.ResponseMetadata.NextCursor, resp.HasMore, nil
+}
+
 // slackConversationsReplies returns a thread's messages (the root message
 // first) via conversations.replies, paginating by cursor until Slack stops
 // returning a next_cursor or slackConversationsRepliesCap is hit.
@@ -802,54 +859,17 @@ var slackConversationsRepliesCap = 1000
 func slackConversationsReplies(ctx context.Context, client *http.Client, botToken, channel, ts string, limit int) (messages []slackMessage, truncated bool, err error) {
 	cursor := ""
 	for {
-		q := url.Values{"channel": {channel}, "ts": {ts}}
-		if limit > 0 {
-			q.Set("limit", strconv.Itoa(limit))
-		}
-		if cursor != "" {
-			q.Set("cursor", cursor)
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, slackAPIBase+"/conversations.replies?"+q.Encode(), nil)
+		page, nextCursor, hasMore, err := slackConversationsRepliesPage(ctx, client, botToken, channel, ts, limit, cursor)
 		if err != nil {
 			return nil, false, err
 		}
-		req.Header.Set("Authorization", "Bearer "+botToken)
-
-		var resp struct {
-			OK       bool   `json:"ok"`
-			Error    string `json:"error"`
-			Messages []struct {
-				User     string `json:"user"`
-				BotID    string `json:"bot_id"`
-				Text     string `json:"text"`
-				TS       string `json:"ts"`
-				ThreadTS string `json:"thread_ts"`
-				Files    []struct {
-					ID   string `json:"id"`
-					Name string `json:"name"`
-				} `json:"files"`
-			} `json:"messages"`
-			HasMore          bool `json:"has_more"`
-			ResponseMetadata struct {
-				NextCursor string `json:"next_cursor"`
-			} `json:"response_metadata"`
-		}
-		if err := doSlackJSON(ctx, client, req, &resp); err != nil {
-			return nil, false, err
-		}
-		if !resp.OK {
-			return nil, false, fmt.Errorf("slack conversations.replies: %s", nonEmpty(resp.Error, "not ok"))
-		}
-		for _, m := range resp.Messages {
-			messages = append(messages, slackMessage{
-				User: m.User, BotID: m.BotID, Text: m.Text, TS: m.TS, ThreadTS: m.ThreadTS,
-				Files: slackMessageFilesFrom(m.Files),
-			})
+		for _, m := range page {
+			messages = append(messages, m)
 			if len(messages) >= slackConversationsRepliesCap {
-				return messages, resp.ResponseMetadata.NextCursor != "" || resp.HasMore, nil
+				return messages, nextCursor != "" || hasMore, nil
 			}
 		}
-		cursor = resp.ResponseMetadata.NextCursor
+		cursor = nextCursor
 		if cursor == "" {
 			return messages, false, nil
 		}
