@@ -2,6 +2,7 @@ package projectclassify
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -162,18 +163,33 @@ func (r *Runner) run(ctx context.Context) {
 			classifyLog.Warn("all votes errored, leaving unclassified for retry", "entity", e.ID, "votes", len(votes))
 			continue
 		}
-		rationale := bestRationale(votes)
-		if winner != nil {
+
+		tiedScore, tied := bestVotes(votes)
+		var rationale string
+		if len(tied) > 1 {
+			// pickWinner already resolved this to nil; bestRationale would
+			// otherwise quote one arbitrary tied vote's language as if it
+			// were a confident pick, misrepresenting why the entity ended
+			// up unassigned.
+			rationale = fmt.Sprintf("Classifier confidence tied at %d/100 across %d candidate projects; resolved to unassigned rather than guess.", tiedScore, len(tied))
+		} else {
+			rationale = bestRationale(votes)
+		}
+
+		switch {
+		case winner != nil:
 			classifyLog.Info("entity classified to project", "entity", e.ID, "project", *winner)
 			assigned++
-		} else {
+		case len(tied) > 1:
+			classifyLog.Info("entity unassigned, exact tie for top score", "entity", e.ID, "score", tiedScore, "tied_projects", len(tied))
+		default:
 			best := -1
 			for _, v := range votes {
 				if v.Err == nil && v.Score > best {
 					best = v.Score
 				}
 			}
-			classifyLog.Info("entity unassigned, no unique winner above threshold", "entity", e.ID, "best_score", best, "threshold", ConfidenceThreshold)
+			classifyLog.Info("entity unassigned, best score below threshold", "entity", e.ID, "best_score", best, "threshold", ConfidenceThreshold)
 		}
 		if err := r.entities.AssignProjectSystem(ctx, r.orgID, e.ID, winner, rationale); err != nil {
 			classifyLog.Error("assign entity failed", "entity", e.ID, "error", err)

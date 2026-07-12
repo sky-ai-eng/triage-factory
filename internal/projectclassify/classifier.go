@@ -114,41 +114,48 @@ func (r *Runner) runVotes(ctx context.Context, projects []domain.Project, entity
 	return votes
 }
 
+// bestVotes finds the highest-scoring successful vote(s) that clear
+// ConfidenceThreshold. score is -1 if none do. tied holds every vote
+// at that score — length 1 in the normal case, length ≥2 on an exact
+// tie. Shared by pickWinner and the runner's rationale logic so both
+// agree on what "tied" means; a duplicated definition risks drifting
+// out of sync with ConfidenceThreshold.
+func bestVotes(votes []Vote) (score int, tied []Vote) {
+	score = -1
+	for _, v := range votes {
+		if v.Err != nil || v.Score < ConfidenceThreshold {
+			continue
+		}
+		switch {
+		case v.Score > score:
+			score = v.Score
+			tied = []Vote{v}
+		case v.Score == score:
+			tied = append(tied, v)
+		}
+	}
+	return score, tied
+}
+
 // pickWinner returns the highest-scoring above-threshold project_id,
 // or nil if no vote clears ConfidenceThreshold. An exact tie for the
 // top qualifying score means "can't tell" and also resolves to nil —
 // never a coin-flip assignment, since project_id drives team
 // visibility on the entity (see OwningTeamForEntitySystem).
 func pickWinner(votes []Vote, entityID string) *string {
-	bestScore := -1
-	var winner string
-	tied := 0
-	var tiedProjects []string
-	for _, v := range votes {
-		if v.Err != nil {
-			continue
-		}
-		if v.Score < ConfidenceThreshold {
-			continue
-		}
-		switch {
-		case v.Score > bestScore:
-			bestScore = v.Score
-			winner = v.ProjectID
-			tied = 1
-			tiedProjects = []string{v.ProjectID}
-		case v.Score == bestScore:
-			tied++
-			tiedProjects = append(tiedProjects, v.ProjectID)
-		}
-	}
-	if bestScore < 0 {
+	score, tied := bestVotes(votes)
+	if score < 0 {
 		return nil
 	}
-	if tied > 1 {
-		classifyLog.Info("exact tie for top score, resolving to unassigned", "entity", entityID, "projects", tiedProjects, "score", bestScore)
+	if len(tied) > 1 {
+		ids := make([]string, len(tied))
+		for i, v := range tied {
+			ids[i] = v.ProjectID
+		}
+		classifyLog.Info("exact tie for top score, resolving to unassigned", "entity", entityID, "projects", ids, "score", score)
 		return nil
 	}
+	winner := tied[0].ProjectID
 	return &winner
 }
 

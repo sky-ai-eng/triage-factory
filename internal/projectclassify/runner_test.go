@@ -121,3 +121,48 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 		}
 	}
 }
+
+// TestRunner_ExactTieRationaleDoesNotQuoteOneCandidate guards against a
+// misleading rationale: on an exact tie, bestRationale would otherwise pick
+// one arbitrary tied vote's confident-sounding text and persist it verbatim,
+// even though that project was NOT assigned — a human reading the rationale
+// on an unassigned entity should see that it was tied, not a cherry-picked
+// quote implying a near-miss on one specific project.
+func TestRunner_ExactTieRationaleDoesNotQuoteOneCandidate(t *testing.T) {
+	isolateHome(t)
+	database := newTestDB(t)
+
+	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{ID: "p-alpha", Name: "Alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{ID: "p-beta", Name: "Beta"}); err != nil {
+		t.Fatal(err)
+	}
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#3", "pr", "T", "https://x/3")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil)
+	r.stage1Fn = func(_ context.Context, _, prompt string) (int, string, error) {
+		if strings.Contains(prompt, "<project_name>\nAlpha\n</project_name>") {
+			return 75, "definitely belongs to Alpha", nil
+		}
+		return 75, "definitely belongs to Beta", nil
+	}
+	r.run(context.Background())
+
+	got, err := sqlitestore.New(database).Entities.GetSystem(context.Background(), runmode.LocalDefaultOrgID, entity.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ProjectID != nil {
+		t.Errorf("entity should be unassigned on an exact tie, got project %v", *got.ProjectID)
+	}
+	if strings.Contains(got.ClassificationRationale, "definitely belongs to") {
+		t.Errorf("rationale quotes one tied candidate's vote as if it won: %q", got.ClassificationRationale)
+	}
+	if !strings.Contains(got.ClassificationRationale, "tied") {
+		t.Errorf("rationale should explain the tie, got: %q", got.ClassificationRationale)
+	}
+}
