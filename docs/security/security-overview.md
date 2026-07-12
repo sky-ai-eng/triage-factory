@@ -127,10 +127,15 @@ it holds and the *hostile input* it is exposed to never overlap:
   I/O, a socket file descriptor it passes straight through to the runtime and
   never reads — the run's bytes never enter the broker's address space (§4.2).
 - **orchestrator** — today's main process, with its capabilities **dropped at
-  exec** (not in-process — see the note below). It runs the dispatcher, resolves
-  and holds credentials, binds the LLM/git/egress proxies (which parse hostile
-  agent traffic), serves the agent-host socket, and drives the run. It holds
-  every credential and **zero capabilities**.
+  exec** (not in-process — see the note below). It runs the dispatcher and drives
+  the run. The credential-holding parts — the LLM/git/egress proxies (which parse
+  hostile agent traffic) and the agent-host socket — run in a **capless per-run
+  child process**, one per run, so a run's credentials are process-isolated per
+  run rather than shared across the box (§5). It holds **zero capabilities**.
+  <!-- TODO(TFAC-620): per-run credential-process isolation; realized when that epic ships. Until then the proxies/agent-host run as goroutines in the orchestrator itself. -->
+- **per-run credential process** — a capless child holding only *one* run's
+  credentials, unsealed with a key it generates for itself. No capabilities, one
+  tenant's material, exposed only to that run's own traffic (§5).
 - **sandbox** — the gVisor jail running the agent. No capabilities, no
   credentials (Property B).
 
@@ -141,9 +146,12 @@ kernel-granted privileges. Capabilities are per-process and enforced by the
 kernel at syscall time.
 
 - The orchestrator is the realistic target — it is the one parsing
-  hostile input. An attacker would obtain only the credentials it holds, and
-  nothing else. It dropped capabilities already, and the kernel denies the
-  syscalls regardless of what code the attacker jumps to.
+  hostile input. It dropped capabilities already, and the kernel denies the
+  syscalls regardless of what code the attacker jumps to. Its credentials live in
+  per-run child processes, so compromising the dispatcher core yields **no**
+  credentials, and compromising a single run's credential process yields only
+  **that run's** material — never the co-located set (§5).
+  <!-- TODO(TFAC-620): realized when per-run credential isolation ships; today an orchestrator compromise reaches every co-located run's in-flight credentials. -->
 - There is no attacker-reachable path to the cap-broker. It parses no network,
   agent, or repository data; reaching it requires first owning the orchestrator
   and then finding a flaw in the narrow RPC between them.
@@ -212,16 +220,17 @@ Why this stays true as the code changes:
   egress CIDR. A change that widens an allowlist or drops a check surfaces as a
   failing test.
 
-**The residuals are named, and none is a capability escalation.** Two are
-documented in the validators themselves: the broker shape-checks a mount *source*
-but does not yet pin it to the run's own paths, and it binds a run's netns by a
-name derived from the run id rather than from broker-tracked state. Each lets a
-*fully* compromised orchestrator reach a sibling run's data at the fixed sandbox
-uid — a confidentiality/integrity residual bounded by host file permissions,
-never a capability regain — and each is moot in practice, because an orchestrator
-compromised enough to exploit it already holds every host-side credential those
-paths would expose. Closing them is the broker-internal per-run-state evolution
-the launch parameters already anticipate.
+**None of this is a capability escalation, and the data-plane sources are pinned
+too.** The broker pins every bind-mount *source* to the run's own tree and binds
+each run's netns from broker-tracked per-run state, so a compromised orchestrator
+cannot point a mount or a namespace at a sibling run's data — the checks enforce
+one consistent per-run scope, not merely a well-formed shape. This is internal
+consistency, not tenant authentication: a credential-free broker cannot
+authenticate an org, so the guarantee is that every path a run touches shares its
+own tree's scope. The privileged run-tree chown/remove path resolves through
+`openat2(RESOLVE_NO_SYMLINKS)`, so the kernel refuses a swapped-symlink component
+rather than a prior check merely catching it.
+<!-- TODO(TFAC-619): mount-source + netns per-run pinning. TODO(TFAC-618): openat2 kernel-enforcement of the run-tree TOCTOU. Both realized when those ship; until then the broker shape-checks the mount source without pinning it and the run-tree ops close the TOCTOU by argument, not kernel enforcement. -->
 
 ### 4.4 A note on dropping capabilities
 
@@ -264,22 +273,28 @@ needs them to do its job. Their safety rests on four things:
   calls are fixed host-side `exec` verbs. The git or Jira token can't be
   repurposed for arbitrary requests.
 
-A compromise of the proxy would still yield the credentials the proxy
-holds. Any process that holds a key and serves untrusted callers can leak that
-key if the process itself is compromised. What privilege separation guarantees
-is that this compromise yields no capabilities: the proxy runs on the
-orchestrator (unprivileged) side.
+A compromise of a run's proxy still yields the credentials that proxy
+holds — any process that holds a key and serves untrusted callers can leak it if
+the process itself is compromised. Two things bound that leak: privilege
+separation guarantees it yields **no capabilities** (the proxy is capless), and
+per-run isolation guarantees it yields **no other run's credentials** — each
+run's proxies and agent-host run in their own **capless per-run process** holding
+only that one run's material.
 
-The *reach* of that compromise is deliberately bounded. An executor does not
-load a secret-bag encryption key or resolve credentials from a shared store: it
-receives only **sealed, per-run credential bundles** carrying the short-lived,
-scoped material a run legitimately needs (control-plane-minted GitHub App
-installation tokens, Bedrock STS session credentials). So a compromise of the
-orchestrator or a proxy yields only the credentials for the runs currently
-placed on that box — not an App private key, not the encryption key, not other
-tenants' stored secrets. The remaining long-lived credential is the raw
-Anthropic API key for orgs on that route — the customer's own, spend-capped,
-expiring, and revocable.
+The *reach* is bounded by construction. An executor loads no secret-bag
+encryption key and resolves nothing from a shared store: each run receives only a
+**sealed, per-run credential bundle** carrying the short-lived, scoped material it
+legitimately needs (control-plane-minted GitHub App installation tokens, Bedrock
+STS session credentials), unsealed inside that run's own process with a key the
+process generates for itself — so the dispatcher core holds no decrypted
+credentials and cannot open any run's bundle. A compromise therefore reaches
+**one run's** credentials, not the co-located set — never an App private key,
+never the encryption key (which never touch an executor), never another tenant's
+material — and when the run ends its process exits and its credentials go with
+its address space. The remaining long-lived credential is the raw Anthropic API
+key for orgs on that route — the customer's own, spend-capped, expiring, and
+revocable.
+<!-- TODO(TFAC-620): per-run credential process + per-run sealing key. Realized when that epic ships; today the proxies/agent-host are goroutines in the shared orchestrator, unsealed with one per-instance key, so a compromise reaches every co-located run's in-flight credentials. -->
 
 ---
 
@@ -308,17 +323,21 @@ skips the gVisor escape.
 - Executors accept **no inbound traffic** — the entire hostile-input
   surface is outbound-initiated.
 - Privilege separation (§4): every hostile-input parser —
-  proxies, agent-host socket, git, archive extraction — runs on the
-  **unprivileged** orchestrator, so a parser flaw yields no capabilities.
+  proxies, agent-host socket, git, archive extraction — runs **capless**, and the
+  credential-holding ones (proxies, agent-host) run in a **per-run** process, so a
+  parser flaw yields neither capabilities nor another run's credentials.
+  <!-- TODO(TFAC-620): "per-run process" is realized when per-run credential isolation ships; today these parsers are goroutines in the shared orchestrator. -->
 - A **tailored seccomp profile** (`docker/seccomp-profile.json`)
   replaces `seccomp=unconfined` in the deployment manifest
 **Vector 3 — the resident credentials.** (See §5.)
 - Property B; App installation tokens (1h, single-installation); BYOK.
 - App-token minting runs on the control plane — executors never hold the App
   private key, only the hour-lived scoped token.
-- Executors receive only sealed, per-run credential bundles; the secret-bag
-  encryption key never loads on an executor, so a compromise reaches only the
-  runs placed there, never the whole tenant secret set.
+- Executors receive only sealed, per-run credential bundles, unsealed inside each
+  run's own process; the secret-bag encryption key never loads on an executor, so
+  a compromise reaches only **that one run's** bundle, never the whole tenant
+  secret set.
+  <!-- TODO(TFAC-620): "that one run's bundle" is realized when per-run credential isolation ships; today one per-instance key unseals every co-located run's bundle. -->
 - LLM credentials are short-lived where the provider allows it: Bedrock uses
   control-plane-minted STS session credentials (action-scoped, optionally network-bound
   to the executor's egress); the Anthropic-API route stays bring-your-own-key,
