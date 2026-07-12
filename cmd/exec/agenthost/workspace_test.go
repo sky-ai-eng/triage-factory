@@ -152,7 +152,7 @@ func TestServer_WorkspaceRoots_AgentViewIsWorkMount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, workspaceInfo("run-ipc-roots"))
+	srv := NewServer(stores, workspaceInfo("run-ipc-roots"), nil)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = listener.Close()

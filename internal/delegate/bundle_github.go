@@ -133,3 +133,18 @@ func (s *Spawner) bundleGitProxyConfigFor(ctx context.Context, info agenthost.Ru
 		},
 	}
 }
+
+// bundleAgentHostCredentials returns the per-request bundle accessor
+// agenthost.Start threads into its Server (see Server.bundleFunc) so the
+// daemon's exec-gh/exec-jira verbs can resolve credentials from this run's
+// sealed bundle on the executor path. Mirrors bundleGitProxyConfigFor's
+// currentGitHub closure: re-reads run_credentials and unseals fresh on every
+// call rather than a captured snapshot, so the brain's refresh sweep reaches
+// every subsequent gh/jira verb exactly like it already reaches the git
+// proxy's TokenSource.
+func (s *Spawner) bundleAgentHostCredentials(orgID, runID string) func(ctx context.Context) (*credbundle.Bundle, bool) {
+	_, myBootEpoch := s.executorIdentity()
+	return func(ctx context.Context) (*credbundle.Bundle, bool) {
+		return s.tryUnsealBundle(ctx, orgID, runID, myBootEpoch)
+	}
+}

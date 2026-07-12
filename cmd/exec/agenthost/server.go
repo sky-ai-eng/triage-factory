@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -63,6 +64,18 @@ type Server struct {
 	// Tests override it to inject a fake covering both tiers.
 	ghResolver ghclient.Resolver
 
+	// bundleFunc resolves this run's current sealed credential bundle when
+	// wired (TF_ROLE=executor runs only — the spawner passes nil on
+	// TF_ROLE=all and local mode). It re-reads run_credentials and unseals
+	// fresh on every call rather than a captured snapshot — the same
+	// refresh contract the git proxy's TokenSource follows — so a brain
+	// refresh-sweep remint reaches every subsequent gh/jira verb the same
+	// way it already reaches git pushes. When set and it resolves a
+	// bundle, dispatch attaches it to the per-request ctx and every
+	// gh/jira verb builds its client from the bundle instead of
+	// ghResolver / the Jira resolver.
+	bundleFunc func(ctx context.Context) (*credbundle.Bundle, bool)
+
 	// shutdown signals the accept loop to stop accepting new conns
 	// and lets in-flight handlers drain.
 	shutdown chan struct{}
@@ -75,11 +88,15 @@ type Server struct {
 // NewServer constructs a Server bound to (stores, info). info comes
 // from the spawner's per-run map — it carries the run's owning org
 // and the kicking-off user identity (empty for event-triggered runs).
-func NewServer(stores db.Stores, info RunInfo) *Server {
+// bundleFunc is non-nil only for a TF_ROLE=executor run with a sealed
+// credential bundle; nil disables the bundle-first branch and every gh/jira
+// verb resolves through ghResolver / the Jira resolver exactly as before.
+func NewServer(stores db.Stores, info RunInfo, bundleFunc func(ctx context.Context) (*credbundle.Bundle, bool)) *Server {
 	return &Server{
 		stores:     stores,
 		info:       info,
 		ghResolver: ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil),
+		bundleFunc: bundleFunc,
 		shutdown:   make(chan struct{}),
 	}
 }
@@ -254,6 +271,19 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 	// Share the Server's resolver (and its token cache) across every gh
 	// call in this run instead of re-minting per request.
 	client.ghResolver = s.ghResolver
+	// Bundle-first (TF_ROLE=executor): attach this request's freshly-read
+	// bundle to ctx so every gh/jira verb LocalClient dispatches to below
+	// builds its client from it instead of ghResolver / the Jira resolver —
+	// the same credbundle.FromContext(ctx) branch internal/delegate's git
+	// proxy and clone-token resolution already use. A miss (no bundle yet,
+	// stale boot epoch, unseal failure) leaves ctx untouched so the verb
+	// falls through to its resolver path, which then surfaces its own
+	// clear error.
+	if s.bundleFunc != nil {
+		if bundle, ok := s.bundleFunc(ctx); ok {
+			ctx = credbundle.WithBundle(ctx, bundle)
+		}
+	}
 	dec := func(dst any) error {
 		if len(rawArgs) == 0 {
 			return nil

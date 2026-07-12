@@ -3,8 +3,10 @@
 package agenthost
 
 import (
+	"context"
 	"errors"
 
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -18,7 +20,7 @@ type HostDaemon struct{}
 // Start always returns an "unsupported platform" error off Linux.
 // Callers wire it under the same Linux build tag the sandbox runner
 // requires.
-func Start(_ db.Stores, _ RunInfo) (*HostDaemon, sandbox.Mount, error) {
+func Start(_ db.Stores, _ RunInfo, _ func(ctx context.Context) (*credbundle.Bundle, bool)) (*HostDaemon, sandbox.Mount, error) {
 	return nil, sandbox.Mount{}, errors.New("agenthost: HostDaemon not supported on this platform")
 }
 
