@@ -2,6 +2,7 @@ package agenthost
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -64,6 +66,18 @@ func jiraStores(url, pat string) db.Stores {
 	}
 }
 
+// disabledJiraSecrets stands in for TF_ROLE=executor's disabled secret store
+// (internal/db/postgres/secrets_disabled.go): every read fails with
+// db.ErrSecretStoreUnavailable, the same error the real disabled store
+// returns for every method.
+type disabledJiraSecrets struct {
+	db.SecretStore
+}
+
+func (disabledJiraSecrets) GetSystem(context.Context, string, string) (string, error) {
+	return "", db.ErrSecretStoreUnavailable
+}
+
 // jiraRecorder captures what the fake Jira backend saw. Mutex-guarded so
 // the handler goroutine and the test goroutine don't race under -race
 // (the same reason internal/jira's client_test guards its capture).
@@ -105,7 +119,7 @@ func startJiraDaemon(t *testing.T, stores db.Stores, info RunInfo) *IPCClient {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, info)
+	srv := NewServer(stores, info, nil)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = listener.Close()
@@ -142,6 +156,50 @@ func TestServer_JiraGetIssue_RoutesHostSide(t *testing.T) {
 	if got := rec.readAuth(); got != "Bearer org-pat" {
 		t.Errorf("Jira saw Authorization %q, want %q — the host daemon must resolve ForSystem and present the bot token", got, "Bearer org-pat")
 	}
+}
+
+// TestLocalClient_JiraGetIssue_ExecutorBundleFirst reproduces the latent bug
+// this fix closes, then proves the fix. On TF_ROLE=executor the secret store
+// is disabled — every SecretStore method returns db.ErrSecretStoreUnavailable
+// — so the ForSystem-resolver path JiraGetIssue used to build its client
+// through unconditionally never resolved: Jira verbs failed outright on an
+// executor. With a bundle attached to ctx — the shape server.dispatch
+// attaches once the spawner wires an executor's bundleFunc — the same call
+// must instead build its client from the bundle's Jira credential and never
+// consult the (disabled) secret store.
+func TestLocalClient_JiraGetIssue_ExecutorBundleFirst(t *testing.T) {
+	jira := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"key":"PROJ-1","fields":{"summary":"hello"}}`)
+	}))
+	defer jira.Close()
+
+	stores := db.Stores{Secrets: disabledJiraSecrets{}, Orgs: fakeJiraOrgs{}}
+	lc := NewLocal(stores, RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-1"})
+
+	t.Run("no bundle: hits the disabled secret store (the pre-fix executor failure)", func(t *testing.T) {
+		_, err := lc.JiraGetIssue(context.Background(), "PROJ-1")
+		if !errors.Is(err, db.ErrSecretStoreUnavailable) {
+			t.Fatalf("JiraGetIssue without a bundle = %v, want an error wrapping db.ErrSecretStoreUnavailable", err)
+		}
+	})
+
+	t.Run("bundle present: resolves from the bundle, never touches the disabled secret store", func(t *testing.T) {
+		bundle := &credbundle.Bundle{Jira: &credbundle.JiraCreds{
+			URL:        jira.URL,
+			AuthMethod: "datacenter",
+			PAT:        "bundle-pat",
+		}}
+		ctx := credbundle.WithBundle(context.Background(), bundle)
+
+		issue, err := lc.JiraGetIssue(ctx, "PROJ-1")
+		if err != nil {
+			t.Fatalf("JiraGetIssue with a bundle: %v (the disabled secret store must never be consulted)", err)
+		}
+		if issue == nil || issue.Key != "PROJ-1" {
+			t.Fatalf("unexpected issue from the bundle path: %+v", issue)
+		}
+	})
 }
 
 // TestServer_JiraCreateIssue_RoundTrip pins a result-bearing write: the

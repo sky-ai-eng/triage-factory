@@ -368,13 +368,17 @@ func (s *projectSession) dispatch(item queueItem) {
 	// so there is no runs.team_id to read — project.TeamID is the canonical
 	// team here). IsEventTriggered is false — every curator turn is user-driven.
 	startAgentHost := func() (sandbox.Mount, io.Closer, error) {
+		// The curator doesn't (yet) participate in the sealed-bundle credential
+		// path (internal/delegate's awaitCredentials gate) — a curator turn
+		// never carries a bundle, so this always resolves through the live
+		// secret store, same as before.
 		hd, mount, err := agenthost.Start(s.curator.stores, agenthost.RunInfo{
 			OrgID:            item.orgID,
 			UserID:           item.creatorUserID,
 			RunID:            requestID,
 			TeamID:           project.TeamID,
 			IsEventTriggered: false,
-		})
+		}, nil)
 		if err != nil {
 			return sandbox.Mount{}, nil, err
 		}

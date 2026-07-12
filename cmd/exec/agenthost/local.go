@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -540,19 +541,24 @@ func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (do
 
 // --- jira ---
 //
-// jiraSystemClient builds the org's bot-attributed Jira client via the
-// ForSystem resolver. The secret store backing it differs by mode but
-// the call site doesn't care: local mode reads the OS keychain on the
-// user's own machine; the daemon (sandbox path) reads the host's
-// Vault-backed store — the host can read the credential the sandboxed
-// agent can't. Either way the agent process never holds the token.
+// jiraSystemClient builds the org's bot-attributed Jira client. On
+// TF_ROLE=executor, when the daemon attached a sealed run bundle to ctx
+// (server.dispatch), it builds straight from the bundle's Jira credential —
+// no secret-store read, since the secret store is disabled on an executor.
+// Every other role/mode falls through to the ForSystem resolver: local mode
+// reads the OS keychain on the user's own machine, TF_ROLE=all reads the
+// live (Vault-backed) secret store. Either way the agent process never holds
+// the token.
 //
 // A missing credential maps to a clear "not configured" message (the
 // guidance exec printed before handing off); every other resolver error
 // (a transient vault/keychain outage) propagates so it isn't misreported
 // as "absent". Over IPC the message crosses as the response Error string,
-// so the agent reads the identical text in both modes.
+// so the agent reads the identical text across every mode/role.
 func (c *LocalClient) jiraSystemClient(ctx context.Context) (*jiraclient.Client, error) {
+	if bundle, ok := credbundle.FromContext(ctx); ok {
+		return bundleJiraClient(bundle.Jira)
+	}
 	client, err := jiraclient.NewResolver(c.stores.Secrets, c.stores.Orgs).ForSystem(ctx, c.info.OrgID)
 	if errors.Is(err, jiraclient.ErrNoJiraSystemCredential) {
 		return nil, errors.New("no Jira credential configured; run triagefactory and complete setup first")
@@ -968,14 +974,22 @@ func (c *LocalClient) resolveRepoClient(ctx context.Context, owner, repo string)
 	return client, identity, nil
 }
 
-// scopedRepoClient builds a per-repo down-scoped client via the resolver's
-// ScopedRepoResolver extension (the production resolver), falling back to the
-// unscoped path when the resolver doesn't implement it (test fakes). nil
-// permissions keeps the installation's FULL permission set on the single repo —
-// the exec-gh verb surface spans pull_requests/issues/contents/checks/actions,
-// so a fixed narrow set risks a 422 or a broken verb; repo-scoping is the
-// confinement that matters.
+// scopedRepoClient builds a per-repo down-scoped client. On TF_ROLE=executor,
+// when the daemon attached a sealed run bundle to ctx (server.dispatch), it
+// builds straight from the bundle's repo-scoped installation token — no
+// secret-store read, since ScopedRepoResolver would otherwise resolve
+// against the (disabled, on an executor) secret store. Every other role/mode
+// falls through to the resolver's ScopedRepoResolver extension (the
+// production resolver), falling back further to the unscoped path when the
+// resolver doesn't implement it (test fakes). nil permissions keeps the
+// installation's FULL permission set on the single repo — the exec-gh verb
+// surface spans pull_requests/issues/contents/checks/actions, so a fixed
+// narrow set risks a 422 or a broken verb; repo-scoping is the confinement
+// that matters.
 func (c *LocalClient) scopedRepoClient(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
+	if bundle, ok := credbundle.FromContext(ctx); ok {
+		return bundleRepoClient(bundle.GitHub, owner, repo)
+	}
 	if sr, ok := c.githubResolver().(ghclient.ScopedRepoResolver); ok {
 		client, identity, err := sr.ClientForRepoScoped(ctx, c.info.OrgID, owner, repo, nil)
 		if err != nil {

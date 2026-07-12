@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
@@ -136,7 +137,7 @@ func startGitHubDaemon(t *testing.T, resolver ghclient.Resolver, info RunInfo) *
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(emptyStores(), info)
+	srv := NewServer(emptyStores(), info, nil)
 	srv.ghResolver = resolver
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
@@ -456,4 +457,141 @@ func TestServer_GithubCreatePR_ReturnsNodeID(t *testing.T) {
 	if number != 42 || htmlURL != "https://github.com/o/r/pull/42" || nodeID != "PR_node42" {
 		t.Fatalf("CreatePR = (%d, %q, %q), want (42, .../pull/42, PR_node42)", number, htmlURL, nodeID)
 	}
+}
+
+// TestLocalClient_GithubCreatePR_ExecutorBundleFirst reproduces the latent
+// bug this fix closes, then proves the fix. On TF_ROLE=executor the secret
+// store is disabled — every SecretStore method returns
+// db.ErrSecretStoreUnavailable — so the resolver-backed path GithubCreatePR
+// used to build its client through unconditionally never resolved: gh verbs
+// failed outright on an executor. poisoned stands in for that resolver
+// (errOnRepo mirrors the exact failure a disabled secret store produces
+// underneath the real resolver's App/PAT resolution). With a bundle attached
+// to ctx — the shape server.dispatch attaches once the spawner wires an
+// executor's bundleFunc (Server.bundleFunc) — the same call must instead
+// build its client from the bundle's repo-scoped token and never consult the
+// resolver at all.
+func TestLocalClient_GithubCreatePR_ExecutorBundleFirst(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"number":7,"html_url":"https://github.com/o/r/pull/7","node_id":"PR_node7"}`)
+	}))
+	defer gh.Close()
+
+	poisoned := fakeGitHubResolver{errOnRepo: db.ErrSecretStoreUnavailable}
+	lc := NewLocal(emptyStores(), ghInfo())
+	lc.ghResolver = poisoned
+
+	t.Run("no bundle: hits the disabled secret store (the pre-fix executor failure)", func(t *testing.T) {
+		_, _, _, err := lc.GithubCreatePR(context.Background(), "o", "r", "feat", "main", "T", "B", false)
+		if !errors.Is(err, db.ErrSecretStoreUnavailable) {
+			t.Fatalf("GithubCreatePR without a bundle = %v, want an error wrapping db.ErrSecretStoreUnavailable", err)
+		}
+	})
+
+	t.Run("bundle present: resolves from the bundle, never touches the poisoned resolver", func(t *testing.T) {
+		bundle := &credbundle.Bundle{GitHub: &credbundle.GitHubCreds{
+			Mode:       "app",
+			BaseURL:    gh.URL,
+			RepoTokens: map[string]credbundle.RepoToken{"o/r": {Token: "bundle-token"}},
+		}}
+		ctx := credbundle.WithBundle(context.Background(), bundle)
+
+		number, htmlURL, nodeID, err := lc.GithubCreatePR(ctx, "o", "r", "feat", "main", "T", "B", false)
+		if err != nil {
+			t.Fatalf("GithubCreatePR with a bundle: %v (the poisoned resolver must never be consulted)", err)
+		}
+		if number != 7 || htmlURL != "https://github.com/o/r/pull/7" || nodeID != "PR_node7" {
+			t.Fatalf("CreatePR = (%d, %q, %q), want (7, .../pull/7, PR_node7)", number, htmlURL, nodeID)
+		}
+	})
+}
+
+// TestLocalClient_GithubGetPR_BundleRepoNotProvisioned pins the AC that a
+// repo the bundle carries no token for (a provisioning gap — the run's
+// authorized repo set didn't include this one) surfaces its own legible
+// error, never ErrSecretStoreUnavailable — the bundle path never touches the
+// secret store at all, so that sentinel could never legitimately appear here.
+func TestLocalClient_GithubGetPR_BundleRepoNotProvisioned(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+
+	lc := NewLocal(emptyStores(), ghInfo())
+	bundle := &credbundle.Bundle{GitHub: &credbundle.GitHubCreds{
+		Mode:       "app",
+		RepoTokens: map[string]credbundle.RepoToken{"o/other-repo": {Token: "bundle-token"}},
+	}}
+	ctx := credbundle.WithBundle(context.Background(), bundle)
+
+	_, err := lc.GithubGetPR(ctx, "o", "r", 1, false)
+	if err == nil || !strings.Contains(err.Error(), "not provisioned") {
+		t.Fatalf("GithubGetPR for an unprovisioned repo = %v, want a 'not provisioned' error", err)
+	}
+	if errors.Is(err, db.ErrSecretStoreUnavailable) {
+		t.Fatalf("GithubGetPR for an unprovisioned repo wrapped ErrSecretStoreUnavailable — the bundle path must never surface that sentinel: %v", err)
+	}
+}
+
+// TestLocalClient_GithubGetPR_BundleGitHubNil pins the org-not-configured
+// case: an executor run whose bundle carries no GitHub credential at all
+// (a Jira-only org) gets the same friendly "not configured" guidance the
+// resolver path gives, not a raw nil-pointer surface.
+func TestLocalClient_GithubGetPR_BundleGitHubNil(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+
+	lc := NewLocal(emptyStores(), ghInfo())
+	ctx := credbundle.WithBundle(context.Background(), &credbundle.Bundle{})
+
+	_, err := lc.GithubGetPR(ctx, "o", "r", 1, false)
+	if err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("GithubGetPR with a GitHub-less bundle = %v, want the friendly 'not configured' guidance", err)
+	}
+}
+
+// TestBundleRepoClient_IdentityMatchesResolvedSource pins that Identity
+// describes the credential actually resolved for THIS repo, not the
+// bundle's overall Mode — credprovision.resolveGitHub flips Mode to "pat"
+// the moment any repo in the run's authorized set falls back to the PAT,
+// even while other repos in the same bundle still carry real App-tier
+// RepoTokens entries (and symmetrically, a "pat"-tagged bundle can still
+// hold no RepoTokens entry for a given repo and fall through to the PAT
+// under an "app" Mode). Reporting IdentityApp for a PAT-backed call (or vice
+// versa) would mislead any future caller that branches on Identity.
+func TestBundleRepoClient_IdentityMatchesResolvedSource(t *testing.T) {
+	t.Run("app-tier RepoTokens match reports IdentityApp even when Mode is pat", func(t *testing.T) {
+		gh := &credbundle.GitHubCreds{
+			Mode:       "pat", // flipped by a sibling repo's PAT fallback
+			PAT:        "ghp_borrowed",
+			RepoTokens: map[string]credbundle.RepoToken{"acme/widgets": {Token: "ghs_widgets"}},
+		}
+		client, identity, err := bundleRepoClient(gh, "acme", "widgets")
+		if err != nil {
+			t.Fatalf("bundleRepoClient: %v", err)
+		}
+		if identity != ghclient.IdentityApp {
+			t.Errorf("identity = %v, want IdentityApp — the resolved token came from RepoTokens", identity)
+		}
+		if client == nil {
+			t.Fatal("client is nil")
+		}
+	})
+
+	t.Run("PAT fallback reports IdentityPAT even when Mode is app", func(t *testing.T) {
+		gh := &credbundle.GitHubCreds{
+			Mode:       "app",
+			PAT:        "ghp_borrowed",
+			RepoTokens: map[string]credbundle.RepoToken{"acme/other-repo": {Token: "ghs_other"}},
+		}
+		client, identity, err := bundleRepoClient(gh, "acme", "widgets")
+		if err != nil {
+			t.Fatalf("bundleRepoClient: %v", err)
+		}
+		if identity != ghclient.IdentityPAT {
+			t.Errorf("identity = %v, want IdentityPAT — this repo has no RepoTokens entry and fell back to the PAT", identity)
+		}
+		if client == nil {
+			t.Fatal("client is nil")
+		}
+	})
 }

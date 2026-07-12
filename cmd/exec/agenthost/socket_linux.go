@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -41,7 +42,7 @@ const hostSocketRoot = "/run/tf"
 // One HostDaemon per delegated run. The spawner's deferred-cleanup
 // chain looks like:
 //
-//	hd, mount, err := Start(stores, info)
+//	hd, mount, err := Start(stores, info, bundleFunc)
 //	if err != nil { ... }
 //	defer hd.Close()
 //	// add `mount` to sandbox.Config.ExtraMounts; sb.Wrap; cmd.Wait
@@ -90,7 +91,13 @@ type HostDaemon struct {
 // regardless of how the surrounding sandbox terminates — the listener
 // close drains the daemon goroutine, the os.Remove cleans up the
 // socket file.
-func Start(stores db.Stores, info RunInfo) (*HostDaemon, sandbox.Mount, error) {
+//
+// bundleFunc is the run's sealed-credential-bundle accessor (non-nil only on
+// TF_ROLE=executor — the spawner passes nil on TF_ROLE=all and local mode);
+// threaded straight into NewServer, which re-reads it per RPC so the daemon's
+// gh/jira verbs resolve credentials from the bundle instead of the (disabled,
+// on an executor) secret store. See Server.bundleFunc.
+func Start(stores db.Stores, info RunInfo, bundleFunc func(ctx context.Context) (*credbundle.Bundle, bool)) (*HostDaemon, sandbox.Mount, error) {
 	if info.RunID == "" {
 		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: RunInfo.RunID required")
 	}
@@ -115,7 +122,7 @@ func Start(stores db.Stores, info RunInfo) (*HostDaemon, sandbox.Mount, error) {
 		return nil, sandbox.Mount{}, err
 	}
 
-	server := NewServer(stores, info)
+	server := NewServer(stores, info, bundleFunc)
 	hd := &HostDaemon{
 		listener: listener,
 		sockPath: sockPath,

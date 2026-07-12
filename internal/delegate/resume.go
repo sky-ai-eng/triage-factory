@@ -16,6 +16,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -386,8 +387,16 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 			TeamID:           opts.TeamID,
 			IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 		}
+		// TF_ROLE=executor: thread this run's bundle accessor into the daemon
+		// so its gh/jira verbs resolve credentials from the sealed bundle
+		// instead of the (disabled, on an executor) secret store — same
+		// credbundle.FromContext(ctx) gate gitProxyConfigFor uses below.
+		var agentHostCreds func(context.Context) (*credbundle.Bundle, bool)
+		if _, ok := credbundle.FromContext(ctx); ok {
+			agentHostCreds = s.bundleAgentHostCredentials(orgID, runID)
+		}
 		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-			hd, mount, err := agenthost.Start(stores, info)
+			hd, mount, err := agenthost.Start(stores, info, agentHostCreds)
 			if err != nil {
 				return sandbox.Mount{}, nil, err
 			}

@@ -156,7 +156,7 @@ func TestIPCClient_MultiCall_PerCallDial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, info)
+	srv := NewServer(stores, info, nil)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = listener.Close()
@@ -198,7 +198,7 @@ func TestServer_LookupRun_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, info)
+	srv := NewServer(stores, info, nil)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = listener.Close()
@@ -232,7 +232,7 @@ func TestServer_VersionMismatch_RejectsCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, RunInfo{RunID: "run-1"})
+	srv := NewServer(stores, RunInfo{RunID: "run-1"}, nil)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = listener.Close()
@@ -269,7 +269,7 @@ func TestServer_UnknownMethod_RejectsCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, RunInfo{RunID: "run-1"})
+	srv := NewServer(stores, RunInfo{RunID: "run-1"}, nil)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = listener.Close()
@@ -311,7 +311,7 @@ func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 		if err != nil {
 			t.Fatalf("listen: %v", err)
 		}
-		s := NewServer(stores, info)
+		s := NewServer(stores, info, nil)
 		go func() { _ = s.Serve(l) }()
 		return sockPath, func() {
 			_ = l.Close()
@@ -457,7 +457,7 @@ func TestServer_GracefulShutdown_CompletesInFlight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, info)
+	srv := NewServer(stores, info, nil)
 	go func() { _ = srv.Serve(listener) }()
 
 	client := Dial(sockPath)

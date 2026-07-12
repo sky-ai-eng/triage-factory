@@ -3,7 +3,6 @@ package delegate
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -15,50 +14,16 @@ import (
 )
 
 // bundleRepoToken resolves the GitHub credential a bundle carries for
-// (owner, repo): an exact repo-scoped installation token when repo is
-// known, falling through to the single org-wide PAT (a PAT can't be
-// narrowed, so it answers for every repo) if no repo-scoped entry matches.
-//
-// repo == "" (the caller has no specific repo in view) resolves ONLY when
-// owner has exactly one RepoTokens entry — mirroring the production
-// resolver's installationFor ambiguity rule ("an empty target only
-// resolves when there's exactly one installation"). Map iteration order is
-// otherwise undefined, and a bundle's RepoTokens are scoped per-repo
-// (unlike the live resolver's account-wide App installation token), so
-// picking an arbitrary sibling repo's token when the run's authorized set
-// covers more than one repo under owner would 403 every call it's used
-// for. Every real caller passes a concrete repo (see ownerRepoForTask); the
-// ambiguous-repo case only falls through to the PAT, never to a wrong
-// App token.
+// (owner, repo). Thin wrapper over the shared credbundle.ResolveRepoToken —
+// cmd/exec/agenthost's bundle-first gh verbs consume the same resolution
+// (and, unlike the git proxy, need the App-vs-PAT source it reports to
+// populate github.Identity accurately), and internal/delegate can't import
+// cmd/exec/agenthost's package (it's the other way around), so the shared
+// logic lives in the dependency-free internal/credbundle instead of being
+// duplicated. See credbundle.ResolveRepoToken for the resolution rules.
 func bundleRepoToken(gh *credbundle.GitHubCreds, owner, repo string) (token string, expiresAt time.Time, ok bool) {
-	if gh == nil {
-		return "", time.Time{}, false
-	}
-	if repo != "" {
-		for repoID, rt := range gh.RepoTokens {
-			o, r, cut := strings.Cut(repoID, "/")
-			if cut && strings.EqualFold(o, owner) && strings.EqualFold(r, repo) {
-				return rt.Token, rt.ExpiresAt, true
-			}
-		}
-	} else {
-		var match credbundle.RepoToken
-		matches := 0
-		for repoID, rt := range gh.RepoTokens {
-			o, _, cut := strings.Cut(repoID, "/")
-			if cut && strings.EqualFold(o, owner) {
-				matches++
-				match = rt
-			}
-		}
-		if matches == 1 {
-			return match.Token, match.ExpiresAt, true
-		}
-	}
-	if gh.PAT != "" {
-		return gh.PAT, time.Time{}, true
-	}
-	return "", time.Time{}, false
+	token, expiresAt, source := credbundle.ResolveRepoToken(gh, owner, repo)
+	return token, expiresAt, source != credbundle.RepoTokenNone
 }
 
 // bundleGHClient builds a *ghclient.Client straight from a bundle's
@@ -131,5 +96,20 @@ func (s *Spawner) bundleGitProxyConfigFor(ctx context.Context, info agenthost.Ru
 		RecordDenial: func(ctx context.Context, denied gitproxy.DeniedGitOp) {
 			denialHost.RecordGitDenied(ctx, denied.Owner, denied.Repo, denied.Ref, denied.Op, denied.Reason)
 		},
+	}
+}
+
+// bundleAgentHostCredentials returns the per-request bundle accessor
+// agenthost.Start threads into its Server (see Server.bundleFunc) so the
+// daemon's exec-gh/exec-jira verbs can resolve credentials from this run's
+// sealed bundle on the executor path. Mirrors bundleGitProxyConfigFor's
+// currentGitHub closure: re-reads run_credentials and unseals fresh on every
+// call rather than a captured snapshot, so the brain's refresh sweep reaches
+// every subsequent gh/jira verb exactly like it already reaches the git
+// proxy's TokenSource.
+func (s *Spawner) bundleAgentHostCredentials(orgID, runID string) func(ctx context.Context) (*credbundle.Bundle, bool) {
+	_, myBootEpoch := s.executorIdentity()
+	return func(ctx context.Context) (*credbundle.Bundle, bool) {
+		return s.tryUnsealBundle(ctx, orgID, runID, myBootEpoch)
 	}
 }

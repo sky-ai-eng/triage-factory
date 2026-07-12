@@ -156,7 +156,7 @@ func startExtensionTestDaemon(t *testing.T, info RunInfo) *IPCClient {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, info)
+	srv := NewServer(stores, info, nil)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = listener.Close()
