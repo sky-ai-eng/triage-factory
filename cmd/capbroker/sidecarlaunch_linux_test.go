@@ -50,10 +50,11 @@ func withTempSidecarStdioSocketDir(t *testing.T) {
 }
 
 // validSidecarLaunchParams returns params that pass
-// sandbox.ValidateSidecarLaunchParams.
-func validSidecarLaunchParams(containerID string) sandbox.SidecarLaunchParams {
+// sandbox.ValidateSidecarLaunchParams. idPrefix gets the
+// SidecarContainerIDSuffix appended so callers don't have to remember it.
+func validSidecarLaunchParams(idPrefix string) sandbox.SidecarLaunchParams {
 	return sandbox.SidecarLaunchParams{
-		ContainerID: containerID,
+		ContainerID: idPrefix + sandbox.SidecarContainerIDSuffix,
 		UID:         sandbox.SidecarUIDBase,
 		GID:         sandbox.SidecarUIDBase,
 	}
@@ -118,7 +119,7 @@ func TestSidecarLaunch_RunAndSidecarRegistriesDontCollide(t *testing.T) {
 		t.Fatalf("Start run: %v", err)
 	}
 
-	sc, err := client.LaunchSidecar(context.Background(), validSidecarLaunchParams("c1-sc"))
+	sc, err := client.LaunchSidecar(context.Background(), validSidecarLaunchParams("c1"))
 	if err != nil {
 		t.Fatalf("LaunchSidecar: %v", err)
 	}
@@ -130,5 +131,27 @@ func TestSidecarLaunch_RunAndSidecarRegistriesDontCollide(t *testing.T) {
 	_ = run.Stdin().Close()
 	if err := run.Wait(); err != nil {
 		t.Errorf("run Wait after sidecar teardown: %v", err)
+	}
+}
+
+// TestSidecarLaunch_RejectsDuplicateContainerID pins that registering a
+// second sidecar under a container id already live in the broker's shared
+// run registry is refused rather than silently overwriting the first
+// entry — an overwrite would leak the original process's supervision state
+// (no further wait/kill could ever reach it).
+func TestSidecarLaunch_RejectsDuplicateContainerID(t *testing.T) {
+	withStubSidecarProcess(t, func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, "cat") })
+	withTempSidecarStdioSocketDir(t)
+	client := serveTestBroker(t, &fakeOps{})
+
+	params := validSidecarLaunchParams("dup")
+	first, err := client.LaunchSidecar(context.Background(), params)
+	if err != nil {
+		t.Fatalf("first LaunchSidecar: %v", err)
+	}
+	defer first.Close()
+
+	if _, err := client.LaunchSidecar(context.Background(), params); err == nil {
+		t.Fatal("expected a second LaunchSidecar with the same container id to be rejected")
 	}
 }

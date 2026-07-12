@@ -30,14 +30,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/procname"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
-
-// commName is this process's kernel-visible name (procname.SetTitle's
-// target, /proc/<pid>/comm). Fixed, not per-run — TASK_COMM_LEN truncates
-// to 15 usable bytes, too short for a run id, and the boot-time orphan
-// sweep (internal/sandbox's reapOrphanSidecars) only needs to recognize
-// "this is a sidecar", not which run it belonged to.
-const commName = "tf-sidecar"
 
 var sidecarLog = logging.Component("sidecar")
 
@@ -60,7 +54,7 @@ func run(args []string) error {
 		return err
 	}
 
-	procname.SetTitle(commName)
+	procname.SetTitle(sandbox.SidecarCommName)
 	logging.SetProcess("sidecar")
 	logBootLine(*containerID)
 

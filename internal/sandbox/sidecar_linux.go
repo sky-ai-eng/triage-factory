@@ -17,10 +17,11 @@ func launchSidecar(ctx context.Context, cfg SidecarConfig) (LaunchedSidecar, err
 		return nil, fmt.Errorf("sandbox: no sidecar launcher installed (cap-broker not started)")
 	}
 	uid := SidecarUID(cfg.SubnetIdx)
-	// "-sc" suffix keeps this key distinct from the run's own ContainerID
-	// (tf-<runIDfrag>-<idx>, no suffix) in the broker's shared run registry
-	// — the two entries must never collide keying the same map slot.
-	containerID := fmt.Sprintf("tf-%s-%d-sc", truncate(cfg.RunID, 11), cfg.SubnetIdx)
+	// SidecarContainerIDSuffix keeps this key distinct from the run's own
+	// ContainerID (tf-<runIDfrag>-<idx>, no suffix) in the broker's shared
+	// run registry — enforced again at the RPC boundary
+	// (ValidateSidecarLaunchParams), not just upheld here by convention.
+	containerID := fmt.Sprintf("tf-%s-%d%s", truncate(cfg.RunID, 11), cfg.SubnetIdx, SidecarContainerIDSuffix)
 	sc, err := sidecarLauncher.LaunchSidecar(ctx, SidecarLaunchParams{
 		ContainerID: containerID,
 		UID:         uid,

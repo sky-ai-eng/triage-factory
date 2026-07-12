@@ -48,6 +48,16 @@ func (s *Server) launchSidecar(ctx context.Context, a launchSidecarArgs) (any, e
 		return nil, err
 	}
 
+	// Fast-path duplicate check: the run registry is shared with LaunchRun's
+	// own entries, keyed by ContainerID, so registering over a live entry
+	// would leak its supervision state (the previous process becomes
+	// unreachable — no wait, no kill — while still holding a pid). Checked
+	// again, atomically, right before insertion below; this first check just
+	// avoids a wasted dial+exec in the common (non-racing) case.
+	if s.sidecarRegistered(p.ContainerID) {
+		return nil, fmt.Errorf("capbroker: sidecar container id %q is already registered", p.ContainerID)
+	}
+
 	dialer := net.Dialer{Timeout: dialStdioTimeout}
 	conn, err := dialer.DialContext(ctx, "unix", p.StdioSocketPath)
 	if err != nil {
@@ -72,6 +82,16 @@ func (s *Server) launchSidecar(ctx context.Context, a launchSidecarArgs) (any, e
 
 	entry := &runEntry{rt: rt, done: make(chan struct{})}
 	s.runsMu.Lock()
+	if _, exists := s.runs[p.ContainerID]; exists {
+		s.runsMu.Unlock()
+		// Lost a race against a concurrent duplicate launch that registered
+		// between the fast-path check above and here — kill and reap what
+		// this call just started rather than leaving it unsupervised, and
+		// report the same duplicate error the fast path would have.
+		_ = rt.Kill()
+		go func() { _, _ = rt.Wait() }()
+		return nil, fmt.Errorf("capbroker: sidecar container id %q is already registered", p.ContainerID)
+	}
 	s.runs[p.ContainerID] = entry
 	s.runsMu.Unlock()
 
@@ -83,4 +103,13 @@ func (s *Server) launchSidecar(ctx context.Context, a launchSidecarArgs) (any, e
 	}()
 
 	return emptyResult{}, nil
+}
+
+// sidecarRegistered reports whether containerID already has a live entry in
+// the shared run registry.
+func (s *Server) sidecarRegistered(containerID string) bool {
+	s.runsMu.Lock()
+	defer s.runsMu.Unlock()
+	_, exists := s.runs[containerID]
+	return exists
 }

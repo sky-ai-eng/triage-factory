@@ -407,10 +407,17 @@ func ValidateLaunchParams(p LaunchParams) error {
 // LaunchSidecar — the sidecar analog of ValidateLaunchParams. The
 // load-bearing check is the uid/gid band: the orchestrator computes
 // SidecarUID(subnetIdx) itself and sends the result, so the broker must
-// independently confirm it falls inside the reserved sidecar range before
+// independently confirm it falls inside the reserved sidecar range (via
+// IsSidecarUID — the same predicate the boot-time orphan reap uses) before
 // ever handing it to a setuid Credential — otherwise a compromised
 // orchestrator could ask the broker to exec the sidecar as uid 0, as its
 // own uid, or as any other uid on the host.
+//
+// The ContainerID suffix check closes the other half of the shared-registry
+// boundary: SidecarContainerIDSuffix is what keeps a sidecar's registry key
+// from ever colliding with a run's own (see wrap()'s "tf-<frag>-<idx>"
+// naming, which never carries it) — enforced here rather than left as a
+// convention only the Linux dispatcher (sidecar_linux.go) upholds.
 //
 // Residual (accepted, same shape as validateNetnsPath's documented one): a
 // fully compromised orchestrator could still request a uid inside the band
@@ -424,10 +431,13 @@ func ValidateSidecarLaunchParams(p SidecarLaunchParams) error {
 	if err := validateRunID("sidecar container id", p.ContainerID); err != nil {
 		return err
 	}
+	if !strings.HasSuffix(p.ContainerID, SidecarContainerIDSuffix) {
+		return fmt.Errorf("sandbox: sidecar container id %q missing the %q suffix that keeps it distinct from a run's own", p.ContainerID, SidecarContainerIDSuffix)
+	}
 	if p.UID != p.GID {
 		return fmt.Errorf("sandbox: sidecar uid %d and gid %d must match", p.UID, p.GID)
 	}
-	if p.UID < SidecarUIDBase || p.UID >= SidecarUIDBase+MaxSandboxes {
+	if !IsSidecarUID(p.UID) {
 		return fmt.Errorf("sandbox: sidecar uid %d outside the reserved band [%d, %d)", p.UID, SidecarUIDBase, SidecarUIDBase+MaxSandboxes)
 	}
 	return nil

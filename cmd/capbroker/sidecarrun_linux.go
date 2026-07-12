@@ -58,17 +58,30 @@ func (c *IPCClient) LaunchSidecar(ctx context.Context, p sandbox.SidecarLaunchPa
 	conn, err := l.Accept()
 	cleanupListener()
 	if err != nil {
-		_ = c.call(context.Background(), methodKillSidecar, killSidecarArgs{ContainerID: p.ContainerID}, nil)
+		killAndDrainSidecar(c, p.ContainerID)
 		return nil, fmt.Errorf("capbroker: accept sidecar stdio: %w", err)
 	}
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		_ = conn.Close()
-		_ = c.call(context.Background(), methodKillSidecar, killSidecarArgs{ContainerID: p.ContainerID}, nil)
+		killAndDrainSidecar(c, p.ContainerID)
 		return nil, fmt.Errorf("capbroker: accepted sidecar stdio is not a unix conn")
 	}
 
 	return &sidecarHandle{client: c, containerID: p.ContainerID, conn: uc}, nil
+}
+
+// killAndDrainSidecar kills a broker-registered sidecar and blocks until
+// the broker has reaped it, draining its registry entry — the broker only
+// deletes an s.runs entry on Wait*, so a Kill alone (with no matching Wait)
+// leaks the entry indefinitely. Used on every path that abandons a launch
+// past the point the broker has registered it: LaunchSidecar's own
+// Accept/type-assertion failures below, and sidecarHandle.Close's normal
+// teardown. Detached context: teardown must complete even if the run's own
+// ctx is already canceled (the common case for Close).
+func killAndDrainSidecar(c *IPCClient, containerID string) {
+	_ = c.call(context.Background(), methodKillSidecar, killSidecarArgs{ContainerID: containerID}, nil)
+	_ = c.call(context.Background(), methodWaitSidecar, waitSidecarArgs{ContainerID: containerID}, nil)
 }
 
 // sidecarHandle is the orchestrator-side sandbox.LaunchedSidecar for a
@@ -90,11 +103,7 @@ func (h *sidecarHandle) Close() error {
 		if h.conn != nil {
 			_ = h.conn.Close()
 		}
-		// Detached context: teardown must complete even if the run's own
-		// ctx is already canceled (the common case — Close runs as part of
-		// cancellation/cleanup).
-		_ = h.client.call(context.Background(), methodKillSidecar, killSidecarArgs{ContainerID: h.containerID}, nil)
-		_ = h.client.call(context.Background(), methodWaitSidecar, waitSidecarArgs{ContainerID: h.containerID}, nil)
+		killAndDrainSidecar(h.client, h.containerID)
 	})
 	return nil
 }

@@ -354,3 +354,18 @@ func TestValidateSidecarLaunchParams_RejectsPathShapedContainerID(t *testing.T) 
 		t.Error("ValidateSidecarLaunchParams accepted a path-shaped container id")
 	}
 }
+
+// TestValidateSidecarLaunchParams_RejectsMissingSuffix pins the check that
+// keeps a sidecar's registry key from ever colliding with a run's own in
+// the broker's shared s.runs map — a run's ContainerID never carries
+// SidecarContainerIDSuffix (see wrap()'s "tf-<frag>-<idx>" naming), so
+// requiring it here at the boundary (not just upheld by the Linux
+// dispatcher's own naming convention) makes that collision structurally
+// impossible.
+func TestValidateSidecarLaunchParams_RejectsMissingSuffix(t *testing.T) {
+	p := validSidecarParams()
+	p.ContainerID = "tf-abc123-1" // a run's own container id shape, no suffix
+	if err := ValidateSidecarLaunchParams(p); err == nil {
+		t.Error("ValidateSidecarLaunchParams accepted a container id missing the sidecar suffix")
+	}
+}

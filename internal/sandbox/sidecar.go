@@ -34,6 +34,38 @@ func SidecarUID(subnetIdx uint8) int {
 	return SidecarUIDBase + int(subnetIdx)
 }
 
+// IsSidecarUID reports whether uid falls inside the reserved sidecar band.
+// The single definition of "what counts as a TF-managed sidecar uid" —
+// used both at launch time (ValidateSidecarLaunchParams, so the broker
+// never setuids a sidecar outside the band) and at boot-time reap
+// (reapOrphanSidecars, so a comm-name match alone never sweeps up an
+// unrelated process that happens to share the name).
+func IsSidecarUID(uid int) bool {
+	return uid >= SidecarUIDBase && uid < SidecarUIDBase+MaxSandboxes
+}
+
+// SidecarCommName is the kernel-visible process name (procname.SetTitle's
+// target, /proc/<pid>/comm) every run-sidecar process sets at startup.
+// Defined once here, exported, so cmd/runsidecar (which sets it) and this
+// package's own boot-time reap (which matches against it) can never drift
+// independently. TASK_COMM_LEN truncates to 15 usable bytes; "tf-sidecar"
+// fits with room to spare and deliberately carries no per-run suffix — the
+// boot-time reap runs once, at TF startup before any run exists, so a
+// per-run discriminator adds nothing: it's the uid-band check
+// (IsSidecarUID), not the name, that scopes the sweep to TF-managed
+// processes.
+const SidecarCommName = "tf-sidecar"
+
+// SidecarContainerIDSuffix is appended to every sidecar's broker-registry
+// container id, distinguishing it from the run's own container id (which
+// never carries this suffix — see wrap()'s "tf-<frag>-<idx>" naming) so the
+// two can never collide keying the same shared broker-side registry.
+// Defined once and enforced at the RPC boundary (ValidateSidecarLaunchParams
+// requires it) rather than left as a convention the dispatcher alone
+// upholds, so a future caller bug or refactor can't silently reintroduce a
+// collision.
+const SidecarContainerIDSuffix = "-sc"
+
 // SidecarConfig is the caller-supplied input to LaunchSidecar: just enough
 // to derive the per-run uid and a grep-friendly process identity. Mirrors
 // Config/Wrap's shape deliberately — LaunchSidecar is the sidecar's analog

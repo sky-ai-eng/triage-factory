@@ -99,9 +99,14 @@ func TestLaunchSidecarProcess_DropsToRequestedUID(t *testing.T) {
 // Kill/Wait lifecycle the broker's runEntry machinery drives generically
 // (the same shape a runsc SupervisedRuntime satisfies): Kill SIGKILLs a
 // still-running sidecar and Wait then returns promptly with a non-nil exit
-// error. Runs at the caller's own uid (no root needed) since it exercises
-// process lifecycle, not the privilege drop.
+// error. Root-gated like the uid-drop test above: even a same-uid
+// Credential makes Go's os/exec call setgroups() in the forked child
+// (to clear supplementary groups) unless Credential.NoSetGroups is set,
+// and that syscall needs CAP_SETGID regardless of the target uid/gid.
 func TestLaunchSidecarProcess_KillTerminatesAndWaitReturns(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root: even a same-uid Credential triggers setgroups(), which needs CAP_SETGID")
+	}
 	withStubSidecarBinary(t, "sleep 60\n")
 
 	parent, child := socketpairFiles(t)
@@ -141,7 +146,11 @@ func TestLaunchSidecarProcess_KillTerminatesAndWaitReturns(t *testing.T) {
 // kernel ESRCH — same as it always has for the runsc path — so this pins
 // "safe to call," not "returns nil"; every real caller (the broker's
 // killRun handler, sidecarHandle.Close) discards the result either way.
+// Root-gated for the same setgroups()/CAP_SETGID reason as the test above.
 func TestLaunchSidecarProcess_KillOnAlreadyExitedIsSafe(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root: even a same-uid Credential triggers setgroups(), which needs CAP_SETGID")
+	}
 	withStubSidecarBinary(t, "true\n")
 
 	parent, child := socketpairFiles(t)
