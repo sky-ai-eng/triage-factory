@@ -107,6 +107,15 @@ func (r *Recorder) Record(ctx context.Context, c Call, outcome *agentproc.Outcom
 		// though it produced some output. Tokens (if any) are still real.
 		row.IsError = true
 	}
+	r.insert(ctx, row, c)
+}
+
+// insert marshals c.Metadata onto row and inserts it, detached from the
+// caller's ctx. Shared by Record (local-mode, agentproc.Outcome-shaped) and
+// RecordDirect (multi-mode, direct-API-shaped) — everything upstream of the
+// row differs between the two call paths, but landing it in the store does
+// not.
+func (r *Recorder) insert(ctx context.Context, row domain.SystemLLMRun, c Call) {
 	if len(c.Metadata) > 0 {
 		if b, err := json.Marshal(c.Metadata); err != nil {
 			log.Warn("marshal system llm run metadata failed; recording without it", "job", c.Job, "error", err)
@@ -127,4 +136,45 @@ func (r *Recorder) Record(ctx context.Context, c Call, outcome *agentproc.Outcom
 	if err := r.store.Record(insertCtx, row); err != nil {
 		log.Warn("record system llm run failed", "job", c.Job, "org", c.OrgID, "model", c.Model, "error", err)
 	}
+}
+
+// RecordDirect builds a system_llm_runs row from a direct-API completion —
+// the multi-mode sibling of Record. Where Record reads cost/duration/turns/
+// tokens off an agentproc.Outcome + UsageSink (the subprocess shape), the
+// caller here already has them, because a direct API call gives them up
+// front rather than via a terminal stream event. Same never-errors/never-
+// panics contract as Record.
+//
+// traceID is the API response's message id (empty on an error that never
+// produced a response — same "no idempotency check" semantics as Record's
+// empty-SessionID case). numTurns is always 1: these are single-turn,
+// non-streaming completions.
+func (r *Recorder) RecordDirect(ctx context.Context, c Call, traceID string, usage DirectUsage, costUSD float64, durationMs int, isError bool) {
+	if r == nil || r.store == nil {
+		return
+	}
+	row := domain.SystemLLMRun{
+		OrgID:               c.OrgID,
+		Job:                 c.Job,
+		Model:               c.Model,
+		StartedAt:           c.StartedAt,
+		CompletedAt:         time.Now().UTC(),
+		TraceID:             traceID,
+		InputTokens:         usage.InputTokens,
+		OutputTokens:        usage.OutputTokens,
+		CacheReadTokens:     usage.CacheReadTokens,
+		CacheCreationTokens: usage.CacheCreationTokens,
+		TotalCostUSD:        costUSD,
+		DurationMs:          durationMs,
+		NumTurns:            1,
+		IsError:             isError,
+	}
+	r.insert(ctx, row, c)
+}
+
+// DirectUsage carries token counts from a direct-API response's usage
+// block, mirroring agentproc.UsageSink's fields so the two paths' cost math
+// stays identical.
+type DirectUsage struct {
+	InputTokens, OutputTokens, CacheReadTokens, CacheCreationTokens int
 }

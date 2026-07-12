@@ -27,13 +27,13 @@ func isolateHome(t *testing.T) {
 // stage1Fn field rather than a package-level mutable var.
 func stage1Stub(scoresByProjectName map[string]int) (stage1Func, *callRecorder) {
 	rec := &callRecorder{}
-	fn := func(_ context.Context, orgID, prompt string) (int, string, error) {
-		rec.record(prompt)
+	fn := func(_ context.Context, orgID string, p haikuPrompt) (int, string, error) {
+		rec.record(p.Message)
 		rec.mu.Lock()
 		rec.orgIDs = append(rec.orgIDs, orgID)
 		rec.mu.Unlock()
 		for name, score := range scoresByProjectName {
-			if strings.Contains(prompt, "<project_name>\n"+name+"\n</project_name>") {
+			if strings.Contains(p.Message, "<project_name>\n"+name+"\n</project_name>") {
 				return score, "stage1 stub for " + name, nil
 			}
 		}
@@ -267,8 +267,8 @@ func TestClassify_HaikuErrorTreatedAsNoVote(t *testing.T) {
 	isolateHome(t)
 	r, _ := stubRunner("test-org", nil)
 	// Override stage1 with a per-project failure: "Flaky" errors, others score 80.
-	r.stage1Fn = func(_ context.Context, _, prompt string) (int, string, error) {
-		if strings.Contains(prompt, "<project_name>\nFlaky\n</project_name>") {
+	r.stage1Fn = func(_ context.Context, _ string, p haikuPrompt) (int, string, error) {
+		if strings.Contains(p.Message, "<project_name>\nFlaky\n</project_name>") {
 			return 0, "", errors.New("simulated CLI failure")
 		}
 		return 80, "ok", nil

@@ -24,9 +24,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -35,6 +33,12 @@ import (
 
 //go:embed prompts/classify_stage1.txt
 var stage1Prompt string
+
+//go:embed prompts/classify_stage1_system.txt
+var stage1SystemPrompt string
+
+//go:embed prompts/classify_stage1_user.txt
+var stage1UserPrompt string
 
 // ConfidenceThreshold is the minimum Haiku score (0-100) required to
 // auto-assign an entity to a project. Below this, project_id stays
@@ -159,6 +163,19 @@ func pickWinner(votes []Vote, entityID string) *string {
 	return &winner
 }
 
+// haikuPrompt bundles the local-mode combined message alongside the
+// multi-mode system+user split. voteStage1 builds all three from the same
+// project/entity/kb inputs so runHaiku (via systemllm.Complete) can pick
+// the shape each mode needs without re-deriving one from the other — the
+// data is sandwiched between two instruction sections in Message, which
+// rules out reconstructing SystemPrompt/UserMessage from Message by simple
+// string splitting.
+type haikuPrompt struct {
+	Message      string
+	SystemPrompt string
+	UserMessage  string
+}
+
 // voteStage1 is the single-shot Haiku call. KB inlined up to
 // kbInlineMaxBytes.
 func (r *Runner) voteStage1(ctx context.Context, project domain.Project, entity domain.Entity) Vote {
@@ -170,8 +187,7 @@ func (r *Runner) voteStage1(ctx context.Context, project domain.Project, entity 
 		kb = ""
 	}
 
-	prompt := fmt.Sprintf(
-		stage1Prompt,
+	fields := []any{
 		project.Name,
 		project.Description,
 		kb,
@@ -180,7 +196,12 @@ func (r *Runner) voteStage1(ctx context.Context, project domain.Project, entity 
 		entity.Kind,
 		entity.Title,
 		truncateDescription(entity.Description),
-	)
+	}
+	prompt := haikuPrompt{
+		Message:      fmt.Sprintf(stage1Prompt, fields...),
+		SystemPrompt: stage1SystemPrompt,
+		UserMessage:  fmt.Sprintf(stage1UserPrompt, fields...),
+	}
 
 	score, rationale, err := r.stage1Fn(ctx, r.orgID, prompt)
 	if err != nil {
@@ -264,26 +285,21 @@ func readProjectKB(orgID, projectID string) (string, bool, error) {
 	return buf.String(), truncated, nil
 }
 
-// realRunStage1Haiku runs a single-shot Haiku classification through the
-// shared agent runtime (agentproc.Run). It is the default value of the
-// Runner's stage1Fn seam (set in NewRunner); tests swap stage1Fn for a stub.
-// It reads the per-org credentials off the receiver.
-func (r *Runner) realRunStage1Haiku(ctx context.Context, orgID, prompt string) (int, string, error) {
-	return r.runHaiku(ctx, agentproc.RunOptions{
-		Model:   ai.SystemJobModel,
-		Message: prompt,
-		TraceID: "classify-stage1",
-		OrgID:   orgID,
-		Secrets: r.secrets,
-	})
+// realRunStage1Haiku runs a single-shot Haiku classification. It is the
+// default value of the Runner's stage1Fn seam (set in NewRunner); tests
+// swap stage1Fn for a stub. It reads the per-org credentials off the
+// receiver.
+func (r *Runner) realRunStage1Haiku(ctx context.Context, orgID string, p haikuPrompt) (int, string, error) {
+	return r.runHaiku(ctx, orgID, p)
 }
 
-// runHaiku drives one classification call through agentproc.Run with a
-// NoopSink (no transcript persistence) and parses the {score, rationale}
-// JSON the model emits. ctx propagates from the Runner's stop channel so
-// server shutdown SIGKILLs in-flight calls instead of waiting for the
-// model to time out.
-func (r *Runner) runHaiku(ctx context.Context, opts agentproc.RunOptions) (int, string, error) {
+// runHaiku drives one classification call through systemllm.Complete —
+// local mode via the shared agent runtime, multi mode via a direct
+// Anthropic/Bedrock API call — and parses the {score, rationale} JSON the
+// model emits. ctx propagates from the Runner's stop channel so server
+// shutdown aborts in-flight calls instead of waiting for the model to time
+// out.
+func (r *Runner) runHaiku(ctx context.Context, orgID string, p haikuPrompt) (int, string, error) {
 	// Bound concurrent background sandboxes across all orgs + jobs. This is
 	// the outer global ceiling; maxConcurrentVotes (in runVotes) is the inner
 	// per-entity fan-out cap. Each vote acquires here, runs, and releases —
@@ -295,32 +311,25 @@ func (r *Runner) runHaiku(ctx context.Context, opts agentproc.RunOptions) (int, 
 	}
 	defer r.limiter.Release()
 
-	// UsageSink accumulates the per-message token breakdown so the run's
-	// cost + tokens land in system_llm_runs; the terminal Result string is
-	// still parsed below. One row per Run call (the classifier fans out
-	// per-entity-per-project, so many rows per cycle — expected). Recording
-	// happens whenever an outcome was produced and never breaks classification.
-	startedAt := time.Now().UTC()
-	usage := &agentproc.UsageSink{}
-	outcome, err := agentproc.Run(ctx, opts, usage)
-	r.recorder.Record(ctx, systemllm.Call{
-		OrgID:     opts.OrgID,
-		Job:       systemllm.JobClassifier,
-		Model:     opts.Model,
-		StartedAt: startedAt,
-	}, outcome, usage)
+	result, err := r.recorder.Complete(ctx, systemllm.CompleteOptions{
+		OrgID:        orgID,
+		Job:          systemllm.JobClassifier,
+		Message:      p.Message,
+		SystemPrompt: p.SystemPrompt,
+		UserMessage:  p.UserMessage,
+		Model:        ai.SystemJobModel,
+		DirectModel:  ai.SystemJobModelDirect,
+		MaxTokens:    2048,
+		Temperature:  0.1,
+		TraceID:      "classify-stage1",
+		Secrets:      r.secrets,
+		CostFn:       ai.CalculateCostUSD,
+	})
 	if err != nil {
-		stderr := ""
-		if outcome != nil {
-			stderr = outcome.Stderr
-		}
-		return 0, "", fmt.Errorf("classify agent failed: %w (stderr: %s)", err, stderr)
-	}
-	if outcome == nil || outcome.Result == nil {
-		return 0, "", fmt.Errorf("classify agent: no terminal result event")
+		return 0, "", fmt.Errorf("classify agent failed: %w", err)
 	}
 
-	raw := ai.StripCodeFences([]byte(outcome.Result.Result))
+	raw := ai.StripCodeFences([]byte(result.Text))
 
 	var resp struct {
 		Score     int    `json:"score"`

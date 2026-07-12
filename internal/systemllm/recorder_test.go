@@ -121,6 +121,53 @@ func TestRecorder_NilSafe(t *testing.T) {
 		&agentproc.Outcome{Result: &agentproc.Result{}}, &agentproc.UsageSink{})
 }
 
+// TestRecorder_RecordDirect_BuildsRow pins RecordDirect's row shape — the
+// direct-API sibling of TestRecorder_BuildsRowFromOutcomeAndUsage. NumTurns
+// is always 1 (single-turn, non-streaming completions), and TraceID comes
+// from the caller-supplied API response id rather than an agentproc session.
+func TestRecorder_RecordDirect_BuildsRow(t *testing.T) {
+	fs := &fakeStore{}
+	r := NewRecorder(fs)
+	started := time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)
+
+	r.RecordDirect(context.Background(), Call{
+		OrgID:     "org-1",
+		Job:       JobClassifier,
+		Model:     "claude-haiku-4-5-20251001",
+		StartedAt: started,
+		Metadata:  map[string]any{"repo_count": 3},
+	}, "msg_abc123", DirectUsage{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 3, CacheCreationTokens: 2}, 0.05, 250, false)
+
+	if len(fs.rows) != 1 {
+		t.Fatalf("recorded %d rows, want 1", len(fs.rows))
+	}
+	got := fs.rows[0]
+	if got.OrgID != "org-1" || got.Job != JobClassifier || got.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("context fields wrong: %+v", got)
+	}
+	if got.TraceID != "msg_abc123" {
+		t.Errorf("TraceID = %q, want the API response id", got.TraceID)
+	}
+	if got.TotalCostUSD != 0.05 || got.DurationMs != 250 || got.NumTurns != 1 || got.IsError {
+		t.Errorf("result fields wrong: %+v", got)
+	}
+	if got.InputTokens != 10 || got.OutputTokens != 5 || got.CacheReadTokens != 3 || got.CacheCreationTokens != 2 {
+		t.Errorf("token fields wrong: %+v", got)
+	}
+	if got.MetadataJSON != `{"repo_count":3}` {
+		t.Errorf("metadata = %q, want {\"repo_count\":3}", got.MetadataJSON)
+	}
+}
+
+// TestRecorder_RecordDirect_NilSafe pins that a nil Recorder and a nil store
+// are both safe no-ops for RecordDirect too, mirroring Record's contract.
+func TestRecorder_RecordDirect_NilSafe(t *testing.T) {
+	var nilRec *Recorder
+	nilRec.RecordDirect(context.Background(), Call{Job: JobScorer}, "", DirectUsage{}, 0, 0, false)
+
+	NewRecorder(nil).RecordDirect(context.Background(), Call{Job: JobScorer}, "", DirectUsage{}, 0, 0, false)
+}
+
 // ctxCheckingStore mimics a real DB driver: it fails the insert if the ctx it
 // receives is already cancelled, and records the row otherwise.
 type ctxCheckingStore struct{ rows []domain.SystemLLMRun }

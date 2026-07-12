@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -18,6 +17,12 @@ import (
 
 //go:embed prompts/batch-prioritize.txt
 var batchPrioritizePrompt string
+
+//go:embed prompts/batch-prioritize-system.txt
+var batchPrioritizeSystemPrompt string
+
+//go:embed prompts/batch-prioritize-user.txt
+var batchPrioritizeUserPrompt string
 
 //go:embed prompts/envelope.txt
 var EnvelopeTemplate string
@@ -49,6 +54,12 @@ var ConflictResolutionPromptTemplate string
 
 //go:embed prompts/repo-profile.txt
 var RepoProfilePrompt string
+
+//go:embed prompts/repo-profile-system.txt
+var RepoProfileSystemPrompt string
+
+//go:embed prompts/repo-profile-user.txt
+var RepoProfileUserPrompt string
 
 //go:embed prompts/ci-fix.txt
 var CIFixPromptTemplate string
@@ -93,7 +104,16 @@ type TaskScore struct {
 // user's model preference is reserved for heavier features like delegation.
 // Shared here (rather than re-declared per package) so the three surfaces
 // can't drift on Haiku version.
+//
+// This is the CLI model alias local mode passes to `claude -p --model`; the
+// raw Messages API used by the multi-mode direct path doesn't accept it —
+// see SystemJobModelDirect.
 const SystemJobModel = "haiku"
+
+// SystemJobModelDirect is the pinned model id the multi-mode direct-API
+// path (internal/systemllm) uses in place of the "haiku" CLI alias. Must
+// match a key in the pricing table (pricing.go) so cost accounting resolves.
+const SystemJobModelDirect = "claude-haiku-4-5-20251001"
 
 // batchScoreFn scores one batch of task inputs. It is the scorer's unit-test
 // seam: the Runner holds one as a struct field (scoreFn), defaulted to a
@@ -208,8 +228,6 @@ func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets ag
 		return nil, fmt.Errorf("marshal tasks: %w", err)
 	}
 
-	prompt := fmt.Sprintf(batchPrioritizePrompt, string(tasksJSON))
-
 	// Bound concurrent background sandboxes across all orgs + jobs. A
 	// cancelled ctx here returns the error into the per-batch skip path above
 	// (the batch counts as skipped, its tasks reset to pending for retry). A
@@ -219,48 +237,37 @@ func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets ag
 	}
 	defer limiter.Release()
 
-	// Run through the shared agent runtime. The terminal `result` event
-	// populates outcome.Result.Result with the agent's final response —
-	// same string the old `claude --output-format json` envelope's
-	// `.result` field carried, so the post-parse logic below is
-	// unchanged. UsageSink accumulates the per-message token breakdown
-	// (no transcript persisted) so the run's cost + tokens land in
-	// system_llm_runs below. ctx propagates from the Runner's stop
-	// channel so server shutdown SIGKILLs in-flight scoring calls instead
-	// of waiting for the model to time out.
-	startedAt := time.Now().UTC()
-	usage := &agentproc.UsageSink{}
-	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
-		Model:   SystemJobModel,
-		Message: prompt,
-		TraceID: "scorer-batch",
-		OrgID:   orgID,
-		Secrets: secrets,
-	}, usage)
-	// Record one row per batch call whenever the subprocess produced an
-	// outcome (covers a failed-but-completed run — it still cost tokens).
-	// A recording failure never breaks scoring; the recorder logs + swallows.
-	recorder.Record(ctx, systemllm.Call{
-		OrgID:     orgID,
-		Job:       systemllm.JobScorer,
-		Model:     SystemJobModel,
-		StartedAt: startedAt,
-		Metadata:  map[string]any{"batch_size": len(tasks)},
-	}, outcome, usage)
+	// Complete owns the mode branch: local mode runs the shared agent
+	// runtime exactly as before (Message, the combined instructions+data
+	// prompt); multi mode calls the org's configured Anthropic/Bedrock
+	// provider directly, with the instructions as the system prompt and
+	// just the task batch as the user turn. Either way the returned text is
+	// the same shape the old `claude --output-format json` envelope's
+	// `.result` field carried, so the post-parse logic below is unchanged.
+	// ctx propagates from the Runner's stop channel so server shutdown
+	// aborts in-flight scoring calls instead of waiting for the model to
+	// time out.
+	result, err := recorder.Complete(ctx, systemllm.CompleteOptions{
+		OrgID:        orgID,
+		Job:          systemllm.JobScorer,
+		Message:      fmt.Sprintf(batchPrioritizePrompt, string(tasksJSON)),
+		SystemPrompt: batchPrioritizeSystemPrompt,
+		UserMessage:  fmt.Sprintf(batchPrioritizeUserPrompt, string(tasksJSON)),
+		Model:        SystemJobModel,
+		DirectModel:  SystemJobModelDirect,
+		MaxTokens:    16384,
+		Temperature:  0.1,
+		TraceID:      "scorer-batch",
+		Secrets:      secrets,
+		Metadata:     map[string]any{"batch_size": len(tasks)},
+		CostFn:       CalculateCostUSD,
+	})
 	if err != nil {
-		stderr := ""
-		if outcome != nil {
-			stderr = outcome.Stderr
-		}
-		return nil, fmt.Errorf("scorer agent failed: %w, stderr: %s", err, stderr)
-	}
-	if outcome == nil || outcome.Result == nil {
-		return nil, fmt.Errorf("scorer agent: no terminal result event")
+		return nil, fmt.Errorf("scorer agent failed: %w", err)
 	}
 
-	raw := []byte(outcome.Result.Result)
 	// The result might contain markdown fences despite the prompt — strip them
-	raw = StripCodeFences(raw)
+	raw := StripCodeFences([]byte(result.Text))
 
 	var scores []TaskScore
 	if err := json.Unmarshal(raw, &scores); err != nil {
