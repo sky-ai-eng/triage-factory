@@ -355,6 +355,9 @@ func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
 	}
 
 	if subpath == "" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := chownPinnedEntry(rootFd); err != nil {
 			return fmt.Errorf("fchownat %s: %w", root, err)
 		}
