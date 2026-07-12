@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
@@ -67,7 +68,7 @@ func (a *App) buildAI() {
 	// processes. nil (unlimited) is reserved for callers that opt out (tests).
 	sysLimiter := syslimit.New(syslimit.DefaultMaxConcurrentSystemRuns)
 
-	a.scorer = ai.NewManager(a.stores.Scores, a.stores.Entities, a.runSecrets, llmRecorder, sysLimiter, ai.RunnerCallbacks{
+	a.scorer = ai.NewManager(a.stores.Scores, a.stores.Entities, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-scorer"), llmRecorder, sysLimiter, ai.RunnerCallbacks{
 		OnScoringStarted: func(orgID string, taskIDs []string) {
 			a.wsHub.Broadcast(websocket.Event{
 				Type:  "scoring_started",
@@ -112,7 +113,7 @@ func (a *App) buildAI() {
 	// the system:poll: "profiler" subscriber (TTL-gated per cycle) and the
 	// explicit re-profile button (force). Sibling to the scorer — both react
 	// to poll sentinels independently; scoring does NOT gate on profiling.
-	a.profiler = repoprofile.NewManager(a.ghResolver, a.runSecrets, a.stores.Repos, a.stores.Orgs, llmRecorder, sysLimiter, a.wsHub)
+	a.profiler = repoprofile.NewManager(a.ghResolver, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-profiler"), a.stores.Repos, a.stores.Orgs, llmRecorder, sysLimiter, a.wsHub)
 	// Chain bare-clone warming off profile-cycle completion: profiling
 	// populates repo_profiles.clone_url, which bootstrapBareClones reads.
 	// Local-only — the warm on-disk bare cache is an N=1 affordance; multi
@@ -134,7 +135,7 @@ func (a *App) buildAI() {
 	// entities with classified_at IS NULL. Sibling to the scorer/profiler:
 	// per-org isolation so a large org's backlog can't head-of-line-block
 	// another tenant's classification.
-	a.classifier = projectclassify.NewManager(a.stores.Entities, a.stores.Projects, a.runSecrets, llmRecorder, sysLimiter)
+	a.classifier = projectclassify.NewManager(a.stores.Entities, a.stores.Projects, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-classifier"), llmRecorder, sysLimiter)
 	classifyLog.Info("project classifier manager ready (per-org runners)", "model", "haiku")
 
 	// Artifact reconciler: per-org Runners mirroring artifacts against live
@@ -260,6 +261,13 @@ func (a *App) buildExecution() error {
 		}
 	}
 	a.spawner.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
+	// Role-mode Bedrock minting for delegated runs on the all/local path
+	// (TFAC-616). nil in local mode (ambient); on the executor role the
+	// bundle path resolves LLM material, so this is only exercised at
+	// TF_ROLE=all where a run resolves in-process.
+	if a.llmResolver != nil {
+		a.spawner.SetLLMResolver(a.llmResolver)
+	}
 	// TFAC-300: the board→Jira lifecycle mirror resolves the org's system/bot
 	// Jira credential per write through this resolver (same construction the
 	// server + poller use). A fresh instance is fine — the resolver is stateless,
@@ -342,6 +350,9 @@ func (a *App) buildExecution() error {
 	}
 	a.curator = curator.New(a.stores, a.wsHub, "")
 	a.curator.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
+	if a.llmResolver != nil {
+		a.curator.SetLLMResolver(llmcred.SystemEnvResolver(a.llmResolver, "tf-curator"))
+	}
 	a.srv.SetCurator(a.curator)
 	return nil
 }

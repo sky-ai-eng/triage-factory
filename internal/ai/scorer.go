@@ -102,6 +102,13 @@ const SystemJobModel = "haiku"
 // without a package-level mutable var. Mirrors the repo-profiler's batchFn.
 type batchScoreFn func(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader) ([]TaskScore, error)
 
+// llmResolveFunc is the RunOptions.LLMResolver shape a background LLM job
+// carries — the brain-side llmcred adapter (llmcred.SystemEnvResolver) that
+// mints short-lived STS creds for a role-mode Bedrock org and passes stored
+// material through otherwise. nil in local mode (ambient) and in tests, where
+// Run keeps its built-in raw-secret resolution.
+type llmResolveFunc func(ctx context.Context, orgID string) (map[string]string, error)
+
 // scoreTasks runs the AI scoring pipeline on a set of tasks for the Runner's
 // org. It batches into chunks of batchSize and runs them in parallel via
 // r.scoreFn (the injectable batch seam). The returned skippedTasks is the
@@ -202,7 +209,7 @@ func (r *Runner) scoreTasks(ctx context.Context, tasks []domain.Task) (scores []
 	return allScores, skipped, nil
 }
 
-func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, limiter *syslimit.Limiter) ([]TaskScore, error) {
+func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter) ([]TaskScore, error) {
 	tasksJSON, err := json.Marshal(tasks)
 	if err != nil {
 		return nil, fmt.Errorf("marshal tasks: %w", err)
@@ -231,11 +238,12 @@ func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets ag
 	startedAt := time.Now().UTC()
 	usage := &agentproc.UsageSink{}
 	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
-		Model:   SystemJobModel,
-		Message: prompt,
-		TraceID: "scorer-batch",
-		OrgID:   orgID,
-		Secrets: secrets,
+		Model:       SystemJobModel,
+		Message:     prompt,
+		TraceID:     "scorer-batch",
+		OrgID:       orgID,
+		Secrets:     secrets,
+		LLMResolver: llmResolve,
 	}, usage)
 	// Record one row per batch call whenever the subprocess produced an
 	// outcome (covers a failed-but-completed run — it still cost tokens).

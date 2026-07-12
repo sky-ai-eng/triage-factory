@@ -12,6 +12,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.20
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.2.4
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.103.0
+	github.com/aws/aws-sdk-go-v2/service/sts v1.43.0
+	github.com/aws/smithy-go v1.26.0
 	github.com/coder/websocket v1.8.14
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/pressly/goose/v3 v3.27.1
@@ -31,8 +33,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/signin v1.1.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.31.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.36.3 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.43.0 // indirect
-	github.com/aws/smithy-go v1.26.0 // indirect
 )
 
 require (

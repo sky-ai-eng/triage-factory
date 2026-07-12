@@ -22,6 +22,12 @@ export const BEDROCK_AUTH_OPTIONS: {
   detail: string
 }[] = [
   {
+    kind: 'role',
+    title: 'IAM role (recommended)',
+    detail:
+      'Short-lived credentials: Triage Factory assumes a role you control and mints per-run session tokens. No static key stored.',
+  },
+  {
     kind: 'bearer',
     title: 'Bedrock API key',
     detail: 'A single Bedrock API key (no IAM setup). Generated in the AWS console.',
@@ -44,7 +50,11 @@ export function bedrockPayloadFromForm(form: OrgConfigForm): Record<string, stri
     model_id: form.bedrock_model_id,
     base_url: form.bedrock_base_url,
   }
-  if (form.bedrock_auth_method === 'bearer') {
+  if (form.bedrock_auth_method === 'role') {
+    // Role mode carries no secret — the ARN is the only method-specific field;
+    // the server mints short-lived session credentials by assuming it.
+    payload.role_arn = form.bedrock_role_arn
+  } else if (form.bedrock_auth_method === 'bearer') {
     payload.bearer_token = form.bedrock_bearer_token
   } else {
     payload.access_key_id = form.aws_access_key_id
@@ -68,6 +78,38 @@ export async function connectBedrock(
       return { ok: false, error: resBody.error || 'Could not save the Bedrock credentials' }
     }
     return { ok: true }
+  } catch {
+    return { ok: false, error: 'Could not connect to server' }
+  }
+}
+
+// fetchBedrockRoleSetup asks the control service to describe the IAM-role
+// handshake for this org: the trust policy (ready-to-copy JSON) the operator
+// pastes onto their role, the external ID that policy must pin, and the caller
+// identity the control service assumes FROM. It's a POST (no body) so it stays
+// a non-idempotent action, not a cacheable GET. A 422 means the control service
+// has no ambient AWS identity (an operator-side deployment problem) — the
+// returned `error` is the remediation text, surfaced inline. Mirrors
+// connectBedrock's shape + fetch conventions.
+export async function fetchBedrockRoleSetup(): Promise<
+  | { ok: true; caller_identity_arn: string; external_id: string; trust_policy: string }
+  | { ok: false; error: string }
+> {
+  try {
+    const res = await fetch('/api/bedrock/role-setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    const resBody = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      return { ok: false, error: resBody.error || 'Could not fetch the role setup details' }
+    }
+    return {
+      ok: true,
+      caller_identity_arn: resBody.caller_identity_arn || '',
+      external_id: resBody.external_id || '',
+      trust_policy: resBody.trust_policy || '',
+    }
   } catch {
     return { ok: false, error: 'Could not connect to server' }
   }

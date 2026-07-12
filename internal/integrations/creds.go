@@ -99,6 +99,15 @@ const (
 	KeyAWSBearerTokenBedrock = "aws_bearer_token_bedrock"
 	KeyBedrockModelID        = "bedrock_model_id"
 	KeyBedrockBaseURL        = "bedrock_base_url"
+
+	// Bedrock IAM-role auth (the short-lived-credential method): the
+	// customer role the control process assumes (aws_role_arn, non-secret
+	// but stored in the same bag for uniformity) and the TF-generated
+	// confused-deputy External ID (aws_external_id). Neither is a
+	// long-lived credential — the org stores no Bedrock secret at all in
+	// this mode; the brain mints short-lived STS session creds per run.
+	KeyAWSRoleARN    = "aws_role_arn"
+	KeyAWSExternalID = "aws_external_id"
 )
 
 // BedrockKeys returns every Bedrock-related secret key the connect flow
@@ -109,6 +118,7 @@ func BedrockKeys() []string {
 	return []string{
 		KeyAWSAccessKeyID, KeyAWSSecretAccessKey, KeyAWSSessionToken,
 		KeyAWSRegion, KeyAWSBearerTokenBedrock, KeyBedrockModelID, KeyBedrockBaseURL,
+		KeyAWSRoleARN, KeyAWSExternalID,
 	}
 }
 

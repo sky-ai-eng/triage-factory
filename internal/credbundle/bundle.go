@@ -32,8 +32,27 @@ type Bundle struct {
 	// AWS_*, etc.) — nil when the org has no LLM credential configured.
 	LLM map[string]string `json:"llm,omitempty"`
 
+	// LLMExpiryUnix is the Unix-second expiry of the LLM material in LLM,
+	// for role-mode Bedrock orgs whose STS session credentials are
+	// short-lived. 0 / omitted for every non-expiring passthrough mode
+	// (Anthropic key, Bedrock bearer / access-keys) — omitempty keeps those
+	// bundles byte-for-byte identical. The executor's live LLM source
+	// (internal/delegate) returns this so the SigV4 proxy re-reads the
+	// newest sealed bundle before the session triple expires.
+	LLMExpiryUnix int64 `json:"llm_expiry_unix,omitempty"`
+
 	GitHub *GitHubCreds `json:"github,omitempty"`
 	Jira   *JiraCreds   `json:"jira,omitempty"`
+}
+
+// LLMExpiry returns the LLM material's expiry as a time.Time (zero when
+// non-expiring). Convenience for the executor's live source and the refresh
+// sweep, which reason in time.Time.
+func (b *Bundle) LLMExpiry() time.Time {
+	if b.LLMExpiryUnix == 0 {
+		return time.Time{}
+	}
+	return time.Unix(b.LLMExpiryUnix, 0)
 }
 
 // GitHubCreds carries either a set of repo-scoped installation tokens (an

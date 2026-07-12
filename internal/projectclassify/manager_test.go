@@ -19,7 +19,7 @@ import (
 // per org.)
 func TestManager_TriggerLazyCreatesPerOrgRunner(t *testing.T) {
 	entities := &recordingEntityStore{seen: map[string]int{}}
-	m := NewManager(entities, nilProjectStore{}, nil, nil, nil)
+	m := NewManager(entities, nilProjectStore{}, nil, nil, nil, nil)
 	defer m.Stop()
 
 	m.Trigger("org-a")
@@ -46,7 +46,7 @@ func TestManager_TriggerLazyCreatesPerOrgRunner(t *testing.T) {
 // each time.
 func TestManager_RepeatTriggerReusesRunner(t *testing.T) {
 	entities := &recordingEntityStore{seen: map[string]int{}}
-	m := NewManager(entities, nilProjectStore{}, nil, nil, nil)
+	m := NewManager(entities, nilProjectStore{}, nil, nil, nil, nil)
 	defer m.Stop()
 
 	m.Trigger("org-a")
@@ -91,7 +91,7 @@ func TestManager_DistinctOrgsRunConcurrently(t *testing.T) {
 		},
 	}
 
-	m := NewManager(entities, nilProjectStore{}, nil, nil, nil)
+	m := NewManager(entities, nilProjectStore{}, nil, nil, nil, nil)
 	defer m.Stop()
 
 	m.Trigger("org-a")
@@ -117,7 +117,7 @@ func TestManager_DistinctOrgsRunConcurrently(t *testing.T) {
 // cross-tenant-bleed classification in multi mode).
 func TestManager_EmptyOrgIDDropped(t *testing.T) {
 	entities := &recordingEntityStore{seen: map[string]int{}}
-	m := NewManager(entities, nilProjectStore{}, nil, nil, nil)
+	m := NewManager(entities, nilProjectStore{}, nil, nil, nil, nil)
 	defer m.Stop()
 
 	m.Trigger("")
@@ -142,7 +142,7 @@ func TestManager_EmptyOrgIDDropped(t *testing.T) {
 // re-instantiating runners the manager can no longer shut down.
 func TestManager_StopIdempotent(t *testing.T) {
 	entities := &recordingEntityStore{seen: map[string]int{}}
-	m := NewManager(entities, nilProjectStore{}, nil, nil, nil)
+	m := NewManager(entities, nilProjectStore{}, nil, nil, nil, nil)
 
 	m.Trigger("org-a")
 	if !waitFor(time.Second, func() bool { return entities.callsFor("org-a") >= 1 }) {

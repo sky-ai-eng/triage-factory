@@ -396,6 +396,7 @@ func (s *projectSession) dispatch(item queueItem) {
 		TraceID:            requestID,
 		OrgID:              item.orgID,
 		Secrets:            s.curator.getSecrets(),
+		LLMResolver:        s.curator.getLLMResolver(),
 		StartAgentHost:     startAgentHost,
 		ReadOnlyRepoMounts: roRepoMounts,
 	}, newRequestSink(s.curator, s.projectID, requestID, item.orgID, item.creatorUserID))

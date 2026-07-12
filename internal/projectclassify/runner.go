@@ -29,12 +29,13 @@ type stage1Func func(ctx context.Context, orgID, prompt string) (int, string, er
 // org, owned by the Manager) is what keeps a large org's backlog from
 // head-of-line-blocking other tenants.
 type Runner struct {
-	orgID    string
-	entities db.EntityStore
-	projects db.ProjectStore
-	secrets  agentproc.SecretsReader // per-org LLM-credential reader threaded into Classify → Haiku (nil in local; system-door in multi).
-	recorder *systemllm.Recorder     // captures per-vote LLM cost + tokens into system_llm_runs (TFAC-451)
-	limiter  *syslimit.Limiter       // shared system-job sandbox cap (nil → unlimited).
+	orgID      string
+	entities   db.EntityStore
+	projects   db.ProjectStore
+	secrets    agentproc.SecretsReader // per-org LLM-credential reader threaded into Classify → Haiku (nil in local; system-door in multi).
+	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests).
+	recorder   *systemllm.Recorder     // captures per-vote LLM cost + tokens into system_llm_runs (TFAC-451)
+	limiter    *syslimit.Limiter       // shared system-job sandbox cap (nil → unlimited).
 
 	// stage1Fn is the test seam (see stage1Func), defaulted in NewRunner
 	// to the real implementation.
@@ -47,16 +48,17 @@ type Runner struct {
 	running  bool
 }
 
-func NewRunner(entities db.EntityStore, projects db.ProjectStore, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, limiter *syslimit.Limiter) *Runner {
+func NewRunner(entities db.EntityStore, projects db.ProjectStore, orgID string, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter) *Runner {
 	r := &Runner{
-		orgID:    orgID,
-		entities: entities,
-		projects: projects,
-		secrets:  secrets,
-		recorder: recorder,
-		limiter:  limiter,
-		trigger:  make(chan struct{}, 1),
-		stop:     make(chan struct{}),
+		orgID:      orgID,
+		entities:   entities,
+		projects:   projects,
+		secrets:    secrets,
+		llmResolve: llmResolve,
+		recorder:   recorder,
+		limiter:    limiter,
+		trigger:    make(chan struct{}, 1),
+		stop:       make(chan struct{}),
 	}
 	r.stage1Fn = r.realRunStage1Haiku
 	return r

@@ -137,4 +137,40 @@ describe('bedrockFormError — Bedrock form validation (TFAC-68)', () => {
     )
     expect(bedrockFormError(s)).toBeNull()
   })
+
+  // TFAC-616: the IAM-role method carries no secret — the ARN is the only
+  // method-specific field, always required (no "keep current"), and shape-gated
+  // to look like an IAM role ARN before the server's real assume-role check.
+  it('requires the role ARN in role mode', () => {
+    const s = bedrockState({}, { bedrock_auth_method: 'role' })
+    expect(bedrockFormError(s)).toMatch(/role ARN/i)
+  })
+
+  it('rejects a malformed role ARN', () => {
+    const s = bedrockState({}, { bedrock_auth_method: 'role', bedrock_role_arn: 'not-an-arn' })
+    expect(bedrockFormError(s)).toMatch(/valid IAM role ARN/i)
+  })
+
+  it('accepts a well-formed role ARN', () => {
+    const s = bedrockState(
+      {},
+      {
+        bedrock_auth_method: 'role',
+        bedrock_role_arn: 'arn:aws:iam::123456789012:role/tf-bedrock',
+      },
+    )
+    expect(bedrockFormError(s)).toBeNull()
+  })
+
+  it('still requires the region in role mode', () => {
+    const s = bedrockState(
+      {},
+      {
+        bedrock_auth_method: 'role',
+        bedrock_role_arn: 'arn:aws:iam::123456789012:role/tf-bedrock',
+        bedrock_region: '  ',
+      },
+    )
+    expect(bedrockFormError(s)).toMatch(/region/i)
+  })
 })

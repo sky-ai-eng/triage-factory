@@ -91,6 +91,12 @@ type Server struct {
 	// Wired via SetReconciler after construction; nil until then, so the
 	// endpoint 503s rather than panicking if a request races startup.
 	reconciler *reconcile.Reconciler
+	// bedrockRole resolves the Bedrock role-mode setup + connect probe's live
+	// AWS calls (TFAC-616). Wired via SetBedrockRoleResolver after
+	// construction; nil in local mode and until then, so the role-setup
+	// endpoint reports "role mode requires the control service" rather than
+	// panicking.
+	bedrockRole bedrockRoleResolver
 	// ghResolver picks the right GitHub credential (org App installation
 	// token → PAT) per request, given the org + target account. The per-repo
 	// handler operations migrated off the old process-global PAT client —
@@ -1026,7 +1032,7 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/skills/import", sk.handleSkillsImport)
 	s.apiMutating("POST /api/skills/upload", sk.handleSkillUpload)
 	s.api("GET /api/github/repos", s.handleGitHubRepos)
-	se := &settingsHandler{tx: s.tx}
+	se := &settingsHandler{tx: s.tx, bedrockRole: func() bedrockRoleResolver { return s.bedrockRole }}
 	s.apiMutating("POST /api/github/preflight-ssh", se.handleGitHubPreflightSSH)
 	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
 	// distinct from the creds stage (auth.ValidateGitHub / /api/jira/connect).
@@ -1042,6 +1048,13 @@ func (s *Server) routes() {
 	// Validated org Bedrock-credential capture — the single write path for
 	// the aws_* / bedrock_* vault secrets (auth_method "none" clears them).
 	s.apiMutating("POST /api/bedrock/connect", se.handleBedrockConnect)
+	// Bedrock role-mode setup (TFAC-616): returns the control service's caller
+	// ARN + the TF-generated External ID so the UI can render a filled
+	// trust-policy snippet. POST (not GET) because first entry generates +
+	// persists the External ID — a state change that needs CSRF protection,
+	// per the mutating-verb convention (route_auth_test enforces GET ≠
+	// apiMutating).
+	s.apiMutating("POST /api/bedrock/role-setup", se.handleBedrockRoleSetup)
 	s.api("GET /api/jira/statuses", se.handleJiraStatuses)
 	s.api("GET /api/jira/stock", s.handleJiraStockGet)
 	s.apiMutating("POST /api/jira/stock", s.handleJiraStockPost)
@@ -1391,6 +1404,14 @@ func (s *Server) SetProfilerTrigger(fn func(orgID string, force bool)) {
 // identical reconcile path. Nil until wired — the endpoint 503s until then.
 func (s *Server) SetReconciler(rc *reconcile.Reconciler) {
 	s.reconciler = rc
+}
+
+// SetBedrockRoleResolver wires the Bedrock role-mode setup + connect-probe
+// resolver (TFAC-616). Called once at startup in multi mode with the shared
+// *llmcred.Resolver; left nil in local mode (no ambient AWS SDK), where the
+// role-setup endpoint reports the method is control-service only.
+func (s *Server) SetBedrockRoleResolver(r bedrockRoleResolver) {
+	s.bedrockRole = r
 }
 
 // SetDashboardBackfiller registers the per-user dashboard-history backfill

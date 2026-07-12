@@ -77,9 +77,10 @@ const bedrockSigningService = "bedrock"
 const maxSigV4BodyBytes = 32 << 20
 
 // SigV4Credentials is the real AWS access-key triple for the Bedrock
-// SigV4 path. Required when Provider == ProviderBedrockSigV4; ignored
-// otherwise. Loaded from the org's secret store at proxy construction;
-// like APIKey, it never appears in the agent subprocess's env.
+// SigV4 path. Required when Provider == ProviderBedrockSigV4 and no
+// SigV4CredentialSource is set; ignored otherwise. Loaded from the org's
+// secret store at proxy construction; like APIKey, it never appears in the
+// agent subprocess's env.
 type SigV4Credentials struct {
 	AccessKeyID     string
 	SecretAccessKey string
@@ -90,6 +91,34 @@ type SigV4Credentials struct {
 	// signature with a scope-mismatch 403.
 	Region string
 }
+
+// SigV4Material is one SigV4CredentialSource result: the signing triple
+// plus its expiry. Expiry drives the proxy's re-read cadence — the proxy
+// re-invokes the source within sigV4RefreshThreshold of Expiry, mirroring
+// the git proxy's per-repo token cache. A zero Expiry means "never
+// expires" (a static access-key triple), minted once.
+type SigV4Material struct {
+	SigV4Credentials
+	Expiry time.Time
+}
+
+// SigV4CredentialSource, when set on Config, supplies the signing triple
+// LIVE per request instead of the frozen Config.SigV4Credentials — the
+// exact git-proxy TokenSource pattern. The proxy caches the returned
+// material and re-invokes the source once it is within
+// sigV4RefreshThreshold of Expiry, so a role-mode run whose STS session
+// credentials are re-minted mid-run (the brain re-seals a fresh bundle;
+// the executor's source re-reads it) picks up the new triple without a
+// proxy restart. A source failure surfaces as a 502 with the error logged
+// — the same "credential refresh lagging" degradation an expired token
+// produces on the git path.
+type SigV4CredentialSource func(ctx context.Context) (SigV4Material, error)
+
+// sigV4RefreshThreshold is how close to expiry the cached signing material
+// gets before the proxy re-invokes its source — matched to the git proxy's
+// refreshThreshold. Well inside the brain's half-TTL re-mint window so a
+// re-sealed bundle is already available by the time the cache goes stale.
+const sigV4RefreshThreshold = 5 * time.Minute
 
 // validate is the construction-time check New runs for
 // ProviderBedrockSigV4, mirroring the fail-loudly-at-boot posture of
@@ -199,18 +228,64 @@ func (s *Server) rewriteSigV4(pr *httputil.ProxyRequest) {
 	// signs whatever headers are present but never adds this one itself.
 	out.Header.Set("X-Amz-Content-Sha256", payload.sha256Hex)
 
-	creds := aws.Credentials{
-		AccessKeyID:     s.cfg.SigV4Credentials.AccessKeyID,
-		SecretAccessKey: s.cfg.SigV4Credentials.SecretAccessKey,
-		SessionToken:    s.cfg.SigV4Credentials.SessionToken,
-	}
-	err := s.signer.SignHTTP(out.Context(), creds, out, payload.sha256Hex,
-		bedrockSigningService, s.cfg.SigV4Credentials.Region, time.Now().UTC())
+	// Resolve the signing triple LIVE (git-proxy TokenSource pattern): with
+	// a source configured this serves the cached credential until near
+	// expiry, then re-reads the newest sealed bundle. A source failure
+	// degrades exactly like an expired git token — a 502 with the error
+	// logged (the "credential refresh lagging" surface), never a half-signed
+	// request forwarded upstream.
+	mat, err := s.currentSigV4(out.Context())
 	if err != nil {
+		failExchange(out, fmt.Errorf("llmproxy: resolve sigv4 credentials: %w", err))
+		return
+	}
+	creds := aws.Credentials{
+		AccessKeyID:     mat.AccessKeyID,
+		SecretAccessKey: mat.SecretAccessKey,
+		SessionToken:    mat.SessionToken,
+	}
+	if err := s.signer.SignHTTP(out.Context(), creds, out, payload.sha256Hex,
+		bedrockSigningService, mat.Region, time.Now().UTC()); err != nil {
 		// SignHTTP with static credentials has no realistic failure mode,
 		// but if it ever errors the request must not go out half-signed.
 		failExchange(out, fmt.Errorf("llmproxy: sigv4 re-sign: %w", err))
 	}
+}
+
+// currentSigV4 returns the signing material for this request. With a
+// SigV4CredentialSource configured it serves the cached material until it
+// is within sigV4RefreshThreshold of expiry, then re-invokes the source —
+// coalesced under sigV4Mu so concurrent requests trigger one re-read. With
+// no source it returns the static Config triple (frozen at construction).
+func (s *Server) currentSigV4(ctx context.Context) (SigV4Material, error) {
+	if s.cfg.SigV4CredentialSource == nil {
+		return SigV4Material{SigV4Credentials: *s.cfg.SigV4Credentials}, nil
+	}
+	s.sigV4Mu.Lock()
+	defer s.sigV4Mu.Unlock()
+	now := time.Now()
+	if s.sigV4Cached != nil && !sigV4Stale(*s.sigV4Cached, now) {
+		return *s.sigV4Cached, nil
+	}
+	mat, err := s.cfg.SigV4CredentialSource(ctx)
+	if err != nil {
+		return SigV4Material{}, err
+	}
+	if mat.AccessKeyID == "" || mat.SecretAccessKey == "" {
+		return SigV4Material{}, errors.New("llmproxy: sigv4 credential source returned an incomplete triple")
+	}
+	s.sigV4Cached = &mat
+	return mat, nil
+}
+
+// sigV4Stale reports whether cached signing material needs re-reading: true
+// when within sigV4RefreshThreshold of expiry. A zero Expiry (a static
+// triple served through the source) is never stale.
+func sigV4Stale(mat SigV4Material, now time.Time) bool {
+	if mat.Expiry.IsZero() {
+		return false
+	}
+	return !mat.Expiry.After(now.Add(sigV4RefreshThreshold))
 }
 
 // failExchange rigs the outgoing request so the transport aborts it:

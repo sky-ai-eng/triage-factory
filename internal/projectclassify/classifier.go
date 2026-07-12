@@ -270,11 +270,12 @@ func readProjectKB(orgID, projectID string) (string, bool, error) {
 // It reads the per-org credentials off the receiver.
 func (r *Runner) realRunStage1Haiku(ctx context.Context, orgID, prompt string) (int, string, error) {
 	return r.runHaiku(ctx, agentproc.RunOptions{
-		Model:   ai.SystemJobModel,
-		Message: prompt,
-		TraceID: "classify-stage1",
-		OrgID:   orgID,
-		Secrets: r.secrets,
+		Model:       ai.SystemJobModel,
+		Message:     prompt,
+		TraceID:     "classify-stage1",
+		OrgID:       orgID,
+		Secrets:     r.secrets,
+		LLMResolver: r.llmResolve,
 	})
 }
 

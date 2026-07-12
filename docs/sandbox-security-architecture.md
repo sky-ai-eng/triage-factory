@@ -55,7 +55,7 @@ process inside the sandbox):
 | | Threat | Defense |
 | --- | --- | --- |
 | **T1** | Credential exfiltration | Property B (§5): no credential ever enters the sandbox environment. |
-| **T2** | In-run credential misuse | Bounded by run wall-clock + the short-lived, single-installation GitHub token; the upstream LLM key is long-lived (BYOK, customer-rotated), so this is **partial coverage in v1** (§5). |
+| **T2** | In-run credential misuse | Bounded by run wall-clock + the short-lived, single-installation GitHub token; in Bedrock **role mode** the LLM credential is short-lived too (≤1h, action-scoped, optionally network-bound STS session creds), while bearer/access-key Bedrock and Anthropic keys stay long-lived (BYOK, customer-rotated) — so this is **partial coverage in v1** (§5). |
 | **T3** | RCE in the agent SDK escaping the SDK process | gVisor + in-sandbox hardening (non-root uid, empty caps, seccomp, no-new-privs). |
 | **T4** | RCE escaping gVisor to the host kernel | gVisor's user-mode-kernel architecture — the reason gVisor is used at all. |
 
@@ -268,9 +268,17 @@ legitimately needs them to do its job. Their safety rests on three things:
   installation — not a user PAT. A leaked token is minutes of single-org access.
   *(Hardening in progress: minting moves to the control plane so the executor
   holds only hour-lived tokens, never the App private key — §8.)*
-- **Bring-your-own-key**: the LLM key at risk in a SaaS deployment is the
-  customer's own, under the customer's rotation control — Triage Factory does
-  not resell inference.
+- **Bring-your-own-key — and, for Bedrock, short-lived by default**: the LLM
+  credential at risk in a SaaS deployment is the customer's own, under the
+  customer's rotation control — Triage Factory does not resell inference. In
+  Bedrock **role mode** there is no stored key at all: the org configures only
+  a customer IAM role ARN + a TF-generated External ID, and the control
+  ("brain") process mints a fresh **STS session credential** per unit of work —
+  short-lived (≤1h), scoped by an inline session policy to `InvokeModel` on
+  that one model, optionally network-bound to the executor's egress, and
+  attributed per run in the customer's CloudTrail. Bearer-token and access-key
+  Bedrock, and the Anthropic-key path, remain the long-lived, customer-rotated
+  residual.
 
 The honest residual: a compromise of the **proxy** yields the credentials the
 proxy holds. This is inherent to the proxy pattern — any process that holds a
@@ -278,7 +286,13 @@ key and serves untrusted callers can leak that key if the process itself is
 compromised — and it is the same exposure a credential-proxy sidecar has in any
 architecture. What privilege separation guarantees is that this compromise
 yields **no capabilities**: the proxy runs on the orchestrator (unprivileged)
-side. The 408 sandbox-fleet spec's rule — "credentials and egress policy stay
+side. In Bedrock role mode this residual shrinks further: the credential the
+proxy holds is itself a short-lived, `InvokeModel`-scoped, optionally
+network-bound STS session credential (the org stores no Bedrock secret at all),
+so a proxy compromise leaks minutes of single-model inference — often unusable
+off the executor's egress — rather than a durable key. Bearer/access-key
+Bedrock and Anthropic keys remain the long-lived residual this paragraph
+describes. The 408 sandbox-fleet spec's rule — "credentials and egress policy stay
 per-run in the proxies, never baked into an image" — is the same invariant
 stated from the customization side.
 
@@ -317,6 +331,13 @@ skips the gVisor escape.
 **Vector 3 — the resident credentials.** (See §5.)
 - **[shipped]** Property B; App installation tokens (1h, single-installation);
   BYOK.
+- **[shipped]** Bedrock **role mode**: brain-minted, short-lived (≤1h) STS
+  session credentials scoped by an inline session policy to `InvokeModel` on
+  the org's one configured model, optionally network-bound to the executor's
+  egress (`aws:SourceIp`/`aws:SourceVpce`) so an exfiltrated credential is
+  unusable elsewhere, and attributed per run in the customer's CloudTrail. The
+  org stores no Bedrock secret; bearer/access-key Bedrock and Anthropic keys
+  stay the long-lived BYOK residual.
 - **[planned]** Move App-token minting to the control plane (executors never hold
   the App private key).
 - **[planned]** A least-privilege `tf_system` database role for executors (no
@@ -388,6 +409,9 @@ basis.
 - Fail-closed egress default-DROP; per-run netns, veth, subnet.
 - Per-run memory ceiling via cgroup-v2.
 - GitHub App installation tokens (short-lived, single-installation).
+- Brain-minted short-lived Bedrock STS session credentials (role mode) —
+  ≤1h, action-scoped to `InvokeModel` on the org's one model, optionally
+  network-bound; the org stores no Bedrock secret.
 - Executors accept no inbound traffic.
 - Local mode takes none of the host privileges (sandbox skipped).
 - `npm ci --ignore-scripts` for the vendored Agent SDK.

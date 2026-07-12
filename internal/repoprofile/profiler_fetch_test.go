@@ -56,6 +56,7 @@ func TestProfiler_FetchErrorLeavesRowUntouched(t *testing.T) {
 	p := NewProfiler(
 		fixedResolver{client: github.NewClient(srv.URL, "tok")},
 		nil, // secrets unused: no with-docs repo reaches profileBatch
+		nil, // llmResolve nil: tests use Run's built-in resolution
 		repos,
 		oneOrgStore{},
 		nil, // recorder nil: a nil recorder makes Record a no-op

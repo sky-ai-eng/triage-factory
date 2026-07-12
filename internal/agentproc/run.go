@@ -158,6 +158,30 @@ type RunOptions struct {
 	// directly on the host with the operator's own git credentials).
 	GitProxy *GitProxyConfig
 
+	// LLMResolver, when non-nil, resolves the org's LLM env map instead of
+	// Run's built-in raw-secret resolution — the seam the brain wires to
+	// internal/llmcred so a role-mode Bedrock org mints short-lived STS
+	// session credentials (there is no raw key to read). It is consulted
+	// ONLY on the resolve-from-secrets path: a run carrying a sealed bundle
+	// on ctx (the executor) still reads bundle.LLM, unchanged. The map's
+	// semantics match resolveCredentials' — a non-nil empty map means
+	// "inherit the host's ambient credentials" (local subscription); a nil
+	// LLMResolver keeps today's behavior in every mode. Set at the
+	// brain-side / all-local call sites (delegate, scorer, profiler,
+	// classifier); a mint failure surfaces here and the caller skips.
+	LLMResolver func(ctx context.Context, orgID string) (map[string]string, error)
+
+	// LLMCredentialSource, when non-nil, is the executor's live re-reader of
+	// the run's newest sealed LLM material (the analog of GitProxy's
+	// TokenSource). startProxiesForSandbox wires it into the SigV4 proxy so a
+	// role-mode run whose STS session credentials are re-minted mid-run picks
+	// up the fresh triple without a proxy restart — reading the newest sealed
+	// bundle, never the run-start snapshot. Returns the newest bundle.LLM env
+	// map plus its expiry (zero = non-expiring). Wired by the delegate on the
+	// executor bundle path only; nil everywhere else keeps the run-start
+	// snapshot (bearer / anthropic, brain-side consumers, local).
+	LLMCredentialSource func(ctx context.Context) (env map[string]string, expiry time.Time, err error)
+
 	// StartAgentHost, when non-nil, starts the per-run host agenthost
 	// daemon in the sandbox branch. The daemon owns the run identity
 	// and serves the RPCs the sandboxed `triagefactory exec`
@@ -500,7 +524,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 
 	sdkDir := filepath.Dir(wrapperPath)
 
-	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID)
+	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID, opts.LLMResolver)
 	if err != nil {
 		cleanup()
 		return nil, cleanup, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
@@ -641,7 +665,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		// block alongside core.hooksPath + the proxy pairs. Empty identity → no
 		// pairs added.
 		identityPairs := githooks.IdentityConfigPairs(opts.GitUserName, opts.GitUserEmail)
-		bundle, proxyEnv, perr := startProxiesForSandbox(runCtx, s.HostIP, creds, opts.GitProxy, identityPairs...)
+		bundle, proxyEnv, perr := startProxiesForSandbox(runCtx, s.HostIP, creds, opts.GitProxy, opts.LLMCredentialSource, identityPairs...)
 		if perr != nil {
 			return nil, perr
 		}
@@ -690,7 +714,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 // go down with it. Shared by the one-shot Run and the interactive
 // RunInteractive so both spawn identically.
 func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string) (*exec.Cmd, error) {
-	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID)
+	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID, opts.LLMResolver)
 	if err != nil {
 		return nil, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
 	}

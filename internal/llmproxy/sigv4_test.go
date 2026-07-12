@@ -656,3 +656,135 @@ func TestProxySigV4RejectsInvalidConfig(t *testing.T) {
 		t.Errorf("New with a complete triple and empty APIKey: %v; want success", err)
 	}
 }
+
+// TestProxySigV4LiveCredentialSource_MidRunSwap pins the TokenSource
+// pattern (TFAC-616): a SigV4CredentialSource that returns near-expiry
+// material forces the proxy to re-read it per request, and swapping the
+// source's triple mid-run must change what the proxy signs upstream — the
+// executor picking up a re-minted STS session credential without a proxy
+// restart.
+func TestProxySigV4LiveCredentialSource_MidRunSwap(t *testing.T) {
+	rec := &sigV4Capture{}
+	upstream := fakeBedrockUpstream(rec)
+	defer upstream.Close()
+
+	credA := llmproxy.SigV4Credentials{AccessKeyID: "ASIAAAAAAAAAAAAAAAA1", SecretAccessKey: "secret-A", Region: "us-east-1"}
+	credB := llmproxy.SigV4Credentials{AccessKeyID: "ASIABBBBBBBBBBBBBBB2", SecretAccessKey: "secret-B", Region: "us-east-1"}
+
+	var current atomic.Value
+	current.Store(credA)
+	var calls atomic.Int64
+	source := func(ctx context.Context) (llmproxy.SigV4Material, error) {
+		calls.Add(1)
+		c := current.Load().(llmproxy.SigV4Credentials)
+		// Expiry inside the refresh threshold → the proxy re-reads on every
+		// request (models a short-TTL role session partway through its life).
+		return llmproxy.SigV4Material{SigV4Credentials: c, Expiry: time.Now().Add(1 * time.Minute)}, nil
+	}
+
+	srv, err := llmproxy.New(llmproxy.Config{
+		Provider:              llmproxy.ProviderBedrockSigV4,
+		Upstream:              upstream.URL,
+		SigV4CredentialSource: source,
+	})
+	if err != nil {
+		t.Fatalf("llmproxy.New: %v", err)
+	}
+	addr, err := srv.Start("")
+	if err != nil {
+		t.Fatalf("Server.Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+	proxyURL := "http://" + addr
+
+	send := func() {
+		body := []byte(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":8,"messages":[]}`)
+		req, err := http.NewRequest("POST", proxyURL+"/model/x/invoke", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		signAsSandboxSDK(t, req, body, aws.Credentials{AccessKeyID: "AKIA-PLACEHOLDER", SecretAccessKey: "placeholder"})
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("roundtrip: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+	}
+
+	// Request 1 → signed with A.
+	send()
+	if got := verifyReceivedSigV4(t, rec.input, credA.SecretAccessKey); got.AccessKeyID != credA.AccessKeyID {
+		t.Fatalf("request 1 signed with %q, want the A key %q", got.AccessKeyID, credA.AccessKeyID)
+	}
+
+	// Swap the source's triple mid-run (the brain re-sealed a fresh bundle).
+	current.Store(credB)
+
+	// Request 2 → must be signed with B (the proxy re-read the source).
+	send()
+	if got := verifyReceivedSigV4(t, rec.input, credB.SecretAccessKey); got.AccessKeyID != credB.AccessKeyID {
+		t.Fatalf("request 2 signed with %q, want the swapped B key %q — the proxy did not re-read the source", got.AccessKeyID, credB.AccessKeyID)
+	}
+	if calls.Load() < 2 {
+		t.Fatalf("source called %d times, want >= 2 (per-request re-read on near-expiry material)", calls.Load())
+	}
+}
+
+// TestProxySigV4LiveCredentialSource_CachesUntilExpiry pins that
+// non-expiring (or far-future) material from the source is minted once and
+// cached, not re-read per request.
+func TestProxySigV4LiveCredentialSource_CachesUntilExpiry(t *testing.T) {
+	rec := &sigV4Capture{}
+	upstream := fakeBedrockUpstream(rec)
+	defer upstream.Close()
+
+	var calls atomic.Int64
+	source := func(ctx context.Context) (llmproxy.SigV4Material, error) {
+		calls.Add(1)
+		return llmproxy.SigV4Material{
+			SigV4Credentials: llmproxy.SigV4Credentials{AccessKeyID: "ASIACACHED000000001", SecretAccessKey: "s", Region: "us-east-1"},
+			Expiry:           time.Now().Add(1 * time.Hour),
+		}, nil
+	}
+	srv, err := llmproxy.New(llmproxy.Config{
+		Provider:              llmproxy.ProviderBedrockSigV4,
+		Upstream:              upstream.URL,
+		SigV4CredentialSource: source,
+	})
+	if err != nil {
+		t.Fatalf("llmproxy.New: %v", err)
+	}
+	addr, err := srv.Start("")
+	if err != nil {
+		t.Fatalf("Server.Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+	proxyURL := "http://" + addr
+
+	for i := 0; i < 3; i++ {
+		body := []byte(`{"messages":[]}`)
+		req, _ := http.NewRequest("POST", proxyURL+"/model/x/invoke", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		signAsSandboxSDK(t, req, body, aws.Credentials{AccessKeyID: "AKIA-PH", SecretAccessKey: "ph"})
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("roundtrip %d: %v", i, err)
+		}
+		resp.Body.Close()
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("source called %d times over 3 requests, want 1 (cached until near expiry)", calls.Load())
+	}
+}

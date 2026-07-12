@@ -256,6 +256,7 @@ export default function OrgSettings({
     draft.org.aws_session_token !== ''
   const bedrockConfigChanged =
     draft.org.bedrock_auth_method !== baseline.org.bedrock_auth_method ||
+    draft.org.bedrock_role_arn !== baseline.org.bedrock_role_arn ||
     draft.org.bedrock_region !== baseline.org.bedrock_region ||
     draft.org.bedrock_model_id !== baseline.org.bedrock_model_id ||
     draft.org.bedrock_base_url !== baseline.org.bedrock_base_url
@@ -680,6 +681,8 @@ export default function OrgSettings({
               }
               const storedConfig = {
                 bedrock_auth_method: draft.org.bedrock_auth_method,
+                bedrock_role_arn: draft.org.bedrock_role_arn,
+                bedrock_external_id: draft.org.bedrock_external_id,
                 bedrock_region: draft.org.bedrock_region,
                 bedrock_model_id: draft.org.bedrock_model_id,
                 bedrock_base_url: draft.org.bedrock_base_url,
@@ -750,6 +753,8 @@ export default function OrgSettings({
               aws_access_key_id: '',
               aws_secret_access_key: '',
               aws_session_token: '',
+              bedrock_role_arn: baseline.org.bedrock_role_arn,
+              bedrock_external_id: baseline.org.bedrock_external_id,
               bedrock_region: baseline.org.bedrock_region,
               bedrock_model_id: baseline.org.bedrock_model_id,
               bedrock_base_url: baseline.org.bedrock_base_url,

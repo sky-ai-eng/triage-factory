@@ -238,10 +238,16 @@ var credentialEnvKeys = []string{
 // brain (which still holds the real secret store) and sealed into a run's
 // credential bundle rather than read by the executor directly.
 func ResolveCredentialsForBundle(ctx context.Context, secrets SecretsReader, orgID string) (map[string]string, error) {
-	return resolveCredentials(ctx, secrets, orgID)
+	return resolveCredentials(ctx, secrets, orgID, nil)
 }
 
-func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string) (map[string]string, error) {
+// resolveCredentials resolves the LLM env map for a run. resolver, when
+// non-nil (RunOptions.LLMResolver), is the brain-side role-aware resolver
+// (internal/llmcred): it fully replaces the built-in raw-secret path so a
+// role-mode Bedrock org mints STS session credentials rather than reading a
+// key that doesn't exist. It is consulted only when the run carries no
+// sealed bundle on ctx — the executor bundle path still wins, unchanged.
+func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string, resolver func(ctx context.Context, orgID string) (map[string]string, error)) (map[string]string, error) {
 	// TF_ROLE=executor (TFAC-614): the run's LLM credential was already
 	// resolved by the brain (which still holds the real secret store) and
 	// sealed into this run's bundle — read it back instead of calling
@@ -254,6 +260,14 @@ func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string
 			return nil, fmt.Errorf("%w: org %s", ErrNoCredentialsConfigured, orgID)
 		}
 		return bundle.LLM, nil
+	}
+
+	// Brain-side / all-local role-aware resolution (internal/llmcred). When
+	// wired, it owns resolution outright — it reproduces the raw-secret env
+	// map for bearer/access_keys/anthropic/local-ambient orgs byte-for-byte
+	// (it delegates to ResolveCredentialsForBundle) and mints for role orgs.
+	if resolver != nil {
+		return resolver(ctx, orgID)
 	}
 
 	multi := runmode.Current() == runmode.ModeMulti

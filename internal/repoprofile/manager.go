@@ -43,8 +43,8 @@ type Manager struct {
 // system-job limiter, WS hub). The wrapped Profiler is shared across every
 // per-org Runner — it is stateless, reading credentials fresh per repo through
 // the resolver, so a config-change hot-swap is honored without rebuilding it.
-func NewManager(resolver github.Resolver, secrets agentproc.SecretsReader, repos db.RepoStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Manager {
-	profiler := NewProfiler(resolver, secrets, repos, orgs, recorder, limiter, ws)
+func NewManager(resolver github.Resolver, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, repos db.RepoStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Manager {
+	profiler := NewProfiler(resolver, secrets, llmResolve, repos, orgs, recorder, limiter, ws)
 	return &Manager{
 		profiler: profiler,
 		runners:  make(map[string]*Runner),

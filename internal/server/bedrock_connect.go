@@ -52,6 +52,11 @@ import (
 const (
 	bedrockAuthMethodBearer     = "bearer"
 	bedrockAuthMethodAccessKeys = "access_keys"
+	// bedrockAuthMethodRole is the short-lived-credential method (TFAC-616):
+	// the org stores no Bedrock secret at all — only the customer role ARN
+	// and a TF-generated External ID — and the brain mints STS session creds
+	// per run. It is the only Bedrock method with a live connect-time probe.
+	bedrockAuthMethodRole = "role"
 	// bedrockAuthMethodNone is request-only: the explicit clear.
 	bedrockAuthMethodNone = "none"
 )
@@ -64,6 +69,8 @@ func bedrockAuthMethodFromRef(ref string) string {
 		return bedrockAuthMethodBearer
 	case integrations.KeyAWSAccessKeyID:
 		return bedrockAuthMethodAccessKeys
+	case integrations.KeyAWSRoleARN:
+		return bedrockAuthMethodRole
 	}
 	return ""
 }
@@ -112,14 +119,19 @@ func validateBedrockBaseURL(raw string) error {
 // model_id / base_url) is updated. Any non-blank secret means "replace" and
 // the full set for the method is required.
 type bedrockConnectRequest struct {
-	AuthMethod      string `json:"auth_method"` // "bearer" | "access_keys" | "none" (clear)
+	AuthMethod      string `json:"auth_method"` // "role" | "bearer" | "access_keys" | "none" (clear)
 	BearerToken     string `json:"bearer_token"`
 	AccessKeyID     string `json:"access_key_id"`
 	SecretAccessKey string `json:"secret_access_key"`
 	SessionToken    string `json:"session_token"`
-	Region          string `json:"region"`   // required for both auth methods
-	ModelID         string `json:"model_id"` // optional; blank clears
-	BaseURL         string `json:"base_url"` // optional endpoint override; blank clears
+	// RoleARN is the customer IAM role the control service assumes (role
+	// mode). Plain text, non-secret. The External ID is TF-generated (never
+	// taken from the request — see decision 3) and returned by the role-setup
+	// endpoint.
+	RoleARN string `json:"role_arn"`
+	Region  string `json:"region"`   // required for every auth method
+	ModelID string `json:"model_id"` // optional; blank clears
+	BaseURL string `json:"base_url"` // optional endpoint override; blank clears
 }
 
 func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +149,7 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 	req.AccessKeyID = strings.TrimSpace(req.AccessKeyID)
 	req.SecretAccessKey = strings.TrimSpace(req.SecretAccessKey)
 	req.SessionToken = strings.TrimSpace(req.SessionToken)
+	req.RoleARN = strings.TrimSpace(req.RoleARN)
 	req.Region = strings.TrimSpace(req.Region)
 	req.ModelID = strings.TrimSpace(req.ModelID)
 	req.BaseURL = strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
@@ -163,8 +176,8 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if req.AuthMethod != bedrockAuthMethodBearer && req.AuthMethod != bedrockAuthMethodAccessKeys {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": `auth_method must be "bearer", "access_keys", or "none"`})
+	if req.AuthMethod != bedrockAuthMethodBearer && req.AuthMethod != bedrockAuthMethodAccessKeys && req.AuthMethod != bedrockAuthMethodRole {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": `auth_method must be "role", "bearer", "access_keys", or "none"`})
 		return
 	}
 	if req.Region == "" {
@@ -180,6 +193,13 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+	}
+
+	// Role mode (TFAC-616) is the only Bedrock method with a live connect
+	// probe and stores no secret credential — handled on its own path.
+	if req.AuthMethod == bedrockAuthMethodRole {
+		se.handleBedrockRoleConnect(w, r, orgID, userID, req)
+		return
 	}
 	// Partial access-key pairs are always a mistake — catch before the
 	// keep-current logic can misread them.
@@ -264,6 +284,15 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 		// resolver, silently ignoring everything stored above.
 		if _, err := tx.Secrets.Delete(r.Context(), orgID, secretKeyAnthropicAPIKey); err != nil {
 			return fmt.Errorf("clear Anthropic key on provider switch: %w", err)
+		}
+		// A stale role ARN would make the llmcred resolver treat this org as
+		// role mode (it detects role by aws_role_arn presence) and try to mint
+		// instead of using the bearer/access-key material stored above — clear
+		// the role keys when switching to a static Bedrock method (TFAC-616).
+		for _, k := range []string{integrations.KeyAWSRoleARN, integrations.KeyAWSExternalID} {
+			if _, err := tx.Secrets.Delete(r.Context(), orgID, k); err != nil {
+				return fmt.Errorf("clear stale %s on provider switch: %w", k, err)
+			}
 		}
 		orgSet.AnthropicAPIKeyRef = ""
 		if req.AuthMethod == bedrockAuthMethodBearer {

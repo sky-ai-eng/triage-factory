@@ -49,7 +49,7 @@ func stage1Stub(scoresByProjectName map[string]int) (stage1Func, *callRecorder) 
 // runner plus the stage1 call recorder.
 func stubRunner(orgID string, stage1 map[string]int) (*Runner, *callRecorder) {
 	s1, rec1 := stage1Stub(stage1)
-	r := NewRunner(nil, nil, orgID, nil, nil, nil)
+	r := NewRunner(nil, nil, orgID, nil, nil, nil, nil)
 	r.stage1Fn = s1
 	return r, rec1
 }

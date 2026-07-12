@@ -408,18 +408,20 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	}
 
 	baseOpts := agentproc.RunOptions{
-		Cwd:            cwd,
-		Model:          model,
-		SessionID:      sessionID,
-		Message:        message,
-		AllowedTools:   agentproc.BuildAllowedToolsWithExtras(selfBin, opts.ExtraAllowedTools),
-		MaxTurns:       100,
-		ExtraEnv:       extraEnv,
-		TraceID:        runID,
-		OrgID:          orgID,
-		Secrets:        s.getRunSecrets(),
-		GitProxy:       gitProxy,
-		StartAgentHost: startAgentHost,
+		Cwd:                 cwd,
+		Model:               model,
+		SessionID:           sessionID,
+		Message:             message,
+		AllowedTools:        agentproc.BuildAllowedToolsWithExtras(selfBin, opts.ExtraAllowedTools),
+		MaxTurns:            100,
+		ExtraEnv:            extraEnv,
+		TraceID:             runID,
+		OrgID:               orgID,
+		Secrets:             s.getRunSecrets(),
+		LLMResolver:         s.llmResolverForRun(orgID, runID),
+		LLMCredentialSource: s.bundleLLMSourceFor(ctx, info),
+		GitProxy:            gitProxy,
+		StartAgentHost:      startAgentHost,
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
 

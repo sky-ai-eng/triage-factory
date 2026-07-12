@@ -241,6 +241,14 @@ type Spawner struct {
 	ghResolver ghclient.Resolver                            // per-(org, owner) GitHub client source (App token in multi, keychain PAT in local)
 	runSecrets agentproc.SecretsReader                      // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi)
 	modelFor   func(context.Context, string, string) string // per-(org, team) default-model resolver (prompt.Model still overrides per delegation)
+	// llmResolver is the shared LLM-credential resolver (internal/llmcred,
+	// TFAC-616) — role-mode Bedrock orgs mint short-lived STS session creds
+	// through it. Used only off the executor bundle path (all/local, where a
+	// delegated run resolves in-process): the RunOptions.LLMResolver it feeds
+	// is ignored when a sealed bundle is on ctx (the executor), whose live
+	// LLM material comes from bundleLLMSourceFor instead. nil in local mode
+	// (ambient) and in tests. Wired post-construction via SetLLMResolver.
+	llmResolver bundleLLMResolver
 	// jiraResolver routes the TFAC-300 board→Jira mirror under the org's
 	// system/bot credential (ForSystem). Wired post-construction via
 	// SetJiraResolver (the resolver is built in the app composition, not handed
@@ -678,6 +686,24 @@ func (s *Spawner) SetRunCredentialResolvers(resolver ghclient.Resolver, secrets 
 	s.ghResolver = resolver
 	s.runSecrets = secrets
 	s.modelFor = modelFor
+}
+
+// SetLLMResolver wires the shared LLM-credential resolver (internal/llmcred,
+// TFAC-616) so a role-mode Bedrock org mints short-lived STS session creds
+// for its delegated runs on the all/local path. Set once at startup like
+// SetRunCredentialResolvers; nil in local mode (ambient) and in tests.
+func (s *Spawner) SetLLMResolver(r bundleLLMResolver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.llmResolver = r
+}
+
+// getLLMResolver returns the wired resolver under the lock, race-free against
+// a startup-time SetLLMResolver.
+func (s *Spawner) getLLMResolver() bundleLLMResolver {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.llmResolver
 }
 
 // SetJiraResolver wires the Jira write-actor resolver so the TFAC-300
