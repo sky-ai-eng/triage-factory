@@ -33,12 +33,6 @@ func newTestDB(t *testing.T) *sql.DB {
 	return database
 }
 
-// errStage2 is a stage2Func that fails loudly: the runner tests below never
-// reach Stage 2 (no borderline+truncated vote), so a call means a regression.
-func errStage2(context.Context, string, string, string) (int, string, error) {
-	return 0, "", errors.New("stage2 should not be reached")
-}
-
 // TestRunner_StopIdempotent pins that Stop is safe to call more than once
 // (guarded by stopOnce); a bare close(r.stop) would panic on the second call.
 func TestRunner_StopIdempotent(t *testing.T) {
@@ -71,7 +65,6 @@ func TestRunner_AllErroredLeavesEntityForRetry(t *testing.T) {
 	r.stage1Fn = func(context.Context, string, string) (int, string, error) {
 		return 0, "", errors.New("simulated CLI down")
 	}
-	r.stage2Fn = errStage2
 	r.run(context.Background()) // synchronous one cycle
 
 	post, err := sqlitestore.New(database).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)
@@ -116,7 +109,6 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 		}
 		return 30, "stub for Good", nil
 	}
-	r.stage2Fn = errStage2
 	r.run(context.Background())
 
 	post, err := sqlitestore.New(database).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)
@@ -127,5 +119,50 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 		if e.ID == entity.ID {
 			t.Errorf("entity should be classified (partial-error path stamps classified_at)")
 		}
+	}
+}
+
+// TestRunner_ExactTieRationaleDoesNotQuoteOneCandidate guards against a
+// misleading rationale: on an exact tie, bestRationale would otherwise pick
+// one arbitrary tied vote's confident-sounding text and persist it verbatim,
+// even though that project was NOT assigned — a human reading the rationale
+// on an unassigned entity should see that it was tied, not a cherry-picked
+// quote implying a near-miss on one specific project.
+func TestRunner_ExactTieRationaleDoesNotQuoteOneCandidate(t *testing.T) {
+	isolateHome(t)
+	database := newTestDB(t)
+
+	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{ID: "p-alpha", Name: "Alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{ID: "p-beta", Name: "Beta"}); err != nil {
+		t.Fatal(err)
+	}
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#3", "pr", "T", "https://x/3")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil)
+	r.stage1Fn = func(_ context.Context, _, prompt string) (int, string, error) {
+		if strings.Contains(prompt, "<project_name>\nAlpha\n</project_name>") {
+			return 75, "definitely belongs to Alpha", nil
+		}
+		return 75, "definitely belongs to Beta", nil
+	}
+	r.run(context.Background())
+
+	got, err := sqlitestore.New(database).Entities.GetSystem(context.Background(), runmode.LocalDefaultOrgID, entity.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ProjectID != nil {
+		t.Errorf("entity should be unassigned on an exact tie, got project %v", *got.ProjectID)
+	}
+	if strings.Contains(got.ClassificationRationale, "definitely belongs to") {
+		t.Errorf("rationale quotes one tied candidate's vote as if it won: %q", got.ClassificationRationale)
+	}
+	if !strings.Contains(got.ClassificationRationale, "tied") {
+		t.Errorf("rationale should explain the tie, got: %q", got.ClassificationRationale)
 	}
 }
