@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -234,6 +235,83 @@ func TestComplete_Direct_BedrockModelDefaultAndOverride(t *testing.T) {
 		}
 		if !strings.Contains(h.lastPath, "custom.inference.profile") {
 			t.Errorf("path = %q, want it to reference the overridden model", h.lastPath)
+		}
+	})
+}
+
+// TestComplete_Direct_BedrockCostAccounting_PricesOnPinnedModel is the
+// regression guard for a Bedrock call recording $0 cost: the resolved
+// request model is a Bedrock inference-profile id/ARN (the regional
+// default, or an org's bedrock_model_id override) that has no entry in
+// ai.pricing's table, so cost math must key off opts.DirectModel (the
+// pinned Anthropic model id) instead.
+//
+// Can't use the real ai.CalculateCostUSD here — internal/ai imports
+// internal/systemllm, and Go treats that as a genuine import cycle even for
+// an internal (package systemllm) test file, not just production code. The
+// stub below mirrors its exact contract instead: 0 for any model string it
+// doesn't recognize, matching the account of the real bug (a resolved
+// Bedrock model has no pricing-table entry → silently $0). Before the fix,
+// CostFn was called with the resolved request model, so this stub would
+// have returned 0 for both cases below; after the fix it's called with
+// opts.DirectModel, matching the pinned constant.
+func TestComplete_Direct_BedrockCostAccounting_PricesOnPinnedModel(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	const sentinelCost = 1.23
+
+	run := func(t *testing.T, secrets stubSecrets, wantModelSubstr string) domain.SystemLLMRun {
+		t.Helper()
+		h := &capturingHandler{t: t, body: sprintfBody(`ok`)}
+		srv := httptest.NewServer(h)
+		defer srv.Close()
+		secrets["org-1/bedrock_base_url"] = srv.URL
+
+		fs := &fakeStore{}
+		r := NewRecorder(fs)
+		opts := completeOpts("org-1", secrets)
+		pinnedModel := opts.DirectModel
+		opts.CostFn = func(model string, _, _, _, _ int) float64 {
+			if model != pinnedModel {
+				return 0 // mirrors ai.CalculateCostUSD: unknown model → 0
+			}
+			return sentinelCost
+		}
+		if _, err := r.Complete(context.Background(), opts); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if !strings.Contains(h.lastPath, wantModelSubstr) {
+			t.Errorf("path = %q, want it to reference %q", h.lastPath, wantModelSubstr)
+		}
+		if len(fs.rows) != 1 {
+			t.Fatalf("recorded %d rows, want 1", len(fs.rows))
+		}
+		return fs.rows[0]
+	}
+
+	t.Run("default model", func(t *testing.T) {
+		got := run(t, stubSecrets{
+			"org-1/aws_bearer_token_bedrock": "tok",
+			"org-1/aws_region":               "us-east-1",
+		}, defaultBedrockHaikuModel)
+		if got.TotalCostUSD != sentinelCost {
+			t.Errorf("TotalCostUSD = %v, want %v (CostFn must be keyed on DirectModel, not the resolved Bedrock model %q)", got.TotalCostUSD, sentinelCost, defaultBedrockHaikuModel)
+		}
+		if got.Model != defaultBedrockHaikuModel {
+			t.Errorf("Model = %q, want the resolved Bedrock model %q recorded for observability", got.Model, defaultBedrockHaikuModel)
+		}
+	})
+
+	t.Run("bedrock_model_id override", func(t *testing.T) {
+		got := run(t, stubSecrets{
+			"org-1/aws_bearer_token_bedrock": "tok",
+			"org-1/aws_region":               "us-east-1",
+			"org-1/bedrock_model_id":         "custom.inference.profile",
+		}, "custom.inference.profile")
+		if got.TotalCostUSD != sentinelCost {
+			t.Errorf("TotalCostUSD = %v, want %v (CostFn must be keyed on DirectModel, not the org's bedrock_model_id override)", got.TotalCostUSD, sentinelCost)
+		}
+		if got.Model != "custom.inference.profile" {
+			t.Errorf("Model = %q, want the overridden Bedrock model recorded for observability", got.Model)
 		}
 	})
 }

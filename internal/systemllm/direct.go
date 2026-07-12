@@ -27,9 +27,17 @@ const defaultBedrockHaikuModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*CompleteResult, error) {
 	// Fail fast on a caller bug (a job that never populated the multi-mode
 	// prompt split) rather than letting the SDK reject an empty system/user
-	// turn with a far less actionable error.
+	// turn with a far less actionable error. DirectModel is required
+	// regardless of provider: besides being the Anthropic-direct request
+	// model, it doubles as the cost-accounting key below — a resolved
+	// Bedrock model (an inference-profile id/ARN) has no pricing-table
+	// entry, so cost math needs the pinned Anthropic model id, not
+	// whatever concrete endpoint actually served the request.
 	if opts.SystemPrompt == "" || opts.UserMessage == "" {
 		return nil, errors.New("systemllm: SystemPrompt and UserMessage are both required in multi mode")
+	}
+	if opts.DirectModel == "" {
+		return nil, errors.New("systemllm: DirectModel is required in multi mode")
 	}
 
 	startedAt := time.Now().UTC()
@@ -82,7 +90,14 @@ func (r *Recorder) recordDirectCall(ctx context.Context, opts CompleteOptions, m
 		}
 		traceID = msg.ID
 		if opts.CostFn != nil {
-			costUSD = opts.CostFn(model, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheCreationTokens)
+			// Priced on opts.DirectModel (the pinned Anthropic model id), NOT
+			// the resolved request model: a Bedrock call's actual model is an
+			// inference-profile id/ARN (the regional default or the org's
+			// bedrock_model_id override) with no pricing-table entry, which
+			// would silently cost $0. All three system jobs are pinned to one
+			// tier (Haiku), so DirectModel is the correct pricing key no
+			// matter which concrete Bedrock endpoint served the request.
+			costUSD = opts.CostFn(opts.DirectModel, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheCreationTokens)
 		}
 	}
 	r.RecordDirect(ctx, Call{
@@ -120,13 +135,15 @@ func extractText(msg *anthropic.Message) string {
 // option.WithoutEnvironmentDefaults skips the SDK's own env-var autoload —
 // this process's env is not a per-org credential source, only the resolved
 // map is, so every auth option below is set explicitly.
+//
+// pinnedModel is used verbatim as the request model for the Anthropic
+// direct-API branch; the Bedrock branches resolve their own model (see
+// bedrockModel) and never touch it. completeDirect has already checked it's
+// non-empty.
 func buildDirectClient(creds map[string]string, pinnedModel string) (anthropic.Client, string, error) {
 	opts := []option.RequestOption{option.WithoutEnvironmentDefaults()}
 
 	if apiKey := creds["ANTHROPIC_API_KEY"]; apiKey != "" {
-		if pinnedModel == "" {
-			return anthropic.Client{}, "", errors.New("systemllm: DirectModel is required for the Anthropic direct-API path")
-		}
 		opts = append(opts, option.WithAPIKey(apiKey))
 		if baseURL := creds["ANTHROPIC_BASE_URL"]; baseURL != "" {
 			opts = append(opts, option.WithBaseURL(baseURL))
