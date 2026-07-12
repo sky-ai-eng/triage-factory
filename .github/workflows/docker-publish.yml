@@ -22,7 +22,7 @@
 # Every published image carries an SBOM + SLSA provenance attestation
 # (buildx `sbom`/`provenance`) and a keyless cosign signature over its
 # digest (GitHub OIDC — no signing keys to manage). See "Verifying
-# releases" in docs/self-host-setup.md for the consumer-facing verify
+# releases" in docs/security/verifying-releases.md for the consumer-facing verify
 # commands.
 
 name: docker-publish

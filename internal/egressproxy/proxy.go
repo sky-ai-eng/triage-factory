@@ -13,7 +13,7 @@
 // dependencies: there is no route to any registry. Fresh worktrees have
 // no node_modules, so every real build/test task that needs deps fails.
 //
-// # The design (sandbox-fleet spec §3, docs/specs/sandbox-fleet/README.md)
+// # The design (sandbox-fleet spec §3, docs/for-agents/specs/sandbox-fleet/README.md)
 //
 // A CONNECT-only forward proxy bound on the run's gateway IP — the same
 // place the LLM/git proxies live — becomes the single audited door to

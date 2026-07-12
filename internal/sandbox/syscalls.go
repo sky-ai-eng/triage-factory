@@ -11,7 +11,7 @@ package sandbox
 // Reference: https://docs.docker.com/engine/security/seccomp/
 //
 // IMPORTANT — inert under gVisor. Validated empirically (see
-// docs/specs/playwright-chromium-sandbox/probe-seccomp.sh): runsc does
+// docs/for-agents/specs/playwright-chromium-sandbox/probe-seccomp.sh): runsc does
 // NOT apply this OCI container seccomp profile to the sandboxed
 // application. A SCMP_ACT_KILL_PROCESS default with zero allowed
 // syscalls had zero effect — and KILL outranks the RET_TRAP gVisor's

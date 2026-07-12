@@ -5,7 +5,7 @@
 // inserts a row on the run_signals outbox, NOTIFYs tf_ctl, and waits (with
 // a bounded timeout) for the owning executor's apply loop to apply it
 // through its own local RunController and ack. See
-// docs/specs/horizontal-scaling/README.md §5.2.
+// docs/for-agents/specs/horizontal-scaling/README.md §5.2.
 //
 // This file also carries StageOrDeliverAdditiveEvent, the cross-pod-aware
 // successor TFAC-594's additive-injection gate calls: the `inject` signal
@@ -38,7 +38,7 @@ import (
 // tfCtlChannel is the shared, kind-discriminated control-plane doorbell
 // channel: control pods NOTIFY {"kind":"new",...} to wake an owner's
 // apply loop, and owners NOTIFY {"kind":"ack",...} to wake a control
-// pod's ack wait — see docs/specs/horizontal-scaling/README.md §5. This
+// pod's ack wait — see docs/for-agents/specs/horizontal-scaling/README.md §5. This
 // package only PUBLISHES here (notifyCtl); consumption is internal/app's
 // single per-pod tf_ctl listener (internal/app/ctl.go), which routes
 // new/ack payloads to HandleCtlNotification below alongside the channel's

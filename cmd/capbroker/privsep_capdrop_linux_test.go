@@ -86,7 +86,7 @@ func hasCap(caps []string, name string) bool {
 // for a typical unprivileged `go test` run; this is meant to run inside a
 // container configured to mirror the compose service's exact capability
 // grant (cap_drop: ALL, cap_add: [SYS_ADMIN, NET_ADMIN]), the same shape
-// docs/self-host-setup.md's sandbox integration-test harness already
+// docs/security/seccomp-profile.md's sandbox integration-test harness already
 // uses.
 func TestCapabilityDrop_BrokerKeepsExactPairOrchestratorEndsEmpty(t *testing.T) {
 	setprivPath, err := exec.LookPath("setpriv")

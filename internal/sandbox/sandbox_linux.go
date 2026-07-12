@@ -35,7 +35,7 @@ type teardownState struct {
 //
 // Fields are exported (despite the type itself being unexported)
 // because iptablesRule embeds into NetworkState, which
-// docs/specs/privsep/README.md §4 requires to round-trip as JSON over
+// docs/for-agents/specs/privsep/README.md §4 requires to round-trip as JSON over
 // a future broker RPC — encoding/json silently drops unexported
 // fields, which would make MasqueradeRule/EgressRules serialize to
 // "{}" and lose the teardown data.

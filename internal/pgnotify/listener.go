@@ -1,5 +1,5 @@
 // Package pgnotify provides the small, dedicated-connection LISTEN/NOTIFY
-// primitive the coordination fabric needs (docs/specs/horizontal-scaling/
+// primitive the coordination fabric needs (docs/for-agents/specs/horizontal-scaling/
 // README.md §5): "each pod holds 1-2 dedicated direct connections for
 // LISTEN (session-scoped — they must bypass any transaction-mode pooler)."
 //

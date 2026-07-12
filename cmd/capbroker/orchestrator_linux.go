@@ -121,7 +121,7 @@ var execSelfCommand = func(socketPath string) (*exec.Cmd, error) {
 // container image, where both processes stay privileged (the spawning
 // process's own capabilities are inherited unchanged by the child); only
 // the container entrypoint's exec-time drop actually narrows anything —
-// see docs/usage.md's privilege-separation section. Before taking that
+// see docs/security/privilege-separation.md. Before taking that
 // fallback, Start refuses to self-spawn if this process itself holds no
 // capabilities: a self-spawned child can never hold more capabilities
 // than its parent, so a capability-dropped orchestrator attempting this

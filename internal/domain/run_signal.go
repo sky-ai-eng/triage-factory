@@ -3,7 +3,7 @@ package domain
 import "time"
 
 // RunSignalKind discriminates the five cross-pod run-control operations
-// (TFAC-585). See docs/specs/horizontal-scaling/README.md §5.2.
+// (TFAC-585). See docs/for-agents/specs/horizontal-scaling/README.md §5.2.
 type RunSignalKind string
 
 const (

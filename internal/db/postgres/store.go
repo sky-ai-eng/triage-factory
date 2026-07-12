@@ -2,7 +2,7 @@
 // per-resource store interfaces declared in package db. Multi-tenant
 // installs of triagefactory wire this implementation at startup
 // (local-mode wires internal/db/sqlite). See the D2 spec at
-// docs/specs/sky-246-d2-store-abstraction.html for the full design,
+// docs/for-agents/specs/sky-246-d2-store-abstraction.html for the full design,
 // and the D3 schema at internal/db/migrations-postgres/.
 //
 // # Two-connection design

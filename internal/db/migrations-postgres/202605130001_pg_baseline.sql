@@ -8540,7 +8540,7 @@ REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
 -- delivery of cancel/interrupt/steer/permission/inject to the executor that
 -- owns a run's live process (runs.executor_id), for the case where the
 -- local process registry (Spawner.procs) misses. See
--- docs/specs/horizontal-scaling/README.md §5.2 for the full design
+-- docs/for-agents/specs/horizontal-scaling/README.md §5.2 for the full design
 -- (RunController's intended second implementation).
 --
 -- Postgres-only, deliberately no SQLite twin: local mode is always its own
@@ -8611,7 +8611,7 @@ REVOKE ALL ON public.run_signals FROM anon, authenticated, service_role;
 -- re-queued as ordinary claimable work, so a crash between "message
 -- recorded" and "process spawned" is recoverable by the standard boot
 -- sweep instead of an ad-hoc path. See
--- docs/specs/horizontal-scaling/README.md §5.2.
+-- docs/for-agents/specs/horizontal-scaling/README.md §5.2.
 --
 -- Both dialects (NOT Postgres-only, unlike run_signals above): local mode's
 -- dispatcher claims its own resumed runs through the identical queue path

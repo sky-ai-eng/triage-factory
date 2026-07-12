@@ -1,6 +1,6 @@
 # Project Bundle Format
 
-`SKY-222` introduces portable project bundles for local-first team handoff.
+Portable project bundles enable local-first team handoff.
 
 - Extension: `.tfproject`
 - Container: ZIP archive

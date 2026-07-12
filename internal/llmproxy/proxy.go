@@ -4,7 +4,7 @@
 //
 // # The threat it addresses
 //
-// The gVisor sandbox validation (docs/specs/sky-254-runsc-validation/)
+// The gVisor sandbox validation (docs/for-agents/specs/sky-254-runsc-validation/)
 // proved that whatever we inject into the OCI bundle's process.env is
 // readable inside the sandbox via `env` or /proc/self/environ. That
 // means injecting ANTHROPIC_API_KEY directly leaks the credential to

@@ -13,7 +13,7 @@ import (
 // NEVER pass Stores to a handler. Handlers depend only on the
 // specific interfaces they consume (db.ScoreStore, db.TaskStore, …).
 // The bundle exists for main.go wiring and for the WithTx wrapper —
-// nothing else. See docs/specs/sky-246-d2-store-abstraction.html §5.
+// nothing else. See docs/for-agents/specs/sky-246-d2-store-abstraction.html §5.
 type Stores struct {
 	// Scores is the first store to land on the D2 wave 0 pilot.
 	// Subsequent waves add the remaining 21 fields here.

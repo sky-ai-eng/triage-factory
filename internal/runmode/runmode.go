@@ -40,7 +40,7 @@ const (
 	ModeLocal Mode = "local"
 
 	// ModeMulti is the multi-tenant, Postgres-backed mode the
-	// architecture spec (docs/multi-tenant-architecture.html) targets
+	// architecture spec (docs/for-agents/multi-tenant-architecture.html) targets
 	// for v1. The binary boots into ModeMulti when TF_MODE=multi;
 	// downstream tickets (D2 store dispatch, D3 schema, D4b
 	// resolvers) consume the flag.

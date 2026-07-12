@@ -1,6 +1,6 @@
 // Package wsbackplane fans websocket.Hub events, session kicks, and
 // brain-bound run sentinels across a multi-pod deployment over Postgres
-// LISTEN/NOTIFY (docs/specs/horizontal-scaling/README.md §5, TFAC-584).
+// LISTEN/NOTIFY (docs/for-agents/specs/horizontal-scaling/README.md §5, TFAC-584).
 //
 // Three channels, one Backplane:
 //

@@ -123,7 +123,7 @@ never inside the install closure itself.
 
 A feature that needs a long-lived background worker (a connection manager, a
 poller) registers it via `ExtensionAPI.OnReady` during install; core fires the
-hook every time this pod's background-brain lease starts (TFAC-583) — at
+hook every time this pod's background-brain lease starts — at
 `TF_ROLE=all` / local mode that's once, at boot, indistinguishable from
 before this ticket; under the control/standby split it's gated to exactly one
 pod at a time, and fires again on a fresh ctx if this pod later re-acquires
