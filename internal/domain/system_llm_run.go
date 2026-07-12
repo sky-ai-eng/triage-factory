@@ -34,8 +34,8 @@ type SystemLLMRun struct {
 	IsError    bool `json:"is_error"`
 
 	// MetadataJSON is optional per-job context, e.g. {"batch_size": 10}
-	// (scorer), {"repo_count": 3} (repo_profiler), {"stage": 1} (classifier).
-	// Empty string serializes to SQL NULL.
+	// (scorer), {"repo_count": 3} (repo_profiler). Empty string serializes
+	// to SQL NULL.
 	MetadataJSON string `json:"metadata_json,omitempty"`
 
 	StartedAt   time.Time `json:"started_at"`
