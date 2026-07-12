@@ -6,9 +6,11 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
@@ -23,6 +25,75 @@ import (
 // as resolving the rootfs by catalog name rather than accepting a path.
 func TrustedSDKDir() string {
 	return paths.SDKDir()
+}
+
+// TrustedGitHooksDir mirrors TrustedSDKDir for the git-hooks bind mount
+// (destination githooks.SandboxDir): the broker resolves the host hooks
+// dir itself rather than trusting the orchestrator's claimed source for
+// this fixed, global destination.
+func TrustedGitHooksDir() string {
+	return paths.HooksDir()
+}
+
+// TrustedTFBinaryDestination mirrors agentproc's private sandboxTFBinary
+// constant — the fixed in-sandbox path the host TF binary is bind-mounted
+// at. Duplicated as a literal (not imported: agentproc imports this
+// package, so the reverse import would cycle); agentproc's own test suite
+// cross-checks the two literals stay equal.
+const TrustedTFBinaryDestination = "/usr/local/bin/triagefactory"
+
+// TrustedTFBinaryPath resolves the broker's own running binary. It is the
+// same file the orchestrator re-execs to spawn the broker (see
+// cmd/capbroker's execSelfCommand: `exec.Command(self, "cap-broker", ...)`
+// where self is the orchestrator's own os.Executable()), so calling
+// os.Executable() again from inside the broker process always resolves to
+// the identical path — no RPC field needed, mirroring TrustedSDKDir.
+func TrustedTFBinaryPath() (string, error) {
+	return os.Executable()
+}
+
+// TrustedAgentHostSocketDestination mirrors cmd/exec/agenthost's exported
+// DefaultSocketPath — the fixed in-sandbox path the per-run agenthost
+// socket is bind-mounted at. Duplicated as a literal for the same cycle
+// reason as TrustedTFBinaryDestination (agenthost imports this package);
+// cmd/exec/agenthost's own test suite cross-checks the two literals stay
+// equal.
+const TrustedAgentHostSocketDestination = "/run/tf.sock"
+
+// trustedAgentHostSocketRoot mirrors cmd/exec/agenthost's private
+// hostSocketRoot constant. Duplicated for the same reason as the
+// destination constants above.
+const trustedAgentHostSocketRoot = "/run/tf"
+
+// sanitizeRunIDForSocket mirrors cmd/exec/agenthost's private
+// sanitizeSocketName exactly (character-for-character); a drift test in
+// that package cross-checks the two functions agree.
+func sanitizeRunIDForSocket(s string) string {
+	r := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-' || r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, s)
+	if len(r) > 64 {
+		r = r[:64]
+	}
+	return r
+}
+
+// TrustedAgentHostSocketPath is the broker's own derivation of "this run's
+// own agenthost socket" host-side path. Unlike TrustedSDKDir/
+// TrustedGitHooksDir/TrustedTFBinaryPath, the broker did not create this
+// file — cmd/exec/agenthost.Start does, host-side, before the launch RPC —
+// so the broker VALIDATES a launch's mount source against this derivation
+// rather than resolving/overriding it.
+func TrustedAgentHostSocketPath(runID string) string {
+	return filepath.Join(trustedAgentHostSocketRoot, sanitizeRunIDForSocket(runID)+".sock")
 }
 
 // This file is the load-bearing narrowing of the broker's attack surface:
@@ -357,7 +428,8 @@ func validateArgv(argv []string) error {
 // the privileged broker with hostile data. Each check maps to a documented
 // rejection: path-shaped ids, an unknown/path-shaped rootfs name, a
 // non-allowlisted env key, a non-pinned command, an unknown rlimit, a
-// forged netns, or a denylisted egress CIDR.
+// worktree/mount source outside this run's own scope, a forged netns, or a
+// denylisted egress CIDR.
 func ValidateLaunchParams(p LaunchParams) error {
 	if err := validateRunID("container id", p.ContainerID); err != nil {
 		return err
@@ -391,7 +463,12 @@ func ValidateLaunchParams(p LaunchParams) error {
 	if err := validateRlimits(p.Rlimits); err != nil {
 		return err
 	}
-	if err := validateMounts(p.Mounts); err != nil {
+	// Beyond the shape check above, pin the worktree to this run's own scope
+	// and every mount source to either a broker-resolved global, this run's
+	// own agenthost socket, or the same org scope as the worktree — see
+	// worktreeScope's doc for the internal-consistency ceiling this enforces
+	// (and does not: a credential-free broker cannot authenticate an org).
+	if err := validateWorktreeAndMounts(p.RunID, p.Worktree, p.Mounts); err != nil {
 		return err
 	}
 	if err := validateNetnsPath(p.RunID, p.NetnsPath); err != nil {
@@ -474,23 +551,80 @@ var allowedMountOptions = map[string]struct{}{
 	"rw": {},
 }
 
-// validateMounts is defense-in-depth on the run-data bind mounts. They are
-// not an escalation vector (they land in the already-unprivileged sandbox,
-// never the rootfs), but the broker performs the bind with capabilities, so
-// require both Source and Destination to be clean absolute paths and the
-// Options to be within the small honored set — a malformed descriptor can't
-// then produce a surprising spec or an unexpected mount flag.
+// worktreeScope classifies Config.Worktree into the shape it must be one
+// of, and returns the org-tree prefix every OTHER mount's source must
+// share. This is internal consistency, not tenant authentication: the
+// broker holds no credentials and has no tenant model, so it cannot
+// authenticate "this run belongs to org A" — it can only require that
+// every path a run touches shares the scope its OWN worktree resolved to.
+// A fully compromised orchestrator can still set the worktree and every
+// mount consistently under one org's tree, but that is just placing a run
+// as that org outright (which it could always do); what this closes is
+// the MIXED shape — org A's run identity paired with org B's data.
 //
-// Residual (accepted): the Source is only shape-checked, not pinned to the
-// run's own paths — the broker has no per-run notion of which host paths this
-// run owns (the orchestrator creates the worktree/checkouts), so a compromised
-// orchestrator could direct the broker to bind any path readable by the fixed
-// sandbox UID (10000), including a sibling run's worktree, into a new sandbox.
-// This is a data confidentiality/integrity residual bounded by host DAC at
-// that fixed UID (no user-namespace remapping) — NOT a capability escalation.
-// A real per-run source allowlist would need the broker to track each run's
-// owned paths; tracked with the broker-internal-state evolution.
-func validateMounts(mounts []Mount) error {
+// Two shapes are legitimate, matched against the actual producers
+// (internal/worktree + internal/curator, verified — not assumed):
+//
+//   - The ephemeral per-run tree: GitHub PR / Jira / Slack delegated task
+//     runs materialize (or park) their whole working tree at exactly
+//     RunTreeRoot(runID) — os.TempDir()/triagefactory-runs/<runID>. These
+//     runs are org-blind by construction (the tree doesn't outlive the
+//     run), so hasScope is false and no OTHER mount may claim an org scope
+//     either — there is nothing for it to be consistent with.
+//   - The org-scoped state-root tree: Curator sessions use
+//     paths.ProjectKBDir(orgID, projectID), i.e. <StateRoot>/orgs/<orgID>/…
+//     in multi mode. orgPrefix is <StateRoot>/orgs/<orgID>; the curator's
+//     shared read-only repo mounts must live under this same prefix.
+//
+// Anything else — an arbitrary host path, a worktree one level too
+// shallow to name an org, a symlink-clean but out-of-tree path — is
+// rejected outright.
+func worktreeScope(runID, worktree string) (orgPrefix string, hasScope bool, err error) {
+	if runID != "" && worktree == RunTreeRoot(runID) {
+		return "", false, nil
+	}
+	root, err := paths.StateRootErr()
+	if err != nil {
+		return "", false, fmt.Errorf("sandbox: resolve state root: %w", err)
+	}
+	orgsRoot := filepath.Join(root, "orgs")
+	rel, relErr := filepath.Rel(orgsRoot, worktree)
+	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false, fmt.Errorf("sandbox: worktree %q is neither this run's own tree nor under the state-root org tree", worktree)
+	}
+	orgID, rest, found := strings.Cut(rel, string(filepath.Separator))
+	if orgID == "" || orgID == "." || !found || rest == "" {
+		return "", false, fmt.Errorf("sandbox: worktree %q does not resolve to a per-org subtree", worktree)
+	}
+	return filepath.Join(orgsRoot, orgID), true, nil
+}
+
+// validateWorktreeAndMounts is defense-in-depth on the run-data bind
+// mounts AND, unlike shape-only validation, pins every mount's Source to
+// this run's own scope. It requires Source/Destination to be clean
+// absolute paths and Options within the small honored set (as before),
+// then classifies each mount by DESTINATION against the broker-owned
+// trusted set — mirroring TrustedSDKDir rather than trusting shape alone:
+//
+//   - TrustedTFBinaryDestination / githooks.SandboxDir (global, fixed):
+//     the Source MUST equal the broker's own resolution
+//     (TrustedTFBinaryPath / TrustedGitHooksDir) — a caller's source for
+//     one of these destinations is never trusted.
+//   - TrustedAgentHostSocketDestination (per-run, fixed): the Source MUST
+//     equal TrustedAgentHostSocketPath(runID) — the broker didn't create
+//     this file (cmd/exec/agenthost did, host-side, before the launch
+//     RPC), so it validates rather than overrides.
+//   - Everything else (today: the curator's shared read-only repo
+//     checkouts): the Source MUST be under the SAME org prefix
+//     worktreeScope derived from Worktree. If Worktree carried no org
+//     scope (the delegated-task-run shape), NO mount may fall in this
+//     bucket at all — there is no legitimate one for that shape.
+func validateWorktreeAndMounts(runID, worktree string, mounts []Mount) error {
+	orgPrefix, hasScope, err := worktreeScope(runID, worktree)
+	if err != nil {
+		return err
+	}
+
 	for _, m := range mounts {
 		if err := validateAbsCleanPath("mount source", m.Source); err != nil {
 			return err
@@ -501,6 +635,33 @@ func validateMounts(mounts []Mount) error {
 		for _, o := range m.Options {
 			if _, ok := allowedMountOptions[o]; !ok {
 				return fmt.Errorf("sandbox: mount %q has unsupported option %q (only ro/rw)", m.Destination, o)
+			}
+		}
+
+		switch m.Destination {
+		case TrustedTFBinaryDestination:
+			trusted, tfErr := TrustedTFBinaryPath()
+			if tfErr != nil {
+				return fmt.Errorf("sandbox: resolve trusted TF binary path: %w", tfErr)
+			}
+			if m.Source != trusted {
+				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved TF binary path %q", m.Destination, m.Source, trusted)
+			}
+		case githooks.SandboxDir:
+			if trusted := TrustedGitHooksDir(); m.Source != trusted {
+				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved git-hooks dir %q", m.Destination, m.Source, trusted)
+			}
+		case TrustedAgentHostSocketDestination:
+			if trusted := TrustedAgentHostSocketPath(runID); m.Source != trusted {
+				return fmt.Errorf("sandbox: mount %q source %q is not this run's own agenthost socket (want %q)", m.Destination, m.Source, trusted)
+			}
+		default:
+			if !hasScope {
+				return fmt.Errorf("sandbox: mount %q source %q is not a recognized broker-global/per-run mount, and this run's worktree carries no org scope to authorize it", m.Destination, m.Source)
+			}
+			rel, relErr := filepath.Rel(orgPrefix, m.Source)
+			if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("sandbox: mount %q source %q is outside this run's own org tree %q", m.Destination, m.Source, orgPrefix)
 			}
 		}
 	}

@@ -1,6 +1,34 @@
 package sandbox
 
-import "context"
+import (
+	"context"
+	"os"
+	"path/filepath"
+)
+
+// runTreeBasename is the directory ephemeral per-run worktrees live under
+// inside os.TempDir(): os.TempDir()/triagefactory-runs/<runID>. This is the
+// GitHub-PR / Jira / Slack task-run shape of Config.Worktree — org-blind by
+// construction, since these trees don't outlive their own run.
+// internal/worktree is the historical owner of this path (its
+// makeWorktreeDir / MakeRunRoot materialize exactly here); it duplicates
+// this literal in its own private runsDir constant rather than importing
+// RunTreeRoot (worktree already imports this package for ChownRunTree /
+// RemoveRunTree, and having the broker-side validator define the trusted
+// shape independently — rather than depend on the producer's constant —
+// mirrors how TrustedSDKDir/TrustedGitHooksDir resolve elsewhere in this
+// package). A worktree package test cross-checks the two literals stay
+// equal.
+const runTreeBasename = "triagefactory-runs"
+
+// RunTreeRoot returns the ephemeral per-run worktree root for runID. This
+// is the ONLY legitimate shape for a delegated task run's Config.Worktree;
+// launchspec_linux.go's mount-source validation rejects any Worktree that
+// is neither this exact path nor under the org-scoped state-root tree
+// (Curator sessions' shape — see worktreeScope).
+func RunTreeRoot(runID string) string {
+	return filepath.Join(os.TempDir(), runTreeBasename, runID)
+}
 
 // This file is the cross-platform surface for the run-tree ownership
 // lifecycle: handing a run tree to the sandbox identity at run start,

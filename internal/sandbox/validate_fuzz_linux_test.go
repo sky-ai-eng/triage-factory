@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 )
 
 // The cap-broker RPC's whole security value equals the narrowness and
@@ -109,6 +111,45 @@ func assertLaunchParamsSafe(t *testing.T, p LaunchParams) {
 		}
 	}
 
+	// Worktree + mount-source scoping: an accepted worktree must be either
+	// this run's own ephemeral tree or an org-scoped state-root subtree, and
+	// every mount's source must be either a broker-resolved global, this
+	// run's own agenthost socket, or (only when the worktree carried an org
+	// scope) under that same org prefix. Re-uses the real trusted-value
+	// functions (RunTreeRoot / TrustedTFBinaryPath / TrustedGitHooksDir /
+	// TrustedAgentHostSocketPath) rather than re-deriving them — same as the
+	// netns check below reusing NetnsNameForRun — since these ARE the
+	// broker's own resolutions, not a parallel implementation to agree with.
+	orgPrefix, hasScope, scopeErr := worktreeScope(p.RunID, p.Worktree)
+	if scopeErr != nil {
+		t.Fatalf("accepted worktree %q that fails its own scope re-check: %v", p.Worktree, scopeErr)
+	}
+	for _, m := range p.Mounts {
+		switch m.Destination {
+		case TrustedTFBinaryDestination:
+			trusted, tfErr := TrustedTFBinaryPath()
+			if tfErr != nil || m.Source != trusted {
+				t.Fatalf("accepted mount %q source %q not the trusted TF binary path", m.Destination, m.Source)
+			}
+		case githooks.SandboxDir:
+			if m.Source != TrustedGitHooksDir() {
+				t.Fatalf("accepted mount %q source %q not the trusted git-hooks dir", m.Destination, m.Source)
+			}
+		case TrustedAgentHostSocketDestination:
+			if m.Source != TrustedAgentHostSocketPath(p.RunID) {
+				t.Fatalf("accepted mount %q source %q not this run's own agenthost socket", m.Destination, m.Source)
+			}
+		default:
+			if !hasScope {
+				t.Fatalf("accepted mount %q source %q with no org scope to authorize it", m.Destination, m.Source)
+			}
+			rel, relErr := filepath.Rel(orgPrefix, m.Source)
+			if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				t.Fatalf("accepted mount %q source %q outside the run's own org tree %q", m.Destination, m.Source, orgPrefix)
+			}
+		}
+	}
+
 	// Rlimits: allowlisted type, soft <= hard, no repeats.
 	seen := make(map[string]struct{}, len(p.Rlimits))
 	for _, r := range p.Rlimits {
@@ -166,8 +207,8 @@ func FuzzValidateLaunchParams(f *testing.F) {
 			{Key: "ANTHROPIC_BASE_URL", Value: "http://127.0.0.1:9"},
 		},
 		Args:      []string{sandboxNodeBinary, sandboxWrapperEntry, "run"},
-		Worktree:  "/work/run-1",
-		Mounts:    []Mount{{Source: "/run/tf/a.sock", Destination: "/tf/a.sock", Options: []string{"ro"}}},
+		Worktree:  RunTreeRoot("run-1"),
+		Mounts:    []Mount{{Source: TrustedAgentHostSocketPath("run-1"), Destination: TrustedAgentHostSocketDestination, Options: []string{"ro"}}},
 		Rlimits:   []Rlimit{{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 4096}},
 		NetnsPath: "/var/run/netns/" + NetnsNameForRun("run-1", 3),
 	}

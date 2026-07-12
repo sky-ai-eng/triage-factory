@@ -3,8 +3,12 @@
 package sandbox
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
 // validParams returns a LaunchParams that passes ValidateLaunchParams, so
@@ -23,7 +27,7 @@ func validParams() LaunchParams {
 			{Key: "GIT_CONFIG_VALUE_0", Value: "/hooks"},
 		},
 		Args:     []string{sandboxNodeBinary, sandboxWrapperEntry, "-p", "hi"},
-		Worktree: "/data/worktrees/run-abc123",
+		Worktree: RunTreeRoot("run-abc123"),
 		SDKDir:   "/opt/tf/sdk",
 		Rlimits:  []Rlimit{{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 1024}},
 		// The netns name must be the one this run's id derives — the ownership
@@ -206,18 +210,146 @@ func TestValidateLaunchParams_RejectsNonAbsolutePaths(t *testing.T) {
 // outside the honored ro/rw set is rejected, so a caller can't slip a
 // surprising mount flag into the broker-built spec.
 func TestValidateLaunchParams_RejectsBadMountOption(t *testing.T) {
+	// The mount source must ALSO be one this run legitimately owns (the
+	// worktree/mount-scope check runs regardless of Options), so use this
+	// run's own agenthost socket — a recognized, per-run mount shape — to
+	// isolate the option check from the scope check.
+	trustedSource := TrustedAgentHostSocketPath("run-abc123")
 	p := validParams()
-	p.Mounts = []Mount{{Source: "/host/x", Destination: "/work/x", Options: []string{"suid"}}}
+	p.Mounts = []Mount{{Source: trustedSource, Destination: TrustedAgentHostSocketDestination, Options: []string{"suid"}}}
 	if err := ValidateLaunchParams(p); err == nil {
 		t.Fatal("accepted an unsupported mount option; want rejection")
 	}
 	// ro/rw (and no options) are honored.
 	for _, opts := range [][]string{nil, {"ro"}, {"rw"}} {
 		ok := validParams()
-		ok.Mounts = []Mount{{Source: "/host/x", Destination: "/work/x", Options: opts}}
+		ok.Mounts = []Mount{{Source: trustedSource, Destination: TrustedAgentHostSocketDestination, Options: opts}}
 		if err := ValidateLaunchParams(ok); err != nil {
 			t.Errorf("mount options %v rejected: %v", opts, err)
 		}
+	}
+}
+
+// TestValidateLaunchParams_RejectsCrossOrgMountSource is acceptance case
+// (a): a mount source under a DIFFERENT org's tree than the worktree is
+// rejected, even though both are shape-valid, broker-created-looking
+// paths — the core cross-tenant residual this ticket closes.
+func TestValidateLaunchParams_RejectsCrossOrgMountSource(t *testing.T) {
+	root := t.TempDir()
+	paths.SetForTest(t, root)
+
+	p := validParams()
+	p.Worktree = filepath.Join(root, "orgs", "org-a", "projects", "proj-1")
+	p.Mounts = []Mount{{
+		Source:      filepath.Join(root, "orgs", "org-b", "curator-repos", "acme", "widgets"),
+		Destination: "/work/repos/acme/widgets",
+		Options:     []string{"ro"},
+	}}
+	if err := ValidateLaunchParams(p); err == nil {
+		t.Fatal("accepted a mount source under a different org's tree than the worktree; want rejection")
+	}
+}
+
+// TestValidateLaunchParams_AcceptsSameOrgMountSource is the positive half
+// of the same case: a mount source under the SAME org as the worktree
+// (the curator's shared read-only repo mount shape) is accepted.
+func TestValidateLaunchParams_AcceptsSameOrgMountSource(t *testing.T) {
+	root := t.TempDir()
+	paths.SetForTest(t, root)
+
+	p := validParams()
+	p.Worktree = filepath.Join(root, "orgs", "org-a", "projects", "proj-1")
+	p.Mounts = []Mount{{
+		Source:      filepath.Join(root, "orgs", "org-a", "curator-repos", "acme", "widgets"),
+		Destination: "/work/repos/acme/widgets",
+		Options:     []string{"ro"},
+	}}
+	if err := ValidateLaunchParams(p); err != nil {
+		t.Errorf("rejected a mount source under the SAME org as the worktree: %v", err)
+	}
+}
+
+// TestValidateLaunchParams_RejectsWorktreeOutsideOrgTree is acceptance
+// case (c): a worktree that is neither this run's own ephemeral tree nor
+// under the state-root org tree (e.g. /etc) is rejected outright.
+func TestValidateLaunchParams_RejectsWorktreeOutsideOrgTree(t *testing.T) {
+	root := t.TempDir()
+	paths.SetForTest(t, root)
+
+	for _, wt := range []string{"/etc", "/etc/passwd", filepath.Join(root, "orgs")} {
+		p := validParams()
+		p.Worktree = wt
+		if err := ValidateLaunchParams(p); err == nil {
+			t.Errorf("accepted worktree %q outside both legitimate shapes; want rejection", wt)
+		}
+	}
+}
+
+// TestValidateLaunchParams_RejectsForeignGlobalMountSource is acceptance
+// case (b): a caller-supplied source for the TF-binary / git-hooks
+// destinations that does not match the broker's own resolution is
+// rejected — these two destinations are broker-resolved, never
+// caller-trusted, mirroring TrustedSDKDir.
+func TestValidateLaunchParams_RejectsForeignGlobalMountSource(t *testing.T) {
+	p := validParams()
+	p.Mounts = []Mount{{Source: "/tmp/attacker-wrapper", Destination: TrustedTFBinaryDestination, Options: []string{"ro"}}}
+	if err := ValidateLaunchParams(p); err == nil {
+		t.Fatal("accepted a foreign source for the TF-binary destination; want rejection")
+	}
+
+	p = validParams()
+	p.Mounts = []Mount{{Source: "/tmp/attacker-hooks", Destination: githooks.SandboxDir, Options: []string{"ro"}}}
+	if err := ValidateLaunchParams(p); err == nil {
+		t.Fatal("accepted a foreign source for the git-hooks destination; want rejection")
+	}
+
+	// The genuinely trusted sources pass.
+	tfBin, err := TrustedTFBinaryPath()
+	if err != nil {
+		t.Fatalf("resolve trusted TF binary path: %v", err)
+	}
+	ok := validParams()
+	ok.Mounts = []Mount{
+		{Source: tfBin, Destination: TrustedTFBinaryDestination, Options: []string{"ro"}},
+		{Source: TrustedGitHooksDir(), Destination: githooks.SandboxDir, Options: []string{"ro"}},
+	}
+	if err := ValidateLaunchParams(ok); err != nil {
+		t.Errorf("rejected the genuinely trusted global mount sources: %v", err)
+	}
+}
+
+// TestValidateLaunchParams_RejectsForeignAgentHostSocket is acceptance case
+// (e)'s negative half: an agenthost-socket mount whose source names a
+// DIFFERENT run (a sibling's, still broker-shaped) is rejected.
+func TestValidateLaunchParams_RejectsForeignAgentHostSocket(t *testing.T) {
+	p := validParams()
+	p.Mounts = []Mount{{
+		Source:      TrustedAgentHostSocketPath("some-other-run"),
+		Destination: TrustedAgentHostSocketDestination,
+	}}
+	if err := ValidateLaunchParams(p); err == nil {
+		t.Fatal("accepted a sibling run's agenthost socket; want rejection")
+	}
+}
+
+// TestValidateLaunchParams_AcceptsRealisticMountSet is acceptance case (d):
+// the actual mount set a normal delegated run assembles (TF binary,
+// git-hooks, the run's own agenthost socket — mirroring
+// internal/agentproc's extraMounts assembly, no curator mounts) against
+// the ephemeral worktree shape is accepted unchanged.
+func TestValidateLaunchParams_AcceptsRealisticMountSet(t *testing.T) {
+	tfBin, err := TrustedTFBinaryPath()
+	if err != nil {
+		t.Fatalf("resolve trusted TF binary path: %v", err)
+	}
+	p := validParams()
+	p.Mounts = []Mount{
+		{Source: tfBin, Destination: TrustedTFBinaryDestination, Options: []string{"ro"}},
+		{Source: TrustedGitHooksDir(), Destination: githooks.SandboxDir, Options: []string{"ro"}},
+		{Source: TrustedAgentHostSocketPath(p.RunID), Destination: TrustedAgentHostSocketDestination},
+	}
+	if err := ValidateLaunchParams(p); err != nil {
+		t.Errorf("rejected a normal run's real mount set: %v", err)
 	}
 }
 

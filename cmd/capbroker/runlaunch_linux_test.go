@@ -77,7 +77,7 @@ func validLaunchParams(containerID string) sandbox.LaunchParams {
 	return sandbox.LaunchParams{
 		RunID:       "run",
 		ContainerID: containerID,
-		Worktree:    "/data/worktrees/run",
+		Worktree:    sandbox.RunTreeRoot("run"),
 		SDKDir:      "/opt/tf/sdk",
 		Args:        []string{"/usr/bin/node", "/sdk/wrapper.mjs", "-p", "hi"},
 		// The netns name must be the one RunID derives — the ownership check
