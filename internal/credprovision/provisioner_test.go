@@ -92,7 +92,10 @@ func (f *fakeRunWorktrees) ListSystem(context.Context, string, string) ([]domain
 // minted for — minting there would be pointless (the git proxy would 403 it
 // anyway) and widens the bundle for no reason.
 func TestManager_resolveGitHub_MintsScopedTokensForAuthorizedRepos(t *testing.T) {
-	exp := time.Unix(1_700_000_000, 0).UTC()
+	// Hour-lived, like a real minted installation token — future-dated (and
+	// truncated to GitHub's second granularity) so the fixture reads as a live
+	// token and stays robust if an expiry check is ever added downstream.
+	exp := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	res := &fakeScopedResolver{
 		base:    "https://ghe.example",
 		name:    "acme[bot]",
