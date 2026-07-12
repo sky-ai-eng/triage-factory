@@ -548,3 +548,50 @@ func TestLocalClient_GithubGetPR_BundleGitHubNil(t *testing.T) {
 		t.Fatalf("GithubGetPR with a GitHub-less bundle = %v, want the friendly 'not configured' guidance", err)
 	}
 }
+
+// TestBundleRepoClient_IdentityMatchesResolvedSource pins that Identity
+// describes the credential actually resolved for THIS repo, not the
+// bundle's overall Mode — credprovision.resolveGitHub flips Mode to "pat"
+// the moment any repo in the run's authorized set falls back to the PAT,
+// even while other repos in the same bundle still carry real App-tier
+// RepoTokens entries (and symmetrically, a "pat"-tagged bundle can still
+// hold no RepoTokens entry for a given repo and fall through to the PAT
+// under an "app" Mode). Reporting IdentityApp for a PAT-backed call (or vice
+// versa) would mislead any future caller that branches on Identity.
+func TestBundleRepoClient_IdentityMatchesResolvedSource(t *testing.T) {
+	t.Run("app-tier RepoTokens match reports IdentityApp even when Mode is pat", func(t *testing.T) {
+		gh := &credbundle.GitHubCreds{
+			Mode:       "pat", // flipped by a sibling repo's PAT fallback
+			PAT:        "ghp_borrowed",
+			RepoTokens: map[string]credbundle.RepoToken{"acme/widgets": {Token: "ghs_widgets"}},
+		}
+		client, identity, err := bundleRepoClient(gh, "acme", "widgets")
+		if err != nil {
+			t.Fatalf("bundleRepoClient: %v", err)
+		}
+		if identity != ghclient.IdentityApp {
+			t.Errorf("identity = %v, want IdentityApp — the resolved token came from RepoTokens", identity)
+		}
+		if client == nil {
+			t.Fatal("client is nil")
+		}
+	})
+
+	t.Run("PAT fallback reports IdentityPAT even when Mode is app", func(t *testing.T) {
+		gh := &credbundle.GitHubCreds{
+			Mode:       "app",
+			PAT:        "ghp_borrowed",
+			RepoTokens: map[string]credbundle.RepoToken{"acme/other-repo": {Token: "ghs_other"}},
+		}
+		client, identity, err := bundleRepoClient(gh, "acme", "widgets")
+		if err != nil {
+			t.Fatalf("bundleRepoClient: %v", err)
+		}
+		if identity != ghclient.IdentityPAT {
+			t.Errorf("identity = %v, want IdentityPAT — this repo has no RepoTokens entry and fell back to the PAT", identity)
+		}
+		if client == nil {
+			t.Fatal("client is nil")
+		}
+	})
+}
