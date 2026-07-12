@@ -19,6 +19,14 @@ const DefaultTTL = time.Hour
 // rather than forward an always-failing duration.
 const MinTTL = 15 * time.Minute
 
+// MaxTTL is the ceiling TF_LLM_CRED_TTL_SEC clamps down to. The feature's
+// whole security value is a short-lived credential — the blast radius of an
+// exfiltrated session cred is "under an hour" — so TF caps the requested
+// AssumeRole duration at one hour regardless of the operator's value or the
+// role's higher MaxSessionDuration. (AWS still caps below this when the
+// role's own max is shorter, surfaced as an actionable AssumeRole error.)
+const MaxTTL = time.Hour
+
 // NetworkBinding is the executor egress binding minted into the session
 // policy of executor-bound (bundle) role mints: an exfiltrated session
 // credential is unusable from anywhere but the executor's egress. Both
@@ -52,6 +60,9 @@ func TTLFromEnv() (time.Duration, error) {
 	ttl := time.Duration(n) * time.Second
 	if ttl < MinTTL {
 		ttl = MinTTL
+	}
+	if ttl > MaxTTL {
+		ttl = MaxTTL
 	}
 	return ttl, nil
 }

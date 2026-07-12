@@ -231,3 +231,54 @@ func TestBedrockRoleConnect_ClearsOtherProviders(t *testing.T) {
 		t.Errorf("role ARN should be cleared on switch back to access_keys, got %q", got)
 	}
 }
+
+// TestTrustPolicyPrincipalARN converts an STS assumed-role session ARN (what
+// GetCallerIdentity returns when the control service runs under an instance
+// role / IRSA — the recommended setup) to the underlying IAM role ARN, which
+// is what a trust policy Principal must name. IAM user/role ARNs pass through.
+func TestTrustPolicyPrincipalARN(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// assumed-role session ARN → role ARN (drops the session name).
+		{"arn:aws:sts::123456789012:assumed-role/tf-control/i-0abc123", "arn:aws:iam::123456789012:role/tf-control"},
+		// GovCloud partition preserved.
+		{"arn:aws-us-gov:sts::123456789012:assumed-role/r/s", "arn:aws-us-gov:iam::123456789012:role/r"},
+		// already a role ARN — unchanged.
+		{"arn:aws:iam::123456789012:role/tf-control", "arn:aws:iam::123456789012:role/tf-control"},
+		// an IAM user ARN — unchanged (already a valid Principal).
+		{"arn:aws:iam::123456789012:user/ci", "arn:aws:iam::123456789012:user/ci"},
+	}
+	for _, c := range cases {
+		if got := trustPolicyPrincipalARN(c.in); got != c.want {
+			t.Errorf("trustPolicyPrincipalARN(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestBedrockRoleSetup_TrustPolicyUsesRoleARNForAssumedRoleCaller pins that
+// the rendered trust policy names the ROLE ARN, not the (invalid-as-Principal)
+// STS session ARN, when the control service runs under an assumed role.
+func TestBedrockRoleSetup_TrustPolicyUsesRoleARNForAssumedRoleCaller(t *testing.T) {
+	s := newRoleTestServer(t, &fakeRoleResolver{arn: "arn:aws:sts::111122223333:assumed-role/tf-control/i-0abc"})
+	rec := doJSON(t, s, "POST", "/api/bedrock/role-setup", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		CallerARN   string `json:"caller_identity_arn"`
+		TrustPolicy string `json:"trust_policy"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// caller_identity_arn stays the raw session ARN (accurate — that's who we are).
+	if out.CallerARN != "arn:aws:sts::111122223333:assumed-role/tf-control/i-0abc" {
+		t.Errorf("caller ARN should be the raw session ARN, got %q", out.CallerARN)
+	}
+	// The trust policy must use the ROLE ARN as Principal, not the session ARN.
+	if !strings.Contains(out.TrustPolicy, "arn:aws:iam::111122223333:role/tf-control") {
+		t.Errorf("trust policy must name the IAM role ARN:\n%s", out.TrustPolicy)
+	}
+	if strings.Contains(out.TrustPolicy, "assumed-role") {
+		t.Errorf("trust policy must NOT contain the STS assumed-role session ARN:\n%s", out.TrustPolicy)
+	}
+}

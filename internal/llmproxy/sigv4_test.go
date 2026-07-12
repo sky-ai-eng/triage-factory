@@ -788,3 +788,50 @@ func TestProxySigV4LiveCredentialSource_CachesUntilExpiry(t *testing.T) {
 		t.Fatalf("source called %d times over 3 requests, want 1 (cached until near expiry)", calls.Load())
 	}
 }
+
+// TestProxySigV4LiveCredentialSource_EmptyRegionFails pins that a source
+// returning material with no Region is rejected (502) rather than signing with
+// an empty credential scope, which AWS would bounce with an opaque auth error.
+func TestProxySigV4LiveCredentialSource_EmptyRegionFails(t *testing.T) {
+	rec := &sigV4Capture{}
+	upstream := fakeBedrockUpstream(rec)
+	defer upstream.Close()
+
+	srv, err := llmproxy.New(llmproxy.Config{
+		Provider: llmproxy.ProviderBedrockSigV4,
+		Upstream: upstream.URL,
+		SigV4CredentialSource: func(context.Context) (llmproxy.SigV4Material, error) {
+			return llmproxy.SigV4Material{
+				SigV4Credentials: llmproxy.SigV4Credentials{AccessKeyID: "ASIA1", SecretAccessKey: "s"}, // Region empty
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmproxy.New: %v", err)
+	}
+	addr, err := srv.Start("")
+	if err != nil {
+		t.Fatalf("Server.Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+
+	body := []byte(`{"messages":[]}`)
+	req, _ := http.NewRequest("POST", "http://"+addr+"/model/x/invoke", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	signAsSandboxSDK(t, req, body, aws.Credentials{AccessKeyID: "AKIA-PH", SecretAccessKey: "ph"})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("roundtrip: %v", err)
+	}
+	defer resp.Body.Close()
+	// A 502 with no valid response is the signal: the proxy refused to sign
+	// with incomplete material (the erroring exchange also strips the
+	// placeholder Authorization, so nothing usable reaches upstream).
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (incomplete material must not be signed)", resp.StatusCode)
+	}
+}

@@ -271,8 +271,13 @@ func (s *Server) currentSigV4(ctx context.Context) (SigV4Material, error) {
 	if err != nil {
 		return SigV4Material{}, err
 	}
-	if mat.AccessKeyID == "" || mat.SecretAccessKey == "" {
-		return SigV4Material{}, errors.New("llmproxy: sigv4 credential source returned an incomplete triple")
+	// Region is part of the SigV4 credential scope, not optional: signing with
+	// an empty scope produces a request AWS rejects with an opaque auth error.
+	// The static-triple path enforces this at construction (SigV4Credentials.
+	// validate); the live source must enforce it per-read since the triple —
+	// and its region — is only known at mint time.
+	if mat.AccessKeyID == "" || mat.SecretAccessKey == "" || mat.Region == "" {
+		return SigV4Material{}, errors.New("llmproxy: sigv4 credential source returned incomplete material (need access key, secret, and region)")
 	}
 	s.sigV4Cached = &mat
 	return mat, nil

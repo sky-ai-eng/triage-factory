@@ -79,6 +79,12 @@ func NewResolver(secrets agentproc.SecretsReader, minter STSMinter, ttl time.Dur
 	if ttl <= 0 {
 		ttl = DefaultTTL
 	}
+	// Enforce the ≤1h ceiling at the mint boundary too (not just TTLFromEnv),
+	// so a caller that constructs a resolver with a longer duration can't widen
+	// the blast radius past what the feature guarantees.
+	if ttl > MaxTTL {
+		ttl = MaxTTL
+	}
 	return &Resolver{
 		secrets: secrets,
 		minter:  minter,
