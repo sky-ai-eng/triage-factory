@@ -222,14 +222,80 @@ func readDirNames(dirFd int) ([]string, error) {
 }
 
 // openat2AnchoredChildDir opens name, anchored off dirFd, as a directory
-// fd for further fd-relative descent. O_NOFOLLOW refuses a symlink entry
-// outright (ELOOP) rather than following it — a symlink is always a leaf
-// at this boundary, never traversed. O_NONBLOCK guards the open itself
-// against blocking on a FIFO planted in place of a real directory (moot
-// once O_DIRECTORY is honored, but cheap insurance against the open
-// syscall's own blocking behavior on unusual entry types).
+// fd. Used only for the top-level ChownRunTree/RemoveRunTree argument
+// itself (root/path's immediate open under the openat2-resolved parent) —
+// recursive descent below goes through openEntryPinned/listableDirFd
+// instead, which pin an entry's identity before any ownership check runs
+// against it. O_NOFOLLOW refuses a symlink entry outright (ELOOP) rather
+// than following it, and O_DIRECTORY refuses anything that isn't actually
+// a directory (ENOTDIR) — root/path is contractually always a directory.
 func openat2AnchoredChildDir(dirFd int, name string) (int, error) {
 	return unix.Openat(dirFd, name, unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+}
+
+// openEntryPinned resolves dirFd/name EXACTLY ONCE and returns an fd
+// pinned to that specific inode, plus its stat info read from that SAME
+// fd — so a caller's owner check (against st) and its subsequent
+// chown/descend (against fd) always act on the identical inode, immune to
+// a rename/swap of `name` in dirFd's directory after this call returns.
+// This is what closes the residual TOCTOU a naive
+// "Fstatat(name) then Fchownat(name)" pair still has: two separate
+// by-name resolutions of the same entry can race a concurrent rename
+// between them; one resolution followed by fd-only operations cannot.
+//
+// The first attempt is a plain, non-O_PATH open (cheap, and already
+// usable directly for getdents if it's a directory). That fails ELOOP for
+// a symlink entry (O_NOFOLLOW refuses to open one normally) and can fail
+// for other reasons on unusual entry types a plain open() can't handle at
+// all (e.g. ENXIO opening a UNIX domain socket file) — either way, the
+// retry with O_PATH succeeds uniformly regardless of entry type (a
+// symlink pinned as itself, never followed; any other type pinned without
+// needing to actually "open" it), matching what the fallback's Lchown
+// could always do by path.
+func openEntryPinned(dirFd int, name string) (fd int, st unix.Stat_t, isPathFd bool, err error) {
+	fd, err = unix.Openat(dirFd, name, unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		fd, err = unix.Openat(dirFd, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return -1, st, false, err
+		}
+		isPathFd = true
+	}
+	if err = unix.Fstat(fd, &st); err != nil {
+		closeFd(fd)
+		return -1, st, false, err
+	}
+	return fd, st, isPathFd, nil
+}
+
+// chownPinnedEntry chowns the inode fd refers to via Fchownat's
+// AT_EMPTY_PATH form ("operate on fd itself, resolve no name"), which
+// works whether fd is a plain or an O_PATH descriptor. Because it never
+// re-resolves `name`, it always chowns the exact inode openEntryPinned
+// pinned — whatever `name` has since been renamed to, or replaced with.
+func chownPinnedEntry(fd int) error {
+	return unix.Fchownat(fd, "", WorktreeUID, WorktreeGID, unix.AT_EMPTY_PATH)
+}
+
+// listableDirFd returns an fd usable with getdents for the directory
+// openEntryPinned identified. A plain (non-O_PATH) fd already qualifies
+// and is returned as-is (distinct=false: it IS fd, the caller must not
+// separately close it). An O_PATH fd can't be used for getdents, so this
+// "upgrades" it into a real fd for the SAME inode via the kernel's
+// /proc/self/fd magic-symlink resolution — which resolves against this
+// process's own open-file table, not a second lookup of the entry's name
+// in its parent directory, so a rename racing the original open can't
+// redirect it (distinct=true: the caller owns and must close the
+// returned fd separately from fd).
+func listableDirFd(fd int, isPathFd bool) (listFd int, distinct bool, err error) {
+	if !isPathFd {
+		return fd, false, nil
+	}
+	listFd, err = unix.Openat(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", fd), unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, false, err
+	}
+	return listFd, true, nil
 }
 
 // ChownRunTree implements the ownership hand-off: the openat2-anchored
@@ -257,14 +323,16 @@ func (hostOps) ChownRunTree(ctx context.Context, root, subpath string) error {
 
 // chownRunTreeOpenat2 is the kernel-enforced implementation.
 // SECURITY: root's resolution is refused by the kernel (not merely a
-// prior check) if any component of its parent is a symlink; every op
-// after that resolves fd-relative with AT_SYMLINK_NOFOLLOW /
-// O_NOFOLLOW, so a symlink swapped in after the anchor opens is chowned
-// as the link itself (never followed to its target) and never descended
-// into. Every entry's CURRENT owner is checked against
-// allowedRunTreeOwner before it's touched, exactly like the fallback's
-// lchownRunTreeEntry — an entry planted with a foreign owner fails the
-// whole operation closed.
+// prior check) if any component of its parent is a symlink. Every op
+// after that resolves an entry's name exactly once (openEntryPinned) and
+// operates on the resulting fd from then on — the owner check
+// (allowedRunTreeOwner against Fstat) and the chown (Fchownat's
+// AT_EMPTY_PATH form) both act on that one pinned fd, so a rename racing
+// between "check" and "chown" cannot substitute a different inode than
+// the one that was checked. A symlink entry is pinned as itself (never
+// followed) and chowned as itself. An entry planted with a foreign owner
+// fails the whole operation closed, exactly like the fallback's
+// lchownRunTreeEntry.
 func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
 	parentFd, base, err := openRunTreeAnchor(root)
 	if err != nil {
@@ -287,7 +355,7 @@ func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
 	}
 
 	if subpath == "" {
-		if err := unix.Fchownat(parentFd, base, WorktreeUID, WorktreeGID, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if err := chownPinnedEntry(rootFd); err != nil {
 			return fmt.Errorf("fchownat %s: %w", root, err)
 		}
 		return chownDirChildren(ctx, rootFd, root)
@@ -319,18 +387,40 @@ func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
 			opErr = chownEntryRecursive(ctx, dirFd, seg, display)
 			break
 		}
-		if opErr = chownEntryShallow(dirFd, seg, display); opErr != nil {
+
+		fd, st, isPathFd, err := openEntryPinned(dirFd, seg)
+		if err != nil {
+			opErr = fmt.Errorf("open %s: %w", display, err)
 			break
 		}
-		childFd, err := openat2AnchoredChildDir(dirFd, seg)
-		if err != nil {
-			opErr = fmt.Errorf("openat %s: %w", display, err)
+		if !allowedRunTreeOwner(st.Uid) {
+			closeFd(fd)
+			opErr = fmt.Errorf("%s is owned by uid %d, not a run-tree owner", display, st.Uid)
 			break
+		}
+		if err := chownPinnedEntry(fd); err != nil {
+			closeFd(fd)
+			opErr = fmt.Errorf("fchownat %s: %w", display, err)
+			break
+		}
+		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+			closeFd(fd)
+			opErr = fmt.Errorf("chown run tree: subpath intermediate %q is not a directory", display)
+			break
+		}
+		listFd, distinct, err := listableDirFd(fd, isPathFd)
+		if err != nil {
+			closeFd(fd)
+			opErr = fmt.Errorf("open %s for listing: %w", display, err)
+			break
+		}
+		if distinct {
+			closeFd(fd)
 		}
 		if ownDirFd {
 			closeFd(dirFd)
 		}
-		dirFd = childFd
+		dirFd = listFd
 		ownDirFd = true
 	}
 	if ownDirFd {
@@ -339,52 +429,40 @@ func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
 	return opErr
 }
 
-// chownEntryShallow re-owns exactly one entry (dirFd/name) to the sandbox
-// identity, after checking its current owner is one this boundary hands
-// over at all — the fd-relative replacement for lchownRunTreeEntry, used
-// where the original code chowned a single intermediate directory without
-// recursing into its other contents.
-func chownEntryShallow(dirFd int, name, displayPath string) error {
-	var st unix.Stat_t
-	if err := unix.Fstatat(dirFd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return fmt.Errorf("fstatat %s: %w", displayPath, err)
-	}
-	if !allowedRunTreeOwner(st.Uid) {
-		return fmt.Errorf("%s is owned by uid %d, not a run-tree owner", displayPath, st.Uid)
-	}
-	if err := unix.Fchownat(dirFd, name, WorktreeUID, WorktreeGID, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return fmt.Errorf("fchownat %s: %w", displayPath, err)
-	}
-	return nil
-}
-
-// chownEntryRecursive re-owns dirFd/name and, if it is itself a directory,
-// descends (O_NOFOLLOW — a symlink entry ELOOPs and is left as an
-// already-chowned leaf, never traversed) and recurses over everything
-// inside it.
+// chownEntryRecursive pins dirFd/name (openEntryPinned), checks and
+// chowns it via that one pinned fd, and — if it is itself a directory —
+// obtains a listable fd for it (listableDirFd) and recurses over
+// everything inside.
 func chownEntryRecursive(ctx context.Context, dirFd int, name, displayPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	var st unix.Stat_t
-	if err := unix.Fstatat(dirFd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return fmt.Errorf("fstatat %s: %w", displayPath, err)
+	fd, st, isPathFd, err := openEntryPinned(dirFd, name)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", displayPath, err)
 	}
 	if !allowedRunTreeOwner(st.Uid) {
+		closeFd(fd)
 		return fmt.Errorf("%s is owned by uid %d, not a run-tree owner", displayPath, st.Uid)
 	}
-	if err := unix.Fchownat(dirFd, name, WorktreeUID, WorktreeGID, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+	if err := chownPinnedEntry(fd); err != nil {
+		closeFd(fd)
 		return fmt.Errorf("fchownat %s: %w", displayPath, err)
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+		closeFd(fd)
 		return nil
 	}
-	childFd, err := openat2AnchoredChildDir(dirFd, name)
+	listFd, distinct, err := listableDirFd(fd, isPathFd)
 	if err != nil {
-		return fmt.Errorf("openat %s: %w", displayPath, err)
+		closeFd(fd)
+		return fmt.Errorf("open %s for listing: %w", displayPath, err)
 	}
-	defer closeFd(childFd)
-	return chownDirChildren(ctx, childFd, displayPath)
+	if distinct {
+		closeFd(fd)
+	}
+	defer closeFd(listFd)
+	return chownDirChildren(ctx, listFd, displayPath)
 }
 
 // chownDirChildren lists dirFd's entries and recursively chowns each one.
@@ -497,12 +575,11 @@ func (hostOps) RemoveRunTree(ctx context.Context, path string) error {
 // removeRunTreeOpenat2 is the kernel-enforced implementation: path's
 // resolution is refused by the kernel (not merely a prior check) if any
 // component of its parent is a symlink; every op after that is
-// fd-relative (Fstatat/Openat with AT_SYMLINK_NOFOLLOW/O_NOFOLLOW,
-// Unlinkat for the actual removal) — the contents go regardless of what
-// uids the run left inside (agent-created files arrive via the privileged
-// gofer and can carry modes the orchestrator could never unlink through,
-// which is exactly why this op lives on the privileged side), matching
-// the fallback's no-interior-ownership-check behavior exactly. A missing
+// fd-relative — the contents go regardless of what uids the run left
+// inside (agent-created files arrive via the privileged gofer and can
+// carry modes the orchestrator could never unlink through, which is
+// exactly why this op lives on the privileged side), matching the
+// fallback's no-interior-ownership-check behavior exactly. A missing
 // tree — either path itself, or its parent — is the idempotent no-op
 // success the os.RemoveAll callers this replaces relied on.
 func removeRunTreeOpenat2(ctx context.Context, path string) error {
@@ -552,11 +629,17 @@ func removeRunTreeOpenat2(ctx context.Context, path string) error {
 	return nil
 }
 
-// removeDirChildren empties dirFd's directory contents: a directory entry
-// is emptied via recursion before AT_REMOVEDIR unlinks the now-empty
-// directory itself; anything else is unlinked directly. No ownership
-// check here — matching removeRunTreeFallback's os.RemoveAll, which never
-// inspected interior uids either.
+// removeDirChildren empties dirFd's directory contents: each entry is
+// pinned once (openEntryPinned) to learn its type from the SAME fd a
+// directory entry is then recursed into (listableDirFd) — no ownership
+// check here, matching removeRunTreeFallback's os.RemoveAll, which never
+// inspected interior uids either. The terminal Unlinkat/Unlinkat(..
+// AT_REMOVEDIR) is necessarily by name (Linux has no unlink-by-fd
+// primitive); by the time it runs, a directory has already been fully
+// emptied via the pinned fd, so a rename racing the entry's name at that
+// last step can only make the unlink itself fail (e.g. ENOTEMPTY/ENOTDIR
+// against whatever now occupies the name) rather than silently remove
+// the wrong tree's contents.
 func removeDirChildren(ctx context.Context, dirFd int, displayPath string) error {
 	names, err := readDirNames(dirFd)
 	if err != nil {
@@ -567,30 +650,35 @@ func removeDirChildren(ctx context.Context, dirFd int, displayPath string) error
 			return err
 		}
 		entryPath := filepath.Join(displayPath, name)
-		var st unix.Stat_t
-		if err := unix.Fstatat(dirFd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		fd, st, isPathFd, err := openEntryPinned(dirFd, name)
+		if err != nil {
 			if errors.Is(err, unix.ENOENT) {
 				continue
 			}
-			return fmt.Errorf("fstatat %s: %w", entryPath, err)
+			return fmt.Errorf("open %s: %w", entryPath, err)
 		}
-		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-			childFd, err := openat2AnchoredChildDir(dirFd, name)
-			if err != nil {
-				return fmt.Errorf("openat %s: %w", entryPath, err)
-			}
-			err = removeDirChildren(ctx, childFd, entryPath)
-			closeFd(childFd)
-			if err != nil {
-				return err
-			}
-			if err := unix.Unlinkat(dirFd, name, unix.AT_REMOVEDIR); err != nil {
-				return fmt.Errorf("unlinkat(rmdir) %s: %w", entryPath, err)
+		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+			closeFd(fd)
+			if err := unix.Unlinkat(dirFd, name, 0); err != nil {
+				return fmt.Errorf("unlinkat %s: %w", entryPath, err)
 			}
 			continue
 		}
-		if err := unix.Unlinkat(dirFd, name, 0); err != nil {
-			return fmt.Errorf("unlinkat %s: %w", entryPath, err)
+		listFd, distinct, err := listableDirFd(fd, isPathFd)
+		if err != nil {
+			closeFd(fd)
+			return fmt.Errorf("open %s for listing: %w", entryPath, err)
+		}
+		if distinct {
+			closeFd(fd)
+		}
+		err = removeDirChildren(ctx, listFd, entryPath)
+		closeFd(listFd)
+		if err != nil {
+			return err
+		}
+		if err := unix.Unlinkat(dirFd, name, unix.AT_REMOVEDIR); err != nil {
+			return fmt.Errorf("unlinkat(rmdir) %s: %w", entryPath, err)
 		}
 	}
 	return nil

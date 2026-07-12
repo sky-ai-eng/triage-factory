@@ -5,6 +5,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -342,13 +343,27 @@ func TestBrokeredMode_RejectsRootOwnedTree(t *testing.T) {
 
 // requireOpenat2Supported skips the test if this kernel can't do
 // RESOLVE_NO_SYMLINKS — the openat2-specific tests below assert on the
-// kernel-enforced code path, not the fallback, and need a real >=5.6
-// kernel to do that.
+// kernel-enforced code path, not the fallback, so they need a direct probe
+// of the REAL kernel capability. The shared runTreeOpenat2Unsupported latch
+// is the wrong thing to check here: it only reflects "has some run-tree op
+// already observed ENOSYS", so on a kernel that genuinely lacks openat2 it
+// still reads false (and this helper would wrongly say "supported") until
+// some earlier test happens to trip it — order-dependent and easy to get
+// wrong. A direct probe has no such dependency.
 func requireOpenat2Supported(t *testing.T) {
 	t.Helper()
-	if runTreeOpenat2Unsupported.Load() {
-		t.Skip("this kernel doesn't support openat2(RESOLVE_NO_SYMLINKS)")
+	dir := t.TempDir()
+	fd, err := unix.Openat2(unix.AT_FDCWD, dir, &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_NO_SYMLINKS,
+	})
+	if err != nil {
+		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EOPNOTSUPP) {
+			t.Skip("this kernel doesn't support openat2(RESOLVE_NO_SYMLINKS)")
+		}
+		t.Fatalf("probing openat2 support: %v", err)
 	}
+	unix.Close(fd)
 }
 
 // TestChownRunTree_RejectsSymlinkedParentComponent pins the openat2 half
@@ -513,5 +528,72 @@ func TestRunTreeOps_WarnsOnceWhenOpenat2Unsupported(t *testing.T) {
 	// wrapped err attribute), so count records via level=WARN instead.
 	if n := strings.Count(buf.String(), "level=WARN"); n != 1 {
 		t.Errorf("openat2-unsupported warning logged %d times, want exactly 1:\n%s", n, buf.String())
+	}
+}
+
+// TestOpenEntryPinned_ImmuneToNameSwapAfterOpen pins the actual
+// TOCTOU-closure property, deterministically rather than via a real race:
+// openEntryPinned resolves a name exactly once; every operation after
+// that (the owner check against st, and chownPinnedEntry) acts on the
+// pinned fd, not a fresh lookup of the name. So even if the directory
+// entry is swapped for a foreign-owned one AFTER the fd is pinned but
+// BEFORE the chown runs — exactly the window a "Fstatat(name) then
+// Fchownat(name)" pair would race — the chown still lands on the
+// originally-checked inode, and the swapped-in file is left untouched.
+func TestOpenEntryPinned_ImmuneToNameSwapAfterOpen(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (CAP_CHOWN) to change file owners")
+	}
+
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "entry")
+	if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFd, err := unix.Open(dir, unix.O_DIRECTORY|unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFd(dirFd)
+
+	fd, st, isPathFd, err := openEntryPinned(dirFd, "entry")
+	if err != nil {
+		t.Fatalf("openEntryPinned: %v", err)
+	}
+	defer closeFd(fd)
+	if isPathFd {
+		t.Fatal("expected a plain (non-O_PATH) fd for a regular file")
+	}
+	if !allowedRunTreeOwner(st.Uid) {
+		t.Fatalf("fixture: entry not initially owned by an allowed uid (got %d)", st.Uid)
+	}
+
+	// Simulate the race: after the fd is pinned but before chownPinnedEntry
+	// runs, "entry" gets renamed out from under it to a foreign-owned file.
+	foreign := filepath.Join(dir, "attacker-planted")
+	if err := os.WriteFile(foreign, []byte("swapped"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(foreign, foreignUID, foreignUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(foreign, victim); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := chownPinnedEntry(fd); err != nil {
+		t.Fatalf("chownPinnedEntry: %v", err)
+	}
+
+	var afterStat unix.Stat_t
+	if err := unix.Fstat(fd, &afterStat); err != nil {
+		t.Fatal(err)
+	}
+	if afterStat.Uid != WorktreeUID {
+		t.Errorf("originally pinned inode owned by %d after chown, want %d — chown followed the renamed name instead of the pinned fd", afterStat.Uid, WorktreeUID)
+	}
+	if swappedUID, _ := statUIDGID(t, victim); swappedUID != foreignUID {
+		t.Errorf("the swapped-in foreign-owned file's owner changed to %d — the chown followed the name instead of staying pinned to the original inode", swappedUID)
 	}
 }
