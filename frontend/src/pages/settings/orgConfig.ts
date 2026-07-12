@@ -10,9 +10,10 @@ import { readError } from '../../lib/api'
 export type CloneProtocol = 'ssh' | 'https'
 
 // BedrockAuthMethod mirrors the connect endpoint's auth_method wire values:
-// a Bedrock API key (bearer) or the IAM access-key pair (+ optional session
+// an assumed IAM role (short-lived session credentials, no static secret), a
+// Bedrock API key (bearer), or the IAM access-key pair (+ optional session
 // token) served by the SigV4 re-signing proxy.
-export type BedrockAuthMethod = 'bearer' | 'access_keys'
+export type BedrockAuthMethod = 'role' | 'bearer' | 'access_keys'
 
 // OrgConfigForm is the editable org-level field set the shared components
 // drive. Field names match the GET/POST /api/settings/org wire keys so a
@@ -53,6 +54,12 @@ export interface OrgConfigForm {
   aws_access_key_id: string
   aws_secret_access_key: string
   aws_session_token: string
+  // IAM-role method (no static secret): the role ARN Triage Factory assumes to
+  // mint per-run session credentials (editable), plus the server-generated
+  // external ID the role's trust policy must pin (read-only — surfaced by the
+  // GET echo / role-setup response, never typed by the user).
+  bedrock_role_arn: string
+  bedrock_external_id: string
   bedrock_region: string
   bedrock_model_id: string
   bedrock_base_url: string
@@ -81,6 +88,10 @@ export interface OrgSettingsData {
   // stored method / region / model / endpoint. The credential itself never
   // leaves the vault.
   bedrock_auth_method?: string
+  // IAM-role method: the stored role ARN and the org's generated external ID
+  // (both omitempty — absent unless the role method is configured).
+  bedrock_role_arn?: string
+  bedrock_external_id?: string
   bedrock_region?: string
   bedrock_model_id?: string
   bedrock_base_url?: string
@@ -105,6 +116,8 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
   aws_access_key_id: '',
   aws_secret_access_key: '',
   aws_session_token: '',
+  bedrock_role_arn: '',
+  bedrock_external_id: '',
   // us-east-1 is Bedrock's primary region for Anthropic models and the
   // resolver's own fallback — pre-filled so the common case is zero-typing.
   bedrock_region: 'us-east-1',
@@ -137,11 +150,20 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
     anthropic_api_key: '',
     // Bedrock secrets stay blank like the key above; the non-secret config
     // seeds from the GET echo so the form shows what's stored.
-    bedrock_auth_method: org.bedrock_auth_method === 'access_keys' ? 'access_keys' : 'bearer',
+    bedrock_auth_method:
+      org.bedrock_auth_method === 'access_keys'
+        ? 'access_keys'
+        : org.bedrock_auth_method === 'role'
+          ? 'role'
+          : 'bearer',
     bedrock_bearer_token: '',
     aws_access_key_id: '',
     aws_secret_access_key: '',
     aws_session_token: '',
+    // Role method: the ARN + external ID are non-secret config, so they round-
+    // trip from the GET echo (external ID is server-generated, never typed).
+    bedrock_role_arn: org.bedrock_role_arn || '',
+    bedrock_external_id: org.bedrock_external_id || '',
     bedrock_region: org.bedrock_region || 'us-east-1',
     bedrock_model_id: org.bedrock_model_id || '',
     bedrock_base_url: org.bedrock_base_url || '',

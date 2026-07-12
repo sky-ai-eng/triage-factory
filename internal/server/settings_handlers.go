@@ -389,10 +389,16 @@ type orgSettingsResponse struct {
 	// leaves the vault — presence rides has_bedrock_credentials and the
 	// method marker below; these three let the Settings form render the
 	// current region / model / endpoint without a secrets round-trip.
-	BedrockAuthMethod string `json:"bedrock_auth_method,omitempty"` // "bearer" | "access_keys"
+	BedrockAuthMethod string `json:"bedrock_auth_method,omitempty"` // "role" | "bearer" | "access_keys"
 	BedrockRegion     string `json:"bedrock_region,omitempty"`
 	BedrockModelID    string `json:"bedrock_model_id,omitempty"`
 	BedrockBaseURL    string `json:"bedrock_base_url,omitempty"`
+	// Role-mode (TFAC-616) non-secret config: the customer role ARN and the
+	// TF-generated External ID, so the settings form re-renders the role card
+	// and the copyable trust-policy snippet without a round-trip to the
+	// role-setup endpoint. Both empty unless the org is in role mode.
+	BedrockRoleARN    string `json:"bedrock_role_arn,omitempty"`
+	BedrockExternalID string `json:"bedrock_external_id,omitempty"`
 	// MemberCount is the number of members in this org. Feeds the
 	// frontend's N=1 collapse alongside the team member count. A property
 	// of the org, so it rides the org-scope response rather than /api/me.
@@ -408,7 +414,7 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 
 	var orgSet domain.OrgSettings
 	var creds auth.Credentials
-	var bedrockRegion, bedrockModelID, bedrockBaseURL string
+	var bedrockRegion, bedrockModelID, bedrockBaseURL, bedrockRoleARN, bedrockExternalID string
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error
 		orgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
@@ -419,10 +425,13 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		// Bedrock non-secret config rides the same vault as the
 		// credential; missing keys come back ("", nil). Best-effort like
 		// the integrations.Load above — a vault hiccup degrades the form
-		// to blank fields, not a 500.
+		// to blank fields, not a 500. The role ARN + External ID are
+		// non-secret too (role mode stores no credential at all).
 		bedrockRegion, _ = tx.Secrets.Get(r.Context(), orgID, integrations.KeyAWSRegion)
 		bedrockModelID, _ = tx.Secrets.Get(r.Context(), orgID, integrations.KeyBedrockModelID)
 		bedrockBaseURL, _ = tx.Secrets.Get(r.Context(), orgID, integrations.KeyBedrockBaseURL)
+		bedrockRoleARN, _ = tx.Secrets.Get(r.Context(), orgID, integrations.KeyAWSRoleARN)
+		bedrockExternalID, _ = tx.Secrets.Get(r.Context(), orgID, integrations.KeyAWSExternalID)
 		return nil
 	}); err != nil {
 		internalError(w, "settings/org", err)
@@ -467,6 +476,8 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		BedrockRegion:       bedrockRegion,
 		BedrockModelID:      bedrockModelID,
 		BedrockBaseURL:      bedrockBaseURL,
+		BedrockRoleARN:      bedrockRoleARN,
+		BedrockExternalID:   bedrockExternalID,
 		MemberCount:         memberCount,
 	})
 }

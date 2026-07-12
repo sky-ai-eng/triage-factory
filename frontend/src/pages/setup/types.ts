@@ -168,8 +168,9 @@ export interface WizardState {
   // The auth method of the STORED Bedrock credential (null when none). The
   // "leave blank to keep current" masking only arms when the form's selected
   // method matches this — switching methods always requires the new method's
-  // secrets, mirroring the backend's keep-current rule.
-  bedrockStoredMethod: 'bearer' | 'access_keys' | null
+  // secrets, mirroring the backend's keep-current rule. ('role' stores no
+  // secret, so keep-current is moot there — but it's still the stored method.)
+  bedrockStoredMethod: 'role' | 'bearer' | 'access_keys' | null
   team: TeamConfigForm
   // True once the team form has been seeded from the server (the Repositories
   // step's load). The team mirror of orgLoaded: the team GET runs ONCE — on the

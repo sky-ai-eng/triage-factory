@@ -23,6 +23,20 @@ import (
 // settings endpoints, holding the transactional store runner.
 type settingsHandler struct {
 	tx db.TxRunner
+	// bedrockRole resolves live AWS calls for the Bedrock role-mode setup +
+	// connect probe (TFAC-616): sts:GetCallerIdentity for the trust-policy
+	// snippet and a real sts:AssumeRole round-trip for the connect probe. A
+	// getter (not a captured value) because routes register before the app
+	// injects the resolver; nil when no ambient AWS SDK is wired (local mode).
+	bedrockRole func() bedrockRoleResolver
+}
+
+// bedrockRoleResolver is the slice of internal/llmcred the Bedrock role-setup
+// and connect-probe handlers call. *llmcred.Resolver satisfies it; tests
+// inject a fake to exercise the two probe failure classes without real AWS.
+type bedrockRoleResolver interface {
+	CallerIdentityARN(ctx context.Context) (string, error)
+	ProbeRole(ctx context.Context, roleARN, externalID string) error
 }
 
 // secretKeyAnthropicAPIKey is the vault key the org's Anthropic API key is

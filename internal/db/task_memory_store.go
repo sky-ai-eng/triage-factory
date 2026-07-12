@@ -19,27 +19,33 @@ import (
 // UsersStore / EntityStore / EventStore:
 //
 //   - Plain methods (UpsertAgentMemory, UpdateRunMemoryHumanContent,
-//     GetMemoriesForEntity, GetRunMemory) run on the app pool in
-//     Postgres (RLS-active). Callers are request-handler equivalents
-//     (review submit, PR submit, swipe-discard cleanup, factory
-//     read-back) and must be inside WithTx in multi-mode so JWT
-//     claims (org_id, sub) are set for RLS evaluation.
+//     GetMemoriesForEntity) run on the app pool in Postgres
+//     (RLS-active). Callers are request-handler equivalents (review
+//     submit, PR submit, swipe-discard cleanup, factory read-back)
+//     and must be inside WithTx in multi-mode so JWT claims (org_id,
+//     sub) are set for RLS evaluation.
 //   - `...System` methods (UpsertAgentMemorySystem,
-//     GetMemoriesForEntitySystem) run on the admin pool (BYPASSRLS).
+//     GetMemoriesForEntitySystem, RecordEntityTouchSystem,
+//     CountMemoriesForEntitySystem) run on the admin pool (BYPASSRLS).
 //     The consumers are background goroutines without a JWT-claims
 //     context — the delegate spawner's post-completion gate teardown
 //     and the run-start materializer both fire from inside the
 //     spawner's `runAgent` goroutine which has no request scope.
 //     org_id stays bound in the INSERT/SELECT as defense in depth.
 //
-// No System variants exist for UpdateRunMemoryHumanContent (only
-// called from HTTP handlers under request claims) or GetRunMemory (no
-// goroutine-internal caller — audit of internal/delegate/* confirmed
-// today's reads happen on the handler side only). Adding speculative
-// System variants would just be dead code the admin-pool conformance
-// suite would have to cover for no consumer; the precedent (e.g.
-// EventStore's missing app-side GetMetadata) is to omit unused
-// variants until a real caller arrives.
+// No System variant exists for UpdateRunMemoryHumanContent (only
+// called from HTTP handlers under request claims). Adding a
+// speculative System variant would just be dead code the admin-pool
+// conformance suite would have to cover for no consumer; the
+// precedent (e.g. EventStore's missing app-side GetMetadata) is to
+// omit unused variants until a real caller arrives.
+//
+// RecordEntityTouchSystem and CountMemoriesForEntitySystem are the
+// deliberate exception to that precedent: they're the run_memory_entities
+// foundation TFAC-622 lands ahead of their production callers, which
+// arrive with the sibling touch-capture (TFAC-623) and memory-load
+// (TFAC-624) tickets. Until then they're exercised only by tests and the
+// tf_system grant conformance suite.
 //
 // SQLite collapses both pools onto the single connection. The
 // `...System` methods are thin wrappers around their non-System
@@ -106,8 +112,9 @@ type TaskMemoryStore interface {
 	// SQLite collapses onto the one connection.
 	UpdateRunMemoryHumanContentSystem(ctx context.Context, orgID, runID, content string) error
 
-	// GetMemoriesForEntity returns all memories across all runs on
-	// this entity (and linked entities via entity_links), oldest
+	// GetMemoriesForEntity returns every run_memory row reachable for
+	// this entity through run_memory_entities — the run touched,
+	// produced for, or was primarily about this entity — oldest
 	// first. The returned TaskMemory.Content is materialized from
 	// agent_content + human_content via the stable separator format
 	// the next agent's prompt context parses. Each row carries its
@@ -135,9 +142,20 @@ type TaskMemoryStore interface {
 	// possible locally.
 	GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error)
 
-	// GetRunMemory returns the single memory row for a run, or nil
-	// when no row exists. Same materialization contract as
-	// GetMemoriesForEntity. Used by the factory run-summary projection
-	// and the resume-picker on the handler side.
-	GetRunMemory(ctx context.Context, orgID, runID string) (*domain.TaskMemory, error)
+	// RecordEntityTouchSystem upserts a (run_id, entity_id) row in
+	// run_memory_entities with role-precedence upgrade: insert if
+	// absent; on conflict, set role only if the new role outranks the
+	// stored one (domain.MemoryRoleOutranks — primary > produced >
+	// touched), so a later stronger classification upgrades the row
+	// and a weaker one never downgrades it. Admin pool only
+	// (tf_system on executors); every caller is a goroutine-internal
+	// write with no JWT-claims context. Best-effort by contract:
+	// callers must never fail the operation that produced the touch
+	// on this method's error.
+	RecordEntityTouchSystem(ctx context.Context, orgID, runID, entityID, role string) error
+
+	// CountMemoriesForEntitySystem returns the number of run_memory
+	// rows reachable for entityID through run_memory_entities, under
+	// the same team-visibility filter as GetMemoriesForEntitySystem.
+	CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) (int, error)
 }

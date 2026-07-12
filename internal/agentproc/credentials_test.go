@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -46,7 +47,7 @@ func TestResolveCredentials_AnthropicConfigured(t *testing.T) {
 		"anthropic_api_key": "sk-ant-org1",
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, orgID)
+	env, err := resolveCredentials(context.Background(), secrets, orgID, nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestResolveCredentials_BedrockConfigured(t *testing.T) {
 		"aws_region":            "us-west-2",
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, orgID)
+	env, err := resolveCredentials(context.Background(), secrets, orgID, nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestResolveCredentials_AnthropicWinsOverBedrock(t *testing.T) {
 		"aws_secret_access_key":    "secret-both",
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, orgID)
+	env, err := resolveCredentials(context.Background(), secrets, orgID, nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}
@@ -134,7 +135,7 @@ func TestResolveCredentials_BedrockAPIKeyPath(t *testing.T) {
 		"bedrock_model_id":         "us.anthropic.claude-sonnet-4-6",
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, orgID)
+	env, err := resolveCredentials(context.Background(), secrets, orgID, nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}
@@ -172,7 +173,7 @@ func TestResolveCredentials_BedrockBearerWinsOverTriple(t *testing.T) {
 		"aws_secret_access_key":    "secret-loses",
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, orgID)
+	env, err := resolveCredentials(context.Background(), secrets, orgID, nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}
@@ -209,7 +210,7 @@ func TestResolveCredentials_BedrockEndpointOverride(t *testing.T) {
 	for name, kv := range cases {
 		t.Run(name, func(t *testing.T) {
 			const orgID = "99999999-9999-9999-9999-999999999999"
-			env, err := resolveCredentials(context.Background(), newFakeSecrets(orgID, kv), orgID)
+			env, err := resolveCredentials(context.Background(), newFakeSecrets(orgID, kv), orgID, nil)
 			if err != nil {
 				t.Fatalf("resolveCredentials: %v", err)
 			}
@@ -225,7 +226,7 @@ func TestResolveCredentials_BedrockEndpointOverride(t *testing.T) {
 	env, err := resolveCredentials(context.Background(), newFakeSecrets(orgID, map[string]string{
 		"aws_access_key_id":     "AKIA-test",
 		"aws_secret_access_key": "secret-test",
-	}), orgID)
+	}), orgID, nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials (no override): %v", err)
 	}
@@ -245,7 +246,7 @@ func TestResolveCredentials_PartialBedrockIsNotConfigured(t *testing.T) {
 		"aws_access_key_id": "AKIA-partial",
 	})
 
-	_, err := resolveCredentials(context.Background(), secrets, orgID)
+	_, err := resolveCredentials(context.Background(), secrets, orgID, nil)
 	if !errors.Is(err, ErrNoCredentialsConfigured) {
 		t.Fatalf("err = %v, want ErrNoCredentialsConfigured wrap", err)
 	}
@@ -254,7 +255,7 @@ func TestResolveCredentials_PartialBedrockIsNotConfigured(t *testing.T) {
 func TestResolveCredentials_EmptyOrgIDLocalMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 
-	env, err := resolveCredentials(context.Background(), nil, "")
+	env, err := resolveCredentials(context.Background(), nil, "", nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials(local, empty): %v", err)
 	}
@@ -266,7 +267,7 @@ func TestResolveCredentials_EmptyOrgIDLocalMode(t *testing.T) {
 func TestResolveCredentials_EmptyOrgIDMultiMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 
-	_, err := resolveCredentials(context.Background(), nil, "")
+	_, err := resolveCredentials(context.Background(), nil, "", nil)
 	if !errors.Is(err, ErrNoCredentialsConfigured) {
 		t.Fatalf("err = %v, want ErrNoCredentialsConfigured wrap (multi mode refuses empty orgID)", err)
 	}
@@ -277,7 +278,7 @@ func TestResolveCredentials_MultiModeOrgWithNoKey(t *testing.T) {
 	const orgID = "55555555-5555-5555-5555-555555555555"
 	secrets := newFakeSecrets(orgID, map[string]string{}) // empty vault row
 
-	_, err := resolveCredentials(context.Background(), secrets, orgID)
+	_, err := resolveCredentials(context.Background(), secrets, orgID, nil)
 	if !errors.Is(err, ErrNoCredentialsConfigured) {
 		t.Fatalf("err = %v, want ErrNoCredentialsConfigured wrap", err)
 	}
@@ -294,7 +295,7 @@ func TestResolveCredentials_LocalModeOrgWithKey(t *testing.T) {
 		"anthropic_api_key": "sk-ant-local-configured",
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, runmode.LocalDefaultOrgID)
+	env, err := resolveCredentials(context.Background(), secrets, runmode.LocalDefaultOrgID, nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}
@@ -309,7 +310,7 @@ func TestResolveCredentials_SecretReadErrorPropagates(t *testing.T) {
 	want := errors.New("vault unavailable")
 	secrets := &fakeSecrets{err: want}
 
-	_, err := resolveCredentials(context.Background(), secrets, orgID)
+	_, err := resolveCredentials(context.Background(), secrets, orgID, nil)
 	if err == nil {
 		t.Fatal("err = nil, want propagated secret-read failure")
 	}
@@ -445,7 +446,7 @@ func TestResolveCredentials_OptionalAnthropicFieldErrorsPropagate(t *testing.T) 
 		errForKey: errors.New("vault transient"),
 	}
 
-	_, err := resolveCredentials(context.Background(), secrets, orgID)
+	_, err := resolveCredentials(context.Background(), secrets, orgID, nil)
 	if err == nil {
 		t.Fatal("optional field error swallowed; resolver should propagate")
 	}
@@ -471,7 +472,7 @@ func TestResolveCredentials_OptionalBedrockFieldErrorsPropagate(t *testing.T) {
 		errForKey: errors.New("vault transient"),
 	}
 
-	_, err := resolveCredentials(context.Background(), secrets, orgID)
+	_, err := resolveCredentials(context.Background(), secrets, orgID, nil)
 	if err == nil {
 		t.Fatal("optional Bedrock field error swallowed; resolver should propagate")
 	}
@@ -499,5 +500,51 @@ func TestCredentialEnvKeysWellFormed(t *testing.T) {
 		if strings.ToUpper(k) != k {
 			t.Errorf("credential env key %q is not upper-case", k)
 		}
+	}
+}
+
+// TestResolveCredentials_LLMResolverPreferredOverRawPath pins the TFAC-616
+// seam: when RunOptions.LLMResolver is wired (brain-side / all-local), it
+// owns resolution — the built-in raw-secret path is not consulted, so a
+// role-mode org (no raw key) resolves via the minting resolver.
+func TestResolveCredentials_LLMResolverPreferredOverRawPath(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	const orgID = "22222222-2222-2222-2222-222222222222"
+	// A bag with NO anthropic/bedrock key — the raw path would error here.
+	secrets := newFakeSecrets(orgID, map[string]string{"aws_role_arn": "arn:aws:iam::1:role/r"})
+	resolver := func(_ context.Context, gotOrg string) (map[string]string, error) {
+		if gotOrg != orgID {
+			t.Errorf("resolver got org %q, want %q", gotOrg, orgID)
+		}
+		return map[string]string{"AWS_ACCESS_KEY_ID": "ASIA-minted", "CLAUDE_CODE_USE_BEDROCK": "1"}, nil
+	}
+	env, err := resolveCredentials(context.Background(), secrets, orgID, resolver)
+	if err != nil {
+		t.Fatalf("resolveCredentials with resolver: %v", err)
+	}
+	if env["AWS_ACCESS_KEY_ID"] != "ASIA-minted" {
+		t.Errorf("resolver output not used: %v", env)
+	}
+}
+
+// TestResolveCredentials_BundleWinsOverLLMResolver pins that the executor
+// bundle path takes precedence over any wired resolver — the brain already
+// minted into the sealed bundle, so an executor never re-resolves.
+func TestResolveCredentials_BundleWinsOverLLMResolver(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	const orgID = "33333333-3333-3333-3333-333333333333"
+	ctx := credbundle.WithBundle(context.Background(), &credbundle.Bundle{
+		LLM: map[string]string{"ANTHROPIC_API_KEY": "from-bundle"},
+	})
+	resolver := func(context.Context, string) (map[string]string, error) {
+		t.Fatal("resolver must not be called when a bundle is on ctx")
+		return nil, nil
+	}
+	env, err := resolveCredentials(ctx, newFakeSecrets(orgID, nil), orgID, resolver)
+	if err != nil {
+		t.Fatalf("resolveCredentials: %v", err)
+	}
+	if env["ANTHROPIC_API_KEY"] != "from-bundle" {
+		t.Errorf("bundle not preferred: %v", env)
 	}
 }

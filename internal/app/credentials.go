@@ -7,6 +7,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 )
 
 // buildRunCredentials wires the per-org run-credential seam shared by
@@ -24,14 +25,30 @@ import (
 //   - ghResolver picks the right GitHub credential (App-installation token
 //     → org PAT) per (org, target). Shared by the poller, spawner, curator,
 //     and repo profiler.
-func (a *App) buildRunCredentials() {
+func (a *App) buildRunCredentials() error {
 	if !a.local() {
 		a.runSecrets = agentproc.NewSystemSecretsReader(a.stores.Secrets)
+		// Shared LLM-credential resolver (internal/llmcred, TFAC-616): the one
+		// seam every brain-side Bedrock/Anthropic resolution flows through.
+		// Multi mode only — local keeps the ambient path (runSecrets nil), so
+		// role mode there simply degrades to the host subscription. Env knobs
+		// (mint TTL + executor egress binding) are validated here so a typo
+		// fails boot rather than shipping an unbound or always-failing mint.
+		ttl, err := llmcred.TTLFromEnv()
+		if err != nil {
+			return err
+		}
+		egress, err := llmcred.NetworkBindingFromEnv()
+		if err != nil {
+			return err
+		}
+		a.llmResolver = llmcred.NewResolver(a.runSecrets, llmcred.NewAWSMinter(), ttl, egress)
 	}
 	a.modelFor = func(ctx context.Context, orgID, teamID string) string {
 		return resolveAIModelForTeam(ctx, a.stores, orgID, teamID)
 	}
 	a.ghResolver = ghclient.NewResolver(a.stores.Secrets, a.stores.GitHubApps, a.stores.Orgs, a.stores.Agents, nil)
+	return nil
 }
 
 // resolveAIModelForTeam looks up the model a specific team uses for

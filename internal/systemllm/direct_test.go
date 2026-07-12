@@ -448,3 +448,39 @@ func TestComplete_Direct_ContextCancelAbortsPromptly(t *testing.T) {
 func sprintfBody(text string) string {
 	return `{"id":"msg_test123","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"` + text + `"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":2,"cache_read_input_tokens":3}}`
 }
+
+// TestComplete_Direct_LLMResolverUsed pins the TFAC-616 seam in the direct
+// path: when CompleteOptions.LLMResolver is wired, completeDirect resolves
+// the env map through it (minting for a role-mode Bedrock org) instead of the
+// raw secret store. Here the raw secrets are EMPTY — only the resolver
+// supplies credentials, so a fall-through to the raw path would 500.
+func TestComplete_Direct_LLMResolverUsed(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	h := &capturingHandler{t: t, body: sprintfBody(`resolver ok`)}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	opts := completeOpts("org-1", stubSecrets{}) // empty raw secrets
+	called := false
+	opts.LLMResolver = func(_ context.Context, orgID string) (map[string]string, error) {
+		called = true
+		if orgID != "org-1" {
+			t.Errorf("resolver got org %q", orgID)
+		}
+		return map[string]string{"ANTHROPIC_API_KEY": "sk-ant-minted", "ANTHROPIC_BASE_URL": srv.URL}, nil
+	}
+	r := NewRecorder(nil)
+	result, err := r.Complete(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !called {
+		t.Fatal("LLMResolver was not consulted")
+	}
+	if result.Text != "resolver ok" {
+		t.Errorf("Text = %q", result.Text)
+	}
+	if got := h.lastHeader.Get("X-Api-Key"); got != "sk-ant-minted" {
+		t.Errorf("X-Api-Key = %q, want the resolver-supplied key", got)
+	}
+}

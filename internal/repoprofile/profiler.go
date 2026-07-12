@@ -25,14 +25,21 @@ const (
 	reprofileTTL     = 3 * 24 * time.Hour // skip repos profiled within the last 3 days
 )
 
+// llmResolveFunc is the RunOptions.LLMResolver shape the profiler's Haiku
+// calls carry — the brain-side llmcred adapter minting short-lived STS creds
+// for a role-mode Bedrock org (nil in local/tests → Run's built-in
+// resolution).
+type llmResolveFunc func(ctx context.Context, orgID string) (map[string]string, error)
+
 // Profiler builds and persists AI-generated profiles for GitHub repositories.
 type Profiler struct {
-	resolver github.Resolver         // per-(org, owner) GitHub client source — App-installation token in multi, keychain PAT in local.
-	secrets  agentproc.SecretsReader // per-org LLM-credential reader for the profiling Haiku calls (nil in local → ambient subscription; system-door reader in multi).
-	repos    db.RepoStore            // profile reads + upserts go through the store
-	orgs     db.OrgsStore            // iterate active orgs at the top of each profile run
-	recorder *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
-	ws       *websocket.Hub
+	resolver   github.Resolver         // per-(org, owner) GitHub client source — App-installation token in multi, keychain PAT in local.
+	secrets    agentproc.SecretsReader // per-org LLM-credential reader for the profiling Haiku calls (nil in local → ambient subscription; system-door reader in multi).
+	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests).
+	repos      db.RepoStore            // profile reads + upserts go through the store
+	orgs       db.OrgsStore            // iterate active orgs at the top of each profile run
+	recorder   *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
+	ws         *websocket.Hub
 
 	// batchFn runs one Haiku profiling batch. Defaulted (in NewProfiler) to a
 	// closure over profileBatch that captures the recorder + system-job
@@ -49,10 +56,10 @@ type Profiler struct {
 // token). The limiter (nil → unlimited) bounds concurrent profiling sandboxes
 // against the other background jobs; it is captured by batchFn alongside the
 // recorder.
-func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, repos db.RepoStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Profiler {
-	p := &Profiler{resolver: resolver, secrets: secrets, repos: repos, orgs: orgs, recorder: recorder, ws: ws}
+func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, repos db.RepoStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Profiler {
+	p := &Profiler{resolver: resolver, secrets: secrets, llmResolve: llmResolve, repos: repos, orgs: orgs, recorder: recorder, ws: ws}
 	p.batchFn = func(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error) {
-		return profileBatch(ctx, orgID, batch, secrets, recorder, limiter)
+		return profileBatch(ctx, orgID, batch, secrets, llmResolve, recorder, limiter)
 	}
 	return p
 }
@@ -365,7 +372,7 @@ type repoProfileResult struct {
 	Profile string `json:"profile"`
 }
 
-func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, limiter *syslimit.Limiter) ([]repoProfileResult, error) {
+func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter) ([]repoProfileResult, error) {
 	inputs := make([]repoProfileInput, len(batch))
 	for i, d := range batch {
 		inputs[i] = repoProfileInput{
@@ -394,6 +401,9 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 	// provider directly, with the instructions as the system prompt and just
 	// the repo batch as the user turn. We only parse the returned text's
 	// JSON array below; cost + tokens land in system_llm_runs via Complete.
+	// LLMResolver routes a role-mode Bedrock org through internal/llmcred so
+	// the direct call is signed with a minted short-lived STS session
+	// credential (TFAC-616); nil for local/ambient.
 	result, err := recorder.Complete(ctx, systemllm.CompleteOptions{
 		OrgID:        orgID,
 		Job:          systemllm.JobRepoProfiler,
@@ -406,6 +416,7 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 		Temperature:  0.1,
 		TraceID:      "repoprofile-batch",
 		Secrets:      secrets,
+		LLMResolver:  llmResolve,
 		Metadata:     map[string]any{"repo_count": len(batch)},
 		CostFn:       ai.CalculateCostUSD,
 	})

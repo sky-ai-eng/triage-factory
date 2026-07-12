@@ -227,7 +227,6 @@ authenticate an org, so the guarantee is that every path a run touches shares it
 own tree's scope. The privileged run-tree chown/remove path resolves through
 `openat2(RESOLVE_NO_SYMLINKS)`, so the kernel refuses a swapped-symlink component
 rather than a prior check merely catching it.
-<!-- TODO(TFAC-618): openat2 kernel-enforcement of the run-tree TOCTOU; until it ships, the run-tree ops close the TOCTOU by argument, not kernel enforcement. The netns per-run-ownership residual documented on validateNetnsPath (a fully compromised orchestrator can still lie consistently about which run a netns belongs to) remains open — the mount-source half of the same "broker is stateless about per-run ownership" theme is now closed above. -->
 
 ### 4.4 A note on dropping capabilities
 
@@ -372,6 +371,7 @@ to remain out of Kubernetes clusters entirely:
   classification, repo profiling) is deliberately toolless — prompt in, JSON out,
   no filesystem, no tool loop, no subprocess — so there is nothing to jail: those
   are direct API calls from the Go process.
+  <!-- TODO(TFAC-628 + TFAC-588): the toolless direct-call half is shipped (TFAC-627); "holds no sandbox capabilities" awaits the compose cap-drop (TFAC-628) and "curator runs on executors" awaits curator homing (TFAC-588). Until both ship, control pods still carry the sandbox caps and sandbox curator turns in-process. -->
 - **If executors must run in Kubernetes**, they run as privileged pods on a
   dedicated, tainted node pool with the cloud metadata endpoint blocked, a
   minimal node role, and no other tenants' pods scheduled there. We do not

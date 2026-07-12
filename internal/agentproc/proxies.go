@@ -149,6 +149,13 @@ var ErrNoSandboxGitCredentials = errors.New("agentproc: no GitHub credential res
 // per the single-installation scope).
 const defaultGitUpstream = "https://github.com"
 
+// sigV4LiveSource re-reads the run's newest sealed LLM material for the
+// SigV4 proxy — the executor's live-refresh channel (RunOptions.
+// LLMCredentialSource). Returns the newest bundle.LLM env map plus its
+// expiry; nil means the proxy freezes the run-start snapshot (the default
+// for bearer / anthropic, brain-side consumers, and local).
+type sigV4LiveSource func(ctx context.Context) (env map[string]string, expiry time.Time, err error)
+
 // GitProxyConfig is the per-run git-egress wiring the caller (delegate)
 // hands startProxiesForSandbox for a run with a GitHub repo in scope.
 // nil disables the git proxy entirely (prompt-only runs — scorer,
@@ -227,7 +234,7 @@ type GitProxyConfig struct {
 // Caller MUST call returned.Shutdown when the run completes (normal
 // or cancelled). On error, no proxies are running and the returned
 // bundle is nil — defer Shutdown is safe but a no-op.
-func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, git *GitProxyConfig, identityPairs ...[2]string) (*runProxies, []string, error) {
+func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, git *GitProxyConfig, llmSource sigV4LiveSource, identityPairs ...[2]string) (*runProxies, []string, error) {
 	if hostVethIP == "" {
 		return nil, nil, errors.New("agentproc: startProxiesForSandbox: hostVethIP is required")
 	}
@@ -235,6 +242,34 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	cfg, err := proxyConfigFromCreds(resolvedCreds)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// Executor live-refresh (TFAC-616): when a SigV4 run supplies a live
+	// source, the proxy re-reads the newest sealed bundle's triple per
+	// request instead of freezing the run-start snapshot — so a role-mode
+	// run whose STS session creds are re-minted mid-run keeps signing. The
+	// run-start snapshot still determines provider / region / upstream (all
+	// stable across mints); only the signing triple goes live. llmproxy
+	// rejects both a static triple and a source, so the static one is
+	// cleared here.
+	if cfg.providerKind == llmproxy.ProviderBedrockSigV4 && llmSource != nil {
+		src := llmSource
+		cfg.llm.SigV4Credentials = nil
+		cfg.llm.SigV4CredentialSource = func(ctx context.Context) (llmproxy.SigV4Material, error) {
+			env, expiry, err := src(ctx)
+			if err != nil {
+				return llmproxy.SigV4Material{}, err
+			}
+			return llmproxy.SigV4Material{
+				SigV4Credentials: llmproxy.SigV4Credentials{
+					AccessKeyID:     env["AWS_ACCESS_KEY_ID"],
+					SecretAccessKey: env["AWS_SECRET_ACCESS_KEY"],
+					SessionToken:    env["AWS_SESSION_TOKEN"],
+					Region:          bedrockRegion(env),
+				},
+				Expiry: expiry,
+			}, nil
+		}
 	}
 
 	// Mint the per-run token that authenticates this sandbox to its own

@@ -122,6 +122,13 @@ const SystemJobModelDirect = "claude-haiku-4-5-20251001"
 // without a package-level mutable var. Mirrors the repo-profiler's batchFn.
 type batchScoreFn func(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader) ([]TaskScore, error)
 
+// llmResolveFunc is the RunOptions.LLMResolver shape a background LLM job
+// carries — the brain-side llmcred adapter (llmcred.SystemEnvResolver) that
+// mints short-lived STS creds for a role-mode Bedrock org and passes stored
+// material through otherwise. nil in local mode (ambient) and in tests, where
+// Run keeps its built-in raw-secret resolution.
+type llmResolveFunc func(ctx context.Context, orgID string) (map[string]string, error)
+
 // scoreTasks runs the AI scoring pipeline on a set of tasks for the Runner's
 // org. It batches into chunks of batchSize and runs them in parallel via
 // r.scoreFn (the injectable batch seam). The returned skippedTasks is the
@@ -222,7 +229,7 @@ func (r *Runner) scoreTasks(ctx context.Context, tasks []domain.Task) (scores []
 	return allScores, skipped, nil
 }
 
-func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, limiter *syslimit.Limiter) ([]TaskScore, error) {
+func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter) ([]TaskScore, error) {
 	tasksJSON, err := json.Marshal(tasks)
 	if err != nil {
 		return nil, fmt.Errorf("marshal tasks: %w", err)
@@ -246,7 +253,9 @@ func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets ag
 	// `.result` field carried, so the post-parse logic below is unchanged.
 	// ctx propagates from the Runner's stop channel so server shutdown
 	// aborts in-flight scoring calls instead of waiting for the model to
-	// time out.
+	// time out. LLMResolver routes a role-mode Bedrock org through
+	// internal/llmcred so the direct API call is signed with a freshly-minted
+	// short-lived STS session credential (TFAC-616); nil for local/ambient.
 	result, err := recorder.Complete(ctx, systemllm.CompleteOptions{
 		OrgID:        orgID,
 		Job:          systemllm.JobScorer,
@@ -259,6 +268,7 @@ func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets ag
 		Temperature:  0.1,
 		TraceID:      "scorer-batch",
 		Secrets:      secrets,
+		LLMResolver:  llmResolve,
 		Metadata:     map[string]any{"batch_size": len(tasks)},
 		CostFn:       CalculateCostUSD,
 	})

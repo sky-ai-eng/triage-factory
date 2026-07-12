@@ -25,7 +25,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 )
+
+// llmResolver is the narrow slice of internal/llmcred the provisioner mints
+// LLM material through — declared here so the provisioner's test can stub it
+// without a real STS minter. The production impl is *llmcred.Resolver.
+type llmResolver interface {
+	ResolveForBundle(ctx context.Context, orgID, runID string) (llmcred.Material, error)
+}
 
 var log = slog.Default().With("component", "credprovision")
 
@@ -60,16 +68,23 @@ type Manager struct {
 	stores       db.Stores
 	ghResolver   ghclient.Resolver
 	jiraResolver jira.Resolver
+	llm          llmResolver
 }
 
 // NewManager builds a Manager against stores — a brain-capable role's
 // normal (secret-bearing) db.Stores, never the disabled-secrets bundle an
-// executor holds.
-func NewManager(stores db.Stores) *Manager {
+// executor holds. llm is the shared LLM-credential resolver
+// (internal/llmcred): for a role-mode Bedrock org it mints a short-lived STS
+// session credential (executor-bound: per-run session name + the executor
+// egress network condition); for every other mode it passes the stored
+// material through. nil falls back to agentproc's raw-secret resolution (no
+// role support) — only for callers that don't wire llmcred.
+func NewManager(stores db.Stores, llm llmResolver) *Manager {
 	return &Manager{
 		stores:       stores,
 		ghResolver:   ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil),
 		jiraResolver: jira.NewResolver(stores.Secrets, stores.Orgs),
+		llm:          llm,
 	}
 }
 
@@ -128,11 +143,30 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) erro
 
 	bundle := &credbundle.Bundle{BootEpoch: inst.BootEpoch}
 
-	llm, err := agentproc.ResolveCredentialsForBundle(ctx, agentproc.NewSystemSecretsReader(m.stores.Secrets), orgID)
-	if err != nil && !errors.Is(err, agentproc.ErrNoCredentialsConfigured) {
-		return fmt.Errorf("credprovision: resolve LLM credentials for org %s: %w", orgID, err)
+	// Resolve LLM material through the shared llmcred seam — role-mode orgs
+	// mint a short-lived STS session credential here (executor-bound: the
+	// run id as RoleSessionName for per-run CloudTrail attribution, plus the
+	// executor egress network condition), every other mode passes through.
+	// A role-mode mint failure has nothing to fall back to (no raw key
+	// stored), so it fails the provision per PS-H5: no bundle is written,
+	// the executor's awaiting-credentials wait times out and requeues, and
+	// the error names AssumeRole + the role ARN (surfaced by llmcred).
+	if m.llm != nil {
+		mat, err := m.llm.ResolveForBundle(ctx, orgID, runID)
+		if err != nil && !llmcred.IsNoCredentials(err) {
+			return fmt.Errorf("credprovision: resolve LLM credentials for org %s (run %s): %w", orgID, runID, err)
+		}
+		bundle.LLM = mat.Env
+		if !mat.Expiry.IsZero() {
+			bundle.LLMExpiryUnix = mat.Expiry.Unix()
+		}
+	} else {
+		llm, err := agentproc.ResolveCredentialsForBundle(ctx, agentproc.NewSystemSecretsReader(m.stores.Secrets), orgID)
+		if err != nil && !errors.Is(err, agentproc.ErrNoCredentialsConfigured) {
+			return fmt.Errorf("credprovision: resolve LLM credentials for org %s: %w", orgID, err)
+		}
+		bundle.LLM = llm
 	}
-	bundle.LLM = llm
 
 	if gh, err := m.resolveGitHub(ctx, orgID, claim.TeamID, claim.TaskID, runID); err != nil {
 		return fmt.Errorf("credprovision: resolve github credentials for run %s: %w", runID, err)

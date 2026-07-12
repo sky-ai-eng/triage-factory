@@ -50,6 +50,16 @@ type CompleteOptions struct {
 	TraceID string
 	Secrets agentproc.SecretsReader
 
+	// LLMResolver, when non-nil, resolves the org's LLM env map through the
+	// role-aware seam (internal/llmcred) instead of the raw secret store — so
+	// a role-mode Bedrock org mints short-lived STS session credentials for
+	// this call rather than reading a key that doesn't exist (TFAC-616). The
+	// direct (multi) path signs the Bedrock request with the returned session
+	// triple; the local path forwards it to agentproc.Run. nil keeps the
+	// built-in raw-secret resolution (bearer/access_keys/Anthropic, local
+	// ambient) — byte-for-byte unchanged.
+	LLMResolver func(ctx context.Context, orgID string) (map[string]string, error)
+
 	// Metadata is optional per-job context (e.g. {"batch_size": 10}),
 	// threaded through to the system_llm_runs row.
 	Metadata map[string]any
@@ -85,11 +95,12 @@ func (r *Recorder) completeLocal(ctx context.Context, opts CompleteOptions) (*Co
 	startedAt := time.Now().UTC()
 	usage := &agentproc.UsageSink{}
 	outcome, err := runLocal(ctx, agentproc.RunOptions{
-		Model:   opts.Model,
-		Message: opts.Message,
-		TraceID: opts.TraceID,
-		OrgID:   opts.OrgID,
-		Secrets: opts.Secrets,
+		Model:       opts.Model,
+		Message:     opts.Message,
+		TraceID:     opts.TraceID,
+		OrgID:       opts.OrgID,
+		Secrets:     opts.Secrets,
+		LLMResolver: opts.LLMResolver,
 	}, usage)
 	r.Record(ctx, Call{
 		OrgID:     opts.OrgID,

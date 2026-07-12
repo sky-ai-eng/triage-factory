@@ -89,6 +89,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -126,8 +127,16 @@ type Config struct {
 
 	// SigV4Credentials is the real AWS access-key triple for the
 	// Bedrock SigV4 path. Required when Provider ==
-	// ProviderBedrockSigV4; ignored otherwise. See sigv4.go.
+	// ProviderBedrockSigV4 and SigV4CredentialSource is nil; ignored
+	// otherwise. See sigv4.go.
 	SigV4Credentials *SigV4Credentials
+
+	// SigV4CredentialSource, when non-nil, supplies the SigV4 signing
+	// triple live per request (the git-proxy TokenSource pattern) so a
+	// role-mode run picks up a re-minted STS credential mid-run. Takes
+	// precedence over SigV4Credentials; exactly one of the two must be set
+	// for ProviderBedrockSigV4. See sigv4.go.
+	SigV4CredentialSource SigV4CredentialSource
 
 	// Upstream is the absolute URL of the real LLM provider — e.g.
 	// "https://api.anthropic.com" or "https://bedrock-runtime.us-east-1.amazonaws.com".
@@ -191,6 +200,13 @@ type Server struct {
 	// for the bearer providers. Stateless and safe for concurrent use.
 	signer *v4.Signer
 
+	// sigV4Mu guards the cached live signing material (cfg.SigV4CredentialSource
+	// path). One credential, cached until within sigV4RefreshThreshold of
+	// expiry, mirroring the git proxy's per-repo token cache — coalesces
+	// concurrent requests onto one re-mint.
+	sigV4Mu     sync.Mutex
+	sigV4Cached *SigV4Material
+
 	// listener is owned once Start has been called. nil until then.
 	listener net.Listener
 	httpSrv  *http.Server
@@ -213,8 +229,15 @@ func New(cfg Config) (*Server, error) {
 			return nil, errors.New("llmproxy: APIKey is required")
 		}
 	case ProviderBedrockSigV4:
-		if err := cfg.SigV4Credentials.validate(); err != nil {
-			return nil, err
+		// Exactly one of the static triple or the live source. The source
+		// path defers all credential validation to mint time (the triple
+		// isn't known at construction), so only shape-check the static path.
+		if cfg.SigV4CredentialSource == nil {
+			if err := cfg.SigV4Credentials.validate(); err != nil {
+				return nil, err
+			}
+		} else if cfg.SigV4Credentials != nil {
+			return nil, errors.New("llmproxy: set exactly one of SigV4Credentials or SigV4CredentialSource, not both")
 		}
 	default:
 		return nil, fmt.Errorf("llmproxy: unsupported provider %q", cfg.Provider)

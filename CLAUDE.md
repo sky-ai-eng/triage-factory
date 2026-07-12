@@ -94,7 +94,7 @@ Pollers publish events to the bus rather than invoking callbacks directly. This 
 
 ### Sandbox, isolation, and executor credentials (multi-mode)
 
-Agent runs — delegated runs and curator turns — execute through `internal/agentproc.Run`, which spawns the Claude Code SDK as a `node` subprocess. In **multi mode on Linux** it wraps that subprocess in a gVisor (runsc) jail; the gate is `shouldSandbox()` = `runmode.Current()==ModeMulti && GOOS=="linux"`, so **local mode runs the same subprocess unsandboxed** — everything below about capabilities and isolation is multi-mode only.
+Agent runs — delegated runs and curator turns — execute through `internal/agentproc.Run`, which spawns the Claude Code SDK as a `node` subprocess. In **multi mode on Linux** it wraps that subprocess in a gVisor (runsc) jail; the gate is `shouldSandbox()` = `runmode.Current()==ModeMulti && GOOS=="linux"`, so **local mode runs the same subprocess unsandboxed** — everything below about capabilities and isolation is multi-mode only. (The Haiku system jobs — scorer/classifier/profiler — bypass this path in multi mode: `internal/systemllm` makes direct, toolless LLM calls with no subprocess and no sandbox; local mode still runs them through the SDK subprocess.)
 
 The executor is split three ways so that no process holds both a dangerous power and exposure to hostile input:
 

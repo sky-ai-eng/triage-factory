@@ -117,7 +117,15 @@ func (a *App) startBrain(term int64) {
 	// themselves nil-safe no-ops too, matching every other brain-unit
 	// member's defensive shape.
 	go credprovision.RunAwaitingSweep(brainCtx, a.credProvisioner, credprovision.DefaultAwaitingSweepInterval)
-	go credprovision.RunRefreshSweep(brainCtx, a.credProvisioner, credprovision.DefaultRefreshSweepInterval, credprovision.DefaultRefreshAfter)
+	// Refresh cadence goes expiry-aware for role-mode Bedrock orgs (TFAC-616):
+	// short-lived STS session creds must be re-minted before they expire, so
+	// the interval + age threshold shrink with the LLM-credential TTL. At the
+	// default 1h TTL this is the unchanged 5m / 30m PS-H5 cadence.
+	refreshInterval, refreshAfter := credprovision.DefaultRefreshSweepInterval, credprovision.DefaultRefreshAfter
+	if a.llmResolver != nil {
+		refreshInterval, refreshAfter = credprovision.RefreshCadenceForTTL(a.llmResolver.TTL())
+	}
+	go credprovision.RunRefreshSweep(brainCtx, a.credProvisioner, refreshInterval, refreshAfter)
 }
 
 // stopBrain stops the background brain. Idempotent under brainMu.

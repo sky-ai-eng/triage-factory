@@ -19,7 +19,7 @@ func TestProfiler_Run_IteratesActiveOrgs(t *testing.T) {
 	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b", "org-c"}}
 	repos := &recordingRepoStore{}
 
-	p := NewProfiler(nil, nil, repos, orgs, nil, nil, nil)
+	p := NewProfiler(nil, nil, nil, repos, orgs, nil, nil, nil)
 	if err := p.Run(context.Background(), false); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestProfiler_Run_OrgsStoreErrorBubbles(t *testing.T) {
 	orgs := &fakeOrgsStore{err: errOrgsDown}
 	repos := &recordingRepoStore{}
 
-	p := NewProfiler(nil, nil, repos, orgs, nil, nil, nil)
+	p := NewProfiler(nil, nil, nil, repos, orgs, nil, nil, nil)
 	if err := p.Run(context.Background(), false); err == nil {
 		t.Fatal("Run returned nil; want error when ListActiveSystem fails")
 	}
