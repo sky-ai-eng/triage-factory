@@ -363,7 +363,7 @@ var orgScopedTables = []string{
 	"run_worktrees",
 	"pending_firings",
 	"artifacts",
-	"run_memory", "run_messages", "runs",
+	"run_memory", "run_memory_entities", "run_messages", "runs",
 	"task_events", "tasks",
 	"event_handlers",
 	"events", "entity_links", "entities",

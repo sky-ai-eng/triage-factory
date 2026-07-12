@@ -27,7 +27,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"team_github_groups", "team_github_repos",
 		"prompts", "projects", "events_catalog", "entities", "entity_links", "events",
 		"event_handlers", "tasks", "task_events", "runs", "artifacts",
-		"run_messages", "run_memory", "pending_firings", "run_worktrees",
+		"run_messages", "run_memory", "run_memory_entities", "pending_firings", "run_worktrees",
 		"swipe_events", "poller_state", "repo_profiles",
 		"system_prompt_versions",
 		"curator_requests", "curator_messages", "curator_pending_context",
@@ -1569,8 +1569,8 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 }
 
 // TestRLS_ChildTablesInheritParentVisibility — denormalized child
-// rows (task_events, run_messages, run_memory, run_worktrees,
-// pending_firings) must NOT be visible to org members
+// rows (task_events, run_messages, run_memory, run_memory_entities,
+// run_worktrees, pending_firings) must NOT be visible to org members
 // who can't see the parent task/run. Earlier policies gated only on
 // org_id, leaking metadata across users in the same org. EXISTS-on-parent
 // inherits the parent table's RLS. (artifacts is excluded: it scopes
@@ -1621,12 +1621,14 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 		orgA, runID)
 	MustExec(t, h.AdminDB, `INSERT INTO run_memory (org_id, run_id, entity_id, agent_content) VALUES ($1, $2, $3, 'note')`,
 		orgA, runID, entityA)
+	MustExec(t, h.AdminDB, `INSERT INTO run_memory_entities (org_id, run_id, entity_id, role) VALUES ($1, $2, $3, 'primary')`,
+		orgA, runID, entityA)
 	MustExec(t, h.AdminDB, `INSERT INTO run_worktrees (org_id, run_id, repo_id, path, ref) VALUES ($1, $2, 'octo/repo', '/tmp/x', 'pr-1')`,
 		orgA, runID)
 
 	// Alice sees all her child rows.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		for _, table := range []string{"task_events", "run_messages", "run_memory", "run_worktrees"} {
+		for _, table := range []string{"task_events", "run_messages", "run_memory", "run_memory_entities", "run_worktrees"} {
 			var n int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
 				return err
@@ -1645,7 +1647,7 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	// child rows — tasks_select and runs_select gate on creator, so
 	// the EXISTS-on-parent in each child policy returns false for him.
 	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		for _, table := range []string{"task_events", "run_messages", "run_memory", "run_worktrees"} {
+		for _, table := range []string{"task_events", "run_messages", "run_memory", "run_memory_entities", "run_worktrees"} {
 			var n int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
 				return err

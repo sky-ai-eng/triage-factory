@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // TaskMemoryStoreFactory is what a per-backend test file hands to
@@ -35,6 +36,31 @@ type TaskMemorySeeder struct {
 	// DELETE SET NULL), and returns the blueprint_run id. Only the
 	// round-trip subtest needs it.
 	BlueprintRun func(t *testing.T, suffix string) (blueprintRunID string)
+
+	// Role reads back the role column of a run_memory_entities row
+	// directly (bypassing the store interface, which has no
+	// role-returning read) — used only by the RecordEntityTouchSystem
+	// precedence subtest. Returns "" if no row exists for (runID, entityID).
+	Role func(t *testing.T, runID, entityID string) string
+}
+
+// memoryForRun finds the memory row belonging to runID in the slice
+// GetMemoriesForEntity(entityID) returns — the replacement for the
+// removed GetRunMemory now that reads are join-based
+// (run_memory_entities) rather than a direct run_id lookup. Returns nil
+// if no row matches.
+func memoryForRun(t *testing.T, ctx context.Context, s db.TaskMemoryStore, orgID, entityID, runID string) *domain.TaskMemory {
+	t.Helper()
+	mems, err := s.GetMemoriesForEntity(ctx, orgID, entityID)
+	if err != nil {
+		t.Fatalf("GetMemoriesForEntity: %v", err)
+	}
+	for i := range mems {
+		if mems[i].RunID == runID {
+			return &mems[i]
+		}
+	}
+	return nil
 }
 
 // RunTaskMemoryStoreConformance covers the TaskMemoryStore contract
@@ -54,14 +80,31 @@ type TaskMemorySeeder struct {
 //   - UpdateRunMemoryHumanContent lands on the existing row, also
 //     canonicalizes empty / whitespace to NULL, and is logged-not-
 //     fatal on missing rows.
-//   - GetMemoriesForEntity returns rows ordered by created_at ASC
-//     and materializes Content via the agent + separator + human
-//     format when both halves are populated.
-//   - GetRunMemory returns nil on miss and the materialized row
-//     otherwise.
+//   - GetMemoriesForEntity returns rows reachable through
+//     run_memory_entities ordered by created_at ASC and materializes
+//     Content via the agent + separator + human format when both
+//     halves are populated — including a row whose denormalized
+//     rm.entity_id points elsewhere, as long as a join row ties the
+//     run to the queried entity.
+//   - RecordEntityTouchSystem upserts a join row with role-precedence
+//     upgrade (primary > produced > touched) and is idempotent.
+//
+// Every UpsertAgentMemory(System) call below is paired with a
+// RecordEntityTouchSystem(..., domain.MemoryRolePrimary) call — the
+// join row a real run's completion will write once the run-end attach
+// ticket lands. Without it, GetMemoriesForEntity's join-based read
+// would see nothing (this ticket does not touch UpsertAgentMemorySystem
+// itself; see the migration's non-goals).
 func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
+
+	seedPrimary := func(t *testing.T, s db.TaskMemoryStore, orgID, runID, entityID string) {
+		t.Helper()
+		if err := s.RecordEntityTouchSystem(ctx, orgID, runID, entityID, domain.MemoryRolePrimary); err != nil {
+			t.Fatalf("RecordEntityTouchSystem: %v", err)
+		}
+	}
 
 	t.Run("UpsertAgentMemory_writes_agent_content", func(t *testing.T) {
 		s, orgID, seed := mk(t)
@@ -69,9 +112,10 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent wrote this"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
-		mem, err := s.GetRunMemory(ctx, orgID, runID)
-		if err != nil || mem == nil {
-			t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+		seedPrimary(t, s, orgID, runID, entityID)
+		mem := memoryForRun(t, ctx, s, orgID, entityID, runID)
+		if mem == nil {
+			t.Fatalf("memoryForRun returned nil")
 		}
 		if mem.Content != "agent wrote this" {
 			t.Errorf("Content = %q, want %q", mem.Content, "agent wrote this")
@@ -97,9 +141,10 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 				if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", tc.content); err != nil {
 					t.Fatalf("UpsertAgentMemory: %v", err)
 				}
-				mem, err := s.GetRunMemory(ctx, orgID, runID)
-				if err != nil || mem == nil {
-					t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+				seedPrimary(t, s, orgID, runID, entityID)
+				mem := memoryForRun(t, ctx, s, orgID, entityID, runID)
+				if mem == nil {
+					t.Fatalf("memoryForRun returned nil")
 				}
 				// Materialized Content is the empty agent_content
 				// fallback (no human content). The store still wrote
@@ -123,15 +168,16 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "first attempt"); err != nil {
 			t.Fatalf("first upsert: %v", err)
 		}
+		seedPrimary(t, s, orgID, runID, entityID)
 		if err := s.UpdateRunMemoryHumanContent(ctx, orgID, runID, "human kept it as-is"); err != nil {
 			t.Fatalf("seed human_content: %v", err)
 		}
 		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "second attempt"); err != nil {
 			t.Fatalf("second upsert: %v", err)
 		}
-		mem, err := s.GetRunMemory(ctx, orgID, runID)
-		if err != nil || mem == nil {
-			t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+		mem := memoryForRun(t, ctx, s, orgID, entityID, runID)
+		if mem == nil {
+			t.Fatalf("memoryForRun returned nil")
 		}
 		if !strings.HasPrefix(mem.Content, "second attempt") {
 			t.Errorf("Content prefix = %q, want to start with %q", mem.Content, "second attempt")
@@ -147,12 +193,13 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent self-report"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
+		seedPrimary(t, s, orgID, runID, entityID)
 		if err := s.UpdateRunMemoryHumanContent(ctx, orgID, runID, "Looks good."); err != nil {
 			t.Fatalf("UpdateRunMemoryHumanContent: %v", err)
 		}
-		mem, err := s.GetRunMemory(ctx, orgID, runID)
-		if err != nil || mem == nil {
-			t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+		mem := memoryForRun(t, ctx, s, orgID, entityID, runID)
+		if mem == nil {
+			t.Fatalf("memoryForRun returned nil")
 		}
 		if !strings.HasPrefix(mem.Content, "agent self-report") {
 			t.Errorf("Content prefix = %q, want to start with %q", mem.Content, "agent self-report")
@@ -171,12 +218,13 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent text"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
+		seedPrimary(t, s, orgID, runID, entityID)
 		if err := s.UpdateRunMemoryHumanContent(ctx, orgID, runID, "   \t  \n  "); err != nil {
 			t.Fatalf("UpdateRunMemoryHumanContent: %v", err)
 		}
-		mem, err := s.GetRunMemory(ctx, orgID, runID)
-		if err != nil || mem == nil {
-			t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+		mem := memoryForRun(t, ctx, s, orgID, entityID, runID)
+		if mem == nil {
+			t.Fatalf("memoryForRun returned nil")
 		}
 		// Whitespace-only canonicalizes to NULL → materialized Content
 		// is just the agent half with no separator.
@@ -208,15 +256,16 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent narrative"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
+		seedPrimary(t, s, orgID, runID, entityID)
 		if err := s.UpdateRunMemoryHumanContent(ctx, orgID, runID, "approval-time verdict"); err != nil {
 			t.Fatalf("seed verdict: %v", err)
 		}
 		if err := s.UpdateRunMemoryHumanContentSystem(ctx, orgID, runID, "**Post-run outcome** — PR merged on GitHub."); err != nil {
 			t.Fatalf("UpdateRunMemoryHumanContentSystem: %v", err)
 		}
-		mem, err := s.GetRunMemory(ctx, orgID, runID)
-		if err != nil || mem == nil {
-			t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+		mem := memoryForRun(t, ctx, s, orgID, entityID, runID)
+		if mem == nil {
+			t.Fatalf("memoryForRun returned nil")
 		}
 		if strings.Contains(mem.Content, "approval-time verdict") {
 			t.Errorf("System overwrite did not supersede the prior verdict: %q", mem.Content)
@@ -248,6 +297,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpsertAgentMemory(ctx, orgID, run1, entityID, "", "first"); err != nil {
 			t.Fatalf("upsert first: %v", err)
 		}
+		seedPrimary(t, s, orgID, run1, entityID)
 		// Sleep so SQLite's second-resolution column doesn't tie. The
 		// Postgres impl binds ns-resolution createdAt from Go side
 		// (matches the EventStore precedent) so the sleep is belt +
@@ -263,6 +313,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpsertAgentMemory(ctx, orgID, run2, entityID, "", "second"); err != nil {
 			t.Fatalf("upsert second: %v", err)
 		}
+		seedPrimary(t, s, orgID, run2, entityID)
 		mems, err := s.GetMemoriesForEntity(ctx, orgID, entityID)
 		if err != nil {
 			t.Fatalf("GetMemoriesForEntity: %v", err)
@@ -286,6 +337,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent reasoning"); err != nil {
 			t.Fatalf("upsert agent: %v", err)
 		}
+		seedPrimary(t, s, orgID, runID, entityID)
 		if err := s.UpdateRunMemoryHumanContent(ctx, orgID, runID, "human verdict"); err != nil {
 			t.Fatalf("update human: %v", err)
 		}
@@ -319,6 +371,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent reasoning only"); err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
+		seedPrimary(t, s, orgID, runID, entityID)
 		mems, err := s.GetMemoriesForEntity(ctx, orgID, entityID)
 		if err != nil {
 			t.Fatalf("GetMemoriesForEntity: %v", err)
@@ -328,6 +381,29 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		}
 		if mems[0].Content != "agent reasoning only" {
 			t.Errorf("Content = %q, want %q (no separator when human_content is NULL)", mems[0].Content, "agent reasoning only")
+		}
+	})
+
+	t.Run("GetMemoriesForEntity_finds_row_via_touched_join_on_different_entity", func(t *testing.T) {
+		// The read path walks run_memory_entities membership, not the
+		// denormalized rm.entity_id column — a run whose primary entity
+		// is A must still surface for entity B once a join row ties
+		// (run, B) at any role, even 'touched'.
+		s, orgID, seed := mk(t)
+		runID, entityA := seed.Run(t, "touch-join-a")
+		_, entityB := seed.Run(t, "touch-join-b")
+		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityA, "", "cross-entity narrative"); err != nil {
+			t.Fatalf("UpsertAgentMemory: %v", err)
+		}
+		if err := s.RecordEntityTouchSystem(ctx, orgID, runID, entityB, domain.MemoryRoleTouched); err != nil {
+			t.Fatalf("RecordEntityTouchSystem: %v", err)
+		}
+		memsB, err := s.GetMemoriesForEntity(ctx, orgID, entityB)
+		if err != nil {
+			t.Fatalf("GetMemoriesForEntity(entityB): %v", err)
+		}
+		if len(memsB) != 1 || memsB[0].RunID != runID || memsB[0].Content != "cross-entity narrative" {
+			t.Fatalf("GetMemoriesForEntity(entityB) = %+v, want the run's memory via the touched join", memsB)
 		}
 	})
 
@@ -342,12 +418,13 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, blueprintRunID, "step memory"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
-		mem, err := s.GetRunMemory(ctx, orgID, runID)
-		if err != nil || mem == nil {
-			t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+		seedPrimary(t, s, orgID, runID, entityID)
+		mem := memoryForRun(t, ctx, s, orgID, entityID, runID)
+		if mem == nil {
+			t.Fatalf("memoryForRun returned nil")
 		}
 		if mem.BlueprintRunID != blueprintRunID {
-			t.Errorf("GetRunMemory BlueprintRunID = %q, want %q", mem.BlueprintRunID, blueprintRunID)
+			t.Errorf("memoryForRun BlueprintRunID = %q, want %q", mem.BlueprintRunID, blueprintRunID)
 		}
 		mems, err := s.GetMemoriesForEntity(ctx, orgID, entityID)
 		if err != nil {
@@ -366,27 +443,55 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpsertAgentMemory(ctx, orgID, run2, ent2, "", "standalone memory"); err != nil {
 			t.Fatalf("UpsertAgentMemory standalone: %v", err)
 		}
-		mem2, err := s.GetRunMemory(ctx, orgID, run2)
-		if err != nil || mem2 == nil {
-			t.Fatalf("GetRunMemory standalone: mem=%v err=%v", mem2, err)
+		seedPrimary(t, s, orgID, run2, ent2)
+		mem2 := memoryForRun(t, ctx, s, orgID, ent2, run2)
+		if mem2 == nil {
+			t.Fatalf("memoryForRun standalone returned nil")
 		}
 		if mem2.BlueprintRunID != "" {
 			t.Errorf("standalone BlueprintRunID = %q, want empty (NULL)", mem2.BlueprintRunID)
 		}
 	})
 
-	t.Run("GetRunMemory_nil_on_missing_row", func(t *testing.T) {
-		// Callers (factory's run summary, the resume picker)
-		// interpret (nil, nil) as "no memory recorded yet," distinct
-		// from a returned struct with empty Content. Drift here would
-		// push them into branching on len(Content) instead of m==nil.
-		s, orgID, _ := mk(t)
-		got, err := s.GetRunMemory(ctx, orgID, "00000000-0000-0000-0000-00000000abcd")
-		if err != nil {
-			t.Fatalf("GetRunMemory: %v", err)
+	t.Run("RecordEntityTouchSystem_role_precedence", func(t *testing.T) {
+		// primary > produced > touched: a later stronger classification
+		// upgrades the row; a weaker one never downgrades it; re-recording
+		// the same (winning) role is a no-op.
+		s, orgID, seed := mk(t)
+		runID, entityID := seed.Run(t, "touch-precedence")
+
+		assertRole := func(want string) {
+			t.Helper()
+			if got := seed.Role(t, runID, entityID); got != want {
+				t.Errorf("role = %q, want %q", got, want)
+			}
 		}
-		if got != nil {
-			t.Errorf("got %+v, want nil", got)
+
+		if err := s.RecordEntityTouchSystem(ctx, orgID, runID, entityID, domain.MemoryRoleTouched); err != nil {
+			t.Fatalf("record touched: %v", err)
 		}
+		assertRole(domain.MemoryRoleTouched)
+
+		if err := s.RecordEntityTouchSystem(ctx, orgID, runID, entityID, domain.MemoryRoleProduced); err != nil {
+			t.Fatalf("record produced: %v", err)
+		}
+		assertRole(domain.MemoryRoleProduced)
+
+		// A weaker role never downgrades an already-stronger row.
+		if err := s.RecordEntityTouchSystem(ctx, orgID, runID, entityID, domain.MemoryRoleTouched); err != nil {
+			t.Fatalf("re-record touched: %v", err)
+		}
+		assertRole(domain.MemoryRoleProduced)
+
+		if err := s.RecordEntityTouchSystem(ctx, orgID, runID, entityID, domain.MemoryRolePrimary); err != nil {
+			t.Fatalf("record primary: %v", err)
+		}
+		assertRole(domain.MemoryRolePrimary)
+
+		// Idempotent re-record of the current (winning) role.
+		if err := s.RecordEntityTouchSystem(ctx, orgID, runID, entityID, domain.MemoryRolePrimary); err != nil {
+			t.Fatalf("re-record primary: %v", err)
+		}
+		assertRole(domain.MemoryRolePrimary)
 	})
 }

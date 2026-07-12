@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -33,9 +34,30 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 				t.Helper()
 				return seedSQLiteBlueprintRunForTaskMemory(t, conn, suffix)
 			},
+			Role: func(t *testing.T, runID, entityID string) string {
+				t.Helper()
+				return roleForSQLiteJoinRow(t, conn, runID, entityID)
+			},
 		}
 		return stores.TaskMemory, runmode.LocalDefaultOrgID, seed
 	})
+}
+
+// roleForSQLiteJoinRow reads back run_memory_entities.role directly — the
+// store interface has no role-returning read, so the
+// RecordEntityTouchSystem precedence conformance subtest needs a raw
+// escape hatch. Returns "" if no row exists.
+func roleForSQLiteJoinRow(t *testing.T, conn *sql.DB, runID, entityID string) string {
+	t.Helper()
+	var role string
+	err := conn.QueryRow(`SELECT role FROM run_memory_entities WHERE run_id = ? AND entity_id = ?`, runID, entityID).Scan(&role)
+	if err == sql.ErrNoRows {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read run_memory_entities role: %v", err)
+	}
+	return role
 }
 
 // TestTaskMemoryStore_SQLite_RejectsNonLocalOrg pins the
@@ -64,8 +86,105 @@ func TestTaskMemoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, badOrg, "e", runmode.LocalDefaultTeamID); err == nil {
 		t.Error("GetMemoriesForEntitySystem(non-local org) should error")
 	}
-	if _, err := stores.TaskMemory.GetRunMemory(ctx, badOrg, "r"); err == nil {
-		t.Error("GetRunMemory(non-local org) should error")
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, badOrg, "r", "e", domain.MemoryRolePrimary); err == nil {
+		t.Error("RecordEntityTouchSystem(non-local org) should error")
+	}
+	if _, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, badOrg, "e", runmode.LocalDefaultTeamID); err == nil {
+		t.Error("CountMemoriesForEntitySystem(non-local org) should error")
+	}
+}
+
+// TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem pins the basic
+// counting contract (SQLite ignores teamID — N=1, one team, so there is
+// no cross-team memory to scope out; see GetMemoriesForEntitySystem's own
+// doc comment for the parity rationale).
+func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	run1, entityID := seedSQLiteRunForTaskMemory(t, conn, "count-1")
+	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, run1, entityID, "", "first"); err != nil {
+		t.Fatalf("UpsertAgentMemory: %v", err)
+	}
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, run1, entityID, domain.MemoryRolePrimary); err != nil {
+		t.Fatalf("RecordEntityTouchSystem: %v", err)
+	}
+
+	if n, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("CountMemoriesForEntitySystem: %v", err)
+	} else if n != 1 {
+		t.Errorf("Count = %d, want 1", n)
+	}
+
+	run2, _ := seedSQLiteRunForTaskMemory(t, conn, "count-2")
+	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, run2, entityID, "", "second"); err != nil {
+		t.Fatalf("UpsertAgentMemory: %v", err)
+	}
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, run2, entityID, domain.MemoryRoleTouched); err != nil {
+		t.Fatalf("RecordEntityTouchSystem: %v", err)
+	}
+
+	if n, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("CountMemoriesForEntitySystem: %v", err)
+	} else if n != 2 {
+		t.Errorf("Count = %d, want 2", n)
+	}
+
+	// Unrelated entity has none.
+	_, otherEntity := seedSQLiteRunForTaskMemory(t, conn, "count-unrelated")
+	if n, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, runmode.LocalDefaultOrgID, otherEntity, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("CountMemoriesForEntitySystem: %v", err)
+	} else if n != 0 {
+		t.Errorf("Count for unrelated entity = %d, want 0", n)
+	}
+}
+
+// TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows pins the
+// migration's backfill statement directly: a run_memory row inserted
+// with NO corresponding run_memory_entities row (simulating a
+// pre-migration row) gets exactly one 'primary' join row once the
+// backfill INSERT runs, and the entity-scoped read then returns it —
+// the read-path switch's result-identical claim for pre-existing data.
+func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	runID, entityID := seedSQLiteRunForTaskMemory(t, conn, "backfill")
+	now := time.Now().UTC()
+	if _, err := conn.Exec(
+		`INSERT INTO run_memory (id, run_id, entity_id, agent_content, created_at) VALUES (?, ?, ?, 'pre-migration note', ?)`,
+		uuid.New().String(), runID, entityID, now,
+	); err != nil {
+		t.Fatalf("seed pre-migration run_memory row: %v", err)
+	}
+
+	// No join row exists yet — the read path finds nothing.
+	if mems, err := stores.TaskMemory.GetMemoriesForEntity(ctx, runmode.LocalDefaultOrgID, entityID); err != nil {
+		t.Fatalf("GetMemoriesForEntity (pre-backfill): %v", err)
+	} else if len(mems) != 0 {
+		t.Fatalf("GetMemoriesForEntity (pre-backfill) = %+v, want empty", mems)
+	}
+
+	// The exact backfill statement from the migration.
+	if _, err := conn.Exec(`
+		INSERT OR IGNORE INTO run_memory_entities (org_id, run_id, entity_id, role, created_at)
+		SELECT org_id, run_id, entity_id, 'primary', created_at FROM run_memory
+	`); err != nil {
+		t.Fatalf("run backfill: %v", err)
+	}
+
+	if role := roleForSQLiteJoinRow(t, conn, runID, entityID); role != domain.MemoryRolePrimary {
+		t.Errorf("backfilled role = %q, want %q", role, domain.MemoryRolePrimary)
+	}
+
+	mems, err := stores.TaskMemory.GetMemoriesForEntity(ctx, runmode.LocalDefaultOrgID, entityID)
+	if err != nil {
+		t.Fatalf("GetMemoriesForEntity (post-backfill): %v", err)
+	}
+	if len(mems) != 1 || mems[0].Content != "pre-migration note" {
+		t.Errorf("GetMemoriesForEntity (post-backfill) = %+v, want the pre-migration row", mems)
 	}
 }
 

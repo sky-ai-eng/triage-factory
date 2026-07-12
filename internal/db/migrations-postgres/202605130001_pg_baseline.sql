@@ -1380,6 +1380,26 @@ CREATE TABLE public.run_memory (
 
 
 --
+-- Name: run_memory_entities; Type: TABLE; Schema: public; Owner: -
+--
+
+-- TFAC-622: lets one run_memory row reach every entity the run actually
+-- touched (a Jira ticket + the PR it opens), not just the denormalized
+-- primary entity_id above. Keyed on run_id rather than the run_memory row
+-- id — touches are recorded mid-run, before the run_memory row exists (it's
+-- written at termination); run_memory's UNIQUE(run_id) makes the join
+-- through run_id sound once that row lands. role is free text (house
+-- style: external_actions.action; see domain.MemoryRole*), no CHECK.
+CREATE TABLE public.run_memory_entities (
+    org_id uuid NOT NULL,
+    run_id uuid NOT NULL,
+    entity_id uuid NOT NULL,
+    role text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: run_messages; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2339,6 +2359,14 @@ ALTER TABLE ONLY public.run_memory
 
 
 --
+-- Name: run_memory_entities run_memory_entities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.run_memory_entities
+    ADD CONSTRAINT run_memory_entities_pkey PRIMARY KEY (run_id, entity_id);
+
+
+--
 -- Name: run_messages run_messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2783,6 +2811,13 @@ CREATE INDEX idx_run_memory_entity_blueprint ON public.run_memory USING btree (e
 --
 
 CREATE INDEX idx_run_memory_run ON public.run_memory USING btree (run_id);
+
+
+--
+-- Name: idx_run_memory_entities_entity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_run_memory_entities_entity ON public.run_memory_entities USING btree (org_id, entity_id);
 
 
 --
@@ -3609,6 +3644,30 @@ ALTER TABLE ONLY public.run_memory
 
 ALTER TABLE ONLY public.run_memory
     ADD CONSTRAINT run_memory_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
+
+
+--
+-- Name: run_memory_entities run_memory_entities_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.run_memory_entities
+    ADD CONSTRAINT run_memory_entities_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: run_memory_entities run_memory_entities_entity_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.run_memory_entities
+    ADD CONSTRAINT run_memory_entities_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
+
+
+--
+-- Name: run_memory_entities run_memory_entities_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.run_memory_entities
+    ADD CONSTRAINT run_memory_entities_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -4619,6 +4678,23 @@ CREATE POLICY run_memory_all ON public.run_memory USING ((EXISTS ( SELECT 1
 
 
 --
+-- Name: run_memory_entities; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.run_memory_entities ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: run_memory_entities run_memory_entities_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY run_memory_entities_all ON public.run_memory_entities USING ((EXISTS ( SELECT 1
+   FROM public.runs r
+  WHERE (r.id = run_memory_entities.run_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM public.runs r
+  WHERE (r.id = run_memory_entities.run_id))));
+
+
+--
 -- Name: run_messages; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -5505,6 +5581,17 @@ GRANT ALL ON TABLE public.run_memory TO anon;
 GRANT ALL ON TABLE public.run_memory TO authenticated;
 GRANT ALL ON TABLE public.run_memory TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.run_memory TO tf_app;
+
+
+--
+-- Name: TABLE run_memory_entities; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.run_memory_entities TO postgres;
+GRANT ALL ON TABLE public.run_memory_entities TO anon;
+GRANT ALL ON TABLE public.run_memory_entities TO authenticated;
+GRANT ALL ON TABLE public.run_memory_entities TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.run_memory_entities TO tf_app;
 
 
 --
@@ -8730,6 +8817,10 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.artifacts TO tf_system;
 GRANT SELECT, INSERT, DELETE ON TABLE public.run_worktrees TO tf_system;
 -- Agent memory (TaskMemory.UpsertAgentMemorySystem / GetMemoriesForEntitySystem).
 GRANT SELECT, INSERT, UPDATE ON TABLE public.run_memory TO tf_system;
+-- Multi-entity memory join (TaskMemory.RecordEntityTouchSystem / the
+-- GetMemoriesForEntitySystem read-path join). UPDATE backs the
+-- role-precedence upgrade (touched -> produced -> primary).
+GRANT SELECT, INSERT, UPDATE ON TABLE public.run_memory_entities TO tf_system;
 -- External-credential write audit log (RecordExternalWrite / the Jira mirror).
 GRANT SELECT, INSERT ON TABLE public.external_actions TO tf_system;
 -- Touched-entity resolution.
@@ -8814,6 +8905,15 @@ GRANT SELECT ON TABLE public.run_credentials TO tf_system;
 -- The executor's schema-compatibility assert (internal/db/migrations.go)
 -- reads this and nothing else; no DDL, ever.
 GRANT SELECT ON TABLE public.goose_db_version TO tf_system;
+
+-- TFAC-622: backfill one 'primary' run_memory_entities row per pre-existing
+-- run_memory row, so the entity-scoped read switch (entity_links UNION
+-- arms, both dead — grep finds zero writers — replaced by membership
+-- through this join) is result-identical for every row that exists as of
+-- this migration.
+INSERT INTO run_memory_entities (org_id, run_id, entity_id, role, created_at)
+SELECT org_id, run_id, entity_id, 'primary', created_at FROM run_memory
+ON CONFLICT (run_id, entity_id) DO NOTHING;
 
 -- +goose Down
 SELECT 'down not supported';

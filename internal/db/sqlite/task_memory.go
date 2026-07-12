@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -27,7 +28,9 @@ const humanFeedbackSeparator = "\n\n---\n" + humanFeedbackHeader
 // taskMemoryStore — SQLite impl. The constructor accepts two queryers
 // for signature parity with the Postgres impl; SQLite has one
 // connection so both collapse to the same queryer. The `...System`
-// variants delegate to their non-System counterparts.
+// variants with a non-System counterpart delegate to it;
+// RecordEntityTouchSystem and CountMemoriesForEntitySystem have none
+// and implement directly.
 type taskMemoryStore struct{ q queryer }
 
 func newTaskMemoryStore(q, _ queryer) db.TaskMemoryStore { return &taskMemoryStore{q: q} }
@@ -126,18 +129,11 @@ func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID,
 
 func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]domain.TaskMemory, error) {
 	rows, err := q.QueryContext(ctx, `
-		WITH related AS (
-			SELECT id FROM entities WHERE id = ?
-			UNION
-			SELECT to_entity_id FROM entity_links WHERE from_entity_id = ?
-			UNION
-			SELECT from_entity_id FROM entity_links WHERE to_entity_id = ?
-		)
 		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
 		FROM run_memory rm
-		WHERE rm.entity_id IN (SELECT id FROM related)
+		WHERE rm.run_id IN (SELECT run_id FROM run_memory_entities WHERE entity_id = ?)
 		ORDER BY rm.created_at ASC
-	`, entityID, entityID, entityID)
+	`, entityID)
 	if err != nil {
 		return nil, err
 	}
@@ -159,29 +155,37 @@ func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]do
 	return out, rows.Err()
 }
 
-func (s *taskMemoryStore) GetRunMemory(ctx context.Context, orgID, runID string) (*domain.TaskMemory, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	row := s.q.QueryRowContext(ctx, `
-		SELECT id, run_id, entity_id, blueprint_run_id, agent_content, human_content, created_at
-		FROM run_memory WHERE run_id = ?
-	`, runID)
+// memoryRoleRankCASE is the SQL CASE expression mapping a role column
+// reference to its domain.MemoryRoleOutranks rank — kept in sync with
+// domain.memoryRoleRank (primary=3 > produced=2 > touched=1 > else=0).
+// Duplicated inline (not a shared const) because it's substituted twice
+// per statement with different column references.
+const memoryRoleRankCASE = "(CASE %s WHEN 'primary' THEN 3 WHEN 'produced' THEN 2 WHEN 'touched' THEN 1 ELSE 0 END)"
 
-	var m domain.TaskMemory
-	var blueprintRunID, agentContent, humanContent sql.NullString
-	var createdAt time.Time
-	err := row.Scan(&m.ID, &m.RunID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
+func (s *taskMemoryStore) RecordEntityTouchSystem(ctx context.Context, orgID, runID, entityID, role string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
 	}
-	if err != nil {
-		return nil, err
+	query := `
+		INSERT INTO run_memory_entities (org_id, run_id, entity_id, role, created_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(run_id, entity_id) DO UPDATE SET role = excluded.role
+		WHERE ` + fmt.Sprintf(memoryRoleRankCASE, "excluded.role") + ` > ` + fmt.Sprintf(memoryRoleRankCASE, "run_memory_entities.role")
+	_, err := s.q.ExecContext(ctx, query, orgID, runID, entityID, role, time.Now().UTC())
+	return err
+}
+
+func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) (int, error) {
+	_ = teamID
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
 	}
-	m.BlueprintRunID = blueprintRunID.String
-	m.Content = materializeMemory(agentContent.String, humanContent.String)
-	m.CreatedAt = createdAt
-	return &m, nil
+	var n int
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM run_memory rm
+		WHERE rm.run_id IN (SELECT run_id FROM run_memory_entities WHERE entity_id = ?)
+	`, entityID).Scan(&n)
+	return n, err
 }
 
 // materializeMemory composes the agent's narrative and the human's

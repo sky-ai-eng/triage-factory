@@ -109,6 +109,12 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 	if err := stores.TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "prior-run", entity.ID, priorBlueprintRunID, "what i did last time"); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
+	// The primary join row a real run's completion will carry once the
+	// run-end attach ticket (TFAC-625) lands — materializePriorMemories'
+	// join-based read (TFAC-622) needs it to find anything.
+	if err := stores.TaskMemory.RecordEntityTouchSystem(context.Background(), runmode.LocalDefaultOrgID, "prior-run", entity.ID, domain.MemoryRolePrimary); err != nil {
+		t.Fatalf("seed join row: %v", err)
+	}
 
 	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, "current-run")
 
@@ -174,6 +180,9 @@ func TestMaterializePriorMemories_BlueprintSiblingsShareFolder(t *testing.T) {
 	}
 	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, "step1-run", entity.ID, blueprintRunID, "step 1 findings"); err != nil {
 		t.Fatalf("step1 memory: %v", err)
+	}
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, "step1-run", entity.ID, domain.MemoryRolePrimary); err != nil {
+		t.Fatalf("seed join row: %v", err)
 	}
 
 	// Step 2 starts: materialize priors under step 2's own namespace (the same
