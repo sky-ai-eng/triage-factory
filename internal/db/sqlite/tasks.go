@@ -570,6 +570,16 @@ func (s *taskStore) RecordEvent(ctx context.Context, orgID, taskID, eventID, kin
 	return err
 }
 
+func (s *taskStore) MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE task_events SET kind = 'injected' WHERE task_id = ? AND event_id = ?
+	`, taskID, eventID)
+	return err
+}
+
 func (s *taskStore) SetVisibilityTeams(ctx context.Context, orgID, taskID string, teamIDs []string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err

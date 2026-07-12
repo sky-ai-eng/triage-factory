@@ -45,7 +45,7 @@ import (
 // Callers that need the durable guarantee check the store error; HandlePRNewCommits
 // treats a drop as acceptable (the next poll re-diffs the head).
 func (s *Spawner) StageOrDeliverInjection(orgID, runID, producer, body string) (delivered bool) {
-	delivered, _ = s.stageOrDeliverInjection(orgID, runID, producer, body)
+	delivered, _, _ = s.stageOrDeliverInjection(orgID, runID, producer, body)
 	return delivered
 }
 
@@ -61,30 +61,38 @@ func (s *Spawner) StageOrDeliverInjection(orgID, runID, producer, body string) (
 // pending_firings instead. Same side effects and body/producer semantics
 // as StageOrDeliverInjection; the two share stageOrDeliverInjection.
 func (s *Spawner) StageOrDeliverInjectionResult(orgID, runID, producer, body string) (delivered, staged bool) {
-	return s.stageOrDeliverInjection(orgID, runID, producer, body)
+	delivered, staged, _ = s.stageOrDeliverInjection(orgID, runID, producer, body)
+	return delivered, staged
 }
 
-func (s *Spawner) stageOrDeliverInjection(orgID, runID, producer, body string) (delivered, staged bool) {
+// stageOrDeliverInjection is the shared primitive above. stagedID is the
+// durable row's id when staged=true (empty otherwise) — the additive-
+// injection gate (StageOrDeliverAdditiveEvent) needs it to delete the row
+// if its post-stage resumability recheck decides against delivery, since
+// every other caller here tolerates a staged-but-never-flushed row as
+// business as usual.
+func (s *Spawner) stageOrDeliverInjection(orgID, runID, producer, body string) (delivered, staged bool, stagedID string) {
 	if body == "" {
-		return false, false
+		return false, false, ""
 	}
 	if s.getProc(runID) != nil {
 		s.deliverInjectionLive(orgID, runID, domain.WrapSystemNote(body))
-		return true, false
+		return true, false, ""
 	}
 	if s.stagedInjections == nil {
 		delegateLog.Warn("stage injection dropped: no staged-injection store wired", "run", runID, "producer", producer)
-		return false, false
+		return false, false, ""
 	}
-	if err := s.stagedInjections.AppendSystem(context.Background(), orgID, &domain.StagedInjection{
+	n := &domain.StagedInjection{
 		RunID:    runID,
 		Producer: producer,
 		Body:     body,
-	}); err != nil {
-		delegateLog.Warn("stage injection: append failed (the producer's next signal re-stages)", "run", runID, "producer", producer, "error", err)
-		return false, false
 	}
-	return false, true
+	if err := s.stagedInjections.AppendSystem(context.Background(), orgID, n); err != nil {
+		delegateLog.Warn("stage injection: append failed (the producer's next signal re-stages)", "run", runID, "producer", producer, "error", err)
+		return false, false, ""
+	}
+	return false, true, n.ID
 }
 
 // stagedInjectionsForResume flushes a resuming run's durable staged-injection queue and

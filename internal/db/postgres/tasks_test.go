@@ -470,6 +470,61 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 	})
 }
 
+// TestTaskStore_Postgres_MarkEventInjectedSystem pins TFAC-621 part 2:
+// MarkEventInjectedSystem flips an EXISTING (task_id, event_id) row's kind
+// to "injected" in place, and no-ops (no error, no row created) when the
+// row is absent — it must never mask over RecordEventSystem's own
+// ON-CONFLICT-DO-NOTHING no-op the way calling RecordEventSystem(...,
+// "injected") a second time on the same PK silently did.
+func TestTaskStore_Postgres_MarkEventInjectedSystem(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userA, _ := seedPgOrgUserAgent(t, h)
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	readKind := func(t *testing.T, taskID, eventID string) (kind string, found bool) {
+		t.Helper()
+		err := h.AdminDB.QueryRow(`SELECT kind FROM task_events WHERE task_id = $1 AND event_id = $2`, taskID, eventID).Scan(&kind)
+		if err == sql.ErrNoRows {
+			return "", false
+		}
+		if err != nil {
+			t.Fatalf("read task_events kind: %v", err)
+		}
+		return kind, true
+	}
+
+	t.Run("upgrades_existing_row", func(t *testing.T) {
+		_, eventID, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "mark-injected-existing")
+		if err := stores.Tasks.RecordEventSystem(ctx, orgID, taskID, eventID, "bumped"); err != nil {
+			t.Fatalf("seed bumped row: %v", err)
+		}
+		if err := stores.Tasks.MarkEventInjectedSystem(ctx, orgID, taskID, eventID); err != nil {
+			t.Fatalf("MarkEventInjectedSystem: %v", err)
+		}
+		kind, found := readKind(t, taskID, eventID)
+		if !found {
+			t.Fatal("row disappeared after MarkEventInjectedSystem")
+		}
+		if kind != "injected" {
+			t.Errorf("kind = %q, want %q", kind, "injected")
+		}
+	})
+
+	t.Run("absent_row_is_noop", func(t *testing.T) {
+		_, eventID, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "mark-injected-absent")
+		// No RecordEventSystem seed at all — (taskID, eventID) has no row.
+		if err := stores.Tasks.MarkEventInjectedSystem(ctx, orgID, taskID, eventID); err != nil {
+			t.Fatalf("MarkEventInjectedSystem on absent row: %v", err)
+		}
+		if _, found := readKind(t, taskID, eventID); found {
+			t.Error("MarkEventInjectedSystem created a row on a no-op absent-row call")
+		}
+	})
+}
+
 // seedPgEntityEvent inserts a bare entity + event (no task) and
 // returns their IDs. Used by tests that call FindOrCreate themselves.
 func seedPgEntityEvent(t *testing.T, conn *sql.DB, orgID, suffix string) (entityID, eventID string) {

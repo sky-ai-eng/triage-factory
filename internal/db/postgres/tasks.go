@@ -680,6 +680,14 @@ func recordTaskEvent(ctx context.Context, q queryer, orgID, taskID, eventID, kin
 	return err
 }
 
+func (s *taskStore) MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string) error {
+	_, err := s.admin.ExecContext(ctx, `
+		UPDATE task_events SET kind = 'injected'
+		 WHERE org_id = $1 AND task_id = $2 AND event_id = $3
+	`, orgID, taskID, eventID)
+	return err
+}
+
 // --- Claim mutations ---
 
 func (s *taskStore) SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) error {

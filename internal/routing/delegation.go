@@ -326,8 +326,8 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID strin
 			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
 		return true
 	default: // InjectDeliveredLocal, InjectStagedResumable
-		if err := r.tasks.RecordEventSystem(ctx, orgID, task.ID, triggeringEventID, "injected"); err != nil {
-			routerLog.Error("failed to record injected task_event", "task_id", task.ID, "run_id", runID, "error", err)
+		if err := r.tasks.MarkEventInjectedSystem(ctx, orgID, task.ID, triggeringEventID); err != nil {
+			routerLog.Error("failed to mark injected task_event", "task_id", task.ID, "run_id", runID, "error", err)
 		}
 		routerLog.Info("injected additive event into active run",
 			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)

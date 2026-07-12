@@ -47,12 +47,27 @@ type fakeExecSlack struct {
 	historyMessages []map[string]any
 	repliesMessages []map[string]any
 
+	// historyCalls / repliesCalls / lastRepliesTS back the root-resolution
+	// tests: proving conversations.replies (not conversations.history) is the
+	// endpoint resolveMessageRootTS calls, and with which ts.
+	historyCalls  int
+	repliesCalls  int
+	lastRepliesTS string
+
 	// userNames maps a Slack user id to the display name users.info answers
 	// with — backs the sender-name resolution test.
 	userNames map[string]string
 
 	// files backs files.info + the raw download endpoint; keyed by file id.
 	files map[string]fakeSlackFile
+
+	// attachCompleteFails makes files.completeUploadExternal (the last leg of
+	// the v2 upload flow uploadAttachment drives) answer not-ok, simulating an
+	// attach failure after a successful chat.postMessage.
+	attachCompleteFails bool
+	// lastAttachThreadTS captures the thread_ts files.completeUploadExternal
+	// was called with — the field the wrong-thread_ts regression test pins.
+	lastAttachThreadTS string
 }
 
 func newFakeExecSlack(t *testing.T) *fakeExecSlack {
@@ -93,9 +108,27 @@ func newFakeExecSlack(t *testing.T) *fakeExecSlack {
 		case strings.HasSuffix(r.URL.Path, "/chat.getPermalink"):
 			writeSlackFakeJSON(w, map[string]any{"ok": true, "permalink": "https://acme.slack.com/archives/x"})
 		case strings.HasSuffix(r.URL.Path, "/conversations.history"):
+			f.historyCalls++
 			writeSlackFakeJSON(w, map[string]any{"ok": true, "messages": f.historyMessages})
 		case strings.HasSuffix(r.URL.Path, "/conversations.replies"):
+			f.repliesCalls++
+			f.lastRepliesTS = r.URL.Query().Get("ts")
 			writeSlackFakeJSON(w, map[string]any{"ok": true, "messages": f.repliesMessages})
+		case strings.HasSuffix(r.URL.Path, "/files.getUploadURLExternal"):
+			writeSlackFakeJSON(w, map[string]any{"ok": true, "upload_url": slackAPIBase + "/fake-upload-target", "file_id": "F-ATTACH"})
+		case strings.HasSuffix(r.URL.Path, "/fake-upload-target"):
+			writeSlackFakeJSON(w, map[string]any{"ok": true})
+		case strings.HasSuffix(r.URL.Path, "/files.completeUploadExternal"):
+			var body struct {
+				ThreadTS string `json:"thread_ts"`
+			}
+			_ = decodeSlackFakeBody(r, &body)
+			f.lastAttachThreadTS = body.ThreadTS
+			if f.attachCompleteFails {
+				writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "fake_attach_failure"})
+				return
+			}
+			writeSlackFakeJSON(w, map[string]any{"ok": true})
 		case strings.HasSuffix(r.URL.Path, "/users.info"):
 			userID := r.URL.Query().Get("user")
 			name := f.userNames[userID]
@@ -499,6 +532,203 @@ func TestSlackExecHandler_React_RecordsActionOnly(t *testing.T) {
 				t.Errorf("detail_json missing emoji: %q", acts[0].DetailJSON)
 			}
 		})
+	}
+}
+
+// ---------- thread-root resolution (TFAC-621 part 1) ----------
+
+// TestSlackExecHandler_ResolvesRootViaThreadReplies pins the exec_host.go
+// fix: resolveMessageRootTS must resolve a reply's thread root via
+// conversations.replies — the only Slack endpoint that can, since a reply is
+// never returned by conversations.history (channel-level messages only).
+// The fake's conversations.replies answers with the thread rooted at rootTS
+// (root message first, matching Slack's real ordering when ts names a
+// reply); conversations.history answers with an unrelated message carrying
+// a DIFFERENT thread_ts, so the pre-fix code (which read history's
+// thread_ts) would produce a distinguishably wrong Target if it regressed.
+func TestSlackExecHandler_ResolvesRootViaThreadReplies(t *testing.T) {
+	const rootTS = "1700000000.000000"
+	const replyTS = "1700000005.000200"
+
+	for _, verb := range []string{"edit", "react"} {
+		t.Run(verb, func(t *testing.T) {
+			r := newSlackExecRig(t)
+			orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-root-"+verb)
+			r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+			r.seedChannel(orgID, "T1", "C1")
+			r.trackChannel(orgID, owner, teamID, "C1")
+			runID := r.seedRun(orgID, teamID, owner, true)
+			info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+			r.fake.repliesMessages = []map[string]any{
+				{"ts": rootTS, "user": "U1", "text": "root message"},
+				{"ts": replyTS, "thread_ts": rootTS, "user": "U1", "text": "a reply"},
+			}
+			r.fake.historyMessages = []map[string]any{
+				{"ts": "1699999999.000000", "thread_ts": "1699999999.000000", "user": "U2", "text": "unrelated channel message"},
+			}
+
+			wantTarget := domain.SlackSourceID("C1", rootTS)
+			switch verb {
+			case "edit":
+				out, err := r.hdl.edit(context.Background(), info, slackEditArgs{Channel: "C1", TS: replyTS, Body: "edited"})
+				if err != nil {
+					t.Fatalf("edit: %v", err)
+				}
+				if out.TS != replyTS {
+					t.Errorf("edit TS = %q, want %q (the message's own ts, not the root)", out.TS, replyTS)
+				}
+				arts := r.artifactsForRun(orgID, runID)
+				if len(arts) != 1 || arts[0].Target != wantTarget {
+					t.Fatalf("artifacts = %+v, want one artifact targeting %q", arts, wantTarget)
+				}
+			case "react":
+				if _, err := r.hdl.react(context.Background(), info, slackReactArgs{Channel: "C1", TS: replyTS, Emoji: "eyes"}); err != nil {
+					t.Fatalf("react: %v", err)
+				}
+			}
+			acts := r.actionsForRun(orgID, runID)
+			if len(acts) != 1 || acts[0].Target != wantTarget {
+				t.Fatalf("external_actions = %+v, want one action targeting %q", acts, wantTarget)
+			}
+
+			if r.fake.historyCalls != 0 {
+				t.Errorf("conversations.history was called %d time(s), want 0 — resolveMessageRootTS must not use it", r.fake.historyCalls)
+			}
+			if r.fake.repliesCalls != 1 {
+				t.Errorf("conversations.replies was called %d time(s), want 1", r.fake.repliesCalls)
+			}
+			if r.fake.lastRepliesTS != replyTS {
+				t.Errorf("conversations.replies ts = %q, want the reply's own ts %q", r.fake.lastRepliesTS, replyTS)
+			}
+		})
+	}
+}
+
+// TestSlackExecHandler_ResolvesRootViaThreadReplies_ChannelRootFallback pins
+// the channel-root case: a ts with no thread (conversations.replies returns
+// just that one message, itself) resolves to itself, unchanged.
+func TestSlackExecHandler_ResolvesRootViaThreadReplies_ChannelRootFallback(t *testing.T) {
+	const ts = "1700000000.000000"
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-root-fallback")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	r.fake.repliesMessages = []map[string]any{{"ts": ts, "user": "U1", "text": "an unthreaded message"}}
+
+	if _, err := r.hdl.react(context.Background(), info, slackReactArgs{Channel: "C1", TS: ts, Emoji: "eyes"}); err != nil {
+		t.Fatalf("react: %v", err)
+	}
+	wantTarget := domain.SlackSourceID("C1", ts)
+	acts := r.actionsForRun(orgID, runID)
+	if len(acts) != 1 || acts[0].Target != wantTarget {
+		t.Fatalf("external_actions = %+v, want one action targeting %q", acts, wantTarget)
+	}
+}
+
+// ---------- send-path hardening (TFAC-621 part 5) ----------
+
+// TestSlackExecHandler_Send_AttachFailure_StillRecordsPostedMessage pins the
+// fix: an uploadAttachment failure after a successful chat.postMessage must
+// not leave the already-posted message unrecorded. The verb still returns
+// the attach error (loudly, non-nil) but the artifact/audit row for the post
+// itself must exist.
+func TestSlackExecHandler_Send_AttachFailure_StillRecordsPostedMessage(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-attach-fail")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	r.fake.attachCompleteFails = true
+
+	out, err := r.hdl.send(context.Background(), info, slackSendArgs{
+		Channel: "C1", Body: "here's the report", AttachName: "report.csv",
+		AttachBase64: base64.StdEncoding.EncodeToString([]byte("a,b,c")),
+	})
+	if err == nil {
+		t.Fatal("expected the attach failure to surface as an error")
+	}
+	if !strings.Contains(err.Error(), "attach failed") {
+		t.Errorf("error = %q, want it to mention the attach failure", err)
+	}
+	if out.TS == "" || out.Channel != "C1" {
+		t.Errorf("result = %+v, want the posted message's channel/ts even on attach failure", out)
+	}
+
+	arts := r.artifactsForRun(orgID, runID)
+	if len(arts) != 1 {
+		t.Fatalf("want 1 artifact for the message that DID post, got %d: %+v", len(arts), arts)
+	}
+	if arts[0].ExternalID != out.TS || arts[0].State != domain.ArtifactStateMessagePosted {
+		t.Errorf("artifact mismatch: %+v", arts[0])
+	}
+	acts := r.actionsForRun(orgID, runID)
+	if len(acts) != 1 || acts[0].Action != domain.ActionSlackMessagePosted {
+		t.Fatalf("external_actions = %+v, want one slack_message_posted row despite the attach failure", acts)
+	}
+}
+
+// TestSlackExecHandler_Send_ThreadedAttach_UsesParentThreadTS pins the fix:
+// a threaded send+attach must upload against the PARENT thread ts, never the
+// just-posted reply's own ts (Slack's files.completeUploadExternal docs warn
+// against passing a reply's ts as thread_ts).
+func TestSlackExecHandler_Send_ThreadedAttach_UsesParentThreadTS(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-attach-threaded")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	const parentTS = "1700000000.000000"
+	out, err := r.hdl.send(context.Background(), info, slackSendArgs{
+		Channel: "C1", ThreadTS: parentTS, Body: "here's the report", AttachName: "report.csv",
+		AttachBase64: base64.StdEncoding.EncodeToString([]byte("a,b,c")),
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	// The fake's postTS is the just-posted REPLY's ts — distinct from parentTS
+	// — so a wrong-thread_ts regression (passing the reply's ts) is
+	// distinguishable from the fix (passing parentTS).
+	if out.TS == parentTS {
+		t.Fatalf("test setup: reply ts must differ from parentTS to be a meaningful assertion")
+	}
+	if r.fake.lastAttachThreadTS != parentTS {
+		t.Errorf("files.completeUploadExternal thread_ts = %q, want the parent thread ts %q (not the reply's own ts %q)",
+			r.fake.lastAttachThreadTS, parentTS, out.TS)
+	}
+}
+
+// TestSlackExecHandler_Send_ChannelRootAttach_UsesOwnTS pins the companion
+// case: a non-threaded send+attach (the new message IS the root) must
+// upload against the message's own ts, since there is no parent to use.
+func TestSlackExecHandler_Send_ChannelRootAttach_UsesOwnTS(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-attach-root")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	out, err := r.hdl.send(context.Background(), info, slackSendArgs{
+		Channel: "C1", Body: "here's the report", AttachName: "report.csv",
+		AttachBase64: base64.StdEncoding.EncodeToString([]byte("a,b,c")),
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if r.fake.lastAttachThreadTS != out.TS {
+		t.Errorf("files.completeUploadExternal thread_ts = %q, want the posted message's own ts %q", r.fake.lastAttachThreadTS, out.TS)
 	}
 }
 

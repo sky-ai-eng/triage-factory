@@ -296,3 +296,64 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 		}
 	})
 }
+
+// TestTaskStore_SQLite_MarkEventInjectedSystem pins TFAC-621 part 2:
+// MarkEventInjectedSystem flips an EXISTING (task_id, event_id) row's kind
+// to "injected" in place, and no-ops (no error, no row created) when the
+// row is absent — it must never mask over RecordEventSystem's own INSERT-OR-
+// IGNORE no-op the way calling RecordEventSystem(..., "injected") a second
+// time on the same PK silently did.
+func TestTaskStore_SQLite_MarkEventInjectedSystem(t *testing.T) {
+	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
+	if err := db.BootstrapSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	store := sqlitestore.New(conn).Tasks
+	ctx := t.Context()
+
+	readKind := func(t *testing.T, taskID, eventID string) (kind string, found bool) {
+		t.Helper()
+		err := conn.QueryRow(`SELECT kind FROM task_events WHERE task_id = ? AND event_id = ?`, taskID, eventID).Scan(&kind)
+		if err == sql.ErrNoRows {
+			return "", false
+		}
+		if err != nil {
+			t.Fatalf("read task_events kind: %v", err)
+		}
+		return kind, true
+	}
+
+	t.Run("upgrades_existing_row", func(t *testing.T) {
+		_, eventID, taskID := seedSQLiteTaskChain(t, conn, "mark-injected-existing")
+		if err := store.RecordEvent(ctx, runmode.LocalDefaultOrgID, taskID, eventID, "bumped"); err != nil {
+			t.Fatalf("seed bumped row: %v", err)
+		}
+		if err := store.MarkEventInjectedSystem(ctx, runmode.LocalDefaultOrgID, taskID, eventID); err != nil {
+			t.Fatalf("MarkEventInjectedSystem: %v", err)
+		}
+		kind, found := readKind(t, taskID, eventID)
+		if !found {
+			t.Fatal("row disappeared after MarkEventInjectedSystem")
+		}
+		if kind != "injected" {
+			t.Errorf("kind = %q, want %q", kind, "injected")
+		}
+	})
+
+	t.Run("absent_row_is_noop", func(t *testing.T) {
+		_, eventID, taskID := seedSQLiteTaskChain(t, conn, "mark-injected-absent")
+		// No RecordEvent seed at all — (taskID, eventID) has no row.
+		if err := store.MarkEventInjectedSystem(ctx, runmode.LocalDefaultOrgID, taskID, eventID); err != nil {
+			t.Fatalf("MarkEventInjectedSystem on absent row: %v", err)
+		}
+		if _, found := readKind(t, taskID, eventID); found {
+			t.Error("MarkEventInjectedSystem created a row on a no-op absent-row call")
+		}
+	})
+}

@@ -83,3 +83,11 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, ru
 	})
 	return out, nil
 }
+
+func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `DELETE FROM staged_agent_injections WHERE org_id = ? AND id = ?`, orgID, id)
+	return err
+}

@@ -727,6 +727,14 @@ func (w *runStatusWorker) loop() {
 		select {
 		case <-w.predecessor:
 		case failed := <-w.stopCh:
+			// Still gated: honor the chain before releasing our own done — a
+			// successor gated on OUR done (entry.prevDone) must never run
+			// ahead of OUR predecessor's still-in-flight trailing clear.
+			// Bounded by ctx.Done() so adapter shutdown can't hang here.
+			select {
+			case <-w.predecessor:
+			case <-w.ctx.Done():
+			}
 			if failed {
 				w.postFailureReply()
 			}
