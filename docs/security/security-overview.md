@@ -170,16 +170,14 @@ code execution regardless of which process is the runtime's parent. Crucially,
 the run's I/O bytes **never enter the broker's address space** — the broker
 passes the socket file descriptor to the runtime and closes its own copy, so
 the kernel wires the runtime's stdio directly to the (unprivileged) orchestrator.
-This is a structural property verifiable by inspection (no read call, descriptor
-closed), not a behavioral promise. *(Validated against real gVisor: the runtime
-faithfully proxies the newline-delimited-JSON agent protocol over a
-socket-backed stdio while the supervising process reads nothing.)*
+The runtime proxies the newline-delimited-JSON agent protocol over a
+socket-backed stdio while the supervising process reads nothing.
 
-### 4.3 The broker's real attack surface is its RPC, and it is narrowed on purpose
+### 4.3 The broker's real attack surface is its narrow RPC
 
-The broker's exposure isn't stdio; it is the RPC from the orchestrator — the
-process that *is* exposed to hostile input. A compromised orchestrator's
-move is to abuse that RPC to regain capabilities. Therefore the broker's
+The broker's exposure isn't stdio; it is the RPC from the orchestrator,
+which *is* exposed to hostile input. A compromised orchestrator's move
+is to abuse that RPC to regain capabilities. Therefore the broker's
 protective value equals the narrowness and validation of that RPC.
 
 > The broker **owns the OCI spec** from a fixed template (rootfs = the
@@ -201,10 +199,9 @@ Why this stays true as the code changes:
 - **One unconditional choke point.** The broker is the only launch path, and
   every launch passes `ValidateLaunchParams` — every privileged run-tree
   chown/remove passes `validateRunTreeRoot` — before the broker builds a spec,
-  execs anything, or touches a file. There is no second entry that skips the gate.
+  execs anything, or touches a file.
 - **Allowlist, not denylist, so new inputs fail closed.** A *new* dangerous value
-  a future change might introduce is refused by default rather than accepted until
-  someone blocks it:
+  a future change might introduce is refused by default:
     - rootfs is chosen by catalog *name* (unknown → rejected);
     - the SDK path is resolved by the broker (the orchestrator's is discarded);
     - the command's first two argv are pinned;
@@ -256,10 +253,11 @@ needs them to do its job. Their safety rests on four things:
   jailbroken agent reading its own `/proc/self/environ` finds a throwaway token,
   not a credential.
 - **Short-lived, narrowly-scoped GitHub auth**: git authentication uses GitHub
-  **App installation tokens** — one-hour lifetime, scoped to a single
-  installation — not a user PAT. These tokens are minted on the **control
-  plane**; the executor holds only the hour-lived scoped token, never the App
-  private key. A leaked token is minutes of single-org access.
+  App installation tokens — one-hour lifetime, scoped to a single
+  installation — not a user PAT. These tokens are minted on the control
+  plane; the executor holds only the hour-lived scoped token, never the App
+  private key. A leaked token is minutes of single-org access, scoped to a few
+  repos at most.
 - **Short-lived, scoped LLM credentials**: for the Bedrock route, an executor
   receives **control-plane-minted STS session credentials** — action-scoped to model
   invocation, expiring (≤1h), and optionally network-bound to the executor's
@@ -300,12 +298,8 @@ revocable.
 
 ## 6. Risk register
 
-Each entry is a way an attacker reaches the privileged process, and how it is
-mitigated.
-
 **Vector 1 — our supply chain.** If the build pipeline or a dependency is
-compromised, the executor is compromised. Irreducible for any privileged vendor
-software; the defense is provenance.
+compromised, the executor is compromised.
 - The Alpine rootfs tarball is sha256-pinned per arch and extracted
   as inert data; its code only ever runs *inside* sandboxes.
 - The agent SDK's npm tree is pinned by an embedded lockfile with
@@ -364,7 +358,7 @@ privileged netns/veth/iptables/cgroup setup and supervised runtime each
 ## 7. Deployment guidance
 
 The *most* secure deployment pattern is as follows, and is particularly relevant
-when k8s is required. The capability requirements allow for privileged workloads
+when k8s is involved. The capability requirements allow for privileged workloads
 to remain out of Kubernetes clusters entirely:
 
 - **Executors as dedicated VMs (or bare metal), outside the cluster.** They
