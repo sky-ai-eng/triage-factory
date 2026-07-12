@@ -168,6 +168,27 @@ type killRunArgs struct {
 	ContainerID string `json:"container_id"`
 }
 
+// launchSidecarArgs carries the validated launch data for one run's
+// credential-sidecar process — the sibling of launchRunArgs for the
+// per-run sidecar harness. Params.StdioSocketPath is populated the same
+// way launchRunArgs.Params.StdioSocketPath is: by the orchestrator-side
+// client, which owns the listener the broker dials.
+type launchSidecarArgs struct {
+	Params sandbox.SidecarLaunchParams `json:"params"`
+}
+
+// waitSidecarArgs / killSidecarArgs mirror waitRunArgs / killRunArgs
+// exactly (both are just a registry key), kept as distinct wire types
+// rather than reused ones so the RPC method list stays self-documenting —
+// one struct pair per method, per this file's own stated convention.
+type waitSidecarArgs struct {
+	ContainerID string `json:"container_id"`
+}
+
+type killSidecarArgs struct {
+	ContainerID string `json:"container_id"`
+}
+
 type chownRunTreeArgs struct {
 	Root    string `json:"root"`
 	Subpath string `json:"subpath,omitempty"`
@@ -212,4 +233,7 @@ const (
 	methodChownRunTree    = "ChownRunTree"
 	methodRemoveRunTree   = "RemoveRunTree"
 	methodCaptureRunDelta = "CaptureRunDelta"
+	methodLaunchSidecar   = "LaunchSidecar"
+	methodWaitSidecar     = "WaitSidecar"
+	methodKillSidecar     = "KillSidecar"
 )

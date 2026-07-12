@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/instance"
 	"github.com/sky-ai-eng/triage-factory/cmd/jwkinit"
 	"github.com/sky-ai-eng/triage-factory/cmd/migrate"
+	"github.com/sky-ai-eng/triage-factory/cmd/runsidecar"
 	"github.com/sky-ai-eng/triage-factory/cmd/snapshotcapture"
 	"github.com/sky-ai-eng/triage-factory/cmd/uninstall"
 )
@@ -55,6 +56,12 @@ func dispatchCLI(args []string) (handled bool, err error) {
 		// a sandboxed `Bash(<bin> exec *)` can never reach it. Undocumented
 		// in --help, like the others.
 		capbroker.Handle(args[1:])
+	case "run-sidecar":
+		// Internal: the per-run credential-sidecar harness. Broker-spawned
+		// only — the cap-broker execs this at a per-run uid it derives,
+		// never the orchestrator or a delegated agent. Same off-`exec`
+		// separation as cap-broker. Undocumented in --help, like the others.
+		runsidecar.Handle(args[1:])
 	case "install":
 		install.Handle(args[1:])
 	case "uninstall":

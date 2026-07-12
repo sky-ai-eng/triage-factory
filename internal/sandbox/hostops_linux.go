@@ -22,6 +22,11 @@ var defaultOps PrivilegedOps = hostOps{}
 // fails loudly rather than silently launching in a less-isolated way.
 var runLauncher RunLauncher
 
+// sidecarLauncher is the sidecar-launch seam, installed alongside
+// runLauncher — same boot-order contract: nil until SetPrivilegedOps runs,
+// and a LaunchSidecar reached before that is a boot-order bug.
+var sidecarLauncher SidecarLauncher
+
 // SetPrivilegedOps installs the cap-broker IPC client as BOTH the
 // package's privileged-op implementation and its run launcher. The
 // orchestrator's cap-broker wiring (cmd/capbroker) calls this once at boot
@@ -46,6 +51,7 @@ func SetPrivilegedOps(ops SandboxOps) {
 	}
 	defaultOps = ops
 	runLauncher = ops
+	sidecarLauncher = ops
 }
 
 // NewHostOps returns the in-process PrivilegedOps implementation. The
@@ -197,6 +203,12 @@ func (hostOps) ReapOrphans(ctx context.Context) error {
 	// Empty groups rmdir; one still holding a live orphan runsc stays
 	// for the next sweep.
 	reapOrphanRunCgroups()
+
+	// Leftover run-sidecar processes from a crashed broker — reparented to
+	// init, unknown to this fresh process's runs registry, safe to
+	// unconditionally SIGKILL because this whole method runs once, at boot,
+	// before any run exists.
+	reapOrphanSidecars()
 
 	return reapBundleOrphans(ctx)
 }

@@ -301,3 +301,71 @@ func TestValidateLaunchParams_DenylistedCIDRRejected(t *testing.T) {
 		}
 	}
 }
+
+// validSidecarParams returns a SidecarLaunchParams that passes
+// ValidateSidecarLaunchParams, mirroring validParams' role for the run
+// launch's own boundary tests.
+func validSidecarParams() SidecarLaunchParams {
+	return SidecarLaunchParams{
+		ContainerID: "tf-abc123-1-sc",
+		UID:         SidecarUIDBase,
+		GID:         SidecarUIDBase,
+	}
+}
+
+func TestValidateSidecarLaunchParams_AcceptsValid(t *testing.T) {
+	if err := ValidateSidecarLaunchParams(validSidecarParams()); err != nil {
+		t.Fatalf("ValidateSidecarLaunchParams rejected valid params: %v", err)
+	}
+	// The top of the band (SidecarUIDBase + MaxSandboxes - 1) must also pass.
+	p := validSidecarParams()
+	p.UID, p.GID = SidecarUIDBase+MaxSandboxes-1, SidecarUIDBase+MaxSandboxes-1
+	if err := ValidateSidecarLaunchParams(p); err != nil {
+		t.Errorf("top-of-band uid rejected: %v", err)
+	}
+}
+
+// TestValidateSidecarLaunchParams_RejectsUIDOutsideBand is the load-bearing
+// security check: a compromised orchestrator asking the broker to setuid
+// the sidecar to root, to the orchestrator's own uid, or to anything else
+// outside the reserved range must be refused before any exec happens.
+func TestValidateSidecarLaunchParams_RejectsUIDOutsideBand(t *testing.T) {
+	for _, uid := range []int{0, 1, WorktreeUID, 10001, SidecarUIDBase - 1, SidecarUIDBase + MaxSandboxes} {
+		p := validSidecarParams()
+		p.UID, p.GID = uid, uid
+		if err := ValidateSidecarLaunchParams(p); err == nil {
+			t.Errorf("ValidateSidecarLaunchParams accepted uid %d, outside the reserved band", uid)
+		}
+	}
+}
+
+func TestValidateSidecarLaunchParams_RejectsMismatchedUIDGID(t *testing.T) {
+	p := validSidecarParams()
+	p.GID = p.UID + 1
+	if err := ValidateSidecarLaunchParams(p); err == nil {
+		t.Error("ValidateSidecarLaunchParams accepted mismatched uid/gid")
+	}
+}
+
+func TestValidateSidecarLaunchParams_RejectsPathShapedContainerID(t *testing.T) {
+	p := validSidecarParams()
+	p.ContainerID = "../etc/passwd"
+	if err := ValidateSidecarLaunchParams(p); err == nil {
+		t.Error("ValidateSidecarLaunchParams accepted a path-shaped container id")
+	}
+}
+
+// TestValidateSidecarLaunchParams_RejectsMissingSuffix pins the check that
+// keeps a sidecar's registry key from ever colliding with a run's own in
+// the broker's shared s.runs map — a run's ContainerID never carries
+// SidecarContainerIDSuffix (see wrap()'s "tf-<frag>-<idx>" naming), so
+// requiring it here at the boundary (not just upheld by the Linux
+// dispatcher's own naming convention) makes that collision structurally
+// impossible.
+func TestValidateSidecarLaunchParams_RejectsMissingSuffix(t *testing.T) {
+	p := validSidecarParams()
+	p.ContainerID = "tf-abc123-1" // a run's own container id shape, no suffix
+	if err := ValidateSidecarLaunchParams(p); err == nil {
+		t.Error("ValidateSidecarLaunchParams accepted a container id missing the sidecar suffix")
+	}
+}
