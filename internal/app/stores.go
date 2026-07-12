@@ -184,7 +184,7 @@ func warnIfExecutorAdminDBIsSuperuser(ctx context.Context, adminDB *sql.DB) {
 	if isSuperuser {
 		appLog.Error("executor admin DB pool is connected as a Postgres superuser — " +
 			"executor should connect as tf_system, the least-privilege role, not a superuser DSN; " +
-			"see docs/self-host-setup.md#executor-database-role-tf_system")
+			"see docs/self-hosting/scaling.md#executor-database-role-tf_system")
 	}
 }
 
@@ -229,7 +229,7 @@ func (a *App) readInstanceConfig(ctx context.Context) error {
 // documented max_connections: at these defaults a 1-control + 2-executor
 // profile is 25×2 + 2×(6×2) = 74 connections. See TF_DB_MAX_OPEN_CONNS in
 // .env.example and the max_connections arithmetic in
-// docs/self-host-setup.md.
+// docs/self-hosting/scaling.md.
 const (
 	defaultPoolMaxConns         = 25
 	defaultExecutorPoolMaxConns = 6

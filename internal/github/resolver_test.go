@@ -948,3 +948,32 @@ func TestResolver_HasAnyCredential(t *testing.T) {
 		})
 	}
 }
+
+// TestResolver_ScopedMint_DisabledSecretStore_FailsLoudlyWithoutLoadingKey is
+// the executor-side guarantee behind control-plane App-token minting: an
+// executor wires the disabled SecretStore (it never holds the
+// secret-decryption key — App-token minting is a control-plane
+// responsibility, and executors receive only pre-minted, hour-lived tokens in
+// their sealed run bundle). So any stray attempt to mint an installation token
+// on an executor — the one code path that would parse the App private key —
+// must fail loudly at the store, before an App JWT is signed. Proven two ways:
+// the error wraps the executor sentinel, and the mint endpoint is never hit
+// (no signed JWT means the private key was never parsed or loaded).
+func TestResolver_ScopedMint_DisabledSecretStore_FailsLoudlyWithoutLoadingKey(t *testing.T) {
+	gh := newGHTestServer(t)
+	r := NewResolver(
+		&fakeSecrets{err: db.ErrSecretStoreUnavailable}, // the executor's disabled secret store
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	)
+
+	_, err := r.(ScopedResolver).TokenForRepoScoped(context.Background(), "org-1", "acme", "widget", map[string]string{"contents": "write"})
+	if !errors.Is(err, db.ErrSecretStoreUnavailable) {
+		t.Fatalf("err = %v, want it to wrap db.ErrSecretStoreUnavailable (a stray executor mint must fail loudly at the sentinel)", err)
+	}
+	if n := atomic.LoadInt32(&gh.mintCalls); n != 0 {
+		t.Fatalf("mint endpoint hit %d times; the disabled secret store must fail before any App JWT is signed (no private-key material loaded)", n)
+	}
+}

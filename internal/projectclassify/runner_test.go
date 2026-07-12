@@ -62,7 +62,7 @@ func TestRunner_AllErroredLeavesEntityForRetry(t *testing.T) {
 
 	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil, nil)
 	// Force every Stage 1 vote to error (simulates claude CLI down).
-	r.stage1Fn = func(context.Context, string, string) (int, string, error) {
+	r.stage1Fn = func(context.Context, string, haikuPrompt) (int, string, error) {
 		return 0, "", errors.New("simulated CLI down")
 	}
 	r.run(context.Background()) // synchronous one cycle
@@ -103,8 +103,8 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 	}
 
 	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil, nil)
-	r.stage1Fn = func(_ context.Context, _, prompt string) (int, string, error) {
-		if strings.Contains(prompt, "<project_name>\nFlaky\n</project_name>") {
+	r.stage1Fn = func(_ context.Context, _ string, p haikuPrompt) (int, string, error) {
+		if strings.Contains(p.Message, "<project_name>\nFlaky\n</project_name>") {
 			return 0, "", errors.New("simulated CLI failure for Flaky")
 		}
 		return 30, "stub for Good", nil
@@ -144,8 +144,8 @@ func TestRunner_ExactTieRationaleDoesNotQuoteOneCandidate(t *testing.T) {
 	}
 
 	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil, nil)
-	r.stage1Fn = func(_ context.Context, _, prompt string) (int, string, error) {
-		if strings.Contains(prompt, "<project_name>\nAlpha\n</project_name>") {
+	r.stage1Fn = func(_ context.Context, _ string, p haikuPrompt) (int, string, error) {
+		if strings.Contains(p.Message, "<project_name>\nAlpha\n</project_name>") {
 			return 75, "definitely belongs to Alpha", nil
 		}
 		return 75, "definitely belongs to Beta", nil

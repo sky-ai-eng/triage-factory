@@ -123,7 +123,7 @@ const (
 // # Where the strict allowlist actually lives
 //
 // The D10 gVisor sandbox builds the OCI bundle's process.env from scratch — see
-// the docs/specs/sky-254-runsc-validation/ probe, which curated
+// the docs/for-agents/specs/sky-254-runsc-validation/ probe, which curated
 // process.env to {PATH, TERM, AGENT_CURATED_KEY} and verified via
 // `env` inside the sandbox that nothing else leaked through. That
 // is the strict env-curation layer; this list is the lighter-touch

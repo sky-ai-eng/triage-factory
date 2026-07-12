@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the poll-scale benchmark (cmd/pollbench): a cold-start GitHub sync
 # against a deterministic fake GitHub API at large-org shape, driven through
-# the real poller + tracker. See docs/poll-bench.md for the standard shapes
+# the real poller + tracker. See docs/benchmarks/poll-bench.md for the standard shapes
 # and recorded baselines.
 #
 # Unlike sandbox-bench.sh this needs no container: the fake GitHub server,

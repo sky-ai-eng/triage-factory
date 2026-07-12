@@ -386,8 +386,6 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 		return nil, fmt.Errorf("marshal batch: %w", err)
 	}
 
-	prompt := fmt.Sprintf(ai.RepoProfilePrompt, string(inputJSON))
-
 	// Bound concurrent background sandboxes across all orgs + jobs. A
 	// cancelled ctx returns the error into the existing batch-failure path
 	// (fallback upsert without AI summary, row left for retry). A nil limiter
@@ -397,41 +395,36 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 	}
 	defer limiter.Release()
 
-	// Run through the shared agent runtime. UsageSink accumulates the
-	// per-message token breakdown (no transcript persisted); we only parse
-	// the terminal Result.Result JSON array below, but the cost + tokens
-	// land in system_llm_runs via the recorder.
-	startedAt := time.Now().UTC()
-	usage := &agentproc.UsageSink{}
-	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
-		Model:       ai.SystemJobModel,
-		Message:     prompt,
-		TraceID:     "repoprofile-batch",
-		OrgID:       orgID,
-		Secrets:     secrets,
-		LLMResolver: llmResolve,
-	}, usage)
-	// One row per batch call whenever the subprocess produced an outcome
-	// (a failed-but-completed run still cost tokens). Never breaks profiling.
-	recorder.Record(ctx, systemllm.Call{
-		OrgID:     orgID,
-		Job:       systemllm.JobRepoProfiler,
-		Model:     ai.SystemJobModel,
-		StartedAt: startedAt,
-		Metadata:  map[string]any{"repo_count": len(batch)},
-	}, outcome, usage)
+	// Complete owns the mode branch: local mode runs the shared agent
+	// runtime exactly as before (Message, the combined instructions+data
+	// prompt); multi mode calls the org's configured Anthropic/Bedrock
+	// provider directly, with the instructions as the system prompt and just
+	// the repo batch as the user turn. We only parse the returned text's
+	// JSON array below; cost + tokens land in system_llm_runs via Complete.
+	// LLMResolver routes a role-mode Bedrock org through internal/llmcred so
+	// the direct call is signed with a minted short-lived STS session
+	// credential (TFAC-616); nil for local/ambient.
+	result, err := recorder.Complete(ctx, systemllm.CompleteOptions{
+		OrgID:        orgID,
+		Job:          systemllm.JobRepoProfiler,
+		Message:      fmt.Sprintf(ai.RepoProfilePrompt, string(inputJSON)),
+		SystemPrompt: ai.RepoProfileSystemPrompt,
+		UserMessage:  fmt.Sprintf(ai.RepoProfileUserPrompt, string(inputJSON)),
+		Model:        ai.SystemJobModel,
+		DirectModel:  ai.SystemJobModelDirect,
+		MaxTokens:    16384,
+		Temperature:  0.1,
+		TraceID:      "repoprofile-batch",
+		Secrets:      secrets,
+		LLMResolver:  llmResolve,
+		Metadata:     map[string]any{"repo_count": len(batch)},
+		CostFn:       ai.CalculateCostUSD,
+	})
 	if err != nil {
-		stderr := ""
-		if outcome != nil {
-			stderr = outcome.Stderr
-		}
-		return nil, fmt.Errorf("repoprofile agent failed: %w, stderr: %s", err, stderr)
-	}
-	if outcome == nil || outcome.Result == nil {
-		return nil, fmt.Errorf("repoprofile agent: no terminal result event")
+		return nil, fmt.Errorf("repoprofile agent failed: %w", err)
 	}
 
-	raw := ai.StripCodeFences([]byte(outcome.Result.Result))
+	raw := ai.StripCodeFences([]byte(result.Text))
 
 	var results []repoProfileResult
 	if err := json.Unmarshal(raw, &results); err != nil {

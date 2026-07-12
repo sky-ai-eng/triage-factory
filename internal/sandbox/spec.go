@@ -247,7 +247,7 @@ func hostSSLCertsDir() string {
 //
 // NOTE — not enforced under gVisor. runsc does NOT apply the OCI
 // container seccomp profile to the sandboxed application (validated:
-// docs/specs/playwright-chromium-sandbox/probe-seccomp.sh — a
+// docs/for-agents/specs/playwright-chromium-sandbox/probe-seccomp.sh — a
 // KILL_PROCESS default had zero effect, and KILL can't be shadowed by
 // systrap's interception trap). gVisor's design makes the Sentry the
 // syscall boundary: the app's syscalls are serviced in user space and

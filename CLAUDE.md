@@ -48,9 +48,9 @@ Triage Factory is a **single Go binary** (HTTP server + pollers + delegated-agen
 - **Server mode** (default) — HTTP API + websocket hub + pollers + scorer + event router + delegation spawner.
 - **CLI mode** (`exec`, `status`) — invoked _by delegated Claude Code agents_ inside a worktree. `cmd/exec/` provides scoped GitHub/Jira subcommands the agent uses instead of calling those APIs directly, so credentials stay in the keychain and activity is auditable via `runs` / `run_artifacts`.
 
-### Core data model (target state)
+### Core data model
 
-The product vision and direction live in `docs/where-tf-is-going.html`. Four levels, each with its own lifecycle:
+The core data model is four levels, each with its own lifecycle:
 
 ```
 Entity (PR #18 / Jira SKY-123)     ← long-lived, from first poll until closed/merged
@@ -86,11 +86,27 @@ Pollers publish events to the bus rather than invoking callbacks directly. This 
 
 ### Poller / tracker
 
-`internal/poller` manages GitHub + Jira pollers. `internal/tracker` does the diff logic: snapshot → refresh → diff against prior snapshot → emit typed events only on transitions. The snapshot-diff is the _sole_ source of truth for re-emit prevention — a check-run ID seen last cycle doesn't fire again. See `docs/tracked-events.md` for the taxonomy.
+`internal/poller` manages GitHub + Jira pollers. `internal/tracker` does the diff logic: snapshot → refresh → diff against prior snapshot → emit typed events only on transitions. The snapshot-diff is the _sole_ source of truth for re-emit prevention — a check-run ID seen last cycle doesn't fire again. See `docs/concepts/tracked-events.md` for the taxonomy.
 
 ### Delegation (the "Agent" column)
 
 `internal/delegate/spawner.go` + `internal/worktree` — delegation spins up a **headless Claude Code instance inside an isolated git worktree**. Credentials are hot-swapped into the spawner on config change (see `SetOnGitHubChanged` in `main.go`); the spawner instance itself is created once at startup. Agents stream stdout into `run_messages`; structured outputs (PRs opened, reviews posted) land in `run_artifacts` with a unique `is_primary` per run. Orphaned worktrees from crashed runs are cleaned on startup via `worktree.Cleanup()`.
+
+### Sandbox, isolation, and executor credentials (multi-mode)
+
+Agent runs — delegated runs and curator turns — execute through `internal/agentproc.Run`, which spawns the Claude Code SDK as a `node` subprocess. In **multi mode on Linux** it wraps that subprocess in a gVisor (runsc) jail; the gate is `shouldSandbox()` = `runmode.Current()==ModeMulti && GOOS=="linux"`, so **local mode runs the same subprocess unsandboxed** — everything below about capabilities and isolation is multi-mode only.
+
+The executor is split three ways so that no process holds both a dangerous power and exposure to hostile input:
+
+- **cap-broker** (`cmd/capbroker`, `internal/sandbox`) — the only holder of `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`. Builds the per-run netns/veth/iptables/cgroup, launches/supervises runsc, owns the OCI spec from a fixed template, and validates the narrow launch RPC (`ValidateLaunchParams`). Holds **no credentials**, parses **no agent output**.
+- **orchestrator** — the main process, capabilities **dropped at exec** via `setpriv` (Go can't drop reliably in-process). Runs the dispatcher, holds credentials, and binds the per-run **llm/git/egress proxies** (`internal/agentproc/proxies.go`) + the **agenthost** unix socket (`cmd/exec/agenthost`) that parse hostile agent traffic — with zero capabilities.
+- **sandbox** — the gVisor jail. **Property B**: no real credential ever enters its env; the agent gets a per-run proxy URL + a throwaway token, and the real key is injected host-side on the upstream hop. Per-run fail-closed egress allowlist.
+
+**Executor credentials never come from the secret store.** On `TF_ROLE=executor` the secret store is disabled (`pgstore.NewWithoutSecrets`; `TF_SECRET_ENCRYPTION_KEY` is never loaded). Credentials arrive as **sealed per-run bundles** — the control plane resolves and seals them (`internal/credprovision` → `internal/credseal`) to the claiming instance's key, writes a `run_credentials` row, and the executor unseals once at claim and threads the plaintext on ctx (`credbundle.FromContext`). So executor-side code (proxies, agenthost, git) reads credentials from the **bundle**, never `stores.Secrets` — resolving from the disabled store is a recurring bug class. `TF_ROLE=all` and local mode use the live secret store directly (no bundle). Full posture: `docs/security/security-overview.md` + `docs/security/privilege-separation.md`.
+
+### Curator
+
+`internal/curator` — an interactive, per-project agent the user chats with, distinct from the task→run delegation flow. Turns are serialized per session and execute through `agentproc.Run` (sandboxed like a delegated run in multi-mode), with tool access to a per-project **knowledge base** and pinned repo worktrees (shared read-only per `(org, repo)`, seeded on demand). State lives in `curator_requests` + the knowledge-base files under `TF_STATE_ROOT`.
 
 ### Instance registry (fleet membership)
 
@@ -114,19 +130,23 @@ React 19 + Vite + TypeScript + Tailwind v4. Router routes live in `frontend/src/
 
 ## Conventions to know before editing
 
-- **Schema: goose-managed forward migrations, fresh installs only.** The consolidated baseline (`202605130001`) is a hard reset — pre-baseline DBs are refused at boot via the brick check in `internal/db/migrations.go`. Operators run `triagefactory uninstall` (or `./scripts/clean-slate.sh` if working from source) and reinstall. New migrations land as `internal/db/migrations-sqlite/NNNNNNNNNNNN_description.sql` (12-digit `YYYYMMDDNNNN` version) with `-- +goose Up` / `-- +goose Down` markers. Down blocks are `SELECT 'down not supported';` no-ops. The brick check (`assertFreshOrCurrent`) gates entry to `goose.Up`: empty DB → proceed; `goose_db_version` contains the baseline (202605130001) → proceed; anything else → `ErrPreV1110Install`. Postgres migrations live in `internal/db/migrations-postgres/`; `db.Migrate(db, dialect)` routes to the matching tree. Postgres tests use the `internal/db/pgtest` harness — testcontainer with two connections (AdminDB superuser, AppDB authenticator+tf_app) — and skip cleanly when Docker isn't available. See `docs/specs/sky-247-d3-multi-tenant-postgres-schema.html`.
+- **Schema: goose-managed forward migrations, fresh installs only.** The consolidated baseline (`202605130001`) is a hard reset — pre-baseline DBs are refused at boot via the brick check in `internal/db/migrations.go`. Operators run `triagefactory uninstall` (or `./scripts/clean-slate.sh` if working from source) and reinstall. New migrations land as `internal/db/migrations-sqlite/NNNNNNNNNNNN_description.sql` (12-digit `YYYYMMDDNNNN` version) with `-- +goose Up` / `-- +goose Down` markers. Down blocks are `SELECT 'down not supported';` no-ops. The brick check (`assertFreshOrCurrent`) gates entry to `goose.Up`: empty DB → proceed; `goose_db_version` contains the baseline (202605130001) → proceed; anything else → `ErrPreV1110Install`. Postgres migrations live in `internal/db/migrations-postgres/`; `db.Migrate(db, dialect)` routes to the matching tree. Postgres tests use the `internal/db/pgtest` harness — testcontainer with two connections (AdminDB superuser, AppDB authenticator+tf_app) — and skip cleanly when Docker isn't available. See `docs/for-agents/specs/sky-247-d3-multi-tenant-postgres-schema.html`.
+- **Stores are dual-dialect behind one interface.** All persistence goes through the `db.Stores` interfaces (`internal/db`), implemented by **both** SQLite (`internal/db/sqlite`) and Postgres (`internal/db/postgres`) — a new store method is the interface + both implementations + a case in the `internal/db/dbtest` conformance suite (which runs against both). Each pod opens two pools: an **admin pool** (RLS-bypassed) and an **app pool** (RLS). Request handlers use the app pool under a per-request RLS context; JWT-less background jobs (pollers, scorer, delegation) use the `...System` method variants on the admin pool, with `org_id` bound by argument rather than RLS. The read-scoping standing rule above governs *what* those org-wide reads may return.
 - **Events catalog** is a read-only system registry seeded from `domain.AllEventTypes()` via `db.SeedEventTypes`. New event types must be added there _and_ the events_catalog table will reject emissions of unregistered types (FK from `events.event_type`).
 - **System triggers ship disabled.** They're reference examples — users opt in or replace them. See `seed.go`.
 - **Go module path:** `github.com/sky-ai-eng/triage-factory`. The GitHub org is `sky-ai-eng`.
 - **Go version:** `go.mod` says 1.26.1, README says 1.23+; keep the floor modern but don't bump without reason.
 - **User integration credentials never touch disk.** Per-user tokens that the running TF binary uses (GitHub PAT, Jira PAT, etc.) live in the OS keychain via `internal/auth`. Token fields in Settings show "leave blank to keep current" when a token is stored. This rule covers credentials the TF process reads at request time — it does NOT apply to multi-mode deployment secrets (DB passwords, GoTrue signing material, etc.), which live in the operator's `.env` like any compose deployment.
-- **JWT verification.** `internal/auth/verify` wraps `MicahParks/keyfunc/v3` + `golang-jwt/jwt/v5` to verify GoTrue-signed RS256 access tokens against a remote JWKS. The **server auth path** is multi-mode only — local-mode boots without a GoTrue dependency and the request-handler middleware never constructs a Verifier. The `triagefactory jwk-init --verify` CLI smoke helper does construct a Verifier regardless of mode (operator-facing debug tool); that path is separate from the server. `triagefactory jwk-init [--write-env F]` generates the RS256 keypair GoTrue signs with — operator runs it once during install. See `docs/self-host-setup.md`.
+- **JWT verification.** `internal/auth/verify` wraps `MicahParks/keyfunc/v3` + `golang-jwt/jwt/v5` to verify GoTrue-signed RS256 access tokens against a remote JWKS. The **server auth path** is multi-mode only — local-mode boots without a GoTrue dependency and the request-handler middleware never constructs a Verifier. The `triagefactory jwk-init --verify` CLI smoke helper does construct a Verifier regardless of mode (operator-facing debug tool); that path is separate from the server. `triagefactory jwk-init [--write-env F]` generates the RS256 keypair GoTrue signs with — operator runs it once during install. See `docs/self-hosting/install.md`.
 - **Runtime mode flag.** `TF_MODE=local|multi` is read once at startup by `internal/runmode` (called from `main()` before the argv-dispatch switch). Default is `local`. Downstream packages branch on `runmode.Current()`: `internal/db` picks SQLite vs Postgres, `internal/paths` (forthcoming with SKY-248 D4b) resolves state-root paths, future auth + sandbox tickets gate multi-only behavior. `runmode.LocalDefaultOrgID` is the synthetic org-context value local-mode callers pass everywhere a real `orgID` is expected.
+- **Role flag.** `TF_ROLE=all|control|executor` (default `all`; local mode forces `all`) selects which subsystems a process runs: `control` serves the API/WS and competes for the background-brain lease; `executor` runs the dispatcher + sandboxes and takes no inbound traffic; `all` runs everything in one process (local + small self-host). Resolved via `internal/runmode`; the split is specified in `docs/for-agents/specs/horizontal-scaling/`.
 - **Branch naming.** Use `aa/TFAC-<NNN>` (uppercase ticket ID, no trailing slug) for ticketed work — e.g., `aa/TFAC-327`, NOT `aa/tfac-327-foo` or `aa/TFAC-327-handler-sweep`. Linear holds the descriptive title; the branch name's job is just to point back to the ticket. For un-ticketed work, `aa/<short-kebab-slug>` is fine. `aa/` is the user's initials (Aidan Allchin); the `codex/...` prefix that exists in the repo comes from a different agent (OpenAI Codex) — don't copy it.
+- **No ticket references in code comments.** Keep `TFAC-`/`SKY-` ids out of source comments — they belong in commit messages, PR bodies, and branch names only. Comments explain **why**; they never restate what the code does or assert what other code does.
 
 ## Reference docs
 
-- `docs/where-tf-is-going.html` — product vision + direction for the entity/event/task/run model.
-- `docs/tracked-events.md` — GitHub/Jira event taxonomy + snapshot field list.
-- `docs/usage.md` — CLI flags, config reference, polling details.
+- `docs/concepts/tracked-events.md` — GitHub/Jira event taxonomy + snapshot field list.
+- `docs/local-mode/` — local-mode usage: CLI flags, configuration, secret storage, headless, polling.
+- `docs/self-hosting/` — multi-mode operator guides (install, scaling, SSO, monitoring).
+- `docs/security/` — isolation tiers, security overview, privilege separation, seccomp, release verification.
 - `docs/for-agents/auto-delegation-briefing.md` — briefing for delegated agents.

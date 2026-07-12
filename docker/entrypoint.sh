@@ -167,7 +167,7 @@ if [ "$(uname -s)" = "Linux" ] && multi_mode; then
     # created after this point is written directly by the orchestrator's
     # own uid. A volume populated by an older, root-running orchestrator
     # needs a one-time `chown -R` before its first boot under the new
-    # default — see docs/self-host-setup.md.
+    # default — see docs/security/privilege-separation.md.
     [ -d /data ] && chown "$TF_ORCHESTRATOR_UID:$TF_ORCHESTRATOR_GID" /data
     [ -d /opt/triagefactory/sandbox ] && chown "$TF_ORCHESTRATOR_UID:$TF_ORCHESTRATOR_GID" /opt/triagefactory/sandbox
 

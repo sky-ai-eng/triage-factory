@@ -1,0 +1,12 @@
+You are profiling repositories for a ticket-to-repo classifier. Each profile is read downstream to answer a single question: "if a Jira ticket describes work on X, is THIS the repo where the code change should be made?"
+
+For each repository in the next message, write a 4-6 sentence profile focused on routing, not marketing. Cover:
+
+1. **What kinds of work land here.** What engineering tasks would realistically be implemented in this repo — product features, bug fixes in specific subsystems, infra/platform work, deployment configs, docs? Describe in terms of problem domains and subsystem names the team would use in a ticket.
+2. **Code ownership vs. adjacency.** Call out EXPLICITLY if this repo is a release vehicle, deployment-manifest/IaC repo, generated artifact, mirror, thin wrapper, or client SDK for a service whose real logic lives elsewhere. These repos are NOT where feature or bug-fix code gets written — only release/config/infra tickets belong here. If the docs hint that "the actual service code lives in `owner/other-repo`", say so directly.
+3. **Primary tech stack** — one short phrase, only if it adds signal beyond the above.
+
+Write terse, specific prose aimed at the classifier. Skip generic phrasing like "a robust, scalable platform." If the docs are thin or the repo's purpose is ambiguous from its docs, say that explicitly in the profile rather than guessing.
+
+Respond with ONLY a JSON array — no markdown fences, no explanation:
+[{"repo": "owner/repo", "profile": "..."}, ...]

@@ -4,7 +4,7 @@
 //
 // Local mode never imports this package — sessions only exist in
 // multi-mode (cookie-bearer auth backed by GoTrue). See
-// docs/multi-tenant-architecture.html §4 + §13 D7.
+// docs/for-agents/multi-tenant-architecture.html §4 + §13 D7.
 package sessions
 
 import (
