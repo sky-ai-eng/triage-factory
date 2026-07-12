@@ -3,11 +3,16 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"golang.org/x/sys/unix"
 )
 
 // foreignUID is an owner no legitimate run tree ever has — the validation
@@ -332,5 +337,181 @@ func TestBrokeredMode_RejectsRootOwnedTree(t *testing.T) {
 	}
 	if _, err := (hostOps{}).CaptureRunDelta(context.Background(), rootOwned); err == nil {
 		t.Error("CaptureRunDelta accepted a root-owned tree in brokered mode; same hole via the capture op")
+	}
+}
+
+// requireOpenat2Supported skips the test if this kernel can't do
+// RESOLVE_NO_SYMLINKS — the openat2-specific tests below assert on the
+// kernel-enforced code path, not the fallback, and need a real >=5.6
+// kernel to do that.
+func requireOpenat2Supported(t *testing.T) {
+	t.Helper()
+	if runTreeOpenat2Unsupported.Load() {
+		t.Skip("this kernel doesn't support openat2(RESOLVE_NO_SYMLINKS)")
+	}
+}
+
+// TestChownRunTree_RejectsSymlinkedParentComponent pins the openat2 half
+// of the boundary directly: a run tree whose path resolves THROUGH a
+// symlinked ancestor (not the root argument itself, which the pre-existing
+// "symlinked root" case above already covers) is refused by the kernel at
+// the anchor open, before any entry inside is ever touched.
+func TestChownRunTree_RejectsSymlinkedParentComponent(t *testing.T) {
+	requireOpenat2Supported(t)
+
+	base := t.TempDir()
+	realGrandparent := filepath.Join(base, "real-gp")
+	root := filepath.Join(realGrandparent, "mid", "run-root")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkedGrandparent := filepath.Join(base, "linked-gp")
+	if err := os.Symlink(realGrandparent, linkedGrandparent); err != nil {
+		t.Fatal(err)
+	}
+	rootViaSymlink := filepath.Join(linkedGrandparent, "mid", "run-root")
+
+	if err := (hostOps{}).ChownRunTree(context.Background(), rootViaSymlink, ""); err == nil {
+		t.Error("ChownRunTree through a symlinked ancestor component = nil error, want kernel refusal")
+	}
+	if err := (hostOps{}).RemoveRunTree(context.Background(), rootViaSymlink); err == nil {
+		t.Error("RemoveRunTree through a symlinked ancestor component = nil error, want kernel refusal")
+	}
+}
+
+// TestRemoveRunTree_SymlinkInsideTree_UnlinksLinkNotTarget mirrors
+// TestChownRunTree_HandsTreeToSandbox's symlink-safety property for the
+// destructive op: a symlink planted inside the tree pointing outside it is
+// unlinked as itself — its out-of-tree target is left untouched — rather
+// than being followed. Needs no root: removal never chowns.
+func TestRemoveRunTree_SymlinkInsideTree_UnlinksLinkNotTarget(t *testing.T) {
+	requireOpenat2Supported(t)
+
+	outside := filepath.Join(t.TempDir(), "outside-target")
+	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := (hostOps{}).RemoveRunTree(context.Background(), root); err != nil {
+		t.Fatalf("RemoveRunTree: %v", err)
+	}
+	if _, err := os.Lstat(root); !os.IsNotExist(err) {
+		t.Errorf("tree still present after RemoveRunTree (stat err = %v)", err)
+	}
+	if _, err := os.Lstat(outside); err != nil {
+		t.Errorf("symlink target OUTSIDE the tree was removed by RemoveRunTree: %v", err)
+	}
+}
+
+// TestRemoveRunTree_MissingLeafUnderExistingParent_IsNoop pins the other
+// half of the idempotent-missing-tree contract: not just a wholly missing
+// path (TestRemoveRunTree_Behavior), but a missing leaf directory whose
+// parent DOES exist — the shape that exercises the second (Openat, not
+// openat2) ENOENT in the fd-relative implementation.
+func TestRemoveRunTree_MissingLeafUnderExistingParent_IsNoop(t *testing.T) {
+	requireOpenat2Supported(t)
+
+	parent := t.TempDir()
+	missing := filepath.Join(parent, "gone")
+	if err := (hostOps{}).RemoveRunTree(context.Background(), missing); err != nil {
+		t.Errorf("RemoveRunTree on a missing leaf under an existing parent = %v, want nil (idempotent)", err)
+	}
+}
+
+// withForcedOpenat2Unsupported points openat2Syscall at a stub that always
+// returns ENOSYS — simulating a pre-5.6 kernel without needing one — and
+// resets both the seam and the process-wide fallback latch on cleanup so
+// later tests still exercise the real kernel-enforced path.
+func withForcedOpenat2Unsupported(t *testing.T) (calls *int) {
+	t.Helper()
+	n := 0
+	origSyscall := openat2Syscall
+	openat2Syscall = func(dirfd int, path string, how *unix.OpenHow) (int, error) {
+		n++
+		return -1, unix.ENOSYS
+	}
+	t.Cleanup(func() {
+		openat2Syscall = origSyscall
+		runTreeOpenat2Unsupported.Store(false)
+	})
+	return &n
+}
+
+// TestRunTreeOps_FallBackWhenOpenat2Unsupported pins the decided ENOSYS
+// contract via the test seam: when openat2 itself reports unsupported, both
+// ops still succeed (through the untouched EvalSymlinks-based fallback) and
+// the decision latches process-wide — a second call never even attempts
+// openat2 again.
+func TestRunTreeOps_FallBackWhenOpenat2Unsupported(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (CAP_CHOWN) to change file owners")
+	}
+	calls := withForcedOpenat2Unsupported(t)
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := (hostOps{}).ChownRunTree(context.Background(), root, ""); err != nil {
+		t.Fatalf("ChownRunTree with openat2 unsupported: %v", err)
+	}
+	if uid, _ := statUIDGID(t, filepath.Join(root, "sub")); uid != WorktreeUID {
+		t.Errorf("fallback did not chown %s to the sandbox identity", filepath.Join(root, "sub"))
+	}
+	if !runTreeOpenat2Unsupported.Load() {
+		t.Fatal("fallback latch not set after an ENOSYS openat2 response")
+	}
+
+	if err := (hostOps{}).RemoveRunTree(context.Background(), root); err != nil {
+		t.Fatalf("RemoveRunTree with openat2 unsupported: %v", err)
+	}
+	if _, err := os.Lstat(root); !os.IsNotExist(err) {
+		t.Errorf("tree still present after fallback RemoveRunTree")
+	}
+
+	callsAfterLatch := *calls
+	root2 := t.TempDir()
+	if err := (hostOps{}).ChownRunTree(context.Background(), root2, ""); err != nil {
+		t.Fatalf("ChownRunTree after latch: %v", err)
+	}
+	if *calls != callsAfterLatch {
+		t.Errorf("openat2Syscall invoked again after the fallback latch was set (calls %d -> %d); it should skip straight to the fallback", callsAfterLatch, *calls)
+	}
+}
+
+// TestRunTreeOps_WarnsOnceWhenOpenat2Unsupported pins the decided logging
+// contract: the WARN naming the kernel-version cause fires exactly once
+// process-wide, not once per call.
+func TestRunTreeOps_WarnsOnceWhenOpenat2Unsupported(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (CAP_CHOWN) to change file owners")
+	}
+	withForcedOpenat2Unsupported(t)
+
+	var buf bytes.Buffer
+	restore := logging.SetOutput(&buf)
+	defer restore()
+
+	root1 := t.TempDir()
+	root2 := t.TempDir()
+	if err := (hostOps{}).ChownRunTree(context.Background(), root1, ""); err != nil {
+		t.Fatalf("ChownRunTree: %v", err)
+	}
+	if err := (hostOps{}).ChownRunTree(context.Background(), root2, ""); err != nil {
+		t.Fatalf("ChownRunTree: %v", err)
+	}
+
+	// "openat2" itself appears twice PER RECORD (once in msg, once in the
+	// wrapped err attribute), so count records via level=WARN instead.
+	if n := strings.Count(buf.String(), "level=WARN"); n != 1 {
+		t.Errorf("openat2-unsupported warning logged %d times, want exactly 1:\n%s", n, buf.String())
 	}
 }

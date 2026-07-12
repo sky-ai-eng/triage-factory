@@ -227,7 +227,7 @@ authenticate an org, so the guarantee is that every path a run touches shares it
 own tree's scope. The privileged run-tree chown/remove path resolves through
 `openat2(RESOLVE_NO_SYMLINKS)`, so the kernel refuses a swapped-symlink component
 rather than a prior check merely catching it.
-<!-- TODO(TFAC-619): mount-source + netns per-run pinning. TODO(TFAC-618): openat2 kernel-enforcement of the run-tree TOCTOU. Both realized when those ship; until then the broker shape-checks the mount source without pinning it and the run-tree ops close the TOCTOU by argument, not kernel enforcement. -->
+<!-- TODO(TFAC-619): mount-source + netns per-run pinning, realized when it ships; until then the broker shape-checks the mount source without pinning it. -->
 
 ### 4.4 A note on dropping capabilities
 
