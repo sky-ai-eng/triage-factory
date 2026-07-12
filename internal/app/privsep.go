@@ -3,9 +3,31 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
+
+// currentUID is the process-uid seam orchestratorUIDCollidesWithSidecarBand
+// reads through — os.Getuid() by default, overridable in tests so the
+// collision path is exercisable without a real setuid drop.
+var currentUID = os.Getuid
+
+// orchestratorUIDCollidesWithSidecarBand reports whether this process's
+// own uid falls inside the reserved sidecar band — sandbox.SidecarUIDBase's
+// own init() assertion only pins the DEFAULT orchestrator uid (10001) as
+// disjoint from that band; it can't see an operator-repointed
+// TF_ORCHESTRATOR_UID. This is the authoritative check: it reads the uid
+// the kernel actually gave this process after whatever privilege drop ran
+// (setpriv, in the shipped container) — not a flag or env var's claim
+// about it. Independent of the broker's own matching check on its
+// --orchestrator-uid flag (cmd/capbroker/cli_linux.go): that flag and this
+// process's real uid are configured on two different command lines and
+// could drift, so this backstop holds even if they do.
+func orchestratorUIDCollidesWithSidecarBand() bool {
+	return sandbox.IsSidecarUID(currentUID())
+}
 
 // capBrokerHandle is the cross-platform seam for the spawned broker
 // process's lifecycle. The real value is *capbroker.Process on Linux; nil
@@ -41,6 +63,15 @@ var startCapBrokerFn = startCapBroker
 func (a *App) startCapBrokerIfSandboxing(ctx context.Context) error {
 	if !agentproc.WillSandbox() {
 		return nil
+	}
+	// A collision here would let the orchestrator and some run's sidecar
+	// share a uid, defeating the per-run-uid isolation the sidecar design
+	// relies on entirely (same-uid processes can signal each other and,
+	// subject to the host's Yama ptrace_scope, ptrace each other) — refuse
+	// to serve rather than boot into that.
+	if orchestratorUIDCollidesWithSidecarBand() {
+		return fmt.Errorf("orchestrator uid %d falls inside the reserved sidecar uid band [%d, %d) — repoint TF_ORCHESTRATOR_UID outside that range",
+			currentUID(), sandbox.SidecarUIDBase, sandbox.SidecarUIDBase+sandbox.MaxSandboxes)
 	}
 	handle, ping, err := startCapBrokerFn(ctx)
 	if err != nil {

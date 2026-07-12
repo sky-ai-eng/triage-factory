@@ -35,7 +35,7 @@ cd frontend && pnpm run dev
 ./scripts/multi-mode-dev.sh down  # tear down
 ```
 
-The repo-root `.claude/settings.json` registers a `PostToolUse` hook that runs `goimports -w` on edited `.go` files and `prettier --write` on frontend sources — do not duplicate that work manually.
+The repo-root `.claude/settings.json` registers a `PostToolUse` hook that runs `goimports -w` on edited `.go` files and `prettier --write` on frontend sources — do not duplicate that work manually. In practice this means you can write/edit Go code that references a new package without hand-adding the import line first; goimports fills it in after the edit lands. Caveat: the hook runs after *every* Edit/Write call, so it strips an import as unused if you add it in one call and only add the code that uses it in a later call — add an import and its first use in the same Edit/Write call (or just skip writing the import yourself and let goimports add it once the using code is in place).
 
 ## Architecture
 

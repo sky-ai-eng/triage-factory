@@ -44,6 +44,10 @@ func runBroker(args []string) error {
 		return err
 	}
 
+	if err := validateOrchestratorUIDFlag(*orchestratorUID); err != nil {
+		return err
+	}
+
 	procname.SetTitle("tf-cap-broker")
 	logging.SetProcess("cap-broker")
 
@@ -114,6 +118,29 @@ func runBroker(args []string) error {
 		// Accept loop died on its own (not via our shutdown) — surface it.
 		return err
 	}
+}
+
+// validateOrchestratorUIDFlag rejects an --orchestrator-uid inside the
+// reserved sidecar uid band. sandbox.SidecarUIDBase's own init() assertion
+// only pins the DEFAULT orchestrator uid (10001) as disjoint from that
+// band — it can't see this operator-supplied flag. A collision would let
+// the orchestrator and some run's sidecar share a uid, which defeats the
+// isolation the sidecar's distinct-uid-per-run design relies on entirely
+// (same-uid processes can signal each other and, subject to the host's
+// Yama ptrace_scope, ptrace each other) — so refuse to start rather than
+// silently booting into that. This is the earliest point the actual
+// configured value is known; the orchestrator itself repeats the
+// equivalent check against its own post-drop os.Getuid() as the
+// authoritative backstop (see internal/app/privsep.go), since this flag
+// and the drop that setpriv performs are configured independently and
+// could, in principle, drift. A negative uid (the flag's default, meaning
+// "unset") always passes — this is a validation of a supplied value, not
+// a requirement that one be supplied.
+func validateOrchestratorUIDFlag(uid int) error {
+	if uid >= 0 && sandbox.IsSidecarUID(uid) {
+		return fmt.Errorf("capbroker: --orchestrator-uid %d falls inside the reserved sidecar uid band [%d, %d) — the orchestrator and a run's sidecar would share a uid; repoint TF_ORCHESTRATOR_UID outside that range", uid, sandbox.SidecarUIDBase, sandbox.SidecarUIDBase+sandbox.MaxSandboxes)
+	}
+	return nil
 }
 
 // logBootLine emits one legibility boot line: this process's uid and
