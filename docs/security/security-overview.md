@@ -354,7 +354,10 @@ to remain out of Kubernetes clusters entirely:
 - **Control plane as ordinary, fully-unprivileged pods.** The API/websocket/polling
   tier is a normal web service that holds **no** sandbox capabilities: every
   sandboxed workload — delegated runs and curator sessions alike — runs on
-  executors, and the scorer/profiler are brain-side LLM calls that never sandbox.
+  executors. The control plane's own background LLM work (task scoring, project
+  classification, repo profiling) is deliberately toolless — prompt in, JSON out,
+  no filesystem, no tool loop, no subprocess — so there is nothing to jail: those
+  are direct API calls from the Go process.
 - **If executors must run in Kubernetes**, they run as privileged pods on a
   dedicated, tainted node pool with the cloud metadata endpoint blocked, a
   minimal node role, and no other tenants' pods scheduled there. We do not

@@ -12,8 +12,8 @@ executor** pods with the `scale` compose profile.
 | Role | Serves user HTTP/WS | Pollers + router + AI brain | Runs migrations | Claims + executes delegated runs | Sandboxes |
 |------|:---:|:---:|:---:|:---:|:---:|
 | `all` (default) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `control` | ✅ | ✅ | ✅ | ❌ | ✅ (curator chat) |
-| `executor` | ❌ | ❌ | ❌ (asserts schema) | ✅ | ✅ (delegated runs) |
+| `control` | ✅ | ✅ | ✅ | ❌ | ❌ |
+| `executor` | ❌ | ❌ | ❌ (asserts schema) | ✅ | ✅ (delegated runs, curator) |
 
 Bring up 1 control + 2 executors:
 
@@ -37,9 +37,12 @@ docker compose --profile scale ps                 # 1 triagefactory (control) + 
 docker compose --profile scale logs -f executor
 ```
 
-Both roles run the **same image and entrypoint** (the broker-then-drop privilege
-separation), and **both carry the sandbox caps** — control pods sandbox curator
-chat sessions on the request path, executors sandbox delegated runs. Each executor
+Both roles run the **same image and entrypoint**, but **only executors carry the
+sandbox caps** (and the broker-then-drop privilege separation that contains them)
+— every sandboxed workload, delegated runs and curator sessions alike, executes
+on executors. A control pod is an ordinary unprivileged web service: its own
+background LLM work (task scoring, project classification, repo profiling) is
+toolless direct API calls that never spawn a sandbox. Each executor
 replica gets its **own** `TF_STATE_ROOT` (`/data`) and rootfs-cache volume: the
 fleet is shared-nothing, and two processes sharing one state root would collide on
 the instance-identity flock (the second refuses to boot). See the header of
@@ -88,12 +91,10 @@ large-fleet option, not a requirement for this profile.
 > of the holder going away. `GET /readyz` reflects this per pod — a `lease` field
 > reports `{name, holder_id, is_holder, term}`, and a standby hard-checks only DB +
 > migrations (never poller-alive) so the proxy below keeps every standby in
-> rotation. One caveat until curator homing lands: curator chat sessions
-> are pod-local (the serving control pod sandboxes them on the request path), so a
-> mid-conversation failover or an unlucky proxy re-route can land a follow-up
-> message on a different pod than the one holding the session — retry from the
-> client recovers it, but it's not yet seamless. The config below is the
-> reverse-proxy half you put in front of M control pods.
+> rotation. Curator chat sessions are executor-homed, not pod-local, so a
+> mid-conversation failover or a proxy re-route to a different control pod is
+> seamless. The config below is the reverse-proxy half you put in front of M
+> control pods.
 
 We ship configuration as a worked example, never proxy software. Any stock reverse
 proxy works; the load-bearing requirements are: **WebSocket upgrade passthrough**

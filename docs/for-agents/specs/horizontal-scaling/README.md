@@ -160,9 +160,9 @@ TF_ROLE = all | control | executor        (default: all; local mode forces all)
   just trivially self-resolve (the process holds every lease, placement
   always picks itself, NOTIFY loops back).
 - **`control`** — serves HTTP/API/WS and *competes for leadership* of
-  the background brain (§3). Never spawns user-run sandboxes (until the
-  system-job endgame in §7, it still jails its own Haiku system jobs, so
-  it keeps the privileged container caps).
+  the background brain (§3). Spawns no sandboxes at all: its system
+  jobs are toolless direct LLM calls and curator turns execute on
+  executors (§7), so it carries no privileged container caps.
 - **`executor`** — runs the dispatcher, sandboxes, agenthost daemons,
   per-run proxies, and its own disk reapers against its own
   `TF_STATE_ROOT`. Serves no user HTTP (a local health endpoint only).
@@ -193,9 +193,10 @@ because "no k8s" is *not* it:
 - **Non-target** means we don't *build for* k8s (no operator, no
   Helm chart, no manifests shipped) — not that it's forbidden.
 
-Control pods are the k8s-hostile half while they still jail system
-jobs (§7); once P4's job-classes land, control is unprivileged and
-runs anywhere, Autopilot included.
+Control pods pose no substrate constraint at all: unprivileged (no
+sandbox caps, no Node invocation — §7), they run anywhere, Autopilot
+included. The privileged-substrate requirement above is
+executors-only.
 
 ### 2.2 The unit of scale
 
@@ -238,7 +239,7 @@ lease. That one decision preserves four invariants at once — tracker
 single-writer, event-queue FIFO, bus-local sentinels, process-true
 `syslimit` — and makes leadership *coarse* (one lease), which is the
 cheapest thing that can possibly work. Sharding the brain per-org
-across control pods is a later refinement (§9 P4) that reuses the same
+across control pods is a later refinement (§9 P5) that reuses the same
 lease table at a finer key; the poll bench says one leader carries
 realistic multi-org load for a long time.
 
@@ -1129,7 +1130,7 @@ deliberately assume one variant and a uniform budget. The gate:
 before TFAC-408's image or resource dimensions ship on a
 multi-executor deployment, land budget admission, the
 eligibility-constrained claim, and `instance_variants` with an
-eviction budget (the §9 P4 item).
+eviction budget (the §9 P5 item).
 
 Keying, settled 2026-07-07: **two-layer, name → recipe → hash.** A
 profile binds a *named* catalog entry; the entry is a recipe (base +
@@ -1157,27 +1158,59 @@ is the deliberate forward-compat room in the meantime, per the
 
 ---
 
-## 7. Background jobs at N (and the system-sandbox endgame)
+## 7. Background jobs at N (and the unprivileged control plane)
 
-Phase 1 keeps all system jobs (scorer/classifier/profiler batches —
-Haiku, jailed in multi-mode) **on the leader**: sentinels stay
-in-process, `syslimit`'s cap stays globally true because exactly one
-process runs them, and nothing about their (already replica-tolerant:
-last-writer-wins, delegation-fenced) writes changes. The cost: control
-pods keep the privileged container caps to jail Haiku — and in the HA
-shape that means *every* control pod, since any of them can become
-leader. Settled (§11): the interim is accepted and job-classes stay
-P4 — the epic ships as one release, so no intermediate release ever
-exposes the interim; the reopening trigger is a fleet customer
-requiring an unprivileged or managed-k8s control tier.
+System jobs (scorer/classifier/profiler batches — Haiku) stay **on the
+leader**: sentinels stay in-process, `syslimit`'s cap stays globally
+true because exactly one process runs them, and nothing about their
+(already replica-tolerant: last-writer-wins, delegation-fenced) writes
+changes.
 
-The endgame (P4, when wanted): generalize the run queue with a **job
-class** so system jobs become claimable work on executors like any
-other sandbox. That single move lets control pods drop
-`SYS_ADMIN`/runsc entirely (a plain web tier), replaces `syslimit` with
-fleet-wide queue accounting (the TFAC-457 cancellation already points
-here), and gives system jobs the same fairness/placement machinery as
-runs. Not needed for the first fleet.
+The endgame (settled 2026-07-11, superseding the original job-class
+plan): **the brain's jobs stop needing a sandbox at all, instead of
+moving to somewhere privileged enough to host one.** The observation
+is that the five brain-side LLM paths split by capability surface,
+not by subsystem:
+
+- **Pure completions** — the scorer (`internal/ai/scorer.go`),
+  classifier stage 1 (`internal/projectclassify`), and the repo
+  profiler (`internal/repoprofile`) are toolless: no `AllowedTools`,
+  no `Cwd` (an empty scratch dir), no git proxy, no agenthost. Prompt
+  in, JSON out. The gVisor jail exists to contain T3 — an SDK RCE
+  reaching tools, files, or network — a surface these jobs never had.
+  They become **direct LLM API calls from Go** (same credential
+  resolution, same spend accounting), dropping the Node SDK
+  subprocess entirely — which also removes the one
+  untrusted-model-output parser that isn't memory-safe Go from the
+  control plane.
+- **Agentic** — curator turns (full tool allowlist, real worktrees,
+  agenthost `exec` surface) genuinely need the jail. Curator is the
+  *only* such brain job, and it homes to executors anyway (§6.3, P2
+  item 12) — placement machinery this epic builds regardless.
+- **Classifier stage 2 is removed, not migrated.** The agentic
+  KB-reading disambiguation pass was the one job both brain-resident
+  and genuinely agentic; rather than home it to executors, delete it.
+  An exact stage-1 tie resolves to **unassigned** — the existing
+  classified-but-unassigned state (`classified_at` set, `project_id`
+  NULL), surfaced by the project backfill UI for a human to place.
+  Rationale: a tie means "can't tell", and "can't tell" must never
+  widen anything — projects are team-scoped, and `OwningTeamForEntitySystem`
+  derives team visibility from `project_id`, so resolving a tie by
+  assigning *both* projects would derive team visibility from
+  classifier uncertainty. Unassigned entities keep flowing: the
+  factory belt keys off tracked repos / Jira project keys, never
+  `entities.project_id`.
+
+Net effect: control pods drop `SYS_ADMIN`/`NET_ADMIN`/runsc **and any
+Node invocation** — a plain Go web tier that runs anywhere,
+managed-k8s included. `syslimit` survives unchanged (the jobs stay
+leader-only and in-process; exactly one process still runs them);
+what disappears is the per-job sandbox cost, not their placement. The
+original alternative — generalize the run queue with a job class so
+system jobs become claimable executor work — is retired: it moved the
+sandbox dependency around instead of deleting it, and its secondary
+payoffs (fleet-wide accounting, fairness for system jobs) don't bind
+at target scale.
 
 Also inherited into this epic from TFAC-307 (they bind at fan-out, not
 at N=1): the short-TTL `ForSystem` credential-resolution cache, pool
@@ -1370,16 +1403,23 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
     split, agenthost upstream throttle/backoff. (M)
 16. Optional `/metrics` exporter. (S)
 
-**P4 — On demand**
-17. System-job job-classes on executors → control drops privileges;
-    fleet-wide accounting replaces `syslimit`. (L)
-18. Per-org brain sharding across control pods (same lease table,
+**P4 — Unprivileged control plane** (in scope for the release; §7)
+17. Classifier stage 2 removed; exact stage-1 ties → unassigned. (S)
+18. Scorer / classifier / profiler become direct toolless LLM calls
+    from Go — no SDK subprocess, no sandbox, no Node; spend
+    accounting + `syslimit` semantics preserved. (M)
+19. Control pods drop the sandbox caps (compose: the `control`-role
+    service loses `cap_add`/seccomp overrides; `all` keeps them) —
+    prerequisite: curator homing (P2 item 12). (S)
+
+**P5 — On demand**
+20. Per-org brain sharding across control pods (same lease table,
     org-keyed rows). (L)
-19. Hot-repo K-replication dial; heterogeneous-profile support per
+21. Hot-repo K-replication dial; heterogeneous-profile support per
     §6.4 — budget admission, eligibility-constrained claim,
     `instance_variants` + rootfs-cache eviction budget, pool labels
     (TFAC-408 §§4–5). (L)
-20. Budgeted/resumable poll cycles — GitHub half shipped (TFAC-571);
+22. Budgeted/resumable poll cycles — GitHub half shipped (TFAC-571);
     Jira parity on demand. (S)
 
 ---
@@ -1409,10 +1449,14 @@ pass (2026-07-08). Reopening conditions noted per entry.
 2. **Operator identity** — CLI-managed user flag,
    `triagefactory operator add|remove|list <email>`, recorded in the
    access-change log (§8.3).
-3. **Privileged control pods** — interim accepted; job-classes stay
-   P4. The epic ships as one release, so no intermediate release
-   exposes the interim. Reopens if a fleet customer requires an
-   unprivileged / managed-k8s control tier (§7).
+3. **Privileged control pods** — superseded 2026-07-11. Original
+   entry: interim accepted, job-classes stay P4, reopen if a customer
+   requires an unprivileged control tier. Revised: control ships
+   unprivileged in the release via §7's de-sandbox plan — toolless
+   system jobs become direct LLM calls (no Node), classifier stage 2
+   is removed (exact ties → unassigned), curator homes to executors —
+   retiring the job-class endgame entirely rather than pulling it
+   forward.
 4. **Executor-loss retry** — `TF_RUN_MAX_ATTEMPTS` default 2;
    duplicate external writes on retry are accepted (upsert semantics
    absorb them; `failure_kind='executor_lost'` audits the rest); no
@@ -1453,7 +1497,7 @@ pass (2026-07-08). Reopening conditions noted per entry.
 ## Related
 
 - `docs/for-agents/specs/sandbox-fleet/` — sandbox profiles; §5's "profile as the
-  scheduling unit" plugs into §6's placement labels (P4).
+  scheduling unit" plugs into §6's placement labels (P5).
 - `docs/benchmarks/sandbox-bench.md`, `docs/benchmarks/poll-bench.md` — the capacity numbers
   behind §0.
 - `docs/security/isolation-tiers.md` — the tier ladder; this spec changes the
