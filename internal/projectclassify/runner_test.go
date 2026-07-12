@@ -33,12 +33,6 @@ func newTestDB(t *testing.T) *sql.DB {
 	return database
 }
 
-// errStage2 is a stage2Func that fails loudly: the runner tests below never
-// reach Stage 2 (no borderline+truncated vote), so a call means a regression.
-func errStage2(context.Context, string, string, string) (int, string, error) {
-	return 0, "", errors.New("stage2 should not be reached")
-}
-
 // TestRunner_StopIdempotent pins that Stop is safe to call more than once
 // (guarded by stopOnce); a bare close(r.stop) would panic on the second call.
 func TestRunner_StopIdempotent(t *testing.T) {
@@ -71,7 +65,6 @@ func TestRunner_AllErroredLeavesEntityForRetry(t *testing.T) {
 	r.stage1Fn = func(context.Context, string, string) (int, string, error) {
 		return 0, "", errors.New("simulated CLI down")
 	}
-	r.stage2Fn = errStage2
 	r.run(context.Background()) // synchronous one cycle
 
 	post, err := sqlitestore.New(database).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)
@@ -116,7 +109,6 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 		}
 		return 30, "stub for Good", nil
 	}
-	r.stage2Fn = errStage2
 	r.run(context.Background())
 
 	post, err := sqlitestore.New(database).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)

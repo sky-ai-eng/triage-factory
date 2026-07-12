@@ -10,17 +10,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
-// stage1Func runs one broad-pass Stage 1 Haiku classification. stage2Func runs
-// one agent-mode Stage 2 call (it takes the project KB dir as cwd). Both are
-// the classifier's unit-test seam — per-instance fields on the Runner,
-// defaulted in NewRunner to the real implementations, overridable in tests.
-// They replace the package-level mutable vars `runStage1Haiku` /
-// `runStage2Haiku`, mirroring the repo-profiler's batchFn pattern.
+// stage1Func runs one broad-pass Haiku classification. It is the
+// classifier's unit-test seam — a per-instance field on the Runner,
+// defaulted in NewRunner to the real implementation, overridable in tests.
+// It replaces the package-level mutable var `runStage1Haiku`, mirroring the
+// repo-profiler's batchFn pattern.
 // orgID is carried explicitly (rather than read off the receiver inside the
 // seam) so a stub can assert the Runner's org threads through to the model
-// call; secrets/recorder/limiter are read off the receiver by the real impls.
+// call; secrets/recorder/limiter are read off the receiver by the real impl.
 type stage1Func func(ctx context.Context, orgID, prompt string) (int, string, error)
-type stage2Func func(ctx context.Context, orgID, prompt, cwd string) (int, string, error)
 
 // Runner drives project classification for a single org as a background loop.
 // It mirrors ai.Runner: a buffered trigger channel coalesces signals
@@ -37,10 +35,9 @@ type Runner struct {
 	recorder *systemllm.Recorder     // captures per-vote LLM cost + tokens into system_llm_runs (TFAC-451)
 	limiter  *syslimit.Limiter       // shared system-job sandbox cap (nil → unlimited).
 
-	// stage1Fn / stage2Fn are the test seam (see stage1Func / stage2Func),
-	// defaulted in NewRunner to the real implementations.
+	// stage1Fn is the test seam (see stage1Func), defaulted in NewRunner
+	// to the real implementation.
 	stage1Fn stage1Func
-	stage2Fn stage2Func
 
 	trigger  chan struct{}
 	stop     chan struct{}
@@ -61,7 +58,6 @@ func NewRunner(entities db.EntityStore, projects db.ProjectStore, orgID string, 
 		stop:     make(chan struct{}),
 	}
 	r.stage1Fn = r.realRunStage1Haiku
-	r.stage2Fn = r.realRunStage2Haiku
 	return r
 }
 
@@ -177,7 +173,7 @@ func (r *Runner) run(ctx context.Context) {
 					best = v.Score
 				}
 			}
-			classifyLog.Info("entity unassigned, best score below threshold", "entity", e.ID, "best_score", best, "threshold", ConfidenceThreshold)
+			classifyLog.Info("entity unassigned, no unique winner above threshold", "entity", e.ID, "best_score", best, "threshold", ConfidenceThreshold)
 		}
 		if err := r.entities.AssignProjectSystem(ctx, r.orgID, e.ID, winner, rationale); err != nil {
 			classifyLog.Error("assign entity failed", "entity", e.ID, "error", err)

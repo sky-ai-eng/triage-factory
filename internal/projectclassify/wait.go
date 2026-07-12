@@ -11,8 +11,8 @@ import (
 // DefaultWaitTimeout is the spawner's deadline for a fresh
 // classification before a delegation proceeds without project KB.
 // 90 seconds gives generous headroom for headless `claude` cold-start
-// (~5-15s) plus Stage 1 (~3-8s) and a single Stage 2 escalation
-// (~10-30s) with margin. Pathological cases still resolve via the
+// (~5-15s) plus the classification call (~3-8s), with a wide margin for
+// a slow or queued org. Pathological cases still resolve via the
 // timeout rather than hanging the spawner indefinitely.
 const DefaultWaitTimeout = 90 * time.Second
 
