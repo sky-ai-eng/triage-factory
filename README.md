@@ -52,7 +52,7 @@ For direct downloads, building from source, and platform notes, see [docs/INSTAL
 - [docs/INSTALLATION.md](docs/INSTALLATION.md) — install, build from source, prerequisites
 - [docs/local-mode/](docs/local-mode/README.md) — local mode: CLI flags, configuration, secret storage, headless
 - [docs/self-hosting/](docs/self-hosting/README.md) — multi-tenant self-hosting (install, scaling, SSO, monitoring)
-- [docs/security/](docs/security/README.md) — isolation tiers, sandbox architecture, privilege separation
+- [docs/security/](docs/security/README.md) — isolation tiers, security overview, privilege separation
 - [docs/concepts/tracked-events.md](docs/concepts/tracked-events.md) — the GitHub/Jira event taxonomy
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribution terms
 

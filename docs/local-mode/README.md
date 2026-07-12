@@ -13,7 +13,7 @@ To install the binary, start with [INSTALLATION.md](../INSTALLATION.md).
 - [Running](running.md) — CLI flags, `install` / `uninstall`, the exec subcommands
 - [Configuration](configuration.md) — settings storage, poll intervals, Jira setup, credentials
 - [Secret storage](secret-storage.md) — keychain vs. encrypted-file backend, `TF_SECRET_ENCRYPTION_KEY`
-- [Running headless](headless.md) — headless Linux servers + `TF_HEADLESS` zero-touch provisioning
+- [Running headless](headless.md) — no browser / keychain-less hosts + `TF_HEADLESS` zero-touch provisioning (cross-platform)
 - [Environment tuning](tuning.md) — logging, `TF_CLAUDE_BINARY`, agent-engine JIT
 
 ## Product behavior (both modes)

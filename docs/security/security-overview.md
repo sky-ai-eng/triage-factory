@@ -187,7 +187,7 @@ protective value equals the narrowness and validation of that RPC.
 > resource limits, and (self-host only) an additional permitted egress CIDR
 > validated against the immutable internal denylist (cloud metadata endpoint
 > `169.254.169.254`, the control-plane subnet, private/link-local ranges — see
-> [sandbox-fleet](../for-agents/specs/sandbox-fleet/) §3.1) before any iptables permit is written. It **never** execs
+> [sandbox-fleet](../for-agents/specs/sandbox-fleet/README.md) §3.1) before any iptables permit is written. It **never** execs
 > an orchestrator-supplied `config.json`, command, or rootfs path.
 
 A compromised orchestrator can inject an environment variable the *sandboxed*
@@ -322,7 +322,8 @@ skips the gVisor escape.
   parser flaw yields neither capabilities nor another run's credentials.
   <!-- TODO(TFAC-620): "per-run process" is realized when per-run credential isolation ships; today these parsers are goroutines in the shared orchestrator. -->
 - A **tailored seccomp profile** (`docker/seccomp-profile.json`)
-  replaces `seccomp=unconfined` in the deployment manifest
+  replaces `seccomp=unconfined` in the deployment manifest.
+
 **Vector 3 — the resident credentials.** (See §5.)
 - Property B; App installation tokens (1h, single-installation); BYOK.
 - App-token minting runs on the control plane — executors never hold the App

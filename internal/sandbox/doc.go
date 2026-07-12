@@ -53,7 +53,11 @@
 //	own user-mode kernel architecture. Load-bearing reason we use
 //	gVisor at all.
 //
-// Local mode collapses T1/T2/T4 (single-tenant); T3 still applies as
-// defense in depth. The Linux + ModeMulti gate in agentproc.Run
-// skips this whole package for local installs.
+// Local mode skips this whole package (the Linux + ModeMulti gate in
+// agentproc.Run): the agent runs as an ordinary subprocess under the
+// user's own uid, with no gVisor jail. The T1-T4 model protects a
+// multi-tenant host from a hostile agent; local mode is single-tenant on
+// the user's own machine, so it does not apply — an SDK RCE (T3) runs
+// with the user's own privileges, the same trust boundary as any local
+// tool they run.
 package sandbox

@@ -1,4 +1,4 @@
-# Running headless on a Linux server (local mode)
+# Running headless (local mode)
 
 Local mode runs fine on a headless server (no desktop, no browser, no OS
 keychain). This is **single-user local mode** — *not* the multi-tenant deployment

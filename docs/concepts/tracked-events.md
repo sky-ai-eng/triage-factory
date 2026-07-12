@@ -4,7 +4,7 @@ Triage Factory monitors GitHub PRs and Jira issues for state changes and emits t
 
 ## How it works
 
-The tracker runs on a configurable poll interval (default: 60s). Each cycle:
+The tracker runs on a configurable poll interval (default: 5 minutes). Each cycle:
 
 1. **Discover** — search queries find new items to track
 2. **Register** — new items are stored in `tracked_items` with an initial snapshot

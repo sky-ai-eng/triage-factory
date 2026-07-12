@@ -7,7 +7,7 @@ reviewer evaluates, see [docs/security/](../security/).
 
 ## Setup
 
-- [Install](install.md) — GitHub OAuth app, `.env`, `jwk-init`, `docker compose up`, verify the OAuth flow
+- [Self-host setup](install.md) — GitHub OAuth app, `.env`, `jwk-init`, `docker compose up`, verify the OAuth flow
 - [SSO with Microsoft Entra (SAML)](sso-entra.md) — enable GoTrue SAML + register an org's connection
 
 ## Operate
