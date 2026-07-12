@@ -40,6 +40,13 @@ import (
 // precedent (e.g. EventStore's missing app-side GetMetadata) is to
 // omit unused variants until a real caller arrives.
 //
+// RecordEntityTouchSystem and CountMemoriesForEntitySystem are the
+// deliberate exception to that precedent: they're the run_memory_entities
+// foundation TFAC-622 lands ahead of their production callers, which
+// arrive with the sibling touch-capture (TFAC-623) and memory-load
+// (TFAC-624) tickets. Until then they're exercised only by tests and the
+// tf_system grant conformance suite.
+//
 // SQLite collapses both pools onto the single connection. The
 // `...System` methods are thin wrappers around their non-System
 // counterparts; assertLocalOrg gates every entry point.
