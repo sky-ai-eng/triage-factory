@@ -773,6 +773,95 @@ func TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker(t *testing.T)
 	}
 }
 
+// TestLifecycleAdapter_RunStatus_GatedStopChainSurvivesChurn is the direct
+// regression test for TFAC-621 part 3 (stale-clear race on a gated stop):
+// running→terminal→running→terminal→running (W1, W2, W3) with W1's clear
+// slow to resolve (a 429-retry stand-in). W2 is created gated on W1 (still
+// retiring) and is itself stopped WHILE still gated — the exact race the
+// fix must survive: pre-fix, W2's gated-stop case returned (and closed
+// w.done) immediately without waiting on its own predecessor, so
+// entry.prevDone pointed at an already-closed W2.done and W3 sailed through
+// its gate long before W1's delayed clear ever resolved, landing W3's fresh
+// status BEFORE the stale clear wiped it. Post-fix, W2's done can't close
+// until W1's does, so W3 transitively waits out the whole chain and its
+// status is what's live once everything settles.
+func TestLifecycleAdapter_RunStatus_GatedStopChainSurvivesChurn(t *testing.T) {
+	withFastLifecycleTimings(t)
+	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
+	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
+	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+
+	adapter := newTestLifecycleAdapter(stores, staticURL(""))
+	runs := map[string]*runEntry{}
+	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
+	ctx := context.Background()
+
+	// W1: running, then park it with a slow trailing clear in flight.
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
+	fake.setStatusClearDelay(400 * time.Millisecond)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "open"), runs) // W1 stops; its clear is now in flight
+
+	// W2: resume immediately (gates on W1's still-open done), then park it
+	// again immediately too — WHILE it is still gated on W1. This is the
+	// stop-while-gated race: W2 never got past the predecessor gate to make
+	// any Slack call of its own.
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "open"), runs)
+
+	// W3: resume again immediately — gates on entry.prevDone, which now
+	// traces W2 -> W1. A distinguishable activity probe marks W3's status
+	// unambiguously (its plain lifecycle text is identical to W1's/W2's).
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.RunActivityTool{{Name: "w3_probe"}}), runs)
+
+	const probe = "is running: w3 probe"
+	waitForCondition(t, 3*time.Second, func() bool {
+		for _, c := range fake.statusCalls() {
+			if c.Status == probe {
+				return true
+			}
+		}
+		return false
+	})
+	// W1's delayed clear must eventually resolve too (up to its 400ms delay
+	// plus slack) — wait it out explicitly rather than racing the assertion
+	// below against a clear that just hasn't landed yet.
+	waitForCondition(t, 2*time.Second, func() bool {
+		for _, c := range fake.statusCalls() {
+			if c.Status == "" {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Resolve-order assertion: W1's delayed clear must resolve BEFORE W3's
+	// probe — never after. A broken chain lets W3 sail through its gate
+	// (and W2's, transitively) before W1's clear ever resolves, so the run
+	// ends with a stale empty clear as the LAST recorded call despite W3
+	// being alive.
+	calls := fake.statusCalls()
+	clearIdx, probeIdx := -1, -1
+	for i, c := range calls {
+		if c.Status == "" && clearIdx == -1 {
+			clearIdx = i
+		}
+		if c.Status == probe && probeIdx == -1 {
+			probeIdx = i
+		}
+	}
+	if clearIdx == -1 {
+		t.Fatalf("W1's delayed clear never resolved: %+v", calls)
+	}
+	if clearIdx > probeIdx {
+		t.Errorf("W1's stale clear resolved AFTER W3's probe (clear at %d, probe at %d) — the gated-stop chain broke: %+v", clearIdx, probeIdx, calls)
+	}
+	if last := calls[len(calls)-1]; last.Status == "" {
+		t.Errorf("final recorded status call is an empty clear while W3 is live: %+v", calls)
+	}
+}
+
 // ---------- run-status consumer: non-Slack cache ----------
 
 // TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup pins the

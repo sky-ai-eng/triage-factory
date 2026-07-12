@@ -76,3 +76,10 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, ru
 	})
 	return out, nil
 }
+
+func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id string) error {
+	_, err := s.admin.ExecContext(ctx, `
+		DELETE FROM staged_agent_injections WHERE org_id = $1::uuid AND id = $2::uuid
+	`, orgID, id)
+	return err
+}

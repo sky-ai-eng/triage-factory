@@ -175,6 +175,35 @@ func setupAdditiveScenario(t *testing.T, database *sql.DB) (entityID string, tas
 	return
 }
 
+// bumpTaskViaRealUpsert routes eventID through the router's real
+// upsertTaskForEvent — the exact write production performs (BumpSystem +
+// RecordEventSystem(..., "bumped")) for a second event landing on an
+// already-active task — BEFORE the test goes on to exercise the injection
+// branch. Without this, a masking test's "second event" never occupied
+// (task.ID, eventID) in task_events at all, so MarkEventInjectedSystem's
+// UPDATE (and, before the fix, RecordEventSystem's now-redundant INSERT)
+// both look like they work even if the real collision they're meant to
+// resolve was never reproduced. This is the fix TFAC-621 part 2 calls for:
+// a state production cannot produce (the event that triggers injection is
+// exactly the event that bumped the task) must exist before injection runs.
+func bumpTaskViaRealUpsert(t *testing.T, router *Router, task *domain.Task, trigger domain.EventHandler, entityID, eventID string) {
+	t.Helper()
+	routing := eventRouting{
+		ownerTeam:    runmode.LocalDefaultTeamID,
+		visibleTeams: []string{runmode.LocalDefaultTeamID},
+		orderedTeams: []string{runmode.LocalDefaultTeamID},
+		teamTriggers: map[string][]domain.EventHandler{runmode.LocalDefaultTeamID: {trigger}},
+		taskPriority: 0.5,
+	}
+	bumped, created, err := router.upsertTaskForEvent(runmode.LocalDefaultOrgID, domain.Event{EventType: additiveTestEventType, ID: eventID}, entityID, routing)
+	if err != nil {
+		t.Fatalf("upsertTaskForEvent (bump): %v", err)
+	}
+	if created || bumped == nil || bumped.ID != task.ID {
+		t.Fatalf("expected the second event to bump the existing task %q, got created=%v task=%+v", task.ID, created, bumped)
+	}
+}
+
 // newAdditiveTestRouter builds a Router wired for the additive-injection
 // gate tests, sharing the same store construction every test below needs.
 func newAdditiveTestRouter(database *sql.DB, agentRuns db.AgentRunStore, stub *injectingStubDelegator) *Router {
@@ -207,6 +236,10 @@ func TestTryAutoDelegate_AdditiveEvent_InjectsIntoActiveRun(t *testing.T) {
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
 	router := newAdditiveTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+	// Reproduce the real collision: production's own upsertTaskForEvent
+	// already wrote a "bumped" task_events row for (task.ID, secondEventID)
+	// before tryAutoDelegate/tryAdditiveInjection ever runs.
+	bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
 
 	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
 
@@ -266,6 +299,9 @@ func TestTryAutoDelegate_AdditiveEvent_StagedResumableRunHandled(t *testing.T) {
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectStagedResumable}
 	router := newAdditiveTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+	// Reproduce the real collision: see the comment on the sibling
+	// InjectDeliveredLocal test above.
+	bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
 
 	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
 
@@ -471,6 +507,63 @@ func TestTryAutoDelegate_AdditiveEvent_NotDeliveredFallsThroughToDeferral(t *tes
 	}
 	if len(rows) != 1 {
 		t.Fatalf("expected the firing to fall through to the normal deferral, got %d pending_firings rows", len(rows))
+	}
+}
+
+// TestTryAutoDelegate_AdditiveEvent_StageToNonResumableRun_NoOrphanedRow is
+// the routing-level regression test for TFAC-621 part 4. Unlike the sibling
+// tests above, this one wires a REAL *delegate.Spawner as the Delegator
+// (not injectingStubDelegator) so StageOrDeliverAdditiveEvent's actual DB
+// side effects — the staged_agent_injections append AND its cleanup — are
+// observable. setupAdditiveScenario's active run is status="running" with
+// no live process registered against this fresh spawner instance, so
+// getProc returns nil (no local delivery) and there's no run_signals wired
+// (no remote path either) — StageOrDeliverAdditiveEvent falls to staging,
+// appends the durable row, then its post-stage recheck reads the run back
+// as status="running" (not "open", not completed+abort — resumableState
+// false) and reports InjectNotDelivered. The caller must fall through to
+// the normal pending_firings deferral, AND the staged row it appended along
+// the way must be deleted rather than orphaned.
+func TestTryAutoDelegate_AdditiveEvent_StageToNonResumableRun_NoOrphanedRow(t *testing.T) {
+	database := newTestDB(t)
+	entityID, task, trigger, activeRunID := setupAdditiveScenario(t, database)
+
+	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType:    additiveTestEventType,
+		EntityID:     &entityID,
+		MetadataJSON: `{"mention":"second"}`,
+		CreatedAt:    time.Now(),
+		OrgID:        runmode.LocalDefaultOrgID,
+	})
+	if err != nil {
+		t.Fatalf("record second event: %v", err)
+	}
+
+	spawner := delegate.NewSpawner(database, sqlitestore.New(database), nil, nil, "m")
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
+		testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
+		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil,
+		spawner, noopScorer{}, websocket.NewHub())
+
+	fired := router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+	if !fired {
+		t.Error("expected tryAutoDelegate to report handled via the normal deferral (enqueueBusyFiring)")
+	}
+
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil {
+		t.Fatalf("list pending firings: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected the firing to fall through to the normal deferral, got %d pending_firings rows", len(rows))
+	}
+
+	var staged int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM staged_agent_injections WHERE run_id = ?`, activeRunID).Scan(&staged); err != nil {
+		t.Fatalf("count staged_agent_injections: %v", err)
+	}
+	if staged != 0 {
+		t.Errorf("staged_agent_injections has %d orphaned row(s) for run %q, want 0 (deferral landed but the staged row was never cleaned up)", staged, activeRunID)
 	}
 }
 

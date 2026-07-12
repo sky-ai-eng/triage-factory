@@ -36,4 +36,12 @@ type StagedInjectionStore interface {
 	// staged. The spawner bundles the returned bodies into one <system-note>
 	// block prepended ahead of the resuming user's message.
 	FlushPendingSystem(ctx context.Context, orgID, runID string) ([]domain.StagedInjection, error)
+
+	// DeleteSystem removes one staged injection by id. Used to clean up a row
+	// staged onto a run that a post-stage recheck then decided wasn't (or is
+	// no longer) resumable after all — the caller falls through to a normal
+	// deferral instead, and the staged row would otherwise be orphaned (or,
+	// worse, double-deliver if the run is later boot-recovered and resumed).
+	// A no-op (no error) if the row is already gone.
+	DeleteSystem(ctx context.Context, orgID, id string) error
 }

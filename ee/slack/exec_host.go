@@ -330,6 +330,7 @@ func (h *slackExecHandler) send(ctx context.Context, info agenthost.RunInfo, a s
 	}
 
 	var ts string
+	var attachErr error
 	if a.Body != "" {
 		ts, err = slackChatPostMessage(ctx, h.client, token, slackMessageParams{
 			Channel: a.Channel, ThreadTS: a.ThreadTS, Text: a.Body, MarkdownBody: a.Body,
@@ -338,12 +339,18 @@ func (h *slackExecHandler) send(ctx context.Context, info agenthost.RunInfo, a s
 			return slackSendResult{}, fmt.Errorf("slack: post message: %w", err)
 		}
 		if a.AttachBase64 != "" {
-			if uerr := h.uploadAttachment(ctx, token, a.Channel, ts, a); uerr != nil {
-				// The message already posted — surface the attach failure but keep
-				// the ts the agent needs for any follow-up (edit/react), rather than
-				// discarding a message that already landed.
-				return slackSendResult{Channel: a.Channel, TS: ts},
-					fmt.Errorf("slack: message posted (ts=%s) but file attach failed: %w", ts, uerr)
+			// Never a reply's ts (Slack's files.completeUploadExternal docs warn
+			// against it) — the parent thread's root when replying, or ts itself
+			// when this message IS the root (a.ThreadTS == "").
+			attachThreadTS := a.ThreadTS
+			if attachThreadTS == "" {
+				attachThreadTS = ts
+			}
+			if uerr := h.uploadAttachment(ctx, token, a.Channel, attachThreadTS, a); uerr != nil {
+				// The message already posted — record it below like any other
+				// successful send, then surface the attach failure loudly rather
+				// than returning early and leaving a real post unrecorded.
+				attachErr = fmt.Errorf("slack: message posted (ts=%s) but file attach failed: %w", ts, uerr)
 			}
 		}
 	} else {
@@ -368,6 +375,9 @@ func (h *slackExecHandler) send(ctx context.Context, info agenthost.RunInfo, a s
 		rootTS = ts
 	}
 	h.recordMessage(ctx, info, domain.ActionSlackMessagePosted, a.Channel, rootTS, ts, h.permalinkBestEffort(ctx, token, a.Channel, ts))
+	if attachErr != nil {
+		return slackSendResult{Channel: a.Channel, TS: ts}, attachErr
+	}
 	return slackSendResult{Channel: a.Channel, TS: ts}, nil
 }
 
@@ -461,23 +471,25 @@ func (h *slackExecHandler) permalinkBestEffort(ctx context.Context, token, chann
 	return link
 }
 
-// resolveMessageRootTS best-effort resolves ts's thread root: a bounded
-// conversations.history lookup (Latest=ts, Inclusive, Limit=1) reads the
-// message's own thread_ts field, if any. Falls back to ts itself (a
-// channel-root message, or a lookup failure) rather than erroring — an edit/
-// react's recording is best-effort and must not fail the already-applied
-// Slack write over a cosmetic Target grouping.
+// resolveMessageRootTS best-effort resolves ts's thread root via a SINGLE
+// conversations.replies request (slackConversationsRepliesPage, not the
+// full-pagination slackConversationsReplies): Slack accepts either a
+// thread's root ts or any reply's ts in the `ts` param and returns the
+// thread's messages with the root first, on every page regardless of the
+// thread's total reply count — conversations.history (channel-level
+// messages only) can never see this, since a reply isn't a channel-level
+// message. One page is enough since only msgs[0] is ever read; following
+// the cursor would cost one HTTP request per reply in a long thread for no
+// benefit. Falls back to ts itself (a channel-root message with no thread,
+// or a lookup failure) rather than erroring — an edit/react's recording is
+// best-effort and must not fail the already-applied Slack write over a
+// cosmetic Target grouping.
 func (h *slackExecHandler) resolveMessageRootTS(ctx context.Context, token, channel, ts string) string {
-	msgs, err := slackConversationsHistory(ctx, h.client, token, slackConversationsHistoryParams{
-		Channel: channel, Latest: ts, Inclusive: true, Limit: 1,
-	})
+	msgs, _, _, err := slackConversationsRepliesPage(ctx, h.client, token, channel, ts, 1, "")
 	if err != nil || len(msgs) == 0 {
 		return ts
 	}
-	if msgs[0].ThreadTS != "" {
-		return msgs[0].ThreadTS
-	}
-	return ts
+	return msgs[0].TS
 }
 
 // findRecentMessageTSForFile locates the ts of the message a just-completed

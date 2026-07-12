@@ -520,23 +520,49 @@ func TestStageOrDeliverAdditiveEvent_NoLiveOwnerFallsBackToStaged(t *testing.T) 
 // run that's already fully terminal (not parked/resumable) -> the staged
 // row will never flush, so the caller must fall through to its own
 // deferral (InjectNotDelivered), never silently swallowing the event.
+//
+// TFAC-621 part 4: this is also the direct regression test for the orphaned
+// staged-injection row — StageOrDeliverAdditiveEvent stages the durable row
+// BEFORE re-checking resumability, so a non-resumable verdict here must
+// delete what it just appended rather than leaving a permanent leaked row
+// (worse: a double-delivery hazard if the run is ever boot-recovered and
+// resumed later, flushing the row into it while the caller's own
+// pending_firing deferral also spawns a fresh run).
 func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-inj3", "sess", "/tmp/wt")
 	if _, err := database.Exec(`UPDATE runs SET status = 'completed', outcome = 'finish' WHERE id = 'r-inj3'`); err != nil {
 		t.Fatalf("terminate run: %v", err)
 	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	stores := testSpawnerStores(database)
+	s := NewSpawner(database, stores, nil, nil, "m")
 	s.SetRunSignals(newFakeRunSignalStore(), nil)
 
 	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj3", "producer", "body", AdditiveFiringRef{})
 	if outcome != InjectNotDelivered {
 		t.Fatalf("outcome = %v, want InjectNotDelivered", outcome)
 	}
+
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM staged_agent_injections WHERE run_id = ?`, "r-inj3").Scan(&count); err != nil {
+		t.Fatalf("count staged_agent_injections: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("staged_agent_injections has %d orphaned row(s) for a run InjectNotDelivered decided against, want 0", count)
+	}
 }
 
 // TestApplySignal_Inject_LiveDeliversAndRecords: the owner's apply loop
 // steers a live inject signal and records task_events 'injected'.
+//
+// TFAC-621 part 2 (owner-side site): production always reaches this path
+// with the control pod's own upsertTaskForEvent having ALREADY written a
+// "bumped" row for (taskID, evID) — the additive event that triggers the
+// cross-pod inject signal is exactly the event that bumped the task. Seed
+// that row here (mirroring RecordEventSystem's real INSERT) so the
+// assertion below exercises deliverInjectSignal's MarkEventInjectedSystem
+// upgrading an existing row in place, not (pre-fix) a masked no-op INSERT
+// racing an absent row that happened to succeed anyway.
 func TestApplySignal_Inject_LiveDeliversAndRecords(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-owner-inj", "sess", "/tmp/wt")
@@ -548,6 +574,9 @@ func TestApplySignal_Inject_LiveDeliversAndRecords(t *testing.T) {
 	taskID := taskIDForRun(t, database, "r-owner-inj")
 	// A fake triggering event row: task_events FKs to events(id).
 	evID := seedFakeEvent(t, database)
+	if err := s.tasks.RecordEventSystem(context.Background(), runmode.LocalDefaultOrgID, taskID, evID, "bumped"); err != nil {
+		t.Fatalf("seed bumped row: %v", err)
+	}
 
 	payload := `{"producer":"p","body":"hello","task_id":"` + taskID + `","triggering_event_id":"` + evID + `"}`
 	id, err := fakeSignals.Insert(context.Background(), runmode.LocalDefaultOrgID, "r-owner-inj", domain.RunSignalInject, payload, "me")

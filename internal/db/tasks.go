@@ -365,6 +365,14 @@ type TaskStore interface {
 	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
 	SetStatusSystem(ctx context.Context, orgID, taskID, status string) error
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
+
+	// MarkEventInjectedSystem flips the (task_id, event_id) timeline row's
+	// kind to "injected" in place — the event bumped the task AND was folded
+	// into the live run, and the fold is the fact worth surfacing over the
+	// row RecordEventSystem/upsertTaskForEvent already wrote for that same
+	// (task, event) pair (RecordEventSystem itself is INSERT-only and would
+	// silently no-op on that PK collision). No-op if the row is absent.
+	MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string) error
 	CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
 	StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error)
 

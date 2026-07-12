@@ -488,7 +488,7 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID,
 			}
 		}
 	}
-	delivered, staged := s.stageOrDeliverInjection(orgID, runID, producer, body)
+	delivered, staged, stagedID := s.stageOrDeliverInjection(orgID, runID, producer, body)
 	if delivered {
 		return InjectDeliveredLocal // race: getProc missed above, live by the time stageOrDeliverInjection ran
 	}
@@ -497,6 +497,19 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID,
 	}
 	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
 	if err != nil || run == nil || !resumableState(run.Status, run.Outcome) {
+		// The row staged above is now orphaned: the caller falls through to
+		// the normal deferral (enqueueBusyFiring), and a staged row nothing
+		// will ever flush is a permanent leak — worse, a double-delivery
+		// hazard if this "non-resumable" run is later boot-recovered and
+		// resumed (the staged row would flush into it while the pending
+		// firing also spawns a fresh run). Best-effort delete: a leaked row
+		// is the pre-existing status quo, never worth failing the deferral
+		// over.
+		if stagedID != "" && s.stagedInjections != nil {
+			if derr := s.stagedInjections.DeleteSystem(ctx, orgID, stagedID); derr != nil {
+				delegateLog.Warn("delete orphaned staged injection failed", "run", runID, "staged_id", stagedID, "error", derr)
+			}
+		}
 		return InjectNotDelivered
 	}
 	return InjectStagedResumable
@@ -686,8 +699,8 @@ func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.RunSignal)
 	}
 	s.deliverInjectionLive(sig.OrgID, sig.RunID, domain.WrapSystemNote(p.Body))
 	if s.tasks != nil && p.TaskID != "" && p.TriggeringEventID != "" {
-		if err := s.tasks.RecordEventSystem(ctx, sig.OrgID, p.TaskID, p.TriggeringEventID, "injected"); err != nil {
-			delegateLog.Error("record injected task_event for cross-pod inject failed", "task_id", p.TaskID, "run_id", sig.RunID, "error", err)
+		if err := s.tasks.MarkEventInjectedSystem(ctx, sig.OrgID, p.TaskID, p.TriggeringEventID); err != nil {
+			delegateLog.Error("mark injected task_event for cross-pod inject failed", "task_id", p.TaskID, "run_id", sig.RunID, "error", err)
 		}
 	}
 	return domain.RunSignalAckDelivered
