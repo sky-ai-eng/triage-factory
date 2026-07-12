@@ -19,7 +19,7 @@ import (
 // orgID is carried explicitly (rather than read off the receiver inside the
 // seam) so a stub can assert the Runner's org threads through to the model
 // call; secrets/recorder/limiter are read off the receiver by the real impl.
-type stage1Func func(ctx context.Context, orgID, prompt string) (int, string, error)
+type stage1Func func(ctx context.Context, orgID string, p haikuPrompt) (int, string, error)
 
 // Runner drives project classification for a single org as a background loop.
 // It mirrors ai.Runner: a buffered trigger channel coalesces signals
