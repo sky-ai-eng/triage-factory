@@ -62,8 +62,11 @@ const TrustedAgentHostSocketDestination = "/run/tf.sock"
 
 // trustedAgentHostSocketRoot mirrors cmd/exec/agenthost's private
 // hostSocketRoot constant. Duplicated for the same reason as the
-// destination constants above.
-const trustedAgentHostSocketRoot = "/run/tf"
+// destination constants above. A var (not const) — like cmd/capbroker's
+// brokerSocketPath — so this package's own tests can redirect it away
+// from the real, root-owned /run/tf, which a non-root `go test`
+// invocation can't create; production never reassigns it.
+var trustedAgentHostSocketRoot = "/run/tf"
 
 // sanitizeRunIDForSocket mirrors cmd/exec/agenthost's private
 // sanitizeSocketName exactly (character-for-character); a drift test in

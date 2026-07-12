@@ -225,10 +225,12 @@ func FuzzValidateLaunchParams(f *testing.F) {
 	if err := os.MkdirAll(RunTreeRoot("run-1"), 0o755); err != nil {
 		f.Fatalf("mkdir seed worktree fixture: %v", err)
 	}
+	// Redirect the agenthost socket root to a per-process temp dir: the real
+	// root is /run/tf, which only root (or whoever the container entrypoint
+	// hands it to) can create — mirrors cmd/capbroker's brokerSocketPath
+	// test redirection for the same reason.
+	trustedAgentHostSocketRoot = f.TempDir()
 	seedSocket := TrustedAgentHostSocketPath("run-1")
-	if err := os.MkdirAll(filepath.Dir(seedSocket), 0o700); err != nil {
-		f.Fatalf("mkdir seed socket dir: %v", err)
-	}
 	if err := os.WriteFile(seedSocket, nil, 0o600); err != nil {
 		f.Fatalf("create seed socket fixture: %v", err)
 	}

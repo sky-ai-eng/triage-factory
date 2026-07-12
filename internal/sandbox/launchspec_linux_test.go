@@ -49,8 +49,17 @@ func ensureGitHooksFixture(t *testing.T) {
 // file — unlike net.Listen — is safe to create redundantly from Go's
 // fuzzing engine's multiple worker processes, which each re-run this
 // package's fuzz seed setup independently against the SAME fixed path.
+//
+// Redirects trustedAgentHostSocketRoot to a per-test temp dir first: the
+// real root is /run/tf, which only root (or whoever the container
+// entrypoint hands it to) can create — mirrors cmd/capbroker's
+// brokerSocketPath test redirection for the same reason.
 func ensureAgentHostSocketFixture(t *testing.T, runID string) string {
 	t.Helper()
+	orig := trustedAgentHostSocketRoot
+	trustedAgentHostSocketRoot = t.TempDir()
+	t.Cleanup(func() { trustedAgentHostSocketRoot = orig })
+
 	sockPath := TrustedAgentHostSocketPath(runID)
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
 		t.Fatalf("mkdir agenthost socket dir: %v", err)
