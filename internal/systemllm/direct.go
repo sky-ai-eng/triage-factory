@@ -25,6 +25,13 @@ const defaultBedrockHaikuModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 // directly from this process — no subprocess, no sandbox. Only reachable in
 // multi mode (see Complete).
 func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*CompleteResult, error) {
+	// Fail fast on a caller bug (a job that never populated the multi-mode
+	// prompt split) rather than letting the SDK reject an empty system/user
+	// turn with a far less actionable error.
+	if opts.SystemPrompt == "" || opts.UserMessage == "" {
+		return nil, errors.New("systemllm: SystemPrompt and UserMessage are both required in multi mode")
+	}
+
 	startedAt := time.Now().UTC()
 
 	creds, err := agentproc.ResolveCredentialsForBundle(ctx, opts.Secrets, opts.OrgID)
@@ -117,6 +124,9 @@ func buildDirectClient(creds map[string]string, pinnedModel string) (anthropic.C
 	opts := []option.RequestOption{option.WithoutEnvironmentDefaults()}
 
 	if apiKey := creds["ANTHROPIC_API_KEY"]; apiKey != "" {
+		if pinnedModel == "" {
+			return anthropic.Client{}, "", errors.New("systemllm: DirectModel is required for the Anthropic direct-API path")
+		}
 		opts = append(opts, option.WithAPIKey(apiKey))
 		if baseURL := creds["ANTHROPIC_BASE_URL"]; baseURL != "" {
 			opts = append(opts, option.WithBaseURL(baseURL))

@@ -22,7 +22,8 @@ type CompleteOptions struct {
 
 	// Message is the full combined instructions+data prompt, used verbatim
 	// as the local-mode agentproc.Run -p message — byte-identical to the
-	// prior direct-agentproc.Run behavior. Always required.
+	// prior direct-agentproc.Run behavior. Required in local mode; ignored
+	// in multi mode, which uses SystemPrompt/UserMessage instead.
 	Message string
 
 	// SystemPrompt + UserMessage are used only by the direct (multi-mode)

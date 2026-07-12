@@ -250,6 +250,62 @@ func TestComplete_Direct_NoCredentialsConfigured(t *testing.T) {
 	}
 }
 
+// TestComplete_Direct_MissingSystemOrUserMessage pins the fast-fail guard
+// for a caller that forgot to populate the multi-mode prompt split: no
+// network call happens (the stub server fails the test if hit), and the
+// error names the actual problem instead of surfacing whatever opaque
+// rejection the SDK would give an empty system/user turn.
+func TestComplete_Direct_MissingSystemOrUserMessage(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("no request should be sent when SystemPrompt/UserMessage is missing")
+	}))
+	defer srv.Close()
+
+	secrets := stubSecrets{
+		"org-1/anthropic_api_key":  "sk-ant-test",
+		"org-1/anthropic_base_url": srv.URL,
+	}
+
+	t.Run("missing system prompt", func(t *testing.T) {
+		opts := completeOpts("org-1", secrets)
+		opts.SystemPrompt = ""
+		if _, err := NewRecorder(nil).Complete(context.Background(), opts); err == nil {
+			t.Fatal("expected an error when SystemPrompt is empty")
+		}
+	})
+
+	t.Run("missing user message", func(t *testing.T) {
+		opts := completeOpts("org-1", secrets)
+		opts.UserMessage = ""
+		if _, err := NewRecorder(nil).Complete(context.Background(), opts); err == nil {
+			t.Fatal("expected an error when UserMessage is empty")
+		}
+	})
+}
+
+// TestComplete_Direct_MissingDirectModel pins the fast-fail guard for the
+// Anthropic direct-API branch: a caller that forgot to set DirectModel must
+// not send a request with an empty model — the stub server fails the test
+// if hit.
+func TestComplete_Direct_MissingDirectModel(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("no request should be sent when DirectModel is missing")
+	}))
+	defer srv.Close()
+
+	secrets := stubSecrets{
+		"org-1/anthropic_api_key":  "sk-ant-test",
+		"org-1/anthropic_base_url": srv.URL,
+	}
+	opts := completeOpts("org-1", secrets)
+	opts.DirectModel = ""
+	if _, err := NewRecorder(nil).Complete(context.Background(), opts); err == nil {
+		t.Fatal("expected an error when DirectModel is empty")
+	}
+}
+
 // TestComplete_Direct_TerminalErrorNotRetried pins 4xx handling: a
 // bad-request response is terminal (per the SDK's own retry policy) and
 // must surface as an error after exactly one request — no retry storm on a
