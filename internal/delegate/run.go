@@ -391,19 +391,24 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	delegateLog.Info("claude starting for run", "run", runID, "cwd", claudeCwd)
 	baseOpts := agentproc.RunOptions{
-		Cwd:            claudeCwd,
-		Model:          model,
-		SessionID:      resumeSession,
-		Message:        prompt,
-		AllowedTools:   agentproc.BuildAllowedToolsWithExtras(selfBin, cfg.extraAllowedTools),
-		MaxTurns:       100,
-		ExtraEnv:       extraEnv,
-		TraceID:        runID,
-		SystemPrompt:   cfg.appendSysPrompt,
-		OrgID:          orgID,
-		Secrets:        s.getRunSecrets(),
-		GitProxy:       gitProxy,
-		StartAgentHost: startAgentHost,
+		Cwd:          claudeCwd,
+		Model:        model,
+		SessionID:    resumeSession,
+		Message:      prompt,
+		AllowedTools: agentproc.BuildAllowedToolsWithExtras(selfBin, cfg.extraAllowedTools),
+		MaxTurns:     100,
+		ExtraEnv:     extraEnv,
+		TraceID:      runID,
+		SystemPrompt: cfg.appendSysPrompt,
+		OrgID:        orgID,
+		Secrets:      s.getRunSecrets(),
+		LLMResolver:  s.llmResolverForRun(orgID, runID),
+		// Executor bundle path only (nil elsewhere): the SigV4 proxy re-reads
+		// the newest sealed bundle's triple live so a re-minted role-mode STS
+		// session credential reaches a mid-run sandbox (TFAC-616).
+		LLMCredentialSource: s.bundleLLMSourceFor(ctx, info),
+		GitProxy:            gitProxy,
+		StartAgentHost:      startAgentHost,
 		// Org commit identity (TFAC-452): empty when none resolved → ambient git
 		// config inherited (today's behavior).
 		GitUserName:  commitIdentity.Name,

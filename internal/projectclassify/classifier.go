@@ -323,6 +323,7 @@ func (r *Runner) runHaiku(ctx context.Context, orgID string, p haikuPrompt) (int
 		Temperature:  0.1,
 		TraceID:      "classify-stage1",
 		Secrets:      r.secrets,
+		LLMResolver:  r.llmResolve,
 		CostFn:       ai.CalculateCostUSD,
 	})
 	if err != nil {

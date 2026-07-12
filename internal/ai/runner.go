@@ -48,13 +48,14 @@ type RunnerCallbacks struct {
 // ResetScoringToPending, UpdateTaskScores) go through db.ScoreStore so
 // the same code path serves both SQLite (local) and Postgres (multi).
 type Runner struct {
-	scores    db.ScoreStore
-	entities  db.EntityStore          // scorer bulk-loads entity descriptions for prompt context
-	orgID     string                  // scoring context org — runmode.LocalDefaultOrgID in local mode
-	secrets   agentproc.SecretsReader // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi).
-	recorder  *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
-	limiter   *syslimit.Limiter       // shared system-job sandbox cap (nil → unlimited); captured by scoreFn.
-	callbacks RunnerCallbacks
+	scores     db.ScoreStore
+	entities   db.EntityStore          // scorer bulk-loads entity descriptions for prompt context
+	orgID      string                  // scoring context org — runmode.LocalDefaultOrgID in local mode
+	secrets    agentproc.SecretsReader // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi).
+	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests → Run's built-in resolution).
+	recorder   *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
+	limiter    *syslimit.Limiter       // shared system-job sandbox cap (nil → unlimited); captured by scoreFn.
+	callbacks  RunnerCallbacks
 
 	// scoreFn scores one batch. The unit-test seam (replaces a direct
 	// scoreBatch call): defaulted in NewRunner to a closure over scoreBatch
@@ -69,20 +70,21 @@ type Runner struct {
 	running  bool
 }
 
-func NewRunner(scores db.ScoreStore, entities db.EntityStore, orgID string, secrets agentproc.SecretsReader, recorder *systemllm.Recorder, limiter *syslimit.Limiter, callbacks RunnerCallbacks) *Runner {
+func NewRunner(scores db.ScoreStore, entities db.EntityStore, orgID string, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter, callbacks RunnerCallbacks) *Runner {
 	r := &Runner{
-		scores:    scores,
-		entities:  entities,
-		orgID:     orgID,
-		secrets:   secrets,
-		recorder:  recorder,
-		limiter:   limiter,
-		callbacks: callbacks,
-		trigger:   make(chan struct{}, 1),
-		stop:      make(chan struct{}),
+		scores:     scores,
+		entities:   entities,
+		orgID:      orgID,
+		secrets:    secrets,
+		llmResolve: llmResolve,
+		recorder:   recorder,
+		limiter:    limiter,
+		callbacks:  callbacks,
+		trigger:    make(chan struct{}, 1),
+		stop:       make(chan struct{}),
 	}
 	r.scoreFn = func(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader) ([]TaskScore, error) {
-		return scoreBatch(ctx, tasks, orgID, secrets, recorder, limiter)
+		return scoreBatch(ctx, tasks, orgID, secrets, llmResolve, recorder, limiter)
 	}
 	return r
 }

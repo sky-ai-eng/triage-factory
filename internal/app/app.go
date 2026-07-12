@@ -35,6 +35,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
 	"github.com/sky-ai-eng/triage-factory/internal/lease"
+	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
@@ -120,6 +121,14 @@ type App struct {
 	ghResolver ghclient.Resolver
 	runSecrets agentproc.SecretsReader
 	modelFor   func(ctx context.Context, orgID, teamID string) string
+
+	// llmResolver is the shared LLM-credential resolver (internal/llmcred,
+	// TFAC-616): every Bedrock/Anthropic resolution the brain does flows
+	// through it, minting short-lived STS session creds for role-mode orgs
+	// and passing stored material through otherwise. Non-nil only in multi
+	// mode (built in buildRunCredentials alongside runSecrets); nil in local,
+	// where resolution stays on the ambient path exactly as before.
+	llmResolver *llmcred.Resolver
 
 	// Subsystems.
 	scorer     *ai.Manager
@@ -260,9 +269,18 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	} else {
 		a.buildExecutorRuntime() // standalone hub + public URL; no HTTP listener
 	}
-	a.buildInfra()          // event bus (SetEventBus only when a server exists)
-	a.buildWSBackplane()    // multi-mode cross-pod fan-out for wsHub (TFAC-584); no-op in local mode
-	a.buildRunCredentials() // ghResolver / runSecrets / modelFor
+	a.buildInfra()                                 // event bus (SetEventBus only when a server exists)
+	a.buildWSBackplane()                           // multi-mode cross-pod fan-out for wsHub (TFAC-584); no-op in local mode
+	if err = a.buildRunCredentials(); err != nil { // ghResolver / runSecrets / modelFor / llmResolver
+		return nil, err
+	}
+	// Bedrock role-mode setup + connect-probe resolver (TFAC-616) — the
+	// server's live AWS calls (GetCallerIdentity / AssumeRole). Multi mode +
+	// a serving role only; nil in local (no ambient AWS SDK) leaves the
+	// role-setup endpoint reporting the method is control-service only.
+	if a.srv != nil && a.llmResolver != nil {
+		a.srv.SetBedrockRoleResolver(a.llmResolver)
+	}
 	if a.plan.brain {
 		a.buildAI() // scorer + project classifier + profiler + reconciler
 	}

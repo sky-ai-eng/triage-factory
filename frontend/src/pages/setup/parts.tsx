@@ -46,15 +46,23 @@ export function ChoiceCards<T extends string>({
     e.preventDefault()
     btnRefs.current[next]?.focus()
   }
+  // Flush N-panel grid: one equal column per option with a hairline between
+  // (divide-x). Tailwind can't JIT a computed `grid-cols-${n}`, so the track
+  // count is set inline. Per-cell padding keeps the outer edges flush (first
+  // cell pads only right, last only left) and gives interior cells padding on
+  // both sides so their content clears the dividers on either side.
+  const last = options.length - 1
   return (
     <div
       role="radiogroup"
       aria-label={ariaLabel}
       onKeyDown={onKeyDown}
-      className="grid grid-cols-2 divide-x divide-[var(--color-border-subtle)]"
+      className="grid divide-x divide-[var(--color-border-subtle)]"
+      style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
     >
       {options.map((opt, i) => {
         const isSelected = selected === opt.kind
+        const pad = i === 0 ? 'pr-5' : i === last ? 'pl-5' : 'px-5'
         return (
           <button
             key={opt.kind}
@@ -66,7 +74,7 @@ export function ChoiceCards<T extends string>({
             aria-checked={isSelected}
             tabIndex={i === tabbable ? 0 : -1}
             onClick={() => onChoose(opt.kind)}
-            className={`group flex flex-col gap-1 rounded-lg text-left outline-none transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/50 ${i === 0 ? 'pr-5' : 'pl-5'}`}
+            className={`group flex flex-col gap-1 rounded-lg text-left outline-none transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/50 ${pad}`}
           >
             <span className="flex items-center gap-1.5">
               <span

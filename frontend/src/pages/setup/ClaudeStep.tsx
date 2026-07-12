@@ -19,9 +19,11 @@
 // AnthropicKeyField, and BedrockFields are exported so the Settings section
 // renders the same provider radio + credential inputs.
 
+import { useState } from 'react'
+import { Check, ChevronRight, Copy } from 'lucide-react'
 import { glassInputClass } from '../settings/primitives'
 import { CLAUDE_SOURCE_OPTIONS } from '../settings/anthropicConnect'
-import { BEDROCK_AUTH_OPTIONS } from '../settings/bedrockConnect'
+import { BEDROCK_AUTH_OPTIONS, fetchBedrockRoleSetup } from '../settings/bedrockConnect'
 import type { BedrockAuthMethod, OrgConfigForm } from '../settings/orgConfig'
 import { ChoiceCards } from './parts'
 import type { ClaudeProvider, StepContext } from './types'
@@ -192,13 +194,231 @@ export function AnthropicKeyField({
         </a>
         . We check it with Anthropic before saving.
       </p>
+      <KeyHardeningChecklist />
+    </div>
+  )
+}
+
+// KeyHardeningChecklist is the "harden your key" nudge under the Anthropic key
+// input (shared, so it shows in both the wizard and Settings): a compact list
+// of the three cheap protections against a leaked key, each expandable to a
+// one-line "why" plus a deep link to the relevant console page. Native
+// <details>/<summary> so there's no new dependency or open-state plumbing.
+function KeyHardeningChecklist() {
+  return (
+    <div className="space-y-1 rounded-lg border border-border-subtle bg-black/[0.02] px-3 py-2">
+      <p className="text-[11px] font-medium text-text-tertiary">Before you save, harden this key</p>
+      <ul className="space-y-0.5">
+        <HardeningItem
+          title="Use a dedicated workspace with a spend limit"
+          why="A scoped workspace with a monthly cap bounds how much a leaked key can spend."
+          href="https://console.anthropic.com/settings/workspaces"
+          linkText="Workspaces"
+        />
+        <HardeningItem
+          title="Set an expiration on the key"
+          why="An expiry bounds the window a leaked or forgotten key stays usable."
+          href="https://console.anthropic.com/settings/keys"
+          linkText="API keys"
+        />
+        <HardeningItem
+          title="Know how to revoke it"
+          why="If the key leaks, delete it from the console — revocation is immediate."
+          href="https://console.anthropic.com/settings/keys"
+          linkText="API keys"
+        />
+      </ul>
+    </div>
+  )
+}
+
+// HardeningItem — one checklist line: the recommendation as the <summary>, its
+// "why" + a deep link revealed on expand. A rotating chevron replaces the
+// native disclosure marker (list-none) to match the wizard's ChoiceCards idiom.
+function HardeningItem({
+  title,
+  why,
+  href,
+  linkText,
+}: {
+  title: string
+  why: string
+  href: string
+  linkText: string
+}) {
+  return (
+    <li className="text-[11px] leading-relaxed text-text-tertiary">
+      <details className="group">
+        <summary className="flex cursor-pointer list-none items-center gap-1 marker:content-none">
+          <ChevronRight
+            size={11}
+            aria-hidden
+            className="shrink-0 text-text-tertiary transition-transform group-open:rotate-90"
+          />
+          <span>{title}</span>
+        </summary>
+        <p className="mt-0.5 pl-[15px] text-text-tertiary/85">
+          {why}{' '}
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-accent hover:underline"
+          >
+            {linkText}
+          </a>
+        </p>
+      </details>
+    </li>
+  )
+}
+
+// CopyButton — the shared Copy/Copied affordance used by the role setup's
+// read-only External ID field and trust-policy block. Matches the settings
+// CopyField idiom (SSOSettings): swap the icon + label for ~1.5s on success,
+// silently no-op if the clipboard is denied (the value is still selectable).
+function CopyButton({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // Clipboard denied — the value is still selectable.
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => void copy()}
+      aria-label={`Copy ${label}`}
+      className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-border-glass)] px-3 py-2 text-[12px] font-medium text-text-secondary transition-colors hover:text-text-primary"
+    >
+      {copied ? <Check size={13} /> : <Copy size={13} />}
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  )
+}
+
+// BedrockRoleFields — the IAM-role method body: the editable Role ARN, the
+// read-only (server-generated) External ID, and a manual "generate setup"
+// action that POSTs /api/bedrock/role-setup and renders the returned trust
+// policy in a copyable block. Manual (a button, not an on-mount effect) so a
+// controlled component stays effect-free and the wizard + Settings share the
+// exact same behavior. The External ID lands in form state via onChange so it
+// round-trips with the rest of the Bedrock config on connect.
+function BedrockRoleFields({
+  form,
+  onChange,
+  invalid,
+}: {
+  form: OrgConfigForm
+  onChange: (patch: Partial<OrgConfigForm>) => void
+  invalid?: boolean
+}) {
+  const [loading, setLoading] = useState(false)
+  const [setupError, setSetupError] = useState<string | null>(null)
+  const [trustPolicy, setTrustPolicy] = useState('')
+  const [callerArn, setCallerArn] = useState('')
+
+  const runSetup = async () => {
+    setLoading(true)
+    setSetupError(null)
+    const r = await fetchBedrockRoleSetup()
+    setLoading(false)
+    if (!r.ok) {
+      setSetupError(r.error)
+      return
+    }
+    setTrustPolicy(r.trust_policy)
+    setCallerArn(r.caller_identity_arn)
+    onChange({ bedrock_external_id: r.external_id })
+  }
+
+  return (
+    <div className="space-y-3">
+      <LabeledInput
+        label="Role ARN"
+        value={form.bedrock_role_arn}
+        onChange={(v) => onChange({ bedrock_role_arn: v })}
+        placeholder="arn:aws:iam::123456789012:role/tf-bedrock"
+        invalid={invalid && form.bedrock_role_arn.trim() === ''}
+      />
+      {/* External ID — read-only, generated by the setup call; the role's trust
+          policy must pin it (the confused-deputy guard). */}
+      <div className="space-y-1.5">
+        <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+          External ID
+        </span>
+        {form.bedrock_external_id ? (
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              readOnly
+              value={form.bedrock_external_id}
+              aria-label="External ID"
+              onFocus={(e) => e.target.select()}
+              className={`${glassInputClass} font-mono text-[12px]`}
+            />
+            <CopyButton value={form.bedrock_external_id} label="External ID" />
+          </div>
+        ) : (
+          <p className="text-[11px] leading-relaxed text-text-tertiary">
+            Generated when you run the setup below — add it to the role&apos;s trust policy.
+          </p>
+        )}
+      </div>
+      {/* Setup action — fetches the trust policy + external ID from the control
+          service. A 422 (no ambient AWS identity) surfaces its remediation text
+          inline. */}
+      <div className="space-y-2">
+        <button
+          type="button"
+          onClick={() => void runSetup()}
+          disabled={loading}
+          className="inline-flex items-center gap-1.5 rounded-xl border border-accent/20 px-4 py-2 text-[13px] text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+        >
+          {loading
+            ? 'Fetching…'
+            : trustPolicy
+              ? 'Refresh setup / trust policy'
+              : 'Generate setup / show trust policy'}
+        </button>
+        {setupError && (
+          <p className="text-[11px] leading-relaxed text-[var(--color-dismiss)]">{setupError}</p>
+        )}
+        {callerArn && (
+          <p className="text-[11px] leading-relaxed text-text-tertiary">
+            Triage Factory assumes the role from{' '}
+            <span className="font-mono text-text-secondary">{callerArn}</span> — this identity must
+            be allowed by the trust policy.
+          </p>
+        )}
+        {trustPolicy && (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                Trust policy
+              </span>
+              <CopyButton value={trustPolicy} label="trust policy" />
+            </div>
+            <pre className="max-h-64 overflow-auto rounded-lg border border-border-subtle bg-black/[0.03] p-3 font-mono text-[11px] leading-relaxed text-text-secondary">
+              {trustPolicy}
+            </pre>
+            <p className="text-[11px] leading-relaxed text-text-tertiary">
+              Create the role in IAM with Bedrock permissions, then set this as its trust policy.
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
 
 // BedrockFields is the Amazon Bedrock credential group: the auth-method
-// picker (Bedrock API key vs IAM access keys), the selected method's secret
-// inputs, and the shared non-secret config (region, optional model ID,
+// picker (IAM role vs Bedrock API key vs IAM access keys), the selected
+// method's inputs, and the shared non-secret config (region, optional model ID,
 // optional endpoint override for VPC endpoints / GovCloud). `hasStored` is
 // true when a credential for the CURRENTLY SELECTED method is already in the
 // vault — it arms the "leave blank to keep current" masking; switching
@@ -224,7 +444,9 @@ export function BedrockFields({
         selected={form.bedrock_auth_method}
         onChoose={(kind: BedrockAuthMethod) => onChange({ bedrock_auth_method: kind })}
       />
-      {form.bedrock_auth_method === 'bearer' ? (
+      {form.bedrock_auth_method === 'role' ? (
+        <BedrockRoleFields form={form} onChange={onChange} invalid={invalid} />
+      ) : form.bedrock_auth_method === 'bearer' ? (
         <LabeledInput
           label={`Bedrock API key${keep}`}
           value={form.bedrock_bearer_token}

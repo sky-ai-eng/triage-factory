@@ -20,7 +20,7 @@ import (
 func TestScoreTasks_BatchesAndCountsSkips(t *testing.T) {
 	// nil stores/secrets/recorder/limiter: scoreTasks skips description
 	// loading when entities is nil and never touches the others on this path.
-	r := NewRunner(nil, nil, "org-x", nil, nil, nil, RunnerCallbacks{})
+	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, RunnerCallbacks{})
 
 	var calls int32
 	r.scoreFn = func(_ context.Context, tasks []TaskInput, orgID string, _ agentproc.SecretsReader) ([]TaskScore, error) {
@@ -66,7 +66,7 @@ func TestScoreTasks_BatchesAndCountsSkips(t *testing.T) {
 // TestRunner_StopIdempotent pins that Stop is safe to call more than once
 // (guarded by stopOnce); a bare close(r.stop) would panic on the second call.
 func TestRunner_StopIdempotent(t *testing.T) {
-	r := NewRunner(nil, nil, "org-x", nil, nil, nil, RunnerCallbacks{})
+	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, RunnerCallbacks{})
 	r.Start()
 	r.Stop()
 	r.Stop() // must not panic
@@ -75,7 +75,7 @@ func TestRunner_StopIdempotent(t *testing.T) {
 // TestScoreTasks_EmptyReturnsZero pins the early-out: no tasks means no scoreFn
 // calls and a clean zero result.
 func TestScoreTasks_EmptyReturnsZero(t *testing.T) {
-	r := NewRunner(nil, nil, "org-x", nil, nil, nil, RunnerCallbacks{})
+	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, RunnerCallbacks{})
 	var calls int32
 	r.scoreFn = func(context.Context, []TaskInput, string, agentproc.SecretsReader) ([]TaskScore, error) {
 		atomic.AddInt32(&calls, 1)

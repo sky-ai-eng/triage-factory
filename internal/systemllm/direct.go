@@ -42,7 +42,11 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 
 	startedAt := time.Now().UTC()
 
-	creds, err := agentproc.ResolveCredentialsForBundle(ctx, opts.Secrets, opts.OrgID)
+	// Role-aware resolution (TFAC-616): a role-mode Bedrock org has no stored
+	// key — LLMResolver mints a short-lived STS session triple, which
+	// buildDirectClient's SigV4 branch signs the request with. Every other
+	// mode (and a nil resolver) falls back to the raw secret map, unchanged.
+	creds, err := resolveDirectCreds(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +75,18 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 	}
 
 	return &CompleteResult{Text: extractText(msg)}, nil
+}
+
+// resolveDirectCreds resolves the org's LLM env map for the direct path:
+// through the role-aware seam (internal/llmcred) when a resolver is wired —
+// minting for role-mode Bedrock orgs, passing stored material through
+// otherwise — else the raw secret store. Both return the same env-map shape
+// buildDirectClient consumes, so the provider branch below is unchanged.
+func resolveDirectCreds(ctx context.Context, opts CompleteOptions) (map[string]string, error) {
+	if opts.LLMResolver != nil {
+		return opts.LLMResolver(ctx, opts.OrgID)
+	}
+	return agentproc.ResolveCredentialsForBundle(ctx, opts.Secrets, opts.OrgID)
 }
 
 // recordDirectCall builds the DirectUsage + cost figures from whatever the

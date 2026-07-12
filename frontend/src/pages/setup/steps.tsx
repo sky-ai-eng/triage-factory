@@ -254,7 +254,9 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     claudeProvider: org.has_bedrock_credentials ? 'bedrock' : 'anthropic',
     bedrockConnected: org.has_bedrock_credentials,
     bedrockStoredMethod:
-      org.bedrock_auth_method === 'bearer' || org.bedrock_auth_method === 'access_keys'
+      org.bedrock_auth_method === 'bearer' ||
+      org.bedrock_auth_method === 'access_keys' ||
+      org.bedrock_auth_method === 'role'
         ? org.bedrock_auth_method
         : null,
   }
@@ -1059,6 +1061,17 @@ const orgClaudeSourceStep: WizardStep = {
 export function bedrockFormError(s: WizardState): string | null {
   const f = s.org
   if (f.bedrock_region.trim() === '') return 'Enter the AWS region (e.g. us-east-1).'
+  // Role mode carries no secret, so "keep current" never applies — the ARN is
+  // always required and must look like an IAM role ARN. (The server does the
+  // real assume-role check on connect; this is the cheap shape gate.)
+  if (f.bedrock_auth_method === 'role') {
+    const arn = f.bedrock_role_arn.trim()
+    if (arn === '') return 'Enter the IAM role ARN Triage Factory should assume.'
+    if (!/^arn:aws[a-z-]*:iam::\d{12}:role\/.+/.test(arn)) {
+      return 'Enter a valid IAM role ARN (arn:aws:iam::123456789012:role/…).'
+    }
+    return null
+  }
   const keep = s.bedrockConnected && s.bedrockStoredMethod === f.bedrock_auth_method
   if (f.bedrock_auth_method === 'bearer') {
     if (f.bedrock_bearer_token.trim() === '' && !keep) {

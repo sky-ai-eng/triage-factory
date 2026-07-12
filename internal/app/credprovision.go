@@ -15,6 +15,6 @@ func (a *App) buildCredProvisioner() error {
 	if runmode.Current() != runmode.ModeMulti || !a.plan.brain {
 		return nil
 	}
-	a.credProvisioner = credprovision.NewManager(a.stores)
+	a.credProvisioner = credprovision.NewManager(a.stores, a.llmResolver)
 	return nil
 }
