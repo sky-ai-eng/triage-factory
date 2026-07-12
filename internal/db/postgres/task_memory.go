@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -150,16 +151,10 @@ func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID,
 
 func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string) ([]domain.TaskMemory, error) {
 	rows, err := q.QueryContext(ctx, `
-		WITH related AS (
-			SELECT id FROM entities WHERE org_id = $1 AND id = $2
-			UNION
-			SELECT to_entity_id FROM entity_links WHERE org_id = $1 AND from_entity_id = $2
-			UNION
-			SELECT from_entity_id FROM entity_links WHERE org_id = $1 AND to_entity_id = $2
-		)
 		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
 		FROM run_memory rm
-		WHERE rm.org_id = $1 AND rm.entity_id IN (SELECT id FROM related)
+		WHERE rm.org_id = $1
+		  AND rm.run_id IN (SELECT run_id FROM run_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		ORDER BY rm.created_at ASC
 	`, orgID, entityID)
 	if err != nil {
@@ -183,18 +178,11 @@ func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string
 // the JOIN as defense in depth alongside the now-bypassed RLS policy.
 func getMemoriesForEntityTeamScoped(ctx context.Context, q queryer, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
 	rows, err := q.QueryContext(ctx, `
-		WITH related AS (
-			SELECT id FROM entities WHERE org_id = $1 AND id = $2
-			UNION
-			SELECT to_entity_id FROM entity_links WHERE org_id = $1 AND from_entity_id = $2
-			UNION
-			SELECT from_entity_id FROM entity_links WHERE org_id = $1 AND to_entity_id = $2
-		)
 		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
 		FROM run_memory rm
 		JOIN runs r ON r.id = rm.run_id AND r.org_id = rm.org_id
 		WHERE rm.org_id = $1
-		  AND rm.entity_id IN (SELECT id FROM related)
+		  AND rm.run_id IN (SELECT run_id FROM run_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		  AND (r.visibility = 'org' OR (r.visibility = 'team' AND r.team_id = NULLIF($3, '')::uuid))
 		ORDER BY rm.created_at ASC
 	`, orgID, entityID, teamID)
@@ -224,26 +212,34 @@ func scanTaskMemories(rows *sql.Rows) ([]domain.TaskMemory, error) {
 	return out, rows.Err()
 }
 
-func (s *taskMemoryStore) GetRunMemory(ctx context.Context, orgID, runID string) (*domain.TaskMemory, error) {
-	row := s.q.QueryRowContext(ctx, `
-		SELECT id, run_id, entity_id, blueprint_run_id, agent_content, human_content, created_at
-		FROM run_memory WHERE org_id = $1 AND run_id = $2
-	`, orgID, runID)
+// memoryRoleRankCASE is the SQL CASE expression mapping a role column
+// reference to its domain.MemoryRoleOutranks rank — kept in sync with
+// domain.memoryRoleRank (primary=3 > produced=2 > touched=1 > else=0).
+// Duplicated inline (not a shared const) because it's substituted twice
+// per statement with different column references.
+const memoryRoleRankCASE = "(CASE %s WHEN 'primary' THEN 3 WHEN 'produced' THEN 2 WHEN 'touched' THEN 1 ELSE 0 END)"
 
-	var m domain.TaskMemory
-	var blueprintRunID, agentContent, humanContent sql.NullString
-	var createdAt time.Time
-	err := row.Scan(&m.ID, &m.RunID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	m.BlueprintRunID = blueprintRunID.String
-	m.Content = materializeMemory(agentContent.String, humanContent.String)
-	m.CreatedAt = createdAt
-	return &m, nil
+func (s *taskMemoryStore) RecordEntityTouchSystem(ctx context.Context, orgID, runID, entityID, role string) error {
+	query := `
+		INSERT INTO run_memory_entities (org_id, run_id, entity_id, role, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (run_id, entity_id) DO UPDATE SET role = EXCLUDED.role
+		WHERE ` + fmt.Sprintf(memoryRoleRankCASE, "EXCLUDED.role") + ` > ` + fmt.Sprintf(memoryRoleRankCASE, "run_memory_entities.role")
+	_, err := s.admin.ExecContext(ctx, query, orgID, runID, entityID, role, time.Now().UTC())
+	return err
+}
+
+func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) (int, error) {
+	var n int
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM run_memory rm
+		JOIN runs r ON r.id = rm.run_id AND r.org_id = rm.org_id
+		WHERE rm.org_id = $1
+		  AND rm.run_id IN (SELECT run_id FROM run_memory_entities WHERE org_id = $1 AND entity_id = $2)
+		  AND (r.visibility = 'org' OR (r.visibility = 'team' AND r.team_id = NULLIF($3, '')::uuid))
+	`, orgID, entityID, teamID).Scan(&n)
+	return n, err
 }
 
 // materializeMemory composes the agent's narrative and the human's

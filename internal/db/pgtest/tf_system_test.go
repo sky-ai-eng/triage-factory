@@ -238,8 +238,14 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, runID, entityID, blueprintRunID, "agent narrative"); err != nil {
 			t.Errorf("TaskMemory.UpsertAgentMemorySystem: %v", err)
 		}
+		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, runID, entityID, domain.MemoryRolePrimary); err != nil {
+			t.Errorf("TaskMemory.RecordEntityTouchSystem: %v", err)
+		}
 		if _, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, teamID); err != nil {
 			t.Errorf("TaskMemory.GetMemoriesForEntitySystem: %v", err)
+		}
+		if _, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, orgID, entityID, teamID); err != nil {
+			t.Errorf("TaskMemory.CountMemoriesForEntitySystem: %v", err)
 		}
 	})
 

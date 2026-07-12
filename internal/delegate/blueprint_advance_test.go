@@ -170,15 +170,23 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, "bpr-"+runID, task,
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "event", "")
 
-	mem, err := sqlitestore.New(database).TaskMemory.GetRunMemory(context.Background(), runmode.LocalDefaultOrgID, runID)
-	if err != nil || mem == nil {
-		t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+	// Raw column read rather than a store method: this test is about
+	// processCompletion's write side (file ingestion + blueprint_run_id
+	// stamping), not the entity-scoped read path, and production's write
+	// side (UpsertAgentMemorySystem) does not itself join an entity in
+	// run_memory_entities — that lands with the run-end attach ticket.
+	var agentContent sql.NullString
+	var gotBlueprintRunID sql.NullString
+	if err := database.QueryRow(
+		`SELECT agent_content, blueprint_run_id FROM run_memory WHERE run_id = ?`, runID,
+	).Scan(&agentContent, &gotBlueprintRunID); err != nil {
+		t.Fatalf("scan run_memory: %v", err)
 	}
-	if mem.Content != "step did X; next step needs Y" {
-		t.Errorf("agent_content = %q; processCompletion should ingest the file from the namespaced path", mem.Content)
+	if agentContent.String != "step did X; next step needs Y" {
+		t.Errorf("agent_content = %q; processCompletion should ingest the file from the namespaced path", agentContent.String)
 	}
-	if mem.BlueprintRunID != blueprintRunID {
-		t.Errorf("run_memory.blueprint_run_id = %q, want %q", mem.BlueprintRunID, blueprintRunID)
+	if gotBlueprintRunID.String != blueprintRunID {
+		t.Errorf("run_memory.blueprint_run_id = %q, want %q", gotBlueprintRunID.String, blueprintRunID)
 	}
 }
 

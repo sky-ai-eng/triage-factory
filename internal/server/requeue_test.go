@@ -79,6 +79,13 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	if err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "e_pa", "", "agent self-report"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
+	// The primary join row a real run's completion will carry once the
+	// run-end attach ticket (TFAC-625) lands — GetMemoriesForEntity's
+	// join-based read (TFAC-622), exercised in assertPendingApprovalCleanedUp
+	// below, needs it to find anything.
+	if err := sqlitestore.New(database).TaskMemory.RecordEntityTouchSystem(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "e_pa", domain.MemoryRolePrimary); err != nil {
+		t.Fatalf("RecordEntityTouchSystem: %v", err)
+	}
 
 	// A finalized review draft parks the run: a review artifact in state=pending
 	// whose ready sentinel (details.review_event) is set, with the agent's draft
@@ -178,15 +185,26 @@ func assertPendingApprovalCleanedUp(
 		t.Errorf("stored human_content includes the canonical heading; materialization layer should own it: %q", humanContent.String)
 	}
 
-	// Read-side check: GetRunMemory's materialization must produce
+	// Read-side check: GetMemoriesForEntity's materialization must produce
 	// the heading exactly once, anchoring the boundary the next
 	// agent's prompt parser scans for.
-	mem, err := sqlitestore.New(database).TaskMemory.GetRunMemory(context.Background(), runmode.LocalDefaultOrgID, runID)
+	var entityID string
+	if err := database.QueryRow(`SELECT entity_id FROM tasks WHERE id = ?`, taskID).Scan(&entityID); err != nil {
+		t.Fatalf("lookup entity_id: %v", err)
+	}
+	mems, err := sqlitestore.New(database).TaskMemory.GetMemoriesForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
-		t.Fatalf("GetRunMemory: %v", err)
+		t.Fatalf("GetMemoriesForEntity: %v", err)
+	}
+	var mem *domain.TaskMemory
+	for i := range mems {
+		if mems[i].RunID == runID {
+			mem = &mems[i]
+			break
+		}
 	}
 	if mem == nil {
-		t.Fatalf("GetRunMemory returned nil after cleanup")
+		t.Fatalf("GetMemoriesForEntity returned no row for run %s after cleanup", runID)
 	}
 	headingCount := strings.Count(mem.Content, "## Human feedback (post-run)")
 	if headingCount != 1 {
