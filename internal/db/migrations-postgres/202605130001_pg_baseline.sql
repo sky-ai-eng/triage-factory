@@ -52,8 +52,9 @@
 -- Target image: supabase/postgres:15.1.0.147 — pre-loads supabase_vault,
 -- pgsodium, pgcrypto, pgjwt, uuid-ossp, pg_graphql via
 -- shared_preload_libraries, and pre-creates the auth + vault + extensions
--- schemas. gen_random_uuid() lives in pg_catalog on PG 13+; no extension
--- dependency required.
+-- schemas. TF drops the vault extension below (secrets are app-encrypted,
+-- not Vault-backed) and never creates pgsodium. gen_random_uuid() lives in
+-- pg_catalog on PG 13+; no extension dependency required.
 
 CREATE SCHEMA IF NOT EXISTS tf;
 
@@ -91,8 +92,12 @@ END
 $$;
 -- +goose StatementEnd
 
--- Defensive — the image already loads supabase_vault.
-CREATE EXTENSION IF NOT EXISTS supabase_vault WITH SCHEMA vault;
+-- The image pre-creates supabase_vault (and preloads pgsodium) before this
+-- migration ever runs; TF doesn't use either, so drop the callable SQL
+-- surface immediately. shared_preload_libraries still loads the underlying
+-- C library into the postmaster (image-managed, outside this migration's
+-- control), but no vault.* function remains reachable afterward.
+DROP EXTENSION IF EXISTS supabase_vault CASCADE;
 
 -- pg_dump emits functions before tables (and before the FKs / triggers that
 -- close the loop). Some function bodies reference tables that don't exist
@@ -167,148 +172,6 @@ BEGIN
       USING ERRCODE = '40001';
   END IF;
   RETURN v_new_version;
-END;
-$$;
--- +goose StatementEnd
-
-
---
--- Name: vault_delete_org_secret(uuid, text); Type: FUNCTION; Schema: public; Owner: -
---
-
--- +goose StatementBegin
-CREATE FUNCTION public.vault_delete_org_secret(p_org_id uuid, p_key text) RETURNS boolean
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-DECLARE
-  v_full_name TEXT := 'org/' || p_org_id::text || '/' || p_key;
-  v_existing  UUID;
-BEGIN
-  -- NULL p_org_id or NULL current_org_id would slip past IS DISTINCT
-  -- FROM (both-NULL is "not distinct"). Refuse both explicitly so a
-  -- claims-less session can't sneak through.
-  IF p_org_id IS NULL OR tf.current_org_id() IS NULL THEN
-    RAISE EXCEPTION 'Vault access denied: missing org context (p_org_id or request.jwt.claims.org_id is NULL)'
-      USING ERRCODE = '42501';
-  END IF;
-  IF p_org_id <> tf.current_org_id() THEN
-    RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
-      USING ERRCODE = '42501';
-  END IF;
-  SELECT id INTO v_existing FROM vault.decrypted_secrets WHERE name = v_full_name;
-  IF v_existing IS NULL THEN
-    RETURN FALSE;
-  END IF;
-  DELETE FROM vault.secrets WHERE id = v_existing;
-  RETURN TRUE;
-END;
-$$;
--- +goose StatementEnd
-
-
---
--- Name: vault_get_org_secret(uuid, text); Type: FUNCTION; Schema: public; Owner: -
---
-
--- +goose StatementBegin
-CREATE FUNCTION public.vault_get_org_secret(p_org_id uuid, p_key text) RETURNS text
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-DECLARE
-  v_full_name TEXT := 'org/' || p_org_id::text || '/' || p_key;
-  v_secret    TEXT;
-BEGIN
-  -- NULL p_org_id or NULL current_org_id would slip past IS DISTINCT
-  -- FROM (both-NULL is "not distinct"). Refuse both explicitly so a
-  -- claims-less session can't sneak through.
-  IF p_org_id IS NULL OR tf.current_org_id() IS NULL THEN
-    RAISE EXCEPTION 'Vault access denied: missing org context (p_org_id or request.jwt.claims.org_id is NULL)'
-      USING ERRCODE = '42501';
-  END IF;
-  IF p_org_id <> tf.current_org_id() THEN
-    RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
-      USING ERRCODE = '42501';
-  END IF;
-  SELECT decrypted_secret INTO v_secret
-    FROM vault.decrypted_secrets
-   WHERE name = v_full_name;
-  RETURN v_secret;
-END;
-$$;
--- +goose StatementEnd
-
-
---
--- Name: vault_get_org_secret_system(uuid, text); Type: FUNCTION; Schema: public; Owner: -
---
-
--- +goose StatementBegin
-CREATE FUNCTION public.vault_get_org_secret_system(p_org_id uuid, p_key text) RETURNS text
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-DECLARE
-  v_full_name TEXT := 'org/' || p_org_id::text || '/' || p_key;
-  v_secret    TEXT;
-BEGIN
-  -- System/background read path. No current_org_id() check: p_org_id
-  -- is trusted (the EXECUTE grant restricts this to the admin/system
-  -- pool — tf_app has none, so a request handler can't reach it; those
-  -- use the claims-checked vault_get_org_secret instead). Same
-  -- secret-name convention: 'org/<org_id>/<key>'. A NULL p_org_id is a
-  -- caller bug, not a privilege failure — refuse it explicitly rather
-  -- than silently looking up 'org//<key>'.
-  IF p_org_id IS NULL THEN
-    RAISE EXCEPTION 'system Vault access denied: p_org_id is NULL'
-      USING ERRCODE = '22004';
-  END IF;
-  SELECT decrypted_secret INTO v_secret
-    FROM vault.decrypted_secrets
-   WHERE name = v_full_name;
-  RETURN v_secret;
-END;
-$$;
--- +goose StatementEnd
-
-
---
--- Name: vault_put_org_secret(uuid, text, text, text); Type: FUNCTION; Schema: public; Owner: -
---
-
--- +goose StatementBegin
-CREATE FUNCTION public.vault_put_org_secret(p_org_id uuid, p_key text, p_secret text, p_description text DEFAULT NULL::text) RETURNS uuid
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-DECLARE
-  v_full_name TEXT := 'org/' || p_org_id::text || '/' || p_key;
-  v_existing  UUID;
-  -- vault.secrets.description is NOT NULL; coalesce NULL → '' so callers
-  -- can pass NULL ergonomically.
-  v_desc      TEXT := COALESCE(p_description, '');
-BEGIN
-  -- DEFINER + arbitrary p_org_id would let any tf_app caller read/write
-  -- ANY org's secrets; gate on the JWT-claims org so the wrapper only
-  -- ever touches the active session's tenant.
-  -- NULL p_org_id or NULL current_org_id would slip past IS DISTINCT
-  -- FROM (both-NULL is "not distinct"). Refuse both explicitly so a
-  -- claims-less session can't sneak through.
-  IF p_org_id IS NULL OR tf.current_org_id() IS NULL THEN
-    RAISE EXCEPTION 'Vault access denied: missing org context (p_org_id or request.jwt.claims.org_id is NULL)'
-      USING ERRCODE = '42501';
-  END IF;
-  IF p_org_id <> tf.current_org_id() THEN
-    RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
-      USING ERRCODE = '42501';
-  END IF;
-  SELECT id INTO v_existing FROM vault.decrypted_secrets WHERE name = v_full_name;
-  IF v_existing IS NOT NULL THEN
-    PERFORM vault.update_secret(v_existing, p_secret, v_full_name, v_desc);
-    RETURN v_existing;
-  END IF;
-  RETURN vault.create_secret(p_secret, v_full_name, v_desc);
 END;
 $$;
 -- +goose StatementEnd
@@ -471,8 +334,9 @@ $$;
 -- RLS — a within-org, non-security boundary — to return the full org
 -- union, while preserving the ORG boundary: with request claims it
 -- requires p_org_id to equal the caller's org; with no claims
--- (admin-pool / system / test) the guard is skipped, mirroring the
--- vault_*_system split. The pinned search_path blocks definer hijacking.
+-- (admin-pool / system / test) the guard is skipped — the same
+-- claims-present-vs-trusted-args split every *System store method uses.
+-- The pinned search_path blocks definer hijacking.
 -- +goose StatementBegin
 CREATE FUNCTION tf.org_tracked_repos(p_org_id uuid) RETURNS TABLE(owner text, repo text)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
@@ -1122,7 +986,7 @@ CREATE TABLE public.org_settings (
     github_clone_protocol text DEFAULT 'ssh'::text NOT NULL,
     jira_base_url text,
     jira_poll_interval interval DEFAULT '00:05:00'::interval NOT NULL,
-    -- Vault refs (not raw secrets) for Anthropic / Bedrock credentials.
+    -- org_secrets key refs (not raw secrets) for Anthropic / Bedrock credentials.
     -- NULL means "use deployment default" on hosted SaaS or "not configured
     -- yet" on self-host. The SecretStore API resolves the ref to a live
     -- token at request time; rotation replaces the secret behind the ref
@@ -5111,51 +4975,6 @@ GRANT ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_vers
 
 
 --
--- Name: FUNCTION vault_delete_org_secret(p_org_id uuid, p_key text); Type: ACL; Schema: public; Owner: -
---
-
-REVOKE ALL ON FUNCTION public.vault_delete_org_secret(p_org_id uuid, p_key text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.vault_delete_org_secret(p_org_id uuid, p_key text) FROM anon, authenticated, service_role;
-GRANT ALL ON FUNCTION public.vault_delete_org_secret(p_org_id uuid, p_key text) TO postgres;
-GRANT ALL ON FUNCTION public.vault_delete_org_secret(p_org_id uuid, p_key text) TO tf_app;
-
-
---
--- Name: FUNCTION vault_get_org_secret(p_org_id uuid, p_key text); Type: ACL; Schema: public; Owner: -
---
-
-REVOKE ALL ON FUNCTION public.vault_get_org_secret(p_org_id uuid, p_key text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.vault_get_org_secret(p_org_id uuid, p_key text) FROM anon, authenticated, service_role;
-GRANT ALL ON FUNCTION public.vault_get_org_secret(p_org_id uuid, p_key text) TO postgres;
-GRANT ALL ON FUNCTION public.vault_get_org_secret(p_org_id uuid, p_key text) TO tf_app;
-
-
---
--- Name: FUNCTION vault_get_org_secret_system(p_org_id uuid, p_key text); Type: ACL; Schema: public; Owner: -
---
-
--- System/admin pool ONLY. Deliberately NOT granted to tf_app: the app
--- pool must stay on the claims-checked vault_get_org_secret. The admin
--- pool connects as supabase_admin (superuser, owns this function) and
--- executes it regardless of grant; postgres is granted to mirror the
--- sibling vault_* ACLs. tf_app lacking EXECUTE here is the load-bearing
--- guardrail — pinned by the pgtest "tf_app denied" assertion.
-REVOKE ALL ON FUNCTION public.vault_get_org_secret_system(p_org_id uuid, p_key text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.vault_get_org_secret_system(p_org_id uuid, p_key text) FROM anon, authenticated, service_role;
-GRANT ALL ON FUNCTION public.vault_get_org_secret_system(p_org_id uuid, p_key text) TO postgres;
-
-
---
--- Name: FUNCTION vault_put_org_secret(p_org_id uuid, p_key text, p_secret text, p_description text); Type: ACL; Schema: public; Owner: -
---
-
-REVOKE ALL ON FUNCTION public.vault_put_org_secret(p_org_id uuid, p_key text, p_secret text, p_description text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.vault_put_org_secret(p_org_id uuid, p_key text, p_secret text, p_description text) FROM anon, authenticated, service_role;
-GRANT ALL ON FUNCTION public.vault_put_org_secret(p_org_id uuid, p_key text, p_secret text, p_description text) TO postgres;
-GRANT ALL ON FUNCTION public.vault_put_org_secret(p_org_id uuid, p_key text, p_secret text, p_description text) TO tf_app;
-
-
---
 -- Name: FUNCTION current_org_id(); Type: ACL; Schema: tf; Owner: -
 --
 
@@ -6206,9 +6025,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.blueprint_runs  TO tf_app;
 -- Per-org GitHub App registration + installation tracking.
 --
 -- Per-org App is the v1 multi-mode default; orgs using the deployment-default
--- (hosted) App have NO org_github_apps row. The `_ref` columns hold Vault
--- secret-name pointers (the actual client_secret / PEM / webhook signing
--- secret are written via vault.create_secret in the manifest backend) so
+-- (hosted) App have NO org_github_apps row. The `_ref` columns hold
+-- org_secrets key pointers (the actual client_secret / PEM / webhook signing
+-- secret are written via SecretStore in the manifest backend) so
 -- app secrets never live in the relational schema.
 --
 -- Installations are 1:N from an org (and observed from GitHub's webhook
@@ -6584,211 +6403,6 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.event_queue TO tf_app;
 
 
 --
--- Per-user secret scope. Mirrors the vault_*_org_secret quartet
--- (defined above), adding a p_user_id dimension and a user-scoped RLS
--- gate. Vault name convention: 'org/<org_id>/user/<user_id>/<key>'. The
--- claims-checked trio gates on BOTH p_org_id = tf.current_org_id() AND
--- p_user_id = tf.current_user_id() so a handler running as user A can
--- never read user B's token; the _system variant trusts explicit args
--- (admin pool only). Custodies the Jira "act as yourself" credential.
---
-
---
--- Name: vault_put_user_secret(uuid, uuid, text, text, text); Type: FUNCTION; Schema: public; Owner: -
---
-
--- +goose StatementBegin
-CREATE FUNCTION public.vault_put_user_secret(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text DEFAULT NULL::text) RETURNS uuid
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-DECLARE
-  v_full_name TEXT := 'org/' || p_org_id::text || '/user/' || p_user_id::text || '/' || p_key;
-  v_existing  UUID;
-  -- vault.secrets.description is NOT NULL; coalesce NULL → '' so callers
-  -- can pass NULL ergonomically.
-  v_desc      TEXT := COALESCE(p_description, '');
-BEGIN
-  -- DEFINER + arbitrary p_org_id/p_user_id would let any tf_app caller
-  -- read/write ANY user's secrets; gate on the JWT-claims org AND user
-  -- so the wrapper only ever touches the active session's own credential.
-  -- NULL p_org_id/p_user_id or NULL current_org_id()/current_user_id()
-  -- would slip past IS DISTINCT FROM (both-NULL is "not distinct"). Refuse
-  -- explicitly so a claims-less session can't sneak through.
-  IF p_org_id IS NULL OR p_user_id IS NULL OR tf.current_org_id() IS NULL OR tf.current_user_id() IS NULL THEN
-    RAISE EXCEPTION 'Vault access denied: missing org/user context (p_org_id, p_user_id, or request.jwt.claims is NULL)'
-      USING ERRCODE = '42501';
-  END IF;
-  IF p_org_id <> tf.current_org_id() THEN
-    RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
-      USING ERRCODE = '42501';
-  END IF;
-  IF p_user_id <> tf.current_user_id() THEN
-    RAISE EXCEPTION 'cross-user Vault access denied: p_user_id=% does not match request.jwt.claims.sub', p_user_id
-      USING ERRCODE = '42501';
-  END IF;
-  SELECT id INTO v_existing FROM vault.decrypted_secrets WHERE name = v_full_name;
-  IF v_existing IS NOT NULL THEN
-    PERFORM vault.update_secret(v_existing, p_secret, v_full_name, v_desc);
-    RETURN v_existing;
-  END IF;
-  RETURN vault.create_secret(p_secret, v_full_name, v_desc);
-END;
-$$;
--- +goose StatementEnd
-
-
---
--- Name: vault_get_user_secret(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
---
-
--- +goose StatementBegin
-CREATE FUNCTION public.vault_get_user_secret(p_org_id uuid, p_user_id uuid, p_key text) RETURNS text
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-DECLARE
-  v_full_name TEXT := 'org/' || p_org_id::text || '/user/' || p_user_id::text || '/' || p_key;
-  v_secret    TEXT;
-BEGIN
-  IF p_org_id IS NULL OR p_user_id IS NULL OR tf.current_org_id() IS NULL OR tf.current_user_id() IS NULL THEN
-    RAISE EXCEPTION 'Vault access denied: missing org/user context (p_org_id, p_user_id, or request.jwt.claims is NULL)'
-      USING ERRCODE = '42501';
-  END IF;
-  IF p_org_id <> tf.current_org_id() THEN
-    RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
-      USING ERRCODE = '42501';
-  END IF;
-  IF p_user_id <> tf.current_user_id() THEN
-    RAISE EXCEPTION 'cross-user Vault access denied: p_user_id=% does not match request.jwt.claims.sub', p_user_id
-      USING ERRCODE = '42501';
-  END IF;
-  SELECT decrypted_secret INTO v_secret
-    FROM vault.decrypted_secrets
-   WHERE name = v_full_name;
-  RETURN v_secret;
-END;
-$$;
--- +goose StatementEnd
-
-
---
--- Name: vault_get_user_secret_system(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
---
-
--- +goose StatementBegin
-CREATE FUNCTION public.vault_get_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text) RETURNS text
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-DECLARE
-  v_full_name TEXT := 'org/' || p_org_id::text || '/user/' || p_user_id::text || '/' || p_key;
-  v_secret    TEXT;
-BEGIN
-  -- System/background read path (write-actor resolver acting as a user).
-  -- No current_org_id()/current_user_id() check: p_org_id + p_user_id are
-  -- trusted (the EXECUTE grant restricts this to the admin/system pool —
-  -- tf_app has none, so a request handler can't reach it; those use the
-  -- claims-checked vault_get_user_secret instead). Same name convention:
-  -- 'org/<org_id>/user/<user_id>/<key>'. A NULL org/user is a caller bug,
-  -- not a privilege failure — refuse explicitly rather than silently
-  -- looking up a malformed name.
-  IF p_org_id IS NULL OR p_user_id IS NULL THEN
-    RAISE EXCEPTION 'system Vault access denied: p_org_id or p_user_id is NULL'
-      USING ERRCODE = '22004';
-  END IF;
-  SELECT decrypted_secret INTO v_secret
-    FROM vault.decrypted_secrets
-   WHERE name = v_full_name;
-  RETURN v_secret;
-END;
-$$;
--- +goose StatementEnd
-
-
---
--- Name: vault_delete_user_secret(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
---
-
--- +goose StatementBegin
-CREATE FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) RETURNS boolean
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-DECLARE
-  v_full_name TEXT := 'org/' || p_org_id::text || '/user/' || p_user_id::text || '/' || p_key;
-  v_existing  UUID;
-BEGIN
-  IF p_org_id IS NULL OR p_user_id IS NULL OR tf.current_org_id() IS NULL OR tf.current_user_id() IS NULL THEN
-    RAISE EXCEPTION 'Vault access denied: missing org/user context (p_org_id, p_user_id, or request.jwt.claims is NULL)'
-      USING ERRCODE = '42501';
-  END IF;
-  IF p_org_id <> tf.current_org_id() THEN
-    RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
-      USING ERRCODE = '42501';
-  END IF;
-  IF p_user_id <> tf.current_user_id() THEN
-    RAISE EXCEPTION 'cross-user Vault access denied: p_user_id=% does not match request.jwt.claims.sub', p_user_id
-      USING ERRCODE = '42501';
-  END IF;
-  SELECT id INTO v_existing FROM vault.decrypted_secrets WHERE name = v_full_name;
-  IF v_existing IS NULL THEN
-    RETURN FALSE;
-  END IF;
-  DELETE FROM vault.secrets WHERE id = v_existing;
-  RETURN TRUE;
-END;
-$$;
--- +goose StatementEnd
-
-
---
--- Name: FUNCTION vault_put_user_secret(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text); Type: ACL; Schema: public; Owner: -
---
-
-REVOKE ALL ON FUNCTION public.vault_put_user_secret(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.vault_put_user_secret(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) FROM anon, authenticated, service_role;
-GRANT ALL ON FUNCTION public.vault_put_user_secret(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) TO postgres;
-GRANT ALL ON FUNCTION public.vault_put_user_secret(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) TO tf_app;
-
-
---
--- Name: FUNCTION vault_get_user_secret(p_org_id uuid, p_user_id uuid, p_key text); Type: ACL; Schema: public; Owner: -
---
-
-REVOKE ALL ON FUNCTION public.vault_get_user_secret(p_org_id uuid, p_user_id uuid, p_key text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.vault_get_user_secret(p_org_id uuid, p_user_id uuid, p_key text) FROM anon, authenticated, service_role;
-GRANT ALL ON FUNCTION public.vault_get_user_secret(p_org_id uuid, p_user_id uuid, p_key text) TO postgres;
-GRANT ALL ON FUNCTION public.vault_get_user_secret(p_org_id uuid, p_user_id uuid, p_key text) TO tf_app;
-
-
---
--- Name: FUNCTION vault_get_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text); Type: ACL; Schema: public; Owner: -
---
-
--- System/admin pool ONLY. Deliberately NOT granted to tf_app: the app
--- pool must stay on the claims-checked vault_get_user_secret. The admin
--- pool connects as supabase_admin (superuser, owns this function) and
--- executes it regardless of grant; postgres is granted to mirror the
--- sibling vault_* ACLs. tf_app lacking EXECUTE here is the load-bearing
--- guardrail — pinned by the pgtest "tf_app denied" assertion. This is
--- the per-user mirror of vault_get_org_secret_system's grant matrix.
-REVOKE ALL ON FUNCTION public.vault_get_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.vault_get_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text) FROM anon, authenticated, service_role;
-GRANT ALL ON FUNCTION public.vault_get_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text) TO postgres;
-
-
---
--- Name: FUNCTION vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text); Type: ACL; Schema: public; Owner: -
---
-
-REVOKE ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) FROM anon, authenticated, service_role;
-GRANT ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) TO postgres;
-GRANT ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) TO tf_app;
-
-
---
 -- consolidated from 202606150001_org_jira_apps.sql
 --
 
@@ -6800,8 +6414,8 @@ GRANT ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id u
 --
 -- This row is the per-org OVERRIDE in credential precedence: an org with no
 -- row uses the deployment first-party app (read from operator config). The
--- client_secret_ref column holds a Vault secret-name pointer (the actual
--- client_secret is written via the vault helpers) so the app secret never
+-- client_secret_ref column holds an org_secrets key pointer (the actual
+-- client_secret is written via SecretStore) so the app secret never
 -- lives in the relational schema — same discipline as org_github_apps.
 
 CREATE TABLE public.org_jira_apps (
@@ -6862,79 +6476,19 @@ ALTER TABLE public.user_jira_identities ADD CONSTRAINT user_jira_identities_sour
 
 
 --
--- consolidated from 202606160002_vault_put_user_secret_system.sql
---
-
--- vault_put_user_secret_system — the write-side mirror of
--- vault_get_user_secret_system: persist a per-user secret WITHOUT a request JWT,
--- for system/background code acting as a user. The motivating caller is the
--- Cloud OAuth access-token minter — Atlassian rotates the refresh token on every
--- refresh, so the minter must write the new refresh token back into the user's
--- credential envelope while running on the claims-free admin pool (the
--- write-actor resolver holds no JWT). The claims-checked vault_put_user_secret
--- is unreachable there, exactly as the read path needs the _system door.
---
--- Same name convention as the rest of the per-user vault wrappers:
--- 'org/<org_id>/user/<user_id>/<key>'. No current_org_id()/current_user_id()
--- gate — p_org_id + p_user_id are trusted because the EXECUTE grant restricts
--- this to the admin/system pool (tf_app has none). A NULL org/user is a caller
--- bug, refused explicitly rather than building a malformed name.
-
--- +goose StatementBegin
-CREATE FUNCTION public.vault_put_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text DEFAULT NULL::text) RETURNS uuid
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-DECLARE
-  v_full_name TEXT := 'org/' || p_org_id::text || '/user/' || p_user_id::text || '/' || p_key;
-  v_existing  UUID;
-  v_desc      TEXT := COALESCE(p_description, '');
-BEGIN
-  IF p_org_id IS NULL OR p_user_id IS NULL THEN
-    RAISE EXCEPTION 'system Vault access denied: p_org_id or p_user_id is NULL'
-      USING ERRCODE = '22004';
-  END IF;
-  SELECT id INTO v_existing FROM vault.decrypted_secrets WHERE name = v_full_name;
-  IF v_existing IS NOT NULL THEN
-    PERFORM vault.update_secret(v_existing, p_secret, v_full_name, v_desc);
-    RETURN v_existing;
-  END IF;
-  RETURN vault.create_secret(p_secret, v_full_name, v_desc);
-END;
-$$;
--- +goose StatementEnd
-
--- System/admin pool ONLY. Deliberately NOT granted to tf_app: the app pool must
--- stay on the claims-checked vault_put_user_secret. Mirrors the
--- vault_get_user_secret_system grant matrix exactly.
-REVOKE ALL ON FUNCTION public.vault_put_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.vault_put_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) FROM anon, authenticated, service_role;
-GRANT ALL ON FUNCTION public.vault_put_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) TO postgres;
-
-
---
 -- consolidated from 202606170001_org_secrets_app_encrypted.sql
 --
 
 --
--- TFAC-402: replace Supabase Vault / pgsodium secret storage with
--- app-layer AES-256-GCM. The Vault root key lives in the postgres
--- container filesystem (/etc/postgresql-custom/pgsodium_root.key), NOT
--- on the pg-data volume, so any container recreate regenerates it and
--- renders every previously-stored secret permanently undecryptable —
--- operator data-loss on a routine `docker compose down/up`.
---
--- The fix is structural: stop delegating secret encryption to Postgres.
--- The TF binary now encrypts org/user integration secrets app-side with
--- TF_SECRET_ENCRYPTION_KEY (a .env key, same model as
+-- Secrets are encrypted app-side (AES-256-GCM) rather than delegated to
+-- Postgres: a Vault-style design keeps its root key in the Postgres
+-- container filesystem, not the pg-data volume, so a routine container
+-- recreate would regenerate the key and permanently lose every stored
+-- secret. The TF binary instead encrypts org/user integration secrets
+-- with TF_SECRET_ENCRYPTION_KEY (a .env key, same model as
 -- TF_SESSION_ENCRYPTION_KEY) and stores opaque ciphertext in this normal
 -- RLS-gated table. A DB dump then yields only AES ciphertext, and there
--- is no Postgres-side key left to lose.
---
--- Fresh-installs-only (multi mode hasn't shipped): no data migration. The
--- supabase_vault / pgsodium extensions stay loaded (image-managed,
--- harmless) — TF simply stops using them, so the vault_* wrapper
--- functions are dropped at the bottom of this migration.
+-- is no Postgres-side key to lose.
 
 CREATE TABLE public.org_secrets (
     -- Surrogate PK. The natural key (org_id, COALESCE(user_id, …), key) can't
@@ -6946,8 +6500,7 @@ CREATE TABLE public.org_secrets (
     org_id      uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
     -- NULL for org-scope secrets; the owning user's id for per-user
     -- secrets (the Jira "act as yourself" credential). The two scopes
-    -- share one table, discriminated by user_id, mirroring the
-    -- vault_*_org_secret / vault_*_user_secret split.
+    -- share one table, discriminated by user_id.
     user_id     uuid NULL REFERENCES public.users(id) ON DELETE CASCADE,
     key         text NOT NULL,
     -- AES-256-GCM ciphertext + its 12-byte nonce, produced by
@@ -6981,26 +6534,23 @@ CREATE UNIQUE INDEX org_secrets_scope_key_uniq
 
 ALTER TABLE public.org_secrets ENABLE ROW LEVEL SECURITY;
 
--- Two permissive policies, scoped to tf_app, that reproduce the dropped
--- vault_* gates exactly. Permissive policies combine with OR, so the
--- effective gate is:
+-- Two permissive policies, scoped to tf_app. Permissive policies combine
+-- with OR, so the effective gate is:
 --   (org-scope row AND org matches) OR (own user-scope row AND org matches)
 -- The admin pool (supabase_admin) bypasses RLS entirely and is the only
 -- path to the *System reads/writes — it trusts the explicit org_id /
--- user_id args, exactly as vault_get_org_secret_system did.
+-- user_id args.
 
--- Org-scope rows (user_id IS NULL): gate on org only, mirroring
--- vault_get_org_secret's `p_org_id = current_org_id()` check.
+-- Org-scope rows (user_id IS NULL): gate on org only.
 CREATE POLICY org_secrets_org ON public.org_secrets
     FOR ALL
     TO tf_app
     USING (user_id IS NULL AND org_id = tf.current_org_id())
     WITH CHECK (user_id IS NULL AND org_id = tf.current_org_id());
 
--- Per-user rows: gate on org AND user, mirroring vault_get_user_secret's
--- additional `p_user_id = current_user_id()` check. This is the
--- load-bearing cross-user boundary — a session acting as user A cannot
--- see user B's secret.
+-- Per-user rows: gate on org AND user. This is the load-bearing
+-- cross-user boundary — a session acting as user A cannot see user B's
+-- secret.
 CREATE POLICY org_secrets_user ON public.org_secrets
     FOR ALL
     TO tf_app
@@ -7010,28 +6560,11 @@ CREATE POLICY org_secrets_user ON public.org_secrets
 -- supabase_admin's ALTER DEFAULT PRIVILEGES auto-grants public-schema
 -- tables to anon/authenticated/service_role at CREATE time. Strip them: a
 -- secrets table must be reachable only by tf_app, even if RLS were ever
--- misconfigured (the dropped vault_* wrappers were REVOKE'd from these
--- roles for exactly this reason). supabase_admin (admin pool) owns the
--- table as superuser and bypasses RLS for the *System methods.
+-- misconfigured. supabase_admin (admin pool) owns the table as superuser
+-- and bypasses RLS for the *System methods.
 REVOKE ALL ON public.org_secrets FROM PUBLIC;
 REVOKE ALL ON public.org_secrets FROM anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_secrets TO tf_app;
-
--- Vault / pgsodium wrappers are dead after the rewrite. Drop all nine
--- (4 org + 5 user, including the two _system variants). IF EXISTS so the
--- migration expresses "ensure these are gone" idempotently — it won't
--- fail on a divergent DB where one was already removed. The
--- supabase_vault / pgsodium extensions and the vault schema stay (image-
--- managed); only TF's wrapper functions go.
-DROP FUNCTION IF EXISTS public.vault_put_org_secret(uuid, text, text, text);
-DROP FUNCTION IF EXISTS public.vault_get_org_secret(uuid, text);
-DROP FUNCTION IF EXISTS public.vault_get_org_secret_system(uuid, text);
-DROP FUNCTION IF EXISTS public.vault_delete_org_secret(uuid, text);
-DROP FUNCTION IF EXISTS public.vault_put_user_secret(uuid, uuid, text, text, text);
-DROP FUNCTION IF EXISTS public.vault_get_user_secret(uuid, uuid, text);
-DROP FUNCTION IF EXISTS public.vault_get_user_secret_system(uuid, uuid, text);
-DROP FUNCTION IF EXISTS public.vault_delete_user_secret(uuid, uuid, text);
-DROP FUNCTION IF EXISTS public.vault_put_user_secret_system(uuid, uuid, text, text, text);
 
 
 --
