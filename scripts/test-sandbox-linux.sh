@@ -181,6 +181,25 @@ else
   integration_failed=1
 fi
 
+# ---------- Stage 4b: relocation integration (sidecar-hosted agenthost) -----
+# The exec-verb socket server relocated INTO the credential sidecar: this runs
+# the relocated host exactly the way the sidecar does (NewServerWithRuntime over
+# a relay runtime on the real /run/tf socket) and drives a real IPCClient
+# through it — LookupRun + a DB verb that relays to the orchestrator's
+# RelayServer. Root-gated (the socket lives under /run/tf); needs no runsc, so
+# it complements the gVisor connect-mechanism check in Stage 4's
+# TestIntegration_AgentHostIPC_RoundTrip.
+blue "Stage 4b: agenthost relocation integration (relocated exec-verb socket + relay)"
+reloc_log="$LOG_DIR/relocation.log"
+if go test -count=1 -v -tags integration -run TestIntegration_RelocatedAgentHost ./cmd/exec/agenthost/... > "$reloc_log" 2>&1; then
+  green "  relocation integration PASS"
+else
+  red   "  relocation integration FAIL — full log: $reloc_log"
+  echo "---- last 80 lines ----"
+  tail -80 "$reloc_log"
+  integration_failed=1
+fi
+
 # ---------- Per-test signal extraction --------------------------------------
 blue "Per-test signals (from integration log)"
 for test in \

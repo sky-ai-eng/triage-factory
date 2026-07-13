@@ -348,16 +348,25 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			TeamID:           cfg.teamID,
 			IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 		}
-		// TF_ROLE=executor: point the daemon's gh/jira verbs at this run's
-		// credential-sidecar REST proxies (holding only placeholders) instead of
-		// the (disabled, on an executor) secret store. nil-safe → nil on
-		// all/local, where the daemon resolves through its own resolver path.
-		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-			hd, mount, err := agenthost.Start(stores, info, cfg.execSandbox.agentHostProxyCreds())
-			if err != nil {
-				return sandbox.Mount{}, nil, err
+		if cfg.execSandbox != nil {
+			// TF_ROLE=executor: the credential sidecar HOSTS the exec-verb socket
+			// server (the relocation) and already created the socket during
+			// bring-up. The orchestrator only supplies the bind mount — it runs no
+			// Server and keeps the hostile-input parser (with its all-orgs stores)
+			// out of its own address space entirely.
+			startAgentHost = func() (sandbox.Mount, io.Closer, error) {
+				return agenthost.SocketMountFor(runID), io.NopCloser(nil), nil
 			}
-			return mount, hd, nil
+		} else {
+			// all/local: the orchestrator IS the credential holder, so it hosts the
+			// socket server in-process over its live stores (no sidecar, no relay).
+			startAgentHost = func() (sandbox.Mount, io.Closer, error) {
+				hd, mount, err := agenthost.Start(stores, info, nil)
+				if err != nil {
+					return sandbox.Mount{}, nil, err
+				}
+				return mount, hd, nil
+			}
 		}
 	}
 

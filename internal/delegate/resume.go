@@ -392,15 +392,22 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 			TeamID:           opts.TeamID,
 			IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 		}
-		// TF_ROLE=executor: point the daemon's gh/jira verbs at this run's
-		// credential-sidecar REST proxies (holding placeholders) instead of the
-		// (disabled) secret store. nil-safe → nil on all/local.
-		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-			hd, mount, err := agenthost.Start(stores, info, opts.execSandbox.agentHostProxyCreds())
-			if err != nil {
-				return sandbox.Mount{}, nil, err
+		if opts.execSandbox != nil {
+			// TF_ROLE=executor: the credential sidecar hosts the exec-verb socket
+			// server (the relocation); the orchestrator only supplies the bind
+			// mount for the socket the sidecar already created at bring-up.
+			startAgentHost = func() (sandbox.Mount, io.Closer, error) {
+				return agenthost.SocketMountFor(runID), io.NopCloser(nil), nil
 			}
-			return mount, hd, nil
+		} else {
+			// all/local: host the socket server in-process over live stores.
+			startAgentHost = func() (sandbox.Mount, io.Closer, error) {
+				hd, mount, err := agenthost.Start(stores, info, nil)
+				if err != nil {
+					return sandbox.Mount{}, nil, err
+				}
+				return mount, hd, nil
+			}
 		}
 	}
 

@@ -1,5 +1,7 @@
 package sidecarproto
 
+import "encoding/json"
+
 // This file defines the typed payloads carried in a Frame.Body for each
 // Kind. They are plain serializable structs — no credential material ever
 // travels here in cleartext: the bundle crosses as opaque sealed bytes
@@ -60,6 +62,27 @@ type StartProxiesBody struct {
 	// the bundle's Jira credential, so no auth material crosses here.
 	JiraAPIEnabled  bool   `json:"jira_api_enabled,omitempty"`
 	JiraAPIUpstream string `json:"jira_api_upstream,omitempty"`
+
+	// AgentHost, when non-nil, asks the sidecar to ALSO host the agenthost
+	// socket server for this run — moving the hostile-input exec verb parser
+	// off the orchestrator (where it sits beside the all-orgs db.Stores) and
+	// into this capless per-run jail. It carries the run's non-secret identity
+	// (what the socket server reports to the agent); every DB effect the verbs
+	// perform relays back to the orchestrator, which binds identity from its
+	// OWN RunInfo, so nothing here is security-load-bearing.
+	AgentHost *AgentHostInfo `json:"agent_host,omitempty"`
+}
+
+// AgentHostInfo is the run's non-secret identity the sidecar-hosted agenthost
+// reports to the agent (LookupRun) and stamps on the verbs' relay calls. It is
+// NOT the authority for org-scoping — the orchestrator binds that from its own
+// RunInfo on every relayed op — so a sidecar cannot escalate by lying here.
+type AgentHostInfo struct {
+	OrgID          string `json:"org_id"`
+	UserID         string `json:"user_id,omitempty"`
+	TeamID         string `json:"team_id"`
+	RunID          string `json:"run_id"`
+	EventTriggered bool   `json:"event_triggered,omitempty"`
 }
 
 // StartProxiesResult is KindStartProxies' response payload: the non-secret
@@ -92,44 +115,19 @@ type StartProxiesResult struct {
 	JiraAPIToken string `json:"jira_api_token,omitempty"`
 }
 
-// AuthorizeRepoBody is KindAuthorizeRepo's request payload (sidecar →
-// orchestrator): the repo a transiting git op targets. The orchestrator
-// makes the DB-backed decision and returns AuthorizeRepoResult.
-type AuthorizeRepoBody struct {
-	Owner string `json:"owner"`
-	Repo  string `json:"repo"`
-}
-
-// AuthorizeRepoResult mirrors gitproxy.Decision across the wire: whether the
-// repo is pushable and, if so, the exact refs allowed. An empty AllowedRefs
-// with Allowed=true means fetch-only (no push ref authorized).
-type AuthorizeRepoResult struct {
-	Allowed     bool     `json:"allowed"`
-	AllowedRefs []string `json:"allowed_refs,omitempty"`
-}
-
-// RecordDenialBody is KindRecordDenial's payload (sidecar → orchestrator,
-// one-way): a denied git op for the orchestrator to audit through the same
-// host-side recording path the push backstop uses.
-type RecordDenialBody struct {
-	Owner  string `json:"owner"`
-	Repo   string `json:"repo"`
-	Ref    string `json:"ref"`
-	Op     string `json:"op"`
-	Reason string `json:"reason"`
-}
-
-// RecordPushBody is KindRecordPush's payload (sidecar → orchestrator,
-// one-way): one branch ref a receive-pack transited, plus the upstream's
-// final HTTP status, mirroring gitproxy.PushedRef across the wire. The
-// orchestrator reshapes it into the same branch artifact / push-failed row
-// the in-process backstop writes. Repo is the "owner/repo" the proxy parsed
-// from the request path; Created marks a newly-created ref; Status is the
-// receive-pack response code (a 2xx means the push landed).
-type RecordPushBody struct {
-	Repo    string `json:"repo"`
-	Ref     string `json:"ref"`
-	NewSHA  string `json:"new_sha"`
-	Created bool   `json:"created"`
-	Status  int    `json:"status"`
+// RelayCallBody is the payload of both KindRelayCall and KindRelayNotify: the
+// generic sidecar → orchestrator relay envelope. Namespace + Op name the op
+// (core reads/authz/records under "core"; a provider's policy ops under its
+// namespace); Args is the op-specific request, opaque to this transport (the
+// op's registered handler owns the shape on both ends). A Call's response is
+// the op's marshaled result carried in the Frame body; a Notify awaits none.
+//
+// The envelope deliberately carries NO org id — the orchestrator binds
+// identity from the supervised run's RunInfo, so a sidecar cannot steer an op
+// at another org's data. This is the same property the retired per-op Kinds
+// had, now expressed once for every op instead of per message type.
+type RelayCallBody struct {
+	Namespace string          `json:"ns"`
+	Op        string          `json:"op"`
+	Args      json.RawMessage `json:"args,omitempty"`
 }

@@ -77,21 +77,6 @@ func (e *executorSandbox) runNetwork() *sandbox.RunNetwork {
 	return e.net
 }
 
-// agentHostProxyCreds points the run's agenthost gh/jira verbs at the sidecar's
-// REST proxies (holding only placeholders). nil-safe → nil, which leaves the
-// agenthost on its resolver path (all/local).
-func (e *executorSandbox) agentHostProxyCreds() *agenthost.ProxyCredentials {
-	if e == nil || e.res == nil {
-		return nil
-	}
-	return &agenthost.ProxyCredentials{
-		GitHubAPIURL:   e.res.GitHubAPIURL,
-		GitHubAPIToken: e.res.GitHubAPIToken,
-		JiraAPIURL:     e.res.JiraAPIURL,
-		JiraAPIToken:   e.res.JiraAPIToken,
-	}
-}
-
 // bringUpExecutorSandbox stands up the run network, launches the credential
 // sidecar, provisions it (publishing the sidecar's public key so the brain
 // seals THIS run's bundle to it, without the orchestrator ever unsealing), and
@@ -146,8 +131,13 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 	identity := s.resolveCommitIdentity(ctx, orgID, run.TriggerType, run.CreatorUserID)
 
 	params := agentproc.SidecarBringUpParams{
-		HostVethIP:    net.HostIP,
-		Git:           git,
+		HostVethIP: net.HostIP,
+		Git:        git,
+		// The org-bound op server the sidecar's relay envelope dispatches to:
+		// the git proxy's push authz/audit (backed by the same git gate) plus
+		// the exec verb-trace DB ops, all identity-bound from RunInfo. Holds
+		// the stores + secrets the capless sidecar cannot.
+		Relay:         agenthost.NewRelayServer(stores, info, git),
 		IdentityPairs: githooks.IdentityConfigPairs(identity.Name, identity.Email),
 		// Every delegated run may touch a GitHub repo (clone/push + GetPR +
 		// agenthost gh verbs), so the git + GitHub-REST proxies are always on.
@@ -157,6 +147,16 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 		// a non-Jira org's bundle carries none and the proxy would fail to bind).
 		// Upstream left empty — the sidecar derives it from the bundle's Jira URL.
 		JiraAPIEnabled: task.EntitySource == "jira",
+		// Relocate the exec-verb socket server into the sidecar: it hosts the
+		// hostile-input parser in this capless jail, relaying every DB effect
+		// back to the orchestrator. Carries the run's non-secret identity only.
+		AgentHost: &sidecarproto.AgentHostInfo{
+			OrgID:          info.OrgID,
+			UserID:         info.UserID,
+			TeamID:         info.TeamID,
+			RunID:          info.RunID,
+			EventTriggered: info.IsEventTriggered,
+		},
 	}
 
 	res, conn, err := agentproc.BringUpRunSidecar(ctx, sc, s.sidecarProvisionFor(orgID, run.ID), params)

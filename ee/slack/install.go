@@ -98,11 +98,10 @@ func install(api server.ExtensionAPI) {
 	wh := &webhookHandler{stores: stores, pipeline: pipeline}
 	api.Raw("POST /api/webhooks/slack/{org_id}", api.PreAuthRateLimit(http.HandlerFunc(wh.handleWebhook)))
 
-	// Agent-facing exec verbs (TFAC-596): registered here, not in init(),
-	// because the ExtensionHandler needs stores — a local-mode CLI process
-	// never reaches install(), so this namespace is never registered there
-	// (see exec_host.go's package doc for why that's the intended posture).
-	registerSlackExec(stores)
+	// Agent-facing exec verbs (TFAC-596) register from this package's init()
+	// (stores-free — the handler relays for policy and selects its token from
+	// the sealed bundle), so they are present in the sidecar process too. See
+	// exec_host.go's package doc.
 
 	// Lifecycle adapters (TFAC-597): 👀 acknowledge, the live setStatus
 	// driver, the failure note, and the no-match reply — everything the bot

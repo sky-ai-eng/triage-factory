@@ -204,8 +204,18 @@ func newSlackExecRig(t *testing.T) *slackExecRig {
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	fake := newFakeExecSlack(t)
 
-	hdl := &slackExecHandler{stores: stores, client: slackHTTPClient}
+	hdl := &slackExecHandler{client: slackHTTPClient}
 	return &slackExecRig{t: t, h: h, stor: stores, hdl: hdl, fake: fake}
+}
+
+// rt builds the direct runtime the handler methods run over in these
+// all/local-shaped tests: its relays dispatch the Slack policy ops locally
+// against the rig's real stores, and ProviderCredential live-resolves the
+// sealed bot-token set from those stores — the same path an all/local run
+// takes (the sidecar path relays instead, exercised in agenthost's relay
+// tests).
+func (r *slackExecRig) rt(info agenthost.RunInfo) agenthost.ExtensionRuntime {
+	return agenthost.NewDirectRuntime(r.stor, info)
 }
 
 // seedWorkspace connects a Slack workspace (bot token + org_slack_workspaces
@@ -358,7 +368,7 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 			runID := r.seedRun(orgID, teamID, owner, eventTriggered)
 
 			info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: eventTriggered}
-			out, err := r.hdl.send(context.Background(), info, slackSendArgs{Channel: "C1", Body: "hello **world**"})
+			out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "hello **world**"})
 			if err != nil {
 				t.Fatalf("send: %v", err)
 			}
@@ -406,12 +416,12 @@ func TestSlackExecHandler_Edit_UpsertsSameArtifactRow(t *testing.T) {
 	runID := r.seedRun(orgID, teamID, owner, true)
 	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
 
-	sendOut, err := r.hdl.send(context.Background(), info, slackSendArgs{Channel: "C1", Body: "first take"})
+	sendOut, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "first take"})
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
-	editOut, err := r.hdl.edit(context.Background(), info, slackEditArgs{Channel: "C1", TS: sendOut.TS, Body: "edited take"})
+	editOut, err := r.hdl.edit(context.Background(), r.rt(info), slackEditArgs{Channel: "C1", TS: sendOut.TS, Body: "edited take"})
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -476,11 +486,11 @@ func TestSlackExecHandler_Edit_PreservesCreatingRunAndTeam_AcrossDifferentTeams(
 	infoA := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runA, TeamID: teamA, IsEventTriggered: true}
 	infoB := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runB, TeamID: teamB, IsEventTriggered: true}
 
-	sendOut, err := r.hdl.send(context.Background(), infoA, slackSendArgs{Channel: "C1", Body: "posted by team A"})
+	sendOut, err := r.hdl.send(context.Background(), r.rt(infoA), slackSendArgs{Channel: "C1", Body: "posted by team A"})
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if _, err := r.hdl.edit(context.Background(), infoB, slackEditArgs{Channel: "C1", TS: sendOut.TS, Body: "edited by team B"}); err != nil {
+	if _, err := r.hdl.edit(context.Background(), r.rt(infoB), slackEditArgs{Channel: "C1", TS: sendOut.TS, Body: "edited by team B"}); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
 
@@ -520,7 +530,7 @@ func TestSlackExecHandler_React_RecordsActionOnly(t *testing.T) {
 			runID := r.seedRun(orgID, teamID, owner, eventTriggered)
 			info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: eventTriggered}
 
-			if _, err := r.hdl.react(context.Background(), info, slackReactArgs{Channel: "C1", TS: "1700000000.000001", Emoji: "thumbsup"}); err != nil {
+			if _, err := r.hdl.react(context.Background(), r.rt(info), slackReactArgs{Channel: "C1", TS: "1700000000.000001", Emoji: "thumbsup"}); err != nil {
 				t.Fatalf("react: %v", err)
 			}
 			if r.fake.lastReactionChannel != "C1" || r.fake.lastReactionTS != "1700000000.000001" || r.fake.lastReactionEmoji != "thumbsup" {
@@ -580,7 +590,7 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies(t *testing.T) {
 			wantTarget := domain.SlackSourceID("C1", rootTS)
 			switch verb {
 			case "edit":
-				out, err := r.hdl.edit(context.Background(), info, slackEditArgs{Channel: "C1", TS: replyTS, Body: "edited"})
+				out, err := r.hdl.edit(context.Background(), r.rt(info), slackEditArgs{Channel: "C1", TS: replyTS, Body: "edited"})
 				if err != nil {
 					t.Fatalf("edit: %v", err)
 				}
@@ -592,7 +602,7 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies(t *testing.T) {
 					t.Fatalf("artifacts = %+v, want one artifact targeting %q", arts, wantTarget)
 				}
 			case "react":
-				if _, err := r.hdl.react(context.Background(), info, slackReactArgs{Channel: "C1", TS: replyTS, Emoji: "eyes"}); err != nil {
+				if _, err := r.hdl.react(context.Background(), r.rt(info), slackReactArgs{Channel: "C1", TS: replyTS, Emoji: "eyes"}); err != nil {
 					t.Fatalf("react: %v", err)
 				}
 			}
@@ -629,7 +639,7 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies_ChannelRootFallback(t *te
 
 	r.fake.repliesMessages = []map[string]any{{"ts": ts, "user": "U1", "text": "an unthreaded message"}}
 
-	if _, err := r.hdl.react(context.Background(), info, slackReactArgs{Channel: "C1", TS: ts, Emoji: "eyes"}); err != nil {
+	if _, err := r.hdl.react(context.Background(), r.rt(info), slackReactArgs{Channel: "C1", TS: ts, Emoji: "eyes"}); err != nil {
 		t.Fatalf("react: %v", err)
 	}
 	wantTarget := domain.SlackSourceID("C1", ts)
@@ -665,7 +675,7 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies_NeverFollowsCursor(t *tes
 	r.fake.repliesMessages = []map[string]any{{"ts": rootTS, "user": "U1", "text": "root message"}}
 	r.fake.repliesNextCursor = "dGVhbTpD" // a non-empty cursor: "there's another page"
 
-	if _, err := r.hdl.react(context.Background(), info, slackReactArgs{Channel: "C1", TS: replyTS, Emoji: "eyes"}); err != nil {
+	if _, err := r.hdl.react(context.Background(), r.rt(info), slackReactArgs{Channel: "C1", TS: replyTS, Emoji: "eyes"}); err != nil {
 		t.Fatalf("react: %v", err)
 	}
 	if r.fake.repliesCalls != 1 {
@@ -696,7 +706,7 @@ func TestSlackExecHandler_Send_AttachFailure_StillRecordsPostedMessage(t *testin
 
 	r.fake.attachCompleteFails = true
 
-	out, err := r.hdl.send(context.Background(), info, slackSendArgs{
+	out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{
 		Channel: "C1", Body: "here's the report", AttachName: "report.csv",
 		AttachBase64: base64.StdEncoding.EncodeToString([]byte("a,b,c")),
 	})
@@ -737,7 +747,7 @@ func TestSlackExecHandler_Send_ThreadedAttach_UsesParentThreadTS(t *testing.T) {
 	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
 
 	const parentTS = "1700000000.000000"
-	out, err := r.hdl.send(context.Background(), info, slackSendArgs{
+	out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{
 		Channel: "C1", ThreadTS: parentTS, Body: "here's the report", AttachName: "report.csv",
 		AttachBase64: base64.StdEncoding.EncodeToString([]byte("a,b,c")),
 	})
@@ -768,7 +778,7 @@ func TestSlackExecHandler_Send_ChannelRootAttach_UsesOwnTS(t *testing.T) {
 	runID := r.seedRun(orgID, teamID, owner, true)
 	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
 
-	out, err := r.hdl.send(context.Background(), info, slackSendArgs{
+	out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{
 		Channel: "C1", Body: "here's the report", AttachName: "report.csv",
 		AttachBase64: base64.StdEncoding.EncodeToString([]byte("a,b,c")),
 	})
@@ -791,7 +801,7 @@ func TestSlackExecHandler_Send_AuthzRefusal_TeamDoesNotTrackChannel(t *testing.T
 	runID := r.seedRun(orgID, teamID, owner, true)
 	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
 
-	_, err := r.hdl.send(context.Background(), info, slackSendArgs{Channel: "C1", Body: "hi"})
+	_, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "hi"})
 	if err == nil {
 		t.Fatal("expected an authz refusal, got nil error")
 	}
@@ -816,7 +826,7 @@ func TestSlackExecHandler_Send_UnknownChannel(t *testing.T) {
 	// so this test isolates the channel-registry lookup, not authz.
 	r.trackChannel(orgID, owner, teamID, "C1")
 
-	_, err := r.hdl.send(context.Background(), info, slackSendArgs{Channel: "C1", Body: "hi"})
+	_, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "hi"})
 	if err == nil {
 		t.Fatal("expected an unknown-channel error, got nil")
 	}
@@ -837,7 +847,7 @@ func TestSlackExecHandler_Send_WorkspaceAmbiguity_TwoAppsOneWorkspace(t *testing
 	runID := r.seedRun(orgID, teamID, owner, true)
 	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
 
-	_, err := r.hdl.send(context.Background(), info, slackSendArgs{Channel: "C1", Body: "hi"})
+	_, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "hi"})
 	if err == nil {
 		t.Fatal("expected an ambiguity refusal, got nil")
 	}
@@ -866,7 +876,7 @@ func TestSlackExecHandler_ReadThread_Golden(t *testing.T) {
 		{"ts": "1700000000.000001", "thread_ts": "1700000000.000000", "user": "U1", "text": "a reply"},
 	}
 
-	out, err := r.hdl.readThread(context.Background(), info, slackReadThreadArgs{Channel: "C1", TS: "1700000000.000000", Limit: 50})
+	out, err := r.hdl.readThread(context.Background(), r.rt(info), slackReadThreadArgs{Channel: "C1", TS: "1700000000.000000", Limit: 50})
 	if err != nil {
 		t.Fatalf("readThread: %v", err)
 	}
@@ -899,7 +909,7 @@ func TestSlackExecHandler_ReadChannel_LimitOnly_Golden(t *testing.T) {
 		{"ts": "1700000001.000000", "user": "U2", "text": "second"},
 	}
 
-	out, err := r.hdl.readChannel(context.Background(), info, slackReadChannelArgs{Channel: "C1", Limit: 20})
+	out, err := r.hdl.readChannel(context.Background(), r.rt(info), slackReadChannelArgs{Channel: "C1", Limit: 20})
 	if err != nil {
 		t.Fatalf("readChannel: %v", err)
 	}
@@ -923,7 +933,7 @@ func TestSlackExecHandler_ReadChannel_AuthzRefusal(t *testing.T) {
 	runID := r.seedRun(orgID, teamID, owner, true)
 	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
 
-	if _, err := r.hdl.readChannel(context.Background(), info, slackReadChannelArgs{Channel: "C1", Limit: 10}); err == nil {
+	if _, err := r.hdl.readChannel(context.Background(), r.rt(info), slackReadChannelArgs{Channel: "C1", Limit: 10}); err == nil {
 		t.Fatal("expected an authz refusal, got nil")
 	} else if !strings.Contains(err.Error(), "does not track") {
 		t.Errorf("error = %q, want it to mention the team doesn't track the channel", err)
@@ -943,7 +953,7 @@ func TestSlackExecHandler_Download_Golden(t *testing.T) {
 
 	r.fake.setFile("F1", "report.csv", []byte("a,b,c\n1,2,3\n"), []string{"C1"})
 
-	out, err := r.hdl.download(context.Background(), info, slackDownloadArgs{FileID: "F1"})
+	out, err := r.hdl.download(context.Background(), r.rt(info), slackDownloadArgs{FileID: "F1"})
 	if err != nil {
 		t.Fatalf("download: %v", err)
 	}
@@ -976,7 +986,7 @@ func TestSlackExecHandler_Download_UntrackedChannel_Refused(t *testing.T) {
 
 	r.fake.setFile("F1", "secret.csv", []byte("data"), []string{"C-untracked"})
 
-	_, err := r.hdl.download(context.Background(), info, slackDownloadArgs{FileID: "F1"})
+	_, err := r.hdl.download(context.Background(), r.rt(info), slackDownloadArgs{FileID: "F1"})
 	if err == nil {
 		t.Fatal("expected a refusal — the file is shared only into an untracked channel")
 	}
@@ -992,12 +1002,19 @@ func TestSlackExecHandler_Download_NoChannels_Refused(t *testing.T) {
 	r := newSlackExecRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-dl-nochan")
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	// The team tracks a home channel in T1 so the run holds a sealed token for
+	// that workspace (a run with NO tracked channel has no Slack authorization
+	// at all and is refused before files.info — a separate, stricter path). The
+	// file below is shared NOWHERE channel-scoped, so the file-channel gate is
+	// what must refuse it.
+	r.seedChannel(orgID, "T1", "C-home")
+	r.trackChannel(orgID, owner, teamID, "C-home")
 	runID := r.seedRun(orgID, teamID, owner, true)
 	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
 
 	r.fake.setFile("F1", "dm-only.csv", []byte("data"), nil)
 
-	_, err := r.hdl.download(context.Background(), info, slackDownloadArgs{FileID: "F1"})
+	_, err := r.hdl.download(context.Background(), r.rt(info), slackDownloadArgs{FileID: "F1"})
 	if err == nil {
 		t.Fatal("expected a refusal — the file has no channel to authorize against")
 	}
@@ -1017,16 +1034,20 @@ func TestSlackExecHandler_Download_FallbackPath_StillAuthorizes(t *testing.T) {
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-dl-fallback")
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test") // exactly one connected workspace
 	r.seedChannel(orgID, "T1", "C-untracked")
-	// teamID tracks nothing — this run's seeded task is a plain GitHub task
-	// (seedRun/seedNonSlackTask), so workspaceFromRunTaskMetadata reports
-	// "no Slack context" and resolveWorkspaceForDownload falls through to
-	// the org-wide sole-workspace path.
+	// The team tracks a DIFFERENT (home) channel in T1, so the run holds a
+	// sealed token for that workspace — but NOT for the file's channel. This
+	// run's seeded task is a plain GitHub task (seedNonSlackTask), so the
+	// resolve-workspace-for-download op reports "no Slack context" and falls
+	// through to the org-wide sole-workspace path; the file-channel gate is what
+	// must then refuse the download of a file in the untracked channel.
+	r.seedChannel(orgID, "T1", "C-home")
+	r.trackChannel(orgID, owner, teamID, "C-home")
 	runID := r.seedRun(orgID, teamID, owner, true)
 	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
 
 	r.fake.setFile("F1", "leak.csv", []byte("data"), []string{"C-untracked"})
 
-	_, err := r.hdl.download(context.Background(), info, slackDownloadArgs{FileID: "F1"})
+	_, err := r.hdl.download(context.Background(), r.rt(info), slackDownloadArgs{FileID: "F1"})
 	if err == nil {
 		t.Fatal("expected the fallback (no-task-context) path to still enforce channel authorization")
 	}
@@ -1038,14 +1059,14 @@ func TestSlackExecHandler_Download_FallbackPath_StillAuthorizes(t *testing.T) {
 // ---------- registration / entitlement gate (mirrors the TFAC-526 extension tests) ----------
 
 func TestSlackExtension_RefusedWithoutEntitlement(t *testing.T) {
-	t.Cleanup(agenthost.ResetExtensions)
+	// The "slack" provider is registered from this package's init(); the gate
+	// checks the run's org entitlement (here: none), so the call is refused.
 	entitlements.RegisterProvider(entitlements.Static()) // nothing entitled
 	t.Cleanup(entitlements.Reset)
 
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	registerSlackExec(stores)
 
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "slack-ext-gate")
 	client := agenthost.NewLocal(stores, agenthost.RunInfo{OrgID: orgID, UserID: owner, TeamID: teamID, RunID: "r1"})
@@ -1060,14 +1081,14 @@ func TestSlackExtension_RefusedWithoutEntitlement(t *testing.T) {
 }
 
 func TestSlackExtension_EntitledDispatchesToHandler(t *testing.T) {
-	t.Cleanup(agenthost.ResetExtensions)
+	// The "slack" provider is registered from this package's init(); with the
+	// feature entitled, the gate passes and dispatch reaches the handler.
 	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureSlack))
 	t.Cleanup(entitlements.Reset)
 
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	registerSlackExec(stores)
 
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "slack-ext-entitled")
 	client := agenthost.NewLocal(stores, agenthost.RunInfo{OrgID: orgID, UserID: owner, TeamID: teamID, RunID: "r1"})
@@ -1078,5 +1099,41 @@ func TestSlackExtension_EntitledDispatchesToHandler(t *testing.T) {
 	_, err := client.CallExtension(context.Background(), "slack", "not-a-real-method", nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown method") {
 		t.Errorf("error = %v, want the handler's own 'unknown method' error (proving dispatch reached it)", err)
+	}
+}
+
+// TestSlackProviderCredential_SealsOnlyTrackedWorkspaces is the sealed-set
+// scoping guarantee: the brain seals a bot token ONLY for the workspaces of the
+// run's team's tracked channels — the authorizable set. A connected workspace
+// the team does not track never enters the run's bundle, so a compromised
+// sidecar cannot reach it (there is no token to select).
+func TestSlackProviderCredential_SealsOnlyTrackedWorkspaces(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-sealed-set")
+
+	// Two connected workspaces; the team tracks a channel in the first only.
+	r.seedWorkspace(orgID, owner, "T-tracked", "A-tracked", "xoxb-tracked")
+	r.seedWorkspace(orgID, owner, "T-other", "A-other", "xoxb-other")
+	r.seedChannel(orgID, "T-tracked", "C-tracked")
+	r.seedChannel(orgID, "T-other", "C-other") // exists, but this team tracks it NOT
+	r.trackChannel(orgID, owner, teamID, "C-tracked")
+
+	raw, err := slackProviderCredential(context.Background(), r.stor, agenthost.ProvisionScope{OrgID: orgID, TeamID: teamID})
+	if err != nil {
+		t.Fatalf("resolve slack credentials: %v", err)
+	}
+	var creds slackBundleCreds
+	if err := json.Unmarshal(raw, &creds); err != nil {
+		t.Fatalf("unmarshal sealed set: %v", err)
+	}
+	if len(creds.Workspaces) != 1 {
+		t.Fatalf("sealed %d workspaces, want exactly 1 (the tracked one): %+v", len(creds.Workspaces), creds.Workspaces)
+	}
+	if got := creds.Workspaces[0]; got.WorkspaceID != "T-tracked" || got.APIAppID != "A-tracked" || got.BotToken != "xoxb-tracked" {
+		t.Fatalf("sealed the wrong workspace: %+v", got)
+	}
+	// The untracked workspace's token must be unreachable from the sealed set.
+	if tok, ok := creds.tokenFor("T-other", "A-other"); ok || tok != "" {
+		t.Fatalf("untracked workspace T-other leaked into the sealed set: tok=%q ok=%v", tok, ok)
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
@@ -19,12 +18,6 @@ import (
 // that started but wedged before minting its key.
 const sidecarHelloTimeout = 30 * time.Second
 
-// recordPushRelayTimeout bounds the orchestrator-side artifact write kicked
-// off by a relayed KindRecordPush, mirroring the in-process backstop's own cap
-// (gitproxy.recordPushTimeout) so a wedged store can't hold the supervision
-// channel's per-frame goroutine open indefinitely.
-const recordPushRelayTimeout = 30 * time.Second
-
 // SidecarProvisionFunc parks the run in awaiting-credentials with the
 // sidecar's published public key and returns the opaque sealed bundle the
 // brain wrote for it, plus the boot epoch it was sealed under. The
@@ -35,24 +28,26 @@ const recordPushRelayTimeout = 30 * time.Second
 type SidecarProvisionFunc func(ctx context.Context, sidecarPubKeyB64 string) (sealed []byte, bootEpoch int64, err error)
 
 // sidecarSupervisor is the orchestrator's end of the supervision channel: it
-// captures the sidecar's hello (its public key) and serves the git proxy's
-// authorize / denial callbacks against the DB-backed decision the delegate
-// supplied on the GitProxyConfig. The credential-bearing direction (relaying
-// the sealed bundle down, asking for proxies) is driven by bringUpSidecar,
-// not here.
+// captures the sidecar's hello (its public key) and routes the sidecar's
+// generic relay envelope to the run's RelayDispatcher — the org-bound op
+// server the delegate supplied, which holds the DB handle and secrets the
+// capless sidecar cannot. The credential-bearing direction (relaying the
+// sealed bundle down, asking for proxies) is driven by BringUpRunSidecar, not
+// here.
 type sidecarSupervisor struct {
-	git *GitProxyConfig
+	relay RelayDispatcher
 
 	helloOnce sync.Once
 	helloCh   chan string
 }
 
-func newSidecarSupervisor(git *GitProxyConfig) *sidecarSupervisor {
-	return &sidecarSupervisor{git: git, helloCh: make(chan string, 1)}
+func newSidecarSupervisor(relay RelayDispatcher) *sidecarSupervisor {
+	return &sidecarSupervisor{relay: relay, helloCh: make(chan string, 1)}
 }
 
 // Handle implements sidecarproto.Handler for inbound sidecar → orchestrator
-// traffic.
+// traffic: the hello key publish, and the two relay-envelope forms routed to
+// the RelayDispatcher.
 func (s *sidecarSupervisor) Handle(ctx context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {
 	switch kind {
 	case sidecarproto.KindHello:
@@ -63,57 +58,29 @@ func (s *sidecarSupervisor) Handle(ctx context.Context, kind sidecarproto.Kind, 
 		s.helloOnce.Do(func() { s.helloCh <- h.PubKey })
 		return nil, nil
 
-	case sidecarproto.KindAuthorizeRepo:
-		var req sidecarproto.AuthorizeRepoBody
-		if err := json.Unmarshal(body, &req); err != nil {
+	case sidecarproto.KindRelayCall:
+		var env sidecarproto.RelayCallBody
+		if err := json.Unmarshal(body, &env); err != nil {
 			return nil, err
 		}
-		// A run with no authorize gate wired (a Jira-only run reached this
-		// path, or a test fixture) must fail closed — a git push the
-		// orchestrator can't adjudicate is denied, never allowed.
-		if s.git == nil || s.git.Authorize == nil {
-			return sidecarproto.AuthorizeRepoResult{Allowed: false}, nil
+		// A run with no dispatcher wired (a test fixture) must fail closed —
+		// a relayed decision the orchestrator can't serve is an error, never
+		// a silent allow-all.
+		if s.relay == nil {
+			return nil, fmt.Errorf("agentproc: relay call %s/%s with no dispatcher wired", env.Namespace, env.Op)
 		}
-		dec, err := s.git.Authorize(ctx, req.Owner, req.Repo)
-		if err != nil {
-			return nil, err
-		}
-		return sidecarproto.AuthorizeRepoResult{Allowed: dec.Allowed, AllowedRefs: dec.AllowedRefs}, nil
+		// A json.RawMessage result is written to the response frame verbatim
+		// (sidecarproto.marshalBody special-cases it), so the sidecar unmarshals
+		// the op's own result shape.
+		return s.relay.DispatchCall(ctx, env.Namespace, env.Op, env.Args)
 
-	case sidecarproto.KindRecordDenial:
-		var d sidecarproto.RecordDenialBody
-		if err := json.Unmarshal(body, &d); err != nil {
+	case sidecarproto.KindRelayNotify:
+		var env sidecarproto.RelayCallBody
+		if err := json.Unmarshal(body, &env); err != nil {
 			return nil, err
 		}
-		if s.git != nil && s.git.RecordDenial != nil {
-			s.git.RecordDenial(ctx, gitproxy.DeniedGitOp{
-				Owner:  d.Owner,
-				Repo:   d.Repo,
-				Ref:    d.Ref,
-				Op:     d.Op,
-				Reason: d.Reason,
-			})
-		}
-		return nil, nil
-
-	case sidecarproto.KindRecordPush:
-		var p sidecarproto.RecordPushBody
-		if err := json.Unmarshal(body, &p); err != nil {
-			return nil, err
-		}
-		if s.git != nil && s.git.RecordPush != nil {
-			// The relayed push already completed upstream; the DB write here
-			// must not run unbounded on the shared control channel, so cap it
-			// at the same window the in-process backstop uses.
-			recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
-			defer cancel()
-			s.git.RecordPush(recCtx, gitproxy.PushedRef{
-				Repo:    p.Repo,
-				Ref:     p.Ref,
-				NewSHA:  p.NewSHA,
-				Created: p.Created,
-				Status:  p.Status,
-			})
+		if s.relay != nil {
+			s.relay.DispatchNotify(ctx, env.Namespace, env.Op, env.Args)
 		}
 		return nil, nil
 
@@ -133,12 +100,21 @@ type SidecarBringUpParams struct {
 	// host (the orchestrator's own clone + agenthost).
 	HostVethIP string
 
-	// Git, when non-nil, requests the git-over-HTTPS proxy and carries the
-	// orchestrator-side authorize gate. TokenSource is IGNORED here — the
-	// sidecar resolves the real token from its own unsealed bundle; only
-	// Authorize / RecordDenial / RecordPush / Upstream are consumed (the first
-	// three relay back over the supervision channel). nil = no git proxy.
+	// Git, when non-nil, requests the git-over-HTTPS proxy: BringUpRunSidecar
+	// reads only GitEnabled (Git != nil) and Upstream from it. Its
+	// Authorize/RecordDenial/RecordPush are NOT consumed here — those are the
+	// git proxy's push authz/audit, served through the Relay dispatcher as
+	// core ops (the delegate builds the same GitProxyConfig into that
+	// dispatcher). TokenSource is likewise ignored — the sidecar resolves the
+	// real token from its own unsealed bundle. nil = no git proxy.
 	Git *GitProxyConfig
+
+	// Relay is the org-bound op server the supervisor routes the sidecar's
+	// relay envelope to (the git proxy's authorize/audit, and — once the
+	// agenthost is relocated — the exec verb trace and provider policy ops).
+	// The delegate builds it from the run's stores + RunInfo + git gate. nil
+	// only in a test fixture, where a relayed op fails closed.
+	Relay RelayDispatcher
 
 	// IdentityPairs are the org commit-identity git config pairs folded into
 	// the sandbox's GIT_CONFIG block (user.name/user.email).
@@ -157,6 +133,12 @@ type SidecarBringUpParams struct {
 	// host); the sidecar injects the real Cloud-Basic / DC-Bearer auth.
 	JiraAPIEnabled  bool
 	JiraAPIUpstream string
+
+	// AgentHost, when non-nil, asks the sidecar to also host the exec-verb
+	// socket server for this run (the relocation) — carrying the run's
+	// non-secret identity. nil leaves the socket server in the orchestrator
+	// (all/local, and the pre-relocation executor path).
+	AgentHost *sidecarproto.AgentHostInfo
 }
 
 // BringUpRunSidecar drives the full credential handshake with a launched
@@ -179,7 +161,7 @@ func BringUpRunSidecar(ctx context.Context, sc sandbox.LaunchedSidecar, provisio
 	if stream == nil {
 		return nil, nil, fmt.Errorf("agentproc: launched sidecar exposes no supervision channel")
 	}
-	sup := newSidecarSupervisor(params.Git)
+	sup := newSidecarSupervisor(params.Relay)
 	conn := sidecarproto.New(stream, sup)
 
 	// The sidecar's hello is its first write; wait for it before provisioning
@@ -217,6 +199,7 @@ func BringUpRunSidecar(ctx context.Context, sc sandbox.LaunchedSidecar, provisio
 		GitHubAPIUpstream:   params.GitHubAPIUpstream,
 		JiraAPIEnabled:      params.JiraAPIEnabled,
 		JiraAPIUpstream:     params.JiraAPIUpstream,
+		AgentHost:           params.AgentHost,
 	}
 	if params.Git != nil {
 		req.GitUpstream = params.Git.Upstream

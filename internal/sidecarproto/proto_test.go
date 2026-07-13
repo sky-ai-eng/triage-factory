@@ -69,22 +69,34 @@ func TestConn_RemoteError(t *testing.T) {
 
 func TestConn_Bidirectional(t *testing.T) {
 	// The classic sidecar shape: the orchestrator (a) asks the sidecar (b) to
-	// start proxies; while serving, the sidecar calls the orchestrator back to
-	// authorize a repo. Exercises both directions on one connection.
-	authHandler := HandlerFunc(func(_ context.Context, kind Kind, _ json.RawMessage) (any, error) {
-		if kind != KindAuthorizeRepo {
+	// start proxies; while serving, the sidecar relays a call back to the
+	// orchestrator (the generic KindRelayCall envelope — a git-push authz
+	// decision). Exercises both directions on one connection.
+	authHandler := HandlerFunc(func(_ context.Context, kind Kind, body json.RawMessage) (any, error) {
+		if kind != KindRelayCall {
 			return nil, errors.New("wrong kind")
 		}
-		return AuthorizeRepoResult{Allowed: true, AllowedRefs: []string{"refs/heads/feature"}}, nil
+		var env RelayCallBody
+		if err := json.Unmarshal(body, &env); err != nil {
+			return nil, err
+		}
+		if env.Namespace != "core" || env.Op != "authorize_repo" {
+			return nil, errors.New("wrong relay op")
+		}
+		return json.RawMessage(`{"allowed":true,"allowed_refs":["refs/heads/feature"]}`), nil
 	})
 	var b *Conn
 	sidecarHandler := HandlerFunc(func(ctx context.Context, kind Kind, _ json.RawMessage) (any, error) {
 		if kind != KindStartProxies {
 			return nil, errors.New("wrong kind")
 		}
-		// The sidecar calls the orchestrator back over its OWN connection.
-		var dec AuthorizeRepoResult
-		if err := b.Call(ctx, KindAuthorizeRepo, AuthorizeRepoBody{Owner: "o", Repo: "r"}, &dec); err != nil {
+		// The sidecar relays a call to the orchestrator over its OWN connection.
+		var dec struct {
+			Allowed bool `json:"allowed"`
+		}
+		if err := b.Call(ctx, KindRelayCall, RelayCallBody{
+			Namespace: "core", Op: "authorize_repo", Args: json.RawMessage(`{"owner":"o","repo":"r"}`),
+		}, &dec); err != nil {
 			return nil, err
 		}
 		if !dec.Allowed {

@@ -9,12 +9,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
-// ExtensionHandler executes one extension method host-side. info carries the
-// run's identity (OrgID for entitlement + RLS scoping, RunID/TeamID for audit
-// writes). args/result are opaque JSON — the wire shape is owned by the
-// registering feature on both ends. Results must fit the IPC frame cap (see
-// maxFrameSize in protocol.go).
-type ExtensionHandler func(ctx context.Context, info RunInfo, method string, args json.RawMessage) (json.RawMessage, error)
+// ExtensionHandler executes one extension method. rt is the provider runtime
+// the handler closes over instead of db.Stores/secrets: rt.Info() carries the
+// run's identity, rt.Relay reaches the provider's org-bound policy ops,
+// rt.ProviderCredential yields its sealed credential set to select from, and
+// rt.Record is the audit funnel. So the SAME handler runs in the orchestrator
+// (direct runtime) and in the capless sidecar (relay runtime) unchanged.
+// args/result are opaque JSON — the wire shape is owned by the registering
+// feature on both ends. Results must fit the IPC frame cap (see maxFrameSize
+// in protocol.go).
+type ExtensionHandler func(ctx context.Context, rt ExtensionRuntime, method string, args json.RawMessage) (json.RawMessage, error)
 
 // extensionRegistration pairs a namespace's handler with the feature gating
 // it, so CallExtension can check entitlement before invoking the handler.
@@ -93,13 +97,21 @@ func RegisteredExtensionFeatures() []entitlements.Feature {
 // the Static (everything off) default (see main.go's dispatchCLI/ee.Install
 // ordering), so this always refuses there; in the daemon process the real
 // Provider decides.
-func callExtension(ctx context.Context, info RunInfo, namespace, method string, args json.RawMessage) (json.RawMessage, error) {
+func callExtension(ctx context.Context, rt Runtime, namespace, method string, args json.RawMessage) (json.RawMessage, error) {
 	reg, ok := extensionRegistry[namespace]
 	if !ok {
 		return nil, fmt.Errorf("unknown extension namespace %q", namespace)
 	}
-	if !entitlements.For(info.OrgID).Has(reg.feature) {
+	// Gate on the run's entitlement BEFORE the handler runs. On the sidecar this
+	// relays to the orchestrator (the sidecar process has no entitlements
+	// provider); on all/local it checks in-process. rt satisfies the narrower
+	// ExtensionRuntime the handler receives.
+	allowed, err := rt.CheckEntitlement(ctx, string(reg.feature))
+	if err != nil {
+		return nil, fmt.Errorf("%s: check entitlement: %w", namespace, err)
+	}
+	if !allowed {
 		return nil, fmt.Errorf("%s: not enabled for this organization", namespace)
 	}
-	return reg.handler(ctx, info, method, args)
+	return reg.handler(ctx, rt, method, args)
 }

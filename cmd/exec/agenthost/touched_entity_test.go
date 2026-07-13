@@ -15,7 +15,6 @@ import (
 // snapshot-less stub the poll cycle later enriches.
 func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
-	client := NewLocal(stores, info)
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
@@ -57,7 +56,7 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			id, err := client.resolveTouchedEntity(ctx, tc.act)
+			id, err := resolveTouchedEntityInfo(ctx, stores, info, tc.act)
 			if err != nil {
 				t.Fatalf("resolveTouchedEntity: %v", err)
 			}
@@ -89,14 +88,14 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 
 	// Idempotent: resolving an already-known target returns the same id and
 	// creates no duplicate (octo/repo#18 was created by the first subtest).
-	first, err := client.resolveTouchedEntity(ctx, &domain.ExternalAction{Provider: domain.ArtifactProviderGitHub, Target: "octo/repo#18"})
+	first, err := resolveTouchedEntityInfo(ctx, stores, info, &domain.ExternalAction{Provider: domain.ArtifactProviderGitHub, Target: "octo/repo#18"})
 	if err != nil {
 		t.Fatalf("resolveTouchedEntity (idempotent): %v", err)
 	}
 	if first == "" {
 		t.Fatal("expected the existing entity id, got empty")
 	}
-	again, _ := client.resolveTouchedEntity(ctx, &domain.ExternalAction{Provider: domain.ArtifactProviderGitHub, Target: "octo/repo#18"})
+	again, _ := resolveTouchedEntityInfo(ctx, stores, info, &domain.ExternalAction{Provider: domain.ArtifactProviderGitHub, Target: "octo/repo#18"})
 	if again != first {
 		t.Errorf("resolve not idempotent: first=%q again=%q", first, again)
 	}

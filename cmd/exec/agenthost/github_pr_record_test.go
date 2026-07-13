@@ -95,6 +95,9 @@ func TestLocalClient_GithubCreatePR_RecordingFailure_DoesNotFailAction(t *testin
 	_, _, client := newGithubRecordingClient(t, gh.URL, true)
 	rec := &erroringArtifacts{}
 	client.stores.Artifacts = rec
+	// The runtime is derived from stores at construction, so a post-construction
+	// swap of the recorder must rebuild it (the DB effects route through c.rt).
+	client.rt = newDirectRuntime(client.stores, client.info)
 
 	number, _, _, err := client.GithubCreatePR(
 		context.Background(), "octo", "repo", "feature/x", "main", "t", "b", true,

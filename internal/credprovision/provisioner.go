@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
@@ -192,6 +193,19 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) erro
 		return fmt.Errorf("credprovision: resolve jira credentials for org %s: %w", orgID, err)
 	} else {
 		bundle.Jira = jc
+	}
+
+	// Every first-class provider beyond the built-in GitHub/Jira (Slack, and
+	// any future one) resolves its own sealed keyed set through its registered
+	// resolver — the brain never imports the provider package, so core stays
+	// free of provider-specific credential symbols. A provider with nothing
+	// configured for this org/team is simply absent from the map.
+	if providers, err := agenthost.ResolveProviderCredentials(ctx, m.stores, agenthost.ProvisionScope{
+		OrgID: orgID, TeamID: claim.TeamID, TaskID: claim.TaskID, RunID: runID,
+	}); err != nil {
+		return fmt.Errorf("credprovision: resolve provider credentials for run %s: %w", runID, err)
+	} else {
+		bundle.Providers = providers
 	}
 
 	plaintext, err := bundle.Marshal()

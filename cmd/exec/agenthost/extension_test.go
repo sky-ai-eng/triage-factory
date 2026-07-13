@@ -16,7 +16,7 @@ import (
 // internal/routing/source_registry_test.go).
 const fakeExtensionFeature = entitlements.Feature("test-fake-extension")
 
-func noopExtensionHandler(context.Context, RunInfo, string, json.RawMessage) (json.RawMessage, error) {
+func noopExtensionHandler(context.Context, ExtensionRuntime, string, json.RawMessage) (json.RawMessage, error) {
 	return nil, nil
 }
 
@@ -87,7 +87,7 @@ func TestLocalClient_CallExtension_NoProvider_NotEnabled(t *testing.T) {
 	t.Cleanup(ResetExtensions)
 	t.Cleanup(entitlements.Reset)
 
-	RegisterExtension("fake", fakeExtensionFeature, func(context.Context, RunInfo, string, json.RawMessage) (json.RawMessage, error) {
+	RegisterExtension("fake", fakeExtensionFeature, func(context.Context, ExtensionRuntime, string, json.RawMessage) (json.RawMessage, error) {
 		t.Fatal("handler must not run when the org isn't entitled")
 		return nil, nil
 	})
@@ -117,8 +117,8 @@ func TestLocalClient_CallExtension_Entitled_InvokesHandlerWithRunInfo(t *testing
 	var gotInfo RunInfo
 	var gotMethod string
 	var gotArgs json.RawMessage
-	RegisterExtension("fake", fakeExtensionFeature, func(_ context.Context, i RunInfo, method string, args json.RawMessage) (json.RawMessage, error) {
-		gotInfo = i
+	RegisterExtension("fake", fakeExtensionFeature, func(_ context.Context, rt ExtensionRuntime, method string, args json.RawMessage) (json.RawMessage, error) {
+		gotInfo = rt.Info()
 		gotMethod = method
 		gotArgs = args
 		return json.RawMessage(`{"ok":true}`), nil
@@ -175,7 +175,7 @@ func TestIPCClient_CallExtension_EntitledRoundTrip(t *testing.T) {
 	t.Cleanup(entitlements.Reset)
 	entitlements.RegisterProvider(entitlements.Static(fakeExtensionFeature))
 
-	RegisterExtension("fake", fakeExtensionFeature, func(_ context.Context, _ RunInfo, method string, _ json.RawMessage) (json.RawMessage, error) {
+	RegisterExtension("fake", fakeExtensionFeature, func(_ context.Context, _ ExtensionRuntime, method string, _ json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(fmt.Sprintf(`{"echo":%q}`, method)), nil
 	})
 
@@ -197,7 +197,7 @@ func TestIPCClient_CallExtension_DaemonRefusal_SurfacesErrorString(t *testing.T)
 	t.Cleanup(ResetExtensions)
 	t.Cleanup(entitlements.Reset) // default Static(): nothing entitled
 
-	RegisterExtension("fake", fakeExtensionFeature, func(context.Context, RunInfo, string, json.RawMessage) (json.RawMessage, error) {
+	RegisterExtension("fake", fakeExtensionFeature, func(context.Context, ExtensionRuntime, string, json.RawMessage) (json.RawMessage, error) {
 		t.Fatal("handler must not run when the org isn't entitled")
 		return nil, nil
 	})

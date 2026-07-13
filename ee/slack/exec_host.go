@@ -1,13 +1,20 @@
 // Host-side handlers for the `triagefactory exec slack ...` verbs (TFAC-596):
-// the entitlement-gated ExtensionHandler registered via
-// agenthost.RegisterExtension. Registered from install() (NOT init()) so it
-// can close over the server's db.Stores — the registry itself is a
-// process-global map safe to write here because ee.Install() runs during
-// server boot, before the agenthost daemon serves any run. The side effect
-// is intended: a local-mode CLI process never reaches install(), so the
-// "slack" namespace is never registered there — these verbs are structurally
-// multi-only, same posture as every other Slack surface (workspaces are
-// Postgres-only).
+// the Slack provider's sidecar-half verb handler. It closes over NO db.Stores
+// and NO secret store — it reaches its org-bound policy (channel authz,
+// workspace resolution) by RELAYING through the runtime to the
+// orchestrator-side ops (exec_provider_ops.go), and its bot token by SELECTING
+// from the run's sealed bundle (exec_provider.go). That is what lets the same
+// handler run in the orchestrator (all/local) AND in the capless per-run
+// credential sidecar, where the exec-verb parser now lives.
+//
+// Because the handler holds nothing host-specific, all three registrations
+// (handler, brain-side credential resolver, orchestrator-side policy ops)
+// happen from init() with no stores — so the "slack" namespace is present in
+// BOTH the server process (where the policy ops execute) and the sidecar
+// process (where the handler runs and only relays). A CLI process links this
+// package too, so init() runs there; the entitlement gate (checked via the
+// runtime) still refuses it, since a CLI process's entitlements provider is the
+// everything-off Static default.
 package slack
 
 import (
@@ -22,8 +29,6 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
-	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
@@ -32,31 +37,38 @@ import (
 // method name (the CLI's method string mirrors the verb: "send", "edit",
 // "react", "read_thread", "read_channel", "download").
 type slackExecHandler struct {
-	stores db.Stores
 	client *http.Client
 }
 
-// registerSlackExec registers the "slack" extension namespace against
-// stores. Called once from install() — see the package doc above.
-func registerSlackExec(stores db.Stores) {
-	h := &slackExecHandler{stores: stores, client: slackHTTPClient}
-	agenthost.RegisterExtension("slack", entitlements.FeatureSlack, h.handle)
+func init() {
+	registerSlackExec()
 }
 
-func (h *slackExecHandler) handle(ctx context.Context, info agenthost.RunInfo, method string, args json.RawMessage) (json.RawMessage, error) {
+// registerSlackExec registers the Slack provider — the sidecar-half verb
+// handler, the brain-side credential resolver, and the orchestrator-side policy
+// ops. All stores-free, so this runs from init() (see the package doc for why
+// init(), not install()).
+func registerSlackExec() {
+	h := &slackExecHandler{client: slackHTTPClient}
+	agenthost.RegisterExtension("slack", entitlements.FeatureSlack, h.handle)
+	agenthost.RegisterProviderCredential("slack", slackProviderCredential)
+	registerSlackProviderOps()
+}
+
+func (h *slackExecHandler) handle(ctx context.Context, rt agenthost.ExtensionRuntime, method string, args json.RawMessage) (json.RawMessage, error) {
 	switch method {
 	case "send":
-		return dispatchSlackExec(args, func(a slackSendArgs) (slackSendResult, error) { return h.send(ctx, info, a) })
+		return dispatchSlackExec(args, func(a slackSendArgs) (slackSendResult, error) { return h.send(ctx, rt, a) })
 	case "edit":
-		return dispatchSlackExec(args, func(a slackEditArgs) (slackEditResult, error) { return h.edit(ctx, info, a) })
+		return dispatchSlackExec(args, func(a slackEditArgs) (slackEditResult, error) { return h.edit(ctx, rt, a) })
 	case "react":
-		return dispatchSlackExec(args, func(a slackReactArgs) (slackReactResult, error) { return h.react(ctx, info, a) })
+		return dispatchSlackExec(args, func(a slackReactArgs) (slackReactResult, error) { return h.react(ctx, rt, a) })
 	case "read_thread":
-		return dispatchSlackExec(args, func(a slackReadThreadArgs) ([]slackMessageView, error) { return h.readThread(ctx, info, a) })
+		return dispatchSlackExec(args, func(a slackReadThreadArgs) ([]slackMessageView, error) { return h.readThread(ctx, rt, a) })
 	case "read_channel":
-		return dispatchSlackExec(args, func(a slackReadChannelArgs) ([]slackMessageView, error) { return h.readChannel(ctx, info, a) })
+		return dispatchSlackExec(args, func(a slackReadChannelArgs) ([]slackMessageView, error) { return h.readChannel(ctx, rt, a) })
 	case "download":
-		return dispatchSlackExec(args, func(a slackDownloadArgs) (slackDownloadResult, error) { return h.download(ctx, info, a) })
+		return dispatchSlackExec(args, func(a slackDownloadArgs) (slackDownloadResult, error) { return h.download(ctx, rt, a) })
 	default:
 		return nil, fmt.Errorf("slack: unknown method %q", method)
 	}
@@ -84,247 +96,80 @@ func dispatchSlackExec[A any, R any](args json.RawMessage, fn func(A) (R, error)
 // CLI's printJSON always has valid JSON to print.
 type slackReactResult struct{}
 
-// --- authorization ---
+// --- authorization + workspace/token resolution (all relayed) ---
+//
+// Every store touch below is a RELAY to the orchestrator-side policy op
+// (exec_provider_ops.go): the handler holds no db.Stores. The orchestrator
+// answers with an authorization result or a workspace IDENTITY (never a
+// token), binding the run's org from its own RunInfo. The bot TOKEN is then
+// SELECTED locally from the run's sealed bundle — so no secret crosses back.
 
-// authorizeChannel is the stage-1 gate every verb runs before touching
-// Slack: the run's team must track channelID (mirrors exec workspace add's
-// team-tracked-repo gate). A mention-triggered run's owning team is always a
-// tracker of its own channel by construction, so this passes trivially for
-// the common case; it's load-bearing for a GitHub/Jira-triggered run
-// reaching into a channel its team doesn't track.
-func (h *slackExecHandler) authorizeChannel(ctx context.Context, info agenthost.RunInfo, channelID string) error {
-	bundle := slackstore.FromStores(h.stores)
-	if bundle == nil {
-		return fmt.Errorf("slack: not available")
-	}
-	tracks, err := bundle.TeamChannels.TracksChannelSystem(ctx, info.OrgID, info.TeamID, channelID)
-	if err != nil {
-		return fmt.Errorf("slack: check channel authorization: %w", err)
-	}
-	if !tracks {
-		return fmt.Errorf("slack: this team does not track channel %s", channelID)
-	}
-	return nil
+// authorizeChannel is the stage-1 gate: the run's team must track channelID.
+// The op errors when it doesn't, so a nil return means authorized.
+func (h *slackExecHandler) authorizeChannel(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) error {
+	return rt.Relay(ctx, "slack", opAuthorizeChannel, slackChannelArg{Channel: channelID}, nil)
 }
 
-// --- workspace / token resolution ---
-
-// resolveWorkspaceAndToken resolves the (workspace, bot token) pair to act
-// as for channelID. Channel registry unknown → error. Otherwise: if this
-// run's task is a slack:mention task whose event metadata names this SAME
-// channel, that metadata's (workspace_id, api_app_id) is authoritative —
-// it's literally which bot identity received the mention. Otherwise, every
-// connected workspace matching the channel's registered WorkspaceID is
-// listed: exactly one → use it; more than one (two apps installed into the
-// same workspace) → refuse rather than guess which bot identity speaks.
-func (h *slackExecHandler) resolveWorkspaceAndToken(ctx context.Context, info agenthost.RunInfo, channelID string) (slackstore.Workspace, string, error) {
-	bundle := slackstore.FromStores(h.stores)
-	if bundle == nil {
-		return slackstore.Workspace{}, "", fmt.Errorf("slack: not available")
-	}
-	channel, err := bundle.Channels.GetSystem(ctx, info.OrgID, channelID)
-	if err != nil {
-		return slackstore.Workspace{}, "", fmt.Errorf("slack: look up channel %s: %w", channelID, err)
-	}
-	if channel == nil {
-		return slackstore.Workspace{}, "", fmt.Errorf("slack: channel %s is not visible to Triage Factory", channelID)
-	}
-
-	if ws, metaChannel, ok, err := h.workspaceFromRunTaskMetadata(ctx, info); err != nil {
-		return slackstore.Workspace{}, "", err
-	} else if ok && metaChannel == channelID {
-		token, err := h.botToken(ctx, info, ws)
-		return ws, token, err
-	}
-
-	workspaces, err := h.orgWorkspaces(ctx, info.OrgID)
-	if err != nil {
-		return slackstore.Workspace{}, "", err
-	}
-	var matches []slackstore.Workspace
-	for _, ws := range workspaces {
-		if ws.WorkspaceID == channel.WorkspaceID {
-			matches = append(matches, ws)
-		}
-	}
-	switch len(matches) {
-	case 0:
-		return slackstore.Workspace{}, "", fmt.Errorf("slack: no connected app for workspace %s (channel %s)", channel.WorkspaceID, channelID)
-	case 1:
-		token, err := h.botToken(ctx, info, matches[0])
-		return matches[0], token, err
-	default:
-		return slackstore.Workspace{}, "", fmt.Errorf(
-			"slack: workspace %s has %d connected apps in this org; cannot determine which bot identity to act as for channel %s",
-			channel.WorkspaceID, len(matches), channelID)
-	}
-}
-
-// resolveWorkspaceForDownload resolves a bot token for `download`, which
-// carries no --channel (a file id alone doesn't name one). It prefers this
-// run's own mention-task metadata (the thread context the run was spawned
-// from, if any); absent that, it falls back to the org's sole connected
-// workspace, refusing when the org has none or more than one (no channel to
-// disambiguate against, so no guessing). This resolves ONLY which bot
-// identity to speak as — it does NOT authorize the download; a token here is
-// just enough credential to look up the file's own metadata. The actual
-// authorization gate is authorizeFileChannels, run against the file's real
-// channel membership once files.info answers (see download) — this two-step
-// split exists because, unlike every other verb, download has no --channel
-// upfront to gate on before making any Slack call at all.
-func (h *slackExecHandler) resolveWorkspaceForDownload(ctx context.Context, info agenthost.RunInfo) (string, error) {
-	if ws, _, ok, err := h.workspaceFromRunTaskMetadata(ctx, info); err != nil {
-		return "", err
-	} else if ok {
-		return h.botToken(ctx, info, ws)
-	}
-
-	workspaces, err := h.orgWorkspaces(ctx, info.OrgID)
-	if err != nil {
+// resolveToken resolves which bot token to act as for channelID: relay the
+// workspace-identity decision, then select that (workspace, app)'s token from
+// the sealed bundle.
+func (h *slackExecHandler) resolveToken(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) (string, error) {
+	var ws slackWorkspaceIdentity
+	if err := rt.Relay(ctx, "slack", opResolveWorkspace, slackChannelArg{Channel: channelID}, &ws); err != nil {
 		return "", err
 	}
-	if len(workspaces) != 1 {
-		return "", fmt.Errorf(
-			"slack: cannot determine which connected workspace to download from (this run has no Slack thread context and the org has %d connected workspaces)",
-			len(workspaces))
-	}
-	return h.botToken(ctx, info, workspaces[0])
+	return selectBotToken(ctx, rt, ws)
 }
 
-// authorizeFileChannels is download's authorization gate — run only after
-// files.info resolves the file's real channel membership, since download
-// carries no --channel upfront to check via authorizeChannel like every
-// other verb. Refuses when channelIDs is empty (a file shared nowhere
-// channel-scoped — e.g. only ever DM'd — has nothing to authorize against,
-// so there's no basis to allow it) or when the team tracks none of them;
-// passes as soon as ANY one of the file's channels is tracked, since a file
-// shared into several channels only needs one legitimate path to it.
-func (h *slackExecHandler) authorizeFileChannels(ctx context.Context, info agenthost.RunInfo, channelIDs []string) error {
-	if len(channelIDs) == 0 {
-		return fmt.Errorf("slack: this file isn't shared into any channel this team could be authorized against")
+// resolveTokenForDownload resolves a bot token for `download`, which carries no
+// channel: relay the download workspace-identity decision, then select.
+func (h *slackExecHandler) resolveTokenForDownload(ctx context.Context, rt agenthost.ExtensionRuntime) (string, error) {
+	var ws slackWorkspaceIdentity
+	if err := rt.Relay(ctx, "slack", opResolveWorkspaceForDownload, struct{}{}, &ws); err != nil {
+		return "", err
 	}
-	bundle := slackstore.FromStores(h.stores)
-	if bundle == nil {
-		return fmt.Errorf("slack: not available")
-	}
-	for _, channelID := range channelIDs {
-		tracks, err := bundle.TeamChannels.TracksChannelSystem(ctx, info.OrgID, info.TeamID, channelID)
-		if err != nil {
-			return fmt.Errorf("slack: check channel authorization: %w", err)
-		}
-		if tracks {
-			return nil
-		}
-	}
-	return fmt.Errorf("slack: this team does not track any channel this file is shared into")
+	return selectBotToken(ctx, rt, ws)
 }
 
-// workspaceFromRunTaskMetadata resolves the run's own Slack context — its
-// task, if a slack:mention task, and that mention's event metadata — via the
-// documented chain: AgentRuns.GetSystem -> Task -> PrimaryEventID ->
-// Events.GetMetadataSystem. ok=false with a nil error covers every "this run
-// genuinely has no Slack thread context" case (a GitHub/Jira-triggered run, a
-// run with no task, a task that isn't slack:mention, no metadata recorded) —
-// none of those are failures, they just mean the caller falls back to its
-// own resolution path. A non-nil error means a real lookup failed (a
-// transient store error) — the caller must NOT treat that the same as "no
-// context": silently falling through to the org-wide fallback on a masked
-// failure risks resolving a different (but not ambiguous, so not refused)
-// connected app than the one that actually owns this run's thread, i.e.
-// replying as the wrong bot identity. So every store call below propagates
-// its error; only a genuine "not found" result maps to ok=false, nil.
-func (h *slackExecHandler) workspaceFromRunTaskMetadata(ctx context.Context, info agenthost.RunInfo) (ws slackstore.Workspace, channel string, ok bool, err error) {
-	run, err := h.stores.AgentRuns.GetSystem(ctx, info.OrgID, info.RunID)
-	if err != nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load run: %w", err)
-	}
-	if run == nil || run.TaskID == "" {
-		return slackstore.Workspace{}, "", false, nil
-	}
-	task, err := h.stores.Tasks.GetSystem(ctx, info.OrgID, run.TaskID)
-	if err != nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load task: %w", err)
-	}
-	if task == nil || task.EventType != domain.EventSlackMention || task.PrimaryEventID == "" {
-		return slackstore.Workspace{}, "", false, nil
-	}
-	metaJSON, err := h.stores.Events.GetMetadataSystem(ctx, info.OrgID, task.PrimaryEventID)
-	if err != nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load event metadata: %w", err)
-	}
-	if metaJSON == "" {
-		return slackstore.Workspace{}, "", false, nil
-	}
-	var meta SlackMentionMetadata
-	if jsonErr := json.Unmarshal([]byte(metaJSON), &meta); jsonErr != nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: parse event metadata: %w", jsonErr)
-	}
-	if meta.WorkspaceID == "" {
-		return slackstore.Workspace{}, "", false, nil
-	}
-	bundle := slackstore.FromStores(h.stores)
-	if bundle == nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: not available")
-	}
-	row, err := bundle.Workspaces.GetByWorkspaceAppSystem(ctx, meta.WorkspaceID, meta.APIAppID)
-	if err != nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: resolve workspace from event metadata: %w", err)
-	}
-	if row == nil {
-		return slackstore.Workspace{}, "", false, nil
-	}
-	return *row, meta.Channel, true, nil
+// authorizeFileChannels is download's gate, run after files.info resolves the
+// file's real channel membership. The op errors when none is tracked.
+func (h *slackExecHandler) authorizeFileChannels(ctx context.Context, rt agenthost.ExtensionRuntime, channelIDs []string) error {
+	return rt.Relay(ctx, "slack", opAuthorizeFileChannels, slackFileChannelsArg{Channels: channelIDs}, nil)
 }
 
-// botToken reads ws's bot token from the secret store.
-func (h *slackExecHandler) botToken(ctx context.Context, info agenthost.RunInfo, ws slackstore.Workspace) (string, error) {
-	token, err := h.stores.Secrets.GetSystem(ctx, info.OrgID, ws.BotTokenRef)
+// selectBotToken picks the bot token for a resolved (workspace, app) identity
+// from the run's sealed bundle — in-process, never asking the orchestrator for
+// a secret. A pair outside the sealed (== authorizable) set is an error,
+// symmetric with a channel the team doesn't track.
+func selectBotToken(ctx context.Context, rt agenthost.ExtensionRuntime, ws slackWorkspaceIdentity) (string, error) {
+	raw, err := rt.ProviderCredential(ctx, "slack")
 	if err != nil {
-		return "", fmt.Errorf("slack: read bot token: %w", err)
+		return "", fmt.Errorf("slack: %w", err)
 	}
-	if token == "" {
-		return "", fmt.Errorf("slack: no bot token configured for workspace %s", ws.WorkspaceID)
+	var creds slackBundleCreds
+	if err := json.Unmarshal(raw, &creds); err != nil {
+		return "", fmt.Errorf("slack: parse sealed credentials: %w", err)
+	}
+	token, ok := creds.tokenFor(ws.WorkspaceID, ws.APIAppID)
+	if !ok {
+		return "", fmt.Errorf("slack: no bot token for workspace %s (app %s) in this run's sealed set", ws.WorkspaceID, ws.APIAppID)
 	}
 	return token, nil
 }
 
-// orgWorkspaces lists orgID's connected Slack workspaces. Exec verbs run with
-// no request-JWT-claims context (an event-triggered run has none at all, and
-// a manual run's synthetic claims aren't threaded through the extension
-// seam), so this goes through the admin-pool ListAllSystem (every org) rather
-// than the app-pool, RLS-gated ListForOrg the HTTP handlers use — filtered
-// down to orgID here.
-func (h *slackExecHandler) orgWorkspaces(ctx context.Context, orgID string) ([]slackstore.Workspace, error) {
-	bundle := slackstore.FromStores(h.stores)
-	if bundle == nil {
-		return nil, fmt.Errorf("slack: not available")
-	}
-	all, err := bundle.Workspaces.ListAllSystem(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("slack: list workspaces: %w", err)
-	}
-	var out []slackstore.Workspace
-	for _, ws := range all {
-		if ws.OrgID == orgID {
-			out = append(out, ws)
-		}
-	}
-	return out, nil
-}
-
 // --- send / edit / react ---
 
-func (h *slackExecHandler) send(ctx context.Context, info agenthost.RunInfo, a slackSendArgs) (slackSendResult, error) {
+func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRuntime, a slackSendArgs) (slackSendResult, error) {
 	if a.Channel == "" {
 		return slackSendResult{}, fmt.Errorf("slack: --channel is required")
 	}
 	if a.Body == "" && a.AttachBase64 == "" {
 		return slackSendResult{}, fmt.Errorf("slack: send needs --body/--body-file or --attach-file")
 	}
-	if err := h.authorizeChannel(ctx, info, a.Channel); err != nil {
+	if err := h.authorizeChannel(ctx, rt, a.Channel); err != nil {
 		return slackSendResult{}, err
 	}
-	_, token, err := h.resolveWorkspaceAndToken(ctx, info, a.Channel)
+	token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return slackSendResult{}, err
 	}
@@ -374,24 +219,24 @@ func (h *slackExecHandler) send(ctx context.Context, info agenthost.RunInfo, a s
 	if rootTS == "" {
 		rootTS = ts
 	}
-	h.recordMessage(ctx, info, domain.ActionSlackMessagePosted, a.Channel, rootTS, ts, h.permalinkBestEffort(ctx, token, a.Channel, ts))
+	h.recordMessage(ctx, rt, domain.ActionSlackMessagePosted, a.Channel, rootTS, ts, h.permalinkBestEffort(ctx, token, a.Channel, ts))
 	if attachErr != nil {
 		return slackSendResult{Channel: a.Channel, TS: ts}, attachErr
 	}
 	return slackSendResult{Channel: a.Channel, TS: ts}, nil
 }
 
-func (h *slackExecHandler) edit(ctx context.Context, info agenthost.RunInfo, a slackEditArgs) (slackEditResult, error) {
+func (h *slackExecHandler) edit(ctx context.Context, rt agenthost.ExtensionRuntime, a slackEditArgs) (slackEditResult, error) {
 	if a.Channel == "" || a.TS == "" {
 		return slackEditResult{}, fmt.Errorf("slack: --channel and --ts are required")
 	}
 	if a.Body == "" {
 		return slackEditResult{}, fmt.Errorf("slack: --body/--body-file is required")
 	}
-	if err := h.authorizeChannel(ctx, info, a.Channel); err != nil {
+	if err := h.authorizeChannel(ctx, rt, a.Channel); err != nil {
 		return slackEditResult{}, err
 	}
-	_, token, err := h.resolveWorkspaceAndToken(ctx, info, a.Channel)
+	token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return slackEditResult{}, err
 	}
@@ -402,18 +247,18 @@ func (h *slackExecHandler) edit(ctx context.Context, info agenthost.RunInfo, a s
 	}
 
 	rootTS := h.resolveMessageRootTS(ctx, token, a.Channel, a.TS)
-	h.recordMessage(ctx, info, domain.ActionSlackMessageEdited, a.Channel, rootTS, a.TS, h.permalinkBestEffort(ctx, token, a.Channel, a.TS))
+	h.recordMessage(ctx, rt, domain.ActionSlackMessageEdited, a.Channel, rootTS, a.TS, h.permalinkBestEffort(ctx, token, a.Channel, a.TS))
 	return slackEditResult{Channel: a.Channel, TS: a.TS}, nil
 }
 
-func (h *slackExecHandler) react(ctx context.Context, info agenthost.RunInfo, a slackReactArgs) (slackReactResult, error) {
+func (h *slackExecHandler) react(ctx context.Context, rt agenthost.ExtensionRuntime, a slackReactArgs) (slackReactResult, error) {
 	if a.Channel == "" || a.TS == "" || a.Emoji == "" {
 		return slackReactResult{}, fmt.Errorf("slack: --channel, --ts, and --emoji are required")
 	}
-	if err := h.authorizeChannel(ctx, info, a.Channel); err != nil {
+	if err := h.authorizeChannel(ctx, rt, a.Channel); err != nil {
 		return slackReactResult{}, err
 	}
-	_, token, err := h.resolveWorkspaceAndToken(ctx, info, a.Channel)
+	token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return slackReactResult{}, err
 	}
@@ -423,7 +268,7 @@ func (h *slackExecHandler) react(ctx context.Context, info agenthost.RunInfo, a 
 
 	rootTS := h.resolveMessageRootTS(ctx, token, a.Channel, a.TS)
 	detail, _ := json.Marshal(map[string]string{"emoji": a.Emoji})
-	agenthost.RecordExternalWrite(ctx, h.stores, info, nil, &domain.ExternalAction{
+	rt.Record(ctx, nil, &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderSlack,
 		Action:     domain.ActionSlackReactionAdded,
 		Target:     domain.SlackSourceID(a.Channel, rootTS),
@@ -439,7 +284,7 @@ func (h *slackExecHandler) react(ctx context.Context, info agenthost.RunInfo, a 
 // key, upserting in place per TFAC-596's matrix) with Target set to the
 // thread's SlackSourceID (rootTS), plus the paired `external_actions` audit
 // row under action.
-func (h *slackExecHandler) recordMessage(ctx context.Context, info agenthost.RunInfo, action, channel, rootTS, ts, permalink string) {
+func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.ExtensionRuntime, action, channel, rootTS, ts, permalink string) {
 	target := domain.SlackSourceID(channel, rootTS)
 	a := &domain.Artifact{
 		Provider:   domain.ArtifactProviderSlack,
@@ -458,7 +303,7 @@ func (h *slackExecHandler) recordMessage(ctx context.Context, info agenthost.Run
 		URL:        permalink,
 		Credential: domain.CredentialSlackBot,
 	}
-	agenthost.RecordExternalWrite(ctx, h.stores, info, a, act)
+	rt.Record(ctx, a, act)
 }
 
 // permalinkBestEffort resolves ts's shareable link; "" on any failure — a
@@ -551,14 +396,14 @@ func (h *slackExecHandler) uploadAttachment(ctx context.Context, token, channel,
 
 // --- read thread / read channel ---
 
-func (h *slackExecHandler) readThread(ctx context.Context, info agenthost.RunInfo, a slackReadThreadArgs) ([]slackMessageView, error) {
+func (h *slackExecHandler) readThread(ctx context.Context, rt agenthost.ExtensionRuntime, a slackReadThreadArgs) ([]slackMessageView, error) {
 	if a.Channel == "" || a.TS == "" {
 		return nil, fmt.Errorf("slack: --channel and --ts are required")
 	}
-	if err := h.authorizeChannel(ctx, info, a.Channel); err != nil {
+	if err := h.authorizeChannel(ctx, rt, a.Channel); err != nil {
 		return nil, err
 	}
-	_, token, err := h.resolveWorkspaceAndToken(ctx, info, a.Channel)
+	token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return nil, err
 	}
@@ -574,14 +419,14 @@ func (h *slackExecHandler) readThread(ctx context.Context, info agenthost.RunInf
 // without an unbounded fetch.
 const defaultReadChannelLimit = 20
 
-func (h *slackExecHandler) readChannel(ctx context.Context, info agenthost.RunInfo, a slackReadChannelArgs) ([]slackMessageView, error) {
+func (h *slackExecHandler) readChannel(ctx context.Context, rt agenthost.ExtensionRuntime, a slackReadChannelArgs) ([]slackMessageView, error) {
 	if a.Channel == "" {
 		return nil, fmt.Errorf("slack: --channel is required")
 	}
-	if err := h.authorizeChannel(ctx, info, a.Channel); err != nil {
+	if err := h.authorizeChannel(ctx, rt, a.Channel); err != nil {
 		return nil, err
 	}
-	_, token, err := h.resolveWorkspaceAndToken(ctx, info, a.Channel)
+	token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return nil, err
 	}
@@ -710,11 +555,11 @@ func (h *slackExecHandler) viewMessages(ctx context.Context, token string, msgs 
 
 // --- download ---
 
-func (h *slackExecHandler) download(ctx context.Context, info agenthost.RunInfo, a slackDownloadArgs) (slackDownloadResult, error) {
+func (h *slackExecHandler) download(ctx context.Context, rt agenthost.ExtensionRuntime, a slackDownloadArgs) (slackDownloadResult, error) {
 	if a.FileID == "" {
 		return slackDownloadResult{}, fmt.Errorf("slack: --id is required")
 	}
-	token, err := h.resolveWorkspaceForDownload(ctx, info)
+	token, err := h.resolveTokenForDownload(ctx, rt)
 	if err != nil {
 		return slackDownloadResult{}, err
 	}
@@ -724,12 +569,12 @@ func (h *slackExecHandler) download(ctx context.Context, info agenthost.RunInfo,
 		return slackDownloadResult{}, fmt.Errorf("slack: look up file: %w", err)
 	}
 	// Authorize against the file's OWN channel membership, not the run's
-	// context — resolveWorkspaceForDownload only picked a bot identity, it
-	// never checked a channel (download has none to check upfront). Every
-	// other verb authorizes before making any Slack call; download can only
-	// do so after this lookup answers, since a bare file id doesn't name a
-	// channel on its own.
-	if err := h.authorizeFileChannels(ctx, info, fi.Channels); err != nil {
+	// context — resolveTokenForDownload only picked a bot identity, it never
+	// checked a channel (download has none to check upfront). Every other verb
+	// authorizes before making any Slack call; download can only do so after
+	// this lookup answers, since a bare file id doesn't name a channel on its
+	// own.
+	if err := h.authorizeFileChannels(ctx, rt, fi.Channels); err != nil {
 		return slackDownloadResult{}, err
 	}
 	if fi.Size > slackExecMaxFileBytes {

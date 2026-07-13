@@ -43,6 +43,26 @@ type Bundle struct {
 
 	GitHub *GitHubCreds `json:"github,omitempty"`
 	Jira   *JiraCreds   `json:"jira,omitempty"`
+
+	// Providers carries the sealed credential set for each first-class
+	// provider beyond the built-in GitHub/Jira (Slack, and any future one),
+	// keyed by provider namespace. Each value is that provider's own opaque
+	// keyed set — core seals and threads the bytes without understanding
+	// them; only the provider's own sidecar-half handler (which owns the
+	// shape) unmarshals and selects a member. This is what keeps core free of
+	// provider-specific credential symbols: the brain resolves a provider's
+	// set through its registered resolver, and the sidecar selects through its
+	// registered handler, with only the JSON envelope crossing core.
+	Providers map[string]json.RawMessage `json:"providers,omitempty"`
+}
+
+// ProviderCreds returns the sealed credential set for the named provider and
+// whether one is present. The bytes are the provider's own keyed set — the
+// caller (a provider's sidecar-half handler) unmarshals them into its own
+// shape.
+func (b *Bundle) ProviderCreds(namespace string) (json.RawMessage, bool) {
+	raw, ok := b.Providers[namespace]
+	return raw, ok && len(raw) > 0
 }
 
 // LLMExpiry returns the LLM material's expiry as a time.Time (zero when
