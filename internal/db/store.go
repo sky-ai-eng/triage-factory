@@ -37,8 +37,8 @@ type Stores struct {
 	// ciphertext in the RLS-gated public.org_secrets table; SQLite
 	// impl delegates to internal/auth's keychain helpers so callers
 	// see the same Put/Get/Delete shape in either mode. orgID is
-	// required and enforced — RLS rejects on a claim/arg mismatch in
-	// multi, sqlite asserts LocalDefaultOrgID.
+	// required and enforced — in multi mode, RLS filters cross-tenant reads
+	// and blocks cross-tenant writes; sqlite asserts LocalDefaultOrgID.
 	Secrets SecretStore
 
 	// EventHandlers owns the unified event_handlers table:

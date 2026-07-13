@@ -19,10 +19,10 @@ A useful pair of one-liners:
 
 Every deployment shape is a point on two axes:
 
-1. **What's shared** — from "an App key" (worst) through "server / DB / secrets" to "nothing."
+1. **What's shared** — from "an App key" through "server / DB / secrets" to "nothing."
 2. **Who operates the shared thing** — you, or a third party (SkyAI).
 
-Logical isolation strength (RLS + per-org secret encryption + gVisor) is constant across tiers — it's always on. The tiers differ in what _physical_ infrastructure is shared and who runs it.
+Logical isolation strength (RLS + per-org secrets + gVisor) is constant across tiers. The tiers differ in what _physical_ infrastructure is shared and who runs it.
 
 ## The tiers
 
@@ -46,15 +46,15 @@ Notes:
 **Strong, always-on logical isolation per org:**
 
 - RLS partitions every row by org. An org's queries can only read its own rows.
-- **One shared, RLS-gated secrets table — no separate secret-management service.** Secrets (GitHub App keys, PATs, LLM credentials) are encrypted app-side (AES-256-GCM, `internal/aead`) with a key that lives only in the deployment's environment (`TF_SECRET_ENCRYPTION_KEY`), never in Postgres, and stored as opaque ciphertext + nonce in a single `public.org_secrets` table alongside every other tenant's rows. Access for the app role is gated by ordinary RLS policies scoped to `org_id = tf.current_org_id()` (and, for per-user secrets, `user_id = tf.current_user_id()` too) — the same JWT-claim anchor every other RLS policy on the system keys on. The app role has no unscoped grant on the table, so the gate can't be bypassed from the app pool. As defense-in-depth beyond RLS, each row's ciphertext is bound to its own `(org_id, user_id, key)` identity via authenticated-encryption associated data, so a ciphertext blob relocated to another row by a direct-DB write fails to decrypt rather than yielding another org's secret.
+- **An RLS-gated secrets table.** Secrets (GitHub App keys, PATs, LLM credentials) are encrypted app-side (AES-256-GCM, `internal/aead`) with a key that lives only in the deployment's environment (`TF_SECRET_ENCRYPTION_KEY`), never in Postgres, and stored as opaque ciphertext + nonce in a single `public.org_secrets` table alongside every other tenant's rows. Access for the app role is gated by ordinary RLS policies scoped to `org_id = tf.current_org_id()` (and, for per-user secrets, `user_id = tf.current_user_id()` too) — the same JWT-claim anchor every other RLS policy on the system keys on. The app role has no unscoped grant on the table, so the gate can't be bypassed from the app pool. Beyond RLS, each row's ciphertext is bound to its own `(org_id, user_id, key)` identity via authenticated-encryption associated data, so a ciphertext blob relocated to another row by a direct-DB write fails to decrypt rather than yielding another org's secret.
 - gVisor kernel-isolates every agent run; an agent can't read another org's worktree or the host's secrets.
 - Sandboxed agents get credentials built from scratch — no host credential bleed into the sandbox.
 
 **Residual, infra-layer blast radius (not zero):**
 
-A compromise at the _infrastructure_ layer — an RLS-policy bug (including on the encrypted secrets table), a gVisor escape, or a SkyAI ops/insider compromise — has a reach that spans tenants, because the orgs share one Postgres cluster and one sandbox host fleet under SkyAI's operation. This is the inherent property of shared third-party infrastructure, and no tenancy model removes it. Only a dedicated deployment (Tier 2.5 or 3) does.
+A compromise at the _infrastructure_ layer — an RLS-policy bug, a gVisor escape, or a SkyAI ops/insider compromise — has a reach that spans tenants, because the orgs share one Postgres cluster and one sandbox host fleet under SkyAI's operation. This is the inherent property of shared third-party infrastructure, and no tenancy model removes it. Only a dedicated deployment (Tier 2.5 or 3) does.
 
-For the overwhelming majority of code, Tier 2 is the right call — it's the **same trust class the customer already accepts by hosting their code on github.com**, itself a shared, third-party-operated, multi-tenant system. If they trust GitHub's tenant isolation for their source, TF-hosted is a comparable bet on the same source.
+For most customers, Tier 2 is the right call. It's the same trust class already accepted by hosting code on github.com, itself a shared, third-party-operated, multi-tenant system. If you trust GitHub's tenant isolation for their source, TF-hosted is a comparable bet on the same source.
 
 The narrow exception is code that _isn't even on standard github.com_ — source kept on an isolated-network enterprise GitHub Server precisely because shared third-party infra is off the table. That code's owners draw the line at Tier 2 for _everything_ in their toolchain, and they should self-host TF (Tier 3) or stay local (Tier 4) — the same boundary they already drew with GitHub.
 
@@ -94,5 +94,5 @@ The last row is the important nuance: **the org is the isolation unit, but for c
 
 ## Related
 
-- `docs/for-agents/multi-tenant-architecture.html` — the full multi-tenant design (RLS, per-org secret encryption, gVisor, the v1/v2/v3 scope). This is a point-in-time architecture-discussion doc, not kept current: it records the original Supabase Vault secret-storage decision and its later reversal in favor of app-side AES-256-GCM encryption (`org_secrets` table) inline, rather than being edited to match. That reversal — not Vault — is what actually shipped; see `internal/db/postgres/secrets.go`.
+- `docs/for-agents/multi-tenant-architecture.html` — the full multi-tenant design (RLS, per-org secret encryption, gVisor, the v1/v2/v3 scope). This is a point-in-time architecture-discussion doc, not kept current.
 - `docs/self-hosting/install.md` — operator install flow for a Tier 3 self-hosted deployment.
