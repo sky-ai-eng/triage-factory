@@ -397,7 +397,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 			// server (the relocation); the orchestrator only supplies the bind
 			// mount for the socket the sidecar already created at bring-up.
 			startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-				return agenthost.SocketMountFor(runID), io.NopCloser(nil), nil
+				return agenthost.SocketMountFor(runID), noopCloser{}, nil
 			}
 		} else {
 			// all/local: host the socket server in-process over live stores.

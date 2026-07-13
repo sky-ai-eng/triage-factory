@@ -30,6 +30,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
+// noopCloser is an io.Closer that closes nothing. The executor path returns it
+// from startAgentHost because the credential sidecar owns the exec-verb socket's
+// lifecycle — the orchestrator hosts no daemon there and so has nothing to shut
+// down. It is deliberately not an io.ReadCloser: there is no reader to read.
+type noopCloser struct{}
+
+func (noopCloser) Close() error { return nil }
+
 // sessionTranscriptExists reports whether the Claude session transcript for
 // sessionID is on disk for the agent's cwd — the cheap existence check the
 // crash-reclaim resume gates on, so a `--resume` is only attempted when the
@@ -355,7 +363,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			// Server and keeps the hostile-input parser (with its all-orgs stores)
 			// out of its own address space entirely.
 			startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-				return agenthost.SocketMountFor(runID), io.NopCloser(nil), nil
+				return agenthost.SocketMountFor(runID), noopCloser{}, nil
 			}
 		} else {
 			// all/local: the orchestrator IS the credential holder, so it hosts the

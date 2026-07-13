@@ -87,15 +87,6 @@ func NewLocal(stores db.Stores, info RunInfo) *LocalClient {
 	}
 }
 
-// newLocalWithRuntime builds a LocalClient over an explicit runtime (the
-// sidecar's relayRuntime), holding no db.Stores — every DB effect relays. The
-// caller MUST also set proxyCreds so the gh/jira resolver paths (which still
-// read stores) are never reached. The repo gate is always wired here (the relay
-// runtime can always serve it).
-func newLocalWithRuntime(rt Runtime) *LocalClient {
-	return &LocalClient{info: rt.Info(), rt: rt, gateWired: true}
-}
-
 func (c *LocalClient) LookupRun(_ context.Context) (RunInfo, error) {
 	// Empty RunID at this stage means AutoDetect's env probe was
 	// bypassed (test seam) or the caller constructed a LocalClient
