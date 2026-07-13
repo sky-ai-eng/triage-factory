@@ -85,9 +85,10 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		}
 	}
 
-	// The public.vault_* secret wrappers are dropped by the org_secrets
-	// migration (TFAC-402). Assert they're gone so a regression that
-	// re-introduces the pgsodium secret path is caught here.
+	// TF never creates the public.vault_* secret wrappers — secrets are
+	// app-encrypted into org_secrets instead. Assert they're absent so a
+	// regression that re-introduces the Vault-backed secret path is
+	// caught here.
 	for _, fn := range []string{
 		"vault_put_org_secret", "vault_get_org_secret", "vault_get_org_secret_system", "vault_delete_org_secret",
 		"vault_put_user_secret", "vault_get_user_secret", "vault_get_user_secret_system", "vault_delete_user_secret",
@@ -101,8 +102,22 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 			t.Fatalf("probe dropped function public.%s: %v", fn, err)
 		}
 		if n != 0 {
-			t.Errorf("public.%s still present — should be dropped by the org_secrets migration", fn)
+			t.Errorf("public.%s present — TF must never create the vault_* wrappers", fn)
 		}
+	}
+
+	// The image pre-creates supabase_vault before this migration runs;
+	// the migration drops it immediately since TF doesn't use it. Assert
+	// it stays gone so a regression (e.g. a stray CREATE EXTENSION) is
+	// caught here.
+	var vaultExtCount int
+	if err := h.AdminDB.QueryRow(
+		`SELECT COUNT(*) FROM pg_extension WHERE extname = 'supabase_vault'`,
+	).Scan(&vaultExtCount); err != nil {
+		t.Fatalf("probe supabase_vault extension: %v", err)
+	}
+	if vaultExtCount != 0 {
+		t.Errorf("supabase_vault extension present — should be dropped by the baseline migration")
 	}
 }
 

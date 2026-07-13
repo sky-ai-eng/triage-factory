@@ -18,4 +18,4 @@ self-host (Tier 3), and local (Tier 4) — so they live here rather than under
 
 ## Related
 
-- [docs/for-agents/multi-tenant-architecture.html](../for-agents/multi-tenant-architecture.html) — the full multi-tenant design (RLS, Vault, gVisor)
+- [docs/for-agents/multi-tenant-architecture.html](../for-agents/multi-tenant-architecture.html) — the full multi-tenant design (RLS, per-org secret encryption, gVisor)

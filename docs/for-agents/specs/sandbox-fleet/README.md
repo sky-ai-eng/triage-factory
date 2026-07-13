@@ -65,8 +65,9 @@ tenants by virtue of network position:
   identity — a shared-host compromise),
 - the operator's **internal network** — on the shared Fly fleet the Machines sit
   on Fly's private network (the SKY-254 validation README notes the internal
-  `fdaa::3` resolver on it); that network is where the shared Postgres, the
-  Vault, and **every other tenant's Machine** live,
+  `fdaa::3` resolver on it); that network is where the shared Postgres — which
+  also holds every org's app-encrypted secrets — and **every other tenant's
+  Machine** live,
 - the operator's **shared egress identity** (NAT source IP) — traffic leaves with
   the Machine's address, an identity shared across all tenants on that host.
 

@@ -85,7 +85,8 @@ services:
     # supabase/postgres ships:
     #   - the `auth` schema + supabase_auth_admin role GoTrue connects as
     #   - vault, pgsodium, pgcrypto, pgvector, pg_graphql extensions
-    #     (vault is what D5 / SKY-249 uses for per-org secrets)
+    #     (vault/pgsodium are image-managed but unused — per-org secrets are
+    #     app-encrypted into public.org_secrets instead, see TF_SECRET_ENCRYPTION_KEY below)
     #   - the authenticator / anon / authenticated / service_role pattern
     #     for D9's RLS app pool to lean on
     # Four distinct passwords by design:

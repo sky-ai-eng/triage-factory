@@ -6,7 +6,7 @@ How Triage Factory isolates tenants, and how to choose a deployment shape for a 
 
 The single most common confusion: conflating the **org** boundary with the **deployment** boundary. They are different things, and most "is this safe enough?" questions are really about one or the other.
 
-- **Org = the isolation unit.** Your tenant. Within a deployment, every org's data is partitioned by Postgres row-level security (RLS), its secrets sit in one shared Vault namespaced + access-gated per-org, and every agent run is kernel-isolated with gVisor and handed credentials constructed from scratch (no host credential bleed). You are never in a shared org with another customer — every signup gets its own org by default (one org / one team / one user at N=1, expandable to many teams and users).
+- **Org = the isolation unit.** Your tenant. Within a deployment, every org's data is partitioned by Postgres row-level security (RLS), its secrets are AES-256-GCM-encrypted app-side and stored as opaque ciphertext in one shared, RLS-gated secrets table scoped per-org, and every agent run is kernel-isolated with gVisor and handed credentials constructed from scratch (no host credential bleed). You are never in a shared org with another customer — every signup gets its own org by default (one org / one team / one user at N=1, expandable to many teams and users).
 - **Deployment = the trust unit.** The Postgres cluster, the sandbox host fleet, the proxies, and the operator's access. Whether this is shared across customers — and _who operates it_ — is what the tiers below distinguish.
 
 These coexist without contradiction: **you have your own logically-isolated org, AND (in a shared deployment) your org runs on physical infrastructure shared with other orgs.** The first is always true. The second varies by tier.
@@ -19,22 +19,22 @@ A useful pair of one-liners:
 
 Every deployment shape is a point on two axes:
 
-1. **What's shared** — from "an App key" (worst) through "server / DB / Vault" to "nothing."
+1. **What's shared** — from "an App key" through "server / DB / secrets" to "nothing."
 2. **Who operates the shared thing** — you, or a third party (SkyAI).
 
-Logical isolation strength (RLS + per-org Vault + gVisor) is constant across tiers — it's always on. The tiers differ in what _physical_ infrastructure is shared and who runs it.
+Logical isolation strength (RLS + per-org secrets + gVisor) is constant across tiers. The tiers differ in what _physical_ infrastructure is shared and who runs it.
 
 ## The tiers
 
 Higher tier number = stronger isolation.
 
-| Tier    | Shape                                                                                           | What's shared                                            | Operator          | Residual blast radius                                                                                       |
-| ------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------- |
-| **4**   | **Local + PAT** — per-user binary on the user's own machine                                     | Nothing                                                  | You (your laptop) | One engineer's own GitHub access. No shared App, no shared server.                                          |
-| **3**   | **Self-hosted** — your own TF deployment (one or many orgs inside)                              | Server / DB / Vault, across _your_ orgs only             | **You**           | Your own infrastructure. Insider risk is your own people, same as any internal system.                      |
-| **2.5** | **Managed dedicated** — SkyAI operates, but on single-tenant infrastructure provisioned for you | Nothing cross-customer; SkyAI operates                   | SkyAI             | Your dedicated instance + SkyAI ops. No other tenants in the blast radius. _(Future offering — not built.)_ |
-| **2**   | **Shared hosted** — `app.triagefactory.com`; your own org among all customers' orgs             | Server / DB / Vault / sandbox host, across _all_ tenants | SkyAI             | Shared infrastructure + SkyAI ops + every other tenant (at the infra layer only — see below).               |
-| **1**   | **Shared org** — multiple parties inside one org sharing an App                                 | The App key too                                          | varies            | Widest. **Anti-pattern; not offered.**                                                                      |
+| Tier    | Shape                                                                                           | What's shared                                              | Operator          | Residual blast radius                                                                                       |
+| ------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------- |
+| **4**   | **Local + PAT** — per-user binary on the user's own machine                                     | Nothing                                                    | You (your laptop) | One engineer's own GitHub access. No shared App, no shared server.                                          |
+| **3**   | **Self-hosted** — your own TF deployment (one or many orgs inside)                              | Server / DB / secrets, across _your_ orgs only             | **You**           | Your own infrastructure. Insider risk is your own people, same as any internal system.                      |
+| **2.5** | **Managed dedicated** — SkyAI operates, but on single-tenant infrastructure provisioned for you | Nothing cross-customer; SkyAI operates                     | SkyAI             | Your dedicated instance + SkyAI ops. No other tenants in the blast radius. _(Future offering — not built.)_ |
+| **2**   | **Shared hosted** — `app.triagefactory.com`; your own org among all customers' orgs             | Server / DB / secrets / sandbox host, across _all_ tenants | SkyAI             | Shared infrastructure + SkyAI ops + every other tenant (at the infra layer only — see below).               |
+| **1**   | **Shared org** — multiple parties inside one org sharing an App                                 | The App key too                                            | varies            | Widest. **Anti-pattern; not offered.**                                                                      |
 
 Notes:
 
@@ -46,15 +46,15 @@ Notes:
 **Strong, always-on logical isolation per org:**
 
 - RLS partitions every row by org. An org's queries can only read its own rows.
-- **One shared Vault gated by `SECURITY DEFINER` functions.** Secrets (GitHub App keys, PATs, LLM credentials) live in a single `supabase_vault` store, namespaced by secret name (`org/<org_uuid>/<key>`). The only path in for the app role is three `SECURITY DEFINER` functions (`vault_{put,get,delete}_org_secret`) that raise `42501` unless the requested `org_id` matches `tf.current_org_id()` (read from the request's verified JWT claim). The app role has no direct grant on the `vault` schema, so the gate can't be bypassed. The `org_id` a caller passes is _not_ trusted — the JWT claim is the authority, the same anchor every RLS policy keys on.
+- **An RLS-gated secrets table.** Secrets (GitHub App keys, PATs, LLM credentials) are encrypted app-side (AES-256-GCM, `internal/aead`) with a key that lives only in the deployment's environment (`TF_SECRET_ENCRYPTION_KEY`), never in Postgres, and stored as opaque ciphertext + nonce in a single `public.org_secrets` table alongside every other tenant's rows. Access for the app role is gated by ordinary RLS policies scoped to `org_id = tf.current_org_id()` (and, for per-user secrets, `user_id = tf.current_user_id()` too) — the same JWT-claim anchor every other RLS policy on the system keys on. Beyond RLS, each row's ciphertext is bound to its own `(org_id, user_id, key)` identity via authenticated-encryption associated data, so a ciphertext blob relocated to another row by a direct-DB write fails to decrypt rather than yielding another org's secret.
 - gVisor kernel-isolates every agent run; an agent can't read another org's worktree or the host's secrets.
 - Sandboxed agents get credentials built from scratch — no host credential bleed into the sandbox.
 
 **Residual, infra-layer blast radius (not zero):**
 
-A compromise at the _infrastructure_ layer — an RLS-policy bug, a gVisor escape, a Vault scoping error, or a SkyAI ops/insider compromise — has a reach that spans tenants, because the orgs share one Postgres cluster and one sandbox host fleet under SkyAI's operation. This is the inherent property of shared third-party infrastructure, and no tenancy model removes it. Only a dedicated deployment (Tier 2.5 or 3) does.
+A compromise at the _infrastructure_ layer — an RLS-policy bug, a gVisor escape, or a SkyAI ops/insider compromise — has a reach that spans tenants, because the orgs share one Postgres cluster and one sandbox host fleet under SkyAI's operation. This is the inherent property of shared third-party infrastructure, and no tenancy model removes it. Only a dedicated deployment (Tier 2.5 or 3) does.
 
-For the overwhelming majority of code, Tier 2 is the right call — it's the **same trust class the customer already accepts by hosting their code on github.com**, itself a shared, third-party-operated, multi-tenant system. If they trust GitHub's tenant isolation for their source, TF-hosted is a comparable bet on the same source.
+For most customers, Tier 2 is the right call. It's the same trust class already accepted by hosting code on github.com, itself a shared, third-party-operated, multi-tenant system. If you trust GitHub's tenant isolation for their source, TF-hosted is a comparable bet on the same source.
 
 The narrow exception is code that _isn't even on standard github.com_ — source kept on an isolated-network enterprise GitHub Server precisely because shared third-party infra is off the table. That code's owners draw the line at Tier 2 for _everything_ in their toolchain, and they should self-host TF (Tier 3) or stay local (Tier 4) — the same boundary they already drew with GitHub.
 
@@ -94,5 +94,5 @@ The last row is the important nuance: **the org is the isolation unit, but for c
 
 ## Related
 
-- `docs/for-agents/multi-tenant-architecture.html` — the full multi-tenant design (RLS, Vault, gVisor, the v1/v2/v3 scope).
+- `docs/for-agents/multi-tenant-architecture.html` — the full multi-tenant design (RLS, per-org secret encryption, gVisor, the v1/v2/v3 scope). This is a point-in-time architecture-discussion doc, not kept current.
 - `docs/self-hosting/install.md` — operator install flow for a Tier 3 self-hosted deployment.

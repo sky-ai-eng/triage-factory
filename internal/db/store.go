@@ -32,12 +32,13 @@ type Stores struct {
 	// snapshot_json blobs. Owns no table.
 	Dashboard DashboardStore
 
-	// Secrets is the per-org secret bag. Postgres impl wraps the
-	// public.vault_* SECURITY DEFINER functions (RLS-gated per org);
-	// SQLite impl delegates to internal/auth's keychain helpers so
-	// callers see the same Put/Get/Delete shape in either mode.
-	// orgID is required and enforced — vault wrapper rejects on a
-	// claim/arg mismatch in multi, sqlite asserts LocalDefaultOrgID.
+	// Secrets is the per-org secret bag. Postgres impl app-encrypts
+	// each value (AES-256-GCM, internal/aead) and stores opaque
+	// ciphertext in the RLS-gated public.org_secrets table; SQLite
+	// impl delegates to internal/auth's keychain helpers so callers
+	// see the same Put/Get/Delete shape in either mode. orgID is
+	// required and enforced — in multi mode, RLS filters cross-tenant reads
+	// and blocks cross-tenant writes; sqlite asserts LocalDefaultOrgID.
 	Secrets SecretStore
 
 	// EventHandlers owns the unified event_handlers table:

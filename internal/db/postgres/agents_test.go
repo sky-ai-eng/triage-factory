@@ -205,7 +205,7 @@ func TestAgentStore_Postgres_AdminCanUpdate(t *testing.T) {
 // github_pat_user_id integrity fix from migration 202605120005.
 // Without the same-org constraint, an org admin in A could write
 // agents.github_pat_user_id = <bob-from-org-B>. Downstream credential
-// lookup goes through Vault wrappers gated by tf.current_org_id() so
+// lookup reads the org-scoped github_pat by org_id (Secrets.GetSystem) so
 // the cross-org PAT itself isn't reachable, but the row's integrity
 // is wrong. Defense in depth: RLS refuses the write directly.
 func TestAgentStore_Postgres_BlocksCrossOrgPATUser(t *testing.T) {
