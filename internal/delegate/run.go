@@ -30,6 +30,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
+// noopCloser is an io.Closer that closes nothing. The executor path returns it
+// from startAgentHost because the credential sidecar owns the exec-verb socket's
+// lifecycle — the orchestrator hosts no daemon there and so has nothing to shut
+// down. It is deliberately not an io.ReadCloser: there is no reader to read.
+type noopCloser struct{}
+
+func (noopCloser) Close() error { return nil }
+
 // sessionTranscriptExists reports whether the Claude session transcript for
 // sessionID is on disk for the agent's cwd — the cheap existence check the
 // crash-reclaim resume gates on, so a `--resume` is only attempted when the
@@ -348,16 +356,25 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			TeamID:           cfg.teamID,
 			IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 		}
-		// TF_ROLE=executor: point the daemon's gh/jira verbs at this run's
-		// credential-sidecar REST proxies (holding only placeholders) instead of
-		// the (disabled, on an executor) secret store. nil-safe → nil on
-		// all/local, where the daemon resolves through its own resolver path.
-		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-			hd, mount, err := agenthost.Start(stores, info, cfg.execSandbox.agentHostProxyCreds())
-			if err != nil {
-				return sandbox.Mount{}, nil, err
+		if cfg.execSandbox != nil {
+			// TF_ROLE=executor: the credential sidecar HOSTS the exec-verb socket
+			// server (the relocation) and already created the socket during
+			// bring-up. The orchestrator only supplies the bind mount — it runs no
+			// Server and keeps the hostile-input parser (with its all-orgs stores)
+			// out of its own address space entirely.
+			startAgentHost = func() (sandbox.Mount, io.Closer, error) {
+				return agenthost.SocketMountFor(runID), noopCloser{}, nil
 			}
-			return mount, hd, nil
+		} else {
+			// all/local: the orchestrator IS the credential holder, so it hosts the
+			// socket server in-process over its live stores (no sidecar, no relay).
+			startAgentHost = func() (sandbox.Mount, io.Closer, error) {
+				hd, mount, err := agenthost.Start(stores, info, nil)
+				if err != nil {
+					return sandbox.Mount{}, nil, err
+				}
+				return mount, hd, nil
+			}
 		}
 	}
 

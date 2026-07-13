@@ -56,22 +56,25 @@ const (
 	// and return the non-secret sandbox env naming them. A Call.
 	KindStartProxies Kind = "start_proxies"
 
-	// KindAuthorizeRepo is the sidecar's git proxy asking the orchestrator to
-	// make the DB-backed per-repo/-ref push decision (the sidecar holds no DB
-	// handle). A Call in the sidecar → orchestrator direction.
-	KindAuthorizeRepo Kind = "authorize_repo"
+	// KindRelayCall is the single sidecar → orchestrator relay envelope for a
+	// request/response op: the sidecar (which holds no DB handle and no
+	// secret store) asks the orchestrator to serve one org-bound, non-secret
+	// policy/data or authz decision, named by (namespace, op) in the body.
+	// The response is the op's marshaled result (or a remote error). Every
+	// DB-backed read + authz the relocated agenthost needs — the git proxy's
+	// push authorization, the exec verb-trace reads, a provider's policy
+	// lookup — rides this one Kind; identity is bound orchestrator-side from
+	// the supervised run's RunInfo, so the body carries no org id and a
+	// sidecar cannot address another org's data.
+	KindRelayCall Kind = "relay_call"
 
-	// KindRecordDenial is the sidecar's git proxy reporting a denied git op
-	// for the orchestrator to audit. A Notify (best-effort, never blocks a
-	// request).
-	KindRecordDenial Kind = "record_denial"
-
-	// KindRecordPush is the sidecar's git proxy reporting a completed branch
-	// push (with the upstream's final status) for the orchestrator to record
-	// as a branch artifact / push-failed audit row — the DB write lives on
-	// the orchestrator, which holds the stores the capless sidecar cannot
-	// reach. A Notify (best-effort, fires after the push already landed).
-	KindRecordPush Kind = "record_push"
+	// KindRelayNotify is the fire-and-forget twin of KindRelayCall for
+	// audit-record ops that must never block the external write they follow —
+	// a denied git op, a completed push, an external-write record. Same
+	// (namespace, op) envelope; no response awaited. The orchestrator serves
+	// it best-effort against its stores (the write already landed upstream);
+	// a dropped notify costs at most one audit row, never the agent's action.
+	KindRelayNotify Kind = "relay_notify"
 )
 
 // Frame is one newline-delimited JSON message. Body is the Kind-specific

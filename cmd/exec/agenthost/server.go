@@ -53,13 +53,29 @@ const sandboxAgentRoot = "/work"
 // the server does not accept identity from the wire and uses its
 // constructor-supplied RunInfo for every method's routing.
 type Server struct {
+	// rt is the runtime every per-request LocalClient's DB effects route
+	// through: directRuntime over db.Stores on all/local (NewServer), or
+	// relayRuntime over the supervision channel on the executor sidecar
+	// (NewServerWithRuntime). This is what lets the SAME dispatch run in the
+	// orchestrator and in the capless per-run jail.
+	rt Runtime
+
+	// stores backs the all/local gh/jira credential resolver only; it is the
+	// zero db.Stores on the executor sidecar (which holds no store — the gh/jira
+	// verbs route through proxyCreds there, so the resolver path is never taken).
 	stores db.Stores
 	info   RunInfo
+
+	// gateWired reports whether the exec-gh repo authz gate can run — true on the
+	// sidecar and a fully-wired all/local Server, false for a partial fixture.
+	gateWired bool
 
 	// ghResolver is the GitHub credential resolver the host-routed gh
 	// methods build their client from (App installation token → org PAT).
 	// Built once per Server in NewServer so the token cache is shared
-	// across every gh call in the run rather than re-minting per RPC.
+	// across every gh call in the run rather than re-minting per RPC. nil on
+	// the executor sidecar (no resolver is constructed there — proxyCreds win,
+	// and the secret store the resolver would read is disabled).
 	// Tests override it to inject a fake covering both tiers.
 	ghResolver ghclient.Resolver
 
@@ -90,9 +106,28 @@ type Server struct {
 // resolver exactly as before.
 func NewServer(stores db.Stores, info RunInfo, proxyCreds *ProxyCredentials) *Server {
 	return &Server{
+		rt:         newDirectRuntime(stores, info),
 		stores:     stores,
 		info:       info,
+		gateWired:  stores.TeamGitHubRepos != nil && stores.RunWorktrees != nil,
 		ghResolver: ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil),
+		proxyCreds: proxyCreds,
+		shutdown:   make(chan struct{}),
+	}
+}
+
+// NewServerWithRuntime constructs the executor sidecar's Server: every
+// per-request LocalClient runs its DB effects over rt (the relay runtime — no
+// stores, no DB connection), and the gh/jira verbs route through proxyCreds so
+// the real credential stays behind the sidecar's REST proxies. NO credential
+// resolver is constructed — the sidecar holds no secret store, and the resolver
+// would be both dead (proxyCreds win) and impossible (nil stores). Identity
+// comes from the runtime; the repo gate is always wired (the relay serves it).
+func NewServerWithRuntime(rt Runtime, proxyCreds *ProxyCredentials) *Server {
+	return &Server{
+		rt:         rt,
+		info:       rt.Info(),
+		gateWired:  true,
 		proxyCreds: proxyCreds,
 		shutdown:   make(chan struct{}),
 	}
@@ -264,15 +299,20 @@ func (s *Server) sendError(conn net.Conn, msg string) {
 // generated-from-spec version of this file would just expand to the
 // same shape.
 func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMessage) (any, error) {
-	client := NewLocal(s.stores, s.info)
-	// Share the Server's resolver (and its token cache) across every gh
-	// call in this run instead of re-minting per request.
-	client.ghResolver = s.ghResolver
-	// Proxy-first (TF_ROLE=executor): when set, every gh/jira verb builds its
-	// client against the run's credential-sidecar REST proxies (holding only a
-	// placeholder) instead of ghResolver / the Jira resolver. nil (all/local)
-	// leaves the verbs on their resolver path unchanged.
-	client.proxyCreds = s.proxyCreds
+	// The per-request LocalClient shares the Server's runtime (its DB effects go
+	// direct-to-stores on all/local, or relay to the orchestrator on the
+	// sidecar), its resolver + token cache (all/local only; nil on the sidecar),
+	// and its proxyCreds (executor only — the gh/jira verbs then build clients
+	// against the sidecar's REST proxies holding only placeholders). stores backs
+	// the resolver path alone and is the zero value on the sidecar.
+	client := &LocalClient{
+		stores:     s.stores,
+		info:       s.info,
+		rt:         s.rt,
+		ghResolver: s.ghResolver,
+		proxyCreds: s.proxyCreds,
+		gateWired:  s.gateWired,
+	}
 	dec := func(dst any) error {
 		if len(rawArgs) == 0 {
 			return nil

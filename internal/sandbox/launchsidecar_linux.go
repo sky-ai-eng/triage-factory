@@ -65,7 +65,19 @@ func LaunchSidecarProcess(ctx context.Context, containerID string, uid, gid int,
 
 	cmd := exec.CommandContext(ctx, binPath, sidecarSubcommand, "--container-id", containerID)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)},
+		// The per-run uid/gid, PLUS the sandbox group as a supplementary group:
+		// the relocated exec-verb socket server the sidecar hosts must chgrp its
+		// /run/tf/<runID>.sock to WorktreeGID so the sandbox uid (which runs with
+		// that gid) can connect. chgrp is owner-legal only for a group the caller
+		// belongs to, so the sidecar must carry WorktreeGID — the same owner-legal
+		// grant the orchestrator used before the relocation. The broker is root
+		// here, so setting the supplementary group succeeds; the setuid transition
+		// still clears the child's effective/permitted caps (capless).
+		Credential: &syscall.Credential{
+			Uid:    uint32(uid),
+			Gid:    uint32(gid),
+			Groups: []uint32{uint32(WorktreeGID)},
+		},
 	}
 	cmd.Stdin = stdio
 	cmd.Stdout = stdio

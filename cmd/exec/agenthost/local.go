@@ -11,7 +11,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
-	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -37,6 +36,15 @@ type LocalClient struct {
 	stores db.Stores
 	info   RunInfo
 
+	// rt is the seam every DB-backed effect routes through: directRuntime over
+	// db.Stores in all/local (and when the orchestrator serves a relayed op),
+	// or relayRuntime over the supervision channel in the capless sidecar. The
+	// resolver-path fields below (ghResolver, and the Jira resolver built inline)
+	// still read c.stores directly, but they are never reached when proxyCreds
+	// is set — the executor sidecar builds a LocalClient with nil stores + a
+	// relayRuntime + proxyCreds, so no store field is dereferenced there.
+	rt Runtime
+
 	// ghResolver overrides the GitHub credential resolver. Nil in
 	// production (githubResolver builds the real one from stores); set by
 	// tests to inject a fake resolver covering both the App-installation and
@@ -55,14 +63,28 @@ type LocalClient struct {
 	// Set by the daemon's dispatch from the Server's own coordinates; nil on
 	// all/local where the resolver path is used.
 	proxyCreds *ProxyCredentials
+
+	// gateWired reports whether the exec-gh repo authorization gate can run —
+	// true whenever the runtime can serve the team-tracks + run_worktrees reads
+	// (always, on the sidecar's relay runtime and a fully-wired all/local
+	// LocalClient). A partial test wiring (nil stores) leaves it false so the
+	// gate no-ops rather than dereferencing an absent store. This replaces the
+	// former `c.stores.X == nil` skip, which would have silently DISABLED the
+	// gate on the sidecar (whose LocalClient holds nil stores by design).
+	gateWired bool
 }
 
-// NewLocal builds a LocalClient bound to the given stores + identity.
-// Callers that resolve identity from env (AutoDetect's local branch)
-// hand the resolved RunInfo here; the daemon hands the per-socket
-// run info here at request dispatch.
+// NewLocal builds a LocalClient bound to the given stores + identity, with an
+// in-process directRuntime over those stores. Callers that resolve identity
+// from env (AutoDetect's local branch) hand the resolved RunInfo here; the
+// daemon hands the per-socket run info here at request dispatch.
 func NewLocal(stores db.Stores, info RunInfo) *LocalClient {
-	return &LocalClient{stores: stores, info: info}
+	return &LocalClient{
+		stores:    stores,
+		info:      info,
+		rt:        newDirectRuntime(stores, info),
+		gateWired: stores.TeamGitHubRepos != nil && stores.RunWorktrees != nil,
+	}
 }
 
 func (c *LocalClient) LookupRun(_ context.Context) (RunInfo, error) {
@@ -79,24 +101,6 @@ func (c *LocalClient) LookupRun(_ context.Context) (RunInfo, error) {
 }
 
 func (c *LocalClient) Close() error { return nil }
-
-// withWrite picks the per-run routing strategy: event-triggered runs
-// route the write through the admin-pool `...System` variant of the
-// store call (no JWT claims available — the trigger fired in a
-// background goroutine); manual runs wrap the call in
-// SyntheticClaimsWithTx with the kicking-off human's identity so RLS
-// policies see the right (orgID, userID) pair. The two-arg shape lets
-// each call site pick its own admin-pool function and tx-pool closure
-// without duplicating the if/else everywhere. Thin wrapper over
-// withWriteInfo (record.go) — the free-function form an ee extension
-// handler (no LocalClient) also uses.
-func (c *LocalClient) withWrite(
-	ctx context.Context,
-	system func() error,
-	user func(ts db.TxStores) error,
-) error {
-	return withWriteInfo(ctx, c.stores, c.info, system, user)
-}
 
 // --- review draft finalization ---
 
@@ -423,125 +427,65 @@ func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, 
 	return art.ID, details.HeadSHA, nil
 }
 
-// listArtifactsByRun reads the calling run's artifacts respecting the pool split:
-// event-triggered runs read admin-pool (no JWT claims); manual runs read under
-// the kicking-off user's synthetic claims. Mirrors withWrite for the read side.
+// listArtifactsByRun reads the calling run's artifacts through the runtime
+// (directRuntime respects the event-vs-manual pool split; relayRuntime relays).
 func (c *LocalClient) listArtifactsByRun(ctx context.Context) ([]domain.Artifact, error) {
-	if c.info.IsEventTriggered {
-		return c.stores.Artifacts.ListByRunSystem(ctx, c.info.OrgID, c.info.RunID)
-	}
-	var out []domain.Artifact
-	err := c.stores.Tx.SyntheticClaimsWithTx(ctx, c.info.OrgID, c.info.UserID, func(ts db.TxStores) error {
-		a, e := ts.Artifacts.ListByRun(ctx, c.info.OrgID, c.info.RunID)
-		out = a
-		return e
-	})
-	return out, err
+	return c.rt.ListRunArtifacts(ctx)
 }
 
 // --- workspace ---
 
 func (c *LocalClient) GetAgentRun(ctx context.Context) (*domain.AgentRun, error) {
-	return c.stores.AgentRuns.GetSystem(ctx, c.info.OrgID, c.info.RunID)
+	return c.rt.GetAgentRun(ctx)
 }
 
 func (c *LocalClient) GetTask(ctx context.Context, taskID string) (*domain.Task, error) {
-	return c.stores.Tasks.GetSystem(ctx, c.info.OrgID, taskID)
+	return c.rt.GetTask(ctx, taskID)
 }
 
 func (c *LocalClient) ListRepos(ctx context.Context) ([]domain.RepoProfile, error) {
-	return c.stores.Repos.ListSystem(ctx, c.info.OrgID)
+	return c.rt.ListRepos(ctx)
 }
 
 func (c *LocalClient) GetRepo(ctx context.Context, repoID string) (*domain.RepoProfile, error) {
-	return c.stores.Repos.GetSystem(ctx, c.info.OrgID, repoID)
+	return c.rt.GetRepo(ctx, repoID)
 }
 
 func (c *LocalClient) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
-	return c.stores.TeamGitHubRepos.TracksRepoSystem(ctx, c.info.TeamID, owner, repo)
+	return c.rt.TeamTracksRepo(ctx, owner, repo)
 }
 
 func (c *LocalClient) GetRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.RunWorktree, error) {
-	return c.stores.RunWorktrees.GetByRepoRefSystem(ctx, c.info.OrgID, c.info.RunID, repoID, ref)
+	return c.rt.GetRunWorktreeByRepoRef(ctx, repoID, ref)
 }
 
 func (c *LocalClient) ListRunWorktrees(ctx context.Context) ([]domain.RunWorktree, error) {
-	return c.stores.RunWorktrees.ListSystem(ctx, c.info.OrgID, c.info.RunID)
+	return c.rt.ListRunWorktrees(ctx)
 }
 
 func (c *LocalClient) InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (bool, string, error) {
-	if c.info.IsEventTriggered {
-		return c.stores.RunWorktrees.InsertSystem(ctx, c.info.OrgID, row)
-	}
-	var (
-		inserted    bool
-		winningPath string
-	)
-	err := c.stores.Tx.SyntheticClaimsWithTx(ctx, c.info.OrgID, c.info.UserID, func(ts db.TxStores) error {
-		i, w, ierr := ts.RunWorktrees.Insert(ctx, c.info.OrgID, row)
-		inserted = i
-		winningPath = w
-		return ierr
-	})
-	return inserted, winningPath, err
+	return c.rt.InsertRunWorktree(ctx, row)
 }
 
 func (c *LocalClient) DeleteRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
-	return c.withWrite(ctx,
-		func() error {
-			return c.stores.RunWorktrees.DeleteByRepoRefSystem(ctx, c.info.OrgID, c.info.RunID, repoID, ref)
-		},
-		func(ts db.TxStores) error {
-			return ts.RunWorktrees.DeleteByRepoRef(ctx, c.info.OrgID, c.info.RunID, repoID, ref)
-		},
-	)
+	return c.rt.DeleteRunWorktree(ctx, repoID, ref)
 }
 
 // --- agent run footer ---
 
-func (c *LocalClient) BuildAgentRunFooter(_ context.Context, kind string) (string, error) {
-	return agentmeta.Build(c.stores.AgentRuns, c.info.OrgID, c.info.RunID, kind), nil
+func (c *LocalClient) BuildAgentRunFooter(ctx context.Context, kind string) (string, error) {
+	return c.rt.AgentRunFooter(ctx, kind)
 }
 
 // --- artifacts ---
 
-// UpsertArtifact stamps the run identity (run_id, org_id, team_id) onto the
-// caller's polymorphic artifact and upserts it. Event-triggered runs route
-// admin-pool (no JWT claims to bind); manual runs wrap the app-pool write in
-// the kicking-off user's synthetic claims — the same branch the pending-PR
-// writer uses. Returns the stored row. See TFAC-460.
+// UpsertArtifact stamps the run identity onto the caller's polymorphic artifact
+// and upserts it, composing the branch-push external action into the same write
+// (TFAC-483). Routes through the runtime — directRuntime does the event-vs-manual
+// pool/tx branch in-process; relayRuntime relays it as one op so the tx stays
+// orchestrator-side. Returns the stored row. See TFAC-460.
 func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
-	a.OrgID = c.info.OrgID
-	a.TeamID = c.info.TeamID
-	a.RunID = c.info.RunID
-	// A branch push is also an external action (ActionBranchPushed) — record it in
-	// the same write as the artifact so the audit log of record and the artifact
-	// agree (TFAC-483). nil for any other kind (the review-draft snapshot this
-	// method also serves is not a fresh external write).
-	act := c.branchPushAction(a)
-	if c.info.IsEventTriggered {
-		stored, err := c.stores.Artifacts.UpsertSystem(ctx, c.info.OrgID, a)
-		if err != nil {
-			return domain.Artifact{}, err
-		}
-		// Event path: no admin tx to compose with, so the action is a second
-		// best-effort admin write — log a failure, never lose the stored artifact.
-		if rerr := c.recordActionSystem(ctx, act); rerr != nil {
-			agenthostLog.Warn("branch external-action recording failed (push already applied)",
-				"run", c.info.RunID, "target", a.Target, "error", rerr)
-		}
-		return stored, nil
-	}
-	var out domain.Artifact
-	err := c.stores.Tx.SyntheticClaimsWithTx(ctx, c.info.OrgID, c.info.UserID, func(ts db.TxStores) error {
-		stored, uerr := ts.Artifacts.Upsert(ctx, c.info.OrgID, a)
-		if uerr != nil {
-			return uerr
-		}
-		out = stored
-		return recordActionTx(ctx, ts, c.info.OrgID, act)
-	})
-	return out, err
+	return c.rt.UpsertArtifact(ctx, a)
 }
 
 // --- jira ---
@@ -754,7 +698,7 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([
 // agent moved the ticket to), empty otherwise; the agent's exec transition can't
 // cheaply know the prior status, so fromState stays empty.
 func (c *LocalClient) recordJiraIssue(ctx context.Context, key, action, state, toState, detailsJSON string) {
-	if c.stores.Artifacts == nil || key == "" {
+	if key == "" {
 		return
 	}
 	a := domain.Artifact{
@@ -776,9 +720,6 @@ func (c *LocalClient) recordJiraIssue(ctx context.Context, key, action, state, t
 // debug so a future Jira response-shape change surfaces as missing rows with a
 // breadcrumb, not silently.
 func (c *LocalClient) recordJiraComment(ctx context.Context, key, commentID, body string) {
-	if c.stores.Artifacts == nil {
-		return
-	}
 	if commentID == "" {
 		agenthostLog.Debug("jira comment recorded without an id; skipping artifact",
 			"run", c.info.RunID, "issue", key)
@@ -804,24 +745,21 @@ func (c *LocalClient) recordJiraComment(ctx context.Context, key, commentID, bod
 // credential. See upsertGithubArtifact.
 func (c *LocalClient) upsertJiraArtifact(ctx context.Context, a domain.Artifact, act *domain.ExternalAction) {
 	a.Provider = domain.ArtifactProviderJira
-	RecordExternalWrite(ctx, c.stores, c.info, &a, act)
+	c.rt.Record(ctx, &a, act)
 }
 
 // jiraSiteBase returns the org's configured Jira site URL, trailing slash
-// trimmed, or "" if it's unreadable or unset. Best-effort and uses the
-// admin-pool settings read so it works without a JWT-claims context, like the
-// rest of recording. This is the human-facing site (e.g.
+// trimmed, or "" if it's unreadable or unset. Best-effort (a read error maps to
+// ""), routed through the runtime so it works whether the stores are in-process
+// or the read relays. This is the human-facing site (e.g.
 // https://acme.atlassian.net), not the API gateway base the Jira client talks
 // to — the same source the poller stamps entity URLs from.
 func (c *LocalClient) jiraSiteBase(ctx context.Context) string {
-	if c.stores.Orgs == nil {
+	base, err := c.rt.OrgJiraBaseURL(ctx)
+	if err != nil {
 		return ""
 	}
-	set, err := c.stores.Orgs.GetSettingsSystem(ctx, c.info.OrgID)
-	if err != nil || set.JiraBaseURL == "" {
-		return ""
-	}
-	return strings.TrimRight(set.JiraBaseURL, "/")
+	return base
 }
 
 // jiraBrowseURL builds the issue's human-facing {site}/browse/<KEY> link, or ""
@@ -1034,16 +972,16 @@ func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) 
 // DB blip during a denied gh op still leaves an audit trail — symmetric with
 // the proxy's "authorize-error" path.
 func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) error {
-	if c.stores.TeamGitHubRepos == nil || c.stores.RunWorktrees == nil {
+	if !c.gateWired {
 		return nil
 	}
-	tracks, err := c.stores.TeamGitHubRepos.TracksRepoSystem(ctx, c.info.TeamID, owner, repo)
+	tracks, err := c.rt.TeamTracksRepo(ctx, owner, repo)
 	if err != nil {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, err)
 	}
 	if tracks {
-		rows, lerr := c.stores.RunWorktrees.ListSystem(ctx, c.info.OrgID, c.info.RunID)
+		rows, lerr := c.rt.ListRunWorktrees(ctx)
 		if lerr != nil {
 			c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 			return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, lerr)
@@ -1558,9 +1496,6 @@ func (c *LocalClient) GithubDownloadArtifact(ctx context.Context, owner, repo, p
 // to dedup on, so recording is skipped with a debug breadcrumb — the comment
 // still posted.
 func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo string, number, commentID int, htmlURL string) {
-	if c.stores.Artifacts == nil {
-		return
-	}
 	if commentID <= 0 {
 		agenthostLog.Debug("github comment recorded without an id; skipping artifact",
 			"run", c.info.RunID, "repo", owner+"/"+repo, "pr", number)
@@ -1586,9 +1521,6 @@ func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo strin
 // a human's top-level comment), the upsert mints a minimal row keyed on the id,
 // which still truthfully records that this run touched it.
 func (c *LocalClient) recordGithubCommentState(ctx context.Context, commentID int, state string) {
-	if c.stores.Artifacts == nil {
-		return
-	}
 	if commentID <= 0 {
 		agenthostLog.Debug("github comment state change without an id; skipping artifact",
 			"run", c.info.RunID, "state", state)
@@ -1631,9 +1563,6 @@ func (c *LocalClient) recordGithubCommentState(ctx context.Context, commentID in
 // the new PR path always creates drafts, but recording the param keeps the row
 // honest if a standalone caller ever opens a non-draft.
 func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, base, title, body string, number int, nodeID, htmlURL string, draft bool) {
-	if c.stores.Artifacts == nil {
-		return
-	}
 	if number <= 0 {
 		agenthostLog.Debug("github PR recorded without a number; skipping artifact",
 			"run", c.info.RunID, "repo", owner+"/"+repo)
@@ -1661,7 +1590,7 @@ func githubCommentDedupKey(commentID int) string {
 // re-records the artifact without a new GitHub write).
 func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifact, act *domain.ExternalAction) {
 	a.Provider = domain.ArtifactProviderGitHub
-	RecordExternalWrite(ctx, c.stores, c.info, &a, act)
+	c.rt.Record(ctx, &a, act)
 }
 
 // --- external-action recording (TFAC-483) ---
@@ -1674,26 +1603,10 @@ func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifac
 // is the kicking-off user (empty → NULL for an event-triggered run, an
 // autonomous system action).
 //
-// stampActionIdentity / recordActionSystem / resolveTouchedEntity are thin
-// LocalClient-bound wrappers over the free functions in record.go — kept here
-// so the several other call sites in this file (UpsertArtifact,
-// RecordGitDenied, RecordGitPushFailed, branchPushAction) don't have to thread
-// c.stores/c.info through by hand. Touch-recording itself
-// (recordTouchInfo) has no LocalClient-bound wrapper: RecordExternalWrite
-// (record.go) is the only caller, and it already holds (stores, info)
-// directly.
-
-// stampActionIdentity fills the run/org/team/actor common to every
-// bot-attributed action from this client's RunInfo.
-func (c *LocalClient) stampActionIdentity(act *domain.ExternalAction) {
-	stampActionIdentityInfo(act, c.info)
-}
-
-// recordActionSystem appends act on the admin pool (event-triggered runs). A nil
-// act — or a partial test wiring with no ExternalActions store — is a no-op.
-func (c *LocalClient) recordActionSystem(ctx context.Context, act *domain.ExternalAction) error {
-	return recordActionSystemInfo(ctx, c.stores, c.info, act)
-}
+// The DB effects here route through the runtime (c.rt): RecordGitDenied /
+// RecordGitPushFailed build their audit action and hand it to recordBotAction →
+// c.rt.Record, so the write hits db.Stores in-process (all/local) or relays to
+// the orchestrator (sidecar) without this file threading stores by hand.
 
 // recordBotAction records one STANDALONE external-action audit row for a bot
 // write that produces no artifact to compose with — a review-thread reply, a
@@ -1701,13 +1614,7 @@ func (c *LocalClient) recordActionSystem(ctx context.Context, act *domain.Extern
 // (RecordExternalWrite, record.go) with a nil artifact; best-effort like every
 // other funnel here.
 func (c *LocalClient) recordBotAction(ctx context.Context, act *domain.ExternalAction) {
-	RecordExternalWrite(ctx, c.stores, c.info, nil, act)
-}
-
-// resolveTouchedEntity turns act's (provider, target) into an entities row —
-// see resolveTouchedEntityInfo (record.go) for the full rationale.
-func (c *LocalClient) resolveTouchedEntity(ctx context.Context, act *domain.ExternalAction) (string, error) {
-	return resolveTouchedEntityInfo(ctx, c.stores, c.info, act)
+	c.rt.Record(ctx, nil, act)
 }
 
 // RecordGitDenied appends a git_denied external-action audit row for a git op
@@ -1719,9 +1626,6 @@ func (c *LocalClient) resolveTouchedEntity(ctx context.Context, act *domain.Exte
 // is logged and swallowed, and a denial is a security signal recorded even for
 // a denied read.
 func (c *LocalClient) RecordGitDenied(ctx context.Context, owner, repo, ref, op, reason string) {
-	if c.stores.ExternalActions == nil {
-		return
-	}
 	detail, _ := json.Marshal(map[string]string{"op": op, "ref": ref, "reason": reason})
 	c.recordBotAction(ctx, &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderGitHub,
@@ -1746,9 +1650,6 @@ func (c *LocalClient) RecordGitDenied(ctx context.Context, owner, repo, ref, op,
 // either — nothing landed, so a github.com branch link would dangle.
 // Best-effort: a recording failure is logged and swallowed.
 func (c *LocalClient) RecordGitPushFailed(ctx context.Context, repoPath, ref, sha string, created bool, httpStatus int) {
-	if c.stores.ExternalActions == nil {
-		return
-	}
 	detail, _ := json.Marshal(map[string]any{"sha": sha, "new": created, "http_status": httpStatus})
 	c.recordBotAction(ctx, &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderGitHub,
@@ -1793,13 +1694,15 @@ func jiraAction(a domain.Artifact, action, from, to string) *domain.ExternalActi
 	}
 }
 
-// branchPushAction builds the ActionBranchPushed row for a branch artifact, or
-// nil for any other kind (a review-draft snapshot is not a fresh external write).
-// The dedup key is deterministic — branch:<run>:<ref>:<sha> — so the git pre-push
-// hook and the git-proxy backstop, which both observe the same push, collapse to
-// one row; a force-push (new sha) is recorded distinctly. The push lands on
-// GitHub under the org App credential.
-func (c *LocalClient) branchPushAction(a domain.Artifact) *domain.ExternalAction {
+// branchPushActionInfo builds the ActionBranchPushed row for a branch artifact,
+// or nil for any other kind. The dedup key is deterministic —
+// branch:<run>:<ref>:<sha> — so the git pre-push hook and the git-proxy
+// backstop, which both observe the same push, collapse to one row; a force-push
+// (new sha) is recorded distinctly. The push lands on GitHub under the org App
+// credential. Free-function form (the counterpart of the LocalClient method)
+// so the direct runtime — which owns UpsertArtifact but holds no LocalClient —
+// can build it from a RunInfo directly.
+func branchPushActionInfo(a domain.Artifact, info RunInfo) *domain.ExternalAction {
 	if a.Kind != domain.ArtifactKindBranch {
 		return nil
 	}
@@ -1812,10 +1715,10 @@ func (c *LocalClient) branchPushAction(a domain.Artifact) *domain.ExternalAction
 		URL:        a.URL,
 		ToState:    domain.ArtifactStateBranchPushed,
 		Credential: domain.CredentialGitHubApp,
-		DedupKey:   domain.BranchPushDedupKey(c.info.RunID, a.ExternalID, sha),
+		DedupKey:   domain.BranchPushDedupKey(info.RunID, a.ExternalID, sha),
 		DetailJSON: a.DetailsJSON, // {"sha":...,"new":...}
 	}
-	c.stampActionIdentity(act)
+	stampActionIdentityInfo(act, info)
 	return act
 }
 
@@ -1827,5 +1730,5 @@ func (c *LocalClient) branchPushAction(a domain.Artifact) *domain.ExternalAction
 // sandbox transport) route through this one check, so a verb author cannot
 // forget it.
 func (c *LocalClient) CallExtension(ctx context.Context, namespace, method string, args json.RawMessage) (json.RawMessage, error) {
-	return callExtension(ctx, c.info, namespace, method, args)
+	return callExtension(ctx, c.rt, namespace, method, args)
 }

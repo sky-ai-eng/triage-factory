@@ -235,6 +235,9 @@ func TestLocalClient_GithubCommentRecordingFailure_DoesNotFailAction(t *testing.
 	_, _, client := newGithubRecordingClient(t, gh.URL, true)
 	rec := &erroringArtifacts{}
 	client.stores.Artifacts = rec
+	// The runtime is derived from stores at construction, so a post-construction
+	// swap of the recorder must rebuild it (the DB effects route through c.rt).
+	client.rt = newDirectRuntime(client.stores, client.info)
 
 	id, err := client.GithubAddComment(context.Background(), "octo", "repo", 1, "best effort")
 	if err != nil {

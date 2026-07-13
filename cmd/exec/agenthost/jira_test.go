@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -48,10 +49,17 @@ func (f fakeJiraSecrets) GetSystem(_ context.Context, _ string, key string) (str
 	}
 }
 
-// fakeJiraOrgs satisfies db.OrgsStore for NewResolver. ForSystem never
-// reads org settings (only ForUser does), so no method needs a body.
+// fakeJiraOrgs satisfies db.OrgsStore for NewResolver. GetSettingsSystem is the
+// one method the recording path reaches (jiraSiteBase, to build a browse URL);
+// it returns empty settings so the artifact URL is "" — the same as a
+// production org with no Jira base configured. The Jira API calls under test
+// touch no other OrgsStore method.
 type fakeJiraOrgs struct {
 	db.OrgsStore
+}
+
+func (fakeJiraOrgs) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
+	return domain.OrgSettings{}, nil
 }
 
 // jiraStores builds a db.Stores whose Secrets resolve to the given Jira

@@ -22,8 +22,19 @@ func Start(_ db.Stores, _ RunInfo, _ *ProxyCredentials) (*HostDaemon, sandbox.Mo
 	return nil, sandbox.Mount{}, errors.New("agenthost: HostDaemon not supported on this platform")
 }
 
+// StartWithServer always returns an "unsupported platform" error off Linux.
+func StartWithServer(_ *Server, _ string) (*HostDaemon, sandbox.Mount, error) {
+	return nil, sandbox.Mount{}, errors.New("agenthost: HostDaemon not supported on this platform")
+}
+
 // Close is a no-op on non-Linux.
 func (h *HostDaemon) Close() error { return nil }
 
 // SocketPath returns "" on non-Linux.
 func (h *HostDaemon) SocketPath() string { return "" }
+
+// SocketPathFor returns "" on non-Linux (the sandbox path is Linux-only).
+func SocketPathFor(_ string) string { return "" }
+
+// SocketMountFor returns a zero mount on non-Linux.
+func SocketMountFor(_ string) sandbox.Mount { return sandbox.Mount{} }

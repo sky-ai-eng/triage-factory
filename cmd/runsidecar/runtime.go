@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/apiproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
@@ -40,9 +41,10 @@ type credRuntime struct {
 	mu        sync.Mutex
 	bundle    *credbundle.Bundle // newest unsealed bundle; nil until first seal
 	proxies   *agentproc.RunProxyHandle
-	githubAPI *apiproxy.Server // GitHub REST credential proxy; nil unless requested
-	jiraAPI   *apiproxy.Server // Jira REST credential proxy; nil unless requested
-	proxied   bool             // guards against a duplicate StartProxies
+	githubAPI *apiproxy.Server      // GitHub REST credential proxy; nil unless requested
+	jiraAPI   *apiproxy.Server      // Jira REST credential proxy; nil unless requested
+	agentHost *agenthost.HostDaemon // the relocated exec-verb socket server; nil unless requested
+	proxied   bool                  // guards against a duplicate StartProxies
 	bootEpoch int64
 }
 
@@ -179,12 +181,73 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		result.JiraAPIURL, result.JiraAPIToken = url, token
 	}
 
+	// Host the exec-verb socket server in THIS capless process rather than the
+	// orchestrator (the relocation): the hostile-input parser now runs in the
+	// per-run jail, holding no db.Stores and no secret store. Its LocalClient's
+	// DB effects relay to the orchestrator over the supervision channel; its
+	// gh/jira verbs build clients against the REST proxies just bound above, so
+	// the real credential never leaves this process's proxy hop.
+	if req.AgentHost != nil {
+		if aerr := r.startAgentHost(req.AgentHost, result); aerr != nil {
+			_ = handle.Shutdown(ctx)
+			if r.githubAPI != nil {
+				_ = r.githubAPI.Shutdown(ctx)
+			}
+			if r.jiraAPI != nil {
+				_ = r.jiraAPI.Shutdown(ctx)
+			}
+			return nil, aerr
+		}
+	}
+
 	r.mu.Lock()
 	r.proxies = handle
 	r.proxied = true
 	r.mu.Unlock()
 
 	return result, nil
+}
+
+// startAgentHost binds the relocated exec-verb socket server: a Server whose
+// per-request LocalClient runs over a relay runtime (every DB effect relays to
+// the orchestrator) and whose gh/jira verbs route through the REST proxies this
+// sidecar just bound (holding only per-run placeholders). It creates the
+// /run/tf/<runID>.sock the broker bind-mounts into the jail and grants it to the
+// sandbox group — the same grant the orchestrator used to do, now owned by this
+// process (a member of that group by launch). Identity comes from the
+// orchestrator's AgentHostInfo but is never trusted for org-scoping: every
+// relayed op is re-bound to the orchestrator's own RunInfo.
+func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sidecarproto.StartProxiesResult) error {
+	info := agenthost.RunInfo{
+		OrgID:            ai.OrgID,
+		UserID:           ai.UserID,
+		TeamID:           ai.TeamID,
+		RunID:            ai.RunID,
+		IsEventTriggered: ai.EventTriggered,
+	}
+	proxyCreds := &agenthost.ProxyCredentials{
+		GitHubAPIURL:   proxies.GitHubAPIURL,
+		GitHubAPIToken: proxies.GitHubAPIToken,
+		JiraAPIURL:     proxies.JiraAPIURL,
+		JiraAPIToken:   proxies.JiraAPIToken,
+	}
+	// The provider-credential accessor lets a provider handler (Slack) select
+	// its bot token from the sealed bundle in-process — a live read so a mid-run
+	// brain re-seal is picked up. The orchestrator is never asked for a secret.
+	providerCreds := func(namespace string) (json.RawMessage, bool) {
+		b := r.currentBundle()
+		if b == nil {
+			return nil, false
+		}
+		return b.ProviderCreds(namespace)
+	}
+	srv := agenthost.NewServerWithRuntime(agenthost.NewRelayRuntime(r.conn, info, providerCreds), proxyCreds)
+	hd, _, err := agenthost.StartWithServer(srv, info.RunID)
+	if err != nil {
+		return fmt.Errorf("runsidecar: start agenthost: %w", err)
+	}
+	r.agentHost = hd
+	return nil
 }
 
 // startGitHubAPIProxy binds a GitHub-REST credential proxy on the veth IP.
@@ -319,23 +382,25 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 			return nil
 		},
 		Authorize: func(ctx context.Context, owner, repo string) (gitproxy.Decision, error) {
-			var res sidecarproto.AuthorizeRepoResult
-			if err := r.conn.Call(ctx, sidecarproto.KindAuthorizeRepo, sidecarproto.AuthorizeRepoBody{Owner: owner, Repo: repo}, &res); err != nil {
+			var reply agentproc.AuthorizeRepoReply
+			if err := agentproc.CallRelay(ctx, r.conn, agentproc.RelayNamespaceCore, agentproc.OpAuthorizeRepo,
+				agentproc.AuthorizeRepoArgs{Owner: owner, Repo: repo}, &reply); err != nil {
 				// A failed authorize relay must fail closed (deny), never
 				// allow-all — a degraded control channel is exactly when a push
 				// must not slip through unauthorized.
 				return gitproxy.Decision{Allowed: false}, err
 			}
-			return gitproxy.Decision{Allowed: res.Allowed, AllowedRefs: res.AllowedRefs}, nil
+			return gitproxy.Decision{Allowed: reply.Allowed, AllowedRefs: reply.AllowedRefs}, nil
 		},
 		RecordDenial: func(_ context.Context, denied gitproxy.DeniedGitOp) {
-			_ = r.conn.Notify(sidecarproto.KindRecordDenial, sidecarproto.RecordDenialBody{
-				Owner:  denied.Owner,
-				Repo:   denied.Repo,
-				Ref:    denied.Ref,
-				Op:     denied.Op,
-				Reason: denied.Reason,
-			})
+			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordDenial,
+				agentproc.RecordDenialArgs{
+					Owner:  denied.Owner,
+					Repo:   denied.Repo,
+					Ref:    denied.Ref,
+					Op:     denied.Op,
+					Reason: denied.Reason,
+				})
 		},
 		RecordPush: func(_ context.Context, push gitproxy.PushedRef) {
 			// Relay the completed push up so the orchestrator records the
@@ -343,13 +408,14 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 			// in this sandbox (StartRunProxies sets PushCaptureProxy), so this
 			// relay is the sole push-capture path on the executor — without it
 			// no executor push reaches the audit log.
-			_ = r.conn.Notify(sidecarproto.KindRecordPush, sidecarproto.RecordPushBody{
-				Repo:    push.Repo,
-				Ref:     push.Ref,
-				NewSHA:  push.NewSHA,
-				Created: push.Created,
-				Status:  push.Status,
-			})
+			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordPush,
+				agentproc.RecordPushArgs{
+					Repo:    push.Repo,
+					Ref:     push.Ref,
+					NewSHA:  push.NewSHA,
+					Created: push.Created,
+					Status:  push.Status,
+				})
 		},
 	}
 }
@@ -361,8 +427,16 @@ func (r *credRuntime) shutdown(ctx context.Context) {
 	handle := r.proxies
 	githubAPI := r.githubAPI
 	jiraAPI := r.jiraAPI
-	r.proxies, r.githubAPI, r.jiraAPI = nil, nil, nil
+	agentHost := r.agentHost
+	r.proxies, r.githubAPI, r.jiraAPI, r.agentHost = nil, nil, nil, nil
 	r.mu.Unlock()
+	// Drain the socket server first (unblocks its accept loop + removes the
+	// socket file) so a graceful teardown leaves no stale /run/tf socket; a
+	// SIGKILL teardown skips this and the file is reclaimed by the next run's
+	// stale-socket removal, exactly like a crashed run today.
+	if agentHost != nil {
+		_ = agentHost.Close()
+	}
 	if handle != nil {
 		_ = handle.Shutdown(ctx)
 	}

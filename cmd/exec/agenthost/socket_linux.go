@@ -101,10 +101,27 @@ func Start(stores db.Stores, info RunInfo, proxyCreds *ProxyCredentials) (*HostD
 	if info.RunID == "" {
 		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: RunInfo.RunID required")
 	}
+	return StartWithServer(NewServer(stores, info, proxyCreds), info.RunID)
+}
+
+// StartWithServer creates the per-run socket for an already-built Server, grants
+// it to the sandbox identity, spawns the accept loop, and returns the bind mount
+// the agent reaches it through. This is the seam the relocation turns on: the
+// executor's credential sidecar builds a relay-backed Server (NewServerWithRuntime)
+// and calls this so the hostile-input verb parser runs INSIDE the capless per-run
+// jail rather than the orchestrator; Start (above) calls it with a stores-backed
+// Server for all/local and the orchestrator's own runs. The socket path + the
+// chgrp+0660 grant are identical either way — only the process that owns them
+// moves. On the sidecar the grant works because the sidecar is launched as a
+// member of the sandbox group (see internal/sandbox's sidecar launch).
+func StartWithServer(server *Server, runID string) (*HostDaemon, sandbox.Mount, error) {
+	if runID == "" {
+		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: RunID required")
+	}
 	if err := os.MkdirAll(hostSocketRoot, 0o700); err != nil {
 		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: mkdir %s: %w", hostSocketRoot, err)
 	}
-	sockPath := filepath.Join(hostSocketRoot, sanitizeSocketName(info.RunID)+".sock")
+	sockPath := filepath.Join(hostSocketRoot, sanitizeSocketName(runID)+".sock")
 
 	// Remove any stale socket file from a previous crash. net.Listen
 	// would otherwise EADDRINUSE on a path that's actually unused.
@@ -122,7 +139,6 @@ func Start(stores db.Stores, info RunInfo, proxyCreds *ProxyCredentials) (*HostD
 		return nil, sandbox.Mount{}, err
 	}
 
-	server := NewServer(stores, info, proxyCreds)
 	hd := &HostDaemon{
 		listener: listener,
 		sockPath: sockPath,
@@ -214,6 +230,23 @@ func (h *HostDaemon) Close() error {
 // for tests that need to point an IPCClient at the daemon without
 // going through the bind-mount-into-sandbox shape.
 func (h *HostDaemon) SocketPath() string { return h.sockPath }
+
+// SocketPathFor returns the host-side path of runID's agenthost socket.
+// Deterministic so the sidecar (which creates + serves it on the executor
+// path) and the orchestrator (which bind-mounts it into the jail) agree on the
+// path without a round trip.
+func SocketPathFor(runID string) string {
+	return filepath.Join(hostSocketRoot, sanitizeSocketName(runID)+".sock")
+}
+
+// SocketMountFor returns the bind mount exposing runID's socket to the agent at
+// DefaultSocketPath. On the executor path the SIDECAR creates + serves the
+// socket, so the orchestrator adds THIS mount to the sandbox spec without
+// starting a Server of its own — the socket already exists (the sidecar bound
+// it during bring-up, before the sandbox launches).
+func SocketMountFor(runID string) sandbox.Mount {
+	return sandbox.Mount{Source: SocketPathFor(runID), Destination: DefaultSocketPath}
+}
 
 // sanitizeSocketName trims a run id to a fs-safe form. RunIDs are
 // already UUIDs in production callers so this is a defense-in-depth
