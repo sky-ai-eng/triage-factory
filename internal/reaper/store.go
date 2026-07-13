@@ -160,6 +160,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	// scope (placement doesn't exist yet) — plain requeue until then.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL, executor_id = NULL, boot_epoch = NULL,
+			cred_pubkey = NULL,
 			result_summary = 'Requeued: executor heartbeat stale (reaper)'
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`

@@ -21,3 +21,16 @@ func wrap(_ context.Context, _ Config) (LaunchedRun, *Sandbox, error) {
 func (s *Sandbox) Close() error {
 	return nil
 }
+
+// setupRunNetwork on non-Linux returns ErrUnsupportedPlatform, mirroring
+// wrap — the credential-isolation path this supports is multi-mode + Linux
+// only. The delegate caller gates on GOOS before reaching here.
+func setupRunNetwork(_ context.Context, _ string) (*RunNetwork, error) {
+	return nil, ErrUnsupportedPlatform
+}
+
+// Close on non-Linux is a no-op — setupRunNetwork never returns a non-nil
+// RunNetwork off Linux, so this only guards a defensive defer.
+func (n *RunNetwork) Close() error {
+	return nil
+}

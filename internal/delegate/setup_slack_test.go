@@ -213,7 +213,7 @@ func TestBuildStepConfig_Slack_FirstClaim(t *testing.T) {
 		t.Fatalf("GetRunSystem: (%v, %v)", br, err)
 	}
 
-	cfg, err := s.buildStepConfig(ctx, org, br, task, run, nil)
+	cfg, err := s.buildStepConfig(ctx, org, br, task, run, nil, nil)
 	if err != nil {
 		t.Fatalf("buildStepConfig: %v (slack must be a supported source)", err)
 	}
@@ -255,7 +255,7 @@ func TestBuildStepConfig_Slack_LaterStep(t *testing.T) {
 		t.Fatalf("GetRunSystem: (%v, %v)", br, err)
 	}
 
-	cfg, err := s.buildStepConfig(ctx, org, br, task, run, nil)
+	cfg, err := s.buildStepConfig(ctx, org, br, task, run, nil, nil)
 	if err != nil {
 		t.Fatalf("buildStepConfig: %v", err)
 	}

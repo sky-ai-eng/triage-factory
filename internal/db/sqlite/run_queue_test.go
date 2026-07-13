@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -407,6 +410,58 @@ func TestRunQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
 	if noActor.ActorAgentID != "" || noActor.ActorAgentName != "" {
 		t.Errorf("no-actor run = (id %q, name %q), want both empty", noActor.ActorAgentID, noActor.ActorAgentName)
 	}
+}
+
+// TestRunQueueStore_SQLite_Credentials runs the shared awaiting-credentials
+// pubkey conformance suite against the SQLite impl. Each factory call opens
+// a fresh in-memory DB so subtests don't share state.
+func TestRunQueueStore_SQLite_Credentials(t *testing.T) {
+	dbtest.RunRunQueueCredentialsConformance(t, func(t *testing.T) (db.RunQueueStore, string, dbtest.RunQueueCredentialsSeeder) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		ctx := context.Background()
+		org := runmode.LocalDefaultOrgID
+
+		task := seedEntityEventTask(t, conn, "rq-cred")
+		insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqcr-p0", Name: "Step 0", Body: "b", Source: "user"})
+		insertBlueprintForTest(t, conn, "rqcr-bp", "RQ Cred Blueprint")
+		if err := stores.Blueprints.ReplaceSteps(ctx, org, "rqcr-bp", []string{"rqcr-p0"}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+			ID: "rqcr-br", BlueprintID: "rqcr-bp", TaskID: task.ID,
+			TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+			WorktreePath: "/tmp/wt-rqcr",
+		})
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+
+		nextStep := 0
+		seed := dbtest.RunQueueCredentialsSeeder{
+			EnqueueRun: func(t *testing.T) string {
+				t.Helper()
+				idx := nextStep
+				nextStep++
+				runID := uuid.New().String()
+				if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+					ID: runID, TaskID: task.ID, PromptID: "rqcr-p0", Model: "m",
+					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
+				}); err != nil {
+					t.Fatalf("EnqueueRun: %v", err)
+				}
+				return runID
+			},
+			ForceStatus: func(t *testing.T, runID, status string) {
+				t.Helper()
+				if _, err := conn.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+					t.Fatalf("force status %q: %v", status, err)
+				}
+			},
+		}
+		return stores.RunQueue, org, seed
+	})
 }
 
 func TestRunQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {

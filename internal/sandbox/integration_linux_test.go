@@ -46,6 +46,10 @@ import (
 // Best-effort: if runsc/chroot/root prereqs aren't met, the pre-warm
 // is skipped and individual tests still skip cleanly via require*.
 func TestMain(m *testing.M) {
+	// A re-exec'd sidecar-reap helper child must mint its comm name and block
+	// before any suite setup runs, exactly as it does in the default binary.
+	reExecAsSidecarHelperIfRequested()
+
 	// Production launches every run through the cap-broker; this package
 	// can't spin one up (import cycle), so the suite installs an in-process
 	// stand-in built from the same launch primitives the broker uses. Wrap()

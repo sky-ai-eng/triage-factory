@@ -179,11 +179,6 @@ func (a *App) buildExecution() error {
 	// runs.executor_id on claimed rows must equal the registry id, and
 	// RunInstanceHeartbeat's fenced renewal needs the matching boot_epoch.
 	a.spawner.SetExecutorID(a.identity.ID, a.bootEpoch)
-	// Sealed-credential-bundle unsealing key (TFAC-614) — nil everywhere
-	// except TF_ROLE=executor (registerInstance only mints one there); the
-	// awaiting-credentials wait is itself gated on runmode.Role(), so a
-	// nil key on every other role is never read.
-	a.spawner.SetSealingKey(a.sealingKey)
 	// Dispatcher concurrency is a deployment decision: the default of 4 is
 	// conservative for a laptop, while a provisioned multi-mode host handles
 	// far more (memory-bound; see the TF_MAX_CONCURRENT_RUNS guidance in

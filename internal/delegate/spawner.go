@@ -20,8 +20,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
-	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -93,11 +91,6 @@ type Spawner struct {
 	// nil-safe (RoleAll/local never gate on it, since they resolve
 	// credentials directly instead).
 	runCredentials db.RunCredentialsStore
-	// sealingKey is this process's ephemeral X25519 keypair (TFAC-614),
-	// wired via SetSealingKey once main mints it (TF_ROLE=executor only;
-	// nil everywhere else). Unseals a run_credentials bundle addressed to
-	// this instance's published public half.
-	sealingKey *credseal.KeyPair
 	// awaitingCredentialsTimeout overrides awaitingCredentialsTimeout (the
 	// package default) when > 0 — tests inject a short value via
 	// SetAwaitingCredentialsTimeout, mirroring idleHibernateTimeout.
@@ -777,14 +770,9 @@ func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo,
 // would let bundleRepoToken's map iteration pick an arbitrary sibling
 // repo's token, which then 403s every call it's used for.
 func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string) *ghclient.Client {
-	// TF_ROLE=executor (TFAC-614): the token was already minted host-side
-	// by the brain and sealed into this run's bundle — build the client
-	// straight from it, no resolver/secret-store call. Every other role
-	// never carries a bundle on ctx (zero behavior change there).
-	if bundle, ok := credbundle.FromContext(ctx); ok {
-		return bundleGHClient(bundle.GitHub, owner, repo)
-	}
-
+	// TF_ROLE=executor never reaches here for a run's GetPR — setupGitHub
+	// builds its client against the credential sidecar's GitHub-REST proxy
+	// (execSandbox), so this resolver path serves only all/local.
 	s.mu.Lock()
 	resolver := s.ghResolver
 	fallback := s.ghClient
@@ -823,13 +811,9 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string
 // resolveGHClient's — required, not optional, whenever the caller has a
 // specific repo in view (every real caller does).
 func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner, repo string) string {
-	// TF_ROLE=executor (TFAC-614): same bundle-first check as
-	// resolveGHClient — the token was pre-minted by the brain.
-	if bundle, ok := credbundle.FromContext(ctx); ok {
-		token, _, _ := bundleRepoToken(bundle.GitHub, owner, repo)
-		return token
-	}
-
+	// TF_ROLE=executor never reaches here — setupGitHub routes the clone
+	// through the sidecar's git proxy (CloneAuthViaGitProxy) instead of
+	// resolving a real token. This resolver path serves only all/local.
 	if runmode.Current() == runmode.ModeLocal {
 		return ""
 	}
@@ -877,15 +861,9 @@ func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner, repo stri
 // lock as resolveCloneToken so a startup-time credential hot-swap can't
 // race it.
 func (s *Spawner) gitProxyConfigFor(ctx context.Context, info agenthost.RunInfo, stores db.Stores) *agentproc.GitProxyConfig {
-	// TF_ROLE=executor (TFAC-614): every credential-needing closure
-	// re-reads run_credentials live on each call (bundleGitProxyConfigFor),
-	// rather than closing over the static ctx-carried bundle — that's what
-	// lets the brain's refresh sweep (re-minted GitHub tokens for a
-	// long-running run) actually reach a run already past its setup gate.
-	if _, ok := credbundle.FromContext(ctx); ok {
-		return s.bundleGitProxyConfigFor(ctx, info, stores)
-	}
-
+	// TF_ROLE=executor never reaches here — its git proxy runs in the
+	// credential sidecar (executorGitGate supplies the authorize gate). This
+	// in-process path, built over the resolver, serves only all/local.
 	if runmode.Current() == runmode.ModeLocal {
 		return nil
 	}

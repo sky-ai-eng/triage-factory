@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -50,6 +49,12 @@ type LocalClient struct {
 	// once rather than per call. Multi mode only; keyed lower("owner/repo").
 	// LocalClient is single-goroutine (see the type doc), so no lock.
 	ghClients map[string]repoClient
+
+	// proxyCreds, when set (TF_ROLE=executor), routes gh/jira verbs through the
+	// run's credential-sidecar REST proxies instead of resolving real tokens.
+	// Set by the daemon's dispatch from the Server's own coordinates; nil on
+	// all/local where the resolver path is used.
+	proxyCreds *ProxyCredentials
 }
 
 // NewLocal builds a LocalClient bound to the given stores + identity.
@@ -556,8 +561,8 @@ func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (do
 // as "absent". Over IPC the message crosses as the response Error string,
 // so the agent reads the identical text across every mode/role.
 func (c *LocalClient) jiraSystemClient(ctx context.Context) (*jiraclient.Client, error) {
-	if bundle, ok := credbundle.FromContext(ctx); ok {
-		return bundleJiraClient(bundle.Jira)
+	if c.proxyCreds != nil {
+		return proxyJiraClient(c.proxyCreds)
 	}
 	client, err := jiraclient.NewResolver(c.stores.Secrets, c.stores.Orgs).ForSystem(ctx, c.info.OrgID)
 	if errors.Is(err, jiraclient.ErrNoJiraSystemCredential) {
@@ -987,8 +992,8 @@ func (c *LocalClient) resolveRepoClient(ctx context.Context, owner, repo string)
 // narrow set risks a 422 or a broken verb; repo-scoping is the confinement
 // that matters.
 func (c *LocalClient) scopedRepoClient(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
-	if bundle, ok := credbundle.FromContext(ctx); ok {
-		return bundleRepoClient(bundle.GitHub, owner, repo)
+	if c.proxyCreds != nil {
+		return proxyRepoClient(c.proxyCreds, owner, repo)
 	}
 	if sr, ok := c.githubResolver().(ghclient.ScopedRepoResolver); ok {
 		client, identity, err := sr.ClientForRepoScoped(ctx, c.info.OrgID, owner, repo, nil)

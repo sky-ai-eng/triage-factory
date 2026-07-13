@@ -1544,6 +1544,16 @@ CREATE TABLE public.runs (
     -- only resets rows where executor_id = self AND boot_epoch < the
     -- current boot's epoch.
     boot_epoch bigint,
+    -- cred_pubkey is the per-run credential sidecar's X25519 public key
+    -- (base64), written by the executor when it parks the run in
+    -- status='awaiting_credentials' and read by the brain at seal time —
+    -- the bundle must be sealed to the sidecar that will actually open it,
+    -- not to the claiming instance's per-boot key. Claim-scoped ownership
+    -- metadata: it rides with executor_id/boot_epoch above and is cleared
+    -- wherever they are (a queued row has no owner and no key), so a
+    -- requeued/reset run never carries a stale key the brain could
+    -- mistakenly seal to.
+    cred_pubkey text,
     CONSTRAINT runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT runs_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT runs_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),

@@ -175,6 +175,31 @@ func DataCenterPAT(baseURL, pat string) Config {
 	}
 }
 
+// ProxyPlaceholder builds a Config for a Jira client that talks to a per-run
+// credential proxy (internal/apiproxy) rather than to Jira directly: baseURL is
+// the proxy's address and placeholder is the per-run token the proxy swaps for
+// the org's real Cloud-Basic / Data-Center-Bearer auth on the upstream hop, so
+// the client — and the process holding it — never touches a durable Jira
+// credential (Property B). The placeholder is presented as a Bearer, which the
+// proxy authenticates regardless of the org's real auth scheme.
+//
+// REST v2 is deliberate and independent of the org's real deployment: the
+// operations the executor drives through this client (GetIssue, SearchIssues,
+// AddComment, TransitionTo) all work on v2 against both Cloud and Data Center,
+// and AddComment posts a plain-string body — the v2 shape a Cloud v3 endpoint
+// rejects in favor of ADF. Matching the org's real version (v3 for Cloud) is
+// therefore gated on ADF-aware comment bodies in this client, which also affect
+// the non-proxy Cloud path; until then v2 is the safe, uniform choice, so this
+// is NOT a Data Center assumption despite reusing that Deployment value.
+func ProxyPlaceholder(baseURL, placeholder string) Config {
+	return Config{
+		BaseURL:    baseURL,
+		Deployment: DeploymentDataCenter,
+		APIVersion: APIv2,
+		auth:       bearerAuth{token: placeholder},
+	}
+}
+
 // CloudAPIToken builds a Config for an Atlassian Cloud API token: Basic auth
 // (base64(email:token)), REST v3. Built by the system resolver (ForSystem) and
 // the request-path config builder (integrations.JiraSystemConfig) once an org

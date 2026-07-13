@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -248,19 +247,13 @@ func ResolveCredentialsForBundle(ctx context.Context, secrets SecretsReader, org
 // key that doesn't exist. It is consulted only when the run carries no
 // sealed bundle on ctx — the executor bundle path still wins, unchanged.
 func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string, resolver func(ctx context.Context, orgID string) (map[string]string, error)) (map[string]string, error) {
-	// TF_ROLE=executor (TFAC-614): the run's LLM credential was already
-	// resolved by the brain (which still holds the real secret store) and
-	// sealed into this run's bundle — read it back instead of calling
-	// through to secrets, which on this role is the disabled store that
-	// would just return db.ErrSecretStoreUnavailable. Every other role
-	// (RoleAll/RoleControl/local) never carries a bundle on ctx, so this
-	// is a no-op there — zero behavior change.
-	if bundle, ok := credbundle.FromContext(ctx); ok {
-		if len(bundle.LLM) == 0 {
-			return nil, fmt.Errorf("%w: org %s", ErrNoCredentialsConfigured, orgID)
-		}
-		return bundle.LLM, nil
-	}
+	// The executor never reaches here (agentproc.Run launches into the prebuilt
+	// network and never resolves credentials — the per-run sidecar holds them),
+	// so there is no ctx-carried bundle to read: this path is all/local + the
+	// brain-side ResolveCredentialsForBundle only, resolving through the live
+	// secret store or the role-aware resolver. The orchestrator STRUCTURALLY
+	// cannot read a run credential from ctx (TFAC-631) — the former bundle-first
+	// branch is gone, not just unreachable.
 
 	// Brain-side / all-local role-aware resolution (internal/llmcred). When
 	// wired, it owns resolution outright — it reproduces the raw-secret env

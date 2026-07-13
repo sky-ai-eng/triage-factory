@@ -12,7 +12,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
@@ -484,24 +483,23 @@ func TestLocalClient_GithubCreatePR_ExecutorBundleFirst(t *testing.T) {
 	lc := NewLocal(emptyStores(), ghInfo())
 	lc.ghResolver = poisoned
 
-	t.Run("no bundle: hits the disabled secret store (the pre-fix executor failure)", func(t *testing.T) {
+	t.Run("no proxy creds: hits the disabled secret store (the pre-fix executor failure)", func(t *testing.T) {
 		_, _, _, err := lc.GithubCreatePR(context.Background(), "o", "r", "feat", "main", "T", "B", false)
 		if !errors.Is(err, db.ErrSecretStoreUnavailable) {
-			t.Fatalf("GithubCreatePR without a bundle = %v, want an error wrapping db.ErrSecretStoreUnavailable", err)
+			t.Fatalf("GithubCreatePR without proxy creds = %v, want an error wrapping db.ErrSecretStoreUnavailable", err)
 		}
 	})
 
-	t.Run("bundle present: resolves from the bundle, never touches the poisoned resolver", func(t *testing.T) {
-		bundle := &credbundle.Bundle{GitHub: &credbundle.GitHubCreds{
-			Mode:       "app",
-			BaseURL:    gh.URL,
-			RepoTokens: map[string]credbundle.RepoToken{"o/r": {Token: "bundle-token"}},
-		}}
-		ctx := credbundle.WithBundle(context.Background(), bundle)
+	t.Run("proxy creds present: routes through the sidecar proxy, never touches the poisoned resolver", func(t *testing.T) {
+		// The gh server stands in for the sidecar's GitHub-REST proxy: the
+		// client points at it with only a placeholder, and the executor never
+		// consults the (poisoned) resolver.
+		lc.proxyCreds = &ProxyCredentials{GitHubAPIURL: gh.URL, GitHubAPIToken: "run-placeholder"}
+		t.Cleanup(func() { lc.proxyCreds = nil })
 
-		number, htmlURL, nodeID, err := lc.GithubCreatePR(ctx, "o", "r", "feat", "main", "T", "B", false)
+		number, htmlURL, nodeID, err := lc.GithubCreatePR(context.Background(), "o", "r", "feat", "main", "T", "B", false)
 		if err != nil {
-			t.Fatalf("GithubCreatePR with a bundle: %v (the poisoned resolver must never be consulted)", err)
+			t.Fatalf("GithubCreatePR with proxy creds: %v (the poisoned resolver must never be consulted)", err)
 		}
 		if number != 7 || htmlURL != "https://github.com/o/r/pull/7" || nodeID != "PR_node7" {
 			t.Fatalf("CreatePR = (%d, %q, %q), want (7, .../pull/7, PR_node7)", number, htmlURL, nodeID)
@@ -509,89 +507,60 @@ func TestLocalClient_GithubCreatePR_ExecutorBundleFirst(t *testing.T) {
 	})
 }
 
-// TestLocalClient_GithubGetPR_BundleRepoNotProvisioned pins the AC that a
-// repo the bundle carries no token for (a provisioning gap — the run's
-// authorized repo set didn't include this one) surfaces its own legible
-// error, never ErrSecretStoreUnavailable — the bundle path never touches the
-// secret store at all, so that sentinel could never legitimately appear here.
-func TestLocalClient_GithubGetPR_BundleRepoNotProvisioned(t *testing.T) {
+// TestLocalClient_GithubGetPR_NoGitHubProxy pins the org-not-configured case:
+// an executor run with no GitHub proxy wired (proxyCreds present but empty URL —
+// a Jira-only org whose bring-up bound no GitHub-REST proxy) gets the same
+// friendly "not configured" guidance the resolver path gives, not a raw
+// nil-pointer surface. The per-repo "not provisioned" case now surfaces as the
+// sidecar proxy's own 502 at request time, not from the agenthost client.
+func TestLocalClient_GithubGetPR_NoGitHubProxy(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 
 	lc := NewLocal(emptyStores(), ghInfo())
-	bundle := &credbundle.Bundle{GitHub: &credbundle.GitHubCreds{
-		Mode:       "app",
-		RepoTokens: map[string]credbundle.RepoToken{"o/other-repo": {Token: "bundle-token"}},
-	}}
-	ctx := credbundle.WithBundle(context.Background(), bundle)
+	lc.proxyCreds = &ProxyCredentials{}
 
-	_, err := lc.GithubGetPR(ctx, "o", "r", 1, false)
-	if err == nil || !strings.Contains(err.Error(), "not provisioned") {
-		t.Fatalf("GithubGetPR for an unprovisioned repo = %v, want a 'not provisioned' error", err)
-	}
-	if errors.Is(err, db.ErrSecretStoreUnavailable) {
-		t.Fatalf("GithubGetPR for an unprovisioned repo wrapped ErrSecretStoreUnavailable — the bundle path must never surface that sentinel: %v", err)
-	}
-}
-
-// TestLocalClient_GithubGetPR_BundleGitHubNil pins the org-not-configured
-// case: an executor run whose bundle carries no GitHub credential at all
-// (a Jira-only org) gets the same friendly "not configured" guidance the
-// resolver path gives, not a raw nil-pointer surface.
-func TestLocalClient_GithubGetPR_BundleGitHubNil(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-
-	lc := NewLocal(emptyStores(), ghInfo())
-	ctx := credbundle.WithBundle(context.Background(), &credbundle.Bundle{})
-
-	_, err := lc.GithubGetPR(ctx, "o", "r", 1, false)
+	_, err := lc.GithubGetPR(context.Background(), "o", "r", 1, false)
 	if err == nil || !strings.Contains(err.Error(), "not configured") {
-		t.Fatalf("GithubGetPR with a GitHub-less bundle = %v, want the friendly 'not configured' guidance", err)
+		t.Fatalf("GithubGetPR with no GitHub proxy = %v, want the friendly 'not configured' guidance", err)
 	}
 }
 
-// TestBundleRepoClient_IdentityMatchesResolvedSource pins that Identity
-// describes the credential actually resolved for THIS repo, not the
-// bundle's overall Mode — credprovision.resolveGitHub flips Mode to "pat"
-// the moment any repo in the run's authorized set falls back to the PAT,
-// even while other repos in the same bundle still carry real App-tier
-// RepoTokens entries (and symmetrically, a "pat"-tagged bundle can still
-// hold no RepoTokens entry for a given repo and fall through to the PAT
-// under an "app" Mode). Reporting IdentityApp for a PAT-backed call (or vice
-// versa) would mislead any future caller that branches on Identity.
-func TestBundleRepoClient_IdentityMatchesResolvedSource(t *testing.T) {
-	t.Run("app-tier RepoTokens match reports IdentityApp even when Mode is pat", func(t *testing.T) {
-		gh := &credbundle.GitHubCreds{
-			Mode:       "pat", // flipped by a sibling repo's PAT fallback
-			PAT:        "ghp_borrowed",
-			RepoTokens: map[string]credbundle.RepoToken{"acme/widgets": {Token: "ghs_widgets"}},
-		}
-		client, identity, err := bundleRepoClient(gh, "acme", "widgets")
-		if err != nil {
-			t.Fatalf("bundleRepoClient: %v", err)
-		}
-		if identity != ghclient.IdentityApp {
-			t.Errorf("identity = %v, want IdentityApp — the resolved token came from RepoTokens", identity)
-		}
-		if client == nil {
-			t.Fatal("client is nil")
-		}
-	})
+// TestProxyRepoClient_PointsAtProxyWithPlaceholder pins the executor GitHub
+// path: the client's REST base is the sidecar proxy URL verbatim and it carries
+// only the per-run placeholder (never a real token — the sidecar injects that
+// upstream). Per-repo App/PAT tier selection now lives entirely in the sidecar,
+// so the agenthost reports a stable App identity (descriptive only — every
+// production verb funnels through githubClientForRepo, which discards it).
+func TestProxyRepoClient_PointsAtProxyWithPlaceholder(t *testing.T) {
+	var gotAuth, gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"number":1}`)
+	}))
+	defer upstream.Close()
 
-	t.Run("PAT fallback reports IdentityPAT even when Mode is app", func(t *testing.T) {
-		gh := &credbundle.GitHubCreds{
-			Mode:       "app",
-			PAT:        "ghp_borrowed",
-			RepoTokens: map[string]credbundle.RepoToken{"acme/other-repo": {Token: "ghs_other"}},
-		}
-		client, identity, err := bundleRepoClient(gh, "acme", "widgets")
-		if err != nil {
-			t.Fatalf("bundleRepoClient: %v", err)
-		}
-		if identity != ghclient.IdentityPAT {
-			t.Errorf("identity = %v, want IdentityPAT — this repo has no RepoTokens entry and fell back to the PAT", identity)
-		}
-		if client == nil {
-			t.Fatal("client is nil")
-		}
-	})
+	client, identity, err := proxyRepoClient(&ProxyCredentials{GitHubAPIURL: upstream.URL, GitHubAPIToken: "run-placeholder"}, "acme", "widgets")
+	if err != nil {
+		t.Fatalf("proxyRepoClient: %v", err)
+	}
+	if identity != ghclient.IdentityApp {
+		t.Errorf("identity = %v, want IdentityApp on the executor proxy path", identity)
+	}
+	if _, err := client.GetPR(context.Background(), "acme", "widgets", 1, false); err != nil {
+		t.Fatalf("GetPR through proxy client: %v", err)
+	}
+	if gotAuth != "Bearer run-placeholder" {
+		t.Errorf("upstream saw Authorization %q, want the per-run placeholder (real token is injected in the sidecar, not here)", gotAuth)
+	}
+	// GetPR issues several requests; any of them proves the base is the bare
+	// proxy URL — the path reaches it under /repos/... with no /api/v3 mangling.
+	if !strings.HasPrefix(gotPath, "/repos/acme/widgets/") {
+		t.Errorf("upstream path = %q, want a /repos/acme/widgets/... path reaching the bare proxy URL unmangled", gotPath)
+	}
+
+	if _, _, err := proxyRepoClient(&ProxyCredentials{}, "acme", "widgets"); err == nil {
+		t.Error("proxyRepoClient with no GitHub proxy URL should error 'not configured'")
+	}
 }

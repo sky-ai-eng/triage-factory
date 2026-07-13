@@ -22,15 +22,16 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/procname"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
 var sidecarLog = logging.Component("sidecar")
@@ -58,33 +59,63 @@ func run(args []string) error {
 	logging.SetProcess("sidecar")
 	logBootLine(*containerID)
 
-	// Idle until the run ends. The broker's stdio fd-passthrough gives this
-	// process a live connection back to the orchestrator — unused for
-	// content in Phase 1 (there is no credential or proxy logic here yet),
-	// but reading it blocks correctly either way: the orchestrator closing
-	// its end (normal teardown) delivers EOF and this returns cleanly, and
-	// the broker's KillSidecar (SIGKILL, sent on every teardown path
-	// regardless) can't be caught or deferred, so there is no separate
-	// signal-handling branch to add for that case. The signal watcher below
-	// only covers the case this process ever runs interactively outside the
-	// broker's launch (a manual `triagefactory run-sidecar` invocation) —
-	// production teardown never depends on it.
+	// Mint this run's X25519 keypair — the private half is born here and
+	// never leaves the process; the public half is announced to the
+	// orchestrator so the brain seals this run's bundle to it. A generation
+	// failure is fatal: without a keypair the sidecar can never unseal, so
+	// there is nothing to idle for.
+	rt, err := newCredRuntime()
+	if err != nil {
+		return fmt.Errorf("mint per-run keypair: %w", err)
+	}
+
+	// The supervision channel: the broker wired this process's stdin+stdout
+	// to a single duplex socket whose other end the orchestrator holds. Serve
+	// the credential protocol over it — the orchestrator relays the sealed
+	// bundle down and asks for proxies; the runtime answers, and calls back
+	// for git-authorize decisions.
+	conn := sidecarproto.New(stdioChannel{}, rt)
+	rt.setConn(conn)
+
+	// Announce the public key first, before processing any request, so the
+	// orchestrator can drive the seal before it asks the sidecar to do
+	// anything. A write failure here means the channel is already dead —
+	// nothing to serve, exit cleanly.
+	if err := conn.Notify(sidecarproto.KindHello, rt.helloBody()); err != nil {
+		return nil
+	}
+
+	// Block until the channel closes (the orchestrator's normal teardown
+	// delivers EOF) or a signal arrives. The broker's KillSidecar (SIGKILL,
+	// sent on every teardown path) can't be caught, so the signal watcher
+	// only covers a manual `triagefactory run-sidecar` invocation outside the
+	// broker — production teardown never depends on it. On the way out, drain
+	// the proxies cleanly (process exit would free them regardless).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	stdinDone := make(chan error, 1)
-	go func() {
-		_, err := io.Copy(io.Discard, os.Stdin)
-		stdinDone <- err
-	}()
-
 	select {
-	case err := <-stdinDone:
-		return err
+	case <-conn.Done():
 	case <-ctx.Done():
-		return nil
 	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rt.shutdown(shutdownCtx)
+	return nil
 }
+
+// stdioChannel adapts this process's stdin (read) + stdout (write) into one
+// io.ReadWriteCloser for the supervision Conn. The broker wired both to the
+// same underlying socket (LaunchSidecarProcess sets cmd.Stdin = cmd.Stdout =
+// stdio), so reads and writes hit the one duplex connection to the
+// orchestrator. Close is a no-op: the broker owns the fd's lifetime and
+// SIGKILLs the process at teardown; closing os.Stdout here would only race
+// that.
+type stdioChannel struct{}
+
+func (stdioChannel) Read(p []byte) (int, error)  { return os.Stdin.Read(p) }
+func (stdioChannel) Write(p []byte) (int, error) { return os.Stdout.Write(p) }
+func (stdioChannel) Close() error                { return nil }
 
 // logBootLine emits one legibility boot line, the same shape cap-broker and
 // the orchestrator each log at startup: this process's uid and effective

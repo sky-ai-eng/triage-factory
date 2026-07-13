@@ -1,0 +1,375 @@
+package runsidecar
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net"
+	"sync"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/apiproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/credseal"
+	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
+)
+
+// credRuntime is the sidecar's credential brain: it owns this run's X25519
+// private key (born here, never leaving the process), the unsealed bundle,
+// and the credential proxies. The orchestrator drives it over the
+// supervision channel — relaying the opaque sealed bundle down and the
+// non-secret proxy env back up — and answers the git proxy's authorize
+// callbacks the other way. It implements sidecarproto.Handler.
+//
+// Everything credential-bearing lives here and nowhere else: an orchestrator
+// compromise reaches no key and no plaintext, and process exit frees this
+// whole address space.
+type credRuntime struct {
+	keypair *credseal.KeyPair
+
+	// conn is the supervision channel back to the orchestrator, used for the
+	// git proxy's authorize/denial callbacks. Set once immediately after the
+	// conn is constructed (the conn needs this runtime as its Handler first).
+	conn *sidecarproto.Conn
+
+	mu        sync.Mutex
+	bundle    *credbundle.Bundle // newest unsealed bundle; nil until first seal
+	proxies   *agentproc.RunProxyHandle
+	githubAPI *apiproxy.Server // GitHub REST credential proxy; nil unless requested
+	jiraAPI   *apiproxy.Server // Jira REST credential proxy; nil unless requested
+	proxied   bool             // guards against a duplicate StartProxies
+	bootEpoch int64
+}
+
+// newCredRuntime mints the per-run keypair. The public half is published to
+// the orchestrator (which relays it to the brain to seal against); the
+// private half never leaves this process.
+func newCredRuntime() (*credRuntime, error) {
+	kp, err := credseal.GenerateKeyPair()
+	if err != nil {
+		return nil, err
+	}
+	return &credRuntime{keypair: kp}, nil
+}
+
+// setConn wires the supervision channel after construction (the conn is built
+// with this runtime as its Handler, so the runtime can't be handed the conn
+// at construction time).
+func (r *credRuntime) setConn(c *sidecarproto.Conn) { r.conn = c }
+
+// helloBody is the sidecar's opening announcement: its per-run public key,
+// base64-encoded, for the orchestrator to publish upward.
+func (r *credRuntime) helloBody() sidecarproto.HelloBody {
+	return sidecarproto.HelloBody{PubKey: base64.StdEncoding.EncodeToString(r.keypair.Public[:])}
+}
+
+// Handle dispatches an inbound supervision request. See sidecarproto.Handler.
+func (r *credRuntime) Handle(ctx context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {
+	switch kind {
+	case sidecarproto.KindSealedBundle:
+		return nil, r.acceptSealedBundle(body)
+	case sidecarproto.KindStartProxies:
+		return r.startProxies(ctx, body)
+	default:
+		return nil, fmt.Errorf("runsidecar: unexpected request kind %q", kind)
+	}
+}
+
+// acceptSealedBundle opens the relayed ciphertext with the per-run private
+// key and stores the plaintext as the newest bundle. Repeatable: the brain's
+// refresh sweep re-seals mid-run and the orchestrator re-relays, so a later
+// call simply replaces the held bundle and the proxies' live sources pick up
+// the newer credential on their next request. An unseal/parse failure is
+// returned to the orchestrator (which surfaces it) and the prior bundle, if
+// any, is left intact.
+func (r *credRuntime) acceptSealedBundle(body json.RawMessage) error {
+	var msg sidecarproto.SealedBundleBody
+	if err := json.Unmarshal(body, &msg); err != nil {
+		return fmt.Errorf("runsidecar: decode sealed bundle: %w", err)
+	}
+	plaintext, err := r.keypair.Open(msg.Sealed)
+	if err != nil {
+		return fmt.Errorf("runsidecar: unseal bundle: %w", err)
+	}
+	bundle, err := credbundle.Unmarshal(plaintext)
+	if err != nil {
+		return fmt.Errorf("runsidecar: parse bundle: %w", err)
+	}
+	r.mu.Lock()
+	r.bundle = bundle
+	r.bootEpoch = msg.BootEpoch
+	r.mu.Unlock()
+	return nil
+}
+
+// currentBundle returns the newest held bundle, or nil if none has arrived.
+func (r *credRuntime) currentBundle() *credbundle.Bundle {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.bundle
+}
+
+// startProxies binds this run's credential proxies on the host-side veth IP
+// and returns the non-secret sandbox env. The LLM/git material comes from the
+// held bundle; the git proxy's authorize decision is relayed back to the
+// orchestrator (no DB handle here). Idempotent-guarded: a duplicate request
+// is an orchestrator bug, so it errors rather than leaking a second listener.
+func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (any, error) {
+	var req sidecarproto.StartProxiesBody
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("runsidecar: decode start-proxies: %w", err)
+	}
+	bundle := r.currentBundle()
+	if bundle == nil {
+		return nil, fmt.Errorf("runsidecar: start-proxies before any credential bundle was relayed")
+	}
+
+	r.mu.Lock()
+	if r.proxied {
+		r.mu.Unlock()
+		return nil, fmt.Errorf("runsidecar: proxies already started for this run")
+	}
+	r.mu.Unlock()
+
+	var git *agentproc.GitProxyConfig
+	if req.GitEnabled {
+		git = r.gitProxyConfig(req.GitUpstream)
+	}
+
+	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, git, r.llmSource, req.IdentityConfigPairs...)
+	if err != nil {
+		return nil, err
+	}
+
+	result := sidecarproto.StartProxiesResult{Env: env}
+	// Surface the git proxy's address + per-run placeholder so the orchestrator
+	// routes its OWN pre-sandbox clone through this same proxy — the real token
+	// stays here. Empty when no git proxy was started (GitEnabled false).
+	result.GitProxyURL, result.GitProxyToken = handle.GitProxy()
+
+	// The GitHub/Jira REST credential proxies the orchestrator's own GetPR +
+	// agenthost verbs route through: the orchestrator holds only the
+	// placeholder, the sidecar injects the real token on the upstream hop. On
+	// any failure here, tear down what already bound so a half-started run
+	// leaks no listener.
+	if req.GitHubAPIEnabled {
+		srv, url, token, aerr := r.startGitHubAPIProxy(req.HostVethIP, req.GitHubAPIUpstream)
+		if aerr != nil {
+			_ = handle.Shutdown(ctx)
+			return nil, aerr
+		}
+		r.githubAPI = srv
+		result.GitHubAPIURL, result.GitHubAPIToken = url, token
+	}
+	if req.JiraAPIEnabled {
+		srv, url, token, aerr := r.startJiraAPIProxy(req.HostVethIP, req.JiraAPIUpstream)
+		if aerr != nil {
+			_ = handle.Shutdown(ctx)
+			if r.githubAPI != nil {
+				_ = r.githubAPI.Shutdown(ctx)
+			}
+			return nil, aerr
+		}
+		r.jiraAPI = srv
+		result.JiraAPIURL, result.JiraAPIToken = url, token
+	}
+
+	r.mu.Lock()
+	r.proxies = handle
+	r.proxied = true
+	r.mu.Unlock()
+
+	return result, nil
+}
+
+// startGitHubAPIProxy binds a GitHub-REST credential proxy on the veth IP.
+// Its per-repo TokenSource reads the held bundle, so the real installation
+// token never leaves the sidecar; the returned placeholder is what the
+// orchestrator's ghclient presents. upstream defaults to api.github.com.
+func (r *credRuntime) startGitHubAPIProxy(hostVethIP, upstream string) (*apiproxy.Server, string, string, error) {
+	if upstream == "" {
+		upstream = "https://api.github.com"
+	}
+	token, err := randomToken()
+	if err != nil {
+		return nil, "", "", err
+	}
+	srv, err := apiproxy.New(apiproxy.Config{
+		Provider:         apiproxy.ProviderGitHub,
+		Upstream:         upstream,
+		IncomingToken:    token,
+		AllowNonLoopback: true,
+		TokenSource: func(_ context.Context, owner, repo string) (string, error) {
+			bundle := r.currentBundle()
+			if bundle == nil {
+				return "", fmt.Errorf("runsidecar: no current bundle for github api proxy")
+			}
+			tok, _, source := credbundle.ResolveRepoToken(bundle.GitHub, owner, repo)
+			if source == credbundle.RepoTokenNone {
+				return "", fmt.Errorf("runsidecar: no github token for %s/%s in bundle", owner, repo)
+			}
+			return tok, nil
+		},
+	})
+	if err != nil {
+		return nil, "", "", fmt.Errorf("runsidecar: construct github api proxy: %w", err)
+	}
+	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
+	if err != nil {
+		return nil, "", "", fmt.Errorf("runsidecar: start github api proxy: %w", err)
+	}
+	return srv, "http://" + addr, token, nil
+}
+
+// startJiraAPIProxy binds a Jira-REST credential proxy on the veth IP,
+// resolving the injected auth (Cloud Basic vs Data Center Bearer) from the
+// bundle's Jira credential. upstream defaults to the bundle's Jira URL.
+func (r *credRuntime) startJiraAPIProxy(hostVethIP, upstream string) (*apiproxy.Server, string, string, error) {
+	bundle := r.currentBundle()
+	if bundle == nil || bundle.Jira == nil {
+		return nil, "", "", fmt.Errorf("runsidecar: jira api proxy requested but bundle carries no Jira credential")
+	}
+	if upstream == "" {
+		upstream = bundle.Jira.URL
+	}
+	var auth apiproxy.AuthHeaderSource
+	if bundle.Jira.AuthMethod == "cloud" {
+		auth = apiproxy.JiraBasic(bundle.Jira.Email, bundle.Jira.APIToken)
+	} else {
+		auth = apiproxy.JiraBearer(bundle.Jira.PAT)
+	}
+	token, err := randomToken()
+	if err != nil {
+		return nil, "", "", err
+	}
+	srv, err := apiproxy.New(apiproxy.Config{
+		Provider:         apiproxy.ProviderJira,
+		Upstream:         upstream,
+		IncomingToken:    token,
+		AllowNonLoopback: true,
+		AuthHeaderSource: auth,
+	})
+	if err != nil {
+		return nil, "", "", fmt.Errorf("runsidecar: construct jira api proxy: %w", err)
+	}
+	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
+	if err != nil {
+		return nil, "", "", fmt.Errorf("runsidecar: start jira api proxy: %w", err)
+	}
+	return srv, "http://" + addr, token, nil
+}
+
+// randomToken mints a per-run placeholder the orchestrator presents to a
+// sidecar API proxy. Non-secret — the proxy authenticates the caller against
+// it, but the real credential is injected upstream and never travels here.
+func randomToken() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("runsidecar: mint proxy token: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
+}
+
+// llmSource is the SigV4 proxy's live re-read of the newest sealed bundle's
+// LLM triple (RunOptions.LLMCredentialSource's shape): each request reads the
+// held bundle so a role-mode run whose STS session credentials the brain
+// re-mints mid-run keeps signing with fresh material. A missing or expired
+// bundle surfaces an error so the proxy 502s with the refresh-lagging hint
+// rather than signing stale, exactly like the in-process path did.
+func (r *credRuntime) llmSource(ctx context.Context) (map[string]string, time.Time, error) {
+	bundle := r.currentBundle()
+	if bundle == nil {
+		return nil, time.Time{}, fmt.Errorf("runsidecar: no current credential bundle — refresh lagging")
+	}
+	if exp := bundle.LLMExpiry(); !exp.IsZero() && exp.Before(time.Now()) {
+		return nil, time.Time{}, fmt.Errorf("runsidecar: current LLM credential expired — refresh lagging")
+	}
+	return bundle.LLM, bundle.LLMExpiry(), nil
+}
+
+// gitProxyConfig builds the git credential proxy's wiring for the sidecar:
+// the TokenSource reads the held bundle's per-repo tokens; ProbeCredentials
+// checks the bundle carries any GitHub credential; Authorize, RecordDenial,
+// and RecordPush relay across the supervision channel to the orchestrator's
+// DB-backed gate and audit path (the capless sidecar holds no stores).
+func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig {
+	return &agentproc.GitProxyConfig{
+		Upstream: upstream,
+		TokenSource: func(_ context.Context, owner, repo string) (gitproxy.Token, error) {
+			bundle := r.currentBundle()
+			if bundle == nil {
+				return gitproxy.Token{}, fmt.Errorf("%w: no current bundle", agentproc.ErrNoSandboxGitCredentials)
+			}
+			token, expiresAt, source := credbundle.ResolveRepoToken(bundle.GitHub, owner, repo)
+			if source == credbundle.RepoTokenNone {
+				return gitproxy.Token{}, fmt.Errorf("%w: repo %s/%s", agentproc.ErrNoSandboxGitCredentials, owner, repo)
+			}
+			return gitproxy.Token{Value: token, ExpiresAt: expiresAt}, nil
+		},
+		ProbeCredentials: func(_ context.Context) error {
+			bundle := r.currentBundle()
+			if bundle == nil || bundle.GitHub == nil || len(bundle.GitHub.RepoTokens) == 0 {
+				return fmt.Errorf("%w: bundle carries no GitHub credential", agentproc.ErrNoSandboxGitCredentials)
+			}
+			return nil
+		},
+		Authorize: func(ctx context.Context, owner, repo string) (gitproxy.Decision, error) {
+			var res sidecarproto.AuthorizeRepoResult
+			if err := r.conn.Call(ctx, sidecarproto.KindAuthorizeRepo, sidecarproto.AuthorizeRepoBody{Owner: owner, Repo: repo}, &res); err != nil {
+				// A failed authorize relay must fail closed (deny), never
+				// allow-all — a degraded control channel is exactly when a push
+				// must not slip through unauthorized.
+				return gitproxy.Decision{Allowed: false}, err
+			}
+			return gitproxy.Decision{Allowed: res.Allowed, AllowedRefs: res.AllowedRefs}, nil
+		},
+		RecordDenial: func(_ context.Context, denied gitproxy.DeniedGitOp) {
+			_ = r.conn.Notify(sidecarproto.KindRecordDenial, sidecarproto.RecordDenialBody{
+				Owner:  denied.Owner,
+				Repo:   denied.Repo,
+				Ref:    denied.Ref,
+				Op:     denied.Op,
+				Reason: denied.Reason,
+			})
+		},
+		RecordPush: func(_ context.Context, push gitproxy.PushedRef) {
+			// Relay the completed push up so the orchestrator records the
+			// branch artifact / push-failed row. The pre-push hook stands down
+			// in this sandbox (StartRunProxies sets PushCaptureProxy), so this
+			// relay is the sole push-capture path on the executor — without it
+			// no executor push reaches the audit log.
+			_ = r.conn.Notify(sidecarproto.KindRecordPush, sidecarproto.RecordPushBody{
+				Repo:    push.Repo,
+				Ref:     push.Ref,
+				NewSHA:  push.NewSHA,
+				Created: push.Created,
+				Status:  push.Status,
+			})
+		},
+	}
+}
+
+// shutdown tears down the proxies (best-effort) on run end. Process exit
+// frees the address space regardless; this drains in-flight connections.
+func (r *credRuntime) shutdown(ctx context.Context) {
+	r.mu.Lock()
+	handle := r.proxies
+	githubAPI := r.githubAPI
+	jiraAPI := r.jiraAPI
+	r.proxies, r.githubAPI, r.jiraAPI = nil, nil, nil
+	r.mu.Unlock()
+	if handle != nil {
+		_ = handle.Shutdown(ctx)
+	}
+	if githubAPI != nil {
+		_ = githubAPI.Shutdown(ctx)
+	}
+	if jiraAPI != nil {
+		_ = jiraAPI.Shutdown(ctx)
+	}
+}

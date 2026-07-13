@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 )
@@ -26,7 +27,8 @@ func (f *fakeSidecarLauncher) LaunchSidecar(ctx context.Context, p SidecarLaunch
 
 type noopLaunchedSidecar struct{}
 
-func (noopLaunchedSidecar) Close() error { return nil }
+func (noopLaunchedSidecar) Supervision() net.Conn { return nil }
+func (noopLaunchedSidecar) Close() error          { return nil }
 
 func withFakeSidecarLauncher(t *testing.T, f *fakeSidecarLauncher) {
 	t.Helper()

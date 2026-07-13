@@ -21,17 +21,19 @@ import (
 // triagefactory binary.
 const sidecarReapHelperEnv = "TF_TEST_SIDECAR_REAP_HELPER"
 
-// TestMain intercepts the re-exec branch before the normal test suite runs.
-// This is the only TestMain in the package's default (non-"integration"
-// build-tagged) test binary — internal/sandbox/integration_linux_test.go
-// defines its own, but under a separate "integration" build tag that a
-// plain `go test ./internal/sandbox/...` never compiles in.
-func TestMain(m *testing.M) {
+// reExecAsSidecarHelperIfRequested intercepts the re-exec branch this suite
+// uses to mint a named, blocking child it can find and reap by comm name.
+// Both the default and the integration test binary drive it from their
+// respective TestMain — one TestMain compiles per build tag, and the
+// integration binary additionally pre-warms the rootfs and installs the
+// in-process launcher, so the shared re-exec discipline lives here rather
+// than in a single TestMain that only one build could hold. When the gate
+// env is unset it returns and the normal suite runs.
+func reExecAsSidecarHelperIfRequested() {
 	if os.Getenv(sidecarReapHelperEnv) != "" {
 		procname.SetTitle(SidecarCommName)
 		select {} // blocks until SIGKILLed (reapOrphanSidecars, or test cleanup)
 	}
-	os.Exit(m.Run())
 }
 
 // procAlive reports whether pid still exists in the process table — true

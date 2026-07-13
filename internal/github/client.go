@@ -71,6 +71,15 @@ type Client struct {
 	pat     string
 	http    *http.Client
 
+	// viaProxy marks a client whose baseURL is a per-run credential proxy
+	// (NewProxyClient), not a real GitHub API base. The REST path
+	// (/repos/{owner}/{repo}/…) reaches such a proxy verbatim, but the GraphQL
+	// endpoint is a sibling of the REST base (api.github.com/graphql, or a GHES
+	// /api/graphql next to /api/v3) that the REST proxy does not front — so
+	// PostGraphQL fails closed here rather than silently misrouting. See
+	// NewProxyClient.
+	viaProxy bool
+
 	// Rate-limit state (see ratelimit.go), updated from the headers on every
 	// response the request core sees and read by RateLimit()/awaitBudget().
 	rlMu        sync.Mutex
@@ -93,6 +102,27 @@ func NewClient(baseURL, pat string) *Client {
 		baseURL: APIBase(baseURL),
 		pat:     pat,
 		http:    &http.Client{Timeout: 30 * time.Second},
+	}
+}
+
+// NewProxyClient builds a client that talks to a per-run credential proxy
+// (internal/apiproxy) rather than to GitHub directly: proxyURL is the proxy's
+// bare address and placeholder is the per-run token the proxy authenticates and
+// swaps for the real credential on the upstream hop, so this client — and the
+// process holding it — never touches a durable GitHub token (Property B).
+//
+// proxyURL is used as the REST base VERBATIM (no APIBase() derivation, unlike
+// NewClient): the request path /repos/{owner}/{repo}/… must reach the proxy
+// unmangled for it to prepend the real host's REST base (api.github.com, or a
+// GHES /api/v3). GraphQL is deliberately unsupported through this client —
+// PostGraphQL fails closed — because the GraphQL endpoint sits beside the REST
+// base, not under it, and the REST proxy does not front it (see viaProxy).
+func NewProxyClient(proxyURL, placeholder string) *Client {
+	return &Client{
+		baseURL:  proxyURL,
+		pat:      placeholder,
+		http:     &http.Client{Timeout: 30 * time.Second},
+		viaProxy: true,
 	}
 }
 
@@ -427,6 +457,15 @@ func (e gqlErrors) first(context string) error {
 // like a GET rather than surfacing immediately as it would for a real
 // mutation.
 func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
+	if c.viaProxy {
+		// A credential-proxy client's baseURL is the REST proxy, which does not
+		// front the sibling GraphQL endpoint; deriving graphqlURL from it would
+		// misroute (a GHES /api/v3/graphql 404, or a bypass straight to
+		// api.github.com carrying only the placeholder). Fail closed until
+		// GraphQL-over-proxy is wired end-to-end (routing + an installation-wide
+		// bundle token for repo-less queries).
+		return nil, errors.New("github: GraphQL is not supported through the per-run credential proxy")
+	}
 	build := func() (*http.Request, error) {
 		return c.newRequest(ctx, "POST", graphqlURL(c.baseURL), body, "")
 	}

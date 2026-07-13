@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -92,12 +91,13 @@ type HostDaemon struct {
 // close drains the daemon goroutine, the os.Remove cleans up the
 // socket file.
 //
-// bundleFunc is the run's sealed-credential-bundle accessor (non-nil only on
-// TF_ROLE=executor — the spawner passes nil on TF_ROLE=all and local mode);
-// threaded straight into NewServer, which re-reads it per RPC so the daemon's
-// gh/jira verbs resolve credentials from the bundle instead of the (disabled,
-// on an executor) secret store. See Server.bundleFunc.
-func Start(stores db.Stores, info RunInfo, bundleFunc func(ctx context.Context) (*credbundle.Bundle, bool)) (*HostDaemon, sandbox.Mount, error) {
+// proxyCreds points the daemon's gh/jira verbs at the run's credential-sidecar
+// REST proxies (non-nil only on TF_ROLE=executor — the spawner passes nil on
+// TF_ROLE=all and local mode); threaded straight into NewServer so the verbs
+// hold only per-run placeholders and the sidecar injects the real credential
+// upstream, instead of reading the (disabled, on an executor) secret store.
+// See Server.proxyCreds.
+func Start(stores db.Stores, info RunInfo, proxyCreds *ProxyCredentials) (*HostDaemon, sandbox.Mount, error) {
 	if info.RunID == "" {
 		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: RunInfo.RunID required")
 	}
@@ -122,7 +122,7 @@ func Start(stores db.Stores, info RunInfo, bundleFunc func(ctx context.Context) 
 		return nil, sandbox.Mount{}, err
 	}
 
-	server := NewServer(stores, info, bundleFunc)
+	server := NewServer(stores, info, proxyCreds)
 	hd := &HostDaemon{
 		listener: listener,
 		sockPath: sockPath,

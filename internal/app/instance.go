@@ -2,13 +2,10 @@ package app
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 
-	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // ensureIdentity resolves this process's persistent instance identity — the
@@ -36,27 +33,19 @@ func (a *App) ensureIdentity() error {
 // executor concern); the role + build version it stamps here are what make
 // version skew and the control/executor split visible in the registry.
 //
-// Only TF_ROLE=executor mints a sealing keypair and publishes its public
-// half (TFAC-614) — a control/all row registers with an empty pubkey, since
-// only an executor ever claims a run and needs a bundle sealed to it. The
-// keypair is minted fresh on every call (a restart never reuses one), so
-// its public half is re-stamped on Register alongside boot_epoch — an
-// old-epoch pubkey published by a prior boot must never linger for the
-// brain to seal against once this process is gone.
+// The instances row's pubkey is always empty (TFAC-631): the orchestrator
+// holds no sealing key and never unseals a run's bundle. Each run's credential
+// sidecar mints its own per-run keypair and publishes its public half onto the
+// run's claim (runs.cred_pubkey) at bring-up, and the brain seals to that.
 func (a *App) registerInstance(ctx context.Context) error {
 	role := string(a.plan.role)
 
-	pubkey := ""
-	if runmode.Current() == runmode.ModeMulti && a.plan.role == runmode.RoleExecutor {
-		kp, err := credseal.GenerateKeyPair()
-		if err != nil {
-			return fmt.Errorf("mint sealing keypair: %w", err)
-		}
-		a.sealingKey = kp
-		pubkey = base64.StdEncoding.EncodeToString(kp.Public[:])
-	}
-
-	epoch, err := a.stores.Instances.Register(ctx, a.identity.ID, role, a.cfg.Version, pubkey)
+	// The orchestrator publishes no sealing pubkey: it holds no private key and
+	// never unseals a run's bundle. Each run's credential sidecar mints its own
+	// per-run keypair and publishes the public half onto the claim
+	// (runs.cred_pubkey) at bring-up, and the brain seals to that — so the
+	// instances row's pubkey is always empty now (TFAC-631).
+	epoch, err := a.stores.Instances.Register(ctx, a.identity.ID, role, a.cfg.Version, "")
 	if err != nil {
 		return fmt.Errorf("register instance: %w", err)
 	}

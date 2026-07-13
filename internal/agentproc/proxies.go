@@ -94,6 +94,13 @@ type runProxies struct {
 	llm    *llmproxy.Server
 	git    *gitproxy.Server
 	egress *egressproxy.Server
+
+	// gitProxyURL / gitProxyToken are the git proxy's own address and per-run
+	// placeholder token, surfaced so the orchestrator's pre-sandbox clone can
+	// route through the SAME proxy (holding only the placeholder). Empty when
+	// no git proxy was started. Read via RunProxyHandle.GitProxy.
+	gitProxyURL   string
+	gitProxyToken string
 }
 
 // Shutdown stops every proxy in the bundle. Returns errors.Join of
@@ -202,6 +209,54 @@ type GitProxyConfig struct {
 	// the old eager repo-less TokenSource probe (which no longer type-checks
 	// now that TokenSource is per-repo).
 	ProbeCredentials func(ctx context.Context) error
+}
+
+// RunProxyHandle is an opaque, shutdown-only handle to a run's started
+// proxies — the exported face of the in-process runProxies bundle. The
+// per-run credential sidecar (which holds the unsealed bundle) holds one of
+// these and tears it down when the run ends; process exit frees the proxies'
+// address space regardless, but an explicit Shutdown drains in-flight
+// connections cleanly.
+type RunProxyHandle struct {
+	p *runProxies
+}
+
+// Shutdown stops every proxy the handle owns. Safe on a nil handle.
+func (h *RunProxyHandle) Shutdown(ctx context.Context) error {
+	if h == nil {
+		return nil
+	}
+	return h.p.Shutdown(ctx)
+}
+
+// GitProxy returns the git proxy's address and per-run placeholder token, or
+// ("", "") when this run started no git proxy. The sidecar surfaces these to
+// the orchestrator so its pre-sandbox clone routes through the same proxy while
+// holding only the placeholder — the real token never leaves the sidecar.
+func (h *RunProxyHandle) GitProxy() (url, token string) {
+	if h == nil || h.p == nil {
+		return "", ""
+	}
+	return h.p.gitProxyURL, h.p.gitProxyToken
+}
+
+// StartRunProxies is the sidecar-callable entry to the same per-run proxy
+// bring-up the in-process path uses (startProxiesForSandbox): it binds the
+// LLM + egress proxies (and the git credential proxy when git is non-nil) on
+// hostVethIP, holding the real credentials host-side, and returns the
+// non-secret sandbox env naming them. Exported so the per-run credential
+// sidecar runs the proxies out of the orchestrator's address space — the
+// orchestrator relays the env back and never holds a real key. The git
+// proxy's TokenSource reads the sidecar's unsealed bundle; its Authorize /
+// RecordDenial closures relay the DB-backed decision to the orchestrator, so
+// no database handle enters the capless sidecar. See startProxiesForSandbox
+// for the full contract.
+func StartRunProxies(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, git *GitProxyConfig, llmSource func(ctx context.Context) (env map[string]string, expiry time.Time, err error), identityPairs ...[2]string) (*RunProxyHandle, []string, error) {
+	bundle, env, err := startProxiesForSandbox(ctx, hostVethIP, resolvedCreds, git, sigV4LiveSource(llmSource), identityPairs...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &RunProxyHandle{p: bundle}, env, nil
 }
 
 // startProxiesForSandbox starts the per-run LLM proxy, plus the git
@@ -351,7 +406,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	// runs with a repo in scope; prompt-only runs pass git=nil and skip
 	// it (but still get core.hooksPath above).
 	if git != nil {
-		proxyPairs, gitSrv, gerr := startGitProxyForSandbox(ctx, hostVethIP, git)
+		proxyPairs, gitProxyURL, gitProxyToken, gitSrv, gerr := startGitProxyForSandbox(ctx, hostVethIP, git)
 		if gerr != nil {
 			// The LLM proxy is already listening; tear it down so a git
 			// failure doesn't leak it, then return a clean nil bundle.
@@ -361,6 +416,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 			return nil, nil, gerr
 		}
 		bundle.git = gitSrv
+		bundle.gitProxyURL, bundle.gitProxyToken = gitProxyURL, gitProxyToken
 		gitPairs = append(gitPairs, proxyPairs...)
 		// The proxy owns push capture for this run: it observes each push's
 		// actual upstream outcome (artifact on 2xx, audit failure row
@@ -388,9 +444,9 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 // For an App-installation source the minted token is cached, so the
 // proxy's own lazy resolve on first request reuses it at no extra mint;
 // a PAT source pays one extra (cheap) secret-store read at run start.
-func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitProxyConfig) ([][2]string, *gitproxy.Server, error) {
+func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitProxyConfig) ([][2]string, string, string, *gitproxy.Server, error) {
 	if git.TokenSource == nil {
-		return nil, nil, errors.New("agentproc: GitProxyConfig.TokenSource is required")
+		return nil, "", "", nil, errors.New("agentproc: GitProxyConfig.TokenSource is required")
 	}
 
 	// Eager credential probe: surface a no-credentials org as
@@ -405,13 +461,13 @@ func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitPro
 			// the typed admin message; any other (transient) resolve error
 			// fails the run too rather than spawning a proxy that can't
 			// authenticate.
-			return nil, nil, fmt.Errorf("agentproc: resolve git credential for sandbox: %w", err)
+			return nil, "", "", nil, fmt.Errorf("agentproc: resolve git credential for sandbox: %w", err)
 		}
 	}
 
 	incoming, err := randomHexToken()
 	if err != nil {
-		return nil, nil, err
+		return nil, "", "", nil, err
 	}
 
 	upstream := git.Upstream
@@ -429,14 +485,20 @@ func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitPro
 		RecordDenial:     git.RecordDenial,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("agentproc: construct git proxy: %w", err)
+		return nil, "", "", nil, fmt.Errorf("agentproc: construct git proxy: %w", err)
 	}
 	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
 	if err != nil {
-		return nil, nil, fmt.Errorf("agentproc: start git proxy on %s: %w", hostVethIP, err)
+		return nil, "", "", nil, fmt.Errorf("agentproc: start git proxy on %s: %w", hostVethIP, err)
 	}
 
-	return sandboxGitProxyPairs("http://"+addr, upstream, incoming), srv, nil
+	// proxyURL + incoming are returned alongside the sandbox git-config pairs so
+	// the orchestrator's own host-side clone can route through this SAME proxy
+	// (CloneAuthViaGitProxy) holding only the placeholder — the real token stays
+	// in the proxy's TokenSource. The host reaches the veth IP too, so one proxy
+	// serves both the in-jail agent and the pre-sandbox clone.
+	proxyURL := "http://" + addr
+	return sandboxGitProxyPairs(proxyURL, upstream, incoming), proxyURL, incoming, srv, nil
 }
 
 // startEgressProxyForSandbox mints a per-run secret, starts the gating

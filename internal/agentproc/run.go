@@ -182,6 +182,26 @@ type RunOptions struct {
 	// snapshot (bearer / anthropic, brain-side consumers, local).
 	LLMCredentialSource func(ctx context.Context) (env map[string]string, expiry time.Time, err error)
 
+	// PrebuiltNetwork, when non-nil, is a run network the delegate stood up
+	// itself (sandbox.SetupRunNetwork) BEFORE calling Run — the executor path
+	// where the credential sidecar and its proxies are already live on
+	// PrebuiltNetwork.HostIP, because the pre-sandbox clone had to route
+	// through them. Run launches the sandbox into this network (Config.Network)
+	// instead of allocating one, does NOT resolve credentials or run the
+	// in-process proxies (PrebuiltProxyEnv already carries the agent's proxy
+	// env), and does NOT tear the network or sidecar down — the delegate owns
+	// both, closing them after Run returns. nil keeps the self-contained path:
+	// Run allocates the network and runs the in-process proxies (all/local,
+	// curator, one-shot system jobs) — byte-identical to before.
+	PrebuiltNetwork *sandbox.RunNetwork
+
+	// PrebuiltProxyEnv is the non-secret sandbox env the delegate's sidecar
+	// bring-up produced (LLM/git/egress proxy URLs + per-run placeholders + the
+	// single GIT_CONFIG_* block). Folded verbatim into the sandbox env when
+	// PrebuiltNetwork is set — it takes the place of the in-process
+	// ConfigureProxies output. Ignored when PrebuiltNetwork is nil.
+	PrebuiltProxyEnv []string
+
 	// StartAgentHost, when non-nil, starts the per-run host agenthost
 	// daemon in the sandbox branch. The daemon owns the run identity
 	// and serves the RPCs the sandboxed `triagefactory exec`
@@ -485,7 +505,6 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		ahCloser   io.Closer
 		sb         *sandbox.Sandbox
 		run        sandbox.LaunchedRun
-		sidecar    sandbox.LaunchedSidecar
 		once       sync.Once
 	)
 	cleanup := func() {
@@ -496,13 +515,10 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 			if run != nil {
 				_ = run.Close()
 			}
-			// The credential sidecar next, BEFORE sb.Close() below releases the
-			// subnet index its uid was derived from — a concurrent new run must
-			// never be handed that uid while this run's sidecar might still be
-			// exiting.
-			if sidecar != nil {
-				_ = sidecar.Close()
-			}
+			// sb.Close is a no-op on the network when the delegate owns it
+			// (Config.Network / the executor path — the delegate's
+			// RunNetwork.Close + sidecar Close run after Run returns); on the
+			// self-contained path it tears down the network wrap allocated.
 			if sb != nil {
 				_ = sb.Close()
 			}
@@ -532,10 +548,20 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 
 	sdkDir := filepath.Dir(wrapperPath)
 
-	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID, opts.LLMResolver)
-	if err != nil {
-		cleanup()
-		return nil, cleanup, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
+	// The self-contained path resolves the org's LLM credentials here and runs
+	// the in-process proxies over them (configureProxies below). The executor
+	// path (PrebuiltNetwork set) holds NO credential — its proxies already run
+	// in the delegate's sidecar over the sealed bundle — so it must NOT resolve
+	// (the executor's secret store is disabled and no bundle is on ctx); the
+	// agent's proxy env arrives verbatim in opts.PrebuiltProxyEnv.
+	var creds map[string]string
+	if opts.PrebuiltNetwork == nil {
+		resolved, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID, opts.LLMResolver)
+		if err != nil {
+			cleanup()
+			return nil, cleanup, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
+		}
+		creds = resolved
 	}
 
 	// Some callers (scorer, classifier stage1, profiler) are prompt-only —
@@ -662,25 +688,42 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		BuildArgs(sandboxOpts)...,
 	)
 
-	// Multi-mode credential injection: when the sandbox calls ConfigureProxies
-	// after wiring the netns, we start the LLM proxy on the host-side veth IP
-	// and return the env entries naming it. The proxy holds the real key on
-	// the host side; the sandbox env carries only the proxy URL + placeholder.
-	// See proxies.go for the mapping from resolved creds to proxy provider /
-	// upstream.
-	configureProxies := func(s *sandbox.Sandbox) ([]string, error) {
-		// Fold the org commit identity (TFAC-452) into the sandbox's GIT_CONFIG_*
-		// block alongside core.hooksPath + the proxy pairs. Empty identity → no
-		// pairs added.
-		identityPairs := githooks.IdentityConfigPairs(opts.GitUserName, opts.GitUserEmail)
-		bundle, proxyEnv, perr := startProxiesForSandbox(runCtx, s.HostIP, creds, opts.GitProxy, opts.LLMCredentialSource, identityPairs...)
-		if perr != nil {
-			return nil, perr
+	// Two credential provenances for the run's proxies:
+	//
+	//   - Self-contained (PrebuiltNetwork nil — all/local/curator/system jobs):
+	//     the orchestrator IS the credential holder, so after Wrap wires the
+	//     netns it calls ConfigureProxies, which starts the LLM/git/egress
+	//     proxies on the host-side veth IP over the credentials resolved above
+	//     and returns the sandbox env naming them. Property B: the returned env
+	//     carries only proxy URLs + per-run placeholders.
+	//
+	//   - Executor (PrebuiltNetwork set): the delegate already stood up the
+	//     network AND the credential sidecar, brought its proxies up on the
+	//     veth IP (because the pre-sandbox clone had to route through them), and
+	//     handed us their sandbox env in PrebuiltProxyEnv. Fold it into the
+	//     sandbox env, give Wrap the network so it skips its own allocation +
+	//     ConfigureProxies, and hold no credential here at all.
+	var configureProxies func(*sandbox.Sandbox) ([]string, error)
+	if opts.PrebuiltNetwork == nil {
+		configureProxies = func(s *sandbox.Sandbox) ([]string, error) {
+			// Fold the org commit identity (TFAC-452) into the sandbox's
+			// GIT_CONFIG_* block alongside core.hooksPath + the proxy pairs.
+			// Empty identity → no pairs added.
+			identityPairs := githooks.IdentityConfigPairs(opts.GitUserName, opts.GitUserEmail)
+			bundle, proxyEnv, perr := startProxiesForSandbox(runCtx, s.HostIP, creds, opts.GitProxy, opts.LLMCredentialSource, identityPairs...)
+			if perr != nil {
+				return nil, perr
+			}
+			// Hand the bundle to the enclosing scope so cleanup tears down the
+			// proxy on every exit path (normal, error, ctx cancellation).
+			proxies = bundle
+			return proxyEnv, nil
 		}
-		// Hand the bundle to the enclosing scope so cleanup tears down the
-		// proxy on every exit path (normal, error, ctx cancellation).
-		proxies = bundle
-		return proxyEnv, nil
+	} else {
+		// The delegate's sidecar bring-up already produced the agent's proxy
+		// env (LLM/git/egress URLs + placeholders + the single GIT_CONFIG_*
+		// block); it takes the place of ConfigureProxies' output here.
+		sbEnv = append(sbEnv, opts.PrebuiltProxyEnv...)
 	}
 
 	sandboxRun, sboxObj, err := sandbox.Wrap(runCtx, sandbox.Config{
@@ -691,39 +734,25 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		Env:              sbEnv,
 		ExtraMounts:      extraMounts,
 		ConfigureProxies: configureProxies,
+		Network:          opts.PrebuiltNetwork,
 		MemoryLimitMB:    runMemoryLimitMB(),
 	})
 	if err != nil {
 		// Wrap cleaned up its own partial state, but configureProxies may
 		// have started the proxies before a later Wrap step failed — cleanup
-		// shuts them down (plus the agenthost daemon + scratch dir).
+		// shuts them down (plus the agenthost daemon + scratch dir). On the
+		// executor path the delegate's sidecar + network are untouched here —
+		// it owns their teardown once Run returns.
 		cleanup()
 		return nil, cleanup, fmt.Errorf("sandbox: %w", err)
 	}
 	sb = sboxObj
 	run = sandboxRun
 
-	// Broker-spawn this run's capless credential-sidecar process (an inert
-	// skeleton today; nothing here changes the run's behavior). Positioned
-	// right after Wrap returns, alongside where
-	// StartAgentHost/ConfigureProxies ran above, so it lives beside the
-	// other per-run bring-up seams a later phase (proxy + agenthost
-	// relocation) will extend. sb.SubnetIdx is the same index Wrap just
-	// allocated for the run's own netns, so the sidecar's uid can never
-	// collide with a concurrently live run's.
-	sidecarHandle, serr := sandbox.LaunchSidecar(runCtx, sandbox.SidecarConfig{
-		RunID:     opts.TraceID,
-		SubnetIdx: sb.SubnetIdx,
-	})
-	if serr != nil {
-		cleanup()
-		return nil, cleanup, fmt.Errorf("sandbox: launch credential sidecar: %w", serr)
-	}
-	sidecar = sidecarHandle
-
 	// The LaunchedRun satisfies runProc (Start/Stdin/Stdout/Stderr/Wait/
-	// OOMKilled); cleanup closes it (kill + cgroup) alongside the rest of
-	// the bring-up.
+	// OOMKilled); cleanup closes it (kill + cgroup). On the executor path the
+	// credential sidecar + network were brought up by the delegate before this
+	// call and are torn down by it after Run returns — not here.
 	return sandboxRun, cleanup, nil
 }
 

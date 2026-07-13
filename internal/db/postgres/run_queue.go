@@ -151,17 +151,17 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	// the fleet view) toward an instance that stopped touching the row.
 	_, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL, result_summary = $3,
-			executor_id = NULL, boot_epoch = NULL
+			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
 		WHERE org_id = $1 AND id = $2 AND status = 'running'
 	`, orgID, runID, lastErr)
 	return err
 }
 
-func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runID string) (bool, error) {
+func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runID, credPubKey string) (bool, error) {
 	res, err := s.conn.ExecContext(ctx, `
-		UPDATE runs SET status = 'awaiting_credentials'
+		UPDATE runs SET status = 'awaiting_credentials', cred_pubkey = NULLIF($3, '')
 		WHERE org_id = $1 AND id = $2 AND status = 'running'
-	`, orgID, runID)
+	`, orgID, runID, credPubKey)
 	if err != nil {
 		return false, err
 	}
@@ -179,9 +179,9 @@ func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.A
 	var r db.AwaitingCredentialsRun
 	err := s.conn.QueryRowContext(ctx, `
 		SELECT id::text, org_id::text, team_id::text, task_id::text, COALESCE(executor_id, ''),
-		       COALESCE(boot_epoch, 0), COALESCE(claimed_at, started_at)
+		       COALESCE(boot_epoch, 0), COALESCE(claimed_at, started_at), COALESCE(cred_pubkey, '')
 		FROM runs WHERE org_id = $1 AND id = $2
-	`, orgID, runID).Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt)
+	`, orgID, runID).Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.AwaitingCredentialsRun{}, false, nil
 	}
@@ -202,7 +202,7 @@ func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.A
 func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, runID string) (bool, error) {
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL,
-			executor_id = NULL, boot_epoch = NULL
+			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
 		WHERE org_id = $1 AND id = $2 AND status = 'awaiting_credentials'
 	`, orgID, runID)
 	if err != nil {
@@ -215,7 +215,7 @@ func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, r
 func (s *runQueueStore) ListAwaitingCredentials(ctx context.Context) ([]db.AwaitingCredentialsRun, error) {
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT id::text, org_id::text, team_id::text, task_id::text, COALESCE(executor_id, ''),
-		       COALESCE(boot_epoch, 0), COALESCE(claimed_at, started_at)
+		       COALESCE(boot_epoch, 0), COALESCE(claimed_at, started_at), COALESCE(cred_pubkey, '')
 		FROM runs WHERE status = 'awaiting_credentials'
 	`)
 	if err != nil {
@@ -228,7 +228,7 @@ func (s *runQueueStore) ListAwaitingCredentials(ctx context.Context) ([]db.Await
 func (s *runQueueStore) ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan time.Time) ([]db.AwaitingCredentialsRun, error) {
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT r.id::text, r.org_id::text, r.team_id::text, r.task_id::text, COALESCE(r.executor_id, ''),
-		       COALESCE(r.boot_epoch, 0), COALESCE(r.claimed_at, r.started_at)
+		       COALESCE(r.boot_epoch, 0), COALESCE(r.claimed_at, r.started_at), COALESCE(r.cred_pubkey, '')
 		FROM runs r
 		JOIN run_credentials rc ON rc.run_id = r.id
 		WHERE r.status NOT IN ('queued', 'awaiting_credentials', `+runTerminalStatusesSQL+`, 'open')
@@ -246,7 +246,7 @@ func scanAwaitingCredentialsRuns(rows *sql.Rows) ([]db.AwaitingCredentialsRun, e
 	var out []db.AwaitingCredentialsRun
 	for rows.Next() {
 		var r db.AwaitingCredentialsRun
-		if err := rows.Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt); err != nil {
+		if err := rows.Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -272,7 +272,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 	// stamp: a queued row has no owner.
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL,
-			executor_id = NULL, boot_epoch = NULL
+			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
 		WHERE status NOT IN (
 			'queued',
 			'completed','failed','cancelled','task_unsolvable',

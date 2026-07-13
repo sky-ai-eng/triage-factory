@@ -102,7 +102,54 @@ type Config struct {
 	// handles via its own defer chain and shuts them down after the
 	// agent process exits. If the callback returns an error, Wrap
 	// tears down any state it allocated and returns the error.
+	//
+	// Ignored when Network is non-nil: that path's caller brought the
+	// proxies up itself while standing the network up, ahead of Wrap.
 	ConfigureProxies func(s *Sandbox) (envAdditions []string, err error)
+
+	// Network, when non-nil, is a per-run network the caller stood up
+	// itself via SetupRunNetwork (subnet index + netns + veth + iptables)
+	// BEFORE calling Wrap. Wrap then launches into it — skipping its own
+	// subnet allocation, network setup, AND the ConfigureProxies callback
+	// — and does NOT tear it down: the caller owns Network.Close().
+	//
+	// This is the executor path where the delegate brings the credential
+	// sidecar and its proxies up on Network.HostIP ahead of the sandbox,
+	// so the pre-sandbox clone can route through them (the veth host IP is
+	// reachable from the host too). The caller passes the proxies' sandbox
+	// env in Config.Env directly, since Wrap runs no ConfigureProxies here.
+	//
+	// nil keeps the self-contained path: Wrap allocates the subnet, builds
+	// the network, runs ConfigureProxies, and owns the teardown — the
+	// all/local, curator, and one-shot system-job callers.
+	Network *RunNetwork
+}
+
+// RunNetwork is a per-run network (subnet index + netns + veth + iptables
+// MASQUERADE) stood up independently of Wrap, so the caller can bind proxies
+// — and launch the credential sidecar — on HostIP before the sandbox itself
+// exists. Wrap consumes one via Config.Network. The caller owns Close(),
+// ordered AFTER the sidecar's Close and the run's (the veth the proxies
+// bound must outlive both), and BEFORE nothing else reclaims the subnet idx.
+//
+// Fields are read-only from outside the package. HostIP is the host-side
+// veth IP the proxies bind on — reachable both from the host (the delegate's
+// own clone) and from inside the sandbox (the jailed agent). Idx is the
+// allocated subnet index, which also derives the run's sidecar uid
+// (SidecarUID), so one index ties the network and the sidecar together.
+type RunNetwork struct {
+	Idx       uint8
+	Subnet    string
+	HostIP    string
+	NetnsPath string
+
+	// netSt holds the platform-specific teardown state (a NetworkState on
+	// Linux) so Close can reverse exactly what SetupRunNetwork created,
+	// without re-deriving names. Typed as any so the cross-platform struct
+	// doesn't drag the Linux-only NetworkState into other builds — the same
+	// convention Sandbox.teardown uses.
+	netSt  any
+	closed bool
 }
 
 // Mount declares an additional bind mount in the sandbox. Source is
@@ -230,6 +277,22 @@ type LaunchedRun interface {
 // Non-Linux: returns ErrUnsupportedPlatform without doing any work.
 func Wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	return wrap(ctx, cfg)
+}
+
+// SetupRunNetwork allocates a subnet index and stands up the per-run network
+// (netns + veth + iptables MASQUERADE + egress allowlist) for runID, ahead of
+// Wrap, returning a RunNetwork the caller passes as Config.Network and whose
+// Close it owns. It is the executor path's hook for bringing proxies + the
+// credential sidecar up on HostIP before the pre-sandbox clone runs; the
+// self-contained Wrap path (Config.Network nil) does the same setup inline
+// and owns its own teardown.
+//
+// On error, any partial network state is already torn down and the subnet
+// index released — the caller does not Close a nil return.
+//
+// Non-Linux: returns ErrUnsupportedPlatform, like Wrap.
+func SetupRunNetwork(ctx context.Context, runID string) (*RunNetwork, error) {
+	return setupRunNetwork(ctx, runID)
 }
 
 // ReapOrphans scans /var/run/netns for tf-<id>-<idx> entries and

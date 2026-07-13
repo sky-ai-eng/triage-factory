@@ -90,10 +90,15 @@ type RunQueueStore interface {
 	// and — Postgres only — fires the tf_ctl cred_request doorbell so the
 	// brain's credential provisioner (internal/credprovision) resolves and
 	// seals this run's bundle without waiting for the backstop sweep.
-	// Guarded on 'running' so a stale/duplicate call can't reopen a run
-	// that already moved past this gate. matched is false when the guard
-	// didn't hold.
-	MarkAwaitingCredentials(ctx context.Context, orgID, runID string) (matched bool, err error)
+	// credPubKey (base64 X25519) is the per-run sidecar public key the
+	// brain seals the bundle to — recorded here, in the same statement as
+	// the status flip, so the provisioner never sees a parked run without
+	// the key it needs; empty stores NULL (a caller that has no sidecar
+	// key yet). Guarded on 'running' so a stale/duplicate call can't
+	// reopen a run that already moved past this gate — the guard also
+	// keeps a late duplicate from overwriting the key the brain may
+	// already have sealed to. matched is false when the guard didn't hold.
+	MarkAwaitingCredentials(ctx context.Context, orgID, runID, credPubKey string) (matched bool, err error)
 
 	// GetClaim returns the run's current claim identity (team, claiming
 	// executor, boot epoch) regardless of status — the brain's targeted,
@@ -146,8 +151,8 @@ type RunQueueStore interface {
 // ListActiveNeedingCredentialRefresh (TFAC-614) — the narrow shape the
 // brain's credential provisioner needs to resolve and seal a run's bundle:
 // enough to look up the org's credentials, the run's authorized repo set
-// (via TeamID), and the claiming executor's published pubkey (via
-// ExecutorID).
+// (via TeamID), and the key to seal to (CredPubKey, with the claiming
+// executor's published instance pubkey reachable via ExecutorID).
 type AwaitingCredentialsRun struct {
 	RunID      string
 	OrgID      string
@@ -156,4 +161,7 @@ type AwaitingCredentialsRun struct {
 	ExecutorID string
 	BootEpoch  int64
 	ClaimedAt  time.Time
+	// CredPubKey is the per-run sidecar public key recorded by
+	// MarkAwaitingCredentials; empty when the run was parked without one.
+	CredPubKey string
 }

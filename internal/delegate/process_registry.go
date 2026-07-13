@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -277,24 +276,6 @@ func (s *Spawner) executorIdentity() (string, int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.executorID, s.bootEpoch
-}
-
-// SetSealingKey wires this process's ephemeral X25519 keypair (TFAC-614),
-// minted once at boot by app.registerInstance for TF_ROLE=executor only.
-// nil everywhere else (RoleAll/RoleControl/local) — the awaiting-
-// credentials wait is gated on runmode.Role() == RoleExecutor, so a nil
-// key is never read.
-func (s *Spawner) SetSealingKey(kp *credseal.KeyPair) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sealingKey = kp
-}
-
-// sealingKeyPair returns the wired sealing keypair under lock.
-func (s *Spawner) sealingKeyPair() *credseal.KeyPair {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sealingKey
 }
 
 // SetMaxConcurrentRuns resizes the off-dispatcher concurrency cap. Call

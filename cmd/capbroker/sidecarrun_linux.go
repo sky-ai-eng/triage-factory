@@ -98,6 +98,11 @@ type sidecarHandle struct {
 
 var _ sandbox.LaunchedSidecar = (*sidecarHandle)(nil)
 
+// Supervision returns the orchestrator's end of the sidecar's stdio socket —
+// the duplex control channel the orchestrator wraps in a sidecarproto.Conn.
+// Owned by this handle; Close closes it.
+func (h *sidecarHandle) Supervision() net.Conn { return h.conn }
+
 func (h *sidecarHandle) Close() error {
 	h.closeOnce.Do(func() {
 		if h.conn != nil {
