@@ -505,3 +505,19 @@ func TestPostGraphQL_ContextCancellation(t *testing.T) {
 		t.Fatal("PostGraphQL did not return after ctx cancellation — the GraphQL path is not ctx-aware")
 	}
 }
+
+// TestNewProxyClient_GraphQLFailsClosed verifies a credential-proxy client
+// refuses GraphQL up front rather than silently misrouting it: the REST proxy
+// its baseURL points at does not front the sibling GraphQL endpoint, so
+// PostGraphQL must fail closed with no network attempt. A normal NewClient is
+// unaffected — only the viaProxy flag trips the guard.
+func TestNewProxyClient_GraphQLFailsClosed(t *testing.T) {
+	c := NewProxyClient("http://10.42.5.1:34567", "per-run-placeholder")
+	_, err := c.PostGraphQL(context.Background(), map[string]any{"query": "{ viewer { login } }"})
+	if err == nil {
+		t.Fatal("PostGraphQL on a proxy client must fail closed, got nil error")
+	}
+	if !strings.Contains(err.Error(), "credential proxy") {
+		t.Fatalf("want the proxy-guard error, got %v", err)
+	}
+}

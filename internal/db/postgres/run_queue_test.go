@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -415,6 +417,47 @@ func TestRunQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	if bare.ActorAgentID != "" || bare.ActorAgentName != "" {
 		t.Errorf("no-actor run = (%q, %q), want both empty", bare.ActorAgentID, bare.ActorAgentName)
 	}
+}
+
+// TestRunQueueStore_Postgres_Credentials runs the shared awaiting-credentials
+// pubkey conformance suite against the Postgres impl (admin pool, matching
+// production wiring). Each factory call resets the harness so subtests don't
+// share state.
+func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
+	h := pgtest.Shared(t)
+	ctx := context.Background()
+
+	dbtest.RunRunQueueCredentialsConformance(t, func(t *testing.T) (db.RunQueueStore, string, dbtest.RunQueueCredentialsSeeder) {
+		t.Helper()
+		h.Reset(t)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		orgID, userID := seedPgOrgForBlueprints(t, h)
+		brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+
+		nextStep := 0
+		seed := dbtest.RunQueueCredentialsSeeder{
+			EnqueueRun: func(t *testing.T) string {
+				t.Helper()
+				idx := nextStep
+				nextStep++
+				runID := uuid.New().String()
+				if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+					ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
+					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
+				}); err != nil {
+					t.Fatalf("EnqueueRun: %v", err)
+				}
+				return runID
+			},
+			ForceStatus: func(t *testing.T, runID, status string) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(`UPDATE runs SET status = $1 WHERE id = $2`, status, runID); err != nil {
+					t.Fatalf("force status %q: %v", status, err)
+				}
+			},
+		}
+		return stores.RunQueue, orgID, seed
+	})
 }
 
 // pgRunStatus reads a run's status and whether completed_at is stamped.

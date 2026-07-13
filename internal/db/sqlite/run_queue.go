@@ -112,7 +112,7 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	// cleared too: a queued row has no owner (mirrors the Postgres impl).
 	_, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL, result_summary = ?,
-			executor_id = NULL, boot_epoch = NULL
+			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
 		WHERE id = ? AND status = 'running'
 	`, lastErr, runID)
 	return err
@@ -122,14 +122,14 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 // ctlbus doorbell — the tf_ctl fabric is Postgres-only (local mode has no
 // LISTEN/NOTIFY), and never reached in practice anyway: local mode is
 // always role=all, which never parks a run in this status.
-func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runID string) (bool, error) {
+func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runID, credPubKey string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
 	res, err := s.conn.ExecContext(ctx, `
-		UPDATE runs SET status = 'awaiting_credentials'
+		UPDATE runs SET status = 'awaiting_credentials', cred_pubkey = NULLIF(?, '')
 		WHERE id = ? AND status = 'running'
-	`, runID)
+	`, credPubKey, runID)
 	if err != nil {
 		return false, err
 	}
@@ -141,17 +141,28 @@ func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.A
 	if err := assertLocalOrg(orgID); err != nil {
 		return db.AwaitingCredentialsRun{}, false, err
 	}
-	var r db.AwaitingCredentialsRun
+	// claimed_at/started_at are selected bare and coalesced in Go: wrapping
+	// them in COALESCE strips the declared column type the driver needs to
+	// hand back a time.Time, so the scan would see a raw string.
+	var (
+		r         db.AwaitingCredentialsRun
+		claimedAt sql.NullTime
+		startedAt time.Time
+	)
 	err := s.conn.QueryRowContext(ctx, `
 		SELECT id, org_id, team_id, task_id, COALESCE(executor_id, ''),
-		       COALESCE(boot_epoch, 0), COALESCE(claimed_at, started_at)
+		       COALESCE(boot_epoch, 0), claimed_at, started_at, COALESCE(cred_pubkey, '')
 		FROM runs WHERE org_id = ? AND id = ?
-	`, orgID, runID).Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt)
+	`, orgID, runID).Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey)
 	if err == sql.ErrNoRows {
 		return db.AwaitingCredentialsRun{}, false, nil
 	}
 	if err != nil {
 		return db.AwaitingCredentialsRun{}, false, err
+	}
+	r.ClaimedAt = startedAt
+	if claimedAt.Valid {
+		r.ClaimedAt = claimedAt.Time
 	}
 	return r, true, nil
 }
@@ -167,7 +178,7 @@ func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, r
 	}
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL,
-			executor_id = NULL, boot_epoch = NULL
+			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
 		WHERE id = ? AND status = 'awaiting_credentials'
 	`, runID)
 	if err != nil {
@@ -180,7 +191,7 @@ func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, r
 func (s *runQueueStore) ListAwaitingCredentials(ctx context.Context) ([]db.AwaitingCredentialsRun, error) {
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT id, org_id, team_id, task_id, COALESCE(executor_id, ''),
-		       COALESCE(boot_epoch, 0), COALESCE(claimed_at, started_at)
+		       COALESCE(boot_epoch, 0), claimed_at, started_at, COALESCE(cred_pubkey, '')
 		FROM runs WHERE status = 'awaiting_credentials'
 	`)
 	if err != nil {
@@ -193,7 +204,7 @@ func (s *runQueueStore) ListAwaitingCredentials(ctx context.Context) ([]db.Await
 func (s *runQueueStore) ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan time.Time) ([]db.AwaitingCredentialsRun, error) {
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT r.id, r.org_id, r.team_id, r.task_id, COALESCE(r.executor_id, ''),
-		       COALESCE(r.boot_epoch, 0), COALESCE(r.claimed_at, r.started_at)
+		       COALESCE(r.boot_epoch, 0), r.claimed_at, r.started_at, COALESCE(r.cred_pubkey, '')
 		FROM runs r
 		JOIN run_credentials rc ON rc.run_id = r.id
 		WHERE r.status NOT IN ('queued', 'awaiting_credentials', `+runTerminalStatusesSQL+`, 'open')
@@ -210,9 +221,19 @@ func (s *runQueueStore) ListActiveNeedingCredentialRefresh(ctx context.Context, 
 func scanAwaitingCredentialsRuns(rows *sql.Rows) ([]db.AwaitingCredentialsRun, error) {
 	var out []db.AwaitingCredentialsRun
 	for rows.Next() {
-		var r db.AwaitingCredentialsRun
-		if err := rows.Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt); err != nil {
+		// Same bare-column + Go-side coalesce as GetClaim — see the comment
+		// there.
+		var (
+			r         db.AwaitingCredentialsRun
+			claimedAt sql.NullTime
+			startedAt time.Time
+		)
+		if err := rows.Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey); err != nil {
 			return nil, err
+		}
+		r.ClaimedAt = startedAt
+		if claimedAt.Valid {
+			r.ClaimedAt = claimedAt.Time
 		}
 		out = append(out, r)
 	}
@@ -237,7 +258,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 	// The reset clears the stamp: a queued row has no owner.
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL,
-			executor_id = NULL, boot_epoch = NULL
+			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
 		WHERE status NOT IN (
 			'queued',
 			'completed','failed','cancelled','task_unsolvable',

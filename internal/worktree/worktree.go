@@ -131,6 +131,22 @@ type CloneAuth struct {
 	// token is the bearer half of the credential, sent as
 	// base64("x-access-token:" + token). Empty disables injection.
 	token string
+
+	// The three proxy* fields, set together by CloneAuthViaGitProxy, are the
+	// alternative to the real-token path above: instead of injecting a
+	// credential, they route this call's network git through the per-run git
+	// proxy, which holds the real token. Used on the executor path (TFAC-631)
+	// where the clone must not put the org's GitHub token in this process.
+	// Fixed string fields (not a slice) so CloneAuth stays comparable — callers
+	// assert equality with `!=`.
+	//
+	// proxyBase scopes both git-config keys; proxyInsteadOf is the upstream
+	// prefix rewritten to it (url.<proxyBase>.insteadOf); proxyExtraHeader is
+	// the placeholder Basic credential the proxy authenticates
+	// (http.<proxyBase>.extraHeader). All empty on the token path.
+	proxyBase        string
+	proxyInsteadOf   string
+	proxyExtraHeader string
 }
 
 // CloneAuthFor scopes token to the host of cloneURL for per-invocation
@@ -149,22 +165,71 @@ func CloneAuthFor(cloneURL, token string) CloneAuth {
 	return CloneAuth{urlPrefix: "https://" + u.Host + "/", token: token}
 }
 
-// active reports whether this CloneAuth will inject anything.
-func (a CloneAuth) active() bool { return a.urlPrefix != "" && a.token != "" }
+// gitProxyPlaceholderUser mirrors agentproc.gitProxyBasicUser ("x-run"): the
+// username half of the per-run git Basic credential the proxy-routing mode
+// presents. The git proxy validates only the password (the placeholder token),
+// so the username is a stable sentinel — kept identical to the sandbox agent's
+// own git-proxy user so host clone and in-jail agent transit the proxy the same
+// way.
+const gitProxyPlaceholderUser = "x-run"
 
-// configEntry is the git config (key, value) that injects the auth as a
-// host-scoped HTTP extraHeader, or ok=false when the auth is inert. The value
-// mirrors the gitproxy's Basic-auth encoding: base64 of "x-access-token:" +
-// token. Split out so gitConfigEnviron and tests share one source of the
-// encoding.
+// CloneAuthViaGitProxy routes a host-side clone/fetch through the per-run git
+// proxy instead of injecting a real token. Every network git op is rewritten
+// from upstream to proxyURL (git url.insteadOf) and carries placeholderToken as
+// its Basic password (http.extraHeader); the proxy — the credential sidecar —
+// swaps the placeholder for the org's real GitHub token on the upstream hop, so
+// THIS process never holds it (TFAC-631). The encoding matches the sandbox
+// agent's own git-proxy pairs so the host-side clone and the in-jail agent
+// transit the one proxy identically. Returns the zero (inert) CloneAuth if any
+// argument is empty.
+func CloneAuthViaGitProxy(proxyURL, upstream, placeholderToken string) CloneAuth {
+	if proxyURL == "" || upstream == "" || placeholderToken == "" {
+		return CloneAuth{}
+	}
+	creds := gitProxyPlaceholderUser + ":" + placeholderToken
+	return CloneAuth{
+		proxyBase:        strings.TrimRight(proxyURL, "/") + "/",
+		proxyInsteadOf:   strings.TrimRight(upstream, "/") + "/",
+		proxyExtraHeader: "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(creds)),
+	}
+}
+
+// active reports whether this CloneAuth will inject anything — either the
+// real-token extraHeader or the git-proxy routing pair.
+func (a CloneAuth) active() bool {
+	return (a.urlPrefix != "" && a.token != "") || a.proxyBase != ""
+}
+
+// configEntry is the single git config (key, value) for the real-token mode
+// (CloneAuthFor): a host-scoped HTTP extraHeader whose value mirrors the
+// gitproxy's Basic-auth encoding, base64 of "x-access-token:" + token. ok=false
+// for the zero value AND for the proxy-routing mode (which emits two entries —
+// see configEntries). Split out so gitConfigEnviron and the token-mode test
+// share one source of the encoding.
 func (a CloneAuth) configEntry() (key, value string, ok bool) {
-	if !a.active() {
+	if a.urlPrefix == "" || a.token == "" {
 		return "", "", false
 	}
 	creds := "x-access-token:" + a.token
 	return "http." + a.urlPrefix + ".extraHeader",
 		"Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(creds)),
 		true
+}
+
+// configEntries returns every git-config (key, value) this auth injects: the
+// single host-scoped extraHeader in the token mode, or the insteadOf +
+// placeholder-extraHeader pair in the proxy-routing mode. Empty when inert.
+func (a CloneAuth) configEntries() [][2]string {
+	if key, value, ok := a.configEntry(); ok {
+		return [][2]string{{key, value}}
+	}
+	if a.proxyBase != "" {
+		return [][2]string{
+			{"url." + a.proxyBase + ".insteadOf", a.proxyInsteadOf},
+			{"http." + a.proxyBase + ".extraHeader", a.proxyExtraHeader},
+		}
+	}
+	return nil
 }
 
 // gitConfigEnviron returns base (a parent environment, e.g. os.Environ())
@@ -185,23 +250,27 @@ func (a CloneAuth) configEntry() (key, value string, ok bool) {
 // correct COUNT and our entry regardless of how duplicate env keys would
 // otherwise resolve — we never depend on first-vs-last-wins dedup behavior.
 func (a CloneAuth) gitConfigEnviron(base []string) ([]string, bool) {
-	key, value, ok := a.configEntry()
-	if !ok {
+	entries := a.configEntries()
+	if len(entries) == 0 {
 		return nil, false
 	}
 	idx := gitConfigCount(base)
-	out := make([]string, 0, len(base)+3)
+	out := make([]string, 0, len(base)+1+2*len(entries))
 	for _, kv := range base {
 		if strings.HasPrefix(kv, "GIT_CONFIG_COUNT=") {
-			continue // re-emitted below, bumped to include our entry
+			continue // re-emitted below, bumped to include our entries
 		}
 		out = append(out, kv)
 	}
-	return append(out,
-		"GIT_CONFIG_COUNT="+strconv.Itoa(idx+1),
-		"GIT_CONFIG_KEY_"+strconv.Itoa(idx)+"="+key,
-		"GIT_CONFIG_VALUE_"+strconv.Itoa(idx)+"="+value,
-	), true
+	out = append(out, "GIT_CONFIG_COUNT="+strconv.Itoa(idx+len(entries)))
+	for i, e := range entries {
+		n := idx + i
+		out = append(out,
+			"GIT_CONFIG_KEY_"+strconv.Itoa(n)+"="+e[0],
+			"GIT_CONFIG_VALUE_"+strconv.Itoa(n)+"="+e[1],
+		)
+	}
+	return out, true
 }
 
 // gitConfigCount parses GIT_CONFIG_COUNT (the number of git's indexed

@@ -1,6 +1,9 @@
 package sandbox
 
-import "context"
+import (
+	"context"
+	"net"
+)
 
 // SidecarUIDBase is the lowest uid in the per-run credential-sidecar band.
 // SidecarUID derives each run's sidecar uid from its subnet index, giving a
@@ -85,11 +88,17 @@ type SidecarConfig struct {
 	SubnetIdx uint8
 }
 
-// LaunchedSidecar is a live, broker-supervised run-sidecar process. Phase 1
-// exposes only teardown — the sidecar does no work yet (see
-// docs/for-agents/specs/per-run-credential-isolation), so there is nothing
-// for a caller to steer or wait on beyond "make it go away."
+// LaunchedSidecar is a live, broker-supervised run-sidecar process.
 type LaunchedSidecar interface {
+	// Supervision returns the orchestrator's end of the duplex control
+	// stream to the sidecar — the same socket whose other end is the
+	// sidecar's stdio. The caller wraps it in a *sidecarproto.Conn to relay
+	// the sealed bundle down and the non-secret proxy env back up, and to
+	// serve the sidecar's git-authorize callbacks. Valid until Close; nil on
+	// a platform/double with no live sidecar. The returned conn's own
+	// lifetime is owned by this handle — Close tears it down.
+	Supervision() net.Conn
+
 	// Close kills the sidecar and blocks until the broker has reaped it
 	// (draining the broker's registry entry), then releases local resources
 	// (the stdio socket + its listener). Idempotent.

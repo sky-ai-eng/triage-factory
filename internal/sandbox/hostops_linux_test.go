@@ -65,8 +65,12 @@ func TestSetPrivilegedOps_NilPanics(t *testing.T) {
 // effect — defaultOps routes to the new implementation, not silently to
 // the original hostOps{}.
 func TestSetPrivilegedOps_ReplacesDefault(t *testing.T) {
-	orig := defaultOps
-	t.Cleanup(func() { defaultOps = orig })
+	// SetPrivilegedOps mutates all three launcher globals, so restore all
+	// three — otherwise the fake run/sidecar launcher leaks into every later
+	// test in the binary (the integration suite launches real runs through
+	// runLauncher and would fail on the fake's not-implemented stub).
+	origOps, origRun, origSidecar := defaultOps, runLauncher, sidecarLauncher
+	t.Cleanup(func() { defaultOps, runLauncher, sidecarLauncher = origOps, origRun, origSidecar })
 
 	SetPrivilegedOps(fakePrivilegedOps{tag: "swapped"})
 	path, err := defaultOps.EnsureRootfs(context.Background(), RootfsSelector{})

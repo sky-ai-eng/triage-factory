@@ -989,7 +989,7 @@ func TestStartGitProxyForSandbox_RoutesAndAuthenticates(t *testing.T) {
 	src := func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 		return gitproxy.Token{Value: realToken, ExpiresAt: time.Now().Add(time.Hour)}, nil
 	}
-	pairs, srv, err := startGitProxyForSandbox(context.Background(), "127.0.0.1", &GitProxyConfig{TokenSource: src, Upstream: upstream.URL})
+	pairs, proxyURL, incomingToken, srv, err := startGitProxyForSandbox(context.Background(), "127.0.0.1", &GitProxyConfig{TokenSource: src, Upstream: upstream.URL})
 	if err != nil {
 		t.Fatalf("startGitProxyForSandbox: %v", err)
 	}
@@ -998,6 +998,17 @@ func TestStartGitProxyForSandbox_RoutesAndAuthenticates(t *testing.T) {
 
 	base := gitProxyBaseFromEnv(t, env)
 	runToken := gitProxyTokenFromEnv(t, env)
+	// The surfaced coordinates (for the orchestrator's own clone) must match
+	// what the sandbox git-config pairs encode — same proxy, same per-run token.
+	if proxyURL != base {
+		t.Errorf("surfaced git proxy URL = %q, want the pairs' base %q", proxyURL, base)
+	}
+	if incomingToken != runToken {
+		t.Errorf("surfaced git proxy token != the token encoded in the pairs")
+	}
+	if incomingToken == realToken {
+		t.Fatal("PROPERTY B VIOLATED: surfaced git proxy token equals the real credential")
+	}
 	if runToken == realToken {
 		t.Fatal("PROPERTY B VIOLATED: per-run git token equals the real credential")
 	}

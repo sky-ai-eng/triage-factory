@@ -22,7 +22,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
@@ -349,16 +348,12 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			TeamID:           cfg.teamID,
 			IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 		}
-		// TF_ROLE=executor: thread this run's bundle accessor into the daemon
-		// so its gh/jira verbs resolve credentials from the sealed bundle
-		// instead of the (disabled, on an executor) secret store — same
-		// credbundle.FromContext(ctx) gate gitProxyConfigFor uses below.
-		var agentHostCreds func(context.Context) (*credbundle.Bundle, bool)
-		if _, ok := credbundle.FromContext(ctx); ok {
-			agentHostCreds = s.bundleAgentHostCredentials(orgID, runID)
-		}
+		// TF_ROLE=executor: point the daemon's gh/jira verbs at this run's
+		// credential-sidecar REST proxies (holding only placeholders) instead of
+		// the (disabled, on an executor) secret store. nil-safe → nil on
+		// all/local, where the daemon resolves through its own resolver path.
 		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-			hd, mount, err := agenthost.Start(stores, info, agentHostCreds)
+			hd, mount, err := agenthost.Start(stores, info, cfg.execSandbox.agentHostProxyCreds())
 			if err != nil {
 				return sandbox.Mount{}, nil, err
 			}
@@ -371,9 +366,16 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// backstop wired to the same record path the pre-push hook uses so a
 	// `git push --no-verify` the hook can't see still records a branch artifact
 	// (TFAC-467). nil in local mode / no GitHub credential — no proxy.
-	gitProxy := s.gitProxyConfigFor(ctx, info, stores)
-	if gitProxy != nil && storesSet {
-		gitProxy.RecordPush = gitPushRecorder(stores, info)
+	// On the executor path the git proxy runs in the credential sidecar (brought
+	// up by the dispatcher), so none is wired here — agentproc launches into the
+	// prebuilt network and ignores GitProxy. On all/local the orchestrator IS
+	// the credential holder and runs the in-process git proxy over the resolver.
+	var gitProxy *agentproc.GitProxyConfig
+	if cfg.execSandbox == nil {
+		gitProxy = s.gitProxyConfigFor(ctx, info, stores)
+		if gitProxy != nil && storesSet {
+			gitProxy.RecordPush = gitPushRecorder(stores, info)
+		}
 	}
 
 	// Crash re-claim: if the run already carries a session from a prior
@@ -403,12 +405,15 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		OrgID:        orgID,
 		Secrets:      s.getRunSecrets(),
 		LLMResolver:  s.llmResolverForRun(orgID, runID),
-		// Executor bundle path only (nil elsewhere): the SigV4 proxy re-reads
-		// the newest sealed bundle's triple live so a re-minted role-mode STS
-		// session credential reaches a mid-run sandbox (TFAC-616).
-		LLMCredentialSource: s.bundleLLMSourceFor(ctx, info),
-		GitProxy:            gitProxy,
-		StartAgentHost:      startAgentHost,
+		// Executor path (nil/empty elsewhere): hand agentproc the prebuilt run
+		// network and the sidecar's proxy env so it launches into them and holds
+		// no credential — the sidecar owns the LLM/git/egress proxies + the
+		// live SigV4 refresh. On all/local these are nil and agentproc allocates
+		// the network and runs the in-process proxies over the resolver.
+		PrebuiltNetwork:  cfg.execSandbox.runNetwork(),
+		PrebuiltProxyEnv: cfg.execSandbox.proxyEnv(),
+		GitProxy:         gitProxy,
+		StartAgentHost:   startAgentHost,
 		// Org commit identity (TFAC-452): empty when none resolved → ambient git
 		// config inherited (today's behavior).
 		GitUserName:  commitIdentity.Name,

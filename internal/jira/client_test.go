@@ -62,6 +62,27 @@ func TestDataCenterPATConfig(t *testing.T) {
 	}
 }
 
+// TestProxyPlaceholderConfig pins the credential-proxy shape: a Bearer
+// placeholder over REST v2, with the proxy URL used as the base verbatim, for
+// both real deployments (the proxy swaps in the org's real auth upstream).
+func TestProxyPlaceholderConfig(t *testing.T) {
+	cfg := ProxyPlaceholder("http://10.42.5.1:34567", "per-run-placeholder")
+	if cfg.APIVersion != APIv2 {
+		t.Errorf("APIVersion = %q, want %q (v2 is deliberate until ADF comment bodies land)", cfg.APIVersion, APIv2)
+	}
+	ba, ok := cfg.auth.(bearerAuth)
+	if !ok {
+		t.Fatalf("auth = %T, want bearerAuth", cfg.auth)
+	}
+	if ba.token != "per-run-placeholder" {
+		t.Errorf("bearer token = %q, want the placeholder", ba.token)
+	}
+	// The proxy URL is the base verbatim and v2 paths route through it.
+	if got, want := cfg.apiURL("issue/%s", "PROJ-1"), "http://10.42.5.1:34567/rest/api/2/issue/PROJ-1"; got != want {
+		t.Errorf("apiURL = %q, want %q", got, want)
+	}
+}
+
 // TestCloudAPITokenConfig pins the {Basic, v3, Cloud} shape.
 func TestCloudAPITokenConfig(t *testing.T) {
 	cfg := CloudAPIToken("https://acme.atlassian.net", "me@acme.com", "tok")

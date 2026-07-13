@@ -233,19 +233,6 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	orgID := run.OrgID
 	startTime := time.Now()
 
-	// TF_ROLE=executor only (TFAC-614): park the claim in
-	// 'awaiting_credentials' until the brain seals this run's credential
-	// bundle, then carry it on ctx for every downstream credential seam
-	// (resolveCredentials, the git proxy TokenSource, the GitHub/Jira
-	// resolvers) to read via credbundle.FromContext. A pure passthrough on
-	// every other role. !ok means the wait timed out and the claim was
-	// already released back to 'queued' — nothing left to do here.
-	var credOK bool
-	ctx, credOK = s.awaitCredentials(ctx, orgID, run)
-	if !credOK {
-		return
-	}
-
 	br, err := s.blueprints.GetRunSystem(ctx, orgID, run.BlueprintRunID)
 	if err != nil || br == nil {
 		if ctx.Err() != nil {
@@ -307,6 +294,22 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 		}
 	}
 
+	// TF_ROLE=executor: stand up the run network + credential sidecar + proxies
+	// BEFORE workspace setup, so the pre-sandbox clone/GetPR and the agenthost
+	// route through the sidecar (holding placeholders) while the orchestrator
+	// holds no credential. nil on every other role (in-process proxy path) and
+	// on an unwired fixture. A bring-up failure (brain not provisioning) is a
+	// transient setup failure — requeue like any other. Torn down after the run.
+	execSandbox, err := s.bringUpExecutorSandbox(ctx, orgID, run, *task)
+	if err != nil {
+		if ctx.Err() != nil {
+			return // dispatcher shutting down — leave the claimed run for boot reconcile
+		}
+		s.handleStepSetupError(orgID, br, *run, err)
+		return
+	}
+	defer execSandbox.Close()
+
 	// Sequence off the plan frozen at mint (br.StepPlan), not the live
 	// blueprint_steps/prompts — an edit to the blueprint mid-flight must not
 	// change what this run executes. The step + prompt are reconstructed from
@@ -330,11 +333,15 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	step := planStep.Step(br.BlueprintID)
 	stepPrompt := planStep.Prompt()
 
-	// Resolve the run's GitHub client (per-org/owner/repo seam). model is
-	// already on the claimed row (captured at Delegate time, stable across
-	// the blueprint).
+	// Resolve the run's GitHub client for the self-contained (all/local) path.
+	// On the executor path execSandbox is non-nil and setupGitHub routes GetPR
+	// through the sidecar's GitHub-REST proxy instead — this client is unused
+	// there (the executor's secret store is disabled).
 	owner, repo := ownerRepoForTask(*task)
-	gh := s.resolveGHClient(ctx, orgID, owner, repo)
+	var gh *ghclient.Client
+	if execSandbox == nil {
+		gh = s.resolveGHClient(ctx, orgID, owner, repo)
+	}
 
 	// The blueprint_run is live on this step → place the task in_progress before
 	// any (possibly slow) workspace setup, so the board reflects the work
@@ -345,7 +352,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	// Build (step 0, first claim) or rehydrate (later steps / crash re-claim) the
 	// shared workspace. A transient setup failure requeues; a persistent one
 	// fails the blueprint.
-	cfg, err := s.buildStepConfig(ctx, orgID, br, *task, *run, gh)
+	cfg, err := s.buildStepConfig(ctx, orgID, br, *task, *run, gh, execSandbox)
 	if err != nil {
 		s.handleStepSetupError(orgID, br, *run, err)
 		return
@@ -355,6 +362,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	cfg.isBlueprintStep = true
 	cfg.blueprintRunID = br.ID
 	cfg.blueprintStep = stepIdx
+	cfg.execSandbox = execSandbox
 
 	// Increment the step prompt's usage, routed per trigger type.
 	if run.TriggerType == "manual" {
@@ -521,6 +529,17 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.AgentRun,
 		return
 	}
 
+	// TF_ROLE=executor: bring up the run network + credential sidecar + proxies
+	// for the resumed agent turn (the worktree was already rehydrated above — no
+	// clone — so this only feeds the agent's LLM/git proxies and the agenthost).
+	// nil on all/local. Torn down after the resume turn returns.
+	execSandbox, esErr := s.bringUpExecutorSandbox(stepCtx, orgID, run, *task)
+	if esErr != nil {
+		s.failRun(orgID, run.ID, task.ID, "manual", userID, "bring up credential sidecar for resume failed: "+esErr.Error(), domain.RunFailureUnclassified)
+		return
+	}
+	defer execSandbox.Close()
+
 	repoEnv := ""
 	if owner != "" && repo != "" {
 		repoEnv = owner + "/" + repo
@@ -538,6 +557,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.AgentRun,
 		ExtraAllowedTools: extraTools,
 		Namespace:         namespace,
 		TeamID:            run.TeamID,
+		execSandbox:       execSandbox,
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
 		s.markCancelledAfterResume(orgID, run.ID, userID)
@@ -743,7 +763,7 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 // every later claim it reconstructs the lightweight config from the task and
 // guarantees the shared worktree is on disk (warm reuse, or cold rehydrate from
 // the durable snapshot via ensureWorkspace).
-func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, run domain.AgentRun, gh *ghclient.Client) (runConfig, error) {
+func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, run domain.AgentRun, gh *ghclient.Client, execSandbox *executorSandbox) (runConfig, error) {
 	if br.WorktreePath == "" {
 		var (
 			cfg runConfig
@@ -751,7 +771,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		)
 		switch task.EntitySource {
 		case "github":
-			cfg, err = s.setupGitHub(ctx, orgID, run.ID, task, gh)
+			cfg, err = s.setupGitHub(ctx, orgID, run.ID, task, gh, execSandbox)
 		case "jira":
 			cfg, err = s.setupJira(ctx, orgID, run.ID, task, gh)
 		case "slack":

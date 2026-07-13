@@ -11,7 +11,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -177,27 +176,26 @@ func TestLocalClient_JiraGetIssue_ExecutorBundleFirst(t *testing.T) {
 	stores := db.Stores{Secrets: disabledJiraSecrets{}, Orgs: fakeJiraOrgs{}}
 	lc := NewLocal(stores, RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-1"})
 
-	t.Run("no bundle: hits the disabled secret store (the pre-fix executor failure)", func(t *testing.T) {
+	t.Run("no proxy creds: hits the disabled secret store (the pre-fix executor failure)", func(t *testing.T) {
 		_, err := lc.JiraGetIssue(context.Background(), "PROJ-1")
 		if !errors.Is(err, db.ErrSecretStoreUnavailable) {
-			t.Fatalf("JiraGetIssue without a bundle = %v, want an error wrapping db.ErrSecretStoreUnavailable", err)
+			t.Fatalf("JiraGetIssue without proxy creds = %v, want an error wrapping db.ErrSecretStoreUnavailable", err)
 		}
 	})
 
-	t.Run("bundle present: resolves from the bundle, never touches the disabled secret store", func(t *testing.T) {
-		bundle := &credbundle.Bundle{Jira: &credbundle.JiraCreds{
-			URL:        jira.URL,
-			AuthMethod: "datacenter",
-			PAT:        "bundle-pat",
-		}}
-		ctx := credbundle.WithBundle(context.Background(), bundle)
+	t.Run("proxy creds present: routes through the sidecar Jira proxy, never touches the disabled secret store", func(t *testing.T) {
+		// The jira server stands in for the sidecar's Jira-REST proxy: the client
+		// presents only the placeholder as a Bearer (the proxy injects the real
+		// Cloud-Basic / DC-Bearer auth upstream).
+		lc.proxyCreds = &ProxyCredentials{JiraAPIURL: jira.URL, JiraAPIToken: "run-placeholder"}
+		t.Cleanup(func() { lc.proxyCreds = nil })
 
-		issue, err := lc.JiraGetIssue(ctx, "PROJ-1")
+		issue, err := lc.JiraGetIssue(context.Background(), "PROJ-1")
 		if err != nil {
-			t.Fatalf("JiraGetIssue with a bundle: %v (the disabled secret store must never be consulted)", err)
+			t.Fatalf("JiraGetIssue with proxy creds: %v (the disabled secret store must never be consulted)", err)
 		}
 		if issue == nil || issue.Key != "PROJ-1" {
-			t.Fatalf("unexpected issue from the bundle path: %+v", issue)
+			t.Fatalf("unexpected issue from the proxy path: %+v", issue)
 		}
 	})
 }

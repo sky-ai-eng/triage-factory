@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/google/uuid"
@@ -61,6 +62,13 @@ type runConfig struct {
 	blueprintStep   int
 	isBlueprintStep bool
 	appendSysPrompt string
+
+	// execSandbox, when non-nil (TF_ROLE=executor), is the run network +
+	// credential sidecar + proxy coordinates the dispatcher stood up before
+	// workspace setup. runAgent threads it into agentproc.RunOptions
+	// (PrebuiltNetwork/PrebuiltProxyEnv) and the agenthost (ProxyCredentials);
+	// the dispatcher owns its teardown (after runAgent returns).
+	execSandbox *executorSandbox
 }
 
 // ErrEntityBusy is returned by Delegate on the event path when the fenced
@@ -396,8 +404,31 @@ func ownerRepoForTask(task domain.Task) (owner, repo string) {
 	return parseOwnerRepo(repoStr)
 }
 
+// cloneHostBase returns the scheme://host of an HTTPS clone URL — the insteadOf
+// upstream the executor's git-proxy clone routing rewrites, matching the sandbox
+// agent's own git-proxy pairs (which key off the org's git host base). An
+// unparseable or schemeless URL (e.g. an SSH remote, which the executor doesn't
+// use) returns as-is; the insteadOf then simply won't match and the clone fails
+// loudly rather than leaking a token.
+func cloneHostBase(cloneURL string) string {
+	u, err := url.Parse(cloneURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return cloneURL
+	}
+	return u.Scheme + "://" + u.Host
+}
+
 // setupGitHub prepares a worktree for a GitHub PR task.
-func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+//
+// On the executor path (execSandbox non-nil) the GetPR client and the host-side
+// clone both route through the run's credential sidecar — the client against
+// the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
+// orchestrator holds no GitHub credential for either. Elsewhere (all/local)
+// ghClient is the resolver-built client and the clone injects a real token.
+func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task domain.Task, ghClient *ghclient.Client, execSandbox *executorSandbox) (runConfig, error) {
+	if execSandbox != nil {
+		ghClient = ghclient.NewProxyClient(execSandbox.res.GitHubAPIURL, execSandbox.res.GitHubAPIToken)
+	}
 	if ghClient == nil {
 		return runConfig{}, fmt.Errorf("GitHub credentials not configured")
 	}
@@ -471,14 +502,23 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 	}
 
 	s.updateStatus(orgID, runID, "cloning")
-	// Resolve the host-side clone credential for this repo's owner.
-	// CloneAuthFor scopes the token to the upstream's host and no-ops on an
-	// SSH URL or an empty token, so this is inert in local SSH mode and for
-	// public/anonymous clones — only a multi-mode HTTPS private clone gets the
-	// App installation token injected (per-invocation env, never persisted).
-	cloneToken := s.resolveCloneToken(ctx, orgID, owner, repo)
+	// Resolve the host-side clone credential. On the executor path the clone
+	// routes through the sidecar's git proxy (CloneAuthViaGitProxy): git is
+	// rewritten from the upstream host to the proxy URL and presents only the
+	// per-run placeholder, so the real App token stays in the sidecar. The
+	// insteadOf upstream is the clone URL's scheme+host (matching the sandbox
+	// agent's own git-proxy pairs, which use the org git base). Elsewhere:
+	// CloneAuthFor scopes a real token to the upstream host and no-ops on an SSH
+	// URL or an empty token, so it's inert in local SSH mode and for
+	// public/anonymous clones.
+	var cloneAuth worktree.CloneAuth
+	if execSandbox != nil {
+		cloneAuth = worktree.CloneAuthViaGitProxy(execSandbox.res.GitProxyURL, cloneHostBase(upstreamCloneURL), execSandbox.res.GitProxyToken)
+	} else {
+		cloneAuth = worktree.CloneAuthFor(upstreamCloneURL, s.resolveCloneToken(ctx, orgID, owner, repo))
+	}
 	wtPath, err := worktree.CreateForPR(ctx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, runID,
-		worktree.WithCloneAuth(worktree.CloneAuthFor(upstreamCloneURL, cloneToken)),
+		worktree.WithCloneAuth(cloneAuth),
 		// Refresh origin/<base> at materialization so `pr diff` frames against a
 		// current base instead of a clone-time-frozen ref (TFAC-505).
 		worktree.WithBaseBranch(pr.BaseRef))

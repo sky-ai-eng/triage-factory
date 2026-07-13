@@ -16,7 +16,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -279,6 +278,12 @@ type ResumeOptions struct {
 	// captures it from the run row (run.TeamID, NOT NULL); empty falls back
 	// to the schema defaults for the absent-auto-deny resolve.
 	TeamID string
+
+	// execSandbox, when non-nil (TF_ROLE=executor), is the run network +
+	// credential sidecar the dispatcher stood up for this resume turn.
+	// ResumeWithMessage threads it into agentproc.RunOptions and the agenthost;
+	// the dispatcher owns its teardown. nil on all/local.
+	execSandbox *executorSandbox
 }
 
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
@@ -387,16 +392,11 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 			TeamID:           opts.TeamID,
 			IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 		}
-		// TF_ROLE=executor: thread this run's bundle accessor into the daemon
-		// so its gh/jira verbs resolve credentials from the sealed bundle
-		// instead of the (disabled, on an executor) secret store — same
-		// credbundle.FromContext(ctx) gate gitProxyConfigFor uses below.
-		var agentHostCreds func(context.Context) (*credbundle.Bundle, bool)
-		if _, ok := credbundle.FromContext(ctx); ok {
-			agentHostCreds = s.bundleAgentHostCredentials(orgID, runID)
-		}
+		// TF_ROLE=executor: point the daemon's gh/jira verbs at this run's
+		// credential-sidecar REST proxies (holding placeholders) instead of the
+		// (disabled) secret store. nil-safe → nil on all/local.
 		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-			hd, mount, err := agenthost.Start(stores, info, agentHostCreds)
+			hd, mount, err := agenthost.Start(stores, info, opts.execSandbox.agentHostProxyCreds())
 			if err != nil {
 				return sandbox.Mount{}, nil, err
 			}
@@ -404,33 +404,40 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		}
 	}
 
-	// Resume runs follow the sandbox branch in multi mode, so wire the same
-	// per-run git proxy the initial invocation got. Authority is re-derived
-	// live (per-repo lazy mint + the run_worktrees-backed gate), so no head-ref
-	// or owner needs threading through resume — the durable rows carry it. Also
-	// wire the receive-pack backstop to the same record path the pre-push hook
-	// uses (TFAC-467). nil config (local mode / no GitHub credential) leaves the
+	// On the executor path the git proxy runs in the credential sidecar (brought
+	// up by the dispatcher before this call), so none is wired here. On all/local
+	// wire the same in-process git proxy the initial invocation got — authority
+	// is re-derived live (per-repo lazy mint + the run_worktrees-backed gate), so
+	// no head-ref or owner needs threading through resume. Also wire the
+	// receive-pack backstop to the same record path the pre-push hook uses
+	// (TFAC-467). nil config (local mode / no GitHub credential) leaves the
 	// --no-verify gap accepted.
-	gitProxy := s.gitProxyConfigFor(ctx, info, stores)
-	if gitProxy != nil && storesSet {
-		gitProxy.RecordPush = gitPushRecorder(stores, info)
+	var gitProxy *agentproc.GitProxyConfig
+	if opts.execSandbox == nil {
+		gitProxy = s.gitProxyConfigFor(ctx, info, stores)
+		if gitProxy != nil && storesSet {
+			gitProxy.RecordPush = gitPushRecorder(stores, info)
+		}
 	}
 
 	baseOpts := agentproc.RunOptions{
-		Cwd:                 cwd,
-		Model:               model,
-		SessionID:           sessionID,
-		Message:             message,
-		AllowedTools:        agentproc.BuildAllowedToolsWithExtras(selfBin, opts.ExtraAllowedTools),
-		MaxTurns:            100,
-		ExtraEnv:            extraEnv,
-		TraceID:             runID,
-		OrgID:               orgID,
-		Secrets:             s.getRunSecrets(),
-		LLMResolver:         s.llmResolverForRun(orgID, runID),
-		LLMCredentialSource: s.bundleLLMSourceFor(ctx, info),
-		GitProxy:            gitProxy,
-		StartAgentHost:      startAgentHost,
+		Cwd:          cwd,
+		Model:        model,
+		SessionID:    sessionID,
+		Message:      message,
+		AllowedTools: agentproc.BuildAllowedToolsWithExtras(selfBin, opts.ExtraAllowedTools),
+		MaxTurns:     100,
+		ExtraEnv:     extraEnv,
+		TraceID:      runID,
+		OrgID:        orgID,
+		Secrets:      s.getRunSecrets(),
+		LLMResolver:  s.llmResolverForRun(orgID, runID),
+		// Executor path (nil/empty on all/local): launch into the prebuilt
+		// network + the sidecar's proxy env; the sidecar holds the credentials.
+		PrebuiltNetwork:  opts.execSandbox.runNetwork(),
+		PrebuiltProxyEnv: opts.execSandbox.proxyEnv(),
+		GitProxy:         gitProxy,
+		StartAgentHost:   startAgentHost,
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
 

@@ -113,8 +113,22 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) erro
 	if err != nil {
 		return fmt.Errorf("credprovision: read claiming instance %s: %w", claim.ExecutorID, err)
 	}
-	if inst == nil || inst.PubKey == "" {
-		log.Warn("claiming instance has no published pubkey; skipping (not yet registered, or not an executor)",
+	if inst == nil {
+		log.Warn("claiming instance not found; skipping (not yet registered)",
+			"run", runID, "executor", claim.ExecutorID)
+		return nil
+	}
+	// Seal to the run's per-run sidecar key when the executor published one
+	// for this claim — a bundle sealed to it opens only inside that run's
+	// sidecar process, so the orchestrator holds no unseal authority. The
+	// per-instance key is the fallback for a run whose sidecar hasn't
+	// published (or a deployment still on the per-instance channel).
+	sealPubKey := claim.CredPubKey
+	if sealPubKey == "" {
+		sealPubKey = inst.PubKey
+	}
+	if sealPubKey == "" {
+		log.Warn("no sidecar or instance pubkey to seal to; skipping (not yet published, or not an executor)",
 			"run", runID, "executor", claim.ExecutorID)
 		return nil
 	}
@@ -134,9 +148,9 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) erro
 		return nil
 	}
 
-	pubBytes, err := base64.StdEncoding.DecodeString(inst.PubKey)
+	pubBytes, err := base64.StdEncoding.DecodeString(sealPubKey)
 	if err != nil || len(pubBytes) != 32 {
-		return fmt.Errorf("credprovision: instance %s has a malformed pubkey", claim.ExecutorID)
+		return fmt.Errorf("credprovision: run %s claim carries a malformed recipient pubkey", runID)
 	}
 	var pub [32]byte
 	copy(pub[:], pubBytes)

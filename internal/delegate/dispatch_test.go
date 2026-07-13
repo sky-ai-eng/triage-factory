@@ -132,8 +132,16 @@ func TestDrainRunQueue_DrainingSkipsClaim(t *testing.T) {
 	if err := database.QueryRow(`SELECT status FROM runs WHERE id = ?`, "run-drain-skip").Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
-	if status != "running" {
-		t.Errorf("status = %q, want running once undrained", status)
+	// ClaimNextRun flips queued->running synchronously; drainRunQueue then
+	// dispatches the claimed run on a goroutine. This fixture's blueprint has an
+	// empty step plan, so that goroutine deterministically cancels the run — and
+	// may already have done so by the time we read (a race -race exposes). It can
+	// never return to 'queued' (requeue is only for transient pre-agent errors),
+	// so any non-queued status proves the gate let the claim through once
+	// undrained — which is what this test pins. Asserting exactly 'running' races
+	// the async dispatch.
+	if status == "queued" {
+		t.Errorf("status = %q, want the run claimed (any non-queued status) once undrained", status)
 	}
 }
 

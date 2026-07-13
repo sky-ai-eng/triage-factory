@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -527,24 +526,7 @@ func TestResolveCredentials_LLMResolverPreferredOverRawPath(t *testing.T) {
 	}
 }
 
-// TestResolveCredentials_BundleWinsOverLLMResolver pins that the executor
-// bundle path takes precedence over any wired resolver — the brain already
-// minted into the sealed bundle, so an executor never re-resolves.
-func TestResolveCredentials_BundleWinsOverLLMResolver(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	const orgID = "33333333-3333-3333-3333-333333333333"
-	ctx := credbundle.WithBundle(context.Background(), &credbundle.Bundle{
-		LLM: map[string]string{"ANTHROPIC_API_KEY": "from-bundle"},
-	})
-	resolver := func(context.Context, string) (map[string]string, error) {
-		t.Fatal("resolver must not be called when a bundle is on ctx")
-		return nil, nil
-	}
-	env, err := resolveCredentials(ctx, newFakeSecrets(orgID, nil), orgID, resolver)
-	if err != nil {
-		t.Fatalf("resolveCredentials: %v", err)
-	}
-	if env["ANTHROPIC_API_KEY"] != "from-bundle" {
-		t.Errorf("bundle not preferred: %v", env)
-	}
-}
+// The executor never calls resolveCredentials (agentproc.Run launches into the
+// prebuilt network and holds no credential), so the former "bundle wins over
+// the resolver" test is gone with the branch it covered — the orchestrator can
+// no longer read a credential from ctx at all (TFAC-631).

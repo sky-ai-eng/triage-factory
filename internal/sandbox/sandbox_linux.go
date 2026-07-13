@@ -18,9 +18,15 @@ import (
 // Close), so a caller that abandons the run before Close still reclaims it.
 type teardownState struct {
 	subnetIdx uint8
+	// ownsNetwork is true when wrap allocated the subnet + built the network
+	// itself (Config.Network nil). When false the caller stood the network up
+	// via SetupRunNetwork and owns its teardown, so Close must NOT tear down
+	// the veth/netns or release the subnet idx out from under it.
+	ownsNetwork bool
 	// netSt is the network state defaultOps.SetupNetwork returned —
 	// possibly only a partial prefix of it if setup failed partway
 	// through. Passed back to defaultOps.TeardownNetwork verbatim.
+	// Zero (and never torn down) when ownsNetwork is false.
 	netSt NetworkState
 	// The per-run OCI bundle is NOT tracked here: spec ownership lives in the
 	// launch, so the bundle is built by the cap-broker (which holds the
@@ -72,15 +78,34 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 		return nil, nil, fmt.Errorf("sandbox: no run launcher installed (cap-broker not started)")
 	}
 
-	idx, err := defaultAllocator().Allocate()
-	if err != nil {
-		return nil, nil, err // ErrSubnetsExhausted
+	// Two provenances for the run's network. When the caller stood one up
+	// ahead of Wrap (Config.Network, the executor path — proxies + sidecar are
+	// already live on its HostIP), reuse it: no allocation, no SetupNetwork, no
+	// ConfigureProxies, and Close leaves its teardown to the caller. Otherwise
+	// (the self-contained all/local/curator path) allocate + build + own it.
+	var (
+		idx         uint8
+		netSt       NetworkState
+		ownsNetwork bool
+	)
+	if cfg.Network != nil {
+		ns, ok := cfg.Network.netSt.(NetworkState)
+		if !ok {
+			return nil, nil, fmt.Errorf("sandbox: Config.Network carries no usable network state")
+		}
+		idx, netSt = cfg.Network.Idx, ns
+	} else {
+		a, err := defaultAllocator().Allocate()
+		if err != nil {
+			return nil, nil, err // ErrSubnetsExhausted
+		}
+		idx, ownsNetwork = a, true
 	}
 
 	// Local typed pointer to the teardown state — stored on
 	// sb.teardown as `any` so the cross-platform Sandbox struct
 	// doesn't drag Linux-only types into other builds.
-	td := &teardownState{subnetIdx: idx}
+	td := &teardownState{subnetIdx: idx, ownsNetwork: ownsNetwork}
 	sb := &Sandbox{
 		RunID:     cfg.RunID,
 		SubnetIdx: idx,
@@ -97,11 +122,15 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// the Part B egress allowlist — the full "Network" privileged-op
 	// bucket (spec §5), routed through defaultOps. td.netSt is stored
 	// unconditionally so a partial failure still leaves Close() enough
-	// to clean up whatever prefix of setup succeeded.
-	netSt, err := defaultOps.SetupNetwork(ctx, cfg.RunID, idx)
-	td.netSt = netSt
-	if err != nil {
-		return nil, nil, fmt.Errorf("sandbox: %w", err)
+	// to clean up whatever prefix of setup succeeded. Skipped when the
+	// caller supplied the network (already built + owned by them).
+	if ownsNetwork {
+		ns, err := defaultOps.SetupNetwork(ctx, cfg.RunID, idx)
+		td.netSt = ns
+		if err != nil {
+			return nil, nil, fmt.Errorf("sandbox: %w", err)
+		}
+		netSt = ns
 	}
 	sb.Subnet = netSt.Subnet
 	sb.HostIP = netSt.HostIP
@@ -115,9 +144,10 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// we sequence this between network-up and bundle-write. Property
 	// B holds because the returned slice contains only URLs +
 	// placeholders; the real credentials live on the host inside the
-	// proxy processes.
+	// proxy processes. Skipped on the caller-owned-network path: those
+	// proxies were bound before Wrap and their env is already in cfg.Env.
 	specCfg := cfg
-	if cfg.ConfigureProxies != nil {
+	if ownsNetwork && cfg.ConfigureProxies != nil {
 		proxyEnv, perr := cfg.ConfigureProxies(sb)
 		if perr != nil {
 			return nil, nil, fmt.Errorf("sandbox: configure proxies: %w", perr)
@@ -216,16 +246,70 @@ func (s *Sandbox) Close() error {
 	}
 	ctx := context.Background()
 
-	// Order matters: tear down the network BEFORE releasing the subnet
-	// idx. If we freed the idx first, a concurrent allocate could pick it
-	// before our teardown finished, and the new run would conflict with our
-	// still-lingering veth. The per-run OCI bundle is torn down by the
-	// LaunchedRun (its Close removes it) — Sandbox no longer owns it, since
-	// PS-P3 moved spec/bundle construction into the launch.
-	if err := defaultOps.TeardownNetwork(ctx, t.netSt); err != nil {
-		fmt.Fprintf(os.Stderr, "sandbox: teardown network: %v\n", err)
+	// Only tear the network down when wrap built it. On the caller-owned
+	// path (Config.Network) the delegate's RunNetwork.Close reverses it —
+	// after the sidecar + run are down — so touching it here would race a
+	// still-live sidecar's proxies off the veth and double-release the idx.
+	if t.ownsNetwork {
+		// Order matters: tear down the network BEFORE releasing the subnet
+		// idx. If we freed the idx first, a concurrent allocate could pick it
+		// before our teardown finished, and the new run would conflict with our
+		// still-lingering veth. The per-run OCI bundle is torn down by the
+		// LaunchedRun (its Close removes it) — Sandbox no longer owns it, since
+		// PS-P3 moved spec/bundle construction into the launch.
+		if err := defaultOps.TeardownNetwork(ctx, t.netSt); err != nil {
+			fmt.Fprintf(os.Stderr, "sandbox: teardown network: %v\n", err)
+		}
+		defaultAllocator().Release(t.subnetIdx)
 	}
-	defaultAllocator().Release(t.subnetIdx)
 	s.teardown = nil // mark closed so re-Close is a no-op
+	return nil
+}
+
+// setupRunNetwork is the Linux implementation behind SetupRunNetwork:
+// allocate a subnet idx, then build the per-run network through the same
+// brokered privileged op wrap uses. On a SetupNetwork error the returned
+// (possibly partial) state is torn down and the idx released so the caller
+// never has to Close a failed bring-up.
+func setupRunNetwork(ctx context.Context, runID string) (*RunNetwork, error) {
+	if defaultOps == nil {
+		return nil, fmt.Errorf("sandbox: no privileged ops installed (cap-broker not started)")
+	}
+	idx, err := defaultAllocator().Allocate()
+	if err != nil {
+		return nil, err // ErrSubnetsExhausted
+	}
+	netSt, serr := defaultOps.SetupNetwork(ctx, runID, idx)
+	if serr != nil {
+		// netSt carries whatever prefix of setup succeeded — reverse it, then
+		// hand the idx back so a partial bring-up leaks neither veth nor slot.
+		_ = defaultOps.TeardownNetwork(ctx, netSt)
+		defaultAllocator().Release(idx)
+		return nil, fmt.Errorf("sandbox: %w", serr)
+	}
+	return &RunNetwork{
+		Idx:       idx,
+		Subnet:    netSt.Subnet,
+		HostIP:    netSt.HostIP,
+		NetnsPath: netSt.NetnsPath,
+		netSt:     netSt,
+	}, nil
+}
+
+// Close reverses SetupRunNetwork: tears the veth/netns/iptables down and
+// releases the subnet idx. Idempotent. Teardown before release mirrors
+// Sandbox.Close's ordering (a freed idx a concurrent Allocate could reclaim
+// mid-teardown would collide with the still-lingering veth). Uses a detached
+// context so a cancelled run still drains — teardown must run regardless.
+func (n *RunNetwork) Close() error {
+	if n == nil || n.closed {
+		return nil
+	}
+	n.closed = true
+	ns, _ := n.netSt.(NetworkState)
+	if err := defaultOps.TeardownNetwork(context.Background(), ns); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox: teardown run network: %v\n", err)
+	}
+	defaultAllocator().Release(n.Idx)
 	return nil
 }

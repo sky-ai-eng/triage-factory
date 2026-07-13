@@ -26,7 +26,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
-	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -67,17 +66,6 @@ type App struct {
 	// registerInstance once stores is live.
 	identity  *instance.Identity
 	bootEpoch int64
-
-	// sealingKey is this process's ephemeral X25519 keypair (TFAC-614),
-	// minted once in registerInstance (internal/app/instance.go), in-memory
-	// only, never persisted — a restart mints a fresh one. Non-nil only at
-	// TF_ROLE=executor in multi mode; nil elsewhere, since only an executor
-	// ever claims a run and needs a bundle sealed to it. The public half is
-	// published on that same Register call; the private half never leaves
-	// this process and is what unseals a run_credentials bundle addressed
-	// to it (see internal/delegate's awaiting-credentials wait, wired via
-	// Spawner.SetSealingKey in subsystems.go).
-	sealingKey *credseal.KeyPair
 
 	// Persistence. database is the primary pool (SQLite in local mode,
 	// the admin Postgres pool in multi mode); appDB is the multi-mode
