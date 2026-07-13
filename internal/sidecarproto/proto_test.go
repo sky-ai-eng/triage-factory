@@ -140,6 +140,42 @@ func TestConn_CallAfterCloseFails(t *testing.T) {
 	}
 }
 
+// TestConn_CallInterruptedByCloseFails covers the in-flight case: the conn
+// shuts down while a Call is blocked waiting for its reply. shutdown() closes
+// the pending channel, and the Call must report that as a failure — never read
+// the zero-value Frame off the closed channel as an empty success.
+func TestConn_CallInterruptedByCloseFails(t *testing.T) {
+	// The server never answers, so the Call blocks on its pending channel until
+	// we tear the connection down underneath it.
+	blocked := HandlerFunc(func(ctx context.Context, _ Kind, _ json.RawMessage) (any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	client, _ := pipeConns(t, nil, blocked)
+
+	errc := make(chan error, 1)
+	go func() {
+		errc <- client.Call(context.Background(), KindStartProxies, StartProxiesBody{HostVethIP: "10.42.1.1"}, nil)
+	}()
+
+	// Give the Call time to register its pending entry and block, then shut the
+	// conn down out from under it.
+	time.Sleep(50 * time.Millisecond)
+	_ = client.Close()
+
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("Call returned nil on a mid-flight shutdown — a closed pending channel must not read as success")
+		}
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("expected ErrClosed, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Call did not return after the conn was closed mid-flight")
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

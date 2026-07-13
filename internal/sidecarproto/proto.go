@@ -210,7 +210,20 @@ func (c *Conn) Call(ctx context.Context, kind Kind, reqBody any, respBody any) e
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case resp := <-ch:
+	case resp, ok := <-ch:
+		if !ok {
+			// shutdown() closed this pending channel instead of delivering a
+			// reply — the conn died (peer hung up, an I/O error, or Close)
+			// while the Call was in flight. Surface the shutdown cause; a
+			// zero-value Frame here is NOT an empty success.
+			c.mu.Lock()
+			err := c.closeErr
+			c.mu.Unlock()
+			if err == nil {
+				err = ErrClosed
+			}
+			return err
+		}
 		if resp.Err != "" {
 			return fmt.Errorf("sidecarproto: remote %s: %s", kind, resp.Err)
 		}
@@ -234,9 +247,14 @@ func (c *Conn) Notify(kind Kind, body any) error {
 	return c.writeFrame(Frame{Kind: kind, Body: payload})
 }
 
-// Close stops the read loop and fails every pending Call with ErrClosed. It
-// does NOT close the underlying stream — the caller (which owns the socket's
-// lifecycle, e.g. the broker's sidecarHandle) does. Idempotent.
+// Close marks the conn closed, fails every pending and subsequent Call with
+// ErrClosed, and closes Done. It does NOT close the underlying stream — the
+// caller owns the socket's lifecycle (e.g. the broker's sidecarHandle) — and
+// therefore does NOT on its own stop the read-loop goroutine: that goroutine
+// stays blocked in Decode until the stream's owner/peer closes it, at which
+// point Decode errors and the loop exits via a second (idempotent) shutdown.
+// So a caller reasoning about goroutine lifetime must close rwc, not just call
+// Close. Idempotent.
 func (c *Conn) Close() error {
 	c.shutdown(ErrClosed)
 	return nil
