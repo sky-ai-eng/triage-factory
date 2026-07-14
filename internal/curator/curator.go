@@ -45,6 +45,23 @@ type Curator struct {
 	ghResolver ghclient.Resolver
 	sessions   map[string]*projectSession // projectID → goroutine handle
 
+	// homer resolves the home executor for a project and whether to forward
+	// (curator homing, spec §6.3). Wired ONLY on multi-mode control pods
+	// (SetHoming); nil on local / role=all / executor, where SendMessage runs
+	// in-process on this pod exactly as before. selfID is this pod's instance
+	// id — the home stamped when a turn runs in-process (so the ownership-scoped
+	// boot sweep can find it).
+	homer  *Homer
+	selfID string
+
+	// doorbell publishes a cross-pod tf_ctl notification (SetDoorbell). Wired on
+	// control pods to nudge the home executor's claim loop ("curator_new") and
+	// to route a cross-pod cancel ("curator_cancel"). nil elsewhere — the
+	// executor claim loop's backstop poll and the DB-level cancel flip cover a
+	// missed doorbell, so this is a latency optimization, never a correctness
+	// dependency.
+	doorbell func(kind, orgID, projectID string)
+
 	// runAgent dispatches one agent turn. Defaults to agentproc.Run in
 	// New; the multi-mode capstone pgtest (TFAC-65) overrides it to drive
 	// SendMessage → dispatch → terminal without spawning the claude
@@ -111,6 +128,83 @@ func (c *Curator) getLLMResolver() func(context.Context, string) (map[string]str
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.llmResolve
+}
+
+// SetHoming wires the curator homing seam (spec §6.3): the Homer that resolves
+// a project's home executor and this pod's instance id. Called once at startup
+// on a multi-mode control pod only — where a chat POST lands but the turn must
+// execute on the home executor. Left unset on local / role=all (in-process,
+// unchanged) and on executors (which run the claim loop, not SendMessage).
+func (c *Curator) SetHoming(homer *Homer, selfID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.homer = homer
+	c.selfID = selfID
+}
+
+// SetDoorbell wires the cross-pod tf_ctl publisher used to nudge the home
+// executor's claim loop and route cross-pod cancels. Control pods only; nil
+// elsewhere degrades to backstop-poll latency, never lost work.
+func (c *Curator) SetDoorbell(fn func(kind, orgID, projectID string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.doorbell = fn
+}
+
+// homeMode is the routing decision for one turn.
+type homeMode int
+
+const (
+	// homeLocal runs the turn in-process on this pod. No homer is wired: local
+	// mode or role=all, where the curator sandboxes here as it always has.
+	homeLocal homeMode = iota
+	// homeForward routes the turn to a remote home executor (control pods).
+	homeForward
+	// homeUnavailable means a homer is wired (a capless control pod) but no
+	// executor is eligible to run the turn, so it cannot execute anywhere — the
+	// caller fails it fast and legibly.
+	homeUnavailable
+)
+
+// ErrNoCuratorExecutor is returned by SendMessage on a control pod when no
+// executor is eligible to run the turn. Control is capless (it cannot sandbox a
+// curator turn itself), so this is a hard, legible failure rather than a silent
+// queue — the operator must add or restore an executor.
+var ErrNoCuratorExecutor = errors.New("no curator executor is available to run this turn; add or restore an executor")
+
+// resolveHome decides where this turn runs. No homer (local / role=all) →
+// homeLocal, home "" (in-process, home_instance_id NULL — the untouched path).
+// A wired homer (control) → homeForward with the executor id, or homeUnavailable
+// when the execution plane is down.
+func (c *Curator) resolveHome(ctx context.Context, orgID, projectID string) (homeInstanceID string, mode homeMode) {
+	c.mu.Lock()
+	homer := c.homer
+	c.mu.Unlock()
+	if homer == nil {
+		return "", homeLocal
+	}
+	home, forward, ok := homer.Resolve(ctx, orgID, projectID)
+	if !ok {
+		return "", homeUnavailable
+	}
+	if forward {
+		return home, homeForward
+	}
+	// forward=false with ok=true means home == self; unreachable on a control
+	// pod (it is never an eligible executor), so treat it as in-process.
+	return home, homeLocal
+}
+
+// ringDoorbell publishes a cross-pod tf_ctl notification if a publisher is
+// wired. Best-effort — a nil publisher or a publish error only costs backstop-
+// poll latency.
+func (c *Curator) ringDoorbell(kind, orgID, projectID string) {
+	c.mu.Lock()
+	fn := c.doorbell
+	c.mu.Unlock()
+	if fn != nil {
+		fn(kind, orgID, projectID)
+	}
 }
 
 // cloneTokenFor resolves the App installation token for a host-side fetch of
@@ -207,9 +301,19 @@ type queueItem struct {
 // in which case the persisted row is flipped to cancelled before we
 // return. Either way, no message reaches a non-running goroutine.
 func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUserID, content string) (string, error) {
+	// Resolve where this turn executes before minting the row so the home is
+	// stamped atomically at creation (curator homing, spec §6.3). local /
+	// role=all / no-homer leaves it "" (the untouched in-process path); a
+	// capless control pod with no eligible executor fails fast rather than
+	// creating a row that can never run.
+	homeInstanceID, mode := c.resolveHome(ctx, orgID, projectID)
+	if mode == homeUnavailable {
+		return "", ErrNoCuratorExecutor
+	}
+
 	var requestID string
 	if err := c.stores.Tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(ts db.TxStores) error {
-		id, err := ts.Curator.CreateRequest(ctx, orgID, projectID, creatorUserID, content)
+		id, err := ts.Curator.CreateRequest(ctx, orgID, projectID, creatorUserID, homeInstanceID, content)
 		if err != nil {
 			return err
 		}
@@ -217,6 +321,18 @@ func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUser
 		return nil
 	}); err != nil {
 		return "", fmt.Errorf("create curator request: %w", err)
+	}
+
+	if mode == homeForward {
+		// Homed to a remote executor — do NOT run a session on this control
+		// pod. The durable queued row (home_instance_id = the executor) IS the
+		// delivery; the doorbell just nudges the home's claim loop so it need
+		// not wait for its backstop poll. Output streams back to this browser
+		// over the WS backplane from wherever the turn runs, so nothing else is
+		// needed here.
+		c.broadcastRequestUpdate(orgID, projectID, requestID, "queued")
+		c.ringDoorbell("curator_new", orgID, projectID)
+		return requestID, nil
 	}
 
 	session := c.getOrStartSession(orgID, projectID)
@@ -250,6 +366,33 @@ func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUser
 	}
 }
 
+// EnqueueClaimed feeds an already-created curator_requests row (claimed off the
+// home executor's claim loop, spec §6.3) into its per-project session goroutine
+// — the executor-side counterpart of SendMessage's in-process enqueue, minus
+// the row creation (the control pod already minted the row and stamped the
+// home). Returns true when the turn was handed to a session; false when the
+// curator is shut down or the per-project queue is momentarily full, so the
+// claim loop leaves the row queued and retries on its next scan.
+//
+// Idempotency: feeding the same request twice is safe — the second dispatch's
+// MarkRequestRunning sees a non-queued row (sql.ErrNoRows) and returns without
+// re-running the agent — so a duplicated doorbell or a scan/mark race never
+// double-executes a turn.
+func (c *Curator) EnqueueClaimed(orgID, projectID, requestID, creatorUserID string) bool {
+	session := c.getOrStartSession(orgID, projectID)
+	if session == nil {
+		return false // curator shut down
+	}
+	item := queueItem{requestID: requestID, orgID: orgID, creatorUserID: creatorUserID}
+	select {
+	case session.queue <- item:
+		c.broadcastRequestUpdate(orgID, projectID, requestID, "queued")
+		return true
+	default:
+		return false // queue full — leave the row queued for the next scan
+	}
+}
+
 // Cancel fires the per-project cancel func, terminating the in-flight
 // agentproc.Run. The goroutine flips the row to cancelled when it
 // observes ctx.Err(). Returns nil even if no in-flight goroutine
@@ -257,14 +400,37 @@ func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUser
 // scheduling means "nothing to cancel" is a routine outcome rather
 // than an error. Caller decides whether to surface it as 404 by
 // checking InFlightCuratorRequestForProject first.
-func (c *Curator) Cancel(projectID string) {
+//
+// Cross-pod (curator homing, spec §6.3): on a control pod the live session runs
+// on the home executor, not here, so the local cancelInFlight is usually a
+// no-op. The "curator_cancel" doorbell reaches the home executor's own Cancel
+// (broadcast + self-filter: only the pod holding the project's session has
+// something to kill), which SIGKILLs the subprocess promptly. The handler's
+// DB-level MarkRequestCancelledIfActive is the backstop if the doorbell is
+// dropped — the turn then runs to completion and its terminal write is a no-op
+// (cancelled wins). A local session (role=all, or the control in-process
+// fallback) is cancelled directly, so both paths always fire.
+func (c *Curator) Cancel(orgID, projectID string) {
 	c.mu.Lock()
 	session, ok := c.sessions[projectID]
 	c.mu.Unlock()
-	if !ok {
-		return
+	if ok {
+		session.cancelInFlight()
 	}
-	session.cancelInFlight()
+	// Route to the home executor too (no-op when no doorbell is wired).
+	c.ringDoorbell("curator_cancel", orgID, projectID)
+}
+
+// CancelLocal fires only the in-process session cancel, without ringing the
+// cross-pod doorbell — the entry point the tf_ctl "curator_cancel" dispatch
+// calls on an executor so a delivered cancel doesn't echo back onto the bus.
+func (c *Curator) CancelLocal(projectID string) {
+	c.mu.Lock()
+	session, ok := c.sessions[projectID]
+	c.mu.Unlock()
+	if ok {
+		session.cancelInFlight()
+	}
 }
 
 // InFlightProjectCount returns how many of projectIDs have a curator request
@@ -314,17 +480,24 @@ func (c *Curator) CancelProject(orgID, projectID, reason string) {
 	}
 	c.mu.Unlock()
 
-	if !ok {
-		// No goroutine ever started — but there may still be queued
-		// rows from a previous process that the goroutine never got
-		// a chance to drain. Cancel them at the DB level so the
-		// FK cascade on project delete doesn't leave behind status
-		// confusion.
-		c.cancelQueuedRows(orgID, projectID, reason)
-		return
+	if ok {
+		session.shutdown(reason)
 	}
-	session.shutdown(reason)
+	// Drain queued rows at the DB level so the FK cascade on project delete
+	// doesn't leave behind status confusion (catches rows homed to executors
+	// too — QueuedRequestsForProjectSystem is org-scoped, not home-scoped).
 	c.cancelQueuedRows(orgID, projectID, reason)
+
+	// Curator homing (spec §6.3): when the live session lives on a remote
+	// executor, the local session teardown above is a no-op — route a cross-pod
+	// cancel so the home executor SIGKILLs its subprocess promptly rather than
+	// running the turn to completion against a row the FK cascade is about to
+	// delete. Then drop the home mapping so it can't outlive the project (no FK
+	// to projects — curator_homes is placement coordination).
+	c.ringDoorbell("curator_cancel", orgID, projectID)
+	if err := c.stores.CuratorHomes.Clear(context.Background(), orgID, projectID); err != nil {
+		curatorLog.Warn("clear curator home on project teardown failed", "org", orgID, "project", projectID, "error", err)
+	}
 }
 
 // Shutdown stops every per-project goroutine and rejects further

@@ -54,6 +54,18 @@ type Store interface {
 	// never touches audit history; a resurrected id simply re-registers at
 	// a fresh boot_epoch 1.
 	DeleteStaleInstances(ctx context.Context, staleAfter time.Duration) (int, error)
+
+	// CancelStrandedCuratorTurns cancels queued/running curator turns whose
+	// home executor's heartbeat is missing or stale (curator homing, spec
+	// §6.3). A permanently-dead home never runs its own ownership-scoped boot
+	// sweep, so without this a turn stranded on it would show as in-flight
+	// forever. Recovery here is retire-only, not requeue: the user's NEXT turn
+	// re-homes the project to a live executor (the Homer's sticky-until-death
+	// mint), so this only needs to clear the stranded row — matching the spec's
+	// "the next turn re-homes" contract rather than re-placing work in SQL.
+	// Own DB time (now() - make_interval), same discipline as ReapDeadExecutors.
+	// Returns the count cancelled.
+	CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error)
 }
 
 // pgStore is the Postgres implementation.
@@ -220,6 +232,30 @@ func (s *pgStore) DeleteStaleInstances(ctx context.Context, staleAfter time.Dura
 	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM instances WHERE last_heartbeat_at < now() - make_interval(secs => $1)
 	`, staleAfter.Seconds())
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+func (s *pgStore) CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error) {
+	// A home is dead when its instances row is missing (GC'd or never
+	// registered) or its heartbeat is older than the threshold — the same
+	// missing-or-stale predicate ReapDeadExecutors uses for a run's executor.
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE curator_requests
+		SET status = 'cancelled',
+		    finished_at = COALESCE(finished_at, now()),
+		    error_msg = COALESCE(error_msg, 'Cancelled: curator home executor lost (reaper) — re-send to re-home')
+		WHERE status IN ('queued', 'running')
+		  AND home_instance_id IS NOT NULL
+		  AND NOT EXISTS (
+		      SELECT 1 FROM instances i
+		      WHERE i.id = curator_requests.home_instance_id
+		        AND i.last_heartbeat_at >= now() - make_interval(secs => $1)
+		  )
+	`, staleThreshold.Seconds())
 	if err != nil {
 		return 0, err
 	}

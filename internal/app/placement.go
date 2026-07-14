@@ -3,8 +3,10 @@ package app
 import (
 	"os"
 
+	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // buildPlacement resolves the placement config from env, builds the
@@ -29,6 +31,17 @@ func (a *App) buildPlacement() error {
 	a.spawner.SetPlacement(a.placementResolver, claim)
 	if a.srv != nil {
 		a.srv.SetPlacementResolver(a.placementResolver)
+	}
+
+	// Curator homing (spec §6.3): a control pod resolves each turn's home
+	// executor over the same rendezvous resolver + curator_homes, then forwards
+	// (or runs in-process as a degraded fallback). Wired here, not in
+	// buildCuratorRuntime, because the resolver only exists now. role=all keeps
+	// the unchanged in-process path (no Homer); executors receive homed turns
+	// via the claim loop, not a Homer.
+	if a.curator != nil && runmode.Current() == runmode.ModeMulti && a.plan.role == runmode.RoleControl {
+		a.curator.SetHoming(curator.NewHomer(a.stores.CuratorHomes, a.placementResolver, a.identity.ID), a.identity.ID)
+		a.curator.SetDoorbell(a.publishCuratorDoorbell)
 	}
 
 	if cfg.Enabled {

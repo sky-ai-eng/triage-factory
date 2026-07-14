@@ -158,6 +158,10 @@ func New(conn *sql.DB) db.Stores {
 		// local mode — the placement hash always returns self — but present
 		// for store-interface + conformance symmetry. See TFAC-587.
 		PlacementOverrides: newPlacementOverrideStore(conn),
+		// CuratorHomes collapses to the one connection (N=1). Inert in local
+		// mode — the one process is always its own home — but present for
+		// store-interface + conformance symmetry. See spec §6.3.
+		CuratorHomes: newCuratorHomeStore(conn),
 		// RunCredentials is admin-pool only in Postgres; SQLite collapses
 		// to the one connection. Never populated in local mode (forced
 		// role=all, the bundle path is executor-role-only) — exists for

@@ -375,7 +375,7 @@ to remain out of Kubernetes clusters entirely:
   classification, repo profiling) is deliberately toolless — prompt in, JSON out,
   no filesystem, no tool loop, no subprocess — so there is nothing to jail: those
   are direct API calls from the Go process.
-  <!-- TODO(TFAC-628 + TFAC-588): the toolless direct-call half is shipped (TFAC-627); "holds no sandbox capabilities" awaits the compose cap-drop (TFAC-628) and "curator runs on executors" awaits curator homing (TFAC-588). Until both ship, control pods still carry the sandbox caps and sandbox curator turns in-process. -->
+  <!-- TODO(TFAC-628): the "runs on executors" half is now true — curator turns home to executors (curator homing shipped) and the toolless direct-call half was already shipped (TFAC-627), so the control process has zero sandbox users. What still awaits the compose cap-drop (TFAC-628) is "holds no sandbox capabilities": the control service still carries the cap-broker + SYS_ADMIN/NET_ADMIN in docker-compose.yml. Nothing on control uses them anymore. -->
 - **If executors must run in Kubernetes**, they run as privileged pods on a
   dedicated, tainted node pool with the cloud metadata endpoint blocked, a
   minimal node role, and no other tenants' pods scheduled there. We do not

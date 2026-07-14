@@ -97,6 +97,13 @@ func (ch *curatorHandler) handleCuratorSend(w http.ResponseWriter, r *http.Reque
 	// via the shim, real values in multi mode.
 	requestID, err := cur.SendMessage(r.Context(), projectID, orgID, userID, content)
 	if err != nil {
+		// A capless control pod with no eligible executor can't run the turn
+		// anywhere — surface it as 503 (retryable once an executor is back),
+		// not a 500.
+		if errors.Is(err, curator.ErrNoCuratorExecutor) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			return
+		}
 		internalError(w, "curator", err)
 		return
 	}
@@ -207,7 +214,7 @@ func (ch *curatorHandler) handleCuratorCancel(w http.ResponseWriter, r *http.Req
 	// The runtime's session goroutine writes the same terminal
 	// status when it observes ctx.Err(); the status filter in
 	// MarkRequestCancelledIfActive makes the second write a no-op.
-	cur.Cancel(projectID)
+	cur.Cancel(orgID, projectID)
 	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		_, e := tx.Curator.MarkRequestCancelledIfActive(r.Context(), orgID, inFlight.ID, "user cancelled")
 		return e

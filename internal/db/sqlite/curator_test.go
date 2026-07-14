@@ -33,7 +33,7 @@ func TestCuratorStore_SQLite_FullTurn(t *testing.T) {
 	// test exercises the production goroutine code path.
 	var requestID string
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
-		id, err := ts.Curator.CreateRequest(ctx, runmode.LocalDefaultOrgID, projectID, runmode.LocalDefaultUserID, "hello")
+		id, err := ts.Curator.CreateRequest(ctx, runmode.LocalDefaultOrgID, projectID, runmode.LocalDefaultUserID, "", "hello")
 		if err != nil {
 			return err
 		}
@@ -160,7 +160,7 @@ func TestCuratorStore_SQLite_CancelRollsUpTokens(t *testing.T) {
 	ip := func(n int) *int { return &n }
 	var requestID string
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
-		id, err := ts.Curator.CreateRequest(ctx, org, projectID, user, "hello")
+		id, err := ts.Curator.CreateRequest(ctx, org, projectID, user, "", "hello")
 		if err != nil {
 			return err
 		}
@@ -573,7 +573,7 @@ func TestCuratorStore_SQLite_CancelOrphanedNonTerminalRequests(t *testing.T) {
 		t.Helper()
 		var id string
 		if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
-			rid, err := ts.Curator.CreateRequest(ctx, runmode.LocalDefaultOrgID, projectID, runmode.LocalDefaultUserID, input)
+			rid, err := ts.Curator.CreateRequest(ctx, runmode.LocalDefaultOrgID, projectID, runmode.LocalDefaultUserID, "", input)
 			if err != nil {
 				return err
 			}
@@ -696,7 +696,7 @@ func TestCuratorStore_SQLite_HistoryAndInFlightReads(t *testing.T) {
 	var first, second string
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
 		var e error
-		if first, e = ts.Curator.CreateRequest(ctx, org, projectID, user, "first"); e != nil {
+		if first, e = ts.Curator.CreateRequest(ctx, org, projectID, user, "", "first"); e != nil {
 			return e
 		}
 		if e = ts.Curator.MarkRequestRunning(ctx, org, first); e != nil {
@@ -711,7 +711,7 @@ func TestCuratorStore_SQLite_HistoryAndInFlightReads(t *testing.T) {
 		if _, e = ts.Curator.InsertMessage(ctx, org, &domain.CuratorMessage{RequestID: first, Role: "assistant", Subtype: "text", Content: "a2"}); e != nil {
 			return e
 		}
-		if second, e = ts.Curator.CreateRequest(ctx, org, projectID, user, "second"); e != nil {
+		if second, e = ts.Curator.CreateRequest(ctx, org, projectID, user, "", "second"); e != nil {
 			return e
 		}
 		_, e = ts.Curator.InsertMessage(ctx, org, &domain.CuratorMessage{RequestID: second, Role: "assistant", Subtype: "text", Content: "b1"})
@@ -758,7 +758,7 @@ func TestCuratorStore_SQLite_HistoryAndInFlightReads(t *testing.T) {
 		}
 
 		// A running row outranks the queued one.
-		third, e := ts.Curator.CreateRequest(ctx, org, projectID, user, "third")
+		third, e := ts.Curator.CreateRequest(ctx, org, projectID, user, "", "third")
 		if e != nil {
 			return e
 		}
@@ -815,7 +815,7 @@ func TestCuratorStore_SQLite_ResetForProject(t *testing.T) {
 	var reqID string
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
 		var e error
-		if reqID, e = ts.Curator.CreateRequest(ctx, org, projectID, user, "wipe me"); e != nil {
+		if reqID, e = ts.Curator.CreateRequest(ctx, org, projectID, user, "", "wipe me"); e != nil {
 			return e
 		}
 		if _, e = ts.Curator.InsertMessage(ctx, org, &domain.CuratorMessage{RequestID: reqID, Role: "assistant", Subtype: "text", Content: "x"}); e != nil {

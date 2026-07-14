@@ -90,7 +90,7 @@ func TestCuratorStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// Alice creates a request in orgA — this must work.
 	var goodRequestID string
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgA, alice, func(ts db.TxStores) error {
-		id, err := ts.Curator.CreateRequest(ctx, orgA, projectA, alice, "hi from alice")
+		id, err := ts.Curator.CreateRequest(ctx, orgA, projectA, alice, "", "hi from alice")
 		if err != nil {
 			return err
 		}
@@ -108,7 +108,7 @@ func TestCuratorStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// insert because (projectA, orgB) doesn't exist as a project
 	// row; RLS additionally fires on (org_id = current_org_id()).
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgA, alice, func(ts db.TxStores) error {
-		_, err := ts.Curator.CreateRequest(ctx, orgB, projectA, alice, "cross-org attempt")
+		_, err := ts.Curator.CreateRequest(ctx, orgB, projectA, alice, "", "cross-org attempt")
 		return err
 	}); err == nil {
 		t.Error("expected cross-org CreateRequest to fail; got nil error")
@@ -157,7 +157,7 @@ func TestCuratorStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	// exists.
 	var requestA string
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgA, alice, func(ts db.TxStores) error {
-		id, err := ts.Curator.CreateRequest(ctx, orgA, projectA, alice, "alice rls seed")
+		id, err := ts.Curator.CreateRequest(ctx, orgA, projectA, alice, "", "alice rls seed")
 		if err != nil {
 			return err
 		}
@@ -206,7 +206,7 @@ func TestCuratorStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// first — curator_requests_modify WITH CHECK requires
 		// org_id = tf.current_org_id() and raises 42501.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Curator.CreateRequest(ctx, orgA, projectA, bob, "bob cross-org")
+			_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Curator.CreateRequest(ctx, orgA, projectA, bob, "", "bob cross-org")
 			return e
 		})
 		pgtest.AssertRLSViolation(t, err)
@@ -237,7 +237,7 @@ func TestCuratorStore_Postgres_GetRequestRLS(t *testing.T) {
 	// Alice creates a request.
 	var aliceReq string
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, alice, func(ts db.TxStores) error {
-		id, err := ts.Curator.CreateRequest(ctx, orgID, projectID, alice, "alice's message")
+		id, err := ts.Curator.CreateRequest(ctx, orgID, projectID, alice, "", "alice's message")
 		if err != nil {
 			return err
 		}
@@ -345,7 +345,7 @@ func TestCuratorStore_Postgres_ListPendingContext_MixedConsumed(t *testing.T) {
 	}
 	var requestID string
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, alice, func(ts db.TxStores) error {
-		id, err := ts.Curator.CreateRequest(ctx, orgID, projectID, alice, "consume me")
+		id, err := ts.Curator.CreateRequest(ctx, orgID, projectID, alice, "", "consume me")
 		if err != nil {
 			return err
 		}
@@ -469,7 +469,7 @@ func TestCuratorStore_Postgres_CancelOrphanedNonTerminalRequests(t *testing.T) {
 		t.Helper()
 		var id string
 		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
-			rid, err := ts.Curator.CreateRequest(ctx, orgID, projectID, userID, input)
+			rid, err := ts.Curator.CreateRequest(ctx, orgID, projectID, userID, "", input)
 			if err != nil {
 				return err
 			}
@@ -540,7 +540,7 @@ func runFullTurn(t *testing.T, ctx context.Context, stores db.Stores, orgID, use
 	t.Helper()
 	// 1. Create request (handler-side, but in the same identity).
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
-		id, err := ts.Curator.CreateRequest(ctx, orgID, projectID, userID, "msg from "+userID)
+		id, err := ts.Curator.CreateRequest(ctx, orgID, projectID, userID, "", "msg from "+userID)
 		if err != nil {
 			return err
 		}
@@ -684,7 +684,7 @@ func TestCuratorStore_Postgres_InFlight_SelfOnly(t *testing.T) {
 	// Bob has a running turn.
 	var bobReq string
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, bob, func(ts db.TxStores) error {
-		id, e := ts.Curator.CreateRequest(ctx, orgID, projectID, bob, "bob's turn")
+		id, e := ts.Curator.CreateRequest(ctx, orgID, projectID, bob, "", "bob's turn")
 		if e != nil {
 			return e
 		}
@@ -741,7 +741,7 @@ func TestCuratorStore_Postgres_ResetForProject(t *testing.T) {
 	aliceReq, _ := runFullTurn(t, ctx, stores, orgID, alice, projectID)
 	var bobReq string
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, bob, func(ts db.TxStores) error {
-		id, e := ts.Curator.CreateRequest(ctx, orgID, projectID, bob, "bob live")
+		id, e := ts.Curator.CreateRequest(ctx, orgID, projectID, bob, "", "bob live")
 		if e != nil {
 			return e
 		}

@@ -374,6 +374,12 @@ type Stores struct {
 	// not a browsable RLS surface, read for an already-authorized orgID.
 	PlacementOverrides PlacementOverrideStore
 
+	// CuratorHomes owns the curator_homes table — the durable
+	// (org, project) -> home executor mapping that homes a curator session to
+	// one executor (spec §6.3). Admin-pool-only, same shape as Instances /
+	// PlacementOverrides: placement coordination, not a browsable RLS surface.
+	CuratorHomes CuratorHomeStore
+
 	// RunCredentials owns the run_credentials table — the sealed per-run
 	// credential bundle channel (TFAC-614). Admin-pool-only, same shape as
 	// Instances/RunSignals: never a request-handler surface, and unlike

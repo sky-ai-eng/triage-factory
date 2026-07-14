@@ -82,6 +82,28 @@ func (a *App) dispatchCtl(payload string) {
 		if a.wsBackplane != nil {
 			a.wsBackplane.HandleCtlKick(payload)
 		}
+	case "curator_new":
+		// Curator homing (spec §6.3): nudge THIS pod's claim loop to scan for
+		// freshly-homed turns. Broadcast + self-filter — the loop lists only
+		// turns homed to this executor, so a control pod (no loop → nil) and a
+		// non-home executor both no-op. The backstop poll covers a dropped
+		// notification.
+		if a.curatorClaimLoop != nil {
+			a.curatorClaimLoop.Wake()
+		}
+	case "curator_cancel":
+		// Curator homing (spec §6.3): fire the in-process session cancel if THIS
+		// pod holds the project's live session. Broadcast + self-filter —
+		// CancelLocal is a no-op on every pod but the home. CancelLocal (not
+		// Cancel) so a delivered cancel doesn't re-broadcast onto the bus.
+		if a.curator != nil {
+			var msg ctlbus.Message
+			if err := json.Unmarshal([]byte(payload), &msg); err != nil {
+				appLog.Warn("tf_ctl: malformed curator_cancel; dropping", "error", err)
+				return
+			}
+			a.curator.CancelLocal(msg.ProjectID)
+		}
 	default:
 		appLog.Warn("tf_ctl: unknown message kind", "kind", probe.Kind)
 	}

@@ -36,7 +36,7 @@ func newCuratorStore(q queryer) db.CuratorStore { return &curatorStore{q: q} }
 
 var _ db.CuratorStore = (*curatorStore)(nil)
 
-func (s *curatorStore) CreateRequest(ctx context.Context, orgID, projectID, creatorUserID, userInput string) (string, error) {
+func (s *curatorStore) CreateRequest(ctx context.Context, orgID, projectID, creatorUserID, homeInstanceID, userInput string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
 	}
@@ -45,15 +45,63 @@ func (s *curatorStore) CreateRequest(ctx context.Context, orgID, projectID, crea
 	// runs.team_id) so curator spend rolls into the project's team; the llm_spend
 	// view reads the column directly. Any future curator INSERT MUST keep this
 	// (SELECT team_id FROM projects WHERE id = ?) subquery — projectID is bound
-	// twice for the correlated lookup (TFAC-476).
+	// twice for the correlated lookup (TFAC-476). home_instance_id is NULL in
+	// local mode (empty homeInstanceID → NULLIF): N=1 never forwards or homes.
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO curator_requests (id, project_id, team_id, status, user_input, created_at, creator_user_id)
-		VALUES (?, ?, (SELECT team_id FROM projects WHERE id = ?), 'queued', ?, ?, ?)
-	`, id, projectID, projectID, userInput, time.Now().UTC(), creatorUserID)
+		INSERT INTO curator_requests (id, project_id, team_id, status, user_input, created_at, creator_user_id, home_instance_id)
+		VALUES (?, ?, (SELECT team_id FROM projects WHERE id = ?), 'queued', ?, ?, ?, NULLIF(?, ''))
+	`, id, projectID, projectID, userInput, time.Now().UTC(), creatorUserID, homeInstanceID)
 	if err != nil {
 		return "", err
 	}
 	return id, nil
+}
+
+// ListQueuedRequestsForHomeSystem is inert in SQLite (N=1 never homes to a
+// remote executor), but implemented for interface + conformance symmetry.
+func (s *curatorStore) ListQueuedRequestsForHomeSystem(ctx context.Context, homeInstanceID string) ([]domain.HomedCuratorRequest, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id, org_id, project_id, creator_user_id
+		FROM curator_requests
+		WHERE home_instance_id = ? AND status = 'queued'
+		ORDER BY created_at ASC, id ASC
+	`, homeInstanceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.HomedCuratorRequest
+	for rows.Next() {
+		var r domain.HomedCuratorRequest
+		if err := rows.Scan(&r.ID, &r.OrgID, &r.ProjectID, &r.CreatorUserID); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// CancelStrandedRequestsForHomeSystem is inert in SQLite (N=1 uses the global
+// CancelOrphanedNonTerminalRequests boot sweep), but implemented for interface
+// symmetry. Plain status flip — no token roll-up (a cancelled-stranded turn's
+// accounting need not be refreshed, and this keeps the tf_system grant to a
+// bare UPDATE in Postgres).
+func (s *curatorStore) CancelStrandedRequestsForHomeSystem(ctx context.Context, homeInstanceID, errMsg string) (int, error) {
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE curator_requests
+		SET status = 'cancelled',
+		    error_msg = COALESCE(error_msg, ?),
+		    finished_at = COALESCE(finished_at, ?)
+		WHERE home_instance_id = ? AND status IN ('queued', 'running')
+	`, errMsg, time.Now().UTC(), homeInstanceID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }
 
 func (s *curatorStore) GetRequest(ctx context.Context, orgID, id string) (*domain.CuratorRequest, error) {

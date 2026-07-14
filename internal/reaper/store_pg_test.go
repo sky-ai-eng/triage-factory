@@ -352,3 +352,80 @@ func TestRunsExecutorID_HasNoForeignKeyToInstances(t *testing.T) {
 		t.Fatalf("runs.executor_id has %d foreign key constraint(s), want 0 — a FK here would make GC deletes cascade into (or be blocked by) audit history", count)
 	}
 }
+
+// TestCancelStrandedCuratorTurns_CancelsDeadHomeOnly pins the curator homing
+// recovery (spec §6.3): queued/running turns homed to a dead (missing or
+// stale-heartbeat) executor are cancelled so they stop showing in-flight, while
+// a turn homed to a live executor is left untouched. Recovery is retire-only —
+// the user's next turn re-homes to a live executor.
+func TestCancelStrandedCuratorTurns_CancelsDeadHomeOnly(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "curhome-"+uuid.New().String()[:8])
+	teamID := reaperFirstTeamForOrg(t, h, orgID)
+
+	projectID := uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO projects (id, org_id, creator_user_id, team_id, name, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'curator-home-proj', now(), now())
+	`, projectID, orgID, userID, teamID)
+
+	// One live executor, one dead (stale-heartbeat) executor.
+	liveExec := "live-" + uuid.New().String()[:8]
+	deadExec := "dead-" + uuid.New().String()[:8]
+	for _, id := range []string{liveExec, deadExec} {
+		if _, err := stores.Instances.Register(ctx, id, domain.InstanceRoleExecutor, "v1", ""); err != nil {
+			t.Fatalf("register %s: %v", id, err)
+		}
+	}
+	backdateHeartbeat(t, h, deadExec, time.Hour)
+
+	// A running turn homed to the dead executor (stranded) and a running turn
+	// homed to the live executor (must survive). A NULL-home turn (the local
+	// in-process path) must also survive — the sweep only touches homed turns.
+	strandedID := uuid.New().String()
+	survivorID := uuid.New().String()
+	localID := uuid.New().String()
+	insertTurn := func(id, home string) {
+		var homeArg any
+		if home != "" {
+			homeArg = home
+		}
+		pgtest.MustExec(t, h.AdminDB, `
+			INSERT INTO curator_requests (id, org_id, project_id, creator_user_id, team_id, status, user_input, home_instance_id, created_at)
+			VALUES ($1, $2, $3, $4, $5, 'running', 'x', $6, now())
+		`, id, orgID, projectID, userID, teamID, homeArg)
+	}
+	insertTurn(strandedID, deadExec)
+	insertTurn(survivorID, liveExec)
+	insertTurn(localID, "")
+
+	store := reaper.NewPostgresStore(h.AdminDB)
+	n, err := store.CancelStrandedCuratorTurns(ctx, 30*time.Second)
+	if err != nil {
+		t.Fatalf("CancelStrandedCuratorTurns: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("cancelled %d turns, want 1 (only the dead-home turn)", n)
+	}
+
+	statusOf := func(id string) string {
+		var s string
+		if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM curator_requests WHERE id = $1`, id).Scan(&s); err != nil {
+			t.Fatalf("read back %s: %v", id, err)
+		}
+		return s
+	}
+	if got := statusOf(strandedID); got != "cancelled" {
+		t.Errorf("stranded turn status = %q, want cancelled", got)
+	}
+	if got := statusOf(survivorID); got != "running" {
+		t.Errorf("live-home turn status = %q, want running (untouched)", got)
+	}
+	if got := statusOf(localID); got != "running" {
+		t.Errorf("NULL-home turn status = %q, want running (sweep must ignore unhomed turns)", got)
+	}
+}
