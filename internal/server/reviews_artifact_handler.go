@@ -329,10 +329,19 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	submitted.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
 	stamp := func() error {
 		return ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			if _, e := tx.Artifacts.TransitionReviewState(cleanupCtx, orgID, art.ID,
+			stamped, e := tx.Artifacts.TransitionReviewState(cleanupCtx, orgID, art.ID,
 				domain.ArtifactStateReviewSubmitted, domain.ArtifactStateReviewSubmitted,
-				submitted.ExternalID, submitted.URL, submitted.DetailsJSON); e != nil {
+				submitted.ExternalID, submitted.URL, submitted.DetailsJSON)
+			if e != nil {
 				return e
+			}
+			// A zero-row CAS means the claimed row is gone or no longer submitted —
+			// nothing here can move it post-claim, so this is a real anomaly. Error
+			// out (rolling back the audit row: it composes with the stamp,
+			// both-or-neither) so the retry + loud-failure path below sees it
+			// instead of a silent fake success.
+			if !stamped {
+				return fmt.Errorf("stamp CAS matched no row: artifact %s is missing or no longer submitted", art.ID)
 			}
 			return tx.ExternalActions.Record(cleanupCtx, orgID,
 				githubApprovalAction(&submitted, userID, domain.ActionReviewSubmitted, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted))
