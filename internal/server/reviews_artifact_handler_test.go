@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
@@ -186,6 +187,62 @@ func TestReviewArtifactApprove_NonPending_409(t *testing.T) {
 	}
 	if submitHit {
 		t.Error("a 409 approve must not touch GitHub")
+	}
+}
+
+// TestReviewArtifactApprove_SubmitsPostClaimContent pins the read-after-claim:
+// an edit that lands between the approve click and the claim must be what
+// reaches GitHub — the submit payload is rebuilt from the row AFTER the claim
+// freezes it, not from the snapshot the handler was dispatched with. The racing
+// PATCH is injected from the resolver's repo-coverage probe (GET /repos), which
+// approve performs after loading its artifact snapshot and before taking the
+// claim — exactly the window where a guarded edit still succeeds.
+func TestReviewArtifactApprove_SubmitsPostClaimContent(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+
+	var artID string
+	var raced bool
+	var submitBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/app/installations/{id}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":      "ghs_" + r.PathValue("id"),
+			"expires_at": time.Now().Add(time.Hour).UTC(),
+		})
+	})
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}", func(w http.ResponseWriter, r *http.Request) {
+		if !raced && artID != "" {
+			raced = true
+			rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"review_body": "EDITED just before the claim"})
+			if rec.Code != http.StatusOK {
+				t.Errorf("racing PATCH = %d, want 200 (the claim hasn't been taken yet); body=%s", rec.Code, rec.Body.String())
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"clone_url": "https://example.test/acme/api.git", "default_branch": "main",
+		})
+	})
+	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&submitBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 31337})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ = seedReviewArtifactWithRun(t, srv, "rrace", "acme", "api", 7, "COMMENT")
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !raced {
+		t.Fatal("the coverage-probe hook never fired — the racing PATCH was not exercised")
+	}
+	got, _ := submitBody["body"].(string)
+	if !strings.HasPrefix(got, "EDITED just before the claim") {
+		t.Errorf("submitted body = %q, want the post-edit content (approve must re-read after the claim)", got)
 	}
 }
 
