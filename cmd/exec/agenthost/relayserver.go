@@ -217,6 +217,17 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(upsertArtifactResult{Artifact: stored})
 
+	case opUpdateReviewDetails:
+		var a updateReviewDetailsArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		updated, err := s.rt.UpdateReviewDetailsIfPending(ctx, a.ArtifactID, a.DetailsJSON)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(updateReviewDetailsResult{Updated: updated})
+
 	case opCheckEntitlement:
 		var a checkEntitlementArgs
 		if err := json.Unmarshal(args, &a); err != nil {

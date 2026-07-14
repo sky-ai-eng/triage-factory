@@ -19,16 +19,20 @@ import (
 // submit at approval. Each comment's severity is parsed back out of its body for
 // the chip. ReviewID is empty until approval stamps the submitted review's id.
 type reviewArtifactJSON struct {
-	ID          string                      `json:"id"`
-	RunID       string                      `json:"run_id,omitempty"`
-	Owner       string                      `json:"owner"`
-	Repo        string                      `json:"repo"`
-	PRNumber    int                         `json:"pr_number"`
-	ReviewID    string                      `json:"review_id"`
-	ReviewBody  string                      `json:"review_body"`
-	ReviewEvent string                      `json:"review_event"`
-	State       string                      `json:"state"`
-	Comments    []reviewArtifactCommentJSON `json:"comments"`
+	ID          string `json:"id"`
+	RunID       string `json:"run_id,omitempty"`
+	Owner       string `json:"owner"`
+	Repo        string `json:"repo"`
+	PRNumber    int    `json:"pr_number"`
+	ReviewID    string `json:"review_id"`
+	ReviewBody  string `json:"review_body"`
+	ReviewEvent string `json:"review_event"`
+	State       string `json:"state"`
+	// URL is the posted review's GitHub deep link (#pullrequestreview-<id>),
+	// stamped at approval — empty while the draft is pending (nothing exists on
+	// GitHub yet). The read-only overlay renders it as "View on GitHub".
+	URL      string                      `json:"url"`
+	Comments []reviewArtifactCommentJSON `json:"comments"`
 	// CommitsSinceFinalize is how many commits the live PR head is ahead of the
 	// finalize-time head (TFAC-500) — the "N commits since this review was written"
 	// indicator. nil when it can't be computed (no finalize head stored, or the
@@ -84,6 +88,7 @@ func (ah *artifactsHandler) reviewGet(w http.ResponseWriter, r *http.Request, or
 		ReviewBody:  details.ReviewBody,
 		ReviewEvent: details.ReviewEvent,
 		State:       art.State,
+		URL:         art.URL,
 		Comments:    []reviewArtifactCommentJSON{},
 	}
 	for _, c := range details.StagedComments {
@@ -103,8 +108,12 @@ func (ah *artifactsHandler) reviewGet(w http.ResponseWriter, r *http.Request, or
 	}
 	// Augment with per-comment freshness + commits-since-finalize against the live
 	// PR head (TFAC-500). Best-effort: never errors the overlay — on any GitHub
-	// failure the comments stay "unknown" and the count stays nil.
-	ah.annotateReviewFreshness(r.Context(), orgID, art, details, &out)
+	// failure the comments stay "unknown" and the count stays nil. Pending only:
+	// a resolved review is immutable, so drift against the live head is
+	// meaningless (and the GitHub reads would be wasted).
+	if art.State == domain.ArtifactStateReviewPending {
+		ah.annotateReviewFreshness(r.Context(), orgID, art, details, &out)
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -149,49 +158,137 @@ func (ah *artifactsHandler) reviewUpdate(w http.ResponseWriter, r *http.Request,
 		details.ReviewEvent = *req.ReviewEvent
 	}
 
-	next := *art
-	next.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
-	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Artifacts.Upsert(r.Context(), orgID, next)
-		return e
-	}); err != nil {
-		internalError(w, "artifacts", err)
+	if !ah.updateReviewDetailsPending(w, r, orgID, userID, art.ID, details) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// updateReviewDetailsPending persists mutated review-draft details through the
+// state-guarded write (UpdateReviewDetailsIfPending), shared by every draft
+// mutation (PATCH body/event, comment edit/delete, refresh). The guard closes
+// the read-mutate-write race those handlers all have: their upfront pending
+// check reads a snapshot, so an unconditional Upsert landing after a concurrent
+// approve would write the stale pending state back over submitted — making the
+// posted review approvable (and submittable) again. A lost race is a 409, the
+// same conflict the upfront check reports. Writes the HTTP error response and
+// returns false on any failure.
+func (ah *artifactsHandler) updateReviewDetailsPending(w http.ResponseWriter, r *http.Request, orgID, userID, artifactID string, details domain.ReviewArtifactDetails) bool {
+	var updated bool
+	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		updated, e = tx.Artifacts.UpdateReviewDetailsIfPending(r.Context(), orgID, artifactID, domain.MarshalReviewArtifactDetails(details))
+		return e
+	}); err != nil {
+		internalError(w, "artifacts", err)
+		return false
+	}
+	if !updated {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending — it was just submitted or dismissed"})
+		return false
+	}
+	return true
+}
+
 // reviewApprove creates and submits the staged review to GitHub atomically
 // (SubmitReview — one POST carrying commit_id + event + body + footer + the staged
-// comments[]), stamps the submitted review's id + URL onto the artifact, flips it
-// pending → submitted, records the human verdict into run_memory, and runs the
-// shared run/task/blueprint bookkeeping. Nothing touched GitHub before this point
-// (the review was staged entirely TF-side), so concurrent runs on one PR each
-// submit their own review here — GitHub allows unlimited submitted reviews per
-// identity. The submit is pessimistic (non-2xx on failure, artifact untouched);
-// everything after is detached best-effort.
+// comments[]), stamps the submitted review's id + URL onto the artifact, records
+// the human verdict into run_memory, and runs the shared run/task/blueprint
+// bookkeeping. Nothing touched GitHub before this point (the review was staged
+// entirely TF-side), so concurrent runs on one PR each submit their own review
+// here — GitHub allows unlimited submitted reviews per identity.
+//
+// The pending → submitted flip is a CAS CLAIM taken BEFORE the GitHub write, so
+// the submit is at-most-once: of two racing approves (two tabs, two pods) exactly
+// one wins the claim and reaches GitHub; the loser 409s. The claim also shuts the
+// door on every state-guarded mutation for the duration. A GitHub failure
+// releases the claim (submitted → pending) so retry works; the release running
+// AFTER the failed write means a crash mid-flight strands the artifact as
+// submitted-without-URL — deliberately preferred over the inverse order, where a
+// crash between a successful post and the flip leaves the review re-submittable.
+//
+// The content submitted is read back AFTER the claim, in the claim's own tx —
+// never the snapshot the handler was dispatched with. The claim is the
+// linearization point for the draft: every guarded mutation requires
+// state=pending, so an edit racing the approve click either commits before the
+// claim (and is included in the re-read) or loses to it (409); submitting the
+// pre-claim snapshot would post content the user had already edited away.
 func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Artifact) {
 	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
 		return
 	}
 
-	// Only a still-pending review can be approved. A stale/double click on an
-	// already-submitted (or dismissed) artifact would otherwise re-submit.
+	// Fast path: a stale/double click on an already-resolved artifact gets a
+	// state-specific 409 without claim churn. Advisory only — the CAS below is
+	// the real guard.
 	if art.State != domain.ArtifactStateReviewPending {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending approval (state: " + art.State + ")"})
 		return
 	}
 
-	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	// Claim the review BEFORE reading the content to submit: CAS pending →
+	// submitted, plus a re-read of the now-frozen row in the same tx (a read
+	// failure rolls the claim back with it, so no claim can outlive this tx
+	// un-observed). Exactly one caller wins; a loser (concurrent approve from
+	// another tab/pod, or a just-landed dismiss) 409s without touching GitHub,
+	// which is what makes the submit at-most-once. The claim carries no
+	// coordinates yet — GitHub hasn't minted them.
+	var claimed bool
+	var fresh *domain.Artifact
+	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		claimed, e = tx.Artifacts.TransitionReviewState(r.Context(), orgID, art.ID,
+			domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+		if e != nil || !claimed {
+			return e
+		}
+		fresh, e = tx.Artifacts.Get(r.Context(), orgID, art.ID)
+		return e
+	}); err != nil {
+		internalError(w, "artifacts", err)
+		return
+	}
+	if !claimed {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending approval — it was just submitted or dismissed"})
+		return
+	}
+	if fresh == nil {
+		// The row vanished between the claim UPDATE and the re-read in the same
+		// tx — not a state anything in the system produces.
+		internalError(w, "artifacts", fmt.Errorf("review artifact %s unreadable immediately after claim", art.ID))
+		return
+	}
+
+	// releaseClaim undoes the pending→submitted claim on any post-claim failure
+	// (validation or the GitHub write), so the user can fix and retry. Detached
+	// from the request context: a client disconnect mustn't strand the claim.
+	releaseClaim := func() {
+		releaseCtx := context.WithoutCancel(r.Context())
+		var released bool
+		if rerr := ah.tx.WithTx(releaseCtx, orgID, userID, func(tx db.TxStores) error {
+			var e error
+			released, e = tx.Artifacts.TransitionReviewState(releaseCtx, orgID, art.ID,
+				domain.ArtifactStateReviewSubmitted, domain.ArtifactStateReviewPending, "", "", "")
+			return e
+		}); rerr != nil || !released {
+			artifactsLog.Error("failed to release review submit claim — review stuck as submitted without a posted review",
+				"artifact", art.ID, "released", released, "error", rerr)
+		}
+	}
+
+	details, err := domain.ParseReviewArtifactDetails(fresh.DetailsJSON)
 	if err != nil {
+		releaseClaim()
 		internalError(w, "artifacts", fmt.Errorf("parse review artifact details: %w", err))
 		return
 	}
 	// The ready sentinel must be set — the agent finalized the review via
 	// finalize-review. A pending artifact without it was started but never
-	// finalized, so there's nothing to approve.
+	// finalized (or an agent-side reset raced the click), so there's nothing to
+	// approve.
 	if details.ReviewEvent == "" {
+		releaseClaim()
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review has not been finalized by the agent yet"})
 		return
 	}
@@ -208,6 +305,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	commitID := details.HeadSHA
 	for _, c := range details.StagedComments {
 		if c.Line == nil {
+			releaseClaim()
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 				"error": "a staged review comment on " + c.Path + " has no line anchor and can't be submitted — edit or delete it, then approve again",
 			})
@@ -230,11 +328,13 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// the PR and returns the event GitHub actually recorded — capture it so the
 	// persisted artifact, the verdict diff, and the response all reflect what
 	// landed, not what was requested.
-	body := details.ReviewBody + agentmeta.Build(ah.agentRuns, orgID, art.RunID, "review")
+	body := details.ReviewBody + agentmeta.Build(ah.agentRuns, orgID, fresh.RunID, "review")
 	reviewID, submittedEvent, err := gh.SubmitReview(r.Context(), owner, repo, number, commitID, details.ReviewEvent, body, submitComments)
 	if err != nil {
 		artifactsLog.Warn("SubmitReview failed",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+		// Release the claim so the user can retry — nothing reached GitHub.
+		releaseClaim()
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
@@ -244,36 +344,58 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 
 	cleanupCtx := context.WithoutCancel(r.Context())
 
-	// Step 1: stamp the submitted review's id + URL onto the artifact (a submitted
-	// review finally has both — a never-published draft had neither) and the actual
-	// submitted event into details, flip it pending → submitted, and compose the
-	// audit row with the flip (TFAC-483). The org-App submit is a human-authorized,
-	// org-executed write — run_id is the drafting run, actor is the approver. Atomic
-	// with the flip.
-	submitted := *art
+	// Step 1: stamp the submitted review's id + URL onto the claimed artifact (a
+	// submitted review finally has both — a never-published draft had neither) and
+	// the actual submitted event into details, and compose the audit row with the
+	// stamp (TFAC-483). The org-App submit is a human-authorized, org-executed
+	// write — run_id is the drafting run, actor is the approver. The state is
+	// already submitted (the claim), so this is a submitted→submitted CAS carrying
+	// the coordinates; retried once, and a double failure is loud — until the
+	// stamp lands the row shows submitted with no URL, which is why this must not
+	// stay a silent Warn.
+	submitted := *fresh
 	submitted.State = domain.ArtifactStateReviewSubmitted
 	submitted.ExternalID = strconv.Itoa(reviewID)
 	submitted.URL = fmt.Sprintf("%s#pullrequestreview-%d", domain.GitHubPullURL(owner+"/"+repo, number), reviewID)
 	submitted.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
-	if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-		if _, e := tx.Artifacts.Upsert(cleanupCtx, orgID, submitted); e != nil {
-			return e
+	stamp := func() error {
+		return ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
+			stamped, e := tx.Artifacts.TransitionReviewState(cleanupCtx, orgID, art.ID,
+				domain.ArtifactStateReviewSubmitted, domain.ArtifactStateReviewSubmitted,
+				submitted.ExternalID, submitted.URL, submitted.DetailsJSON)
+			if e != nil {
+				return e
+			}
+			// A zero-row CAS means the claimed row is gone or no longer submitted —
+			// nothing here can move it post-claim, so this is a real anomaly. Error
+			// out (rolling back the audit row: it composes with the stamp,
+			// both-or-neither) so the retry + loud-failure path below sees it
+			// instead of a silent fake success.
+			if !stamped {
+				return fmt.Errorf("stamp CAS matched no row: artifact %s is missing or no longer submitted", art.ID)
+			}
+			return tx.ExternalActions.Record(cleanupCtx, orgID,
+				githubApprovalAction(&submitted, userID, domain.ActionReviewSubmitted, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted))
+		})
+	}
+	if err := stamp(); err != nil {
+		artifactsLog.Warn("stamp submitted review onto artifact failed; retrying once", "artifact", art.ID, "error", err)
+		if err := stamp(); err != nil {
+			artifactsLog.Error("stamp submitted review onto artifact failed twice — artifact shows submitted without the posted review's id/URL",
+				"artifact", art.ID, "review", submitted.ExternalID, "url", submitted.URL, "error", err)
 		}
-		return tx.ExternalActions.Record(cleanupCtx, orgID,
-			githubApprovalAction(&submitted, userID, domain.ActionReviewSubmitted, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted))
-	}); err != nil {
-		artifactsLog.Warn("flip review artifact to submitted + record action failed", "artifact", art.ID, "error", err)
 	}
 
 	// Step 2: human verdict capture — diff the agent's proposed draft against the
-	// human-edited final (body, event, the staged comments) into
+	// human-edited final (body, event, the staged comments — all from the
+	// post-claim re-read, so a last-moment edit shows up in the diff) into
 	// run_memory.human_content.
-	if art.RunID != "" {
+	if fresh.RunID != "" {
 		humanContent := FormatHumanFeedback(buildReviewHumanFeedbackInput(details, details.StagedComments))
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, art.RunID, humanContent)
+			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, fresh.RunID, humanContent)
 		}); err != nil {
-			artifactsLog.Warn("failed to record human verdict", "run", art.RunID, "error", err)
+			artifactsLog.Warn("failed to record human verdict", "run", fresh.RunID, "error", err)
 		}
 	}
 
@@ -281,7 +403,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// never flips run status or resumes/terminates a blueprint. The only lifecycle
 	// effect is closing the task when this was the LAST unresolved artifact on an
 	// already-terminal blueprint; otherwise a no-op.
-	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
+	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, fresh.RunID)
 
 	// Tell the drafting agent its review was submitted (live or via the ledger).
 	// submitted keeps art.ID — the review handle the agent spoke to start-review —
@@ -311,17 +433,26 @@ func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Flip pending → dismissed, pessimistic — the flip is the resolution. The
-	// proposed snapshot is preserved on the row; abandonment retires the staged
-	// draft, not the record of what the agent wrote. No audit row: there is no
-	// org-credential write to record (the draft never reached GitHub).
+	// Flip pending → dismissed, pessimistic — the flip is the resolution. A CAS,
+	// not an upsert: a dismiss racing an approve must lose cleanly (409) rather
+	// than overwrite a just-submitted review as dismissed. The proposed snapshot
+	// is preserved on the row; abandonment retires the staged draft, not the
+	// record of what the agent wrote. No audit row: there is no org-credential
+	// write to record (the draft never reached GitHub).
 	dismissed := *art
 	dismissed.State = domain.ArtifactStateReviewDismissed
+	var flipped bool
 	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Artifacts.Upsert(r.Context(), orgID, dismissed)
+		var e error
+		flipped, e = tx.Artifacts.TransitionReviewState(r.Context(), orgID, art.ID,
+			domain.ArtifactStateReviewPending, domain.ArtifactStateReviewDismissed, "", "", "")
 		return e
 	}); err != nil {
 		internalError(w, "artifacts", err)
+		return
+	}
+	if !flipped {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending — it was just submitted or dismissed"})
 		return
 	}
 
@@ -443,13 +574,7 @@ func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request
 	details.FinalizedHeadSHA = liveHead
 	details.FinalizedBaseSHA = pr.BaseSHA
 
-	next := *art
-	next.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
-	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Artifacts.Upsert(r.Context(), orgID, next)
-		return e
-	}); err != nil {
-		internalError(w, "artifacts", err)
+	if !ah.updateReviewDetailsPending(w, r, orgID, userID, art.ID, details) {
 		return
 	}
 
@@ -522,13 +647,7 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 	_, clean := domain.ParseSeverityBadge(req.Body)
 	details.StagedComments[idx].Body = domain.SeverityBadgeMarkdown(severity) + clean
 
-	next := *art
-	next.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
-	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Artifacts.Upsert(r.Context(), orgID, next)
-		return e
-	}); err != nil {
-		internalError(w, "artifacts", err)
+	if !ah.updateReviewDetailsPending(w, r, orgID, userID, art.ID, details) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -576,13 +695,7 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 	}
 	details.StagedComments = append(details.StagedComments[:idx], details.StagedComments[idx+1:]...)
 
-	next := *art
-	next.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
-	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Artifacts.Upsert(r.Context(), orgID, next)
-		return e
-	}); err != nil {
-		internalError(w, "artifacts", err)
+	if !ah.updateReviewDetailsPending(w, r, orgID, userID, art.ID, details) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

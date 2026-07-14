@@ -780,6 +780,130 @@ func TestArtifactStore_SQLite_ListPendingReviewsByTarget(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_SQLite_TransitionReviewState pins the review CAS: exactly
+// one of two same-from transitions wins; the loser (and a wrong-from or
+// wrong-kind row) reports false without touching anything; the stamp trio
+// (external_id/url/details_json) applies preserve-on-empty in the same write.
+func TestArtifactStore_SQLite_TransitionReviewState(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runID := seedArtifactRun(t, conn)
+	org := runmode.LocalDefaultOrgID
+
+	rev, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
+		RunID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
+		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindReview,
+		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7",
+		DedupKey: "rev-cas", DetailsJSON: `{"number":7}`,
+	})
+	if err != nil {
+		t.Fatalf("seed review: %v", err)
+	}
+	pr, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
+		RunID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
+		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7", DedupKey: "pr-cas",
+	})
+	if err != nil {
+		t.Fatalf("seed pr: %v", err)
+	}
+
+	// The claim: pending → submitted, no stamp yet.
+	won, err := stores.Artifacts.TransitionReviewState(ctx, org, rev.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if err != nil || !won {
+		t.Fatalf("claim = (%v, %v), want (true, nil)", won, err)
+	}
+	// The losing racer: same from-state, row already moved.
+	won, err = stores.Artifacts.TransitionReviewState(ctx, org, rev.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if err != nil || won {
+		t.Fatalf("second claim = (%v, %v), want (false, nil) — the CAS must admit one winner", won, err)
+	}
+	// The claim alone must not have blanked details (preserve-on-empty).
+	got, _ := stores.Artifacts.Get(ctx, org, rev.ID)
+	if got.State != domain.ArtifactStateReviewSubmitted || got.DetailsJSON != `{"number":7}` || got.URL != "" {
+		t.Fatalf("post-claim row = state %q details %q url %q, want submitted/original details/empty url", got.State, got.DetailsJSON, got.URL)
+	}
+
+	// The stamp: submitted → submitted carrying the posted review's coordinates.
+	won, err = stores.Artifacts.TransitionReviewState(ctx, org, rev.ID,
+		domain.ArtifactStateReviewSubmitted, domain.ArtifactStateReviewSubmitted,
+		"12345", "https://github.com/octo/repo/pull/7#pullrequestreview-12345", `{"number":7,"review_event":"COMMENT"}`)
+	if err != nil || !won {
+		t.Fatalf("stamp = (%v, %v), want (true, nil)", won, err)
+	}
+	got, _ = stores.Artifacts.Get(ctx, org, rev.ID)
+	if got.ExternalID != "12345" || got.URL != "https://github.com/octo/repo/pull/7#pullrequestreview-12345" ||
+		got.DetailsJSON != `{"number":7,"review_event":"COMMENT"}` {
+		t.Fatalf("post-stamp row = %+v, want the posted review's coordinates", got)
+	}
+
+	// Kind guard: a non-review row never transitions, even from a matching state.
+	won, err = stores.Artifacts.TransitionReviewState(ctx, org, pr.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if err != nil || won {
+		t.Fatalf("pr transition = (%v, %v), want (false, nil) — CAS is review-only", won, err)
+	}
+	// Missing row.
+	won, err = stores.Artifacts.TransitionReviewState(ctx, org, "00000000-0000-0000-0000-000000000000",
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if err != nil || won {
+		t.Fatalf("missing-row transition = (%v, %v), want (false, nil)", won, err)
+	}
+}
+
+// TestArtifactStore_SQLite_UpdateReviewDetailsIfPending pins the guarded draft
+// write: it lands only while the review is still pending, and reports false —
+// leaving the row untouched — once the review resolved, so a stale writer can't
+// resurrect a submitted review's draft state.
+func TestArtifactStore_SQLite_UpdateReviewDetailsIfPending(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runID := seedArtifactRun(t, conn)
+	org := runmode.LocalDefaultOrgID
+
+	rev, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
+		RunID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
+		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindReview,
+		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7",
+		DedupKey: "rev-details", DetailsJSON: `{"v":1}`,
+	})
+	if err != nil {
+		t.Fatalf("seed review: %v", err)
+	}
+
+	updated, err := stores.Artifacts.UpdateReviewDetailsIfPending(ctx, org, rev.ID, `{"v":2}`)
+	if err != nil || !updated {
+		t.Fatalf("pending update = (%v, %v), want (true, nil)", updated, err)
+	}
+	got, _ := stores.Artifacts.Get(ctx, org, rev.ID)
+	if got.DetailsJSON != `{"v":2}` {
+		t.Fatalf("details = %q, want {\"v\":2}", got.DetailsJSON)
+	}
+
+	// Resolve the review, then attempt the stale write.
+	if won, err := stores.Artifacts.TransitionReviewState(ctx, org, rev.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", ""); err != nil || !won {
+		t.Fatalf("resolve: (%v, %v)", won, err)
+	}
+	updated, err = stores.Artifacts.UpdateReviewDetailsIfPending(ctx, org, rev.ID, `{"v":3}`)
+	if err != nil || updated {
+		t.Fatalf("post-resolve update = (%v, %v), want (false, nil)", updated, err)
+	}
+	got, _ = stores.Artifacts.Get(ctx, org, rev.ID)
+	if got.DetailsJSON != `{"v":2}` || got.State != domain.ArtifactStateReviewSubmitted {
+		t.Fatalf("row after refused write = state %q details %q, want submitted/{\"v\":2} untouched", got.State, got.DetailsJSON)
+	}
+
+	// System variant is the same write in SQLite.
+	if _, err := stores.Artifacts.UpdateReviewDetailsIfPendingSystem(ctx, org, rev.ID, `{"v":4}`); err != nil {
+		t.Fatalf("system variant: %v", err)
+	}
+}
+
 func newSQLiteForArtifactTest(t *testing.T) *sql.DB {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")

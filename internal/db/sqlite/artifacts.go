@@ -121,6 +121,63 @@ func (s *artifactStore) UpsertSystem(ctx context.Context, orgID string, a domain
 	return s.Upsert(ctx, orgID, a)
 }
 
+// TransitionReviewState is the review CAS: one UPDATE guarded on the current
+// state, so of two racing approves exactly one sees a row flip (RowsAffected=1)
+// and the loser gets false without touching anything. external_id / url /
+// details_json follow Upsert's preserve-on-empty convention.
+func (s *artifactStore) TransitionReviewState(ctx context.Context, orgID, id, from, to, externalID, url, detailsJSON string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE artifacts
+		SET state        = ?,
+		    external_id  = COALESCE(NULLIF(?, ''), external_id),
+		    url          = COALESCE(NULLIF(?, ''), url),
+		    details_json = COALESCE(NULLIF(?, ''), details_json),
+		    updated_at   = CURRENT_TIMESTAMP
+		WHERE org_id = ? AND id = ? AND kind = ? AND state = ?
+	`, to, externalID, url, detailsJSON, orgID, id, domain.ArtifactKindReview, from)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// UpdateReviewDetailsIfPending guards the draft-mutation write on the row still
+// being a pending review, so a stale writer can't resurrect a resolved one.
+func (s *artifactStore) UpdateReviewDetailsIfPending(ctx context.Context, orgID, id, detailsJSON string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE artifacts
+		SET details_json = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE org_id = ? AND id = ? AND kind = ? AND state = ?
+	`, nullIfEmpty(detailsJSON), orgID, id, domain.ArtifactKindReview, domain.ArtifactStateReviewPending)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// UpdateReviewDetailsIfPendingSystem is identical to UpdateReviewDetailsIfPending
+// in SQLite: local mode is single-tenant (N=1) with no RLS, so there is no
+// admin/app pool split. The method exists for parity with the Postgres store,
+// where the event-triggered exec writers (no JWT-claims context) need an
+// admin-pool path.
+func (s *artifactStore) UpdateReviewDetailsIfPendingSystem(ctx context.Context, orgID, id, detailsJSON string) (bool, error) {
+	return s.UpdateReviewDetailsIfPending(ctx, orgID, id, detailsJSON)
+}
+
 func (s *artifactStore) Get(ctx context.Context, orgID, id string) (*domain.Artifact, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

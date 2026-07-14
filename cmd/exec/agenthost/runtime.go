@@ -48,6 +48,13 @@ type Runtime interface {
 	InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (inserted bool, winningPath string, err error)
 	DeleteRunWorktree(ctx context.Context, repoID, ref string) error
 	UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error)
+	// UpdateReviewDetailsIfPending persists a review draft's mutated
+	// details_json, guarded on the draft still being state=pending. Returns
+	// false when the draft was resolved (submitted/dismissed) since it was read
+	// — the writer surfaces the lost race instead of resurrecting the resolved
+	// review, which the unconditional UpsertArtifact (state last-writer-wins)
+	// would do with its stale in-memory pending state.
+	UpdateReviewDetailsIfPending(ctx context.Context, artifactID, detailsJSON string) (bool, error)
 	// Record is the void, best-effort external-write funnel (RecordExternalWrite):
 	// a recording failure is logged host-side and never fails the agent's
 	// already-applied action, so it needs no error return.
@@ -108,9 +115,22 @@ const (
 	opOrgJiraBase             = "org_jira_base"
 	opBuildAgentRunFooter     = "build_agent_run_footer"
 	opUpsertArtifact          = "upsert_artifact"
+	opUpdateReviewDetails     = "update_review_details_if_pending"
 	opRecordExternalWrite     = "record_external_write"
 	opCheckEntitlement        = "check_entitlement"
 )
+
+// updateReviewDetailsArgs / updateReviewDetailsResult are the
+// update_review_details_if_pending op's payloads — the draft's artifact id +
+// its rewritten details_json, and whether the guarded write landed.
+type updateReviewDetailsArgs struct {
+	ArtifactID  string `json:"artifact_id"`
+	DetailsJSON string `json:"details_json"`
+}
+
+type updateReviewDetailsResult struct {
+	Updated bool `json:"updated"`
+}
 
 // checkEntitlementArgs / checkEntitlementResult are the check_entitlement op's
 // payloads — a feature name, and whether the run's org holds it.
@@ -275,6 +295,23 @@ func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (
 		return recordActionTx(ctx, ts, r.info.OrgID, act)
 	})
 	return out, err
+}
+
+// UpdateReviewDetailsIfPending routes the guarded draft write through the same
+// event-vs-manual pool split UpsertArtifact uses: event-triggered runs write
+// admin-pool (no JWT claims); manual runs write under the kicking-off user's
+// synthetic claims.
+func (r *directRuntime) UpdateReviewDetailsIfPending(ctx context.Context, artifactID, detailsJSON string) (bool, error) {
+	if r.info.IsEventTriggered {
+		return r.stores.Artifacts.UpdateReviewDetailsIfPendingSystem(ctx, r.info.OrgID, artifactID, detailsJSON)
+	}
+	var updated bool
+	err := r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
+		u, e := ts.Artifacts.UpdateReviewDetailsIfPending(ctx, r.info.OrgID, artifactID, detailsJSON)
+		updated = u
+		return e
+	})
+	return updated, err
 }
 
 func (r *directRuntime) Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction) {
@@ -451,6 +488,14 @@ func (r *relayRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (d
 		return domain.Artifact{}, err
 	}
 	return res.Artifact, nil
+}
+
+func (r *relayRuntime) UpdateReviewDetailsIfPending(ctx context.Context, artifactID, detailsJSON string) (bool, error) {
+	var res updateReviewDetailsResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opUpdateReviewDetails, updateReviewDetailsArgs{ArtifactID: artifactID, DetailsJSON: detailsJSON}, &res); err != nil {
+		return false, err
+	}
+	return res.Updated, nil
 }
 
 func (r *relayRuntime) Record(_ context.Context, a *domain.Artifact, act *domain.ExternalAction) {

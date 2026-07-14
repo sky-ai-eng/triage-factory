@@ -25,6 +25,9 @@ interface Props {
   // can surface GitHub errors; a void no-op is still accepted (the PR overlay).
   onUpdateComment: (id: string, body: string) => void | Promise<void>
   onDeleteComment: (id: string) => void | Promise<void>
+  // readOnly hides each comment's edit/delete affordances — a resolved review's
+  // comments are published and immutable.
+  readOnly?: boolean
 }
 
 export default function DiffFile({
@@ -33,6 +36,7 @@ export default function DiffFile({
   defaultCollapsed = false,
   onUpdateComment,
   onDeleteComment,
+  readOnly = false,
 }: Props) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed)
 
@@ -70,6 +74,7 @@ export default function DiffFile({
                   mappedLine={comment.mappedLine}
                   onUpdate={onUpdateComment}
                   onDelete={onDeleteComment}
+                  readOnly={readOnly}
                 />
               </>
             )
@@ -83,7 +88,7 @@ export default function DiffFile({
     }
 
     return { widgets: map, unanchored: comments.filter((c) => !placed.has(c.id)) }
-  }, [comments, file.hunks, onUpdateComment, onDeleteComment])
+  }, [comments, file.hunks, onUpdateComment, onDeleteComment, readOnly])
 
   // Tokenize with syntax highlighting + word-level edit marks
   const displayPath = file.newPath === '/dev/null' ? file.oldPath : file.newPath
@@ -220,6 +225,7 @@ export default function DiffFile({
               mappedLine={c.mappedLine}
               onUpdate={onUpdateComment}
               onDelete={onDeleteComment}
+              readOnly={readOnly}
             />
           ))}
         </div>

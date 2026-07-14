@@ -80,6 +80,36 @@ describe('ArtifactList', () => {
     expect(onOpen).toHaveBeenCalledWith('review', 'rv1')
   })
 
+  it('renders RESOLVED pull_request / review rows as link-outs to the posted object, not overlay openers', async () => {
+    const onOpen = vi.fn()
+    mockArtifacts([
+      art({
+        id: 'rv1',
+        kind: 'review',
+        state: 'submitted',
+        target: 'org/repo#18',
+        url: 'https://gh/pull/18#pullrequestreview-9',
+      }),
+      art({
+        id: 'pr1',
+        kind: 'pull_request',
+        state: 'open',
+        target: 'org/repo#18',
+        url: 'https://gh/pr',
+      }),
+    ])
+    render(<ArtifactList runId="r1" onOpenApproval={onOpen} />)
+
+    // The submitted review's row IS the link to the posted review on GitHub —
+    // clicking it must not reopen the stale TF-side draft editor.
+    const review = await screen.findByRole('link', { name: /Open review/ })
+    expect(review).toHaveAttribute('href', 'https://gh/pull/18#pullrequestreview-9')
+    const pr = screen.getByRole('link', { name: /Open pull request/ })
+    expect(pr).toHaveAttribute('href', 'https://gh/pr')
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
   it('renders branch / issue / comment rows as plain link-outs, not overlay openers', async () => {
     const onOpen = vi.fn()
     mockArtifacts([

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
@@ -186,6 +187,151 @@ func TestReviewArtifactApprove_NonPending_409(t *testing.T) {
 	}
 	if submitHit {
 		t.Error("a 409 approve must not touch GitHub")
+	}
+}
+
+// TestReviewArtifactApprove_SubmitsPostClaimContent pins the read-after-claim:
+// an edit that lands between the approve click and the claim must be what
+// reaches GitHub — the submit payload is rebuilt from the row AFTER the claim
+// freezes it, not from the snapshot the handler was dispatched with. The racing
+// PATCH is injected from the resolver's repo-coverage probe (GET /repos), which
+// approve performs after loading its artifact snapshot and before taking the
+// claim — exactly the window where a guarded edit still succeeds.
+func TestReviewArtifactApprove_SubmitsPostClaimContent(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+
+	var artID string
+	var raced bool
+	var submitBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/app/installations/{id}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":      "ghs_" + r.PathValue("id"),
+			"expires_at": time.Now().Add(time.Hour).UTC(),
+		})
+	})
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}", func(w http.ResponseWriter, r *http.Request) {
+		if !raced && artID != "" {
+			raced = true
+			rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"review_body": "EDITED just before the claim"})
+			if rec.Code != http.StatusOK {
+				t.Errorf("racing PATCH = %d, want 200 (the claim hasn't been taken yet); body=%s", rec.Code, rec.Body.String())
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"clone_url": "https://example.test/acme/api.git", "default_branch": "main",
+		})
+	})
+	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&submitBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 31337})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ = seedReviewArtifactWithRun(t, srv, "rrace", "acme", "api", 7, "COMMENT")
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !raced {
+		t.Fatal("the coverage-probe hook never fired — the racing PATCH was not exercised")
+	}
+	got, _ := submitBody["body"].(string)
+	if !strings.HasPrefix(got, "EDITED just before the claim") {
+		t.Errorf("submitted body = %q, want the post-edit content (approve must re-read after the claim)", got)
+	}
+}
+
+// TestReviewArtifactApprove_GitHubFailure_ReleasesClaim pins the claim/release
+// pair around the GitHub write: approve claims the artifact (pending → submitted)
+// BEFORE SubmitReview so the post is at-most-once, and a GitHub failure releases
+// the claim (back to pending, no id/URL) so a retry can succeed. The retry then
+// completes the flow: submitted, with the posted review's id + URL stamped.
+func TestReviewArtifactApprove_GitHubFailure_ReleasesClaim(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	fail := true
+	mux := newAppAPIMux()
+	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
+		if fail {
+			fail = false
+			http.Error(w, `{"message":"boom"}`, http.StatusBadGateway)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 777})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rrel", "acme", "api", 7, "COMMENT")
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("failed approve = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	art := getArtifact(t, srv, artID)
+	if art.State != domain.ArtifactStateReviewPending || art.ExternalID != "" || art.URL != "" {
+		t.Fatalf("after failed submit: state=%q ext=%q url=%q, want the claim released (pending, no coordinates)", art.State, art.ExternalID, art.URL)
+	}
+
+	rec = doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retry approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	art = getArtifact(t, srv, artID)
+	if art.State != domain.ArtifactStateReviewSubmitted || art.ExternalID != "777" || !strings.Contains(art.URL, "pullrequestreview-777") {
+		t.Fatalf("after retry: state=%q ext=%q url=%q, want submitted with the posted review's coordinates", art.State, art.ExternalID, art.URL)
+	}
+}
+
+// TestReviewArtifactGet_Submitted_URLNoFreshness pins the resolved-review read:
+// GET returns state=submitted with the posted review's url, and makes NO GitHub
+// call — freshness against the live head is meaningless once the review posted,
+// so commits_since_finalize stays null.
+func TestReviewArtifactGet_Submitted_URLNoFreshness(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	mux := newAppAPIMux()
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("a submitted review's GET must not fetch the live PR head")
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	})
+	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 555})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rsurl", "acme", "api", 7, "COMMENT")
+	if rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil); rec.Code != http.StatusOK {
+		t.Fatalf("approve = %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		State                string `json:"state"`
+		URL                  string `json:"url"`
+		ReviewID             string `json:"review_id"`
+		CommitsSinceFinalize *int   `json:"commits_since_finalize"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.State != domain.ArtifactStateReviewSubmitted || out.ReviewID != "555" ||
+		!strings.Contains(out.URL, "pullrequestreview-555") {
+		t.Errorf("get = state %q id %q url %q, want the posted review's coordinates", out.State, out.ReviewID, out.URL)
+	}
+	if out.CommitsSinceFinalize != nil {
+		t.Errorf("commits_since_finalize = %v, want null for a resolved review", *out.CommitsSinceFinalize)
 	}
 }
 
