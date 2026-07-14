@@ -53,7 +53,9 @@ This is a separate threat, and §4 and §6 are the answer to it.
 The two connect at one point: the agent's traffic is among the inputs our own
 parsers (the proxies, the agent-host socket) handle, so a parser bug there is
 where Adversary A could reach Adversary B — which is exactly why that parsing
-runs on the unprivileged orchestrator, never the capability-holder (§4).
+runs on an unprivileged process, never the capability-holder (§4): in a
+multi-mode executor it is the run's own capless credential sidecar, holding only
+that one run's material; on the all/local path it is the orchestrator.
 
 Local mode (single user, single machine, SQLite) collapses adversary A's
 multi-tenant threats: it is single-tenant, and **the sandbox is skipped
@@ -116,7 +118,8 @@ it holds and the *hostile input* it is exposed to never overlap:
 | Component | Holds capabilities? | Holds credentials? | Parses hostile input? |
 | --- | --- | --- | --- |
 | **cap-broker** | **Yes** (the only holder) | No | **No** |
-| **orchestrator** | No (dropped at exec) | Yes | Yes |
+| **orchestrator** | No (dropped at exec) | Its own control-plane creds; **no per-run agent credential** | Its own control-plane inputs; **not** a run's agent output |
+| **credential sidecar** (one per run) | No (capless) | Yes — one run's material only | Yes — that one run's agent traffic |
 | **sandbox** (agent) | No | No | Yes |
 
 - **cap-broker** — the only process that holds `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`. It
@@ -131,11 +134,14 @@ it holds and the *hostile input* it is exposed to never overlap:
   the run. The credential-holding parts — the LLM/git/egress proxies (which parse
   hostile agent traffic) and the agent-host socket — run in a **capless per-run
   child process**, one per run, so a run's credentials are process-isolated per
-  run rather than shared across the box (§5). It holds **zero capabilities**.
-  <!-- TODO(TFAC-620): per-run credential-process isolation; realized when that epic ships. Until then the proxies/agent-host run as goroutines in the orchestrator itself. -->
-- **per-run credential process** — a capless child holding only *one* run's
+  run rather than shared across the box (§5); the orchestrator itself keeps only a
+  capless op server (`RelayServer`) that answers that child's narrow, validated
+  policy/DB/audit relays — no credential-bearing op. It holds **zero
+  capabilities**.
+- **credential sidecar** — a capless per-run child holding only *one* run's
   credentials, unsealed with a key it generates for itself. No capabilities, one
-  tenant's material, exposed only to that run's own traffic (§5).
+  tenant's material, exposed only to that run's own traffic, freed when the run's
+  process exits (§5).
 - **sandbox** — the gVisor jail running the agent. No capabilities, no
   credentials (Property B).
 
@@ -145,13 +151,14 @@ A vulnerability compromises a **running process** — its memory and its
 kernel-granted privileges. Capabilities are per-process and enforced by the
 kernel at syscall time.
 
-- The orchestrator is the realistic target — it is the one parsing
-  hostile input. It dropped capabilities already, and the kernel denies the
-  syscalls regardless of what code the attacker jumps to. Its credentials live in
-  per-run child processes, so compromising the dispatcher core yields **no**
-  credentials, and compromising a single run's credential process yields only
-  **that run's** material — never the co-located set (§5).
-  <!-- TODO(TFAC-620): realized when per-run credential isolation ships; today an orchestrator compromise reaches every co-located run's in-flight credentials. -->
+- The orchestrator and each run's credential sidecar are the realistic targets —
+  the processes parsing hostile input. Neither holds capabilities (the
+  orchestrator dropped them at exec; the sidecar's setuid-from-root exec cleared
+  them), and the kernel denies the syscalls regardless of what code the attacker
+  jumps to. The per-run agent credentials live only in the run's own sidecar, so
+  compromising the orchestrator/dispatcher core yields **no** agent credentials,
+  and compromising a single run's sidecar yields only **that run's** material —
+  never the co-located set (§5).
 - There is no attacker-reachable path to the cap-broker. It parses no network,
   agent, or repository data; reaching it requires first owning the orchestrator
   and then finding a flaw in the narrow RPC between them.
@@ -291,7 +298,6 @@ material — and when the run ends its process exits and its credentials go with
 its address space. The remaining long-lived credential is the raw Anthropic API
 key for orgs on that route — the customer's own, spend-capped, expiring, and
 revocable.
-<!-- TODO(TFAC-620): per-run credential process + per-run sealing key. Realized when that epic ships; today the proxies/agent-host are goroutines in the shared orchestrator, unsealed with one per-instance key, so a compromise reaches every co-located run's in-flight credentials. -->
 
 ---
 
@@ -319,7 +325,6 @@ skips the gVisor escape.
   proxies, agent-host socket, git, archive extraction — runs **capless**, and the
   credential-holding ones (proxies, agent-host) run in a **per-run** process, so a
   parser flaw yields neither capabilities nor another run's credentials.
-  <!-- TODO(TFAC-620): "per-run process" is realized when per-run credential isolation ships; today these parsers are goroutines in the shared orchestrator. -->
 - A **tailored seccomp profile** (`docker/seccomp-profile.json`)
   replaces `seccomp=unconfined` in the deployment manifest.
 
@@ -331,7 +336,6 @@ skips the gVisor escape.
   run's own process; the secret-bag encryption key never loads on an executor, so
   a compromise reaches only **that one run's** bundle, never the whole tenant
   secret set.
-  <!-- TODO(TFAC-620): "that one run's bundle" is realized when per-run credential isolation ships; today one per-instance key unseals every co-located run's bundle. -->
 - LLM credentials are short-lived where the provider allows it: Bedrock uses
   control-plane-minted STS session credentials (action-scoped, optionally network-bound
   to the executor's egress); the Anthropic-API route stays bring-your-own-key,

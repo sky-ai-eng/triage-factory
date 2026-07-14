@@ -23,8 +23,23 @@ image is completely unaffected by this section.
 | Process | Holds capabilities | Holds credentials | Parses hostile input | Listens for connections |
 | --- | --- | --- | --- | --- |
 | **cap-broker** (`tf-cap-broker`) | **Yes** — `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` | No | No | Yes — but only a host-only unix socket (`/run/tf/cap-broker.sock`, mode 0600), reachable only by the orchestrator |
-| **orchestrator** (`tf-orchestrator`) | **No** — empty effective set, capability bounding set cleared | Yes — GitHub/Jira tokens, the GitHub App key, DB credentials | Yes — webhook payloads, agent output, the HTTP API | Yes — the public HTTP API / websocket |
-| **sandbox** (the delegated agent) | No | No | Yes — it's the source of the hostile input | No — outbound only, through the orchestrator's egress proxy |
+| **orchestrator** (`tf-orchestrator`) | **No** — empty effective set, capability bounding set cleared | Its own control-plane work only — webhook/poll/DB credentials; **never a per-run agent credential** (those live only in the run's sidecar), and on a `TF_ROLE=executor` process, none at all (the secret store is disabled there) | Its own control-plane inputs — webhook payloads, the HTTP API; **not** the per-run agent's output anymore (that moved to the sidecar). Hosts the capless `RelayServer` that answers the sidecar's narrow, validated policy/DB/audit relays — no credential-bearing op | Yes — the public HTTP API / websocket |
+| **credential sidecar** (`tf-sidecar`, one per live run) | **No** — the setuid-from-root exec clears its effective/permitted capabilities | Yes — exactly **one** run's material, from the sealed per-run bundle (LLM key, GitHub/Jira/provider tokens), unsealed with a key the process mints for itself and that never leaves it | Yes — **that one run's** agent traffic: the exec-verb socket the agent dials and the upstream API responses its proxies parse | The per-run agenthost unix socket + that run's LLM/git/API proxies, bound on the run's own veth IP — reachable by the run's sandbox and the orchestrator, never off-box |
+| **sandbox** (the delegated agent) | No | No | Yes — it's the source of the hostile input | No — outbound only, through the run's egress proxy |
+
+The **credential sidecar** is not a boot process like the other two: the broker
+spawns one per delegated run, at a per-run uid derived from the run's subnet
+index (the reserved `SidecarUID` band, `20000+`), and it dies when the run ends.
+That per-run uid is the isolation boundary between concurrent runs' credentials:
+two sidecars at different uids cannot `ptrace` or read one another's memory even
+though they share the host's process table, so a compromise of one run's
+credential process reaches that run's material and no other's. When the run
+ends the sidecar's process exits and its whole credential-bearing address space
+goes with it — the eviction guarantee (`internal/sandbox`'s eviction proof reads
+the per-run uid band out of `/proc` to confirm it vacates). This is why the
+per-run agent credentials and the parsing of that agent's own output moved off
+the orchestrator: no single process now holds both a run's credentials and the
+capabilities that build its cell.
 
 The broker serves two families of operations over that socket, both behind
 boundary validation (`internal/sandbox`'s `ValidateLaunchParams` and
@@ -39,12 +54,20 @@ needs `CAP_CHOWN`, the capture child's setuid/netns need `CAP_SETUID`/`CAP_SYS_A
 and removing a tree the sandbox wrote into means unlinking through modes the
 orchestrator can't. The chown/remove ops additionally require the target tree to
 already be owned by the orchestrator or the sandbox identity — a validly-shaped
-path pointing at `/etc` is refused by ownership, not just by shape. One deliberate
-exception stays orchestrator-side with no capability at all: the per-run agenthost
-socket is *chgrp'd* (not chowned) to the sandbox group — an owner-legal group
-grant, possible because the image makes `tf-orchestrator` a member of `tf-sandbox`
-(gid 10000) and the entrypoint's `setpriv` carries exactly that one supplementary
-group through the drop.
+path pointing at `/etc` is refused by ownership, not just by shape. A third
+launch family is the per-run credential sidecar: the broker execs it at the
+validated per-run uid (re-checking the `SidecarUID` band at the RPC boundary, so
+a compromised orchestrator can't ask for uid 0), the sidecar analog of the runsc
+launch.
+
+The per-run agenthost socket is granted to the sandbox with no capability at all:
+it is *chgrp'd* (not chowned) to the sandbox group — an owner-legal group grant,
+possible because the granting process is a member of `tf-sandbox` (gid 10000).
+That process is now the run's **sidecar**, which the broker launches carrying
+that one supplementary group and which creates and serves the socket itself; on
+the self-contained all/local path, where there is no sidecar, the orchestrator
+does the same chgrp in-process (the entrypoint's `setpriv` carries the group
+through its drop).
 
 **Broker lifetime.** After the entrypoint's `exec`, the broker is a child of the
 orchestrator, but the orchestrator neither supervises nor restarts it (post-drop it
@@ -58,7 +81,8 @@ tini's `-g` signal fan-out reaches both processes directly.
 
 - `docker compose exec triagefactory ps aux` (or `ps -ef` inside the container's
   PID namespace) shows two `triagefactory`-derived processes named `tf-cap-broker`
-  and `tf-orchestrator` — not two processes both named `triagefactory`.
+  and `tf-orchestrator` — not two processes both named `triagefactory` — plus one
+  `tf-sidecar` per delegated run currently in flight (none when the box is idle).
 - `cat /proc/<cap-broker pid>/status | grep ^Cap` and the same for the
   orchestrator's pid: the broker's `CapEff` decodes to `cap_sys_admin,cap_net_admin`
   (via `capsh --decode=<hex>` or by eye against
@@ -71,20 +95,26 @@ tini's `-g` signal fan-out reaches both processes directly.
   `TF_ORCHESTRATOR_UID` in `.env.example`). Different uids is what makes the
   orchestrator's zero capabilities meaningful: even a `CAP_SYS_PTRACE`-holding
   attacker (which the orchestrator isn't, but hypothetically) can't `ptrace` a
-  different-uid process without it.
+  different-uid process without it. The same read on a live `tf-sidecar` shows a
+  `CapEff` of all zeroes at a distinct uid in the `20000+` band — and each run's
+  sidecar sits at a *different* uid in that band, which is exactly what stops one
+  run's compromised credential process from `ptrace`-ing another's.
 
-Both processes are also identifiable in the logs: every line carries a
-`proc=cap-broker` or `proc=orchestrator` attribute (distinct from `component`,
+All three are identifiable in the logs: every line carries a `proc=cap-broker`,
+`proc=orchestrator`, or `proc=sidecar` attribute (distinct from `component`,
 which names the subsystem within a process), and each process logs exactly one boot
 line reporting its own uid and effective capability set, e.g.:
 
 ```
 level=INFO msg=boot component=cap-broker uid=0 CapEff=cap_net_admin,cap_sys_admin socket=/run/tf/cap-broker.sock proc=cap-broker
 level=INFO msg=boot component=boot uid=10001 CapEff=(empty) proc=orchestrator
+level=INFO msg=boot component=sidecar uid=20007 CapEff=(empty) container_id=tf-<run>-7-sc proc=sidecar
 ```
 
-A `CapEff=(empty)` orchestrator boot line is the confirmation the drop applied;
-anything else there is a bug, not a variant configuration.
+A `CapEff=(empty)` boot line is the confirmation the drop applied — for the
+orchestrator and for every per-run sidecar; anything else there is a bug, not a
+variant configuration. (The sidecar line appears once per run, at that run's
+start, not at container boot.)
 
 ## `$HOME`
 

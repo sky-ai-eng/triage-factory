@@ -7,9 +7,12 @@
 //
 // The capabilities that build this cell (netns, veth, iptables, cgroup,
 // and the runsc launch) are held by a separate cap-broker process —
-// never by the orchestrator that resolves credentials and parses agent
-// output. This package builds the OCI spec from a fixed template (empty
-// caps, uid 10000, seccomp) and validates the narrow, numeric parameters
+// never by the process that holds the run's credentials and parses its
+// agent output. In a multi-mode executor that process is the run's own
+// capless credential sidecar (one per run); on the self-contained
+// all/local path it is the orchestrator itself. This package builds the
+// OCI spec from a fixed template (empty caps, uid 10000, seccomp) and
+// validates the narrow, numeric parameters
 // the broker accepts over its RPC, so a compromised orchestrator cannot
 // steer sandbox construction. The deployment threat model and that split
 // live in docs/security/security-overview.md; the validated runsc/egress
@@ -30,8 +33,12 @@
 // ConfigureProxies callback: after the netns + veth are up but
 // before the OCI bundle is written, the caller binds a per-run LLM
 // proxy on Sandbox.HostIP and returns ANTHROPIC_BASE_URL +
-// placeholder env entries. The real credential lives in the proxy
-// process on the host; the sandbox env carries only the proxy URL.
+// placeholder env entries. The real credential lives in the proxy: in a
+// multi-mode executor that proxy runs in the run's own capless
+// credential sidecar, holding only that one run's material and freed
+// when the run's process exits; on the self-contained all/local path the
+// ConfigureProxies caller binds it in-process. Either way the sandbox
+// env carries only the proxy URL, never the credential.
 //
 // # Threat model (T1–T4)
 //
