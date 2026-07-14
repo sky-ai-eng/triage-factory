@@ -403,6 +403,13 @@ func TestCancelStrandedCuratorTurns_CancelsDeadHomeOnly(t *testing.T) {
 	insertTurn(survivorID, liveExec)
 	insertTurn(localID, "")
 
+	// The stranded turn already streamed a token-bearing message before its
+	// home died — the sweep must roll those up, not strand llm_spend at 0.
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO curator_messages (org_id, creator_user_id, request_id, role, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+		VALUES ($1, $2, $3, 'assistant', 7, 13, 5, 9)
+	`, orgID, userID, strandedID)
+
 	store := reaper.NewPostgresStore(h.AdminDB)
 	n, err := store.CancelStrandedCuratorTurns(ctx, 30*time.Second)
 	if err != nil {
@@ -410,6 +417,16 @@ func TestCancelStrandedCuratorTurns_CancelsDeadHomeOnly(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("cancelled %d turns, want 1 (only the dead-home turn)", n)
+	}
+	// Token roll-up landed on the cancelled stranded turn.
+	var in, out, cr, cc int
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM curator_requests WHERE id = $1`, strandedID,
+	).Scan(&in, &out, &cr, &cc); err != nil {
+		t.Fatalf("read back stranded turn tokens: %v", err)
+	}
+	if in != 7 || out != 13 || cr != 5 || cc != 9 {
+		t.Errorf("stranded-turn token roll-up = (%d,%d,%d,%d), want (7,13,5,9)", in, out, cr, cc)
 	}
 
 	statusOf := func(id string) string {

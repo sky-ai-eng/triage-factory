@@ -87,15 +87,23 @@ func (s *curatorStore) ListQueuedRequestsForHomeSystem(ctx context.Context, home
 }
 
 // CancelStrandedRequestsForHomeSystem flips this executor's stranded queued/
-// running turns to cancelled (curator homing, spec §6.3) via the admin pool.
-// Plain status flip, no token roll-up — keeps the tf_system grant a bare UPDATE
-// and a cancelled-stranded turn's accounting need not be refreshed.
+// running turns to cancelled (curator homing, spec §6.3) via the admin pool. It
+// rolls the denormalized token columns up from the curator_messages SUM, same
+// as every other terminal write (a 'running' turn stranded on a dead home may
+// have streamed and paid for messages before the home died, so llm_spend must
+// reflect them rather than strand at 0 — TFAC-473). tf_system therefore needs
+// SELECT on curator_messages as well as UPDATE on curator_requests; both are
+// granted in the baseline. Correlated on curator_requests.id (bulk update).
 func (s *curatorStore) CancelStrandedRequestsForHomeSystem(ctx context.Context, homeInstanceID, errMsg string) (int, error) {
 	res, err := s.admin.ExecContext(ctx, `
 		UPDATE curator_requests
 		SET status = 'cancelled',
 		    error_msg = COALESCE(error_msg, $2),
-		    finished_at = COALESCE(finished_at, now())
+		    finished_at = COALESCE(finished_at, now()),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = curator_requests.id),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = curator_requests.id),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = curator_requests.id),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = curator_requests.id)
 		WHERE home_instance_id = $1 AND status IN ('queued', 'running')
 	`, homeInstanceID, errMsg)
 	if err != nil {

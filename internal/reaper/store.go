@@ -243,11 +243,19 @@ func (s *pgStore) CancelStrandedCuratorTurns(ctx context.Context, staleThreshold
 	// A home is dead when its instances row is missing (GC'd or never
 	// registered) or its heartbeat is older than the threshold — the same
 	// missing-or-stale predicate ReapDeadExecutors uses for a run's executor.
+	// The token columns are rolled up from the curator_messages SUM, same as
+	// every other terminal write (a 'running' turn that streamed before its home
+	// died must still report its spend — TFAC-473); this reaper runs on the
+	// leader's superuser admin pool, so no extra grant applies here.
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE curator_requests
 		SET status = 'cancelled',
 		    finished_at = COALESCE(finished_at, now()),
-		    error_msg = COALESCE(error_msg, 'Cancelled: curator home executor lost (reaper) — re-send to re-home')
+		    error_msg = COALESCE(error_msg, 'Cancelled: curator home executor lost (reaper) — re-send to re-home'),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = curator_requests.id),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = curator_requests.id),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = curator_requests.id),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = curator_requests.id)
 		WHERE status IN ('queued', 'running')
 		  AND home_instance_id IS NOT NULL
 		  AND NOT EXISTS (

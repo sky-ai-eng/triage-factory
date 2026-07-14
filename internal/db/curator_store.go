@@ -269,11 +269,12 @@ type CuratorStore interface {
 	// curator_request homed to homeInstanceID to cancelled with errMsg — the
 	// ownership-scoped recovery pass (curator homing, spec §6.3). Each pod
 	// sweeps only turns homed to ITSELF: an executor cancels its own prior-boot
-	// stranded turns on boot, and the leader reaper cancels turns homed to a
-	// dead executor (both via home_instance_id = the target). This replaces the
-	// fleet-unsafe global CancelOrphanedNonTerminalRequests on multi-mode split
-	// roles — a control restart must never cancel an executor's live turns.
-	// Admin-pool / BYPASSRLS, home_instance_id bound by argument. Returns the
-	// row count flipped.
+	// stranded turns on boot. This replaces the fleet-unsafe global
+	// CancelOrphanedNonTerminalRequests on multi-mode split roles — a control
+	// restart must never cancel an executor's live turns. Like every other
+	// terminal write it refreshes the denormalized token columns from the
+	// curator_messages SUM so a turn killed mid-stream still reports its spend
+	// (TFAC-473), so the admin pool needs SELECT on curator_messages too.
+	// Home_instance_id bound by argument. Returns the row count flipped.
 	CancelStrandedRequestsForHomeSystem(ctx context.Context, homeInstanceID, errMsg string) (int, error)
 }

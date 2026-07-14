@@ -881,3 +881,94 @@ func TestCuratorStore_SQLite_ResetForProject(t *testing.T) {
 		t.Errorf("curator_messages survived reset: %d rows", msgs)
 	}
 }
+
+// TestCuratorStore_SQLite_CancelStrandedRequestsForHomeSystem pins the
+// ownership-scoped boot sweep (curator homing): it cancels only turns homed to
+// the given instance, rolls their token cache up from curator_messages the same
+// way every terminal write does (TFAC-473), and leaves turns homed elsewhere
+// untouched. SQLite is inert in production (N=1 never homes remotely), but the
+// SQL must still be correct across dialects.
+func TestCuratorStore_SQLite_CancelStrandedRequestsForHomeSystem(t *testing.T) {
+	conn := newSQLiteForCuratorTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	projectID, err := stores.Projects.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		domain.Project{Name: "p"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	create := func(input, home string) string {
+		t.Helper()
+		var id string
+		if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
+			rid, err := ts.Curator.CreateRequest(ctx, runmode.LocalDefaultOrgID, projectID, runmode.LocalDefaultUserID, home, input)
+			if err != nil {
+				return err
+			}
+			id = rid
+			return nil
+		}); err != nil {
+			t.Fatalf("CreateRequest %s: %v", input, err)
+		}
+		return id
+	}
+
+	// Homed to exec-1: a running turn that streamed tokens + a queued turn.
+	mineRunning := create("mine-running", "exec-1")
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
+		return ts.Curator.MarkRequestRunning(ctx, runmode.LocalDefaultOrgID, mineRunning)
+	}); err != nil {
+		t.Fatalf("MarkRequestRunning: %v", err)
+	}
+	ip := func(n int) *int { return &n }
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
+		_, err := ts.Curator.InsertMessage(ctx, runmode.LocalDefaultOrgID, &domain.CuratorMessage{
+			RequestID: mineRunning, Role: "assistant", Subtype: "text", Content: "partial",
+			InputTokens: ip(3), OutputTokens: ip(5), CacheReadTokens: ip(7), CacheCreationTokens: ip(11),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+	mineQueued := create("mine-queued", "exec-1")
+	// Homed to a different executor — must survive.
+	theirs := create("theirs", "exec-2")
+
+	n, err := stores.Curator.CancelStrandedRequestsForHomeSystem(ctx, "exec-1", "process restarted")
+	if err != nil {
+		t.Fatalf("CancelStrandedRequestsForHomeSystem: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("flipped %d rows, want 2 (only exec-1's running + queued)", n)
+	}
+
+	getStatus := func(id string) string {
+		var status string
+		if err := conn.QueryRow(`SELECT status FROM curator_requests WHERE id = ?`, id).Scan(&status); err != nil {
+			t.Fatalf("read status %s: %v", id, err)
+		}
+		return status
+	}
+	if got := getStatus(mineRunning); got != "cancelled" {
+		t.Errorf("mine-running status = %q, want cancelled", got)
+	}
+	if got := getStatus(mineQueued); got != "cancelled" {
+		t.Errorf("mine-queued status = %q, want cancelled", got)
+	}
+	if got := getStatus(theirs); got != "queued" {
+		t.Errorf("other-home status = %q, want queued (untouched)", got)
+	}
+
+	var in, out, cr, cc int
+	if err := conn.QueryRow(`
+		SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+		FROM curator_requests WHERE id = ?
+	`, mineRunning).Scan(&in, &out, &cr, &cc); err != nil {
+		t.Fatalf("read tokens: %v", err)
+	}
+	if in != 3 || out != 5 || cr != 7 || cc != 11 {
+		t.Errorf("token roll-up = (%d,%d,%d,%d), want (3,5,7,11)", in, out, cr, cc)
+	}
+}

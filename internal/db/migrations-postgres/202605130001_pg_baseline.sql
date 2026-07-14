@@ -8576,6 +8576,11 @@ GRANT SELECT ON TABLE public.llm_spend TO tf_system;
 -- The per-turn running/terminal writes ride the app pool under the requesting
 -- user's synthetic claims, not tf_system.
 GRANT SELECT, UPDATE ON TABLE public.curator_requests TO tf_system;
+-- curator_messages: SELECT so the ownership-scoped boot sweep's token roll-up
+-- (the correlated SUM every terminal write performs, TFAC-473) can read the
+-- turn's streamed messages on the executor's tf_system pool. Read-only — the
+-- per-message inserts ride the app pool under synthetic claims.
+GRANT SELECT ON TABLE public.curator_messages TO tf_system;
 -- curator_homes: the control pod upserts the (org, project) -> home mapping at
 -- turn dispatch and the executor claim loop reads it; the reaper/reset clears
 -- it. All I/O is admin-pool with org_id bound by argument (curator homing).

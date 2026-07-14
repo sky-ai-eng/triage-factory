@@ -83,15 +83,22 @@ func (s *curatorStore) ListQueuedRequestsForHomeSystem(ctx context.Context, home
 
 // CancelStrandedRequestsForHomeSystem is inert in SQLite (N=1 uses the global
 // CancelOrphanedNonTerminalRequests boot sweep), but implemented for interface
-// symmetry. Plain status flip — no token roll-up (a cancelled-stranded turn's
-// accounting need not be refreshed, and this keeps the tf_system grant to a
-// bare UPDATE in Postgres).
+// symmetry. Rolls the denormalized token columns up from the curator_messages
+// SUM, same as every other terminal write (CompleteRequest /
+// MarkRequestCancelledIfActive / CancelOrphanedNonTerminalRequests): a 'running'
+// turn stranded on a dead home may have streamed (and paid for) messages before
+// the home died, so cancelling it must reflect that usage rather than strand
+// llm_spend at 0 (TFAC-473). Correlated on curator_requests.id (bulk update).
 func (s *curatorStore) CancelStrandedRequestsForHomeSystem(ctx context.Context, homeInstanceID, errMsg string) (int, error) {
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE curator_requests
 		SET status = 'cancelled',
 		    error_msg = COALESCE(error_msg, ?),
-		    finished_at = COALESCE(finished_at, ?)
+		    finished_at = COALESCE(finished_at, ?),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = curator_requests.id),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = curator_requests.id),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = curator_requests.id),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = curator_requests.id)
 		WHERE home_instance_id = ? AND status IN ('queued', 'running')
 	`, errMsg, time.Now().UTC(), homeInstanceID)
 	if err != nil {
