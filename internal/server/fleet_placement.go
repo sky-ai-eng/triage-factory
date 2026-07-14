@@ -13,14 +13,14 @@ import (
 )
 
 // placementResolver is the narrow view the explainer needs of
-// *placement.Resolver (TFAC-587): compute the full candidate order for a key,
+// *placement.Resolver: compute the full candidate order for a key,
 // even when the layer is advisory-off, so an operator can preview placement.
 type placementResolver interface {
 	Explain(ctx context.Context, orgID, keyKind, keyValue string) (placement.Plan, error)
 }
 
 // SetPlacementResolver wires the rendezvous resolver that backs GET
-// /api/fleet/placement (TFAC-587). Called once at startup on serving roles;
+// /api/fleet/placement. Called once at startup on serving roles;
 // nil until then, so the endpoint 503s rather than panicking on a request
 // that races boot.
 func (s *Server) SetPlacementResolver(r placementResolver) { s.placement = r }
@@ -60,10 +60,10 @@ type placementExplainDTO struct {
 	LivenessSec  float64                 `json:"liveness_seconds"`
 }
 
-// handleFleetPlacement is the placement explainer (TFAC-587, spec §6.1): for a
-// key it returns the computed rendezvous candidate order and why (weights,
-// overrides, liveness) — the same order the claim honors. Org-admin gated on
-// the ?org= query (the fleet operator identity is a later ticket, TFAC-589);
+// handleFleetPlacement is the placement explainer (spec §6.1): for a key it
+// returns the computed rendezvous candidate order and why (weights, overrides,
+// liveness) — the same order the claim honors. Org-admin gated on the ?org=
+// query (a dedicated fleet operator identity is a later ticket);
 // the answer names executor instance ids for the caller's own org's work, so
 // org-admin is the right scope until then.
 //
@@ -104,8 +104,10 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "kind must be 'repo' or 'project'")
 		return
 	}
-	// The key value is 'repo' for a repo key, 'project' for a project key —
-	// accept either param name so the URL reads naturally for both kinds.
+	// Read the key value from ?repo= for a repo key or ?project= for a project
+	// key — either query-parameter NAME is accepted so the URL reads naturally
+	// for each kind (repo=owner/repo, or project=<id>). The value itself is the
+	// owner/repo string or the project id.
 	keyValue := strings.TrimSpace(r.URL.Query().Get("repo"))
 	if keyValue == "" {
 		keyValue = strings.TrimSpace(r.URL.Query().Get("project"))

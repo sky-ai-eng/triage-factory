@@ -14,7 +14,7 @@ import (
 type PlacementOverrideStoreFactory func(t *testing.T) (store db.PlacementOverrideStore, orgID string)
 
 // RunPlacementOverrideStoreConformance covers the contract every backend impl
-// must hold (TFAC-587): absence reads as (nil, nil) not an error; upsert then
+// must hold: absence reads as (nil, nil) not an error; upsert then
 // get round-trips a pin and a replica count; upsert is replace-wholesale
 // keyed on (org, kind, value); list is org-scoped and ordered; delete reports
 // matched and is idempotent.

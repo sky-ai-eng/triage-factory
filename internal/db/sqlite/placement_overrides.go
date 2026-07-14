@@ -11,7 +11,7 @@ import (
 )
 
 // placementOverrideStore is the SQLite impl of db.PlacementOverrideStore —
-// the placement pin/replica overrides (TFAC-587). SQLite is N=1 and unscoped:
+// the placement pin/replica overrides. SQLite is N=1 and unscoped:
 // the rows are inert (the placement hash always returns self), but the store
 // exists for interface + conformance symmetry across dialects.
 type placementOverrideStore struct{ q queryer }

@@ -16,7 +16,7 @@ import (
 )
 
 // runPlacement dispatches `triagefactory instance placement <verb>` — the
-// operator surface for the placement affinity layer (TFAC-587): the explainer
+// operator surface for the placement affinity layer: the explainer
 // (computed rendezvous candidate order for a key) plus the override CRUD
 // (manual pin / hot-key replica count). Shares the `instance` command's
 // shell-access operator boundary and its own DB handle (no IPC to a live
@@ -265,7 +265,7 @@ func runPlacementList(args []string) {
 }
 
 func printPlacementUsage() {
-	fmt.Println(`triagefactory instance placement — inspect and steer run placement (TFAC-587).
+	fmt.Println(`triagefactory instance placement — inspect and steer run placement.
 
 USAGE
   triagefactory instance placement explain  --org <id> --repo <owner/repo>

@@ -7,7 +7,7 @@ import (
 )
 
 // PlacementOverrideStore owns the placement_overrides table — the "table for
-// the exceptions" half of the placement design (TFAC-587, spec §6.1): human
+// the exceptions" half of the placement design (spec §6.1): human
 // intent (a manual pin or a hot-key replica count) that wins over the
 // computed rendezvous order for a single key. Expected to stay nearly empty;
 // the capacity-weighted rendezvous hash (internal/placement) is the default

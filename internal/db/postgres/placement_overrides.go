@@ -10,7 +10,7 @@ import (
 )
 
 // placementOverrideStore is the Postgres impl of db.PlacementOverrideStore —
-// the placement pin/replica overrides (TFAC-587, spec §6.1). Wired against
+// the placement pin/replica overrides (spec §6.1). Wired against
 // the ADMIN (BYPASSRLS) pool in postgres.New: placement_overrides is a
 // system-only table (RLS deny-by-default, REVOKEd from the app roles, exactly
 // like instances), read for an already-authorized, operator-gated orgID

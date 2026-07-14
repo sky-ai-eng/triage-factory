@@ -103,7 +103,10 @@ type Candidate struct {
 
 	// Reason is a short human tag for the explainer: "" when plainly ranked,
 	// otherwise why it was excluded or specially placed ("dead", "draining",
-	// "gated", "control-only", "no-capacity", "pinned").
+	// "control-only", "no-capacity", "pinned"). Note "gated" is deliberately
+	// NOT here: a momentarily dispatch-gated executor stays an eligible
+	// rendezvous candidate (gating is transient and handled at claim time), so
+	// the resolver never tags one.
 	Reason string
 }
 

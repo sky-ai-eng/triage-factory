@@ -9,7 +9,7 @@ import (
 )
 
 // placementResolver is the narrow view the spawner needs of
-// *placement.Resolver (TFAC-587): report whether placement is on, and compute
+// *placement.Resolver: report whether placement is on, and compute
 // a plan for a key. Kept as an interface so a test can inject a fake and so a
 // nil resolver reads cleanly as "placement off".
 type placementResolver interface {
@@ -17,7 +17,7 @@ type placementResolver interface {
 	Resolve(ctx context.Context, orgID, keyKind, keyValue string) (placement.Plan, error)
 }
 
-// SetPlacement wires the placement affinity layer (TFAC-587): the resolver
+// SetPlacement wires the placement affinity layer: the resolver
 // that computes the (org, repo) rendezvous stamp at enqueue, and the claim
 // config the dispatcher passes to ClaimNextRun. Called once at startup
 // (internal/app) before RunDispatcher starts. A nil resolver or a disabled

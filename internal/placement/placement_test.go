@@ -131,7 +131,7 @@ func TestRank_TieBreakStable(t *testing.T) {
 	}
 }
 
-// TestWeightedScore_Finite guards the (0,1] mapping: no member ever produces
+// TestWeightedScore_Finite guards the (0,1) mapping: no member ever produces
 // a NaN/Inf score that would corrupt the sort.
 func TestWeightedScore_Finite(t *testing.T) {
 	for i := 0; i < 1000; i++ {
@@ -139,6 +139,28 @@ func TestWeightedScore_Finite(t *testing.T) {
 		if math.IsNaN(s) || math.IsInf(s, 0) || s <= 0 {
 			t.Fatalf("degenerate score for exec-%d: %v", i, s)
 		}
+	}
+}
+
+// TestHashToUnit_StrictlyOpenInterval pins the boundary bug directly: the two
+// hash extremes (all-zero top bits, and the max hash where the naive mapping
+// rounded up to exactly 1.0 and produced a ±Inf score) must both land strictly
+// inside (0,1), keeping ln finite. A random sample would essentially never hit
+// these 1-in-2^64 corners, so they are exercised explicitly.
+func TestHashToUnit_StrictlyOpenInterval(t *testing.T) {
+	for _, h := range []uint64{0, 1, 1<<11 - 1, 1 << 11, math.MaxUint64 - 1, math.MaxUint64} {
+		u := hashToUnit(h)
+		if !(u > 0 && u < 1) {
+			t.Fatalf("hashToUnit(%d) = %v, want strictly in (0,1)", h, u)
+		}
+		if l := math.Log(u); math.IsInf(l, 0) || math.IsNaN(l) {
+			t.Fatalf("ln(hashToUnit(%d)) = %v (non-finite)", h, l)
+		}
+	}
+	// The exact-max hash used to yield u==1 → ln==0 → score -Inf. Assert the
+	// resulting score is now finite and positive.
+	if s := -1.0 / math.Log(hashToUnit(math.MaxUint64)); math.IsInf(s, 0) || s <= 0 {
+		t.Fatalf("max-hash score = %v, want finite positive", s)
 	}
 }
 

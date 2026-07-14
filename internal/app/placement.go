@@ -7,7 +7,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
 )
 
-// buildPlacement resolves the placement config (TFAC-587) from env, builds the
+// buildPlacement resolves the placement config from env, builds the
 // rendezvous resolver over the fleet registry + override table, and wires it
 // into the spawner (the enqueue stamp + the two-tier claim config) and, on a
 // serving role, the server (the /api/fleet/placement explainer). Runs after

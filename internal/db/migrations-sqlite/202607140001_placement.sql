@@ -1,5 +1,5 @@
 -- +goose Up
--- Placement affinity layer (TFAC-587, spec §6): capacity-weighted rendezvous
+-- Placement affinity layer (spec §6): capacity-weighted rendezvous
 -- hashing keeps a repeatedly-hit repo's bare/worktree cache warm on one (or
 -- K) executor instead of re-multiplying it across the fleet. Two additions,
 -- both no-ops in local mode (N=1: the hash always returns self) — they land

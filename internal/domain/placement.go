@@ -12,8 +12,8 @@ const (
 )
 
 // PlacementOverride is one row in placement_overrides — human intent that
-// wins over the computed rendezvous order for a single key (TFAC-587, spec
-// §6.1). Deliberately narrow: a manual pin, a hot-key replica count, and
+// wins over the computed rendezvous order for a single key (spec §6.1).
+// Deliberately narrow: a manual pin, a hot-key replica count, and
 // nothing else (drain lives on the executor's own registry row, not here).
 // The table is expected to stay nearly empty; the rendezvous hash is the
 // default map and needs no rows at all.

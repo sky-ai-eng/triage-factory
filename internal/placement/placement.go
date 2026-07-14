@@ -1,9 +1,9 @@
-// Package placement is the horizontal-scaling affinity layer (TFAC-587,
-// spec §6): a capacity-weighted rendezvous hash that maps a per-org cache
-// key — (org, repo) for delegation, (org, project) for curator — onto the
-// live executor fleet, so a repeatedly-hit repo tends to execute on the same
-// executor and keeps its bare/worktree cache warm (TFAC-60 economics
-// preserved at N>1).
+// Package placement is the horizontal-scaling affinity layer (spec §6): a
+// capacity-weighted rendezvous hash that maps a per-org cache key —
+// (org, repo) for delegation, (org, project) for curator — onto the live
+// executor fleet, so a repeatedly-hit repo tends to execute on the same
+// executor and keeps its bare/worktree cache warm (the per-(org, repo) cache
+// economics preserved at N>1).
 //
 // The governing doctrine is *the queue is the truth; placement is a
 // preference*: nothing here carries correctness. A self-contained multi-mode
@@ -78,15 +78,27 @@ func Rank(key string, members []Member) []Ranked {
 }
 
 // weightedScore is the per-(key, member) weighted-rendezvous score. u is the
-// member's hash mapped into (0,1]; -ln(u) is a positive Exp(1)-distributed
-// value, and dividing weight by it yields the max-is-winner statistic whose
-// argmax is chosen with probability proportional to weight.
+// member's hash mapped strictly into (0,1); -ln(u) is a positive
+// Exp(1)-distributed value, and dividing weight by it yields the max-is-winner
+// statistic whose argmax is chosen with probability proportional to weight.
 func weightedScore(key, instanceID string, weight int) float64 {
-	h := hash64(key, instanceID)
-	// Map to (0,1]: (h+1)/2^64 lands in (0,1], never 0, so ln is finite and
-	// the division never blows up. 2^64 as a float is exact.
-	u := (float64(h) + 1.0) / (float64(math.MaxUint64) + 1.0)
-	return -float64(weight) / math.Log(u)
+	return -float64(weight) / math.Log(hashToUnit(hash64(key, instanceID)))
+}
+
+// hashToUnit maps a 64-bit hash strictly into the open interval (0,1). It
+// takes the top 53 bits (float64's exact-integer range) and divides by 2^53,
+// so the result lands in [0,1) with no rounding to exactly 1 — the naive
+// (h+1)/2^64 rounds UP to u==1 for the largest hashes (float64(MaxUint64)
+// already IS 2^64, and the +1s vanish), which would make ln(u)==0 and the
+// weightedScore ±Inf and corrupt the ordering. The v==0 corner (top 53 bits
+// all zero) is nudged to the smallest step so u is never 0 either; ln stays
+// finite and negative across the whole domain.
+func hashToUnit(h uint64) float64 {
+	u := float64(h>>11) / (1 << 53)
+	if u == 0 {
+		return 1.0 / (1 << 53)
+	}
+	return u
 }
 
 // hash64 is a deterministic, seed-free 64-bit hash of key ⊕ instanceID —
