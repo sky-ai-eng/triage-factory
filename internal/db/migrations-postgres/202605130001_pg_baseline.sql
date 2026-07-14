@@ -5920,6 +5920,15 @@ CREATE INDEX idx_runs_blueprint        ON public.runs (blueprint_run_id, bluepri
 -- 'queued' run (FIFO by started_at, id) under FOR UPDATE SKIP LOCKED. Partial so
 -- it only spans unclaimed work, mirroring idx_event_queue_pending.
 CREATE INDEX idx_runs_queued ON public.runs (started_at, id) WHERE (status = 'queued'::text);
+-- Placement tier-1 claim index: the two-tier claim's hot path is an executor
+-- pulling its OWN preferred queued runs (preferred_executor_id = me), ordered
+-- by started_at, id. This partial index makes that an indexed equality — the
+-- point of stamping the rendezvous winner at enqueue instead of re-evaluating
+-- the hash per claim — and lets the ORDER BY (preferred = me) DESC, started_at,
+-- id resolve a tier-1 row without scanning the whole queued set. Same partial
+-- WHERE status='queued' as idx_runs_queued, so it too spans only unclaimed
+-- work. Global-oldest (placement disabled) still uses idx_runs_queued.
+CREATE INDEX idx_runs_queued_preferred ON public.runs (preferred_executor_id, started_at, id) WHERE (status = 'queued'::text);
 -- Replay fence (relocated from runs): one event firing one trigger materializes
 -- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
 -- manual blueprint runs (NULL) never participate.
