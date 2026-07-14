@@ -3,6 +3,10 @@ package agenthost
 import (
 	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -10,62 +14,105 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-// servedCoreRelayOps mirrors the op set RelayServer.dispatchCoreCall +
-// dispatchCoreNotify actually serve (relayserver.go). Kept here as an explicit
-// list so the security claim below reads as an enumeration a reviewer can check
-// against the switch by eye: policy (authorize_repo), DB reads/writes (the exec
-// verb trace), audit (record_*), and entitlement — and nothing that resolves or
-// returns a credential.
-var servedCoreRelayOps = []string{
-	// git push policy
-	agentproc.OpAuthorizeRepo,
-	// DB reads
-	opGetAgentRun,
-	opGetTask,
-	opListRepos,
-	opGetRepo,
-	opTeamTracksRepo,
-	opGetRunWorktreeByRepoRef,
-	opListRunWorktrees,
-	opListRunArtifacts,
-	opOrgJiraBase,
-	opBuildAgentRunFooter,
-	// DB writes
-	opInsertRunWorktree,
-	opDeleteRunWorktree,
-	opUpsertArtifact,
-	// entitlement gate
-	opCheckEntitlement,
-	// audit notifies
-	agentproc.OpRecordDenial,
-	agentproc.OpRecordPush,
-	opRecordExternalWrite,
-}
-
 // credentialOpSubstrings are the tokens a credential-resolution op name would
-// carry. The orchestrator's relay surface must expose none — provider creds are
-// read sidecar-side from the sealed bundle, never asked of the orchestrator.
-var credentialOpSubstrings = []string{"secret", "credential", "unseal", "private_key", "sealed_bundle"}
+// carry, matched against the served ops' case-label identifiers (camelCase, so
+// no underscores). The orchestrator's relay surface must expose none — provider
+// creds are read sidecar-side from the sealed bundle, never asked of the
+// orchestrator.
+var credentialOpSubstrings = []string{"secret", "cred", "unseal", "token", "key"}
+
+// extractServedCoreRelayOpLabels parses relayserver.go and returns a label for
+// every case in dispatchCoreCall's and dispatchCoreNotify's `switch op` — the
+// ops the RelayServer actually serves, read from the live source rather than a
+// hand-maintained mirror. A named const case yields its identifier
+// (agentproc.OpAuthorizeRepo → OpAuthorizeRepo, opGetTask → opGetTask); a raw
+// string-literal case yields its unquoted value, so a non-idiomatic literal case
+// can't dodge the name check either. It fails loudly if a dispatch func or the
+// `switch op` it expects has moved, so a refactor surfaces here instead of
+// silently emptying the check — which is the whole point: a future op added to
+// the switch is then covered automatically, with nothing to keep in sync.
+func extractServedCoreRelayOpLabels(t *testing.T) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "relayserver.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse relayserver.go: %v", err)
+	}
+	wantFuncs := map[string]bool{"dispatchCoreCall": true, "dispatchCoreNotify": true}
+	seenFunc := map[string]bool{}
+	var labels []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name == nil || !wantFuncs[fn.Name.Name] {
+			return true
+		}
+		seenFunc[fn.Name.Name] = true
+		ast.Inspect(fn.Body, func(m ast.Node) bool {
+			sw, ok := m.(*ast.SwitchStmt)
+			if !ok {
+				return true
+			}
+			if tag, ok := sw.Tag.(*ast.Ident); !ok || tag.Name != "op" {
+				return true // some other switch — keep looking
+			}
+			for _, stmt := range sw.Body.List {
+				cc, ok := stmt.(*ast.CaseClause)
+				if !ok {
+					continue
+				}
+				for _, expr := range cc.List { // nil List == the default clause
+					switch e := expr.(type) {
+					case *ast.Ident:
+						labels = append(labels, e.Name)
+					case *ast.SelectorExpr:
+						labels = append(labels, e.Sel.Name)
+					case *ast.BasicLit:
+						if e.Kind == token.STRING {
+							if v, uerr := strconv.Unquote(e.Value); uerr == nil {
+								labels = append(labels, v)
+							}
+						}
+					}
+				}
+			}
+			return false // found the `switch op`; don't descend into it
+		})
+		return true
+	})
+	for name := range wantFuncs {
+		if !seenFunc[name] {
+			t.Fatalf("relayserver.go: dispatch func %q not found — did it get renamed? update this drift guard", name)
+		}
+	}
+	if len(labels) == 0 {
+		t.Fatal("relayserver.go: extracted no `switch op` case labels — the AST drift guard is broken")
+	}
+	return labels
+}
 
 // TestRelayServer_ServesNoCredentialBearingOp is the executable form of the
 // fourth cross-sidecar negative: the run-time surface the agenthost relocation
 // added to the orchestrator — the RelayServer — carries no secret-resolution op.
 // Two independent checks:
 //
-//  1. None of the ops it serves is named like a credential resolver.
+//  1. No op the switch actually serves is named like a credential resolver
+//     (read live from relayserver.go, so a newly-added op can't slip past).
 //  2. A request for a credential-shaped op is rejected as unsupported (the
 //     switch has no such case), so a compromised sidecar cannot ask the
 //     orchestrator to hand back a secret.
 func TestRelayServer_ServesNoCredentialBearingOp(t *testing.T) {
-	// (1) No served op is a credential resolver by name.
-	for _, op := range servedCoreRelayOps {
+	// (1) No served op is a credential resolver by name — checked against the
+	// live switch's case labels, not a mirror that could drift out of coverage.
+	served := extractServedCoreRelayOpLabels(t)
+	for _, op := range served {
 		low := strings.ToLower(op)
 		for _, bad := range credentialOpSubstrings {
 			if strings.Contains(low, bad) {
-				t.Errorf("RelayServer serves op %q which reads like a credential resolver (matched %q) — the orchestrator must hold no per-run secret op", op, bad)
+				t.Errorf("RelayServer serves op %q whose identifier reads like a credential resolver (matched %q) — the orchestrator must hold no per-run secret op", op, bad)
 			}
 		}
 	}
+	t.Logf("checked %d live-extracted RelayServer ops for credential-shaped names", len(served))
 
 	// (2) A credential-shaped request is unsupported. A zero-value stores and a
 	// nil git gate are fine: the switch default returns before touching either.
