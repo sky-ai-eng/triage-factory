@@ -9,10 +9,13 @@ import { metaForKind } from './artifactMeta'
 // run-scoped fetch or the approval overlay. ArtifactList still owns the fetch;
 // the feed renders link-out-only rows (no onOpenApproval handler).
 
-// A single artifact row. A pull_request / review row WITH a wired onOpenApproval
-// handler renders as a button that opens the approval overlay (the external link
-// stays reachable as a trailing affordance); every other row — and every row in
-// the audit feed, which wires no handler — is the link itself.
+// A single artifact row. A still-ACTIONABLE pull_request / review row (a draft
+// PR / pending review awaiting an approve-or-dismiss decision) WITH a wired
+// onOpenApproval handler renders as a button that opens the approval overlay
+// (the external link stays reachable as a trailing affordance). Every other row
+// — resolved PRs/reviews, other kinds, and every row in the audit feed, which
+// wires no handler — is the link itself: a submitted review links to the posted
+// review's GitHub anchor, not back into the stale TF-side draft editor.
 export function ArtifactRow({
   artifact,
   onOpenApproval,
@@ -30,6 +33,10 @@ export function ArtifactRow({
   const Icon = meta.icon
   const overlayKind: 'review' | 'pr' | null =
     artifact.kind === 'pull_request' ? 'pr' : artifact.kind === 'review' ? 'review' : null
+  // Only the awaiting-a-decision state routes to the overlay; any resolved state
+  // falls through to the link-out rendering below.
+  const actionable =
+    artifact.kind === 'pull_request' ? artifact.state === 'draft' : artifact.state === 'pending'
 
   const body = (
     <>
@@ -47,7 +54,7 @@ export function ArtifactRow({
 
   // Inline (not a precomputed boolean) so TypeScript narrows both to non-null
   // inside the branch — no `!` assertions on the click handler.
-  if (overlayKind != null && onOpenApproval != null) {
+  if (overlayKind != null && onOpenApproval != null && actionable) {
     return (
       <li className="flex items-center gap-1">
         <button

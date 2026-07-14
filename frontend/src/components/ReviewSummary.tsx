@@ -39,6 +39,12 @@ interface Props {
   // queue" button.
   onClose: () => void
   submitting: boolean
+  // readOnly renders the resolved-review view: the verdict as a static chip, no
+  // body editing, no Refresh, and the footer's Submit replaced by a link out to
+  // the posted review (url — empty for a dismissed review, which never reached
+  // GitHub).
+  readOnly?: boolean
+  url?: string
 }
 
 const EVENT_OPTIONS = [
@@ -124,6 +130,8 @@ export default function ReviewSummary({
   onSubmit,
   onClose,
   submitting,
+  readOnly = false,
+  url,
 }: Props) {
   const [editingBody, setEditingBody] = useState(false)
   const [rawView, setRawView] = useState(false)
@@ -185,7 +193,7 @@ export default function ReviewSummary({
             <p className="text-[12px] text-text-tertiary mt-0.5">
               {owner}/{repo} #{prNumber}
             </p>
-            {commitsSinceFinalize != null && commitsSinceFinalize > 0 && (
+            {!readOnly && commitsSinceFinalize != null && commitsSinceFinalize > 0 && (
               <div className="mt-1.5 flex flex-col gap-1.5">
                 <div className="flex items-center gap-2">
                   <span
@@ -276,24 +284,34 @@ export default function ReviewSummary({
             )}
           </div>
 
-          {/* Event type selector */}
-          <div className="flex items-center gap-1.5 shrink-0">
-            {EVENT_OPTIONS.map((opt) => (
-              <button
-                key={opt.value}
-                onClick={() => selectEvent(opt.value)}
-                disabled={pendingEvent !== null}
-                className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1.5 rounded-lg border transition-all duration-150 disabled:opacity-60 ${
-                  reviewEvent === opt.value
-                    ? `${opt.color} ${opt.bg} border-current/20`
-                    : 'text-text-tertiary border-transparent hover:bg-black/[0.03]'
-                }`}
-              >
-                {opt.icon}
-                {opt.label}
-              </button>
-            ))}
-          </div>
+          {/* Event type selector — a static verdict chip once resolved (the
+              submitted event is history, not a choice). */}
+          {readOnly ? (
+            <span
+              className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1.5 rounded-lg border shrink-0 ${currentEvent.color} ${currentEvent.bg} border-current/20`}
+            >
+              {currentEvent.icon}
+              {currentEvent.label}
+            </span>
+          ) : (
+            <div className="flex items-center gap-1.5 shrink-0">
+              {EVENT_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => selectEvent(opt.value)}
+                  disabled={pendingEvent !== null}
+                  className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1.5 rounded-lg border transition-all duration-150 disabled:opacity-60 ${
+                    reviewEvent === opt.value
+                      ? `${opt.color} ${opt.bg} border-current/20`
+                      : 'text-text-tertiary border-transparent hover:bg-black/[0.03]'
+                  }`}
+                >
+                  {opt.icon}
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         {eventError && (
           <p className="mt-2 text-[11px] text-dismiss">
@@ -336,7 +354,7 @@ export default function ReviewSummary({
           </div>
         ) : (
           <div className="relative group">
-            {/* View toggle + edit button */}
+            {/* View toggle + edit button (edit only while still pending) */}
             <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
               <button
                 onClick={() => setRawView(!rawView)}
@@ -344,25 +362,28 @@ export default function ReviewSummary({
               >
                 {rawView ? 'Preview' : 'Raw'}
               </button>
-              <button
-                onClick={() => {
-                  setDraft(reviewBody)
-                  setEditingBody(true)
-                }}
-                className="text-[10px] text-text-tertiary hover:text-accent px-1.5 py-0.5 rounded bg-white/60 border border-border-subtle transition-colors"
-              >
-                Edit
-              </button>
+              {!readOnly && (
+                <button
+                  onClick={() => {
+                    setDraft(reviewBody)
+                    setEditingBody(true)
+                  }}
+                  className="text-[10px] text-text-tertiary hover:text-accent px-1.5 py-0.5 rounded bg-white/60 border border-border-subtle transition-colors"
+                >
+                  Edit
+                </button>
+              )}
             </div>
 
             <div className="bg-white/30 rounded-xl px-4 py-3 border border-transparent hover:border-border-subtle transition-colors min-h-[48px]">
               {!reviewBody ? (
                 <span
                   onClick={() => {
+                    if (readOnly) return
                     setDraft(reviewBody)
                     setEditingBody(true)
                   }}
-                  className="text-[13px] text-text-tertiary italic cursor-text"
+                  className={`text-[13px] text-text-tertiary italic ${readOnly ? '' : 'cursor-text'}`}
                 >
                   No summary provided
                 </span>
@@ -393,33 +414,46 @@ export default function ReviewSummary({
           >
             Close
           </button>
-          <button
-            onClick={onSubmit}
-            disabled={submitting}
-            className={`flex items-center gap-1.5 text-[12px] font-semibold px-4 py-2 rounded-xl transition-all duration-150 ${
-              submitting
-                ? 'bg-accent/50 text-white/70 cursor-not-allowed'
-                : `text-white ${
-                    reviewEvent === 'APPROVE'
-                      ? 'bg-claim hover:bg-claim/90'
-                      : reviewEvent === 'REQUEST_CHANGES'
-                        ? 'bg-dismiss hover:bg-dismiss/90'
-                        : 'bg-accent hover:bg-accent/90'
-                  }`
-            }`}
-          >
-            {submitting ? (
-              <>
-                <span className="inline-block w-3 h-3 border border-white/40 border-t-white rounded-full animate-spin" />
-                Submitting...
-              </>
-            ) : (
-              <>
-                {currentEvent.icon}
-                Submit to GitHub
-              </>
-            )}
-          </button>
+          {readOnly ? (
+            url && (
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 text-[12px] font-semibold px-4 py-2 rounded-xl text-white bg-accent hover:bg-accent/90 transition-all duration-150"
+              >
+                View on GitHub
+              </a>
+            )
+          ) : (
+            <button
+              onClick={onSubmit}
+              disabled={submitting}
+              className={`flex items-center gap-1.5 text-[12px] font-semibold px-4 py-2 rounded-xl transition-all duration-150 ${
+                submitting
+                  ? 'bg-accent/50 text-white/70 cursor-not-allowed'
+                  : `text-white ${
+                      reviewEvent === 'APPROVE'
+                        ? 'bg-claim hover:bg-claim/90'
+                        : reviewEvent === 'REQUEST_CHANGES'
+                          ? 'bg-dismiss hover:bg-dismiss/90'
+                          : 'bg-accent hover:bg-accent/90'
+                    }`
+              }`}
+            >
+              {submitting ? (
+                <>
+                  <span className="inline-block w-3 h-3 border border-white/40 border-t-white rounded-full animate-spin" />
+                  Submitting...
+                </>
+              ) : (
+                <>
+                  {currentEvent.icon}
+                  Submit to GitHub
+                </>
+              )}
+            </button>
+          )}
         </div>
       </div>
     </div>

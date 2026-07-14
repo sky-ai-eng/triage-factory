@@ -24,6 +24,9 @@ interface ReviewArtifact {
   review_body: string
   review_event: string
   state: string
+  // The posted review's GitHub deep link, stamped at approval; empty while the
+  // draft is pending (nothing exists on GitHub yet).
+  url: string
   // null when it couldn't be computed (live head unreachable); 0 means the PR
   // hasn't advanced since finalize.
   commits_since_finalize: number | null
@@ -48,12 +51,19 @@ interface Props {
   onClose: () => void
 }
 
-// ReviewOverlay is the modal opened from a parked review run's approval card. The
-// agent already created a GitHub pending review (private to the bot); this overlay
-// reads it 1:1, edits inline comments live, stages the summary body + verdict, and
-// on Submit approves — submitting the pending review to GitHub. Mirrors
-// PendingPROverlay's shape (artifactId-addressed, pessimistic sync, isolated diff
-// error) with review-specific affordances (inline comments + body/event editor).
+// ReviewOverlay is the modal opened from a parked review run's approval card.
+// The review is staged TF-side (TFAC-494); this overlay reads it 1:1, edits
+// inline comments live, stages the summary body + verdict, and on Submit
+// approves — creating + submitting the review on GitHub atomically. Mirrors
+// PendingPROverlay's shape (artifactId-addressed, pessimistic sync, isolated
+// diff error) with review-specific affordances (inline comments + body/event
+// editor).
+//
+// A resolved review (submitted/dismissed) renders READ-ONLY: no Submit, no
+// edits, a link out to the posted review instead. The artifacts list stops
+// routing resolved reviews here, but the overlay can still land on one — it was
+// already open when someone else approved, or an approval-roster row raced its
+// fetch — and must not present a dead (or worse, double-posting) Submit.
 export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   const [review, setReview] = useState<ReviewArtifact | null>(null)
   const [files, setFiles] = useState<FileData[]>([])
@@ -283,6 +293,9 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   const movedCount = (review?.comments ?? []).filter((c) => c.freshness === 'moved').length
   const outdatedCount = (review?.comments ?? []).filter((c) => c.freshness === 'outdated').length
 
+  // A resolved review is view-only; every mutating affordance below keys off this.
+  const readOnly = review != null && review.state !== 'pending'
+
   // Group comments by file path for the diff renderer. The overlay renders the
   // finalize-time frame, so a comment anchors by the path + line it was written
   // against (TFAC-500); freshness + mappedLine ride along for the badge only.
@@ -343,12 +356,16 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
             {/* Top bar */}
             <div className="shrink-0 flex items-center justify-between px-6 py-4 border-b border-border-subtle">
               <div className="flex items-center gap-3">
-                <div className="w-2 h-2 rounded-full bg-snooze animate-pulse" />
+                {!readOnly && <div className="w-2 h-2 rounded-full bg-snooze animate-pulse" />}
                 <h1
                   id={titleId}
                   className="text-[15px] font-semibold text-text-primary tracking-tight"
                 >
-                  Pending Review
+                  {readOnly
+                    ? review.state === 'submitted'
+                      ? 'Submitted Review'
+                      : 'Dismissed Review'
+                    : 'Pending Review'}
                 </h1>
                 {review && (
                   <span className="text-[12px] text-text-tertiary">
@@ -407,6 +424,8 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
                     onSubmit={handleSubmit}
                     onClose={onClose}
                     submitting={submitting}
+                    readOnly={readOnly}
+                    url={review.url}
                   />
 
                   {submitError && (
@@ -445,6 +464,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
                           defaultCollapsed={files.length > 8}
                           onUpdateComment={handleUpdateComment}
                           onDeleteComment={handleDeleteComment}
+                          readOnly={readOnly}
                         />
                       )
                     })}

@@ -926,6 +926,114 @@ func TestArtifactStore_Postgres_ListPendingReviewsByTarget(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_Postgres_TransitionReviewState pins the review CAS: exactly
+// one of two same-from transitions wins; the loser (and a wrong-kind row)
+// reports false without touching anything; the stamp trio applies
+// preserve-on-empty in the same write.
+func TestArtifactStore_Postgres_TransitionReviewState(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
+	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	rev, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+		RunID: runID, OrgID: orgID, TeamID: teamID,
+		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindReview,
+		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7",
+		DedupKey: "rev-cas", DetailsJSON: `{"number":7}`,
+	})
+	if err != nil {
+		t.Fatalf("seed review: %v", err)
+	}
+	pr, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+		RunID: runID, OrgID: orgID, TeamID: teamID,
+		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7", DedupKey: "pr-cas",
+	})
+	if err != nil {
+		t.Fatalf("seed pr: %v", err)
+	}
+
+	won, err := stores.Artifacts.TransitionReviewState(ctx, orgID, rev.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if err != nil || !won {
+		t.Fatalf("claim = (%v, %v), want (true, nil)", won, err)
+	}
+	won, err = stores.Artifacts.TransitionReviewState(ctx, orgID, rev.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if err != nil || won {
+		t.Fatalf("second claim = (%v, %v), want (false, nil) — the CAS must admit one winner", won, err)
+	}
+	got, _ := stores.Artifacts.Get(ctx, orgID, rev.ID)
+	if got.State != domain.ArtifactStateReviewSubmitted || got.DetailsJSON != `{"number":7}` || got.URL != "" {
+		t.Fatalf("post-claim row = state %q details %q url %q, want submitted/original details/empty url", got.State, got.DetailsJSON, got.URL)
+	}
+
+	won, err = stores.Artifacts.TransitionReviewState(ctx, orgID, rev.ID,
+		domain.ArtifactStateReviewSubmitted, domain.ArtifactStateReviewSubmitted,
+		"12345", "https://github.com/octo/repo/pull/7#pullrequestreview-12345", `{"number":7,"review_event":"COMMENT"}`)
+	if err != nil || !won {
+		t.Fatalf("stamp = (%v, %v), want (true, nil)", won, err)
+	}
+	got, _ = stores.Artifacts.Get(ctx, orgID, rev.ID)
+	if got.ExternalID != "12345" || got.URL != "https://github.com/octo/repo/pull/7#pullrequestreview-12345" ||
+		got.DetailsJSON != `{"number":7,"review_event":"COMMENT"}` {
+		t.Fatalf("post-stamp row = %+v, want the posted review's coordinates", got)
+	}
+
+	won, err = stores.Artifacts.TransitionReviewState(ctx, orgID, pr.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if err != nil || won {
+		t.Fatalf("pr transition = (%v, %v), want (false, nil) — CAS is review-only", won, err)
+	}
+}
+
+// TestArtifactStore_Postgres_UpdateReviewDetailsIfPending pins the guarded
+// draft write: it lands only while the review is still pending and refuses —
+// leaving the row untouched — once the review resolved.
+func TestArtifactStore_Postgres_UpdateReviewDetailsIfPending(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
+	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	rev, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
+		RunID: runID, OrgID: orgID, TeamID: teamID,
+		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindReview,
+		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7",
+		DedupKey: "rev-details", DetailsJSON: `{"v":1}`,
+	})
+	if err != nil {
+		t.Fatalf("seed review: %v", err)
+	}
+
+	updated, err := stores.Artifacts.UpdateReviewDetailsIfPendingSystem(ctx, orgID, rev.ID, `{"v":2}`)
+	if err != nil || !updated {
+		t.Fatalf("pending update = (%v, %v), want (true, nil)", updated, err)
+	}
+	got, _ := stores.Artifacts.Get(ctx, orgID, rev.ID)
+	if got.DetailsJSON != `{"v":2}` {
+		t.Fatalf("details = %q, want {\"v\":2}", got.DetailsJSON)
+	}
+
+	if won, err := stores.Artifacts.TransitionReviewState(ctx, orgID, rev.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", ""); err != nil || !won {
+		t.Fatalf("resolve: (%v, %v)", won, err)
+	}
+	updated, err = stores.Artifacts.UpdateReviewDetailsIfPendingSystem(ctx, orgID, rev.ID, `{"v":3}`)
+	if err != nil || updated {
+		t.Fatalf("post-resolve update = (%v, %v), want (false, nil)", updated, err)
+	}
+	got, _ = stores.Artifacts.Get(ctx, orgID, rev.ID)
+	if got.DetailsJSON != `{"v":2}` || got.State != domain.ArtifactStateReviewSubmitted {
+		t.Fatalf("row after refused write = state %q details %q, want submitted/{\"v\":2} untouched", got.State, got.DetailsJSON)
+	}
+}
+
 // seedPgArtifactRun mints a minimal run the artifacts.run_id FK can point
 // at. origin is non-'blueprint' so runs_origin_requires_parents doesn't
 // demand a parent chain; trigger_type='manual' needs a non-NULL creator.

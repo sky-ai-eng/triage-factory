@@ -132,6 +132,63 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 	return out, nil
 }
 
+// TransitionReviewState is the review CAS: one UPDATE guarded on the current
+// state, so of two racing approves exactly one sees a row flip (RowsAffected=1)
+// and the loser gets false without touching anything. external_id / url /
+// details_json follow Upsert's preserve-on-empty convention. App pool — every
+// caller is a request handler under claims; RLS scopes the row by team like
+// every other app-side artifact write.
+func (s *artifactStore) TransitionReviewState(ctx context.Context, orgID, id, from, to, externalID, url, detailsJSON string) (bool, error) {
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE artifacts
+		SET state        = $1,
+		    external_id  = COALESCE(NULLIF($2, ''), external_id),
+		    url          = COALESCE(NULLIF($3, ''), url),
+		    details_json = COALESCE(NULLIF($4, ''), details_json),
+		    updated_at   = now()
+		WHERE org_id = $5 AND id = $6 AND kind = $7 AND state = $8
+	`, to, externalID, url, detailsJSON, orgID, id, domain.ArtifactKindReview, from)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// UpdateReviewDetailsIfPending guards the draft-mutation write on the row still
+// being a pending review, so a stale writer can't resurrect a resolved one.
+// App pool (RLS-active), under request or synthetic claims.
+func (s *artifactStore) UpdateReviewDetailsIfPending(ctx context.Context, orgID, id, detailsJSON string) (bool, error) {
+	return s.updateReviewDetailsIfPending(ctx, s.q, orgID, id, detailsJSON)
+}
+
+// UpdateReviewDetailsIfPendingSystem runs the same guarded UPDATE on the admin
+// pool (BYPASSRLS) for event-triggered exec writers that have no JWT-claims
+// context — the same split UpsertSystem covers. org_id stays bound as defense
+// in depth.
+func (s *artifactStore) UpdateReviewDetailsIfPendingSystem(ctx context.Context, orgID, id, detailsJSON string) (bool, error) {
+	return s.updateReviewDetailsIfPending(ctx, s.admin, orgID, id, detailsJSON)
+}
+
+func (s *artifactStore) updateReviewDetailsIfPending(ctx context.Context, q queryer, orgID, id, detailsJSON string) (bool, error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE artifacts
+		SET details_json = NULLIF($1, ''), updated_at = now()
+		WHERE org_id = $2 AND id = $3 AND kind = $4 AND state = $5
+	`, detailsJSON, orgID, id, domain.ArtifactKindReview, domain.ArtifactStateReviewPending)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 func (s *artifactStore) Get(ctx context.Context, orgID, id string) (*domain.Artifact, error) {
 	// App pool (RLS-active): every caller is an HTTP handler under request
 	// claims. RLS scopes the row to the caller's team exactly like runs; org_id

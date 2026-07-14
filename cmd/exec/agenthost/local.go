@@ -215,9 +215,7 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	details.FinalizedBaseSHA = finalizeBase
 	details.Proposed = proposed
 
-	updated := *art
-	updated.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
-	if _, err := c.UpsertArtifact(ctx, updated); err != nil {
+	if err := c.saveReviewDraftDetails(ctx, art.ID, details); err != nil {
 		return fmt.Errorf("snapshot review draft into artifact: %w", err)
 	}
 	return nil
@@ -419,9 +417,7 @@ func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, 
 	details.ReviewEvent = ""
 	details.Proposed = domain.ReviewArtifactProposed{}
 
-	updated := *art
-	updated.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
-	if _, err := c.UpsertArtifact(ctx, updated); err != nil {
+	if err := c.saveReviewDraftDetails(ctx, art.ID, details); err != nil {
 		return "", "", fmt.Errorf("reset review draft: %w", err)
 	}
 	return art.ID, details.HeadSHA, nil
@@ -431,6 +427,24 @@ func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, 
 // (directRuntime respects the event-vs-manual pool split; relayRuntime relays).
 func (c *LocalClient) listArtifactsByRun(ctx context.Context) ([]domain.Artifact, error) {
 	return c.rt.ListRunArtifacts(ctx)
+}
+
+// saveReviewDraftDetails persists a mutated review draft's details_json through
+// the state-guarded write (pending only). Every draft mutation goes through
+// this instead of UpsertArtifact: the writers read the draft, mutate details in
+// memory, and write back — an unconditional upsert landing after a concurrent
+// human approve/dismiss would write the stale pending state back over the
+// resolved row, making a review that already posted to GitHub approvable (and
+// submittable) again. A lost race surfaces as an actionable error.
+func (c *LocalClient) saveReviewDraftDetails(ctx context.Context, artifactID string, details domain.ReviewArtifactDetails) error {
+	updated, err := c.rt.UpdateReviewDetailsIfPending(ctx, artifactID, domain.MarshalReviewArtifactDetails(details))
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return fmt.Errorf("this review is no longer pending (it was submitted or dismissed while you were editing) — nothing was changed")
+	}
+	return nil
 }
 
 // --- workspace ---
@@ -1173,9 +1187,7 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 	}
 	details.StagedComments = append(details.StagedComments, comment)
 
-	updated := *art
-	updated.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
-	if _, err := c.UpsertArtifact(ctx, updated); err != nil {
+	if err := c.saveReviewDraftDetails(ctx, art.ID, details); err != nil {
 		return "", fmt.Errorf("stage review comment: %w", err)
 	}
 	return commentID, nil
@@ -1196,9 +1208,7 @@ func (c *LocalClient) UpdateStagedReviewComment(ctx context.Context, commentID, 
 	}
 	details.StagedComments[idx].Body = body
 
-	updated := *art
-	updated.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
-	if _, err := c.UpsertArtifact(ctx, updated); err != nil {
+	if err := c.saveReviewDraftDetails(ctx, art.ID, details); err != nil {
 		return fmt.Errorf("update staged review comment: %w", err)
 	}
 	return nil
@@ -1217,9 +1227,7 @@ func (c *LocalClient) DeleteStagedReviewComment(ctx context.Context, commentID s
 	}
 	details.StagedComments = append(details.StagedComments[:idx], details.StagedComments[idx+1:]...)
 
-	updated := *art
-	updated.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
-	if _, err := c.UpsertArtifact(ctx, updated); err != nil {
+	if err := c.saveReviewDraftDetails(ctx, art.ID, details); err != nil {
 		return fmt.Errorf("delete staged review comment: %w", err)
 	}
 	return nil

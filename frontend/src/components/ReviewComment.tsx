@@ -18,6 +18,9 @@ interface Props {
   // accepted for callers with no inline-comment surface (the PR overlay's no-op).
   onUpdate: (id: string, body: string) => void | Promise<void>
   onDelete: (id: string) => void | Promise<void>
+  // readOnly hides the edit/delete affordances — a resolved review's comments
+  // are published and immutable.
+  readOnly?: boolean
 }
 
 // Native chip styling per severity level — the diff UI renders this
@@ -98,6 +101,7 @@ export default function ReviewComment({
   mappedLine,
   onUpdate,
   onDelete,
+  readOnly = false,
 }: Props) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(body)
@@ -195,7 +199,7 @@ export default function ReviewComment({
             </span>
           </div>
           <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-            {!editing && (
+            {!editing && !readOnly && (
               <>
                 <button
                   onClick={() => setEditing(true)}

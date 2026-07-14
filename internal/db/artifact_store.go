@@ -53,6 +53,46 @@ type ArtifactStore interface {
 	// Identical to Upsert in SQLite (single-tenant, no RLS).
 	UpsertSystem(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error)
 
+	// TransitionReviewState atomically compare-and-swaps a REVIEW artifact's
+	// state: the row moves from → to only when it still holds `from` (and is a
+	// review), and the caller learns whether it won (true) or lost the race /
+	// addressed a missing row (false). This is the approve/dismiss claim
+	// primitive: Upsert's state column is last-writer-wins, so a
+	// read-check-then-upsert flip lets two concurrent approves both pass the
+	// check and double-submit one review to GitHub — the CAS makes exactly one
+	// caller the winner, and it runs BEFORE the external write so a review can
+	// be posted at most once.
+	//
+	// externalID / url / detailsJSON optionally stamp the resolved review's
+	// coordinates in the same atomic write, preserve-on-empty like Upsert (an
+	// empty value leaves the column untouched) — the approve success path flips
+	// submitted→submitted carrying what GitHub minted, so the artifact row (and
+	// every list read over it) shows the posted review's URL, never the stale
+	// draft.
+	//
+	// Runs on the app pool in Postgres (RLS-active): every caller is a request
+	// handler under claims. org_id stays bound as defense in depth.
+	TransitionReviewState(ctx context.Context, orgID, id, from, to, externalID, url, detailsJSON string) (bool, error)
+
+	// UpdateReviewDetailsIfPending rewrites a review artifact's details_json
+	// only while the draft is still state=pending, returning false when the row
+	// is missing, not a review, or already resolved. Draft mutations (staged
+	// body/event/comments, refresh) must use this instead of Upsert: an
+	// unconditional upsert writes the writer's stale in-memory state back over
+	// a concurrently submitted/dismissed review, resurrecting it as approvable
+	// — which re-opens the double-submit hole TransitionReviewState closes.
+	//
+	// Runs on the app pool in Postgres (RLS-active), under request or synthetic
+	// claims. org_id stays bound as defense in depth.
+	UpdateReviewDetailsIfPending(ctx context.Context, orgID, id, detailsJSON string) (bool, error)
+
+	// UpdateReviewDetailsIfPendingSystem is the admin-pool (BYPASSRLS) variant
+	// of UpdateReviewDetailsIfPending for the exec choke point's event-triggered
+	// review-draft writers, which hold a real (org_id, team_id) identity but no
+	// JWT-claims context — the same split UpsertSystem covers. Identical to
+	// UpdateReviewDetailsIfPending in SQLite (single-tenant, no RLS).
+	UpdateReviewDetailsIfPendingSystem(ctx context.Context, orgID, id, detailsJSON string) (bool, error)
+
 	// Get returns a single artifact by id, or nil when none matches. Runs on
 	// the app pool in Postgres (RLS-active), so the caller must be inside a
 	// claims-set tx — every consumer is an HTTP handler under request claims
