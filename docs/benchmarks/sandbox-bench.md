@@ -163,6 +163,58 @@ tasks — budget **~500–600MB per run** for planning, i.e. ~80–90 runs
 on a 62GB host, comfortably above any realistic dispatcher setting
 and well below the 256 hard cap.
 
+## Credential-sidecar footprint (post-relocation)
+
+Every multi-mode delegated run now also carries a **credential sidecar** — the
+capless per-run process that holds the run's sealed bundle and hosts its
+LLM/git/API proxies plus the relocated agent-host socket server (the
+per-run-credential-isolation epic). The sidecar is a plain Go host process, *not*
+a gVisor sandbox, so its footprint reads straight out of `/proc/<pid>/status`
+without the sandbox-tree accounting caveats above.
+
+Measured standalone on a 6.17 host (single process, no fleet-scale page sharing):
+
+| state | VmRSS | threads |
+|---|---:|---:|
+| idle (X25519 key minted, no proxies bound) | ~22.4 MB | 10 |
+| proxies bound (LLM + GitHub-API + Jira-API + git) | ~24.5 MB | 10 |
+
+So the four bound proxies add ~2 MB of resident heap on top of the Go-runtime
+floor; the agent-host socket server (a single unix listener, measured separately
+because its `/run/tf` bind needs root) adds well under a further MB. `VmData` sits
+at ~150 MB but is the reserved Go heap arena, **not** resident — the same
+RSS-vs-reservation distinction the accounting note above draws for the sandbox
+tree.
+
+Two things this changes, and one it doesn't:
+
+- **The spec's ~10 MB estimate predates the full relocation.** It was written when
+  the proxies and agent-host ran as goroutines in the shared orchestrator; the
+  measured ~24 MB is the cost of standing them (plus the relay runtime) up as a
+  standalone Go process per run. The delta is the Go runtime baseline, not the
+  proxy logic — attribute it to the relocation, not to new work the sidecar does.
+- **Marginal cost at fleet scale is lower than the standalone number.** Every
+  sidecar execs the *same* `triagefactory` binary, so its file-backed text pages
+  are shared across all live sidecars and amortize toward zero — the same
+  mechanism that took the real engine from ~193 MB measured alone to ~155 MB
+  marginal at fleet scale (see the Claude profile above). The true marginal per
+  run is the private (heap/stack) portion, a few MB. Against the ~500–600 MB/run
+  engine-plus-wrapper planning budget, the sidecar is a rounding error: **the
+  per-run planning budget is unchanged in practice** (still ~500–600 MB/run).
+- **The 256 hard cap is structurally unchanged.** The sidecar adds no new
+  ceiling: its per-run uid comes from the reserved `SidecarUID` band, which is
+  sized to `MaxSandboxes` (256) — one slot per run, matching the subnet
+  allocator's own `[0, 256)` pool exactly. Concurrency is still bound by the
+  subnet allocator (and, well before it, host memory), not by the sidecar.
+
+Reproducing the standalone figure needs no runsc host: launch `triagefactory
+run-sidecar` with its stdio on a socketpair, drive the sealed-bundle +
+start-proxies handshake (`internal/agentproc.BringUpRunSidecar`, `HostVethIP`
+`127.0.0.1`), and read `VmRSS` from `/proc/<pid>/status`. The authoritative
+*fleet-scale* marginal — after page sharing, alongside live sandboxes — rides the
+`sandbox-bench` harness on a runsc host, where the sidecar process joins each
+run's tree.
+
 ## Relationship to the dispatcher cap
 
 The run dispatcher semaphore (`internal/delegate/process_registry.go`,

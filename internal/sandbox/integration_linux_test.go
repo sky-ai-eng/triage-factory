@@ -46,16 +46,29 @@ import (
 // Best-effort: if runsc/chroot/root prereqs aren't met, the pre-warm
 // is skipped and individual tests still skip cleanly via require*.
 func TestMain(m *testing.M) {
-	// A re-exec'd sidecar-reap helper child must mint its comm name and block
-	// before any suite setup runs, exactly as it does in the default binary.
+	// Re-exec'd test-child branches must intercept before any suite setup runs,
+	// exactly as they do in the default binary: the sidecar-reap comm helper,
+	// the live-sidecar stand-in (LaunchSidecarProcess execs this binary with the
+	// run-sidecar argv), and the cross-sidecar ptrace probe. Each sets itself up
+	// and blocks or exits, never reaching the pre-warm or m.Run below.
 	reExecAsSidecarHelperIfRequested()
+	maybeRunSidecarSubcommand()
+	maybeRunPtraceProbe()
 
 	// Production launches every run through the cap-broker; this package
-	// can't spin one up (import cycle), so the suite installs an in-process
-	// stand-in built from the same launch primitives the broker uses. Wrap()
-	// routes its launch through runLauncher, so this must be set before any
-	// test calls Wrap.
+	// can't spin one up (import cycle), so the suite installs in-process
+	// stand-ins built from the same launch primitives the broker uses. Wrap()
+	// routes its launch through runLauncher and LaunchSidecar through
+	// sidecarLauncher, so both must be set before any test calls them.
 	runLauncher = inProcessLauncher{}
+	sidecarHarnessCleanup, err := installInProcessSidecarHarness()
+	if err != nil {
+		// Record it, don't abort: the live-sidecar tests fail loudly with this
+		// exact cause (via sidecarHarnessErr), while the non-sidecar integration
+		// tests — which don't use the harness — still run.
+		sidecarHarnessErr = err
+		fmt.Fprintf(os.Stderr, "TestMain: sidecar harness setup failed: %v\n", err)
+	}
 
 	if shouldPreWarmRootfs() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -64,7 +77,9 @@ func TestMain(m *testing.M) {
 		}
 		cancel()
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	sidecarHarnessCleanup()
+	os.Exit(code)
 }
 
 // shouldPreWarmRootfs gates the pre-warm on the same prereqs the

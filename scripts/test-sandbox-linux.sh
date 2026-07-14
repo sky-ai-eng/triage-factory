@@ -209,6 +209,9 @@ for test in \
   TestIntegration_WorktreeIsolation \
   TestIntegration_CleanupRemovesNetns \
   TestIntegration_ReapOrphans \
+  TestIntegration_SidecarEviction_UIDBandVacates \
+  TestIntegration_CrossSidecarSocketIsolation \
+  TestIntegration_CrossSidecarPtraceDenied \
   TestIntegration_RootfsHasNode \
   TestIntegration_RootfsHasGit \
   TestIntegration_RootfsHasRipgrep \
