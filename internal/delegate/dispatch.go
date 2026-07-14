@@ -195,7 +195,7 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 			return
 		}
 		executorID, bootEpoch := s.executorIdentity()
-		run, err := s.runQueue.ClaimNextRun(ctx, executorID, bootEpoch)
+		run, err := s.runQueue.ClaimNextRun(ctx, executorID, bootEpoch, s.claimPlacement())
 		if err != nil {
 			<-sem
 			dispatchLog.Warn("claim next run failed; retrying on the next scan", "error", err)
@@ -742,18 +742,27 @@ func stepModelOrInherit(stepModel, inherited string) string {
 // runs_event_trigger_fence index.
 func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunID string, task domain.Task, step domain.BlueprintStep, model, triggerType, triggerID, creatorUserID, actorAgentID string) error {
 	stepIdx := step.StepIndex
+	runID := uuid.New().String()
+	// Placement stamp (TFAC-587): the rendezvous winner for this run's
+	// (org, repo) key, computed over live registry members here on the
+	// enqueuing pod. Recomputed on every step (step 0 from Delegate, each
+	// advance from the reactor) so it re-stamps against current membership
+	// and never outlives one queue dwell. Empty = no affinity (placement off,
+	// non-repo task, or a failed read) → the claim treats it as unowned.
+	preferred := s.preferredExecutorFor(ctx, orgID, task, runID)
 	return s.runQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
-		ID:                 uuid.New().String(),
-		TaskID:             task.ID,
-		PromptID:           step.StepPromptID,
-		Status:             "queued",
-		Model:              model,
-		TriggerType:        triggerType,
-		TriggerID:          triggerID,
-		CreatorUserID:      creatorUserID,
-		ActorAgentID:       actorAgentID,
-		BlueprintRunID:     blueprintRunID,
-		BlueprintStepIndex: &stepIdx,
+		ID:                  runID,
+		TaskID:              task.ID,
+		PromptID:            step.StepPromptID,
+		Status:              "queued",
+		Model:               model,
+		TriggerType:         triggerType,
+		TriggerID:           triggerID,
+		CreatorUserID:       creatorUserID,
+		ActorAgentID:        actorAgentID,
+		BlueprintRunID:      blueprintRunID,
+		BlueprintStepIndex:  &stepIdx,
+		PreferredExecutorID: preferred,
 	})
 }
 

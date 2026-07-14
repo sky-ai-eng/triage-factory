@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -87,7 +88,7 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, attempts int) reaperFixt
 		t.Fatalf("EnqueueRun: %v", err)
 	}
 	for i := 0; i < attempts; i++ {
-		got, err := stores.RunQueue.ClaimNextRun(ctx, executorID, 1)
+		got, err := stores.RunQueue.ClaimNextRun(ctx, executorID, 1, db.ClaimPlacement{})
 		if err != nil || got == nil {
 			t.Fatalf("ClaimNextRun (attempt %d): got=%v err=%v", i+1, got, err)
 		}

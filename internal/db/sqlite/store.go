@@ -154,6 +154,10 @@ func New(conn *sql.DB) db.Stores {
 		// /api/jira/stock + the one-shot "config took effect" announce
 		// toast — see the poll_readiness migration. See TFAC-583.
 		PollReadiness: newPollReadinessStore(conn),
+		// PlacementOverrides collapses to the one connection (N=1). Inert in
+		// local mode — the placement hash always returns self — but present
+		// for store-interface + conformance symmetry. See TFAC-587.
+		PlacementOverrides: newPlacementOverrideStore(conn),
 		// RunCredentials is admin-pool only in Postgres; SQLite collapses
 		// to the one connection. Never populated in local mode (forced
 		// role=all, the bundle path is executor-role-only) — exists for

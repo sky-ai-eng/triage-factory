@@ -40,6 +40,8 @@ func Handle(args []string) {
 		runSetDraining(args[1:], true)
 	case "undrain":
 		runSetDraining(args[1:], false)
+	case "placement":
+		runPlacement(args[1:])
 	case "-h", "--help", "help":
 		printUsage()
 	default:
@@ -145,6 +147,8 @@ USAGE
   triagefactory instance list              show every registered instance
   triagefactory instance drain <id>        stop new claims, quiesce
   triagefactory instance undrain <id>      resume claims
+  triagefactory instance placement ...     inspect / steer run placement
+                                           (run "instance placement --help")
 
 NOTES
   Draining takes effect within one heartbeat interval (a few seconds) of

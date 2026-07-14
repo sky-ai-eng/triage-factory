@@ -97,6 +97,11 @@ type Server struct {
 	// endpoint reports "role mode requires the control service" rather than
 	// panicking.
 	bedrockRole bedrockRoleResolver
+	// placement backs the GET /api/fleet/placement explainer (TFAC-587): the
+	// computed capacity-weighted rendezvous candidate order for a key. Wired
+	// via SetPlacementResolver after construction; nil until then so the
+	// endpoint 503s rather than panicking if a request races startup.
+	placement placementResolver
 	// ghResolver picks the right GitHub credential (org App installation
 	// token → PAT) per request, given the org + target account. The per-repo
 	// handler operations migrated off the old process-global PAT client —
@@ -747,6 +752,10 @@ func (s *Server) routes() {
 	// need to be logged in to manage your integration credentials.
 	s.apiMutating("POST /api/integrations/setup", s.handleIntegrationsSetup)
 	s.api("GET /api/integrations/status", s.handleIntegrationsStatus)
+	// Placement explainer (TFAC-587): the computed rendezvous candidate order
+	// for a key. Org-admin gated inside the handler on ?org= (the fleet
+	// operator identity is TFAC-589). Read-only.
+	s.api("GET /api/fleet/placement", s.handleFleetPlacement)
 	// Local-mode "Start your factory" provision action — creates
 	// the synthetic tenant + materializes shipped defaults via the shared
 	// bootstrap chain. Idempotent; no-op once a tenant exists.

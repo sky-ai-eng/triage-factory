@@ -36,6 +36,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/lease"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
+	"github.com/sky-ai-eng/triage-factory/internal/placement"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
 	"github.com/sky-ai-eng/triage-factory/internal/reaper"
@@ -135,6 +136,15 @@ type App struct {
 	curator          *curator.Curator
 	router           *routing.Router
 	srv              *server.Server
+
+	// placementResolver computes the capacity-weighted rendezvous placement
+	// (TFAC-587): the (org, repo) affinity stamp the spawner writes at enqueue
+	// and the two-tier claim config the dispatcher passes to ClaimNextRun.
+	// Also backs the GET /api/fleet/placement explainer. Built in
+	// buildPlacement; a disabled config (local mode, or TF_PLACEMENT=off)
+	// still constructs a resolver whose Enabled() is false — a uniform no-op
+	// seam rather than a nil to guard everywhere.
+	placementResolver *placement.Resolver
 
 	// leaseElector drives the background-brain lease election (TFAC-583).
 	// Non-nil only at role=control in multi mode — role=all/local never
@@ -280,6 +290,13 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	// partition self-fence deadline and supersession exit hook, both of
 	// which need a.spawner to exist.
 	if err = a.buildReaper(); err != nil {
+		return nil, err
+	}
+	// Placement affinity (TFAC-587): the rendezvous resolver + the spawner's
+	// enqueue stamp / two-tier claim config + the explainer's server handle.
+	// After buildExecution (needs a.spawner) and buildServer (a.srv, when a
+	// serving role — nil-checked inside).
+	if err = a.buildPlacement(); err != nil {
 		return nil, err
 	}
 	// Brain-side sealed-credential-bundle provisioner (TFAC-614) — same

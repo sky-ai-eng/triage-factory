@@ -399,6 +399,10 @@ var orgScopedTables = []string{
 	// instances) — TRUNCATE CASCADE from orgs would never reach it, so it
 	// must be listed explicitly too.
 	"poll_readiness",
+	// placement_overrides (TFAC-587): org_id column but no FK to orgs
+	// (admin-pool-only system state, same posture as poll_readiness) — not
+	// reached by CASCADE, so listed explicitly.
+	"placement_overrides",
 	// users last — most other tables FK into it.
 	"users",
 	// NOT INCLUDED explicitly: system_prompt_versions, events_catalog.

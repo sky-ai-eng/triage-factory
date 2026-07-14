@@ -114,6 +114,7 @@ USER COMMANDS
   triagefactory instance list              show every registered fleet instance
   triagefactory instance drain <id>        stop new claims, quiesce
   triagefactory instance undrain <id>      resume claims
+  triagefactory instance placement ...     inspect / steer run placement
 
 AGENT COMMANDS
   Used by delegated Claude Code agents inside their worktree, not

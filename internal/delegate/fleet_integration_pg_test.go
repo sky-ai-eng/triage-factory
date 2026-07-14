@@ -171,7 +171,7 @@ func TestFleet_ReaperRequeue_DeadExecutorRunClaimedBySurvivor(t *testing.T) {
 	sB := newFleetSpawner(t, h, fx, idB)
 
 	execA, epochA := sA.executorIdentity()
-	claimed, err := fx.stores.RunQueue.ClaimNextRun(ctx, execA, epochA)
+	claimed, err := fx.stores.RunQueue.ClaimNextRun(ctx, execA, epochA, db.ClaimPlacement{})
 	if err != nil || claimed == nil || claimed.ID != fx.runID {
 		t.Fatalf("A claims: claimed=%v err=%v", claimed, err)
 	}
@@ -190,7 +190,7 @@ func TestFleet_ReaperRequeue_DeadExecutorRunClaimedBySurvivor(t *testing.T) {
 	}
 
 	execB, epochB := sB.executorIdentity()
-	claimedByB, err := fx.stores.RunQueue.ClaimNextRun(ctx, execB, epochB)
+	claimedByB, err := fx.stores.RunQueue.ClaimNextRun(ctx, execB, epochB, db.ClaimPlacement{})
 	if err != nil || claimedByB == nil || claimedByB.ID != fx.runID {
 		t.Fatalf("B claims after reap: claimed=%v err=%v", claimedByB, err)
 	}
@@ -256,7 +256,7 @@ func TestFleet_Fence_SupersededInstanceStopsClaimingAndKillsSandboxes(t *testing
 		t.Fatal("B must not be affected by A's supersession")
 	}
 	execB, epochB := sB.executorIdentity()
-	claimed, err := fx.stores.RunQueue.ClaimNextRun(ctx, execB, epochB)
+	claimed, err := fx.stores.RunQueue.ClaimNextRun(ctx, execB, epochB, db.ClaimPlacement{})
 	if err != nil || claimed == nil {
 		t.Fatalf("B claims after A's fence: claimed=%v err=%v", claimed, err)
 	}

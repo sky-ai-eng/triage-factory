@@ -1392,7 +1392,18 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
 
 **P2 — Affinity**
 11. Rendezvous placement + `preferred_executor_id` stamping + two-tier
-    aging claim + `placement_overrides` + placement explainer. (M)
+    aging claim + `placement_overrides` + placement explainer. (M) ✅ shipped
+    (TFAC-587): `internal/placement` (pure capacity-weighted rendezvous +
+    resolver), the enqueue stamp (control computes the winner over live
+    registry members; re-stamped each blueprint-step advance; cleared to NULL
+    on every requeue/reset/reaper/resume path), the two-tier `ClaimNextRun`
+    (tier 1 = `preferred_executor_id = me`, tier 2 = aged past
+    `TF_PLACEMENT_AGING_SEC` or preferred dead/gated/draining), the
+    `placement_overrides` table (pin / hot-key `replicas=K`), and the
+    explainer (`GET /api/fleet/placement` + `triagefactory instance
+    placement`). Feature-flagged via `TF_PLACEMENT` (on by default in multi,
+    forced off in local N=1); a disabled config makes the claim byte-identical
+    to global-oldest, so the whole layer drops with all tests green.
 12. Curator homes + re-home on death. (M)
 
 **P3 — Fleet operations**

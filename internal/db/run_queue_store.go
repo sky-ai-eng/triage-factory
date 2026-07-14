@@ -27,22 +27,62 @@ import (
 // firing boundary in BlueprintStore.CreateRunIfNotFiredSystem). The queue does
 // not subsume the replay fence — by the time a step is enqueued the blueprint_run
 // already exists.
+// ClaimPlacement configures the placement-aware, two-tier claim (TFAC-587,
+// spec §6.2). The ZERO VALUE (Enabled=false) selects the original
+// global-oldest claim — the whole placement layer is advisory, so a disabled
+// config leaves ClaimNextRun byte-identical to the pre-placement dispatcher.
+// This is the "dropping the entire placement layer leaves all tests green"
+// contract: every existing caller passes ClaimPlacement{} and sees no change.
+type ClaimPlacement struct {
+	// Enabled turns on the two-tier claim: tier 1 (preferred_executor_id =
+	// the claiming executor) plus tier 2 (any run aged past AgingInterval, or
+	// whose stamped preferred executor is not a live claimant). Disabled →
+	// the claim ignores preferred_executor_id entirely.
+	Enabled bool
+
+	// AgingInterval is the tier-2 spillover delay: how long a queued run
+	// waits for its preferred owner before ANY executor may claim it (spec
+	// §6.2's ~15-30s). A run with no preferred (NULL) is claimable
+	// immediately regardless of this — NULL is "unowned", not "aging".
+	AgingInterval time.Duration
+
+	// Liveness is the heartbeat-staleness window past which a run's stamped
+	// preferred executor is treated as no longer a live claimant (dead), so
+	// the run spills immediately without waiting out AgingInterval. Draining
+	// and dispatch-gated preferreds spill the same way, read from the
+	// instances row.
+	Liveness time.Duration
+}
+
 type RunQueueStore interface {
 	// EnqueueRun inserts a runs row in status='queued' for a blueprint step.
 	// It is the work-list write the dispatcher later claims. run carries the
 	// step's identity: ID, TaskID, PromptID, Model, TriggerType,
 	// CreatorUserID, TriggerID, BlueprintRunID (required), BlueprintStepIndex.
+	// PreferredExecutorID (TFAC-587) is the rendezvous placement stamp, empty
+	// for no affinity (placement disabled, local N=1, or a non-repo key).
 	// Routes through the admin pool — the dispatcher/reactor mint work items
 	// with no JWT-claims context; the row's creator_user_id is still stamped
 	// for audit and later RLS-scoped reads. The schema CHECK pairing
 	// trigger_type with creator_user_id nullability is the caller's contract.
 	EnqueueRun(ctx context.Context, orgID string, run domain.AgentRun) error
 
-	// ClaimNextRun claims the globally-oldest queued run whose owning
-	// blueprint_run is still 'running' and not cancel-requested, flips it
-	// queued -> running, stamps claimed_at + executor_id + boot_epoch,
-	// increments attempts, and returns it. Returns (nil, nil) when nothing is
-	// claimable.
+	// ClaimNextRun claims a queued run whose owning blueprint_run is still
+	// 'running' and not cancel-requested, flips it queued -> running, stamps
+	// claimed_at + executor_id + boot_epoch, increments attempts, and returns
+	// it. Returns (nil, nil) when nothing is claimable.
+	//
+	// placement (TFAC-587) selects the claim discipline. Disabled (the zero
+	// value): the globally-oldest claimable run, ORDER BY started_at, id — the
+	// original behavior every non-placement caller relies on. Enabled: the
+	// two-tier claim — tier 1 is this executor's own preferred runs (an
+	// indexed preferred_executor_id equality), tier 2 spills any run aged past
+	// placement.AgingInterval or whose stamped preferred is not a live
+	// claimant (dead/gated/draining). A run's own preferred owner sorts first
+	// (tier 1 before tier 2), so a fresh run with a live owner is exclusively
+	// its owner's until it ages — the warm-cache property — while a saturated
+	// or dead owner never head-of-line-blocks its shard. SQLite is N=1 and
+	// ignores placement entirely (one executor always self-hits tier 1).
 	//
 	// executorID/bootEpoch (the caller's persistent instance-registry
 	// identity, TFAC-577) are stamped atomically in the same claim statement
@@ -52,13 +92,13 @@ type RunQueueStore interface {
 	// still leaves the row correctly self-attributed.
 	//
 	// Cross-org by design: the dispatcher is a single system worker draining
-	// every tenant in insertion order (the claimed run carries its org_id,
-	// which scopes all downstream work). Postgres uses FOR UPDATE SKIP LOCKED
-	// so a future multi-worker dispatcher never double-claims; SQLite is
-	// single-worker. A queued step of a cancel-requested or already-terminal
-	// blueprint is deliberately never claimed — the sequence-level cancel is
-	// honored here (decision: a queued-not-started step cancels with zero work).
-	ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64) (*domain.AgentRun, error)
+	// every tenant (the claimed run carries its org_id, which scopes all
+	// downstream work). Postgres uses FOR UPDATE SKIP LOCKED so a future
+	// multi-worker dispatcher never double-claims; SQLite is single-worker. A
+	// queued step of a cancel-requested or already-terminal blueprint is
+	// deliberately never claimed — the sequence-level cancel is honored here
+	// (decision: a queued-not-started step cancels with zero work).
+	ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement ClaimPlacement) (*domain.AgentRun, error)
 
 	// RequeueRun returns a claimed run to status='queued' after a transient
 	// dispatcher failure (e.g. workspace setup hiccup), recording lastErr for

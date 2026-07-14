@@ -368,6 +368,12 @@ type Stores struct {
 	// authorized orgID.
 	PollReadiness PollReadinessStore
 
+	// PlacementOverrides owns the placement_overrides table — human intent
+	// (manual pin / hot-key replica count) over the computed rendezvous
+	// placement order (TFAC-587). Admin-pool-only, same shape as Instances:
+	// not a browsable RLS surface, read for an already-authorized orgID.
+	PlacementOverrides PlacementOverrideStore
+
 	// RunCredentials owns the run_credentials table — the sealed per-run
 	// credential bundle channel (TFAC-614). Admin-pool-only, same shape as
 	// Instances/RunSignals: never a request-handler surface, and unlike
